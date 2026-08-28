@@ -49,12 +49,27 @@ Keycloak에 `KC_HOSTNAME=http://localhost:8080`을 고정해 두었기 때문에
 
 ## 설정을 바꾼 뒤
 
-렐름은 **처음 한 번만** import된다. 이미 만들어진 렐름이 있으면 이 파일을 고쳐도 반영되지 않는다.
-다시 넣으려면:
+Keycloak의 H2 데이터베이스는 컨테이너 안에만 있다(볼륨을 붙이지 않았다). 따라서
+**컨테이너를 새로 만들면 이 파일이 다시 들어온다.**
 
 ```bash
-docker compose down -v      # keycloak 볼륨까지 삭제 (DB도 지워짐 — 주의)
-docker compose up -d
+docker compose up -d --force-recreate keycloak
 ```
 
-또는 관리 콘솔에서 직접 고친다.
+`stop`/`start`나 `restart`로는 유지되고, `up --force-recreate`나 `down` 후 재기동에서 초기화된다.
+
+### 왜 볼륨을 안 붙였나
+
+`kc-db:/opt/keycloak/data/h2` 처럼 이름있는 볼륨을 붙이면 root 소유로 생성되는데
+Keycloak은 UID 1000으로 돌기 때문에 H2 파일을 못 만들고 죽는다:
+
+```
+Caused by: java.nio.file.AccessDeniedException: /opt/keycloak/data/h2/keycloakdb.mv.db
+ERROR: Failed to start server in (development) mode
+```
+
+(이미지에 그 디렉터리가 없어서 도커가 소유권을 복사해 줄 대상이 없다.)
+
+**결과**: 관리 콘솔에서 만든 계정은 컨테이너를 다시 만들면 사라진다. 개발 중에는 오히려
+편하다 — 이 파일이 늘 진실이 된다. 운영에서는 Keycloak도 PostgreSQL을 쓰게 하고
+그 DB를 영속화한다(6단계).

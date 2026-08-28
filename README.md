@@ -146,12 +146,14 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
 - **API 로그에 `Could not parse schema engine response` / `failed to detect the libssl`**:
   Prisma 엔진은 네이티브 바이너리라 musl(alpine)에서 돌지 않습니다. `api/Dockerfile`의
   베이스가 `node:22-slim`인지, `openssl` 패키지를 설치하는지 확인하고 `--build`로 다시 빌드.
-- **로그인 버튼이 "인증 서버 없음"**: Keycloak이 아직 뜨는 중(첫 기동 40초쯤). `docker compose ps`에서
-  `kin-keycloak`이 healthy가 되면 새로고침.
+- **로그인 버튼이 "인증 서버 없음"**: Keycloak이 아직 뜨는 중(첫 기동 40초쯤). 잠시 뒤 새로고침.
+  `docker compose logs keycloak | Select-String Imported` 로 렐름이 들어왔는지 확인할 수 있다.
 - **로그인 후 `invalid_redirect_uri`**: 8042가 아닌 주소로 열었을 때. 렐름에 등록된 주소는
   `http://localhost:8042/*` 뿐이다. `keycloak/kin-realm.json`의 `redirectUris`를 고치고
   `docker compose down -v` 후 재기동하거나, 관리 콘솔에서 직접 추가.
-- **렐름 파일을 고쳤는데 반영 안 됨**: 렐름은 처음 한 번만 import된다. `keycloak/README.md` 참고.
+- **렐름 파일을 고쳤는데 반영 안 됨**: `docker compose up -d --force-recreate keycloak`.
+- **Keycloak이 `AccessDeniedException: keycloakdb.mv.db`로 죽음**: H2 경로에 이름있는 볼륨을
+  붙였을 때 생긴다(root 소유로 만들어지는데 Keycloak은 UID 1000). `keycloak/README.md` 참고.
 - **API가 401만 뱉음**: 토큰의 `iss`와 API의 `KC_ISSUER`가 달라진 경우. compose의
   `KC_HOSTNAME`과 `KC_ISSUER`가 둘 다 `http://localhost:8080`인지 확인.
 - **처음부터 다시**: `docker compose down -v` (영상·DB·Keycloak 계정이 전부 삭제됨)
