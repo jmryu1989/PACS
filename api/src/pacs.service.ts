@@ -103,7 +103,11 @@ export class PacsService implements OnModuleInit {
     return toClient(saved, r);
   }
 
-  /** 판독문 저장. 검사 상태 행이 없으면 함께 만든다. */
+  /**
+   * 판독문 임시 저장(draft). 검사를 옮겨다닐 때마다 호출되므로 **버전을 남기지 않는다.**
+   * 목적은 손실 방지 하나뿐 — HPACS가 7년차에 넣은 그 기능이다(교훈 §1).
+   * 확정(save/approve/addendum/reset)은 commitReport 쪽이다.
+   */
   async putReport(uid: string, body: any, actor: string, roles: string[] = []) {
     need(roles, 'radiologist', '판독문 저장');
     await this.prisma.studyState.upsert({ where: { uid }, create: { uid }, update: {} });
@@ -117,10 +121,80 @@ export class PacsService implements OnModuleInit {
       where: { uid }, create: { uid, ...data }, update: data,
     });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
-    await this.audit(actor, 'report.save', uid, {
+    await this.audit(actor, 'report.draft', uid, {
       len: [data.findings.length, data.conclusion.length, data.recommendation.length],
     });
     return saved;
+  }
+
+  /**
+   * 판독문 확정. 내용 저장 + 버전 적립 + RS 전이를 **한 번에, 트랜잭션으로** 한다.
+   *
+   * 왜 한 엔드포인트인가: 예전엔 프론트가 판독문 PUT과 상태 PATCH를 따로 쐈다.
+   * 두 요청의 도착 순서가 뒤집히면 "승인됐는데 내용은 이전 것"인 상태가 남는다.
+   * 판독문과 그 판독문의 상태는 같이 움직여야 하는 하나의 사실이다.
+   */
+  async commitReport(uid: string, body: any, actor: string, roles: string[] = []) {
+    need(roles, 'radiologist', '판독문 확정');
+    const action = body.action;
+    if (!['save', 'approve', 'addendum', 'reset'].includes(action))
+      throw new BadRequestException(`알 수 없는 action: ${action}`);
+
+    const prev = await this.prisma.studyState.findUnique({ where: { uid } });
+
+    // Addendum은 승인된 판독에만 붙는다. 승인 전이라면 그냥 고쳐 쓰면 되기 때문.
+    if (action === 'addendum' && prev?.rs !== 'A')
+      throw new BadRequestException('Addendum은 승인(RS: A)된 판독문에만 붙일 수 있습니다');
+
+    // 판독을 되돌리는 것은 기록을 지우는 일이다. 사유 없이는 안 된다. (교훈 §1)
+    if (action === 'reset' && !String(body.reason ?? '').trim())
+      throw new BadRequestException('판독 취소에는 사유가 필요합니다');
+
+    const rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W' }[action];
+    const content = action === 'reset'
+      ? { findings: '', conclusion: '', recommendation: '' }
+      : {
+          findings: body.findings ?? '',
+          conclusion: body.conclusion ?? '',
+          recommendation: body.recommendation ?? '',
+        };
+
+    const last = await this.prisma.reportVersion.findFirst({
+      where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
+    });
+    const version = (last?.version ?? 0) + 1;
+
+    const stateData: any = { rs };
+    if (action === 'approve' || action === 'addendum') {
+      stateData.repDoc = actor.split('@')[0];
+      stateData.confirm = new Date().toISOString().slice(0, 10);
+    }
+
+    const [state] = await this.prisma.$transaction([
+      this.prisma.studyState.upsert({ where: { uid }, create: { uid, ...stateData }, update: stateData }),
+      this.prisma.report.upsert({
+        where: { uid },
+        create: { uid, ...content, version, updatedBy: actor },
+        update: { ...content, version, updatedBy: actor },
+      }),
+      this.prisma.reportVersion.create({
+        data: { uid, version, action, ...content, reason: body.reason ?? null, author: actor },
+      }),
+    ]);
+
+    await this.audit(actor, `report.${action}`, uid, {
+      version,
+      len: [content.findings.length, content.conclusion.length, content.recommendation.length],
+      reason: body.reason ?? undefined,
+    });
+
+    const r = await this.prisma.report.findUnique({ where: { uid } });
+    return toClient(state, r);
+  }
+
+  /** 판독문 이력 (최신순) */
+  versions(uid: string) {
+    return this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' } });
   }
 
   /**

@@ -148,6 +148,20 @@
     .modal .foot button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 14px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
     .modal .note { grid-column: 1 / -1; color: #7f8899; font-size: 11px; padding-top: 4px; }
+
+    /* 판독문 이력 */
+    .hist { max-height: 60vh; overflow: auto; padding: 8px 12px; }
+    .ver { border-left: 2px solid #3a4356; padding: 4px 0 8px 10px; margin-bottom: 10px; }
+    .vh { display: flex; gap: 8px; align-items: center; font-size: 11px; color: #aab2c0; flex-wrap: wrap; }
+    .vh b { color: #dfe5ee; }
+    .vh .tag { padding: 1px 7px; border-radius: 3px; font-size: 10px; }
+    .tag.save { background: #8a7a3a; color: #fff6cf; }
+    .tag.approve { background: #3f7a4a; color: #d9ffe0; }
+    .tag.addendum { background: #3b6ea5; color: #dbeaff; }
+    .tag.reset { background: #8a4a4a; color: #ffd9d9; }
+    .vr { color: #ffb0b0; font-size: 11px; margin: 4px 0; }
+    .hist pre { margin: 4px 0 0; padding: 6px 8px; background: #14181f; border: 1px solid #262e3c;
+                color: #cdd3dc; font: 11px/1.5 inherit; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -285,7 +299,7 @@
         <div class="rbtns">
           <button class="approve" id="b-approve">Approve</button>
           <button class="save" id="b-save">Save</button>
-          <button disabled>Edit</button>
+          <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
           <button disabled>Prelim</button>
           <button disabled>Dictate</button>
           <button id="b-transcribe">Transcribe</button>
@@ -304,6 +318,7 @@
         <div class="rfoot2">
           <button id="b-copy">Copy</button>
           <button id="b-paste">Paste</button>
+          <button id="b-history" title="판독문 개정 이력">이력</button>
           <button id="b-unread">Reset to Unread</button>
           <button id="b-clear">Clear</button>
           <button id="b-prev">◀ Prev</button>
@@ -336,6 +351,15 @@
         <div class="statusbar"><span id="orderhint">Study List에서 검사 1건 + Order List에서 오더 1건 선택 → 우클릭 Match</span></div>
       </div>
       </div><!-- /workrow -->
+    </div>
+  </div>
+
+  <!-- 판독문 개정 이력 -->
+  <div class="modal" id="histmodal">
+    <div class="box" style="width:640px;max-width:92vw">
+      <h3>판독문 개정 이력</h3>
+      <div class="hist" id="hist-body"></div>
+      <div class="foot"><button class="ok" id="hist-close">닫기</button></div>
     </div>
   </div>
 
@@ -716,6 +740,7 @@
     }
     function refreshRight() {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadReport();
+      updateReportButtons();
     }
 
     function renderClinical() {
@@ -1000,23 +1025,95 @@
       if (serverMode) api("PUT", `/studies/${encodeURIComponent(selectedUid)}/report`, next).catch(apiFail);
       else saveApp();
     }
-    function commitReport(newRs) {
+    /**
+     * 판독문 확정. action: save | approve | addendum | reset
+     * 서버 모드에서는 내용·버전·RS가 한 요청으로 함께 간다 — 따로 보내면 순서가 뒤집혀
+     * "승인됐는데 내용은 이전 것"이 될 수 있다.
+     */
+    async function commitReport(action, reason) {
       if (!selectedUid) return;
-      stashReport();
-      appState[selectedUid].rs = newRs;
-      if (newRs === "A") {   // 승인 시 판독의·확정일 기록 (RepDoc/Confirm)
-        appState[selectedUid].repDoc = user.split("@")[0];
-        appState[selectedUid].confirm = today();
+      const uid = selectedUid;
+      const content = {
+        findings: $("#findings").value,
+        conclusion: $("#conclusion").value,
+        recommendation: $("#recommendation").value,
+      };
+
+      if (serverMode) {
+        try {
+          const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
+            { action, reason, ...content });
+          appState[uid] = { ...appState[uid], ...st };
+          const s = studies.find(x => x.uid === uid);
+          if (s) s.rs = st.rs;
+          if (action === "reset") loadReport();   // 서버가 내용을 비웠으니 화면도 비운다
+        } catch (e) { alert("저장 실패: " + e.message); return; }
+      } else {
+        const rs = { save: "T", approve: "A", addendum: "A", reset: "W" }[action];
+        appState[uid] = { ...appState[uid], ...content, rs };
+        if (rs === "A") {
+          appState[uid].repDoc = user.split("@")[0];
+          appState[uid].confirm = today();
+        }
+        if (action === "reset") {
+          Object.assign(appState[uid], { findings: "", conclusion: "", recommendation: "" });
+          loadReport();
+        }
+        cur().rs = rs;
+        saveApp();
       }
-      cur().rs = newRs;
-      const a = appState[selectedUid];
-      saveApp(selectedUid, { rs: newRs, repDoc: a.repDoc, confirm: a.confirm });
-      render(); renderRelated();
+      render(); renderRelated(); updateReportButtons();
     }
-    $("#b-save").addEventListener("click", () => commitReport("T"));
-    $("#b-transcribe").addEventListener("click", () => commitReport("T"));
-    $("#b-approve").addEventListener("click", () => commitReport("A"));
-    $("#b-unread").addEventListener("click", () => commitReport("W"));
+
+    /** Addendum은 승인된 판독문에만 붙는다 */
+    function updateReportButtons() {
+      const approved = cur()?.rs === "A";
+      $("#b-addendum").disabled = !approved || !KinAuth.has("radiologist");
+    }
+    $("#b-save").addEventListener("click", () => commitReport("save"));
+    $("#b-transcribe").addEventListener("click", () => commitReport("save"));
+    $("#b-approve").addEventListener("click", () => commitReport("approve"));
+    $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
+    $("#b-unread").addEventListener("click", () => {
+      // 판독을 되돌리는 것은 저장된 진술을 지우는 일이다. 사유 없이는 보내지 않는다.
+      const reason = prompt("판독 취소 사유를 적어주세요 (기록에 남습니다):");
+      if (!reason?.trim()) return;
+      commitReport("reset", reason.trim());
+    });
+
+    // ── 판독문 이력 ──
+    async function showHistory() {
+      if (!selectedUid) { alert("검사를 선택하세요."); return; }
+      const box = $("#hist-body");
+      $("#histmodal").classList.add("show");
+      box.innerHTML = "<div style='color:#667;padding:10px'>불러오는 중…</div>";
+      if (!serverMode) {
+        box.innerHTML = "<div style='color:#d8b24a;padding:10px'>서버에 연결돼 있을 때만 이력이 남습니다.</div>";
+        return;
+      }
+      try {
+        const list = await api("GET", `/studies/${encodeURIComponent(selectedUid)}/report/versions`);
+        const LABEL = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소" };
+        box.innerHTML = list.length ? list.map(v => `
+          <div class="ver">
+            <div class="vh">
+              <b>v${v.version}</b>
+              <span class="tag ${v.action}">${LABEL[v.action] ?? v.action}</span>
+              <span>${v.author}</span>
+              <span style="color:#667">${v.at.replace("T", " ").slice(0, 19)}</span>
+            </div>
+            ${v.reason ? `<div class="vr">사유: ${v.reason}</div>` : ""}
+            ${v.findings || v.conclusion || v.recommendation
+              ? `<pre>${[v.findings, v.conclusion, v.recommendation].filter(Boolean).join("\n---\n")}</pre>`
+              : `<div style="color:#556;padding:4px 0">(내용 없음)</div>`}
+          </div>`).join("")
+          : "<div style='color:#667;padding:10px'>아직 확정된 판이 없습니다. Save 또는 Approve를 누르면 여기 쌓입니다.</div>";
+      } catch (e) {
+        box.innerHTML = `<div style="color:#ff8080;padding:10px">${e.message}</div>`;
+      }
+    }
+    $("#b-history").addEventListener("click", showHistory);
+    $("#hist-close").addEventListener("click", () => $("#histmodal").classList.remove("show"));
     $("#b-clear").addEventListener("click", () => {
       $("#findings").value = $("#conclusion").value = $("#recommendation").value = "";
     });
@@ -1264,7 +1361,7 @@ ${r.recommendation ?? ""}
     // 처음부터 회색인 편이 낫다. (서버 검사가 진짜 방어선이고 이건 안내다)
     function applyRoleUi() {
       const rad = KinAuth.has("radiologist"), tec = KinAuth.has("technician");
-      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread"].forEach(s => {
+      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum"].forEach(s => {
         const el = $(s); el.disabled = !rad;
         if (!rad) el.title = "판독의(radiologist) 권한이 필요합니다";
       });

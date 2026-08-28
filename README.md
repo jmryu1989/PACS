@@ -106,10 +106,23 @@ Radiology / Technician 두 탭은 화면 분리가 아니라 **권한 분리**�
 |---|---|---|
 | GET | `/api/bootstrap` | 프론트 시작 시 상태·판독문·오더를 한 번에 |
 | PATCH | `/api/studies/:uid` | RS·SS·EM·TS·Ward 등 부분 수정 |
-| PUT | `/api/studies/:uid/report` | 판독문 저장 |
+| PUT | `/api/studies/:uid/report` | 판독문 임시저장 (버전 안 남김) |
+| POST | `/api/studies/:uid/report/commit` | 판독문 확정 — `save`/`approve`/`addendum`/`reset` |
+| GET | `/api/studies/:uid/report/versions` | 판독문 개정 이력 |
 | POST | `/api/match` · `/api/unmatch` | 검사↔오더 매칭 (트랜잭션) |
 | GET | `/api/audit?uid=` | 감사 로그 |
 | GET | `/api/me` | 내 토큰의 주인과 롤 |
+
+### 판독문은 덮어쓰지 않는다
+
+`Report`는 현재 내용이고, `ReportVersion`은 **추가만 하는 역사**입니다.
+
+- 임시저장(검사를 옮겨다닐 때 자동)은 버전을 남기지 않습니다 — 손실 방지가 목적
+- Save / Approve / Addendum / Reset은 그때의 내용을 그대로 한 판으로 적립합니다
+- **Approve된 판독문을 고쳐도 이전 승인본은 남습니다.** Addendum은 승인본 위에 덧붙는 새 판입니다
+- **Reset to Unread에는 사유가 필수**입니다. 저장된 진술을 지우는 일이므로 사유가 기록에 남습니다
+
+판독문은 의무기록입니다. "누가 언제 무엇이라고 말했는가"가 나중에 뒤집히면 안 됩니다.
 
 `/api/health`를 뺀 모든 요청은 `Authorization: Bearer <token>`이 필요합니다.
 서버는 서명·발급자(iss)·대상(aud)·만료를 모두 확인하고, **감사 로그의 actor를 토큰에서**

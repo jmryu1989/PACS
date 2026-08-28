@@ -37,16 +37,44 @@ model StudyState {
   report Report?
 }
 
-/// 판독문. 검사당 1건 (개정 이력은 4단계에서 ReportVersion으로 분리 예정)
+/// 판독문의 **현재 내용**. 화면이 빠르게 읽어가는 스냅샷.
 model Report {
   uid            String   @id
   findings       String   @default("")
   conclusion     String   @default("")
   recommendation String   @default("")
+  version        Int      @default(0)   // 마지막으로 확정된 판(버전)
   updatedBy      String?
   updatedAt      DateTime @updatedAt
 
   study StudyState @relation(fields: [uid], references: [uid], onDelete: Cascade)
+}
+
+/// 판독문의 **역사**. 추가만 하고 고치거나 지우지 않는다(append-only).
+///
+/// 왜 필요한가: 판독문은 의무기록이다. "누가 언제 무엇이라고 말했는가"가 나중에
+/// 뒤집히면 안 된다. Approve된 판독을 고치면 이전 판이 사라지는 구조는
+/// 기록이 아니라 메모다. (HPACS 릴리즈노트 교훈 §1)
+///
+/// action 의미:
+///   save      임시 저장 확정 (RS: T)
+///   approve   승인 — 이 시점의 내용이 판독의의 진술이 된다 (RS: A)
+///   addendum  승인 뒤 덧붙임 — 이전 승인본은 그대로 남는다 (RS: A)
+///   reset     판독 취소 후 미판독으로 (RS: W). reason 필수
+model ReportVersion {
+  id             Int      @id @default(autoincrement())
+  uid            String
+  version        Int
+  action         String
+  findings       String   @default("")
+  conclusion     String   @default("")
+  recommendation String   @default("")
+  reason         String?
+  author         String
+  at             DateTime @default(now())
+
+  @@unique([uid, version])
+  @@index([uid])
 }
 
 /// RIS(HRIS)에서 넘어온 오더. 지금은 시드 데이터, 4~5단계에서 HL7 v2로 교체된다.

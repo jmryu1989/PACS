@@ -33,9 +33,22 @@ export class PacsController {
     return this.svc.patchState(uid, body, req.actor, req.roles);
   }
 
+  /** 임시 저장 — 버전을 남기지 않는다 */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
     return this.svc.putReport(uid, body, req.actor, req.roles);
+  }
+
+  /** 확정 — save / approve / addendum / reset. 내용·버전·RS를 한 트랜잭션으로 */
+  @Post('studies/:uid/report/commit')
+  commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.commitReport(uid, body, req.actor, req.roles);
+  }
+
+  /** 판독문 이력 */
+  @Get('studies/:uid/report/versions')
+  versions(@Param('uid') uid: string) {
+    return this.svc.versions(uid);
   }
 
   @Delete('studies/:uid')
