@@ -1,0 +1,6 @@
+# 스크립트로 재생성 가능한 산출물은 커밋하지 않음
+sample-data/*.dcm
+
+# Python 캐시
+__pycache__/
+*.pyc

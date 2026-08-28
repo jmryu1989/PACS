@@ -1,0 +1,25 @@
+{
+  "Name": "KIN-Lab",
+
+  "RemoteAccessAllowed": true,
+  "AuthenticationEnabled": true,
+  "RegisteredUsers": {
+    "admin": "admin"
+  },
+
+  "DicomWeb": {
+    "Enable": true,
+    "Root": "/dicom-web/"
+  },
+
+  "OHIF": {
+    "DataSource": "dicom-web",
+    "UserConfiguration": "/etc/orthanc/ohif.js"
+  },
+
+  "DicomAet": "KINLAB",
+  "DicomPort": 4242,
+
+  "StableAge": 10,
+  "StorageCompression": false
+}

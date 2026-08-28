@@ -1,0 +1,21 @@
+# Korea Imaging Network — 0단계 실습: 미니 PACS
+# 실행:  docker compose up -d
+# 접속:  http://localhost:8042        (Orthanc 웹 UI, admin / admin)
+#        http://localhost:8042/ohif/  (OHIF 뷰어)
+services:
+  orthanc:
+    image: orthancteam/orthanc:24.12.0
+    container_name: kin-orthanc
+    restart: unless-stopped
+    environment:
+      OHIF_PLUGIN_ENABLED: "true"   # 이미지에 내장된 OHIF 뷰어 플러그인 활성화
+    ports:
+      - "8042:8042"   # HTTP: 웹 UI, REST API, DICOMweb, OHIF
+      - "4242:4242"   # DICOM 프로토콜 (C-STORE/C-FIND 실습용)
+    volumes:
+      - ./config/orthanc.json:/etc/orthanc/orthanc.json:ro
+      - ./config/ohif.js:/etc/orthanc/ohif.js:ro
+      - orthanc-db:/var/lib/orthanc/db
+
+volumes:
+  orthanc-db:
