@@ -31,6 +31,13 @@
     .tabs > div { padding: 6px 16px; cursor: pointer; color: #7f8899; border-bottom: 2px solid transparent; }
     .tabs > div.on { color: #4da3ff; border-bottom-color: #4da3ff; }
 
+    /* Context Menu 버튼 툴바 (8.1.3) */
+    .ctxbar { display: none; align-items: center; gap: 4px; padding: 3px 8px; background: #171c25; border-bottom: 1px solid #2c3444; flex: none; }
+    .ctxbar.show { display: flex; }
+    .ctxbar button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .ctxbar button:disabled { opacity: .35; cursor: default; }
+    .ctxbar .fold { color: #7f8899; cursor: pointer; padding: 0 4px; user-select: none; }
+
     .grid { overflow: auto; flex: 1; }
     table { border-collapse: collapse; width: 100%; }
     th, td { border: 1px solid #262e3c; padding: 3px 6px; white-space: nowrap; }
@@ -57,8 +64,16 @@
     .ts-cancelled { color: #7f8899; text-decoration: line-through; }
     @keyframes blink { 50% { opacity: .3; } }
 
+    /* SS / Matched (8장) */
+    .ss { font-size: 11px; }
+    .ss.Verified { color: #4ac06a; }
+    .ss.Unverified { color: #d8b24a; }
+    .mt { display: inline-block; min-width: 14px; text-align: center; border-radius: 3px; font-weight: bold; font-size: 11px; }
+    .mt.M { background: #2f5f8a; color: #d9ecff; }
+    .mt.U { color: #667; }
+
     /* 우클릭 컨텍스트 메뉴 */
-    .ctx { display: none; position: fixed; background: #232936; border: 1px solid #3a4356; z-index: 20; min-width: 170px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+    .ctx { display: none; position: fixed; background: #232936; border: 1px solid #3a4356; z-index: 20; min-width: 190px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
     .ctx div { padding: 6px 14px; cursor: pointer; font-size: 12px; }
     .ctx div:hover { background: #3b6ea5; color: #fff; }
     .ctx div.dis { color: #556; cursor: default; }
@@ -96,13 +111,17 @@
     .workrow { flex: 1; display: flex; min-height: 0; }
     .panel { display: flex; flex-direction: column; min-height: 0; }
     .related-p { width: 44%; border-right: 1px solid #333c4d; }
-    .reltabs { display: flex; background: #1b212c; flex: none; }
+    .reltabs { display: flex; align-items: center; background: #1b212c; flex: none; }
     .reltabs div { padding: 4px 12px; font-size: 11px; color: #7f8899; cursor: pointer; }
     .reltabs div.on { color: #4da3ff; border-bottom: 2px solid #4da3ff; }
+    .reltabs .spacer { flex: 1; }
+    .reltabs button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; margin-right: 4px; }
+    .reltabs label { color: #7f8899; font-size: 11px; padding: 0 6px; display: flex; align-items: center; gap: 3px; cursor: pointer; }
     .grid2 { overflow: auto; flex: 1; }
 
     /* Report */
     .report-p { flex: 1; }
+    .order-p { flex: 1; }
     .rbtns { display: flex; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; flex-wrap: wrap; }
     .rbtns button, .rfoot2 button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .rbtns button:disabled { opacity: .35; cursor: default; }
@@ -116,6 +135,19 @@
     #recommendation { flex: 1; min-height: 26px; }
     .rfoot2 { display: flex; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }
     #err { color: #ff8080; padding: 2px 10px; flex: none; }
+
+    /* ── 모달 (Modify Exam) ── */
+    .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 30; align-items: center; justify-content: center; }
+    .modal.show { display: flex; }
+    .modal .box { background: #1b212c; border: 1px solid #3a4356; min-width: 380px; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
+    .modal .box h3 { margin: 0; padding: 8px 12px; background: #232936; font-size: 12px; color: #dfe5ee; font-weight: normal; }
+    .modal .body { padding: 10px 12px; display: grid; grid-template-columns: 90px 1fr; gap: 6px 8px; align-items: center; }
+    .modal .body label { color: #8892a4; font-size: 11px; }
+    .modal .body input, .modal .body select { background: #14181f; border: 1px solid #3a4356; color: #cdd3dc; padding: 4px 6px; font: inherit; }
+    .modal .foot { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 12px; background: #171c25; }
+    .modal .foot button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 14px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
+    .modal .note { grid-column: 1 / -1; color: #7f8899; font-size: 11px; padding-top: 4px; }
   </style>
 </head>
 <body>
@@ -154,47 +186,35 @@
 
   <div id="err"></div>
 
-  <!-- 워크리스트 우클릭 메뉴 -->
-  <div class="ctx" id="ctx">
-    <div id="c-open">Film Box 열기</div>
-    <div id="c-report">판독문 작성으로</div>
-    <hr>
-    <div id="c-tele">원격판독 의뢰 (Tele Request)</div>
-    <div id="c-cancel">의뢰 취소</div>
-  </div>
+  <!-- 우클릭 메뉴 (내용은 상황에 따라 JS가 채움) -->
+  <div class="ctx" id="ctx"></div>
 
   <div class="split">
-    <!-- ══ 좌측: 워크리스트 (6.3) ══ -->
+    <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
       <div class="tabs">
         <div class="on" data-tab="Radiology">Radiology</div>
         <div data-tab="Technician">Technician</div>
       </div>
 
+      <!-- Context Menu 버튼 (8.1.3) — Technician 모드에서만 -->
+      <div class="ctxbar" id="ctxbar">
+        <span class="fold" id="fold">▽</span>
+        <span id="ctxbtns" style="display:flex;gap:4px">
+          <button id="t-modify">Modify Exam</button>
+          <button id="t-verify">Verify</button>
+          <button id="t-unverify">Unverify</button>
+          <button disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
+        </span>
+        <span style="flex:1"></span>
+        <button id="t-simulate" title="장비에서 새 영상이 도착한 상황을 흉내냅니다">＋ 장비 수신 시뮬</button>
+      </div>
+
       <div class="grid">
         <table>
           <thead>
-            <tr id="heads">
-              <th data-key="pf">PF</th><th data-key="no">No</th><th data-key="count">Count</th><th data-key="series">Series</th>
-              <th data-key="em">EM</th><th data-key="rs">RS</th><th data-key="acc">Accession No</th><th data-key="ts">TS</th>
-              <th data-key="id">ID</th><th data-key="name">Name</th><th data-key="age">Age</th><th data-key="birth">BirthDate</th>
-              <th data-key="sex">Sex</th><th data-key="modality">Modality</th><th data-key="desc">StudyDesc</th>
-              <th data-key="date">StudyDate</th>
-            </tr>
-            <tr class="filters">
-              <th></th><th></th><th></th><th></th>
-              <th><select id="f-em"><option value=""></option><option>E</option><option>N</option></select></th>
-              <th><select id="f-rs"><option value=""></option><option>A</option><option>T</option><option>W</option></select></th>
-              <th><input id="f-acc"></th>
-              <th></th>
-              <th><input id="f-id"></th>
-              <th><input id="f-name"></th>
-              <th></th><th></th>
-              <th><select id="f-sex"><option value=""></option><option>M</option><option>F</option><option>O</option></select></th>
-              <th><select id="f-mod"><option value=""></option><option>CT</option><option>MR</option><option>CR</option><option>US</option></select></th>
-              <th><input id="f-desc"></th>
-              <th></th>
-            </tr>
+            <tr id="heads"></tr>
+            <tr class="filters" id="filterrow"></tr>
           </thead>
           <tbody id="rows"></tbody>
         </table>
@@ -202,11 +222,11 @@
 
       <div class="statusbar">
         <span id="filterlist">Filter : -</span>
-        <span id="countlist">W:0 A:0 T:0 P:0</span>
+        <span id="countlist"></span>
       </div>
     </div>
 
-    <!-- ══ 우측: 판독 작업 공간 ══ -->
+    <!-- ══ 우측: 작업 공간 ══ -->
     <div class="right">
       <!-- Report window (7.3): 썸네일 | Clinical Info | Reading Template -->
       <div class="rw">
@@ -241,13 +261,13 @@
       </div>
 
       <div class="workrow">
-      <!-- Related Report List -->
+      <!-- Related Report List / Related Exam List -->
       <div class="panel related-p">
         <div class="reltabs" id="reltabs">
           <div class="on" data-rel="all">All</div>
           <div data-rel="modal">Modal</div>
           <div data-rel="body">Body</div>
-          <div data-rel="mb">Modal & Body</div>
+          <div data-rel="mb">Modal &amp; Body</div>
           <div data-rel="study">Study</div>
         </div>
         <div class="grid2">
@@ -258,7 +278,7 @@
         </div>
       </div>
 
-      <!-- Report (7.4) -->
+      <!-- Report (7.4) — Radiology 모드 -->
       <div class="panel report-p">
         <div class="rbtns">
           <button class="approve" id="b-approve">Approve</button>
@@ -288,7 +308,52 @@
           <button id="b-next">Next ▶</button>
         </div>
       </div>
+
+      <!-- Order List (8.2.2) — Technician 모드 -->
+      <div class="panel order-p" style="display:none">
+        <div class="reltabs">
+          <div class="on">Order List (RIS)</div>
+          <div class="spacer"></div>
+          <label><input type="checkbox" id="o-sync"> ID sync with worklist</label>
+          <button id="o-refresh">Refresh</button>
+          <button id="o-clear">Clear</button>
+        </div>
+        <div class="grid2">
+          <table>
+            <thead>
+              <tr><th>No</th><th>Mt</th><th>ID</th><th>Name</th><th>Sex</th><th>BirthDate</th><th>ScheduledDate</th><th>Modality</th><th>StudyDesc</th><th>Ward</th><th>ReqDoc</th></tr>
+              <tr class="filters">
+                <th></th><th></th><th><input data-o="id"></th><th><input data-o="name"></th>
+                <th></th><th></th><th></th>
+                <th><input data-o="modality"></th><th><input data-o="desc"></th><th></th><th></th>
+              </tr>
+            </thead>
+            <tbody id="orderrows"></tbody>
+          </table>
+        </div>
+        <div class="statusbar"><span id="orderhint">Study List에서 검사 1건 + Order List에서 오더 1건 선택 → 우클릭 Match</span></div>
+      </div>
       </div><!-- /workrow -->
+    </div>
+  </div>
+
+  <!-- Modify Exam 모달 (8.1.2.1.5) -->
+  <div class="modal" id="modal">
+    <div class="box">
+      <h3 id="mtitle">Modify Exam</h3>
+      <div class="body">
+        <label>Patient ID</label><input id="m-id">
+        <label>Name</label><input id="m-name">
+        <label>Sex</label><select id="m-sex"><option>M</option><option>F</option><option>O</option></select>
+        <label>BirthDate</label><input id="m-birth" placeholder="YYYY-MM-DD">
+        <label>StudyDesc</label><input id="m-desc">
+        <label>Ward</label><input id="m-ward">
+        <div class="note">※ 판독 전(RS: W)인 검사만 수정 가능. 수정 내용은 이 앱의 localStorage에만 저장되며 Orthanc 원본 DICOM은 변경되지 않습니다.</div>
+      </div>
+      <div class="foot">
+        <button id="m-cancel">Cancel</button>
+        <button class="ok" id="m-save">Save</button>
+      </div>
     </div>
   </div>
 
@@ -311,10 +376,37 @@
       return String(v);
     }
     const fmtD = d => d.length === 8 ? `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}` : d;
+    const today = () => new Date().toISOString().slice(0, 10);
+    function ageOf(birth, date) {
+      if (!birth || !date) return "";
+      const b = +birth.replace(/-/g, ""), d = +date.replace(/-/g, "");
+      return b && d ? Math.floor((d - b) / 10000) : "";
+    }
 
+    // ── 영속 상태 ──
     let appState = {};
     try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
     const saveApp = () => { try { localStorage.setItem("kin-app", JSON.stringify(appState)); } catch (e) {} };
+
+    let incoming = [];   // 장비 수신 시뮬로 생성된 가짜 검사
+    try { incoming = JSON.parse(localStorage.getItem("kin-incoming") ?? "[]"); } catch (e) {}
+    const saveIncoming = () => { try { localStorage.setItem("kin-incoming", JSON.stringify(incoming)); } catch (e) {} };
+
+    // ── Order List (8.2.2): HRIS에서 온 오더 목록 (여기선 가짜) ──
+    const SEED_ORDERS = [
+      { oid: "O-9001", id: "P-1001", name: "KIM CHULSOO",  sex: "M", birth: "1962-03-04", sched: today() + " 09:10", modality: "CT", desc: "Brain CT without contrast", ward: "NR",  reqDoc: "PARK MD" },
+      { oid: "O-9002", id: "P-1002", name: "LEE YOUNGHEE", sex: "F", birth: "1975-11-22", sched: today() + " 09:40", modality: "CT", desc: "Brain CT with contrast",    ward: "ER",  reqDoc: "KIM MD" },
+      { oid: "O-9003", id: "P-2001", name: "HAN JIWOO",    sex: "F", birth: "1990-07-14", sched: today() + " 10:05", modality: "CT", desc: "Brain CT screening",       ward: "OPD", reqDoc: "CHOI MD" },
+      { oid: "O-9004", id: "P-2002", name: "OH SEUNGMIN",  sex: "M", birth: "1984-01-30", sched: today() + " 10:30", modality: "CR", desc: "Chest PA",                 ward: "OPD", reqDoc: "KIM MD" },
+      { oid: "O-9005", id: "P-2003", name: "SEO YUNA",     sex: "F", birth: "2001-09-02", sched: today() + " 11:00", modality: "CT", desc: "Brain CT f/u",             ward: "NR",  reqDoc: "PARK MD" },
+      { oid: "O-9006", id: "P-2004", name: "BAEK DOYUN",   sex: "M", birth: "1958-12-19", sched: today() + " 11:25", modality: "US", desc: "Abdominal US",             ward: "GI",  reqDoc: "LEE MD" },
+    ];
+    let orders = null;
+    try { orders = JSON.parse(localStorage.getItem("kin-orders")); } catch (e) {}
+    if (!Array.isArray(orders) || !orders.length)
+      orders = SEED_ORDERS.map(o => ({ ...o, matched: "U", studyUid: null }));
+    const saveOrders = () => { try { localStorage.setItem("kin-orders", JSON.stringify(orders)); } catch (e) {} };
+    saveOrders();
 
     // ── Reading Template (기본 3종 + localStorage) ──
     let templates = null;
@@ -335,7 +427,7 @@
       const s = cur();
       const useMod = $("#t-mod").checked;
       const list = templates.filter(t => !useMod || !s || !t.modality || s.modality.includes(t.modality));
-      $("#tplrows").innerHTML = list.map((t, i) => `
+      $("#tplrows").innerHTML = list.map(t => `
         <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입">
           <td>${t.title}</td><td>${t.shortcut}</td><td>${t.modality}</td>
         </tr>`).join("") || `<tr><td class="empty" colspan="3">템플릿 없음</td></tr>`;
@@ -348,13 +440,97 @@
     });
     $("#t-mod").addEventListener("change", renderTemplates);
 
+    // ══════════ 컬럼 스펙: 모드별로 다른 워크리스트 (6.3 / 8.1.1) ══════════
+    // f: 없으면 필터 없음 / 'text' = 입력칸 / 배열 = 드롭다운
+    const COLS = {
+      Radiology: [
+        { k: "pf", t: "PF" },
+        { k: "no", t: "No", num: 1 },
+        { k: "count", t: "Count", num: 1 },
+        { k: "series", t: "Series", num: 1 },
+        { k: "em", t: "EM", f: ["E", "N"] },
+        { k: "rs", t: "RS", f: ["A", "T", "W"] },
+        { k: "acc", t: "Accession No", f: "text" },
+        { k: "ts", t: "TS" },
+        { k: "id", t: "ID", f: "text" },
+        { k: "name", t: "Name", f: "text" },
+        { k: "age", t: "Age", num: 1 },
+        { k: "birth", t: "BirthDate" },
+        { k: "sex", t: "Sex", f: ["M", "F", "O"] },
+        { k: "modality", t: "Modality", f: ["CT", "MR", "CR", "US", "SC"] },
+        { k: "desc", t: "StudyDesc", f: "text" },
+        { k: "date", t: "StudyDate" },
+      ],
+      Technician: [
+        { k: "no", t: "No", num: 1 },
+        { k: "count", t: "Count", num: 1 },
+        { k: "series", t: "Series", num: 1 },
+        { k: "em", t: "EM", f: ["E", "N"] },
+        { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
+        { k: "matched", t: "Mt", f: ["M", "U"] },
+        { k: "rs", t: "RS", f: ["A", "T", "W"] },
+        { k: "acc", t: "Accession No", f: "text" },
+        { k: "id", t: "ID", f: "text" },
+        { k: "name", t: "Name", f: "text" },
+        { k: "age", t: "Age", num: 1 },
+        { k: "sex", t: "Sex", f: ["M", "F", "O"] },
+        { k: "modality", t: "Modality", f: ["CT", "MR", "CR", "US", "SC"] },
+        { k: "desc", t: "StudyDesc", f: "text" },
+        { k: "date", t: "StudyDate" },
+        { k: "ward", t: "Ward", f: "text" },
+        { k: "reqHosp", t: "ReqHosp" },
+      ],
+    };
+    // 특수 렌더링이 필요한 칸만 함수로
+    const CELL = {
+      em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
+      rs: s => `<span class="rs ${s.rs}">${s.rs}</span>`,
+      ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
+      ss: s => `<span class="ss ${s.ss}">${s.ss}</span>`,
+      matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
+    };
+
+    let mode = "Radiology";
+    const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
+
+    function renderHeads() {
+      $("#heads").innerHTML = COLS[mode].map(c => `<th data-key="${c.k}">${c.t}</th>`).join("");
+      $("#filterrow").innerHTML = COLS[mode].map(c => {
+        if (!c.f) return "<th></th>";
+        if (c.f === "text")
+          return `<th><input data-f="${c.k}" value="${fval[c.k] ?? ""}"></th>`;
+        return `<th><select data-f="${c.k}">` +
+          ["", ...c.f].map(o => `<option value="${o}"${(fval[c.k] ?? "") === o ? " selected" : ""}>${o}</option>`).join("") +
+          `</select></th>`;
+      }).join("");
+    }
+    $("#filterrow").addEventListener("input", e => {
+      const el = e.target.closest("[data-f]"); if (!el) return;
+      fval[el.dataset.f] = el.value.trim();
+      render();
+    });
+
     // ── 데이터 ──
     let studies = [];
     let demoMode = false;
-    let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, relMode = "all";
-    // 데모 모드용 회색 CT 자리표시 이미지
+    let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null, relMode = "all";
+
     const DEMO_IMG = "data:image/svg+xml," + encodeURIComponent(
       `<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='black'/><ellipse cx='60' cy='60' rx='42' ry='50' fill='%23555'/><ellipse cx='60' cy='60' rx='36' ry='44' fill='%23888'/><ellipse cx='60' cy='55' rx='10' ry='6' fill='%23333'/><text x='60' y='112' fill='%23666' font-size='9' text-anchor='middle'>DEMO</text></svg>`);
+
+    // 저장된 상태를 검사 객체에 얹는다. Match로 덮어쓴 값(ov)이 가장 마지막에 적용된다.
+    function applyState(s) {
+      const a = appState[s.uid] ?? {};
+      s.em = a.em ?? s.em ?? "N";
+      s.rs = a.rs ?? "W";
+      s.ts = a.ts ?? "none";
+      s.ss = a.ss ?? (s.synthetic ? "Unverified" : "Verified");
+      s.matched = a.matched ?? "U";
+      s.ward = a.ward ?? s.ward ?? "";
+      s.reqHosp = a.reqHosp ?? s.reqHosp ?? "KIN";
+      if (a.ov) Object.assign(s, a.ov);
+      return s;
+    }
 
     async function load() {
       try {
@@ -363,13 +539,10 @@
         studies = (await res.json()).map(st => {
           const uid = tagv(st, "0020000D");
           const birth = tagv(st, "00100030"), date = tagv(st, "00080020");
-          return {
+          return applyState({
             uid, pf: "·",
             count: +tagv(st, "00201208") || 0,
             series: +tagv(st, "00201206") || 0,
-            em: appState[uid]?.em ?? "N",
-            rs: appState[uid]?.rs ?? "W",
-            ts: appState[uid]?.ts ?? "none",
             acc: tagv(st, "00080050"),
             id: tagv(st, "00100020"),
             name: tagv(st, "00100010").replace(/\^/g, " "),
@@ -377,10 +550,10 @@
             birth: fmtD(birth), sex: tagv(st, "00100040"),
             modality: st["00080061"]?.Value?.join(",") ?? "",
             desc: tagv(st, "00081030"), date: fmtD(date),
-          };
+          });
         });
-        render();
-        // 스토리지 표시 (6.8 시스템 현황의 흉내)
+        mergeIncoming();
+        render(); refreshRight();
         try {
           const st = await (await fetch("/statistics")).json();
           $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB 사용";
@@ -389,82 +562,113 @@
         // ── 데모 모드: Orthanc 없이 열람 시 (GitHub Pages 등) 가짜 데이터로 전환 ──
         demoMode = true;
         $("#err").textContent = "데모 모드 — 가짜 데이터 (Orthanc 미연결)";
-        const P = (uid, id, name, age, birth, sex, desc, date, acc) =>
-          ({ uid, pf: "·", count: 20, series: 1, em: appState[uid]?.em ?? "N",
-             rs: appState[uid]?.rs ?? "W", ts: "none", acc, id, name, age, birth, sex,
-             modality: "CT", desc, date });
+        const P = (uid, id, name, age, birth, sex, desc, date, acc) => applyState(
+          { uid, pf: "·", count: 20, series: 1, acc, id, name, age, birth, sex, modality: "CT", desc, date });
         studies = [
-          P("demo-1", "P-1001", "KIM CHULSOO", 64, "1962-03-04", "M", "Brain CT (synthetic)", "2026-08-28", "KIN20261000"),
-          P("demo-1p", "P-1001", "KIM CHULSOO", 63, "1962-03-04", "M", "Brain CT initial (synthetic)", "2026-02-10", "KIN20260950"),
-          P("demo-2", "P-1002", "LEE YOUNGHEE", 50, "1975-11-22", "F", "Brain CT (synthetic)", "2026-08-27", "KIN20261001"),
-          P("demo-3", "P-1003", "PARK MINJUN", 37, "1988-10-09", "M", "Brain CT f/u (synthetic)", "2026-08-27", "KIN20261002"),
-          P("demo-4", "P-1004", "CHOI SUJIN", 33, "1993-05-17", "F", "Brain CT (synthetic)", "2026-08-26", "KIN20261003"),
-          P("demo-5", "P-1005", "JUNG DOHYUN", 69, "1957-02-28", "M", "Brain CT f/u (synthetic)", "2026-08-25", "KIN20261004"),
+          P("demo-1",  "P-1001", "KIM CHULSOO",  64, "1962-03-04", "M", "Brain CT (synthetic)",         "2026-08-28", "KIN20261000"),
+          P("demo-1p", "P-1001", "KIM CHULSOO",  63, "1962-03-04", "M", "Brain CT initial (synthetic)", "2026-02-10", "KIN20260950"),
+          P("demo-2",  "P-1002", "LEE YOUNGHEE", 50, "1975-11-22", "F", "Brain CT (synthetic)",         "2026-08-27", "KIN20261001"),
+          P("demo-3",  "P-1003", "PARK MINJUN",  37, "1988-10-09", "M", "Brain CT f/u (synthetic)",     "2026-08-27", "KIN20261002"),
+          P("demo-4",  "P-1004", "CHOI SUJIN",   33, "1993-05-17", "F", "Brain CT (synthetic)",         "2026-08-26", "KIN20261003"),
+          P("demo-5",  "P-1005", "JUNG DOHYUN",  69, "1957-02-28", "M", "Brain CT f/u (synthetic)",     "2026-08-25", "KIN20261004"),
         ];
-        render();
+        mergeIncoming();
+        render(); refreshRight();
       }
     }
 
-    const colFilters = [
-      ["f-em",   (s, f) => f === "" || s.em === f],
-      ["f-rs",   (s, f) => f === "" || s.rs === f],
-      ["f-acc",  (s, f) => s.acc.toUpperCase().includes(f)],
-      ["f-id",   (s, f) => s.id.toUpperCase().includes(f)],
-      ["f-name", (s, f) => s.name.toUpperCase().includes(f)],
-      ["f-sex",  (s, f) => f === "" || s.sex === f],
-      ["f-mod",  (s, f) => f === "" || s.modality.includes(f)],
-      ["f-desc", (s, f) => s.desc.toUpperCase().includes(f)],
-    ];
+    function mergeIncoming() {
+      studies = studies.concat(incoming.map(s => applyState({ ...s })));
+    }
 
     function withinDays(dateStr, days) {
       if (days < 0 || !dateStr) return true;
-      const d = new Date(dateStr), today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const from = new Date(today); from.setDate(from.getDate() - days);
+      const d = new Date(dateStr), t = new Date();
+      t.setHours(0, 0, 0, 0);
+      const from = new Date(t); from.setDate(from.getDate() - days);
       return d >= from;
     }
 
+    function testCol(s, c) {
+      const v = fval[c.k] ?? "";
+      if (!v) return true;
+      if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(v.toUpperCase());
+      return String(s[c.k]) === v;
+    }
+
     function filtered() {
+      const cols = COLS[mode].filter(c => c.f);
       return studies.filter(s => {
+        // Radiology 탭에는 기사가 확인(Verify)한 검사만 올라온다 — 8장 흐름의 관문
+        if (mode === "Radiology" && s.ss !== "Verified") return false;
         const kw = $("#quick").value.trim().toUpperCase();
         if (kw && !s.name.toUpperCase().includes(kw) && !s.id.toUpperCase().includes(kw)) return false;
         if (!withinDays(s.date, quickDays)) return false;
-        return colFilters.every(([fid, test]) => test(s, $("#" + fid).value.trim().toUpperCase()));
+        return cols.every(c => testCol(s, c));
       });
     }
 
     function render() {
+      const cols = COLS[mode];
       let list = filtered();
       if (sortDir !== 0 && sortKey)
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
 
       $("#rows").innerHTML = list.map((s, i) => `
-        <tr data-uid="${s.uid}" class="${s.uid === selectedUid ? "sel" : ""}">
-          <td>${s.pf}</td><td class="num">${i + 1}</td><td class="num">${s.count}</td><td class="num">${s.series}</td>
-          <td class="${s.em === "E" ? "em-e" : ""}">${s.em === "E" ? "E" : ""}</td>
-          <td><span class="rs ${s.rs}">${s.rs}</span></td>
-          <td>${s.acc}</td><td class="ts ts-${s.ts}">${s.ts}</td>
-          <td>${s.id}</td><td>${s.name}</td>
-          <td class="num">${s.age}</td><td>${s.birth}</td><td>${s.sex}</td>
-          <td>${s.modality}</td><td>${s.desc}</td><td>${s.date}</td>
-        </tr>`).join("")
-        || `<tr><td class="empty" colspan="16">No records found</td></tr>`;
+        <tr data-uid="${s.uid}" class="${s.uid === selectedUid ? "sel" : ""}">` +
+        cols.map(c => {
+          const v = c.k === "no" ? i + 1 : (CELL[c.k] ? CELL[c.k](s) : (s[c.k] ?? ""));
+          return `<td class="${c.num ? "num" : ""}">${v}</td>`;
+        }).join("") + `</tr>`).join("")
+        || `<tr><td class="empty" colspan="${cols.length}">No records found</td></tr>`;
 
       const active = [];
       if (quickDays >= 0) active.push(`StudyDate(${$("#qf .on").textContent})`);
-      colFilters.forEach(([fid]) => { const v = $("#" + fid).value.trim(); if (v) active.push(`${fid.slice(2)}(${v})`); });
+      cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})`); });
       $("#filterlist").textContent = "Filter : " + (active.join(", ") || "-");
-      const c = k => list.filter(s => s.rs === k).length;
-      $("#countlist").textContent = `W:${c("W")} A:${c("A")} T:${c("T")} P:0 · Total ${list.length}`;
+
+      const n = (k, v) => list.filter(s => s[k] === v).length;
+      $("#countlist").textContent = mode === "Radiology"
+        ? `W:${n("rs","W")} A:${n("rs","A")} T:${n("rs","T")} P:0 · Total ${list.length}`
+        : `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
     }
+
+    // ── 모드 전환 ──
+    function setMode(m) {
+      mode = m;
+      document.querySelectorAll(".tabs > div").forEach(x => x.classList.toggle("on", x.dataset.tab === m));
+      const tech = m === "Technician";
+      $("#ctxbar").classList.toggle("show", tech);
+      document.querySelector(".s-template").style.display = tech ? "none" : "flex";
+      document.querySelector(".s-clinical").style.width = tech ? "66%" : "30%";
+      document.querySelector(".report-p").style.display = tech ? "none" : "flex";
+      document.querySelector(".order-p").style.display = tech ? "flex" : "none";
+      sortKey = null; sortDir = 0;
+      renderHeads(); render(); renderOrders();
+    }
+    document.querySelector(".tabs").addEventListener("click", e => {
+      const t = e.target.closest("div[data-tab]"); if (!t) return;
+      setMode(t.dataset.tab);
+    });
+    $("#fold").addEventListener("click", () => {
+      const b = $("#ctxbtns");
+      const hidden = b.style.display === "none";
+      b.style.display = hidden ? "flex" : "none";
+      $("#fold").textContent = hidden ? "▽" : "△";
+    });
 
     // ── 선택 ──
     function cur() { return studies.find(s => s.uid === selectedUid); }
+    function curOrder() { return orders.find(o => o.oid === selectedOid); }
 
     function select(uid) {
       stashReport();
       selectedUid = uid;
-      render(); renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadReport();
+      render(); refreshRight();
+      if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
+    }
+    function refreshRight() {
+      renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadReport();
     }
 
     function renderClinical() {
@@ -478,6 +682,8 @@
           <tr><td>Date</td><td>${s.date}</td></tr>
           <tr><td>AccNo</td><td>${s.acc}</td></tr>
           <tr><td>Img/Se</td><td>${s.count} / ${s.series}</td></tr>
+          <tr><td>SS / Mt</td><td>${s.ss} / ${s.matched === "M" ? "Matched" : "Unmatched"}</td></tr>
+          <tr><td>Ward</td><td>${s.ward || "-"}</td></tr>
         </table>` : "No clinical information provided.";
     }
 
@@ -506,7 +712,7 @@
               <td>${x.date}</td><td>${x.desc}</td><td class="num">${x.count}</td>
               <td class="${x.em === "E" ? "em-e" : ""}">${x.em === "E" ? "E" : ""}</td>
               <td><span class="rs ${x.rs}">${x.rs}</span></td>
-              <td>${a.repDoc ?? ""}</td><td>${a.confirm ?? ""}</td><td>KIN</td>
+              <td>${a.repDoc ?? ""}</td><td>${a.confirm ?? ""}</td><td>${x.reqHosp}</td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="10">과거 검사 없음</td></tr>`)
         : `<tr><td class="empty" colspan="10">-</td></tr>`;
@@ -520,7 +726,8 @@
     async function renderThumbs() {
       const wrap = $("#thumbwrap");
       if (!selectedUid) { wrap.innerHTML = ""; return; }
-      if (demoMode) {
+      const s = cur();
+      if (demoMode || s?.synthetic) {
         wrap.innerHTML = `<div class="thumbs" style="grid-template-columns:repeat(2,1fr)"><img src="${DEMO_IMG}"></div>`;
         return;
       }
@@ -548,6 +755,155 @@
       }
     }
 
+    // ══════════ Order List (8.2.2) ══════════
+    const ofval = {};
+    $(".order-p .filters").addEventListener("input", e => {
+      const el = e.target.closest("[data-o]"); if (!el) return;
+      ofval[el.dataset.o] = el.value.trim().toUpperCase();
+      renderOrders();
+    });
+
+    function filteredOrders() {
+      const s = cur();
+      return orders.filter(o => {
+        if ($("#o-sync").checked && s && o.id !== s.id) return false;
+        return Object.entries(ofval).every(([k, v]) => !v || String(o[k] ?? "").toUpperCase().includes(v));
+      });
+    }
+
+    function renderOrders() {
+      if (mode !== "Technician") return;
+      const list = filteredOrders();
+      $("#orderrows").innerHTML = list.map((o, i) => `
+        <tr data-oid="${o.oid}" class="${o.oid === selectedOid ? "sel" : ""}">
+          <td class="num">${i + 1}</td>
+          <td><span class="mt ${o.matched}">${o.matched}</span></td>
+          <td>${o.id}</td><td>${o.name}</td><td>${o.sex}</td><td>${o.birth}</td>
+          <td>${o.sched}</td><td>${o.modality}</td><td>${o.desc}</td><td>${o.ward}</td><td>${o.reqDoc}</td>
+        </tr>`).join("") || `<tr><td class="empty" colspan="11">오더 없음</td></tr>`;
+
+      const s = cur(), o = curOrder();
+      $("#orderhint").textContent =
+        `선택: 검사 ${s ? s.name + " / " + s.date : "(없음)"}  ·  오더 ${o ? o.name + " / " + o.sched : "(없음)"}` +
+        (s && o && s.matched === "U" && o.matched === "U" ? "  → 우클릭 Match 가능" : "");
+    }
+    $("#orderrows").addEventListener("click", e => {
+      const tr = e.target.closest("tr[data-oid]"); if (!tr) return;
+      selectedOid = tr.dataset.oid;
+      renderOrders();
+    });
+    $("#o-sync").addEventListener("change", renderOrders);
+    $("#o-refresh").addEventListener("click", renderOrders);
+    $("#o-clear").addEventListener("click", () => {
+      Object.keys(ofval).forEach(k => ofval[k] = "");
+      document.querySelectorAll(".order-p .filters input").forEach(i => i.value = "");
+      $("#o-sync").checked = false;
+      renderOrders();
+    });
+
+    // ── Match / Unmatch (8.1.2.1.1 ~ 2) ──
+    function doMatch() {
+      const s = cur(), o = curOrder();
+      if (!s || !o) { alert("Study List에서 검사 1건, Order List에서 오더 1건을 각각 선택하세요."); return; }
+      if (s.matched === "M" || o.matched === "M") { alert("이미 매칭된 항목입니다."); return; }
+      if (!confirm(`아래 오더 정보를 검사에 덮어씁니다.\n\n검사: ${s.name} (${s.id}) ${s.date}\n오더: ${o.name} (${o.id}) ${o.sched}\n\n진행할까요?`)) return;
+
+      const a = appState[s.uid] ??= {};
+      a.orig ??= { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
+      a.ov = { id: o.id, name: o.name, sex: o.sex, birth: o.birth, age: ageOf(o.birth, s.date), desc: o.desc, ward: o.ward };
+      a.matched = "M"; a.oid = o.oid;
+      Object.assign(s, a.ov, { matched: "M" });
+      o.matched = "M"; o.studyUid = s.uid;
+      saveApp(); saveOrders();
+      render(); renderOrders(); renderClinical(); renderRelated();
+    }
+    function doUnmatch() {
+      const s = cur();
+      if (!s || s.matched !== "M") { alert("매칭(M)된 검사를 선택하세요."); return; }
+      const a = appState[s.uid] ?? {};
+      if (a.orig) Object.assign(s, a.orig);
+      delete a.ov; a.matched = "U";
+      const o = orders.find(x => x.oid === a.oid);
+      if (o) { o.matched = "U"; o.studyUid = null; }
+      delete a.oid;
+      s.matched = "U";
+      saveApp(); saveOrders();
+      render(); renderOrders(); renderClinical(); renderRelated();
+    }
+
+    // ── Verify / Unverify (8.1.3) ──
+    function setSs(uid, ss) {
+      const s = studies.find(x => x.uid === uid); if (!s) return;
+      s.ss = ss;
+      appState[uid] = { ...appState[uid], ss };
+      saveApp(); render(); renderClinical();
+    }
+    $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
+    $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
+
+    // ── 장비 수신 시뮬: 미확인·미매칭 검사 1건 생성 ──
+    let simSeq = incoming.length;
+    $("#t-simulate").addEventListener("click", () => {
+      simSeq++;
+      const mods = ["CT", "CR", "US"];
+      const s = {
+        uid: "sim-" + Date.now(),
+        synthetic: true, pf: "·",
+        count: 20 + Math.floor(Math.random() * 60), series: 1,
+        acc: "EQ" + String(Date.now()).slice(-8),
+        id: "TEMP-" + String(1000 + simSeq),
+        name: "UNKNOWN " + simSeq,
+        birth: "", age: "", sex: "O",
+        modality: mods[Math.floor(Math.random() * mods.length)],
+        desc: "(장비 수신 · 미확인)",
+        date: today(),
+        ward: "", reqHosp: "KIN",
+      };
+      incoming.push(s); saveIncoming();
+      const hydrated = applyState({ ...s });
+      studies.push(hydrated);
+      setMode("Technician");
+      select(hydrated.uid);
+    });
+
+    // ── Modify Exam (8.1.2.1.5) ──
+    function openModify() {
+      const s = cur();
+      if (!s) { alert("검사를 선택하세요."); return; }
+      if (s.rs !== "W") { alert("판독 전(RS: W)인 검사만 수정할 수 있습니다.\n현재 RS: " + s.rs); return; }
+      $("#m-id").value = s.id; $("#m-name").value = s.name; $("#m-sex").value = s.sex || "O";
+      $("#m-birth").value = s.birth; $("#m-desc").value = s.desc; $("#m-ward").value = s.ward;
+      $("#modal").classList.add("show");
+    }
+    $("#m-cancel").addEventListener("click", () => $("#modal").classList.remove("show"));
+    $("#m-save").addEventListener("click", () => {
+      const s = cur(); if (!s) return;
+      const a = appState[s.uid] ??= {};
+      a.orig ??= { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
+      const birth = $("#m-birth").value.trim();
+      a.ov = { ...(a.ov ?? {}),
+        id: $("#m-id").value.trim(), name: $("#m-name").value.trim(), sex: $("#m-sex").value,
+        birth, age: ageOf(birth, s.date), desc: $("#m-desc").value.trim(), ward: $("#m-ward").value.trim() };
+      Object.assign(s, a.ov);
+      saveApp();
+      $("#modal").classList.remove("show");
+      render(); renderClinical(); renderRelated(); renderOrders();
+    });
+    $("#t-modify").addEventListener("click", openModify);
+
+    // ── Delete (8.1.2.1.8) ──
+    function doDelete(uid) {
+      const s = studies.find(x => x.uid === uid); if (!s) return;
+      if (s.rs !== "W") { alert("RS가 W(Wait)인 검사만 삭제할 수 있습니다."); return; }
+      if (!s.synthetic) { alert("실제 Orthanc 검사 삭제는 아직 구현되지 않았습니다.\n(3단계 백엔드에서 권한·감사로그와 함께 구현)"); return; }
+      if (!confirm(`검사를 삭제합니다.\n${s.name} (${s.id}) ${s.date}\n계속할까요?`)) return;
+      incoming = incoming.filter(x => x.uid !== uid); saveIncoming();
+      studies = studies.filter(x => x.uid !== uid);
+      delete appState[uid]; saveApp();
+      if (selectedUid === uid) { selectedUid = null; refreshRight(); }
+      render();
+    }
+
     // ── Report ──
     function loadReport() {
       const r = appState[selectedUid] ?? {};
@@ -571,7 +927,7 @@
       appState[selectedUid].rs = newRs;
       if (newRs === "A") {   // 승인 시 판독의·확정일 기록 (RepDoc/Confirm)
         appState[selectedUid].repDoc = user.split("@")[0];
-        appState[selectedUid].confirm = new Date().toISOString().slice(0, 10);
+        appState[selectedUid].confirm = today();
       }
       cur().rs = newRs;
       saveApp(); render(); renderRelated();
@@ -624,31 +980,31 @@ ${r.recommendation ?? ""}
 
     // ── 공통 이벤트 ──
     function openFilmbox(uid) {
+      const s = studies.find(x => x.uid === uid);
+      if (s?.synthetic) { alert("장비 수신 시뮬로 만든 가짜 검사입니다. 실제 영상이 없습니다."); return; }
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
       window.open(`/ohif/viewer?StudyInstanceUIDs=${uid}`, "_blank");
     }
 
     $("#quick").addEventListener("input", render);
-    colFilters.forEach(([fid]) => $("#" + fid).addEventListener("input", render));
     $("#refresh").addEventListener("click", load);
     $("#m-home").addEventListener("click", load);
     $("#m-filmbox").addEventListener("click", () => { if (selectedUid) openFilmbox(selectedUid); });
+
     // ── User Filter List (6.2.1): 현재 필터 조합을 이름 붙여 저장 → 칩으로 표시 ──
     let userFilters = [];
     try { userFilters = JSON.parse(localStorage.getItem("kin-filters") ?? "[]"); } catch (e) {}
     const saveFilters = () => { try { localStorage.setItem("kin-filters", JSON.stringify(userFilters)); } catch (e) {} };
 
-    function snapshotFilter() {
-      const f = { quick: $("#quick").value, days: quickDays };
-      colFilters.forEach(([fid]) => f[fid] = $("#" + fid).value);
-      return f;
-    }
+    const snapshotFilter = () => ({ quick: $("#quick").value, days: quickDays, mode, cols: { ...fval } });
     function applyFilter(f) {
       $("#quick").value = f.quick ?? "";
       quickDays = f.days ?? -1;
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
-      colFilters.forEach(([fid]) => $("#" + fid).value = f[fid] ?? "");
-      render();
+      Object.keys(fval).forEach(k => delete fval[k]);
+      Object.assign(fval, f.cols ?? {});
+      if (f.mode && f.mode !== mode) setMode(f.mode);
+      else { renderHeads(); render(); }
     }
     function renderChips() {
       $("#chips").innerHTML = userFilters.map((uf, i) =>
@@ -674,10 +1030,10 @@ ${r.recommendation ?? ""}
 
     $("#clearfilter").addEventListener("click", () => {
       $("#quick").value = "";
-      colFilters.forEach(([fid]) => $("#" + fid).value = "");
+      Object.keys(fval).forEach(k => delete fval[k]);
       quickDays = -1;
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", x.dataset.days === "-1"));
-      render();
+      renderHeads(); render();
     });
 
     $("#qf").addEventListener("click", e => {
@@ -730,33 +1086,85 @@ ${r.recommendation ?? ""}
     }
     const tsIs = (uid, v) => (appState[uid]?.ts ?? "none") === v;
 
-    // 우클릭 메뉴
+    // ══════════ 우클릭 컨텍스트 메뉴 (모드·대상에 따라 항목이 달라짐) ══════════
     const ctx = $("#ctx");
-    let ctxUid = null;
+    let ctxItems = [];
+    function showCtx(e, items) {
+      ctxItems = items;
+      ctx.innerHTML = items.map((it, i) =>
+        it.sep ? "<hr>" : `<div data-i="${i}" class="${it.dis ? "dis" : ""}">${it.label}</div>`).join("");
+      ctx.style.left = Math.min(e.clientX, innerWidth - 200) + "px";
+      ctx.style.top = Math.min(e.clientY, innerHeight - (items.length * 28 + 20)) + "px";
+      ctx.style.display = "block";
+    }
+    ctx.addEventListener("click", e => {
+      const d = e.target.closest("div[data-i]"); if (!d) return;
+      const it = ctxItems[+d.dataset.i];
+      if (it.dis) return;
+      it.act();
+    });
+    document.addEventListener("click", () => ctx.style.display = "none");
+
     $("#rows").addEventListener("contextmenu", e => {
       const tr = e.target.closest("tr");
       if (!tr?.dataset.uid) return;
       e.preventDefault();
-      ctxUid = tr.dataset.uid;
-      select(ctxUid);
-      const ts = appState[ctxUid]?.ts ?? "none";
-      const requested = !["none", "cancelled", "fail"].includes(ts);
-      $("#c-tele").classList.toggle("dis", requested);
-      $("#c-cancel").classList.toggle("dis", !["wait", "sending", "sent"].includes(ts));
-      ctx.style.left = Math.min(e.clientX, innerWidth - 180) + "px";
-      ctx.style.top = Math.min(e.clientY, innerHeight - 130) + "px";
-      ctx.style.display = "block";
+      const uid = tr.dataset.uid;
+      select(uid);
+      const s = studies.find(x => x.uid === uid);
+      if (mode === "Radiology") {
+        const ts = appState[uid]?.ts ?? "none";
+        const requested = !["none", "cancelled", "fail"].includes(ts);
+        showCtx(e, [
+          { label: "Film Box 열기", act: () => openFilmbox(uid) },
+          { label: "판독문 작성으로", act: () => $("#findings").focus() },
+          { sep: 1 },
+          { label: "원격판독 의뢰 (Tele Request)", dis: requested, act: () => teleRequest(uid) },
+          { label: "의뢰 취소", dis: !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
+        ]);
+      } else {
+        const o = curOrder();
+        showCtx(e, [
+          { label: "Match", dis: !(o && s.matched === "U" && o.matched === "U"), act: doMatch },
+          { label: "Unmatch", dis: s.matched !== "M", act: doUnmatch },
+          { sep: 1 },
+          { label: "Verify", dis: s.ss === "Verified", act: () => setSs(uid, "Verified") },
+          { label: "Unverify", dis: s.ss === "Unverified", act: () => setSs(uid, "Unverified") },
+          { label: "Modify Exam", dis: s.rs !== "W", act: openModify },
+          { sep: 1 },
+          { label: s.em === "E" ? "Switch to Normal" : "Switch to Emergency", act: () => {
+              s.em = s.em === "E" ? "N" : "E";
+              appState[uid] = { ...appState[uid], em: s.em };
+              saveApp(); render(); renderRelated();
+            } },
+          { label: "Switch ReqHosp", act: () => {
+              const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
+              if (v == null) return;
+              s.reqHosp = v.trim() || "KIN";
+              appState[uid] = { ...appState[uid], reqHosp: s.reqHosp };
+              saveApp(); render(); renderRelated();
+            } },
+          { label: "Merge / Split Exam", dis: 1, act: () => {} },
+          { sep: 1 },
+          { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
+        ]);
+      }
     });
-    document.addEventListener("click", () => ctx.style.display = "none");
-    $("#c-open").addEventListener("click", () => { if (ctxUid) openFilmbox(ctxUid); });
-    $("#c-report").addEventListener("click", () => { if (ctxUid) $("#findings").focus(); });
-    $("#c-tele").addEventListener("click", e => {
-      if (e.target.classList.contains("dis")) return;
-      if (ctxUid) teleRequest(ctxUid);
-    });
-    $("#c-cancel").addEventListener("click", e => {
-      if (e.target.classList.contains("dis")) return;
-      if (ctxUid) setTs(ctxUid, "cancelled");   // 판독 시작 전에만 취소 가능 (매뉴얼 TS 규칙)
+
+    $("#orderrows").addEventListener("contextmenu", e => {
+      const tr = e.target.closest("tr[data-oid]"); if (!tr) return;
+      e.preventDefault();
+      selectedOid = tr.dataset.oid; renderOrders();
+      const o = curOrder(), s = cur();
+      showCtx(e, [
+        { label: "Match", dis: !(s && s.matched === "U" && o.matched === "U"), act: doMatch },
+        { label: "Unmatch", dis: o.matched !== "M", act: () => {
+            const s2 = studies.find(x => x.uid === o.studyUid);
+            if (s2) { selectedUid = s2.uid; doUnmatch(); }
+          } },
+        { sep: 1 },
+        { label: "New Exam (SC 생성)", dis: 1, act: () => {} },
+      ]);
     });
 
     $("#relrows").addEventListener("click", e => {
@@ -768,12 +1176,8 @@ ${r.recommendation ?? ""}
       if (tr?.dataset.uid) openFilmbox(tr.dataset.uid);
     });
 
-    document.querySelector(".tabs").addEventListener("click", e => {
-      const t = e.target.closest("div[data-tab]"); if (!t) return;
-      document.querySelectorAll(".tabs > div").forEach(x => x.classList.remove("on"));
-      t.classList.add("on"); render();
-    });
-
+    // ── 시작 ──
+    renderHeads();
     renderTemplates();
     load();
   </script>
