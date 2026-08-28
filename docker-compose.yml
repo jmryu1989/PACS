@@ -15,6 +15,7 @@ services:
     volumes:
       - ./config/orthanc.json:/etc/orthanc/orthanc.json:ro
       - ./config/ohif.js:/etc/orthanc/ohif.js:ro
+      - ./worklist-v0:/worklist:ro
       - orthanc-db:/var/lib/orthanc/db
 
 volumes:

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>KIN Worklist v2 — 실데이터</title>
+  <style>
+    body { font-family: "Malgun Gothic", sans-serif; margin: 20px; background: #f4f6f8; }
+    h1 { font-size: 20px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .toolbar input, .toolbar select { padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; }
+    #summary { margin: 8px 0; color: #555; font-size: 13px; }
+    #error { color: #c0392b; margin: 8px 0; }
+    table { border-collapse: collapse; width: 100%; background: #fff; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; }
+    th { background: #2c3e50; color: #fff; cursor: pointer; user-select: none; white-space: nowrap; }
+    th:hover { background: #3d5166; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover td { background: #eef4fb; }
+  </style>
+</head>
+<body>
+  <h1>KIN 워크리스트 v2 <small style="color:#888">(Orthanc 실데이터 · QIDO-RS)</small></h1>
+
+  <div class="toolbar">
+    <input id="search" placeholder="환자명 / ID 검색">
+    <select id="modality">
+      <option value="">모달리티 전체</option>
+      <option>CT</option><option>MR</option><option>CR</option><option>US</option>
+    </select>
+  </div>
+
+  <div id="error"></div>
+  <div id="summary"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th data-key="name">환자명 ↕</th>
+        <th data-key="id">환자ID ↕</th>
+        <th data-key="modality">검사 ↕</th>
+        <th data-key="desc">검사설명 ↕</th>
+        <th data-key="date">검사일 ↕</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <p style="color:#888;font-size:13px">행을 클릭하면 OHIF 뷰어로 그 검사가 열린다.</p>
+
+  <script>
+    // ---- DICOM 태그에서 값 꺼내기 ----
+    // QIDO-RS 응답은 {"00100010": {"vr":"PN","Value":[{"Alphabetic":"KIM^CHULSOO"}]}, ...} 형태
+    function tag(study, key) {
+      const v = study[key]?.Value?.[0];
+      if (v == null) return "";
+      if (typeof v === "object") return v.Alphabetic ?? "";  // 사람 이름(PN)인 경우
+      return String(v);
+    }
+
+    function fmtDate(d) {  // "20260828" -> "2026-08-28"
+      return d.length === 8 ? `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}` : d;
+    }
+
+    let studies = [];  // QIDO 응답을 v1과 같은 모양으로 변환해서 담는다
+
+    const rows = document.querySelector("#rows");
+    const search = document.querySelector("#search");
+    const modality = document.querySelector("#modality");
+    const summary = document.querySelector("#summary");
+    const errorBox = document.querySelector("#error");
+
+    let sortKey = "date";
+    let sortDir = -1;
+
+    function render() {
+      const kw = search.value.trim().toUpperCase();
+
+      let list = studies.filter(s =>
+        (s.name.toUpperCase().includes(kw) || s.id.toUpperCase().includes(kw)) &&
+        (modality.value === "" || s.modality.includes(modality.value))
+      );
+
+      list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * sortDir);
+
+      let html = "";
+      for (const s of list) {
+        html += `
+          <tr data-uid="${s.uid}">
+            <td>${s.name}</td>
+            <td>${s.id}</td>
+            <td>${s.modality}</td>
+            <td>${s.desc}</td>
+            <td>${s.date}</td>
+          </tr>
+        `;
+      }
+      rows.innerHTML = html;
+      summary.textContent = `${list.length}건 표시 (전체 ${studies.length}건)`;
+    }
+
+    async function load() {
+      try {
+        // 같은 출처(Orthanc가 이 페이지를 서빙)라 인증·CORS 문제 없음
+        const res = await fetch("/dicom-web/studies?includefield=00081030");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        studies = data.map(st => ({
+          name:     tag(st, "00100010"),   // PatientName
+          id:       tag(st, "00100020"),   // PatientID
+          modality: st["00080061"]?.Value?.join(", ") ?? "",  // ModalitiesInStudy (복수 가능)
+          desc:     tag(st, "00081030"),   // StudyDescription
+          date:     fmtDate(tag(st, "00080020")),  // StudyDate
+          uid:      tag(st, "0020000D"),   // StudyInstanceUID — 뷰어 연결용
+        }));
+
+        render();
+      } catch (e) {
+        errorBox.textContent = `Orthanc 연결 실패: ${e.message} — 컨테이너가 떠 있는지 확인 (docker compose up -d)`;
+      }
+    }
+
+    search.addEventListener("input", render);
+    modality.addEventListener("change", render);
+
+    for (const th of document.querySelectorAll("th")) {
+      th.addEventListener("click", () => {
+        const key = th.dataset.key;
+        if (sortKey === key) { sortDir = -sortDir; }
+        else { sortKey = key; sortDir = 1; }
+        render();
+      });
+    }
+
+    // 행 클릭 -> OHIF 뷰어 (이벤트 위임: tbody 하나에만 리스너)
+    rows.addEventListener("click", e => {
+      const tr = e.target.closest("tr");
+      if (tr) window.open(`/ohif/viewer?StudyInstanceUIDs=${tr.dataset.uid}`, "_blank");
+    });
+
+    load();
+  </script>
+</body>
+</html>

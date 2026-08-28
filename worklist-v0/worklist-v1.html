@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>KIN Worklist v1</title>
+  <style>
+    body { font-family: "Malgun Gothic", sans-serif; margin: 20px; background: #f4f6f8; }
+    h1 { font-size: 20px; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .toolbar input, .toolbar select { padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; }
+    #summary { margin: 8px 0; color: #555; font-size: 13px; }
+    table { border-collapse: collapse; width: 100%; background: #fff; font-size: 14px; }
+    th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; }
+    th { background: #2c3e50; color: #fff; cursor: pointer; user-select: none; white-space: nowrap; }
+    th:hover { background: #3d5166; }
+    tr:hover td { background: #eef4fb; }
+    .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
+    .badge.wait { background: #e74c3c; }
+    .badge.done { background: #27ae60; }
+    .badge.scan { background: #f39c12; }
+  </style>
+</head>
+<body>
+  <h1>KIN 워크리스트 v1</h1>
+
+  <div class="toolbar">
+    <input id="search" placeholder="환자명 / ID 검색">
+    <select id="modality">
+      <option value="">모달리티 전체</option>
+      <option>CT</option><option>MR</option><option>CR</option><option>US</option>
+    </select>
+    <select id="status">
+      <option value="">상태 전체</option>
+      <option>판독대기</option><option>판독완료</option><option>촬영완료</option>
+    </select>
+  </div>
+
+  <div id="summary"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th data-key="name">환자명 ↕</th>
+        <th data-key="id">환자ID ↕</th>
+        <th data-key="modality">검사 ↕</th>
+        <th data-key="bodypart">부위 ↕</th>
+        <th data-key="date">검사일시 ↕</th>
+        <th data-key="status">상태 ↕</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script>
+    const studies = [
+      { name: "김철수", id: "P-0001", modality: "CT", bodypart: "Brain",    date: "2026-08-28 14:22", status: "판독대기" },
+      { name: "이영희", id: "P-0002", modality: "MR", bodypart: "L-Spine",  date: "2026-08-27 09:10", status: "판독완료" },
+      { name: "박민준", id: "P-0003", modality: "CR", bodypart: "Chest",    date: "2026-08-28 16:05", status: "촬영완료" },
+      { name: "최수진", id: "P-0004", modality: "CT", bodypart: "Chest",    date: "2026-08-28 11:47", status: "판독대기" },
+      { name: "정도현", id: "P-0005", modality: "US", bodypart: "Abdomen",  date: "2026-08-26 15:30", status: "판독완료" },
+      { name: "강예린", id: "P-0006", modality: "MR", bodypart: "Brain",    date: "2026-08-28 08:15", status: "판독대기" },
+      { name: "윤재호", id: "P-0007", modality: "CR", bodypart: "Knee",     date: "2026-08-27 13:55", status: "판독완료" },
+      { name: "임서연", id: "P-0008", modality: "CT", bodypart: "Abdomen",  date: "2026-08-28 17:20", status: "촬영완료" },
+      { name: "한지우", id: "P-0009", modality: "US", bodypart: "Thyroid",  date: "2026-08-28 10:02", status: "판독대기" },
+      { name: "오민석", id: "P-0010", modality: "MR", bodypart: "Shoulder", date: "2026-08-25 16:40", status: "판독완료" },
+      { name: "김철호", id: "P-0011", modality: "CR", bodypart: "Chest",    date: "2026-08-28 09:33", status: "판독대기" },
+      { name: "송하은", id: "P-0012", modality: "CT", bodypart: "Brain",    date: "2026-08-27 18:11", status: "판독완료" },
+    ];
+
+    const badgeClass = { "판독대기": "wait", "판독완료": "done", "촬영완료": "scan" };
+
+    const rows = document.querySelector("#rows");
+    const search = document.querySelector("#search");
+    const modality = document.querySelector("#modality");
+    const status = document.querySelector("#status");
+    const summary = document.querySelector("#summary");
+
+    let sortKey = "date";
+    let sortDir = -1; // 최신 먼저
+
+    function render() {
+      const kw = search.value.trim();
+
+      let list = studies.filter(s =>
+        (s.name.includes(kw) || s.id.includes(kw)) &&
+        (modality.value === "" || s.modality === modality.value) &&
+        (status.value === "" || s.status === status.value)
+      );
+
+      list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * sortDir);
+
+      let html = "";
+      for (const s of list) {
+        html += `
+          <tr>
+            <td>${s.name}</td>
+            <td>${s.id}</td>
+            <td>${s.modality}</td>
+            <td>${s.bodypart}</td>
+            <td>${s.date}</td>
+            <td><span class="badge ${badgeClass[s.status]}">${s.status}</span></td>
+          </tr>
+        `;
+      }
+      rows.innerHTML = html;
+
+      const wait = list.filter(s => s.status === "판독대기").length;
+      summary.textContent = `${list.length}건 표시 (전체 ${studies.length}건) · 판독대기 ${wait}건`;
+    }
+
+    search.addEventListener("input", render);
+    modality.addEventListener("change", render);
+    status.addEventListener("change", render);
+
+    for (const th of document.querySelectorAll("th")) {
+      th.addEventListener("click", () => {
+        const key = th.dataset.key;
+        if (sortKey === key) { sortDir = -sortDir; }
+        else { sortKey = key; sortDir = 1; }
+        render();
+      });
+    }
+
+    render();
+  </script>
+</body>
+</html>

@@ -12,6 +12,10 @@
     "Root": "/dicom-web/"
   },
 
+  "ServeFolders": {
+    "/worklist": "/worklist"
+  },
+
   "OHIF": {
     "DataSource": "dicom-web",
     "UserConfiguration": "/etc/orthanc/ohif.js"
