@@ -46,7 +46,24 @@
     .rs.T { background: #8a7a3a; color: #fff6cf; }
     .rs.A { background: #3f7a4a; color: #d9ffe0; }
     .em-e { color: #ff6b6b; font-weight: bold; }
-    .ts { color: #7f8899; font-size: 11px; }
+    .ts { font-size: 11px; }
+    .ts-none { color: #556; }
+    .ts-wait { color: #d8b24a; }
+    .ts-sending { color: #d8b24a; animation: blink 1s infinite; }
+    .ts-sent { color: #4da3ff; }
+    .ts-inReading { color: #b06ee5; }
+    .ts-completed { color: #4ac06a; }
+    .ts-fail { color: #ff6b6b; }
+    .ts-cancelled { color: #7f8899; text-decoration: line-through; }
+    @keyframes blink { 50% { opacity: .3; } }
+
+    /* 우클릭 컨텍스트 메뉴 */
+    .ctx { display: none; position: fixed; background: #232936; border: 1px solid #3a4356; z-index: 20; min-width: 170px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+    .ctx div { padding: 6px 14px; cursor: pointer; font-size: 12px; }
+    .ctx div:hover { background: #3b6ea5; color: #fff; }
+    .ctx div.dis { color: #556; cursor: default; }
+    .ctx div.dis:hover { background: none; color: #556; }
+    .ctx hr { border: none; border-top: 1px solid #3a4356; margin: 2px 0; }
 
     .statusbar { display: flex; justify-content: space-between; padding: 4px 8px; background: #1b212c; border-top: 1px solid #333c4d; color: #8892a4; font-size: 11px; flex: none; }
 
@@ -136,6 +153,15 @@
   </div>
 
   <div id="err"></div>
+
+  <!-- 워크리스트 우클릭 메뉴 -->
+  <div class="ctx" id="ctx">
+    <div id="c-open">Film Box 열기</div>
+    <div id="c-report">판독문 작성으로</div>
+    <hr>
+    <div id="c-tele">원격판독 의뢰 (Tele Request)</div>
+    <div id="c-cancel">의뢰 취소</div>
+  </div>
 
   <div class="split">
     <!-- ══ 좌측: 워크리스트 (6.3) ══ -->
@@ -343,7 +369,7 @@
             series: +tagv(st, "00201206") || 0,
             em: appState[uid]?.em ?? "N",
             rs: appState[uid]?.rs ?? "W",
-            ts: "none",
+            ts: appState[uid]?.ts ?? "none",
             acc: tagv(st, "00080050"),
             id: tagv(st, "00100020"),
             name: tagv(st, "00100010").replace(/\^/g, " "),
@@ -417,7 +443,7 @@
           <td>${s.pf}</td><td class="num">${i + 1}</td><td class="num">${s.count}</td><td class="num">${s.series}</td>
           <td class="${s.em === "E" ? "em-e" : ""}">${s.em === "E" ? "E" : ""}</td>
           <td><span class="rs ${s.rs}">${s.rs}</span></td>
-          <td>${s.acc}</td><td class="ts">${s.ts}</td>
+          <td>${s.acc}</td><td class="ts ts-${s.ts}">${s.ts}</td>
           <td>${s.id}</td><td>${s.name}</td>
           <td class="num">${s.age}</td><td>${s.birth}</td><td>${s.sex}</td>
           <td>${s.modality}</td><td>${s.desc}</td><td>${s.date}</td>
@@ -684,6 +710,55 @@ ${r.recommendation ?? ""}
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) openFilmbox(tr.dataset.uid);
     });
+
+    // ── 원격판독 의뢰 상태머신 (TS, 6.3.2) ──
+    // none → wait → sending → sent → inReading → completed  (+ cancelled/fail)
+    function setTs(uid, ts) {
+      const s = studies.find(x => x.uid === uid);
+      if (!s) return;
+      s.ts = ts;
+      appState[uid] = { ...appState[uid], ts };
+      saveApp(); render();
+    }
+    function teleRequest(uid) {
+      // 전송 파이프라인 시뮬레이션 — 3단계에서 실제 백엔드 상태머신으로 교체
+      setTs(uid, "wait");
+      setTimeout(() => { if (tsIs(uid, "wait")) setTs(uid, "sending"); }, 1200);
+      setTimeout(() => { if (tsIs(uid, "sending")) setTs(uid, "sent"); }, 3500);
+      setTimeout(() => { if (tsIs(uid, "sent")) setTs(uid, "inReading"); }, 6500);
+      setTimeout(() => { if (tsIs(uid, "inReading")) setTs(uid, "completed"); }, 11000);
+    }
+    const tsIs = (uid, v) => (appState[uid]?.ts ?? "none") === v;
+
+    // 우클릭 메뉴
+    const ctx = $("#ctx");
+    let ctxUid = null;
+    $("#rows").addEventListener("contextmenu", e => {
+      const tr = e.target.closest("tr");
+      if (!tr?.dataset.uid) return;
+      e.preventDefault();
+      ctxUid = tr.dataset.uid;
+      select(ctxUid);
+      const ts = appState[ctxUid]?.ts ?? "none";
+      const requested = !["none", "cancelled", "fail"].includes(ts);
+      $("#c-tele").classList.toggle("dis", requested);
+      $("#c-cancel").classList.toggle("dis", !["wait", "sending", "sent"].includes(ts));
+      ctx.style.left = Math.min(e.clientX, innerWidth - 180) + "px";
+      ctx.style.top = Math.min(e.clientY, innerHeight - 130) + "px";
+      ctx.style.display = "block";
+    });
+    document.addEventListener("click", () => ctx.style.display = "none");
+    $("#c-open").addEventListener("click", () => { if (ctxUid) openFilmbox(ctxUid); });
+    $("#c-report").addEventListener("click", () => { if (ctxUid) $("#findings").focus(); });
+    $("#c-tele").addEventListener("click", e => {
+      if (e.target.classList.contains("dis")) return;
+      if (ctxUid) teleRequest(ctxUid);
+    });
+    $("#c-cancel").addEventListener("click", e => {
+      if (e.target.classList.contains("dis")) return;
+      if (ctxUid) setTs(ctxUid, "cancelled");   // 판독 시작 전에만 취소 가능 (매뉴얼 TS 규칙)
+    });
+
     $("#relrows").addEventListener("click", e => {
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) select(tr.dataset.uid);
