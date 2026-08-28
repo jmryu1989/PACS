@@ -1,5 +1,15 @@
 # KIN API — 개발용 이미지 (프로덕션 멀티스테이지는 6단계에서)
-FROM node:22-alpine
+#
+# alpine이 아니라 slim(Debian)을 쓰는 이유: Prisma의 쿼리·스키마 엔진은 미리 컴파일된
+# 네이티브 바이너리이고, alpine은 glibc가 아닌 musl을 쓴다. alpine에서는 엔진이 OpenSSL을
+# 못 찾아 "Could not parse schema engine response"로 죽는다. 이미지가 조금 커지는 대신
+# 하루를 아낀다.
+FROM node:22-slim
+
+# Prisma 엔진이 요구하는 OpenSSL (slim 이미지에는 빠져 있을 수 있음)
+RUN apt-get update -y \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

@@ -108,6 +108,9 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
   상태를 보고 `docker compose logs api`로 원인 확인. DB 준비 전에 API가 뜨면 재시작으로 해결.
 - **API 코드를 고쳤는데 반영이 안 됨**: `src/`는 마운트돼 있어 자동 재시작됩니다.
   `prisma/schema.prisma`를 고쳤다면 `docker compose restart api` (스키마를 다시 push함).
+- **API 로그에 `Could not parse schema engine response` / `failed to detect the libssl`**:
+  Prisma 엔진은 네이티브 바이너리라 musl(alpine)에서 돌지 않습니다. `api/Dockerfile`의
+  베이스가 `node:22-slim`인지, `openssl` 패키지를 설치하는지 확인하고 `--build`로 다시 빌드.
 - **처음부터 다시**: `docker compose down -v` (영상과 DB가 전부 삭제됨)
 
 ## 이것이 사업의 미니어처인 이유

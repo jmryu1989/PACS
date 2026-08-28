@@ -67,6 +67,17 @@ export class PacsService implements OnModuleInit {
     if (body.orig !== undefined) data.orig = dump(body.orig);
     if (!Object.keys(data).length) throw new BadRequestException('바꿀 필드가 없습니다');
 
+    // 판독문은 "그때 그 영상, 그 환자"에 대한 진술이다. 판독이 끝난 뒤 환자·검사 정보를
+    // 갈아치우면 그 진술의 근거가 사라진다. 그래서 RS가 W일 때만 덮어쓰기를 허용한다.
+    // (HPACS 매뉴얼 8.1.2.1.5 — 승인된 검사를 수정하면 판독문을 버리고 새 검사를 만든다)
+    // 화면에서도 막고 있지만, 화면의 검사는 검사가 아니다. 서버가 막아야 막힌 것이다.
+    if (body.ov !== undefined) {
+      const prev = await this.prisma.studyState.findUnique({ where: { uid } });
+      const rs = body.rs ?? prev?.rs ?? 'W';
+      if (rs !== 'W')
+        throw new BadRequestException(`판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: ${rs})`);
+    }
+
     const saved = await this.prisma.studyState.upsert({
       where: { uid }, create: { uid, ...data }, update: data,
     });
@@ -105,6 +116,9 @@ export class PacsService implements OnModuleInit {
 
     const prev = await this.prisma.studyState.findUnique({ where: { uid } });
     if (prev?.matched === 'M') throw new BadRequestException('이미 매칭된 검사입니다');
+    // Match도 환자 정보를 덮어쓰는 동작이므로 같은 규칙을 받는다
+    if (prev && prev.rs !== 'W')
+      throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: ${prev.rs})`);
 
     const ov = {
       id: order.patientId, name: order.name, sex: order.sex, birth: order.birth,
