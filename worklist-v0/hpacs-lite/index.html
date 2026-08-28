@@ -13,10 +13,13 @@
     .sub { color: #667; font-size: 11px; margin-bottom: 26px; }
     button { width: 100%; background: #2196f3; color: #fff; border: none; padding: 10px 0; border-radius: 3px;
              font-size: 14px; cursor: pointer; }
+    button { transition: background .12s, transform .06s, filter .1s; }
     button:hover { background: #1976d2; }
+    button:not(:disabled):active { transform: translateY(1px) scale(.99); filter: brightness(1.25); }
     button:disabled { background: #2c3444; color: #667; cursor: default; }
     button.ghost { background: none; border: 1px solid #3a4356; color: #8892a4; margin-top: 10px; font-size: 12px; padding: 8px 0; }
     button.ghost:hover { background: #232936; color: #aab2c0; }
+    button.ghost:active { background: #2c3444; }
     #msg { color: #ff8080; font-size: 12px; min-height: 16px; margin-top: 12px; line-height: 1.5; }
     .hint { color: #556; font-size: 11px; margin-top: 20px; line-height: 1.7; border-top: 1px solid #2c3444; padding-top: 14px; }
     .hint b { color: #7f8899; font-weight: normal; }

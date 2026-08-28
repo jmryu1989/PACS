@@ -149,6 +149,41 @@
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
     .modal .note { grid-column: 1 / -1; color: #7f8899; font-size: 11px; padding-top: 4px; }
 
+    /* ══ 클릭 피드백 ══
+       눌리는 느낌이 없으면 사용자는 "먹었나?" 하고 한 번 더 누른다.
+       판독 시스템에서 두 번 누르는 건 두 번 저장되는 것이다. */
+    button, .chip, .menubar .item, .tabs > div, .rtabs div, .reltabs div, .ctx div, thead th {
+      transition: background .1s, color .1s, border-color .1s, transform .05s, filter .1s;
+    }
+    button:not(:disabled):hover, .chip:hover { filter: brightness(1.3); }
+    button:not(:disabled):active, .chip:active {
+      transform: translateY(1px) scale(.985);
+      filter: brightness(1.6);
+    }
+    .menubar .item:active { background: #3b6ea5; color: #fff; }
+    .tabs > div:active { color: #4da3ff; background: #232936; }
+    .rtabs div:active, .reltabs div:active { color: #4da3ff; background: #232936; }
+    .ctx div:not(.dis):active { background: #2f5f8a; }
+    tbody tr:active td { background: #3b5474; }
+    thead th:active { background: #2f3849; }
+    .rs:active { transform: scale(.85); }
+    .thumbs img:active { outline: 2px solid #4da3ff; }
+    .redit textarea:focus { outline: none; border-color: #3b6ea5; }
+
+    /* ══ 토스트 ══ 무슨 일이 일어났는지 화면 아래에서 한 줄로 알려준다 */
+    #toast {
+      position: fixed; left: 50%; bottom: 28px; z-index: 40;
+      transform: translateX(-50%) translateY(14px);
+      background: #232936; border: 1px solid #3a4356; border-left-width: 3px;
+      color: #dfe5ee; padding: 9px 20px; border-radius: 4px; font-size: 12px;
+      opacity: 0; pointer-events: none; box-shadow: 0 6px 22px rgba(0,0,0,.55);
+      transition: opacity .18s, transform .18s;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #toast.ok { border-left-color: #4ac06a; }
+    #toast.info { border-left-color: #4da3ff; }
+    #toast.err { border-left-color: #ff6b6b; color: #ffd9d9; }
+
     /* 판독문 이력 */
     .hist { max-height: 60vh; overflow: auto; padding: 8px 12px; }
     .ver { border-left: 2px solid #3a4356; padding: 4px 0 8px 10px; margin-bottom: 10px; }
@@ -354,6 +389,8 @@
     </div>
   </div>
 
+  <div id="toast"></div>
+
   <!-- 판독문 개정 이력 -->
   <div class="modal" id="histmodal">
     <div class="box" style="width:640px;max-width:92vw">
@@ -430,10 +467,16 @@
       }
       return res.json();
     }
-    function apiFail(e) {
-      $("#err").textContent = "서버 저장 실패: " + e.message;
-      setTimeout(() => { if ($("#err").textContent.startsWith("서버 저장 실패")) $("#err").textContent = ""; }, 4000);
+    // ── 토스트: 무슨 일이 일어났는지 한 줄로 ──
+    let toastTimer;
+    function toast(msg, kind = "ok") {
+      const el = $("#toast");
+      el.textContent = msg;
+      el.className = "show " + kind;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.className = kind; }, kind === "err" ? 4000 : 1900);
     }
+    function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
 
     let appState = {};
     try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
@@ -900,6 +943,7 @@
         saveApp(); saveOrders();
       }
       render(); renderOrders(); renderClinical(); renderRelated();
+      toast(`매칭 완료 — ${o.name} (${o.id})`);
     }
 
     async function doUnmatch() {
@@ -926,6 +970,7 @@
         saveApp(); saveOrders();
       }
       render(); renderOrders(); renderClinical(); renderRelated();
+      toast("매칭을 해제했습니다 — 원래 정보로 되돌렸습니다", "info");
     }
 
     // ── Verify / Unverify (8.1.3) ──
@@ -934,6 +979,9 @@
       s.ss = ss;
       appState[uid] = { ...appState[uid], ss };
       saveApp(uid, { ss }); render(); renderClinical();
+      toast(ss === "Verified"
+        ? "검사를 확인했습니다 — Radiology 탭에 올라갑니다"
+        : "확인을 해제했습니다 — Radiology 탭에서 내려갑니다", "info");
     }
     $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
     $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
@@ -961,6 +1009,7 @@
       studies.push(hydrated);
       setMode("Technician");
       select(hydrated.uid);
+      toast(`장비에서 검사가 도착했습니다 — ${s.name} (미확인·미매칭)`, "info");
     });
 
     // ── Modify Exam (8.1.2.1.5) ──
@@ -985,6 +1034,7 @@
       saveApp(s.uid, { ov: a.ov, orig: a.orig });
       $("#modal").classList.remove("show");
       render(); renderClinical(); renderRelated(); renderOrders();
+      toast("검사 정보를 수정했습니다");
     });
     $("#t-modify").addEventListener("click", openModify);
 
@@ -1001,6 +1051,7 @@
       else saveApp();
       if (selectedUid === uid) { selectedUid = null; refreshRight(); }
       render();
+      toast("검사를 삭제했습니다", "info");
     }
 
     // ── Report ──
@@ -1063,6 +1114,12 @@
         saveApp();
       }
       render(); renderRelated(); updateReportButtons();
+      toast({
+        save: "임시 저장했습니다 (RS: T)",
+        approve: "판독문을 승인했습니다 (RS: A)",
+        addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
+        reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
+      }[action], action === "reset" ? "info" : "ok");
     }
 
     /** Addendum은 승인된 판독문에만 붙는다 */
@@ -1120,6 +1177,7 @@
     $("#b-copy").addEventListener("click", () => {
       const t = `Findings:\n${$("#findings").value}\n\nConclusion:\n${$("#conclusion").value}\n\nRecommendation:\n${$("#recommendation").value}`;
       navigator.clipboard?.writeText(t);
+      toast("판독문을 복사했습니다");
     });
     $("#b-paste").addEventListener("click", async () => {
       try { $("#findings").value += await navigator.clipboard.readText(); } catch (e) {}
@@ -1193,6 +1251,7 @@ ${r.recommendation ?? ""}
       if (!name) return;
       userFilters.push({ name, ...snapshotFilter() });
       saveFilters(); renderChips();
+      toast(`필터 "${name}" 저장 — 칩을 클릭하면 적용, 우클릭하면 삭제`);
     });
     $("#chips").addEventListener("click", e => {
       const b = e.target.closest("button[data-i]"); if (!b) return;
@@ -1235,7 +1294,9 @@ ${r.recommendation ?? ""}
         const s = studies.find(x => x.uid === uid);
         s.rs = { W: "T", T: "A", A: "W" }[s.rs];
         appState[uid] = { ...appState[uid], rs: s.rs };
-        saveApp(uid, { rs: s.rs }); render(); return;
+        saveApp(uid, { rs: s.rs }); render();
+        toast(`RS → ${s.rs}  (${{ W: "판독 대기", T: "임시저장", A: "승인" }[s.rs]})`, "info");
+        return;
       }
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) select(tr.dataset.uid);
@@ -1255,6 +1316,7 @@ ${r.recommendation ?? ""}
       saveApp(uid, { ts }); render();
     }
     function teleRequest(uid) {
+      toast("원격판독을 의뢰했습니다 — TS 열에서 진행 상태를 보세요", "info");
       // 전송 파이프라인 시뮬레이션 — 3단계에서 실제 백엔드 상태머신으로 교체
       setTs(uid, "wait");
       setTimeout(() => { if (tsIs(uid, "wait")) setTs(uid, "sending"); }, 1200);
