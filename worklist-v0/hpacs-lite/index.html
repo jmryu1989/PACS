@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>KIN PACS — 로그인</title>
+  <style>
+    body { margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
+           background: #10141b; font-family: "Malgun Gothic", "Segoe UI", sans-serif; }
+    .box { width: 340px; background: #1b212c; border: 1px solid #2c3444; border-top: 3px solid #2196f3;
+           padding: 28px 30px 22px; }
+    .logo { color: #fff; font-size: 26px; font-weight: bold; letter-spacing: 1px; margin-bottom: 30px; }
+    .logo span { color: #21c7b7; }
+    .field { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #3a4356;
+             margin-bottom: 22px; padding: 6px 2px; }
+    .field svg { flex: none; }
+    .field input { flex: 1; background: none; border: none; outline: none; color: #cdd3dc; font-size: 14px; }
+    .row { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+    label { color: #8892a4; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+    button { background: #2196f3; color: #fff; border: none; padding: 8px 26px; border-radius: 3px;
+             font-size: 14px; cursor: pointer; }
+    button:hover { background: #1976d2; }
+    .find { text-align: center; margin-top: 26px; }
+    .find a { color: #667; font-size: 11px; letter-spacing: 1px; text-decoration: none; }
+    #msg { color: #ff8080; font-size: 12px; height: 16px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="logo">kin <span>KIN PACS</span></div>
+
+    <div class="field">
+      <svg width="16" height="16" fill="#667" viewBox="0 0 16 16"><path d="M0 3v10h16V3H0zm8 5L1.5 4h13L8 8zm0 1.5L14.5 5v7h-13V5L8 9.5z"/></svg>
+      <input id="email" placeholder="Please enter your email address">
+    </div>
+    <div class="field">
+      <svg width="16" height="16" fill="#667" viewBox="0 0 16 16"><path d="M4 6V4a4 4 0 118 0v2h1v9H3V6h1zm2 0h4V4a2 2 0 10-4 0v2z"/></svg>
+      <input id="pw" type="password" placeholder="Please enter your password">
+    </div>
+
+    <div class="row">
+      <label><input type="checkbox" id="remember"> Remember me</label>
+      <button id="signin">Sign in</button>
+    </div>
+    <div id="msg"></div>
+
+    <div class="find"><a href="#">FIND EMAIL</a></div>
+  </div>
+
+  <script>
+    const email = document.querySelector("#email");
+    const pw = document.querySelector("#pw");
+    const remember = document.querySelector("#remember");
+    const msg = document.querySelector("#msg");
+
+    // Remember Me: 저장된 이메일 복원 (HPACS 4장-3)
+    try {
+      const saved = localStorage.getItem("kin-remember");
+      if (saved) { email.value = saved; remember.checked = true; }
+    } catch (e) {}
+
+    function signin() {
+      if (!email.value.trim() || !pw.value) {
+        msg.textContent = "이메일과 비밀번호를 입력해 주세요.";
+        return;
+      }
+      // 가짜 인증: 아무나 통과. 3단계에서 Keycloak으로 교체된다.
+      try {
+        sessionStorage.setItem("kin-user", email.value.trim());
+        if (remember.checked) localStorage.setItem("kin-remember", email.value.trim());
+        else localStorage.removeItem("kin-remember");
+      } catch (e) {}
+      location.href = "main.html";
+    }
+
+    document.querySelector("#signin").addEventListener("click", signin);
+    pw.addEventListener("keydown", e => { if (e.key === "Enter") signin(); });
+    email.addEventListener("keydown", e => { if (e.key === "Enter") pw.focus(); });
+  </script>
+</body>
+</html>

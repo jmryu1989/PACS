@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>KIN Worklist v3 — HPACS 재현</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: "Malgun Gothic", "Segoe UI", sans-serif; margin: 0; background: #1b2028; color: #cdd3dc; font-size: 13px; }
+
+    /* ── 상단 바: 검색 + 날짜 퀵필터 ── */
+    .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: #232936; border-bottom: 1px solid #333c4d; }
+    .topbar input { background: #1b2028; border: 1px solid #3a4356; color: #cdd3dc; padding: 5px 10px; border-radius: 14px; width: 180px; }
+    .qf { display: flex; gap: 4px; }
+    .qf button { background: #2a3140; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 12px; border-radius: 3px; cursor: pointer; }
+    .qf button.on { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
+
+    /* ── 탭 ── */
+    .tabs { display: flex; background: #232936; padding: 0 12px; border-bottom: 1px solid #333c4d; }
+    .tabs div { padding: 7px 18px; cursor: pointer; color: #7f8899; border-bottom: 2px solid transparent; }
+    .tabs div.on { color: #4da3ff; border-bottom-color: #4da3ff; }
+
+    /* ── 테이블 ── */
+    .grid { overflow-x: auto; height: calc(100vh - 118px); }
+    table { border-collapse: collapse; width: 100%; min-width: 1100px; }
+    th, td { border: 1px solid #2c3444; padding: 4px 8px; white-space: nowrap; }
+    thead th { background: #2a3140; color: #dfe5ee; cursor: pointer; user-select: none; position: sticky; top: 0; }
+    thead tr.filters th { padding: 2px; cursor: default; background: #232936; position: sticky; top: 27px; }
+    .filters input, .filters select { width: 100%; background: #1b2028; border: 1px solid #3a4356; color: #cdd3dc; padding: 2px 4px; font-size: 12px; }
+    tbody tr { cursor: default; }
+    tbody tr:hover td { background: #2b3547; }
+    tbody tr.sel td { background: #34455f; }
+    td.num { text-align: right; }
+    .empty { text-align: center; color: #667; padding: 40px !important; }
+
+    /* 상태 뱃지 */
+    .rs { display: inline-block; width: 18px; text-align: center; border-radius: 3px; font-weight: bold; }
+    .rs.W { background: #8a4a4a; color: #ffd9d9; }
+    .rs.T { background: #8a7a3a; color: #fff6cf; }
+    .rs.A { background: #3f7a4a; color: #d9ffe0; }
+    .em-e { color: #ff6b6b; font-weight: bold; }
+
+    /* ── 하단 바 ── */
+    .bottombar { display: flex; justify-content: space-between; padding: 5px 12px; background: #232936; border-top: 1px solid #333c4d; color: #8892a4; font-size: 12px; }
+    #err { color: #ff8080; padding: 6px 12px; }
+  </style>
+</head>
+<body>
+
+  <div class="topbar">
+    <input id="quick" placeholder="ID or Name">
+    <div class="qf" id="qf">
+      <button data-days="0">Today</button>
+      <button data-days="3">3 Days</button>
+      <button data-days="7">Week</button>
+      <button data-days="30">1 Month</button>
+      <button data-days="60">2 Months</button>
+      <button data-days="-1" class="on">All</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <div class="on" data-tab="Radiology">Radiology</div>
+    <div data-tab="Technician">Technician</div>
+  </div>
+
+  <div id="err"></div>
+
+  <div class="grid">
+    <table>
+      <thead>
+        <tr id="heads">
+          <th data-key="no">No</th>
+          <th data-key="count">Count</th>
+          <th data-key="series">Series</th>
+          <th data-key="em">EM</th>
+          <th data-key="rs">RS</th>
+          <th data-key="acc">Accession No</th>
+          <th data-key="name">Name</th>
+          <th data-key="id">ID</th>
+          <th data-key="age">Age</th>
+          <th data-key="birth">BirthDate</th>
+          <th data-key="sex">Sex</th>
+          <th data-key="modality">Modality</th>
+          <th data-key="desc">StudyDesc</th>
+          <th data-key="date">StudyDate</th>
+        </tr>
+        <tr class="filters">
+          <th></th><th></th><th></th>
+          <th><select id="f-em"><option value=""></option><option>E</option><option>N</option></select></th>
+          <th><select id="f-rs"><option value=""></option><option>A</option><option>T</option><option>W</option></select></th>
+          <th><input id="f-acc"></th>
+          <th><input id="f-name"></th>
+          <th><input id="f-id"></th>
+          <th></th><th></th>
+          <th><select id="f-sex"><option value=""></option><option>M</option><option>F</option><option>O</option></select></th>
+          <th><select id="f-mod"><option value=""></option><option>CT</option><option>MR</option><option>CR</option><option>US</option></select></th>
+          <th><input id="f-desc"></th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="bottombar">
+    <span id="filterlist">Filter : -</span>
+    <span id="countlist"></span>
+  </div>
+
+  <script>
+    // ───────── 데이터 로드 (QIDO-RS) ─────────
+    function tag(st, key) {
+      const v = st[key]?.Value?.[0];
+      if (v == null) return "";
+      if (typeof v === "object") return v.Alphabetic ?? "";
+      return String(v);
+    }
+    const fmtD = d => d.length === 8 ? `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}` : d;
+
+    // RS/EM은 DICOM에 없는 앱 상태 → 임시로 localStorage (3단계에서 DB로 승격)
+    let appState = {};
+    try { appState = JSON.parse(localStorage.getItem("kin-rs") ?? "{}"); } catch (e) {}
+    function saveState() { try { localStorage.setItem("kin-rs", JSON.stringify(appState)); } catch (e) {} }
+
+    let studies = [];
+
+    async function load() {
+      try {
+        const res = await fetch("/dicom-web/studies?includefield=00081030,00201206,00201208");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+        studies = data.map(st => {
+          const uid = tag(st, "0020000D");
+          const birth = tag(st, "00100030");
+          const date = tag(st, "00080020");
+          const age = (birth && date) ? Math.floor((+date.slice(0,8) - +birth) / 10000) : "";
+          return {
+            uid,
+            count:    +tag(st, "00201208") || 0,   // NumberOfStudyRelatedInstances
+            series:   +tag(st, "00201206") || 0,   // NumberOfStudyRelatedSeries
+            em:       appState[uid]?.em ?? "N",
+            rs:       appState[uid]?.rs ?? "W",    // 기본: Wait(판독대기)
+            acc:      tag(st, "00080050"),
+            name:     tag(st, "00100010").replace(/\^/g, " "),
+            id:       tag(st, "00100020"),
+            age, birth: fmtD(birth),
+            sex:      tag(st, "00100040"),
+            modality: st["00080061"]?.Value?.join(",") ?? "",
+            desc:     tag(st, "00081030"),
+            date:     fmtD(date),
+          };
+        });
+        render();
+      } catch (e) {
+        document.querySelector("#err").textContent =
+          "Orthanc 연결 실패: " + e.message + " — docker compose up -d 확인";
+      }
+    }
+
+    // ───────── 필터 상태 ─────────
+    const $ = s => document.querySelector(s);
+    let quickDays = -1;          // -1 = All
+    let sortKey = null, sortDir = 0;   // 0 없음 / 1 오름 / -1 내림 (3클릭 초기화)
+    let selectedUid = null;
+
+    const colFilters = [
+      ["f-em",   s => f => f === "" || s.em === f],
+      ["f-rs",   s => f => f === "" || s.rs === f],
+      ["f-acc",  s => f => s.acc.toUpperCase().includes(f)],
+      ["f-name", s => f => s.name.toUpperCase().includes(f)],
+      ["f-id",   s => f => s.id.toUpperCase().includes(f)],
+      ["f-sex",  s => f => f === "" || s.sex === f],
+      ["f-mod",  s => f => f === "" || s.modality.includes(f)],
+      ["f-desc", s => f => s.desc.toUpperCase().includes(f)],
+    ];
+
+    function withinDays(dateStr, days) {
+      if (days < 0 || !dateStr) return true;
+      const d = new Date(dateStr), today = new Date();
+      today.setHours(0,0,0,0);
+      const from = new Date(today); from.setDate(from.getDate() - days);
+      return d >= from;
+    }
+
+    // ───────── 렌더 ─────────
+    function render() {
+      const kw = $("#quick").value.trim().toUpperCase();
+
+      let list = studies.filter(s => {
+        if (kw && !s.name.toUpperCase().includes(kw) && !s.id.toUpperCase().includes(kw)) return false;
+        if (!withinDays(s.date, quickDays)) return false;
+        for (const [fid, make] of colFilters) {
+          const f = $("#" + fid).value.trim().toUpperCase();
+          if (!make(s)(f)) return false;
+        }
+        return true;
+      });
+
+      if (sortDir !== 0 && sortKey) {
+        list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+      }
+
+      let html = "";
+      list.forEach((s, i) => {
+        html += `
+          <tr data-uid="${s.uid}" class="${s.uid === selectedUid ? "sel" : ""}">
+            <td class="num">${i + 1}</td>
+            <td class="num">${s.count}</td>
+            <td class="num">${s.series}</td>
+            <td class="${s.em === "E" ? "em-e" : ""}">${s.em === "E" ? "E" : ""}</td>
+            <td><span class="rs ${s.rs}" title="클릭: W→T→A 순환">${s.rs}</span></td>
+            <td>${s.acc}</td>
+            <td>${s.name}</td>
+            <td>${s.id}</td>
+            <td class="num">${s.age}</td>
+            <td>${s.birth}</td>
+            <td>${s.sex}</td>
+            <td>${s.modality}</td>
+            <td>${s.desc}</td>
+            <td>${s.date}</td>
+          </tr>
+        `;
+      });
+      $("#rows").innerHTML = html || `<tr><td class="empty" colspan="14">No records found</td></tr>`;
+
+      // 하단 좌측: 활성 필터 목록
+      const active = [];
+      if (quickDays >= 0) active.push(`StudyDate(${$("#qf .on").textContent})`);
+      if (kw) active.push(`Quick(${kw})`);
+      for (const [fid] of colFilters) {
+        const v = $("#" + fid).value.trim();
+        if (v) active.push(`${fid.slice(2)}(${v})`);
+      }
+      $("#filterlist").textContent = "Filter : " + (active.join(", ") || "-");
+
+      // 하단 우측: Count List
+      const c = k => list.filter(s => s.rs === k).length;
+      $("#countlist").textContent =
+        `Total ${list.length}  ·  W:${c("W")}  T:${c("T")}  A:${c("A")}`;
+    }
+
+    // ───────── 이벤트 ─────────
+    $("#quick").addEventListener("input", render);
+    for (const [fid] of colFilters) $("#" + fid).addEventListener("input", render);
+
+    // 날짜 퀵필터
+    $("#qf").addEventListener("click", e => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      document.querySelectorAll("#qf button").forEach(x => x.classList.remove("on"));
+      b.classList.add("on");
+      quickDays = +b.dataset.days;
+      render();
+    });
+
+    // 정렬: 1클릭 오름 / 2클릭 내림 / 3클릭 초기화 (HPACS 6.3.3-5)
+    $("#heads").addEventListener("click", e => {
+      const th = e.target.closest("th");
+      if (!th) return;
+      const key = th.dataset.key;
+      if (sortKey !== key) { sortKey = key; sortDir = 1; }
+      else if (sortDir === 1) sortDir = -1;
+      else { sortKey = null; sortDir = 0; }
+      render();
+    });
+
+    // 행: 클릭 선택 / 더블클릭 Film Box(뷰어) — HPACS 6.3.4.1.1
+    $("#rows").addEventListener("click", e => {
+      // RS 뱃지 클릭: 판독상태 순환 W→T→A
+      if (e.target.classList.contains("rs")) {
+        const uid = e.target.closest("tr").dataset.uid;
+        const s = studies.find(x => x.uid === uid);
+        s.rs = { W: "T", T: "A", A: "W" }[s.rs];
+        appState[uid] = { ...appState[uid], rs: s.rs };
+        saveState(); render();
+        return;
+      }
+      const tr = e.target.closest("tr");
+      if (tr?.dataset.uid) { selectedUid = tr.dataset.uid; render(); }
+    });
+    $("#rows").addEventListener("dblclick", e => {
+      const tr = e.target.closest("tr");
+      if (tr?.dataset.uid) window.open(`/ohif/viewer?StudyInstanceUIDs=${tr.dataset.uid}`, "_blank");
+    });
+
+    // 탭 (Technician은 아직 같은 목록 — 추후 분리)
+    document.querySelector(".tabs").addEventListener("click", e => {
+      const t = e.target.closest("div[data-tab]");
+      if (!t) return;
+      document.querySelectorAll(".tabs div").forEach(x => x.classList.remove("on"));
+      t.classList.add("on");
+      render();
+    });
+
+    load();
+  </script>
+</body>
+</html>
