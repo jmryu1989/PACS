@@ -1,0 +1,79 @@
+// Korea Imaging Network — HPACS-lite 백엔드 스키마 (3단계 시작점)
+//
+// 설계 메모:
+// - 영상 자체는 Orthanc(DICOM)가 진실의 원천이다. 이 DB는 "영상에 대한 사람의 결정"만 저장한다.
+//   (판독 상태, 판독문, 기사 확인, RIS 오더 매칭, 누가 언제 무엇을 했는지)
+// - 그래서 StudyState의 PK는 StudyInstanceUID다. 우리가 발급한 ID가 아니라 DICOM이 발급한 ID.
+// - ov/orig 같은 가변 구조는 JSON 문자열로 넣는다. 아직 그 안을 조건으로 검색할 일이 없기 때문.
+//   검색이 필요해지는 순간 컬럼으로 승격시킨다.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
+model StudyState {
+  uid       String   @id                      // StudyInstanceUID
+  rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인)
+  ss        String   @default("Verified")     // Study Status: Verified / Unverified (기사 확인)
+  em        String   @default("N")            // Emergency: E / N
+  ts        String   @default("none")         // Tele Status: none→wait→sending→sent→inReading→completed
+  matched   String   @default("U")            // RIS 오더 매칭: M / U
+  ward      String   @default("")
+  reqHosp   String   @default("KIN")
+  repDoc    String?                           // 판독의 (Approve 시 기록)
+  confirm   String?                           // 판독 확정일
+  ov        String?                           // Match/Modify로 덮어쓴 값 (JSON)
+  orig      String?                           // 덮어쓰기 전 원본 (JSON) — Unmatch 복원용
+  orderOid  String?                           // 매칭된 오더
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  report Report?
+}
+
+/// 판독문. 검사당 1건 (개정 이력은 4단계에서 ReportVersion으로 분리 예정)
+model Report {
+  uid            String   @id
+  findings       String   @default("")
+  conclusion     String   @default("")
+  recommendation String   @default("")
+  updatedBy      String?
+  updatedAt      DateTime @updatedAt
+
+  study StudyState @relation(fields: [uid], references: [uid], onDelete: Cascade)
+}
+
+/// RIS(HRIS)에서 넘어온 오더. 지금은 시드 데이터, 4~5단계에서 HL7 v2로 교체된다.
+model Order {
+  oid       String  @id
+  patientId String
+  name      String
+  sex       String
+  birth     String
+  sched     String
+  modality  String
+  descr     String
+  ward      String
+  reqDoc    String
+  matched   String  @default("U")
+  studyUid  String?
+}
+
+/// 감사 로그. 의료영상 시스템에서 "누가 언제 무엇을 바꿨는가"는 기능이 아니라 요건이다.
+model AuditLog {
+  id     Int      @id @default(autoincrement())
+  at     DateTime @default(now())
+  actor  String
+  action String
+  target String
+  detail String?
+
+  @@index([target])
+  @@index([at])
+}

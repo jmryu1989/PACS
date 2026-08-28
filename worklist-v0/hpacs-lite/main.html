@@ -161,6 +161,7 @@
     <div class="spacer"></div>
     <div class="mright">Prefetch <input type="checkbox" checked></div>
     <div class="mright" id="storage">0.0GB / -</div>
+    <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
     <div class="mright" id="user"></div>
     <div class="mright"><select style="background:#14181f;color:#aab2c0;border:1px solid #3a4356"><option>한국어</option><option>English</option></select></div>
     <div class="mright logout" id="logout">로그아웃</div>
@@ -383,10 +384,50 @@
       return b && d ? Math.floor((d - b) / 10000) : "";
     }
 
-    // ── 영속 상태 ──
+    // ══════════ 영속 상태: 서버(KIN API) 우선, 안 되면 localStorage ══════════
+    // 3단계 이전에는 모든 상태가 이 브라우저에만 있었다. 브라우저를 바꾸면 사라지고,
+    // 동업자는 다른 데이터를 봤다. 이제 서버가 진실의 원천이고 localStorage는 폴백일 뿐이다.
+    const API = `${location.protocol === "file:" ? "http:" : location.protocol}//${location.hostname || "localhost"}:3000/api`;
+    let serverMode = false;
+
+    async function api(method, path, body) {
+      const res = await fetch(API + path, {
+        method,
+        headers: { "Content-Type": "application/json", "X-KIN-User": user },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.message ?? `HTTP ${res.status}`);
+      }
+      return res.json();
+    }
+    function apiFail(e) {
+      $("#err").textContent = "서버 저장 실패: " + e.message;
+      setTimeout(() => { if ($("#err").textContent.startsWith("서버 저장 실패")) $("#err").textContent = ""; }, 4000);
+    }
+
     let appState = {};
     try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
-    const saveApp = () => { try { localStorage.setItem("kin-app", JSON.stringify(appState)); } catch (e) {} };
+
+    const STATE_KEYS = ["rs", "ss", "em", "ts", "matched", "ward", "reqHosp", "repDoc", "confirm", "ov", "orig"];
+
+    /**
+     * 상태 저장. 로컬 모드면 통째로 localStorage에, 서버 모드면 해당 검사 한 건만 PATCH.
+     * uid를 넘기지 않으면 서버 모드에서는 아무것도 하지 않는다 — 무엇을 보낼지 알 수 없기 때문.
+     */
+    function saveApp(uid) {
+      if (!serverMode) {
+        try { localStorage.setItem("kin-app", JSON.stringify(appState)); } catch (e) {}
+        return;
+      }
+      if (!uid) return;
+      const a = appState[uid] ?? {};
+      const body = {};
+      for (const k of STATE_KEYS) if (a[k] !== undefined) body[k] = a[k];
+      if (!Object.keys(body).length) return;
+      api("PATCH", `/studies/${encodeURIComponent(uid)}`, body).catch(apiFail);
+    }
 
     let incoming = [];   // 장비 수신 시뮬로 생성된 가짜 검사
     try { incoming = JSON.parse(localStorage.getItem("kin-incoming") ?? "[]"); } catch (e) {}
@@ -802,32 +843,57 @@
     });
 
     // ── Match / Unmatch (8.1.2.1.1 ~ 2) ──
-    function doMatch() {
+    async function doMatch() {
       const s = cur(), o = curOrder();
       if (!s || !o) { alert("Study List에서 검사 1건, Order List에서 오더 1건을 각각 선택하세요."); return; }
       if (s.matched === "M" || o.matched === "M") { alert("이미 매칭된 항목입니다."); return; }
       if (!confirm(`아래 오더 정보를 검사에 덮어씁니다.\n\n검사: ${s.name} (${s.id}) ${s.date}\n오더: ${o.name} (${o.id}) ${o.sched}\n\n진행할까요?`)) return;
 
       const a = appState[s.uid] ??= {};
-      a.orig ??= { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
-      a.ov = { id: o.id, name: o.name, sex: o.sex, birth: o.birth, age: ageOf(o.birth, s.date), desc: o.desc, ward: o.ward };
-      a.matched = "M"; a.oid = o.oid;
-      Object.assign(s, a.ov, { matched: "M" });
-      o.matched = "M"; o.studyUid = s.uid;
-      saveApp(); saveOrders();
+      const orig = a.orig ?? { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
+      const ov = { id: o.id, name: o.name, sex: o.sex, birth: o.birth, age: ageOf(o.birth, s.date), desc: o.desc, ward: o.ward };
+
+      if (serverMode) {
+        // 검사와 오더를 함께 바꾸는 일이라 서버 트랜잭션에 맡긴다.
+        // 한쪽만 바뀌면 M/U가 어긋난 유령 상태가 남는다.
+        try {
+          const st = await api("POST", "/match", { uid: s.uid, oid: o.oid, patient: { age: ov.age, orig } });
+          appState[s.uid] = { ...a, ...st };
+          Object.assign(s, st.ov ?? {}, { matched: "M", ward: st.ward });
+          o.matched = "M"; o.studyUid = s.uid;
+        } catch (e) { alert("매칭 실패: " + e.message); return; }
+      } else {
+        a.orig ??= orig; a.ov = ov; a.matched = "M"; a.oid = o.oid;
+        Object.assign(s, ov, { matched: "M" });
+        o.matched = "M"; o.studyUid = s.uid;
+        saveApp(); saveOrders();
+      }
       render(); renderOrders(); renderClinical(); renderRelated();
     }
-    function doUnmatch() {
+
+    async function doUnmatch() {
       const s = cur();
       if (!s || s.matched !== "M") { alert("매칭(M)된 검사를 선택하세요."); return; }
       const a = appState[s.uid] ?? {};
-      if (a.orig) Object.assign(s, a.orig);
-      delete a.ov; a.matched = "U";
-      const o = orders.find(x => x.oid === a.oid);
-      if (o) { o.matched = "U"; o.studyUid = null; }
-      delete a.oid;
-      s.matched = "U";
-      saveApp(); saveOrders();
+
+      if (serverMode) {
+        try {
+          const st = await api("POST", "/unmatch", { uid: s.uid });
+          appState[s.uid] = { ...a, ...st, ov: undefined };
+          if (st.orig) Object.assign(s, st.orig);
+          s.matched = "U";
+          const o = orders.find(x => x.studyUid === s.uid);
+          if (o) { o.matched = "U"; o.studyUid = null; }
+        } catch (e) { alert("매칭 해제 실패: " + e.message); return; }
+      } else {
+        if (a.orig) Object.assign(s, a.orig);
+        delete a.ov; a.matched = "U";
+        const o = orders.find(x => x.oid === a.oid);
+        if (o) { o.matched = "U"; o.studyUid = null; }
+        delete a.oid;
+        s.matched = "U";
+        saveApp(); saveOrders();
+      }
       render(); renderOrders(); renderClinical(); renderRelated();
     }
 
@@ -836,7 +902,7 @@
       const s = studies.find(x => x.uid === uid); if (!s) return;
       s.ss = ss;
       appState[uid] = { ...appState[uid], ss };
-      saveApp(); render(); renderClinical();
+      saveApp(uid); render(); renderClinical();
     }
     $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
     $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
@@ -885,7 +951,7 @@
         id: $("#m-id").value.trim(), name: $("#m-name").value.trim(), sex: $("#m-sex").value,
         birth, age: ageOf(birth, s.date), desc: $("#m-desc").value.trim(), ward: $("#m-ward").value.trim() };
       Object.assign(s, a.ov);
-      saveApp();
+      saveApp(s.uid);
       $("#modal").classList.remove("show");
       render(); renderClinical(); renderRelated(); renderOrders();
     });
@@ -899,7 +965,9 @@
       if (!confirm(`검사를 삭제합니다.\n${s.name} (${s.id}) ${s.date}\n계속할까요?`)) return;
       incoming = incoming.filter(x => x.uid !== uid); saveIncoming();
       studies = studies.filter(x => x.uid !== uid);
-      delete appState[uid]; saveApp();
+      delete appState[uid];
+      if (serverMode) api("DELETE", `/studies/${encodeURIComponent(uid)}`).catch(apiFail);
+      else saveApp();
       if (selectedUid === uid) { selectedUid = null; refreshRight(); }
       render();
     }
@@ -913,13 +981,18 @@
     }
     function stashReport() {
       if (!selectedUid) return;
-      appState[selectedUid] = {
-        ...appState[selectedUid],
+      const a = appState[selectedUid] ?? {};
+      const next = {
         findings: $("#findings").value,
         conclusion: $("#conclusion").value,
         recommendation: $("#recommendation").value,
       };
-      saveApp();
+      // 검사를 옮겨다닐 때마다 호출되므로, 바뀐 게 없으면 서버를 부르지 않는다
+      const same = ["findings", "conclusion", "recommendation"].every(k => (a[k] ?? "") === next[k]);
+      appState[selectedUid] = { ...a, ...next };
+      if (same) return;
+      if (serverMode) api("PUT", `/studies/${encodeURIComponent(selectedUid)}/report`, next).catch(apiFail);
+      else saveApp();
     }
     function commitReport(newRs) {
       if (!selectedUid) return;
@@ -930,7 +1003,7 @@
         appState[selectedUid].confirm = today();
       }
       cur().rs = newRs;
-      saveApp(); render(); renderRelated();
+      saveApp(selectedUid); render(); renderRelated();
     }
     $("#b-save").addEventListener("click", () => commitReport("T"));
     $("#b-transcribe").addEventListener("click", () => commitReport("T"));
@@ -1057,7 +1130,7 @@ ${r.recommendation ?? ""}
         const s = studies.find(x => x.uid === uid);
         s.rs = { W: "T", T: "A", A: "W" }[s.rs];
         appState[uid] = { ...appState[uid], rs: s.rs };
-        saveApp(); render(); return;
+        saveApp(uid); render(); return;
       }
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) select(tr.dataset.uid);
@@ -1074,7 +1147,7 @@ ${r.recommendation ?? ""}
       if (!s) return;
       s.ts = ts;
       appState[uid] = { ...appState[uid], ts };
-      saveApp(); render();
+      saveApp(uid); render();
     }
     function teleRequest(uid) {
       // 전송 파이프라인 시뮬레이션 — 3단계에서 실제 백엔드 상태머신으로 교체
@@ -1135,14 +1208,14 @@ ${r.recommendation ?? ""}
           { label: s.em === "E" ? "Switch to Normal" : "Switch to Emergency", act: () => {
               s.em = s.em === "E" ? "N" : "E";
               appState[uid] = { ...appState[uid], em: s.em };
-              saveApp(); render(); renderRelated();
+              saveApp(uid); render(); renderRelated();
             } },
           { label: "Switch ReqHosp", act: () => {
               const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
               if (v == null) return;
               s.reqHosp = v.trim() || "KIN";
               appState[uid] = { ...appState[uid], reqHosp: s.reqHosp };
-              saveApp(); render(); renderRelated();
+              saveApp(uid); render(); renderRelated();
             } },
           { label: "Merge / Split Exam", dis: 1, act: () => {} },
           { sep: 1 },
@@ -1176,10 +1249,27 @@ ${r.recommendation ?? ""}
       if (tr?.dataset.uid) openFilmbox(tr.dataset.uid);
     });
 
-    // ── 시작 ──
-    renderHeads();
-    renderTemplates();
-    load();
+    // ══════════ 시작 ══════════
+    // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.
+    // 서버 없이도 앱이 열려야 GitHub Pages 데모와 오프라인 작업이 가능하다.
+    async function boot() {
+      renderHeads();
+      renderTemplates();
+      try {
+        const b = await api("GET", "/bootstrap");
+        serverMode = true;
+        appState = b.states;
+        orders = b.orders;
+        $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB 연결됨`;
+        $("#dbstat").title = `상태·판독문이 서버(${API})에 저장됩니다 — 브라우저를 바꿔도 유지됩니다`;
+      } catch (e) {
+        serverMode = false;
+        $("#dbstat").innerHTML = `<span style="color:#d8b24a">●</span> 로컬 저장`;
+        $("#dbstat").title = `API 미연결 (${e.message}) — 이 브라우저에만 저장됩니다. docker compose up -d 로 API를 띄우세요`;
+      }
+      await load();
+    }
+    boot();
   </script>
 </body>
 </html>

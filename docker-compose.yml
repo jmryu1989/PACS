@@ -1,7 +1,9 @@
-# Korea Imaging Network — 0단계 실습: 미니 PACS
-# 실행:  docker compose up -d
+# Korea Imaging Network — 미니 PACS + 백엔드
+# 실행:  docker compose up -d --build
 # 접속:  http://localhost:8042        (Orthanc 웹 UI, admin / admin)
 #        http://localhost:8042/ohif/  (OHIF 뷰어)
+#        http://localhost:8042/worklist/hpacs-lite/index.html   (HPACS-lite)
+#        http://localhost:3000/api/health                       (KIN API)
 services:
   orthanc:
     image: orthancteam/orthanc:24.12.0
@@ -18,5 +20,42 @@ services:
       - ./worklist-v0:/worklist:ro
       - orthanc-db:/var/lib/orthanc/db
 
+  # ── 3단계: 판독 상태·판독문·오더를 담는 진짜 데이터베이스 ──
+  db:
+    image: postgres:16-alpine
+    container_name: kin-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kin
+      POSTGRES_PASSWORD: kin
+      POSTGRES_DB: kin
+    ports:
+      - "5432:5432"   # DBeaver 등으로 직접 들여다보기 위해 열어둔다
+    volumes:
+      - pg-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kin"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./api
+    container_name: kin-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://kin:kin@db:5432/kin
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy   # DB가 받을 준비될 때까지 기다린다
+    volumes:
+      # 소스만 마운트 → 코드 고치면 컨테이너 안에서 자동 재시작(watch).
+      # node_modules는 마운트하지 않는다 (윈도우 파일과 리눅스 바이너리가 섞이면 깨진다)
+      - ./api/src:/app/src
+      - ./api/prisma:/app/prisma
+
 volumes:
   orthanc-db:
+  pg-db:

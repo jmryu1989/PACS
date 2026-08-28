@@ -4,3 +4,10 @@ sample-data/*.dcm
 # Python 캐시
 __pycache__/
 *.pyc
+
+# Node / API
+node_modules/
+api/dist/
+api/*.db
+api/prisma/*.db
+.env
