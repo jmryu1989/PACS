@@ -1,18 +1,26 @@
-import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { PacsService } from './pacs.service';
+import { AuthGuard, Public } from './auth.guard';
 
 /**
- * 인증은 아직 없다. 프론트가 X-KIN-User 헤더로 자기가 누구인지 말하고, 서버는 그대로 믿는다.
- * 3단계 후반에 Keycloak(OIDC)으로 교체하면서 이 헤더는 토큰의 subject로 바뀐다.
- * 그때까지 이 API를 사내망 밖에 노출하지 않는다.
+ * 모든 엔드포인트가 Keycloak 토큰을 요구한다(@Public 제외).
+ * 호출자가 누구인지는 헤더가 아니라 **서명된 토큰**에서 나온다 — req.actor / req.roles.
+ * 역할별 권한은 서비스 계층에서 필드 단위로 검사한다 (기사는 Verify, 판독의는 Approve).
  */
 @Controller()
+@UseGuards(AuthGuard)
 export class PacsController {
   constructor(private svc: PacsService) {}
 
+  @Public()
   @Get('health')
   health() {
-    return { ok: true, at: new Date().toISOString() };
+    return { ok: true, at: new Date().toISOString(), auth: process.env.AUTH_REQUIRED !== 'false' };
+  }
+
+  @Get('me')
+  me(@Req() req: any) {
+    return { actor: req.actor, roles: req.roles };
   }
 
   @Get('bootstrap')
@@ -21,28 +29,28 @@ export class PacsController {
   }
 
   @Patch('studies/:uid')
-  patch(@Param('uid') uid: string, @Body() body: any, @Headers('x-kin-user') actor: string) {
-    return this.svc.patchState(uid, body, actor);
+  patch(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.patchState(uid, body, req.actor, req.roles);
   }
 
   @Put('studies/:uid/report')
-  report(@Param('uid') uid: string, @Body() body: any, @Headers('x-kin-user') actor: string) {
-    return this.svc.putReport(uid, body, actor);
+  report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.putReport(uid, body, req.actor, req.roles);
   }
 
   @Delete('studies/:uid')
-  remove(@Param('uid') uid: string, @Headers('x-kin-user') actor: string) {
-    return this.svc.removeState(uid, actor);
+  remove(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.removeState(uid, req.actor, req.roles);
   }
 
   @Post('match')
-  match(@Body() body: any, @Headers('x-kin-user') actor: string) {
-    return this.svc.match(body.uid, body.oid, body.patient, actor);
+  match(@Body() body: any, @Req() req: any) {
+    return this.svc.match(body.uid, body.oid, body.patient, req.actor, req.roles);
   }
 
   @Post('unmatch')
-  unmatch(@Body() body: any, @Headers('x-kin-user') actor: string) {
-    return this.svc.unmatch(body.uid, actor);
+  unmatch(@Body() body: any, @Req() req: any) {
+    return this.svc.unmatch(body.uid, req.actor, req.roles);
   }
 
   @Get('audit')

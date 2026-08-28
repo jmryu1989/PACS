@@ -1,6 +1,19 @@
-import { Injectable, BadRequestException, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { SEED_ORDERS } from './seed';
+
+/**
+ * 역할 검사. HPACS의 Radiology / Technician 두 탭이 그냥 화면 분리가 아니라
+ * 권한 분리라는 것이 핵심 — 방사선사는 검사를 확인(Verify)하고 오더를 매칭하지만
+ * 판독문을 승인하지 않는다. 판독의는 그 반대다.
+ * admin은 둘 다 할 수 있다(개발·운영 편의).
+ */
+function need(roles: string[], role: string, what: string) {
+  if (!roles?.includes(role) && !roles?.includes('admin'))
+    throw new ForbiddenException(`${what}은(는) ${role} 권한이 필요합니다`);
+}
+const RADIOLOGIST_FIELDS = ['rs', 'repDoc', 'confirm'];
+const TECHNICIAN_FIELDS = ['ss', 'matched', 'ward', 'reqHosp', 'em', 'ov', 'orig'];
 
 /** JSON 문자열 컬럼 ↔ 객체 변환. 서버가 깨진 값을 받아도 죽지 않게 감싼다. */
 const parse = (s?: string) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -60,7 +73,11 @@ export class PacsService implements OnModuleInit {
   }
 
   /** 검사 상태 부분 수정 (RS 토글, Verify, Switch EM/ReqHosp, TS 전이 …) */
-  async patchState(uid: string, body: any, actor: string) {
+  async patchState(uid: string, body: any, actor: string, roles: string[] = []) {
+    // 무엇을 바꾸려 하는가에 따라 필요한 권한이 다르다
+    if (RADIOLOGIST_FIELDS.some(k => body[k] !== undefined)) need(roles, 'radiologist', '판독 상태 변경');
+    if (TECHNICIAN_FIELDS.some(k => body[k] !== undefined)) need(roles, 'technician', '검사 정보 변경');
+
     const data: any = {};
     for (const k of STATE_FIELDS) if (body[k] !== undefined) data[k] = body[k];
     if (body.ov !== undefined) data.ov = dump(body.ov);
@@ -87,7 +104,8 @@ export class PacsService implements OnModuleInit {
   }
 
   /** 판독문 저장. 검사 상태 행이 없으면 함께 만든다. */
-  async putReport(uid: string, body: any, actor: string) {
+  async putReport(uid: string, body: any, actor: string, roles: string[] = []) {
+    need(roles, 'radiologist', '판독문 저장');
     await this.prisma.studyState.upsert({ where: { uid }, create: { uid }, update: {} });
     const data = {
       findings: body.findings ?? '',
@@ -109,7 +127,8 @@ export class PacsService implements OnModuleInit {
    * Match (8.1.2.1.1): 오더 정보를 검사에 덮어쓴다.
    * 두 테이블을 같이 바꾸므로 트랜잭션. 하나만 바뀌면 M/U가 어긋난 유령 상태가 남는다.
    */
-  async match(uid: string, oid: string, patient: any, actor: string) {
+  async match(uid: string, oid: string, patient: any, actor: string, roles: string[] = []) {
+    need(roles, 'technician', '오더 매칭');
     const order = await this.prisma.order.findUnique({ where: { oid } });
     if (!order) throw new BadRequestException('오더를 찾을 수 없습니다');
     if (order.matched === 'M') throw new BadRequestException('이미 매칭된 오더입니다');
@@ -140,7 +159,8 @@ export class PacsService implements OnModuleInit {
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
-  async unmatch(uid: string, actor: string) {
+  async unmatch(uid: string, actor: string, roles: string[] = []) {
+    need(roles, 'technician', '매칭 해제');
     const prev = await this.prisma.studyState.findUnique({ where: { uid } });
     if (!prev || prev.matched !== 'M') throw new BadRequestException('매칭된 검사가 아닙니다');
 
@@ -161,7 +181,8 @@ export class PacsService implements OnModuleInit {
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */
-  async removeState(uid: string, actor: string) {
+  async removeState(uid: string, actor: string, roles: string[] = []) {
+    need(roles, 'technician', '검사 삭제');
     const prev = await this.prisma.studyState.findUnique({ where: { uid } });
     if (prev?.orderOid)
       await this.prisma.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });

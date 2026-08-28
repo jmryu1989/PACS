@@ -1,0 +1,96 @@
+{
+  "realm": "kin",
+  "displayName": "Korea Imaging Network",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "loginTheme": "keycloak",
+  "accessTokenLifespan": 1800,
+  "ssoSessionIdleTimeout": 14400,
+  "ssoSessionMaxLifespan": 43200,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+
+  "roles": {
+    "realm": [
+      { "name": "radiologist", "description": "판독의 — 판독문 작성·승인" },
+      { "name": "technician",  "description": "방사선사 — 검사 확인(Verify), 오더 매칭" },
+      { "name": "admin",       "description": "관리자" }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "kin-web",
+      "name": "HPACS-lite Web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "rootUrl": "http://localhost:8042",
+      "redirectUris": [
+        "http://localhost:8042/*",
+        "http://127.0.0.1:8042/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8042",
+        "http://127.0.0.1:8042"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8042/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "kin-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "kin-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "jmryu",
+      "email": "jmryu@kin.kr",
+      "firstName": "정모",
+      "lastName": "류",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "kin1234", "temporary": false }],
+      "realmRoles": ["radiologist", "technician", "admin"]
+    },
+    {
+      "username": "doctor",
+      "email": "doctor@kin.kr",
+      "firstName": "판독",
+      "lastName": "의",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "kin1234", "temporary": false }],
+      "realmRoles": ["radiologist"]
+    },
+    {
+      "username": "tech",
+      "email": "tech@kin.kr",
+      "firstName": "방사선",
+      "lastName": "사",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "kin1234", "temporary": false }],
+      "realmRoles": ["technician"]
+    }
+  ]
+}

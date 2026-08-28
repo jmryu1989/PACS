@@ -39,17 +39,51 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── 인증: Keycloak (OIDC) ──
+  # 렐름·클라이언트·개발용 계정은 keycloak/kin-realm.json 에서 자동으로 들어온다.
+  # 이 파일은 처음 한 번만 import된다 (자세한 건 keycloak/README.md).
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    container_name: kin-keycloak
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # 이 주소가 토큰의 iss에 박힌다. 고정해 두지 않으면 요청 호스트에 따라 흔들린다.
+      KC_HOSTNAME: http://localhost:8080
+      KC_HTTP_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/kin-realm.json:/opt/keycloak/data/import/kin-realm.json:ro
+      - kc-db:/opt/keycloak/data/h2
+    healthcheck:
+      # 26버전 이미지에는 curl이 없다. Java로 소켓을 열어 확인한다.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/kin HTTP/1.1\\nHost: localhost\\n\\n' >&3 && head -1 <&3 | grep -q 200"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+
   api:
     build: ./api
     container_name: kin-api
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://kin:kin@db:5432/kin
+      # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
+      AUTH_REQUIRED: "true"
+      KC_ISSUER: http://localhost:8080/realms/kin
+      KC_JWKS_URL: http://keycloak:8080/realms/kin/protocol/openid-connect/certs
+      KC_AUDIENCE: kin-api
     ports:
       - "3000:3000"
     depends_on:
       db:
         condition: service_healthy   # DB가 받을 준비될 때까지 기다린다
+      keycloak:
+        condition: service_healthy
     volumes:
       # 소스만 마운트 → 코드 고치면 컨테이너 안에서 자동 재시작(watch).
       # node_modules는 마운트하지 않는다 (윈도우 파일과 리눅스 바이너리가 섞이면 깨진다)
@@ -59,3 +93,4 @@ services:
 volumes:
   orthanc-db:
   pg-db:
+  kc-db:

@@ -11,7 +11,7 @@
 ## 실행 순서 (약 15분)
 
 ```bash
-# 1. 전체 기동 — Orthanc + PostgreSQL + KIN API
+# 1. 전체 기동 — Orthanc + PostgreSQL + Keycloak + KIN API
 #    (첫 실행은 이미지 다운로드와 API 빌드로 몇 분 걸림)
 docker compose up -d --build
 
@@ -30,13 +30,27 @@ python3 upload_samples.py
 | http://localhost:8042 | Orthanc 관리 UI (Orthanc Explorer 2) |
 | http://localhost:8042/ohif/ | **OHIF 뷰어** |
 | http://localhost:8042/worklist/hpacs-lite/index.html | **HPACS-lite** — 판독 워크스페이스 |
+| http://localhost:8080 | Keycloak 관리 콘솔 (`admin` / `admin`) |
 | http://localhost:3000/api/health | KIN API 살아있는지 확인 |
 
-로그인: Orthanc는 `admin` / `admin`, HPACS-lite는 아무 이메일·비밀번호나 통과(가짜 인증).
+로그인:
 
-HPACS-lite 우측 상단에 **● DB 연결됨**이 초록으로 뜨면 판독문·상태가 PostgreSQL에
-저장됩니다. 노랑 **● 로컬 저장**이면 API가 안 떠 있는 것이고, 이때는 그 브라우저에만
-저장됩니다(`docker compose logs api`로 확인).
+- Orthanc — `admin` / `admin`
+- HPACS-lite — **KIN 계정으로 로그인** 버튼 → Keycloak 화면에서 아래 계정 중 하나
+
+| 아이디 | 비밀번호 | 할 수 있는 일 |
+|---|---|---|
+| `jmryu` | `kin1234` | 전부 (판독의 + 방사선사 + 관리자) |
+| `doctor` | `kin1234` | 판독문 작성·승인. Verify·매칭은 막힘 |
+| `tech` | `kin1234` | Verify·오더 매칭. 판독문은 읽기 전용 |
+
+**데모 모드로 둘러보기**를 누르면 서버 없이 가짜 데이터로 열립니다(GitHub Pages 공유용).
+
+우측 상단 표시:
+
+- 초록 **● DB 연결됨** — 판독문·상태가 PostgreSQL에 저장됨. 브라우저를 바꿔도 유지
+- 회색 **● 데모 모드** — 로그인하지 않은 둘러보기. 이 브라우저에만 남음
+- 노랑 **● 로컬 저장** — API 미연결 (`docker compose logs api`로 확인)
 
 ## 첫날 미션 체크리스트
 
@@ -61,11 +75,30 @@ worklist-v0/              # 프론트엔드 (Orthanc가 /worklist 로 서빙)
     index.html            #     로그인 (가짜 인증 — 3단계 후반 Keycloak으로 교체)
     main.html             #     Radiology / Technician 두 모드
 
+    auth.js               #     Keycloak OIDC (Authorization Code + PKCE)
+
 api/                      # 백엔드 (NestJS + Prisma + PostgreSQL) — 3단계
   prisma/schema.prisma    #   StudyState, Report, Order, AuditLog
+  src/auth.guard.ts       #   JWT 검증 (서명·iss·aud·exp)
   src/pacs.controller.ts  #   REST 엔드포인트
-  src/pacs.service.ts     #   상태 전이·매칭 트랜잭션·감사로그
+  src/pacs.service.ts     #   상태 전이·매칭 트랜잭션·역할 검사·감사로그
+
+keycloak/                 # 인증 서버 설정
+  kin-realm.json          #   렐름·클라이언트·롤·개발용 계정 (자동 import)
+  README.md               #   주의사항 — JSON에 주석 금지 등
 ```
+
+### 권한 모델
+
+Radiology / Technician 두 탭은 화면 분리가 아니라 **권한 분리**다.
+
+| | radiologist | technician |
+|---|---|---|
+| 판독문 저장·승인, RS 변경 | ✅ | ❌ |
+| Verify/Unverify, 오더 매칭, 검사정보 수정, 삭제 | ❌ | ✅ |
+
+`admin`은 둘 다. 화면에서도 버튼을 잠그지만 **진짜 방어선은 서버**다
+(`pacs.service.ts`의 `need()`). 화면은 안내일 뿐이다.
 
 ### API 엔드포인트
 
@@ -76,9 +109,11 @@ api/                      # 백엔드 (NestJS + Prisma + PostgreSQL) — 3단계
 | PUT | `/api/studies/:uid/report` | 판독문 저장 |
 | POST | `/api/match` · `/api/unmatch` | 검사↔오더 매칭 (트랜잭션) |
 | GET | `/api/audit?uid=` | 감사 로그 |
+| GET | `/api/me` | 내 토큰의 주인과 롤 |
 
-호출자는 `X-KIN-User` 헤더로 자신을 밝히고 서버는 그대로 믿습니다. 인증이 붙기 전까지
-**이 API를 사내망 밖에 노출하지 마세요.**
+`/api/health`를 뺀 모든 요청은 `Authorization: Bearer <token>`이 필요합니다.
+서버는 서명·발급자(iss)·대상(aud)·만료를 모두 확인하고, **감사 로그의 actor를 토큰에서**
+꺼냅니다 — 클라이언트가 자기 이름을 정하지 못합니다.
 
 핵심 개념 미리보기: OHIF는 Orthanc의 **DICOMweb** API(`/dicom-web/...`)로 영상을
 가져옵니다. 지금 브라우저 개발자도구(Network 탭)를 열고 스터디를 열어보면
@@ -111,7 +146,15 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
 - **API 로그에 `Could not parse schema engine response` / `failed to detect the libssl`**:
   Prisma 엔진은 네이티브 바이너리라 musl(alpine)에서 돌지 않습니다. `api/Dockerfile`의
   베이스가 `node:22-slim`인지, `openssl` 패키지를 설치하는지 확인하고 `--build`로 다시 빌드.
-- **처음부터 다시**: `docker compose down -v` (영상과 DB가 전부 삭제됨)
+- **로그인 버튼이 "인증 서버 없음"**: Keycloak이 아직 뜨는 중(첫 기동 40초쯤). `docker compose ps`에서
+  `kin-keycloak`이 healthy가 되면 새로고침.
+- **로그인 후 `invalid_redirect_uri`**: 8042가 아닌 주소로 열었을 때. 렐름에 등록된 주소는
+  `http://localhost:8042/*` 뿐이다. `keycloak/kin-realm.json`의 `redirectUris`를 고치고
+  `docker compose down -v` 후 재기동하거나, 관리 콘솔에서 직접 추가.
+- **렐름 파일을 고쳤는데 반영 안 됨**: 렐름은 처음 한 번만 import된다. `keycloak/README.md` 참고.
+- **API가 401만 뱉음**: 토큰의 `iss`와 API의 `KC_ISSUER`가 달라진 경우. compose의
+  `KC_HOSTNAME`과 `KC_ISSUER`가 둘 다 `http://localhost:8080`인지 확인.
+- **처음부터 다시**: `docker compose down -v` (영상·DB·Keycloak 계정이 전부 삭제됨)
 
 ## 이것이 사업의 미니어처인 이유
 

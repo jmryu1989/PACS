@@ -163,6 +163,7 @@
     <div class="mright" id="storage">0.0GB / -</div>
     <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
     <div class="mright" id="user"></div>
+    <div class="mright" id="roles" style="color:#4da3ff" title="Keycloak 렐름 롤"></div>
     <div class="mright"><select style="background:#14181f;color:#aab2c0;border:1px solid #3a4356"><option>한국어</option><option>English</option></select></div>
     <div class="mright logout" id="logout">로그아웃</div>
   </div>
@@ -358,16 +359,16 @@
     </div>
   </div>
 
+  <script src="auth.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
-    let user = "";
-    try { user = sessionStorage.getItem("kin-user") ?? ""; } catch (e) {}
-    if (!user) location.href = "index.html";
+    // 세션은 Keycloak 토큰(또는 데모 모드)에서 온다. 헤더에 이름을 적어 보내는 게 아니라
+    // 서명된 토큰을 보내고, 서버가 그걸 검증해 actor를 정한다.
+    const sess = KinAuth.session();
+    if (!sess) location.href = "index.html";
+    let user = sess?.user ?? "";
     document.querySelector("#user").textContent = user;
-    document.querySelector("#logout").addEventListener("click", () => {
-      try { sessionStorage.removeItem("kin-user"); } catch (e) {}
-      location.href = "index.html";
-    });
+    document.querySelector("#logout").addEventListener("click", () => KinAuth.logout());
 
     const $ = s => document.querySelector(s);
     function tagv(st, key) {
@@ -391,11 +392,14 @@
     let serverMode = false;
 
     async function api(method, path, body) {
+      const tok = await KinAuth.token();
+      if (!tok) throw new Error("로그인이 필요합니다");
       const res = await fetch(API + path, {
         method,
-        headers: { "Content-Type": "application/json", "X-KIN-User": user },
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + tok },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
+      if (res.status === 401) { KinAuth.logout(); throw new Error("세션이 만료되었습니다"); }
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.message ?? `HTTP ${res.status}`);
@@ -413,18 +417,20 @@
     const STATE_KEYS = ["rs", "ss", "em", "ts", "matched", "ward", "reqHosp", "repDoc", "confirm", "ov", "orig"];
 
     /**
-     * 상태 저장. 로컬 모드면 통째로 localStorage에, 서버 모드면 해당 검사 한 건만 PATCH.
-     * uid를 넘기지 않으면 서버 모드에서는 아무것도 하지 않는다 — 무엇을 보낼지 알 수 없기 때문.
+     * 상태 저장. 로컬 모드면 통째로 localStorage에, 서버 모드면 **바뀐 필드만** PATCH.
+     *
+     * 전체를 보내면 안 되는 이유: 서버가 필드별로 권한을 본다. 방사선사가 Verify(ss)만
+     * 눌렀는데 판독의가 남긴 rs까지 딸려 보내면 "판독 상태 변경은 radiologist 권한이
+     * 필요합니다"로 거절당한다. 보내는 것이 곧 요구하는 권한이다.
      */
-    function saveApp(uid) {
+    function saveApp(uid, patch) {
       if (!serverMode) {
         try { localStorage.setItem("kin-app", JSON.stringify(appState)); } catch (e) {}
         return;
       }
-      if (!uid) return;
-      const a = appState[uid] ?? {};
+      if (!uid || !patch) return;
       const body = {};
-      for (const k of STATE_KEYS) if (a[k] !== undefined) body[k] = a[k];
+      for (const k of STATE_KEYS) if (patch[k] !== undefined) body[k] = patch[k];
       if (!Object.keys(body).length) return;
       api("PATCH", `/studies/${encodeURIComponent(uid)}`, body).catch(apiFail);
     }
@@ -902,7 +908,7 @@
       const s = studies.find(x => x.uid === uid); if (!s) return;
       s.ss = ss;
       appState[uid] = { ...appState[uid], ss };
-      saveApp(uid); render(); renderClinical();
+      saveApp(uid, { ss }); render(); renderClinical();
     }
     $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
     $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
@@ -951,7 +957,7 @@
         id: $("#m-id").value.trim(), name: $("#m-name").value.trim(), sex: $("#m-sex").value,
         birth, age: ageOf(birth, s.date), desc: $("#m-desc").value.trim(), ward: $("#m-ward").value.trim() };
       Object.assign(s, a.ov);
-      saveApp(s.uid);
+      saveApp(s.uid, { ov: a.ov, orig: a.orig });
       $("#modal").classList.remove("show");
       render(); renderClinical(); renderRelated(); renderOrders();
     });
@@ -1003,7 +1009,9 @@
         appState[selectedUid].confirm = today();
       }
       cur().rs = newRs;
-      saveApp(selectedUid); render(); renderRelated();
+      const a = appState[selectedUid];
+      saveApp(selectedUid, { rs: newRs, repDoc: a.repDoc, confirm: a.confirm });
+      render(); renderRelated();
     }
     $("#b-save").addEventListener("click", () => commitReport("T"));
     $("#b-transcribe").addEventListener("click", () => commitReport("T"));
@@ -1130,7 +1138,7 @@ ${r.recommendation ?? ""}
         const s = studies.find(x => x.uid === uid);
         s.rs = { W: "T", T: "A", A: "W" }[s.rs];
         appState[uid] = { ...appState[uid], rs: s.rs };
-        saveApp(uid); render(); return;
+        saveApp(uid, { rs: s.rs }); render(); return;
       }
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) select(tr.dataset.uid);
@@ -1147,7 +1155,7 @@ ${r.recommendation ?? ""}
       if (!s) return;
       s.ts = ts;
       appState[uid] = { ...appState[uid], ts };
-      saveApp(uid); render();
+      saveApp(uid, { ts }); render();
     }
     function teleRequest(uid) {
       // 전송 파이프라인 시뮬레이션 — 3단계에서 실제 백엔드 상태머신으로 교체
@@ -1208,14 +1216,14 @@ ${r.recommendation ?? ""}
           { label: s.em === "E" ? "Switch to Normal" : "Switch to Emergency", act: () => {
               s.em = s.em === "E" ? "N" : "E";
               appState[uid] = { ...appState[uid], em: s.em };
-              saveApp(uid); render(); renderRelated();
+              saveApp(uid, { em: s.em }); render(); renderRelated();
             } },
           { label: "Switch ReqHosp", act: () => {
               const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
               if (v == null) return;
               s.reqHosp = v.trim() || "KIN";
               appState[uid] = { ...appState[uid], reqHosp: s.reqHosp };
-              saveApp(uid); render(); renderRelated();
+              saveApp(uid, { reqHosp: s.reqHosp }); render(); renderRelated();
             } },
           { label: "Merge / Split Exam", dis: 1, act: () => {} },
           { sep: 1 },
@@ -1252,9 +1260,34 @@ ${r.recommendation ?? ""}
     // ══════════ 시작 ══════════
     // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.
     // 서버 없이도 앱이 열려야 GitHub Pages 데모와 오프라인 작업이 가능하다.
+    // 역할에 따라 화면을 잠근다. 서버가 어차피 막지만, 눌러보고 거절당하는 것보다
+    // 처음부터 회색인 편이 낫다. (서버 검사가 진짜 방어선이고 이건 안내다)
+    function applyRoleUi() {
+      const rad = KinAuth.has("radiologist"), tec = KinAuth.has("technician");
+      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread"].forEach(s => {
+        const el = $(s); el.disabled = !rad;
+        if (!rad) el.title = "판독의(radiologist) 권한이 필요합니다";
+      });
+      ["#findings", "#conclusion", "#recommendation"].forEach(s => $(s).readOnly = !rad);
+      ["#t-verify", "#t-unverify", "#t-modify", "#t-simulate"].forEach(s => {
+        const el = $(s); el.disabled = !tec;
+        if (!tec) el.title = "방사선사(technician) 권한이 필요합니다";
+      });
+      const r = sess.demo ? "데모" : (sess.roles.filter(x => ["radiologist","technician","admin"].includes(x)).join(", ") || "권한 없음");
+      $("#roles").textContent = r;
+    }
+
     async function boot() {
       renderHeads();
       renderTemplates();
+      applyRoleUi();
+      if (sess.demo) {
+        serverMode = false;
+        $("#dbstat").innerHTML = `<span style="color:#7f8899">●</span> 데모 모드`;
+        $("#dbstat").title = "로그인하지 않은 둘러보기 모드 — 변경 내용은 이 브라우저에만 남습니다";
+        await load();
+        return;
+      }
       try {
         const b = await api("GET", "/bootstrap");
         serverMode = true;

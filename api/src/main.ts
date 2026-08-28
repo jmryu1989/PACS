@@ -11,5 +11,9 @@ async function bootstrap() {
 
   await app.listen(3000, '0.0.0.0');
   console.log('[KIN API] http://localhost:3000/api');
+  if (process.env.AUTH_REQUIRED === 'false')
+    console.warn('[KIN API] ⚠️  인증이 꺼져 있습니다 (AUTH_REQUIRED=false). 사내망 밖에 노출하지 마세요.');
+  else
+    console.log(`[KIN API] 인증: Keycloak (iss=${process.env.KC_ISSUER})`);
 }
 bootstrap();
