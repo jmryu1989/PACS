@@ -51,6 +51,18 @@ export class PacsController {
     return this.svc.versions(uid);
   }
 
+  /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
+  @Post('studies/:uid/hold')
+  hold(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.hold(uid, req.actor, req.roles);
+  }
+
+  /** 점유 해제 — 검사를 옮길 때 (확정 시에는 자동으로 풀린다) */
+  @Post('studies/:uid/release')
+  release(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.release(uid, req.actor);
+  }
+
   @Delete('studies/:uid')
   remove(@Param('uid') uid: string, @Req() req: any) {
     return this.svc.removeState(uid, req.actor, req.roles);

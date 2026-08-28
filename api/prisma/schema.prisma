@@ -31,6 +31,8 @@ model StudyState {
   ov        String?                           // Match/Modify로 덮어쓴 값 (JSON)
   orig      String?                           // 덮어쓰기 전 원본 (JSON) — Unmatch 복원용
   orderOid  String?                           // 매칭된 오더
+  holder    String?                           // 지금 판독문을 쓰고 있는 사람
+  heldAt    DateTime?                         // 마지막 하트비트. TTL이 지나면 점유가 풀린다
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 

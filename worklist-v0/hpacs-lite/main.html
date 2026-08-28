@@ -72,6 +72,11 @@
     .mt.M { background: #2f5f8a; color: #d9ecff; }
     .mt.U { color: #667; }
 
+    /* 점유 표시 (Viewing) */
+    .hold { font-size: 11px; white-space: nowrap; }
+    .hold.me { color: #4ac06a; }
+    .hold.other { color: #ff9a4a; font-weight: bold; }
+
     /* 우클릭 컨텍스트 메뉴 */
     .ctx { display: none; position: fixed; background: #232936; border: 1px solid #3a4356; z-index: 20; min-width: 190px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
     .ctx div { padding: 6px 14px; cursor: pointer; font-size: 12px; }
@@ -560,6 +565,7 @@
       Radiology: [
         { k: "pf", t: "PF" },
         { k: "no", t: "No", num: 1 },
+        { k: "viewing", t: "Viewing" },
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
         { k: "em", t: "EM", f: ["E", "N"] },
@@ -602,6 +608,11 @@
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
       ss: s => `<span class="ss ${s.ss}">${s.ss}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
+      // Viewing: 지금 이 검사의 판독문을 쓰고 있는 사람
+      viewing: s => !s.holder ? ""
+        : s.holder === user
+          ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
+          : `<span class="hold other" title="${s.holder} 님이 작성 중">✎ ${s.holder.split("@")[0]}</span>`,
     };
 
     let mode = "Radiology";
@@ -642,6 +653,8 @@
       s.matched = a.matched ?? "U";
       s.ward = a.ward ?? s.ward ?? "";
       s.reqHosp = a.reqHosp ?? s.reqHosp ?? "KIN";
+      s.holder = a.holder;          // 서버가 만료된 점유는 빼고 준다
+      s.version = a.version ?? 0;   // 낙관적 락 기준
       if (a.ov) Object.assign(s, a.ov);
       return s;
     }
@@ -777,6 +790,8 @@
 
     function select(uid) {
       stashReport();
+      if (heldUid && heldUid !== uid) releaseHold();   // 다른 검사로 가면 잡고 있던 걸 놓는다
+      warnedFor = null;
       selectedUid = uid;
       render(); refreshRight();
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
@@ -1093,12 +1108,30 @@
       if (serverMode) {
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
-            { action, reason, ...content });
+            { action, reason, baseVersion: appState[uid]?.version ?? 0, ...content });
+          heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
           appState[uid] = { ...appState[uid], ...st };
           const s = studies.find(x => x.uid === uid);
-          if (s) s.rs = st.rs;
+          if (s) { s.rs = st.rs; s.holder = st.holder; s.version = st.version; }
           if (action === "reset") loadReport();   // 서버가 내용을 비웠으니 화면도 비운다
-        } catch (e) { alert("저장 실패: " + e.message); return; }
+        } catch (e) {
+          // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
+          // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
+          if (e.message.includes("저장했습니다")) {
+            toast(e.message, "err");
+            if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
+              navigator.clipboard?.writeText(
+                [content.findings, content.conclusion, content.recommendation].filter(Boolean).join("\n\n"));
+              const b = await api("GET", "/bootstrap");
+              appState[uid] = { ...appState[uid], ...b.states[uid] };
+              loadReport(); render(); renderRelated();
+              toast("서버 판독문을 불러왔습니다. 쓰던 내용은 클립보드에 있습니다.", "info");
+            }
+            return;
+          }
+          toast("저장 실패: " + e.message, "err");
+          return;
+        }
       } else {
         const rs = { save: "T", approve: "A", addendum: "A", reset: "W" }[action];
         appState[uid] = { ...appState[uid], ...content, rs };
@@ -1137,6 +1170,78 @@
       if (!reason?.trim()) return;
       commitReport("reset", reason.trim());
     });
+
+    // ══════════ 동시 판독 점유 (교훈 §2) ══════════
+    // 점유는 **열람이 아니라 쓰기**로 시작한다. 검사를 열어보는 건 흔한 일이고,
+    // 그걸 점유로 치면 경고가 남발되며, 남발된 경고는 아무도 안 본다.
+    let heldUid = null, heartbeat = null, warnedFor = null;
+    const HOLD_MIN_CHARS = 2;      // "두 글자 이상 입력" — HPACS가 2021년에 정한 기준
+    const HEARTBEAT_MS = 60000;    // 서버 TTL(5분)보다 충분히 짧게
+
+    async function claimHold(uid) {
+      if (!serverMode || heldUid === uid) return;
+      await releaseHold();
+      try {
+        const r = await api("POST", `/studies/${encodeURIComponent(uid)}/hold`);
+        const s = studies.find(x => x.uid === uid);
+        if (s) s.holder = r.holder;
+        appState[uid] = { ...appState[uid], holder: r.holder };
+        render();
+
+        if (r.conflict) {
+          // 막지 않는다. 응급 판독을 자물쇠로 세우는 건 위험하다.
+          // 실제 덮어쓰기는 저장 시점의 버전 비교가 막는다.
+          if (warnedFor !== uid) {
+            warnedFor = uid;
+            toast(`${r.holder} 님이 이 검사를 작성 중입니다. 저장할 때 충돌할 수 있습니다.`, "err");
+          }
+          return;
+        }
+        heldUid = uid;
+        clearInterval(heartbeat);
+        heartbeat = setInterval(() => {
+          if (heldUid) api("POST", `/studies/${encodeURIComponent(heldUid)}/hold`).catch(() => {});
+        }, HEARTBEAT_MS);
+      } catch (e) { /* 점유 실패로 판독을 막지는 않는다 */ }
+    }
+
+    async function releaseHold() {
+      if (!serverMode || !heldUid) return;
+      const uid = heldUid;
+      heldUid = null;
+      clearInterval(heartbeat); heartbeat = null;
+      const s = studies.find(x => x.uid === uid);
+      if (s) s.holder = undefined;
+      if (appState[uid]) appState[uid].holder = undefined;
+      try { await api("POST", `/studies/${encodeURIComponent(uid)}/release`); } catch (e) {}
+    }
+
+    // 판독문에 두 글자 이상 쓰면 그때 점유가 시작된다
+    ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
+      $(sel).addEventListener("input", () => {
+        if (!selectedUid) return;
+        const total = $("#findings").value.length + $("#conclusion").value.length + $("#recommendation").value.length;
+        if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
+      }));
+
+    // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
+    // 지금은 30초 폴링. 실시간(SSE)은 사람이 늘어나면 그때.
+    let poll = null;
+    function startPolling() {
+      clearInterval(poll);
+      poll = setInterval(async () => {
+        if (!serverMode || document.hidden) return;
+        try {
+          const b = await api("GET", "/bootstrap");
+          for (const [uid, st] of Object.entries(b.states)) {
+            appState[uid] = { ...appState[uid], holder: st.holder, version: st.version };
+            const s = studies.find(x => x.uid === uid);
+            if (s) { s.holder = st.holder; s.version = st.version; }
+          }
+          render();
+        } catch (e) {}
+      }, 30000);
+    }
 
     // ── 판독문 이력 ──
     async function showHistory() {
@@ -1454,6 +1559,7 @@ ${r.recommendation ?? ""}
         orders = b.orders;
         $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB 연결됨`;
         $("#dbstat").title = `상태·판독문이 서버(${API})에 저장됩니다 — 브라우저를 바꿔도 유지됩니다`;
+        startPolling();
       } catch (e) {
         serverMode = false;
         $("#dbstat").innerHTML = `<span style="color:#d8b24a">●</span> 로컬 저장`;

@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, ForbiddenException, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { SEED_ORDERS } from './seed';
 
@@ -19,6 +19,14 @@ const TECHNICIAN_FIELDS = ['ss', 'matched', 'ward', 'reqHosp', 'em', 'ov', 'orig
 const parse = (s?: string) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
 const dump = (o: any) => (o == null ? null : JSON.stringify(o));
 
+/**
+ * 점유 유효시간. 브라우저가 죽거나 탭이 닫히면 해제 요청이 오지 않는다.
+ * "닫았을 때 해제"만 믿으면 검사가 영원히 잠긴다 — 그래서 시간으로도 푼다.
+ * 프론트는 이보다 짧은 주기로 하트비트를 보내 점유를 갱신한다.
+ */
+const HOLD_TTL_MS = 5 * 60 * 1000;
+const holdAlive = (s: any) => s?.holder && s.heldAt && Date.now() - new Date(s.heldAt).getTime() < HOLD_TTL_MS;
+
 /** 프론트가 그대로 쓸 수 있는 모양으로 되돌린다 (main.html의 appState 한 칸과 같은 구조) */
 function toClient(s: any, r: any) {
   return {
@@ -27,6 +35,12 @@ function toClient(s: any, r: any) {
     repDoc: s.repDoc ?? undefined, confirm: s.confirm ?? undefined,
     ov: parse(s.ov) ?? undefined, orig: parse(s.orig) ?? undefined,
     oid: s.orderOid ?? undefined,
+    // 만료된 점유는 없는 것으로 내보낸다. 화면이 유령 자물쇠를 그리지 않게.
+    // undefined가 아니라 null인 이유: JSON.stringify는 undefined 키를 통째로 지운다.
+    // 키가 사라지면 클라이언트의 `{...기존, ...응답}` 이 이전 점유자를 그대로 남긴다.
+    // "값을 비웠다"는 사실도 전송되어야 한다.
+    holder: holdAlive(s) ? s.holder : null,
+    version: r?.version ?? 0,
     findings: r?.findings ?? '', conclusion: r?.conclusion ?? '', recommendation: r?.recommendation ?? '',
   };
 }
@@ -164,7 +178,20 @@ export class PacsService implements OnModuleInit {
     });
     const version = (last?.version ?? 0) + 1;
 
-    const stateData: any = { rs };
+    /**
+     * 낙관적 락. 프론트는 화면에 띄울 때 본 판 번호(baseVersion)를 같이 보낸다.
+     * 그 사이 다른 사람이 확정했다면 번호가 달라지고, 여기서 막힌다.
+     *
+     * 점유 표시는 안내일 뿐이다(뺏을 수 있고, TTL로 풀리고, 동시에 시작할 수도 있다).
+     * **덮어쓰기를 실제로 막는 건 이 비교 하나뿐이다.**
+     */
+    const current = await this.prisma.report.findUnique({ where: { uid }, select: { version: true, updatedBy: true } });
+    if (body.baseVersion !== undefined && (current?.version ?? 0) !== body.baseVersion)
+      throw new ConflictException(
+        `그 사이 ${current?.updatedBy ?? '다른 사용자'}가 v${current?.version}을 저장했습니다. ` +
+        `내용을 다시 불러온 뒤 작성해 주세요.`);
+
+    const stateData: any = { rs, holder: null, heldAt: null };   // 확정하면 점유가 풀린다
     if (action === 'approve' || action === 'addendum') {
       stateData.repDoc = actor.split('@')[0];
       stateData.confirm = new Date().toISOString().slice(0, 10);
@@ -190,6 +217,41 @@ export class PacsService implements OnModuleInit {
 
     const r = await this.prisma.report.findUnique({ where: { uid } });
     return toClient(state, r);
+  }
+
+  /**
+   * 판독문 점유 선언 / 하트비트.
+   *
+   * 점유는 **열람이 아니라 쓰기**로 시작한다(프론트가 두 글자 이상 입력했을 때 부른다).
+   * 검사를 열어보는 건 흔한 일이라 그걸 점유로 치면 경고가 남발되고, 남발된 경고는 무시된다.
+   * (HPACS도 2021년에 이 기준으로 바꿨다 — 교훈 §2)
+   *
+   * 이미 다른 사람이 살아 있는 점유를 갖고 있으면 **막지 않고 알려준다.**
+   * 응급 판독을 자물쇠로 막는 건 위험하다. 실제 충돌은 저장 시점의 버전 비교가 잡는다.
+   */
+  async hold(uid: string, actor: string, roles: string[] = []) {
+    need(roles, 'radiologist', '판독문 점유');
+    const prev = await this.prisma.studyState.findUnique({ where: { uid } });
+    const other = holdAlive(prev) && prev.holder !== actor ? prev.holder : null;
+
+    // 남이 잡고 있으면 뺏지 않는다. 뺏으면 그쪽 화면의 자물쇠가 조용히 풀린다.
+    if (!other) {
+      await this.prisma.studyState.upsert({
+        where: { uid },
+        create: { uid, holder: actor, heldAt: new Date() },
+        update: { holder: actor, heldAt: new Date() },
+      });
+      if (!holdAlive(prev)) await this.audit(actor, 'report.hold', uid);
+    }
+    return { holder: other ?? actor, mine: !other, conflict: !!other };
+  }
+
+  /** 점유 해제 (검사를 옮기거나 판독을 확정할 때) */
+  async release(uid: string, actor: string) {
+    const prev = await this.prisma.studyState.findUnique({ where: { uid } });
+    if (!prev || prev.holder !== actor) return { ok: true };   // 내 것이 아니면 건드리지 않는다
+    await this.prisma.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    return { ok: true };
   }
 
   /** 판독문 이력 (최신순) */
