@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>KIN Worklist v0</title>
+</head>
+<body>
+  <h1>워크리스트</h1>
+  <input id="search" placeholder="환자명 검색">
+  <table border="1">
+    <thead>
+      <tr><th>환자명</th><th>환자ID</th><th>검사</th><th>날짜</th><th>상태</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script>
+    const studies = [
+      { name: "김철수", id: "P-0001", modality: "CT", date: "2026-08-28", status: "판독대기" },
+      { name: "이영희", id: "P-0002", modality: "MR", date: "2026-08-27", status: "판독완료" },
+      { name: "박민준", id: "P-0003", modality: "CR", date: "2026-08-28", status: "촬영완료" },
+    ];
+
+    const rows = document.querySelector("#rows");
+    const search = document.querySelector("#search");
+
+    function render(keyword) {
+      rows.innerHTML = "";
+      for (const s of studies) {
+        if (s.name.includes(keyword)) {
+          rows.innerHTML += `
+            <tr>
+              <td>${s.name}</td>
+              <td>${s.id}</td>
+              <td>${s.modality}</td>
+              <td>${s.date}</td>
+              <td>${s.status}</td>
+            </tr>
+          `;
+        }
+      }
+    }
+
+    render("");
+
+    search.addEventListener("input", () => {
+      render(search.value);
+    });
+  </script>
+</body>
+</html>
