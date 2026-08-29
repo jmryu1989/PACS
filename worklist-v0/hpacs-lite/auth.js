@@ -79,8 +79,12 @@ const KinAuth = (() => {
       return s.roles.includes(role) || s.roles.includes('admin');
     },
 
-    /** Keycloak 로그인 화면으로 보낸다 */
-    async login() {
+    /**
+     * Keycloak 로그인 화면으로 보낸다.
+     * opts.prompt === 'login' 이면 이미 로그인된 세션이 있어도 아이디를 다시 묻는다.
+     * 공용 판독 PC에서 앞사람 계정으로 그냥 들어가지는 걸 막는다.
+     */
+    async login(opts = {}) {
       const c = await config();
       const verifier = randomStr();
       const state = randomStr();
@@ -92,6 +96,7 @@ const KinAuth = (() => {
         redirect_uri: REDIRECT, state,
         code_challenge: challenge, code_challenge_method: 'S256',
       });
+      if (opts.prompt) q.set('prompt', opts.prompt);
       location.href = `${c.authorization_endpoint}?${q}`;
     },
 

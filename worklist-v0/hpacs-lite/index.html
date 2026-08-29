@@ -32,6 +32,7 @@
     <div class="sub">Korea Imaging Network</div>
 
     <button id="signin" disabled>확인 중…</button>
+    <button class="ghost" id="switch" style="display:none">다른 계정으로 로그인</button>
     <button class="ghost" id="demo">데모 모드로 둘러보기 (서버 없이)</button>
 
     <div id="msg"></div>
@@ -64,6 +65,7 @@
         if (!res.ok) throw new Error('HTTP ' + res.status);
         $("#signin").disabled = false;
         $("#signin").textContent = 'KIN 계정으로 로그인';
+        $("#switch").style.display = 'block';
         $("#hint").style.display = 'block';
         $("#stat").innerHTML = '<span style="color:#4ac06a">●</span> 인증 서버 연결됨';
       } catch (e) {
@@ -73,6 +75,8 @@
     }
 
     $("#signin").addEventListener('click', () => KinAuth.login().catch(e => $("#msg").textContent = e.message));
+    // 이미 로그인된 세션이 있어도 아이디를 다시 묻는다 (공용 판독 PC / 두 계정 동시 테스트)
+    $("#switch").addEventListener('click', () => KinAuth.login({ prompt: 'login' }).catch(e => $("#msg").textContent = e.message));
     $("#demo").addEventListener('click', () => { KinAuth.demo(); location.href = 'main.html'; });
 
     boot();

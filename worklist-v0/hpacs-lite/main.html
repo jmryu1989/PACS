@@ -1111,8 +1111,7 @@
             { action, reason, baseVersion: appState[uid]?.version ?? 0, ...content });
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
           appState[uid] = { ...appState[uid], ...st };
-          const s = studies.find(x => x.uid === uid);
-          if (s) { s.rs = st.rs; s.holder = st.holder; s.version = st.version; }
+          syncStudy(uid);
           if (action === "reset") loadReport();   // 서버가 내용을 비웠으니 화면도 비운다
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
@@ -1124,7 +1123,8 @@
                 [content.findings, content.conclusion, content.recommendation].filter(Boolean).join("\n\n"));
               const b = await api("GET", "/bootstrap");
               appState[uid] = { ...appState[uid], ...b.states[uid] };
-              loadReport(); render(); renderRelated();
+              syncStudy(uid);
+              loadReport(); render(); renderRelated(); updateReportButtons();
               toast("서버 판독문을 불러왔습니다. 쓰던 내용은 클립보드에 있습니다.", "info");
             }
             return;
@@ -1171,16 +1171,38 @@
       commitReport("reset", reason.trim());
     });
 
+    /**
+     * appState → studies 동기화. 화면은 studies 배열을 그리므로, appState만 고치면
+     * 데이터는 맞는데 화면이 옛것을 보여준다. 이 불일치 버그를 세 번 만들고 나서야
+     * 갱신 경로를 하나로 모았다 — 상태를 두 곳에 두면 반드시 어긋난다.
+     */
+    function syncStudy(uid) {
+      const s = studies.find(x => x.uid === uid);
+      const a = appState[uid];
+      if (!s || !a) return;
+      for (const k of ["rs", "ss", "em", "ts", "matched", "holder", "version", "repDoc", "confirm"])
+        if (a[k] !== undefined) s[k] = a[k];
+      if (a.holder === null || a.holder === undefined) s.holder = a.holder;
+      if (a.ward) s.ward = a.ward;
+      if (a.reqHosp) s.reqHosp = a.reqHosp;
+    }
+
     // ══════════ 동시 판독 점유 (교훈 §2) ══════════
     // 점유는 **열람이 아니라 쓰기**로 시작한다. 검사를 열어보는 건 흔한 일이고,
     // 그걸 점유로 치면 경고가 남발되며, 남발된 경고는 아무도 안 본다.
-    let heldUid = null, heartbeat = null, warnedFor = null;
+    let heldUid = null, heartbeat = null, warnedFor = null, holdPending = null;
     const HOLD_MIN_CHARS = 2;      // "두 글자 이상 입력" — HPACS가 2021년에 정한 기준
     const HEARTBEAT_MS = 60000;    // 서버 TTL(5분)보다 충분히 짧게
 
     async function claimHold(uid) {
-      if (!serverMode || heldUid === uid) return;
-      await releaseHold();
+      // 타이핑은 글자마다 input 이벤트를 낸다. 가드가 없으면 요청이 열 개씩 겹치고,
+      // 뒤늦게 도착한 하나가 `await releaseHold()` 구간에서 방금 잡은 점유를 스스로 푼다.
+      // (실제로 그렇게 됐다 — 화면엔 잡힌 것처럼 보이는데 서버는 비어 있었다)
+      if (!serverMode || heldUid === uid || holdPending === uid) return;
+      holdPending = uid;
+      try {
+        if (heldUid && heldUid !== uid) await releaseHold();
+      } catch (e) {}
       try {
         const r = await api("POST", `/studies/${encodeURIComponent(uid)}/hold`);
         const s = studies.find(x => x.uid === uid);
@@ -1203,6 +1225,7 @@
           if (heldUid) api("POST", `/studies/${encodeURIComponent(heldUid)}/hold`).catch(() => {});
         }, HEARTBEAT_MS);
       } catch (e) { /* 점유 실패로 판독을 막지는 않는다 */ }
+      finally { holdPending = null; }
     }
 
     async function releaseHold() {
@@ -1234,9 +1257,16 @@
         try {
           const b = await api("GET", "/bootstrap");
           for (const [uid, st] of Object.entries(b.states)) {
-            appState[uid] = { ...appState[uid], holder: st.holder, version: st.version };
-            const s = studies.find(x => x.uid === uid);
-            if (s) { s.holder = st.holder; s.version = st.version; }
+            if (uid === selectedUid) {
+              // 지금 편집 중인 검사의 version은 절대 갱신하지 않는다.
+              // baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래 올려버리면
+              // 남이 저장한 걸 본 적도 없으면서 최신을 아는 셈이 되어, 다음 저장이
+              // 충돌 경고 없이 남의 판독문을 덮는다 — 낙관적 락이 조용히 무력화된다.
+              appState[uid] = { ...appState[uid], holder: st.holder };
+            } else {
+              appState[uid] = { ...appState[uid], ...st };
+            }
+            syncStudy(uid);
           }
           render();
         } catch (e) {}
