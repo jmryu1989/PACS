@@ -1426,7 +1426,7 @@
     $("#t-modify").addEventListener("click", openModify);
 
     // ── Delete (8.1.2.1.8) ──
-    function doDelete(uid) {
+    async function doDelete(uid) {
       const s = studies.find(x => x.uid === uid); if (!s) return;
       if (s.rs !== "W") { alert("RS가 W(Wait)인 검사만 삭제할 수 있습니다."); return; }
       // 영상 자체(Orthanc)를 지우는 것은 아직 안 한다. 되돌릴 수 없는 동작이라
@@ -1435,10 +1435,12 @@
       // **막 도착한 검사처럼 다시 나타난다.** 그게 이 동작의 진짜 의미다.
       if (!confirm(`이 검사의 판독 상태·매칭 기록을 지웁니다.\n${s.name} (${s.id}) ${s.date}\n` +
                    `영상은 남고, 검사는 방금 도착한 것처럼 다시 나타납니다. 계속할까요?`)) return;
+      // 서버가 거절했는데 화면부터 지우면 검사가 사라진 것처럼 거짓말한다.
+      // 응답을 기다려야 판독 이력·다른 사람의 초안 때문에 거절된 이유도 메뉴의 catch가 보여준다.
+      if (serverMode) await api("DELETE", `/studies/${encodeURIComponent(uid)}`);
+      else saveApp();
       studies = studies.filter(x => x.uid !== uid);
       delete appState[uid];
-      if (serverMode) api("DELETE", `/studies/${encodeURIComponent(uid)}`).catch(apiFail);
-      else saveApp();
       if (selectedUid === uid) { selectedUid = null; refreshRight(); }
       render();
       toast("검사를 삭제했습니다", "info");

@@ -1032,6 +1032,24 @@ export class PacsService implements OnModuleInit {
     const prev = await this.gate(uid, c);
     if (prev && prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 삭제할 수 없습니다');
+
+    /**
+     * 삭제 가능 여부는 지금의 RS가 아니라 **사람의 기록이 생긴 적이 있는가**로 정한다.
+     * 승인 뒤 Reset하면 RS는 다시 W지만, ReportVersion은 있었던 결정을 보존한다.
+     * 그 상태 행을 지우면 현재 판독문은 cascade로 사라지고 이력은 조회 관문을 잃는다.
+     * 초안도 아직 진술은 아니지만 누군가 쓰는 중인 글이므로 삭제로 가로채지 않는다.
+     */
+    const [version, draft] = await Promise.all([
+      this.prisma.reportVersion.findFirst({ where: { uid }, select: { id: true } }),
+      this.prisma.reportDraft.findFirst({ where: { uid }, select: { author: true } }),
+    ]);
+    if (version)
+      throw new BadRequestException(
+        '판독 이력이 있는 검사는 삭제할 수 없습니다. 판독 취소(Reset)로 되돌리세요.');
+    if (draft)
+      throw new BadRequestException(
+        '작성 중인 판독문 초안이 있는 검사는 삭제할 수 없습니다. 초안을 확정하거나 버린 뒤 다시 시도하세요.');
+
     if (prev?.orderOid)
       await this.prisma.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });
     await this.prisma.studyState.deleteMany({ where: { uid } });
