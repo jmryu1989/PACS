@@ -1258,11 +1258,16 @@
           const b = await api("GET", "/bootstrap");
           for (const [uid, st] of Object.entries(b.states)) {
             if (uid === selectedUid) {
-              // 지금 편집 중인 검사의 version은 절대 갱신하지 않는다.
-              // baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래 올려버리면
-              // 남이 저장한 걸 본 적도 없으면서 최신을 아는 셈이 되어, 다음 저장이
-              // 충돌 경고 없이 남의 판독문을 덮는다 — 낙관적 락이 조용히 무력화된다.
-              appState[uid] = { ...appState[uid], holder: st.holder };
+              // 지금 편집 중인 검사는 두 가지만 보호한다:
+              //   version — baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래
+              //     올리면 남이 저장한 걸 본 적도 없으면서 최신을 아는 셈이 되어, 다음
+              //     저장이 충돌 경고 없이 남의 판독문을 덮는다. 낙관적 락의 조용한 무력화.
+              //   판독문 내용 — 타이핑 중인 textarea 와 어긋나면 안 된다.
+              // 나머지(rs·ss·holder 등)는 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
+              const mine = appState[uid] ?? {};
+              appState[uid] = { ...mine, ...st,
+                version: mine.version ?? 0,
+                findings: mine.findings, conclusion: mine.conclusion, recommendation: mine.recommendation };
             } else {
               appState[uid] = { ...appState[uid], ...st };
             }
@@ -1582,6 +1587,11 @@ ${r.recommendation ?? ""}
         await load();
         return;
       }
+      // 세션(refresh 포함)이 만료됐으면 로그인 화면으로 보낸다.
+      // 조용히 로컬 저장으로 떨어지면 판독의는 서버에 저장되는 줄 알고 일하는데
+      // 실제로는 이 브라우저에만 쌓인다 — 데이터가 조용히 갈라지는 최악의 실패다.
+      // (HPACS 릴리즈노트 2022.11: "토큰시간 만료시 재로그인창 안뜨는 이슈 수정" — 같은 버그)
+      if (!(await KinAuth.token())) { location.href = "index.html"; return; }
       try {
         const b = await api("GET", "/bootstrap");
         serverMode = true;
