@@ -531,9 +531,14 @@ export class PacsService implements OnModuleInit {
   }
 
   /**
-   * 판독문 임시 저장(draft). 검사를 옮겨다닐 때마다 호출되므로 **버전을 남기지 않는다.**
+   * 판독문 임시 저장(draft). 검사를 옮겨다닐 때마다 호출되므로 **판(version)을 올리지 않는다.**
    * 목적은 손실 방지 하나뿐 — HPACS가 7년차에 넣은 그 기능이다(교훈 §1).
    * 확정(save/approve/addendum/reset)은 commitReport 쪽이다.
+   *
+   * 다만 "판을 안 올린다"가 "아무것도 검사하지 않는다"는 뜻은 아니었다. 예전엔 이 경로가
+   * **낙관적 락을 통째로 우회**했다: A가 검사를 열어둔 채 방치 → B가 수정·Save(v3) →
+   * A가 다른 검사로 이동하면서 초안이 조용히 나가 B의 v3를 A의 옛 화면 내용으로 덮었다.
+   * 경고도 이력도 없었다. 확정에만 관문을 달면 관문이 아니다 (인계문서 §9-A).
    */
   async putReport(uid: string, body: any, c: Caller) {
     need(c.roles, 'radiologist', '판독문 저장');
@@ -542,6 +547,24 @@ export class PacsService implements OnModuleInit {
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
+
+    /**
+     * **baseVersion은 선택이 아니라 필수다.**
+     *
+     * commitReport는 `body.baseVersion !== undefined`일 때만 비교한다 — 우리 클라이언트가
+     * 항상 보내니까 괜찮다는 계산이었다. 하지만 초안 저장은 사용자가 누르지 않아도
+     * (검사 이동·로그아웃·자동 저장으로) 나가는 요청이다. 버전을 빼먹은 요청이
+     * 조용히 통과하면, 그 순간 이 경로는 다시 뒷문이 된다.
+     */
+    if (typeof body.baseVersion !== 'number')
+      throw new BadRequestException('초안 저장에는 baseVersion이 필요합니다');
+
+    const current = await this.prisma.report.findUnique({ where: { uid } });
+    if ((current?.version ?? 0) !== body.baseVersion)
+      throw new ConflictException(
+        `그 사이 ${current?.updatedBy ?? '다른 사용자'}가 v${current?.version}을 저장했습니다. ` +
+        `내용을 다시 불러온 뒤 작성해 주세요.`);
+
     await this.prisma.studyState.upsert({
       where: { uid }, create: { uid, institutionId: me, reqHosp: this.instName(me) }, update: {},
     });
@@ -551,12 +574,46 @@ export class PacsService implements OnModuleInit {
       recommendation: body.recommendation ?? '',
       updatedBy: c.actor,
     };
-    const saved = await this.prisma.report.upsert({
+
+    /**
+     * **초안이 통째로 비워질 때는 지우기 직전 내용을 이력에 한 판 박는다.**
+     *
+     * 초안은 판을 안 남기므로, 비운 채로 저장하면 그 내용은 이 시스템 어디에도 없다.
+     * Clear 버튼 한 번 + 다음 검사 클릭이면 승인본까지 무기록으로 사라졌다 —
+     * 사유를 강제하는 Reset을 우회하는 뒷문이었다.
+     * Reset이 하는 것과 같은 처리를 여기서도 한다 (commitReport의 discardOps 참조).
+     *
+     * 조건은 "전부 비었다"로 좁게 잡는다. 한 글자 지울 때마다 판을 쌓으면 이력이
+     * 이력이 아니게 되고, 정말 잃어버린 순간을 찾을 수 없게 된다.
+     */
+    const hadText = !!(current?.findings || current?.conclusion || current?.recommendation);
+    const nowEmpty = !(data.findings || data.conclusion || data.recommendation);
+    const ops: any[] = [];
+    if (hadText && nowEmpty) {
+      const last = await this.prisma.reportVersion.findFirst({
+        where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
+      });
+      ops.push(this.prisma.reportVersion.create({
+        data: {
+          uid, version: (last?.version ?? 0) + 1, action: 'discarded',
+          findings: current!.findings, conclusion: current!.conclusion,
+          recommendation: current!.recommendation,
+          reason: `초안이 비워짐 (비운 사람: ${c.actor})`,
+          author: current!.updatedBy ?? c.actor,   // 버린 사람이 아니라 **쓴 사람**이 저자다
+        },
+      }));
+    }
+    ops.push(this.prisma.report.upsert({
       where: { uid }, create: { uid, ...data }, update: data,
-    });
+    }));
+    // 스냅샷과 지우기가 같은 트랜잭션이라 "지워졌는데 기록은 없다"가 생길 틈이 없다.
+    const results = await this.prisma.$transaction(ops);
+    const saved: any = results[results.length - 1];
+
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await this.audit(c.actor, 'report.draft', uid, {
       len: [data.findings.length, data.conclusion.length, data.recommendation.length],
+      discarded: hadText && nowEmpty ? true : undefined,
     });
     return saved;
   }

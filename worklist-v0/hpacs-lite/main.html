@@ -437,7 +437,8 @@
     if (!sess) location.href = "index.html";
     let user = sess?.user ?? "";
     document.querySelector("#user").textContent = user;
-    document.querySelector("#logout").addEventListener("click", () => KinAuth.logout());
+    // 로그아웃 핸들러는 아래 "이탈 시 판독문 보존"에 있다 — 나가기 전에 초안을 저장하고
+    // 점유를 풀어야 하므로, 그 함수들이 정의된 곳 옆에 둔다.
 
     const $ = s => document.querySelector(s);
     function tagv(st, key) {
@@ -1229,9 +1230,29 @@
         el.readOnly = locked || !KinAuth.has("radiologist");
       }
     }
-    function stashReport() {
-      if (!selectedUid) return;
+    /** 지금 textarea 내용이 마지막으로 저장된 것과 다른가 */
+    function reportDirty() {
+      if (!selectedUid) return false;
       const a = appState[selectedUid] ?? {};
+      return ["findings", "conclusion", "recommendation"]
+        .some(k => (a[k] ?? "") !== $("#" + k).value);
+    }
+
+    /**
+     * 판독문 초안 저장. 사용자가 누르지 않아도 나가는 요청이다 —
+     * 검사 이동·인쇄·자동 저장·로그아웃·탭 닫기.
+     *
+     * **baseVersion을 함께 보낸다.** 예전엔 안 보냈고 서버도 안 봤다. 그래서
+     * "A가 검사를 열어둔 채 방치 → B가 수정·Save(v3) → A가 다른 검사로 이동"만으로
+     * B의 v3가 A의 옛 화면 내용으로 조용히 덮였다. 확정에만 낙관적 락을 걸면
+     * 락이 아니다 (인계문서 §9-A: 관문은 한 곳만 열려 있어도 관문이 아니다).
+     *
+     * `keepalive`는 탭이 닫히는 중에도 요청이 끝까지 가게 한다(beforeunload용).
+     */
+    async function stashReport({ keepalive = false } = {}) {
+      if (!selectedUid) return;
+      const uid = selectedUid;
+      const a = appState[uid] ?? {};
       const next = {
         findings: $("#findings").value,
         conclusion: $("#conclusion").value,
@@ -1239,16 +1260,67 @@
       };
       // 검사를 옮겨다닐 때마다 호출되므로, 바뀐 게 없으면 서버를 부르지 않는다
       const same = ["findings", "conclusion", "recommendation"].every(k => (a[k] ?? "") === next[k]);
-      appState[selectedUid] = { ...a, ...next };
       if (same) return;
-      if (serverMode) api("PUT", `/studies/${encodeURIComponent(selectedUid)}/report`, next).catch(apiFail);
-      else saveApp();
+
+      /**
+       * **가려진 판독문은 저장하지 않는다.**
+       * 남의 예비 판독(RS=P)이면 화면은 빈 칸이다. 그 빈 칸을 초안으로 보내면
+       * 남의 판독문을 지우는 요청이 된다. 서버가 403으로 막지만, 그 전에
+       * `appState`가 이미 ""로 덮여 F5 전까지 빈 채로 보인다.
+       * 판독 권한이 없을 때(기사)도 같은 이유로 보내지 않는다.
+       */
+      if (a.prelimHidden || !KinAuth.has("radiologist")) return;
+
+      appState[uid] = { ...a, ...next };
+      if (!serverMode) { saveApp(); return; }
+
+      const body = { ...next, baseVersion: a.version ?? 0 };
+      const path = `/studies/${encodeURIComponent(uid)}/report`;
+      if (keepalive) {
+        // 탭이 닫히는 중이라 응답을 볼 수 없다. 보내는 것까지가 우리 몫이다.
+        try {
+          const tok = await KinAuth.token();
+          await fetch(API + path, {
+            method: "PUT", keepalive: true,
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + tok },
+            body: JSON.stringify(body),
+          });
+        } catch (e) {}
+        return;
+      }
+      try {
+        await api("PUT", path, body);
+      } catch (e) {
+        /**
+         * 충돌(409). 서버는 아무것도 안 바꿨다 — 남의 판독문은 무사하다.
+         * 내가 쓰던 내용도 버리지 않는다. 클립보드에 넣고, 서버 것을 다시 불러온다.
+         * 조용히 실패하면 사용자는 저장된 줄 안다. 그게 데이터가 갈라지는 시작이다.
+         */
+        if (e.message.includes("저장했습니다")) {
+          navigator.clipboard?.writeText(
+            [next.findings, next.conclusion, next.recommendation].filter(Boolean).join("\n\n"));
+          try {
+            const b = await api("GET", "/bootstrap");
+            appState[uid] = { ...appState[uid], ...b.states[uid] };
+            syncStudy(uid);
+            if (selectedUid === uid) { loadReport(); updateReportButtons(); }
+            render(); renderRelated();
+          } catch (e2) {}
+          toast(e.message + " 쓰던 내용은 클립보드에 있습니다.", "err");
+          return;
+        }
+        apiFail(e);
+      }
     }
     /**
      * 판독문 확정. action: save | approve | addendum | reset
      * 서버 모드에서는 내용·버전·RS가 한 요청으로 함께 간다 — 따로 보내면 순서가 뒤집혀
      * "승인됐는데 내용은 이전 것"이 될 수 있다.
      */
+    // 확정이 나가 있는 동안은 자동 저장이 끼어들면 안 된다. 같은 baseVersion으로
+    // 두 요청이 겹치면 뒤엣것이 자기 자신 때문에 충돌 경고를 띄운다.
+    let commitInFlight = false;
+
     async function commitReport(action, reason, reviewer) {
       if (!selectedUid) return;
       const uid = selectedUid;
@@ -1259,6 +1331,7 @@
       };
 
       if (serverMode) {
+        commitInFlight = true;
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
             { action, reason, reviewer, baseVersion: appState[uid]?.version ?? 0, ...content });
@@ -1286,7 +1359,7 @@
           }
           toast("저장 실패: " + e.message, "err");
           return;
-        }
+        } finally { commitInFlight = false; }
       } else {
         // 로컬 폴백에는 사용자 명단도 접근 제어도 없다. 여기서 P를 흉내내면
         // "가려진 줄 알았는데 안 가려진" 판독문이 생긴다 — 그건 없는 것만 못하다.
@@ -1323,10 +1396,19 @@
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
-      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread"]) {
+      // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
+      // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
+      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste"]) {
         const el = $(id);
+        if (!el) continue;
         el.disabled = !rad || locked;
-        if (locked) el.title = "다른 판독의의 예비 판독(RS: P)입니다";
+        el.title = locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+          : !rad ? "판독의 권한이 필요합니다" : "";
+      }
+      // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
+      if (s?.rs === "A" && rad && !locked) {
+        $("#b-clear").disabled = true;
+        $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
       }
       // Addendum은 승인된 판독문에만 붙는다
       $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked;
@@ -1456,6 +1538,54 @@
         if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
       }));
 
+    // ══════════ 이탈 시 판독문 보존 (교훈 §1) ══════════
+    /**
+     * 초안 저장은 **검사를 옮길 때만** 작동했다. 서버 주석은 그 기능의 목적을
+     * "손실 방지 하나뿐"이라고 적어놨는데, 정작 판독문이 사라지는 흔한 세 경우를
+     * 아무것도 안 막았다:
+     *   ① 탭/브라우저를 닫는다        ② 로그아웃한다        ③ 그냥 자리를 뜬다
+     * ②는 점유(TTL 5분)까지 남겨서, 사라진 판독문 + 잠긴 검사가 동시에 생겼다.
+     *
+     * 셋 다 같은 답이다: **나가기 전에 저장한다.** 그리고 저장이 확실하지 않은
+     * 경로(탭 닫기)에서만 브라우저 경고를 띄운다.
+     */
+    const AUTOSAVE_MS = 20000;
+
+    // ③ 주기적 자동 저장. 20초면 사고로 잃는 양이 "방금 친 문장"을 넘지 않는다.
+    setInterval(() => {
+      if (!serverMode || !selectedUid || commitInFlight) return;
+      if (!reportDirty()) return;
+      stashReport();
+    }, AUTOSAVE_MS);
+
+    // ① 탭·브라우저를 닫거나 새로고침
+    window.addEventListener("beforeunload", e => {
+      if (!reportDirty()) return;
+      // keepalive 요청은 문서가 사라진 뒤에도 끝까지 간다. 다만 보장은 아니라서,
+      // 경고도 함께 띄운다 — 판독문은 잃어버리면 안 되는 유일한 것이다.
+      stashReport({ keepalive: true });
+      if (serverMode && heldUid) {
+        KinAuth.token().then(tok => fetch(`${API}/studies/${encodeURIComponent(heldUid)}/release`, {
+          method: "POST", keepalive: true, headers: { "Authorization": "Bearer " + tok },
+        })).catch(() => {});
+      }
+      e.preventDefault();
+      e.returnValue = "";   // 구형 브라우저는 이 대입이 있어야 경고가 뜬다
+      return "";
+    });
+
+    // ② 로그아웃 — 저장하고, 점유를 풀고, 그 다음에 나간다
+    let loggingOut = false;
+    $("#logout").addEventListener("click", async () => {
+      if (loggingOut) return;
+      loggingOut = true;
+      try {
+        await stashReport();
+        await releaseHold();   // 안 풀면 남은 사람에게 이 검사가 5분간 잠겨 보인다
+      } catch (e) {}
+      KinAuth.logout();
+    });
+
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
     // 지금은 30초 폴링. 실시간(SSE)은 사람이 늘어나면 그때.
     let poll = null;
@@ -1558,15 +1688,57 @@
     }
     $("#b-history").addEventListener("click", showHistory);
     $("#hist-close").addEventListener("click", () => $("#histmodal").classList.remove("show"));
+    /**
+     * 판독문 textarea를 **스크립트로** 고쳐도 되는가.
+     *
+     * `readOnly`는 사람의 타이핑만 막는다. `el.value = ...` 대입은 그대로 통과한다.
+     * 그래서 Clear·Paste 같은 버튼은 잠금을 스스로 확인해야 한다 —
+     * 예비 판독 잠금이 이 두 버튼에서만 열려 있었다.
+     * 막는 이유를 문자열로 돌려준다. 통과면 null.
+     */
+    function reportWriteBlock() {
+      if (!selectedUid) return "검사를 선택하세요";
+      if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
+      if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
+      return null;
+    }
+
+    /**
+     * Clear — 세 칸을 한 번에 비운다.
+     *
+     * 예전엔 확인창도, 권한 검사도, 잠금 검사도 없었다. 그리고 비운 뒤 다른 검사를
+     * 클릭하면 초안 저장이 조용히 빈 판독문을 보냈다 — **사유를 강제하는 Reset을
+     * 우회하는 뒷문**이었다. 승인본(RS=A)까지 화면에서 사라졌다.
+     *
+     * 이제 세 겹으로 막는다:
+     *   ① 승인된 판독문은 Clear로 못 비운다 — 그 길은 사유가 남는 Reset뿐이다.
+     *   ② 권한·예비판독 잠금을 확인한다.
+     *   ③ 확인창. 그리고 실제로 비워지는 순간 서버가 직전 내용을 이력에 `discarded`로 남긴다.
+     */
     $("#b-clear").addEventListener("click", () => {
+      const why = reportWriteBlock();
+      if (why) { toast(why, "err"); return; }
+      const s = cur();
+      if (s?.rs === "A") {
+        toast("승인된 판독문은 Clear로 비울 수 없습니다 — 판독 취소(Reset)를 사용하세요", "err");
+        return;
+      }
+      const has = $("#findings").value || $("#conclusion").value || $("#recommendation").value;
+      if (!has) return;
+      if (!confirm("판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
+                   "지워지는 내용은 이력에 '폐기된 초안'으로 남습니다. 계속할까요?")) return;
       $("#findings").value = $("#conclusion").value = $("#recommendation").value = "";
+      toast("판독문을 비웠습니다 — 직전 내용은 이력에 남습니다", "info");
     });
     $("#b-copy").addEventListener("click", () => {
       const t = `Findings:\n${$("#findings").value}\n\nConclusion:\n${$("#conclusion").value}\n\nRecommendation:\n${$("#recommendation").value}`;
       navigator.clipboard?.writeText(t);
       toast("판독문을 복사했습니다");
     });
+    // Paste도 `.value`에 직접 쓴다 — readOnly를 무시하는 같은 경로다.
     $("#b-paste").addEventListener("click", async () => {
+      const why = reportWriteBlock();
+      if (why) { toast(why, "err"); return; }
       try { $("#findings").value += await navigator.clipboard.readText(); } catch (e) {}
     });
     $("#b-print").addEventListener("click", () => {
@@ -1906,8 +2078,11 @@ ${r.recommendation ?? ""}
     // 처음부터 회색인 편이 낫다. (서버 검사가 진짜 방어선이고 이건 안내다)
     function applyRoleUi() {
       const rad = KinAuth.has("radiologist"), tec = KinAuth.has("technician");
-      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum"].forEach(s => {
-        const el = $(s); el.disabled = !rad;
+      // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
+      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum",
+       "#b-clear", "#b-paste"].forEach(s => {
+        const el = $(s); if (!el) return;
+        el.disabled = !rad;
         if (!rad) el.title = "판독의(radiologist) 권한이 필요합니다";
       });
       ["#findings", "#conclusion", "#recommendation"].forEach(s => $(s).readOnly = !rad);
