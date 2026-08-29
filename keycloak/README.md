@@ -73,6 +73,24 @@ API의 `AuthGuard`가 그 값을 `req.institution`으로 꺼내고, 서비스 �
 소속 그룹이 없는 계정은 **빈 목록이 아니라 403**을 받는다. 매퍼 설정이 틀렸을 때
 "검사가 하나도 없네"로 보이는 것이 가장 나쁘다.
 
+## 서비스 계정 (kin-api) — 사용자 목록 조회
+
+Preliminary(RS=P)는 상급 판독의를 **지정**하는 기능이고, 지정된 사람만 판독문을 볼 수 있다.
+지정 대상을 자유 입력으로 받으면 오타 하나에 아무도 못 여는 판독문이 생긴다.
+그래서 API가 Keycloak에 "우리 기관의 판독의가 누구인가"를 직접 묻는다.
+
+- 컨피덴셜 클라이언트 `kin-api` + 서비스 계정 (compose의 `KC_CLIENT_SECRET`)
+- 부여된 realm-management 롤: `view-users`, `query-users`, `query-groups`, `view-realm`
+
+`view-realm`이 필요한 이유: `GET /admin/realms/{realm}/roles/{role}/users`(롤 보유자 목록)는
+`view-users`만으로는 **403**이다. 이 엔드포인트가 롤 조회 권한을 따로 보기 때문.
+전부 읽기 전용이고 쓰기 권한(`manage-*`)은 주지 않았다.
+
+사용자의 토큰을 빌려 쓰지 않는다 — 판독의에게 사용자 조회 권한을 줄 이유가 없다.
+서버가 서버 자격으로 묻는다.
+
+> **운영 전 할 일**: 시크릿이 지금 compose에 평문으로 있다. 6단계에서 시크릿 매니저로 옮긴다.
+
 ## issuer 주소가 두 개인 이유
 
 - 브라우저는 `http://localhost:8080`으로 Keycloak에 간다 → 토큰의 `iss`가 그 주소로 박힌다

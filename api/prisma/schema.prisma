@@ -53,6 +53,15 @@ model StudyState {
   reqHosp   String   @default("KIN")
   repDoc    String?                           // 판독의 (Approve 시 기록)
   confirm   String?                           // 판독 확정일
+
+  /// Preliminary(RS=P) — 예비 판독을 쓴 사람과, 최종 판독을 맡긴 상급 판독의.
+  ///
+  /// RS가 P인 동안 **판독문 내용은 이 두 사람만 볼 수 있다.** 워크리스트에는 보이지만
+  /// 내용은 가려진다. 아직 확정되지 않은 소견이 기관 전체에 퍼지면, 나중에 상급자가
+  /// 뒤집어도 이미 읽은 사람의 머릿속은 안 뒤집힌다.
+  /// (HPACS 매뉴얼 7.4.1.3-4.1 — "지정된 판독의만 판독 내용을 볼 수 있다")
+  preDoc      String?
+  preReviewer String?
   ov        String?                           // Match/Modify로 덮어쓴 값 (JSON)
   orig      String?                           // 덮어쓰기 전 원본 (JSON) — Unmatch 복원용
   orderOid  String?                           // 매칭된 오더

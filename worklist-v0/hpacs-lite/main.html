@@ -52,6 +52,8 @@
     .rs.W { background: #8a4a4a; color: #ffd9d9; }
     .rs.T { background: #8a7a3a; color: #fff6cf; }
     .rs.A { background: #3f7a4a; color: #d9ffe0; }
+    .rs.P { background: #6a4a8a; color: #ecd9ff; }   /* Preliminary — 아직 확정 아님 */
+    .prelim-lock { color: #b06ee5; font-size: 11px; padding: 4px 0; }
     .em-e { color: #ff6b6b; font-weight: bold; }
     .ts { font-size: 11px; }
     .ts-none { color: #556; }
@@ -199,6 +201,8 @@
     .tag.approve { background: #3f7a4a; color: #d9ffe0; }
     .tag.addendum { background: #3b6ea5; color: #dbeaff; }
     .tag.reset { background: #8a4a4a; color: #ffd9d9; }
+    .tag.preliminary { background: #6a4a8a; color: #ecd9ff; }
+    .tag.discarded { background: #4a4a52; color: #c8c8d4; }   /* 되돌리면서 버려진 초안 */
     .vr { color: #ffb0b0; font-size: 11px; margin: 4px 0; }
     .hist pre { margin: 4px 0 0; padding: 6px 8px; background: #14181f; border: 1px solid #262e3c;
                 color: #cdd3dc; font: 11px/1.5 inherit; white-space: pre-wrap; word-break: break-word; }
@@ -339,7 +343,7 @@
           <button class="approve" id="b-approve">Approve</button>
           <button class="save" id="b-save">Save</button>
           <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
-          <button disabled>Prelim</button>
+          <button id="b-prelim" title="상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)">Prelim</button>
           <button disabled>Dictate</button>
           <button id="b-transcribe">Transcribe</button>
           <button disabled>Except</button>
@@ -489,6 +493,7 @@
     try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
 
     const STATE_KEYS = ["rs", "ss", "em", "ts", "matched", "ward", "reqHosp", "repDoc", "confirm", "ov", "orig"];
+    // 서버에서 내려오는(=화면이 못 정하는) 읽기 전용 필드. 이건 PATCH로 보내지 않는다.
 
     /**
      * 상태 저장. 로컬 모드면 통째로 localStorage에, 서버 모드면 **바뀐 필드만** PATCH.
@@ -567,7 +572,7 @@
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
         { k: "em", t: "EM", f: ["E", "N"] },
-        { k: "rs", t: "RS", f: ["A", "T", "W"] },
+        { k: "rs", t: "RS", f: ["A", "P", "T", "W"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
@@ -578,6 +583,10 @@
         { k: "modality", t: "Modality", f: ["CT", "MR", "CR", "US", "SC"] },
         { k: "desc", t: "StudyDesc", f: "text" },
         { k: "date", t: "StudyDate" },
+        // 예비 판독을 쓴 사람과, 최종 판독을 맡은 상급 판독의.
+        // HPACS도 2025.07에 이 둘을 컬럼으로 붙였다 (교훈 §13 — 컬럼은 끝없이 늘어난다)
+        { k: "preDoc", t: "PreDoc", f: "text" },
+        { k: "preReviewer", t: "PreReviewer", f: "text" },
       ],
       Technician: [
         { k: "no", t: "No", num: 1 },
@@ -586,7 +595,7 @@
         { k: "em", t: "EM", f: ["E", "N"] },
         { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
         { k: "matched", t: "Mt", f: ["M", "U"] },
-        { k: "rs", t: "RS", f: ["A", "T", "W"] },
+        { k: "rs", t: "RS", f: ["A", "P", "T", "W"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
@@ -653,6 +662,9 @@
       // 기관명은 서버가 정한다. Switch ReqHosp로 손으로 적어 넣던 값은
       // 기관이 실제 데이터가 된 지금 그것을 덮으면 안 된다.
       s.reqHosp = s.institutionName ? s.reqHosp : (a.reqHosp ?? s.reqHosp ?? "KIN");
+      s.preDoc = a.preDoc ?? "";
+      s.preReviewer = a.preReviewer ?? "";
+      s.prelimHidden = a.prelimHidden;
       s.holder = a.holder;          // 서버가 만료된 점유는 빼고 준다
       s.version = a.version ?? 0;   // 낙관적 락 기준
       if (a.ov) Object.assign(s, a.ov);
@@ -802,7 +814,7 @@
 
       const n = (k, v) => list.filter(s => s[k] === v).length;
       $("#countlist").textContent = mode === "Radiology"
-        ? `W:${n("rs","W")} A:${n("rs","A")} T:${n("rs","T")} P:0 · Total ${list.length}`
+        ? `W:${n("rs","W")} A:${n("rs","A")} T:${n("rs","T")} P:${n("rs","P")} · Total ${list.length}`
         : `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
     }
 
@@ -1105,9 +1117,20 @@
     // ── Report ──
     function loadReport() {
       const r = appState[selectedUid] ?? {};
-      $("#findings").value = r.findings ?? "";
-      $("#conclusion").value = r.conclusion ?? "";
-      $("#recommendation").value = r.recommendation ?? "";
+      // 예비 판독(RS=P) 중이고 내가 지정된 사람이 아니면 서버가 내용을 안 준다.
+      // 이때 빈 칸을 그대로 보여주면 "판독문이 없다"로 읽힌다 — 없는 것과 못 보는 것은 다르다.
+      const locked = !!r.prelimHidden;
+      const ph = locked
+        ? `${r.preReviewer ?? "지정된 판독의"} 님이 최종 판독 중입니다 (RS: P) — 내용은 지정된 판독의만 볼 수 있습니다`
+        : "";
+      for (const [sel, base] of [["#findings", "Please enter findings"],
+                                 ["#conclusion", "Please enter conclusion"],
+                                 ["#recommendation", "Please enter recommendation"]]) {
+        const el = $(sel);
+        el.value = locked ? "" : (r[sel.slice(1)] ?? "");
+        el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
+        el.readOnly = locked || !KinAuth.has("radiologist");
+      }
     }
     function stashReport() {
       if (!selectedUid) return;
@@ -1129,7 +1152,7 @@
      * 서버 모드에서는 내용·버전·RS가 한 요청으로 함께 간다 — 따로 보내면 순서가 뒤집혀
      * "승인됐는데 내용은 이전 것"이 될 수 있다.
      */
-    async function commitReport(action, reason) {
+    async function commitReport(action, reason, reviewer) {
       if (!selectedUid) return;
       const uid = selectedUid;
       const content = {
@@ -1141,11 +1164,13 @@
       if (serverMode) {
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
-            { action, reason, baseVersion: appState[uid]?.version ?? 0, ...content });
+            { action, reason, reviewer, baseVersion: appState[uid]?.version ?? 0, ...content });
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
           appState[uid] = { ...appState[uid], ...st };
           syncStudy(uid);
-          if (action === "reset") loadReport();   // 서버가 내용을 비웠으니 화면도 비운다
+          // reset은 서버가 내용을 비웠고, preliminary는 이제부터 가려질 수 있다 —
+          // 둘 다 화면의 판독문을 서버 응답 기준으로 다시 그려야 한다.
+          if (action === "reset" || action === "preliminary") loadReport();
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
           // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
@@ -1166,6 +1191,12 @@
           return;
         }
       } else {
+        // 로컬 폴백에는 사용자 명단도 접근 제어도 없다. 여기서 P를 흉내내면
+        // "가려진 줄 알았는데 안 가려진" 판독문이 생긴다 — 그건 없는 것만 못하다.
+        if (action === "preliminary") {
+          toast("예비 판독 지정은 서버에 연결돼 있을 때만 가능합니다", "err");
+          return;
+        }
         const rs = { save: "T", approve: "A", addendum: "A", reset: "W" }[action];
         appState[uid] = { ...appState[uid], ...content, rs };
         if (rs === "A") {
@@ -1185,14 +1216,61 @@
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
+        preliminary: "예비 판독으로 넘겼습니다 (RS: P) — 지정한 상급 판독의만 내용을 볼 수 있습니다",
       }[action], action === "reset" ? "info" : "ok");
     }
 
-    /** Addendum은 승인된 판독문에만 붙는다 */
     function updateReportButtons() {
-      const approved = cur()?.rs === "A";
-      $("#b-addendum").disabled = !approved || !KinAuth.has("radiologist");
+      const s = cur();
+      const rad = KinAuth.has("radiologist");
+      // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
+      // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
+      const locked = !!appState[selectedUid]?.prelimHidden;
+      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread"]) {
+        const el = $(id);
+        el.disabled = !rad || locked;
+        if (locked) el.title = "다른 판독의의 예비 판독(RS: P)입니다";
+      }
+      // Addendum은 승인된 판독문에만 붙는다
+      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked;
+      /**
+       * Prelim은 "아직 확정 안 된 판독을 상급자에게 넘기는" 동작이다.
+       * 이미 승인(A)된 것에는 의미가 없고, 이미 P인 것을 다시 넘기면 지정이 덮어써진다.
+       * 넘긴 뒤에는 지정된 상급자가 Approve로 끝낸다 — 그건 서버가 강제한다.
+       */
+      const b = $("#b-prelim");
+      if (b) {
+        const locked = !!appState[selectedUid]?.prelimHidden;
+        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || !serverMode;
+        b.title = !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
+          : s?.rs === "P" ? "이미 예비 판독 중입니다"
+          : s?.rs === "A" ? "이미 승인된 판독입니다"
+          : "상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)";
+      }
     }
+
+    /**
+     * Preliminary — 상급 판독의를 지정한다.
+     *
+     * 지정 대상은 서버가 Keycloak에 물어 만든 **실제 명단**에서 고른다.
+     * 이 값이 판독문 접근을 좌우하므로 손으로 타이핑하게 두면 오타 하나에
+     * 아무도 못 여는 판독문이 생긴다.
+     */
+    async function doPreliminary() {
+      if (!selectedUid) { alert("검사를 선택하세요."); return; }
+      let peers;
+      try { peers = await api("GET", "/colleagues"); }
+      catch (e) { toast("판독의 목록을 불러오지 못했습니다: " + e.message, "err"); return; }
+      if (!peers.length) { alert("이 기관에 지정할 다른 판독의가 없습니다."); return; }
+
+      const pick = prompt(
+        "최종 판독을 맡길 상급 판독의 번호:\n" +
+        peers.map((u, i) => `${i + 1}. ${u.name} (${u.username})`).join("\n"), "1");
+      const n = +pick;
+      if (!n || !peers[n - 1]) return;
+      await commitReport("preliminary", null, peers[n - 1].id);
+    }
+    $("#b-prelim")?.addEventListener("click", doPreliminary);
     $("#b-save").addEventListener("click", () => commitReport("save"));
     $("#b-transcribe").addEventListener("click", () => commitReport("save"));
     $("#b-approve").addEventListener("click", () => commitReport("approve"));
@@ -1213,7 +1291,8 @@
       const s = studies.find(x => x.uid === uid);
       const a = appState[uid];
       if (!s || !a) return;
-      for (const k of ["rs", "ss", "em", "ts", "matched", "holder", "version", "repDoc", "confirm"])
+      for (const k of ["rs", "ss", "em", "ts", "matched", "holder", "version", "repDoc", "confirm",
+                        "preDoc", "preReviewer", "prelimHidden"])
         if (a[k] !== undefined) s[k] = a[k];
       if (a.holder === null || a.holder === undefined) s.holder = a.holder;
       if (a.ward) s.ward = a.ward;
@@ -1360,7 +1439,8 @@
       }
       try {
         const list = await api("GET", `/studies/${encodeURIComponent(selectedUid)}/report/versions`);
-        const LABEL = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소" };
+        const LABEL = { save: "임시저장", approve: "승인", addendum: "추가기재", reset: "판독취소",
+                        preliminary: "예비판독", discarded: "폐기된 초안" };
         box.innerHTML = list.length ? list.map(v => `
           <div class="ver">
             <div class="vh">

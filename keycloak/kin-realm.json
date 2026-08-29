@@ -78,6 +78,18 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "kin-api",
+      "name": "KIN API (service account)",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "kin-api-dev-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect"
     }
   ],
   "users": [
@@ -187,6 +199,40 @@
       "groups": [
         "/kin-center"
       ]
+    },
+    {
+      "username": "doctor2",
+      "email": "doctor2@kin.kr",
+      "firstName": "판독",
+      "lastName": "이",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kin1234",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "radiologist"
+      ],
+      "groups": [
+        "/hallym"
+      ]
+    },
+    {
+      "username": "service-account-kin-api",
+      "enabled": true,
+      "serviceAccountClientId": "kin-api",
+      "clientRoles": {
+        "realm-management": [
+          "view-users",
+          "query-users",
+          "query-groups",
+          "view-realm"
+        ]
+      }
     }
   ],
   "groups": [

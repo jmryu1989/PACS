@@ -29,6 +29,15 @@ export class PacsController {
     return caller(req);
   }
 
+  /**
+   * 내 기관의 다른 판독의들 — Preliminary에서 상급 판독의를 고를 때 쓴다.
+   * 목록은 Keycloak이 진실의 원천이다. 우리 DB에 복사본을 두지 않는다.
+   */
+  @Get('colleagues')
+  colleagues(@Req() req: any) {
+    return this.svc.colleagues(caller(req));
+  }
+
   @Get('bootstrap')
   bootstrap(@Req() req: any) {
     return this.svc.bootstrap(caller(req));
@@ -54,7 +63,7 @@ export class PacsController {
     return this.svc.putReport(uid, body, caller(req));
   }
 
-  /** 확정 — save / approve / addendum / reset. 내용·버전·RS를 한 트랜잭션으로 */
+  /** 확정 — save / approve / addendum / reset / preliminary. 내용·버전·RS를 한 트랜잭션으로 */
   @Post('studies/:uid/report/commit')
   commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
     return this.svc.commitReport(uid, body, caller(req));

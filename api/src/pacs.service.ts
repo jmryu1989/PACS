@@ -1,6 +1,7 @@
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
+import { KeycloakService } from './keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS } from './seed';
 
 /**
@@ -59,13 +60,32 @@ const dump = (o: any) => (o == null ? null : JSON.stringify(o));
 const HOLD_TTL_MS = 5 * 60 * 1000;
 const holdAlive = (s: any) => s?.holder && s.heldAt && Date.now() - new Date(s.heldAt).getTime() < HOLD_TTL_MS;
 
+/**
+ * Preliminary(RS=P) 판독문을 이 사람이 볼 수 있는가.
+ *
+ * 예비 판독은 **아직 확정되지 않은 소견**이다. 상급 판독의가 뒤집을 수 있는 내용이
+ * 기관 전체에 퍼지면, 나중에 정정해도 이미 읽은 사람의 머릿속까지 정정되지는 않는다.
+ * 그래서 작성자와 지정된 상급자만 본다. (HPACS 매뉴얼 7.4.1.3-4.1)
+ *
+ * 검사 자체는 워크리스트에 그대로 보인다 — 가리는 건 판독문 내용뿐이다.
+ * 검사를 통째로 숨기면 "그 검사 어디 갔냐"가 되고, 그건 다른 종류의 사고다.
+ */
+function canReadPrelim(s: any, actor: string) {
+  if (s?.rs !== 'P') return true;
+  return s.preDoc === actor || s.preReviewer === actor;
+}
+
 /** 프론트가 그대로 쓸 수 있는 모양으로 되돌린다 (main.html의 appState 한 칸과 같은 구조) */
-function toClient(s: any, r: any) {
+function toClient(s: any, r: any, actor = '') {
+  const hidden = !canReadPrelim(s, actor);
   return {
     rs: s.rs, ss: s.ss, em: s.em, ts: s.ts,
     matched: s.matched, ward: s.ward, reqHosp: s.reqHosp,
     institutionId: s.institutionId ?? null,
     teleInstitutionId: s.teleInstitutionId ?? null,
+    preDoc: s.preDoc ?? undefined, preReviewer: s.preReviewer ?? undefined,
+    // 화면이 "왜 비어 있는지" 말할 수 있어야 한다. 빈 판독문과 가려진 판독문은 다르다.
+    prelimHidden: hidden || undefined,
     repDoc: s.repDoc ?? undefined, confirm: s.confirm ?? undefined,
     ov: parse(s.ov) ?? undefined, orig: parse(s.orig) ?? undefined,
     oid: s.orderOid ?? undefined,
@@ -75,7 +95,9 @@ function toClient(s: any, r: any) {
     // "값을 비웠다"는 사실도 전송되어야 한다.
     holder: holdAlive(s) ? s.holder : null,
     version: r?.version ?? 0,
-    findings: r?.findings ?? '', conclusion: r?.conclusion ?? '', recommendation: r?.recommendation ?? '',
+    findings: hidden ? '' : (r?.findings ?? ''),
+    conclusion: hidden ? '' : (r?.conclusion ?? ''),
+    recommendation: hidden ? '' : (r?.recommendation ?? ''),
   };
 }
 
@@ -90,7 +112,11 @@ const TELE_CLOSED = ['none', 'cancelled'];
 
 @Injectable()
 export class PacsService implements OnModuleInit {
-  constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
+  constructor(
+    private prisma: PrismaService,
+    private orthanc: OrthancService,
+    private keycloak: KeycloakService,
+  ) {}
 
   /** 기관 목록 캐시. 몇 개 안 되고 거의 안 바뀌므로 메모리에 둔다. */
   private institutions: any[] = [];
@@ -238,7 +264,7 @@ export class PacsService implements OnModuleInit {
         institutionName: this.instName(s.institutionId),
         // 이 검사가 우리에게 원격판독으로 넘어온 것인가 (화면에서 구분해 보여준다)
         tele: s.teleInstitutionId === me && s.institutionId !== me,
-        state: toClient(s, repByUid.get(uid)),
+        state: toClient(s, repByUid.get(uid), c.actor),
       });
     }
     return { studies: out, serverTime: new Date().toISOString() };
@@ -260,7 +286,7 @@ export class PacsService implements OnModuleInit {
     return {
       me: { actor: c.actor, roles: c.roles, institution: me, institutionName: this.instName(me) },
       institutions: this.institutions.map(i => ({ id: i.id, name: i.name, type: i.type })),
-      states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid])])),
+      states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid], c.actor)])),
       orders: orders.map(o => ({
         oid: o.oid, id: o.patientId, name: o.name, sex: o.sex, birth: o.birth,
         sched: o.sched, modality: o.modality, desc: o.descr, ward: o.ward,
@@ -293,6 +319,11 @@ export class PacsService implements OnModuleInit {
       if (TELE_BY_OWNER.includes(ts)) {
         if (owner !== me)
           throw new ForbiddenException('원격판독 의뢰는 검사를 보유한 기관만 할 수 있습니다');
+        // 매뉴얼 6.3.4.4 — 원격판독은 RS가 W이고 TS가 none/cancelled일 때만 요청할 수 있다.
+        // 이미 우리 쪽에서 판독이 시작된 검사를 밖으로 보내면 판독문이 둘로 갈라진다.
+        if (!TELE_CLOSED.includes(ts) && (prev?.rs ?? 'W') !== 'W')
+          throw new BadRequestException(
+            `판독 전(RS: W)인 검사만 원격판독을 의뢰할 수 있습니다 (현재 RS: ${prev?.rs})`);
         if (TELE_CLOSED.includes(ts)) data.teleInstitutionId = null;   // 의뢰 취소 → 통로를 닫는다
         else if (body.teleTo !== undefined) {
           if (!this.institutions.some(i => i.id === body.teleTo))
@@ -332,7 +363,7 @@ export class PacsService implements OnModuleInit {
     });
     await this.audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(saved, r);
+    return toClient(saved, r, c.actor);
   }
 
   /**
@@ -343,7 +374,10 @@ export class PacsService implements OnModuleInit {
   async putReport(uid: string, body: any, c: Caller) {
     need(c.roles, 'radiologist', '판독문 저장');
     const me = inst(c);
-    await this.gate(uid, c);
+    const prev = await this.gate(uid, c);
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException(
+        `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
     await this.prisma.studyState.upsert({
       where: { uid }, create: { uid, institutionId: me, reqHosp: this.instName(me) }, update: {},
     });
@@ -374,10 +408,16 @@ export class PacsService implements OnModuleInit {
     need(c.roles, 'radiologist', '판독문 확정');
     const me = inst(c);
     const action = body.action;
-    if (!['save', 'approve', 'addendum', 'reset'].includes(action))
+    if (!['save', 'approve', 'addendum', 'reset', 'preliminary'].includes(action))
       throw new BadRequestException(`알 수 없는 action: ${action}`);
 
     const prev = await this.gate(uid, c);
+
+    // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
+    // 읽기만 막고 쓰기를 열어두면, 내용을 못 본 채로 덮어쓸 수 있다 — 더 나쁘다.
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException(
+        `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
 
     // Addendum은 승인된 판독에만 붙는다. 승인 전이라면 그냥 고쳐 쓰면 되기 때문.
     if (action === 'addendum' && prev?.rs !== 'A')
@@ -387,7 +427,33 @@ export class PacsService implements OnModuleInit {
     if (action === 'reset' && !String(body.reason ?? '').trim())
       throw new BadRequestException('판독 취소에는 사유가 필요합니다');
 
-    const rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W' }[action];
+    /**
+     * ── Preliminary (RS=P) ──
+     * "전문의가 상급 판독의를 지정하여 상급 판독의가 최종 판독하는 시스템"
+     * (HPACS 매뉴얼 7.4.1.3-4). 별도의 전공의 롤이 있는 게 아니라, 누가 누구에게
+     * 넘기느냐의 문제다. RS는 진행률이 아니라 **책임의 이전**을 표현한다 (교훈 §14).
+     *
+     * 지정 대상은 서버가 Keycloak에 물어 **실제로 존재하는 우리 기관 판독의**인지
+     * 확인한다. 이 값이 판독문 접근을 좌우하므로, 클라이언트가 보낸 문자열을
+     * 그대로 믿으면 오타 하나로 아무도 못 여는 판독문이 생긴다.
+     */
+    let reviewer: string | undefined;
+    if (action === 'preliminary') {
+      reviewer = String(body.reviewer ?? '').trim();
+      if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
+      if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
+      const peers = await this.keycloak.usersInGroupWithRole(me, 'radiologist');
+      if (!peers.some(u => u.id === reviewer))
+        throw new BadRequestException(`${reviewer} 은(는) 이 기관의 판독의가 아닙니다`);
+    }
+
+    // 승인으로 P를 끝내는 것은 **지정된 상급 판독의**의 일이다.
+    // 예비 판독을 쓴 사람이 스스로 승인하면 감독이라는 절차 자체가 없어진다.
+    if (action === 'approve' && prev?.rs === 'P' && prev.preReviewer !== c.actor)
+      throw new ForbiddenException(
+        `예비 판독의 최종 승인은 지정된 상급 판독의(${prev.preReviewer})만 할 수 있습니다`);
+
+    const rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P' }[action];
     const content = action === 'reset'
       ? { findings: '', conclusion: '', recommendation: '' }
       : {
@@ -399,7 +465,7 @@ export class PacsService implements OnModuleInit {
     const last = await this.prisma.reportVersion.findFirst({
       where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
     });
-    const version = (last?.version ?? 0) + 1;
+    let version = (last?.version ?? 0) + 1;
 
     /**
      * 낙관적 락. 프론트는 화면에 띄울 때 본 판 번호(baseVersion)를 같이 보낸다.
@@ -408,13 +474,47 @@ export class PacsService implements OnModuleInit {
      * 점유 표시는 안내일 뿐이다(뺏을 수 있고, TTL로 풀리고, 동시에 시작할 수도 있다).
      * **덮어쓰기를 실제로 막는 건 이 비교 하나뿐이다.**
      */
-    const current = await this.prisma.report.findUnique({ where: { uid }, select: { version: true, updatedBy: true } });
+    const current = await this.prisma.report.findUnique({ where: { uid } });
     if (body.baseVersion !== undefined && (current?.version ?? 0) !== body.baseVersion)
       throw new ConflictException(
         `그 사이 ${current?.updatedBy ?? '다른 사용자'}가 v${current?.version}을 저장했습니다. ` +
         `내용을 다시 불러온 뒤 작성해 주세요.`);
 
+    /**
+     * Reset은 저장돼 있던 판독문을 지운다. 그런데 **초안(draft)은 버전을 남기지 않으므로**
+     * 그냥 지우면 그 내용은 이 시스템 어디에도 남지 않는다. 사유만 남고 무엇을 버렸는지는
+     * 아무도 모른다.
+     *
+     * HPACS 릴리즈노트 2025.01은 이 동작에 "저장된 판독문을 삭제하기 때문에 주의가 필요하다"고
+     * 경고문을 달았다. **경쟁사가 경고문을 붙인 자리는 보통 고쳐야 할 자리다.**
+     * `ReportVersion`은 어차피 추가만 하는 역사이므로, 지우기 직전의 내용을 한 판 박아두면
+     * 잃을 것이 없다. 판독문은 잃어버리면 안 되는 유일한 것이다 (교훈 §1).
+     *
+     * 화면에는 여전히 안 보인다 — 되돌린 것은 되돌린 것이다. 다만 이력에는 남는다.
+     */
+    const discardOps: any[] = [];
+    if (action === 'reset' && current &&
+        (current.findings || current.conclusion || current.recommendation)) {
+      discardOps.push(this.prisma.reportVersion.create({
+        data: {
+          uid, version, action: 'discarded',
+          findings: current.findings, conclusion: current.conclusion,
+          recommendation: current.recommendation,
+          reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
+          author: current.updatedBy ?? c.actor,   // 버린 사람이 아니라 **쓴 사람**이 저자다
+        },
+      }));
+      version += 1;
+    }
+
     const stateData: any = { rs, holder: null, heldAt: null };   // 확정하면 점유가 풀린다
+    if (action === 'preliminary') {
+      stateData.preDoc = c.actor;
+      stateData.preReviewer = reviewer;
+    }
+    // 판독이 되돌아가면 지정도 풀린다. RS는 W인데 "누구에게 맡겨져 있음"이 남아
+    // 판독문이 계속 가려지는 상태가 제일 나쁘다.
+    if (action === 'reset') { stateData.preDoc = null; stateData.preReviewer = null; }
     if (action === 'approve' || action === 'addendum') {
       stateData.repDoc = c.actor.split('@')[0];
       stateData.confirm = new Date().toISOString().slice(0, 10);
@@ -423,7 +523,10 @@ export class PacsService implements OnModuleInit {
       if (prev?.teleInstitutionId === me && prev?.institutionId !== me) stateData.ts = 'completed';
     }
 
-    const [state] = await this.prisma.$transaction([
+    // 폐기 스냅샷이 먼저 들어간다. 같은 트랜잭션이라 실패하면 지우기도 함께 취소된다 —
+    // "지워졌는데 기록은 없다"가 생길 틈이 없다.
+    const ops = [
+      ...discardOps,
       this.prisma.studyState.upsert({
         where: { uid },
         create: { uid, institutionId: prev?.institutionId ?? me, reqHosp: this.instName(prev?.institutionId ?? me), ...stateData },
@@ -437,16 +540,19 @@ export class PacsService implements OnModuleInit {
       this.prisma.reportVersion.create({
         data: { uid, version, action, ...content, reason: body.reason ?? null, author: c.actor },
       }),
-    ]);
+    ];
+    const results = await this.prisma.$transaction(ops);
+    const state: any = results[discardOps.length];   // 스냅샷 다음이 상태 행이다
 
     await this.audit(c.actor, `report.${action}`, uid, {
       version, by: me,
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
       reason: body.reason ?? undefined,
+      reviewer,   // 누구에게 맡겼는가. 책임이 옮겨간 기록이므로 감사로그에 남아야 한다.
     });
 
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r);
+    return toClient(state, r, c.actor);
   }
 
   /**
@@ -466,6 +572,8 @@ export class PacsService implements OnModuleInit {
     need(c.roles, 'radiologist', '판독문 점유');
     const me = inst(c);
     const prev = await this.gate(uid, c);
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
     const other = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
 
     // 남이 잡고 있으면 뺏지 않는다. 뺏으면 그쪽 화면의 자물쇠가 조용히 풀린다.
@@ -490,8 +598,22 @@ export class PacsService implements OnModuleInit {
 
   /** 판독문 이력 (최신순) */
   async versions(uid: string, c: Caller) {
-    await this.gate(uid, c);
+    const prev = await this.gate(uid, c);
+    // 본문을 가려놓고 이력에서 읽히면 가린 게 아니다. 같은 규칙을 여기에도 건다.
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException(
+        `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
     return this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' } });
+  }
+
+  /**
+   * 내 기관의 판독의 목록 — Preliminary에서 상급 판독의를 고를 때 쓴다.
+   * 사용자 목록은 Keycloak에 있고, 우리 DB에 복사본을 만들면 두 곳이 어긋난다.
+   */
+  async colleagues(c: Caller) {
+    const me = inst(c);
+    const users = await this.keycloak.usersInGroupWithRole(me, 'radiologist');
+    return users.filter(u => u.id !== c.actor);   // 자기 자신은 지정 대상이 아니다
   }
 
   /**
@@ -532,7 +654,7 @@ export class PacsService implements OnModuleInit {
     ]);
     await this.audit(c.actor, 'match', uid, { oid, ov, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r);
+    return toClient(state, r, c.actor);
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
@@ -557,7 +679,7 @@ export class PacsService implements OnModuleInit {
     const [state] = await this.prisma.$transaction(ops);
     await this.audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r);
+    return toClient(state, r, c.actor);
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */

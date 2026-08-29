@@ -79,6 +79,13 @@ services:
       KC_ISSUER: http://localhost:8080/realms/kin
       KC_JWKS_URL: http://keycloak:8080/realms/kin/protocol/openid-connect/certs
       KC_AUDIENCE: kin-api
+      # 서비스 계정 — "우리 기관 판독의가 누구인가"를 Keycloak에 묻기 위한 것(Preliminary 지정용).
+      # 사용자의 토큰을 빌려 쓰지 않는다. 판독의에게 사용자 조회 권한을 줄 이유가 없다.
+      # 운영에서는 이 시크릿을 compose가 아니라 시크릿 매니저에서 온다 (6단계).
+      KC_ADMIN_URL: http://keycloak:8080
+      KC_REALM: kin
+      KC_CLIENT_ID: kin-api
+      KC_CLIENT_SECRET: kin-api-dev-secret
       # API가 브라우저 대신 Orthanc의 QIDO-RS를 부른다 (기관 필터를 서버에 두기 위해).
       # 도커 네트워크 안 주소이므로 localhost가 아니라 서비스 이름이다.
       ORTHANC_URL: http://orthanc:8042
