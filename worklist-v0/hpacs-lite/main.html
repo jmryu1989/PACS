@@ -161,6 +161,11 @@
     .modal .foot { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 12px; background: #171c25; }
     .modal .foot button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 14px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
+    /* 상용구는 여러 줄인 것이 정상이다 — 입력칸도 여러 줄이어야 한다 */
+    .modal .tplbody { align-items: start; }
+    .modal .tplbody label { padding-top: 5px; }
+    .modal .tplbody textarea { background: #14181f; border: 1px solid #3a4356; color: #cdd3dc;
+                               padding: 4px 6px; font: inherit; resize: vertical; width: 100%; }
     .modal .note { grid-column: 1 / -1; color: #7f8899; font-size: 11px; padding-top: 4px; }
 
     /* ══ 클릭 피드백 ══
@@ -422,6 +427,32 @@
     </div>
   </div>
 
+  <!--
+    상용구 편집 모달 (7.3.5.1.1)
+
+    prompt로 받던 것을 모달로 바꿨다. `prompt`는 **줄바꿈을 입력할 수 없다** —
+    기본 상용구의 findings에는 `\n`이 서너 개인데, "수정"으로 열면 한 줄로 뭉개진 채
+    영구 저장됐다. 게다가 `?? ""`라 중간에 Cancel을 눌러도 빈 값이 저장됐다.
+    판독문 상용구는 여러 줄인 것이 정상이므로, 여러 줄을 넣을 수 없는 입력창은
+    그 기능을 못 쓰게 만드는 것과 같다.
+  -->
+  <div class="modal" id="tplmodal">
+    <div class="box" style="width:560px;max-width:94vw">
+      <h3 id="tpl-title">상용구</h3>
+      <div class="body tplbody">
+        <label>제목</label><input id="tpl-t" placeholder="예: Normal Brain CT">
+        <label>단축어</label><input id="tpl-s" placeholder="예: nbct — 판독문에서 입력 후 Tab">
+        <label>Modality</label><input id="tpl-m" placeholder="비우면 모든 검사에서 보입니다">
+        <label>Findings</label><textarea id="tpl-f" rows="6"></textarea>
+        <label>Conclusion</label><textarea id="tpl-c" rows="3"></textarea>
+      </div>
+      <div class="foot">
+        <button id="tpl-cancel">취소</button>
+        <button class="ok" id="tpl-save">저장</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modify Exam 모달 (8.1.2.1.5) -->
   <div class="modal" id="modal">
     <div class="box">
@@ -628,7 +659,8 @@
       const useMod = $("#t-mod").checked;
       const list = templates.filter(t => !useMod || !s || !t.modality || s.modality.includes(t.modality));
       $("#tplrows").innerHTML = list.map(t => `
-        <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입 / 우클릭: 편집">
+        <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입${
+          t.shortcut ? ` / 판독문에서 &quot;${esc(t.shortcut)}&quot; 입력 후 Tab` : ""} / 우클릭: 편집">
           <td>${esc(t.title)}</td><td>${esc(t.shortcut)}</td><td>${esc(t.modality)}</td>
         </tr>`).join("") || `<tr><td class="empty" colspan="3">상용구 없음 — 우클릭해서 추가하세요</td></tr>`;
     }
@@ -641,21 +673,78 @@
     $("#t-mod").addEventListener("change", renderTemplates);
 
     /**
+     * **단축어(shortcut)를 실제로 동작시킨다.**
+     *
+     * 지금까지 이 필드는 등록도 되고 목록에 보이기도 했지만 **아무 데도 안 쓰였다.**
+     * 판독의가 "nbct"를 등록하고 눌러봐야 아무 일도 안 일어난다 — 있는 척하는 기능은
+     * 없는 기능보다 나쁘다. 무엇을 잘못했나 찾게 만들기 때문이다.
+     *
+     * 동작: 판독문 칸에서 단축어를 치고 **Tab**을 누르면 그 자리에서 펼쳐진다.
+     * Tab을 가로채는 건 커서 바로 앞 단어가 등록된 단축어일 때뿐이다 —
+     * 그 외에는 평소대로 다음 칸으로 넘어간다.
+     */
+    function expandShortcut(el) {
+      const pos = el.selectionStart;
+      if (pos !== el.selectionEnd) return false;
+      const before = el.value.slice(0, pos);
+      const word = (before.match(/[A-Za-z0-9가-힣_-]+$/) ?? [""])[0];
+      if (!word) return false;
+      const t = templates.find(x => x.shortcut && x.shortcut === word);
+      if (!t) return false;
+      // 어느 칸에서 눌렀든 그 칸에 맞는 내용을 넣는다. Findings 칸에서 Conclusion을
+      // 펼치면 판독문이 섞인다 — 상용구는 칸마다 다른 문장이다.
+      const text = el.id === "conclusion" ? (t.conclusion ?? "")
+                 : el.id === "recommendation" ? (t.recommendation ?? "")
+                 : (t.findings ?? "");
+      if (!text) return false;
+      el.value = before.slice(0, before.length - word.length) + text + el.value.slice(pos);
+      const caret = pos - word.length + text.length;
+      el.setSelectionRange(caret, caret);
+      el.dispatchEvent(new Event("input", { bubbles: true }));   // 점유·자동저장이 알아채야 한다
+      toast(`상용구 "${t.title}" 삽입`, "info");
+      return true;
+    }
+    ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
+      $(sel).addEventListener("keydown", e => {
+        if (e.key !== "Tab" || e.shiftKey || e.target.readOnly) return;
+        if (expandShortcut(e.target)) e.preventDefault();
+      }));
+
+    /**
      * 상용구 편집. 매뉴얼 7.3.5.1.1대로 목록에서 우클릭해 만든다.
      * 지금까지는 기본 3종만 있고 추가할 방법이 아예 없었다 — 있으나 마나였다.
      *
-     * 입력은 prompt로 받는다. 모달을 하나 더 만들 수도 있지만, 판독의가 쓰는 건
-     * 목록과 더블클릭 삽입이지 편집창이 아니다. 편집창을 예쁘게 만드는 건 나중이다.
+     * **입력을 prompt에서 모달로 바꿨다.** prompt는 줄바꿈을 입력할 수 없어서,
+     * 여러 줄인 기본 상용구를 "수정"으로 열면 한 줄로 뭉개진 채 영구 저장됐다.
+     * 게다가 `?? ""` 때문에 중간에 Cancel을 눌러도 빈 값이 저장됐다 —
+     * 취소가 취소가 아니라 삭제였다.
      */
-    async function editTemplate(t) {
-      const title = prompt("제목:", t?.title ?? "");
-      if (!title?.trim()) return;
-      const shortcut = prompt("단축어 (없어도 됩니다):", t?.shortcut ?? "") ?? "";
-      const modality = prompt("Modality (비우면 모든 검사에서 보입니다):", t?.modality ?? "") ?? "";
-      const findings = prompt("Findings:", t?.findings ?? "") ?? "";
-      const conclusion = prompt("Conclusion:", t?.conclusion ?? "") ?? "";
-      const body = { id: t?.id, title: title.trim(), shortcut: shortcut.trim(),
-                     modality: modality.trim(), findings, conclusion };
+    let tplEditing = null;
+    function editTemplate(t) {
+      tplEditing = t;
+      $("#tpl-title").textContent = t ? `상용구 수정 — ${t.title}` : "새 상용구";
+      $("#tpl-t").value = t?.title ?? "";
+      $("#tpl-s").value = t?.shortcut ?? "";
+      $("#tpl-m").value = t?.modality ?? "";
+      $("#tpl-f").value = t?.findings ?? "";
+      $("#tpl-c").value = t?.conclusion ?? "";
+      $("#tplmodal").classList.add("show");
+      $("#tpl-t").focus();
+    }
+    // 취소는 아무것도 안 한다. 저장을 누른 것만이 저장이다.
+    $("#tpl-cancel").addEventListener("click", () => { $("#tplmodal").classList.remove("show"); tplEditing = null; });
+    $("#tplmodal").addEventListener("click", e => { if (e.target.id === "tplmodal") $("#tpl-cancel").click(); });
+    $("#tpl-save").addEventListener("click", async () => {
+      const t = tplEditing;
+      const title = $("#tpl-t").value.trim();
+      if (!title) { toast("제목은 비울 수 없습니다", "err"); $("#tpl-t").focus(); return; }
+      const shortcut = $("#tpl-s").value.trim();
+      // 단축어가 겹치면 어느 쪽이 나올지 모른다 — 먼저 등록된 것이 이기고, 뒤엣것은 죽는다.
+      const dup = shortcut && templates.find(x => x !== t && x.shortcut === shortcut);
+      if (dup) { toast(`단축어 "${shortcut}" 은(는) "${dup.title}" 이(가) 쓰고 있습니다`, "err"); return; }
+      const body = { id: t?.id, title, shortcut,
+                     modality: $("#tpl-m").value.trim(),
+                     findings: $("#tpl-f").value, conclusion: $("#tpl-c").value };
       if (serverMode) {
         try { await api("POST", "/templates", body); await reloadPrefs(); }
         catch (e) { toast("상용구 저장 실패: " + e.message, "err"); return; }
@@ -663,8 +752,9 @@
         if (t) Object.assign(t, body); else templates.push(body);
         saveTemplatesLocal(); renderTemplates();
       }
+      $("#tplmodal").classList.remove("show"); tplEditing = null;
       toast(`상용구 "${body.title}" 저장`);
-    }
+    });
 
     $("#tplrows").addEventListener("contextmenu", e => {
       e.preventDefault();
@@ -1992,9 +2082,20 @@ ${r.recommendation ?? ""}
     });
 
     // Prev/Next: 필터된 목록에서 이전/다음 검사로 이동
+    /**
+     * Prev/Next — 필터된 목록에서 이전/다음 검사로.
+     *
+     * 선택된 검사가 목록에 없으면 `findIndex`가 **-1**이다. 예전엔 그대로 더해서
+     * `list[-1 + 1]` = 목록 맨 위로 튀었다. 탭을 바꾸거나 필터를 걸어 선택이 빠지면
+     * Next가 "다음"이 아니라 "처음"이 되는 것이다. Prev는 `list[-2]`라 아무 일도 안 났다 —
+     * 두 버튼이 서로 다르게 틀렸다.
+     * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
+     */
     function move(step) {
       const list = filtered();
+      if (!list.length) return;
       const i = list.findIndex(s => s.uid === selectedUid);
+      if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid); return; }
       const next = list[i + step];
       if (next) select(next.uid);
     }
@@ -2033,8 +2134,17 @@ ${r.recommendation ?? ""}
       Object.assign(fval, f.cols ?? {});
       // setMode()가 정렬을 지우므로 모드를 먼저 바꾸고 정렬을 나중에 얹는다
       if (f.mode && f.mode !== mode) setMode(f.mode);
-      sortKey = f.sortKey ?? null;
-      sortDir = f.sortDir ?? 0;
+      /**
+       * **저장된 정렬이 지금 모드에 있는 컬럼인지 확인한다.**
+       *
+       * setMode에는 이 검사가 있는데(`COLS[m].some(...)`), applyFilter는 그 **뒤에**
+       * 값을 얹으므로 검사를 건너뛴다. Technician 모드에서 저장한 필터를 Radiology에
+       * 적용하면 없는 컬럼으로 정렬이 걸리고, `a[sortKey]`가 전부 undefined라
+       * 목록이 아무 순서로나 늘어선다 — 정렬이 걸린 줄도 모른 채.
+       */
+      const okSort = f.sortKey && COLS[mode].some(c => c.k === f.sortKey);
+      sortKey = okSort ? f.sortKey : null;
+      sortDir = okSort ? (f.sortDir ?? 0) : 0;
       renderHeads(); render();
     }
     function renderChips() {
@@ -2042,9 +2152,22 @@ ${r.recommendation ?? ""}
         `<button class="chip" data-i="${i}" title="클릭: 적용 / 우클릭: 메뉴">${uf.isDefault ? "⚑ " : ""}${esc(uf.name)}</button>`).join("");
     }
 
+    /**
+     * 서버에서 필터·상용구를 다시 받아온다.
+     *
+     * **응답을 검증한다.** 예전엔 `templates = p.templates`를 그대로 대입해서,
+     * 한쪽이 빠진 응답 하나에 전역 `templates`가 `undefined`가 됐다.
+     * 그 뒤로는 `renderTemplates()`가 매번 죽고 — 상용구 패널뿐 아니라
+     * `refreshRight()`가 통째로 멈춰서 검사를 선택해도 오른쪽이 안 그려진다.
+     * 한 번 깨지면 F5 전까지 안 돌아온다. 못 믿을 값은 안 받는 편이 낫다.
+     */
     async function reloadPrefs() {
       if (!serverMode) return;
       const p = await api("GET", "/prefs");
+      if (!Array.isArray(p?.filters) || !Array.isArray(p?.templates)) {
+        toast("환경설정 응답이 올바르지 않아 이전 값을 유지합니다", "err");
+        return;
+      }
       userFilters = p.filters; templates = p.templates;
       renderChips(); renderTemplates();
     }
@@ -2353,9 +2476,18 @@ ${r.recommendation ?? ""}
       myInstitution = b.me?.institution ?? null;
       myInstitutionName = b.me?.institutionName ?? "";
       institutions = b.institutions ?? [];
-      // 필터·상용구는 이제 계정에 있다. 이 브라우저에 뭐가 남아 있든 서버가 진실이다.
-      if (b.filters) { userFilters = b.filters; renderChips(); }
-      if (b.templates) templates = b.templates;
+      /**
+       * 필터·상용구는 이제 계정에 있다. 이 브라우저에 뭐가 남아 있든 서버가 진실이다.
+       *
+       * 예전엔 `if (b.filters)` 였다 — 서버가 안 주면 **앞사람의 로컬 필터가 그대로
+       * 살아남았다.** 공용 판독 PC에서 남의 칩이 내 화면에 보이는 것이고,
+       * 그걸 눌러 저장하면 남의 필터 이름으로 내 화면이 만들어진다.
+       * 계정에 붙인다고 해놓고 브라우저에 남은 것을 안 지우면 반쪽이다.
+       */
+      userFilters = Array.isArray(b.filters) ? b.filters : [];
+      templates = Array.isArray(b.templates) ? b.templates : [];
+      try { localStorage.removeItem("kin-filters"); localStorage.removeItem("kin-templates"); } catch (e) {}
+      renderChips(); renderTemplates();
       $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB 연결됨`;
       $("#dbstat").title = `상태·판독문이 서버(${API})에 저장됩니다 — 브라우저를 바꿔도 유지됩니다`;
       // 어느 기관으로 로그인했는지 항상 보이게. 두 기관을 오가며 시험할 때
