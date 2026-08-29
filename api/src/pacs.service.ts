@@ -712,23 +712,24 @@ export class PacsService implements OnModuleInit {
    * 남의 초안을 일반 경로로 지우게 하면, 실수인지 강제 조치인지 이력에서 구분할 수 없다.
    * 그래서 별도 admin 경로에서만 모든 초안을 지우고, 지우기 직전 내용을 판으로 남긴다.
    *
-   * ReportVersion과 ReportDraft를 같은 트랜잭션에서 잠그는 이유는 조회한 초안과 실제로
-   * 지운 초안이 달라지는 틈을 없애기 위해서다. 자동 저장이 중간에 끼면 새 글을 지우면서
-   * 이전 글만 보존하는, 가장 나쁜 종류의 거짓 이력이 된다.
+   * 현재 UID의 초안 행만 FOR UPDATE로 고정한다. 조회한 초안과 실제로 지운 초안이
+   * 달라지는 틈은 막되, 다른 검사의 자동 저장과 확정까지 멈추는 테이블 락은 잡지 않는다.
+   * 그 사이 다른 판독 확정이 같은 판 번호를 먼저 쓰면 이 트랜잭션은 P2002로 롤백되며,
+   * 최신 판 번호와 남은 초안을 다시 읽어 한 번 재시도한다.
    */
   async forceDiscardDrafts(uid: string, c: Caller) {
     need(c.roles, 'admin', '판독문 초안 강제 해제');
     const me = inst(c);
     await this.gate(uid, c);
 
-    return this.prisma.$transaction(async tx => {
-      // 판 번호를 먼저 정하고 초안을 나중에 지우는 commitReport와 잠금 순서를 맞춘다.
-      await tx.$executeRaw`LOCK TABLE "ReportVersion" IN SHARE ROW EXCLUSIVE MODE`;
-      await tx.$executeRaw`LOCK TABLE "ReportDraft" IN SHARE ROW EXCLUSIVE MODE`;
-
-      const drafts = await tx.reportDraft.findMany({
-        where: { uid }, orderBy: { author: 'asc' },
-      });
+    const run = () => this.prisma.$transaction(async tx => {
+      const drafts = await tx.$queryRaw<any[]>`
+        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", "updatedAt"
+        FROM "ReportDraft"
+        WHERE uid = ${uid}
+        ORDER BY author
+        FOR UPDATE
+      `;
       if (!drafts.length) {
         // 강제 해제 호출 자체도 관리자 조치다. 지울 것이 없었어도 흔적은 남긴다.
         await tx.auditLog.create({
@@ -758,7 +759,10 @@ export class PacsService implements OnModuleInit {
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
         })),
       });
-      await tx.reportDraft.deleteMany({ where: { uid } });
+      // 조회 뒤 새로 생긴 초안은 지우지 않는다. 판으로 보존한 바로 그 행들만 없앤다.
+      await tx.reportDraft.deleteMany({
+        where: { OR: drafts.map(d => ({ uid: d.uid, author: d.author })) },
+      });
       // 판독문 전문은 감사로그에 넣지 않는다. 누구의 몇 글자를 지웠는지만 남긴다.
       await tx.auditLog.create({
         data: {
@@ -769,6 +773,14 @@ export class PacsService implements OnModuleInit {
 
       return { ok: true, count: drafts.length, drafts: summary, versions };
     });
+
+    try {
+      return await run();
+    } catch (e: any) {
+      // 다른 판독 확정이 같은 (uid, version)을 먼저 썼다면, 새 번호로 전체 작업을 한 번만 다시 한다.
+      if (e?.code !== 'P2002') throw e;
+      return run();
+    }
   }
 
   /**
