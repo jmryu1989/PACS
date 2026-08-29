@@ -21,6 +21,10 @@ python3 make_sample_ct.py
 
 # 3. Orthanc에 업로드
 python3 upload_samples.py
+
+# 4. (선택) 가짜 CT 장비가 되어 진짜 DICOM 프로토콜로 한 건 더 보내기
+pip install pynetdicom
+python3 send_cstore.py --name "HONG^GILDONG" --id P-1006
 ```
 
 그리고 브라우저에서:
@@ -104,6 +108,28 @@ Radiology / Technician 두 탭은 화면 분리가 아니라 **권한 분리**�
 
 `admin`은 둘 다. 화면에서도 버튼을 잠그지만 **진짜 방어선은 서버**다
 (`pacs.service.ts`의 `need()`). 화면은 안내일 뿐이다.
+
+### 검사는 어떻게 들어오나 — C-STORE
+
+실제 CT/MR 장비는 HTTP를 모른다. DICOM 상위 프로토콜로 TCP 연결(Association)을 맺고,
+어떤 SOP Class를 어떤 전송구문으로 보낼지 협상한 뒤, **C-STORE**로 인스턴스를 하나씩 민다.
+`scripts/send_cstore.py`가 그 장비 역할을 한다 (Orthanc의 DICOM 포트 4242, AET `KINLAB`).
+
+```bash
+python3 send_cstore.py                                    # 한림병원 CT 1건
+python3 send_cstore.py --institution "KIN 판독센터"        # 다른 기관에서 도착
+python3 send_cstore.py --verbose                          # 협상 로그를 전부 본다
+```
+
+DCMTK가 있다면 같은 일을 이렇게 한다: `storescu -aec KINLAB -aet HALLYM_CT localhost 4242 파일.dcm`
+
+도착한 검사는 **SS=Unverified**로 등록된다. 방사선사가 Technician 탭에서 Verify해야
+Radiology 탭에 올라온다 — 도착하자마자 판독 목록에 뜨면 기사가 환자·검사정보를 고칠 틈이 없고,
+판독이 붙은 뒤에는 더 고칠 수 없다(RS≠W 규칙).
+
+전송 성공과 저장 성공은 다른 사건이다. 스크립트는 C-STORE 응답 상태를 하나씩 확인하고,
+하나라도 0x0000이 아니면 실패로 끝낸다. 보낸 수와 저장된 수가 어긋나는 것이
+원격판독에서 가장 흔한 사고다(교훈 §10).
 
 ### 기관 모델 (멀티 기관 테넌시)
 

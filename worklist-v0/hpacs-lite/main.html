@@ -263,7 +263,6 @@
           <button disabled title="③ 의도적 생략 (DICOM 조작 필요)">Split Exam</button>
         </span>
         <span style="flex:1"></span>
-        <button id="t-simulate" title="장비에서 새 영상이 도착한 상황을 흉내냅니다">＋ 장비 수신 시뮬</button>
       </div>
 
       <div class="grid">
@@ -510,10 +509,6 @@
       api("PATCH", `/studies/${encodeURIComponent(uid)}`, body).catch(apiFail);
     }
 
-    let incoming = [];   // 장비 수신 시뮬로 생성된 가짜 검사
-    try { incoming = JSON.parse(localStorage.getItem("kin-incoming") ?? "[]"); } catch (e) {}
-    const saveIncoming = () => { try { localStorage.setItem("kin-incoming", JSON.stringify(incoming)); } catch (e) {} };
-
     // ── Order List (8.2.2): HRIS에서 온 오더 목록 (여기선 가짜) ──
     const SEED_ORDERS = [
       { oid: "O-9001", id: "P-1001", name: "KIM CHULSOO",  sex: "M", birth: "1962-03-04", sched: today() + " 09:10", modality: "CT", desc: "Brain CT without contrast", ward: "NR",  reqDoc: "PARK MD" },
@@ -652,7 +647,7 @@
       s.em = a.em ?? s.em ?? "N";
       s.rs = a.rs ?? "W";
       s.ts = a.ts ?? "none";
-      s.ss = a.ss ?? (s.synthetic ? "Unverified" : "Verified");
+      s.ss = a.ss ?? s.ss ?? "Verified";
       s.matched = a.matched ?? "U";
       s.ward = a.ward ?? s.ward ?? "";
       // 기관명은 서버가 정한다. Switch ReqHosp로 손으로 적어 넣던 값은
@@ -675,27 +670,29 @@
      * 서버가 없을 때(데모·오프라인)만 Orthanc 직통 경로가 남는다. 그 경로에는
      * 기관 개념이 없으므로 전부 "(로컬)"로 보인다 — 진짜처럼 보이면 안 되니까.
      */
+    /** API가 준 검사 하나를 화면이 쓰는 모양으로 */
+    function fromApi(s) {
+      appState[s.uid] = { ...appState[s.uid], ...s.state };
+      return applyState({
+        uid: s.uid, pf: "·",
+        count: s.count, series: s.series, acc: s.acc,
+        id: s.id, name: s.name,
+        age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
+        birth: fmtD(s.birth), sex: s.sex,
+        modality: s.modality, desc: s.desc, date: fmtD(s.date),
+        // ReqHosp 열에 들어가는 진짜 기관명. 원격판독으로 받은 검사는 표시를 붙인다 —
+        // 내 병원 검사인지 남의 병원 검사인지가 판독의에게 한눈에 보여야 한다.
+        institutionName: s.institutionName,
+        reqHosp: s.tele ? `${s.institutionName} ▸원격` : s.institutionName,
+        tele: s.tele,
+      });
+    }
+
     async function load() {
       try {
         if (!serverMode) throw new Error("no-server");
         const r = await api("GET", "/studies");
-        studies = r.studies.map(s => {
-          appState[s.uid] = { ...appState[s.uid], ...s.state };
-          return applyState({
-            uid: s.uid, pf: "·",
-            count: s.count, series: s.series, acc: s.acc,
-            id: s.id, name: s.name,
-            age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
-            birth: fmtD(s.birth), sex: s.sex,
-            modality: s.modality, desc: s.desc, date: fmtD(s.date),
-            // ReqHosp 열에 들어가는 진짜 기관명. 원격판독으로 받은 검사는 표시를 붙인다 —
-            // 내 병원 검사인지 남의 병원 검사인지가 판독의에게 한눈에 보여야 한다.
-            institutionName: s.institutionName,
-            reqHosp: s.tele ? `${s.institutionName} ▸원격` : s.institutionName,
-            tele: s.tele,
-          });
-        });
-        mergeIncoming();
+        studies = r.studies.map(fromApi);
         render(); refreshRight();
         try {
           const st = await (await fetch("/statistics")).json();
@@ -734,7 +731,6 @@
             reqHosp: "(로컬)",
           });
         });
-        mergeIncoming();
         render(); refreshRight();
         try {
           const st = await (await fetch("/statistics")).json();
@@ -754,13 +750,8 @@
           P("demo-4",  "P-1004", "CHOI SUJIN",   33, "1993-05-17", "F", "Brain CT (synthetic)",         "2026-08-26", "KIN20261003"),
           P("demo-5",  "P-1005", "JUNG DOHYUN",  69, "1957-02-28", "M", "Brain CT f/u (synthetic)",     "2026-08-25", "KIN20261004"),
         ];
-        mergeIncoming();
         render(); refreshRight();
       }
-    }
-
-    function mergeIncoming() {
-      studies = studies.concat(incoming.map(s => applyState({ ...s })));
     }
 
     function withinDays(dateStr, days) {
@@ -912,7 +903,7 @@
       const wrap = $("#thumbwrap");
       if (!selectedUid) { wrap.innerHTML = ""; return; }
       const s = cur();
-      if (demoMode || s?.synthetic) {
+      if (demoMode) {
         wrap.innerHTML = `<div class="thumbs" style="grid-template-columns:repeat(2,1fr)"><img src="${DEMO_IMG}"></div>`;
         return;
       }
@@ -1056,31 +1047,15 @@
     $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
     $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
 
-    // ── 장비 수신 시뮬: 미확인·미매칭 검사 1건 생성 ──
-    let simSeq = incoming.length;
-    $("#t-simulate").addEventListener("click", () => {
-      simSeq++;
-      const mods = ["CT", "CR", "US"];
-      const s = {
-        uid: "sim-" + Date.now(),
-        synthetic: true, pf: "·",
-        count: 20 + Math.floor(Math.random() * 60), series: 1,
-        acc: "EQ" + String(Date.now()).slice(-8),
-        id: "TEMP-" + String(1000 + simSeq),
-        name: "UNKNOWN " + simSeq,
-        birth: "", age: "", sex: "O",
-        modality: mods[Math.floor(Math.random() * mods.length)],
-        desc: "(장비 수신 · 미확인)",
-        date: today(),
-        ward: "", reqHosp: "KIN",
-      };
-      incoming.push(s); saveIncoming();
-      const hydrated = applyState({ ...s });
-      studies.push(hydrated);
-      setMode("Technician");
-      select(hydrated.uid);
-      toast(`장비에서 검사가 도착했습니다 — ${s.name} (미확인·미매칭)`, "info");
-    });
+    // ── 장비 수신 ──
+    // 예전엔 여기 "장비 수신 시뮬" 버튼이 있었다. localStorage에 가짜 행을 만들 뿐이라
+    // 영상도 없고 서버도 몰랐다 — 화면에만 있는 검사였다.
+    //
+    // 지금은 진짜 장비가 진짜 프로토콜로 보낸다: scripts/send_cstore.py 가
+    // DICOM Association을 맺고 C-STORE로 Orthanc(4242)에 인스턴스를 밀어넣는다.
+    // 그러면 서버의 검사 목록에 새 검사가 생기고, 아래 폴링이 그걸 집어온다.
+    //     python3 send_cstore.py --institution "한림병원"
+    // 도착한 검사는 SS=Unverified다. 기사가 Verify해야 Radiology 탭으로 올라간다.
 
     // ── Modify Exam (8.1.2.1.5) ──
     function openModify() {
@@ -1112,9 +1087,12 @@
     function doDelete(uid) {
       const s = studies.find(x => x.uid === uid); if (!s) return;
       if (s.rs !== "W") { alert("RS가 W(Wait)인 검사만 삭제할 수 있습니다."); return; }
-      if (!s.synthetic) { alert("실제 Orthanc 검사 삭제는 아직 구현되지 않았습니다.\n(3단계 백엔드에서 권한·감사로그와 함께 구현)"); return; }
-      if (!confirm(`검사를 삭제합니다.\n${s.name} (${s.id}) ${s.date}\n계속할까요?`)) return;
-      incoming = incoming.filter(x => x.uid !== uid); saveIncoming();
+      // 영상 자체(Orthanc)를 지우는 것은 아직 안 한다. 되돌릴 수 없는 동작이라
+      // 권한·감사로그·연쇄 해제를 갖춰야 한다 (교훈 §5). 지금 지울 수 있는 건
+      // "영상에 대한 사람의 결정"뿐이고, 그러면 다음 목록 조회 때 그 검사는
+      // **막 도착한 검사처럼 다시 나타난다.** 그게 이 동작의 진짜 의미다.
+      if (!confirm(`이 검사의 판독 상태·매칭 기록을 지웁니다.\n${s.name} (${s.id}) ${s.date}\n` +
+                   `영상은 남고, 검사는 방금 도착한 것처럼 다시 나타납니다. 계속할까요?`)) return;
       studies = studies.filter(x => x.uid !== uid);
       delete appState[uid];
       if (serverMode) api("DELETE", `/studies/${encodeURIComponent(uid)}`).catch(apiFail);
@@ -1305,30 +1283,50 @@
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
     // 지금은 30초 폴링. 실시간(SSE)은 사람이 늘어나면 그때.
     let poll = null;
-    /** 지난 폴링이 본 상태 uid 집합. "새로 생긴 것"을 판단하는 기준. */
-    let seenStateUids = new Set();
     function startPolling() {
-      seenStateUids = new Set(Object.keys(appState));
       clearInterval(poll);
       poll = setInterval(async () => {
         if (!serverMode || document.hidden) return;
         try {
-          const b = await api("GET", "/bootstrap");
-          // 원격판독으로 검사가 **새로 넘어오면** 목록 자체가 달라진다.
-          // 상태만 갱신하면 받는 쪽 화면에 그 검사가 영영 안 나타난다.
-          //
-          // 비교 대상은 "화면에 있는 검사"가 아니라 "지난번 폴링이 본 상태 목록"이다.
-          // 화면과 비교하면, 목록에 못 실리는 행(예: Orthanc에서 지워진 검사의 상태)이
-          // 하나 남아 있을 때 30초마다 영원히 새로고침하게 된다.
-          const now = Object.keys(b.states);
-          const fresh = now.filter(uid => !seenStateUids.has(uid));
-          now.forEach(uid => seenStateUids.add(uid));
-          if (fresh.length) {
-            await load();
-            if (!document.hidden) toast(`새 검사 ${fresh.length}건이 도착했습니다`, "info");
+          /**
+           * **`/bootstrap`이 아니라 `/studies`를 본다.**
+           *
+           * bootstrap은 StudyState 행만 준다. 그런데 장비에서 막 C-STORE로 도착한
+           * 검사는 아직 행이 없다 — 서버가 목록을 만들 때 비로소 생긴다. bootstrap만
+           * 보면 그 검사는 다음 새로고침 전까지 아무에게도 안 보인다. 방사선사가
+           * 확인해야 판독이 시작되는 구조에서, 도착을 못 보는 건 워크플로가 멈춘 것이다.
+           *
+           * /studies는 목록과 상태를 함께 주므로 도착·원격판독 수신·상태 변화를
+           * 한 번에 잡는다. (오더는 자주 안 바뀌므로 여기서 갱신하지 않는다)
+           */
+          const r = await api("GET", "/studies");
+          const known = new Set(studies.map(x => x.uid));
+          const fresh = r.studies.filter(s => !known.has(s.uid));
+
+          // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
+          if (fresh.length || r.studies.length !== studies.length) {
+            const editing = selectedUid ? { ...appState[selectedUid] } : null;
+            studies = r.studies.map(fromApi);
+            // 편집 중인 검사는 아래와 같은 이유로 되돌려 놓는다
+            if (editing && appState[selectedUid]) {
+              appState[selectedUid] = { ...appState[selectedUid],
+                version: editing.version ?? 0,
+                findings: editing.findings, conclusion: editing.conclusion,
+                recommendation: editing.recommendation };
+              syncStudy(selectedUid);
+            }
+            // render()만 한다. refreshRight()는 판독문을 textarea에 다시 써넣어
+            // 타이핑 중인 커서를 맨 앞으로 되돌린다 — 30초마다 그러면 못 쓴다.
+            // 새 검사가 왔다고 오른쪽 판이 바뀔 일도 없다(선택이 안 바뀌었으니).
+            render();
+            if (fresh.length)
+              toast(`새 검사 ${fresh.length}건이 도착했습니다` +
+                    (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : ""), "info");
             return;
           }
-          for (const [uid, st] of Object.entries(b.states)) {
+
+          for (const s of r.studies) {
+            const uid = s.uid, st = s.state;
             if (uid === selectedUid) {
               // 지금 편집 중인 검사는 두 가지만 보호한다:
               //   version — baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래
@@ -1429,7 +1427,6 @@ ${r.recommendation ?? ""}
     // ── 공통 이벤트 ──
     function openFilmbox(uid) {
       const s = studies.find(x => x.uid === uid);
-      if (s?.synthetic) { alert("장비 수신 시뮬로 만든 가짜 검사입니다. 실제 영상이 없습니다."); return; }
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
       window.open(`/ohif/viewer?StudyInstanceUIDs=${uid}`, "_blank");
     }
@@ -1673,7 +1670,7 @@ ${r.recommendation ?? ""}
         if (!rad) el.title = "판독의(radiologist) 권한이 필요합니다";
       });
       ["#findings", "#conclusion", "#recommendation"].forEach(s => $(s).readOnly = !rad);
-      ["#t-verify", "#t-unverify", "#t-modify", "#t-simulate"].forEach(s => {
+      ["#t-verify", "#t-unverify", "#t-modify"].forEach(s => {
         const el = $(s); el.disabled = !tec;
         if (!tec) el.title = "방사선사(technician) 권한이 필요합니다";
       });

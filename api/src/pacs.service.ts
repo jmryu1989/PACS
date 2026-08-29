@@ -199,7 +199,17 @@ export class PacsService implements OnModuleInit {
     for (const n of news) {
       const row = n.patch
         ? await this.prisma.studyState.update({ where: { uid: n.uid }, data: { institutionId: n.institutionId } })
-        : await this.prisma.studyState.create({ data: { uid: n.uid, institutionId: n.institutionId, reqHosp: n.reqHosp } });
+        : await this.prisma.studyState.create({
+            data: {
+              uid: n.uid, institutionId: n.institutionId, reqHosp: n.reqHosp,
+              // 처음 보는 검사는 방금 장비에서 도착한 것이다 → **기사 확인 전(Unverified)**.
+              // Radiology 탭은 Verified만 보여주므로, 이게 판독 진입 관문이 된다.
+              // 도착하자마자 판독 목록에 뜨면 기사가 환자·검사정보를 고칠 틈이 없고,
+              // 그 상태로 판독이 붙으면 더는 고칠 수 없다(RS≠W 규칙).
+              ss: 'Unverified',
+            },
+          });
+      if (!n.patch) await this.audit('system', 'study.arrived', n.uid, { institutionId: n.institutionId });
       byUid.set(n.uid, row as any);
     }
 
