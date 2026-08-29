@@ -68,6 +68,19 @@ docker compose up -d --build          # 첫 실행은 몇 분
 | 고쳤는데 화면이 그대로 | 브라우저 캐시 | 강력 새로고침부터 |
 | `db push`가 unique 추가를 거부 | Prisma는 **중복이 0건이어도** `@unique` 추가를 "잠재적 데이터 손실"로 분류한다 | 중복을 먼저 SQL로 세어 0을 확인한 뒤 `--accept-data-loss`. 행 삭제는 일어나지 않는다 |
 | API 컨테이너가 재시작 루프 | 컨테이너 CMD가 `db push && npm run start:dev`라, `db push`가 승인을 요구하면 **API가 아예 못 뜬다** | 실행 중 컨테이너에 `exec`할 수 없으므로 같은 이미지의 **일회성 컨테이너**로 `db push`를 먼저 적용하고 서비스를 다시 띄운다 |
+| `Up`인데 접속이 안 된다 | `docker compose ps`의 STATUS가 `Up`이어도 **PORTS가 `443/tcp`처럼 화살표 없이** 찍혀 있으면 호스트에 게시되지 않은 것이다. 컨테이너가 compose의 `ports:` 없이 다시 만들어졌을 때 이렇게 된다 | **STATUS가 아니라 PORTS 칸에 `→`가 있는지**를 본다. `docker compose up -d --force-recreate <서비스>` |
+
+### 컨테이너를 건드린 뒤에는 반드시
+
+`restart`·`up`·`run`·일회성 컨테이너·`db push` 같은 것을 한 뒤에는 **작업이 끝났다고 보고하기 전에** 스택 상태를 눈으로 확인한다. 코드가 맞아도 컨테이너 상태가 틀어질 수 있고, **그건 diff 리뷰로는 절대 안 잡힌다.**
+
+```bash
+docker compose ps                       # PORTS 칸에 → 가 다 있는지
+curl -sk https://localhost:8443/api/health   # 정식 입구로 한 번
+```
+
+실제로 그렇게 새어나간 적이 있다. 코드 커밋은 완벽했는데 프록시가 포트 게시를 잃은 채
+`Up`으로 떠 있었고, 사용자가 "연결이 안 된다"고 할 때까지 아무도 몰랐다.
 
 ## 4. 코드 규칙
 

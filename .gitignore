@@ -1,5 +1,14 @@
-# 스크립트로 재생성 가능한 산출물은 커밋하지 않음
-sample-data/*.dcm
+# 영상 데이터는 통째로 커밋하지 않는다.
+#
+# 예전에는 `sample-data/*.dcm`만 막았는데, 그건 **최상위의 .dcm 하나**만 막는 패턴이다.
+# dicomlibrary 공개 샘플을 `sample-data/public/`에 받으면서 535MB가 추적 대상이 됐고,
+# `git add -A` 한 번이면 퍼블릭 저장소에 통째로 올라갈 뻔했다. 한 번 올라간 큰 파일은
+# 히스토리를 다시 쓰지 않으면 안 지워진다.
+#
+# 여기 있는 건 전부 다시 만들거나 다시 받을 수 있다:
+#   합성 팬텀  scripts/make_sample_ct.py
+#   공개 샘플  https://www.dicomlibrary.com/ → scripts/import_public_samples.py
+sample-data/
 
 # Python 캐시
 __pycache__/

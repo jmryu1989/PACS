@@ -2,10 +2,14 @@
 # 실행:  docker compose up -d --build
 #
 # ── 정식 입구는 리버스 프록시 하나다 ──
-#   https://localhost:8443/                     HPACS-lite (자체 서명 인증서 — 첫 접속에 경고 1회)
-#   https://localhost:8443/ohif/                OHIF 뷰어
-#   https://localhost:8443/api/health           KIN API
-#   https://localhost:8443/auth/                Keycloak (관리 콘솔 admin/admin)
+# 포트가 8443이 아니라 9443인 이유: 윈도우(Hyper-V/WSL2)가 8440~8939를 동적 포트
+# 예약 범위로 잡아버려서 도커가 8443을 바인딩하지 못한다. 컨테이너는 Up인데 PORTS에
+# 화살표가 안 붙고 접속만 거부되는, 알아채기 어려운 증상으로 나온다.
+# 9443은 예약 범위 밖이고, netsh로 우리 앞에 예약해 두면 다시 뺏기지 않는다.
+#   https://localhost:9443/                     HPACS-lite (자체 서명 인증서 — 첫 접속에 경고 1회)
+#   https://localhost:9443/ohif/                OHIF 뷰어
+#   https://localhost:9443/api/health           KIN API
+#   https://localhost:9443/auth/                Keycloak (관리 콘솔 admin/admin)
 #   http://localhost:8081/                      → https로 리다이렉트
 #
 # 아래 포트들은 **운영·디버깅용**으로만 열어둔다. 앱은 이 주소로 쓰지 않는다 —
@@ -22,7 +26,7 @@ services:
     container_name: kin-proxy
     restart: unless-stopped
     ports:
-      - "8443:443"
+      - "9443:443"
       - "8081:80"
     depends_on:
       - orthanc
@@ -78,7 +82,7 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       # 이 주소가 토큰의 iss에 박힌다. 고정해 두지 않으면 요청 호스트에 따라 흔들린다.
       # 이제 브라우저는 프록시를 통해 들어오므로, 브라우저가 보는 주소를 적는다.
-      KC_HOSTNAME: https://localhost:8443/auth
+      KC_HOSTNAME: https://localhost:9443/auth
       # Keycloak을 /auth 밑에 둔다. 프록시가 경로를 고쳐 쓰지 않아도 되고,
       # Keycloak이 스스로 만드는 링크·리다이렉트도 처음부터 맞는다.
       KC_HTTP_RELATIVE_PATH: /auth
@@ -111,7 +115,7 @@ services:
       # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.
       # JWKS·Admin은 도커 네트워크 안 주소이고, 둘 다 /auth 접두어가 붙는다
       # (KC_HTTP_RELATIVE_PATH를 넣었으므로 내부 경로도 바뀐다).
-      KC_ISSUER: https://localhost:8443/auth/realms/kin
+      KC_ISSUER: https://localhost:9443/auth/realms/kin
       KC_JWKS_URL: http://keycloak:8080/auth/realms/kin/protocol/openid-connect/certs
       KC_AUDIENCE: kin-api
       # 서비스 계정 — "우리 기관 판독의가 누구인가"를 Keycloak에 묻기 위한 것(Preliminary 지정용).

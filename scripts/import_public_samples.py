@@ -52,6 +52,15 @@ try:
 except ImportError:
     sys.exit("pydicom이 필요합니다:  pip install pydicom requests")
 
+# 공개 샘플에는 규격을 어긴 UID가 흔하다 (구성요소에 선행 0 — `.05453119.`).
+# 장비가 만든 값이라 우리가 고칠 것도 아니고 저장에도 지장이 없는데,
+# pydicom이 **파일마다** 경고를 낸다. 1,110장이면 경고 1,110줄이 되고
+# 마지막의 "성공 N / 실패 M"을 화면 밖으로 밀어낸다.
+# 보낸 수와 저장된 수가 맞는지가 이 스크립트에서 제일 중요한 한 줄이다 (교훈 §10).
+# 그 한 줄을 지키려고 이 경고만 끈다 — 다른 경고는 그대로 둔다.
+import warnings
+warnings.filterwarnings("ignore", message="Invalid value for VR UI")
+
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -89,6 +98,10 @@ def main() -> None:
     ap.add_argument("--orthanc", default="http://localhost:8042")
     ap.add_argument("--institution", default=None)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--rename", action="store_true",
+        help="검사마다 서로 다른 환자 ID·이름을 붙인다 (공개 샘플은 전부 PatientID=0이라 "
+             "한 환자의 검사 넷처럼 보이고 Related Report List가 서로를 prior로 묶는다)")
     a = ap.parse_args()
 
     src = os.path.abspath(a.dir)
@@ -159,15 +172,41 @@ def main() -> None:
         print("\nInstitutionName을 그대로 둡니다 → 대부분 '미배정'이 되고,")
         print("관리자 계정 메뉴바 [⚠ 미배정]에서 배정하게 됩니다.")
 
+    # 검사별 가짜 신원. 공개 샘플은 전부 PatientID=0 / PatientName=Anonymized라,
+    # 그대로 넣으면 **한 환자의 검사 넷**으로 보이고 Related Report List가 서로를
+    # prior로 묶는다. 판독 화면을 보여주는 자리에서 그건 실제 상황이 아니다.
+    # 합성 데이터에 합성 신원을 붙이는 것이므로 새로 만들어내는 위험은 없다.
+    FAKE = [
+        ("P-2001", "KIM^SEOYEON",  "19780412", "F"),
+        ("P-2002", "PARK^JIHUN",   "19650930", "M"),
+        ("P-2003", "LEE^MINSEO",   "19910207", "F"),
+        ("P-2004", "CHOI^DOYUN",   "19551118", "M"),
+        ("P-2005", "JUNG^HAEUN",   "20030625", "F"),
+        ("P-2006", "KANG^TAEYANG", "19840303", "M"),
+    ]
+    ident = {uid: FAKE[i % len(FAKE)] for i, uid in enumerate(studies)}
+    if a.rename:
+        print("\n검사마다 다른 환자 신원을 붙입니다:")
+        for uid, (pid, nm, *_ ) in ident.items():
+            print(f"  {pid}  {nm.replace('^', ' ')}  ← {studies[uid]['desc'] or uid[-12:]}")
+
     ok = fail = 0
     for name, raw in payload:
         body = raw
-        if a.institution:
+        if a.institution or a.rename:
             ds = pydicom.dcmread(io.BytesIO(raw), force=True)
             # 한글을 넣으려면 **먼저** 문자셋을 선언해야 한다. 안 하면 DICOM 기본값이
             # ASCII(ISO_IR 6)라 "한림병원"이 "????"로 저장된다 — 경고 한 줄 없이.
             ds.SpecificCharacterSet = "ISO_IR 192"      # UTF-8
-            ds.InstitutionName = a.institution
+            if a.institution:
+                ds.InstitutionName = a.institution
+            if a.rename:
+                pid, nm, birth, sex = ident.get(
+                    str(getattr(ds, "StudyInstanceUID", "")), FAKE[0])
+                ds.PatientID = pid
+                ds.PatientName = nm
+                ds.PatientBirthDate = birth
+                ds.PatientSex = sex
             buf = io.BytesIO()
             ds.save_as(buf, write_like_original=True)
             body = buf.getvalue()
