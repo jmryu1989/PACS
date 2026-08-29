@@ -1,7 +1,7 @@
 """살아 있는 PACS 스택에 대고 돌리는 불변조건 테스트.
 
 커버리지가 목적이 아니다. 컨트롤러에 진입점이 하나 늘어날 때마다 아래 ROUTES 표에
-REPORT/TENANT/NEITHER 중 하나로 선언하게 만드는 것이 이 파일의 첫 번째 역할이다.
+REPORT/TENANT/USER/NEITHER 중 하나로 선언하게 만드는 것이 이 파일의 첫 번째 역할이다.
 REPORT라고 선언하는 순간 실제 Keycloak 토큰·Orthanc 검사·PostgreSQL 역사를 쓰는
 배터리를 피할 수 없다. Prisma나 Orthanc를 대신하는 가짜 객체는 두지 않는다.
 """
@@ -45,6 +45,7 @@ CONTROLLER_GLOB = "*.controller.ts"
 class Kind(str, Enum):
     REPORT = "REPORT"
     TENANT = "TENANT"
+    USER = "USER"
     NEITHER = "NEITHER"
 
 
@@ -61,12 +62,12 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "health"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "colleagues"): Route(Kind.TENANT),
-    ("GET", "prefs"): Route(Kind.NEITHER),
-    ("POST", "filters"): Route(Kind.NEITHER),
-    ("PATCH", "filters/:id/default"): Route(Kind.NEITHER),
-    ("DELETE", "filters/:id"): Route(Kind.NEITHER),
-    ("POST", "templates"): Route(Kind.NEITHER),
-    ("DELETE", "templates/:id"): Route(Kind.NEITHER),
+    ("GET", "prefs"): Route(Kind.USER),
+    ("POST", "filters"): Route(Kind.USER),
+    ("PATCH", "filters/:id/default"): Route(Kind.USER),
+    ("DELETE", "filters/:id"): Route(Kind.USER),
+    ("POST", "templates"): Route(Kind.USER),
+    ("DELETE", "templates/:id"): Route(Kind.USER),
     ("GET", "bootstrap"): Route(Kind.REPORT, "bootstrap", "collection"),
     ("GET", "studies"): Route(Kind.REPORT, "studies", "collection"),
     ("GET", "unassigned"): Route(Kind.TENANT),
@@ -93,17 +94,46 @@ def controller_routes() -> set[tuple[str, str]]:
     """Nest 데코레이터를 열거한다. 런타임 메타데이터가 외부에 없어서 소스를 읽는다."""
     found: set[tuple[str, str]] = set()
     controller_dir = ROOT / "api" / "src"
-    decorator = re.compile(r"@(Get|Post|Put|Patch|Delete)\(\s*(?:(['\"])(.*?)\2)?\s*\)")
+    # 지금 쓰는 다섯 종류만 보면 @All 같은 새 진입점이 선언표 밖으로 조용히 빠진다.
+    # Nest의 경로형 HTTP 데코레이터를 실제 메서드로 정규화한다.
+    http_decorators = {
+        "All": "ALL",
+        "Get": "GET",
+        "Post": "POST",
+        "Put": "PUT",
+        "Delete": "DELETE",
+        "Patch": "PATCH",
+        "Options": "OPTIONS",
+        "Head": "HEAD",
+        "Search": "SEARCH",
+        "Sse": "GET",
+    }
+    names = "|".join(map(re.escape, http_decorators))
+    decorator = re.compile(rf"@({names})\(\s*(?:(['\"])(.*?)\2)?\s*\)")
+    route_call = re.compile(rf"@({names}|RequestMapping)\s*\(")
     prefix_re = re.compile(r"@Controller\(\s*(?:(['\"])(.*?)\1)?\s*\)")
-    for path in sorted(controller_dir.glob(CONTROLLER_GLOB)):
+    # 하위 폴더를 빼면 새 모듈 전체가 호구조사에서 빠지므로 컨트롤러를 재귀 탐색한다.
+    for path in sorted(controller_dir.rglob(CONTROLLER_GLOB)):
         source = path.read_text(encoding="utf-8")
         prefix_match = prefix_re.search(source)
         prefix = (prefix_match.group(2) if prefix_match else "") or ""
         prefix = prefix.strip("/")
-        for match in decorator.finditer(source):
+        matches = list(decorator.finditer(source))
+        parsed_offsets = {match.start() for match in matches}
+        unparsed = [
+            match.group(1)
+            for match in route_call.finditer(source)
+            if match.start() not in parsed_offsets
+        ]
+        if unparsed:
+            raise AssertionError(
+                f"{path.relative_to(ROOT)}의 HTTP 데코레이터를 해석하지 못했습니다: {unparsed}. "
+                "문자열 리터럴 경로로 바꾸거나 호구조사 파서를 확장하세요."
+            )
+        for match in matches:
             child = (match.group(3) or "").strip("/")
             route_path = "/".join(part for part in (prefix, child) if part)
-            found.add((match.group(1).upper(), route_path))
+            found.add((http_decorators[match.group(1)], route_path))
     return found
 
 
