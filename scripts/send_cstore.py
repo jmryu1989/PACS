@@ -29,6 +29,15 @@ pynetdicom을 쓴다. DCMTK가 있다면 아래와 같다:
 import argparse
 import sys
 
+# 윈도우 콘솔은 기본이 CP949다. 출력에 CP949로 못 옮기는 글자가 하나라도 있으면
+# UnicodeEncodeError로 죽고, **전송은 성공했는데 종료코드는 실패**가 된다.
+# 스크립트를 자동화에 물릴 때 이게 제일 헷갈리는 실패다. 안내문 때문에 죽지 않게 한다.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
 try:

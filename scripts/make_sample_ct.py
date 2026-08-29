@@ -63,7 +63,9 @@ def make_slice_pixels(z_frac: float) -> np.ndarray:
 
 
 def make_dataset(index: int) -> Dataset:
-    z_frac = index / (N_SLICES - 1)
+    # N_SLICES가 1이면 0으로 나눈다. `--slices 1`로 한 장만 보내는 건
+    # 경계 시험에서 흔한 요청이라 실제로 밟힌다.
+    z_frac = index / (N_SLICES - 1) if N_SLICES > 1 else 0.5
     hu = make_slice_pixels(z_frac)
 
     # HU -> 저장 픽셀값: stored = (HU - intercept) / slope, 여기선 slope=1, intercept=-1024
