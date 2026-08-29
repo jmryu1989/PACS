@@ -370,6 +370,8 @@
         <div class="draftbar" id="draftbar" style="display:none">
           <span id="draftmsg"></span>
           <span class="spacer"></span>
+          <button id="b-report-reload" style="display:none"
+                  title="현재 화면의 내용을 버리고 서버에서 받은 최신 판독문을 표시합니다">서버 내용 불러오기</button>
           <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">초안 버리기</button>
         </div>
         <div class="redit">
@@ -1508,6 +1510,9 @@
       if (!d && !pending) { bar.style.display = "none"; return; }
       bar.style.display = "flex";
       $("#b-draft-discard").style.display = d ? "" : "none";
+      // pending은 초안이 없어도 생긴다. 서버 값과 화면 값이 갈라졌다고 알려놓고
+      // 검사 재선택만을 탈출구로 남기지 않는다. 가려진 Prelim에는 불러올 본문이 없으므로 숨긴다.
+      $("#b-report-reload").style.display = pending && !r.prelimHidden ? "" : "none";
       if (pending) {
         $("#draftmsg").innerHTML = r.prelimHidden
           ? `<b>● 다른 판독의가 이 검사를 예비 판독으로 넘겼습니다</b> — 쓰던 내용은 그대로 두었지만 저장할 수 없습니다`
@@ -1539,6 +1544,12 @@
       toast("초안을 버렸습니다", "info");
     }
     $("#b-draft-discard").addEventListener("click", discardDraft);
+    $("#b-report-reload").addEventListener("click", () => {
+      // 표시 뒤 상태가 다시 바뀌었을 수도 있다. 가려진 판독문을 force로 빈 값에 덮지 않는다.
+      if (!selectedUid || appState[selectedUid]?.prelimHidden) return;
+      loadReport({ force: true });
+      updateReportButtons();
+    });
     /** 지금 textarea 내용이 마지막으로 저장된 것(초안이 있으면 초안)과 다른가 */
     function reportDirty() {
       if (!selectedUid) return false;
