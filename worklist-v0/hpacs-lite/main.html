@@ -1161,11 +1161,11 @@
       if (heldUid && heldUid !== uid) releaseHold();   // 다른 검사로 가면 잡고 있던 걸 놓는다
       warnedFor = null;
       selectedUid = uid;
-      render(); refreshRight();
+      render(); refreshRight({ forceReport: true });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
     }
-    function refreshRight() {
-      renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadReport();
+    function refreshRight({ forceReport = false } = {}) {
+      renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadReport({ force: forceReport });
       updateReportButtons();
     }
 
@@ -1460,7 +1460,19 @@
       return r.draft ?? r;
     }
 
-    function loadReport() {
+    let reportRefreshPendingFor = null;
+    function loadReport({ force = false } = {}) {
+      /**
+       * 판독문을 그리는 함수가 **스스로** 저장 안 된 입력을 덮지 않는다.
+       * Refresh·Home·재연결처럼 호출자가 늘 때마다 바깥에 가드를 하나씩 달면
+       * 다음 호출 지점이 또 빠진다. 정말 덮어야 하는 생애주기 전환만 force로 밝힌다.
+       */
+      if (!force && reportDirty()) {
+        reportRefreshPendingFor = selectedUid;
+        renderDraftBar();
+        return;
+      }
+      reportRefreshPendingFor = null;
       const r = appState[selectedUid] ?? {};
       // 예비 판독(RS=P) 중이고 내가 지정된 사람이 아니면 서버가 내용을 안 준다.
       // 이때 빈 칸을 그대로 보여주면 "판독문이 없다"로 읽힌다 — 없는 것과 못 보는 것은 다르다.
@@ -1491,8 +1503,15 @@
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
-      if (!d) { bar.style.display = "none"; return; }
+      const pending = !!selectedUid && reportRefreshPendingFor === selectedUid;
+      if (!d && !pending) { bar.style.display = "none"; return; }
       bar.style.display = "flex";
+      $("#b-draft-discard").style.display = d ? "" : "none";
+      if (pending) {
+        $("#draftmsg").innerHTML = `<b>● 서버에 새 내용이 있습니다</b> — 저장 안 된 입력은 덮지 않고 그대로 유지했습니다` +
+          (d ? ` · 초안 버리기를 누르면 서버 내용으로 돌아갑니다` : ``);
+        return;
+      }
       const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
       // 내가 이 초안을 쓰기 시작한 뒤 남이 확정을 했다면, 그걸 지금 말해야 한다.
       // 확정 버튼을 누른 다음에야 알게 되면 이미 늦다.
@@ -1513,7 +1532,7 @@
       }
       appState[uid] = { ...appState[uid], draft: null };
       if (!serverMode) saveApp();
-      if (selectedUid === uid) { loadReport(); updateReportButtons(); }
+      if (selectedUid === uid) { loadReport({ force: true }); updateReportButtons(); }
       toast("초안을 버렸습니다", "info");
     }
     $("#b-draft-discard").addEventListener("click", discardDraft);
@@ -1640,9 +1659,8 @@
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
           appState[uid] = { ...appState[uid], ...st };
           syncStudy(uid);
-          // reset은 서버가 내용을 비웠고, preliminary는 이제부터 가려질 수 있다 —
-          // 둘 다 화면의 판독문을 서버 응답 기준으로 다시 그려야 한다.
-          if (action === "reset" || action === "preliminary") loadReport();
+          // 확정 응답은 내가 방금 선택한 서버 상태다. 여기서는 입력 보호보다 그 결과가 우선한다.
+          loadReport({ force: true });
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
           // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
@@ -1654,7 +1672,7 @@
               const b = await api("GET", "/bootstrap");
               appState[uid] = { ...appState[uid], ...b.states[uid] };
               syncStudy(uid);
-              loadReport(); render(); renderRelated(); updateReportButtons();
+              loadReport({ force: true }); render(); renderRelated(); updateReportButtons();
               toast("서버 판독문을 불러왔습니다. 쓰던 내용은 클립보드에 있습니다.", "info");
             }
             return;
@@ -1674,15 +1692,17 @@
           return;
         }
         const rs = { save: "T", approve: "A", addendum: "A", reset: "W" }[action];
-        appState[uid] = { ...appState[uid], ...content, rs };
+        // 서버 확정은 ReportDraft를 회수한다. 로컬도 초안을 남기면 force 로드가
+        // 방금 확정한 내용 대신 옛 초안을 다시 고르는 서로 다른 생애주기가 된다.
+        appState[uid] = { ...appState[uid], ...content, rs, draft: null };
         if (rs === "A") {
           appState[uid].repDoc = user.split("@")[0];
           appState[uid].confirm = today();
         }
         if (action === "reset") {
           Object.assign(appState[uid], { findings: "", conclusion: "", recommendation: "" });
-          loadReport();
         }
+        loadReport({ force: true });
         cur().rs = rs;
         saveApp();
       }
