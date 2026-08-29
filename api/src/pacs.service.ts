@@ -45,7 +45,6 @@ function inst(c: Caller): string {
   return c.institution;
 }
 
-const RADIOLOGIST_FIELDS = ['rs', 'repDoc', 'confirm'];
 const TECHNICIAN_FIELDS = ['ss', 'matched', 'ward', 'reqHosp', 'em', 'ov', 'orig'];
 
 /** JSON 문자열 컬럼 ↔ 객체 변환. 서버가 깨진 값을 받아도 죽지 않게 감싼다. */
@@ -83,12 +82,25 @@ function toClient(s: any, r: any, actor = '') {
     matched: s.matched, ward: s.ward, reqHosp: s.reqHosp,
     institutionId: s.institutionId ?? null,
     teleInstitutionId: s.teleInstitutionId ?? null,
-    preDoc: s.preDoc ?? undefined, preReviewer: s.preReviewer ?? undefined,
+    /**
+     * ── 아래 필드는 전부 `undefined`가 아니라 `null`이다 ──
+     *
+     * 클라이언트는 `{...기존, ...응답}`으로 상태를 병합한다. 그런데 `JSON.stringify`는
+     * undefined 키를 **통째로 지운다.** 키가 없으면 스프레드가 이전 값을 못 덮으므로
+     * "이 값은 비워졌다"는 사실이 영영 전달되지 않는다.
+     *
+     * 실제로 이 실수를 두 번 했다. 처음엔 `holder`에서(인계문서 §8), 이번엔 나머지
+     * 전부에서. 결과는 **매칭을 해제했는데 화면엔 남의 환자 이름이 그대로 남고**,
+     * **승인이 끝났는데 판독문이 계속 잠긴 것처럼 보이는 것**이었다.
+     *
+     * 비움도 값이다. 값이 사라졌다는 것도 전송해야 한다.
+     */
+    preDoc: s.preDoc ?? null, preReviewer: s.preReviewer ?? null,
     // 화면이 "왜 비어 있는지" 말할 수 있어야 한다. 빈 판독문과 가려진 판독문은 다르다.
-    prelimHidden: hidden || undefined,
-    repDoc: s.repDoc ?? undefined, confirm: s.confirm ?? undefined,
-    ov: parse(s.ov) ?? undefined, orig: parse(s.orig) ?? undefined,
-    oid: s.orderOid ?? undefined,
+    prelimHidden: hidden,
+    repDoc: s.repDoc ?? null, confirm: s.confirm ?? null,
+    ov: parse(s.ov) ?? null, orig: parse(s.orig) ?? null,
+    oid: s.orderOid ?? null,
     // 만료된 점유는 없는 것으로 내보낸다. 화면이 유령 자물쇠를 그리지 않게.
     // undefined가 아니라 null인 이유: JSON.stringify는 undefined 키를 통째로 지운다.
     // 키가 사라지면 클라이언트의 `{...기존, ...응답}` 이 이전 점유자를 그대로 남긴다.
@@ -101,8 +113,21 @@ function toClient(s: any, r: any, actor = '') {
   };
 }
 
-/** 클라이언트가 마음대로 컬럼을 못 만들게 화이트리스트로 거른다. */
-const STATE_FIELDS = ['rs', 'ss', 'em', 'ts', 'matched', 'ward', 'reqHosp', 'repDoc', 'confirm'];
+/**
+ * PATCH로 바꿀 수 있는 필드.
+ *
+ * **`rs`·`repDoc`·`confirm`이 여기 없는 것이 핵심이다.**
+ * 예전엔 있었고, 그래서 `PATCH {rs:"T"}` 한 번으로 예비 판독(RS=P) 잠금이 풀렸다.
+ * 판독문에 걸어둔 관문 네 개(저장·확정·점유·이력)를 전부 우회하는 창문이었다.
+ *
+ * RS는 단순한 컬럼이 아니라 **판독문의 생애주기**다. 상태가 바뀔 때마다 판(version)이
+ * 쌓이고, 승인자가 기록되고, 취소에는 사유가 남아야 한다. 그건 `commitReport`가
+ * 트랜잭션으로 하는 일이고, 여기서 필드 하나 바꾸듯 할 수 있는 일이 아니다.
+ * `repDoc`·`confirm`도 승인의 결과이지 클라이언트가 정할 값이 아니다.
+ */
+const STATE_FIELDS = ['ss', 'em', 'ts', 'matched', 'ward', 'reqHosp'];
+/** 예전에 PATCH로 열려 있던 필드들. 조용히 무시하지 않고 소리 내어 막는다. */
+const REPORT_OWNED_FIELDS = ['rs', 'repDoc', 'confirm'];
 
 /** 원격판독 상태머신. 어느 쪽 기관이 이 전이를 일으킬 수 있는가가 핵심이다. */
 const TELE_BY_OWNER = ['none', 'wait', 'sending', 'sent', 'cancelled', 'fail'];  // 의뢰 기관이 미는 구간
@@ -420,11 +445,31 @@ export class PacsService implements OnModuleInit {
   /** 검사 상태 부분 수정 (RS 토글, Verify, Switch EM/ReqHosp, TS 전이 …) */
   async patchState(uid: string, body: any, c: Caller) {
     const me = inst(c);
+
+    /**
+     * 판독문의 생애주기에 속한 필드는 여기로 못 들어온다.
+     * 조용히 무시하면 클라이언트는 "저장됐다"고 믿고 화면만 앞서 나간다 — 소리 내어 막는다.
+     */
+    const owned = REPORT_OWNED_FIELDS.filter(k => body[k] !== undefined);
+    if (owned.length)
+      throw new BadRequestException(
+        `${owned.join(', ')} 은(는) 판독문 확정(POST /report/commit)으로만 바꿀 수 있습니다`);
+
     // 무엇을 바꾸려 하는가에 따라 필요한 권한이 다르다
-    if (RADIOLOGIST_FIELDS.some(k => body[k] !== undefined)) need(c.roles, 'radiologist', '판독 상태 변경');
     if (TECHNICIAN_FIELDS.some(k => body[k] !== undefined)) need(c.roles, 'technician', '검사 정보 변경');
 
     const prev = await this.gate(uid, c);
+
+    /**
+     * **예비 판독 중인 검사는 여기서도 막는다.**
+     *
+     * 판독문 저장·확정·점유·이력 네 곳에 관문을 달면서 이 한 곳을 빼먹었고,
+     * 그래서 `PATCH {rs:"T"}` 한 번으로 잠금이 통째로 풀렸다. 응답에 판독문 본문까지
+     * 실려 나갔다. **관문은 한 곳만 열려 있어도 관문이 아니다.**
+     */
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException(
+        `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 다룰 수 있습니다.`);
 
     const data: any = {};
     for (const k of STATE_FIELDS) if (body[k] !== undefined) data[k] = body[k];
@@ -468,7 +513,7 @@ export class PacsService implements OnModuleInit {
     // (HPACS 매뉴얼 8.1.2.1.5 — 승인된 검사를 수정하면 판독문을 버리고 새 검사를 만든다)
     // 화면에서도 막고 있지만, 화면의 검사는 검사가 아니다. 서버가 막아야 막힌 것이다.
     if (body.ov !== undefined) {
-      const rs = body.rs ?? prev?.rs ?? 'W';
+      const rs = prev?.rs ?? 'W';
       if (rs !== 'W')
         throw new BadRequestException(`판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: ${rs})`);
     }
@@ -558,6 +603,16 @@ export class PacsService implements OnModuleInit {
      */
     let reviewer: string | undefined;
     if (action === 'preliminary') {
+      /**
+       * 이미 승인된 판독문은 예비 판독으로 되돌릴 수 없다.
+       *
+       * 허용하면 확정된 의무기록이 지정된 두 사람만의 것이 되고, 본문이 body의
+       * 빈 값으로 덮인다. 실제로 그렇게 됐다 — 승인자 본인조차 자기 판독문을 못 봤다.
+       * 되돌리려면 사유가 남는 Reset을 거쳐야 한다.
+       */
+      if (prev?.rs === 'A')
+        throw new BadRequestException(
+          '승인된 판독문은 예비 판독으로 되돌릴 수 없습니다. 먼저 판독 취소(Reset)를 하세요');
       reviewer = String(body.reviewer ?? '').trim();
       if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
       if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
@@ -572,7 +627,19 @@ export class PacsService implements OnModuleInit {
       throw new ForbiddenException(
         `예비 판독의 최종 승인은 지정된 상급 판독의(${prev.preReviewer})만 할 수 있습니다`);
 
-    const rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P' }[action];
+    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P' }[action];
+
+    /**
+     * **예비 판독 중에는 임시 저장이 P를 풀지 못한다.**
+     *
+     * 이걸 빼먹어서 감독이 통째로 우회됐다: 작성자가 `save`로 RS를 T로 떨어뜨린 뒤
+     * `approve`를 부르면, 위의 검사가 `prev.rs === 'P'`를 보므로 그냥 통과했다.
+     * 정상 호출 두 번에 상급자 감독이 사라졌다.
+     *
+     * P에서 빠져나가는 길은 두 개뿐이다 — 지정된 상급자의 승인, 또는 사유가 남는 취소.
+     * 그 사이의 저장은 여전히 예비 판독이다.
+     */
+    if (prev?.rs === 'P' && action === 'save') rs = 'P';
     const content = action === 'reset'
       ? { findings: '', conclusion: '', recommendation: '' }
       : {
@@ -633,7 +700,13 @@ export class PacsService implements OnModuleInit {
     }
     // 판독이 되돌아가면 지정도 풀린다. RS는 W인데 "누구에게 맡겨져 있음"이 남아
     // 판독문이 계속 가려지는 상태가 제일 나쁘다.
-    if (action === 'reset') { stateData.preDoc = null; stateData.preReviewer = null; }
+    if (action === 'reset') {
+      // 판독이 되돌아가면 그 판독에 딸린 이름도 함께 지운다. RS는 W인데 RepDoc에
+      // 판독의 이름과 확정일이 남아 있으면, 화면은 "누가 읽었다"고 말하면서
+      // 동시에 "아직 안 읽었다"고 말하는 셈이다.
+      stateData.preDoc = null; stateData.preReviewer = null;
+      stateData.repDoc = null; stateData.confirm = null;
+    }
     if (action === 'approve' || action === 'addendum') {
       stateData.repDoc = c.actor.split('@')[0];
       stateData.confirm = new Date().toISOString().slice(0, 10);
