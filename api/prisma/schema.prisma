@@ -64,7 +64,8 @@ model StudyState {
   preReviewer String?
   ov        String?                           // Match/Modify로 덮어쓴 값 (JSON)
   orig      String?                           // 덮어쓰기 전 원본 (JSON) — Unmatch 복원용
-  orderOid  String?                           // 매칭된 오더
+  /// 매칭은 1:1이다. nullable unique라 미매칭(NULL)은 여럿이어도 같은 오더가 두 검사에 붙지는 않는다.
+  orderOid  String?  @unique                  // 매칭된 오더
   holder    String?                           // 지금 판독문을 쓰고 있는 사람
   heldAt    DateTime?                         // 마지막 하트비트. TTL이 지나면 점유가 풀린다
   updatedAt DateTime @updatedAt
@@ -161,7 +162,8 @@ model Order {
   ward      String
   reqDoc    String
   matched   String  @default("U")
-  studyUid  String?
+  /// 반대편에도 같은 1:1 제약을 둔다. 애플리케이션 검사 사이의 경쟁은 DB만이 끝까지 볼 수 있다.
+  studyUid  String? @unique
 
   @@index([institutionId])
 }

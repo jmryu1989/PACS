@@ -971,12 +971,10 @@ export class PacsService implements OnModuleInit {
     // 오더도 검사도 내 기관 것이어야 한다. 남의 병원 오더를 우리 검사에 붙이면
     // 환자 정보가 기관을 넘어 덮어써진다 — 조용히 섞이는 최악의 경로다.
     if (order.institutionId !== me) throw new BadRequestException('오더를 찾을 수 없습니다');
-    if (order.matched === 'M') throw new BadRequestException('이미 매칭된 오더입니다');
 
     const prev = await this.gate(uid, c);
     if (prev && prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 매칭할 수 없습니다 (보유 기관의 일입니다)');
-    if (prev?.matched === 'M') throw new BadRequestException('이미 매칭된 검사입니다');
     // Match도 환자 정보를 덮어쓰는 동작이므로 같은 규칙을 받는다
     if (prev && prev.rs !== 'W')
       throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: ${prev.rs})`);
@@ -987,14 +985,47 @@ export class PacsService implements OnModuleInit {
     };
     const orig = parse(prev?.orig) ?? patient?.orig ?? null;
 
-    const [state] = await this.prisma.$transaction([
-      this.prisma.studyState.upsert({
-        where: { uid },
-        create: { uid, institutionId: me, reqHosp: this.instName(me), matched: 'M', orderOid: oid, ov: dump(ov), orig: dump(orig), ward: order.ward },
-        update: { matched: 'M', orderOid: oid, ov: dump(ov), orig: dump(orig), ward: order.ward },
-      }),
-      this.prisma.order.update({ where: { oid }, data: { matched: 'M', studyUid: uid } }),
-    ]);
+    let state;
+    try {
+      state = await this.prisma.$transaction(async tx => {
+        /**
+         * 먼저 읽은 `matched` 값은 두 요청이 함께 U를 봐버릴 수 있다. 조건부 갱신은
+         * "아직 U일 때만 내가 M으로 바꾼다"를 DB 한 문장으로 만들고, 행 잠금 뒤의
+         * 실제 상태에서 한 요청만 count=1을 받게 한다.
+         */
+        const claimedOrder = await tx.order.updateMany({
+          where: { oid, institutionId: me, matched: 'U' },
+          data: { matched: 'M', studyUid: uid },
+        });
+        if (claimedOrder.count !== 1)
+          throw new BadRequestException('이미 매칭된 오더입니다. 목록을 새로고침한 뒤 다시 선택하세요.');
+
+        const data = { matched: 'M', orderOid: oid, ov: dump(ov), orig: dump(orig), ward: order.ward };
+        if (!prev) {
+          return tx.studyState.create({
+            data: { uid, institutionId: me, reqHosp: this.instName(me), ...data },
+          });
+        }
+
+        // 검사 쪽도 같은 상태였을 때만 선점한다. 실패하면 위 오더 갱신도 함께 롤백된다.
+        const claimedStudy = await tx.studyState.updateMany({
+          where: { uid, institutionId: me, matched: 'U' }, data,
+        });
+        if (claimedStudy.count !== 1)
+          throw new BadRequestException('이미 매칭된 검사입니다. 목록을 새로고침한 뒤 다시 선택하세요.');
+        return tx.studyState.findUniqueOrThrow({ where: { uid } });
+      });
+    } catch (e: any) {
+      /**
+       * 서로 다른 오더를 같은 검사에 거는 경쟁은 각 오더 행이 달라 updateMany만으로
+       * 직렬화되지 않는다. 양쪽 nullable unique가 마지막 관문이고, 그 충돌은 사용자가
+       * 조치할 수 있는 말로 바꾼다. PostgreSQL은 NULL 중복을 허용하므로 미매칭은 막지 않는다.
+       */
+      if (e?.code === 'P2002')
+        throw new BadRequestException(
+          '이미 다른 오더 또는 검사와 매칭되었습니다. 목록을 새로고침한 뒤 다시 선택하세요.');
+      throw e;
+    }
     await this.audit(c.actor, 'match', uid, { oid, ov, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
     return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
