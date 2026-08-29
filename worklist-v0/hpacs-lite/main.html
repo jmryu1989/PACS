@@ -1466,17 +1466,18 @@
        * 판독문을 그리는 함수가 **스스로** 저장 안 된 입력을 덮지 않는다.
        * Refresh·Home·재연결처럼 호출자가 늘 때마다 바깥에 가드를 하나씩 달면
        * 다음 호출 지점이 또 빠진다. 정말 덮어야 하는 생애주기 전환만 force로 밝힌다.
+       *
+       * 단, 보호하는 것은 textarea의 **값뿐**이다. 잠금·권한까지 함께 건너뛰면
+       * 다른 사람이 Prelim으로 넘긴 뒤에도 계속 쓸 수 있는 화면이 남는다.
+       * "무엇이 들어 있는가"와 "지금 쓸 수 있는가"는 서로 다른 상태다.
        */
-      if (!force && reportDirty()) {
-        reportRefreshPendingFor = selectedUid;
-        renderDraftBar();
-        return;
-      }
-      reportRefreshPendingFor = null;
       const r = appState[selectedUid] ?? {};
       // 예비 판독(RS=P) 중이고 내가 지정된 사람이 아니면 서버가 내용을 안 준다.
       // 이때 빈 칸을 그대로 보여주면 "판독문이 없다"로 읽힌다 — 없는 것과 못 보는 것은 다르다.
       const locked = !!r.prelimHidden;
+      // 자동 저장된 내 초안은 DOM과 같아 dirty가 아니어도, 잠금 전환이 그 글을 지워서는 안 된다.
+      const preserveValue = !force && (reportDirty() || (locked && !!r.draft));
+      reportRefreshPendingFor = preserveValue ? selectedUid : null;
       const src = locked ? {} : reportSource();
       const ph = locked
         ? `${r.preReviewer ?? "지정된 판독의"} 님이 최종 판독 중입니다 (RS: P) — 내용은 지정된 판독의만 볼 수 있습니다`
@@ -1485,7 +1486,7 @@
                                  ["#conclusion", "Please enter conclusion"],
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
-        el.value = locked ? "" : (src[sel.slice(1)] ?? "");
+        if (!preserveValue) el.value = locked ? "" : (src[sel.slice(1)] ?? "");
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = locked || !KinAuth.has("radiologist");
       }
@@ -1508,8 +1509,10 @@
       bar.style.display = "flex";
       $("#b-draft-discard").style.display = d ? "" : "none";
       if (pending) {
-        $("#draftmsg").innerHTML = `<b>● 서버에 새 내용이 있습니다</b> — 저장 안 된 입력은 덮지 않고 그대로 유지했습니다` +
-          (d ? ` · 초안 버리기를 누르면 서버 내용으로 돌아갑니다` : ``);
+        $("#draftmsg").innerHTML = r.prelimHidden
+          ? `<b>● 다른 판독의가 이 검사를 예비 판독으로 넘겼습니다</b> — 쓰던 내용은 그대로 두었지만 저장할 수 없습니다`
+          : `<b>● 서버에 새 내용이 있습니다</b> — 저장 안 된 입력은 덮지 않고 그대로 유지했습니다` +
+            (d ? ` · 초안 버리기를 누르면 서버 내용으로 돌아갑니다` : ``);
         return;
       }
       const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
@@ -2008,10 +2011,10 @@
                 draft: editing.draft ?? null };
               syncStudy(selectedUid);
             }
-            // render()만 한다. refreshRight()는 판독문을 textarea에 다시 써넣어
-            // 타이핑 중인 커서를 맨 앞으로 되돌린다 — 30초마다 그러면 못 쓴다.
-            // 새 검사가 왔다고 오른쪽 판이 바뀔 일도 없다(선택이 안 바뀌었으니).
+            // 썸네일 등 오른쪽 전체를 다시 그릴 필요는 없지만, 판독문 잠금은 반영해야 한다.
+            // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
             render();
+            if (selectedUid) { loadReport(); updateReportButtons(); }
             if (fresh.length)
               toast(`새 검사 ${fresh.length}건이 도착했습니다` +
                     (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : ""), "info");
@@ -2030,23 +2033,16 @@
               //     화면은 초안을 그리고, 확정본은 "그 사이 남이 v5를 확정했다" 안내에만 쓰인다.
               // 나머지(rs·ss·holder 등)도 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
               const mine = appState[uid] ?? {};
-              /**
-               * 내가 이 검사에 쓰던 게 있는가. **병합 전에** 판단해야 한다 —
-               * 병합한 뒤에 물으면 서버가 보낸 새 확정본과 화면을 비교하게 되어
-               * "안 썼는데 썼다"가 나오고, 자동 저장이 남이 확정한 내용을 밀어내는
-               * 유령 초안을 만든다.
-               */
-              const busy = !!mine.draft || reportDirty();
               appState[uid] = { ...mine, ...st,
                 version: mine.version ?? 0,
                 draft: mine.draft ?? null };
               /**
-               * 안 쓰고 있으면 남이 바꾼 것을 화면에도 반영한다.
+               * 판독문 값은 loadReport가 스스로 지키므로, 호출자는 항상 상태를 반영한다.
                * 예전엔 폴링이 `prelimHidden`만 반영하고 판독문 패널은 그대로 뒀다 —
                * 내가 읽는 중에 남이 그 검사를 Prelim으로 넘기면 내용이 그대로 남고
                * 버튼도 활성인 채라, Save를 눌러야 403을 만났다. (남은버그 3-1)
                */
-              if (!busy && selectedUid === uid) { loadReport(); updateReportButtons(); }
+              if (selectedUid === uid) { loadReport(); updateReportButtons(); }
             } else {
               appState[uid] = { ...appState[uid], ...st };
             }
