@@ -225,6 +225,64 @@ export class PacsService implements OnModuleInit {
     return s.institutionId === institution || s.teleInstitutionId === institution;
   }
 
+  /**
+   * ── 미배정 검사 (institutionId = null) ──
+   *
+   * DICOM `InstitutionName`을 못 알아본 검사는 어느 기관 것도 아니다. 그건 의도한
+   * 설계다 — 모르는 기관명을 아무 데나 밀어넣으면 남의 병원 검사가 조용히 섞인다.
+   *
+   * 그런데 그 결과 **그 검사는 누구에게도 안 보인다.** 장비 태그 오타 하나로
+   * 영상이 시스템에 들어와 있는데 아무도 모르는 상태가 되고, 아무도 모르므로
+   * 아무도 고치지 않는다. 조용히 사라지는 검사는 조용히 섞이는 검사만큼 나쁘다.
+   *
+   * 그래서 **관리자용 통로 하나**를 낸다. 목록에 섞어 보여주지 않고, 별도 경로로만
+   * 보이고, 배정은 감사로그에 남는다. (§9 — 편의로 기관 경계를 뚫지는 않는다)
+   */
+  async unassigned(c: Caller) {
+    need(c.roles, 'admin', '미배정 검사 조회');
+    inst(c);   // 소속이 없는 계정은 admin이어도 여기서 막힌다
+    const orphans = await this.prisma.studyState.findMany({ where: { institutionId: null } });
+    if (!orphans.length) return { studies: [], institutions: this.institutions.map(i => ({ id: i.id, name: i.name })) };
+    const set = new Set(orphans.map(o => o.uid));
+    const qido = await this.orthanc.studies();
+    const studies = qido
+      .filter(st => set.has(OrthancService.tag(st, '0020000D')))
+      .map(st => ({
+        uid: OrthancService.tag(st, '0020000D'),
+        id: OrthancService.tag(st, '00100020'),
+        name: OrthancService.tag(st, '00100010').replace(/\^/g, ' '),
+        date: OrthancService.tag(st, '00080020'),
+        desc: OrthancService.tag(st, '00081030'),
+        // 왜 못 알아봤는지 사람이 보고 판단할 수 있어야 한다. 이 문자열이 단서다.
+        dicomInstitution: OrthancService.tag(st, '00080080'),
+      }));
+    return { studies, institutions: this.institutions.map(i => ({ id: i.id, name: i.name })) };
+  }
+
+  /**
+   * 미배정 검사를 기관에 배정한다.
+   *
+   * **이미 배정된 검사는 여기로 옮기지 못한다.** 판독문이 붙은 검사를 다른 기관으로
+   * 옮기는 것은 전혀 다른 무게의 일이다 — 누가 읽었는지, 누가 볼 수 있는지가 함께
+   * 바뀐다. 이 통로는 "고아를 집에 보내는" 것 하나만 한다.
+   */
+  async assignInstitution(uid: string, institutionId: string, c: Caller) {
+    need(c.roles, 'admin', '검사 기관 배정');
+    inst(c);
+    if (!this.institutions.some(i => i.id === institutionId))
+      throw new BadRequestException(`알 수 없는 기관입니다: ${institutionId}`);
+    const s = await this.prisma.studyState.findUnique({ where: { uid } });
+    if (!s) throw new NotFoundException('검사를 찾을 수 없습니다');
+    if (s.institutionId)
+      throw new BadRequestException(
+        `이미 ${this.instName(s.institutionId)}에 배정된 검사입니다. 기관 이동은 이 통로로 하지 않습니다.`);
+    const saved = await this.prisma.studyState.update({
+      where: { uid }, data: { institutionId, reqHosp: this.instName(institutionId) },
+    });
+    await this.audit(c.actor, 'study.assign', uid, { institutionId });
+    return toClient(saved, await this.prisma.report.findUnique({ where: { uid } }), c.actor, null);
+  }
+
   /** 쓰기 전 관문. 없는 검사와 남의 검사는 같은 메시지로 막는다(존재 여부도 정보다). */
   /**
    * 내 초안 한 건. **모든 `toClient` 호출이 이걸 실어야 한다.**
@@ -376,8 +434,17 @@ export class PacsService implements OnModuleInit {
   /** 내 필터 + 내 상용구. 처음 보는 계정이면 기본 상용구를 넣어준다. */
   async prefs(c: Caller) {
     const owner = c.actor;
+    /**
+     * 새 계정에는 기본 상용구를 넣어준다 — 빈 목록은 버그로 보이기 때문.
+     * (HPACS도 "신규계정인 경우 Reading Template 생성이 되지 않았던 오류"를 고친 적이 있다)
+     *
+     * **단, 판독의에게만.** 상용구는 판독문을 쓰는 도구다. 방사선사는 판독문을 안 쓰므로
+     * 그 사람 계정에 판독 상용구가 세 개 생기면, 못 쓰는 기능이 목록에 놓여 있는 셈이다.
+     * 화면에 있는데 아무것도 못 하는 것은 안내가 아니라 소음이다.
+     */
+    const canRead = c.roles?.includes('radiologist') || c.roles?.includes('admin');
     const n = await this.prisma.readingTemplate.count({ where: { owner } });
-    if (n === 0)
+    if (n === 0 && canRead)
       await this.prisma.readingTemplate.createMany({
         data: SEED_TEMPLATES.map(t => ({ ...t, owner })),
       });

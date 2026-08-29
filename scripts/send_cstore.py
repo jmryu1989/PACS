@@ -122,7 +122,14 @@ def main() -> None:
     print(f"  StudyUID  {gen.study_uid}")
     if fail:
         sys.exit("일부 인스턴스가 저장되지 않았다. 보낸 수와 저장된 수가 다르면 그건 실패다.")
-    print("\nHPACS-lite의 Technician 탭에서 SS=Unverified 로 보인다. Verify해야 Radiology 탭에 올라온다.")
+    # 기관명을 API가 못 알아보면 이 검사는 **어느 워크리스트에도 안 뜬다.**
+    # 그걸 모르고 "Technician 탭에서 보인다"고만 안내하면, 안 보이는 이유를
+    # 엉뚱한 데서 찾게 된다. 등록된 별칭은 Institution.dicomNames에 있다.
+    print(
+        f'\n기관명 "{a.institution}"이 등록된 별칭과 맞으면 '
+        "Technician 탭에 SS=Unverified 로 뜬다. Verify해야 Radiology 탭에 올라온다.\n"
+        "맞지 않으면 **미배정**이 되어 어느 워크리스트에도 안 뜬다 — "
+        "관리자 계정의 메뉴바 [⚠ 미배정]에서 배정하거나 별칭을 고칠 것.")
 
 
 if __name__ == "__main__":

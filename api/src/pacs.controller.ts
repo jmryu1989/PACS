@@ -1,6 +1,21 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { AuthGuard, Public } from './auth.guard';
+
+/**
+ * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
+ *
+ * `+"abc"`는 `NaN`이고, Prisma는 `where: { id: NaN }`을 받으면 쿼리를 만들다
+ * 터져서 **500**을 낸다. 잘못된 요청(400)이 서버 오류(500)로 보이면,
+ * 로그를 보는 사람은 서버가 고장난 줄 알고 엉뚱한 데를 파게 된다.
+ * 경계에서 걸러야 안쪽이 깨끗하다.
+ */
+function numId(raw: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0)
+    throw new BadRequestException(`잘못된 id입니다: ${raw}`);
+  return n;
+}
 
 /**
  * 모든 엔드포인트가 Keycloak 토큰을 요구한다(@Public 제외).
@@ -54,12 +69,12 @@ export class PacsController {
   /** 기본 필터 지정/해제 — 로그인하면 자동으로 걸리는 그 필터 */
   @Patch('filters/:id/default')
   setDefaultFilter(@Param('id') id: string, @Body() body: any, @Req() req: any) {
-    return this.svc.setDefaultFilter(+id, body?.on !== false, caller(req));
+    return this.svc.setDefaultFilter(numId(id), body?.on !== false, caller(req));
   }
 
   @Delete('filters/:id')
   deleteFilter(@Param('id') id: string, @Req() req: any) {
-    return this.svc.deleteFilter(+id, caller(req));
+    return this.svc.deleteFilter(numId(id), caller(req));
   }
 
   @Post('templates')
@@ -69,7 +84,7 @@ export class PacsController {
 
   @Delete('templates/:id')
   deleteTemplate(@Param('id') id: string, @Req() req: any) {
-    return this.svc.deleteTemplate(+id, caller(req));
+    return this.svc.deleteTemplate(numId(id), caller(req));
   }
 
   @Get('bootstrap')
@@ -84,6 +99,18 @@ export class PacsController {
   @Get('studies')
   studies(@Req() req: any) {
     return this.svc.listStudies(caller(req));
+  }
+
+  /** 기관을 못 알아본 검사 — 관리자 전용 통로. 워크리스트에는 안 섞인다 */
+  @Get('unassigned')
+  unassigned(@Req() req: any) {
+    return this.svc.unassigned(caller(req));
+  }
+
+  /** 미배정 검사를 기관에 배정 (고아를 집에 보내는 것만 한다 — 기관 이동은 아니다) */
+  @Post('studies/:uid/assign')
+  assign(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.assignInstitution(uid, String(body?.institutionId ?? ''), caller(req));
   }
 
   @Patch('studies/:uid')
