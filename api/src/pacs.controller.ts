@@ -130,6 +130,12 @@ export class PacsController {
     return this.svc.discardDraft(uid, caller(req));
   }
 
+  /** 관리자 강제 해제 — 모든 초안을 폐기 이력으로 보존한 뒤 지운다 */
+  @Delete('studies/:uid/draft/force')
+  forceDiscardDrafts(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.forceDiscardDrafts(uid, caller(req));
+  }
+
   /** 확정 — save / approve / addendum / reset / preliminary. 내용·버전·RS를 한 트랜잭션으로 */
   @Post('studies/:uid/report/commit')
   commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {

@@ -706,6 +706,72 @@ export class PacsService implements OnModuleInit {
   }
 
   /**
+   * 관리자용 초안 강제 해제.
+   *
+   * 평소의 discardDraft는 **내 초안만** 지운다. 그 경계를 느슨하게 만들어 관리자가
+   * 남의 초안을 일반 경로로 지우게 하면, 실수인지 강제 조치인지 이력에서 구분할 수 없다.
+   * 그래서 별도 admin 경로에서만 모든 초안을 지우고, 지우기 직전 내용을 판으로 남긴다.
+   *
+   * ReportVersion과 ReportDraft를 같은 트랜잭션에서 잠그는 이유는 조회한 초안과 실제로
+   * 지운 초안이 달라지는 틈을 없애기 위해서다. 자동 저장이 중간에 끼면 새 글을 지우면서
+   * 이전 글만 보존하는, 가장 나쁜 종류의 거짓 이력이 된다.
+   */
+  async forceDiscardDrafts(uid: string, c: Caller) {
+    need(c.roles, 'admin', '판독문 초안 강제 해제');
+    const me = inst(c);
+    await this.gate(uid, c);
+
+    return this.prisma.$transaction(async tx => {
+      // 판 번호를 먼저 정하고 초안을 나중에 지우는 commitReport와 잠금 순서를 맞춘다.
+      await tx.$executeRaw`LOCK TABLE "ReportVersion" IN SHARE ROW EXCLUSIVE MODE`;
+      await tx.$executeRaw`LOCK TABLE "ReportDraft" IN SHARE ROW EXCLUSIVE MODE`;
+
+      const drafts = await tx.reportDraft.findMany({
+        where: { uid }, orderBy: { author: 'asc' },
+      });
+      if (!drafts.length) {
+        // 강제 해제 호출 자체도 관리자 조치다. 지울 것이 없었어도 흔적은 남긴다.
+        await tx.auditLog.create({
+          data: {
+            actor: c.actor, action: 'report.draft.force-discard', target: uid,
+            detail: dump({ by: me, drafts: [], versions: [] }),
+          },
+        });
+        return { ok: true, count: 0, drafts: [], versions: [] };
+      }
+
+      const last = await tx.reportVersion.findFirst({
+        where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
+      });
+      const firstVersion = (last?.version ?? 0) + 1;
+      const versions = drafts.map((d, i) => firstVersion + i);
+      const summary = drafts.map(d => ({
+        author: d.author,
+        len: [d.findings.length, d.conclusion.length, d.recommendation.length],
+      }));
+
+      await tx.reportVersion.createMany({
+        data: drafts.map((d, i) => ({
+          uid, version: versions[i], action: 'discarded',
+          findings: d.findings, conclusion: d.conclusion, recommendation: d.recommendation,
+          reason: `관리자 강제 초안 해제 (해제자: ${c.actor})`,
+          author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
+        })),
+      });
+      await tx.reportDraft.deleteMany({ where: { uid } });
+      // 판독문 전문은 감사로그에 넣지 않는다. 누구의 몇 글자를 지웠는지만 남긴다.
+      await tx.auditLog.create({
+        data: {
+          actor: c.actor, action: 'report.draft.force-discard', target: uid,
+          detail: dump({ by: me, drafts: summary, versions }),
+        },
+      });
+
+      return { ok: true, count: drafts.length, drafts: summary, versions };
+    });
+  }
+
+  /**
    * 판독문 확정. 내용 저장 + 버전 적립 + RS 전이를 **한 번에, 트랜잭션으로** 한다.
    *
    * 왜 한 엔드포인트인가: 예전엔 프론트가 판독문 PUT과 상태 PATCH를 따로 쐈다.
@@ -1071,7 +1137,14 @@ export class PacsService implements OnModuleInit {
      * 초안도 아직 진술은 아니지만 누군가 쓰는 중인 글이므로 삭제로 가로채지 않는다.
      */
     const [version, draft] = await Promise.all([
-      this.prisma.reportVersion.findFirst({ where: { uid }, select: { id: true } }),
+      /**
+       * 강제 해제로 보존한 discarded 초안만 있는 검사는 이후 삭제할 수 있어야 한다.
+       * 그것은 판독 결정이 아니라 삭제 직전의 안전 사본이다. save/approve/reset 같은
+       * 실제 생애주기 이력이 하나라도 있으면 이전과 똑같이 삭제를 막는다.
+       */
+      this.prisma.reportVersion.findFirst({
+        where: { uid, action: { not: 'discarded' } }, select: { id: true },
+      }),
       this.prisma.reportDraft.findFirst({ where: { uid }, select: { author: true } }),
     ]);
     if (version)
@@ -1079,7 +1152,8 @@ export class PacsService implements OnModuleInit {
         '판독 이력이 있는 검사는 삭제할 수 없습니다. 판독 취소(Reset)로 되돌리세요.');
     if (draft)
       throw new BadRequestException(
-        '작성 중인 판독문 초안이 있는 검사는 삭제할 수 없습니다. 초안을 확정하거나 버린 뒤 다시 시도하세요.');
+        `작성 중인 판독문 초안이 있는 검사는 삭제할 수 없습니다. ` +
+        `작성자(${draft.author})에게 확정 또는 폐기를 요청하거나 관리자에게 강제 해제를 요청하세요.`);
 
     if (prev?.orderOid)
       await this.prisma.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });
