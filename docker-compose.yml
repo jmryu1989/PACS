@@ -79,6 +79,11 @@ services:
       KC_ISSUER: http://localhost:8080/realms/kin
       KC_JWKS_URL: http://keycloak:8080/realms/kin/protocol/openid-connect/certs
       KC_AUDIENCE: kin-api
+      # API가 브라우저 대신 Orthanc의 QIDO-RS를 부른다 (기관 필터를 서버에 두기 위해).
+      # 도커 네트워크 안 주소이므로 localhost가 아니라 서비스 이름이다.
+      ORTHANC_URL: http://orthanc:8042
+      ORTHANC_USER: admin
+      ORTHANC_PASS: admin
     ports:
       - "3000:3000"
     depends_on:
@@ -86,6 +91,8 @@ services:
         condition: service_healthy   # DB는 준비될 때까지 기다린다 (Prisma가 바로 붙는다)
       keycloak:
         condition: service_started   # Keycloak은 기다리지 않는다 (첫 요청 때 필요)
+      orthanc:
+        condition: service_started   # Orthanc도 첫 요청 때 필요하다 (부팅 때가 아니라)
     volumes:
       # 소스만 마운트 → 코드 고치면 컨테이너 안에서 자동 재시작(watch).
       # node_modules는 마운트하지 않는다 (윈도우 파일과 리눅스 바이너리가 섞이면 깨진다)

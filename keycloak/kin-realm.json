@@ -12,15 +12,22 @@
   "bruteForceProtected": true,
   "failureFactor": 5,
   "waitIncrementSeconds": 60,
-
   "roles": {
     "realm": [
-      { "name": "radiologist", "description": "판독의 — 판독문 작성·승인" },
-      { "name": "technician",  "description": "방사선사 — 검사 확인(Verify), 오더 매칭" },
-      { "name": "admin",       "description": "관리자" }
+      {
+        "name": "radiologist",
+        "description": "판독의 — 판독문 작성·승인"
+      },
+      {
+        "name": "technician",
+        "description": "방사선사 — 검사 확인(Verify), 오더 매칭"
+      },
+      {
+        "name": "admin",
+        "description": "관리자"
+      }
     ]
   },
-
   "clients": [
     {
       "clientId": "kin-web",
@@ -56,11 +63,23 @@
             "id.token.claim": "false",
             "access.token.claim": "true"
           }
+        },
+        {
+          "name": "kin-institution-groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "claim.name": "groups"
+          }
         }
       ]
     }
   ],
-
   "users": [
     {
       "username": "jmryu",
@@ -69,8 +88,21 @@
       "lastName": "류",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "kin1234", "temporary": false }],
-      "realmRoles": ["radiologist", "technician", "admin"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kin1234",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "radiologist",
+        "technician",
+        "admin"
+      ],
+      "groups": [
+        "/hallym"
+      ]
     },
     {
       "username": "doctor",
@@ -79,8 +111,19 @@
       "lastName": "의",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "kin1234", "temporary": false }],
-      "realmRoles": ["radiologist"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kin1234",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "radiologist"
+      ],
+      "groups": [
+        "/hallym"
+      ]
     },
     {
       "username": "tech",
@@ -89,8 +132,79 @@
       "lastName": "사",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [{ "type": "password", "value": "kin1234", "temporary": false }],
-      "realmRoles": ["technician"]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kin1234",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "technician"
+      ],
+      "groups": [
+        "/hallym"
+      ]
+    },
+    {
+      "username": "kdoctor",
+      "email": "kdoctor@kin.kr",
+      "firstName": "판독",
+      "lastName": "센터의",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kin1234",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "radiologist"
+      ],
+      "groups": [
+        "/kin-center"
+      ]
+    },
+    {
+      "username": "ktech",
+      "email": "ktech@kin.kr",
+      "firstName": "센터",
+      "lastName": "기사",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "kin1234",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "technician"
+      ],
+      "groups": [
+        "/kin-center"
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "name": "hallym",
+      "path": "/hallym",
+      "attributes": {},
+      "realmRoles": [],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "kin-center",
+      "path": "/kin-center",
+      "attributes": {},
+      "realmRoles": [],
+      "clientRoles": {},
+      "subGroups": []
     }
   ]
 }

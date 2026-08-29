@@ -456,6 +456,9 @@
     // 동업자는 다른 데이터를 봤다. 이제 서버가 진실의 원천이고 localStorage는 폴백일 뿐이다.
     const API = `${location.protocol === "file:" ? "http:" : location.protocol}//${location.hostname || "localhost"}:3000/api`;
     let serverMode = false;
+    // 내 소속 기관. 서버가 토큰의 그룹에서 뽑아 bootstrap으로 알려준다.
+    // 화면이 정하는 값이 아니다 — 여기 있는 건 표시용이고, 진짜 필터는 서버에 있다.
+    let myInstitution = null, myInstitutionName = "", institutions = [];
 
     async function api(method, path, body) {
       const tok = await KinAuth.token();
@@ -652,14 +655,65 @@
       s.ss = a.ss ?? (s.synthetic ? "Unverified" : "Verified");
       s.matched = a.matched ?? "U";
       s.ward = a.ward ?? s.ward ?? "";
-      s.reqHosp = a.reqHosp ?? s.reqHosp ?? "KIN";
+      // 기관명은 서버가 정한다. Switch ReqHosp로 손으로 적어 넣던 값은
+      // 기관이 실제 데이터가 된 지금 그것을 덮으면 안 된다.
+      s.reqHosp = s.institutionName ? s.reqHosp : (a.reqHosp ?? s.reqHosp ?? "KIN");
       s.holder = a.holder;          // 서버가 만료된 점유는 빼고 준다
       s.version = a.version ?? 0;   // 낙관적 락 기준
       if (a.ov) Object.assign(s, a.ov);
       return s;
     }
 
+    /**
+     * 검사 목록.
+     *
+     * 서버 모드에서는 **API가 준 목록만** 쓴다. 예전엔 여기서 Orthanc의
+     * /dicom-web/studies 를 직접 불렀는데, 그러면 기관 필터를 걸 곳이 화면밖에 없다.
+     * 화면 필터는 경계가 아니라 커튼이다 — 주소창에 그 URL을 치면 다 보인다.
+     * 이제 서버가 QIDO를 대신 부르고 기관으로 거른 뒤 상태까지 얹어서 준다.
+     *
+     * 서버가 없을 때(데모·오프라인)만 Orthanc 직통 경로가 남는다. 그 경로에는
+     * 기관 개념이 없으므로 전부 "(로컬)"로 보인다 — 진짜처럼 보이면 안 되니까.
+     */
     async function load() {
+      try {
+        if (!serverMode) throw new Error("no-server");
+        const r = await api("GET", "/studies");
+        studies = r.studies.map(s => {
+          appState[s.uid] = { ...appState[s.uid], ...s.state };
+          return applyState({
+            uid: s.uid, pf: "·",
+            count: s.count, series: s.series, acc: s.acc,
+            id: s.id, name: s.name,
+            age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
+            birth: fmtD(s.birth), sex: s.sex,
+            modality: s.modality, desc: s.desc, date: fmtD(s.date),
+            // ReqHosp 열에 들어가는 진짜 기관명. 원격판독으로 받은 검사는 표시를 붙인다 —
+            // 내 병원 검사인지 남의 병원 검사인지가 판독의에게 한눈에 보여야 한다.
+            institutionName: s.institutionName,
+            reqHosp: s.tele ? `${s.institutionName} ▸원격` : s.institutionName,
+            tele: s.tele,
+          });
+        });
+        mergeIncoming();
+        render(); refreshRight();
+        try {
+          const st = await (await fetch("/statistics")).json();
+          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB 사용";
+        } catch (e) {}
+        return;
+      } catch (e) {
+        // 서버 모드에서 목록이 실패하면 **가짜 데이터로 내려가지 않는다.**
+        // 빈 화면 + 빨간 메시지가, 남의 병원 검사나 데모 환자를 진짜인 척
+        // 보여주는 것보다 훨씬 낫다. (인계문서 §4-7과 같은 원칙)
+        if (serverMode) {
+          studies = [];
+          $("#err").textContent = "검사 목록을 불러오지 못했습니다 — " + e.message;
+          toast("검사 목록 실패: " + e.message, "err");
+          render(); refreshRight();
+          return;
+        }
+      }
       try {
         const res = await fetch("/dicom-web/studies?includefield=00081030,00201206,00201208");
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -677,6 +731,7 @@
             birth: fmtD(birth), sex: tagv(st, "00100040"),
             modality: st["00080061"]?.Value?.join(",") ?? "",
             desc: tagv(st, "00081030"), date: fmtD(date),
+            reqHosp: "(로컬)",
           });
         });
         mergeIncoming();
@@ -1184,7 +1239,7 @@
         if (a[k] !== undefined) s[k] = a[k];
       if (a.holder === null || a.holder === undefined) s.holder = a.holder;
       if (a.ward) s.ward = a.ward;
-      if (a.reqHosp) s.reqHosp = a.reqHosp;
+      if (a.reqHosp && !s.institutionName) s.reqHosp = a.reqHosp;
     }
 
     // ══════════ 동시 판독 점유 (교훈 §2) ══════════
@@ -1250,12 +1305,29 @@
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
     // 지금은 30초 폴링. 실시간(SSE)은 사람이 늘어나면 그때.
     let poll = null;
+    /** 지난 폴링이 본 상태 uid 집합. "새로 생긴 것"을 판단하는 기준. */
+    let seenStateUids = new Set();
     function startPolling() {
+      seenStateUids = new Set(Object.keys(appState));
       clearInterval(poll);
       poll = setInterval(async () => {
         if (!serverMode || document.hidden) return;
         try {
           const b = await api("GET", "/bootstrap");
+          // 원격판독으로 검사가 **새로 넘어오면** 목록 자체가 달라진다.
+          // 상태만 갱신하면 받는 쪽 화면에 그 검사가 영영 안 나타난다.
+          //
+          // 비교 대상은 "화면에 있는 검사"가 아니라 "지난번 폴링이 본 상태 목록"이다.
+          // 화면과 비교하면, 목록에 못 실리는 행(예: Orthanc에서 지워진 검사의 상태)이
+          // 하나 남아 있을 때 30초마다 영원히 새로고침하게 된다.
+          const now = Object.keys(b.states);
+          const fresh = now.filter(uid => !seenStateUids.has(uid));
+          now.forEach(uid => seenStateUids.add(uid));
+          if (fresh.length) {
+            await load();
+            if (!document.hidden) toast(`새 검사 ${fresh.length}건이 도착했습니다`, "info");
+            return;
+          }
           for (const [uid, st] of Object.entries(b.states)) {
             if (uid === selectedUid) {
               // 지금 편집 중인 검사는 두 가지만 보호한다:
@@ -1448,21 +1520,49 @@ ${r.recommendation ?? ""}
 
     // ── 원격판독 의뢰 상태머신 (TS, 6.3.2) ──
     // none → wait → sending → sent → inReading → completed  (+ cancelled/fail)
-    function setTs(uid, ts) {
+    async function setTs(uid, ts, teleTo) {
       const s = studies.find(x => x.uid === uid);
       if (!s) return;
+      if (serverMode) {
+        // TS는 유일하게 기관을 넘는 상태다. 서버가 거절하면 화면도 되돌린다 —
+        // 화면만 앞서 나가면 "보낸 줄 알았는데 안 갔다"가 된다.
+        try {
+          const st = await api("PATCH", `/studies/${encodeURIComponent(uid)}`,
+            teleTo ? { ts, teleTo } : { ts });
+          appState[uid] = { ...appState[uid], ...st };
+          syncStudy(uid); render();
+        } catch (e) { toast("원격판독 상태 변경 실패: " + e.message, "err"); }
+        return;
+      }
       s.ts = ts;
       appState[uid] = { ...appState[uid], ts };
       saveApp(uid, { ts }); render();
     }
-    function teleRequest(uid) {
-      toast("원격판독을 의뢰했습니다 — TS 열에서 진행 상태를 보세요", "info");
-      // 전송 파이프라인 시뮬레이션 — 3단계에서 실제 백엔드 상태머신으로 교체
-      setTs(uid, "wait");
+
+    /**
+     * 원격판독 의뢰. 이제 "어디로 보내는가"를 반드시 고른다.
+     *
+     * 예전 시뮬은 혼자서 completed까지 굴러갔다. 기관이 생긴 지금은 그러면 안 된다 —
+     * inReading·completed는 **받는 쪽**이 실제로 열고 판독해야 찍히는 상태다.
+     * 보낸 쪽이 혼자 "완료"를 그리면 그건 워크플로가 아니라 애니메이션이다. (교훈 §10)
+     */
+    async function teleRequest(uid) {
+      const others = institutions.filter(i => i.id !== myInstitution);
+      if (!others.length) { toast("보낼 수 있는 다른 기관이 없습니다", "err"); return; }
+      let target = others[0];
+      if (others.length > 1) {
+        const pick = prompt(
+          "원격판독을 받을 기관 번호:\n" + others.map((i, n) => `${n + 1}. ${i.name}`).join("\n"), "1");
+        const n = +pick;
+        if (!n || !others[n - 1]) return;
+        target = others[n - 1];
+      } else if (!confirm(`${target.name} 에 원격판독을 의뢰할까요?`)) return;
+
+      await setTs(uid, "wait", target.id);
+      toast(`${target.name} 에 원격판독을 의뢰했습니다 — TS 열에서 진행 상태를 보세요`, "info");
+      // 전송 파이프라인 시뮬레이션(우리 쪽 구간만). 실제 전송 큐는 5단계 Connect.
       setTimeout(() => { if (tsIs(uid, "wait")) setTs(uid, "sending"); }, 1200);
       setTimeout(() => { if (tsIs(uid, "sending")) setTs(uid, "sent"); }, 3500);
-      setTimeout(() => { if (tsIs(uid, "sent")) setTs(uid, "inReading"); }, 6500);
-      setTimeout(() => { if (tsIs(uid, "inReading")) setTs(uid, "completed"); }, 11000);
     }
     const tsIs = (uid, v) => (appState[uid]?.ts ?? "none") === v;
 
@@ -1495,12 +1595,17 @@ ${r.recommendation ?? ""}
       if (mode === "Radiology") {
         const ts = appState[uid]?.ts ?? "none";
         const requested = !["none", "cancelled", "fail"].includes(ts);
+        // 받는 쪽(원격판독으로 넘어온 검사)과 보내는 쪽은 할 수 있는 일이 다르다.
+        // 서버도 같은 규칙으로 막지만, 회색으로 보이는 편이 눌러보고 거절당하는 것보다 낫다.
+        const mine = !s?.tele;
         showCtx(e, [
           { label: "Film Box 열기", act: () => openFilmbox(uid) },
           { label: "판독문 작성으로", act: () => $("#findings").focus() },
           { sep: 1 },
-          { label: "원격판독 의뢰 (Tele Request)", dis: requested, act: () => teleRequest(uid) },
-          { label: "의뢰 취소", dis: !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
+          { label: "원격판독 의뢰 (Tele Request)", dis: !mine || requested, act: () => teleRequest(uid) },
+          { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
+          { sep: 1 },
+          { label: "판독 시작 (수신 기관)", dis: mine || ts !== "sent", act: () => setTs(uid, "inReading") },
         ]);
       } else {
         const o = curOrder();
@@ -1597,8 +1702,14 @@ ${r.recommendation ?? ""}
         serverMode = true;
         appState = b.states;
         orders = b.orders;
+        myInstitution = b.me?.institution ?? null;
+        myInstitutionName = b.me?.institutionName ?? "";
+        institutions = b.institutions ?? [];
         $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB 연결됨`;
         $("#dbstat").title = `상태·판독문이 서버(${API})에 저장됩니다 — 브라우저를 바꿔도 유지됩니다`;
+        // 어느 기관으로 로그인했는지 항상 보이게. 두 기관을 오가며 시험할 때
+        // "지금 누구로 보고 있는지"를 모르면 필터가 되는지 안 되는지도 알 수 없다.
+        $("#roles").textContent = `${myInstitutionName} · ` + $("#roles").textContent;
         startPolling();
       } catch (e) {
         serverMode = false;

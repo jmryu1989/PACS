@@ -38,11 +38,16 @@ python3 upload_samples.py
 - Orthanc — `admin` / `admin`
 - HPACS-lite — **KIN 계정으로 로그인** 버튼 → Keycloak 화면에서 아래 계정 중 하나
 
-| 아이디 | 비밀번호 | 할 수 있는 일 |
-|---|---|---|
-| `jmryu` | `kin1234` | 전부 (판독의 + 방사선사 + 관리자) |
-| `doctor` | `kin1234` | 판독문 작성·승인. Verify·매칭은 막힘 |
-| `tech` | `kin1234` | Verify·오더 매칭. 판독문은 읽기 전용 |
+| 아이디 | 비밀번호 | 기관 | 할 수 있는 일 |
+|---|---|---|---|
+| `jmryu` | `kin1234` | 한림병원 | 전부 (판독의 + 방사선사 + 관리자) |
+| `doctor` | `kin1234` | 한림병원 | 판독문 작성·승인. Verify·매칭은 막힘 |
+| `tech` | `kin1234` | 한림병원 | Verify·오더 매칭. 판독문은 읽기 전용 |
+| `kdoctor` | `kin1234` | KIN 판독센터 | 판독의. **한림 검사는 안 보인다** |
+| `ktech` | `kin1234` | KIN 판독센터 | 방사선사. 판독센터 검사만 |
+
+기관이 다르면 **서로의 검사가 보이지 않는다.** 원격판독으로 의뢰한 검사 하나만 넘어간다.
+`admin` 롤도 이 경계는 못 넘는다 (자세한 건 `keycloak/README.md`).
 
 **데모 모드로 둘러보기**를 누르면 서버 없이 가짜 데이터로 열립니다(GitHub Pages 공유용).
 
@@ -100,11 +105,30 @@ Radiology / Technician 두 탭은 화면 분리가 아니라 **권한 분리**�
 `admin`은 둘 다. 화면에서도 버튼을 잠그지만 **진짜 방어선은 서버**다
 (`pacs.service.ts`의 `need()`). 화면은 안내일 뿐이다.
 
+### 기관 모델 (멀티 기관 테넌시)
+
+권한(무엇을 할 수 있나)과 기관(무엇을 볼 수 있나)은 **다른 축**이다.
+
+- 검사의 소속 기관은 DICOM `InstitutionName`(0008,0080)에서 판정한다. 영상에 찍혀 오는 사실이므로,
+  처음 목록에 올라올 때 `StudyState.institutionId`에 확정한다. 알아볼 수 없는 기관명은
+  아무 데나 밀어넣지 않고 **미배정**으로 둔다 — 조용히 섞이는 것이 가장 나쁘다.
+- 사용자의 기관은 Keycloak **그룹**에서 온다. 서명된 토큰의 `groups` 클레임이므로
+  클라이언트가 고칠 수 없다.
+- 브라우저는 더 이상 `/dicom-web/studies`를 직접 부르지 않는다. **API가 QIDO-RS를 대신 부른다.**
+  화면 필터는 경계가 아니라 커튼이다 — 주소창에 그 URL을 치면 다 보이기 때문.
+- 기관을 넘는 통로는 **`StudyState.teleInstitutionId` 하나뿐**이다. 원격판독을 의뢰하면
+  거기에 수신 기관이 박히고, 취소하면 지워진다. `none`/`wait`/`sending`/`sent`는 의뢰 기관이,
+  `inReading`/`completed`는 수신 기관이 민다.
+
+> **주의**: Orthanc는 아직 하나다. 지금 가른 것은 DB 레코드의 소속과 목록이고,
+> 영상 픽셀(WADO)·뷰어는 여전히 공용이다. 영상 자체의 기관 분리는 5단계(기관별 게이트웨이)의 몫.
+
 ### API 엔드포인트
 
 | 메서드 | 경로 | 하는 일 |
 |---|---|---|
-| GET | `/api/bootstrap` | 프론트 시작 시 상태·판독문·오더를 한 번에 |
+| GET | `/api/bootstrap` | 프론트 시작 시 내 기관 상태·판독문·오더·기관 목록을 한 번에 |
+| GET | `/api/studies` | **검사 목록** — 서버가 Orthanc QIDO-RS를 대신 부르고 기관으로 걸러 준다 |
 | PATCH | `/api/studies/:uid` | RS·SS·EM·TS·Ward 등 부분 수정 |
 | PUT | `/api/studies/:uid/report` | 판독문 임시저장 (버전 안 남김) |
 | POST | `/api/studies/:uid/report/commit` | 판독문 확정 — `save`/`approve`/`addendum`/`reset` |

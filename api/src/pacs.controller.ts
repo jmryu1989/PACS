@@ -1,12 +1,18 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
-import { PacsService } from './pacs.service';
+import { PacsService, Caller } from './pacs.service';
 import { AuthGuard, Public } from './auth.guard';
 
 /**
  * 모든 엔드포인트가 Keycloak 토큰을 요구한다(@Public 제외).
- * 호출자가 누구인지는 헤더가 아니라 **서명된 토큰**에서 나온다 — req.actor / req.roles.
- * 역할별 권한은 서비스 계층에서 필드 단위로 검사한다 (기사는 Verify, 판독의는 Approve).
+ * 호출자가 누구인지·어느 기관인지는 헤더가 아니라 **서명된 토큰**에서 나온다.
+ * 역할별 권한과 기관 경계는 서비스 계층에서 검사한다 — 화면이 아니라 서버가 방어선이다.
  */
+const caller = (req: any): Caller => ({
+  actor: req.actor,
+  roles: req.roles ?? [],
+  institution: req.institution ?? null,
+});
+
 @Controller()
 @UseGuards(AuthGuard)
 export class PacsController {
@@ -20,66 +26,75 @@ export class PacsController {
 
   @Get('me')
   me(@Req() req: any) {
-    return { actor: req.actor, roles: req.roles };
+    return caller(req);
   }
 
   @Get('bootstrap')
-  bootstrap() {
-    return this.svc.bootstrap();
+  bootstrap(@Req() req: any) {
+    return this.svc.bootstrap(caller(req));
+  }
+
+  /**
+   * 검사 목록. 서버가 Orthanc QIDO-RS를 대신 부르고 기관으로 걸러 내려준다.
+   * 브라우저는 더 이상 /dicom-web/studies 를 직접 부르지 않는다.
+   */
+  @Get('studies')
+  studies(@Req() req: any) {
+    return this.svc.listStudies(caller(req));
   }
 
   @Patch('studies/:uid')
   patch(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.patchState(uid, body, req.actor, req.roles);
+    return this.svc.patchState(uid, body, caller(req));
   }
 
   /** 임시 저장 — 버전을 남기지 않는다 */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.putReport(uid, body, req.actor, req.roles);
+    return this.svc.putReport(uid, body, caller(req));
   }
 
   /** 확정 — save / approve / addendum / reset. 내용·버전·RS를 한 트랜잭션으로 */
   @Post('studies/:uid/report/commit')
   commit(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.commitReport(uid, body, req.actor, req.roles);
+    return this.svc.commitReport(uid, body, caller(req));
   }
 
   /** 판독문 이력 */
   @Get('studies/:uid/report/versions')
-  versions(@Param('uid') uid: string) {
-    return this.svc.versions(uid);
+  versions(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.versions(uid, caller(req));
   }
 
   /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
   @Post('studies/:uid/hold')
   hold(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.hold(uid, req.actor, req.roles);
+    return this.svc.hold(uid, caller(req));
   }
 
   /** 점유 해제 — 검사를 옮길 때 (확정 시에는 자동으로 풀린다) */
   @Post('studies/:uid/release')
   release(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.release(uid, req.actor);
+    return this.svc.release(uid, caller(req));
   }
 
   @Delete('studies/:uid')
   remove(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.removeState(uid, req.actor, req.roles);
+    return this.svc.removeState(uid, caller(req));
   }
 
   @Post('match')
   match(@Body() body: any, @Req() req: any) {
-    return this.svc.match(body.uid, body.oid, body.patient, req.actor, req.roles);
+    return this.svc.match(body.uid, body.oid, body.patient, caller(req));
   }
 
   @Post('unmatch')
   unmatch(@Body() body: any, @Req() req: any) {
-    return this.svc.unmatch(body.uid, req.actor, req.roles);
+    return this.svc.unmatch(body.uid, caller(req));
   }
 
   @Get('audit')
-  audit(@Query('uid') uid?: string, @Query('take') take?: string) {
-    return this.svc.audits(uid, take ? +take : 100);
+  audit(@Req() req: any, @Query('uid') uid?: string, @Query('take') take?: string) {
+    return this.svc.audits(uid, take ? +take : 100, caller(req));
   }
 }

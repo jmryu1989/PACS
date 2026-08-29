@@ -38,6 +38,10 @@ export class AuthGuard implements CanActivate {
     if (process.env.AUTH_REQUIRED === 'false') {
       req.actor = req.headers['x-kin-user'] || 'dev';
       req.roles = ['radiologist', 'technician', 'admin'];
+      // 인증이 꺼져 있으면 기관도 헤더로 흉내낸다. 기본값을 주는 이유는
+      // 이 모드가 이미 "아무나 아무거나"이기 때문 — 여기서만 기관을 비워두면
+      // 진짜 경계 코드와 다른 두 번째 경로가 생긴다.
+      req.institution = req.headers['x-kin-institution'] || 'hallym';
       return true;
     }
 
@@ -59,6 +63,22 @@ export class AuthGuard implements CanActivate {
 
     req.actor = payload.email ?? payload.preferred_username ?? payload.sub;
     req.roles = payload.realm_access?.roles ?? [];
+
+    /**
+     * 소속 기관. Keycloak **그룹**에서 온다 (kin-realm.json의 groups + groupMembership 매퍼).
+     *
+     * 왜 그룹인가: 기관은 "이 사람이 무엇을 할 수 있는가"(롤)가 아니라
+     * "이 사람이 어느 조직에 속하는가"다. 롤로 흉내내면 기관이 늘어날 때마다
+     * 롤이 늘고, 롤 검사 코드가 기관 목록을 알게 된다.
+     *
+     * 클라이언트가 정할 수 없다는 점이 중요하다 — 감사로그의 actor와 같은 이유로,
+     * 기관도 **서명된 토큰**에서만 나온다. 헤더로 받으면 그건 필터가 아니라 요청이다.
+     *
+     * 매퍼가 full path로 넣으면 "/hallym"으로 오므로 앞의 슬래시를 떼어낸다.
+     */
+    const groups: string[] = (payload.groups ?? []).map((g: string) => g.replace(/^\//, ''));
+    req.groups = groups;
+    req.institution = groups[0] ?? null;
     return true;
   }
 }

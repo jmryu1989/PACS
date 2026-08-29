@@ -38,6 +38,41 @@ Keycloak 관리 콘솔: http://localhost:8080 (`admin` / `admin`)
 API는 서명·발급자뿐 아니라 **이 토큰이 우리 API를 위해 발급된 것인지**(audience)까지 확인한다.
 이게 없으면 같은 Keycloak의 다른 클라이언트용 토큰으로도 우리 API를 부를 수 있다.
 
+## 기관(그룹) — 멀티 기관 테넌시
+
+기관은 **롤이 아니라 그룹**이다. 롤은 "무엇을 할 수 있는가"(판독의/방사선사),
+그룹은 "어느 조직에 속하는가"(한림병원/KIN 판독센터)다. 축이 다르므로 섞지 않는다.
+롤로 흉내내면 기관이 하나 늘 때마다 롤이 늘고, 권한 검사 코드가 기관 목록을 알게 된다.
+
+렐름에 그룹 두 개가 있다:
+
+| 그룹 | 기관 | 유형 |
+|---|---|---|
+| `hallym` | 한림병원 | hospital |
+| `kin-center` | KIN 판독센터 | reading-center |
+
+`kin-institution-groups` 프로토콜 매퍼가 소속 그룹을 access token의 `groups` 클레임에 넣는다
+(`full.path=false` 라서 `/hallym`이 아니라 `hallym`으로 온다).
+API의 `AuthGuard`가 그 값을 `req.institution`으로 꺼내고, 서비스 계층이 모든 조회·수정을
+그 기관으로 거른다. **클라이언트가 기관을 고를 수 없다** — 감사로그의 actor와 같은 이유로
+기관도 서명된 토큰에서만 나온다. 헤더로 받으면 그건 필터가 아니라 요청이다.
+
+### 개발용 계정 (전부 `kin1234`)
+
+| 계정 | 기관 | 롤 |
+|---|---|---|
+| `jmryu` | 한림병원 | radiologist + technician + admin |
+| `doctor` | 한림병원 | radiologist |
+| `tech` | 한림병원 | technician |
+| `kdoctor` | KIN 판독센터 | radiologist |
+| `ktech` | KIN 판독센터 | technician |
+
+`admin` 롤도 기관 경계를 넘지 못한다. 역할과 소속은 다른 축이라, admin이라고 남의 병원
+환자를 보게 하면 그건 편의가 아니라 구멍이다.
+
+소속 그룹이 없는 계정은 **빈 목록이 아니라 403**을 받는다. 매퍼 설정이 틀렸을 때
+"검사가 하나도 없네"로 보이는 것이 가장 나쁘다.
+
 ## issuer 주소가 두 개인 이유
 
 - 브라우저는 `http://localhost:8080`으로 Keycloak에 간다 → 토큰의 `iss`가 그 주소로 박힌다

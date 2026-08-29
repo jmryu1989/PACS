@@ -17,6 +17,9 @@ from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid, CTImageStorage
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "sample-data")
+# DICOM InstitutionName(0008,0080) — 이 검사를 어느 기관이 찍었는가.
+# 다른 스크립트가 환자별로 이 값을 덮어쓴다 (make_sample_patients.py 참고).
+INSTITUTION_NAME = "한림병원"
 N_SLICES = 60
 SIZE = 256           # 256 x 256 매트릭스
 SLICE_THICKNESS = 2.5  # mm
@@ -76,6 +79,10 @@ def make_dataset(index: int) -> Dataset:
     ds.is_little_endian = True
     ds.is_implicit_VR = False
 
+    # 문자셋 선언이 **먼저** 와야 한다. 없으면 DICOM 기본값이 ASCII(ISO_IR 6)라
+    # 기관명·환자명의 한글이 "????"로 저장된다. 그것도 경고 하나 없이 조용히.
+    ds.SpecificCharacterSet = "ISO_IR 192"   # UTF-8
+
     # 환자/검사 정보 (가상의 인물)
     ds.PatientName = "KIN^Phantom"
     ds.PatientID = "KIN-0001"
@@ -92,6 +99,10 @@ def make_dataset(index: int) -> Dataset:
     ds.StudyDate = now.strftime("%Y%m%d")
     ds.StudyTime = now.strftime("%H%M%S")
     ds.AccessionNumber = "KIN20260001"
+    # 촬영 기관. API가 이 태그(0008,0080)를 읽어 검사의 소속 기관을 정한다.
+    # 값은 api/src/seed.ts의 Institution.dicomNames 별칭 중 하나여야 한다 —
+    # 못 알아보면 그 검사는 어느 기관에도 안 잡히는 "(미배정)"이 된다.
+    ds.InstitutionName = INSTITUTION_NAME
     ds.StudyID = "1"
     ds.SeriesNumber = 1
     ds.InstanceNumber = index + 1

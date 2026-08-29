@@ -38,6 +38,7 @@ def main() -> None:
         ds = gen.make_dataset(i)
         ds.PatientName = "KIM^CHULSOO"
         ds.PatientID = "P-1001"
+        ds.InstitutionName = "한림병원"   # prior는 본검사와 같은 기관이어야 Related List에 뜬다
         ds.PatientBirthDate = "19620304"
         ds.PatientSex = "M"
         ds.StudyDate = "20260210"          # 약 6개월 전

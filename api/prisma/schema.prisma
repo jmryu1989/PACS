@@ -16,9 +16,34 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// 기관. 병원 하나, 판독센터 하나가 각각 한 행이다.
+///
+/// 왜 필요한가: Connect(5단계)는 "병원 A의 검사를 병원 B가 본다"이므로,
+/// 그 전에 "이 검사는 어느 기관 것인가"가 데이터에 있어야 한다.
+/// 지금은 DB 레코드의 소속만 가른다 — 영상 자체(Orthanc)는 아직 하나다.
+///
+/// dicomNames: DICOM InstitutionName(0008,0080)에 실제로 찍혀 오는 문자열들.
+/// 장비마다 표기가 제각각이라("한림병원", "HALLYM", "Hallym Univ. Hospital")
+/// 하나의 기관에 여러 별칭이 붙는다. 콤마로 구분해 넣는다.
+model Institution {
+  id         String   @id                     // "hallym", "kin-center"
+  name       String                           // 화면에 보이는 이름
+  type       String   @default("hospital")    // hospital | reading-center
+  dicomNames String   @default("")            // InstitutionName 별칭, 콤마 구분
+  createdAt  DateTime @default(now())
+}
+
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
 model StudyState {
   uid       String   @id                      // StudyInstanceUID
+
+  /// 이 검사를 소유한 기관 = 촬영한 기관. DICOM InstitutionName에서 판정해 처음 볼 때 박는다.
+  /// null은 "아직 판정 못 함"이다. 모르는 기관명을 아무 데나 넣지 않는다 —
+  /// 남의 병원 검사가 조용히 우리 목록에 섞이는 것이 이 단계에서 가장 나쁜 실패다.
+  institutionId   String?
+  /// 원격판독을 받은 기관. **이 컬럼 하나만이 기관 경계를 넘게 해주는 통로다.**
+  /// TS 상태머신이 wait 이상으로 갈 때 채워지고, 취소하면 비워진다.
+  teleInstitutionId String?
   rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인)
   ss        String   @default("Verified")     // Study Status: Verified / Unverified (기사 확인)
   em        String   @default("N")            // Emergency: E / N
@@ -37,6 +62,9 @@ model StudyState {
   createdAt DateTime @default(now())
 
   report Report?
+
+  @@index([institutionId])
+  @@index([teleInstitutionId])
 }
 
 /// 판독문의 **현재 내용**. 화면이 빠르게 읽어가는 스냅샷.
@@ -82,6 +110,8 @@ model ReportVersion {
 /// RIS(HRIS)에서 넘어온 오더. 지금은 시드 데이터, 4~5단계에서 HL7 v2로 교체된다.
 model Order {
   oid       String  @id
+  /// 오더를 낸 기관. RIS는 기관마다 따로 돌아간다 — 오더가 기관을 넘는 일은 없다.
+  institutionId String @default("hallym")
   patientId String
   name      String
   sex       String
@@ -93,6 +123,8 @@ model Order {
   reqDoc    String
   matched   String  @default("U")
   studyUid  String?
+
+  @@index([institutionId])
 }
 
 /// 감사 로그. 의료영상 시스템에서 "누가 언제 무엇을 바꿨는가"는 기능이 아니라 요건이다.
