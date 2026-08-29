@@ -15,7 +15,20 @@
  * (더 안전한 방법은 HttpOnly 쿠키 + BFF지만, 그건 리버스 프록시를 세운 뒤의 일이다.)
  */
 const KinAuth = (() => {
-  const KC = `${location.protocol}//${location.hostname || 'localhost'}:8080`;
+  /**
+   * Keycloak 주소.
+   *
+   * 예전엔 `:8080`을 직접 박았다 — 화면(8042)과 인증(8080)과 API(3000)가 각각 다른
+   * 출처였고, 그래서 CORS를 계속 맞춰야 했고 토큰은 sessionStorage 말고 둘 곳이 없었다.
+   *
+   * 이제 리버스 프록시가 셋을 한 출처로 모은다. 같은 출처의 `/auth`를 쓰므로
+   * 주소를 알 필요가 없다 — 어디에 배포하든 그 호스트가 곧 인증 서버다.
+   * (프록시 없이 8042로 직접 열었을 때만 옛 경로로 되돌아간다)
+   */
+  const PROXIED = location.port !== '8042';
+  const KC = PROXIED
+    ? `${location.origin}/auth`
+    : `${location.protocol}//${location.hostname || 'localhost'}:8080`;
   const REALM = 'kin';
   const CLIENT = 'kin-web';
   const REDIRECT = location.origin + location.pathname;   // index.html 자기 자신

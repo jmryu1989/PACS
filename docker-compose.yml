@@ -1,10 +1,36 @@
 # Korea Imaging Network — 미니 PACS + 백엔드
 # 실행:  docker compose up -d --build
-# 접속:  http://localhost:8042        (Orthanc 웹 UI, admin / admin)
-#        http://localhost:8042/ohif/  (OHIF 뷰어)
-#        http://localhost:8042/worklist/hpacs-lite/index.html   (HPACS-lite)
-#        http://localhost:3000/api/health                       (KIN API)
+#
+# ── 정식 입구는 리버스 프록시 하나다 ──
+#   https://localhost:8443/                     HPACS-lite (자체 서명 인증서 — 첫 접속에 경고 1회)
+#   https://localhost:8443/ohif/                OHIF 뷰어
+#   https://localhost:8443/api/health           KIN API
+#   https://localhost:8443/auth/                Keycloak (관리 콘솔 admin/admin)
+#   http://localhost:8081/                      → https로 리다이렉트
+#
+# 아래 포트들은 **운영·디버깅용**으로만 열어둔다. 앱은 이 주소로 쓰지 않는다 —
+# 출처가 둘이면 토큰의 iss도 쿠키도 둘로 갈린다.
+#   http://localhost:8042   Orthanc 관리 UI (admin/admin)
+#   http://localhost:3000   API 직접 호출
+#   http://localhost:5432   PostgreSQL
 services:
+  # ── 리버스 프록시: 모든 것을 한 출처로 ──
+  # 왜: CORS 제거, 토큰을 HttpOnly 쿠키로 옮길 길, Orthanc 자격증명을 브라우저에서 제거,
+  #     그리고 프로덕션(6단계)의 모양을 지금 만들어 두기. 자세한 건 proxy/Dockerfile.
+  proxy:
+    build: ./proxy
+    container_name: kin-proxy
+    restart: unless-stopped
+    ports:
+      - "8443:443"
+      - "8081:80"
+    depends_on:
+      - orthanc
+      - api
+      - keycloak
+    volumes:
+      - proxy-certs:/etc/nginx/certs   # 자체 서명 인증서는 여기 남는다(저장소에 커밋하지 않는다)
+
   orthanc:
     image: orthancteam/orthanc:24.12.0
     container_name: kin-orthanc
@@ -51,7 +77,13 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       # 이 주소가 토큰의 iss에 박힌다. 고정해 두지 않으면 요청 호스트에 따라 흔들린다.
-      KC_HOSTNAME: http://localhost:8080
+      # 이제 브라우저는 프록시를 통해 들어오므로, 브라우저가 보는 주소를 적는다.
+      KC_HOSTNAME: https://localhost:8443/auth
+      # Keycloak을 /auth 밑에 둔다. 프록시가 경로를 고쳐 쓰지 않아도 되고,
+      # Keycloak이 스스로 만드는 링크·리다이렉트도 처음부터 맞는다.
+      KC_HTTP_RELATIVE_PATH: /auth
+      # X-Forwarded-* 를 신뢰한다. 없으면 Keycloak은 자기가 http로 열린 줄 안다.
+      KC_PROXY_HEADERS: xforwarded
       KC_HTTP_ENABLED: "true"
     ports:
       - "8080:8080"
@@ -76,13 +108,16 @@ services:
       DATABASE_URL: postgresql://kin:kin@db:5432/kin
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"
-      KC_ISSUER: http://localhost:8080/realms/kin
-      KC_JWKS_URL: http://keycloak:8080/realms/kin/protocol/openid-connect/certs
+      # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.
+      # JWKS·Admin은 도커 네트워크 안 주소이고, 둘 다 /auth 접두어가 붙는다
+      # (KC_HTTP_RELATIVE_PATH를 넣었으므로 내부 경로도 바뀐다).
+      KC_ISSUER: https://localhost:8443/auth/realms/kin
+      KC_JWKS_URL: http://keycloak:8080/auth/realms/kin/protocol/openid-connect/certs
       KC_AUDIENCE: kin-api
       # 서비스 계정 — "우리 기관 판독의가 누구인가"를 Keycloak에 묻기 위한 것(Preliminary 지정용).
       # 사용자의 토큰을 빌려 쓰지 않는다. 판독의에게 사용자 조회 권한을 줄 이유가 없다.
       # 운영에서는 이 시크릿을 compose가 아니라 시크릿 매니저에서 온다 (6단계).
-      KC_ADMIN_URL: http://keycloak:8080
+      KC_ADMIN_URL: http://keycloak:8080/auth
       KC_REALM: kin
       KC_CLIENT_ID: kin-api
       KC_CLIENT_SECRET: kin-api-dev-secret
@@ -109,3 +144,4 @@ services:
 volumes:
   orthanc-db:
   pg-db:
+  proxy-certs:
