@@ -89,6 +89,36 @@ model Report {
   study StudyState @relation(fields: [uid], references: [uid], onDelete: Cascade)
 }
 
+/// 아직 확정되지 않은, **쓰는 사람의 것인** 판독문.
+///
+/// 왜 따로 두는가: 예전엔 초안도 `Report`에 썼다. 그런데 `Report`는 "이 검사의 확정된
+/// 판독문"이 있는 자리다. 아직 아무의 진술도 아닌 글을 거기 쓰니까 문제가 줄줄이 나왔다 —
+/// 초안이 남의 확정본을 덮고, 두 사람의 초안이 서로를 덮고, Clear 한 번에 승인본이
+/// 화면에서 사라졌다. 방어막을 겹겹이 쌓아 막아봤지만 전부 **한 칸을 둘이 쓰는** 것에서
+/// 나온 증상이었다.
+///
+/// 초안을 쓴 사람에게 붙이면 그 셋이 한꺼번에 없어진다. 충돌은 감지할 필요조차 없다 —
+/// 애초에 같은 행을 안 쓰기 때문이다. 20초 자동 저장이 남의 것과 부딪힐 일이 없고,
+/// 그래서 사용자가 안 보고 있을 때 충돌 대화를 띄울 일도 없다.
+///
+/// 충돌은 **확정할 때만** 일어난다. 사람이 화면 앞에 있고, 스스로 누른 순간이고,
+/// 물어볼 수 있는 자리다. 낙관적 락(`Report.version`)이 거기 하나만 있으면 된다.
+///
+/// baseVersion: 이 초안을 쓰기 시작할 때 화면에 있던 확정 판.
+/// 나중에 돌아왔을 때 "그 사이 남이 v5를 저장했다"를 말해줄 수 있어야 한다.
+model ReportDraft {
+  uid            String
+  author         String
+  findings       String   @default("")
+  conclusion     String   @default("")
+  recommendation String   @default("")
+  baseVersion    Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@id([uid, author])
+  @@index([uid])
+}
+
 /// 판독문의 **역사**. 추가만 하고 고치거나 지우지 않는다(append-only).
 ///
 /// 왜 필요한가: 판독문은 의무기록이다. "누가 언제 무엇이라고 말했는가"가 나중에

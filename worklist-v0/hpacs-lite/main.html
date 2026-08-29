@@ -141,6 +141,13 @@
     #conclusion { flex: 2; min-height: 34px; }
     #recommendation { flex: 1; min-height: 26px; }
     .rfoot2 { display: flex; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }
+    /* 초안 표시줄 — 확정본이 아닌 것을 보고 있다는 안내. 경고(빨강)가 아니라 안내(노랑)다. */
+    .draftbar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; flex: none;
+                background: #2a2617; border-top: 1px solid #5c5124; color: #d8b24a; font-size: 11px; }
+    .draftbar .spacer { flex: 1; }
+    .draftbar button { background: #232936; border: 1px solid #5c5124; color: #d8b24a;
+                       padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .draftbar b { color: #f0c95a; }
     #err { color: #ff8080; padding: 2px 10px; flex: none; }
 
     /* ── 모달 (Modify Exam) ── */
@@ -349,6 +356,13 @@
           <button disabled>Except</button>
           <button disabled>Mark CVR</button>
           <button id="b-print">Print</button>
+        </div>
+        <!-- 쓰다 만 초안이 있을 때만 보인다. 확정본과 다른 것을 보고 있다는 사실을
+             화면이 말해주지 않으면, 사용자는 저장된 것을 보고 있다고 믿는다. -->
+        <div class="draftbar" id="draftbar" style="display:none">
+          <span id="draftmsg"></span>
+          <span class="spacer"></span>
+          <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">초안 버리기</button>
         </div>
         <div class="redit">
           <h4>Findings</h4>
@@ -1213,11 +1227,25 @@
     }
 
     // ── Report ──
+    const RFIELDS = ["findings", "conclusion", "recommendation"];
+
+    /**
+     * 지금 화면에 있어야 할 판독문의 출처.
+     *
+     * 초안이 있으면 초안, 없으면 확정본. **초안은 내 것뿐이다** — 서버가 남의 초안을
+     * 안 보내준다. 초안은 아직 진술이 아니고, 남이 쓰고 있다는 사실은 점유 표시가 말한다.
+     */
+    function reportSource() {
+      const r = appState[selectedUid] ?? {};
+      return r.draft ?? r;
+    }
+
     function loadReport() {
       const r = appState[selectedUid] ?? {};
       // 예비 판독(RS=P) 중이고 내가 지정된 사람이 아니면 서버가 내용을 안 준다.
       // 이때 빈 칸을 그대로 보여주면 "판독문이 없다"로 읽힌다 — 없는 것과 못 보는 것은 다르다.
       const locked = !!r.prelimHidden;
+      const src = locked ? {} : reportSource();
       const ph = locked
         ? `${r.preReviewer ?? "지정된 판독의"} 님이 최종 판독 중입니다 (RS: P) — 내용은 지정된 판독의만 볼 수 있습니다`
         : "";
@@ -1225,27 +1253,68 @@
                                  ["#conclusion", "Please enter conclusion"],
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
-        el.value = locked ? "" : (r[sel.slice(1)] ?? "");
+        el.value = locked ? "" : (src[sel.slice(1)] ?? "");
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = locked || !KinAuth.has("radiologist");
       }
+      renderDraftBar();
     }
-    /** 지금 textarea 내용이 마지막으로 저장된 것과 다른가 */
+
+    /**
+     * 초안 표시줄.
+     *
+     * 초안을 사람에게 붙이고 나면 화면이 확정본이 아닌 것을 보여줄 수 있게 된다.
+     * 그 사실을 말해주지 않으면 사용자는 저장된 것을 보고 있다고 믿는다 —
+     * "조용히 갈라지는" 실패가 여기서 다시 생긴다.
+     */
+    function renderDraftBar() {
+      const bar = $("#draftbar");
+      const r = appState[selectedUid] ?? {};
+      const d = r.prelimHidden ? null : r.draft;
+      if (!d) { bar.style.display = "none"; return; }
+      bar.style.display = "flex";
+      const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
+      // 내가 이 초안을 쓰기 시작한 뒤 남이 확정을 했다면, 그걸 지금 말해야 한다.
+      // 확정 버튼을 누른 다음에야 알게 되면 이미 늦다.
+      const behind = (r.version ?? 0) > (d.baseVersion ?? 0);
+      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ${esc(at)}에 자동 저장됨` +
+        (behind ? ` · <b>주의</b> 이 초안을 쓰는 동안 다른 사람이 v${esc(r.version)}을 확정했습니다`
+                : ` · 확정하려면 Save 또는 Approve`);
+    }
+
+    /** 초안 버리기 — 확정본으로 돌아간다 */
+    async function discardDraft() {
+      const uid = selectedUid;
+      if (!uid || !appState[uid]?.draft) return;
+      if (!confirm("쓰다 만 초안을 버리고 저장된 판독문으로 돌아갑니다.\n계속할까요?")) return;
+      if (serverMode) {
+        try { await api("DELETE", `/studies/${encodeURIComponent(uid)}/draft`); }
+        catch (e) { apiFail(e); return; }
+      }
+      appState[uid] = { ...appState[uid], draft: null };
+      if (!serverMode) saveApp();
+      if (selectedUid === uid) { loadReport(); updateReportButtons(); }
+      toast("초안을 버렸습니다", "info");
+    }
+    $("#b-draft-discard").addEventListener("click", discardDraft);
+    /** 지금 textarea 내용이 마지막으로 저장된 것(초안이 있으면 초안)과 다른가 */
     function reportDirty() {
       if (!selectedUid) return false;
-      const a = appState[selectedUid] ?? {};
-      return ["findings", "conclusion", "recommendation"]
-        .some(k => (a[k] ?? "") !== $("#" + k).value);
+      const src = reportSource();
+      return RFIELDS.some(k => (src[k] ?? "") !== $("#" + k).value);
     }
 
     /**
      * 판독문 초안 저장. 사용자가 누르지 않아도 나가는 요청이다 —
      * 검사 이동·인쇄·자동 저장·로그아웃·탭 닫기.
      *
-     * **baseVersion을 함께 보낸다.** 예전엔 안 보냈고 서버도 안 봤다. 그래서
-     * "A가 검사를 열어둔 채 방치 → B가 수정·Save(v3) → A가 다른 검사로 이동"만으로
-     * B의 v3가 A의 옛 화면 내용으로 조용히 덮였다. 확정에만 낙관적 락을 걸면
-     * 락이 아니다 (인계문서 §9-A: 관문은 한 곳만 열려 있어도 관문이 아니다).
+     * **여기엔 충돌이 없다.** 초안은 `Report`가 아니라 내 `ReportDraft` 행에 들어가므로
+     * 남의 확정본도, 남의 초안도 건드릴 수 없다. 예전엔 이 경로가 확정본을 덮었고,
+     * 그래서 낙관적 락을 여기에도 달았더니 이번엔 20초 자동 저장이 409를 받았다 —
+     * 사용자가 안 보고 있을 때 "충돌했습니다"를 띄워봐야 할 수 있는 일이 없다.
+     * 락을 하나 더 다는 게 아니라 **한 칸을 둘이 쓰던 것**을 그만두는 게 답이었다.
+     *
+     * 충돌은 확정할 때만 일어난다 — 사람이 화면 앞에 있는 자리에서.
      *
      * `keepalive`는 탭이 닫히는 중에도 요청이 끝까지 가게 한다(beforeunload용).
      */
@@ -1259,22 +1328,25 @@
         recommendation: $("#recommendation").value,
       };
       // 검사를 옮겨다닐 때마다 호출되므로, 바뀐 게 없으면 서버를 부르지 않는다
-      const same = ["findings", "conclusion", "recommendation"].every(k => (a[k] ?? "") === next[k]);
-      if (same) return;
+      if (!reportDirty()) return;
 
       /**
        * **가려진 판독문은 저장하지 않는다.**
        * 남의 예비 판독(RS=P)이면 화면은 빈 칸이다. 그 빈 칸을 초안으로 보내면
-       * 남의 판독문을 지우는 요청이 된다. 서버가 403으로 막지만, 그 전에
-       * `appState`가 이미 ""로 덮여 F5 전까지 빈 채로 보인다.
+       * 내 초안이 남의 판독문 자리에 생긴다. 서버도 403으로 막는다.
        * 판독 권한이 없을 때(기사)도 같은 이유로 보내지 않는다.
        */
       if (a.prelimHidden || !KinAuth.has("radiologist")) return;
 
-      appState[uid] = { ...a, ...next };
+      const empty = RFIELDS.every(k => !next[k]);
+      const baseVersion = a.draft?.baseVersion ?? a.version ?? 0;
+      // 비운 초안은 초안이 없는 것과 같다 — 안 그러면 빈 초안이 확정본을 가린다.
+      const draft = empty ? null : { ...next, baseVersion, at: new Date().toISOString() };
+      appState[uid] = { ...a, draft };
+      if (selectedUid === uid) renderDraftBar();
       if (!serverMode) { saveApp(); return; }
 
-      const body = { ...next, baseVersion: a.version ?? 0 };
+      const body = { ...next, baseVersion };
       const path = `/studies/${encodeURIComponent(uid)}/report`;
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 보내는 것까지가 우리 몫이다.
@@ -1288,29 +1360,7 @@
         } catch (e) {}
         return;
       }
-      try {
-        await api("PUT", path, body);
-      } catch (e) {
-        /**
-         * 충돌(409). 서버는 아무것도 안 바꿨다 — 남의 판독문은 무사하다.
-         * 내가 쓰던 내용도 버리지 않는다. 클립보드에 넣고, 서버 것을 다시 불러온다.
-         * 조용히 실패하면 사용자는 저장된 줄 안다. 그게 데이터가 갈라지는 시작이다.
-         */
-        if (e.message.includes("저장했습니다")) {
-          navigator.clipboard?.writeText(
-            [next.findings, next.conclusion, next.recommendation].filter(Boolean).join("\n\n"));
-          try {
-            const b = await api("GET", "/bootstrap");
-            appState[uid] = { ...appState[uid], ...b.states[uid] };
-            syncStudy(uid);
-            if (selectedUid === uid) { loadReport(); updateReportButtons(); }
-            render(); renderRelated();
-          } catch (e2) {}
-          toast(e.message + " 쓰던 내용은 클립보드에 있습니다.", "err");
-          return;
-        }
-        apiFail(e);
-      }
+      try { await api("PUT", path, body); } catch (e) { apiFail(e); }
     }
     /**
      * 판독문 확정. action: save | approve | addendum | reset
@@ -1617,8 +1667,7 @@
             if (editing && appState[selectedUid]) {
               appState[selectedUid] = { ...appState[selectedUid],
                 version: editing.version ?? 0,
-                findings: editing.findings, conclusion: editing.conclusion,
-                recommendation: editing.recommendation };
+                draft: editing.draft ?? null };
               syncStudy(selectedUid);
             }
             // render()만 한다. refreshRight()는 판독문을 textarea에 다시 써넣어
@@ -1638,12 +1687,28 @@
               //   version — baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래
               //     올리면 남이 저장한 걸 본 적도 없으면서 최신을 아는 셈이 되어, 다음
               //     저장이 충돌 경고 없이 남의 판독문을 덮는다. 낙관적 락의 조용한 무력화.
-              //   판독문 내용 — 타이핑 중인 textarea 와 어긋나면 안 된다.
-              // 나머지(rs·ss·holder 등)는 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
+              //   draft — 타이핑 중인 내 초안. 서버 응답이 한 박자 늦으면 방금 친 문장이
+              //     되돌아간다. 확정본(findings 등)은 갱신해도 된다 — 초안이 있는 동안
+              //     화면은 초안을 그리고, 확정본은 "그 사이 남이 v5를 확정했다" 안내에만 쓰인다.
+              // 나머지(rs·ss·holder 등)도 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
               const mine = appState[uid] ?? {};
+              /**
+               * 내가 이 검사에 쓰던 게 있는가. **병합 전에** 판단해야 한다 —
+               * 병합한 뒤에 물으면 서버가 보낸 새 확정본과 화면을 비교하게 되어
+               * "안 썼는데 썼다"가 나오고, 자동 저장이 남이 확정한 내용을 밀어내는
+               * 유령 초안을 만든다.
+               */
+              const busy = !!mine.draft || reportDirty();
               appState[uid] = { ...mine, ...st,
                 version: mine.version ?? 0,
-                findings: mine.findings, conclusion: mine.conclusion, recommendation: mine.recommendation };
+                draft: mine.draft ?? null };
+              /**
+               * 안 쓰고 있으면 남이 바꾼 것을 화면에도 반영한다.
+               * 예전엔 폴링이 `prelimHidden`만 반영하고 판독문 패널은 그대로 뒀다 —
+               * 내가 읽는 중에 남이 그 검사를 Prelim으로 넘기면 내용이 그대로 남고
+               * 버튼도 활성인 채라, Save를 눌러야 403을 만났다. (남은버그 3-1)
+               */
+              if (!busy && selectedUid === uid) { loadReport(); updateReportButtons(); }
             } else {
               appState[uid] = { ...appState[uid], ...st };
             }
@@ -1707,13 +1772,14 @@
      * Clear — 세 칸을 한 번에 비운다.
      *
      * 예전엔 확인창도, 권한 검사도, 잠금 검사도 없었다. 그리고 비운 뒤 다른 검사를
-     * 클릭하면 초안 저장이 조용히 빈 판독문을 보냈다 — **사유를 강제하는 Reset을
-     * 우회하는 뒷문**이었다. 승인본(RS=A)까지 화면에서 사라졌다.
+     * 클릭하면 초안 저장이 조용히 빈 판독문을 `Report`에 써서 **승인본까지 지웠다.**
      *
-     * 이제 세 겹으로 막는다:
-     *   ① 승인된 판독문은 Clear로 못 비운다 — 그 길은 사유가 남는 Reset뿐이다.
-     *   ② 권한·예비판독 잠금을 확인한다.
-     *   ③ 확인창. 그리고 실제로 비워지는 순간 서버가 직전 내용을 이력에 `discarded`로 남긴다.
+     * 초안이 분리된 지금 Clear가 비우는 것은 **내 초안뿐**이다. 저장된 판독문은
+     * 손댈 수 없다 — 뒷문이 코드가 아니라 구조에서 없어졌다.
+     * 아래 세 검사는 이제 안전장치가 아니라 예의다:
+     *   ① 승인된 판독문에서는 막는다. 지워지진 않지만 빈 화면이 "사라졌다"로 읽힌다.
+     *   ② 권한·예비판독 잠금.
+     *   ③ 확인창 — 되돌릴 수 없는 동작에 손이 미끄러질 자리를 주지 않는다 (교훈 §5).
      */
     $("#b-clear").addEventListener("click", () => {
       const why = reportWriteBlock();
@@ -1725,10 +1791,10 @@
       }
       const has = $("#findings").value || $("#conclusion").value || $("#recommendation").value;
       if (!has) return;
-      if (!confirm("판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
-                   "지워지는 내용은 이력에 '폐기된 초안'으로 남습니다. 계속할까요?")) return;
+      if (!confirm("쓰고 있던 판독문 세 칸(Findings/Conclusion/Recommendation)을 모두 비웁니다.\n" +
+                   "저장된 판독문은 그대로 남습니다. 계속할까요?")) return;
       $("#findings").value = $("#conclusion").value = $("#recommendation").value = "";
-      toast("판독문을 비웠습니다 — 직전 내용은 이력에 남습니다", "info");
+      toast("쓰던 내용을 비웠습니다 — 저장된 판독문은 그대로입니다", "info");
     });
     $("#b-copy").addEventListener("click", () => {
       const t = `Findings:\n${$("#findings").value}\n\nConclusion:\n${$("#conclusion").value}\n\nRecommendation:\n${$("#recommendation").value}`;

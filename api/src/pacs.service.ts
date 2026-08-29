@@ -74,8 +74,15 @@ function canReadPrelim(s: any, actor: string) {
   return s.preDoc === actor || s.preReviewer === actor;
 }
 
-/** 프론트가 그대로 쓸 수 있는 모양으로 되돌린다 (main.html의 appState 한 칸과 같은 구조) */
-function toClient(s: any, r: any, actor = '') {
+/**
+ * 프론트가 그대로 쓸 수 있는 모양으로 되돌린다 (main.html의 appState 한 칸과 같은 구조)
+ *
+ * `d`는 **이 호출자 본인의 초안**이다. 남의 초안은 절대 실어 보내지 않는다 —
+ * 초안은 아직 진술이 아니고, 확정되지 않은 소견이 퍼지면 나중에 뒤집어도
+ * 이미 읽은 사람의 머릿속은 안 뒤집힌다 (RS=P를 가리는 것과 같은 이유).
+ * 남이 쓰고 있다는 사실은 점유 표시(holder)가 이미 말해준다.
+ */
+function toClient(s: any, r: any, actor = '', d: any = null) {
   const hidden = !canReadPrelim(s, actor);
   return {
     rs: s.rs, ss: s.ss, em: s.em, ts: s.ts,
@@ -110,6 +117,15 @@ function toClient(s: any, r: any, actor = '') {
     findings: hidden ? '' : (r?.findings ?? ''),
     conclusion: hidden ? '' : (r?.conclusion ?? ''),
     recommendation: hidden ? '' : (r?.recommendation ?? ''),
+    /**
+     * 내가 쓰다 만 초안. 없으면 `undefined`가 아니라 `null`이다 —
+     * 클라이언트가 `{...기존, ...응답}`으로 병합하므로, 키가 없으면 "초안이 사라졌다"가
+     * 전달되지 않아 확정한 뒤에도 옛 초안이 화면에 계속 남는다. (§14 — 비움도 값이다)
+     */
+    draft: (hidden || !d) ? null : {
+      findings: d.findings, conclusion: d.conclusion, recommendation: d.recommendation,
+      baseVersion: d.baseVersion, at: d.updatedAt,
+    },
   };
 }
 
@@ -210,6 +226,18 @@ export class PacsService implements OnModuleInit {
   }
 
   /** 쓰기 전 관문. 없는 검사와 남의 검사는 같은 메시지로 막는다(존재 여부도 정보다). */
+  /**
+   * 내 초안 한 건. **모든 `toClient` 호출이 이걸 실어야 한다.**
+   *
+   * 안 실으면 `draft: null`이 나가고, 클라이언트의 `{...기존, ...응답}`이
+   * 방금 쓰고 있던 초안을 지운다 — 점유 하트비트나 Verify 한 번에 화면의 판독문이
+   * 사라지는 것이다. §14("비움도 값이다")의 정확히 반대편 함정이고,
+   * 같은 실수를 `holder`에서 한 번, `toClient`의 7개 필드에서 또 했다.
+   */
+  private myDraft(uid: string, actor: string) {
+    return this.prisma.reportDraft.findUnique({ where: { uid_author: { uid, author: actor } } });
+  }
+
   private async gate(uid: string, c: Caller) {
     const me = inst(c);
     const s = await this.prisma.studyState.findUnique({ where: { uid } });
@@ -266,6 +294,10 @@ export class PacsService implements OnModuleInit {
 
     const reports = await this.prisma.report.findMany();
     const repByUid = new Map(reports.map(r => [r.uid, r]));
+    // 목록에도 내 초안을 함께 싣는다. 30초 폴링 응답이 초안 없이 오면
+    // 클라이언트 병합이 쓰고 있던 초안을 지운다.
+    const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
+    const draftByUid = new Map(drafts.map(d => [d.uid, d]));
 
     const out: any[] = [];
     for (const st of qido) {
@@ -289,7 +321,7 @@ export class PacsService implements OnModuleInit {
         institutionName: this.instName(s.institutionId),
         // 이 검사가 우리에게 원격판독으로 넘어온 것인가 (화면에서 구분해 보여준다)
         tele: s.teleInstitutionId === me && s.institutionId !== me,
-        state: toClient(s, repByUid.get(uid), c.actor),
+        state: toClient(s, repByUid.get(uid), c.actor, draftByUid.get(uid)),
       });
     }
     return { studies: out, serverTime: new Date().toISOString() };
@@ -308,13 +340,17 @@ export class PacsService implements OnModuleInit {
       where: { uid: { in: states.map(s => s.uid) } },
     });
     const byUid = Object.fromEntries(reports.map(r => [r.uid, r]));
+    // 켤 때 내 초안도 함께 — "어제 쓰다 만 것"이 PC를 바꿔도 따라온다.
+    // 필터·상용구를 계정에 붙인 것과 같은 이유다 (§6-A-4).
+    const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
+    const draftByUid = Object.fromEntries(drafts.map(d => [d.uid, d]));
     const prefs = await this.prefs(c);   // 필터·상용구도 첫 요청에 함께 (왕복을 늘리지 않는다)
     return {
       me: { actor: c.actor, roles: c.roles, institution: me, institutionName: this.instName(me) },
       filters: prefs.filters,
       templates: prefs.templates,
       institutions: this.institutions.map(i => ({ id: i.id, name: i.name, type: i.type })),
-      states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid], c.actor)])),
+      states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid], c.actor, draftByUid[s.uid])])),
       orders: orders.map(o => ({
         oid: o.oid, id: o.patientId, name: o.name, sex: o.sex, birth: o.birth,
         sched: o.sched, modality: o.modality, desc: o.descr, ward: o.ward,
@@ -527,18 +563,23 @@ export class PacsService implements OnModuleInit {
     });
     await this.audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(saved, r, c.actor);
+    return toClient(saved, r, c.actor, await this.myDraft(uid, c.actor));
   }
 
   /**
-   * 판독문 임시 저장(draft). 검사를 옮겨다닐 때마다 호출되므로 **판(version)을 올리지 않는다.**
-   * 목적은 손실 방지 하나뿐 — HPACS가 7년차에 넣은 그 기능이다(교훈 §1).
-   * 확정(save/approve/addendum/reset)은 commitReport 쪽이다.
+   * 판독문 초안 저장. **`Report`가 아니라 내 `ReportDraft` 행에 쓴다.**
    *
-   * 다만 "판을 안 올린다"가 "아무것도 검사하지 않는다"는 뜻은 아니었다. 예전엔 이 경로가
-   * **낙관적 락을 통째로 우회**했다: A가 검사를 열어둔 채 방치 → B가 수정·Save(v3) →
-   * A가 다른 검사로 이동하면서 초안이 조용히 나가 B의 v3를 A의 옛 화면 내용으로 덮었다.
-   * 경고도 이력도 없었다. 확정에만 관문을 달면 관문이 아니다 (인계문서 §9-A).
+   * 예전엔 초안도 `Report`에 썼고, 거기서 이 시스템의 판독문 손실이 거의 다 나왔다:
+   * 초안이 남의 확정본을 덮고, 두 사람의 초안이 서로를 덮고, Clear 한 번에 승인본이
+   * 화면에서 사라졌다. 확정 경로에만 낙관적 락이 있었기 때문이라고 생각해서
+   * 이쪽에도 락을 달았더니, 이번엔 **20초 자동 저장이 409를 받는** 문제가 생겼다 —
+   * 사용자가 안 보고 있을 때 "충돌했습니다"를 띄워봐야 할 수 있는 일이 없다.
+   *
+   * 진짜 원인은 락이 없어서가 아니라 **한 칸을 둘이 썼기 때문**이었다.
+   * 초안을 쓴 사람에게 붙이면 충돌은 감지할 필요조차 없다. 같은 행을 안 쓰니까.
+   *
+   * 충돌은 확정할 때만 일어난다 — 사람이 화면 앞에 있고, 스스로 누른 순간이고,
+   * 물어볼 수 있는 자리다. 낙관적 락은 `commitReport` 한 곳에만 있으면 된다.
    */
   async putReport(uid: string, body: any, c: Caller) {
     need(c.roles, 'radiologist', '판독문 저장');
@@ -548,74 +589,53 @@ export class PacsService implements OnModuleInit {
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
 
-    /**
-     * **baseVersion은 선택이 아니라 필수다.**
-     *
-     * commitReport는 `body.baseVersion !== undefined`일 때만 비교한다 — 우리 클라이언트가
-     * 항상 보내니까 괜찮다는 계산이었다. 하지만 초안 저장은 사용자가 누르지 않아도
-     * (검사 이동·로그아웃·자동 저장으로) 나가는 요청이다. 버전을 빼먹은 요청이
-     * 조용히 통과하면, 그 순간 이 경로는 다시 뒷문이 된다.
-     */
-    if (typeof body.baseVersion !== 'number')
-      throw new BadRequestException('초안 저장에는 baseVersion이 필요합니다');
-
-    const current = await this.prisma.report.findUnique({ where: { uid } });
-    if ((current?.version ?? 0) !== body.baseVersion)
-      throw new ConflictException(
-        `그 사이 ${current?.updatedBy ?? '다른 사용자'}가 v${current?.version}을 저장했습니다. ` +
-        `내용을 다시 불러온 뒤 작성해 주세요.`);
-
     await this.prisma.studyState.upsert({
       where: { uid }, create: { uid, institutionId: me, reqHosp: this.instName(me) }, update: {},
     });
-    const data = {
+
+    const content = {
       findings: body.findings ?? '',
       conclusion: body.conclusion ?? '',
       recommendation: body.recommendation ?? '',
-      updatedBy: c.actor,
     };
+    const empty = !(content.findings || content.conclusion || content.recommendation);
 
     /**
-     * **초안이 통째로 비워질 때는 지우기 직전 내용을 이력에 한 판 박는다.**
-     *
-     * 초안은 판을 안 남기므로, 비운 채로 저장하면 그 내용은 이 시스템 어디에도 없다.
-     * Clear 버튼 한 번 + 다음 검사 클릭이면 승인본까지 무기록으로 사라졌다 —
-     * 사유를 강제하는 Reset을 우회하는 뒷문이었다.
-     * Reset이 하는 것과 같은 처리를 여기서도 한다 (commitReport의 discardOps 참조).
-     *
-     * 조건은 "전부 비었다"로 좁게 잡는다. 한 글자 지울 때마다 판을 쌓으면 이력이
-     * 이력이 아니게 되고, 정말 잃어버린 순간을 찾을 수 없게 된다.
+     * 빈 초안은 **행을 지운다.** 빈 초안을 남겨두면 그게 확정본을 가려서,
+     * 승인된 판독문을 열었는데 빈 칸이 보이는 상태가 된다.
+     * "초안이 없다"와 "초안이 비어 있다"는 화면에서 같은 뜻이어야 한다.
      */
-    const hadText = !!(current?.findings || current?.conclusion || current?.recommendation);
-    const nowEmpty = !(data.findings || data.conclusion || data.recommendation);
-    const ops: any[] = [];
-    if (hadText && nowEmpty) {
-      const last = await this.prisma.reportVersion.findFirst({
-        where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
-      });
-      ops.push(this.prisma.reportVersion.create({
-        data: {
-          uid, version: (last?.version ?? 0) + 1, action: 'discarded',
-          findings: current!.findings, conclusion: current!.conclusion,
-          recommendation: current!.recommendation,
-          reason: `초안이 비워짐 (비운 사람: ${c.actor})`,
-          author: current!.updatedBy ?? c.actor,   // 버린 사람이 아니라 **쓴 사람**이 저자다
-        },
-      }));
+    if (empty) {
+      await this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } });
+      await this.audit(c.actor, 'report.draft.clear', uid, {});
+      return { uid, author: c.actor, cleared: true };
     }
-    ops.push(this.prisma.report.upsert({
-      where: { uid }, create: { uid, ...data }, update: data,
-    }));
-    // 스냅샷과 지우기가 같은 트랜잭션이라 "지워졌는데 기록은 없다"가 생길 틈이 없다.
-    const results = await this.prisma.$transaction(ops);
-    const saved: any = results[results.length - 1];
 
+    const saved = await this.prisma.reportDraft.upsert({
+      where: { uid_author: { uid, author: c.actor } },
+      create: { uid, author: c.actor, ...content, baseVersion: body.baseVersion ?? 0 },
+      update: { ...content, baseVersion: body.baseVersion ?? 0 },
+    });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await this.audit(c.actor, 'report.draft', uid, {
-      len: [data.findings.length, data.conclusion.length, data.recommendation.length],
-      discarded: hadText && nowEmpty ? true : undefined,
+      len: [content.findings.length, content.conclusion.length, content.recommendation.length],
     });
     return saved;
+  }
+
+  /**
+   * 초안 버리기. 확정본으로 돌아가고 싶을 때 — "쓰다 만 것"과 "저장된 것"이
+   * 다를 때 사용자가 고를 수 있어야 한다.
+   * 내 초안만 지운다. 남의 초안은 애초에 보이지도 않는다.
+   */
+  async discardDraft(uid: string, c: Caller) {
+    need(c.roles, 'radiologist', '판독문 저장');
+    await this.gate(uid, c);
+    const r = await this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } });
+    if (r.count) await this.audit(c.actor, 'report.draft.discard', uid, {});
+    const s = await this.prisma.studyState.findUnique({ where: { uid } });
+    const rep = await this.prisma.report.findUnique({ where: { uid } });
+    return toClient(s, rep, c.actor, null);
   }
 
   /**
@@ -789,6 +809,13 @@ export class PacsService implements OnModuleInit {
       this.prisma.reportVersion.create({
         data: { uid, version, action, ...content, reason: body.reason ?? null, author: c.actor },
       }),
+      /**
+       * 확정했으면 내 초안은 더 이상 초안이 아니다 — 진술이 됐다.
+       * 안 지우면 다음에 이 검사를 열 때 방금 확정한 것과 같은 내용의 초안이
+       * 확정본을 가린 채 떠서, "저장이 안 됐나?"를 만든다.
+       * 같은 트랜잭션이라 확정이 실패하면 초안도 그대로 남는다.
+       */
+      this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } }),
     ];
     const results = await this.prisma.$transaction(ops);
     const state: any = results[discardOps.length];   // 스냅샷 다음이 상태 행이다
@@ -801,7 +828,7 @@ export class PacsService implements OnModuleInit {
     });
 
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor);
+    return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
   }
 
   /**
@@ -903,7 +930,7 @@ export class PacsService implements OnModuleInit {
     ]);
     await this.audit(c.actor, 'match', uid, { oid, ov, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor);
+    return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
   }
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
@@ -928,7 +955,7 @@ export class PacsService implements OnModuleInit {
     const [state] = await this.prisma.$transaction(ops);
     await this.audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor);
+    return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */
