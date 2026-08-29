@@ -21,6 +21,32 @@ export const SEED_INSTITUTIONS = [
 ];
 
 /**
+ * 새 계정이 처음 로그인했을 때 넣어주는 판독 상용구.
+ *
+ * 빈 목록으로 시작하면 "이게 뭐 하는 칸이지"가 되고, 그러면 아무도 안 쓴다.
+ * HPACS도 "신규계정인 경우 Reading Template 생성이 되지 않았던 오류"를 고친 적이 있다
+ * (릴리즈노트) — 빈 상태로 두면 버그 취급을 받는다는 뜻이다.
+ *
+ * 여기 있는 건 출발점일 뿐이고, 판독의는 곧 자기 문장으로 갈아치운다. 그게 정상이다.
+ */
+export const SEED_TEMPLATES = [
+  {
+    title: 'Normal Brain CT', shortcut: 'nbct', modality: 'CT', bodypart: 'Head', ord: 1,
+    findings: 'No evidence of acute intracranial hemorrhage.\nNo mass effect or midline shift.\nVentricles and sulci are within normal limits.',
+    conclusion: 'No acute intracranial abnormality.', recommendation: '',
+  },
+  {
+    title: 'Brain CT f/u nodule', shortcut: 'fu', modality: 'CT', bodypart: 'Head', ord: 2,
+    findings: 'Known hyperdense nodule in right frontal region.\nNo interval change in size.\nNo new lesion.',
+    conclusion: 'Stable known nodule. No interval change.', recommendation: '',
+  },
+  {
+    title: 'Screening', shortcut: 'scr', modality: '', bodypart: '', ord: 3,
+    findings: 'Screening examination.\n', conclusion: '', recommendation: '',
+  },
+];
+
+/**
  * RIS(HRIS) 오더 시드. 4~5단계에서 HL7 v2 ORM 메시지 수신으로 교체된다.
  * 날짜는 서버가 처음 뜬 날로 잡는다 — 데모에서 "오늘 오더"로 보이게 하려고.
  *

@@ -38,6 +38,40 @@ export class PacsController {
     return this.svc.colleagues(caller(req));
   }
 
+  // ── 개인 설정: 필터·판독 상용구 ──
+  // 계정에 붙는다. 브라우저가 아니라 — PC를 바꿔도 따라온다.
+
+  @Get('prefs')
+  prefs(@Req() req: any) {
+    return this.svc.prefs(caller(req));
+  }
+
+  @Post('filters')
+  saveFilter(@Body() body: any, @Req() req: any) {
+    return this.svc.saveFilter(body, caller(req));
+  }
+
+  /** 기본 필터 지정/해제 — 로그인하면 자동으로 걸리는 그 필터 */
+  @Patch('filters/:id/default')
+  setDefaultFilter(@Param('id') id: string, @Body() body: any, @Req() req: any) {
+    return this.svc.setDefaultFilter(+id, body?.on !== false, caller(req));
+  }
+
+  @Delete('filters/:id')
+  deleteFilter(@Param('id') id: string, @Req() req: any) {
+    return this.svc.deleteFilter(+id, caller(req));
+  }
+
+  @Post('templates')
+  saveTemplate(@Body() body: any, @Req() req: any) {
+    return this.svc.saveTemplate(body, caller(req));
+  }
+
+  @Delete('templates/:id')
+  deleteTemplate(@Param('id') id: string, @Req() req: any) {
+    return this.svc.deleteTemplate(+id, caller(req));
+  }
+
   @Get('bootstrap')
   bootstrap(@Req() req: any) {
     return this.svc.bootstrap(caller(req));

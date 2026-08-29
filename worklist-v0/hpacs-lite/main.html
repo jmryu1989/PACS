@@ -530,7 +530,11 @@
     const saveOrders = () => { try { localStorage.setItem("kin-orders", JSON.stringify(orders)); } catch (e) {} };
     saveOrders();
 
-    // ── Reading Template (기본 3종 + localStorage) ──
+    // ── Reading Template ──
+    // **계정에 붙는다.** 서버 모드면 bootstrap이 내 것을 실어 오고, 로컬 모드에서만
+    // localStorage를 쓴다. 판독의는 자기 상용구를 하루 종일 쓰는데 PC를 바꿨다고
+    // 사라지면 깨지는 건 작업이 아니라 신뢰다 (교훈 §6).
+    // 매뉴얼이 "Upload/Download **My** Template File"이라고 부르듯 기관 공용이 아니라 개인 것이다.
     let templates = null;
     try { templates = JSON.parse(localStorage.getItem("kin-templates")); } catch (e) {}
     templates ??= [
@@ -543,16 +547,19 @@
       { title: "Screening", shortcut: "scr", modality: "",
         findings: "Screening examination.\n", conclusion: "" },
     ];
-    try { localStorage.setItem("kin-templates", JSON.stringify(templates)); } catch (e) {}
+    const saveTemplatesLocal = () => {
+      try { localStorage.setItem("kin-templates", JSON.stringify(templates)); } catch (e) {}
+    };
+    saveTemplatesLocal();
 
     function renderTemplates() {
       const s = cur();
       const useMod = $("#t-mod").checked;
       const list = templates.filter(t => !useMod || !s || !t.modality || s.modality.includes(t.modality));
       $("#tplrows").innerHTML = list.map(t => `
-        <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입">
+        <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입 / 우클릭: 편집">
           <td>${t.title}</td><td>${t.shortcut}</td><td>${t.modality}</td>
-        </tr>`).join("") || `<tr><td class="empty" colspan="3">템플릿 없음</td></tr>`;
+        </tr>`).join("") || `<tr><td class="empty" colspan="3">상용구 없음 — 우클릭해서 추가하세요</td></tr>`;
     }
     $("#tplrows").addEventListener("dblclick", e => {
       const tr = e.target.closest("tr[data-i]"); if (!tr) return;
@@ -561,6 +568,54 @@
       $("#conclusion").value += (($("#conclusion").value && "\n") || "") + t.conclusion;
     });
     $("#t-mod").addEventListener("change", renderTemplates);
+
+    /**
+     * 상용구 편집. 매뉴얼 7.3.5.1.1대로 목록에서 우클릭해 만든다.
+     * 지금까지는 기본 3종만 있고 추가할 방법이 아예 없었다 — 있으나 마나였다.
+     *
+     * 입력은 prompt로 받는다. 모달을 하나 더 만들 수도 있지만, 판독의가 쓰는 건
+     * 목록과 더블클릭 삽입이지 편집창이 아니다. 편집창을 예쁘게 만드는 건 나중이다.
+     */
+    async function editTemplate(t) {
+      const title = prompt("제목:", t?.title ?? "");
+      if (!title?.trim()) return;
+      const shortcut = prompt("단축어 (없어도 됩니다):", t?.shortcut ?? "") ?? "";
+      const modality = prompt("Modality (비우면 모든 검사에서 보입니다):", t?.modality ?? "") ?? "";
+      const findings = prompt("Findings:", t?.findings ?? "") ?? "";
+      const conclusion = prompt("Conclusion:", t?.conclusion ?? "") ?? "";
+      const body = { id: t?.id, title: title.trim(), shortcut: shortcut.trim(),
+                     modality: modality.trim(), findings, conclusion };
+      if (serverMode) {
+        try { await api("POST", "/templates", body); await reloadPrefs(); }
+        catch (e) { toast("상용구 저장 실패: " + e.message, "err"); return; }
+      } else {
+        if (t) Object.assign(t, body); else templates.push(body);
+        saveTemplatesLocal(); renderTemplates();
+      }
+      toast(`상용구 "${body.title}" 저장`);
+    }
+
+    $("#tplrows").addEventListener("contextmenu", e => {
+      e.preventDefault();
+      if (!KinAuth.has("radiologist")) { toast("판독의만 상용구를 편집할 수 있습니다", "err"); return; }
+      const tr = e.target.closest("tr[data-i]");
+      const t = tr ? templates[+tr.dataset.i] : null;
+      showCtx(e, [
+        { label: "＋ 새 상용구", act: () => editTemplate(null) },
+        { label: "수정", dis: !t, act: () => editTemplate(t) },
+        { sep: 1 },
+        { label: "삭제", dis: !t, act: async () => {
+            if (!confirm(`상용구 "${t.title}" 을(를) 삭제할까요?`)) return;
+            if (serverMode) {
+              try { await api("DELETE", `/templates/${t.id}`); await reloadPrefs(); }
+              catch (err) { toast("삭제 실패: " + err.message, "err"); return; }
+            } else {
+              templates.splice(templates.indexOf(t), 1); saveTemplatesLocal(); renderTemplates();
+            }
+            toast("상용구를 삭제했습니다", "info");
+          } },
+      ]);
+    });
 
     // ══════════ 컬럼 스펙: 모드별로 다른 워크리스트 (6.3 / 8.1.1) ══════════
     // f: 없으면 필터 없음 / 'text' = 입력칸 / 배열 = 드롭다운
@@ -828,7 +883,11 @@
       document.querySelector(".s-clinical").style.width = tech ? "66%" : "30%";
       document.querySelector(".report-p").style.display = tech ? "none" : "flex";
       document.querySelector(".order-p").style.display = tech ? "flex" : "none";
-      sortKey = null; sortDir = 0;
+      // 탭을 바꿔도 **같은 컬럼이 양쪽에 있으면 정렬을 유지한다.**
+      // 두 탭의 컬럼 구성이 달라서 예전엔 무조건 초기화했는데, id·name·date처럼
+      // 양쪽에 다 있는 컬럼까지 풀리는 건 그냥 손해다.
+      // 탭 전환은 화면 전환이지 상태 초기화가 아니다 (교훈 §6 — HPACS가 세 번 낸 버그).
+      if (sortKey && !COLS[m].some(c => c.k === sortKey)) { sortKey = null; sortDir = 0; }
       renderHeads(); render(); renderOrders();
     }
     document.querySelector(".tabs").addEventListener("click", e => {
@@ -1516,41 +1575,98 @@ ${r.recommendation ?? ""}
     $("#m-home").addEventListener("click", load);
     $("#m-filmbox").addEventListener("click", () => { if (selectedUid) openFilmbox(selectedUid); });
 
-    // ── User Filter List (6.2.1): 현재 필터 조합을 이름 붙여 저장 → 칩으로 표시 ──
+    // ── User Filter List (6.2.1) ──
+    // 현재 필터 조합에 이름을 붙여 **계정에** 저장한다. 칩을 누르면 그대로 돌아온다.
+    // 정렬(sortKey/sortDir)도 함께 저장한다 — 필터가 같아도 정렬이 다르면 다른 화면이다.
+    // (HPACS도 2025년에야 "정렬을 적용하여 사용자 필터로 저장"을 넣었다)
     let userFilters = [];
     try { userFilters = JSON.parse(localStorage.getItem("kin-filters") ?? "[]"); } catch (e) {}
-    const saveFilters = () => { try { localStorage.setItem("kin-filters", JSON.stringify(userFilters)); } catch (e) {} };
+    const saveFiltersLocal = () => { try { localStorage.setItem("kin-filters", JSON.stringify(userFilters)); } catch (e) {} };
 
-    const snapshotFilter = () => ({ quick: $("#quick").value, days: quickDays, mode, cols: { ...fval } });
+    const snapshotFilter = () => ({
+      quick: $("#quick").value, days: quickDays, mode, cols: { ...fval },
+      sortKey, sortDir,
+    });
     function applyFilter(f) {
       $("#quick").value = f.quick ?? "";
       quickDays = f.days ?? -1;
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
       Object.keys(fval).forEach(k => delete fval[k]);
       Object.assign(fval, f.cols ?? {});
+      // setMode()가 정렬을 지우므로 모드를 먼저 바꾸고 정렬을 나중에 얹는다
       if (f.mode && f.mode !== mode) setMode(f.mode);
-      else { renderHeads(); render(); }
+      sortKey = f.sortKey ?? null;
+      sortDir = f.sortDir ?? 0;
+      renderHeads(); render();
     }
     function renderChips() {
       $("#chips").innerHTML = userFilters.map((uf, i) =>
-        `<button class="chip" data-i="${i}" title="클릭: 적용 / 우클릭: 삭제">${uf.name}</button>`).join("");
+        `<button class="chip" data-i="${i}" title="클릭: 적용 / 우클릭: 메뉴">${uf.isDefault ? "⚑ " : ""}${uf.name}</button>`).join("");
     }
-    $("#savefilter").addEventListener("click", () => {
-      const name = prompt("필터 이름:");
-      if (!name) return;
-      userFilters.push({ name, ...snapshotFilter() });
-      saveFilters(); renderChips();
-      toast(`필터 "${name}" 저장 — 칩을 클릭하면 적용, 우클릭하면 삭제`);
+
+    async function reloadPrefs() {
+      if (!serverMode) return;
+      const p = await api("GET", "/prefs");
+      userFilters = p.filters; templates = p.templates;
+      renderChips(); renderTemplates();
+    }
+
+    $("#savefilter").addEventListener("click", async () => {
+      const name = prompt("필터 이름 (같은 이름이면 덮어씁니다):");
+      if (!name?.trim()) return;
+      // 기본 필터 = 로그인하면 자동으로 걸리는 필터. 릴리즈노트의 깃발(⚑) 기능.
+      const isDefault = confirm(
+        `"${name}" 을(를) 기본 필터로 지정할까요?\n\n` +
+        `지정하면 다음 로그인부터 이 필터가 자동으로 적용됩니다.\n(취소를 누르면 그냥 저장만 합니다)`);
+      const f = { name: name.trim(), isDefault, ...snapshotFilter() };
+      if (serverMode) {
+        try { await api("POST", "/filters", f); await reloadPrefs(); }
+        catch (e) { toast("필터 저장 실패: " + e.message, "err"); return; }
+      } else {
+        const i = userFilters.findIndex(x => x.name === f.name);
+        if (isDefault) userFilters.forEach(x => x.isDefault = false);
+        if (i >= 0) userFilters[i] = f; else userFilters.push(f);
+        saveFiltersLocal(); renderChips();
+      }
+      toast(`필터 "${f.name}" 저장${isDefault ? " (기본 필터로 지정)" : ""}`);
     });
+
     $("#chips").addEventListener("click", e => {
       const b = e.target.closest("button[data-i]"); if (!b) return;
       applyFilter(userFilters[+b.dataset.i]);
     });
+
+    // 우클릭에 바로 삭제를 걸어두면 손이 미끄러진 한 번으로 사라진다.
+    // 되돌릴 수 없는 동작은 메뉴를 한 겹 두른다 (교훈 §5).
     $("#chips").addEventListener("contextmenu", e => {
       const b = e.target.closest("button[data-i]"); if (!b) return;
       e.preventDefault();
-      userFilters.splice(+b.dataset.i, 1);
-      saveFilters(); renderChips();
+      const i = +b.dataset.i, f = userFilters[i];
+      showCtx(e, [
+        { label: "적용", act: () => applyFilter(f) },
+        { label: f.isDefault ? "기본 필터 해제" : "기본 필터로 지정", act: async () => {
+            if (serverMode) {
+              try { await api("PATCH", `/filters/${f.id}/default`, { on: !f.isDefault }); await reloadPrefs(); }
+              catch (err) { toast("실패: " + err.message, "err"); return; }
+            } else {
+              const on = !f.isDefault;
+              userFilters.forEach(x => x.isDefault = false);
+              f.isDefault = on; saveFiltersLocal(); renderChips();
+            }
+            toast(f.isDefault ? "기본 필터에서 해제했습니다" : `"${f.name}" 을 기본 필터로 지정했습니다`);
+          } },
+        { sep: 1 },
+        { label: "삭제", act: async () => {
+            if (!confirm(`필터 "${f.name}" 을(를) 삭제할까요?`)) return;
+            if (serverMode) {
+              try { await api("DELETE", `/filters/${f.id}`); await reloadPrefs(); }
+              catch (err) { toast("삭제 실패: " + err.message, "err"); return; }
+            } else {
+              userFilters.splice(i, 1); saveFiltersLocal(); renderChips();
+            }
+            toast("필터를 삭제했습니다", "info");
+          } },
+      ]);
     });
     renderChips();
 
@@ -1782,6 +1898,9 @@ ${r.recommendation ?? ""}
         myInstitution = b.me?.institution ?? null;
         myInstitutionName = b.me?.institutionName ?? "";
         institutions = b.institutions ?? [];
+        // 필터·상용구는 이제 계정에 있다. 이 브라우저에 뭐가 남아 있든 서버가 진실이다.
+        if (b.filters) { userFilters = b.filters; renderChips(); }
+        if (b.templates) templates = b.templates;
         $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB 연결됨`;
         $("#dbstat").title = `상태·판독문이 서버(${API})에 저장됩니다 — 브라우저를 바꿔도 유지됩니다`;
         // 어느 기관으로 로그인했는지 항상 보이게. 두 기관을 오가며 시험할 때
@@ -1794,6 +1913,18 @@ ${r.recommendation ?? ""}
         $("#dbstat").title = `API 미연결 (${e.message}) — 이 브라우저에만 저장됩니다. docker compose up -d 로 API를 띄우세요`;
       }
       await load();
+
+      /**
+       * 기본 필터(⚑)를 적용한다. "로그아웃 후 다시 로그인 하여도 해당 필터가 기본으로
+       * 적용됩니다" — 릴리즈노트의 그 동작이다.
+       *
+       * load() **뒤에** 건다. 앞에서 걸면 목록이 도착하면서 다시 그려져 필터가 풀린다.
+       */
+      const def = userFilters.find(f => f.isDefault);
+      if (def) {
+        applyFilter(def);
+        toast(`기본 필터 "${def.name}" 적용됨 — Clear를 누르면 풀립니다`, "info");
+      }
     }
     boot();
   </script>

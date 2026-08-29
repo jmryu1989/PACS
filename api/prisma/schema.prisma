@@ -136,6 +136,53 @@ model Order {
   @@index([institutionId])
 }
 
+/// 사용자가 이름 붙여 저장한 워크리스트 필터.
+///
+/// **계정에 붙는다.** 브라우저가 아니라. 판독의는 자기 필터를 하루 종일 쓰는데,
+/// PC를 바꿨다고 초기화되면 깨지는 건 작업이 아니라 신뢰다.
+/// HPACS는 이 카테고리 버그를 5년간 반복했고(교훈 §6), 2024년에야 "계정별 저장"에 도달했다.
+///
+/// isDefault: 로그인하면 자동으로 적용되는 필터. 릴리즈노트의 깃발(⚑) 기능 —
+/// "Set default filter … 로그아웃 후 다시 로그인 하여도 해당 필터가 기본으로 적용됩니다."
+/// sortKey/sortDir: 정렬도 필터의 일부다. HPACS도 2025년에 "정렬을 적용하여
+/// 사용자 필터로 저장" 기능을 넣었다 — 필터만 같고 정렬이 다르면 다른 화면이다.
+model UserFilter {
+  id        Int      @id @default(autoincrement())
+  owner     String                          // 토큰의 actor. 이 사람 것만 보인다
+  name      String
+  mode      String   @default("Radiology")  // Radiology / Technician
+  isDefault Boolean  @default(false)
+  quick     String   @default("")           // Quick Search 문자열
+  days      Int      @default(-1)           // 날짜 퀵필터 (-1 = All)
+  cols      String   @default("{}")         // 컬럼별 필터 값 (JSON)
+  sortKey   String?
+  sortDir   Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([owner, name])
+  @@index([owner])
+}
+
+/// 판독 상용구. 매뉴얼이 "Upload/Download **My** Template File"이라고 부르는 그것 —
+/// 기관 공용이 아니라 **개인 소유**다. 판독의마다 문장이 다르고, 그게 정상이다.
+///
+/// 여기도 계정에 붙는다. 필터와 같은 이유다.
+model ReadingTemplate {
+  id             Int      @id @default(autoincrement())
+  owner          String
+  title          String
+  shortcut       String   @default("")
+  modality       String   @default("")   // 선택된 검사와 같은 유형만 보이게 하는 필터용
+  bodypart       String   @default("")
+  findings       String   @default("")
+  conclusion     String   @default("")
+  recommendation String   @default("")
+  ord            Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([owner])
+}
+
 /// 감사 로그. 의료영상 시스템에서 "누가 언제 무엇을 바꿨는가"는 기능이 아니라 요건이다.
 model AuditLog {
   id     Int      @id @default(autoincrement())

@@ -2,7 +2,7 @@ import { Injectable, BadRequestException, ConflictException, ForbiddenException,
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
-import { SEED_INSTITUTIONS, SEED_ORDERS } from './seed';
+import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 
 /**
  * 호출자. 셋 다 **서명된 토큰**에서 나온다 — 클라이언트가 정할 수 없다.
@@ -283,8 +283,11 @@ export class PacsService implements OnModuleInit {
       where: { uid: { in: states.map(s => s.uid) } },
     });
     const byUid = Object.fromEntries(reports.map(r => [r.uid, r]));
+    const prefs = await this.prefs(c);   // 필터·상용구도 첫 요청에 함께 (왕복을 늘리지 않는다)
     return {
       me: { actor: c.actor, roles: c.roles, institution: me, institutionName: this.instName(me) },
+      filters: prefs.filters,
+      templates: prefs.templates,
       institutions: this.institutions.map(i => ({ id: i.id, name: i.name, type: i.type })),
       states: Object.fromEntries(states.map(s => [s.uid, toClient(s, byUid[s.uid], c.actor)])),
       orders: orders.map(o => ({
@@ -297,6 +300,122 @@ export class PacsService implements OnModuleInit {
   }
 
   // ══════════════════ 쓰기 ══════════════════
+
+  // ══════════════════ 개인 설정 (필터·상용구) ══════════════════
+  //
+  // 둘 다 **계정에 붙는다.** 브라우저가 아니라.
+  // 판독의는 자기 필터를 하루 종일 쓴다. PC를 바꿨다고 초기화되면 깨지는 건
+  // 작업이 아니라 신뢰다 (교훈 §6 — HPACS가 5년간 반복한 버그 카테고리).
+  //
+  // 반대로 **모니터 구성에 딸린 것(필름박스 레이아웃 등)은 계정에 두면 안 된다.**
+  // HPACS도 Hanging Protocol만은 "계정 + 컴퓨터"별로 기억하도록 따로 만들었다 —
+  // 집의 1대 모니터와 병원의 3대 모니터에 같은 레이아웃을 강요할 수 없기 때문.
+  // 계정에 저장할 것과 기기에 남길 것을 나누는 기준이 여기 있다.
+
+  /** 내 필터 + 내 상용구. 처음 보는 계정이면 기본 상용구를 넣어준다. */
+  async prefs(c: Caller) {
+    const owner = c.actor;
+    const n = await this.prisma.readingTemplate.count({ where: { owner } });
+    if (n === 0)
+      await this.prisma.readingTemplate.createMany({
+        data: SEED_TEMPLATES.map(t => ({ ...t, owner })),
+      });
+
+    const [filters, templates] = await Promise.all([
+      this.prisma.userFilter.findMany({ where: { owner }, orderBy: { createdAt: 'asc' } }),
+      this.prisma.readingTemplate.findMany({ where: { owner }, orderBy: [{ ord: 'asc' }, { id: 'asc' }] }),
+    ]);
+    return {
+      filters: filters.map(f => ({ ...f, cols: parse(f.cols) ?? {} })),
+      templates,
+    };
+  }
+
+  /** 필터 저장 (같은 이름이면 덮어쓴다 — 이름이 곧 사용자에게는 그 필터다) */
+  async saveFilter(body: any, c: Caller) {
+    const owner = c.actor;
+    const name = String(body.name ?? '').trim();
+    if (!name) throw new BadRequestException('필터 이름이 필요합니다');
+
+    const data = {
+      mode: body.mode ?? 'Radiology',
+      quick: String(body.quick ?? ''),
+      days: Number.isFinite(+body.days) ? +body.days : -1,
+      cols: dump(body.cols ?? {}) ?? '{}',
+      sortKey: body.sortKey ?? null,
+      sortDir: +body.sortDir || 0,
+      isDefault: !!body.isDefault,
+    };
+
+    // 기본 필터는 하나뿐이다. 새로 지정하면 이전 것이 풀린다 —
+    // 두 개가 기본이면 로그인할 때마다 어느 쪽이 걸릴지 모른다.
+    if (data.isDefault)
+      await this.prisma.userFilter.updateMany({ where: { owner }, data: { isDefault: false } });
+
+    const saved = await this.prisma.userFilter.upsert({
+      where: { owner_name: { owner, name } },
+      create: { owner, name, ...data },
+      update: data,
+    });
+    return { ...saved, cols: parse(saved.cols) ?? {} };
+  }
+
+  /** 기본 필터 지정/해제 */
+  async setDefaultFilter(id: number, on: boolean, c: Caller) {
+    const owner = c.actor;
+    const f = await this.prisma.userFilter.findUnique({ where: { id } });
+    if (!f || f.owner !== owner) throw new NotFoundException('필터를 찾을 수 없습니다');
+    if (on) await this.prisma.userFilter.updateMany({ where: { owner }, data: { isDefault: false } });
+    await this.prisma.userFilter.update({ where: { id }, data: { isDefault: on } });
+    return { ok: true };
+  }
+
+  async deleteFilter(id: number, c: Caller) {
+    // 남의 것을 지우지 못하게 owner를 조건에 넣는다. 찾아서 검사하고 지우면
+    // 그 사이가 벌어질 수 있으므로 조건을 삭제문 안에 둔다.
+    const r = await this.prisma.userFilter.deleteMany({ where: { id, owner: c.actor } });
+    if (!r.count) throw new NotFoundException('필터를 찾을 수 없습니다');
+    return { ok: true };
+  }
+
+  private async nextTemplateOrd(owner: string) {
+    const last = await this.prisma.readingTemplate.findFirst({
+      where: { owner }, orderBy: { ord: 'desc' }, select: { ord: true },
+    });
+    return (last?.ord ?? 0) + 1;
+  }
+
+  /** 상용구 저장 (id가 있으면 수정) */
+  async saveTemplate(body: any, c: Caller) {
+    need(c.roles, 'radiologist', '판독 상용구 편집');
+    const owner = c.actor;
+    const title = String(body.title ?? '').trim();
+    if (!title) throw new BadRequestException('제목이 필요합니다');
+    const data = {
+      title,
+      shortcut: String(body.shortcut ?? '').trim(),
+      modality: String(body.modality ?? '').trim(),
+      bodypart: String(body.bodypart ?? '').trim(),
+      findings: body.findings ?? '',
+      conclusion: body.conclusion ?? '',
+      recommendation: body.recommendation ?? '',
+      // 새로 만든 건 목록 끝에 붙는다. 0으로 두면 맨 위로 올라가서, 방금 만든 하나가
+      // 매일 쓰던 상용구들을 밀어낸다. 순서는 사용자가 정할 것이지 우연히 정해질 게 아니다.
+      ord: +body.ord || (body.id ? 0 : await this.nextTemplateOrd(owner)),
+    };
+    if (body.id) {
+      const r = await this.prisma.readingTemplate.updateMany({ where: { id: +body.id, owner }, data });
+      if (!r.count) throw new NotFoundException('상용구를 찾을 수 없습니다');
+      return this.prisma.readingTemplate.findUnique({ where: { id: +body.id } });
+    }
+    return this.prisma.readingTemplate.create({ data: { owner, ...data } });
+  }
+
+  async deleteTemplate(id: number, c: Caller) {
+    const r = await this.prisma.readingTemplate.deleteMany({ where: { id, owner: c.actor } });
+    if (!r.count) throw new NotFoundException('상용구를 찾을 수 없습니다');
+    return { ok: true };
+  }
 
   /** 검사 상태 부분 수정 (RS 토글, Verify, Switch EM/ReqHosp, TS 전이 …) */
   async patchState(uid: string, body: any, c: Caller) {
