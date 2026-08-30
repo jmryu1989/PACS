@@ -562,6 +562,8 @@ export class PacsService implements OnModuleInit {
     if (TECHNICIAN_FIELDS.some(k => body[k] !== undefined)) need(c.roles, 'technician', '검사 정보 변경');
 
     const prev = await this.gate(uid, c);
+    // 쓰기 경로는 행을 만들지 않는다. 생성은 DICOM 기관명을 검증하는 listStudies 한 곳뿐이다.
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
     /**
      * **예비 판독 중인 검사는 여기서도 막는다.**
@@ -621,13 +623,7 @@ export class PacsService implements OnModuleInit {
         throw new BadRequestException(`판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: ${rs})`);
     }
 
-    // 처음 만들어지는 행(장비 수신 시뮬 등)은 만든 사람의 기관 것이 된다.
-    // Orthanc에 실제로 있는 검사라면 listStudies가 이미 DICOM 태그로 기관을 박아 놓았다.
-    const saved = await this.prisma.studyState.upsert({
-      where: { uid },
-      create: { uid, institutionId: me, reqHosp: this.instName(me), ...data },
-      update: data,
-    });
+    const saved = await this.prisma.studyState.update({ where: { uid }, data });
     await this.audit(c.actor, 'state.patch', uid, { ...data, by: me });
     const r = await this.prisma.report.findUnique({ where: { uid } });
     return toClient(saved, r, c.actor, await this.myDraft(uid, c.actor));
@@ -650,15 +646,11 @@ export class PacsService implements OnModuleInit {
    */
   async putReport(uid: string, body: any, c: Caller) {
     need(c.roles, 'radiologist', '판독문 저장');
-    const me = inst(c);
     const prev = await this.gate(uid, c);
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
-
-    await this.prisma.studyState.upsert({
-      where: { uid }, create: { uid, institutionId: me, reqHosp: this.instName(me) }, update: {},
-    });
 
     const content = {
       findings: body.findings ?? '',
@@ -798,6 +790,7 @@ export class PacsService implements OnModuleInit {
       throw new BadRequestException(`알 수 없는 action: ${action}`);
 
     const prev = await this.gate(uid, c);
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
     // 읽기만 막고 쓰기를 열어두면, 내용을 못 본 채로 덮어쓸 수 있다 — 더 나쁘다.
@@ -941,11 +934,7 @@ export class PacsService implements OnModuleInit {
     // "지워졌는데 기록은 없다"가 생길 틈이 없다.
     const ops = [
       ...discardOps,
-      this.prisma.studyState.upsert({
-        where: { uid },
-        create: { uid, institutionId: prev?.institutionId ?? me, reqHosp: this.instName(prev?.institutionId ?? me), ...stateData },
-        update: stateData,
-      }),
+      this.prisma.studyState.update({ where: { uid }, data: stateData }),
       this.prisma.report.upsert({
         where: { uid },
         create: { uid, ...content, version, updatedBy: c.actor },
@@ -1001,18 +990,16 @@ export class PacsService implements OnModuleInit {
    */
   async hold(uid: string, c: Caller) {
     need(c.roles, 'radiologist', '판독문 점유');
-    const me = inst(c);
     const prev = await this.gate(uid, c);
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
     const other = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
 
     // 남이 잡고 있으면 뺏지 않는다. 뺏으면 그쪽 화면의 자물쇠가 조용히 풀린다.
     if (!other) {
-      await this.prisma.studyState.upsert({
-        where: { uid },
-        create: { uid, institutionId: me, reqHosp: this.instName(me), holder: c.actor, heldAt: new Date() },
-        update: { holder: c.actor, heldAt: new Date() },
+      await this.prisma.studyState.update({
+        where: { uid }, data: { holder: c.actor, heldAt: new Date() },
       });
       if (!holdAlive(prev)) await this.audit(c.actor, 'report.hold', uid);
     }
