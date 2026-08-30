@@ -89,6 +89,13 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?KC_ADMIN_PASSWORD를 .env에 설정하세요}
+      # 렐름·계정·회전된 자격증명은 PostgreSQL에 남긴다. JSON import는 빈 DB에서만 실행된다.
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/keycloak
+      KC_DB_USERNAME: kin
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
+      # 렐름 JSON의 비밀값은 저장소가 아니라 .env에서 주입한다.
+      KC_KIN_API_SECRET: ${KC_CLIENT_SECRET:?KC_CLIENT_SECRET을 .env에 설정하세요}
       # 이 주소가 토큰의 iss에 박힌다. 고정해 두지 않으면 요청 호스트에 따라 흔들린다.
       # 이제 브라우저는 프록시를 통해 들어오므로, 브라우저가 보는 주소를 적는다.
       KC_HOSTNAME: ${PUBLIC_ORIGIN:-https://localhost:9443}/auth
@@ -103,14 +110,9 @@ services:
     volumes:
       - ./keycloak/kin-realm.json:/opt/keycloak/data/import/kin-realm.json:ro
       - ./keycloak/themes/kin-login:/opt/keycloak/themes/kin-login:ro
-    # H2 파일에 볼륨을 붙이지 않는다.
-    #   붙이면 새 이름있는 볼륨이 root 소유로 만들어지는데 Keycloak은 UID 1000으로 돌아서
-    #   "AccessDeniedException: keycloakdb.mv.db"로 죽는다. (이미지에 그 디렉터리가 없어
-    #   도커가 소유권을 복사해 줄 대상이 없기 때문)
-    #   개발 모드에서는 컨테이너 안에 두고, 컨테이너를 새로 만들 때마다 렐름을 다시 넣는다.
-    #   → 관리 콘솔에서 만든 계정은 컨테이너를 다시 만들면 사라진다. 운영에서는
-    #     Keycloak도 PostgreSQL을 쓰게 하고 그 DB를 영속화한다(6단계).
-    #
+    depends_on:
+      db:
+        condition: service_healthy
     # 헬스체크도 두지 않는다. 이 이미지에는 curl/wget이 없고 셸 트릭은 환경을 탄다.
     # API는 JWKS를 부팅이 아니라 **첫 요청 때** 가져오므로 Keycloak이 늦게 떠도 괜찮다.
 

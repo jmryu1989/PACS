@@ -30,6 +30,7 @@ services:
     logging: *bounded-logging
 
   keycloak:
+    command: start --import-realm
     environment:
       KC_HOSTNAME: https://pacs.koreaimagingnetwork.com/auth
     ports: !override
