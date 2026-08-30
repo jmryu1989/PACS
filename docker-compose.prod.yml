@@ -1,0 +1,45 @@
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  proxy:
+    environment:
+      DEPLOYMENT_MODE: production
+      PUBLIC_PORT: "443"
+      SERVER_NAME: pacs.koreaimagingnetwork.com
+    ports: !override
+      - "80:80"
+      - "443:443"
+    # 개발 인증서 볼륨을 운영에 남기면 Let's Encrypt 누락을 자체 서명으로 가릴 수 있다.
+    volumes: !override
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    logging: *bounded-logging
+
+  orthanc:
+    ports: !override
+      - "127.0.0.1:4242:4242"
+    logging: *bounded-logging
+
+  db:
+    ports: !reset []
+    logging: *bounded-logging
+
+  keycloak:
+    environment:
+      KC_HOSTNAME: https://pacs.koreaimagingnetwork.com/auth
+    ports: !override
+      - "127.0.0.1:8080:8080"
+    logging: *bounded-logging
+
+  api:
+    environment:
+      KC_ISSUER: https://pacs.koreaimagingnetwork.com/auth/realms/kin
+    ports: !reset []
+    # 이미지 안에 빌드된 소스·Prisma 스키마만 쓴다. 운영에서 호스트 파일을 덮으면
+    # 배포한 이미지와 실제 실행 코드가 달라져 재현 가능한 롤백이 사라진다.
+    volumes: !reset []
+    logging: *bounded-logging

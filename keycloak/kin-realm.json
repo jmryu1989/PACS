@@ -2,7 +2,7 @@
   "realm": "kin",
   "displayName": "Korea Imaging Network",
   "enabled": true,
-  "sslRequired": "none",
+  "sslRequired": "external",
   "registrationAllowed": false,
   "resetPasswordAllowed": true,
   "loginTheme": "keycloak",
@@ -41,12 +41,14 @@
       "protocol": "openid-connect",
       "rootUrl": "http://localhost:8042",
       "redirectUris": [
+        "https://pacs.koreaimagingnetwork.com/*",
         "https://localhost:9443/*",
         "https://127.0.0.1:9443/*",
         "http://localhost:8042/*",
         "http://127.0.0.1:8042/*"
       ],
       "webOrigins": [
+        "https://pacs.koreaimagingnetwork.com",
         "https://localhost:9443",
         "https://127.0.0.1:9443",
         "http://localhost:8042",
