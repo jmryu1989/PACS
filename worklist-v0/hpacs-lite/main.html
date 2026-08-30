@@ -855,6 +855,14 @@
         { k: "reqHosp", t: "ReqHosp" },
       ],
     };
+    // 빈 StudyDescription을 데이터에 채우면 "같은 검사명" 묶음과 Modify 원본까지
+    // 모달리티로 바뀐다. 원본 의미는 보존하고, 사람이 읽는 자리에서만 대체한다.
+    function shownStudyDesc(s) {
+      return String(s?.desc ?? "").trim()
+        || String(s?.modality ?? "").trim()
+        || "(설명 없음)";
+    }
+
     // 특수 렌더링이 필요한 칸만 함수로
     const CELL = {
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
@@ -862,6 +870,7 @@
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
       ss: s => `<span class="ss ${s.ss}">${s.ss}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
+      desc: s => esc(shownStudyDesc(s)),
       // Viewing: 지금 이 검사의 판독문을 쓰고 있는 사람
       viewing: s => !s.holder ? ""
         : s.holder === user
@@ -1178,7 +1187,7 @@
           <tr><td>Patient</td><td>${esc(s.name)} (${esc(s.id)})</td></tr>
           <tr><td>Sex/Age</td><td>${esc(s.sex)} / ${esc(s.age)}</td></tr>
           <tr><td>Birth</td><td>${esc(s.birth)}</td></tr>
-          <tr><td>Study</td><td>${esc(s.desc)}</td></tr>
+          <tr><td>Study</td><td>${esc(shownStudyDesc(s))}</td></tr>
           <tr><td>Date</td><td>${esc(s.date)}</td></tr>
           <tr><td>AccNo</td><td>${esc(s.acc)}</td></tr>
           <tr><td>Img/Se</td><td>${esc(s.count)} / ${esc(s.series)}</td></tr>
@@ -1208,7 +1217,7 @@
             <tr data-uid="${esc(x.uid)}">
               <td class="num">${i + 1}</td>
               <td>${x.uid === selectedUid ? "👁" : ""}</td>
-              <td>${esc(x.date)}</td><td>${esc(x.desc)}</td><td class="num">${esc(x.count)}</td>
+              <td>${esc(x.date)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td class="${x.em === "E" ? "em-e" : ""}">${x.em === "E" ? "E" : ""}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
               <td>${esc(x.repDoc ?? "")}</td><td>${esc(x.confirm ?? "")}</td><td>${esc(x.reqHosp)}</td>
