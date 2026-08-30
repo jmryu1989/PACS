@@ -1,7 +1,7 @@
 :root {
   --kin-bg: #0B1220;
-  --kin-text: #E9F0FA;
-  --kin-muted: #93A6C4;
+  --kin-text: #F2F6FD;
+  --kin-muted: #A7B8D6;
   --kin-label: #8FA5CA;
   --kin-accent: #4F8EF7;
   --kin-highlight: #9CC3FF;
@@ -13,7 +13,7 @@
   --kin-input-bg: #0A101E;
   --kin-input-border: rgba(140, 168, 215, .3);
   --kin-input-radius: 8px;
-  --kin-focus-ring: rgba(79, 142, 247, .12);
+  --kin-focus-ring: rgba(79, 142, 247, .14);
   --kin-btn: linear-gradient(180deg, #2E63C8, #1D4794);
   --kin-btn-shadow: 0 12px 26px rgba(8, 20, 48, .55), inset 0 1px 0 rgba(190, 215, 255, .22);
 }

@@ -18,6 +18,7 @@
       --kin-row-sel: rgba(79,142,247,.14);
       --kin-row-hover: rgba(130,160,210,.05);
       --kin-focus-ring: rgba(79,142,247,.12);
+      --kin-btn: linear-gradient(180deg,#2E63C8,#1D4794);
       --kin-st-w: #4F8EF7;
       --kin-st-a: #3FBF8F;
       --kin-st-ho: #E8B65B;
@@ -149,11 +150,11 @@
     /* Report */
     .report-p { flex: 1; }
     .order-p { flex: 1; }
-    .rbtns { display: flex; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; flex-wrap: wrap; }
-    .rbtns button, .rfoot2 button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+    .rbtns { display: flex; gap: 4px; padding: 4px 8px; background: var(--kin-panel); flex: none; flex-wrap: wrap; }
+    .rbtns button, .rfoot2 button { background: var(--kin-panel2); border: 1px solid var(--kin-line2); color: var(--kin-muted); padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .rbtns button:disabled { opacity: .35; cursor: default; }
-    .rbtns .approve { background: #3f7a4a; color: #fff; border-color: #3f7a4a; }
-    .rbtns .save { background: #8a7a3a; color: #fff; border-color: #8a7a3a; }
+    .rbtns .approve { background: var(--kin-btn); color: var(--kin-text); border-color: var(--kin-accent); }
+    .rbtns .save { background: var(--kin-panel2); color: var(--kin-text); border-color: var(--kin-line2); }
     .redit { flex: 1; overflow: auto; padding: 4px 10px; display: flex; flex-direction: column; gap: 2px; }
     .redit h4 { margin: 2px 0; font-size: 11px; color: #8892a4; font-weight: normal; }
     .redit textarea { width: 100%; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 6px; font: inherit; resize: none; }
