@@ -64,6 +64,7 @@ const KinAuth = (() => {
     const c = claimsOf(tok.access_token);
     S.setItem('kin-at', tok.access_token);
     if (tok.refresh_token) S.setItem('kin-rt', tok.refresh_token);
+    if (tok.id_token) S.setItem('kin-it', tok.id_token);
     // 만료 30초 전을 만료로 친다 — 네트워크 왕복 중에 죽는 걸 막는다
     S.setItem('kin-exp', String(Date.now() + (tok.expires_in - 30) * 1000));
     S.setItem('kin-user', c?.email ?? c?.preferred_username ?? '');
@@ -72,7 +73,7 @@ const KinAuth = (() => {
   }
 
   function clear() {
-    ['kin-at', 'kin-rt', 'kin-exp', 'kin-user', 'kin-roles', 'kin-demo', 'kin-verifier', 'kin-state']
+    ['kin-at', 'kin-rt', 'kin-it', 'kin-exp', 'kin-user', 'kin-roles', 'kin-demo', 'kin-verifier', 'kin-state']
       .forEach(k => S.removeItem(k));
 
     // sessionStorage는 탭마다 따로라서 워크리스트 로그아웃만으로는 열린 뷰어가 모른다.
@@ -191,20 +192,41 @@ const KinAuth = (() => {
 
     async logout() {
       const rt = S.getItem('kin-rt');
+      const idToken = S.getItem('kin-it');
       const demo = S.getItem('kin-demo');
-      clear();
-      if (demo) { location.href = 'index.html'; return; }
+      const redirect = location.origin + location.pathname.replace(/[^/]*$/, 'index.html');
+      if (demo) { clear(); location.replace(redirect); return; }
       try {
         const c = await config();
-        // Keycloak 세션까지 끊는다. 이걸 안 하면 다시 로그인 버튼을 눌렀을 때
-        // 아이디도 안 묻고 그냥 들어가진다 — 병원 공용 PC에서 사고가 난다.
+        // 앱에서 이미 사용자 확인을 받았으므로 refresh token을 POST 본문으로 보내
+        // Keycloak 세션을 바로 끊는다. GET URL에 refresh token을 넣으면 서버·브라우저
+        // 기록에 남고, id_token_hint 없이 RP 로그아웃을 열면 확인 화면이 한 번 더 뜬다.
+        if (rt) {
+          const res = await fetch(c.end_session_endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ client_id: CLIENT, refresh_token: rt }),
+          });
+          if (res.ok) {
+            clear();
+            location.replace(redirect);
+            return;
+          }
+        }
+
+        // refresh token이 없는 오래된 탭의 안전망. ID 토큰이 있으면 Keycloak은
+        // 별도 확인 없이 세션을 종료하고 지정한 로그인 화면으로 돌아간다.
         const q = new URLSearchParams({
           client_id: CLIENT,
-          post_logout_redirect_uri: location.origin + location.pathname.replace(/[^/]*$/, 'index.html'),
+          post_logout_redirect_uri: redirect,
         });
-        if (rt) q.set('refresh_token', rt);
-        location.href = `${c.end_session_endpoint}?${q}`;
-      } catch (e) { location.href = 'index.html'; }
+        if (idToken) q.set('id_token_hint', idToken);
+        clear();
+        location.replace(`${c.end_session_endpoint}?${q}`);
+      } catch (e) {
+        clear();
+        location.replace(redirect);
+      }
     },
   };
 })();

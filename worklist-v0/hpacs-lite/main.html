@@ -2195,12 +2195,13 @@
     let loggingOut = false;
     $("#logout").addEventListener("click", async () => {
       if (loggingOut) return;
+      if (!confirm("로그아웃하시겠습니까?")) return;
       loggingOut = true;
       try {
         await stashReport();
         await releaseHold();   // 안 풀면 남은 사람에게 이 검사가 5분간 잠겨 보인다
       } catch (e) {}
-      KinAuth.logout();
+      await KinAuth.logout();
     });
 
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
