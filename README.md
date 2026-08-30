@@ -306,6 +306,7 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
 - **렐름 파일을 고쳤는데 반영 안 됨**: `docker compose up -d --force-recreate keycloak`.
 - **운영 Keycloak 컨테이너를 재생성함**: H2가 초기화돼 공개 개발값이 다시 import되므로,
   관리자 비밀번호와 `kin-api` 클라이언트 시크릿을 즉시 다시 설정하고 `.env`도 맞춘다.
+  `kcadm`으로 만든 운영 런타임 계정도 함께 사라지므로 재생성 절차에 계정 복구를 포함한다.
 - **Keycloak이 `AccessDeniedException: keycloakdb.mv.db`로 죽음**: H2 경로에 이름있는 볼륨을
   붙였을 때 생긴다(root 소유로 만들어지는데 Keycloak은 UID 1000). `keycloak/README.md` 참고.
 - **API가 401만 뱉음**: 토큰의 `iss`와 API의 `KC_ISSUER`가 달라진 경우. compose의
