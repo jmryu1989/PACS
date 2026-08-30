@@ -182,6 +182,12 @@ export class PacsController {
 
   @Get('audit')
   audit(@Req() req: any, @Query('uid') uid?: string, @Query('take') take?: string) {
-    return this.svc.audits(uid, take ? +take : 100, caller(req));
+    let n = 100;
+    if (take !== undefined) {
+      n = Number(take);
+      if (!Number.isInteger(n) || n < 1 || n > 500)
+        throw new BadRequestException(`잘못된 take입니다: ${take} (1~500 정수)`);
+    }
+    return this.svc.audits(uid, n, caller(req));
   }
 }

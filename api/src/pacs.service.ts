@@ -539,9 +539,12 @@ export class PacsService implements OnModuleInit {
       ord: +body.ord || (body.id ? 0 : await this.nextTemplateOrd(owner)),
     };
     if (body.id) {
-      const r = await this.prisma.readingTemplate.updateMany({ where: { id: +body.id, owner }, data });
+      const id = Number(body.id);
+      if (!Number.isInteger(id) || id <= 0)
+        throw new BadRequestException(`잘못된 상용구 id입니다: ${body.id}`);
+      const r = await this.prisma.readingTemplate.updateMany({ where: { id, owner }, data });
       if (!r.count) throw new NotFoundException('상용구를 찾을 수 없습니다');
-      return this.prisma.readingTemplate.findUnique({ where: { id: +body.id } });
+      return this.prisma.readingTemplate.findUnique({ where: { id } });
     }
     return this.prisma.readingTemplate.create({ data: { owner, ...data } });
   }
