@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { AuthGuard, Public } from './auth.guard';
 
@@ -43,6 +43,11 @@ export class PacsController {
   me(@Req() req: any) {
     return caller(req);
   }
+
+  /** nginx auth_request 전용. 토큰이 유효하면 204이고 PHI 본문은 싣지 않는다. */
+  @Get('authz/dicom')
+  @HttpCode(204)
+  authzDicom() { return; }
 
   /**
    * 내 기관의 다른 판독의들 — Preliminary에서 상급 판독의를 고를 때 쓴다.

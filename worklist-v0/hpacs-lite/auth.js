@@ -67,6 +67,10 @@ const KinAuth = (() => {
   function store(tok) {
     const c = claimsOf(tok.access_token);
     S.setItem('kin-at', tok.access_token);
+    // OHIF의 DICOM 요청을 프록시 auth_request가 검증하기 위한 같은 출처 쿠키.
+    // HttpOnly가 아니므로 임시책이고, BFF 도입 때 서버 세션 쿠키로 대체한다.
+    document.cookie = `kin_at=${encodeURIComponent(tok.access_token)}`
+      + `; Path=/; Secure; SameSite=Strict; Max-Age=${tok.expires_in}`;
     if (tok.refresh_token) S.setItem('kin-rt', tok.refresh_token);
     if (tok.id_token) S.setItem('kin-it', tok.id_token);
     // 만료 30초 전을 만료로 친다 — 네트워크 왕복 중에 죽는 걸 막는다
@@ -79,6 +83,7 @@ const KinAuth = (() => {
   function clear() {
     ['kin-at', 'kin-rt', 'kin-it', 'kin-exp', 'kin-user', 'kin-roles', 'kin-demo', 'kin-verifier', 'kin-state']
       .forEach(k => S.removeItem(k));
+    document.cookie = 'kin_at=; Path=/; Max-Age=0; Secure; SameSite=Strict';
 
     // sessionStorage는 탭마다 따로라서 워크리스트 로그아웃만으로는 열린 뷰어가 모른다.
     // 같은 출처 채널과 storage 폴백을 함께 울려 모든 뷰어 탭의 환자명 title을 지운다.

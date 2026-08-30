@@ -61,6 +61,7 @@ class Route:
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "health"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
+    ("GET", "authz/dicom"): Route(Kind.NEITHER),
     ("GET", "colleagues"): Route(Kind.TENANT),
     ("GET", "prefs"): Route(Kind.USER),
     ("POST", "filters"): Route(Kind.USER),

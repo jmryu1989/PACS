@@ -48,12 +48,21 @@ export class AuthGuard implements CanActivate {
     if (!this.jwks) throw new UnauthorizedException('서버에 KC_JWKS_URL이 설정되지 않았습니다');
 
     const header = req.headers.authorization ?? '';
-    if (!header.startsWith('Bearer '))
-      throw new UnauthorizedException('Authorization 헤더가 없습니다');
+    let raw = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!raw) {
+      // OHIF는 DICOM 요청에 Authorization을 싣지 않는다. auth_request 서브요청은
+      // 로그인 때 심은 같은 출처 쿠키를 검증한다. BFF 도입 시 HttpOnly 세션으로 대체한다.
+      const match = /(?:^|;\s*)kin_at=([^;]+)/.exec(req.headers.cookie ?? '');
+      if (match) {
+        try { raw = decodeURIComponent(match[1]); }
+        catch { throw new UnauthorizedException('인증 쿠키 형식이 올바르지 않습니다'); }
+      }
+    }
+    if (!raw) throw new UnauthorizedException('Authorization 헤더가 없습니다');
 
     let payload: any;
     try {
-      ({ payload } = await jwtVerify(header.slice(7), this.jwks, {
+      ({ payload } = await jwtVerify(raw, this.jwks, {
         issuer: process.env.KC_ISSUER,
         audience: process.env.KC_AUDIENCE ?? 'kin-api',
       }));
