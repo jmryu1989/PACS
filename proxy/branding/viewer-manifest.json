@@ -1,0 +1,19 @@
+{
+  "name": "KIN 판독 뷰어",
+  "short_name": "판독 뷰어",
+  "description": "Korea Imaging Network 판독 뷰어",
+  "dir": "auto",
+  "lang": "ko-KR",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/kin-brand/kin-favicon-32.png",
+      "sizes": "32x32",
+      "type": "image/png"
+    }
+  ],
+  "start_url": "/ohif/",
+  "background_color": "#000000",
+  "display": "standalone",
+  "theme_color": "#0E1728"
+}

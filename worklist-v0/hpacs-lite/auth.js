@@ -69,6 +69,18 @@ const KinAuth = (() => {
   function clear() {
     ['kin-at', 'kin-rt', 'kin-exp', 'kin-user', 'kin-roles', 'kin-demo', 'kin-verifier', 'kin-state']
       .forEach(k => S.removeItem(k));
+
+    // sessionStorage는 탭마다 따로라서 워크리스트 로그아웃만으로는 열린 뷰어가 모른다.
+    // 같은 출처 채널과 storage 폴백을 함께 울려 모든 뷰어 탭의 환자명 title을 지운다.
+    try {
+      const channel = new BroadcastChannel('kin-session');
+      channel.postMessage({ type: 'session-ended' });
+      channel.close();
+    } catch (e) { /* 구형 브라우저는 아래 storage 이벤트만 쓴다. */ }
+    try {
+      localStorage.setItem('kin-session-ended', String(Date.now()));
+      localStorage.removeItem('kin-session-ended');
+    } catch (e) {}
   }
 
   return {

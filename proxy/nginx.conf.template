@@ -51,10 +51,15 @@ server {
 
     # 토큰과 쿠키가 커서 기본 프록시 버퍼로는 응답 헤더가 넘칠 수 있다.
     location /auth/ {
+        # Keycloak 26.0.7 로그인 템플릿은 단일 favicon.ico 링크만 낸다. 테마 템플릿을
+        # 복제하지 않고 그 링크만 J1 SVG + 32px PNG 폴백으로 확장한다.
+        proxy_set_header Accept-Encoding "";
         proxy_pass http://keycloak:8080;
         proxy_buffer_size       16k;
         proxy_buffers        8  16k;
         proxy_busy_buffers_size 32k;
+        sub_filter_once off;
+        sub_filter 'img/favicon.ico" />' 'img/kin-emblem-j1.svg" type="image/svg+xml" /><link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png" />';
     }
 
     # 브라우저에 Orthanc 자격증명을 주지 않는다. 공개 경로 일곱 곳이 같은 include를
@@ -64,9 +69,33 @@ server {
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
 
+    # 내장 뷰어의 번들을 포크하지 않는다. 브라우저 셸에 필요한 KIN 자산만 프록시가
+    # 직접 제공하고, 실제 헤더/도구 브랜딩은 app-config.js의 whiteLabeling이 맡는다.
+    location ^~ /kin-brand/ {
+        alias /usr/share/nginx/html/kin-brand/;
+        add_header Cache-Control "public, max-age=3600";
+    }
+
+    location = /ohif/manifest.json {
+        alias /usr/share/nginx/html/kin-brand/viewer-manifest.json;
+        default_type application/manifest+json;
+    }
+
     location /ohif/ {
+        # sub_filter가 압축된 HTML에는 적용되지 않는다. 번들/CSS는 그대로 통과시키고
+        # text/html 응답의 고정 title·favicon 메타만 KIN 브라우저 셸로 바꾼다.
+        proxy_set_header Accept-Encoding "";
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
+        sub_filter_once off;
+        sub_filter '<meta name="application-name" content="OHIF Viewer"/>' '<meta name="application-name" content="KIN 판독 뷰어"/>';
+        sub_filter '<meta name="apple-mobile-web-app-title" content="@ohif/app"/>' '<meta name="apple-mobile-web-app-title" content="KIN 판독 뷰어"/>';
+        sub_filter '<meta name="msapplication-TileImage" content="./assets/mstile-144x144.png"/>' '<meta name="msapplication-TileImage" content="/kin-brand/kin-favicon-32.png"/>';
+        sub_filter '<link rel="shortcut icon" href="./assets/favicon.ico"/>' '';
+        sub_filter '<link rel="icon" type="image/png" sizes="16x16" href="./assets/favicon-16x16.png"/>' '';
+        sub_filter '<link rel="icon" type="image/png" sizes="32x32" href="./assets/favicon-32x32.png"/>' '<link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg"/><link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png"/>';
+        sub_filter '<link rel="icon" type="image/png" sizes="228x228" href="./assets/coast-228x228.png"/>' '';
+        sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — KOREA IMAGING NETWORK</title>';
     }
 
     # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
