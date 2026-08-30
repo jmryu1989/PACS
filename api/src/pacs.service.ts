@@ -878,51 +878,6 @@ export class PacsService implements OnModuleInit {
           recommendation: body.recommendation ?? '',
         };
 
-    const last = await this.prisma.reportVersion.findFirst({
-      where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
-    });
-    let version = (last?.version ?? 0) + 1;
-
-    /**
-     * 낙관적 락. 프론트는 화면에 띄울 때 본 판 번호(baseVersion)를 같이 보낸다.
-     * 그 사이 다른 사람이 확정했다면 번호가 달라지고, 여기서 막힌다.
-     *
-     * 점유 표시는 안내일 뿐이다(뺏을 수 있고, TTL로 풀리고, 동시에 시작할 수도 있다).
-     * **덮어쓰기를 실제로 막는 건 이 비교 하나뿐이다.**
-     */
-    const current = await this.prisma.report.findUnique({ where: { uid } });
-    if (body.baseVersion !== undefined && (current?.version ?? 0) !== body.baseVersion)
-      throw new ConflictException(
-        `그 사이 ${current?.updatedBy ?? '다른 사용자'}가 v${current?.version}을 저장했습니다. ` +
-        `내용을 다시 불러온 뒤 작성해 주세요.`);
-
-    /**
-     * Reset은 저장돼 있던 판독문을 지운다. 그런데 **초안(draft)은 버전을 남기지 않으므로**
-     * 그냥 지우면 그 내용은 이 시스템 어디에도 남지 않는다. 사유만 남고 무엇을 버렸는지는
-     * 아무도 모른다.
-     *
-     * HPACS 릴리즈노트 2025.01은 이 동작에 "저장된 판독문을 삭제하기 때문에 주의가 필요하다"고
-     * 경고문을 달았다. **경쟁사가 경고문을 붙인 자리는 보통 고쳐야 할 자리다.**
-     * `ReportVersion`은 어차피 추가만 하는 역사이므로, 지우기 직전의 내용을 한 판 박아두면
-     * 잃을 것이 없다. 판독문은 잃어버리면 안 되는 유일한 것이다 (교훈 §1).
-     *
-     * 화면에는 여전히 안 보인다 — 되돌린 것은 되돌린 것이다. 다만 이력에는 남는다.
-     */
-    const discardOps: any[] = [];
-    if (action === 'reset' && current &&
-        (current.findings || current.conclusion || current.recommendation)) {
-      discardOps.push(this.prisma.reportVersion.create({
-        data: {
-          uid, version, action: 'discarded',
-          findings: current.findings, conclusion: current.conclusion,
-          recommendation: current.recommendation,
-          reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
-          author: current.updatedBy ?? c.actor,   // 버린 사람이 아니라 **쓴 사람**이 저자다
-        },
-      }));
-      version += 1;
-    }
-
     const stateData: any = { rs, holder: null, heldAt: null };   // 확정하면 점유가 풀린다
     if (action === 'preliminary') {
       stateData.preDoc = c.actor;
@@ -945,39 +900,62 @@ export class PacsService implements OnModuleInit {
       if (prev?.teleInstitutionId === me && prev?.institutionId !== me) stateData.ts = 'completed';
     }
 
-    // 폐기 스냅샷이 먼저 들어간다. 같은 트랜잭션이라 실패하면 지우기도 함께 취소된다 —
-    // "지워졌는데 기록은 없다"가 생길 틈이 없다.
-    const ops = [
-      ...discardOps,
-      this.prisma.studyState.update({ where: { uid }, data: stateData }),
-      this.prisma.report.upsert({
-        where: { uid },
-        create: { uid, ...content, version, updatedBy: c.actor },
-        update: { ...content, version, updatedBy: c.actor },
-      }),
-      this.prisma.reportVersion.create({
-        data: { uid, version, action, ...content, reason: body.reason ?? null, author: c.actor },
-      }),
-      /**
-       * 확정했으면 내 초안은 더 이상 초안이 아니다 — 진술이 됐다.
-       * 안 지우면 다음에 이 검사를 열 때 방금 확정한 것과 같은 내용의 초안이
-       * 확정본을 가린 채 떠서, "저장이 안 됐나?"를 만든다.
-       * 같은 트랜잭션이라 확정이 실패하면 초안도 그대로 남는다.
-       */
-      this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } }),
-    ];
-    let results: any[];
+    let results: [any, number];
     try {
-      results = await this.prisma.$transaction(ops);
+      results = await this.prisma.$transaction(async tx => {
+        // 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로 잠글 수 없다. B 적용 후
+        // 항상 존재하는 StudyState를 먼저 잠가 첫 판부터 같은 uid의 확정을 직렬화한다.
+        await tx.$queryRaw`
+          SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
+
+        // 안정된 부모 행을 잡은 뒤 현재 Report를 잠근 채 판 번호를 읽는다.
+        const [cur] = await tx.$queryRaw<any[]>`
+          SELECT version, "updatedBy", findings, conclusion, recommendation
+          FROM "Report" WHERE uid = ${uid} FOR UPDATE`;
+
+        if (body.baseVersion !== undefined && (cur?.version ?? 0) !== body.baseVersion)
+          throw new ConflictException(
+            `그 사이 ${cur?.updatedBy ?? '다른 사용자'}가 v${cur?.version}을 저장했습니다. ` +
+            `내용을 다시 불러온 뒤 작성해 주세요.`);
+
+        const last = await tx.reportVersion.findFirst({
+          where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
+        });
+        let version = (last?.version ?? 0) + 1;
+
+        // Reset은 현재 판독문을 비우기 직전에 이력으로 보존한다. 같은 트랜잭션이라
+        // 실패하면 비움도 스냅샷도 함께 취소되어 판독문을 잃을 틈이 없다.
+        if (action === 'reset' && cur &&
+            (cur.findings || cur.conclusion || cur.recommendation)) {
+          await tx.reportVersion.create({ data: {
+            uid, version, action: 'discarded',
+            findings: cur.findings, conclusion: cur.conclusion,
+            recommendation: cur.recommendation,
+            reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
+            author: cur.updatedBy ?? c.actor,
+          }});
+          version += 1;
+        }
+
+        const state = await tx.studyState.update({ where: { uid }, data: stateData });
+        await tx.report.upsert({ where: { uid },
+          create: { uid, ...content, version, updatedBy: c.actor },
+          update: { ...content, version, updatedBy: c.actor } });
+        await tx.reportVersion.create({ data: {
+          uid, version, action, ...content, reason: body.reason ?? null, author: c.actor } });
+        // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 지운다.
+        await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
+        return [state, version] as [any, number];
+      });
     } catch (e: any) {
-      // 동시 확정이 같은 (uid, version)을 먼저 썼다. 이것은 서버 고장(500)이 아니라
-      // 편집 충돌(409)이다 — 사용자가 조치할 수 있는 말로 바꾼다.
+      // @@unique(uid, version)은 최종 방어선이다. 불변조건이 깨져 충돌하더라도
+      // 서버 고장으로 노출하지 않도록 C-1의 409 변환은 그대로 유지한다.
       if (e?.code === 'P2002')
         throw new ConflictException(
           '다른 사용자가 방금 이 판독문을 확정했습니다. 내용을 다시 불러온 뒤 확정해 주세요.');
       throw e;
     }
-    const state: any = results[discardOps.length];   // 스냅샷 다음이 상태 행이다
+    const [state, version] = results;
 
     await this.audit(c.actor, `report.${action}`, uid, {
       version, by: me,
