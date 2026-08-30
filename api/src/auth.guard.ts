@@ -65,6 +65,9 @@ export class AuthGuard implements CanActivate {
       ({ payload } = await jwtVerify(raw, this.jwks, {
         issuer: process.env.KC_ISSUER,
         audience: process.env.KC_AUDIENCE ?? 'kin-api',
+        // 검증 규칙은 환경이 아니라 코드가 고정한다. exp 없는 토큰과 다른 알고리즘을 받지 않는다.
+        algorithms: ['RS256'],
+        requiredClaims: ['exp', 'sub', 'iss', 'aud'],
       }));
     } catch (e: any) {
       throw new UnauthorizedException('토큰 검증 실패: ' + e.message);
@@ -84,10 +87,14 @@ export class AuthGuard implements CanActivate {
      * 기관도 **서명된 토큰**에서만 나온다. 헤더로 받으면 그건 필터가 아니라 요청이다.
      *
      * 매퍼가 full path로 넣으면 "/hallym"으로 오므로 앞의 슬래시를 떼어낸다.
-     */
+    */
     const groups: string[] = (payload.groups ?? []).map((g: string) => g.replace(/^\//, ''));
+    // 0개는 매퍼 누락이고 복수는 배열 순서가 기관 경계를 결정한다. 둘 다 소리 내어 거부한다.
+    if (groups.length !== 1)
+      throw new ForbiddenException(
+        `기관 그룹이 ${groups.length}개입니다. 계정은 정확히 하나의 기관 그룹에 속해야 합니다 (Keycloak 그룹 설정 확인).`);
     req.groups = groups;
-    req.institution = groups[0] ?? null;
+    req.institution = groups[0];
     return true;
   }
 }
