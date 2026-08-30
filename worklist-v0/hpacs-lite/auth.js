@@ -72,7 +72,6 @@ const KinAuth = (() => {
     document.cookie = `kin_at=${encodeURIComponent(tok.access_token)}`
       + `; Path=/; Secure; SameSite=Strict; Max-Age=${tok.expires_in}`;
     if (tok.refresh_token) S.setItem('kin-rt', tok.refresh_token);
-    if (tok.id_token) S.setItem('kin-it', tok.id_token);
     // 만료 30초 전을 만료로 친다 — 네트워크 왕복 중에 죽는 걸 막는다
     S.setItem('kin-exp', String(Date.now() + (tok.expires_in - 30) * 1000));
     S.setItem('kin-user', c?.email ?? c?.preferred_username ?? '');
