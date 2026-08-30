@@ -68,15 +68,16 @@ if [ "$DEPLOYMENT_MODE" = "production" ]; then
     'add_header Strict-Transport-Security "max-age=31536000" always;' \
     > "$SNIPPET_DIR/hsts.conf"
 
-  printf '%s\n' \
-    'location = /auth/admin { return 404; }' \
-    'location ^~ /auth/admin/ { return 404; }' \
-    'location = /auth/realms/master { return 404; }' \
-    'location ^~ /auth/realms/master/ { return 404; }' \
-    > "$SNIPPET_DIR/keycloak-admin-guards.conf"
 else
   : > "$SNIPPET_DIR/default-servers.conf"
   : > "$SNIPPET_DIR/acme-challenge.conf"
   : > "$SNIPPET_DIR/hsts.conf"
-  : > "$SNIPPET_DIR/keycloak-admin-guards.conf"
 fi
+
+# 개발 프록시도 외부 진입점이 될 수 있다. 배포 모드와 관계없이 관리 표면을 숨긴다.
+printf '%s\n' \
+  'location = /auth/admin { return 404; }' \
+  'location ^~ /auth/admin/ { return 404; }' \
+  'location = /auth/realms/master { return 404; }' \
+  'location ^~ /auth/realms/master/ { return 404; }' \
+  > "$SNIPPET_DIR/keycloak-admin-guards.conf"
