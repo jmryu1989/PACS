@@ -418,8 +418,11 @@ h1#kc-page-title {
 }
 
 #kc-form-login .login-pf-settings {
-  position: relative;
-  display: block;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
   min-height: 36px;
   margin: 20px 0 0;
   padding: 16px 0 0;
@@ -445,43 +448,20 @@ h1#kc-page-title {
 }
 
 #kc-form-login .login-pf-settings > div:last-of-type {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-}
-
-#kc-form-login .login-pf-settings::before {
-  position: absolute;
-  right: 87px;
-  bottom: 3px;
-  width: 8px;
-  height: 7px;
-  content: "";
-  border: 1px solid #5E7396;
-  border-radius: 1px;
+  position: static;
+  min-width: 0;
 }
 
 #kc-form-login .login-pf-settings::after {
-  position: absolute;
-  right: 0;
-  bottom: 3px;
-  content: "TLS 암호화 연결";
+  position: static;
+  flex: none;
+  margin-left: auto;
+  content: "\1F512  TLS 암호화 연결";
   color: #5E7396;
   font-size: 11px;
   line-height: 1.2;
   letter-spacing: .06em;
-}
-
-#kc-form-login .login-pf-settings > div:last-of-type::after {
-  position: absolute;
-  right: 89px;
-  bottom: 9px;
-  width: 5px;
-  height: 5px;
-  content: "";
-  border: 1px solid #5E7396;
-  border-bottom: 0;
-  border-radius: 5px 5px 0 0;
+  white-space: nowrap;
 }
 
 .login-pf a,
