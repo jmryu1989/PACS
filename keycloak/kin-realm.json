@@ -90,7 +90,7 @@
       "name": "KIN API (service account)",
       "enabled": true,
       "publicClient": false,
-      "secret": "kin-api-dev-secret",
+      "secret": "${KC_KIN_API_SECRET}",
       "serviceAccountsEnabled": true,
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
@@ -106,13 +106,6 @@
       "lastName": "류",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [
-        {
-          "type": "password",
-          "value": "kin1234",
-          "temporary": false
-        }
-      ],
       "realmRoles": [
         "radiologist",
         "technician",
@@ -129,13 +122,6 @@
       "lastName": "의",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [
-        {
-          "type": "password",
-          "value": "kin1234",
-          "temporary": false
-        }
-      ],
       "realmRoles": [
         "radiologist"
       ],
@@ -150,13 +136,6 @@
       "lastName": "사",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [
-        {
-          "type": "password",
-          "value": "kin1234",
-          "temporary": false
-        }
-      ],
       "realmRoles": [
         "technician"
       ],
@@ -171,13 +150,6 @@
       "lastName": "센터의",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [
-        {
-          "type": "password",
-          "value": "kin1234",
-          "temporary": false
-        }
-      ],
       "realmRoles": [
         "radiologist"
       ],
@@ -192,13 +164,6 @@
       "lastName": "기사",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [
-        {
-          "type": "password",
-          "value": "kin1234",
-          "temporary": false
-        }
-      ],
       "realmRoles": [
         "technician"
       ],
@@ -213,13 +178,6 @@
       "lastName": "이",
       "enabled": true,
       "emailVerified": true,
-      "credentials": [
-        {
-          "type": "password",
-          "value": "kin1234",
-          "temporary": false
-        }
-      ],
       "realmRoles": [
         "radiologist"
       ],

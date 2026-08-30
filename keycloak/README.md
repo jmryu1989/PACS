@@ -1,6 +1,7 @@
 # Keycloak 렐름 (개발용)
 
-`kin-realm.json`은 컨테이너가 뜰 때 자동으로 들어간다(`start-dev --import-realm`).
+`kin-realm.json`은 빈 Keycloak PostgreSQL DB를 처음 띄울 때만 들어간다
+(`start-dev --import-realm`). 이후 렐름·계정·회전된 자격증명은 PostgreSQL에 유지된다.
 
 > ⚠️ **이 파일의 JSON에는 주석을 넣을 수 없다.** Keycloak은 모르는 필드를 만나면
 > import 자체를 거부하고 서버가 뜨지 않는다 (`Unrecognized field ... not marked as ignorable`).
@@ -21,16 +22,16 @@
 
 ## 개발용 계정
 
-| 아이디 | 비밀번호 | 롤 |
-|---|---|---|
-| `jmryu` | `kin1234` | radiologist, technician, admin |
-| `doctor` | `kin1234` | radiologist |
-| `tech` | `kin1234` | technician |
+| 아이디 | 롤 |
+|---|---|
+| `jmryu` | radiologist, technician, admin |
+| `doctor` | radiologist |
+| `tech` | technician |
 
 Keycloak 관리 콘솔: http://localhost:8080 (관리자 비밀번호는 `.env`의 `KC_ADMIN_PASSWORD`)
 
-> **이 비밀번호는 저장소에 공개돼 있다.** 개발 편의용이며, 이 렐름 파일로 운영 사용자를
-> 만들지 않는다. 운영에서는 관리 콘솔이나 Admin REST로 계정을 만들고 이 파일은 쓰지 않는다.
+> 렐름 파일에는 사용자 비밀번호가 없다. 최초 import 뒤 관리 콘솔이나 Admin REST로 설정하고,
+> 로컬 자동화용 값은 Git에서 제외된 `.env`의 `KIN_TEST_PASSWORD`로만 관리한다.
 
 ## 왜 audience 매퍼가 있나
 
@@ -57,7 +58,7 @@ API의 `AuthGuard`가 그 값을 `req.institution`으로 꺼내고, 서비스 �
 그 기관으로 거른다. **클라이언트가 기관을 고를 수 없다** — 감사로그의 actor와 같은 이유로
 기관도 서명된 토큰에서만 나온다. 헤더로 받으면 그건 필터가 아니라 요청이다.
 
-### 개발용 계정 (전부 `kin1234`)
+### 개발용 계정
 
 | 계정 | 기관 | 롤 |
 |---|---|---|
@@ -89,8 +90,8 @@ Preliminary(RS=P)는 상급 판독의를 **지정**하는 기능이고, 지정�
 사용자의 토큰을 빌려 쓰지 않는다 — 판독의에게 사용자 조회 권한을 줄 이유가 없다.
 서버가 서버 자격으로 묻는다.
 
-> **운영 전 할 일**: import 후 클라이언트 시크릿을 재생성하고 `.env`를 맞춘다.
-> 6단계에서는 시크릿 매니저로 옮긴다.
+클라이언트 시크릿은 렐름 JSON의 `${KC_KIN_API_SECRET}` 플레이스홀더에 Compose가
+`.env`의 `KC_CLIENT_SECRET`을 주입한다. 운영에서는 같은 값을 시크릿 매니저에서 공급한다.
 
 ## issuer 주소가 두 개인 이유
 
@@ -103,27 +104,12 @@ Keycloak에 `KC_HOSTNAME=http://localhost:8080`을 고정해 두었기 때문에
 
 ## 설정을 바꾼 뒤
 
-Keycloak의 H2 데이터베이스는 컨테이너 안에만 있다(볼륨을 붙이지 않았다). 따라서
-**컨테이너를 새로 만들면 이 파일이 다시 들어온다.**
+Keycloak은 기존 PostgreSQL의 별도 `keycloak` 데이터베이스를 쓴다. 컨테이너를 재생성해도
+현재 렐름이 유지되고, import 파일의 변경은 기존 렐름을 덮어쓰지 않는다.
 
 ```bash
 docker compose up -d --force-recreate keycloak
 ```
 
-`stop`/`start`나 `restart`로는 유지되고, `up --force-recreate`나 `down` 후 재기동에서 초기화된다.
-
-### 왜 볼륨을 안 붙였나
-
-`kc-db:/opt/keycloak/data/h2` 처럼 이름있는 볼륨을 붙이면 root 소유로 생성되는데
-Keycloak은 UID 1000으로 돌기 때문에 H2 파일을 못 만들고 죽는다:
-
-```
-Caused by: java.nio.file.AccessDeniedException: /opt/keycloak/data/h2/keycloakdb.mv.db
-ERROR: Failed to start server in (development) mode
-```
-
-(이미지에 그 디렉터리가 없어서 도커가 소유권을 복사해 줄 대상이 없다.)
-
-**결과**: 관리 콘솔에서 만든 계정은 컨테이너를 다시 만들면 사라진다. 개발 중에는 오히려
-편하다 — 이 파일이 늘 진실이 된다. 운영에서는 Keycloak도 PostgreSQL을 쓰게 하고
-그 DB를 영속화한다(6단계).
+빈 DB에서 렐름 파일을 다시 import해야 할 때는 사용자 비밀번호를 별도로 설정한다.
+저장소의 JSON에는 비밀번호나 고정 클라이언트 시크릿을 추가하지 않는다.

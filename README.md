@@ -13,7 +13,7 @@
 ```bash
 # 1. 실제 자격증명을 로컬 전용 .env에 넣는다 (.env는 Git에서 무시됨)
 cp .env.example .env
-# change-me 값을 모두 교체한다. 로컬 kin-api 시크릿은 렐름 JSON의 개발값과 맞춘다.
+# change-me 값을 모두 교체한다. 렐름 JSON의 시크릿 플레이스홀더에도 이 값이 주입된다.
 
 # 2. 전체 기동 — Orthanc + PostgreSQL + Keycloak + KIN API
 #    (첫 실행은 이미지 다운로드와 API 빌드로 몇 분 걸림)
@@ -297,12 +297,8 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
 - **로그인 후 `invalid_redirect_uri`**: 8042가 아닌 주소로 열었을 때. 렐름에 등록된 주소는
   `http://localhost:8042/*` 뿐이다. `keycloak/kin-realm.json`의 `redirectUris`를 고치고
   `docker compose down -v` 후 재기동하거나, 관리 콘솔에서 직접 추가.
-- **렐름 파일을 고쳤는데 반영 안 됨**: `docker compose up -d --force-recreate keycloak`.
-- **운영 Keycloak 컨테이너를 재생성함**: H2가 초기화돼 공개 개발값이 다시 import되므로,
-  관리자 비밀번호와 `kin-api` 클라이언트 시크릿을 즉시 다시 설정하고 `.env`도 맞춘다.
-  `kcadm`으로 만든 운영 런타임 계정도 함께 사라지므로 재생성 절차에 계정 복구를 포함한다.
-- **Keycloak이 `AccessDeniedException: keycloakdb.mv.db`로 죽음**: H2 경로에 이름있는 볼륨을
-  붙였을 때 생긴다(root 소유로 만들어지는데 Keycloak은 UID 1000). `keycloak/README.md` 참고.
+- **렐름 파일을 고쳤는데 반영 안 됨**: import는 빈 PostgreSQL DB에서만 실행된다. 기존 렐름은
+  관리 콘솔이나 Admin REST로 변경하고, 재구축 전에는 반드시 realm export를 남긴다.
 - **API가 401만 뱉음**: 토큰의 `iss`와 API의 `KC_ISSUER`가 달라진 경우. compose의
   `KC_HOSTNAME`과 `KC_ISSUER`가 둘 다 `http://localhost:8080`인지 확인.
 - **처음부터 다시**: `docker compose down -v` (영상·DB·Keycloak 계정이 전부 삭제됨)
