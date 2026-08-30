@@ -45,7 +45,7 @@ function inst(c: Caller): string {
   return c.institution;
 }
 
-const TECHNICIAN_FIELDS = ['ss', 'matched', 'ward', 'reqHosp', 'em', 'ov', 'orig'];
+const TECHNICIAN_FIELDS = ['ss', 'ward', 'reqHosp', 'em', 'ov'];
 
 /** JSON 문자열 컬럼 ↔ 객체 변환. 서버가 깨진 값을 받아도 죽지 않게 감싼다. */
 const parse = (s?: string) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -141,9 +141,10 @@ function toClient(s: any, r: any, actor = '', d: any = null) {
  * 트랜잭션으로 하는 일이고, 여기서 필드 하나 바꾸듯 할 수 있는 일이 아니다.
  * `repDoc`·`confirm`도 승인의 결과이지 클라이언트가 정할 값이 아니다.
  */
-const STATE_FIELDS = ['ss', 'em', 'ts', 'matched', 'ward', 'reqHosp'];
-/** 예전에 PATCH로 열려 있던 필드들. 조용히 무시하지 않고 소리 내어 막는다. */
-const REPORT_OWNED_FIELDS = ['rs', 'repDoc', 'confirm'];
+const STATE_FIELDS = ['ss', 'em', 'ts', 'ward', 'reqHosp'];
+/** 전용 경로가 소유한 필드들. PATCH로 오면 조용히 무시하지 않고 소리 내어 막는다.
+ * matched·orig는 /match·/unmatch의 Order+Study 원자 트랜잭션만이 쓴다. */
+const REPORT_OWNED_FIELDS = ['rs', 'repDoc', 'confirm', 'matched', 'orig'];
 
 /** 원격판독 상태머신. 어느 쪽 기관이 이 전이를 일으킬 수 있는가가 핵심이다. */
 const TELE_BY_OWNER = ['none', 'wait', 'sending', 'sent', 'cancelled', 'fail'];  // 의뢰 기관이 미는 구간
@@ -562,7 +563,7 @@ export class PacsService implements OnModuleInit {
     const owned = REPORT_OWNED_FIELDS.filter(k => body[k] !== undefined);
     if (owned.length)
       throw new BadRequestException(
-        `${owned.join(', ')} 은(는) 판독문 확정(POST /report/commit)으로만 바꿀 수 있습니다`);
+        `${owned.join(', ')} 은(는) 전용 경로(판독문 확정 /report/commit, 매칭 /match·/unmatch)로만 바꿀 수 있습니다`);
 
     // 무엇을 바꾸려 하는가에 따라 필요한 권한이 다르다
     if (TECHNICIAN_FIELDS.some(k => body[k] !== undefined)) need(c.roles, 'technician', '검사 정보 변경');
@@ -585,7 +586,6 @@ export class PacsService implements OnModuleInit {
     const data: any = {};
     for (const k of STATE_FIELDS) if (body[k] !== undefined) data[k] = body[k];
     if (body.ov !== undefined) data.ov = dump(body.ov);
-    if (body.orig !== undefined) data.orig = dump(body.orig);
 
     // ── 원격판독: 유일하게 기관을 넘는 동작 ──
     if (body.ts !== undefined) {
@@ -1123,6 +1123,9 @@ export class PacsService implements OnModuleInit {
     const me = inst(c);
     const prev = await this.gate(uid, c);
     if (!prev || prev.matched !== 'M') throw new BadRequestException('매칭된 검사가 아닙니다');
+    // Match와 같은 규칙을 해제에도 건다. 승인 뒤 환자·오더 연결을 바꾸면 진술의 근거가 사라진다.
+    if (prev.rs !== 'W')
+      throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭을 풀 수 있습니다 (현재 RS: ${prev.rs})`);
     if (prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 매칭을 풀 수 없습니다 (보유 기관의 일입니다)');
 

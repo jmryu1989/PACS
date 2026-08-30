@@ -839,8 +839,8 @@
     try { appState = JSON.parse(localStorage.getItem("kin-app") ?? "{}"); } catch (e) {}
 
     // PATCH로 보낼 수 있는 필드. 서버의 STATE_FIELDS와 같아야 한다.
-    // rs·repDoc·confirm은 여기 없다 — 판독문 확정(commitReport)만이 그것들을 움직인다.
-    const STATE_KEYS = ["ss", "em", "ts", "matched", "ward", "reqHosp", "ov", "orig"];
+    // 판독 생애주기는 commitReport, matched·orig는 /match·/unmatch만 움직인다.
+    const STATE_KEYS = ["ss", "em", "ts", "ward", "reqHosp", "ov"];
     // 서버에서 내려오는(=화면이 못 정하는) 읽기 전용 필드. 이건 PATCH로 보내지 않는다.
 
     /**
@@ -1692,7 +1692,7 @@
         id: $("#m-id").value.trim(), name: $("#m-name").value.trim(), sex: $("#m-sex").value,
         birth, age: ageOf(birth, s.date), desc: $("#m-desc").value.trim(), ward: $("#m-ward").value.trim() };
       Object.assign(s, a.ov);
-      saveApp(s.uid, { ov: a.ov, orig: a.orig });
+      saveApp(s.uid, { ov: a.ov });
       $("#modal").classList.remove("show");
       render(); renderClinical(); renderRelated(); renderOrders();
       toast("검사 정보를 수정했습니다");
