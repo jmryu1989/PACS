@@ -1,0 +1,507 @@
+:root {
+  --kin-bg: #0B1220;
+  --kin-text: #F2F6FD;
+  --kin-muted: #A7B8D6;
+  --kin-label: #8FA5CA;
+  --kin-accent: #4F8EF7;
+  --kin-highlight: #9CC3FF;
+  --kin-card-bg: rgba(9, 14, 26, .8);
+  --kin-card-border: rgba(140, 168, 215, .24);
+  --kin-card-radius: 10px;
+  --kin-card-shadow: 0 30px 80px rgba(0, 2, 8, .66), inset 0 1px 0 rgba(190, 215, 255, .14);
+  --kin-card-bar: linear-gradient(90deg, #2F6EE0, #4F8EF7 55%, #9CC3FF);
+  --kin-input-bg: #0A101E;
+  --kin-input-border: rgba(140, 168, 215, .3);
+  --kin-input-radius: 8px;
+  --kin-focus-ring: rgba(79, 142, 247, .14);
+  --kin-btn: linear-gradient(180deg, #2E63C8, #1D4794);
+  --kin-btn-shadow: 0 12px 26px rgba(8, 20, 48, .55), inset 0 1px 0 rgba(190, 215, 255, .22);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+.login-pf,
+.login-pf body {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  min-height: 660px;
+}
+
+.login-pf {
+  background: var(--kin-bg);
+}
+
+.login-pf body {
+  position: relative;
+  margin: 0;
+  overflow: hidden;
+  background: var(--kin-bg);
+  color: var(--kin-text);
+  font-family: Pretendard, "Noto Sans KR", -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+
+.login-pf body::before {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  content: "";
+  pointer-events: none;
+  background:
+    linear-gradient(105deg, rgba(5, 9, 17, .66) 0%, rgba(5, 9, 17, .3) 45%, rgba(5, 9, 17, .5) 100%),
+    radial-gradient(1000px 650px at 78% 20%, rgba(79, 142, 247, .14), transparent 60%),
+    radial-gradient(ellipse at center, transparent 50%, rgba(3, 6, 12, .66) 100%);
+}
+
+.login-pf body::after {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  content: "";
+  pointer-events: none;
+  background: url("../img/kin-login-background.jpg") center center / cover no-repeat;
+  filter: brightness(1.04) saturate(1.03);
+}
+
+.login-pf-page {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 1280px;
+  height: 100%;
+  margin: 0 auto;
+  padding: 0 56px;
+  gap: 60px;
+}
+
+#kc-header {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  color: var(--kin-text);
+  text-align: left;
+  white-space: normal;
+}
+
+#kc-header-wrapper {
+  width: 420px;
+  padding: 0;
+  color: #F4F8FF;
+  font-size: clamp(34px, 4.4vw, 56px);
+  font-weight: 250;
+  line-height: 1.16;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  text-shadow: 0 2px 24px rgba(0, 0, 0, .5);
+}
+
+#kc-header-wrapper::after {
+  display: block;
+  width: 510px;
+  margin-top: 28px;
+  padding-top: 24px;
+  content: "영상의학 원격판독 네트워크\A검사가 도착한 순간부터, 판독이 승인되는 순간까지.";
+  color: var(--kin-muted);
+  background: linear-gradient(90deg, var(--kin-accent), rgba(156, 195, 255, .25)) top left / 88px 1px no-repeat;
+  font-size: 15px;
+  font-weight: 300;
+  line-height: 1.9;
+  letter-spacing: .06em;
+  text-shadow: 0 1px 12px rgba(0, 0, 0, .5);
+  white-space: pre;
+}
+
+.login-pf-page::after {
+  position: absolute;
+  right: 0;
+  bottom: 16px;
+  left: 0;
+  content: "계정 발급은 소속 기관 관리자에게 문의하십시오 · © 2026 KOREA IMAGING NETWORK";
+  color: rgba(180, 196, 222, .55);
+  font-size: 11px;
+  line-height: 1.5;
+  letter-spacing: .08em;
+  text-align: center;
+  pointer-events: none;
+}
+
+.login-pf-page .card-pf {
+  position: relative;
+  flex: 0 0 380px;
+  width: 380px;
+  max-width: 380px;
+  margin: 0;
+  padding: 36px 36px 30px;
+  overflow: hidden;
+  color: var(--kin-text);
+  background: var(--kin-card-bg);
+  border: 1px solid var(--kin-card-border);
+  border-radius: var(--kin-card-radius);
+  box-shadow: var(--kin-card-shadow);
+}
+
+.login-pf-page .card-pf::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 3px;
+  content: "";
+  background: var(--kin-card-bar);
+}
+
+@supports (backdrop-filter: blur(18px)) {
+  .login-pf-page .card-pf {
+    backdrop-filter: blur(18px);
+  }
+}
+
+.login-pf-header {
+  min-height: 34px;
+  margin: 0 0 26px;
+  padding: 0 0 0 46px;
+  background: url("../img/kin-emblem-j1.svg") left center / 34px 34px no-repeat;
+  text-align: left;
+}
+
+h1#kc-page-title {
+  min-height: 34px;
+  margin: 0;
+  color: var(--kin-text);
+  font-size: 0;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: .1em;
+  text-align: left;
+}
+
+h1#kc-page-title::before {
+  display: block;
+  margin: 0 0 8px;
+  content: "KOREA IMAGING NETWORK";
+  color: #7E95BD;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: .34em;
+  white-space: nowrap;
+}
+
+h1#kc-page-title::after {
+  display: block;
+  content: "시스템 로그인";
+  color: var(--kin-text);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: .1em;
+}
+
+#kc-content,
+#kc-content-wrapper,
+#kc-form,
+#kc-form-wrapper {
+  width: 100%;
+  margin: 0;
+}
+
+#kc-form-login {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+}
+
+#kc-form-login > .form-group {
+  margin: 0;
+}
+
+#kc-form-login > .form-group:nth-of-type(1) {
+  order: 1;
+}
+
+#kc-form-login > .form-group:nth-of-type(2) {
+  order: 2;
+}
+
+#kc-form-login > .login-pf-settings {
+  order: 4;
+}
+
+#kc-form-buttons {
+  order: 3;
+}
+
+#kc-form-login label {
+  display: block;
+  margin: 0 0 8px 1px;
+  color: var(--kin-label);
+  font-size: 0;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: .1em;
+}
+
+#kc-form-login label::before {
+  font-size: 11.5px;
+}
+
+#kc-form-login label[for="username"]::before {
+  content: "아이디 또는 이메일";
+}
+
+#kc-form-login label[for="password"]::before {
+  content: "비밀번호";
+}
+
+#kc-form-login .pf-c-form-control {
+  width: 100%;
+  height: 48px;
+  margin: 0 0 20px;
+  padding: 0 15px;
+  color: #EDF3FC;
+  background: var(--kin-input-bg);
+  border: 1px solid var(--kin-input-border);
+  border-radius: var(--kin-input-radius);
+  outline: 0;
+  box-shadow: none;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 48px;
+  transition: border-color .15s, box-shadow .15s;
+}
+
+#kc-form-login .pf-c-form-control:focus {
+  border-color: var(--kin-accent);
+  box-shadow: 0 0 0 3px var(--kin-focus-ring);
+}
+
+#kc-form-login .pf-c-input-group {
+  display: block;
+  margin: 0 0 20px;
+  background: transparent;
+}
+
+#kc-form-login #password {
+  margin-bottom: 0;
+}
+
+#kc-form-login button[data-password-toggle] {
+  display: none;
+}
+
+#kc-form-buttons {
+  position: relative;
+  margin: 4px 0 0;
+}
+
+#kc-form-buttons::after {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  content: "로그인";
+  color: #FFF;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 50px;
+  letter-spacing: .16em;
+  pointer-events: none;
+}
+
+#kc-login.pf-c-button {
+  width: 100%;
+  height: 50px;
+  margin: 0;
+  padding: 0 15px;
+  color: transparent;
+  background: var(--kin-btn);
+  border: 0;
+  border-radius: var(--kin-input-radius);
+  box-shadow: var(--kin-btn-shadow);
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 50px;
+  letter-spacing: .16em;
+  cursor: pointer;
+}
+
+#kc-login.pf-c-button:hover {
+  filter: brightness(1.08);
+}
+
+#kc-login.pf-c-button:focus-visible {
+  outline: 2px solid var(--kin-highlight);
+  outline-offset: 3px;
+}
+
+#kc-form-login .login-pf-settings {
+  position: relative;
+  display: block;
+  min-height: 35px;
+  margin: 20px 0 0;
+  padding: 16px 0 0;
+  border-top: 1px solid rgba(140, 168, 215, .14);
+  color: #5E7396;
+}
+
+#kc-form-options:empty {
+  display: none;
+}
+
+#kc-form-login .login-pf-settings a {
+  color: #7E95BD;
+  font-size: 0;
+  line-height: 1.2;
+  letter-spacing: .03em;
+  text-decoration: none;
+}
+
+#kc-form-login .login-pf-settings a::before {
+  content: "비밀번호를 잊으셨나요?";
+  font-size: 12.5px;
+}
+
+#kc-form-login .login-pf-settings > div:last-of-type {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+}
+
+#kc-form-login .login-pf-settings::before {
+  position: absolute;
+  right: 87px;
+  bottom: 3px;
+  width: 8px;
+  height: 7px;
+  content: "";
+  border: 1px solid #5E7396;
+  border-radius: 1px;
+}
+
+#kc-form-login .login-pf-settings::after {
+  position: absolute;
+  right: 0;
+  bottom: 3px;
+  content: "TLS 암호화 연결";
+  color: #5E7396;
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: .06em;
+}
+
+#kc-form-login .login-pf-settings > div:last-of-type::after {
+  position: absolute;
+  right: 89px;
+  bottom: 9px;
+  width: 5px;
+  height: 5px;
+  content: "";
+  border: 1px solid #5E7396;
+  border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+}
+
+.login-pf a,
+.login-pf a:hover,
+.login-pf a:focus {
+  color: #7E95BD;
+}
+
+.pf-c-alert,
+.alert {
+  margin: 0 0 20px;
+  color: #F5D5D5;
+  background: rgba(110, 30, 38, .35);
+  border: 1px solid rgba(245, 128, 140, .35);
+  border-radius: 7px;
+  box-shadow: none;
+}
+
+.pf-c-alert__icon,
+.pf-c-alert__title,
+.alert-error,
+.kc-feedback-text {
+  color: #F5D5D5;
+}
+
+#input-error.kc-feedback-text {
+  display: block;
+  margin: -12px 0 16px 1px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+#kc-info {
+  margin: 20px 0 0;
+}
+
+#kc-info-wrapper {
+  padding: 14px;
+  color: var(--kin-muted);
+  background: rgba(10, 16, 30, .7);
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  html,
+  .login-pf,
+  .login-pf body {
+    min-height: 100%;
+  }
+
+  .login-pf body {
+    overflow: auto;
+  }
+
+  .login-pf-page {
+    justify-content: center;
+    min-height: 100%;
+    height: auto;
+    padding: 64px 24px 72px;
+  }
+
+  #kc-header {
+    display: none;
+  }
+
+  .login-pf-page .card-pf {
+    flex: none;
+    width: min(380px, 100%);
+    max-width: 380px;
+  }
+}
+
+@media (max-width: 460px) {
+  .login-pf-page {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .login-pf-page .card-pf {
+    padding-right: 28px;
+    padding-left: 28px;
+  }
+}
+
+@media (max-height: 659px) and (min-width: 901px) {
+  html,
+  .login-pf,
+  .login-pf body {
+    min-height: 660px;
+  }
+
+  .login-pf body {
+    overflow-y: auto;
+  }
+}

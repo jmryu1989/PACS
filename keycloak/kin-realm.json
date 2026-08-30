@@ -5,7 +5,7 @@
   "sslRequired": "external",
   "registrationAllowed": false,
   "resetPasswordAllowed": true,
-  "loginTheme": "keycloak",
+  "loginTheme": "kin-login",
   "accessTokenLifespan": 1800,
   "ssoSessionIdleTimeout": 14400,
   "ssoSessionMaxLifespan": 43200,

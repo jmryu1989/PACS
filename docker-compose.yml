@@ -102,6 +102,7 @@ services:
       - "8080:8080"
     volumes:
       - ./keycloak/kin-realm.json:/opt/keycloak/data/import/kin-realm.json:ro
+      - ./keycloak/themes/kin-login:/opt/keycloak/themes/kin-login:ro
     # H2 파일에 볼륨을 붙이지 않는다.
     #   붙이면 새 이름있는 볼륨이 root 소유로 만들어지는데 Keycloak은 UID 1000으로 돌아서
     #   "AccessDeniedException: keycloakdb.mv.db"로 죽는다. (이미지에 그 디렉터리가 없어
