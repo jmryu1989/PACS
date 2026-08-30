@@ -962,7 +962,17 @@ export class PacsService implements OnModuleInit {
        */
       this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } }),
     ];
-    const results = await this.prisma.$transaction(ops);
+    let results: any[];
+    try {
+      results = await this.prisma.$transaction(ops);
+    } catch (e: any) {
+      // 동시 확정이 같은 (uid, version)을 먼저 썼다. 이것은 서버 고장(500)이 아니라
+      // 편집 충돌(409)이다 — 사용자가 조치할 수 있는 말로 바꾼다.
+      if (e?.code === 'P2002')
+        throw new ConflictException(
+          '다른 사용자가 방금 이 판독문을 확정했습니다. 내용을 다시 불러온 뒤 확정해 주세요.');
+      throw e;
+    }
     const state: any = results[discardOps.length];   // 스냅샷 다음이 상태 행이다
 
     await this.audit(c.actor, `report.${action}`, uid, {
