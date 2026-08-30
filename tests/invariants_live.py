@@ -172,6 +172,9 @@ class LiveStack:
             "KIN_TEST_TOKEN_URL",
             "http://127.0.0.1:8080/auth/realms/kin/protocol/openid-connect/token",
         )
+        # 운영 UI 클라이언트는 password grant를 받지 않는다. 실행 감사에서는 운영 렐름에
+        # 포함되지 않는 별도 로컬 클라이언트를 KIN_TEST_CLIENT_ID로 명시한다.
+        self.client_id = os.environ.get("KIN_TEST_CLIENT_ID", "kin-web")
         self.orthanc = os.environ.get("KIN_TEST_ORTHANC", "http://127.0.0.1:8042").rstrip("/")
         self.tokens: dict[str, str] = {}
         self.actors: dict[str, str] = {}
@@ -218,7 +221,7 @@ class LiveStack:
         if not password:
             raise RuntimeError(f"Keycloak 개발 계정 비밀번호를 찾을 수 없습니다: {user}")
         data = urlencode({
-            "client_id": "kin-web", "grant_type": "password",
+            "client_id": self.client_id, "grant_type": "password",
             "username": user, "password": password,
         }).encode("ascii")
         request = Request(
