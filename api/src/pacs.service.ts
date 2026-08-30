@@ -150,6 +150,12 @@ const TELE_BY_OWNER = ['none', 'wait', 'sending', 'sent', 'cancelled', 'fail']; 
 const TELE_BY_RECEIVER = ['inReading', 'completed'];                             // 수신 기관이 미는 구간
 /** 통로가 닫히는 상태 — 여기로 가면 수신 기관은 검사를 더 못 본다 */
 const TELE_CLOSED = ['none', 'cancelled'];
+/** 화면의 실제 버튼 흐름과 같은 전이만 허용한다. 역행·건너뛰기는 데이터 조작이다. */
+const TELE_NEXT: Record<string, string[]> = {
+  none: ['wait'], wait: ['sending', 'cancelled'], sending: ['sent', 'fail', 'cancelled'],
+  sent: ['inReading', 'cancelled'], inReading: ['completed', 'cancelled'],
+  completed: [], cancelled: ['wait'], fail: ['wait', 'cancelled'],
+};
 
 @Injectable()
 export class PacsService implements OnModuleInit {
@@ -583,8 +589,13 @@ export class PacsService implements OnModuleInit {
 
     // ── 원격판독: 유일하게 기관을 넘는 동작 ──
     if (body.ts !== undefined) {
+      // 기관 관문과 역할 관문은 다른 축이다. 원격판독 의뢰·수신은 판독의만 결정한다.
+      need(c.roles, 'radiologist', '원격판독 상태 변경');
       const owner = prev?.institutionId ?? me;
       const ts = body.ts;
+      const from = prev?.ts ?? 'none';
+      if (!(TELE_NEXT[from] ?? []).includes(ts))
+        throw new BadRequestException(`허용되지 않는 TS 전이입니다: ${from} → ${ts}`);
       if (TELE_BY_OWNER.includes(ts)) {
         if (owner !== me)
           throw new ForbiddenException('원격판독 의뢰는 검사를 보유한 기관만 할 수 있습니다');
