@@ -3,7 +3,12 @@
 <head>
   <meta charset="utf-8">
   <title>KIN PACS — 로그인</title>
+  <script>
+    const KIN_PRODUCTION = location.protocol === 'https:' && location.hostname === 'pacs.koreaimagingnetwork.com';
+    if (KIN_PRODUCTION) document.documentElement.classList.add('production-entry');
+  </script>
   <style>
+    html.production-entry body { visibility: hidden; }
     body { margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center;
            background: #10141b; font-family: "Malgun Gothic", "Segoe UI", sans-serif; }
     .box { width: 340px; background: #1b212c; border: 1px solid #2c3444; border-top: 3px solid #2196f3;
@@ -47,19 +52,38 @@
   <script src="auth.js"></script>
   <script>
     const $ = s => document.querySelector(s);
+    const revealLanding = () => document.documentElement.classList.remove('production-entry');
+
+    // 서버 없는 데모와 연결 진단은 로컬 개발에만 남긴다. 운영에서는 DOM에서도 제거한다.
+    if (KIN_PRODUCTION) $("#demo").remove();
 
     async function boot() {
       // 1) Keycloak에서 돌아온 경우 — ?code= 를 토큰으로 바꾸고 바로 입장
+      let redirectFailed = false;
       try {
         if (await KinAuth.handleRedirect()) { location.replace('main.html'); return; }
       } catch (e) {
         $("#msg").textContent = '로그인 실패: ' + e.message;
+        redirectFailed = true;
       }
 
       // 2) 이미 로그인돼 있으면 통과
       if (await KinAuth.token()) { location.replace('main.html'); return; }
 
-      // 3) Keycloak이 살아 있는지 확인해서 버튼 상태를 정한다
+      // 3) 운영 첫 진입은 기존 PKCE 로그인 함수를 그대로 사용해 랜딩을 건너뛴다.
+      if (KIN_PRODUCTION && !redirectFailed) {
+        try {
+          await KinAuth.login();
+          return;
+        } catch (e) {
+          $("#msg").textContent = '로그인 실패: ' + e.message;
+        }
+      }
+
+      // 로그인 오류나 인증 서버 장애 때만 랜딩을 보여 주어 재시도할 수 있게 한다.
+      revealLanding();
+
+      // 4) Keycloak이 살아 있는지 확인해서 버튼 상태를 정한다
       try {
         const res = await fetch(`${KinAuth.KC}/realms/kin/.well-known/openid-configuration`);
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -77,7 +101,7 @@
     $("#signin").addEventListener('click', () => KinAuth.login().catch(e => $("#msg").textContent = e.message));
     // 이미 로그인된 세션이 있어도 아이디를 다시 묻는다 (공용 판독 PC / 두 계정 동시 테스트)
     $("#switch").addEventListener('click', () => KinAuth.login({ prompt: 'login' }).catch(e => $("#msg").textContent = e.message));
-    $("#demo").addEventListener('click', () => { KinAuth.demo(); location.href = 'main.html'; });
+    $("#demo")?.addEventListener('click', () => { KinAuth.demo(); location.href = 'main.html'; });
 
     boot();
   </script>
