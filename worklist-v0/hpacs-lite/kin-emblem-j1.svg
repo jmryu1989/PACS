@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Korea Imaging Network 엠블럼">
+  <title>KIN 엠블럼 J1 — 두 물가</title>
+  <defs>
+    <mask id="river" maskUnits="userSpaceOnUse" x="0" y="0" width="96" height="96">
+      <circle cx="48" cy="48" r="40" fill="#fff"/>
+      <g fill="none" stroke="#000" stroke-linecap="round">
+        <path d="M 18 84 C 30 74, 36 68, 42 58" stroke-width="10"/>
+        <path d="M 42 58 C 52 50, 64 46, 88 40" stroke-width="8"/>
+        <path d="M 44 56 C 48 42, 50 30, 50 4" stroke-width="6"/>
+        <path d="M 54 50 C 62 40, 70 32, 84 18" stroke-width="5"/>
+      </g>
+    </mask>
+    <clipPath id="disc"><circle cx="48" cy="48" r="40"/></clipPath>
+    <linearGradient id="deep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2E63C8"/><stop offset="1" stop-color="#1B3F86"/>
+    </linearGradient>
+    <linearGradient id="light" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8CB8FB"/><stop offset="1" stop-color="#5C97F8"/>
+    </linearGradient>
+  </defs>
+  <g mask="url(#river)">
+    <circle cx="48" cy="48" r="40" fill="url(#deep)"/>
+    <path d="M 18 84 C 30 74, 36 68, 42 58 C 52 50, 64 46, 88 40 L 96 36 L 96 0 L 0 0 L 0 92 Z"
+          fill="url(#light)" clip-path="url(#disc)"/>
+  </g>
+</svg>

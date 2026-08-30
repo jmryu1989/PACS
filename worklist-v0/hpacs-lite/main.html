@@ -4,6 +4,26 @@
   <meta charset="utf-8">
   <title>KIN PACS</title>
   <style>
+    :root {
+      --kin-bg: #0B1220;
+      --kin-panel: #0E1728;
+      --kin-panel2: #111C31;
+      --kin-line: rgba(130,160,210,.14);
+      --kin-line2: rgba(130,160,210,.22);
+      --kin-text: #E9F0FA;
+      --kin-muted: #93A6C4;
+      --kin-dim: #5E7396;
+      --kin-link: #9CC3FF;
+      --kin-accent: #4F8EF7;
+      --kin-row-sel: rgba(79,142,247,.14);
+      --kin-row-hover: rgba(130,160,210,.05);
+      --kin-focus-ring: rgba(79,142,247,.12);
+      --kin-st-w: #4F8EF7;
+      --kin-st-a: #3FBF8F;
+      --kin-st-ho: #E8B65B;
+      --kin-st-p: #B58CF7;
+      --kin-st-t: #2FC4CE;
+    }
     * { box-sizing: border-box; }
     body { font-family: "Malgun Gothic", "Segoe UI", sans-serif; margin: 0; background: #14181f; color: #cdd3dc; font-size: 12px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
@@ -218,11 +238,165 @@
     .vr { color: #ffb0b0; font-size: 11px; margin: 4px 0; }
     .hist pre { margin: 4px 0 0; padding: 6px 8px; background: #14181f; border: 1px solid #262e3c;
                 color: #cdd3dc; font: 11px/1.5 inherit; white-space: pre-wrap; word-break: break-word; }
+
+    /* W1 확정안 — 상태색은 행 바·RS 글자·카운트 점에만 쓴다. */
+    body {
+      background: var(--kin-bg);
+      color: var(--kin-text);
+      font-family: Pretendard, "Noto Sans KR", -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+      font-size: 13px;
+    }
+    .menubar {
+      height: 52px;
+      padding: 0 20px;
+      gap: 2px;
+      color: var(--kin-text);
+      background: var(--kin-panel);
+      border-bottom: 1px solid var(--kin-line2);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; margin-right: 20px; white-space: nowrap; }
+    .brand img { width: 22px; height: 22px; }
+    .brand span { color: #AFC3E2; font-size: 11px; font-weight: 600; letter-spacing: .26em; }
+    .menubar .tabs { align-self: stretch; height: 100%; margin-right: 12px; padding: 0; background: transparent; border: 0; }
+    .menubar .tabs > div {
+      display: flex;
+      align-items: center;
+      padding: 0 18px;
+      color: var(--kin-muted);
+      font-size: 13px;
+      border-bottom: 2px solid transparent;
+    }
+    .menubar .tabs > div.on { color: var(--kin-text); border-bottom-color: var(--kin-accent); font-weight: 600; }
+    .menubar .item { padding: 8px 10px; color: var(--kin-muted); }
+    .menubar .item:hover { background: var(--kin-row-hover); color: var(--kin-text); }
+    .mright { color: var(--kin-muted); font-size: 12px; }
+
+    .userfilter {
+      min-height: 59px;
+      padding: 12px 20px;
+      gap: 8px;
+      background: var(--kin-bg);
+      border-bottom: 1px solid var(--kin-line);
+    }
+    .userfilter input#quick,
+    .chip,
+    .qf button,
+    .ctxbar button {
+      height: 34px;
+      padding: 0 12px;
+      color: var(--kin-muted);
+      background: var(--kin-panel);
+      border: 1px solid var(--kin-line2);
+      border-radius: 7px;
+      font-size: 12.5px;
+    }
+    .userfilter input#quick { width: 190px; border-radius: 7px; outline: none; }
+    .userfilter input#quick:focus,
+    .filters input:focus,
+    .filters select:focus {
+      border-color: var(--kin-accent);
+      box-shadow: 0 0 0 3px var(--kin-focus-ring);
+      outline: none;
+    }
+    .qf button.on {
+      color: #CFE2FF;
+      background: rgba(79,142,247,.16);
+      border-color: rgba(79,142,247,.5);
+      font-weight: 600;
+    }
+
+    .split { background: var(--kin-bg); }
+    .left { border-right-color: var(--kin-line2); }
+    .ctxbar { background: var(--kin-bg); border-bottom-color: var(--kin-line); }
+    .grid { background: var(--kin-bg); }
+    .left .grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .left .grid th,
+    .left .grid td { padding: 9px 12px; border: 0; border-bottom: 1px solid var(--kin-line); color: var(--kin-text); }
+    .left .grid thead th {
+      height: 35px;
+      color: var(--kin-muted);
+      background: var(--kin-panel2);
+      border-bottom-color: var(--kin-line2);
+      font-size: 11.5px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-align: left;
+    }
+    .left .grid thead tr.filters th { top: 35px; height: 27px; padding: 3px; background: var(--kin-panel2); }
+    .filters input,
+    .filters select {
+      height: 21px;
+      color: var(--kin-text);
+      background: var(--kin-panel);
+      border: 1px solid var(--kin-line2);
+      border-radius: 4px;
+    }
+    .left .grid tbody tr:hover td { background: var(--kin-row-hover); }
+    .left .grid tbody tr.sel td,
+    .left .grid tbody tr.sel:hover td { background: var(--kin-row-sel); }
+    .left .grid td.num,
+    .left .grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .left .grid td.dim { color: var(--kin-dim); }
+    .left .grid td.acc { color: var(--kin-link); }
+
+    .rs { min-width: 0; padding: 0; color: var(--kin-text); background: transparent; border-radius: 0; font-weight: 700; }
+    .rs.W, .rs.A, .rs.H, .rs.O, .rs.P, .rs.T { background: transparent; }
+    .rs.W, #rows tr.st-w .rs { color: var(--kin-st-w); }
+    .rs.A, #rows tr.st-a .rs { color: var(--kin-st-a); }
+    .rs.H, .rs.O, #rows tr.st-h .rs, #rows tr.st-o .rs { color: var(--kin-st-ho); }
+    .rs.P, #rows tr.st-p .rs { color: var(--kin-st-p); }
+    .rs.T, #rows tr.st-t .rs { color: var(--kin-st-t); }
+    #rows tr.st-w td:first-child { box-shadow: inset 3px 0 0 var(--kin-st-w); }
+    #rows tr.st-a td:first-child { box-shadow: inset 3px 0 0 var(--kin-st-a); }
+    #rows tr.st-h td:first-child,
+    #rows tr.st-o td:first-child { box-shadow: inset 3px 0 0 var(--kin-st-ho); }
+    #rows tr.st-p td:first-child { box-shadow: inset 3px 0 0 var(--kin-st-p); }
+    #rows tr.st-t td:first-child { box-shadow: inset 3px 0 0 var(--kin-st-t); }
+    #rows tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--kin-accent) !important; }
+
+    .statusbar {
+      min-height: 39px;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 18px;
+      padding: 10px 20px;
+      color: var(--kin-muted);
+      background: var(--kin-panel);
+      border-top: 1px solid var(--kin-line2);
+      font-size: 12.5px;
+    }
+    #countlist { display: flex; align-items: center; gap: 18px; }
+    #countlist .count { display: flex; align-items: center; gap: 6px; }
+    #countlist .dot { width: 8px; height: 8px; border-radius: 50%; }
+    #countlist .dot-w { background: var(--kin-st-w); }
+    #countlist .dot-a { background: var(--kin-st-a); }
+    #countlist .dot-ho { background: var(--kin-st-ho); }
+    #countlist .dot-p { background: var(--kin-st-p); }
+    #countlist .dot-t { background: var(--kin-st-t); }
+    #filterlist { margin-left: auto; color: var(--kin-dim); font-size: 11.5px; }
+
+    .right { background: var(--kin-bg); }
+    .rw { border-bottom-color: var(--kin-line2); }
+    .rw section, .related-p { border-color: var(--kin-line2); }
+    .rw h3, .panel h3, .rtabs, .reltabs, .rbtns, .rfoot2 { background: var(--kin-panel); }
+    .rw h3, .panel h3, .rtabs div, .reltabs div { color: var(--kin-muted); }
+    .rtabs { border-bottom-color: var(--kin-accent); }
+    .rtabs div.on, .reltabs div.on { color: var(--kin-link); }
+    .reltabs div.on { border-bottom-color: var(--kin-accent); }
+    .clinical { color: var(--kin-muted); }
+    .clinical td:first-child { color: var(--kin-dim); }
+    .redit textarea { color: var(--kin-text); background: var(--kin-bg); border-color: var(--kin-line2); }
+    .redit textarea:focus { border-color: var(--kin-accent); box-shadow: 0 0 0 3px var(--kin-focus-ring); }
   </style>
 </head>
 <body>
 
   <div class="menubar">
+    <div class="brand"><img src="kin-emblem-j1.svg" alt=""><span>KOREA IMAGING NETWORK</span></div>
+    <div class="tabs">
+      <div class="on" data-tab="Radiology">Radiology</div>
+      <div data-tab="Technician">Technician</div>
+    </div>
     <div class="item" id="m-home">⌂ Home</div>
     <div class="item" title="추후 구현">▤ Report</div>
     <div class="item" title="추후 구현">⚙ Config</div>
@@ -267,11 +441,6 @@
   <div class="split">
     <!-- ══ 좌측: 워크리스트 (6.3) / Study List (8.1) ══ -->
     <div class="left">
-      <div class="tabs">
-        <div class="on" data-tab="Radiology">Radiology</div>
-        <div data-tab="Technician">Technician</div>
-      </div>
-
       <!-- Context Menu 버튼 (8.1.3) — Technician 모드에서만 -->
       <div class="ctxbar" id="ctxbar">
         <span class="fold" id="fold">▽</span>
@@ -295,8 +464,8 @@
       </div>
 
       <div class="statusbar">
-        <span id="filterlist">Filter : -</span>
         <span id="countlist"></span>
+        <span id="filterlist">Filter : -</span>
       </div>
     </div>
 
@@ -819,7 +988,7 @@
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
         { k: "em", t: "EM", f: ["E", "N"] },
-        { k: "rs", t: "RS", f: ["A", "P", "T", "W"] },
+        { k: "rs", t: "RS", f: ["A", "H", "O", "P", "T", "W"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "ts", t: "TS" },
         { k: "id", t: "ID", f: "text" },
@@ -842,7 +1011,7 @@
         { k: "em", t: "EM", f: ["E", "N"] },
         { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
         { k: "matched", t: "Mt", f: ["M", "U"] },
-        { k: "rs", t: "RS", f: ["A", "P", "T", "W"] },
+        { k: "rs", t: "RS", f: ["A", "H", "O", "P", "T", "W"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "id", t: "ID", f: "text" },
         { k: "name", t: "Name", f: "text" },
@@ -866,7 +1035,7 @@
     // 특수 렌더링이 필요한 칸만 함수로
     const CELL = {
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
-      rs: s => `<span class="rs ${s.rs}">${s.rs}</span>`,
+      rs: s => `<span class="rs ${esc(s.rs)}">${esc(s.rs)}</span>`,
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
       ss: s => `<span class="ss ${s.ss}">${s.ss}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
@@ -882,7 +1051,7 @@
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
 
     function renderHeads() {
-      $("#heads").innerHTML = COLS[mode].map(c => `<th data-key="${c.k}">${c.t}</th>`).join("");
+      $("#heads").innerHTML = COLS[mode].map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
       $("#filterrow").innerHTML = COLS[mode].map(c => {
         if (!c.f) return "<th></th>";
         if (c.f === "text")
@@ -1101,11 +1270,12 @@
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
 
       $("#rows").innerHTML = list.map((s, i) => `
-        <tr data-uid="${esc(s.uid)}" class="${s.uid === selectedUid ? "sel" : ""}">` +
+        <tr data-uid="${esc(s.uid)}" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}">` +
         cols.map(c => {
           // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
           const v = c.k === "no" ? i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
-          return `<td class="${c.num ? "num" : ""}">${v}</td>`;
+          const classes = [c.num ? "num" : "", c.k === "acc" ? "acc" : "", ["id", "birth"].includes(c.k) ? "dim" : ""];
+          return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${cols.length}">No records found</td></tr>`;
 
@@ -1120,9 +1290,17 @@
       $("#filterlist").textContent = "Filter : " + (active.join(", ") || "-");
 
       const n = (k, v) => list.filter(s => s[k] === v).length;
-      $("#countlist").textContent = mode === "Radiology"
-        ? `W:${n("rs","W")} A:${n("rs","A")} T:${n("rs","T")} P:${n("rs","P")} · Total ${list.length}`
-        : `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
+      if (mode === "Radiology") {
+        $("#countlist").innerHTML =
+          `<span class="count"><span class="dot dot-w"></span>W:${n("rs","W")}</span>` +
+          `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
+          `<span class="count"><span class="dot dot-ho"></span>H,O:${n("rs","H") + n("rs","O")}</span>` +
+          `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
+          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>`;
+      } else {
+        $("#countlist").textContent =
+          `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
+      }
     }
 
     // ── 모드 전환 ──
