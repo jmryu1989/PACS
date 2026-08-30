@@ -290,6 +290,41 @@ export class PacsService implements OnModuleInit {
     return toClient(saved, await this.prisma.report.findUnique({ where: { uid } }), c.actor, null);
   }
 
+  /**
+   * DICOMweb 경로의 기관 관문. 워크리스트가 지키는 경계(visible)를 영상 경로에도 세운다.
+   * auth_request 제약상 거부는 전부 403이다 — 404를 던지면 nginx가 500으로 바꾼다.
+   */
+  async authzDicom(originalUri: string, c: Caller) {
+    const me = inst(c);
+    const [path, query = ''] = originalUri.split('?');
+
+    // 로그인만으로 충분한 경로 — PHI 없음
+    if (path === '/statistics' || path === '/system' || path === '/tools/lookup') return;
+
+    // /dicom-web/studies/{uid}/... — 경로의 UID로 관문
+    let m = /^\/dicom-web\/studies\/([0-9.]+)(?:\/|$)/.exec(path);
+    let uid = m?.[1];
+
+    // /dicom-web/studies?StudyInstanceUID=... — 쿼리의 UID로 관문 (OHIF 초기 조회)
+    if (!uid && path === '/dicom-web/studies') {
+      const q = new URLSearchParams(query);
+      uid = q.get('StudyInstanceUID') ?? q.get('0020000D') ?? undefined;
+      // UID 없는 전체 열거는 이 관문이 막으려는 바로 그것이다. 목록은 /api/studies가 기관을 걸러 준다.
+      if (!uid) throw new ForbiddenException('전체 목록은 워크리스트 API를 사용하세요');
+    }
+
+    // /instances/{orthancId}/... — Orthanc에 물어 StudyInstanceUID로 환원
+    if (!uid) {
+      const im = /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path);
+      if (im) uid = await this.orthanc.instanceStudyUid(im[1]);   // 불변이라 캐시됨
+    }
+
+    if (!uid) throw new ForbiddenException('허용되지 않는 경로입니다');
+    const s = await this.prisma.studyState.findUnique({ where: { uid } });
+    // 미등록(기관 미확정) 검사는 기본 거부 — 워크리스트를 한 번 열면 lazy 등록이 기관을 박는다.
+    if (!s || !this.visible(s, me)) throw new ForbiddenException('열람 권한이 없습니다');
+  }
+
   /** 쓰기 전 관문. 없는 검사와 남의 검사는 같은 메시지로 막는다(존재 여부도 정보다). */
   /**
    * 내 초안 한 건. **모든 `toClient` 호출이 이걸 실어야 한다.**

@@ -15,6 +15,7 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 export class OrthancService {
   private base = (process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '');
   private auth: string;
+  private readonly instanceStudy = new Map<string, string>();   // orthancId → StudyInstanceUID
 
   constructor() {
     const user = process.env.ORTHANC_USER;
@@ -47,6 +48,18 @@ export class OrthancService {
     return this.get(
       '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080',
     );
+  }
+
+  /** 썸네일 경로(/instances/{id})의 기관 관문용. 실패는 던진다 — 관문에서 403이 된다. */
+  async instanceStudyUid(id: string): Promise<string> {
+    const hit = this.instanceStudy.get(id);
+    if (hit) return hit;
+    const study = await this.get(`/instances/${id}/study`);
+    const uid = study?.MainDicomTags?.StudyInstanceUID;
+    if (!uid) throw new Error(`instance ${id}의 StudyInstanceUID를 찾을 수 없습니다`);
+    if (this.instanceStudy.size > 50000) this.instanceStudy.clear();   // 단순 상한
+    this.instanceStudy.set(id, uid);
+    return uid;
   }
 
   /** DICOM 태그 한 칸 꺼내기 (PN 타입은 {Alphabetic: "..."} 로 온다) */

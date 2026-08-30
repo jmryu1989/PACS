@@ -44,10 +44,12 @@ export class PacsController {
     return caller(req);
   }
 
-  /** nginx auth_request 전용. 토큰이 유효하면 204이고 PHI 본문은 싣지 않는다. */
+  /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */
   @Get('authz/dicom')
   @HttpCode(204)
-  authzDicom() { return; }
+  authzDicom(@Req() req: any) {
+    return this.svc.authzDicom(String(req.headers['x-original-uri'] ?? ''), caller(req));
+  }
 
   /**
    * 내 기관의 다른 판독의들 — Preliminary에서 상급 판독의를 고를 때 쓴다.
