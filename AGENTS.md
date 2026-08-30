@@ -53,7 +53,7 @@ PostgreSQL + nginx 리버스 프록시, 프론트는 바닐라 JS 단일 HTML �
 docker compose up -d --build          # 첫 실행은 몇 분
 ```
 
-정식 입구는 **하나**다: `https://localhost:8443` (자체 서명 인증서 — 경고 1회 통과).
+정식 입구는 **하나**다: `https://localhost:9443` (자체 서명 인증서 — 경고 1회 통과).
 `/api` `/auth` `/worklist` `/ohif` `/dicom-web` 이 전부 같은 출처다.
 `8042`(Orthanc 관리 UI)·`3000`(API 직통)·`8080`(Keycloak)은 **디버깅용**으로만 열려 있다.
 
@@ -82,7 +82,7 @@ docker compose up -d --build          # 첫 실행은 몇 분
 
 ```bash
 docker compose ps                       # PORTS 칸에 → 가 다 있는지
-curl -sk https://localhost:8443/api/health   # 정식 입구로 한 번
+curl -sk https://localhost:9443/api/health   # 정식 입구로 한 번
 ```
 
 실제로 그렇게 새어나간 적이 있다. 코드 커밋은 완벽했는데 프록시가 포트 게시를 잃은 채
