@@ -547,6 +547,7 @@ export class PacsService implements OnModuleInit {
   }
 
   async deleteTemplate(id: number, c: Caller) {
+    need(c.roles, 'radiologist', '판독 상용구 삭제');   // saveTemplate과 같은 역할 경계
     const r = await this.prisma.readingTemplate.deleteMany({ where: { id, owner: c.actor } });
     if (!r.count) throw new NotFoundException('상용구를 찾을 수 없습니다');
     return { ok: true };
@@ -1019,6 +1020,7 @@ export class PacsService implements OnModuleInit {
 
   /** 점유 해제 (검사를 옮기거나 판독을 확정할 때) */
   async release(uid: string, c: Caller) {
+    need(c.roles, 'radiologist', '판독문 점유 해제');   // hold와 같은 역할 경계
     const prev = await this.gate(uid, c);
     if (!prev || prev.holder !== c.actor) return { ok: true };   // 내 것이 아니면 건드리지 않는다
     await this.prisma.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
@@ -1040,6 +1042,7 @@ export class PacsService implements OnModuleInit {
    * 사용자 목록은 Keycloak에 있고, 우리 DB에 복사본을 만들면 두 곳이 어긋난다.
    */
   async colleagues(c: Caller) {
+    need(c.roles, 'radiologist', '판독의 목록 조회');   // Preliminary 지정 화면 전용
     const me = inst(c);
     const users = await this.keycloak.usersInGroupWithRole(me, 'radiologist');
     return users.filter(u => u.id !== c.actor);   // 자기 자신은 지정 대상이 아니다
