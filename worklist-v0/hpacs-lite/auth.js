@@ -224,7 +224,6 @@ const KinAuth = (() => {
 
     async logout() {
       const rt = S.getItem('kin-rt');
-      const idToken = S.getItem('kin-it');
       const demo = S.getItem('kin-demo');
       const redirect = location.origin + location.pathname.replace(/[^/]*$/, 'index.html');
       if (demo) { clear(); location.replace(redirect); return; }
@@ -232,7 +231,7 @@ const KinAuth = (() => {
         const c = await config();
         // 앱에서 이미 사용자 확인을 받았으므로 refresh token을 POST 본문으로 보내
         // Keycloak 세션을 바로 끊는다. GET URL에 refresh token을 넣으면 서버·브라우저
-        // 기록에 남고, id_token_hint 없이 RP 로그아웃을 열면 확인 화면이 한 번 더 뜬다.
+        // 기록에 남고, 토큰 힌트 없이 RP 로그아웃을 열면 확인 화면이 한 번 더 뜬다.
         if (rt) {
           const res = await fetch(c.end_session_endpoint, {
             method: 'POST',
@@ -246,13 +245,12 @@ const KinAuth = (() => {
           }
         }
 
-        // refresh token이 없는 오래된 탭의 안전망. ID 토큰이 있으면 Keycloak은
-        // 별도 확인 없이 세션을 종료하고 지정한 로그인 화면으로 돌아간다.
+        // refresh token이 없는 오래된 탭의 안전망. 토큰은 URL에 싣지 않는다.
+        // Keycloak의 확인 화면을 거쳐 지정한 로그인 화면으로 돌아간다.
         const q = new URLSearchParams({
           client_id: CLIENT,
           post_logout_redirect_uri: redirect,
         });
-        if (idToken) q.set('id_token_hint', idToken);
         clear();
         location.replace(`${c.end_session_endpoint}?${q}`);
       } catch (e) {
