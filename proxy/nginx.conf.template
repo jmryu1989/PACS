@@ -98,38 +98,13 @@ server {
         sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — KOREA IMAGING NETWORK</title>';
     }
 
-    # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
-    # OHIF가 쓰는 QIDO/WADO 조회만 남기고 모든 쓰기 메서드를 같은 입구에서 막는다.
-    location /dicom-web/ {
-        limit_except GET HEAD { deny all; }
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
-    }
-
-    # 썸네일. 읽기만 — DELETE /instances/{id}는 영상을 지운다.
-    location /instances/ {
-        limit_except GET HEAD { deny all; }
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
-    }
-
-    # SOP Instance UID → Orthanc 내부 ID. /tools 전체를 열면 execute-script도 노출된다.
-    location = /tools/lookup {
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
-    }
-
-    location = /statistics {
-        limit_except GET HEAD { deny all; }
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
-    }
-
-    location = /system {
-        limit_except GET HEAD { deny all; }
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
-    }
+    # 인증 서브요청 게이트가 배포되기 전에는 영상·메타데이터를 아예 노출하지 않는다.
+    # 뷰어가 잠시 멈추더라도 무인증 교차기관 PHI가 200으로 나가는 것보다 안전하다.
+    location /dicom-web/       { return 404; }
+    location /instances/       { return 404; }
+    location = /tools/lookup   { return 404; }
+    location = /statistics     { return 404; }
+    location = /system         { return 404; }
 
     # 목록에 없는 Orthanc 관리·삭제 경로는 뒷단으로 넘기지 않는다.
     location / { return 404 "not exposed\n"; }
