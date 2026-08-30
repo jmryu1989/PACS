@@ -187,12 +187,12 @@ class LiveStack:
             if username and (common or credentials):
                 self.passwords[username] = common or credentials[0].get("value", "")
 
-        orthanc = json.loads((ROOT / "config" / "orthanc.json").read_text(encoding="utf-8"))
-        configured_users = orthanc.get("RegisteredUsers") or {}
-        if not configured_users:
-            raise RuntimeError("config/orthanc.json에 테스트가 사용할 등록 사용자가 없습니다")
-        self.orthanc_user, configured_password = next(iter(configured_users.items()))
-        self.orthanc_password = os.environ.get("KIN_TEST_ORTHANC_PASSWORD", configured_password)
+        self.orthanc_user = os.environ.get("KIN_TEST_ORTHANC_USER", "admin")
+        self.orthanc_password = os.environ.get(
+            "KIN_TEST_ORTHANC_PASSWORD", os.environ.get("ORTHANC_PASS", ""),
+        )
+        if not self.orthanc_password:
+            raise RuntimeError("KIN_TEST_ORTHANC_PASSWORD 또는 ORTHANC_PASS가 필요합니다")
 
     def request(self, method: str, path: str, user: str | None = None, body: Any = None) -> HttpResult:
         data = None if body is None else json.dumps(body).encode("utf-8")

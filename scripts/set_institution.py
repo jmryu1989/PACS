@@ -20,9 +20,10 @@ import sys
 
 import requests
 from pydicom import dcmread
+from orthanc_auth import orthanc_auth
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8042").rstrip("/")
-AUTH = ("admin", "admin")
+AUTH = orthanc_auth()
 
 # PatientID → InstitutionName.
 # 값은 api/src/seed.ts 의 Institution.dicomNames 별칭 중 하나여야 한다.

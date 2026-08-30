@@ -14,11 +14,16 @@ import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 @Injectable()
 export class OrthancService {
   private base = (process.env.ORTHANC_URL ?? 'http://orthanc:8042').replace(/\/$/, '');
-  private auth =
-    'Basic ' +
-    Buffer.from(
-      `${process.env.ORTHANC_USER ?? 'admin'}:${process.env.ORTHANC_PASS ?? 'admin'}`,
-    ).toString('base64');
+  private auth: string;
+
+  constructor() {
+    const user = process.env.ORTHANC_USER;
+    const pass = process.env.ORTHANC_PASS;
+    if (!user || !pass) {
+      throw new ServiceUnavailableException('ORTHANC_USER와 ORTHANC_PASS가 설정되지 않았습니다');
+    }
+    this.auth = 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
+  }
 
   private async get(path: string) {
     let res: Response;

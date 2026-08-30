@@ -11,18 +11,22 @@
 ## 실행 순서 (약 15분)
 
 ```bash
-# 1. 전체 기동 — Orthanc + PostgreSQL + Keycloak + KIN API
+# 1. 실제 자격증명을 로컬 전용 .env에 넣는다 (.env는 Git에서 무시됨)
+cp .env.example .env
+# change-me 값을 모두 교체한다. 로컬 kin-api 시크릿은 렐름 JSON의 개발값과 맞춘다.
+
+# 2. 전체 기동 — Orthanc + PostgreSQL + Keycloak + KIN API
 #    (첫 실행은 이미지 다운로드와 API 빌드로 몇 분 걸림)
 docker compose up -d --build
 
-# 2. 실습용 합성 CT 60슬라이스 생성 (외부 다운로드 불필요)
+# 3. 실습용 합성 CT 60슬라이스 생성 (외부 다운로드 불필요)
 cd scripts
 python3 make_sample_ct.py
 
-# 3. Orthanc에 업로드
+# 4. Orthanc에 업로드 (먼저 .env의 ORTHANC_PASS를 셸 환경변수로 내보낸다)
 python3 upload_samples.py
 
-# 4. (선택) 가짜 CT 장비가 되어 진짜 DICOM 프로토콜로 한 건 더 보내기
+# 5. (선택) 가짜 CT 장비가 되어 진짜 DICOM 프로토콜로 한 건 더 보내기
 pip install pynetdicom
 python3 send_cstore.py --name "HONG^GILDONG" --id P-1006
 ```
@@ -34,22 +38,10 @@ python3 send_cstore.py --name "HONG^GILDONG" --id P-1006
 | http://localhost:8042 | Orthanc 관리 UI (Orthanc Explorer 2) |
 | http://localhost:8042/ohif/ | **OHIF 뷰어** |
 | http://localhost:8042/worklist/hpacs-lite/index.html | **HPACS-lite** — 판독 워크스페이스 |
-| http://localhost:8080 | Keycloak 관리 콘솔 (`admin` / `admin`) |
+| http://localhost:8080 | Keycloak 관리 콘솔 |
 | http://localhost:3000/api/health | KIN API 살아있는지 확인 |
 
-로그인:
-
-- Orthanc — `admin` / `admin`
-- HPACS-lite — **KIN 계정으로 로그인** 버튼 → Keycloak 화면에서 아래 계정 중 하나
-
-| 아이디 | 비밀번호 | 기관 | 할 수 있는 일 |
-|---|---|---|---|
-| `jmryu` | `kin1234` | 한림병원 | 전부 (판독의 + 방사선사 + 관리자) |
-| `doctor` | `kin1234` | 한림병원 | 판독문 작성·승인. Verify·매칭은 막힘 |
-| `tech` | `kin1234` | 한림병원 | Verify·오더 매칭. 판독문은 읽기 전용 |
-| `doctor2` | `kin1234` | 한림병원 | 판독의. Preliminary 시험용 제3자 |
-| `kdoctor` | `kin1234` | KIN 판독센터 | 판독의. **한림 검사는 안 보인다** |
-| `ktech` | `kin1234` | KIN 판독센터 | 방사선사. 판독센터 검사만 |
+로그인 계정은 관리자에게 문의하세요.
 
 기관이 다르면 **서로의 검사가 보이지 않는다.** 원격판독으로 의뢰한 검사 하나만 넘어간다.
 `admin` 롤도 이 경계는 못 넘는다 (자세한 건 `keycloak/README.md`).
@@ -256,8 +248,8 @@ Radiology 탭에 올라온다 — 도착하자마자 판독 목록에 뜨면 기
 
 ```bash
 # REST API 맛보기 — PACS와 코드로 대화하기
-curl -u admin:admin http://localhost:8042/studies
-curl -u admin:admin http://localhost:8042/dicom-web/studies   # QIDO-RS
+curl -u "$ORTHANC_USER:$ORTHANC_PASS" http://localhost:8042/studies
+curl -u "$ORTHANC_USER:$ORTHANC_PASS" http://localhost:8042/dicom-web/studies   # QIDO-RS
 
 # DICOM 프로토콜 맛보기 — DCMTK 설치 후 (brew install dcmtk / apt install dcmtk)
 storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
@@ -268,7 +260,7 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
 - **8042 포트가 이미 사용 중**: `docker-compose.yml`의 `"8042:8042"`를 `"8043:8042"`로
   바꾸고 주소도 `localhost:8043`으로.
 - **/ohif/ 가 404**: `docker compose up -d` 후 플러그인 로드까지 몇 초 걸림.
-  `curl -u admin:admin http://localhost:8042/plugins` 에 `"ohif"`가 보여야 정상 —
+  `curl -u "$ORTHANC_USER:$ORTHANC_PASS" http://localhost:8042/plugins` 에 `"ohif"`가 보여야 정상 —
   compose 파일의 `OHIF_PLUGIN_ENABLED: "true"`가 지워지지 않았는지 확인.
 - **업로드 스크립트 실패**: Orthanc가 아직 기동 중일 수 있음. 몇 초 뒤 재시도.
 - **HPACS-lite가 "로컬 저장"으로 뜸**: API가 안 떠 있음. `docker compose ps`로 `kin-api`
@@ -284,6 +276,8 @@ storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
   `http://localhost:8042/*` 뿐이다. `keycloak/kin-realm.json`의 `redirectUris`를 고치고
   `docker compose down -v` 후 재기동하거나, 관리 콘솔에서 직접 추가.
 - **렐름 파일을 고쳤는데 반영 안 됨**: `docker compose up -d --force-recreate keycloak`.
+- **운영 Keycloak 컨테이너를 재생성함**: H2가 초기화돼 공개 개발값이 다시 import되므로,
+  관리자 비밀번호와 `kin-api` 클라이언트 시크릿을 즉시 다시 설정하고 `.env`도 맞춘다.
 - **Keycloak이 `AccessDeniedException: keycloakdb.mv.db`로 죽음**: H2 경로에 이름있는 볼륨을
   붙였을 때 생긴다(root 소유로 만들어지는데 Keycloak은 UID 1000). `keycloak/README.md` 참고.
 - **API가 401만 뱉음**: 토큰의 `iss`와 API의 `KC_ISSUER`가 달라진 경우. compose의

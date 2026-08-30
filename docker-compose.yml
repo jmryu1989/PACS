@@ -9,12 +9,12 @@
 #   https://localhost:9443/                     HPACS-lite (자체 서명 인증서 — 첫 접속에 경고 1회)
 #   https://localhost:9443/ohif/                OHIF 뷰어
 #   https://localhost:9443/api/health           KIN API
-#   https://localhost:9443/auth/                Keycloak (관리 콘솔 admin/admin)
+#   https://localhost:9443/auth/                Keycloak
 #   http://localhost:8081/                      → https로 리다이렉트
 #
 # 아래 포트들은 **운영·디버깅용**으로만 열어둔다. 앱은 이 주소로 쓰지 않는다 —
 # 출처가 둘이면 토큰의 iss도 쿠키도 둘로 갈린다.
-#   http://localhost:8042   Orthanc 관리 UI (admin/admin)
+#   http://localhost:8042   Orthanc 관리 UI
 #   http://localhost:3000   API 직접 호출
 #   http://localhost:5432   PostgreSQL
 services:
@@ -25,6 +25,10 @@ services:
     build: ./proxy
     container_name: kin-proxy
     restart: unless-stopped
+    environment:
+      PUBLIC_PORT: ${PUBLIC_PORT:-9443}
+      ORTHANC_USER: admin
+      ORTHANC_PASS: ${ORTHANC_PASS:?ORTHANC_PASS를 .env에 설정하세요}
     ports:
       - "9443:443"
       - "8081:80"
@@ -41,6 +45,9 @@ services:
     restart: unless-stopped
     environment:
       OHIF_PLUGIN_ENABLED: "true"   # 이미지에 내장된 OHIF 뷰어 플러그인 활성화
+      # orthanc.json에 계정을 남기면 운영 비밀번호와 프록시 헤더가 쉽게 어긋난다.
+      # 이미지가 JSON을 읽은 뒤 같은 설정 경로를 이 값으로 덮게 해 한 출처만 둔다.
+      ORTHANC__REGISTERED_USERS: '{"admin":"${ORTHANC_PASS:?ORTHANC_PASS를 .env에 설정하세요}"}'
     ports:
       - "8042:8042"   # HTTP: 웹 UI, REST API, DICOMweb, OHIF
       - "4242:4242"   # DICOM 프로토콜 (C-STORE/C-FIND 실습용)
@@ -57,7 +64,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: kin
-      POSTGRES_PASSWORD: kin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
       POSTGRES_DB: kin
     ports:
       - "5432:5432"   # DBeaver 등으로 직접 들여다보기 위해 열어둔다
@@ -79,10 +86,10 @@ services:
     command: start-dev --import-realm
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?KC_ADMIN_PASSWORD를 .env에 설정하세요}
       # 이 주소가 토큰의 iss에 박힌다. 고정해 두지 않으면 요청 호스트에 따라 흔들린다.
       # 이제 브라우저는 프록시를 통해 들어오므로, 브라우저가 보는 주소를 적는다.
-      KC_HOSTNAME: https://localhost:9443/auth
+      KC_HOSTNAME: ${PUBLIC_ORIGIN:-https://localhost:9443}/auth
       # Keycloak을 /auth 밑에 둔다. 프록시가 경로를 고쳐 쓰지 않아도 되고,
       # Keycloak이 스스로 만드는 링크·리다이렉트도 처음부터 맞는다.
       KC_HTTP_RELATIVE_PATH: /auth
@@ -109,13 +116,13 @@ services:
     container_name: kin-api
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://kin:kin@db:5432/kin
+      DATABASE_URL: postgresql://kin:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}@db:5432/kin
       # 인증. iss는 브라우저가 보는 주소, JWKS는 도커 네트워크 안 주소 — 서로 다르다.
       AUTH_REQUIRED: "true"
       # iss는 **브라우저가 본 주소**다 — 토큰에 그렇게 박혀 오기 때문.
       # JWKS·Admin은 도커 네트워크 안 주소이고, 둘 다 /auth 접두어가 붙는다
       # (KC_HTTP_RELATIVE_PATH를 넣었으므로 내부 경로도 바뀐다).
-      KC_ISSUER: https://localhost:9443/auth/realms/kin
+      KC_ISSUER: ${PUBLIC_ORIGIN:-https://localhost:9443}/auth/realms/kin
       KC_JWKS_URL: http://keycloak:8080/auth/realms/kin/protocol/openid-connect/certs
       KC_AUDIENCE: kin-api
       # 서비스 계정 — "우리 기관 판독의가 누구인가"를 Keycloak에 묻기 위한 것(Preliminary 지정용).
@@ -124,12 +131,12 @@ services:
       KC_ADMIN_URL: http://keycloak:8080/auth
       KC_REALM: kin
       KC_CLIENT_ID: kin-api
-      KC_CLIENT_SECRET: kin-api-dev-secret
+      KC_CLIENT_SECRET: ${KC_CLIENT_SECRET:?KC_CLIENT_SECRET을 .env에 설정하세요}
       # API가 브라우저 대신 Orthanc의 QIDO-RS를 부른다 (기관 필터를 서버에 두기 위해).
       # 도커 네트워크 안 주소이므로 localhost가 아니라 서비스 이름이다.
       ORTHANC_URL: http://orthanc:8042
       ORTHANC_USER: admin
-      ORTHANC_PASS: admin
+      ORTHANC_PASS: ${ORTHANC_PASS:?ORTHANC_PASS를 .env에 설정하세요}
     ports:
       - "3000:3000"
     depends_on:

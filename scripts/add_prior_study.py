@@ -13,9 +13,10 @@ import requests
 from pydicom.uid import generate_uid
 
 import make_sample_ct as gen
+from orthanc_auth import orthanc_auth
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8042"
-AUTH = ("admin", "admin")
+AUTH = orthanc_auth()
 N_SLICES = 20
 
 

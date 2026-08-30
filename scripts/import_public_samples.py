@@ -46,6 +46,7 @@ except Exception:
     pass
 
 import requests
+from orthanc_auth import orthanc_auth
 
 try:
     import pydicom
@@ -109,7 +110,6 @@ def main() -> None:
         os.makedirs(src, exist_ok=True)
         sys.exit(f"{src} 를 만들었습니다. 여기에 내려받은 zip을 넣고 다시 실행하세요.")
 
-    auth = ("admin", "admin")
     studies = {}      # StudyInstanceUID -> 요약
     flagged = {}      # 태그명 -> 값 예시(중복 제거)
     payload = []      # (이름, 바이트) — dry-run이 아니면 업로드한다
@@ -165,6 +165,8 @@ def main() -> None:
     if a.dry_run:
         print("\n--dry-run 이므로 업로드하지 않았습니다.")
         return
+
+    auth = orthanc_auth()
 
     if a.institution:
         print(f"\nInstitutionName을 \"{a.institution}\" 으로 바꿔서 올립니다.")

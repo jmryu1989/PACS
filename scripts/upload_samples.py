@@ -2,7 +2,7 @@
 sample-data/ 의 DICOM 파일을 Orthanc REST API로 업로드한다.
 
 사용법:
-    python3 upload_samples.py                      # localhost:8042, admin/admin
+    python3 upload_samples.py                      # localhost:8042, 자격증명은 환경변수
     python3 upload_samples.py http://다른주소:8042  # 대상 지정
 """
 import glob
@@ -10,9 +10,10 @@ import os
 import sys
 
 import requests
+from orthanc_auth import orthanc_auth
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8042"
-AUTH = ("admin", "admin")
+AUTH = orthanc_auth()
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "sample-data")
 
 

@@ -5,7 +5,7 @@ make_sample_ct.py의 팬텀 생성기를 재사용하되, 환자마다 이름·I
 바꿔서 별도 Study로 만든다. 파일로 저장하지 않고 REST API로 바로 올린다.
 
 사용법:
-    python make_sample_patients.py            # localhost:8042, admin/admin
+    python make_sample_patients.py            # localhost:8042, 자격증명은 환경변수
 """
 import io
 import sys
@@ -14,9 +14,10 @@ import requests
 from pydicom.uid import generate_uid
 
 import make_sample_ct as gen  # 같은 폴더의 생성기 재사용
+from orthanc_auth import orthanc_auth
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8042"
-AUTH = ("admin", "admin")
+AUTH = orthanc_auth()
 
 # 마지막 칸은 DICOM InstitutionName(0008,0080) — 이 검사를 찍은 기관.
 # API가 이 태그로 검사의 소속을 정하므로, 여기가 곧 멀티 기관 테스트 데이터다.
