@@ -200,14 +200,19 @@ h1#kc-page-title {
   min-height: 34px;
   margin: 0;
   color: var(--kin-text);
-  font-size: 0;
+  font-size: 19px;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: normal;
   letter-spacing: .1em;
   text-align: left;
 }
 
-h1#kc-page-title::before {
+.login-pf-page .card-pf:has(#kc-form-login) h1#kc-page-title {
+  font-size: 0;
+  line-height: 1.2;
+}
+
+.login-pf-page .card-pf:has(#kc-form-login) h1#kc-page-title::before {
   display: block;
   margin: 0;
   content: "KOREA IMAGING NETWORK";
@@ -219,7 +224,7 @@ h1#kc-page-title::before {
   white-space: nowrap;
 }
 
-h1#kc-page-title::after {
+.login-pf-page .card-pf:has(#kc-form-login) h1#kc-page-title::after {
   display: block;
   content: "시스템 로그인";
   color: var(--kin-text);
@@ -259,18 +264,23 @@ h1#kc-page-title::after {
   order: 4;
 }
 
-#kc-form-buttons {
+#kc-form-login #kc-form-buttons {
   order: 3;
 }
 
-#kc-form-login label {
+.login-pf-page .card-pf label {
   display: block;
   margin: 0 0 8px 1px;
   color: var(--kin-label);
-  font-size: 0;
+  font-size: 11.5px;
   font-weight: 600;
-  line-height: 1.2;
+  line-height: normal;
   letter-spacing: .1em;
+}
+
+#kc-form-login label {
+  font-size: 0;
+  line-height: 1.2;
 }
 
 #kc-form-login label::before {
@@ -286,7 +296,7 @@ h1#kc-page-title::after {
   content: "비밀번호";
 }
 
-#kc-form-login .pf-c-form-control {
+.login-pf-page .card-pf .pf-c-form-control {
   width: 100%;
   height: 48px;
   margin: 0 0 20px;
@@ -303,9 +313,47 @@ h1#kc-page-title::after {
   transition: border-color .15s, box-shadow .15s;
 }
 
-#kc-form-login .pf-c-form-control:focus {
+.login-pf-page .card-pf .pf-c-form-control:focus {
   border-color: var(--kin-accent);
   box-shadow: 0 0 0 3px var(--kin-focus-ring);
+}
+
+.login-pf-page .card-pf .pf-c-button.pf-m-primary {
+  width: 100%;
+  height: 50px;
+  margin: 0;
+  padding: 0 15px;
+  color: #FFF;
+  background: var(--kin-btn);
+  border: 0;
+  border-radius: var(--kin-input-radius);
+  box-shadow: var(--kin-btn-shadow);
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 50px;
+  letter-spacing: .1em;
+  cursor: pointer;
+}
+
+.login-pf-page .card-pf .pf-c-button.pf-m-secondary {
+  min-height: 42px;
+  padding: 0 15px;
+  color: var(--kin-muted);
+  background: transparent;
+  border: 1px solid var(--kin-input-border);
+  border-radius: var(--kin-input-radius);
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.login-pf-page .card-pf form:not(#kc-form-login) #kc-form-buttons {
+  margin-top: 4px;
+}
+
+.login-pf-page .card-pf form:not(#kc-form-login) #kc-form-options {
+  margin-bottom: 12px;
 }
 
 #kc-form-login .pf-c-input-group {
@@ -327,7 +375,7 @@ h1#kc-page-title::after {
   margin: 4px 0 0;
 }
 
-#kc-form-buttons::after {
+#kc-form-login #kc-form-buttons::after {
   position: absolute;
   inset: 0;
   display: flex;
@@ -476,6 +524,66 @@ h1#kc-page-title::after {
   background: rgba(10, 16, 30, .7);
   border-radius: 7px;
   font-size: 13px;
+}
+
+.login-pf body:has(#kc-totp-settings-form) {
+  overflow-y: auto;
+}
+
+.login-pf-page:has(#kc-totp-settings-form) {
+  align-items: flex-start;
+  min-height: 100%;
+  height: auto;
+  padding-top: 24px;
+  padding-bottom: 40px;
+}
+
+.login-pf-page .card-pf:has(#kc-totp-settings-form) {
+  flex-basis: 520px;
+  width: 520px;
+  max-width: 520px;
+  padding: 28px 32px 24px;
+  overflow: visible;
+}
+
+.login-pf-page .card-pf:has(#kc-totp-settings-form) .login-pf-header {
+  margin-bottom: 18px;
+}
+
+#kc-totp-settings {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  color: var(--kin-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#kc-totp-settings > li {
+  margin: 0 0 10px;
+}
+
+#kc-totp-settings p,
+#kc-totp-supported-apps {
+  margin: 0 0 6px;
+}
+
+#kc-totp-secret-qr-code {
+  display: block;
+  width: 160px;
+  height: 160px;
+  margin: 6px auto;
+}
+
+#kc-totp-settings-form .form-group {
+  margin: 0 0 12px;
+}
+
+#kc-totp-settings-form .pf-c-form-control {
+  margin-bottom: 0;
+}
+
+#kc-totp-settings-form .pf-c-button {
+  margin-top: 6px;
 }
 
 @media (max-width: 900px) {
