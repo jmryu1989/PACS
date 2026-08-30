@@ -4,9 +4,11 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // 프론트는 Orthanc(8042)가 서빙하고 API는 3000에 있다 → 다른 출처이므로 CORS 필요.
-  // 3단계 후반에 리버스 프록시로 한 출처에 합치면 이 줄은 사라진다.
-  app.enableCors({ origin: true, credentials: false });
+  // 프록시가 한 출처로 합쳤다. 예외적인 개발 출처가 필요할 때만 env 화이트리스트를 연다.
+  const corsOrigins = (process.env.CORS_ORIGINS ?? '')
+    .split(',').map(origin => origin.trim()).filter(Boolean);
+  if (corsOrigins.length)
+    app.enableCors({ origin: corsOrigins, credentials: false });
   app.setGlobalPrefix('api');
 
   await app.listen(3000, '0.0.0.0');
