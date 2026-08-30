@@ -2545,9 +2545,33 @@ ${esc($("#recommendation").value)}
 
     // ── 공통 이벤트 ──
     function openFilmbox(uid) {
-      const s = studies.find(x => x.uid === uid);
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
-      window.open(`/ohif/viewer?StudyInstanceUIDs=${uid}`, "_blank");
+      const url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}`;
+      const width = Math.max(640, Math.min(1600, screen.availWidth - 80));
+      const height = Math.max(600, Math.min(1000, screen.availHeight - 80));
+      const left = Math.max(0, (screen.availLeft ?? 0) + 40);
+      const top = Math.max(0, (screen.availTop ?? 0) + 40);
+      const popup = window.open(
+        url,
+        "_blank",
+        `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`,
+      );
+      if (popup) {
+        // 새 창이 원래 워크리스트의 window 객체를 잡고 있을 이유가 없다.
+        popup.opener = null;
+        popup.focus();
+        return;
+      }
+
+      // 팝업 정책이 크기 지정 창을 거절해도 사용자가 누른 링크 자체는 새 탭으로 살린다.
+      const fallback = document.createElement("a");
+      fallback.href = url;
+      fallback.target = "_blank";
+      fallback.rel = "noopener";
+      document.body.appendChild(fallback);
+      fallback.click();
+      fallback.remove();
+      toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
 
     $("#quick").addEventListener("input", render);
