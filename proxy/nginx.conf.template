@@ -45,6 +45,12 @@ server {
     include /etc/nginx/snippets/hsts.conf;
     include /etc/nginx/snippets/keycloak-admin-guards.conf;
 
+    # 토큰이 브라우저 저장소에 남는 이행 기간에는 외부 스크립트와 외부 연결을 막아
+    # XSS의 계정 탈취 반경을 줄인다. inline은 현 단일 HTML 프론트 때문에 아직 필요하다.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+
     location = / { return 302 /worklist/hpacs-lite/index.html; }
 
     location /api/ { proxy_pass http://api:3000; }
