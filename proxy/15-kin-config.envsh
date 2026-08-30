@@ -1,0 +1,82 @@
+#!/bin/sh
+# nginx 공식 entrypoint가 이 파일을 source하므로 export한 파생값을 뒤의 envsubst가 받는다.
+# 별도 프로세스인 .sh로 만들면 PUBLIC_PORT_SUFFIX가 사라져 운영 URL에 빈 변수가 남는다.
+
+: "${ORTHANC_USER:?ORTHANC_USER is required}"
+: "${ORTHANC_PASS:?ORTHANC_PASS is required}"
+
+PUBLIC_PORT="${PUBLIC_PORT:-9443}"
+case "$PUBLIC_PORT" in
+  ''|*[!0-9]*) echo "[kin-proxy] PUBLIC_PORT must be numeric" >&2; return 1 ;;
+esac
+
+DEPLOYMENT_MODE="${DEPLOYMENT_MODE:-development}"
+SERVER_NAME="${SERVER_NAME:-_}"
+if [ "$DEPLOYMENT_MODE" = "production" ]; then
+  if [ "$PUBLIC_PORT" != "443" ] || [ "$SERVER_NAME" != "pacs.koreaimagingnetwork.com" ]; then
+    echo "[kin-proxy] production requires the public PACS host on port 443" >&2
+    return 1
+  fi
+  TLS_CERTIFICATE="${TLS_CERTIFICATE:-/etc/letsencrypt/live/$SERVER_NAME/fullchain.pem}"
+  TLS_CERTIFICATE_KEY="${TLS_CERTIFICATE_KEY:-/etc/letsencrypt/live/$SERVER_NAME/privkey.pem}"
+else
+  TLS_CERTIFICATE="${TLS_CERTIFICATE:-/etc/nginx/certs/kin.crt}"
+  TLS_CERTIFICATE_KEY="${TLS_CERTIFICATE_KEY:-/etc/nginx/certs/kin.key}"
+fi
+
+if [ "$PUBLIC_PORT" = "443" ]; then
+  PUBLIC_PORT_SUFFIX=""
+else
+  PUBLIC_PORT_SUFFIX=":$PUBLIC_PORT"
+fi
+
+export PUBLIC_PORT PUBLIC_PORT_SUFFIX SERVER_NAME TLS_CERTIFICATE TLS_CERTIFICATE_KEY
+
+SNIPPET_DIR=/etc/nginx/snippets
+mkdir -p "$SNIPPET_DIR"
+umask 077
+
+ORTHANC_BASIC="$(printf '%s' "$ORTHANC_USER:$ORTHANC_PASS" | base64 | tr -d '\n')"
+printf 'proxy_set_header Authorization "Basic %s";\n' "$ORTHANC_BASIC" \
+  > "$SNIPPET_DIR/orthanc-basic-auth.conf"
+
+if [ "$DEPLOYMENT_MODE" = "production" ]; then
+  printf '%s\n' \
+    'server {' \
+    '    listen 80 default_server;' \
+    '    server_name _;' \
+    '    return 444;' \
+    '}' \
+    'server {' \
+    '    listen 443 ssl default_server;' \
+    '    http2 on;' \
+    '    server_name _;' \
+    "    ssl_certificate     $TLS_CERTIFICATE;" \
+    "    ssl_certificate_key $TLS_CERTIFICATE_KEY;" \
+    '    ssl_protocols TLSv1.2 TLSv1.3;' \
+    '    return 444;' \
+    '}' > "$SNIPPET_DIR/default-servers.conf"
+
+  printf '%s\n' \
+    'location ^~ /.well-known/acme-challenge/ {' \
+    '    root /var/www/certbot;' \
+    '    default_type text/plain;' \
+    '    try_files $uri =404;' \
+    '}' > "$SNIPPET_DIR/acme-challenge.conf"
+
+  printf '%s\n' \
+    'add_header Strict-Transport-Security "max-age=31536000" always;' \
+    > "$SNIPPET_DIR/hsts.conf"
+
+  printf '%s\n' \
+    'location = /auth/admin { return 404; }' \
+    'location ^~ /auth/admin/ { return 404; }' \
+    'location = /auth/realms/master { return 404; }' \
+    'location ^~ /auth/realms/master/ { return 404; }' \
+    > "$SNIPPET_DIR/keycloak-admin-guards.conf"
+else
+  : > "$SNIPPET_DIR/default-servers.conf"
+  : > "$SNIPPET_DIR/acme-challenge.conf"
+  : > "$SNIPPET_DIR/hsts.conf"
+  : > "$SNIPPET_DIR/keycloak-admin-guards.conf"
+fi

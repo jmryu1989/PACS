@@ -1,0 +1,107 @@
+# KIN 리버스 프록시 — 브라우저가 보는 출처를 하나로 모은다.
+# PUBLIC_PORT 계열만 envsubst한다. $host·$request_uri 같은 nginx 변수는 런타임까지 남아야 한다.
+
+include /etc/nginx/snippets/default-servers.conf;
+
+server {
+    listen 80;
+    server_name ${SERVER_NAME};
+
+    include /etc/nginx/snippets/acme-challenge.conf;
+
+    # 서버 수준 return은 location 선택보다 먼저 실행되어 ACME webroot까지 리다이렉트한다.
+    # challenge만 예외로 남기기 위해 일반 요청의 리다이렉트를 location에 둔다.
+    location / {
+        return 301 https://$host${PUBLIC_PORT_SUFFIX}$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${SERVER_NAME};
+
+    ssl_certificate     ${TLS_CERTIFICATE};
+    ssl_certificate_key ${TLS_CERTIFICATE_KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+
+    # nginx가 컨테이너의 443으로 절대 URL을 만들면 로컬 호스트의 9443을 잃는다.
+    # 상대 리다이렉트는 브라우저가 현재 보고 있는 출처를 그대로 보존한다.
+    absolute_redirect off;
+
+    client_max_body_size 0;
+    proxy_read_timeout   300s;
+    proxy_send_timeout   300s;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host              $http_host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host  $http_host;
+    proxy_set_header X-Forwarded-Port  ${PUBLIC_PORT};
+
+    include /etc/nginx/snippets/hsts.conf;
+    include /etc/nginx/snippets/keycloak-admin-guards.conf;
+
+    location = / { return 302 /worklist/hpacs-lite/index.html; }
+
+    location /api/ { proxy_pass http://api:3000; }
+
+    # 토큰과 쿠키가 커서 기본 프록시 버퍼로는 응답 헤더가 넘칠 수 있다.
+    location /auth/ {
+        proxy_pass http://keycloak:8080;
+        proxy_buffer_size       16k;
+        proxy_buffers        8  16k;
+        proxy_busy_buffers_size 32k;
+    }
+
+    # 브라우저에 Orthanc 자격증명을 주지 않는다. 공개 경로 일곱 곳이 같은 include를
+    # 읽어야 비밀번호 교체 때 한 곳만 낡은 헤더로 남는 일이 없다.
+    location /worklist/ {
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    location /ohif/ {
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
+    # OHIF가 쓰는 QIDO/WADO 조회만 남기고 모든 쓰기 메서드를 같은 입구에서 막는다.
+    location /dicom-web/ {
+        limit_except GET HEAD { deny all; }
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    # 썸네일. 읽기만 — DELETE /instances/{id}는 영상을 지운다.
+    location /instances/ {
+        limit_except GET HEAD { deny all; }
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    # SOP Instance UID → Orthanc 내부 ID. /tools 전체를 열면 execute-script도 노출된다.
+    location = /tools/lookup {
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    location = /statistics {
+        limit_except GET HEAD { deny all; }
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    location = /system {
+        limit_except GET HEAD { deny all; }
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
+    # 목록에 없는 Orthanc 관리·삭제 경로는 뒷단으로 넘기지 않는다.
+    location / { return 404 "not exposed\n"; }
+}

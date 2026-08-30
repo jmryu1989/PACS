@@ -29,6 +29,8 @@ services:
       PUBLIC_PORT: ${PUBLIC_PORT:-9443}
       ORTHANC_USER: admin
       ORTHANC_PASS: ${ORTHANC_PASS:?ORTHANC_PASS를 .env에 설정하세요}
+      # 공식 20-envsubst 스크립트가 nginx의 $host 같은 변수를 건드리지 못하게 한다.
+      NGINX_ENVSUBST_FILTER: '^(PUBLIC_PORT|PUBLIC_PORT_SUFFIX|SERVER_NAME|TLS_CERTIFICATE|TLS_CERTIFICATE_KEY)'
     ports:
       - "9443:443"
       - "8081:80"

@@ -15,9 +15,15 @@ FROM nginx:1.27-alpine
 # 히스토리에서 지워도 이미 나간 것이다.
 RUN apk add --no-cache openssl
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY 10-selfsigned.sh /docker-entrypoint.d/10-selfsigned.sh
+COPY 15-kin-config.envsh /docker-entrypoint.d/15-kin-config.envsh
+COPY 25-nginx-test.sh /docker-entrypoint.d/25-nginx-test.sh
 # 윈도우에서 체크아웃하면 실행 비트가 안 붙는다. CRLF도 함께 털어낸다 —
 # 셸 스크립트에 CR이 남으면 "not found" 같은 엉뚱한 오류로 나타난다.
 RUN sed -i 's/\r$//' /docker-entrypoint.d/10-selfsigned.sh \
- && chmod +x /docker-entrypoint.d/10-selfsigned.sh
+                       /docker-entrypoint.d/15-kin-config.envsh \
+                       /docker-entrypoint.d/25-nginx-test.sh \
+ && chmod +x /docker-entrypoint.d/10-selfsigned.sh \
+             /docker-entrypoint.d/15-kin-config.envsh \
+             /docker-entrypoint.d/25-nginx-test.sh
