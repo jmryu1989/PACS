@@ -54,6 +54,34 @@ python3 send_cstore.py --name "HONG^GILDONG" --id P-1006
 - 회색 **● 데모 모드** — 로그인하지 않은 둘러보기. 이 브라우저에만 남음
 - 노랑 **● 로컬 저장** — API 미연결 (`docker compose logs api`로 확인)
 
+## 운영 서버 최초 인증서와 기동
+
+운영 proxy는 Let's Encrypt 인증서가 없으면 `nginx -t`에서 멈춘다. 자체 서명 인증서로
+그 실패를 가리지 않는 것이 의도이므로, 최초 발급 때는 proxy를 내린 채 certbot이 80번을
+직접 듣게 한다. 아래 명령은 저장소 루트에서 실행한다.
+
+```bash
+# 1. DNS가 서버 공인 IP를 가리키는지 먼저 확인한다.
+dig pacs.koreaimagingnetwork.com
+
+# 2. 최초 한 번만 standalone으로 발급한다. proxy가 80번을 잡고 있으면 안 된다.
+docker compose -f docker-compose.yml -f docker-compose.prod.yml stop proxy
+sudo certbot certonly --standalone -d pacs.koreaimagingnetwork.com
+
+# 3. 인증서 파일을 확인한 뒤 운영 스택을 올린다.
+sudo test -s /etc/letsencrypt/live/pacs.koreaimagingnetwork.com/fullchain.pem
+sudo test -s /etc/letsencrypt/live/pacs.koreaimagingnetwork.com/privkey.pem
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+최초 발급 뒤에는 nginx가 `/.well-known/acme-challenge/`를 서빙하므로 갱신만 webroot로 한다.
+갱신 성공 뒤에는 새 인증서를 읽도록 proxy를 reload한다.
+
+```bash
+sudo certbot renew --webroot -w "$(pwd)/certbot/www"
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec proxy nginx -s reload
+```
+
 ## 첫날 미션 체크리스트
 
 - [ ] OHIF에서 스터디를 열고 마우스 휠로 60장 스크롤하기
