@@ -298,8 +298,10 @@ export class PacsService implements OnModuleInit {
     const me = inst(c);
     const [path, query = ''] = originalUri.split('?');
 
+    // 서버 정보는 관리자만. 프론트 사용처 없음 — 버전 정보는 표면 축소가 이득이다.
+    if (path === '/system') { need(c.roles, 'admin', '서버 정보 조회'); return; }
     // 로그인만으로 충분한 경로 — PHI 없음
-    if (path === '/statistics' || path === '/system' || path === '/tools/lookup') return;
+    if (path === '/statistics' || path === '/tools/lookup') return;
 
     // /dicom-web/studies/{uid}/... — 경로의 UID로 관문
     let m = /^\/dicom-web\/studies\/([0-9.]+)(?:\/|$)/.exec(path);
