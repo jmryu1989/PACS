@@ -316,7 +316,13 @@ export class PacsService implements OnModuleInit {
     // /instances/{orthancId}/... — Orthanc에 물어 StudyInstanceUID로 환원
     if (!uid) {
       const im = /^\/instances\/([0-9a-f-]+)(?:\/|$)/.exec(path);
-      if (im) uid = await this.orthanc.instanceStudyUid(im[1]);   // 불변이라 캐시됨
+      if (im) {
+        try { uid = await this.orthanc.instanceStudyUid(im[1]); }   // 불변이라 캐시됨
+        catch {
+          // 존재 여부도 정보다. Orthanc 장애도 403이 되지만, 503은 auth_request가 500으로 바꾸므로 수용한다.
+          throw new ForbiddenException('열람 권한이 없습니다');
+        }
+      }
     }
 
     if (!uid) throw new ForbiddenException('허용되지 않는 경로입니다');
