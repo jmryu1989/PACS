@@ -673,11 +673,25 @@
     const sess = KinAuth.session();
     if (!sess) location.href = "index.html";
     let user = sess?.user ?? "";
-    document.querySelector("#user").textContent = user;
+    const userDisplayName = sess?.displayName || user;
+    document.querySelector("#user").textContent = userDisplayName;
     // 로그아웃 핸들러는 아래 "이탈 시 판독문 보존"에 있다 — 나가기 전에 초안을 저장하고
     // 점유를 풀어야 하므로, 그 함수들이 정의된 곳 옆에 둔다.
 
     const $ = s => document.querySelector(s);
+    const actorNames = new Map();
+    function rememberActor(id, name, username = "") {
+      const key = String(id ?? "");
+      const login = String(username ?? "");
+      const shown = name && name !== login ? String(name) : key || login;
+      if (!shown) return;
+      for (const alias of [key, login, key.split("@")[0]].filter(Boolean)) actorNames.set(alias, shown);
+    }
+    rememberActor(user, userDisplayName, user.split("@")[0]);
+    function displayActor(value) {
+      const raw = String(value ?? "");
+      return actorNames.get(raw) || actorNames.get(raw.split("@")[0]) || raw;
+    }
     function tagv(st, key) {
       const v = st[key]?.Value?.[0];
       if (v == null) return "";
@@ -1043,11 +1057,13 @@
       ss: s => `<span class="ss ${s.ss}">${s.ss}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
       desc: s => esc(shownStudyDesc(s)),
+      preDoc: s => esc(displayActor(s.preDoc)),
+      preReviewer: s => esc(displayActor(s.preReviewer)),
       // Viewing: 지금 이 검사의 판독문을 쓰고 있는 사람
       viewing: s => !s.holder ? ""
         : s.holder === user
           ? `<span class="hold me" title="내가 작성 중">✎ 나</span>`
-          : `<span class="hold other" title="${esc(s.holder)} 님이 작성 중">✎ ${esc(s.holder.split("@")[0])}</span>`,
+          : `<span class="hold other" title="${esc(displayActor(s.holder))} 님이 작성 중">✎ ${esc(displayActor(s.holder))}</span>`,
     };
 
     let mode = "Radiology";
@@ -1401,7 +1417,7 @@
               <td>${esc(x.date)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td class="${x.em === "E" ? "em-e" : ""}">${x.em === "E" ? "E" : ""}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${esc(x.repDoc ?? "")}</td><td>${esc(x.confirm ?? "")}</td><td>${esc(x.reqHosp)}</td>
+              <td>${esc(displayActor(x.repDoc))}</td><td>${esc(x.confirm ?? "")}</td><td>${esc(x.reqHosp)}</td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="10">과거 검사 없음</td></tr>`)
         : `<tr><td class="empty" colspan="10">-</td></tr>`;
@@ -1672,7 +1688,7 @@
       reportRefreshPendingFor = preserveValue ? selectedUid : null;
       const src = locked ? {} : reportSource();
       const ph = locked
-        ? `${r.preReviewer ?? "지정된 판독의"} 님이 최종 판독 중입니다 (RS: P) — 내용은 지정된 판독의만 볼 수 있습니다`
+        ? `${displayActor(r.preReviewer) || "지정된 판독의"} 님이 최종 판독 중입니다 (RS: P) — 내용은 지정된 판독의만 볼 수 있습니다`
         : "";
       for (const [sel, base] of [["#findings", "Please enter findings"],
                                  ["#conclusion", "Please enter conclusion"],
@@ -2284,7 +2300,7 @@
             <div class="vh">
               <b>v${v.version}</b>
               <span class="tag ${esc(v.action)}">${esc(LABEL[v.action] ?? v.action)}</span>
-              <span>${esc(v.author)}</span>
+              <span>${esc(displayActor(v.author))}</span>
               <span style="color:#667">${esc(String(v.at).replace("T", " ").slice(0, 19))}</span>
             </div>
             ${v.reason ? `<div class="vr">사유: ${esc(v.reason)}</div>` : ""}
@@ -2770,6 +2786,15 @@ ${r.recommendation ?? ""}
       throw last;
     }
 
+    // 판독 기록에는 안정적인 이메일 식별자가 남는다. 화면에서만 Keycloak 성명으로 바꾼다.
+    async function loadActorNames() {
+      if (!serverMode) return;
+      try {
+        const peers = await api("GET", "/colleagues");
+        peers.forEach(p => rememberActor(p.id, p.name, p.username));
+      } catch (e) { /* 이름 조회가 실패해도 이메일 표시는 유지한다. */ }
+    }
+
     /** 서버가 살아 있을 때. 재연결에서도 다시 불리므로 누적되는 조작을 하지 않는다. */
     function goOnline(b) {
       serverMode = true; offline = false;
@@ -2831,6 +2856,7 @@ ${r.recommendation ?? ""}
         try {
           const b = await api("GET", "/bootstrap");
           goOnline(b);
+          await loadActorNames();
           await load();
           toast("서버에 다시 연결됐습니다 — 저장이 가능합니다", "ok");
         } catch (e) { /* 다음 회차에 다시 */ }
@@ -2838,7 +2864,7 @@ ${r.recommendation ?? ""}
     }
     $("#dbstat").addEventListener("click", async () => {
       if (!offline) return;
-      try { goOnline(await api("GET", "/bootstrap")); await load();
+      try { goOnline(await api("GET", "/bootstrap")); await loadActorNames(); await load();
             toast("서버에 다시 연결됐습니다", "ok"); }
       catch (e) { toast("아직 연결되지 않습니다: " + e.message, "err"); }
     });
@@ -2935,6 +2961,7 @@ ${r.recommendation ?? ""}
                 `(localStorage의 ${key}에 보관)`, "info");
         }
         goOnline(b);
+        await loadActorNames();
       } catch (e) {
         goOffline(e);
       }

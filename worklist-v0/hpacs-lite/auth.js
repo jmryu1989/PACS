@@ -55,6 +55,11 @@ const KinAuth = (() => {
     } catch (e) { return null; }
   };
 
+  // actor 식별자는 이메일 그대로 유지한다. 성명은 화면에서만 쓰는 별도 값이다.
+  const displayNameOf = c =>
+    [c?.family_name, c?.given_name].filter(Boolean).join('') || c?.name ||
+    c?.email || c?.preferred_username || '';
+
   function store(tok) {
     const c = claimsOf(tok.access_token);
     S.setItem('kin-at', tok.access_token);
@@ -90,8 +95,10 @@ const KinAuth = (() => {
     session() {
       if (S.getItem('kin-demo')) return { user: S.getItem('kin-user') || 'demo', roles: [], demo: true };
       if (!S.getItem('kin-at')) return null;
+      const user = S.getItem('kin-user') || '';
       return {
-        user: S.getItem('kin-user'),
+        user,
+        displayName: displayNameOf(claimsOf(S.getItem('kin-at'))) || user,
         roles: JSON.parse(S.getItem('kin-roles') ?? '[]'),
         demo: false,
       };
