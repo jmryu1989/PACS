@@ -5,8 +5,7 @@
 # `git add -A` 한 번이면 퍼블릭 저장소에 통째로 올라갈 뻔했다. 한 번 올라간 큰 파일은
 # 히스토리를 다시 쓰지 않으면 안 지워진다.
 #
-# 여기 있는 건 전부 다시 만들거나 다시 받을 수 있다:
-#   합성 팬텀  scripts/make_sample_ct.py
+# 여기 있는 건 전부 다시 받을 수 있다:
 #   공개 샘플  https://www.dicomlibrary.com/ → scripts/import_public_samples.py
 sample-data/
 

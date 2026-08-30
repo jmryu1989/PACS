@@ -19,16 +19,9 @@ cp .env.example .env
 #    (첫 실행은 이미지 다운로드와 API 빌드로 몇 분 걸림)
 docker compose up -d --build
 
-# 3. 실습용 합성 CT 60슬라이스 생성 (외부 다운로드 불필요)
+# 3. 승인된 DICOMLibrary 공개 샘플 투입
 cd scripts
-python3 make_sample_ct.py
-
-# 4. Orthanc에 업로드 (먼저 .env의 ORTHANC_PASS를 셸 환경변수로 내보낸다)
-python3 upload_samples.py
-
-# 5. (선택) 가짜 CT 장비가 되어 진짜 DICOM 프로토콜로 한 건 더 보내기
-pip install pynetdicom
-python3 send_cstore.py --name "HONG^GILDONG" --id P-1006
+python3 import_public_samples.py --institution "한림병원"
 ```
 
 그리고 브라우저에서:
@@ -84,9 +77,9 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec proxy nginx
 
 ## 첫날 미션 체크리스트
 
-- [ ] OHIF에서 스터디를 열고 마우스 휠로 60장 스크롤하기
-- [ ] 윈도잉(W/L) 도구로 밝기·대비를 바꿔 두개골/뇌를 번갈아 보기
-- [ ] 측정 도구로 병변(우측 상부의 밝은 결절, 중간 슬라이스 부근) 크기 재기
+- [ ] OHIF에서 DICOMLibrary 스터디를 열고 전체 시리즈를 확인하기
+- [ ] CT 스터디에서 윈도잉(W/L)을 바꿔 연부조직·골조직을 확인하기
+- [ ] 측정 도구로 공개 영상의 식별 가능한 해부 구조를 재기
 - [ ] Orthanc 관리 UI에서 같은 스터디를 찾아 DICOM 태그 열람하기
 - [ ] `config/orthanc.json`과 `docker-compose.yml`을 한 줄씩 읽고, 이해 안 되는 단어 목록 만들기 → 이것이 2단계 교재
 
@@ -95,9 +88,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec proxy nginx
 ```
 docker-compose.yml        # Orthanc + PostgreSQL + API 컨테이너 정의
 config/orthanc.json       # Orthanc 설정: 계정, DICOMweb, DICOM AE, ServeFolders
-scripts/make_sample_ct.py # 합성 두부 CT 팬텀 생성 (pydicom)
-scripts/upload_samples.py # REST API(/instances)로 업로드
-sample-data/              # 생성된 .dcm 파일이 여기 쌓임
+scripts/import_public_samples.py # 승인된 DICOMLibrary 공개 샘플 투입
+sample-data/public/              # DICOMLibrary 공개 샘플 원본
 
 worklist-v0/              # 프론트엔드 (Orthanc가 /worklist 로 서빙)
   worklist-v1~v3.html     #   워크리스트 재현 습작
@@ -186,12 +178,14 @@ HPACS는 이 카테고리 버그를 5년간 반복했고(교훈 §6) 2024년에�
 
 실제 CT/MR 장비는 HTTP를 모른다. DICOM 상위 프로토콜로 TCP 연결(Association)을 맺고,
 어떤 SOP Class를 어떤 전송구문으로 보낼지 협상한 뒤, **C-STORE**로 인스턴스를 하나씩 민다.
-`scripts/send_cstore.py`가 그 장비 역할을 한다 (Orthanc의 DICOM 포트 4242, AET `KINLAB`).
+`scripts/send_cstore.py`가 DICOMLibrary 공개 CT의 픽셀을 재사용해 그 장비 역할을 한다
+(Orthanc의 DICOM 포트 4242, AET `KINLAB`). 환자·검사 식별자와 UID만 테스트용으로 바꾸며
+합성 팬텀은 만들지 않는다.
 
 ```bash
-python3 send_cstore.py                                    # 한림병원 CT 1건
-python3 send_cstore.py --institution "KIN 판독센터"        # 다른 기관에서 도착
-python3 send_cstore.py --verbose                          # 협상 로그를 전부 본다
+python3 send_cstore.py --name "ROUTE^TEST" --id INV-ROUTE
+python3 send_cstore.py --name "ROUTE^TEST" --id INV-ROUTE --institution "KIN 판독센터"
+python3 send_cstore.py --name "ROUTE^TEST" --id INV-ROUTE --verbose
 ```
 
 DCMTK가 있다면 같은 일을 이렇게 한다: `storescu -aec KINLAB -aet HALLYM_CT localhost 4242 파일.dcm`
