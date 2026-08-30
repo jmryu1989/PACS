@@ -913,7 +913,9 @@ export class PacsService implements OnModuleInit {
           SELECT version, "updatedBy", findings, conclusion, recommendation
           FROM "Report" WHERE uid = ${uid} FOR UPDATE`;
 
-        if (body.baseVersion !== undefined && (cur?.version ?? 0) !== body.baseVersion)
+        if (body.baseVersion === undefined)
+          throw new BadRequestException('baseVersion이 필요합니다 (화면이 마지막으로 본 판 번호)');
+        if ((cur?.version ?? 0) !== body.baseVersion)
           throw new ConflictException(
             `그 사이 ${cur?.updatedBy ?? '다른 사용자'}가 v${cur?.version}을 저장했습니다. ` +
             `내용을 다시 불러온 뒤 작성해 주세요.`);
