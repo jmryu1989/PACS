@@ -34,6 +34,10 @@ const KinAuth = (() => {
   const REDIRECT = location.origin + location.pathname;   // index.html 자기 자신
   const S = sessionStorage;
 
+  // 콜백 주소는 성공뿐 아니라 실패·재방문에서도 즉시 지운다.
+  // code/state를 주소창과 히스토리에 남기지 않고, 같은 콜백을 새 로그인으로 오인하지 않는다.
+  const cleanCallbackUrl = () => history.replaceState({}, '', location.pathname + location.hash);
+
   let conf = null;
   async function config() {
     if (conf) return conf;
@@ -133,16 +137,41 @@ const KinAuth = (() => {
       location.href = `${c.authorization_endpoint}?${q}`;
     },
 
-    /** 로그인 화면에서 돌아왔을 때 ?code= 를 토큰으로 바꾼다. 처리했으면 true */
+    /** 로그인 화면에서 돌아왔을 때 ?code= 를 토큰으로 바꾼다. 재로그인이 필요하면 'retry' */
     async handleRedirect() {
       const p = new URLSearchParams(location.search);
       const code = p.get('code');
       if (!code) {
-        if (p.get('error')) throw new Error(p.get('error_description') || p.get('error'));
+        if (p.get('error')) {
+          const message = p.get('error_description') || p.get('error');
+          cleanCallbackUrl();
+          S.removeItem('kin-verifier'); S.removeItem('kin-state');
+          throw new Error(message);
+        }
         return false;
       }
+
+      const savedState = S.getItem('kin-state');
+
+      // 성공한 콜백을 뒤로가기/새 탭에서 다시 연 경우다. 이미 세션이 있으면 boot가
+      // 그대로 입장시키고, 세션이 없는 새 탭이면 깨끗한 주소에서 로그인을 한 번 재개한다.
+      if (!savedState) {
+        cleanCallbackUrl();
+        S.removeItem('kin-verifier');
+        return S.getItem('kin-at') ? false : 'retry';
+      }
+
       // state 확인 — 이걸 빼면 CSRF로 남의 코드를 우리 세션에 심을 수 있다
-      if (p.get('state') !== S.getItem('kin-state')) throw new Error('state 불일치 — 로그인을 다시 시도하세요');
+      if (p.get('state') !== savedState) {
+        cleanCallbackUrl();
+        S.removeItem('kin-verifier'); S.removeItem('kin-state');
+        throw new Error('state 불일치 — 로그인을 다시 시도하세요');
+      }
+
+      const verifier = S.getItem('kin-verifier');
+      cleanCallbackUrl();
+      S.removeItem('kin-verifier'); S.removeItem('kin-state');
+      if (!verifier) throw new Error('로그인 검증 정보 없음 — 로그인을 다시 시도하세요');
 
       const c = await config();
       const res = await fetch(c.token_endpoint, {
@@ -150,14 +179,12 @@ const KinAuth = (() => {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
           grant_type: 'authorization_code', client_id: CLIENT, code,
-          redirect_uri: REDIRECT, code_verifier: S.getItem('kin-verifier'),
+          redirect_uri: REDIRECT, code_verifier: verifier,
         }),
       });
       const tok = await res.json();
       if (!res.ok) throw new Error(tok.error_description ?? tok.error ?? '토큰 교환 실패');
       store(tok);
-      S.removeItem('kin-verifier'); S.removeItem('kin-state');
-      history.replaceState({}, '', location.pathname);   // 주소창에서 code 지우기
       return true;
     },
 
