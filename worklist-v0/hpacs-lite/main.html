@@ -1345,7 +1345,7 @@
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
 
       $("#rows").innerHTML = list.map((s, i) => `
-        <tr data-uid="${esc(s.uid)}" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}">` +
+        <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}">` +
         cols.map(c => {
           // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
           const v = c.k === "no" ? i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
@@ -2792,7 +2792,19 @@ ${esc($("#recommendation").value)}
      */
     $("#rows").addEventListener("click", e => {
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) select(tr.dataset.uid);
+      if (!tr?.dataset.uid) return;
+      const uid = tr.dataset.uid;
+      select(uid);
+      // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다.
+      $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true });
+    });
+    $("#rows").addEventListener("keydown", e => {
+      if (e.key !== "Enter" || e.isComposing || mode !== "Radiology") return;
+      const tr = e.target.closest("tr[data-uid]");
+      if (!tr || tr.dataset.uid !== selectedUid) return;
+      if (isRelatedPreview()) showCurrentStudy();
+      e.preventDefault();
+      $("#findings").focus();
     });
     $("#rows").addEventListener("dblclick", e => {
       const tr = e.target.closest("tr");
