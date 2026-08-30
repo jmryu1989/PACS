@@ -49,7 +49,7 @@
     .split { flex: 1; display: flex; min-height: 0; }
 
     /* ══ 좌측: 워크리스트 ══ */
-    .left { width: 44%; display: flex; flex-direction: column; border-right: 2px solid #333c4d; min-width: 500px; }
+    .left { width: 44%; display: flex; flex-direction: column; min-width: 500px; }
     .tabs { display: flex; background: #1b212c; padding: 0 8px; border-bottom: 1px solid #333c4d; flex: none; }
     .tabs > div { padding: 6px 16px; cursor: pointer; color: #7f8899; border-bottom: 2px solid transparent; }
     .tabs > div.on { color: #4da3ff; border-bottom-color: #4da3ff; }
@@ -135,7 +135,7 @@
     .right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
     /* Report window 행: 썸네일 | Clinical | Reading Template */
-    .rw { height: 215px; flex: none; display: flex; border-bottom: 1px solid #333c4d; }
+    .rw { height: 215px; flex: none; display: flex; }
     .rw section { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid #333c4d; }
     .rw section:last-child { border-right: none; }
     .rw h3, .panel h3 { margin: 0; padding: 4px 10px; font-size: 11px; color: #8892a4; background: #1b212c; flex: none; font-weight: normal; }
@@ -159,7 +159,7 @@
     /* Related Report List | Report — 나란히 두 기둥 */
     .workrow { flex: 1; display: flex; min-height: 0; }
     .panel { display: flex; flex-direction: column; min-height: 0; }
-    .related-p { width: 44%; border-right: 1px solid #333c4d; }
+    .related-p { width: 44%; }
     .reltabs { display: flex; align-items: center; background: #1b212c; flex: none; }
     .reltabs .rel-title { padding: 4px 10px; color: var(--kin-text); font-size: 11px; white-space: nowrap; }
     .reltabs div { padding: 4px 12px; font-size: 11px; color: #7f8899; cursor: pointer; }
@@ -200,6 +200,19 @@
     .related-reportbar .readonly { color: var(--kin-muted); }
     .report-p.related-view .redit textarea { background: rgba(14,23,40,.72); color: var(--kin-muted); }
     #err { color: #ff8080; padding: 2px 10px; flex: none; }
+
+    /* 패널 경계는 세션 안에서만 움직인다. 판독 PC마다 화면 구성이 달라 계정 설정으로
+       저장하면 다른 모니터에서 오히려 화면을 망가뜨리기 때문이다. */
+    .resizer { position: relative; flex: none; background: var(--kin-bg); touch-action: none; z-index: 3; }
+    .resizer::after { content: ""; position: absolute; background: var(--kin-line2); transition: background .12s; }
+    .resizer:hover::after, .resizer.dragging::after { background: var(--kin-accent); }
+    .resizer-v { width: 6px; cursor: col-resize; }
+    .resizer-v::after { top: 0; bottom: 0; left: 2px; width: 2px; }
+    .resizer-h { height: 6px; cursor: row-resize; }
+    .resizer-h::after { left: 0; right: 0; top: 2px; height: 2px; }
+    body.resizing, body.resizing * { user-select: none !important; }
+    body.resizing-x, body.resizing-x * { cursor: col-resize !important; }
+    body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 
     /* ── 모달 (Modify Exam) ── */
     .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 30; align-items: center; justify-content: center; }
@@ -499,6 +512,8 @@
         <span id="filterlist">Filter : -</span>
       </div>
     </div>
+    <div class="resizer resizer-v" id="resize-main" role="separator" aria-orientation="vertical"
+         title="드래그하여 워크리스트 너비 조절"></div>
 
     <!-- ══ 우측: 작업 공간 ══ -->
     <div class="right">
@@ -533,6 +548,8 @@
           </div>
         </section>
       </div>
+      <div class="resizer resizer-h" id="resize-top" role="separator" aria-orientation="horizontal"
+           title="드래그하여 상단 패널 높이 조절"></div>
 
       <div class="workrow">
       <!-- Related Report List / Related Exam List -->
@@ -549,6 +566,8 @@
           </table>
         </div>
       </div>
+      <div class="resizer resizer-v" id="resize-related" role="separator" aria-orientation="vertical"
+           title="드래그하여 Related 패널 너비 조절"></div>
 
       <!-- Report (7.4) — Radiology 모드 -->
       <div class="panel report-p">
@@ -2573,6 +2592,47 @@ ${esc($("#recommendation").value)}
       fallback.remove();
       toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
+
+    // ── 패널 크기 조절 ──
+    function bindPanelResize(selector, axis, resize) {
+      const handle = $(selector);
+      handle.addEventListener("pointerdown", e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        handle.setPointerCapture(e.pointerId);
+        handle.classList.add("dragging");
+        document.body.classList.add("resizing", axis === "x" ? "resizing-x" : "resizing-y");
+
+        const move = event => {
+          if (event.pointerId === e.pointerId) resize(event);
+        };
+        const end = event => {
+          if (event.pointerId !== e.pointerId) return;
+          handle.removeEventListener("pointermove", move);
+          handle.removeEventListener("pointerup", end);
+          handle.removeEventListener("pointercancel", end);
+          handle.classList.remove("dragging");
+          document.body.classList.remove("resizing", "resizing-x", "resizing-y");
+          if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", end);
+        handle.addEventListener("pointercancel", end);
+      });
+    }
+    const clampPanel = (value, min, max) => Math.max(min, Math.min(max, value));
+    bindPanelResize("#resize-main", "x", e => {
+      const box = $(".split").getBoundingClientRect();
+      $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
+    });
+    bindPanelResize("#resize-top", "y", e => {
+      const box = $(".right").getBoundingClientRect();
+      $(".rw").style.height = clampPanel(e.clientY - box.top, 140, box.height - 266) + "px";
+    });
+    bindPanelResize("#resize-related", "x", e => {
+      const box = $(".workrow").getBoundingClientRect();
+      $(".related-p").style.width = clampPanel(e.clientX - box.left, 220, box.width - 366) + "px";
+    });
 
     $("#quick").addEventListener("input", render);
     $("#refresh").addEventListener("click", load);
