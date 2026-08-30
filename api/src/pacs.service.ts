@@ -765,6 +765,8 @@ export class PacsService implements OnModuleInit {
     await this.gate(uid, c);
 
     const run = () => this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`
+        SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const drafts = await tx.$queryRaw<any[]>`
         SELECT uid, author, findings, conclusion, recommendation, "baseVersion", "updatedAt"
         FROM "ReportDraft"
