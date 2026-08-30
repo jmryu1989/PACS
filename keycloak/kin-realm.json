@@ -56,7 +56,7 @@
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:8042/*"
+        "post.logout.redirect.uris": "+"
       },
       "protocolMappers": [
         {
