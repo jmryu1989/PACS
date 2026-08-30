@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import threading
@@ -61,7 +62,7 @@ class Route:
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "health"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
-    ("GET", "authz/dicom"): Route(Kind.NEITHER),
+    ("GET", "authz/dicom"): Route(Kind.TENANT),
     ("GET", "colleagues"): Route(Kind.TENANT),
     ("GET", "prefs"): Route(Kind.USER),
     ("POST", "filters"): Route(Kind.USER),
@@ -176,6 +177,7 @@ class LiveStack:
         # 포함되지 않는 별도 로컬 클라이언트를 KIN_TEST_CLIENT_ID로 명시한다.
         self.client_id = os.environ.get("KIN_TEST_CLIENT_ID", "kin-web")
         self.orthanc = os.environ.get("KIN_TEST_ORTHANC", "http://127.0.0.1:8042").rstrip("/")
+        self.proxy = os.environ.get("KIN_TEST_PROXY", "https://localhost:9443").rstrip("/")
         self.tokens: dict[str, str] = {}
         self.actors: dict[str, str] = {}
         self.active: dict[str, Fixture] = {}
@@ -261,6 +263,38 @@ class LiveStack:
         except HTTPError as error:
             payload, text = _json_or_text(error.read())
             return HttpResult(error.code, payload, text)
+
+    def dicom_request(self, path: str, user: str | None = None) -> HttpResult:
+        """정식 프록시의 DICOM 경로. 사용자 지정 시 쿠키가 아닌 Bearer로 검증한다."""
+        headers = {"Accept": "*/*"}
+        if user:
+            headers["Authorization"] = "Bearer " + self.token(user)
+        request = Request(self.proxy + path, headers=headers, method="GET")
+        # 로컬 정식 입구는 자체 서명 인증서다. 토큰 검증과 기관 관문은 서버에서 그대로 돈다.
+        context = ssl._create_unverified_context()
+        try:
+            with urlopen(request, timeout=30, context=context) as response:
+                payload, text = _json_or_text(response.read())
+                return HttpResult(response.status, payload, text)
+        except HTTPError as error:
+            payload, text = _json_or_text(error.read())
+            return HttpResult(error.code, payload, text)
+
+    def first_instance_id(self, uid: str) -> str:
+        """테스트 픽스처의 첫 Orthanc 인스턴스 ID를 안전하게 찾는다."""
+        lookup = self._orthanc_request("POST", "/tools/lookup", uid.encode("ascii"))
+        if lookup.status != 200:
+            raise RuntimeError(f"Orthanc study lookup 실패: {lookup.status} {lookup.text}")
+        studies = [item.get("ID") for item in lookup.body if item.get("Type") == "Study"]
+        if len(studies) != 1:
+            raise RuntimeError(f"Study UID에 대응하는 Orthanc study가 1개가 아닙니다: {len(studies)}")
+        study = self._orthanc_request("GET", f"/studies/{quote(studies[0])}")
+        if study.status != 200 or not study.body.get("Series"):
+            raise RuntimeError(f"Orthanc study에 series가 없습니다: {study.status} {study.text}")
+        series = self._orthanc_request("GET", f"/series/{quote(study.body['Series'][0])}")
+        if series.status != 200 or not series.body.get("Instances"):
+            raise RuntimeError(f"Orthanc series에 instance가 없습니다: {series.status} {series.text}")
+        return series.body["Instances"][0]
 
     def create_fixture(self, institution: str = "한림병원") -> Fixture:
         run = uuid.uuid4().hex
@@ -519,6 +553,48 @@ class LiveInvariantTests(unittest.TestCase):
                     else:
                         self.assertEqual(result.status, 404, result.text)
                     self.assert_snapshot_unchanged(fixture, "kdoctor", before)
+
+    def test_dicom_routes_enforce_tenant_boundary_and_preserve_tele_access(self) -> None:
+        with self.stack.fixture() as fixture:
+            uid = quote(fixture.uid)
+            instance_id = quote(self.stack.first_instance_id(fixture.uid))
+            protected = (
+                f"/dicom-web/studies/{uid}/metadata",
+                f"/instances/{instance_id}/preview",
+                f"/dicom-web/studies?StudyInstanceUID={uid}",
+            )
+
+            # 로그인만으로는 부족하다. 타 기관은 UID나 Orthanc ID를 알아도 열지 못한다.
+            for path in protected:
+                with self.subTest(boundary="other-tenant", path=path):
+                    result = self.stack.dicom_request(path, "kdoctor")
+                    self.assertEqual(result.status, 403, result.text)
+
+            # 전체 열거는 기관을 가를 UID가 없다. 소유기관 토큰이어도 워크리스트 API를 써야 한다.
+            for user in ("kdoctor", fixture.owner_user):
+                with self.subTest(boundary="uidless-list", user=user):
+                    result = self.stack.dicom_request("/dicom-web/studies", user)
+                    self.assertEqual(result.status, 403, result.text)
+
+            for path in protected:
+                with self.subTest(boundary="owner", path=path):
+                    result = self.stack.dicom_request(path, fixture.owner_user)
+                    self.assertEqual(result.status, 200, result.text)
+
+            # visible()의 두 번째 가지: 정식 원격판독 수신기관은 같은 영상에 접근할 수 있다.
+            requested = self.stack.request(
+                "PATCH", f"/studies/{uid}", fixture.owner_user,
+                {"ts": "wait", "teleTo": "kin-center"},
+            )
+            self.assertEqual(requested.status, 200, requested.text)
+            for path in protected:
+                with self.subTest(boundary="tele-receiver", path=path):
+                    result = self.stack.dicom_request(path, "kdoctor")
+                    self.assertEqual(result.status, 200, result.text)
+
+            # A-1 회귀: 기관 판단 전에 인증부터 요구한다.
+            unauthenticated = self.stack.dicom_request(protected[0])
+            self.assertEqual(unauthenticated.status, 401, unauthenticated.text)
 
     def test_preliminary_save_then_author_approve_stays_locked(self) -> None:
         with self.stack.fixture() as fixture:
