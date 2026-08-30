@@ -62,9 +62,25 @@
     .ctxbar .fold { color: #7f8899; cursor: pointer; padding: 0 4px; user-select: none; }
 
     .grid { overflow: auto; flex: 1; }
-    /* hPACS처럼 가로 이동은 유지하되 하단 바가 레이아웃을 차지하지 않게 한다. */
+    /* 마우스 사용자도 가로 이동할 수 있도록 하단 바를 슬림하게 유지한다. */
+    @supports (-moz-appearance: none) {
+      .grid,
+      .grid2 {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(130,160,210,.28) transparent;
+      }
+    }
     .grid::-webkit-scrollbar,
-    .grid2::-webkit-scrollbar { height: 0; }
+    .grid2::-webkit-scrollbar { height: 8px; }
+    .grid::-webkit-scrollbar-track,
+    .grid2::-webkit-scrollbar-track { background: var(--kin-bg); }
+    .grid::-webkit-scrollbar-thumb,
+    .grid2::-webkit-scrollbar-thumb {
+      background: rgba(130,160,210,.28);
+      border-radius: 4px;
+    }
+    .grid::-webkit-scrollbar-thumb:hover,
+    .grid2::-webkit-scrollbar-thumb:hover { background: rgba(130,160,210,.45); }
     table { border-collapse: collapse; width: 100%; }
     th, td { border: 1px solid #262e3c; padding: 3px 6px; white-space: nowrap; }
     thead th { background: #232936; color: #dfe5ee; cursor: pointer; user-select: none; position: sticky; top: 0; z-index: 1; font-weight: normal; }
