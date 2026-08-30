@@ -30,7 +30,8 @@ server {
     # 상대 리다이렉트는 브라우저가 현재 보고 있는 출처를 그대로 보존한다.
     absolute_redirect off;
 
-    client_max_body_size 0;
+    # 전역 기본. DICOM 쓰기(STOW)는 이미 limit_except로 막혀 있어 큰 본문을 받을 곳이 없다.
+    client_max_body_size 32m;
     proxy_read_timeout   300s;
     proxy_send_timeout   300s;
 
@@ -53,7 +54,11 @@ server {
 
     location = / { return 302 /worklist/hpacs-lite/index.html; }
 
-    location /api/ { proxy_pass http://api:3000; }
+    location /api/ {
+        # 판독문·필터·상용구 JSON뿐이다. 2MB면 넉넉하고, 그 이상은 실수 아니면 공격이다.
+        client_max_body_size 2m;
+        proxy_pass http://api:3000;
+    }
 
     # 토큰과 쿠키가 커서 기본 프록시 버퍼로는 응답 헤더가 넘칠 수 있다.
     location /auth/ {
