@@ -303,7 +303,7 @@ export class PacsService implements OnModuleInit {
     // 서버 정보는 관리자만. 프론트 사용처 없음 — 버전 정보는 표면 축소가 이득이다.
     if (path === '/system') { need(c.roles, 'admin', '서버 정보 조회'); return; }
     // 로그인만으로 충분한 경로 — PHI 없음
-    if (path === '/statistics' || path === '/tools/lookup') return;
+    if (path === '/statistics') return;
 
     // /dicom-web/studies/{uid}/... — 경로의 UID로 관문
     let m = /^\/dicom-web\/studies\/([0-9.]+)(?:\/|$)/.exec(path);
@@ -333,6 +333,26 @@ export class PacsService implements OnModuleInit {
     const s = await this.prisma.studyState.findUnique({ where: { uid } });
     // 미등록(기관 미확정) 검사는 기본 거부 — 워크리스트를 한 번 열면 lazy 등록이 기관을 박는다.
     if (!s || !this.visible(s, me)) throw new ForbiddenException('열람 권한이 없습니다');
+  }
+
+  /** SOP lookup도 요청 Study의 기관 관문 안에서만 Orthanc ID를 내보낸다. */
+  async dicomLookup(studyUid: string, sopUid: string, c: Caller) {
+    const me = inst(c);
+    if (!/^[0-9.]+$/.test(studyUid ?? '') || !/^[0-9.]+$/.test(sopUid ?? ''))
+      throw new BadRequestException('studyUid와 sopUid가 필요합니다');
+
+    const found = await this.orthanc.lookupInstance(sopUid);
+    const instances = found.filter((item: any) => item?.Type === 'Instance' && /^[0-9a-f-]+$/.test(item?.ID ?? ''));
+    if (instances.length !== 1) throw new ForbiddenException('열람 권한이 없습니다');
+
+    let actualUid: string;
+    try { actualUid = await this.orthanc.instanceStudyUid(instances[0].ID); }
+    catch { throw new ForbiddenException('열람 권한이 없습니다'); }
+    if (actualUid !== studyUid) throw new ForbiddenException('열람 권한이 없습니다');
+
+    const study = await this.prisma.studyState.findUnique({ where: { uid: actualUid } });
+    if (!study || !this.visible(study, me)) throw new ForbiddenException('열람 권한이 없습니다');
+    return { id: instances[0].ID };
   }
 
   /** 쓰기 전 관문. 없는 검사와 남의 검사는 같은 메시지로 막는다(존재 여부도 정보다). */

@@ -1524,8 +1524,8 @@
           return tagv(arr[Math.floor(arr.length / 2)], "00080018");
         });
         const ids = await Promise.all(reps.map(async sop => {
-          const lk = await fetch("/tools/lookup", { method: "POST", body: sop });
-          return (await lk.json()).find(x => x.Type === "Instance")?.ID;
+          const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: sop });
+          return lk.id;
         }));
         if (stale()) return;
         const n = Math.max(Math.ceil(Math.sqrt(ids.length)), 2);

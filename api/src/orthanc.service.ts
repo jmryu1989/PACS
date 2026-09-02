@@ -50,6 +50,22 @@ export class OrthancService {
     );
   }
 
+  /** SOP Instance UID를 Orthanc 내부 ID로 찾는다. 기관 판정은 호출자가 Study로 환원한 뒤 한다. */
+  async lookupInstance(sopUid: string): Promise<any[]> {
+    let res: Response;
+    try {
+      res = await fetch(this.base + '/tools/lookup', {
+        method: 'POST',
+        headers: { Authorization: this.auth, 'Content-Type': 'text/plain' },
+        body: sopUid,
+      });
+    } catch (e: any) {
+      throw new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e.message}`);
+    }
+    if (!res.ok) throw new ServiceUnavailableException(`Orthanc HTTP ${res.status}`);
+    return res.json();
+  }
+
   /** 썸네일 경로(/instances/{id})의 기관 관문용. 실패는 던진다 — 관문에서 403이 된다. */
   async instanceStudyUid(id: string): Promise<string> {
     const hit = this.instanceStudy.get(id);

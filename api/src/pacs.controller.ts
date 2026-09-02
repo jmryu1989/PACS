@@ -51,6 +51,12 @@ export class PacsController {
     return this.svc.authzDicom(String(req.headers['x-original-uri'] ?? ''), caller(req));
   }
 
+  @Post('dicom/lookup')
+  @HttpCode(200)
+  dicomLookup(@Body() body: any, @Req() req: any) {
+    return this.svc.dicomLookup(body?.studyUid, body?.sopUid, caller(req));
+  }
+
   /**
    * 내 기관의 다른 판독의들 — Preliminary에서 상급 판독의를 고를 때 쓴다.
    * 목록은 Keycloak이 진실의 원천이다. 우리 DB에 복사본을 두지 않는다.

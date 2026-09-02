@@ -126,13 +126,6 @@ server {
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }
 
-    # SOP Instance UID → Orthanc 내부 ID. /tools 전체를 열면 execute-script도 노출된다.
-    location = /tools/lookup {
-        auth_request /kin-authz;
-        proxy_pass http://orthanc:8042;
-        include /etc/nginx/snippets/orthanc-basic-auth.conf;
-    }
-
     location = /statistics {
         limit_except GET HEAD { deny all; }
         auth_request /kin-authz;
