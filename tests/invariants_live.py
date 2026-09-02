@@ -9,6 +9,8 @@ REPORT라고 선언하는 순간 실제 Keycloak 토큰·Orthanc 검사·Postgre
 from __future__ import annotations
 
 import base64
+import html
+import http.cookiejar
 import json
 import os
 import re
@@ -27,7 +29,9 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen,
+)
 
 
 # 실패 메시지가 핵심 증거인데 Windows CP949가 한글을 깨뜨리면 어떤 불변조건이 무너졌는지
@@ -418,6 +422,189 @@ class EntryPointManifestTests(unittest.TestCase):
             "라우트 선언표가 컨트롤러와 다릅니다. "
             f"표에 없는 라우트={missing}, 컨트롤러에 없는 선언={stale}",
         )
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class BffInvariantTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.stack = LiveStack()
+        cls.stack.require_stack()
+        cls.context = ssl._create_unverified_context()
+        password = os.environ.get("KC_ADMIN_PASSWORD", "")
+        if not password:
+            raise RuntimeError("KC_ADMIN_PASSWORD가 필요합니다")
+        data = urlencode({
+            "client_id": "admin-cli", "grant_type": "password",
+            "username": "admin", "password": password,
+        }).encode("ascii")
+        with urlopen(Request(
+            "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/token",
+            data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        ), timeout=30) as response:
+            cls.admin_token = json.loads(response.read().decode("utf-8"))["access_token"]
+        groups = cls.admin("GET", "/groups?search=hallym")
+        exact = [group for group in groups.body if group.get("name") == "hallym"]
+        if len(exact) != 1:
+            raise RuntimeError(f"hallym 그룹을 하나로 확정할 수 없습니다: {len(exact)}")
+        cls.hallym_group_id = exact[0]["id"]
+
+    @classmethod
+    def admin(cls, method: str, path: str, body: Any = None) -> HttpResult:
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Authorization": "Bearer " + cls.admin_token}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(
+            "http://127.0.0.1:8080/auth/admin/realms/kin" + path,
+            data=data, headers=headers, method=method,
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                raw = response.read()
+                payload, text = _json_or_text(raw)
+                if method == "POST" and path == "/users":
+                    payload = response.headers.get("Location", "").rstrip("/").split("/")[-1]
+                return HttpResult(response.status, payload, text)
+        except HTTPError as error:
+            payload, text = _json_or_text(error.read())
+            return HttpResult(error.code, payload, text)
+
+    def proxy(self, opener, method: str, path: str, body: Any = None,
+              headers: dict[str, str] | None = None) -> HttpResult:
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        sent = {"Accept": "application/json", **(headers or {})}
+        if data is not None:
+            sent["Content-Type"] = "application/json"
+        request = Request(self.stack.proxy + path, data=data, headers=sent, method=method)
+        try:
+            with opener.open(request, timeout=30) as response:
+                payload, text = _json_or_text(response.read())
+                return HttpResult(response.status, payload, text)
+        except HTTPError as error:
+            payload, text = _json_or_text(error.read())
+            return HttpResult(error.code, payload, text)
+
+    def bff_login(self, username: str, password: str):
+        jar = http.cookiejar.CookieJar()
+        opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.context))
+        login = self.proxy(opener, "GET", "/api/auth/login")
+        self.assertEqual(login.status, 200, login.text)
+        match = re.search(r'<form[^>]+action="([^"]+)"', login.text, re.I)
+        self.assertIsNotNone(match, "Keycloak 로그인 form이 없습니다")
+        data = urlencode({
+            "username": username, "password": password, "credentialId": "",
+        }).encode("utf-8")
+        submitted = Request(
+            html.unescape(match.group(1)), data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        )
+        with opener.open(submitted, timeout=30) as response:
+            response.read()
+        sid = next((cookie.value for cookie in jar if cookie.name == "kin_sid"), None)
+        self.assertIsNotNone(sid, "BFF 로그인 뒤 kin_sid가 없습니다")
+        return opener, sid
+
+    def create_member(self, with_group: bool) -> tuple[str, str, str]:
+        username = "bff-invariant-" + uuid.uuid4().hex
+        password = uuid.uuid4().hex + "Aa1!"
+        created = self.admin("POST", "/users", {
+            "username": username, "enabled": True, "emailVerified": True,
+            "email": username + "@local.test", "firstName": "BFF", "lastName": "Invariant",
+        })
+        self.assertEqual(created.status, 201, created.text)
+        user_id = created.body
+        reset = self.admin("PUT", f"/users/{user_id}/reset-password", {
+            "type": "password", "value": password, "temporary": False,
+        })
+        self.assertEqual(reset.status, 204, reset.text)
+        if with_group:
+            joined = self.admin("PUT", f"/users/{user_id}/groups/{self.hallym_group_id}")
+            self.assertEqual(joined.status, 204, joined.text)
+        return user_id, username, password
+
+    def test_cookie_session_security_and_legacy_cookie_rejection(self) -> None:
+        raw = build_opener(HTTPSHandler(context=self.context))
+        forged = self.proxy(raw, "GET", "/api/me", headers={"Cookie": "kin_sid=forged"})
+        self.assertEqual(forged.status, 401, forged.text)
+
+        legacy = self.proxy(raw, "GET", "/api/me", headers={
+            "Cookie": "kin_at=" + self.stack.token("doctor"),
+        })
+        self.assertEqual(legacy.status, 401, legacy.text)
+
+        opener, sid = self.bff_login("doctor", self.stack.passwords["doctor"])
+        csrf = self.proxy(opener, "POST", "/api/studies/1.2.3/hold", {})
+        self.assertEqual(csrf.status, 403, csrf.text)
+        logged_out = self.proxy(
+            opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"},
+        )
+        self.assertEqual(logged_out.status, 204, logged_out.text)
+        reused = self.proxy(raw, "GET", "/api/me", headers={"Cookie": "kin_sid=" + sid})
+        self.assertEqual(reused.status, 401, reused.text)
+
+        realm = json.loads((ROOT / "keycloak" / "kin-realm.json").read_text(encoding="utf-8"))
+        clients = {client["clientId"]: client for client in realm["clients"]}
+        self.assertFalse(clients["kin-web"]["enabled"])
+        self.assertEqual(
+            clients["kin-bff"].get("attributes", {}).get("pkce.code.challenge.method"), "S256",
+        )
+
+        live_clients = {}
+        for client_id in ("kin-web", "kin-bff"):
+            found = self.admin("GET", "/clients?clientId=" + client_id)
+            self.assertEqual(found.status, 200, found.text)
+            exact = [client for client in found.body if client.get("clientId") == client_id]
+            self.assertEqual(len(exact), 1, f"{client_id} 라이브 클라이언트 수")
+            live_clients[client_id] = exact[0]
+        self.assertFalse(live_clients["kin-web"]["enabled"])
+        self.assertEqual(
+            live_clients["kin-bff"].get("attributes", {}).get("pkce.code.challenge.method"),
+            "S256",
+        )
+
+    def test_only_four_routes_are_public(self) -> None:
+        opener = build_opener(HTTPSHandler(context=self.context), NoRedirect())
+        public = {
+            ("GET", "health"): 200,
+            ("GET", "auth/login"): 302,
+            ("GET", "auth/register"): 302,
+            ("GET", "auth/callback"): 302,
+        }
+        for (method, route), _meta in ROUTES.items():
+            path = route.replace(":uid", "1.2.3").replace(":id", "1")
+            body = {} if method in {"POST", "PUT", "PATCH"} else None
+            result = self.proxy(opener, method, "/api/" + path, body)
+            with self.subTest(method=method, path=path):
+                self.assertEqual(result.status, public.get((method, route), 401), result.text)
+
+    def test_pending_and_invalid_have_codes_but_can_logout(self) -> None:
+        for with_group, code in (
+            (False, "INSTITUTION_PENDING"),
+            (True, "INSTITUTION_INVALID"),
+        ):
+            user_id = username = password = None
+            opener = None
+            try:
+                user_id, username, password = self.create_member(with_group)
+                opener, _sid = self.bff_login(username, password)
+                me = self.proxy(opener, "GET", "/api/me")
+                self.assertEqual(me.status, 403, me.text)
+                self.assertEqual(me.body.get("code"), code, me.text)
+                logout = self.proxy(
+                    opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"},
+                )
+                self.assertEqual(logout.status, 204, logout.text)
+            finally:
+                if opener is not None:
+                    self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
+                if user_id is not None:
+                    deleted = self.admin("DELETE", f"/users/{user_id}")
+                    self.assertIn(deleted.status, (204, 404), deleted.text)
 
 
 class LiveInvariantTests(unittest.TestCase):

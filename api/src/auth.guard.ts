@@ -55,7 +55,7 @@ export class AuthGuard implements CanActivate {
 
     const header = req.headers.authorization ?? '';
     let raw = header.startsWith('Bearer ') ? header.slice(7) : '';
-    let method: 'bearer' | 'session' | 'legacy' | null = raw ? 'bearer' : null;
+    let method: 'bearer' | 'session' | null = raw ? 'bearer' : null;
     if (!raw) {
       const sid = this.auth.sessionId(req);
       if (sid) {
@@ -63,17 +63,9 @@ export class AuthGuard implements CanActivate {
         req.sid = sid;
         raw = session.accessToken;
         method = 'session';
-      } else {
-        // 프론트가 아직 kin-web을 쓰는 커밋 3에서는 OHIF의 기존 탭을 끊지 않는다.
-        // 새 프론트가 모든 탭의 kin_at을 일소한 뒤 커밋 6에서 이 마지막 폴백을 지운다.
-        const match = /(?:^|;\s*)kin_at=([^;]+)/.exec(req.headers.cookie ?? '');
-        if (match) {
-          try { raw = decodeURIComponent(match[1]); method = 'legacy'; }
-          catch { throw new UnauthorizedException('인증 쿠키 형식이 올바르지 않습니다'); }
-        }
       }
     }
-    if (!raw) throw new UnauthorizedException('Authorization 헤더가 없습니다');
+    if (!raw) throw new UnauthorizedException('인증 정보가 없습니다');
 
     const payload = await this.auth.verifyAccessToken(raw);
 

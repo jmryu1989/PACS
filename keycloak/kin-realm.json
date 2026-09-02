@@ -32,7 +32,7 @@
     {
       "clientId": "kin-web",
       "name": "HPACS-lite Web",
-      "enabled": true,
+      "enabled": false,
       "publicClient": true,
       "standardFlowEnabled": true,
       "implicitFlowEnabled": false,
@@ -97,6 +97,9 @@
         "https://localhost:9443/api/auth/callback",
         "https://127.0.0.1:9443/api/auth/callback"
       ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
       "protocolMappers": [
         {
           "name": "kin-api-audience",
