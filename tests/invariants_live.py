@@ -95,6 +95,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "match"): Route(Kind.TENANT),
     ("POST", "unmatch"): Route(Kind.TENANT),
     ("GET", "audit"): Route(Kind.TENANT),
+    ("GET", "admin/users"): Route(Kind.NEITHER),
+    ("POST", "admin/users"): Route(Kind.NEITHER),
+    ("PATCH", "admin/users/:id"): Route(Kind.NEITHER),
+    ("POST", "admin/users/:id/reset-password"): Route(Kind.NEITHER),
 }
 
 

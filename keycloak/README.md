@@ -74,18 +74,21 @@ API의 `AuthGuard`가 그 값을 `req.institution`으로 꺼내고, 서비스 �
 소속 그룹이 없는 계정은 **빈 목록이 아니라 403**을 받는다. 매퍼 설정이 틀렸을 때
 "검사가 하나도 없네"로 보이는 것이 가장 나쁘다.
 
-## 서비스 계정 (kin-api) — 사용자 목록 조회
+## 서비스 계정 (kin-api) — 사용자 조회·회원 관리
 
 Preliminary(RS=P)는 상급 판독의를 **지정**하는 기능이고, 지정된 사람만 판독문을 볼 수 있다.
 지정 대상을 자유 입력으로 받으면 오타 하나에 아무도 못 여는 판독문이 생긴다.
 그래서 API가 Keycloak에 "우리 기관의 판독의가 누구인가"를 직접 묻는다.
 
 - 컨피덴셜 클라이언트 `kin-api` + 서비스 계정 (compose의 `KC_CLIENT_SECRET`)
-- 부여된 realm-management 롤: `view-users`, `query-users`, `query-groups`, `view-realm`
+- 부여된 realm-management 롤: `manage-users`, `view-users`, `query-users`, `query-groups`, `view-realm`
 
 `view-realm`이 필요한 이유: `GET /admin/realms/{realm}/roles/{role}/users`(롤 보유자 목록)는
 `view-users`만으로는 **403**이다. 이 엔드포인트가 롤 조회 권한을 따로 보기 때문.
-전부 읽기 전용이고 쓰기 권한(`manage-*`)은 주지 않았다.
+회원 콘솔은 `manage-users`로 생성·정지·역할·그룹·비밀번호 초기화를 수행한다. 이 역할은
+사용자 삭제까지 가능한 넓은 권한이므로 API는 고정된 `/api/admin/users` 동작만 제공한다.
+범용 Keycloak 프록시와 사용자 삭제 라우트는 없고, 서비스 계정 사용자는 목록과 모든 쓰기에서
+제외한다. impersonation·client 관리는 별도 역할이라 서비스 계정 토큰으로 403이다.
 
 사용자의 토큰을 빌려 쓰지 않는다 — 판독의에게 사용자 조회 권한을 줄 이유가 없다.
 서버가 서버 자격으로 묻는다.
