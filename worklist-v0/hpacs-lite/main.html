@@ -36,6 +36,8 @@
     .menubar .item:hover { background: #232936; }
     .menubar .spacer { flex: 1; }
     .mright { color: #8892a4; font-size: 11px; margin-left: 10px; white-space: nowrap; display: flex; align-items: center; gap: 4px; }
+    .member-link { color: #86bdf2; cursor: pointer; text-decoration: none; }
+    .member-link:hover { color: #c7e4ff; }
     .logout { color: #ff8080; cursor: pointer; }
 
     /* ── 사용자 필터 영역 (6.2) ── */
@@ -455,6 +457,7 @@
     <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
     <div class="mright" id="user"></div>
     <div class="mright" id="roles" style="color:#4da3ff" title="Keycloak 렐름 롤"></div>
+    <a class="mright member-link" id="member-link" href="admin.html" style="display:none">회원</a>
     <div class="mright"><select style="background:#14181f;color:#aab2c0;border:1px solid #3a4356"><option>한국어</option><option>English</option></select></div>
     <div class="mright logout" id="logout">로그아웃</div>
   </div>
@@ -2981,6 +2984,7 @@ ${esc($("#recommendation").value)}
       });
       const r = sess.demo ? "데모" : (sess.roles.filter(x => ["radiologist","technician","admin"].includes(x)).join(", ") || "권한 없음");
       $("#roles").textContent = r;
+      $("#member-link").style.display = !sess.demo && KinAuth.has("admin") ? "" : "none";
     }
 
     /**

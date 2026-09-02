@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>회원 관리 — KIN</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07101d;
+      --panel: #101b2a;
+      --panel2: #142237;
+      --line: #29405d;
+      --text: #eef4ff;
+      --muted: #9fb0c5;
+      --accent: #4b98e3;
+      --danger: #e0646c;
+      --warn: #e3b34b;
+      --ok: #4ac47a;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 920px; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+    button, input, select { font: inherit; }
+    button, .button-link {
+      border: 1px solid #3c5b80; border-radius: 7px; background: #19304b; color: var(--text);
+      padding: 7px 11px; cursor: pointer; text-decoration: none;
+    }
+    button:hover, .button-link:hover { background: #23466d; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { border-color: #4b98e3; background: #24649e; }
+    button.danger { border-color: #7e3b44; background: #4f252c; color: #ffd9dd; }
+    input, select {
+      border: 1px solid #355272; border-radius: 7px; background: #0b1625; color: var(--text);
+      padding: 8px 10px;
+    }
+    label { display: grid; gap: 5px; color: var(--muted); }
+    header {
+      height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 20px;
+      background: #0d1725; border-bottom: 1px solid var(--line);
+    }
+    header .brand { font-size: 12px; letter-spacing: .15em; color: #86bdf2; }
+    header h1 { margin: 0; font-size: 17px; }
+    header .spacer { flex: 1; }
+    header .actor { color: var(--muted); }
+    main { padding: 22px; }
+    .toolbar { display: flex; align-items: end; gap: 10px; margin-bottom: 14px; }
+    .toolbar label { min-width: 190px; }
+    .toolbar .wide { width: 300px; }
+    .toolbar .spacer { flex: 1; }
+    .badge { border-radius: 999px; background: #5c4215; color: #ffe09b; padding: 5px 10px; font-weight: 700; }
+    .message { display: none; margin: 0 0 14px; border: 1px solid #7c343e; border-radius: 8px; background: #3c1b23; color: #ffd9dd; padding: 10px 12px; white-space: pre-wrap; }
+    .message.show { display: block; }
+    .table-wrap { overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #22364f; padding: 10px 11px; text-align: left; vertical-align: middle; }
+    th { background: var(--panel2); color: #b9c9dc; font-size: 12px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #13233a; }
+    .username { color: #86bdf2; font-weight: 650; }
+    .dim { color: var(--muted); }
+    .state { display: inline-block; border-radius: 999px; padding: 3px 7px; font-size: 11px; font-weight: 750; }
+    .approved { background: #16442d; color: #8ce2af; }
+    .pending { background: #5c4215; color: #ffe09b; }
+    .invalid { background: #592631; color: #ffadb7; }
+    .suspended { margin-left: 5px; background: #393d48; color: #d1d5dd; }
+    .warning { color: #ffb8c1; font-weight: 700; }
+    .actions { display: flex; flex-wrap: wrap; gap: 5px; }
+    .actions button { padding: 5px 8px; font-size: 12px; }
+    .empty { text-align: center; color: var(--muted); padding: 30px; }
+    .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 14px; }
+    dialog { width: min(560px, calc(100vw - 48px)); border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text); padding: 0; box-shadow: 0 20px 70px #000b; }
+    dialog::backdrop { background: #000a; }
+    .dialog-body { padding: 22px; }
+    .dialog-body h2 { margin: 0 0 18px; font-size: 20px; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+    .form-grid .full { grid-column: 1 / -1; }
+    .roles { display: flex; gap: 18px; border: 1px solid #355272; border-radius: 7px; padding: 10px; }
+    .roles label, .check { display: flex; align-items: center; gap: 7px; color: var(--text); }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+    .secret { margin: 14px 0; border: 1px solid #6c5731; border-radius: 8px; background: #2a2418; color: #ffe4a9; padding: 13px; overflow-wrap: anywhere; font: 700 15px/1.5 ui-monospace, monospace; user-select: all; }
+    .secret-warning { color: #ffd37a; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">KOREA IMAGING NETWORK</div>
+    <h1>회원 관리</h1>
+    <div class="spacer"></div>
+    <span class="actor" id="actor"></span>
+    <a class="button-link" href="main.html">워크리스트</a>
+    <button type="button" id="logout">로그아웃</button>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <label class="wide">검색
+        <input id="search" type="search" placeholder="아이디, 이름, 이메일">
+      </label>
+      <label>기관
+        <select id="institution-filter"><option value="">전체 기관</option></select>
+      </label>
+      <span class="badge" id="pending-badge">대기 0명</span>
+      <div class="spacer"></div>
+      <button type="button" id="refresh">새로고침</button>
+      <button type="button" class="primary" id="open-create">회원 생성</button>
+    </div>
+
+    <p class="message" id="message" role="alert"></p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>아이디</th><th>이름 / 이메일</th><th>기관</th><th>역할</th><th>상태</th><th>작업</th>
+          </tr>
+        </thead>
+        <tbody id="users"></tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <button type="button" id="previous">이전</button>
+      <span id="page-label">1 / 1</span>
+      <button type="button" id="next">다음</button>
+    </div>
+  </main>
+
+  <datalist id="institution-options"></datalist>
+
+  <dialog id="create-dialog">
+    <form class="dialog-body" id="create-form">
+      <h2>회원 생성</h2>
+      <p class="message" id="create-message" role="alert"></p>
+      <div class="form-grid">
+        <label>아이디<input name="username" required maxlength="128" autocomplete="off"></label>
+        <label>이메일<input name="email" type="email" required maxlength="254" autocomplete="off"></label>
+        <label>성<input name="lastName" required maxlength="128" autocomplete="off"></label>
+        <label>이름<input name="firstName" required maxlength="128" autocomplete="off"></label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" data-close="create-dialog">취소</button>
+        <button type="submit" class="primary">생성</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="membership-dialog">
+    <form class="dialog-body" id="membership-form">
+      <h2 id="membership-title">회원 승인</h2>
+      <p class="message" id="membership-message" role="alert"></p>
+      <div class="form-grid">
+        <label class="full">기관
+          <input name="institution" list="institution-options" required maxlength="128" autocomplete="off">
+        </label>
+        <fieldset class="full roles">
+          <legend>역할</legend>
+          <label><input type="checkbox" name="role" value="radiologist">판독의</label>
+          <label><input type="checkbox" name="role" value="technician">방사선사</label>
+          <label><input type="checkbox" name="role" value="admin">관리자</label>
+        </fieldset>
+        <label class="full check"><input type="checkbox" name="verificationOverride">대면 확인으로 이메일 검증 예외 승인</label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" data-close="membership-dialog">취소</button>
+        <button type="submit" class="primary">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="password-dialog">
+    <div class="dialog-body">
+      <h2>임시 비밀번호</h2>
+      <p class="secret-warning">이 창을 닫으면 다시 볼 수 없습니다. 안전한 방법으로 회원에게 전달하세요.</p>
+      <div class="secret" id="temporary-password"></div>
+      <div class="dialog-actions">
+        <button type="button" class="primary" id="close-password">확인하고 닫기</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="auth.js"></script>
+  <script>
+    (() => {
+      const API = `${location.origin}/api`;
+      const state = { page: 1, pageSize: 25, total: 0, users: [], editingId: null, institutions: new Set() };
+      const $ = selector => document.querySelector(selector);
+
+      function setMessage(value) {
+        const box = $("#message");
+        box.textContent = value || "";
+        box.classList.toggle("show", !!value);
+      }
+
+      function setDialogMessage(selector, value) {
+        const box = $(selector);
+        box.textContent = value || "";
+        box.classList.toggle("show", !!value);
+      }
+
+      function errorText(body, status) {
+        const message = body && body.message;
+        if (typeof message === "string") return message;
+        if (Array.isArray(message)) return message.filter(item => typeof item === "string").join("\n");
+        if (message && typeof message.message === "string") return message.message;
+        return `요청을 처리하지 못했습니다 (HTTP ${status})`;
+      }
+
+      async function request(method, path, body) {
+        const options = { method, headers: { "X-KIN-CSRF": "1" } };
+        if (body !== undefined) {
+          options.headers["Content-Type"] = "application/json";
+          options.body = JSON.stringify(body);
+        }
+        const response = await fetch(API + path, options);
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) {
+          await KinAuth.logout();
+          throw new Error("세션이 만료되었습니다");
+        }
+        if (response.status === 403) {
+          location.replace("main.html");
+          throw new Error("회원 관리 권한이 없습니다");
+        }
+        if (!response.ok) throw new Error(errorText(payload, response.status));
+        return payload;
+      }
+
+      function appendCell(row, value, className) {
+        const cell = document.createElement("td");
+        if (className) cell.className = className;
+        cell.textContent = value == null || value === "" ? "—" : String(value);
+        row.append(cell);
+        return cell;
+      }
+
+      function action(label, handler, className) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        if (className) button.className = className;
+        button.addEventListener("click", handler);
+        return button;
+      }
+
+      function statusCell(row, user) {
+        const cell = document.createElement("td");
+        const approval = document.createElement("span");
+        approval.className = `state ${user.approvalState.toLowerCase()}`;
+        approval.textContent = user.approvalState;
+        cell.append(approval);
+        if (!user.enabled) {
+          const suspended = document.createElement("span");
+          suspended.className = "state suspended";
+          suspended.textContent = "SUSPENDED";
+          cell.append(suspended);
+        }
+        if (user.approvalState === "INVALID") {
+          const warning = document.createElement("div");
+          warning.className = "warning";
+          warning.textContent = "기관·역할 설정을 확인하세요";
+          cell.append(warning);
+        }
+        row.append(cell);
+      }
+
+      function userMatches(user) {
+        const query = $("#search").value.trim().toLocaleLowerCase("ko");
+        const institution = $("#institution-filter").value;
+        const haystack = [user.username, user.name, user.email].join(" ").toLocaleLowerCase("ko");
+        return (!query || haystack.includes(query)) && (!institution || user.institution === institution);
+      }
+
+      function openMembership(user) {
+        state.editingId = user.id;
+        setDialogMessage("#membership-message", "");
+        $("#membership-title").textContent = user.approvalState === "PENDING" ? "회원 승인" : "회원 자격 변경";
+        const form = $("#membership-form");
+        form.elements.institution.value = user.institution || "";
+        form.querySelectorAll('input[name="role"]').forEach(input => {
+          input.checked = user.roles.includes(input.value);
+        });
+        form.elements.verificationOverride.checked = false;
+        $("#membership-dialog").showModal();
+      }
+
+      async function mutate(user, body) {
+        setMessage("");
+        try {
+          await request("PATCH", `/admin/users/${encodeURIComponent(user.id)}`, body);
+          await loadUsers();
+        } catch (error) {
+          setMessage(error.message);
+        }
+      }
+
+      async function resetPassword(user, mode) {
+        setMessage("");
+        try {
+          const changed = await request("POST", `/admin/users/${encodeURIComponent(user.id)}/reset-password`, { mode });
+          if (mode === "temp") showTemporaryPassword(changed.temporaryPassword);
+          else setMessage("비밀번호 변경 메일을 보냈습니다.");
+        } catch (error) {
+          setMessage(error.message);
+        }
+      }
+
+      function renderUsers() {
+        const body = $("#users");
+        body.replaceChildren();
+        const visible = state.users.filter(userMatches);
+        if (!visible.length) {
+          const row = document.createElement("tr");
+          const cell = document.createElement("td");
+          cell.colSpan = 6;
+          cell.className = "empty";
+          cell.textContent = "조건에 맞는 회원이 없습니다.";
+          row.append(cell);
+          body.append(row);
+          return;
+        }
+        visible.forEach(user => {
+          const row = document.createElement("tr");
+          appendCell(row, user.username, "username");
+          const identity = document.createElement("td");
+          const name = document.createElement("div");
+          name.textContent = user.name;
+          const email = document.createElement("div");
+          email.className = "dim";
+          email.textContent = user.email;
+          identity.append(name, email);
+          row.append(identity);
+          appendCell(row, user.institution);
+          appendCell(row, user.roles.join(", "));
+          statusCell(row, user);
+
+          const actions = document.createElement("td");
+          actions.className = "actions";
+          actions.append(action(user.approvalState === "PENDING" ? "승인" : "자격 변경", () => openMembership(user)));
+          if (user.approvalState === "APPROVED")
+            actions.append(action("승인 취소", () => mutate(user, { approvalState: "PENDING" })));
+          actions.append(action("임시 비번", () => resetPassword(user, "temp")));
+          actions.append(user.enabled
+            ? action("정지", () => mutate(user, { enabled: false }), "danger")
+            : action("활성", () => mutate(user, { enabled: true })));
+          row.append(actions);
+          body.append(row);
+        });
+      }
+
+      function rebuildInstitutionOptions() {
+        const filter = $("#institution-filter");
+        const selected = filter.value;
+        filter.replaceChildren();
+        const all = document.createElement("option");
+        all.value = "";
+        all.textContent = "전체 기관";
+        filter.append(all);
+        const list = $("#institution-options");
+        list.replaceChildren();
+        [...state.institutions].sort().forEach(institution => {
+          const filterOption = document.createElement("option");
+          filterOption.value = institution;
+          filterOption.textContent = institution;
+          filter.append(filterOption);
+          const inputOption = document.createElement("option");
+          inputOption.value = institution;
+          list.append(inputOption);
+        });
+        if ([...filter.options].some(option => option.value === selected)) filter.value = selected;
+      }
+
+      async function loadUsers() {
+        setMessage("");
+        try {
+          const result = await request("GET", `/admin/users?page=${state.page}`);
+          state.page = result.page;
+          state.pageSize = result.pageSize;
+          state.total = result.total;
+          state.users = Array.isArray(result.users) ? result.users : [];
+          state.users.forEach(user => { if (user.institution) state.institutions.add(user.institution); });
+          rebuildInstitutionOptions();
+          $("#pending-badge").textContent = `대기 ${result.pendingCount}명`;
+          const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+          $("#page-label").textContent = `${state.page} / ${pages}`;
+          $("#previous").disabled = state.page <= 1;
+          $("#next").disabled = state.page >= pages;
+          renderUsers();
+        } catch (error) {
+          setMessage(error.message);
+        }
+      }
+
+      function showTemporaryPassword(password) {
+        const value = $("#temporary-password");
+        value.textContent = password;
+        $("#password-dialog").showModal();
+      }
+
+      function closeTemporaryPassword() {
+        const dialog = $("#password-dialog");
+        $("#temporary-password").textContent = "";
+        dialog.close();
+      }
+
+      $("#search").addEventListener("input", renderUsers);
+      $("#institution-filter").addEventListener("change", renderUsers);
+      $("#refresh").addEventListener("click", loadUsers);
+      $("#previous").addEventListener("click", () => { state.page -= 1; loadUsers(); });
+      $("#next").addEventListener("click", () => { state.page += 1; loadUsers(); });
+      $("#open-create").addEventListener("click", () => {
+        setDialogMessage("#create-message", "");
+        $("#create-dialog").showModal();
+      });
+      $("#logout").addEventListener("click", () => KinAuth.logout());
+      $("#close-password").addEventListener("click", closeTemporaryPassword);
+      $("#password-dialog").addEventListener("cancel", event => { event.preventDefault(); closeTemporaryPassword(); });
+      document.querySelectorAll("[data-close]").forEach(button => {
+        button.addEventListener("click", () => $("#" + button.dataset.close).close());
+      });
+
+      $("#create-form").addEventListener("submit", async event => {
+        event.preventDefault();
+        setDialogMessage("#create-message", "");
+        const form = event.currentTarget;
+        const values = new FormData(form);
+        try {
+          const created = await request("POST", "/admin/users", {
+            username: values.get("username"), email: values.get("email"),
+            firstName: values.get("firstName"), lastName: values.get("lastName"),
+          });
+          form.reset();
+          $("#create-dialog").close();
+          showTemporaryPassword(created.temporaryPassword);
+          delete created.temporaryPassword;
+          state.page = 1;
+          await loadUsers();
+        } catch (error) {
+          setDialogMessage("#create-message", error.message);
+        }
+      });
+
+      $("#membership-form").addEventListener("submit", async event => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const roles = [...form.querySelectorAll('input[name="role"]:checked')].map(input => input.value);
+        if (!roles.length) { setDialogMessage("#membership-message", "역할을 한 개 이상 선택하세요."); return; }
+        const user = state.users.find(item => item.id === state.editingId);
+        if (!user) { setDialogMessage("#membership-message", "회원 정보를 다시 불러오세요."); return; }
+        $("#membership-dialog").close();
+        state.editingId = null;
+        await mutate(user, {
+          approvalState: "APPROVED",
+          institution: form.elements.institution.value,
+          roles,
+          verificationOverride: form.elements.verificationOverride.checked,
+        });
+      });
+      $("#membership-dialog").addEventListener("close", () => { state.editingId = null; });
+
+      async function boot() {
+        try { await KinAuth.init(); }
+        catch { location.replace("index.html"); return; }
+        const session = KinAuth.session();
+        if (!session || session.state !== "approved") { location.replace("index.html"); return; }
+        if (session.demo || !KinAuth.has("admin")) { location.replace("main.html"); return; }
+        $("#actor").textContent = session.displayName || session.user;
+        await loadUsers();
+      }
+
+      boot();
+    })();
+  </script>
+</body>
+</html>

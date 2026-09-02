@@ -5,6 +5,7 @@
   "sslRequired": "external",
   "registrationAllowed": false,
   "resetPasswordAllowed": true,
+  "passwordPolicy": "length(8)",
   "loginTheme": "kin-login",
   "accessTokenLifespan": 1800,
   "ssoSessionIdleTimeout": 14400,

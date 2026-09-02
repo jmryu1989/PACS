@@ -164,8 +164,8 @@ export class AdminService {
       throw new BadRequestException('Keycloak 서비스 계정 예약 이름은 사용할 수 없습니다');
     const email = text(body?.email, 'email', 254);
     if (!email.includes('@')) throw new BadRequestException('email 형식이 올바르지 않습니다');
-    const firstName = text(body?.firstName ?? body?.name, 'name', 128, false);
-    const lastName = text(body?.lastName, 'lastName', 128, false);
+    const firstName = text(body?.firstName ?? body?.name, 'firstName', 128);
+    const lastName = text(body?.lastName, 'lastName', 128);
     if (body?.verificationOverride !== undefined && typeof body.verificationOverride !== 'boolean')
       throw new BadRequestException('verificationOverride는 boolean이어야 합니다');
     const verificationOverride = body?.verificationOverride === true;
