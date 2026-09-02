@@ -96,6 +96,7 @@ services:
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
       # 렐름 JSON의 비밀값은 저장소가 아니라 .env에서 주입한다.
       KC_KIN_API_SECRET: ${KC_CLIENT_SECRET:?KC_CLIENT_SECRET을 .env에 설정하세요}
+      KC_WEB_SECRET: ${KC_WEB_SECRET:?KC_WEB_SECRET을 .env에 설정하세요}
       # 이 주소가 토큰의 iss에 박힌다. 고정해 두지 않으면 요청 호스트에 따라 흔들린다.
       # 이제 브라우저는 프록시를 통해 들어오므로, 브라우저가 보는 주소를 적는다.
       KC_HOSTNAME: ${PUBLIC_ORIGIN:-https://localhost:9443}/auth
@@ -137,6 +138,9 @@ services:
       KC_REALM: kin
       KC_CLIENT_ID: kin-api
       KC_CLIENT_SECRET: ${KC_CLIENT_SECRET:?KC_CLIENT_SECRET을 .env에 설정하세요}
+      KC_WEB_SECRET: ${KC_WEB_SECRET:?KC_WEB_SECRET을 .env에 설정하세요}
+      KIN_COOKIE_SECRET: ${KIN_COOKIE_SECRET:?KIN_COOKIE_SECRET을 .env에 설정하세요}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://localhost:9443}
       # API가 브라우저 대신 Orthanc의 QIDO-RS를 부른다 (기관 필터를 서버에 두기 위해).
       # 도커 네트워크 안 주소이므로 localhost가 아니라 서비스 이름이다.
       ORTHANC_URL: http://orthanc:8042

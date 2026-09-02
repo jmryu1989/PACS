@@ -82,6 +82,49 @@
       ]
     },
     {
+      "clientId": "kin-bff",
+      "name": "KIN BFF",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${KC_WEB_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "https://pacs.koreaimagingnetwork.com/api/auth/callback",
+        "https://localhost:9443/api/auth/callback",
+        "https://127.0.0.1:9443/api/auth/callback"
+      ],
+      "protocolMappers": [
+        {
+          "name": "kin-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "kin-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "kin-institution-groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "claim.name": "groups"
+          }
+        }
+      ]
+    },
+    {
       "clientId": "kin-api",
       "name": "KIN API (service account)",
       "enabled": true,
