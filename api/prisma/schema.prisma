@@ -16,6 +16,19 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// 브라우저 대신 Keycloak 토큰을 보관하는 서버측 로그인 세션.
+model AuthSession {
+  sid          String   @id
+  sub          String
+  accessToken  String
+  refreshToken String
+  atExpiresAt  DateTime
+  createdAt    DateTime @default(now())
+  lastSeenAt   DateTime
+
+  @@index([sub])
+}
+
 /// 기관. 병원 하나, 판독센터 하나가 각각 한 행이다.
 ///
 /// 왜 필요한가: Connect(5단계)는 "병원 A의 검사를 병원 B가 본다"이므로,
