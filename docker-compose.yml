@@ -111,6 +111,7 @@ services:
     volumes:
       - ./keycloak/kin-realm.json:/opt/keycloak/data/import/kin-realm.json:ro
       - ./keycloak/themes/kin-login:/opt/keycloak/themes/kin-login:ro
+      - ./keycloak/themes/kin-email:/opt/keycloak/themes/kin-email:ro
     depends_on:
       db:
         condition: service_healthy

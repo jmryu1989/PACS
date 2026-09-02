@@ -17,6 +17,30 @@
 | 토큰 수명 | access 30분 / 세션 유휴 4시간 / 최대 12시간 |
 | 보호 | 비밀번호 최소 8자리(조합 강제 없음), 로그인 5회 실패 시 잠금(brute force) |
 
+## SMTP와 이메일 검증
+
+회원 가입 검증과 비밀번호 재설정 메일은 Google Workspace SMTP를 사용한다.
+
+- SMTP: `smtp.gmail.com:587`, STARTTLS, 인증 사용
+- 발신 주소: `no-reply@koreaimagingnetwork.com`
+- 렐름 정책: `verifyEmail=true`, `resetPasswordAllowed=true`
+- 이메일 언어: 기본 한국어(`kin-email`), 필요 시 영어 선택
+- SMTP 앱 비밀번호는 사용자가 무표시 입력으로 라이브 렐름에만 넣는다.
+
+앱 비밀번호는 렐름 JSON, 명령 이력, 로그, 문서에 남기지 않는다. 렐름 export를 검증할 때도
+`smtpServer.password` 같은 비밀 필드를 출력하지 않고 `host`·`from`·`auth`의 존재만 확인한다.
+빈 DB import 뒤에는 아래 값만 템플릿으로 사용하고 `<SMTP_APP_PASSWORD>`의 실값은 사용자가
+히스토리가 남지 않는 보안 입력 절차로 직접 주입한다.
+
+```text
+host=smtp.gmail.com
+port=587
+from=no-reply@koreaimagingnetwork.com
+auth=true
+starttls=true
+password=<SMTP_APP_PASSWORD>
+```
+
 비밀번호는 최소 8자리만 요구하고 12자리·문자 조합을 강제하지 않는다. 세션 유휴 4시간과
 5회 실패 잠금은 HPACS가 2025년 6월에야 넣은 정책이다
 (→ `HPACS-릴리즈노트-교훈.md` §9). 뒤늦게 붙이면 전 구간을 건드리게 되므로 처음부터 켠다.

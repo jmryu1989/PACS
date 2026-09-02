@@ -337,6 +337,7 @@
           if (user.approvalState === "APPROVED")
             actions.append(action("승인 취소", () => mutate(user, { approvalState: "PENDING" })));
           actions.append(action("임시 비번", () => resetPassword(user, "temp")));
+          actions.append(action("비번 메일", () => resetPassword(user, "email")));
           actions.append(user.enabled
             ? action("정지", () => mutate(user, { enabled: false }), "danger")
             : action("활성", () => mutate(user, { enabled: true })));
