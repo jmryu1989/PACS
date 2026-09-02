@@ -47,6 +47,27 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTROLLER_GLOB = "*.controller.ts"
 
 
+def load_local_env() -> None:
+    """Git에서 제외된 로컬 시험 비밀을 출력하지 않고 환경에만 채운다."""
+    path = ROOT / ".env"
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ[key] = value
+
+
+load_local_env()
+
+
 class Kind(str, Enum):
     REPORT = "REPORT"
     TENANT = "TENANT"
@@ -181,37 +202,197 @@ def _json_or_text(raw: bytes) -> tuple[Any, str]:
 
 class LiveStack:
     def __init__(self) -> None:
-        self.api = os.environ.get("KIN_TEST_API", "http://127.0.0.1:3000/api").rstrip("/")
+        self.proxy = os.environ.get("KIN_TEST_PROXY", "https://localhost:9443").rstrip("/")
+        self.api = os.environ.get("KIN_TEST_API", self.proxy + "/api").rstrip("/")
         self.keycloak = os.environ.get(
             "KIN_TEST_TOKEN_URL",
             "http://127.0.0.1:8080/auth/realms/kin/protocol/openid-connect/token",
         )
-        # 운영 UI 클라이언트는 password grant를 받지 않는다. 실행 감사에서는 운영 렐름에
-        # 포함되지 않는 별도 로컬 클라이언트를 KIN_TEST_CLIENT_ID로 명시한다.
-        self.client_id = os.environ.get("KIN_TEST_CLIENT_ID", "kin-web")
         self.orthanc = os.environ.get("KIN_TEST_ORTHANC", "http://127.0.0.1:8042").rstrip("/")
-        self.proxy = os.environ.get("KIN_TEST_PROXY", "https://localhost:9443").rstrip("/")
+        self.context = ssl._create_unverified_context()
         self.tokens: dict[str, str] = {}
         self.actors: dict[str, str] = {}
         self.active: dict[str, Fixture] = {}
-        self._load_seed_configuration()
-
-    def _load_seed_configuration(self) -> None:
-        realm = json.loads((ROOT / "keycloak" / "kin-realm.json").read_text(encoding="utf-8"))
         self.passwords: dict[str, str] = {}
-        common = os.environ.get("KIN_TEST_PASSWORD")
-        for user in realm.get("users", []):
-            username = user.get("username")
-            credentials = user.get("credentials") or []
-            if username and (common or credentials):
-                self.passwords[username] = common or credentials[0].get("value", "")
+        self.usernames: dict[str, str] = {}
+        self.user_ids: dict[str, str] = {}
+        self.test_client_id = "kin-invariants-" + uuid.uuid4().hex[:12]
+        self.test_client_uuid: str | None = None
+        self.admin_token: str | None = None
+        self._load_local_configuration()
 
+    def _load_local_configuration(self) -> None:
         self.orthanc_user = os.environ.get("KIN_TEST_ORTHANC_USER", "admin")
         self.orthanc_password = os.environ.get(
             "KIN_TEST_ORTHANC_PASSWORD", os.environ.get("ORTHANC_PASS", ""),
         )
         if not self.orthanc_password:
             raise RuntimeError("KIN_TEST_ORTHANC_PASSWORD 또는 ORTHANC_PASS가 필요합니다")
+
+    def _open(self, request: Request):
+        if request.full_url.startswith("https://"):
+            return urlopen(request, timeout=30, context=self.context)
+        return urlopen(request, timeout=30)
+
+    def _admin_login(self) -> None:
+        password = os.environ.get("KC_ADMIN_PASSWORD", "")
+        if not password:
+            raise RuntimeError("KC_ADMIN_PASSWORD가 필요합니다")
+        data = urlencode({
+            "client_id": "admin-cli", "grant_type": "password",
+            "username": "admin", "password": password,
+        }).encode("ascii")
+        request = Request(
+            "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/token",
+            data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        )
+        with self._open(request) as response:
+            self.admin_token = json.loads(response.read().decode("utf-8"))["access_token"]
+
+    def kc_admin(self, method: str, path: str, body: Any = None) -> HttpResult:
+        if not self.admin_token:
+            self._admin_login()
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Authorization": "Bearer " + str(self.admin_token)}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(
+            "http://127.0.0.1:8080/auth/admin/realms/kin" + path,
+            data=data, headers=headers, method=method,
+        )
+        try:
+            with self._open(request) as response:
+                payload, text = _json_or_text(response.read())
+                if method == "POST" and path == "/clients":
+                    payload = response.headers.get("Location", "").rstrip("/").split("/")[-1]
+                if method == "POST" and path == "/users":
+                    payload = response.headers.get("Location", "").rstrip("/").split("/")[-1]
+                return HttpResult(response.status, payload, text)
+        except HTTPError as error:
+            payload, text = _json_or_text(error.read())
+            return HttpResult(error.code, payload, text)
+
+    def _create_test_client(self) -> None:
+        created = self.kc_admin("POST", "/clients", {
+            "clientId": self.test_client_id,
+            "name": "KIN local invariant runner",
+            "enabled": True,
+            "publicClient": True,
+            "standardFlowEnabled": False,
+            "directAccessGrantsEnabled": True,
+            "serviceAccountsEnabled": False,
+            "protocol": "openid-connect",
+        })
+        if created.status != 201 or not created.body:
+            raise RuntimeError(f"로컬 시험 클라이언트 생성 실패: {created.status} {created.text}")
+        self.test_client_uuid = str(created.body)
+        mappers = (
+            {
+                "name": "kin-api-audience", "protocol": "openid-connect",
+                "protocolMapper": "oidc-audience-mapper", "consentRequired": False,
+                "config": {
+                    "included.custom.audience": "kin-api", "id.token.claim": "false",
+                    "access.token.claim": "true",
+                },
+            },
+            {
+                "name": "kin-institution-groups", "protocol": "openid-connect",
+                "protocolMapper": "oidc-group-membership-mapper", "consentRequired": False,
+                "config": {
+                    "full.path": "false", "id.token.claim": "false",
+                    "access.token.claim": "true", "userinfo.token.claim": "false",
+                    "claim.name": "groups",
+                },
+            },
+        )
+        for mapper in mappers:
+            added = self.kc_admin(
+                "POST", f"/clients/{quote(self.test_client_uuid)}/protocol-mappers/models", mapper,
+            )
+            if added.status != 201:
+                raise RuntimeError(f"로컬 시험 클라이언트 매퍼 생성 실패: {added.status} {added.text}")
+
+    def create_test_identity(self, logical: str, roles: list[str], group: str) -> str:
+        if logical in self.user_ids:
+            return self.user_ids[logical]
+        username = f"kin-test-{uuid.uuid4().hex[:12]}-{logical}"
+        password = uuid.uuid4().hex + "Aa1!"
+        created = self.kc_admin("POST", "/users", {
+            "username": username, "enabled": True, "emailVerified": True,
+            "email": username + "@local.test", "firstName": "KIN", "lastName": logical,
+        })
+        if created.status != 201 or not created.body:
+            raise RuntimeError(f"로컬 시험 사용자 생성 실패({logical}): {created.status} {created.text}")
+        user_id = str(created.body)
+        self.user_ids[logical] = user_id
+        self.usernames[logical] = username
+        self.passwords[logical] = password
+
+        reset = self.kc_admin("PUT", f"/users/{quote(user_id)}/reset-password", {
+            "type": "password", "value": password, "temporary": False,
+        })
+        if reset.status != 204:
+            raise RuntimeError(f"로컬 시험 사용자 비밀번호 설정 실패({logical}): {reset.status}")
+        for role_name in roles:
+            role = self.kc_admin("GET", "/roles/" + quote(role_name))
+            if role.status != 200:
+                raise RuntimeError(f"로컬 시험 역할 조회 실패({role_name}): {role.status}")
+            assigned = self.kc_admin(
+                "POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body],
+            )
+            if assigned.status != 204:
+                raise RuntimeError(f"로컬 시험 역할 설정 실패({logical}/{role_name}): {assigned.status}")
+        groups = self.kc_admin("GET", "/groups?search=" + quote(group))
+        if groups.status != 200 or not isinstance(groups.body, list):
+            raise RuntimeError(f"로컬 시험 그룹 조회 실패({group}): {groups.status}")
+        exact = [row for row in groups.body if row.get("name") == group]
+        if len(exact) != 1:
+            raise RuntimeError(f"로컬 시험 그룹 조회 실패({group})")
+        joined = self.kc_admin("PUT", f"/users/{quote(user_id)}/groups/{quote(exact[0]['id'])}")
+        if joined.status != 204:
+            raise RuntimeError(f"로컬 시험 그룹 설정 실패({logical}/{group}): {joined.status}")
+        return user_id
+
+    def provision_test_identities(self) -> None:
+        if self.test_client_uuid:
+            return
+        try:
+            self._admin_login()
+            self._create_test_client()
+            definitions = {
+                "jmryu": (["radiologist", "technician", "admin"], "hallym"),
+                "doctor": (["radiologist"], "hallym"),
+                "doctor2": (["radiologist"], "hallym"),
+                "tech": (["technician"], "hallym"),
+                "kdoctor": (["radiologist"], "kin-center"),
+                "ktech": (["technician"], "kin-center"),
+            }
+            for logical, (roles, group) in definitions.items():
+                self.create_test_identity(logical, roles, group)
+        except Exception:
+            self.cleanup_test_identities()
+            raise
+
+    def username(self, logical: str) -> str:
+        return self.usernames.get(logical, logical)
+
+    def cleanup_test_identities(self) -> None:
+        failures = []
+        for logical, user_id in list(self.user_ids.items())[::-1]:
+            deleted = self.kc_admin("DELETE", f"/users/{quote(user_id)}")
+            if deleted.status not in (204, 404):
+                failures.append(f"사용자 {logical}: {deleted.status}")
+        self.user_ids.clear()
+        self.usernames.clear()
+        self.passwords.clear()
+        if self.test_client_uuid:
+            deleted = self.kc_admin("DELETE", f"/clients/{quote(self.test_client_uuid)}")
+            if deleted.status not in (204, 404):
+                failures.append(f"클라이언트: {deleted.status}")
+        self.test_client_uuid = None
+        self.tokens.clear()
+        if failures:
+            raise RuntimeError("로컬 시험 계정 정리 실패: " + "; ".join(failures))
 
     def request(self, method: str, path: str, user: str | None = None, body: Any = None) -> HttpResult:
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -222,7 +403,7 @@ class LiveStack:
             headers["Authorization"] = "Bearer " + self.token(user)
         request = Request(self.api + path, data=data, headers=headers, method=method)
         try:
-            with urlopen(request, timeout=30) as response:
+            with self._open(request) as response:
                 payload, text = _json_or_text(response.read())
                 return HttpResult(response.status, payload, text)
         except HTTPError as error:
@@ -236,14 +417,14 @@ class LiveStack:
         if not password:
             raise RuntimeError(f"Keycloak 개발 계정 비밀번호를 찾을 수 없습니다: {user}")
         data = urlencode({
-            "client_id": self.client_id, "grant_type": "password",
-            "username": user, "password": password,
+            "client_id": self.test_client_id, "grant_type": "password",
+            "username": self.username(user), "password": password,
         }).encode("ascii")
         request = Request(
             self.keycloak, data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
         )
-        with urlopen(request, timeout=30) as response:
+        with self._open(request) as response:
             token = json.loads(response.read().decode("utf-8"))["access_token"]
         self.tokens[user] = token
         me = self.request("GET", "/me", user)
@@ -260,6 +441,7 @@ class LiveStack:
         health = self.request("GET", "/health")
         if health.status != 200 or not health.body.get("ok"):
             raise RuntimeError(f"살아 있는 API가 필요합니다: {health.status} {health.text}")
+        self.provision_test_identities()
         for user in ("jmryu", "doctor", "doctor2", "tech", "kdoctor", "ktech"):
             self.token(user)
 
@@ -437,20 +619,10 @@ class BffInvariantTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.stack = LiveStack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.stack.require_stack()
-        cls.context = ssl._create_unverified_context()
-        password = os.environ.get("KC_ADMIN_PASSWORD", "")
-        if not password:
-            raise RuntimeError("KC_ADMIN_PASSWORD가 필요합니다")
-        data = urlencode({
-            "client_id": "admin-cli", "grant_type": "password",
-            "username": "admin", "password": password,
-        }).encode("ascii")
-        with urlopen(Request(
-            "http://127.0.0.1:8080/auth/realms/master/protocol/openid-connect/token",
-            data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
-        ), timeout=30) as response:
-            cls.admin_token = json.loads(response.read().decode("utf-8"))["access_token"]
+        cls.context = cls.stack.context
+        cls.admin_token = str(cls.stack.admin_token)
         groups = cls.admin("GET", "/groups?search=hallym")
         exact = [group for group in groups.body if group.get("name") == "hallym"]
         if len(exact) != 1:
@@ -493,6 +665,54 @@ class BffInvariantTests(unittest.TestCase):
             payload, text = _json_or_text(error.read())
             return HttpResult(error.code, payload, text)
 
+    def service_admin(self, method: str, path: str, body: Any = None) -> HttpResult:
+        """kin-api 서비스 계정의 Keycloak Admin 권한 상한을 실제로 검사한다."""
+        secret = os.environ.get("KC_CLIENT_SECRET", "")
+        if not secret:
+            raise RuntimeError("KC_CLIENT_SECRET이 필요합니다")
+        token_request = Request(
+            self.stack.keycloak,
+            data=urlencode({
+                "client_id": "kin-api", "client_secret": secret,
+                "grant_type": "client_credentials",
+            }).encode("ascii"),
+            headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        )
+        with self.stack._open(token_request) as response:
+            token = json.loads(response.read().decode("utf-8"))["access_token"]
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Authorization": "Bearer " + token}
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(
+            "http://127.0.0.1:8080/auth/admin/realms/kin" + path,
+            data=data, headers=headers, method=method,
+        )
+        try:
+            with self.stack._open(request) as response:
+                payload, text = _json_or_text(response.read())
+                return HttpResult(response.status, payload, text)
+        except HTTPError as error:
+            payload, text = _json_or_text(error.read())
+            return HttpResult(error.code, payload, text)
+
+    def kcadm(self, config: str, *arguments: str, login: bool = False) -> subprocess.CompletedProcess[str]:
+        base = ["docker", "exec", "kin-keycloak"]
+        if login:
+            command = (
+                "/opt/keycloak/bin/kcadm.sh config credentials "
+                f"--config {config} --server http://localhost:8080/auth --realm master "
+                '--user "$KC_BOOTSTRAP_ADMIN_USERNAME" --password "$KC_BOOTSTRAP_ADMIN_PASSWORD"'
+            )
+            return subprocess.run(
+                base + ["sh", "-lc", command], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
+            )
+        return subprocess.run(
+            base + ["/opt/keycloak/bin/kcadm.sh", *arguments, "--config", config],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+
     def bff_login(self, username: str, password: str):
         jar = http.cookiejar.CookieJar()
         opener = build_opener(HTTPCookieProcessor(jar), HTTPSHandler(context=self.context))
@@ -501,7 +721,7 @@ class BffInvariantTests(unittest.TestCase):
         match = re.search(r'<form[^>]+action="([^"]+)"', login.text, re.I)
         self.assertIsNotNone(match, "Keycloak 로그인 form이 없습니다")
         data = urlencode({
-            "username": username, "password": password, "credentialId": "",
+            "username": self.stack.username(username), "password": password, "credentialId": "",
         }).encode("utf-8")
         submitted = Request(
             html.unescape(match.group(1)), data=data,
@@ -610,13 +830,187 @@ class BffInvariantTests(unittest.TestCase):
                     deleted = self.admin("DELETE", f"/users/{user_id}")
                     self.assertIn(deleted.status, (204, 404), deleted.text)
 
+    def test_member_service_account_is_hidden_and_unwritable(self) -> None:
+        page = 1
+        seen = []
+        while True:
+            listed = self.stack.request("GET", f"/admin/users?page={page}", "jmryu")
+            self.assertEqual(listed.status, 200, listed.text)
+            seen.extend(listed.body.get("users", []))
+            if page * listed.body["pageSize"] >= listed.body["total"]:
+                break
+            page += 1
+        self.assertFalse(
+            any(str(user.get("username", "")).startswith("service-account-") for user in seen),
+            "회원 목록에 Keycloak 서비스 계정이 노출됐습니다",
+        )
+
+        clients = self.admin("GET", "/clients?clientId=kin-api")
+        self.assertEqual(clients.status, 200, clients.text)
+        exact = [client for client in clients.body if client.get("clientId") == "kin-api"]
+        self.assertEqual(len(exact), 1, "kin-api 클라이언트를 하나로 확정할 수 없습니다")
+        service = self.admin("GET", f"/clients/{exact[0]['id']}/service-account-user")
+        self.assertEqual(service.status, 200, service.text)
+        blocked = self.stack.request(
+            "PATCH", f"/admin/users/{quote(service.body['id'])}", "jmryu", {"enabled": False},
+        )
+        self.assertEqual(blocked.status, 403, blocked.text)
+
+        technician = self.stack.request("GET", "/admin/users?page=1", "tech")
+        self.assertEqual(technician.status, 403, technician.text)
+
+    def test_member_self_suspension_and_admin_removal_are_blocked(self) -> None:
+        own_id = self.stack.user_ids["jmryu"]
+        suspended = self.stack.request(
+            "PATCH", f"/admin/users/{quote(own_id)}", "jmryu", {"enabled": False},
+        )
+        self.assertEqual(suspended.status, 400, suspended.text)
+        demoted = self.stack.request(
+            "PATCH", f"/admin/users/{quote(own_id)}", "jmryu",
+            {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"]},
+        )
+        self.assertEqual(demoted.status, 400, demoted.text)
+
+    def test_member_suspension_revokes_session_without_erasing_membership(self) -> None:
+        target_id = self.stack.user_ids["doctor"]
+        opener, _sid = self.bff_login("doctor", self.stack.passwords["doctor"])
+        try:
+            changed = self.stack.request(
+                "PATCH", f"/admin/users/{quote(target_id)}", "jmryu", {"enabled": False},
+            )
+            self.assertEqual(changed.status, 200, changed.text)
+            self.assertFalse(changed.body.get("enabled"), changed.text)
+            expired = self.proxy(opener, "GET", "/api/me")
+            self.assertEqual(expired.status, 401, expired.text)
+
+            groups = self.admin("GET", f"/users/{quote(target_id)}/groups")
+            roles = self.admin("GET", f"/users/{quote(target_id)}/role-mappings/realm")
+            self.assertEqual(groups.status, 200, groups.text)
+            self.assertEqual(roles.status, 200, roles.text)
+            self.assertEqual([group["name"] for group in groups.body], ["hallym"])
+            self.assertIn("radiologist", [role["name"] for role in roles.body])
+        finally:
+            restored = self.admin("PUT", f"/users/{quote(target_id)}", {"enabled": True})
+            self.assertIn(restored.status, (204, 404), restored.text)
+            self.stack.tokens.pop("doctor", None)
+            self.stack.actors.pop("doctor", None)
+
+    def test_member_delete_proxy_client_and_impersonation_paths_are_absent(self) -> None:
+        target_id = self.stack.user_ids["doctor2"]
+        absent = (
+            self.stack.request("DELETE", f"/admin/users/{quote(target_id)}", "jmryu"),
+            self.stack.request("GET", "/admin/clients", "jmryu"),
+            self.stack.request("POST", f"/admin/users/{quote(target_id)}/impersonation", "jmryu", {}),
+            self.stack.request("GET", "/admin/keycloak/users", "jmryu"),
+        )
+        for result in absent:
+            self.assertEqual(result.status, 404, result.text)
+
+        self.assertEqual(
+            self.service_admin("POST", f"/users/{quote(target_id)}/impersonation").status, 403,
+            "kin-api 서비스 계정에 impersonation 권한이 있습니다",
+        )
+        self.assertEqual(
+            self.service_admin("GET", "/clients").status, 403,
+            "kin-api 서비스 계정에 클라이언트 열거 권한이 있습니다",
+        )
+
+        controller = (ROOT / "api" / "src" / "admin.controller.ts").read_text(encoding="utf-8")
+        keycloak = (ROOT / "api" / "src" / "keycloak.service.ts").read_text(encoding="utf-8")
+        self.assertNotRegex(controller, r"@(Delete|Put|All|RequestMapping)\s*\(")
+        self.assertRegex(keycloak, r"private async adm\(")
+
+    def test_member_xss_value_stays_text_and_temporary_password_is_one_time(self) -> None:
+        payload = '<img src=x onerror="document.body.dataset.pwned=1">'
+        script = """
+const { AdminService } = require('/app/dist/admin.service.js');
+const payload = process.argv[1];
+const value = new AdminService({}, {}).row({
+  id: 'x', username: 'x', email: 'x@local.test', emailVerified: true,
+  firstName: payload, lastName: '', enabled: true, serviceAccountClientId: null,
+  groups: ['hallym'], roles: ['radiologist'],
+});
+process.stdout.write(JSON.stringify(value));
+"""
+        mapped = subprocess.run(
+            ["docker", "exec", "kin-api", "node", "-e", script, payload],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        self.assertEqual(mapped.returncode, 0, mapped.stderr)
+        self.assertEqual(json.loads(mapped.stdout)["name"], payload)
+
+        source = (ROOT / "worklist-v0" / "hpacs-lite" / "admin.html").read_text(encoding="utf-8")
+        self.assertNotIn("innerHTML", source)
+        self.assertNotIn("localStorage", source)
+        self.assertNotIn("sessionStorage", source)
+        self.assertIn("cell.textContent = value", source)
+        self.assertIn("box.textContent = value", source)
+        self.assertIn('value.textContent = password;', source)
+        self.assertIn('$("#temporary-password").textContent = "";', source)
+
+    def test_member_unverified_email_cannot_be_approved(self) -> None:
+        username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
+        created = self.admin("POST", "/users", {
+            "username": username, "enabled": True, "emailVerified": False,
+            "email": username + "@local.test", "firstName": "Unverified", "lastName": "KIN",
+        })
+        self.assertEqual(created.status, 201, created.text)
+        try:
+            blocked = self.stack.request(
+                "PATCH", f"/admin/users/{quote(str(created.body))}", "jmryu",
+                {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"]},
+            )
+            self.assertEqual(blocked.status, 400, blocked.text)
+            self.assertEqual(
+                blocked.body.get("message"),
+                "이메일 검증이 끝나지 않은 사용자는 승인할 수 없습니다",
+            )
+        finally:
+            deleted = self.admin("DELETE", f"/users/{quote(str(created.body))}")
+            self.assertIn(deleted.status, (204, 404), deleted.text)
+
+    def test_zzz_break_glass_recovers_dedicated_admin_set(self) -> None:
+        recovered_id = self.stack.user_ids["jmryu"]
+        other_id = self.stack.create_test_identity("breakglass", ["admin"], "hallym")
+        ids = (recovered_id, other_id)
+        for user_id in ids:
+            self.assertRegex(user_id, r"^[0-9a-f-]{36}$")
+        config = "/tmp/kin-breakglass-" + uuid.uuid4().hex + ".config"
+        logged_in = self.kcadm(config, login=True)
+        self.assertEqual(logged_in.returncode, 0, "kcadm loopback 인증 실패")
+        try:
+            for user_id in ids:
+                disabled = self.kcadm(config, "update", f"users/{user_id}", "-r", "kin", "-s", "enabled=false")
+                self.assertEqual(disabled.returncode, 0, "전용 시험 관리자 비활성화 실패")
+            for user_id in ids:
+                current = self.admin("GET", f"/users/{user_id}")
+                self.assertEqual(current.status, 200, current.text)
+                self.assertFalse(current.body.get("enabled"), current.text)
+
+            recovered = self.kcadm(
+                config, "update", f"users/{recovered_id}", "-r", "kin", "-s", "enabled=true",
+            )
+            self.assertEqual(recovered.returncode, 0, "kcadm break-glass 복구 실패")
+            self.stack.tokens.pop("jmryu", None)
+            self.stack.actors.pop("jmryu", None)
+            self.assertEqual(self.stack.request("GET", "/me", "jmryu").status, 200)
+        finally:
+            for user_id in ids:
+                self.kcadm(config, "update", f"users/{user_id}", "-r", "kin", "-s", "enabled=true")
+                self.admin("PUT", f"/users/{user_id}", {"enabled": True})
+            subprocess.run(
+                ["docker", "exec", "kin-keycloak", "rm", "-f", config],
+                capture_output=True, timeout=30,
+            )
+
 
 class LiveInvariantTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.stack = LiveStack()
-        cls.stack.require_stack()
+        cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.addClassCleanup(cls.stack.cleanup_all)
+        cls.stack.require_stack()
 
     def assert_status(self, result: HttpResult, *allowed: int) -> None:
         self.assertIn(result.status, allowed, result.text)

@@ -6,12 +6,22 @@ python tests/invariants_live.py
 ```
 
 테스트는 현재 저장소의 Keycloak·Orthanc 개발 설정을 읽어 실제 토큰과 C-STORE를 사용한다.
-비밀번호를 환경별로 바꿨다면 `KIN_TEST_PASSWORD`와 `KIN_TEST_ORTHANC_PASSWORD`로 덮어쓴다.
-`kin-web`은 Authorization Code + PKCE 전용이므로 password grant를 켜지 않는다. 실행 감사는
-운영 렐름 파일에 없는 로컬 전용 클라이언트를 만들고 `KIN_TEST_CLIENT_ID`로 지정한다.
+로컬 `.env`는 필요한 값을 출력하지 않고 실행 환경에만 읽는다. Orthanc 비밀번호를
+별도로 주려면 `KIN_TEST_ORTHANC_PASSWORD`를 쓴다.
+
+Keycloak 사용자 시험은 기존 개인·시드 계정의 비밀번호를 읽거나 바꾸지 않는다.
+매 실행마다 `kin-test-*` 사용자와 `kin-invariants-*` password-grant 전용
+클라이언트를 임시로 만들고 종료 정리에서 정확한 ID로 삭제한다. `kin-web`은
+Authorization Code + PKCE 전용 설정을 유지한다.
 
 각 픽스처는 임의의 Study UID로 매번 새로 전송되고, 종료할 때 그 UID의 Orthanc 스터디와
 DB 행만 삭제된다. 정리 대상 UID가 숫자와 점 이외의 문자를 포함하면 DB 삭제를 거부한다.
+
+회원 관리 배터리는 서비스 계정 제외·쓰기 차단, 자기 정지·관리자 해제 차단,
+정지 즉시 BFF 세션 401, 삭제·범용 프록시·impersonation·클라이언트 경로 부재,
+XSS 문자열의 원문 계약과 `textContent` 렌더링, 임시 비밀번호 1회 표시,
+이메일 미검증 승인 거부, PENDING/INVALID 코드를 확인한다. 마지막에는 전용
+시험 관리자 집합만 모두 비활성화한 뒤 컨테이너 loopback `kcadm` 복구를 리허설한다.
 
 `test_zzz_known_failure_concurrent_commit_must_not_return_500`은 동시 확정 16건에서 500이
 한 건도 나오지 않는지 검사한다. 성공 1건을 제외한 충돌은 409여야 한다.
