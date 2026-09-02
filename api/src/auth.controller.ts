@@ -38,6 +38,10 @@ export class AuthController {
       res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=${encodeURIComponent(error)}`);
       return;
     }
+    if (!code) {
+      res.redirect(302, `${origin}/worklist/hpacs-lite/index.html?auth_error=stale`);
+      return;
+    }
     try {
       const sid = await this.auth.finishLogin(req, code ?? '', state ?? '');
       this.auth.setSessionCookie(res, sid);

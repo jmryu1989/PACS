@@ -41,7 +41,7 @@ export class PacsController {
 
   @Get('me')
   me(@Req() req: any) {
-    return caller(req);
+    return { ...caller(req), user: req.actor, displayName: req.displayName ?? req.actor };
   }
 
   /** nginx auth_request 전용. 204=통과, 403=기관 경계 밖. PHI 본문은 싣지 않는다. */

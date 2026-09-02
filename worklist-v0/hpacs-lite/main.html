@@ -719,13 +719,9 @@
   <script src="auth.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
-    // 세션은 Keycloak 토큰(또는 데모 모드)에서 온다. 헤더에 이름을 적어 보내는 게 아니라
-    // 서명된 토큰을 보내고, 서버가 그걸 검증해 actor를 정한다.
-    const sess = KinAuth.session();
-    if (!sess) location.href = "index.html";
-    let user = sess?.user ?? "";
-    const userDisplayName = sess?.displayName || user;
-    document.querySelector("#user").textContent = userDisplayName;
+    // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
+    // 함수 정의가 끝난 뒤 boot 첫 줄에서 채워져, 상태 판정보다 화면 코드가 먼저 돌지 않는다.
+    let sess = null, user = "", userDisplayName = "";
     // 로그아웃 핸들러는 아래 "이탈 시 판독문 보존"에 있다 — 나가기 전에 초안을 저장하고
     // 점유를 풀어야 하므로, 그 함수들이 정의된 곳 옆에 둔다.
 
@@ -738,7 +734,6 @@
       if (!shown) return;
       for (const alias of [key, login, key.split("@")[0]].filter(Boolean)) actorNames.set(alias, shown);
     }
-    rememberActor(user, userDisplayName, user.split("@")[0]);
     function displayActor(value) {
       const raw = String(value ?? "");
       return actorNames.get(raw) || actorNames.get(raw.split("@")[0]) || raw;
@@ -752,13 +747,13 @@
     /**
      * HTML 이스케이프.
      *
-     * 이 앱은 토큰을 sessionStorage에 둔다 — auth.js에 적어둔 대로 **여기서 XSS는 곧
-     * 계정 탈취**다. 그런데 워크리스트도 판독문 이력도 서버·DICOM에서 온 문자열을
-     * 그대로 innerHTML에 넣고 있었다.
+     * 인증 토큰은 서버측 세션에만 있지만, XSS가 생기면 사용자 권한으로 API를 호출하거나
+     * 화면의 환자정보를 읽을 수 있다. 그런데 워크리스트도 판독문 이력도 서버·DICOM에서
+     * 온 문자열을 그대로 innerHTML에 넣고 있었다.
      *
      * 가장 현실적인 경로: 판독의 A가 소견에 `<img src=x onerror=...>`를 써서 저장하고,
-     * 판독의 B가 그 검사의 "이력"을 누르는 순간 B의 토큰이 나간다. 서버가 역할·기관·
-     * 예비판독 접근을 아무리 잘 막아도 이 한 줄이면 무의미해진다.
+     * 판독의 B가 그 검사의 "이력"을 누르는 순간 B의 세션으로 임의 요청이 실행된다.
+     * 서버가 역할·기관·예비판독 접근을 아무리 잘 막아도 이 한 줄이면 무의미해진다.
      *
      * 속성값에도 쓰므로 따옴표까지 막는다.
      */
@@ -810,14 +805,12 @@
     let myInstitution = null, myInstitutionName = "", institutions = [];
 
     async function api(method, path, body) {
-      const tok = await KinAuth.token();
-      if (!tok) throw new Error("로그인이 필요합니다");
       const res = await fetch(API + path, {
         method,
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + tok },
+        headers: { "Content-Type": "application/json", "X-KIN-CSRF": "1" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      if (res.status === 401) { KinAuth.logout(); throw new Error("세션이 만료되었습니다"); }
+      if (res.status === 401) { await KinAuth.logout(); throw new Error("세션이 만료되었습니다"); }
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.message ?? `HTTP ${res.status}`);
@@ -1954,10 +1947,9 @@
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 보내는 것까지가 우리 몫이다.
         try {
-          const tok = await KinAuth.token();
           await fetch(API + path, {
             method: "PUT", keepalive: true,
-            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + tok },
+            headers: { "Content-Type": "application/json", "X-KIN-CSRF": "1" },
             body: JSON.stringify(body),
           });
         } catch (e) {}
@@ -2308,9 +2300,9 @@
       // 경고도 함께 띄운다 — 판독문은 잃어버리면 안 되는 유일한 것이다.
       stashReport({ keepalive: true });
       if (serverMode && heldUid) {
-        KinAuth.token().then(tok => fetch(`${API}/studies/${encodeURIComponent(heldUid)}/release`, {
-          method: "POST", keepalive: true, headers: { "Authorization": "Bearer " + tok },
-        })).catch(() => {});
+        fetch(`${API}/studies/${encodeURIComponent(heldUid)}/release`, {
+          method: "POST", keepalive: true, headers: { "X-KIN-CSRF": "1" },
+        }).catch(() => {});
       }
       e.preventDefault();
       e.returnValue = "";   // 구형 브라우저는 이 대입이 있어야 경고가 뜬다
@@ -3153,7 +3145,45 @@ ${esc($("#recommendation").value)}
     $("#m-unassigned").addEventListener("click", showUnassigned);
     $("#un-close").addEventListener("click", () => $("#unmodal").classList.remove("show"));
 
+    function showMembershipState(state) {
+      const pending = state === "pending";
+      document.title = pending ? "관리자 승인 대기 — KIN" : "계정 설정 확인 — KIN";
+      const panel = document.createElement("main");
+      panel.style.cssText = "min-height:100vh;display:grid;place-items:center;background:#07101d;color:#eef4ff;font-family:system-ui,sans-serif;padding:24px";
+      const card = document.createElement("section");
+      card.style.cssText = "width:min(520px,100%);background:#111d2d;border:1px solid #29405d;border-radius:14px;padding:34px;box-shadow:0 18px 60px #0008";
+      const brand = document.createElement("div");
+      brand.textContent = "KOREA IMAGING NETWORK";
+      brand.style.cssText = "font-size:12px;letter-spacing:.18em;color:#75a9dc;margin-bottom:18px";
+      const title = document.createElement("h1");
+      title.textContent = pending ? "관리자 승인 대기" : "계정 설정 확인 필요";
+      title.style.cssText = "font-size:24px;margin:0 0 14px";
+      const message = document.createElement("p");
+      message.textContent = pending
+        ? "가입 신청이 접수되었습니다. 관리자가 기관과 역할을 확인한 뒤 사용할 수 있습니다."
+        : "기관 또는 업무 역할 설정이 올바르지 않습니다. 관리자에게 문의해 주세요.";
+      message.style.cssText = "line-height:1.7;color:#c8d5e6;margin:0 0 24px";
+      const logout = document.createElement("button");
+      logout.textContent = "로그아웃";
+      logout.style.cssText = "border:0;border-radius:8px;background:#2b78c5;color:white;padding:11px 20px;cursor:pointer";
+      logout.addEventListener("click", () => KinAuth.logout());
+      card.append(brand, title, message, logout);
+      panel.append(card);
+      document.body.replaceChildren(panel);
+    }
+
     async function boot() {
+      await KinAuth.init();
+      sess = KinAuth.session();
+      if (!sess) { location.replace("index.html"); return; }
+      if (sess.state === "pending" || sess.state === "invalid") {
+        showMembershipState(sess.state);
+        return;
+      }
+      user = sess.user ?? "";
+      userDisplayName = sess.displayName || user;
+      $("#user").textContent = userDisplayName;
+      rememberActor(user, userDisplayName, user.split("@")[0]);
       renderHeads();
       renderTemplates();
       applyRoleUi();
@@ -3165,11 +3195,6 @@ ${esc($("#recommendation").value)}
         await load();
         return;
       }
-      // 세션(refresh 포함)이 만료됐으면 로그인 화면으로 보낸다.
-      // 조용히 로컬 저장으로 떨어지면 판독의는 서버에 저장되는 줄 알고 일하는데
-      // 실제로는 이 브라우저에만 쌓인다 — 데이터가 조용히 갈라지는 최악의 실패다.
-      // (HPACS 릴리즈노트 2022.11: "토큰시간 만료시 재로그인창 안뜨는 이슈 수정" — 같은 버그)
-      if (!(await KinAuth.token())) { location.href = "index.html"; return; }
       try {
         const b = await fetchBootstrap();
         /**

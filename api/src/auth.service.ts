@@ -285,6 +285,8 @@ export class AuthService implements OnModuleInit, OnModuleDestroy {
           refresh_token: session.refreshToken,
         }),
       });
+    } catch {
+      // Keycloak이 멈춰도 이 앱의 세션 폐기와 204 응답은 끝까지 수행한다.
     } finally {
       await this.prisma.authSession.deleteMany({ where: { sid } });
       this.expireSessionCookie(res);

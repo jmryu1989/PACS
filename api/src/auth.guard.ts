@@ -79,6 +79,8 @@ export class AuthGuard implements CanActivate {
 
     req.sub = payload.sub;
     req.actor = payload.email ?? payload.preferred_username ?? payload.sub;
+    req.displayName = [payload.family_name, payload.given_name].filter(Boolean).join('')
+      || payload.name || req.actor;
     req.roles = Array.isArray(payload.realm_access?.roles) ? payload.realm_access.roles : [];
 
     /**
