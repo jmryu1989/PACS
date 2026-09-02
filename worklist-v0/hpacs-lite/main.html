@@ -3173,7 +3173,11 @@ ${esc($("#recommendation").value)}
     }
 
     async function boot() {
-      await KinAuth.init();
+      try { await KinAuth.init(); }
+      catch {
+        location.replace("index.html");
+        return;
+      }
       sess = KinAuth.session();
       if (!sess) { location.replace("index.html"); return; }
       if (sess.state === "pending" || sess.state === "invalid") {
