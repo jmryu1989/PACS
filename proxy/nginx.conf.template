@@ -1,6 +1,10 @@
 # KIN 리버스 프록시 — 브라우저가 보는 출처를 하나로 모은다.
 # PUBLIC_PORT 계열만 envsubst한다. $host·$request_uri 같은 nginx 변수는 런타임까지 남아야 한다.
 
+limit_req_zone $binary_remote_addr zone=kin_registration:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=kin_token:10m rate=30r/m;
+limit_req_status 429;
+
 include /etc/nginx/snippets/default-servers.conf;
 
 server {
@@ -54,15 +58,39 @@ server {
 
     location = / { return 302 /worklist/hpacs-lite/index.html; }
 
+    # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. 진입점과 실제 등록
+    # 제출을 같은 제한 구역에 넣어 새 계정 생성 입력면을 양쪽에서 막는다.
+    location = /api/auth/register {
+        limit_req zone=kin_registration burst=5 nodelay;
+        client_max_body_size 2m;
+        proxy_pass http://api:3000;
+    }
+
     location /api/ {
         # 판독문·필터·상용구 JSON뿐이다. 2MB면 넉넉하고, 그 이상은 실수 아니면 공격이다.
         client_max_body_size 2m;
         proxy_pass http://api:3000;
     }
 
+    location = /auth/realms/kin/login-actions/registration {
+        limit_req zone=kin_registration burst=5 nodelay;
+        proxy_pass http://keycloak:8080;
+        proxy_buffer_size       16k;
+        proxy_buffers        8  16k;
+        proxy_busy_buffers_size 32k;
+    }
+
+    location = /auth/realms/kin/protocol/openid-connect/token {
+        limit_req zone=kin_token burst=10 nodelay;
+        proxy_pass http://keycloak:8080;
+        proxy_buffer_size       16k;
+        proxy_buffers        8  16k;
+        proxy_busy_buffers_size 32k;
+    }
+
     # 토큰과 쿠키가 커서 기본 프록시 버퍼로는 응답 헤더가 넘칠 수 있다.
     location /auth/ {
-        # Keycloak 26.0.7 로그인 템플릿은 단일 favicon.ico 링크만 낸다. 테마 템플릿을
+        # Keycloak 로그인 템플릿은 단일 favicon.ico 링크만 낸다. 테마 템플릿을
         # 복제하지 않고 그 링크만 J1 SVG + 32px PNG 폴백으로 확장한다.
         proxy_set_header Accept-Encoding "";
         proxy_pass http://keycloak:8080;

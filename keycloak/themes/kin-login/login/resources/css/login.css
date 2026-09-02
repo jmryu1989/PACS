@@ -146,7 +146,7 @@ html,
   right: 0;
   bottom: 16px;
   left: 0;
-  content: "계정 발급은 소속 기관 관리자에게 문의하십시오 · © 2026 KOREA IMAGING NETWORK";
+  content: "가입 신청 후 관리자 승인을 거쳐 사용할 수 있습니다 · © 2026 KOREA IMAGING NETWORK";
   color: rgba(180, 196, 222, .55);
   font-size: 11px;
   line-height: 1.5;
@@ -205,6 +205,55 @@ h1#kc-page-title {
   line-height: normal;
   letter-spacing: .1em;
   text-align: left;
+}
+
+#kc-locale {
+  position: absolute;
+  top: 18px;
+  right: 24px;
+  z-index: 5;
+}
+
+#kc-current-locale-link {
+  padding: 4px 6px;
+  color: var(--kin-muted);
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#kc-current-locale-link::after {
+  margin-left: 5px;
+  content: "⌄";
+  color: var(--kin-dim, #5E7396);
+}
+
+#kc-locale-dropdown ul[role="menu"] {
+  display: none;
+  min-width: 150px;
+  margin: 6px 0 0;
+  padding: 6px;
+  background: var(--kin-input-bg);
+  border: 1px solid var(--kin-input-border);
+  border-radius: 7px;
+  box-shadow: 0 14px 34px rgba(0, 2, 8, .6);
+}
+
+#kc-locale-dropdown .pf-c-dropdown__menu-item {
+  padding: 8px 10px;
+  color: var(--kin-muted);
+  background: transparent;
+  border-radius: 5px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+#kc-locale-dropdown .pf-c-dropdown__menu-item:hover,
+#kc-locale-dropdown .pf-c-dropdown__menu-item:focus {
+  color: var(--kin-text);
+  background: rgba(79, 142, 247, .14);
 }
 
 .login-pf-page .card-pf:has(#kc-form-login) h1#kc-page-title {
@@ -506,6 +555,55 @@ h1#kc-page-title {
   font-size: 13px;
 }
 
+#kc-registration {
+  color: var(--kin-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+#kc-registration a {
+  color: var(--kin-highlight);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+body:has(#kc-register-form) {
+  overflow-y: auto;
+}
+
+.login-pf-page:has(#kc-register-form) {
+  align-items: flex-start;
+  min-height: 100%;
+  height: auto;
+  padding-top: 28px;
+  padding-bottom: 52px;
+}
+
+.login-pf-page .card-pf:has(#kc-register-form) {
+  flex-basis: 460px;
+  width: 460px;
+  max-width: 460px;
+  padding: 30px 34px 26px;
+  overflow: visible;
+}
+
+#kc-register-form .form-group {
+  margin: 0;
+}
+
+#kc-register-form .pf-c-form-control {
+  margin-bottom: 15px;
+}
+
+#kc-register-form #kc-form-options {
+  margin: 4px 0 14px;
+}
+
+#kc-register-form #kc-form-buttons {
+  margin-top: 4px;
+}
+
 .login-pf body:has(#kc-totp-settings-form) {
   overflow-y: auto;
 }
@@ -592,6 +690,11 @@ h1#kc-page-title {
     flex: none;
     width: min(380px, 100%);
     max-width: 380px;
+  }
+
+  .login-pf-page .card-pf:has(#kc-register-form) {
+    width: min(460px, 100%);
+    max-width: 460px;
   }
 }
 

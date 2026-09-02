@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html class="auto-entry">
 <head>
   <meta charset="utf-8">
   <title>로그인 — KOREA IMAGING NETWORK</title>
@@ -7,7 +7,6 @@
   <link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png">
   <script>
     const KIN_PRODUCTION = location.protocol === 'https:' && location.hostname === 'pacs.koreaimagingnetwork.com';
-    if (KIN_PRODUCTION) document.documentElement.classList.add('production-entry');
   </script>
   <style>
     :root {
@@ -30,7 +29,7 @@
       --kin-error: #F5D5D5;
     }
     * { box-sizing: border-box; }
-    html.production-entry body { visibility: hidden; }
+    html.auto-entry body { visibility: hidden; }
     body {
       min-width: 320px;
       min-height: 620px;
@@ -126,6 +125,7 @@
     <div class="sub">인증 서버 연결 상태를 확인합니다.</div>
 
     <button id="signin" disabled>확인 중…</button>
+    <button class="ghost" id="register">가입 신청</button>
     <button class="ghost" id="switch" style="display:none">다른 계정으로 로그인</button>
     <button class="ghost" id="demo">데모 모드로 둘러보기 (서버 없이)</button>
 
@@ -141,7 +141,7 @@
   <script src="auth.js"></script>
   <script>
     const $ = s => document.querySelector(s);
-    const revealLanding = () => document.documentElement.classList.remove('production-entry');
+    const revealLanding = () => document.documentElement.classList.remove('auto-entry');
 
     // 서버 없는 데모와 연결 진단은 로컬 개발에만 남긴다. 운영에서는 DOM에서도 제거한다.
     if (KIN_PRODUCTION) $("#demo").remove();
@@ -164,9 +164,9 @@
         return;
       }
 
-      // 운영의 정상 첫 진입만 바로 로그인으로 보낸다. stale/실패 콜백은 사용자가 원인을
-      // 읽고 다시 누를 수 있어야 하므로 자동 재시도로 루프를 만들지 않는다.
-      if (KIN_PRODUCTION && !authError && !initError) {
+      // 정상 첫 진입은 로컬과 운영 모두 바로 로그인으로 보낸다. stale/실패 콜백은
+      // 사용자가 원인을 읽고 다시 누를 수 있어야 하므로 자동 재시도로 루프를 만들지 않는다.
+      if (!authError && !initError) {
         try {
           await KinAuth.login();
           return;
@@ -201,6 +201,7 @@
     }
 
     $("#signin").addEventListener('click', () => KinAuth.login().catch(e => $("#msg").textContent = e.message));
+    $("#register").addEventListener('click', () => KinAuth.register().catch(e => $("#msg").textContent = e.message));
     // 이미 로그인된 세션이 있어도 아이디를 다시 묻는다 (공용 판독 PC / 두 계정 동시 테스트)
     $("#switch").addEventListener('click', () => KinAuth.login({ prompt: 'login' }).catch(e => $("#msg").textContent = e.message));
     $("#demo")?.addEventListener('click', () => { KinAuth.demo(); location.href = 'main.html'; });

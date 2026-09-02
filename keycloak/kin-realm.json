@@ -3,7 +3,7 @@
   "displayName": "Korea Imaging Network",
   "enabled": true,
   "sslRequired": "external",
-  "registrationAllowed": false,
+  "registrationAllowed": true,
   "resetPasswordAllowed": true,
   "verifyEmail": true,
   "internationalizationEnabled": true,

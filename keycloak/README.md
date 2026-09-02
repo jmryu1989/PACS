@@ -2,6 +2,8 @@
 
 `kin-realm.json`은 빈 Keycloak PostgreSQL DB를 처음 띄울 때만 들어간다
 (`start-dev --import-realm`). 이후 렐름·계정·회전된 자격증명은 PostgreSQL에 유지된다.
+서버는 `26.7.3`으로 고정한다. `prompt=create` 가입 진입은 26.1.0부터 지원되므로
+그보다 낮은 버전으로 내리면 BFF 가입 링크가 로그인 화면으로 잘못 열린다.
 
 > ⚠️ **이 파일의 JSON에는 주석을 넣을 수 없다.** Keycloak은 모르는 필드를 만나면
 > import 자체를 거부하고 서버가 뜨지 않는다 (`Unrecognized field ... not marked as ignorable`).
@@ -40,6 +42,11 @@ auth=true
 starttls=true
 password=<SMTP_APP_PASSWORD>
 ```
+
+자기 가입은 `registrationAllowed=true`이지만 프론트가 Keycloak 등록 주소를 직접 만들지 않는다.
+`/api/auth/register`가 state·PKCE·pending 쿠키를 만든 다음 `prompt=create`로 넘기는 경로만
+사용한다. 가입 직후에는 기관·업무 역할이 없어 승인 대기 상태이며, 이메일 검증을 마친 계정만
+관리자가 승인할 수 있다.
 
 비밀번호는 최소 8자리만 요구하고 12자리·문자 조합을 강제하지 않는다. 세션 유휴 4시간과
 5회 실패 잠금은 HPACS가 2025년 6월에야 넣은 정책이다

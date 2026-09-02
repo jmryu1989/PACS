@@ -95,6 +95,10 @@ const KinAuth = (() => {
       location.href = `${API}/auth/login${query}`;
     },
 
+    async register() {
+      location.href = `${API}/auth/register`;
+    },
+
     demo() {
       clearLocal();
       S.setItem('kin-demo', '1');

@@ -82,7 +82,7 @@ services:
   # 렐름·클라이언트·개발용 계정은 keycloak/kin-realm.json 에서 자동으로 들어온다.
   # 이 파일은 처음 한 번만 import된다 (자세한 건 keycloak/README.md).
   keycloak:
-    image: quay.io/keycloak/keycloak:26.0.7
+    image: quay.io/keycloak/keycloak:26.7.3
     container_name: kin-keycloak
     restart: unless-stopped
     command: start-dev --import-realm
