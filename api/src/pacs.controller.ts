@@ -1,6 +1,6 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
-import { AuthGuard, Public } from './auth.guard';
+import { Public } from './auth.guard';
 
 /**
  * URL의 `:id`를 정수로. **`+id`를 그대로 쓰면 안 된다.**
@@ -23,13 +23,13 @@ function numId(raw: string): number {
  * 역할별 권한과 기관 경계는 서비스 계층에서 검사한다 — 화면이 아니라 서버가 방어선이다.
  */
 const caller = (req: any): Caller => ({
+  sub: req.sub,
   actor: req.actor,
   roles: req.roles ?? [],
   institution: req.institution ?? null,
 });
 
 @Controller()
-@UseGuards(AuthGuard)
 export class PacsController {
   constructor(private svc: PacsService) {}
 

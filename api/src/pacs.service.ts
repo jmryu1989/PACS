@@ -5,12 +5,14 @@ import { KeycloakService } from './keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 
 /**
- * 호출자. 셋 다 **서명된 토큰**에서 나온다 — 클라이언트가 정할 수 없다.
+ * 호출자. 넷 다 **서명된 토큰**에서 나온다 — 클라이언트가 정할 수 없다.
+ *  sub         KC 사용자 ID    (세션 일괄 폐기 키)
  *  actor       누구인가        (감사로그)
  *  roles       무엇을 할 수 있나 (판독의/기사)
  *  institution 어디 소속인가    (어떤 데이터를 볼 수 있나)  ← 이번 작업에서 추가
  */
 export interface Caller {
+  sub: string;
   actor: string;
   roles: string[];
   institution: string | null;

@@ -61,6 +61,10 @@ class Route:
 # 않으면 test_every_controller_route_is_declared가 살아 있는 스택을 건드리기도 전에 실패한다.
 ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "health"): Route(Kind.NEITHER),
+    ("GET", "auth/login"): Route(Kind.NEITHER),
+    ("GET", "auth/register"): Route(Kind.NEITHER),
+    ("GET", "auth/callback"): Route(Kind.NEITHER),
+    ("POST", "auth/logout"): Route(Kind.NEITHER),
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "authz/dicom"): Route(Kind.TENANT),
     ("GET", "colleagues"): Route(Kind.TENANT),

@@ -9,7 +9,10 @@ async function bootstrap() {
     process.exit(1);
   }
   if (process.env.AUTH_REQUIRED !== 'false')
-    for (const key of ['KC_ISSUER', 'KC_JWKS_URL', 'KC_AUDIENCE'])
+    for (const key of [
+      'KC_ISSUER', 'KC_JWKS_URL', 'KC_AUDIENCE',
+      'KC_WEB_SECRET', 'KIN_COOKIE_SECRET', 'PUBLIC_ORIGIN',
+    ])
       if (!process.env[key]) {
         console.error(`[KIN API] ${key}가 설정되지 않았습니다. 인증이 켜진 상태에서는 필수입니다. 기동을 중단합니다.`);
         process.exit(1);

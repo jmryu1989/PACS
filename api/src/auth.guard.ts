@@ -3,10 +3,21 @@ import {
   SetMetadata, UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { AuthService } from './auth.service';
 
-/** 이 엔드포인트는 토큰 없이 부를 수 있다 (health 확인용) */
+/** 토큰 없이 부를 수 있는 네 진입점에만 붙인다: health, login, register, callback. */
 export const Public = () => SetMetadata('public', true);
+
+type MemberState = 'PENDING' | 'APPROVED' | 'INVALID';
+const APP_ROLES = new Set(['radiologist', 'technician', 'admin']);
+
+/** 회원콘솔과 가드가 공유하는 두 축 중 승인 상태의 단일 판정표. */
+export function memberState(groups: string[], roles: string[]): MemberState {
+  const appRoles = (Array.isArray(roles) ? roles : []).filter(role => APP_ROLES.has(role));
+  if (groups.length === 0) return 'PENDING';
+  if (groups.length === 1 && appRoles.length >= 1) return 'APPROVED';
+  return 'INVALID';
+}
 
 /**
  * Keycloak이 발급한 access token을 검증한다.
@@ -22,11 +33,7 @@ export const Public = () => SetMetadata('public', true);
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
-  private jwks = process.env.KC_JWKS_URL
-    ? createRemoteJWKSet(new URL(process.env.KC_JWKS_URL))
-    : null;
-
-  constructor(private reflector: Reflector) {}
+  constructor(private reflector: Reflector, private auth: AuthService) {}
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest();
@@ -37,6 +44,7 @@ export class AuthGuard implements CanActivate {
     // 인증을 끄고 돌리는 개발 모드. compose 기본값은 켜짐이고, 끄면 로그로 경고한다.
     if (process.env.AUTH_REQUIRED === 'false') {
       req.actor = req.headers['x-kin-user'] || 'dev';
+      req.sub = req.headers['x-kin-sub'] || 'dev';
       req.roles = ['radiologist', 'technician', 'admin'];
       // 인증이 꺼져 있으면 기관도 헤더로 흉내낸다. 기본값을 주는 이유는
       // 이 모드가 이미 "아무나 아무거나"이기 때문 — 여기서만 기관을 비워두면
@@ -45,36 +53,33 @@ export class AuthGuard implements CanActivate {
       return true;
     }
 
-    if (!this.jwks) throw new UnauthorizedException('서버에 KC_JWKS_URL이 설정되지 않았습니다');
-
     const header = req.headers.authorization ?? '';
     let raw = header.startsWith('Bearer ') ? header.slice(7) : '';
+    let method: 'bearer' | 'session' | 'legacy' | null = raw ? 'bearer' : null;
     if (!raw) {
-      // OHIF는 DICOM 요청에 Authorization을 싣지 않는다. auth_request 서브요청은
-      // 로그인 때 심은 같은 출처 쿠키를 검증한다. BFF 도입 시 HttpOnly 세션으로 대체한다.
-      const match = /(?:^|;\s*)kin_at=([^;]+)/.exec(req.headers.cookie ?? '');
-      if (match) {
-        try { raw = decodeURIComponent(match[1]); }
-        catch { throw new UnauthorizedException('인증 쿠키 형식이 올바르지 않습니다'); }
+      const sid = this.auth.sessionId(req);
+      if (sid) {
+        const session = await this.auth.authenticateSession(sid, ctx.switchToHttp().getResponse());
+        req.sid = sid;
+        raw = session.accessToken;
+        method = 'session';
+      } else {
+        // 프론트가 아직 kin-web을 쓰는 커밋 3에서는 OHIF의 기존 탭을 끊지 않는다.
+        // 새 프론트가 모든 탭의 kin_at을 일소한 뒤 커밋 6에서 이 마지막 폴백을 지운다.
+        const match = /(?:^|;\s*)kin_at=([^;]+)/.exec(req.headers.cookie ?? '');
+        if (match) {
+          try { raw = decodeURIComponent(match[1]); method = 'legacy'; }
+          catch { throw new UnauthorizedException('인증 쿠키 형식이 올바르지 않습니다'); }
+        }
       }
     }
     if (!raw) throw new UnauthorizedException('Authorization 헤더가 없습니다');
 
-    let payload: any;
-    try {
-      ({ payload } = await jwtVerify(raw, this.jwks, {
-        issuer: process.env.KC_ISSUER,
-        audience: process.env.KC_AUDIENCE ?? 'kin-api',
-        // 검증 규칙은 환경이 아니라 코드가 고정한다. exp 없는 토큰과 다른 알고리즘을 받지 않는다.
-        algorithms: ['RS256'],
-        requiredClaims: ['exp', 'sub', 'iss', 'aud'],
-      }));
-    } catch (e: any) {
-      throw new UnauthorizedException('토큰 검증 실패: ' + e.message);
-    }
+    const payload = await this.auth.verifyAccessToken(raw);
 
+    req.sub = payload.sub;
     req.actor = payload.email ?? payload.preferred_username ?? payload.sub;
-    req.roles = payload.realm_access?.roles ?? [];
+    req.roles = Array.isArray(payload.realm_access?.roles) ? payload.realm_access.roles : [];
 
     /**
      * 소속 기관. Keycloak **그룹**에서 온다 (kin-realm.json의 groups + groupMembership 매퍼).
@@ -88,13 +93,25 @@ export class AuthGuard implements CanActivate {
      *
      * 매퍼가 full path로 넣으면 "/hallym"으로 오므로 앞의 슬래시를 떼어낸다.
     */
-    const groups: string[] = (payload.groups ?? []).map((g: string) => g.replace(/^\//, ''));
-    // 0개는 매퍼 누락이고 복수는 배열 순서가 기관 경계를 결정한다. 둘 다 소리 내어 거부한다.
-    if (groups.length !== 1)
-      throw new ForbiddenException(
-        `기관 그룹이 ${groups.length}개입니다. 계정은 정확히 하나의 기관 그룹에 속해야 합니다 (Keycloak 그룹 설정 확인).`);
+    const groups: string[] = (Array.isArray(payload.groups) ? payload.groups : [])
+      .filter((group: unknown): group is string => typeof group === 'string')
+      .map(group => group.replace(/^\//, ''));
     req.groups = groups;
-    req.institution = groups[0];
+    req.institution = groups.length === 1 ? groups[0] : null;
+    req.authMethod = method;
+
+    const state = memberState(groups, req.roles);
+    req.memberState = state;
+    const path = String(req.originalUrl ?? '').split('?')[0];
+    const isLogout = req.method === 'POST' && path === '/api/auth/logout';
+    if (state !== 'APPROVED' && !isLogout)
+      throw new ForbiddenException({
+        code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID',
+      });
+
+    // Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다.
+    if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method) && req.headers['x-kin-csrf'] !== '1')
+      throw new ForbiddenException('X-KIN-CSRF 헤더가 필요합니다');
     return true;
   }
 }
