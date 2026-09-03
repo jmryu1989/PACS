@@ -36,7 +36,7 @@ export class AdminService {
       username: user.username,
       email: user.email,
       emailVerified: user.emailVerified,
-      name: [user.lastName, user.firstName].filter(Boolean).join('') || user.username,
+      name: [user.lastName, user.firstName].filter(Boolean).join(' ') || user.username,
       institution: user.groups.length === 1 ? user.groups[0] : null,
       roles,
       enabled: user.enabled,

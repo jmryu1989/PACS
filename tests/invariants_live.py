@@ -948,6 +948,23 @@ process.stdout.write(JSON.stringify(value));
         self.assertIn('value.textContent = password;', source)
         self.assertIn('$("#temporary-password").textContent = "";', source)
 
+    def test_member_names_have_one_separator_between_family_and_given_name(self) -> None:
+        me = self.stack.request("GET", "/me", "doctor")
+        self.assertEqual(me.status, 200, me.text)
+        self.assertEqual(me.body.get("displayName"), "doctor KIN")
+
+        listed = self.stack.request("GET", "/admin/users?page=1", "jmryu")
+        self.assertEqual(listed.status, 200, listed.text)
+        doctor = next(
+            user for user in listed.body["users"]
+            if user["username"] == self.stack.username("doctor")
+        )
+        self.assertEqual(doctor["name"], "doctor KIN")
+
+        colleagues = self.stack.request("GET", "/colleagues", "doctor")
+        self.assertEqual(colleagues.status, 200, colleagues.text)
+        self.assertIn("doctor2 KIN", [user["name"] for user in colleagues.body])
+
     def test_registration_success_page_has_safe_return_path(self) -> None:
         source = (
             ROOT / "keycloak" / "themes" / "kin-login" / "login" / "info.ftl"

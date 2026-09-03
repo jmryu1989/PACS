@@ -263,7 +263,7 @@ export class KeycloakService {
         // 이 값이 preReviewer 컬럼에 들어가고, 나중에 "이 판독문이 내 것인가"를 이걸로 비교한다.
         id: u.email ?? u.username,
         username: u.username,
-        name: [u.lastName, u.firstName].filter(Boolean).join('') || u.username,
+        name: [u.lastName, u.firstName].filter(Boolean).join(' ') || u.username,
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
