@@ -158,10 +158,11 @@
     .tpl-list td { font-size: 11px; }
     .tpl-list tr { cursor: pointer; }
 
-    /* Related Report List | Report — 나란히 두 기둥 */
+    /* Related Exam + 이전 판독문 | 현재 판독문 — 나란히 두 기둥 */
     .workrow { flex: 1; display: flex; min-height: 0; }
     .panel { display: flex; flex-direction: column; min-height: 0; }
     .related-p { width: 44%; }
+    .related-list-pane { flex: 1; min-height: 100px; display: flex; flex-direction: column; }
     .reltabs { display: flex; align-items: center; background: #1b212c; flex: none; }
     .reltabs .rel-title { padding: 4px 10px; color: var(--kin-text); font-size: 11px; white-space: nowrap; }
     .reltabs div { padding: 4px 12px; font-size: 11px; color: #7f8899; cursor: pointer; }
@@ -171,7 +172,20 @@
     .reltabs label { color: #7f8899; font-size: 11px; padding: 0 6px; display: flex; align-items: center; gap: 3px; cursor: pointer; }
     .grid2 { overflow: auto; flex: 1; }
     #relrows tr[data-uid] { cursor: pointer; }
-    #relrows tr.preview td { background: var(--kin-row-sel); }
+    #relrows tr.related-selected td { background: var(--kin-row-sel); }
+    .prior-report-pane { height: 46%; min-height: 130px; display: flex; flex-direction: column; }
+    .prior-report-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex: none;
+                         background: var(--kin-panel); border-bottom: 1px solid var(--kin-line2); }
+    .prior-report-head b { color: var(--kin-text); font-size: 11px; white-space: nowrap; }
+    .prior-report-head .meta { color: var(--kin-link); font-size: 11px; overflow: hidden;
+                               text-overflow: ellipsis; white-space: nowrap; }
+    .prior-report-head .readonly { margin-left: auto; color: var(--kin-muted); font-size: 11px; white-space: nowrap; }
+    .prior-report-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 10px; }
+    .prior-report-status { color: var(--kin-dim); padding: 12px 2px; }
+    .prior-report-section h4 { margin: 3px 0; color: var(--kin-muted); font-size: 11px; font-weight: normal; }
+    .prior-report-value { min-height: 28px; padding: 5px 7px; white-space: pre-wrap; overflow-wrap: anywhere;
+                          color: var(--kin-text); background: rgba(14,23,40,.72);
+                          border: 1px solid var(--kin-line2); }
 
     /* Report */
     .report-p { flex: 1; }
@@ -195,12 +209,6 @@
     .draftbar button { background: #232936; border: 1px solid #5c5124; color: #d8b24a;
                        padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .draftbar b { color: #f0c95a; }
-    .related-reportbar { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex: none;
-                         background: rgba(79,142,247,.10); border-top: 1px solid var(--kin-line2);
-                         border-bottom: 1px solid var(--kin-line2); color: var(--kin-link); font-size: 11px; }
-    .related-reportbar .spacer { flex: 1; }
-    .related-reportbar .readonly { color: var(--kin-muted); }
-    .report-p.related-view .redit textarea { background: rgba(14,23,40,.72); color: var(--kin-muted); }
     #err { color: #ff8080; padding: 2px 10px; flex: none; }
 
     /* 패널 경계는 세션 안에서만 움직인다. 판독 PC마다 화면 구성이 달라 계정 설정으로
@@ -215,6 +223,20 @@
     body.resizing, body.resizing * { user-select: none !important; }
     body.resizing-x, body.resizing-x * { cursor: col-resize !important; }
     body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
+
+    /* 세로 판독 모니터는 워크리스트·prior·현재 판독문에 화면을 내준다. 영상은 전용 OHIF
+       모니터에서 보므로 썸네일/임상/상용구 행은 숨기고 네 작업 칸을 위아래로 쌓는다. */
+    body.portrait .split { flex-direction: column; }
+    body.portrait .left { width: 100%; min-width: 0; height: 32%; min-height: 180px; flex: none; }
+    body.portrait .right { min-height: 0; }
+    body.portrait .rw, body.portrait #resize-top { display: none; }
+    body.portrait .workrow { flex-direction: column; }
+    body.portrait .related-p { width: 100%; height: 56%; min-height: 230px; flex: none; }
+    body.portrait .report-p, body.portrait .order-p { min-height: 180px; }
+    body.portrait #resize-main, body.portrait #resize-related { width: 100%; height: 6px; cursor: row-resize; }
+    body.portrait #resize-main::after, body.portrait #resize-related::after {
+      left: 0; right: 0; top: 2px; bottom: auto; width: auto; height: 2px;
+    }
 
     /* ── 모달 (Modify Exam) ── */
     .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 30; align-items: center; justify-content: center; }
@@ -476,6 +498,7 @@
     <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
     <div class="spacer"></div>
     <button class="chip" id="refresh">Refresh</button>
+    <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">배치: 자동</button>
     <button class="chip" id="savefilter">Save Filter</button>
     <button class="chip" id="clearfilter">Clear</button>
   </div>
@@ -555,18 +578,36 @@
            title="드래그하여 상단 패널 높이 조절"></div>
 
       <div class="workrow">
-      <!-- Related Report List / Related Exam List -->
+      <!-- Related Exam 목록 + 별도 이전 판독문 창 -->
       <div class="panel related-p">
-        <div class="reltabs" id="reltabs">
-          <span class="rel-title">Related Exam</span>
-          <span class="spacer"></span>
-          <button id="b-related-current" style="display:none">현재 검사로 복귀</button>
+        <div class="related-list-pane">
+          <div class="reltabs" id="reltabs">
+            <span class="rel-title">Related Exam</span>
+            <span class="spacer"></span>
+          </div>
+          <div class="grid2">
+            <table>
+              <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
+              <tbody id="relrows"><tr><td class="empty" colspan="7">-</td></tr></tbody>
+            </table>
+          </div>
         </div>
-        <div class="grid2">
-          <table>
-            <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
-            <tbody id="relrows"><tr><td class="empty" colspan="7">-</td></tr></tbody>
-          </table>
+        <div class="resizer resizer-h" id="resize-prior" role="separator" aria-orientation="horizontal"
+             title="드래그하여 Related 목록과 이전 판독문 높이 조절"></div>
+        <div class="prior-report-pane">
+          <div class="prior-report-head">
+            <b>이전 판독문</b>
+            <span class="meta" id="prior-report-meta"></span>
+            <span class="readonly">읽기 전용</span>
+          </div>
+          <div class="prior-report-body">
+            <div class="prior-report-status" id="prior-report-status">Related Exam을 선택하세요</div>
+            <div id="prior-report-content" style="display:none">
+              <div class="prior-report-section"><h4>Findings</h4><div class="prior-report-value" id="prior-findings"></div></div>
+              <div class="prior-report-section"><h4>Conclusion</h4><div class="prior-report-value" id="prior-conclusion"></div></div>
+              <div class="prior-report-section"><h4>Recommendation</h4><div class="prior-report-value" id="prior-recommendation"></div></div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="resizer resizer-v" id="resize-related" role="separator" aria-orientation="vertical"
@@ -584,12 +625,6 @@
           <button disabled>Except</button>
           <button disabled>Mark CVR</button>
           <button id="b-print">Print</button>
-        </div>
-        <div class="related-reportbar" id="related-reportbar" style="display:none">
-          <b>Related 승인 판독문</b>
-          <span id="related-report-label"></span>
-          <span class="spacer"></span>
-          <span class="readonly">읽기 전용</span>
         </div>
         <!-- 쓰다 만 초안이 있을 때만 보인다. 확정본과 다른 것을 보고 있다는 사실을
              화면이 말해주지 않으면, 사용자는 저장된 것을 보고 있다고 믿는다. -->
@@ -1139,7 +1174,7 @@
     let studies = [];
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
-    // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 "잠깐 열람할 검사"다.
+    // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
     // 둘을 한 변수로 쓰면 prior를 클릭한 순간 저장·승인 대상까지 prior로 바뀐다.
     let relatedUid = null;
 
@@ -1379,7 +1414,6 @@
       mode = m;
       document.querySelectorAll(".tabs > div").forEach(x => x.classList.toggle("on", x.dataset.tab === m));
       const tech = m === "Technician";
-      if (tech && isRelatedPreview()) showCurrentStudy();
       $("#ctxbar").classList.toggle("show", tech);
       document.querySelector(".s-template").style.display = tech ? "none" : "flex";
       document.querySelector(".s-clinical").style.width = tech ? "66%" : "30%";
@@ -1406,7 +1440,6 @@
     // ── 선택 ──
     function cur() { return studies.find(s => s.uid === selectedUid); }
     function relatedStudy() { return relatedUid ? studies.find(s => s.uid === relatedUid) : null; }
-    function isRelatedPreview() { return !!relatedStudy() && relatedUid !== selectedUid; }
     function viewed() { return relatedStudy() ?? cur(); }
     function viewingUid() { return viewed()?.uid ?? null; }
     function curOrder() { return orders.find(o => o.oid === selectedOid); }
@@ -1420,24 +1453,23 @@
        * 점유 경고(`warnedFor = null`)가 초기화돼 **"OO 님이 작성 중입니다"가
        * 클릭할 때마다 다시 떴다.** 남발된 경고는 아무도 안 본다(교훈 §2).
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
-       */
-      if (uid === selectedUid) {
-        // Related prior를 보고 있다가 원래 워크리스트 행을 다시 누르면 작성 화면으로 돌아온다.
-        if (isRelatedPreview()) showCurrentStudy();
-        return;
-      }
+      */
+      if (uid === selectedUid) return;
       stashReport();
       if (heldUid && heldUid !== uid) releaseHold();   // 다른 검사로 가면 잡고 있던 걸 놓는다
       warnedFor = null;
       relatedUid = null;
+      relatedReportSeq += 1;
+      clearRelatedReport();
       selectedUid = uid;
       render(); refreshRight({ forceReport: true });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
     }
     function refreshRight({ forceReport = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
-      if (isRelatedPreview()) loadRelatedReport();
-      else loadReport({ force: forceReport });
+      if (relatedUid) loadRelatedReport();
+      else clearRelatedReport();
+      loadReport({ force: forceReport });
       updateReportButtons();
     }
 
@@ -1465,11 +1497,10 @@
         rel = studies.filter(x => s.sourcePatientKey && x.sourcePatientKey === s.sourcePatientKey && x.uid !== s.uid);
         rel = [...rel].sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid));
       }
-      $("#b-related-current").style.display = isRelatedPreview() ? "" : "none";
       $("#relrows").innerHTML = s
         ? (rel.map(x => {
             return `
-            <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid ? "preview" : ""}">
+            <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid ? "related-selected" : ""}">
               <td>${x.uid === relatedUid ? "👁 열람 중" : "열기"}</td>
               <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
@@ -1478,17 +1509,6 @@
           }).join("") || `<tr><td class="empty" colspan="7">관련 검사 없음</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
     }
-    function showCurrentStudy() {
-      if (!relatedUid) return;
-      relatedSelectSeq += 1;
-      relatedUid = null;
-      relatedReportSeq += 1;   // 늦게 돌아온 prior 판독문 응답이 현재 검사 위를 덮지 못하게 한다
-      $(".report-p").classList.remove("related-view");
-      $("#related-reportbar").style.display = "none";
-      renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
-      loadReport({ force: true }); updateReportButtons();
-    }
-    $("#b-related-current").addEventListener("click", showCurrentStudy);
 
     /**
      * 썸네일. **PACS에서 wrong-patient image display는 그 자체로 사고 분류 항목이다.**
@@ -1711,14 +1731,29 @@
       else saveApp();
       studies = studies.filter(x => x.uid !== uid);
       delete appState[uid];
-      if (selectedUid === uid) { selectedUid = null; refreshRight(); }
+      if (selectedUid === uid) {
+        selectedUid = null;
+        relatedUid = null;
+        relatedReportSeq += 1;
+        clearRelatedReport();
+        refreshRight();
+      }
       render();
       toast("검사를 삭제했습니다", "info");
     }
 
     // ── Report ──
     const RFIELDS = ["findings", "conclusion", "recommendation"];
-    let relatedReportSeq = 0, relatedSelectSeq = 0;
+    let relatedReportSeq = 0;
+
+    function clearRelatedReport(message = "Related Exam을 선택하세요") {
+      $("#prior-report-meta").textContent = "";
+      $("#prior-report-status").textContent = message;
+      $("#prior-report-status").style.display = "";
+      $("#prior-report-content").style.display = "none";
+      for (const id of ["#prior-findings", "#prior-conclusion", "#prior-recommendation"])
+        $(id).textContent = "";
+    }
 
     /**
      * Related에서 고른 검사는 승인 판독문만 열람한다.
@@ -1729,19 +1764,15 @@
      */
     async function loadRelatedReport() {
       const s = relatedStudy();
-      if (!s) return;
+      if (!s) { clearRelatedReport(); return; }
       const uid = s.uid;
+      const currentUid = selectedUid;
       const seq = ++relatedReportSeq;
-      const stale = () => seq !== relatedReportSeq || uid !== relatedUid || selectedUid === uid;
-      const bar = $("#related-reportbar");
-      $(".report-p").classList.add("related-view");
-      bar.style.display = "flex";
-      $("#related-report-label").textContent = `${s.date} · ${s.modality} · ${shownStudyDesc(s)}`;
-      $("#draftbar").style.display = "none";
-      for (const [sel, base] of [["#findings", "승인 판독문 불러오는 중…"],
-                                 ["#conclusion", ""], ["#recommendation", ""]]) {
-        const el = $(sel); el.value = ""; el.placeholder = base; el.readOnly = true;
-      }
+      const stale = () => seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
+      $("#prior-report-meta").textContent = `${s.date} · ${s.modality} · ${shownStudyDesc(s)}`;
+      $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
+      $("#prior-report-status").style.display = "";
+      $("#prior-report-content").style.display = "none";
 
       let report = null;
       try {
@@ -1752,38 +1783,34 @@
         } else if (!serverMode && s.rs === "A") {
           // 서버가 없는 데모에서는 이력 API가 없으므로 확정본만 사용한다. draft는 절대 고르지 않는다.
           const r = appState[uid] ?? {};
-          report = { findings: r.findings, conclusion: r.conclusion, recommendation: r.recommendation };
+          report = {
+            findings: r.findings, conclusion: r.conclusion, recommendation: r.recommendation,
+            author: r.repDoc,
+          };
         }
       } catch (e) {
         if (stale()) return;
-        $("#findings").placeholder = `판독문 조회 실패: ${e.message}`;
+        $("#prior-report-status").textContent = `판독문 조회 실패: ${e.message}`;
         return;
       }
       if (stale()) return;
-      for (const sel of ["#findings", "#conclusion", "#recommendation"]) {
-        const el = $(sel);
-        el.value = report?.[sel.slice(1)] ?? "";
-        el.placeholder = !report && sel === "#findings" ? "판독문 없음" : "";
-        el.readOnly = true;
-      }
+      if (!report) { $("#prior-report-status").textContent = "판독문 없음"; return; }
+      $("#prior-report-meta").textContent =
+        `${s.date} · ${s.modality} · ${shownStudyDesc(s)} · 판독의 ${displayActor(report.author) || "-"}`;
+      $("#prior-findings").textContent = report.findings ?? "";
+      $("#prior-conclusion").textContent = report.conclusion ?? "";
+      $("#prior-recommendation").textContent = report.recommendation ?? "";
+      $("#prior-report-status").style.display = "none";
+      $("#prior-report-content").style.display = "";
     }
 
-    async function previewRelated(uid) {
+    function previewRelated(uid) {
       const current = cur();
       const target = studies.find(s => s.uid === uid);
       if (!current || !target || target.uid === current.uid || !current.sourcePatientKey ||
           target.sourcePatientKey !== current.sourcePatientKey) return;
-      const currentUid = selectedUid;
-      const seq = ++relatedSelectSeq;
-      if (offline && reportDirty()) {
-        toast("서버 연결이 끊겨 현재 판독문을 보존할 수 없습니다. 연결이 돌아온 뒤 Related Exam을 여세요.", "err");
-        return;
-      }
-      // 화면의 현재 초안을 prior로 덮기 전에 정상 초안 경로로 보존한다.
-      await stashReport();
-      if (seq !== relatedSelectSeq || selectedUid !== currentUid) return;
       relatedUid = uid;
-      renderClinical(); renderRelated(); renderThumbs(); loadRelatedReport(); updateReportButtons();
+      renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadRelatedReport();
     }
 
     /**
@@ -1799,10 +1826,6 @@
 
     let reportRefreshPendingFor = null;
     function loadReport({ force = false } = {}) {
-      // 폴링·새로고침이 현재 검사 내용을 갱신해도, 사용자가 prior를 읽는 동안 화면을 빼앗지 않는다.
-      if (isRelatedPreview()) { loadRelatedReport(); return; }
-      $(".report-p").classList.remove("related-view");
-      $("#related-reportbar").style.display = "none";
       /**
        * 판독문을 그리는 함수가 **스스로** 저장 안 된 입력을 덮지 않는다.
        * Refresh·Home·재연결처럼 호출자가 늘 때마다 바깥에 가드를 하나씩 달면
@@ -1843,7 +1866,6 @@
      */
     function renderDraftBar() {
       const bar = $("#draftbar");
-      if (isRelatedPreview()) { bar.style.display = "none"; return; }
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
       const pending = !!selectedUid && reportRefreshPendingFor === selectedUid;
@@ -1892,7 +1914,7 @@
     });
     /** 지금 textarea 내용이 마지막으로 저장된 것(초안이 있으면 초안)과 다른가 */
     function reportDirty() {
-      if (!selectedUid || isRelatedPreview()) return false;
+      if (!selectedUid) return false;
       const src = reportSource();
       return RFIELDS.some(k => (src[k] ?? "") !== $("#" + k).value);
     }
@@ -1986,10 +2008,6 @@
 
     async function commitReport(action, reason, reviewer) {
       if (!selectedUid) return;
-      if (isRelatedPreview()) {
-        toast("Related Exam 판독문은 읽기 전용입니다. 현재 검사로 복귀한 뒤 작성하세요.", "err");
-        return;
-      }
       // 확정은 겹쳐 부르지 않는다. 더블클릭이 만든 판 하나가 더 쌓이는 걸 여기서 막는다.
       if (commitInFlight) return;
       // 서버가 죽었는데 로컬에 확정을 쌓으면, 그건 확정이 아니라 이 브라우저의 메모다.
@@ -2076,18 +2094,16 @@
     function updateReportButtons() {
       const s = cur();
       const rad = KinAuth.has("radiologist");
-      const related = isRelatedPreview();
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
-      const locked = related || !!appState[selectedUid]?.prelimHidden;
+      const locked = !!appState[selectedUid]?.prelimHidden;
       // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
       // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
       for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste"]) {
         const el = $(id);
         if (!el) continue;
         el.disabled = !rad || locked;
-        el.title = related ? "Related Exam 판독문은 읽기 전용입니다"
-          : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+        el.title = locked ? "다른 판독의의 예비 판독(RS: P)입니다"
           : !rad ? "판독의 권한이 필요합니다" : "";
       }
       // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
@@ -2097,8 +2113,7 @@
       }
       // Addendum은 승인된 판독문에만 붙는다
       $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked;
-      $("#b-addendum").title = related ? "Related Exam 판독문은 읽기 전용입니다"
-        : s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
+      $("#b-addendum").title = s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
       /**
        * Prelim은 "아직 확정 안 된 판독을 상급자에게 넘기는" 동작이다.
        * 이미 승인(A)된 것에는 의미가 없고, 이미 P인 것을 다시 넘기면 지정이 덮어써진다.
@@ -2107,8 +2122,7 @@
       const b = $("#b-prelim");
       if (b) {
         b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || !serverMode;
-        b.title = related ? "Related Exam 판독문은 읽기 전용입니다"
-          : !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
+        b.title = !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
           : s?.rs === "P" ? "이미 예비 판독 중입니다"
           : s?.rs === "A" ? "이미 승인된 판독입니다"
           : "상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)";
@@ -2272,7 +2286,7 @@
     // 판독문에 두 글자 이상 쓰면 그때 점유가 시작된다
     ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
       $(sel).addEventListener("input", () => {
-        if (!selectedUid || isRelatedPreview()) return;
+        if (!selectedUid) return;
         const total = $("#findings").value.length + $("#conclusion").value.length + $("#recommendation").value.length;
         if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
       }));
@@ -2425,7 +2439,7 @@
 
     // ── 판독문 이력 ──
     async function showHistory() {
-      const uid = viewingUid();
+      const uid = selectedUid;
       if (!uid) { alert("검사를 선택하세요."); return; }
       const box = $("#hist-body");
       $("#histmodal").classList.add("show");
@@ -2468,7 +2482,6 @@
      */
     function reportWriteBlock() {
       if (!selectedUid) return "검사를 선택하세요";
-      if (isRelatedPreview()) return "Related Exam 판독문은 읽기 전용입니다";
       if (!KinAuth.has("radiologist")) return "판독문 편집은 판독의 권한이 필요합니다";
       if (appState[selectedUid]?.prelimHidden) return "다른 판독의의 예비 판독(RS: P)입니다";
       return null;
@@ -2514,9 +2527,9 @@
       try { $("#findings").value += await navigator.clipboard.readText(); } catch (e) {}
     });
     $("#b-print").addEventListener("click", () => {
-      const uid = viewingUid();
+      const uid = selectedUid;
       if (!uid) return;
-      const s = viewed(); stashReport();
+      const s = cur(); stashReport();
       const r = appState[uid] ?? {};
       const w = window.open("", "_blank");
       if (!w) { toast("인쇄 창을 열 수 없습니다. 팝업 허용 여부를 확인하세요.", "err"); return; }
@@ -2595,12 +2608,13 @@ ${esc($("#recommendation").value)}
       handle.addEventListener("pointerdown", e => {
         if (e.button !== 0) return;
         e.preventDefault();
+        const dragAxis = typeof axis === "function" ? axis() : axis;
         handle.setPointerCapture(e.pointerId);
         handle.classList.add("dragging");
-        document.body.classList.add("resizing", axis === "x" ? "resizing-x" : "resizing-y");
+        document.body.classList.add("resizing", dragAxis === "x" ? "resizing-x" : "resizing-y");
 
         const move = event => {
-          if (event.pointerId === e.pointerId) resize(event);
+          if (event.pointerId === e.pointerId) resize(event, dragAxis);
         };
         const end = event => {
           if (event.pointerId !== e.pointerId) return;
@@ -2617,17 +2631,55 @@ ${esc($("#recommendation").value)}
       });
     }
     const clampPanel = (value, min, max) => Math.max(min, Math.min(max, value));
-    bindPanelResize("#resize-main", "x", e => {
+    let layoutMode = "auto";
+    const portraitLayout = () => document.body.classList.contains("portrait");
+    function applyLayout() {
+      const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
+      document.body.classList.toggle("portrait", portrait);
+      $("#layout-toggle").textContent = {
+        auto: "배치: 자동", portrait: "배치: 세로 고정", landscape: "배치: 가로 고정",
+      }[layoutMode];
+      $("#layout-toggle").setAttribute("aria-label", `화면 배치 ${layoutMode}`);
+      $("#resize-main").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
+      $("#resize-related").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
+      if (portrait) {
+        $(".left").style.width = "";
+        $(".related-p").style.width = "";
+      } else {
+        $(".left").style.height = "";
+        $(".related-p").style.height = "";
+      }
+    }
+    $("#layout-toggle").addEventListener("click", () => {
+      layoutMode = layoutMode === "auto" ? "portrait" : layoutMode === "portrait" ? "landscape" : "auto";
+      applyLayout();
+    });
+    window.addEventListener("resize", () => { if (layoutMode === "auto") applyLayout(); });
+    applyLayout();
+
+    bindPanelResize("#resize-main", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".split").getBoundingClientRect();
-      $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
+      if (axis === "y")
+        $(".left").style.height = clampPanel(e.clientY - box.top, 180, box.height - 420) + "px";
+      else
+        $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
     });
     bindPanelResize("#resize-top", "y", e => {
       const box = $(".right").getBoundingClientRect();
       $(".rw").style.height = clampPanel(e.clientY - box.top, 140, box.height - 266) + "px";
     });
-    bindPanelResize("#resize-related", "x", e => {
+    bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();
-      $(".related-p").style.width = clampPanel(e.clientX - box.left, 220, box.width - 366) + "px";
+      if (axis === "y")
+        $(".related-p").style.height = clampPanel(e.clientY - box.top, 230, box.height - 186) + "px";
+      else
+        $(".related-p").style.width = clampPanel(e.clientX - box.left, 220, box.width - 366) + "px";
+    });
+    bindPanelResize("#resize-prior", "y", e => {
+      const box = $(".related-p").getBoundingClientRect();
+      const list = $(".related-list-pane");
+      list.style.flex = "none";
+      list.style.height = clampPanel(e.clientY - box.top, 100, box.height - 136) + "px";
     });
 
     $("#quick").addEventListener("input", render);
@@ -2798,7 +2850,6 @@ ${esc($("#recommendation").value)}
       if (e.key !== "Enter" || e.isComposing || mode !== "Radiology") return;
       const tr = e.target.closest("tr[data-uid]");
       if (!tr || tr.dataset.uid !== selectedUid) return;
-      if (isRelatedPreview()) showCurrentStudy();
       e.preventDefault();
       $("#findings").focus();
     });
