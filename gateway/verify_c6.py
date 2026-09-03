@@ -1,7 +1,8 @@
-"""Destructive-to-fixtures C-6 verification against the local KIN development stack.
+"""LOCAL DEVELOPMENT ONLY: destructive-to-fixtures C-6 verification.
 
 The script creates isolated Keycloak identities, Gateway volumes, and DICOM fixtures, then
 removes all of them. Generated secrets live only in a temporary .env file and are never printed.
+Never point it at a production realm or a medical-institution Gateway.
 """
 
 from __future__ import annotations
@@ -215,9 +216,15 @@ def audit_once(stack: LiveStack, uid: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="LOCAL DEVELOPMENT ONLY: creates and removes Keycloak and DICOM fixtures",
+    )
     parser.add_argument("--outage-seconds", type=int, default=300)
     parser.add_argument("--large-slices", type=int, default=501)
+    parser.add_argument(
+        "--invariant-smoke", action="store_true",
+        help="run the local-only C-7 KIN_TEST_INGEST=gateway smoke and exit",
+    )
     args = parser.parse_args()
     if args.outage_seconds < 1 or args.large_slices < 1:
         parser.error("durations and slice counts must be positive")
@@ -280,6 +287,31 @@ def main() -> None:
                 time.sleep(1)
             else:
                 raise TimeoutError("gateway containers did not become ready")
+
+            if args.invariant_smoke:
+                smoke_env = {
+                    **process_env,
+                    "KIN_TEST_INGEST": "gateway",
+                    "KIN_TEST_GATEWAY_HOST": "127.0.0.1",
+                    "KIN_TEST_GATEWAY_PORT": str(dicom_port),
+                    "KIN_TEST_GATEWAY_AET": "KINGW",
+                    "KIN_TEST_GATEWAY_INSTITUTION_NAME": "KIN 판독센터",
+                }
+                smoke = run(
+                    [
+                        sys.executable, str(ROOT / "tests" / "invariants_live.py"),
+                        "LiveInvariantTests.test_selected_ingest_reaches_worklist",
+                    ],
+                    env=smoke_env, timeout=300, check=False,
+                )
+                if smoke.returncode:
+                    raise RuntimeError(
+                        "C-7 gateway fixture smoke failed\n" + smoke.stdout + smoke.stderr
+                    )
+                if "Ran 1 test" not in smoke.stdout + smoke.stderr:
+                    raise RuntimeError("C-7 gateway fixture smoke did not execute exactly one test")
+                print("TEST-C-7 KIN_TEST_INGEST=gateway: fixture → KIN worklist PASS")
+                return
 
             # 1) Connected two-stack receive and the late-instance base study.
             late_patient_id = "C6-" + uuid.uuid4().hex[:12]

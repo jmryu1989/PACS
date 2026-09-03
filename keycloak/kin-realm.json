@@ -31,6 +31,10 @@
       {
         "name": "admin",
         "description": "관리자"
+      },
+      {
+        "name": "gateway",
+        "description": "기관 Gateway — 자기 테넌트 DICOM 수신 전용"
       }
     ]
   },
@@ -144,6 +148,43 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "protocol": "openid-connect"
+    },
+    {
+      "clientId": "gw-kin-center",
+      "name": "KIN Gateway template (disabled; provision secret at deployment)",
+      "enabled": false,
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "kin-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "kin-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "kin-institution-groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "claim.name": "groups"
+          }
+        }
+      ]
     }
   ],
   "users": [

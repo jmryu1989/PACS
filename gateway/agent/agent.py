@@ -21,11 +21,15 @@ from typing import Any, Iterable
 import requests
 
 
-MANAGED_PHASES = ("pending", "announcing", "sending", "retry", "complete")
+MANAGED_PHASES = ("pending", "announcing", "sending", "retry", "failed", "complete")
 
 
 class GatewayError(RuntimeError):
     """An error safe to persist and print (it must not contain response bodies)."""
+
+
+class PermanentGatewayError(GatewayError):
+    """A study cannot succeed by retrying the same bytes and needs operator action."""
 
 
 def log(event: str, *, uid: str | None = None, **fields: Any) -> None:
@@ -140,7 +144,7 @@ class Queue:
     def due(self) -> sqlite3.Row | None:
         return self.db.execute("""
           SELECT * FROM studies
-          WHERE phase <> 'complete' AND next_at <= ?
+          WHERE phase NOT IN ('complete', 'failed') AND next_at <= ?
           ORDER BY updated_at, uid LIMIT 1
         """, (time.time(),)).fetchone()
 
@@ -187,6 +191,13 @@ class Queue:
                 last_error=NULL, updated_at=? WHERE uid=?
             """, (time.time(), uid))
 
+    def fail(self, uid: str, reason: str) -> None:
+        with self.db:
+            self.db.execute("""
+              UPDATE studies SET phase='failed', next_at=0, last_error=?, updated_at=?
+              WHERE uid=?
+            """, (reason[:160], time.time(), uid))
+
     def retry(self, uid: str, reason: str, base: float, maximum: float) -> tuple[int, float]:
         row = self.db.execute("SELECT attempt FROM studies WHERE uid=?", (uid,)).fetchone()
         attempt = int(row["attempt"] if row else 0) + 1
@@ -205,9 +216,13 @@ class Queue:
         rows = [{
             "uid": row["uid"], "phase": row["phase"], "batchIndex": row["batch_index"],
             "successfulSops": len(json.loads(row["successful_sops"])), "attempt": row["attempt"],
+            "lastError": row["last_error"],
         } for row in self.db.execute("SELECT * FROM studies ORDER BY updated_at, uid")]
         return {
-            "pending": sum(count for phase, count in counts.items() if phase != "complete"),
+            "pending": sum(
+                count for phase, count in counts.items() if phase not in {"complete", "failed"}
+            ),
+            "failed": counts.get("failed", 0),
             "complete": counts.get("complete", 0),
             "rows": rows,
         }
@@ -375,7 +390,7 @@ def plan_batches(instances: list[dict[str, Any]], budget: int) -> list[list[dict
     for item in instances:
         estimated = int(item["size"]) + 512
         if estimated + 128 > budget:
-            raise GatewayError("single DICOM instance exceeds byte budget")
+            raise PermanentGatewayError("single DICOM instance exceeds byte budget")
         if current and used + estimated > budget:
             batches.append(current)
             current = []
@@ -492,6 +507,11 @@ class Agent:
                     uid = str(row["uid"])
                     try:
                         self.process(row)
+                    except PermanentGatewayError as error:
+                        reason = str(error)
+                        self.queue.fail(uid, reason)
+                        log("study.failed", uid=uid, error=reason)
+                        continue
                     except Exception as error:
                         reason = str(error) if isinstance(error, GatewayError) else type(error).__name__
                         attempt, delay = self.queue.retry(

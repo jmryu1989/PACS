@@ -36,6 +36,14 @@ python3 import_public_samples.py --institution "한림병원"
 
 로그인 계정은 관리자에게 문의하세요.
 
+| 인증 주체 | ID | 용도 |
+|---|---|---|
+| 사람 | 관리자 발급 계정 | 판독·검사 확인·회원 관리 |
+| Gateway 서비스 계정 | `gw-<institutionId>` | 자기 기관의 announce와 지정형 STOW만 |
+
+Gateway는 사람 계정이 아니다. Keycloak client credentials와 기관 그룹 하나, `gateway` 역할
+하나만 사용하며 시크릿은 저장소가 아닌 배포 환경에서 주입한다.
+
 기관이 다르면 **서로의 검사가 보이지 않는다.** 원격판독으로 의뢰한 검사 하나만 넘어간다.
 `admin` 롤도 이 경계는 못 넘는다 (자세한 건 `keycloak/README.md`).
 
@@ -66,6 +74,10 @@ sudo test -s /etc/letsencrypt/live/pacs.koreaimagingnetwork.com/fullchain.pem
 sudo test -s /etc/letsencrypt/live/pacs.koreaimagingnetwork.com/privkey.pem
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
+
+운영의 DICOM 4242 포트는 Gateway 경로 실측 뒤에만 닫는다. 먼저 원내 장비 → Gateway → KIN
+워크리스트 수신을 확인하고, 그 다음 production override를 적용한 뒤 외부 호스트에서 4242 TCP
+연결이 거부되는지 확인한다. 로컬 실습 compose의 4242는 학습용으로 유지된다.
 
 최초 발급 뒤에는 nginx가 `/.well-known/acme-challenge/`를 서빙하므로 갱신만 webroot로 한다.
 갱신 성공 뒤에는 새 인증서를 읽도록 proxy를 reload한다.

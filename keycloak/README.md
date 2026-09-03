@@ -14,8 +14,8 @@
 | 항목 | 값 |
 |---|---|
 | 렐름 | `kin` |
-| 클라이언트 | `kin-web` (public, Authorization Code + PKCE S256) |
-| 롤 | `radiologist`, `technician`, `admin` |
+| 클라이언트 | `kin-web` (public, Authorization Code + PKCE S256), `gw-kin-center` (비활성 Gateway 템플릿) |
+| 롤 | `radiologist`, `technician`, `admin`, `gateway` |
 | 토큰 수명 | access 30분 / 세션 유휴 4시간 / 최대 12시간 |
 | 보호 | 비밀번호 최소 8자리(조합 강제 없음), 로그인 5회 실패 시 잠금(brute force) |
 
@@ -105,6 +105,13 @@ API의 `AuthGuard`가 그 값을 `req.institution`으로 꺼내고, 서비스 �
 
 소속 그룹이 없는 계정은 **빈 목록이 아니라 403**을 받는다. 매퍼 설정이 틀렸을 때
 "검사가 하나도 없네"로 보이는 것이 가장 나쁘다.
+
+## Gateway 서비스 계정
+
+렐름 JSON의 `gw-kin-center`는 구조를 고정하는 **비활성 템플릿**이며 시크릿이 없다. 실제 설치
+때 `gw-<institutionId>` confidential client를 별도로 만들고 client credentials를 켠 뒤,
+서비스 계정에 해당 기관 그룹 하나와 realm 역할 `gateway` 하나만 부여한다. 사람 역할을 섞거나
+시크릿을 렐름 JSON에 기록하지 않는다.
 
 ## 서비스 계정 (kin-api) — 사용자 조회·회원 관리
 

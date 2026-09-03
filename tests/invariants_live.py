@@ -22,11 +22,12 @@ import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import (
@@ -219,6 +220,9 @@ class LiveStack:
         self.user_ids: dict[str, str] = {}
         self.test_client_id = "kin-invariants-" + uuid.uuid4().hex[:12]
         self.test_client_uuid: str | None = None
+        self.service_clients: dict[str, dict[str, str]] = {}
+        self.service_tokens: dict[str, str] = {}
+        self.created_gateway_role = False
         self.admin_token: str | None = None
         self._load_local_configuration()
 
@@ -313,6 +317,119 @@ class LiveStack:
             if added.status != 201:
                 raise RuntimeError(f"로컬 시험 클라이언트 매퍼 생성 실패: {added.status} {added.text}")
 
+    def service_identity(self, logical: str) -> dict[str, str]:
+        if logical in self.service_clients:
+            return self.service_clients[logical]
+        definitions = {
+            "gateway": ("gw-kin-center", ["gateway"], ["kin-center"]),
+            "gateway-no-role": ("gw-kin-center-norole", [], ["kin-center"]),
+            "gateway-mixed": ("gw-kin-center-mixed", ["gateway", "radiologist"], ["kin-center"]),
+            "gateway-wrong-azp": ("service-kin-center", ["gateway"], ["kin-center"]),
+        }
+        if logical not in definitions:
+            raise RuntimeError(f"정의되지 않은 시험 서비스 신원: {logical}")
+
+        role = self.kc_admin("GET", "/roles/gateway")
+        if role.status == 404:
+            created_role = self.kc_admin("POST", "/roles", {
+                "name": "gateway", "description": "temporary invariant gateway role",
+            })
+            if created_role.status != 201:
+                raise RuntimeError(f"시험 gateway 역할 생성 실패: {created_role.status}")
+            self.created_gateway_role = True
+        elif role.status != 200:
+            raise RuntimeError(f"시험 gateway 역할 조회 실패: {role.status}")
+
+        prefix, roles, groups = definitions[logical]
+        client_id = f"{prefix}-invariant-{uuid.uuid4().hex[:10]}"
+        secret = uuid.uuid4().hex + uuid.uuid4().hex
+        created = self.kc_admin("POST", "/clients", {
+            "clientId": client_id,
+            "name": f"KIN invariant {logical}",
+            "enabled": True,
+            "publicClient": False,
+            "secret": secret,
+            "standardFlowEnabled": False,
+            "directAccessGrantsEnabled": False,
+            "serviceAccountsEnabled": True,
+            "protocol": "openid-connect",
+        })
+        if created.status != 201 or not created.body:
+            raise RuntimeError(f"시험 서비스 클라이언트 생성 실패: {created.status}")
+        client_uuid = str(created.body)
+        identity = {"id": client_uuid, "client_id": client_id, "secret": secret}
+        self.service_clients[logical] = identity
+
+        mappers = (
+            {
+                "name": "kin-api-audience", "protocol": "openid-connect",
+                "protocolMapper": "oidc-audience-mapper", "consentRequired": False,
+                "config": {
+                    "included.custom.audience": "kin-api", "id.token.claim": "false",
+                    "access.token.claim": "true",
+                },
+            },
+            {
+                "name": "kin-institution-groups", "protocol": "openid-connect",
+                "protocolMapper": "oidc-group-membership-mapper", "consentRequired": False,
+                "config": {
+                    "full.path": "false", "id.token.claim": "false",
+                    "access.token.claim": "true", "userinfo.token.claim": "false",
+                    "claim.name": "groups",
+                },
+            },
+        )
+        for mapper in mappers:
+            added = self.kc_admin(
+                "POST", f"/clients/{quote(client_uuid)}/protocol-mappers/models", mapper,
+            )
+            if added.status != 201:
+                raise RuntimeError(f"시험 서비스 매퍼 생성 실패: {added.status}")
+
+        service = self.kc_admin("GET", f"/clients/{quote(client_uuid)}/service-account-user")
+        if service.status != 200 or not service.body.get("id"):
+            raise RuntimeError(f"시험 서비스 계정 조회 실패: {service.status}")
+        service_id = quote(str(service.body["id"]))
+        for group_name in groups:
+            found = self.kc_admin("GET", "/groups?search=" + quote(group_name))
+            if found.status != 200 or not isinstance(found.body, list):
+                raise RuntimeError(f"시험 서비스 그룹 조회 실패: {group_name}/{found.status}")
+            exact = [item for item in found.body if item.get("name") == group_name]
+            if len(exact) != 1:
+                raise RuntimeError(f"시험 서비스 그룹 조회 실패: {group_name}")
+            joined = self.kc_admin(
+                "PUT", f"/users/{service_id}/groups/{quote(str(exact[0]['id']))}",
+            )
+            if joined.status != 204:
+                raise RuntimeError(f"시험 서비스 그룹 설정 실패: {joined.status}")
+        for role_name in roles:
+            found = self.kc_admin("GET", "/roles/" + quote(role_name))
+            if found.status != 200:
+                raise RuntimeError(f"시험 서비스 역할 조회 실패: {role_name}/{found.status}")
+            assigned = self.kc_admin(
+                "POST", f"/users/{service_id}/role-mappings/realm", [found.body],
+            )
+            if assigned.status != 204:
+                raise RuntimeError(f"시험 서비스 역할 설정 실패: {assigned.status}")
+        return identity
+
+    def service_token(self, logical: str) -> str:
+        if logical in self.service_tokens:
+            return self.service_tokens[logical]
+        identity = self.service_identity(logical)
+        data = urlencode({
+            "client_id": identity["client_id"], "client_secret": identity["secret"],
+            "grant_type": "client_credentials",
+        }).encode("ascii")
+        request = Request(
+            self.keycloak, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        )
+        with self._open(request) as response:
+            token = str(json.loads(response.read().decode("utf-8"))["access_token"])
+        self.service_tokens[logical] = token
+        return token
+
     def create_test_identity(self, logical: str, roles: list[str], group: str) -> str:
         if logical in self.user_ids:
             return self.user_ids[logical]
@@ -378,6 +495,8 @@ class LiveStack:
         return self.usernames.get(logical, logical)
 
     def cleanup_test_identities(self) -> None:
+        if self.user_ids or self.test_client_uuid or self.service_clients or self.created_gateway_role:
+            self._admin_login()
         failures = []
         for logical, user_id in list(self.user_ids.items())[::-1]:
             deleted = self.kc_admin("DELETE", f"/users/{quote(user_id)}")
@@ -391,6 +510,17 @@ class LiveStack:
             if deleted.status not in (204, 404):
                 failures.append(f"클라이언트: {deleted.status}")
         self.test_client_uuid = None
+        for logical, identity in list(self.service_clients.items())[::-1]:
+            deleted = self.kc_admin("DELETE", f"/clients/{quote(identity['id'])}")
+            if deleted.status not in (204, 404):
+                failures.append(f"서비스 클라이언트 {logical}: {deleted.status}")
+        self.service_clients.clear()
+        self.service_tokens.clear()
+        if self.created_gateway_role:
+            deleted = self.kc_admin("DELETE", "/roles/gateway")
+            if deleted.status not in (204, 404):
+                failures.append(f"gateway 역할: {deleted.status}")
+        self.created_gateway_role = False
         self.tokens.clear()
         if failures:
             raise RuntimeError("로컬 시험 계정 정리 실패: " + "; ".join(failures))
@@ -403,6 +533,28 @@ class LiveStack:
         if user:
             headers["Authorization"] = "Bearer " + self.token(user)
         request = Request(self.api + path, data=data, headers=headers, method=method)
+        try:
+            with self._open(request) as response:
+                payload, text = _json_or_text(response.read())
+                return HttpResult(response.status, payload, text)
+        except HTTPError as error:
+            payload, text = _json_or_text(error.read())
+            return HttpResult(error.code, payload, text)
+
+    def bearer_request(
+        self, method: str, path: str, token: str, body: Any = None,
+        *, base: str | None = None, headers: dict[str, str] | None = None,
+    ) -> HttpResult:
+        request_headers = {"Accept": "application/json", "Authorization": "Bearer " + token}
+        request_headers.update(headers or {})
+        if isinstance(body, bytes):
+            data = body
+        elif body is None:
+            data = None
+        else:
+            data = json.dumps(body).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+        request = Request((base or self.api) + path, data=data, headers=request_headers, method=method)
         try:
             with self._open(request) as response:
                 payload, text = _json_or_text(response.read())
@@ -460,6 +612,12 @@ class LiveStack:
             payload, text = _json_or_text(error.read())
             return HttpResult(error.code, payload, text)
 
+    def orthanc_bytes(self, path: str) -> bytes:
+        auth = base64.b64encode(f"{self.orthanc_user}:{self.orthanc_password}".encode()).decode()
+        request = Request(self.orthanc + path, headers={"Authorization": "Basic " + auth})
+        with urlopen(request, timeout=30) as response:
+            return response.read()
+
     def dicom_request(self, path: str, user: str | None = None) -> HttpResult:
         """정식 프록시의 DICOM 경로. 사용자 지정 시 쿠키가 아닌 Bearer로 검증한다."""
         headers = {"Accept": "*/*"}
@@ -492,15 +650,34 @@ class LiveStack:
             raise RuntimeError(f"Orthanc series에 instance가 없습니다: {series.status} {series.text}")
         return series.body["Instances"][0]
 
-    def create_fixture(self, institution: str = "한림병원") -> Fixture:
-        run = uuid.uuid4().hex
-        owner = "jmryu" if institution == "한림병원" else "kdoctor"
-        patient_id = "INV-" + run[:16]
+    def fixture_command(self, institution: str, name: str, patient_id: str) -> list[str]:
         command = [
             sys.executable, str(ROOT / "scripts" / "send_cstore.py"),
-            "--institution", institution, "--name", f"INVARIANT^{run[:10]}",
+            "--institution", institution, "--name", name,
             "--id", patient_id, "--desc", "Invariant route fixture", "--slices", "1",
         ]
+        mode = os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower()
+        if mode not in {"cstore", "gateway"}:
+            raise RuntimeError("KIN_TEST_INGEST는 cstore 또는 gateway여야 합니다")
+        if mode == "gateway":
+            host = os.environ.get("KIN_TEST_GATEWAY_HOST", "").strip()
+            if not host:
+                raise RuntimeError("gateway fixture에는 KIN_TEST_GATEWAY_HOST가 필요합니다")
+            try:
+                port = int(os.environ.get("KIN_TEST_GATEWAY_PORT", "4243"))
+            except ValueError:
+                raise RuntimeError("KIN_TEST_GATEWAY_PORT는 정수여야 합니다") from None
+            called_aet = os.environ.get("KIN_TEST_GATEWAY_AET", "KINGW").strip() or "KINGW"
+            command += ["--host", host, "--port", str(port), "--called-aet", called_aet]
+        return command
+
+    def create_fixture(
+        self, institution: str = "한림병원", *, patient_id: str | None = None,
+    ) -> Fixture:
+        run = uuid.uuid4().hex
+        owner = "jmryu" if institution == "한림병원" else "kdoctor"
+        patient_id = "INV-" + run[:16] if patient_id is None else patient_id
+        command = self.fixture_command(institution, f"INVARIANT^{run[:10]}", patient_id)
         completed = subprocess.run(
             command, cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=120,
@@ -514,7 +691,9 @@ class LiveStack:
         fixture = Fixture(uid, patient_id, institution, owner, "REPORT-" + run)
         self.active[uid] = fixture
         try:
-            deadline = time.monotonic() + 20
+            mode = os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower()
+            wait_seconds = 90 if mode == "gateway" else 20
+            deadline = time.monotonic() + wait_seconds
             while time.monotonic() < deadline:
                 listed = self.request("GET", "/studies", owner)
                 if listed.status == 200 and any(s.get("uid") == uid for s in listed.body.get("studies", [])):
@@ -590,8 +769,10 @@ class LiveStack:
             raise RuntimeError("픽스처 일괄 정리 실패: " + "; ".join(failures))
 
     @contextmanager
-    def fixture(self, institution: str = "한림병원") -> Iterator[Fixture]:
-        fixture = self.create_fixture(institution)
+    def fixture(
+        self, institution: str = "한림병원", *, patient_id: str | None = None,
+    ) -> Iterator[Fixture]:
+        fixture = self.create_fixture(institution, patient_id=patient_id)
         try:
             yield fixture
         finally:
@@ -1096,6 +1277,205 @@ class LiveInvariantTests(unittest.TestCase):
         self.assert_status(result, 201)
         self.assertEqual(result.body.get("rs"), "P")
         return result
+
+    @staticmethod
+    def multipart_dicom(content: bytes) -> tuple[bytes, str]:
+        boundary = "kin-invariant-" + uuid.uuid4().hex
+        body = (
+            f"--{boundary}\r\nContent-Type: application/dicom\r\n\r\n".encode("ascii") +
+            content + f"\r\n--{boundary}--\r\n".encode("ascii")
+        )
+        return body, f'multipart/related; type="application/dicom"; boundary={boundary}'
+
+    def test_connect_source_patient_key_is_tenant_scoped_and_empty_safe(self) -> None:
+        patient_id = "INV-SHARED-" + uuid.uuid4().hex[:10]
+        with ExitStack() as fixtures:
+            hallym_a = fixtures.enter_context(self.stack.fixture(patient_id=patient_id))
+            hallym_b = fixtures.enter_context(self.stack.fixture(patient_id=patient_id))
+            kin = fixtures.enter_context(self.stack.fixture("KIN 판독센터", patient_id=patient_id))
+            empty = fixtures.enter_context(self.stack.fixture("KIN 판독센터", patient_id=""))
+
+            for fixture in (hallym_a, hallym_b):
+                shared = self.stack.request(
+                    "PATCH", f"/studies/{quote(fixture.uid)}", fixture.owner_user,
+                    {"ts": "wait", "teleTo": "kin-center"},
+                )
+                self.assertEqual(shared.status, 200, shared.text)
+
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            self.assertEqual(listed.status, 200, listed.text)
+            rows = {item["uid"]: item for item in listed.body.get("studies", [])}
+            for fixture in (hallym_a, hallym_b, kin, empty):
+                self.assertIn(fixture.uid, rows)
+            self.assertEqual(rows[hallym_a.uid].get("sourcePatientKey"), f"hallym|{patient_id}")
+            self.assertEqual(rows[hallym_b.uid].get("sourcePatientKey"), f"hallym|{patient_id}")
+            self.assertEqual(rows[kin.uid].get("sourcePatientKey"), f"kin-center|{patient_id}")
+            self.assertIsNone(rows[empty.uid].get("sourcePatientKey"))
+            same_source = [
+                row for row in rows.values()
+                if row.get("sourcePatientKey") == f"hallym|{patient_id}"
+            ]
+            self.assertEqual(len(same_source), 2, "단일 기관의 기존 prior 묶음이 달라졌습니다")
+
+    def test_gateway_adjacent_identities_are_rejected(self) -> None:
+        for logical in ("gateway-no-role", "gateway-mixed", "gateway-wrong-azp"):
+            with self.subTest(identity=logical):
+                result = self.stack.bearer_request(
+                    "GET", "/studies", self.stack.service_token(logical),
+                )
+                self.assertEqual(result.status, 403, result.text)
+                self.assertEqual(result.body.get("code"), "GATEWAY_IDENTITY_INVALID", result.text)
+
+    def test_gateway_allowed_surface_stays_minimal(self) -> None:
+        token = self.stack.service_token("gateway")
+        uid = "2.25." + str(uuid.uuid4().int)
+        studies = self.stack.bearer_request("GET", "/studies", token)
+        self.assertEqual(studies.status, 403, studies.text)
+        wado = self.stack.bearer_request(
+            "GET", f"/dicom-web/studies/{uid}/metadata", token, base=self.stack.proxy,
+        )
+        self.assertEqual(wado.status, 403, wado.text)
+        human = self.stack.request(
+            "POST", "/gateway/announce", "kdoctor", {"studyUid": uid},
+        )
+        self.assertEqual(human.status, 403, human.text)
+        health = self.stack.bearer_request("GET", "/health", token)
+        self.assertEqual(health.status, 200, health.text)
+
+    def test_gateway_announce_is_idempotent_and_preserves_dicom_origin(self) -> None:
+        token = self.stack.service_token("gateway")
+        uid = "2.25." + str(uuid.uuid4().int)
+        self.stack.active[uid] = Fixture(uid, "", "KIN 판독센터", "kdoctor", "")
+        first = self.stack.bearer_request(
+            "POST", "/gateway/announce", token,
+            {"studyUid": uid, "institutionNameTag": "한림병원"},
+        )
+        second = self.stack.bearer_request(
+            "POST", "/gateway/announce", token,
+            {"studyUid": uid, "institutionNameTag": "한림병원"},
+        )
+        self.assertEqual(first.status, 200, first.text)
+        self.assertEqual(second.status, 200, second.text)
+        self.assertEqual(first.body.get("origin"), "gateway")
+        audits = self.stack.request("GET", "/audit?uid=" + quote(uid), "kdoctor")
+        announced = [row for row in audits.body if row.get("action") == "study.announce"]
+        self.assertEqual(len(announced), 1, audits.text)
+        self.assertIn("tagMismatch", json.dumps(announced[0], ensure_ascii=False))
+
+        with self.stack.fixture("KIN 판독센터") as existing:
+            preserved = self.stack.bearer_request(
+                "POST", "/gateway/announce", token, {"studyUid": existing.uid},
+            )
+            self.assertEqual(preserved.status, 200, preserved.text)
+            self.assertEqual(preserved.body.get("origin"), "dicom")
+
+        with self.stack.fixture() as foreign:
+            conflict = self.stack.bearer_request(
+                "POST", "/gateway/announce", token, {"studyUid": foreign.uid},
+            )
+            self.assertEqual(conflict.status, 409, conflict.text)
+            self.assertEqual(conflict.body.get("code"), "STUDY_OWNERSHIP_CONFLICT", conflict.text)
+
+    def test_gateway_stow_requires_announce_and_matching_uid(self) -> None:
+        token = self.stack.service_token("gateway")
+        with self.stack.fixture() as source:
+            instance_id = self.stack.first_instance_id(source.uid)
+            content = self.stack.orthanc_bytes(f"/instances/{quote(instance_id)}/file")
+            body, content_type = self.multipart_dicom(content)
+            unannounced_uid = "2.25." + str(uuid.uuid4().int)
+            unannounced = self.stack.bearer_request(
+                "POST", f"/dicom-web/studies/{unannounced_uid}", token, body,
+                base=self.stack.proxy,
+                headers={"Content-Type": content_type, "Accept": "application/dicom+json"},
+            )
+            self.assertEqual(unannounced.status, 403, unannounced.text)
+            uidless = self.stack.bearer_request(
+                "POST", "/dicom-web/studies", token, body, base=self.stack.proxy,
+                headers={"Content-Type": content_type, "Accept": "application/dicom+json"},
+            )
+            self.assertEqual(uidless.status, 403, uidless.text)
+
+            announced_uid = "2.25." + str(uuid.uuid4().int)
+            self.stack.active[announced_uid] = Fixture(
+                announced_uid, "", "KIN 판독센터", "kdoctor", "",
+            )
+            announced = self.stack.bearer_request(
+                "POST", "/gateway/announce", token, {"studyUid": announced_uid},
+            )
+            self.assertEqual(announced.status, 200, announced.text)
+            mismatch = self.stack.bearer_request(
+                "POST", f"/dicom-web/studies/{announced_uid}", token, body,
+                base=self.stack.proxy,
+                headers={"Content-Type": content_type, "Accept": "application/dicom+json"},
+            )
+            self.assertEqual(mismatch.status, 409, mismatch.text)
+            self.assertIn("00081198", mismatch.text)
+
+    def test_gateway_agent_queue_and_batch_contract(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "gateway" / "agent" / "test_agent.py")],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("Ran 5 tests", completed.stderr + completed.stdout)
+
+    def test_production_gateway_contract_is_declared(self) -> None:
+        completed = subprocess.run(
+            [
+                "docker", "compose", "-f", "docker-compose.yml", "-f",
+                "docker-compose.prod.yml", "config", "--format", "json",
+            ],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        rendered = json.loads(completed.stdout)
+        ports = rendered["services"]["orthanc"].get("ports", [])
+        self.assertFalse(
+            any(str(port.get("target")) == "4242" or str(port.get("published")) == "4242"
+                for port in ports),
+            "production compose가 클라우드 Orthanc 4242를 다시 게시합니다",
+        )
+
+        realm = json.loads((ROOT / "keycloak" / "kin-realm.json").read_text(encoding="utf-8"))
+        self.assertIn("gateway", {role["name"] for role in realm["roles"]["realm"]})
+        clients = [item for item in realm["clients"] if item.get("clientId") == "gw-kin-center"]
+        self.assertEqual(len(clients), 1)
+        self.assertNotIn("secret", clients[0], "Gateway 시크릿을 렐름 JSON에 커밋했습니다")
+        self.assertFalse(clients[0].get("enabled"), "시크릿 없는 Gateway 템플릿은 활성화하면 안 됩니다")
+
+        page = (ROOT / "worklist-v0" / "hpacs-lite" / "main.html").read_text(encoding="utf-8")
+        self.assertRegex(page, r"\.userfilter\s*\{[^}]*flex-wrap:\s*wrap")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        gateway_readme = (ROOT / "gateway" / "README.md").read_text(encoding="utf-8")
+        self.assertIn("gw-<institutionId>", readme)
+        self.assertIn("Phase 1 지원 범위는 CT", gateway_readme)
+        self.assertIn("로컬 개발 스택 전용", gateway_readme)
+
+        with patch.dict(os.environ, {
+            "KIN_TEST_INGEST": "gateway", "KIN_TEST_GATEWAY_HOST": "gateway.test",
+            "KIN_TEST_GATEWAY_PORT": "14243", "KIN_TEST_GATEWAY_AET": "KINGW",
+        }):
+            command = self.stack.fixture_command("KIN 판독센터", "INVARIANT^MODE", "INV-MODE")
+        self.assertEqual(command[command.index("--host") + 1], "gateway.test")
+        self.assertEqual(command[command.index("--port") + 1], "14243")
+        self.assertEqual(command[command.index("--called-aet") + 1], "KINGW")
+
+    def test_selected_ingest_reaches_worklist(self) -> None:
+        mode = os.environ.get("KIN_TEST_INGEST", "cstore").strip().lower()
+        institution = (
+            os.environ.get("KIN_TEST_GATEWAY_INSTITUTION_NAME", "").strip()
+            if mode == "gateway" else "한림병원"
+        )
+        if mode == "gateway" and not institution:
+            self.fail("gateway smoke에는 KIN_TEST_GATEWAY_INSTITUTION_NAME이 필요합니다")
+        with self.stack.fixture(institution) as fixture:
+            listed = self.stack.request("GET", "/studies", fixture.owner_user)
+            self.assertEqual(listed.status, 200, listed.text)
+            row = next(
+                (item for item in listed.body.get("studies", []) if item.get("uid") == fixture.uid),
+                None,
+            )
+            self.assertIsNotNone(row, "선택한 fixture 수신 경로가 워크리스트까지 이어지지 않았습니다")
 
     def call_report_route(
         self, route: Route, fixture: Fixture, user: str, base_version: int,

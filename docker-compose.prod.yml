@@ -21,7 +21,6 @@ services:
 
   orthanc:
     ports: !override
-      - "127.0.0.1:4242:4242"
       - "127.0.0.1:8042:8042"
     logging: *bounded-logging
 
