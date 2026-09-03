@@ -445,7 +445,7 @@ export class PacsService implements OnModuleInit {
         acc: OrthancService.tag(st, '00080050'),
         id: patientId,
         // 화면 오버레이가 PatientID를 바꿔도 Related의 기관 경계는 원본 DICOM 값에 남는다.
-        sourcePatientKey: s.institutionId == null ? null : `${s.institutionId}|${patientId}`,
+        sourcePatientKey: s.institutionId == null || !patientId ? null : `${s.institutionId}|${patientId}`,
         name: OrthancService.tag(st, '00100010').replace(/\^/g, ' '),
         birth, date,
         sex: OrthancService.tag(st, '00100040'),
