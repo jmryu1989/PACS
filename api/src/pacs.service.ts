@@ -437,12 +437,15 @@ export class PacsService implements OnModuleInit {
 
       const birth = OrthancService.tag(st, '00100030');
       const date = OrthancService.tag(st, '00080020');
+      const patientId = OrthancService.tag(st, '00100020');
       out.push({
         uid,
         count: +OrthancService.tag(st, '00201208') || 0,
         series: +OrthancService.tag(st, '00201206') || 0,
         acc: OrthancService.tag(st, '00080050'),
-        id: OrthancService.tag(st, '00100020'),
+        id: patientId,
+        // 화면 오버레이가 PatientID를 바꿔도 Related의 기관 경계는 원본 DICOM 값에 남는다.
+        sourcePatientKey: s.institutionId == null ? null : `${s.institutionId}|${patientId}`,
         name: OrthancService.tag(st, '00100010').replace(/\^/g, ' '),
         birth, date,
         sex: OrthancService.tag(st, '00100040'),

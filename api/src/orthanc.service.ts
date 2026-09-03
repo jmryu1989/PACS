@@ -40,13 +40,13 @@ export class OrthancService {
   /**
    * QIDO-RS 검사 목록.
    *
-   * includefield에 00080080(InstitutionName)이 들어 있는 것이 이번 작업의 핵심이다.
-   * QIDO는 기본 응답에 이 태그를 넣어주지 않는다 — 명시하지 않으면 모든 검사의
-   * 기관이 조용히 "미배정"이 된다.
+   * 기관과 환자 키의 원본 태그를 includefield에 명시한다. Orthanc가 지금은 PatientID를
+   * 기본 응답에 주더라도 그 동작에 기대면 업그레이드 뒤 Related 경계가 조용히 바뀔 수 있다.
+   * InstitutionName은 명시하지 않으면 모든 검사가 "미배정"이 된다.
    */
   studies(): Promise<any[]> {
     return this.get(
-      '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080',
+      '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080,00100020',
     );
   }
 

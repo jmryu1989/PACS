@@ -1184,7 +1184,7 @@
       return applyState({
         uid: s.uid, pf: "·",
         count: s.count, series: s.series, acc: s.acc,
-        id: s.id, name: s.name,
+        id: s.id, name: s.name, sourcePatientKey: s.sourcePatientKey,
         age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
         birth: fmtD(s.birth), sex: s.sex,
         modality: s.modality, desc: s.desc, date: fmtD(s.date),
@@ -1457,12 +1457,12 @@
         </table>` : "No clinical information provided.";
     }
 
-    // Related Exam: PatientID가 같은 "다른" 검사만. 현재 검사는 복귀 버튼으로 돌아간다.
+    // Related Exam: 서버가 원본 기관+PatientID로 만든 키가 같은 "다른" 검사만.
     function renderRelated() {
       const s = cur();
       let rel = [];
       if (s) {
-        rel = studies.filter(x => x.id === s.id && x.uid !== s.uid);
+        rel = studies.filter(x => s.sourcePatientKey && x.sourcePatientKey === s.sourcePatientKey && x.uid !== s.uid);
         rel = [...rel].sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid));
       }
       $("#b-related-current").style.display = isRelatedPreview() ? "" : "none";
@@ -1771,7 +1771,8 @@
     async function previewRelated(uid) {
       const current = cur();
       const target = studies.find(s => s.uid === uid);
-      if (!current || !target || target.uid === current.uid || target.id !== current.id) return;
+      if (!current || !target || target.uid === current.uid || !current.sourcePatientKey ||
+          target.sourcePatientKey !== current.sourcePatientKey) return;
       const currentUid = selectedUid;
       const seq = ++relatedSelectSeq;
       if (offline && reportDirty()) {
