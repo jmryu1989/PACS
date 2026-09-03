@@ -10,6 +10,7 @@ export const Public = () => SetMetadata('public', true);
 
 type MemberState = 'PENDING' | 'APPROVED' | 'INVALID';
 const APP_ROLES = new Set(['radiologist', 'technician', 'admin']);
+const KIN_ROLES = new Set([...APP_ROLES, 'gateway']);
 
 /** 회원콘솔과 가드가 공유하는 두 축 중 승인 상태의 단일 판정표. */
 export function memberState(groups: string[], roles: string[]): MemberState {
@@ -46,6 +47,7 @@ export class AuthGuard implements CanActivate {
       req.actor = req.headers['x-kin-user'] || 'dev';
       req.sub = req.headers['x-kin-sub'] || 'dev';
       req.roles = ['radiologist', 'technician', 'admin'];
+      req.kind = 'member';
       // 인증이 꺼져 있으면 기관도 헤더로 흉내낸다. 기본값을 주는 이유는
       // 이 모드가 이미 "아무나 아무거나"이기 때문 — 여기서만 기관을 비워두면
       // 진짜 경계 코드와 다른 두 번째 경로가 생긴다.
@@ -93,6 +95,33 @@ export class AuthGuard implements CanActivate {
     req.groups = groups;
     req.institution = groups.length === 1 ? groups[0] : null;
     req.authMethod = method;
+
+    /**
+     * Gateway는 회원의 특수 역할이 아니라 client-credentials 신원이다.
+     * realm_access에는 Keycloak 기본 역할도 섞이므로 KIN이 관리하는 네 역할만 비교한다.
+     * gw-* 또는 gateway 역할 어느 한쪽이라도 보이면 '비슷한 회원'으로 흘려보내지 않고,
+     * 네 조건이 전부 맞는지 여기서 닫힌 판정을 한다.
+     */
+    const kinRoles = req.roles.filter((role: string) => KIN_ROLES.has(role));
+    const azp = typeof payload.azp === 'string' ? payload.azp : '';
+    const gatewayAdjacent = azp.startsWith('gw-') || kinRoles.includes('gateway');
+    if (gatewayAdjacent) {
+      const validGateway = method === 'bearer' && azp.startsWith('gw-') && groups.length === 1 &&
+        kinRoles.length === 1 && kinRoles[0] === 'gateway';
+      if (!validGateway)
+        throw new ForbiddenException({ code: 'GATEWAY_IDENTITY_INVALID' });
+
+      req.kind = 'gateway';
+      const path = String(req.originalUrl ?? '').split('?')[0];
+      const originalMethod = String(req.headers['x-original-method'] ?? '').toUpperCase();
+      const gatewayApi = path.startsWith('/api/gateway/');
+      const stowAuthorization = path === '/api/authz/dicom' && originalMethod === 'POST';
+      if (!gatewayApi && !stowAuthorization)
+        throw new ForbiddenException('게이트웨이에 허용되지 않는 경로입니다');
+      return true;
+    }
+
+    req.kind = 'member';
 
     const state = memberState(groups, req.roles);
     req.memberState = state;

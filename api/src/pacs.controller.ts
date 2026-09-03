@@ -27,6 +27,7 @@ const caller = (req: any): Caller => ({
   actor: req.actor,
   roles: req.roles ?? [],
   institution: req.institution ?? null,
+  kind: req.kind ?? 'member',
 });
 
 @Controller()
@@ -48,7 +49,18 @@ export class PacsController {
   @Get('authz/dicom')
   @HttpCode(204)
   authzDicom(@Req() req: any) {
-    return this.svc.authzDicom(String(req.headers['x-original-uri'] ?? ''), caller(req));
+    return this.svc.authzDicom(
+      String(req.headers['x-original-uri'] ?? ''),
+      String(req.headers['x-original-method'] ?? req.method ?? ''),
+      caller(req),
+    );
+  }
+
+  /** Gateway가 바이트를 보내기 전에 자격증명의 기관으로 Study 소유권을 고정한다. */
+  @Post('gateway/announce')
+  @HttpCode(200)
+  announce(@Body() body: any, @Req() req: any) {
+    return this.svc.announceStudy(body?.studyUid, body?.institutionNameTag, caller(req));
   }
 
   @Post('dicom/lookup')

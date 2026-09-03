@@ -5,17 +5,19 @@ import { KeycloakService } from './keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 
 /**
- * 호출자. 넷 다 **서명된 토큰**에서 나온다 — 클라이언트가 정할 수 없다.
+ * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
  *  sub         KC 사용자 ID    (세션 일괄 폐기 키)
  *  actor       누구인가        (감사로그)
  *  roles       무엇을 할 수 있나 (판독의/기사)
  *  institution 어디 소속인가    (어떤 데이터를 볼 수 있나)  ← 이번 작업에서 추가
+ *  kind        사람인가 gateway인가 (허용되는 API 면)
  */
 export interface Caller {
   sub: string;
   actor: string;
   roles: string[];
   institution: string | null;
+  kind: 'member' | 'gateway';
 }
 
 /**
@@ -27,6 +29,12 @@ export interface Caller {
 function need(roles: string[], role: string, what: string) {
   if (!roles?.includes(role) && !roles?.includes('admin'))
     throw new ForbiddenException(`${what}은(는) ${role} 권한이 필요합니다`);
+}
+
+/** Gateway 라우트에는 admin 예외가 없다. 신원 종류와 전용 역할이 모두 맞아야 한다. */
+function needExact(c: Caller, role: string, what: string) {
+  if (c.kind !== 'gateway' || !c.roles?.includes(role))
+    throw new ForbiddenException(`${what}은(는) ${role} 전용입니다`);
 }
 
 /**
@@ -296,9 +304,25 @@ export class PacsService implements OnModuleInit {
    * DICOMweb 경로의 기관 관문. 워크리스트가 지키는 경계(visible)를 영상 경로에도 세운다.
    * auth_request 제약상 거부는 전부 403이다 — 404를 던지면 nginx가 500으로 바꾼다.
    */
-  async authzDicom(originalUri: string, c: Caller) {
+  async authzDicom(originalUri: string, originalMethod: string, c: Caller) {
     const me = inst(c);
     const [path, query = ''] = originalUri.split('?');
+    const method = originalMethod.toUpperCase();
+
+    // Gateway가 여는 유일한 DICOMweb 면: announce로 소유권을 먼저 고정한 지정형 STOW.
+    if (method === 'POST') {
+      needExact(c, 'gateway', 'DICOM 수신');
+      const m = /^\/dicom-web\/studies\/([0-9.]+)$/.exec(path);
+      if (!m) throw new ForbiddenException('지정형 STOW만 허용됩니다');
+      const s = await this.prisma.studyState.findUnique({ where: { uid: m[1] } });
+      if (!s || s.institutionId !== me)
+        throw new ForbiddenException('announce되지 않은 검사입니다');
+      return;
+    }
+    if (!['GET', 'HEAD'].includes(method))
+      throw new ForbiddenException('허용되지 않는 DICOMweb 메서드입니다');
+    if (c.kind === 'gateway')
+      throw new ForbiddenException('게이트웨이는 영상을 조회할 수 없습니다');
 
     // 서버 정보는 관리자만. 프론트 사용처 없음 — 버전 정보는 표면 축소가 이득이다.
     if (path === '/system') { need(c.roles, 'admin', '서버 정보 조회'); return; }
@@ -333,6 +357,55 @@ export class PacsService implements OnModuleInit {
     const s = await this.prisma.studyState.findUnique({ where: { uid } });
     // 미등록(기관 미확정) 검사는 기본 거부 — 워크리스트를 한 번 열면 lazy 등록이 기관을 박는다.
     if (!s || !this.visible(s, me)) throw new ForbiddenException('열람 권한이 없습니다');
+  }
+
+  /**
+   * Gateway 수신 예고. DICOM 태그는 참고 신호일 뿐이고 소유 기관은 서명된 자격증명으로 정한다.
+   * 같은 기관의 재시도는 쓰기와 감사를 모두 생략한다.
+   */
+  async announceStudy(studyUid: string, institutionNameTag: unknown, c: Caller) {
+    needExact(c, 'gateway', '검사 수신 예고');
+    const me = inst(c);
+    if (typeof studyUid !== 'string' || !/^[0-9.]+$/.test(studyUid))
+      throw new BadRequestException('올바른 studyUid가 필요합니다');
+    if (institutionNameTag != null && typeof institutionNameTag !== 'string')
+      throw new BadRequestException('institutionNameTag는 문자열이어야 합니다');
+
+    const existing = await this.prisma.studyState.findUnique({ where: { uid: studyUid } });
+    if (existing) {
+      if (existing.institutionId !== me)
+        throw new ConflictException({ code: 'STUDY_OWNERSHIP_CONFLICT' });
+      return { studyUid, institutionId: me, origin: existing.origin };
+    }
+
+    const resolvedTag = this.resolveInstitution(typeof institutionNameTag === 'string' ? institutionNameTag : '');
+    const tagMismatch = resolvedTag != null && resolvedTag !== me;
+    try {
+      const saved = await this.prisma.$transaction(async tx => {
+        const created = await tx.studyState.create({ data: {
+          uid: studyUid,
+          institutionId: me,
+          reqHosp: this.instName(me),
+          ss: 'Unverified',
+          origin: 'gateway',
+        } });
+        await tx.auditLog.create({ data: {
+          actor: c.actor || 'unknown',
+          action: 'study.announce',
+          target: studyUid,
+          detail: dump({ institutionId: me, ...(tagMismatch ? { tagMismatch: true } : {}) }),
+        } });
+        return created;
+      });
+      return { studyUid, institutionId: me, origin: saved.origin };
+    } catch (error: any) {
+      // 동시 재시도는 unique 경쟁에서 진 쪽도 같은 기관이면 멱등 성공이다.
+      if (error?.code !== 'P2002') throw error;
+      const winner = await this.prisma.studyState.findUnique({ where: { uid: studyUid } });
+      if (!winner || winner.institutionId !== me)
+        throw new ConflictException({ code: 'STUDY_OWNERSHIP_CONFLICT' });
+      return { studyUid, institutionId: me, origin: winner.origin };
+    }
   }
 
   /** SOP lookup도 요청 Study의 기관 관문 안에서만 Orthanc ID를 내보낸다. */

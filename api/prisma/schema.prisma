@@ -57,6 +57,8 @@ model StudyState {
   /// 원격판독을 받은 기관. **이 컬럼 하나만이 기관 경계를 넘게 해주는 통로다.**
   /// TS 상태머신이 wait 이상으로 갈 때 채워지고, 취소하면 비워진다.
   teleInstitutionId String?
+  /// 최초 등록 경로. 기존·DICOM lazy 등록은 dicom, Gateway announce만 gateway.
+  origin    String   @default("dicom")
   rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인)
   ss        String   @default("Verified")     // Study Status: Verified / Unverified (기사 확인)
   em        String   @default("N")            // Emergency: E / N

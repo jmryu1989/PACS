@@ -7,6 +7,7 @@ const caller = (req: any): Caller => ({
   actor: req.actor,
   roles: req.roles ?? [],
   institution: req.institution ?? null,
+  kind: req.kind ?? 'member',
 });
 
 /**

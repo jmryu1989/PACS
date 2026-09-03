@@ -137,6 +137,15 @@ server {
         sub_filter '<title>OHIF Viewer</title>' '<title>판독 뷰어 — KOREA IMAGING NETWORK</title>';
     }
 
+    # 검사 UID를 경로에 박은 STOW만 Gateway에 연다. UID 없는 POST는 아래 읽기 전용
+    # location에 남아 403이고, API authz가 announce 선행과 기관 일치를 다시 확인한다.
+    location ~ ^/dicom-web/studies/[0-9.]+$ {
+        limit_except GET HEAD POST { deny all; }
+        auth_request /kin-authz;
+        proxy_pass http://orthanc:8042;
+        include /etc/nginx/snippets/orthanc-basic-auth.conf;
+    }
+
     # 4242만 닫아도 STOW-RS가 열려 있으면 HTTPS로 영상을 쓸 수 있다.
     # 조회도 먼저 API의 토큰 검증을 통과해야 Orthanc 자격증명을 대신 붙인다.
     location /dicom-web/ {
@@ -176,6 +185,7 @@ server {
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Original-URI $request_uri;
+        proxy_set_header X-Original-Method $request_method;
         proxy_set_header Authorization $http_authorization;
         proxy_set_header Cookie $http_cookie;
     }
