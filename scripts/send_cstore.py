@@ -32,8 +32,27 @@ WARNING_CODES = {
 }
 
 
-def public_ct_series(source: Path, count: int):
+def public_ct_series(source: Path, count: int, largest: bool = False):
     """공개 데이터의 한 CT 시리즈에서 필요한 수만큼 읽는다."""
+    if largest:
+        groups = {}
+        for path in sorted(source.rglob("*.dcm")):
+            try:
+                ds = dcmread(path, defer_size=1024, force=True)
+            except Exception:
+                continue
+            if (str(getattr(ds, "Modality", "")) != "CT" or "PixelData" not in ds or
+                    not getattr(ds, "SeriesInstanceUID", None)):
+                continue
+            groups.setdefault(str(ds.SeriesInstanceUID), []).append(path)
+        paths = max(groups.values(), key=lambda items: sum(path.stat().st_size for path in items), default=[])
+        if len(paths) < count:
+            sys.exit(
+                f"가장 큰 공개 CT 시리즈가 부족합니다: {source} "
+                f"(요청 {count}장, 발견 {len(paths)}장)"
+            )
+        return [(path, dcmread(path, force=True)) for path in paths[:count]]
+
     chosen = []
     series_uid = None
     for path in sorted(source.rglob("*.dcm")):
@@ -73,6 +92,9 @@ def main() -> None:
     parser.add_argument("--desc", default="DICOMLibrary-derived C-STORE fixture")
     parser.add_argument("--slices", type=int, default=1)
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--largest-series", action="store_true", help="바이트 합이 가장 큰 CT 시리즈 사용")
+    parser.add_argument("--study-uid", help="늦게 도착한 인스턴스 시험용 기존 StudyInstanceUID")
+    parser.add_argument("--instance-offset", type=int, default=0)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -85,12 +107,14 @@ def main() -> None:
     calling = args.calling_aet or (
         "KINC_CT" if "판독센터" in args.institution else "HALLYM_CT"
     )
-    study_uid = generate_uid()
+    study_uid = args.study_uid or generate_uid()
     series_uid = generate_uid()
     frame_uid = generate_uid()
     datasets = []
 
-    for index, (path, ds) in enumerate(public_ct_series(args.source_dir, args.slices), 1):
+    for index, (path, ds) in enumerate(
+        public_ct_series(args.source_dir, args.slices, args.largest_series), args.instance_offset + 1,
+    ):
         sop_uid = generate_uid()
         ds.SpecificCharacterSet = "ISO_IR 192"
         ds.PatientName = args.name

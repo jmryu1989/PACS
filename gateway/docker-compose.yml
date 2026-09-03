@@ -1,0 +1,61 @@
+name: ${GW_PROJECT_NAME:-kin-gateway}
+
+services:
+  gw-orthanc:
+    image: orthancteam/orthanc:24.12.0
+    container_name: ${GW_ORTHANC_CONTAINER:-kin-gw-orthanc}
+    restart: unless-stopped
+    environment:
+      ORTHANC__REGISTERED_USERS: '{"${GW_ORTHANC_USER:-agent}":"${GW_ORTHANC_PASS:?GW_ORTHANC_PASS를 gateway/.env에 설정하세요}"}'
+      ORTHANC__STABLE_AGE: ${GW_STABLE_AGE:-10}
+    ports:
+      - "${GW_DICOM_BIND:-0.0.0.0}:${GW_DICOM_PORT:-4243}:4242"
+      - "127.0.0.1:${GW_ORTHANC_HTTP_PORT:-8043}:8042"
+    volumes:
+      - ./orthanc.json:/etc/orthanc/orthanc.json:ro
+      - orthanc-data:/var/lib/orthanc/db
+    networks:
+      - local
+      - ingress
+
+  gw-agent:
+    build: ./agent
+    container_name: ${GW_AGENT_CONTAINER:-kin-gw-agent}
+    restart: unless-stopped
+    environment:
+      LOCAL_ORTHANC_URL: http://gw-orthanc:8042
+      LOCAL_ORTHANC_USER: ${GW_ORTHANC_USER:-agent}
+      LOCAL_ORTHANC_PASS: ${GW_ORTHANC_PASS:?GW_ORTHANC_PASS를 gateway/.env에 설정하세요}
+      KIN_BASE_URL: ${KIN_BASE_URL:?KIN_BASE_URL을 gateway/.env에 설정하세요}
+      KIN_CLIENT_ID: ${KIN_CLIENT_ID:?KIN_CLIENT_ID를 gateway/.env에 설정하세요}
+      KIN_CLIENT_SECRET: ${KIN_CLIENT_SECRET:?KIN_CLIENT_SECRET을 gateway/.env에 설정하세요}
+      KIN_TLS_VERIFY: ${KIN_TLS_VERIFY:-true}
+      QUEUE_DB: /data/queue.db
+      BYTE_BUDGET_MIB: ${GW_BYTE_BUDGET_MIB:-24}
+      POLL_SECONDS: ${GW_POLL_SECONDS:-2}
+      HTTP_TIMEOUT_SECONDS: ${GW_HTTP_TIMEOUT_SECONDS:-30}
+      STOW_TIMEOUT_SECONDS: ${GW_STOW_TIMEOUT_SECONDS:-300}
+      BACKOFF_BASE_SECONDS: ${GW_BACKOFF_BASE_SECONDS:-5}
+      BACKOFF_MAX_SECONDS: ${GW_BACKOFF_MAX_SECONDS:-300}
+    depends_on:
+      - gw-orthanc
+    volumes:
+      - agent-data:/data
+    networks:
+      - local
+      - cloud
+
+volumes:
+  orthanc-data:
+  agent-data:
+
+networks:
+  # 로컬 Orthanc 통신만 가능한 망. cloud를 끊으면 큐는 쌓이되 원내 수신은 계속된다.
+  local:
+    name: ${GW_LOCAL_NETWORK:-kin-gateway-local}
+    internal: true
+  cloud:
+    name: ${GW_CLOUD_NETWORK:-kin-gateway-cloud}
+  # Docker가 host의 원내 C-STORE 포트를 게시하는 전용 망. Agent는 여기에 붙지 않는다.
+  ingress:
+    name: ${GW_INGRESS_NETWORK:-kin-gateway-ingress}

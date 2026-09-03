@@ -1,0 +1,22 @@
+{
+  "Name": "KIN-Gateway",
+  "RemoteAccessAllowed": true,
+  "AuthenticationEnabled": true,
+  "RegisteredUsers": {},
+
+  "DicomAet": "KINGW",
+  "DicomPort": 4242,
+  "DicomAlwaysAllowStore": false,
+  "DicomCheckModalityHost": false,
+  "DicomModalities": {
+    "source-pacs": ["KINC_CT", "127.0.0.1", 4242]
+  },
+
+  "DicomWeb": {
+    "Enable": true,
+    "Root": "/dicom-web/"
+  },
+
+  "StableAge": 10,
+  "StorageCompression": false
+}
