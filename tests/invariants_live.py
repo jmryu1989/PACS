@@ -948,6 +948,14 @@ process.stdout.write(JSON.stringify(value));
         self.assertIn('value.textContent = password;', source)
         self.assertIn('$("#temporary-password").textContent = "";', source)
 
+    def test_registration_success_page_has_safe_return_path(self) -> None:
+        source = (
+            ROOT / "keycloak" / "themes" / "kin-login" / "login" / "info.ftl"
+        ).read_text(encoding="utf-8")
+        self.assertIn('id="kin-continue"', source)
+        self.assertIn('href="/api/auth/login"', source)
+        self.assertIn('${msg("continueToKin")}', source)
+
     def test_member_unverified_email_cannot_be_approved(self) -> None:
         username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
         created = self.admin("POST", "/users", {

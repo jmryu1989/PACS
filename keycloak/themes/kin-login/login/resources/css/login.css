@@ -385,6 +385,13 @@ h1#kc-page-title {
   cursor: pointer;
 }
 
+#kin-continue {
+  display: block;
+  box-sizing: border-box;
+  text-align: center;
+  text-decoration: none;
+}
+
 .login-pf-page .card-pf .pf-c-button.pf-m-secondary {
   min-height: 42px;
   padding: 0 15px;
