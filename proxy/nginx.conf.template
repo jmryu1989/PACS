@@ -104,6 +104,10 @@ server {
     # 브라우저에 Orthanc 자격증명을 주지 않는다. 공개 경로 일곱 곳이 같은 include를
     # 읽어야 비밀번호 교체 때 한 곳만 낡은 헤더로 남는 일이 없다.
     location /worklist/ {
+        # OHIF와 같은 cross-origin isolation 상태와 browsing context group에 남아야
+        # 이름 붙인 팝업 핸들이 navigation 뒤에도 산다.
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Embedder-Policy "require-corp" always;
         proxy_pass http://orthanc:8042;
         include /etc/nginx/snippets/orthanc-basic-auth.conf;
     }

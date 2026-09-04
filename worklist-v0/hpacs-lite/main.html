@@ -2644,11 +2644,7 @@ ${esc($("#recommendation").value)}
       };
     }
 
-    async function ohifPlacement(stored) {
-      let details = null;
-      if (typeof window.getScreenDetails === "function") {
-        try { details = await window.getScreenDetails(); } catch (_) {}
-      }
+    function ohifPlacement(stored, details = null) {
       const screens = (details?.screens || []).map(usableScreenRect).filter(Boolean);
       if (stored) return clampOhifRect(stored, screens.length ? screens : [currentScreenRect()]);
 
@@ -2698,6 +2694,12 @@ ${esc($("#recommendation").value)}
       const seq = ++ohifOpenSeq;
       const stored = readStoredOhifRect();
       const initial = stored || defaultOhifRect();
+      // 권한 요청과 팝업 모두 사용자 활성화가 필요하다. 권한 Promise를 먼저 시작하되
+      // await는 동기 window.open 뒤로 미뤄 둘 중 하나가 활성화를 빼앗지 않게 한다.
+      let screenDetailsPromise = Promise.resolve(null);
+      if (typeof window.getScreenDetails === "function") {
+        try { screenDetailsPromise = window.getScreenDetails().catch(() => null); } catch (_) {}
+      }
       const popup = window.open(
         "",
         OHIF_WINDOW_NAME,
@@ -2706,7 +2708,7 @@ ${esc($("#recommendation").value)}
       if (popup) {
         // 새 창이 원래 워크리스트의 window 객체를 잡고 있을 이유가 없다.
         popup.opener = null;
-        const rect = await ohifPlacement(stored);
+        const rect = ohifPlacement(stored, await screenDetailsPromise);
         if (seq !== ohifOpenSeq || popup.closed) return;
         try {
           popup.moveTo(rect.left, rect.top);
