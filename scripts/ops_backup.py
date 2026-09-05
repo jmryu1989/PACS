@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -121,13 +122,13 @@ def counts(container, database, user):
     return json.loads(text(command + ["SELECT json_object_agg(name,n) FROM (" + " UNION ALL ".join(selects) + ") counts;"]))
 
 
-def wait_ready(origin):
+def wait_ready(origin, timeout=120):
     parsed = urlsplit(origin)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
             or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
         raise RuntimeError("Expected an HTTPS PUBLIC_ORIGIN without credentials/path")
     context = ssl._create_unverified_context() if parsed.hostname in ("localhost", "127.0.0.1", "::1") else ssl.create_default_context()
-    deadline = time.monotonic() + 120
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             with urlopen(origin + "/api/health", context=context, timeout=5) as response:
@@ -144,17 +145,35 @@ def wait_ready(origin):
     raise RuntimeError("API, Keycloak and worklist did not become ready after resume")
 
 
-def backup(output):
+def prepare_backup_parent(parent):
+    if parent.exists():
+        if not parent.is_dir():
+            raise RuntimeError("Backup parent is not a directory")
+        if os.name == "posix":
+            info = parent.stat()
+            if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+                raise RuntimeError("Existing backup parent must be private and owned by the current user")
+    else:
+        # Never chmod an existing /tmp, home, mount or other shared directory.
+        # A racing creator also fails here; only our new leaf receives mode 700.
+        parent.mkdir(parents=True, mode=0o700)
+
+
+def backup(output, ready_timeout=120):
+    if not 1 <= ready_timeout <= 900:
+        raise RuntimeError("Readiness timeout must be between 1 and 900 seconds")
     parent = Path(output).resolve()
     if parent == ROOT or ROOT in parent.parents:
         raise RuntimeError("Backups containing secrets must be outside the Git repository")
     if not (ROOT / ".env").is_file():
         raise RuntimeError("Local .env is required")
     # Inspect may contain secrets; only selected fields go into the manifest.
-    info = json.loads(text(["docker", "inspect", *CONTAINERS]))
+    info = json.loads(text(["docker", "inspect", *CONTAINERS, "kin-proxy"]))
     by_name = {item["Name"].lstrip("/"): item for item in info}
     if not by_name["kin-db"]["State"]["Running"]:
         raise RuntimeError("PostgreSQL must be running")
+    if any(item["State"].get("Restarting") for item in info):
+        raise RuntimeError("Resolve restarting containers before taking a consistent backup")
     projects = {item["Config"].get("Labels", {}).get("com.docker.compose.project") for item in info}
     if None in projects or len(projects) != 1:
         raise RuntimeError("Containers do not belong to one Compose project")
@@ -169,8 +188,7 @@ def backup(output):
     initial_running = [name for name in CONTAINERS[:-1] if by_name[name]["State"]["Running"]]
     api_env = dict(entry.split("=", 1) for entry in by_name["kin-api"]["Config"].get("Env", []) if "=" in entry)
     origin = api_env.get("PUBLIC_ORIGIN", "https://localhost:9443").rstrip("/")
-    parent.mkdir(parents=True, exist_ok=True)
-    parent.chmod(0o700)
+    prepare_backup_parent(parent)
     volume_kib = int(temporary_run(["--network", "none", "--read-only",
                                     "--mount", f"type=volume,source={volume},target=/source,readonly",
                                     "--entrypoint", "du", by_name["kin-db"]["Image"], "-sk", "/source"]).split()[0])
@@ -186,9 +204,15 @@ def backup(output):
                 "git_dirty": bool(text(["git", "status", "--porcelain", "--untracked-files=no"])),
                 "postgres_image": by_name["kin-db"]["Image"],
                 "orthanc_image": by_name["kin-orthanc"]["Image"],
-                "resumed_services": initial_running, "public_origin": origin, "counts": {}}
+                "resumed_services": initial_running, "public_origin": origin, "counts": {}, "ready": None,
+                "running_images": {name: {"id": item["Image"], "configured": item["Config"].get("Image")}
+                                   for name, item in by_name.items()}}
+    for image in manifest["running_images"].values():
+        metadata = json.loads(text(["docker", "image", "inspect", image["id"]]))[0]
+        image["repo_digests"] = metadata.get("RepoDigests") or []
     write_json(directory / "manifest.json", manifest)
     pause_started = time.monotonic()
+    stage = "stop writers"
     try:
         if initial_running:
             run(["docker", "stop", "--time", "45", *initial_running], timeout=180)
@@ -196,13 +220,16 @@ def backup(output):
             if text(["docker", "inspect", "--format", "{{.State.Running}}", name]) != "false":
                 raise RuntimeError("A write service is still running")
         for database in ("kin", "keycloak"):
+            stage = "dump " + database
             manifest["counts"][database] = counts("kin-db", database, "kin")
             with (directory / (database + ".dump")).open("wb") as handle:
                 run(["docker", "exec", "kin-db", "pg_dump", "-U", "kin", "-d", database, "-Fc"], output=handle)
+        stage = "archive Orthanc"
         temporary_run(["--network", "none", "--read-only",
              "--mount", f"type=volume,source={volume},target=/source,readonly",
              "--mount", f"type=bind,source={directory},target=/backup",
              "--entrypoint", "tar", manifest["postgres_image"], "-czf", "/backup/orthanc.tgz", "-C", "/source", "."], timeout=1800)
+        stage = "copy configuration and checksum"
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)
         for name in FILES:
@@ -213,6 +240,9 @@ def backup(output):
         manifest["sha256"] = {name: digest(directory / name) for name in FILES}
         manifest["bytes"] = {name: (directory / name).stat().st_size for name in FILES}
         manifest["complete"] = True
+    except BaseException as error:
+        manifest["backup_error"] = {"stage": stage, "type": type(error).__name__}
+        raise
     finally:
         resume_failures = []
         for name in initial_running:
@@ -223,22 +253,31 @@ def backup(output):
         manifest["pause_seconds"] = round(time.monotonic() - pause_started, 3)
         if not resume_failures and set(initial_running) == set(CONTAINERS[:-1]):
             try:
-                wait_ready(origin)
+                wait_ready(origin, ready_timeout)
+                manifest["ready"] = True
                 manifest["ready_seconds"] = round(time.monotonic() - pause_started, 3)
             except Exception:
-                resume_failures.append("application readiness")
+                manifest["ready"] = False
+                manifest["readiness_error"] = "Application readiness deadline exceeded"
         manifest["resume_failures"] = resume_failures
         write_json(directory / "manifest.json", manifest)
+        # Even an unsuccessful resume must identify a complete recovery snapshot.
+        print(json.dumps({"backup": str(directory), "complete": manifest["complete"],
+                          "ready": manifest["ready"], "resume_failures": resume_failures,
+                          "pause_seconds": manifest["pause_seconds"]}), flush=True)
         if resume_failures:
             raise RuntimeError("Write services need recovery: " + ", ".join(resume_failures))
-    print(json.dumps({"backup": str(directory), "complete": True, "pause_seconds": manifest["pause_seconds"]}))
+        if manifest["ready"] is False:
+            raise RuntimeError("Backup preserved; application readiness needs recovery before deployment")
 
 
 def validate_backup(directory):
     directory = Path(directory).resolve(strict=True)
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-    if manifest.get("format") != 1 or not manifest.get("complete") or manifest.get("resume_failures"):
-        raise RuntimeError("Backup is incomplete or services failed to resume")
+    if manifest.get("format") != 1 or not manifest.get("complete"):
+        raise RuntimeError("Backup is incomplete")
+    # Snapshot validity is independent of the source application's readiness.
+    # A failed restart is exactly when an intact snapshot must remain usable.
     for name in FILES:
         path = directory / name
         if path.is_symlink() or not path.is_file() or digest(path) != manifest.get("sha256", {}).get(name):
@@ -339,12 +378,13 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     backup_parser = commands.add_parser("backup")
     backup_parser.add_argument("--output", required=True, help="Parent directory outside the repository")
+    backup_parser.add_argument("--ready-timeout", type=int, default=120, help="Seconds to wait after resuming writers (1-900)")
     commands.add_parser("rehearse").add_argument("directory")
     args = parser.parse_args()
     require_local_docker()
     with lock():
         if args.action == "backup":
-            backup(args.output)
+            backup(args.output, args.ready_timeout)
         else:
             rehearse(args.directory)
 
