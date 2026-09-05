@@ -21,7 +21,7 @@ $env:KIN_TEST_GATEWAY_INSTITUTION_NAME="KIN 판독센터"
 python tests/invariants_live.py LiveInvariantTests.test_selected_ingest_reaches_worklist
 ```
 
-전체 불변조건(v0.6.3 기준 65개)은 두 기관 fixture를 쓰므로 로컬 `cstore` 모드로 실행한다. Gateway smoke는
+전체 불변조건(v0.6.3 기준 69개)은 두 기관 fixture를 쓰므로 로컬 `cstore` 모드로 실행한다. Gateway smoke는
 자격증명의 기관과 `KIN_TEST_GATEWAY_INSTITUTION_NAME`이 일치해야 한다. 실제 환자 영상이 아닌
 격리된 시험 Gateway와 공개 fixture만 사용한다.
 
@@ -50,3 +50,45 @@ DB 무변경, 원격판독 양방향 holder 노출. 회원 승인 — 승인/취
 INVALID 두 축의 교정, 대면 생성, verificationOverride 감사, 자격 변경 세션 폐기, 임시 비밀번호 비기록
 (회원 감사 행은 `/audit`이 아니라 psql로 읽는다). 교차 — 원격판독 TS 상태머신, 감사 action 표와
 본문 비노출, PATCH 우회 표, 잔여 역할·기관 관문(dicom/lookup·남의 기관 오더).
+
+## Run B2 — 실제 브라우저 E2E
+
+```powershell
+python -m pip install --only-binary=:all: -r tests/e2e/requirements.txt
+python -m playwright install chromium
+docker compose up -d
+python tests/invariants_live.py
+python tests/e2e/test_worklist.py
+```
+
+Python 3.9 이상, 기존 불변조건의 `pydicom`·`pynetdicom`·`requests` 및 로컬 공개 CT
+샘플이 필요하다. Playwright/Chromium 버전은 requirements와 설치 명령으로 맞춘다.
+Python 3.9 Windows에서는 greenlet 3.1.1 바이너리를 고정해 C++ 빌드 도구 없이 설치한다.
+두 시험 명령은 순차 실행하고 **둘 다 종료코드 0**이어야 한다. skip/expectedFailure를
+추가해서 통과시키지 않는다. 화면을 보려면 `KIN_E2E_HEADED=1`을 설정한다.
+
+E2E는 14개 시험(화면 흐름 11 + 로컬 대상 거부 3)이다. 실제 정식 입구 `/` →
+`/worklist/hpacs-lite/index.html` → Keycloak 로그인 폼 → BFF 세션으로 시작한다.
+API를 mock하거나 토큰을 브라우저에 주입하지 않는다. 독립 browser context를 사용해
+판독의 2명·기사·관리자의 점유와 역할을 구분한다. API는 공개 fixture 준비와 결과 검증에만 쓴다.
+
+| TEST ID | 검사 내용 |
+|---|---|
+| E2E-B2-01 | BFF 로그인, HttpOnly/Secure/Strict 쿠키, 토큰 저장소 부재, UI 로그아웃 후 401 |
+| E2E-B2-02 | 검사 선택과 UID별 초안/확정본 격리 |
+| E2E-B2-03~05 | 촬영중 잠금, 기사 Verify, 응급 우회와 다른 검사 잠금 유지 |
+| E2E-B2-06 | prior 소견, 더블클릭 hpCompare, 두 UID의 frame 200과 두 캔버스 실제 픽셀 표시 |
+| E2E-B2-07~08 | 두 계정 점유, 비관리자 메뉴 부재, 관리자 강제 해제 감사와 기존 초안 보존 |
+| E2E-B2-09~10 | 보류/Reset 사유 모달·취소 무변경·서버 사유와 승인 이력 보존 |
+| E2E-B2-11 | UI 승인 후 Save/Transcribe/Approve 비활성, 재로드 지속 |
+| E2E-B2-12a~c | 원격 URL·자격증명 URL·Docker Host/Context·Gateway·운영 Compose 거부 |
+
+E2E는 로컬 `cstore` 전용이다. 운영 서버에서 실행하지 않는다. 로컬 URL과 Docker 소켓을
+자원 생성 전에 검사한다. 시험마다 소유한 UID의 Orthanc·DB·감사 행 삭제 결과를 확인하고,
+마지막에 임시 계정의 BFF 세션·Keycloak 계정·전용 시험 클라이언트도 정리한다.
+정리 실패는 시험 실패다. 강제 프로세스 종료 때는 finally가 실행되지 않을 수 있으므로
+실행을 중단했다면 해당 실행의 임시 `kin-test-*`/UID 잔존을 확인한다.
+
+실패 스크린샷은 인증된 워크리스트만 `tests/e2e/artifacts/`에 저장하고 Git에서 제외한다.
+비밀번호·쿠키·토큰·storageState·네트워크 trace는 파일에 저장하지 않는다.
+실제 다중 모니터 권한과 모니터별 배치, 임상 화질 적합성은 이 시험의 검증 범위가 아니다.

@@ -21,3 +21,6 @@ api/prisma/*.db
 
 # 실제 자격증명은 저장소에 넣지 않는다. 커밋 가능한 키 목록은 .env.example이 기준이다.
 .env
+
+# E2E failure screenshots and local run evidence may contain session-specific UI.
+tests/e2e/artifacts/
