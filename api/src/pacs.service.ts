@@ -971,6 +971,17 @@ export class PacsService implements OnModuleInit {
     if (action === 'addendum' && prev?.rs !== 'A')
       throw new BadRequestException('Addendum은 승인(RS: A)된 판독문에만 붙일 수 있습니다');
 
+    /**
+     * 승인(A)에서 나가는 길도 둘뿐이다 — 이전 판을 남기는 Addendum, 사유가 남는 Reset.
+     *
+     * v0.6.3 회귀 확충에서 드러났다: `save`는 사유 없이 승인을 T로 떨어뜨리면서 repDoc·confirm을
+     * 그대로 남겨 화면이 "읽었다"와 "아직 안 읽었다"를 동시에 말하게 했고, `approve`는 다른 판독의가
+     * 본문과 승인자 이름을 조용히 갈아치우는 무표시 재승인이었다. 화면은 Save를 회색으로도 안 막았다.
+     * P의 출구 규칙과 같은 모양으로 닫는다 — 하나만 닫으면 나머지 하나가 문이다.
+     */
+    if (prev?.rs === 'A' && (action === 'save' || action === 'approve'))
+      throw new BadRequestException('승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다');
+
     // 판독을 되돌리는 것은 기록을 지우는 일이다. 사유 없이는 안 된다. (교훈 §1)
     if (action === 'reset' && !String(body.reason ?? '').trim())
       throw new BadRequestException('판독 취소에는 사유가 필요합니다');

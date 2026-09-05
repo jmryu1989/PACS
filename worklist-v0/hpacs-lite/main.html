@@ -2172,6 +2172,12 @@
       if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
+        // 승인에서 나가는 길은 Addendum·Reset뿐이다. Save(Transcribe도 save다)는 사유 없이 승인을 풀고
+        // Approve는 승인자를 갈아치우는 재승인이었다 — 서버가 400으로 막고, 여기서는 회색으로 미리 말해준다.
+        for (const id of ["#b-save", "#b-transcribe", "#b-approve"]) {
+          $(id).disabled = true;
+          $(id).title = "승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다";
+        }
       }
       // Addendum은 승인된 판독문에만 붙는다
       $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming || !!held;

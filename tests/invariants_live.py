@@ -2920,6 +2920,27 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertTrue(old_by_id.keys() <= after_by_id.keys(), "Reset 이전 판이 사라졌습니다")
             self.assertIsNotNone(self.report_state(fixture, "doctor"))
 
+    def test_approved_report_only_exits_via_addendum_or_reset(self) -> None:
+        with self.stack.fixture() as fixture:
+            approved = self.approve(fixture)
+            before = self.snapshot(fixture, "doctor")
+            for user, action in (("doctor", "save"), ("doctor", "approve"), ("doctor2", "approve"), ("doctor2", "save")):
+                with self.subTest(user=user, action=action):
+                    result = self.commit(fixture, user, action, approved.body["version"], findings="replaced")
+                    self.assert_status(result, 400)
+                    self.assertIn("추가기재(Addendum) 또는 판독 취소(Reset)", result.body["message"])
+                    self.assert_snapshot_unchanged(fixture, "doctor", before)
+            self.assertEqual(self.report_state(fixture, "doctor")["repDoc"], self.prefix("doctor"))
+            added = self.commit(fixture, "doctor2", "addendum", approved.body["version"], findings="add")
+            self.assert_status(added, 201)
+            reset = self.commit(fixture, "doctor", "reset", added.body["version"], reason="정정")
+            self.assert_status(reset, 201)
+            self.assertEqual(reset.body["rs"], "W")
+            # 화면도 같은 말을 한다 — 잠금은 안내일 뿐이지만, 눌러보고 거절당하는 것보다 회색이 낫다
+            page = (ROOT / "worklist-v0" / "hpacs-lite" / "main.html").read_text(encoding="utf-8")
+            self.assertIn('for (const id of ["#b-save", "#b-transcribe", "#b-approve"])', page)
+            self.assertIn("승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
+
     def test_zzz_known_failure_concurrent_commit_must_not_return_500(self) -> None:
         """다음 배치의 빨간 테스트. @expectedFailure로 숨기지 않는다."""
         with self.stack.fixture() as fixture:
