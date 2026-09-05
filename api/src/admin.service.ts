@@ -173,6 +173,16 @@ export class AdminService {
       throw new BadRequestException('기관·역할을 함께 지정하려면 verificationOverride:true가 필요합니다');
     if (verificationOverride && (body?.institution === undefined || body?.roles === undefined))
       throw new BadRequestException('대면 확인 생성에는 institution과 roles가 모두 필요합니다');
+    /**
+     * 기관·역할의 실제 검증(화이트리스트)은 Keycloak에 쓰기 **전에** 끝낸다.
+     * approve() 안에서만 검사하던 때는 잘못된 입력마다 비활성 고아 계정이 하나씩 남고 응답은
+     * 409 USER_ISOLATED였다(v0.6.3 회귀 확충에서 발견). 존재 여부만 보던 위 검사와 달리 값을 본다.
+     * approve()의 재검사는 그대로 둔다 — PATCH 승인이 같은 함수를 지나므로 그쪽 관문이기도 하다.
+     */
+    if (verificationOverride) {
+      await this.institution(body.institution);
+      this.roles(body.roles);
+    }
 
     const temporaryPassword = randomBytes(18).toString('base64url') + 'aA1!';
     let created: KeycloakUser | null = null;

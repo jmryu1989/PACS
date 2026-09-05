@@ -1469,6 +1469,35 @@ process.stdout.write(JSON.stringify(value));
                     if user.get("username") == username:
                         self.delete_member(user["id"])
 
+    def test_member_create_override_validates_before_keycloak_write(self) -> None:
+        usernames: list[str] = []
+        try:
+            for extra, fragment in (
+                ({"institution": "no-such-institution", "roles": ["radiologist"]}, "허용되지 않은 기관"),
+                ({"institution": "hallym", "roles": ["gateway"]}, "허용되지 않은 역할"),
+                ({"institution": "hallym", "roles": []}, "roles"),
+            ):
+                username = "kin-test-orphan-" + uuid.uuid4().hex[:10]
+                usernames.append(username)
+                with self.subTest(body=extra):
+                    result = self.stack.request("POST", "/admin/users", "jmryu", {
+                        "username": username, "email": username + "@local.test",
+                        "firstName": "KIN", "lastName": "Orphan", "verificationOverride": True, **extra,
+                    })
+                    self.assertEqual(result.status, 400, result.text)
+                    self.assertIn(fragment, result.body.get("message", ""), result.text)
+                    found = self.admin("GET", f"/users?username={quote(username)}&exact=true")
+                    self.assertEqual(
+                        [u for u in found.body if u.get("username") == username], [],
+                        "잘못된 입력이 Keycloak에 고아 계정을 남겼습니다",
+                    )
+        finally:
+            for username in usernames:
+                found = self.admin("GET", f"/users?username={quote(username)}&exact=true")
+                for user in found.body or []:
+                    if user.get("username") == username:
+                        self.delete_member(user["id"])
+
     def test_member_verification_override_is_the_single_audited_bypass(self) -> None:
         username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
         created = self.admin("POST", "/users", {
