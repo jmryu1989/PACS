@@ -160,6 +160,13 @@ def prepare_backup_parent(parent):
         parent.mkdir(parents=True, mode=0o700)
 
 
+def reload_proxy():
+    # Static nginx upstreams keep the IP resolved at startup. Docker can assign
+    # different IPs when all writers resume, so Up containers can still yield 502.
+    run(["docker", "exec", "kin-proxy", "nginx", "-t"], timeout=30)
+    run(["docker", "exec", "kin-proxy", "nginx", "-s", "reload"], timeout=30)
+
+
 def backup(output, ready_timeout=120):
     if not 1 <= ready_timeout <= 900:
         raise RuntimeError("Readiness timeout must be between 1 and 900 seconds")
@@ -255,7 +262,17 @@ def backup(output, ready_timeout=120):
             except Exception:
                 resume_failures.append(name)
         manifest["pause_seconds"] = round(time.monotonic() - pause_started, 3)
-        if not resume_failures and set(initial_running) == set(CONTAINERS[:-1]):
+        manifest["proxy_reloaded"] = None
+        if not resume_failures and initial_running and by_name["kin-proxy"]["State"]["Running"]:
+            try:
+                reload_proxy()
+                manifest["proxy_reloaded"] = True
+            except Exception:
+                manifest["proxy_reloaded"] = False
+                manifest["ready"] = False
+                manifest["readiness_error"] = "Proxy configuration check or reload failed"
+        if (not resume_failures and manifest["proxy_reloaded"] is not False
+                and set(initial_running) == set(CONTAINERS[:-1])):
             try:
                 wait_ready(origin, ready_timeout)
                 manifest["ready"] = True

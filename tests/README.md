@@ -122,7 +122,9 @@ Linux에서 새 백업 디렉터리 700·파일 600을 적용한다. 기존 출�
 
 `ops_backup_test.py`는 실패 뒤 서비스 재개·시크릿 출력 방지·변조 백업 거절·소유권 없는 자원 삭제
 거절·작업 잠금·daemon 장애·archive 경로·부모 권한 보존·준비 실패와 snapshot 분리 등
-16개 안전 시험이다(TEST-OPS-01~02). 실제 복원 리허설과 함께 통과해야 한다.
+17개 안전 시험이다(TEST-OPS-01~02). 실제 복원 리허설과 함께 통과해야 한다.
+쓰기 서비스 재개 후 nginx 설정 검사·reload로 정적 upstream의 Docker IP를 다시 해석한다.
+reload 실패는 준비 실패로 기록하고 종료코드 1을 반환한다. 실행 중이던 proxy에만 적용한다.
 Linux의 root Docker helper가 호스트 파일 소유권을 바꾸지 않도록 Orthanc 압축은 stdout으로
 흘리고 호스트 실행 계정이 파일을 쓴다. 바이너리 스트림·timeout 뒤 소유 helper 정리도 검사한다.
 이 단계의 서버 내부 백업은 오프사이트 재해복구가 아니다. Gateway queue·인증서·Docker 이미지

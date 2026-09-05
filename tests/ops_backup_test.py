@@ -25,7 +25,7 @@ class BackupSafetyTests(unittest.TestCase):
             root.mkdir()
             (root / ".env").write_text("TEST_ONLY=placeholder")
             info = []
-            for name in ops.CONTAINERS:
+            for name in (*ops.CONTAINERS, "kin-proxy"):
                 info.append({"Name": "/" + name, "State": {"Running": name != "kin-keycloak"},
                              "Image": "sha256:" + "a" * 64,
                              "Config": {"Labels": {"com.docker.compose.project": "fixture",
@@ -189,7 +189,7 @@ class BackupSafetyTests(unittest.TestCase):
                      "Config": {"Labels": {"com.docker.compose.project": "fixture",
                                            "com.docker.compose.project.working_dir": str(root)}},
                      "Mounts": [{"Destination": "/var/lib/orthanc/db", "Type": "volume", "Name": "fixture-volume"}]}
-                    for name in ops.CONTAINERS]
+                    for name in (*ops.CONTAINERS, "kin-proxy")]
 
             def fake_text(args, **kwargs):
                 if args[:2] == ["docker", "inspect"]:
@@ -222,6 +222,13 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertTrue(manifest["complete"])
             self.assertFalse(manifest["ready"])
             self.assertEqual(manifest["resume_failures"], [])
+            self.assertTrue(manifest["proxy_reloaded"])
+
+    def test_17_invalid_proxy_configuration_is_never_reloaded(self):
+        with patch.object(ops, "run", side_effect=RuntimeError("invalid proxy config")) as command:
+            with self.assertRaisesRegex(RuntimeError, "invalid proxy config"):
+                ops.reload_proxy()
+            command.assert_called_once_with(["docker", "exec", "kin-proxy", "nginx", "-t"], timeout=30)
 
     def test_15_binary_archive_stream_does_not_decode_or_buffer_stdout(self):
         payload = b"\x1f\x8b\xff\x00binary archive"
