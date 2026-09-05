@@ -2641,6 +2641,7 @@ ${esc($("#recommendation").value)}
         const details = await window.getScreenDetails();
         if (monitorQueryUnsupported) monitorSessionGranted = true;
         cacheMonitorScreens(details);
+        localStorage.removeItem(OHIF_RECT_KEY);
         updateMonitorButton();
         toast("모니터 배치 허용됨 — 판독 창이 다른 모니터에 열립니다", "info");
       } catch (_) {
@@ -2773,12 +2774,20 @@ ${esc($("#recommendation").value)}
       const seq = ++ohifOpenSeq;
       const stored = readStoredOhifRect();
       const initial = ohifPlacement(stored);
+      const isNewPopup = !ohifPopupHandle || ohifPopupHandle.closed;
       const popup = window.open(
         "",
         OHIF_WINDOW_NAME,
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
+        // feature는 안쪽 크기이므로 저장된 바깥 크기로 맞춰 재열기 누적을 막는다.
+        if (isNewPopup) {
+          try {
+            popup.resizeTo(initial.width, initial.height);
+            popup.moveTo(initial.left, initial.top);
+          } catch (_) {}
+        }
         // 새 창이 원래 워크리스트의 window 객체를 잡고 있을 이유가 없다.
         popup.opener = null;
         popup.location.href = url;
