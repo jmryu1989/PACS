@@ -719,6 +719,15 @@ export class PacsService implements OnModuleInit {
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
     /**
+     * match·unmatch·삭제와 같은 규칙: 원격판독으로 받은 검사의 촬영 상태·환자 정보는 **보유 기관의 일**이다.
+     * 세 형제 관문은 있었는데 patchState만 열려 있어서, 수신 기관 기사가 ss·em을 바꿔 소유 기관을 자기
+     * 검사의 판독에서 잠그거나 ov로 환자 정보를 덮을 수 있었다(v0.6.3 회귀 확충에서 발견 —
+     * "관문은 한 곳만 열려 있어도 관문이 아니다"). 수신 기관이 여는 건 TS의 자기 구간(아래)뿐이다.
+     */
+    if (prev.institutionId !== me && TECHNICIAN_FIELDS.some(k => body[k] !== undefined))
+      throw new ForbiddenException('원격판독으로 받은 검사의 촬영·환자 정보는 보유 기관만 바꿀 수 있습니다');
+
+    /**
      * **예비 판독 중인 검사는 여기서도 막는다.**
      *
      * 판독문 저장·확정·점유·이력 네 곳에 관문을 달면서 이 한 곳을 빼먹었고,

@@ -2997,6 +2997,30 @@ class LiveInvariantTests(unittest.TestCase):
             self.assert_status(self.stack.request("GET", f"/audit?uid={quote(doctor_id)}", "kdoctor"), 404)
             self.assert_status(self.stack.request("GET", f"/audit?uid={quote(doctor_id)}", "jmryu"), 404)
 
+    def test_tele_receiver_cannot_edit_owner_exam_metadata(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+            self.assert_status(self.stack.request("DELETE", path, "ktech"), 403)   # 이미 있던 형제 관문
+            before = self.snapshot(fixture, "doctor")
+            for body in (
+                {"ss": "Unverified", "em": "N"}, {"em": "E"},
+                {"ov": {"id": "K1", "name": "RENAMED"}}, {"ward": "K", "reqHosp": "KIN"},
+            ):
+                with self.subTest(body=body):
+                    result = self.stack.request("PATCH", path, "ktech", body)
+                    self.assert_status(result, 403)
+                    self.assertIn("보유 기관", result.body["message"])
+            state = self.state(fixture, "doctor")
+            self.assertEqual((state["ss"], state["em"], state["ov"]), ("Verified", "N", None))
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"}), 200)   # 소유 기관은 잠기지 않았다
+            # 수신 기관의 TS 자기 구간과 소유 기관 기사의 권한은 그대로다
+            for ts in ("sending", "sent"):
+                self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": ts}), 200)
+            self.assert_status(self.stack.request("PATCH", path, "kdoctor", {"ts": "inReading"}), 200)
+            self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Unverified"}), 200)
+
     def test_zzz_known_failure_concurrent_commit_must_not_return_500(self) -> None:
         """다음 배치의 빨간 테스트. @expectedFailure로 숨기지 않는다."""
         with self.stack.fixture() as fixture:
