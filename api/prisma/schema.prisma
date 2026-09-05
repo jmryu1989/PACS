@@ -60,6 +60,7 @@ model StudyState {
   /// 최초 등록 경로. 기존·DICOM lazy 등록은 dicom, Gateway announce만 gateway.
   origin    String   @default("dicom")
   rs        String   @default("W")            // Reading Status: W(대기) T(임시저장) A(승인)
+  holdReason String?
   ss        String   @default("Verified")     // Study Status: Verified / Unverified (기사 확인)
   em        String   @default("N")            // Emergency: E / N
   ts        String   @default("none")         // Tele Status: none→wait→sending→sent→inReading→completed

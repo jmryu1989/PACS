@@ -123,6 +123,7 @@ function toClient(s: any, r: any, actor = '', d: any = null) {
     // 키가 사라지면 클라이언트의 `{...기존, ...응답}` 이 이전 점유자를 그대로 남긴다.
     // "값을 비웠다"는 사실도 전송되어야 한다.
     holder: holdAlive(s) ? s.holder : null,
+    holdReason: s.holdReason ?? null,
     version: r?.version ?? 0,
     findings: hidden ? '' : (r?.findings ?? ''),
     conclusion: hidden ? '' : (r?.conclusion ?? ''),
@@ -154,7 +155,7 @@ function toClient(s: any, r: any, actor = '', d: any = null) {
 const STATE_FIELDS = ['ss', 'em', 'ts', 'ward', 'reqHosp'];
 /** 전용 경로가 소유한 필드들. PATCH로 오면 조용히 무시하지 않고 소리 내어 막는다.
  * matched·orig는 /match·/unmatch의 Order+Study 원자 트랜잭션만이 쓴다. */
-const REPORT_OWNED_FIELDS = ['rs', 'repDoc', 'confirm', 'matched', 'orig'];
+const REPORT_OWNED_FIELDS = ['rs', 'repDoc', 'confirm', 'matched', 'orig', 'holdReason'];
 
 /** 원격판독 상태머신. 어느 쪽 기관이 이 전이를 일으킬 수 있는가가 핵심이다. */
 const TELE_BY_OWNER = ['none', 'wait', 'sending', 'sent', 'cancelled', 'fail'];  // 의뢰 기관이 미는 구간
@@ -949,7 +950,7 @@ export class PacsService implements OnModuleInit {
     need(c.roles, 'radiologist', '판독문 확정');
     const me = inst(c);
     const action = body.action;
-    if (!['save', 'approve', 'addendum', 'reset', 'preliminary'].includes(action))
+    if (!['save', 'approve', 'addendum', 'reset', 'preliminary', 'defer'].includes(action))
       throw new BadRequestException(`알 수 없는 action: ${action}`);
 
     const prev = await this.gate(uid, c);
@@ -973,6 +974,16 @@ export class PacsService implements OnModuleInit {
     // 판독을 되돌리는 것은 기록을 지우는 일이다. 사유 없이는 안 된다. (교훈 §1)
     if (action === 'reset' && !String(body.reason ?? '').trim())
       throw new BadRequestException('판독 취소에는 사유가 필요합니다');
+    if (action === 'defer') {
+      if (!String(body.reason ?? '').trim())
+        throw new BadRequestException('보류에는 사유가 필요합니다');
+      if (prev.rs === 'P')
+        throw new BadRequestException('예비 판독(RS: P)은 보류할 수 없습니다 — 승인 또는 취소만 가능합니다');
+      if (prev.rs === 'A')
+        throw new BadRequestException('승인된 판독문은 보류할 수 없습니다. 먼저 판독 취소(Reset)를 하세요');
+      if (!['W', 'T', 'H'].includes(prev.rs))
+        throw new BadRequestException('대기·임시저장·보류 상태에서만 보류할 수 있습니다');
+    }
 
     /**
      * ── Preliminary (RS=P) ──
@@ -1010,7 +1021,7 @@ export class PacsService implements OnModuleInit {
       throw new ForbiddenException(
         `예비 판독의 최종 승인은 지정된 상급 판독의(${prev.preReviewer})만 할 수 있습니다`);
 
-    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P' }[action];
+    let rs = { save: 'T', approve: 'A', addendum: 'A', reset: 'W', preliminary: 'P', defer: 'H' }[action];
 
     /**
      * **예비 판독 중에는 임시 저장이 P를 풀지 못한다.**
@@ -1032,6 +1043,7 @@ export class PacsService implements OnModuleInit {
         };
 
     const stateData: any = { rs, holder: null, heldAt: null };   // 확정하면 점유가 풀린다
+    stateData.holdReason = action === 'defer' ? body.reason : null;
     if (action === 'preliminary') {
       stateData.preDoc = c.actor;
       stateData.preReviewer = reviewer;

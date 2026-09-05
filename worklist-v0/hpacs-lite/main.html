@@ -644,6 +644,7 @@
           <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">초안 버리기</button>
         </div>
         <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
+        <div class="draftbar" id="deferbar" style="display:none"><span id="defermsg"></span></div>
         <div class="redit">
           <h4>Findings</h4>
           <textarea id="findings" placeholder="Please enter findings"></textarea>
@@ -657,6 +658,7 @@
           <button id="b-paste">Paste</button>
           <button id="b-history" title="판독문 개정 이력">History</button>
           <button id="b-unread">Reset to Unread</button>
+          <button id="b-defer">보류</button>
           <button id="b-clear">Clear</button>
           <button id="b-prev">◀ Prev</button>
           <button id="b-next">Next ▶</button>
@@ -759,6 +761,20 @@
       <div class="foot">
         <button id="m-cancel">Cancel</button>
         <button class="ok" id="m-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="reasonmodal">
+    <div class="box">
+      <h3 id="reason-title"></h3>
+      <div class="body tplbody">
+        <label>사유</label><div id="reason-choices"></div>
+        <label for="reason-extra">기타/추가 설명</label><textarea id="reason-extra" maxlength="200" rows="3"></textarea>
+      </div>
+      <div class="foot">
+        <button id="reason-cancel">취소</button>
+        <button class="ok" id="reason-ok" disabled>확인</button>
       </div>
     </div>
   </div>
@@ -1156,7 +1172,7 @@
     // 특수 렌더링이 필요한 칸만 함수로
     const CELL = {
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
-      rs: s => `<span class="rs ${esc(s.rs)}">${esc(s.rs)}</span>`,
+      rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${mode === "Radiology" && s.ss === "Unverified" ? "촬영중" : esc(s.ss)}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
@@ -1206,6 +1222,7 @@
       const a = appState[s.uid] ?? {};
       s.em = a.em ?? s.em ?? "N";
       s.rs = a.rs ?? "W";
+      s.holdReason = a.holdReason ?? null;
       s.ts = a.ts ?? "none";
       s.ss = a.ss ?? s.ss ?? "Verified";
       s.matched = a.matched ?? "U";
@@ -1418,7 +1435,8 @@
         $("#countlist").innerHTML =
           `<span class="count"><span class="dot dot-w"></span>W:${n("rs","W")}</span>` +
           `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
-          `<span class="count"><span class="dot dot-ho"></span>H,O:${n("rs","H") + n("rs","O")}</span>` +
+          `<span class="count"><span class="dot dot-ho"></span>H:${n("rs","H")}</span>` +
+          `<span class="count"><span class="dot dot-ho"></span>O:${n("rs","O")}</span>` +
           `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
           `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
           `<span class="count">촬영중:${n("ss","Unverified")}</span>`;
@@ -1474,6 +1492,8 @@
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
       if (uid === selectedUid) return;
+      // 사유를 고르는 동안 A→B→A로 이동해도 이전 모달의 결정을 새 선택에 적용하지 않는다.
+      if (reasonResolve) reasonResolve(null);
       stashReport();
       if (heldUid && heldUid !== uid) releaseHold();   // 다른 검사로 가면 잡고 있던 걸 놓는다
       warnedFor = null;
@@ -2049,7 +2069,7 @@
         commitInFlight = true;
         // 요청이 나가 있는 동안 버튼을 회색으로. 플래그만으로도 두 번째 호출은 막히지만,
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
-        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim"])
+        for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
@@ -2090,10 +2110,10 @@
           toast("예비 판독 지정은 서버에 연결돼 있을 때만 가능합니다", "err");
           return;
         }
-        const rs = { save: "T", approve: "A", addendum: "A", reset: "W" }[action];
+        const rs = { save: "T", approve: "A", addendum: "A", reset: "W", defer: "H" }[action];
         // 서버 확정은 ReportDraft를 회수한다. 로컬도 초안을 남기면 force 로드가
         // 방금 확정한 내용 대신 옛 초안을 다시 고르는 서로 다른 생애주기가 된다.
-        appState[uid] = { ...appState[uid], ...content, rs, draft: null };
+        appState[uid] = { ...appState[uid], ...content, rs, draft: null, holdReason: action === "defer" ? reason : null };
         if (rs === "A") {
           appState[uid].repDoc = user.split("@")[0];
           appState[uid].confirm = today();
@@ -2103,11 +2123,13 @@
         }
         loadReport({ force: true });
         cur().rs = rs;
+        cur().holdReason = appState[uid].holdReason;
         saveApp();
       }
       render(); renderRelated(); updateReportButtons();
       toast({
         save: "임시 저장했습니다 (RS: T)",
+        defer: `보류했습니다 (RS: H) — ${reason}`,
         approve: "판독문을 승인했습니다 (RS: A)",
         addendum: "추가기재를 저장했습니다 — 이전 승인본은 그대로 남습니다",
         reset: "판독을 취소했습니다 (RS: W). 사유가 이력에 기록됐습니다",
@@ -2126,12 +2148,14 @@
       const heldTitle = `${displayActor(held)} 님이 판독 중입니다`;
       $("#holdbar").style.display = held ? "flex" : "none";
       $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
+      $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ 보류 — ${s.holdReason ?? ""}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
       // Clear·Paste가 여기 들어와야 하는 이유: 둘 다 textarea의 `.value`에 직접 쓴다.
       // `readOnly`는 스크립트 대입을 안 막으므로, 잠긴 판독문이 이 두 버튼으로 지워졌다.
-      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste"]) {
+      for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste", "#b-defer"]) {
         const el = $(id);
         if (!el) continue;
         el.disabled = !rad || locked || filming || !!held;
@@ -2139,6 +2163,12 @@
           : !rad ? "판독의 권한이 필요합니다" : "";
       }
       // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
+      $("#b-defer").disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
+      $("#b-defer").title = held ? heldTitle : filming ? filmingTitle
+        : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+        : s?.rs === "A" ? "승인된 판독문은 보류할 수 없습니다. 먼저 판독 취소(Reset)를 하세요"
+        : s?.rs === "P" ? "예비 판독(RS: P)은 보류할 수 없습니다 — 승인 또는 취소만 가능합니다"
+        : !rad ? "판독의 권한이 필요합니다" : !serverMode ? "서버에 연결돼 있을 때만 보류할 수 있습니다" : "";
       if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
@@ -2206,11 +2236,50 @@
     $("#b-transcribe").addEventListener("click", () => commitReport("save"));
     $("#b-approve").addEventListener("click", () => commitReport("approve"));
     $("#b-addendum").addEventListener("click", () => commitReport("addendum"));
-    $("#b-unread").addEventListener("click", () => {
+    let reasonResolve = null;
+    function askReason({ title, choices }) {
+      if (reasonResolve) reasonResolve(null);
+      const modal = $("#reasonmodal"), extra = $("#reason-extra"), ok = $("#reason-ok");
+      $("#reason-title").textContent = title;
+      $("#reason-choices").innerHTML = choices.map(choice =>
+        `<label style="display:block"><input type="radio" name="reason-choice" value="${esc(choice)}"> ${esc(choice)}</label>`).join("");
+      extra.value = "";
+      const value = () => {
+        const choice = modal.querySelector('input[name="reason-choice"]:checked')?.value;
+        const detail = extra.value.trim();
+        if (!choice || (choice === "기타" && !detail) || detail.length > 200) return null;
+        return detail ? `${choice} — ${detail}` : choice;
+      };
+      const update = () => { ok.disabled = !value(); };
+      update();
+      modal.classList.add("show");
+      return new Promise(resolve => {
+        const finish = reason => {
+          modal.classList.remove("show");
+          modal.oninput = modal.onchange = modal.onkeydown = null;
+          ok.onclick = $("#reason-cancel").onclick = null;
+          reasonResolve = null;
+          resolve(reason);
+        };
+        reasonResolve = finish;
+        modal.oninput = modal.onchange = update;
+        modal.onkeydown = e => { if (e.key === "Escape") finish(null); };
+        $("#reason-cancel").onclick = () => finish(null);
+        ok.onclick = () => { const reason = value(); if (reason) finish(reason); };
+      });
+    }
+    $("#b-unread").addEventListener("click", async () => {
       // 판독을 되돌리는 것은 저장된 진술을 지우는 일이다. 사유 없이는 보내지 않는다.
-      const reason = prompt("판독 취소 사유를 적어주세요 (기록에 남습니다):");
-      if (!reason?.trim()) return;
-      commitReport("reset", reason.trim());
+      const uid = selectedUid;
+      const reason = await askReason({ title: "판독 취소 사유", choices: ["내용 정정 필요", "환자·검사 불일치", "잘못된 검사에 작성", "의뢰 취소", "기타"] });
+      if (!reason || uid !== selectedUid) return;
+      commitReport("reset", reason);
+    });
+    $("#b-defer").addEventListener("click", async () => {
+      const uid = selectedUid;
+      const reason = await askReason({ title: "판독 보류 사유", choices: ["prior 없음", "임상정보 부족", "영상 불량", "재촬영 필요", "기타"] });
+      if (!reason || uid !== selectedUid) return;
+      commitReport("defer", reason);
     });
 
     /**
@@ -2223,7 +2292,7 @@
       const a = appState[uid];
       if (!s || !a) return;
       for (const k of ["rs", "ss", "em", "ts", "matched", "holder", "version", "repDoc", "confirm",
-                        "preDoc", "preReviewer", "prelimHidden"])
+                        "preDoc", "preReviewer", "prelimHidden", "holdReason"])
         if (a[k] !== undefined) s[k] = a[k];
       if (a.holder === null || a.holder === undefined) s.holder = a.holder;
       if (a.ward) s.ward = a.ward;
@@ -3210,7 +3279,8 @@ ${esc($("#recommendation").value)}
       const forceReleaseItems = KinAuth.has("admin") && s?.holder ? [{
         label: "점유 강제 해제 (관리자)", dis: s.holder === user, act: async () => {
           if (!confirm(`${displayActor(s.holder)} 님의 점유를 강제로 해제합니다. 그쪽 화면은 다음 저장에서 거절됩니다. 계속할까요?`)) return;
-          await api("POST", `/studies/${encodeURIComponent(uid)}/release/force`);
+          try { await api("POST", `/studies/${encodeURIComponent(uid)}/release/force`); }
+          catch (e) { apiFail(e); return; }
           s.holder = null;
           appState[uid] = { ...appState[uid], holder: null };
           render();
@@ -3303,7 +3373,7 @@ ${esc($("#recommendation").value)}
     function applyRoleUi() {
       const rad = KinAuth.has("radiologist"), tec = KinAuth.has("technician");
       // Clear·Paste도 판독문을 고치는 버튼이다. 목록에서 빠져 있어서 기사에게도 열려 있었다.
-      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum",
+      ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-addendum", "#b-defer",
        "#b-clear", "#b-paste"].forEach(s => {
         const el = $(s); if (!el) return;
         el.disabled = !rad;

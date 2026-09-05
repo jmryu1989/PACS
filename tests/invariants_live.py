@@ -1238,6 +1238,7 @@ class LiveInvariantTests(unittest.TestCase):
         keys = (
             "rs", "version", "findings", "conclusion", "recommendation",
             "preDoc", "preReviewer", "repDoc", "confirm",
+            "holdReason",
         )
         return {key: state.get(key) for key in keys}
 
@@ -1288,6 +1289,68 @@ class LiveInvariantTests(unittest.TestCase):
         )
         return body, f'multipart/related; type="application/dicom"; boundary={boundary}'
 
+    def test_defer_requires_reason_and_records_unoccupied_h(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            result = self.stack.request("POST", path + "/report/commit", "doctor", {"action": "defer", "reason": " "})
+            self.assert_status(result, 400)
+            self.assertEqual(result.body["message"], "보류에는 사유가 필요합니다")
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            result = self.stack.request("POST", path + "/report/commit", "doctor", {
+                "action": "defer", "reason": "prior 없음", "baseVersion": 0, "findings": fixture.secret,
+            })
+            self.assert_status(result, 201)
+            self.assertEqual(result.body["rs"], "H")
+            self.assertEqual(result.body["holdReason"], "prior 없음")
+            self.assertIsNone(result.body["holder"])
+            self.assertEqual(result.body["findings"], fixture.secret)
+            latest = self.versions(fixture, "doctor")[-1]
+            self.assertEqual((latest["action"], latest["reason"]), ("defer", "prior 없음"))
+            audit = self.stack.request("GET", f"/audit?uid={quote(fixture.uid)}", "jmryu")
+            self.assert_status(audit, 200)
+            self.assertEqual(len([r for r in audit.body if r["action"] == "report.defer"]), 1)
+
+    def test_defer_all_exits_clear_hold_reason(self) -> None:
+        for action, rs in (("save", "T"), ("approve", "A"), ("preliminary", "P"), ("reset", "W")):
+            with self.subTest(action=action), self.stack.fixture() as fixture:
+                path = f"/studies/{quote(fixture.uid)}/report/commit"
+                deferred = self.stack.request("POST", path, "doctor", {
+                    "action": "defer", "reason": "임상정보 부족", "baseVersion": 0,
+                })
+                self.assert_status(deferred, 201)
+                result = self.stack.request("POST", path, "doctor2", {
+                    "action": action, "baseVersion": deferred.body["version"], "reason": "내용 정정 필요",
+                    "reviewer": self.stack.actor("doctor"), "findings": "continued",
+                })
+                self.assert_status(result, 201)
+                self.assertEqual(result.body["rs"], rs)
+                self.assertIn("holdReason", result.body)
+                self.assertIsNone(result.body["holdReason"])
+
+    def test_defer_cannot_leave_preliminary_or_approved(self) -> None:
+        for state in ("P", "A"):
+            with self.subTest(state=state), self.stack.fixture() as fixture:
+                if state == "P":
+                    self.preliminary(fixture)
+                else:
+                    self.approve(fixture)
+                before = self.snapshot(fixture, "doctor")
+                result = self.stack.request("POST", f"/studies/{quote(fixture.uid)}/report/commit", "doctor", {
+                    "action": "defer", "reason": "영상 불량", "baseVersion": before[0]["version"],
+                })
+                self.assert_status(result, 400)
+                self.assertIn("보류할 수 없습니다", result.body["message"])
+                self.assert_snapshot_unchanged(fixture, "doctor", before)
+
+    def test_defer_reason_cannot_be_patched(self) -> None:
+        with self.stack.fixture() as fixture:
+            before = self.snapshot(fixture, "doctor")
+            for reason in ("우회", None):
+                result = self.stack.request("PATCH", f"/studies/{quote(fixture.uid)}", "jmryu", {"holdReason": reason})
+                self.assert_status(result, 400)
+                self.assertIn("전용 경로", result.body["message"])
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+
     def test_hold_blocks_other_actor_draft_and_all_commits_but_preserves_reads(self) -> None:
         with self.stack.fixture() as fixture:
             path = f"/studies/{quote(fixture.uid)}"
@@ -1296,7 +1359,7 @@ class LiveInvariantTests(unittest.TestCase):
             before = self.snapshot(fixture, "doctor2")
             attempts = [("PUT", "/report", {"findings": fixture.secret})] + [
                 ("POST", "/report/commit", {"action": action, "baseVersion": 0, "findings": fixture.secret})
-                for action in ("save", "approve", "addendum", "reset", "preliminary")
+                for action in ("save", "approve", "addendum", "reset", "preliminary", "defer")
             ]
             for method, suffix, body in attempts:
                 with self.subTest(action=body.get("action", "draft")):
