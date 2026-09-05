@@ -2684,7 +2684,8 @@ ${esc($("#recommendation").value)}
           width: Number(value?.width), height: Number(value?.height),
         };
         return [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) &&
-          rect.width > 0 && rect.height > 0 ? rect : null;
+          rect.left > -30000 && rect.top > -30000 &&
+          rect.width >= 320 && rect.height >= 240 ? rect : null;
       } catch (_) { return null; }
     }
 
@@ -2736,12 +2737,15 @@ ${esc($("#recommendation").value)}
     function rememberOhifRect(popup = ohifPopupHandle) {
       try {
         if (!popup || popup.closed) return false;
+        // 최소화·닫힘 전이의 좌표로 마지막 정상 자리를 덮지 않는다.
+        try { if (popup.document.visibilityState === "hidden") return false; } catch (_) {}
         const rect = {
           left: Number(popup.screenX), top: Number(popup.screenY),
           width: Number(popup.outerWidth), height: Number(popup.outerHeight),
         };
         if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) ||
-            rect.width <= 0 || rect.height <= 0) return false;
+            rect.left <= -30000 || rect.top <= -30000 ||
+            rect.width < 320 || rect.height < 240) return false;
         localStorage.setItem(OHIF_RECT_KEY, JSON.stringify(rect));
         return true;
       } catch (_) { return false; }
