@@ -2970,6 +2970,33 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertIn('for (const id of ["#b-save", "#b-transcribe", "#b-approve"])', page)
             self.assertIn("승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
 
+    def test_uid_routes_404_without_study_state_row(self) -> None:
+        doctor_id = self.stack.user_ids["doctor"]
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            tagged = self.stack.request("PATCH", path, "tech", {"ov": {"id": "OVR", "name": fixture.secret}})
+            self.assert_status(tagged, 200)   # 감사 detail에 환자 정보(ov)가 실린다
+            # 살아 있는 행: 타기관은 404, 목록형 감사에도 안 보인다
+            self.assert_status(self.stack.request("GET", f"/audit?uid={quote(fixture.uid)}", "kdoctor"), 404)
+            collection = self.stack.request("GET", "/audit?take=500", "kdoctor")
+            self.assert_status(collection, 200)
+            self.assertFalse(any(row["target"] == fixture.uid for row in collection.body))
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": fixture.secret}), 200)
+            forced = self.stack.request("DELETE", path + "/draft/force", "jmryu")
+            self.assert_status(forced, 200)
+            self.assertEqual(forced.body["count"], 1)   # discarded 이력 1건이 남는다
+            self.assert_status(self.stack.request("DELETE", path, "tech"), 200)
+            # 행이 사라진 뒤에는 누구에게도 없는 검사다. GET /studies는 lazy 등록으로 행을 되살리므로 부르지 않는다.
+            for user in ("kdoctor", "doctor", "jmryu"):
+                with self.subTest(user=user):
+                    audit = self.stack.request("GET", f"/audit?uid={quote(fixture.uid)}", user)
+                    versions = self.stack.request("GET", path + "/report/versions", user)
+                    self.assertEqual((audit.status, versions.status), (404, 404), audit.text + versions.text)
+                    self.assertFalse(audit.contains(fixture.secret) or versions.contains(fixture.secret))
+            # 회원 감사 행(target = Keycloak 사용자 id)은 검사 uid 관문을 지나지 못한다 — 관리자여도
+            self.assert_status(self.stack.request("GET", f"/audit?uid={quote(doctor_id)}", "kdoctor"), 404)
+            self.assert_status(self.stack.request("GET", f"/audit?uid={quote(doctor_id)}", "jmryu"), 404)
+
     def test_zzz_known_failure_concurrent_commit_must_not_return_500(self) -> None:
         """다음 배치의 빨간 테스트. @expectedFailure로 숨기지 않는다."""
         with self.stack.fixture() as fixture:

@@ -1203,6 +1203,12 @@ export class PacsService implements OnModuleInit {
   /** 판독문 이력 (최신순) */
   async versions(uid: string, c: Caller) {
     const prev = await this.gate(uid, c);
+    /**
+     * 행이 없는 uid는 없는 검사다. gate()는 "안 보이는 검사"만 404로 바꾸고 "없는 검사"는 null로
+     * 흘려보내는데, 그러면 삭제된 검사에 남은 discarded 이력이 **모든 기관**에 읽혔다(v0.6.3 회귀 확충에서
+     * 발견). 이력의 조회 관문은 StudyState 행이다 — 행이 없으면 기관을 가를 수 없고, 가를 수 없으면 거절한다.
+     */
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     // 본문을 가려놓고 이력에서 읽히면 가린 게 아니다. 같은 규칙을 여기에도 건다.
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
@@ -1365,7 +1371,10 @@ export class PacsService implements OnModuleInit {
   async audits(uid: string | undefined, take: number, c: Caller) {
     const me = inst(c);
     if (uid) {
-      await this.gate(uid, c);
+      const prev = await this.gate(uid, c);
+      // versions()와 같은 이유. 삭제된 검사의 감사(환자 정보가 든 ov 포함)와 회원 감사 행(target이
+      // Keycloak 사용자 id)이 이 통로로 새어 나갔다. 회원 감사 조회가 필요해지면 admin 전용 경로로 만든다.
+      if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
       return this.prisma.auditLog.findMany({ where: { target: uid }, orderBy: { at: 'desc' }, take: Math.min(take, 500) });
     }
     const mine = await this.prisma.studyState.findMany({
