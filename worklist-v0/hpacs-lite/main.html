@@ -1818,6 +1818,9 @@
       const target = studies.find(s => s.uid === uid);
       if (!current || !target || target.uid === current.uid || !current.sourcePatientKey ||
           target.sourcePatientKey !== current.sourcePatientKey) return;
+      // 같은 prior를 다시 고르는 것은 이동이 아니다. 행을 다시 만들면
+      // 뒤따르는 dblclick이 떼어진 옛 행에 떨어져 목록 리스너에 도달하지 않는다.
+      if (uid === relatedUid) return;
       relatedUid = uid;
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates(); loadRelatedReport();
     }
