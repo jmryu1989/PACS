@@ -12,12 +12,13 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import ssl
 import subprocess
 import sys
+import tarfile
 import time
 import uuid
 from urllib.parse import urlsplit
@@ -242,6 +243,17 @@ def validate_backup(directory):
         path = directory / name
         if path.is_symlink() or not path.is_file() or digest(path) != manifest.get("sha256", {}).get(name):
             raise RuntimeError("Backup component checksum mismatch: " + name)
+    # Checksums prove consistency with the manifest, not trust in archive paths.
+    # Refuse links/devices/traversal before any extraction, even in an isolated volume.
+    found_index = False
+    with tarfile.open(directory / "orthanc.tgz", "r|gz") as archive:
+        for entry in archive:
+            path = PurePosixPath(entry.name)
+            if path.is_absolute() or ".." in path.parts or not (entry.isfile() or entry.isdir()):
+                raise RuntimeError("Unsafe Orthanc archive entry")
+            found_index |= str(path) == "index" and entry.isfile()
+    if not found_index:
+        raise RuntimeError("Orthanc archive has no SQLite index")
     for key in ("postgres_image", "orthanc_image"):
         if not re.fullmatch(r"sha256:[a-f0-9]{64}", manifest.get(key, "")):
             raise RuntimeError("Backup image ID is invalid")
@@ -251,7 +263,7 @@ def validate_backup(directory):
 
 
 def remove_owned(kind, name, token):
-    if not name.startswith("kin-rehearsal-"):
+    if kind not in ("container", "volume") or not name.startswith("kin-rehearsal-"):
         raise RuntimeError("Refusing cleanup outside rehearsal resources")
     label = text(["docker", kind, "inspect", "--format", '{{index .Labels "kin.ops.run"}}' if kind == "volume"
                   else '{{index .Config.Labels "kin.ops.run"}}', name])
@@ -265,6 +277,9 @@ def remove_owned_if_present(kind, name, token):
     found = run(["docker", kind, "inspect", name], check=False)
     if found.returncode == 0:
         remove_owned(kind, name, token)
+    elif not any(message in found.stderr.decode("utf-8", errors="replace").lower()
+                 for message in ("no such object", "no such container", "no such volume")):
+        raise RuntimeError("Could not verify temporary resource cleanup")
 
 
 def rehearse(directory):

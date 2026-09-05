@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -109,6 +111,30 @@ class BackupSafetyTests(unittest.TestCase):
                         self.fail("Second operation acquired an existing lock")
                 self.assertTrue(path.exists())
             self.assertFalse(path.exists())
+
+    def test_09_daemon_failure_is_not_successful_cleanup(self):
+        failure = SimpleNamespace(returncode=1, stdout=b"", stderr=b"Cannot connect to the Docker daemon")
+        with patch.object(ops, "run", return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, "Could not verify"):
+                ops.remove_owned_if_present("container", "kin-rehearsal-owned", "token")
+
+    def test_10_unsafe_archive_is_refused_even_with_matching_checksums(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name in ops.FILES:
+                (directory / name).write_bytes(b"test fixture")
+            with tarfile.open(directory / "orthanc.tgz", "w:gz") as archive:
+                entry = tarfile.TarInfo("../outside")
+                entry.size = 1
+                archive.addfile(entry, io.BytesIO(b"x"))
+            ops.write_json(directory / "manifest.json", {
+                "format": 1, "complete": True, "resume_failures": [],
+                "sha256": {name: ops.digest(directory / name) for name in ops.FILES},
+            })
+            with patch.object(ops, "run") as command:
+                with self.assertRaisesRegex(RuntimeError, "Unsafe Orthanc archive"):
+                    ops.validate_backup(directory)
+                command.assert_not_called()
 
 
 if __name__ == "__main__":
