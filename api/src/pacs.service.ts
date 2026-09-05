@@ -805,6 +805,9 @@ export class PacsService implements OnModuleInit {
     const prev = await this.gate(uid, c);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
+    const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
+    if (heldByOther)
+      throw new ConflictException({ code: 'REPORT_HELD', holder: heldByOther, message: `${heldByOther} 님이 판독 중입니다` });
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
@@ -952,6 +955,9 @@ export class PacsService implements OnModuleInit {
     const prev = await this.gate(uid, c);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
+    const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
+    if (heldByOther)
+      throw new ConflictException({ code: 'REPORT_HELD', holder: heldByOther, message: `${heldByOther} 님이 판독 중입니다` });
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
@@ -1157,6 +1163,18 @@ export class PacsService implements OnModuleInit {
     if (!prev || prev.holder !== c.actor) return { ok: true };   // 내 것이 아니면 건드리지 않는다
     await this.prisma.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
     return { ok: true };
+  }
+
+  async forceRelease(uid: string, c: Caller) {
+    need(c.roles, 'admin', '판독 점유 강제 해제');
+    const prev = await this.gate(uid, c);
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+    await this.prisma.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    // 점유가 없었어도 관리자 조치의 호출 흔적은 남긴다.
+    await this.audit(c.actor, 'hold.force-release', uid, {
+      by: inst(c), holder: prev.holder ?? null, heldAt: prev.heldAt ?? null, alive: holdAlive(prev),
+    });
+    return { ok: true, released: prev.holder ?? null };
   }
 
   /** 판독문 이력 (최신순) */

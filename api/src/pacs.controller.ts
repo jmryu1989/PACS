@@ -185,6 +185,12 @@ export class PacsController {
     return this.svc.release(uid, caller(req));
   }
 
+  @Post('studies/:uid/release/force')
+  @HttpCode(200)
+  forceRelease(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.forceRelease(uid, caller(req));
+  }
+
   @Delete('studies/:uid')
   remove(@Param('uid') uid: string, @Req() req: any) {
     return this.svc.removeState(uid, caller(req));

@@ -643,6 +643,7 @@
                   title="현재 화면의 내용을 버리고 서버에서 받은 최신 판독문을 표시합니다">서버 내용 불러오기</button>
           <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">초안 버리기</button>
         </div>
+        <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
         <div class="redit">
           <h4>Findings</h4>
           <textarea id="findings" placeholder="Please enter findings"></textarea>
@@ -859,7 +860,17 @@
       if (res.status === 401) { await KinAuth.logout(); throw new Error("세션이 만료되었습니다"); }
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        throw new Error(j.message ?? `HTTP ${res.status}`);
+        if (res.status === 409 && j.code === "REPORT_HELD") {
+          const uid = decodeURIComponent(path.split("/")[2]);
+          appState[uid] = { ...appState[uid], holder: j.holder };
+          syncStudy(uid);
+          if (uid === selectedUid) { updateReportButtons(); loadReport(); }
+          if (warnedFor !== uid) {
+            warnedFor = uid;
+            toast(`${displayActor(j.holder)} 님이 판독 중입니다 — 저장되지 않았습니다`, "err");
+          }
+        }
+        throw Object.assign(new Error(j.message ?? `HTTP ${res.status}`), { code: j.code });
       }
       return res.json();
     }
@@ -1864,7 +1875,7 @@
         const el = $(sel);
         if (!preserveValue) el.value = locked ? "" : (src[sel.slice(1)] ?? "");
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
-        el.readOnly = locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
+        el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
       }
       renderDraftBar();
     }
@@ -1946,7 +1957,7 @@
      * `keepalive`는 탭이 닫히는 중에도 요청이 끝까지 가게 한다(beforeunload용).
      */
     async function stashReport({ keepalive = false } = {}) {
-      if (!selectedUid) return;
+      if (!selectedUid || heldByOther(cur())) return;
       const uid = selectedUid;
       const a = appState[uid] ?? {};
       const next = {
@@ -1993,7 +2004,7 @@
         } catch (e) {}
         return;
       }
-      try { await api("PUT", path, body); } catch (e) { apiFail(e); }
+      try { await api("PUT", path, body); } catch (e) { if (e.code !== "REPORT_HELD") apiFail(e); }
     }
     /**
      * 판독문 확정. action: save | approve | addendum | reset
@@ -2051,6 +2062,7 @@
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
           // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
+          if (e.code === "REPORT_HELD") return;
           if (e.message.includes("저장했습니다")) {
             toast(e.message, "err");
             if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
@@ -2103,11 +2115,17 @@
       }[action], action === "reset" ? "info" : "ok");
     }
 
+    function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
+
     function updateReportButtons() {
       const s = cur();
       const rad = KinAuth.has("radiologist");
       const filming = s?.ss === "Unverified" && s?.em !== "E";
       const filmingTitle = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다";
+      const held = heldByOther(s);
+      const heldTitle = `${displayActor(held)} 님이 판독 중입니다`;
+      $("#holdbar").style.display = held ? "flex" : "none";
+      $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
@@ -2116,18 +2134,18 @@
       for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste"]) {
         const el = $(id);
         if (!el) continue;
-        el.disabled = !rad || locked || filming;
-        el.title = filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+        el.disabled = !rad || locked || filming || !!held;
+        el.title = held ? heldTitle : filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
           : !rad ? "판독의 권한이 필요합니다" : "";
       }
       // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
-      if (s?.rs === "A" && rad && !locked && !filming) {
+      if (s?.rs === "A" && rad && !locked && !filming && !held) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
       }
       // Addendum은 승인된 판독문에만 붙는다
-      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming;
-      $("#b-addendum").title = filming ? filmingTitle : s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
+      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming || !!held;
+      $("#b-addendum").title = held ? heldTitle : filming ? filmingTitle : s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
       /**
        * Prelim은 "아직 확정 안 된 판독을 상급자에게 넘기는" 동작이다.
        * 이미 승인(A)된 것에는 의미가 없고, 이미 P인 것을 다시 넘기면 지정이 덮어써진다.
@@ -2135,14 +2153,14 @@
        */
       const b = $("#b-prelim");
       if (b) {
-        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !serverMode;
-        b.title = filming ? filmingTitle : !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
+        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !!held || !serverMode;
+        b.title = held ? heldTitle : filming ? filmingTitle : !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
           : s?.rs === "P" ? "이미 예비 판독 중입니다"
           : s?.rs === "A" ? "이미 승인된 판독입니다"
           : "상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)";
       }
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
-        $(id).readOnly = !rad || locked || filming;
+        $(id).readOnly = !rad || locked || filming || !!held;
       }
     }
 
@@ -2248,14 +2266,14 @@
         if (s) s.holder = r.holder;
         appState[uid] = { ...appState[uid], holder: r.holder };
         render();
+        if (uid === selectedUid) { updateReportButtons(); loadReport(); }
 
         if (r.conflict) {
-          // 막지 않는다. 응급 판독을 자물쇠로 세우는 건 위험하다.
-          // 실제 덮어쓰기는 저장 시점의 버전 비교가 막는다.
+          // 남의 점유는 뺏지 않는다. 잠금 해제는 폴링이나 다음 점유 응답으로 반영한다.
           holdBlocked = { uid, at: Date.now() };
           if (warnedFor !== uid) {
             warnedFor = uid;
-            toast(`${r.holder} 님이 이 검사를 작성 중입니다. 저장할 때 충돌할 수 있습니다.`, "err");
+            toast(`${displayActor(r.holder)} 님이 먼저 판독을 시작했습니다 — 잠금이 풀리면 이어서 할 수 있습니다`, "err");
           }
           return;
         }
@@ -2324,6 +2342,7 @@
     // ③ 주기적 자동 저장. 20초면 사고로 잃는 양이 "방금 친 문장"을 넘지 않는다.
     setInterval(() => {
       if (!serverMode || !selectedUid || commitInFlight) return;
+      if (heldByOther(cur())) return;
       if (!reportDirty()) return;
       stashReport();
     }, AUTOSAVE_MS);
@@ -2333,7 +2352,7 @@
       if (!reportDirty()) return;
       // keepalive 요청은 문서가 사라진 뒤에도 끝까지 간다. 다만 보장은 아니라서,
       // 경고도 함께 띄운다 — 판독문은 잃어버리면 안 되는 유일한 것이다.
-      stashReport({ keepalive: true });
+      if (!heldByOther(cur())) stashReport({ keepalive: true });
       if (serverMode && heldUid) {
         fetch(`${API}/studies/${encodeURIComponent(heldUid)}/release`, {
           method: "POST", keepalive: true, headers: { "X-KIN-CSRF": "1" },
@@ -3188,6 +3207,17 @@ ${esc($("#recommendation").value)}
       const uid = tr.dataset.uid;
       select(uid);
       const s = studies.find(x => x.uid === uid);
+      const forceReleaseItems = KinAuth.has("admin") && s?.holder ? [{
+        label: "점유 강제 해제 (관리자)", dis: s.holder === user, act: async () => {
+          if (!confirm(`${displayActor(s.holder)} 님의 점유를 강제로 해제합니다. 그쪽 화면은 다음 저장에서 거절됩니다. 계속할까요?`)) return;
+          await api("POST", `/studies/${encodeURIComponent(uid)}/release/force`);
+          s.holder = null;
+          appState[uid] = { ...appState[uid], holder: null };
+          render();
+          if (uid === selectedUid) { updateReportButtons(); loadReport(); }
+          toast("점유를 해제했습니다 (감사로그 기록)");
+        },
+      }] : [];
       if (mode === "Radiology") {
         const ts = appState[uid]?.ts ?? "none";
         const requested = !["none", "cancelled", "fail"].includes(ts);
@@ -3202,6 +3232,7 @@ ${esc($("#recommendation").value)}
           { label: "의뢰 취소", dis: !mine || !["wait", "sending", "sent"].includes(ts), act: () => setTs(uid, "cancelled") },
           { sep: 1 },
           { label: "판독 시작 (수신 기관)", dis: mine || ts !== "sent", act: () => setTs(uid, "inReading") },
+          ...forceReleaseItems,
         ]);
       } else {
         const o = curOrder();
@@ -3229,6 +3260,7 @@ ${esc($("#recommendation").value)}
           { label: "Merge / Split Exam", dis: 1, act: () => {} },
           { sep: 1 },
           { label: "Delete", dis: s.rs !== "W", act: () => doDelete(uid) },
+          ...forceReleaseItems,
         ]);
       }
     });

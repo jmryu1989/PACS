@@ -114,6 +114,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/report/versions"): Route(Kind.REPORT, "versions"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
     ("POST", "studies/:uid/release"): Route(Kind.REPORT, "release"),
+    ("POST", "studies/:uid/release/force"): Route(Kind.REPORT, "release-force"),
     ("DELETE", "studies/:uid"): Route(Kind.REPORT, "study-delete"),
     ("POST", "match"): Route(Kind.TENANT),
     ("POST", "unmatch"): Route(Kind.TENANT),
@@ -1287,6 +1288,73 @@ class LiveInvariantTests(unittest.TestCase):
         )
         return body, f'multipart/related; type="application/dicom"; boundary={boundary}'
 
+    def test_hold_blocks_other_actor_draft_and_all_commits_but_preserves_reads(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            actor = self.stack.actor("doctor")
+            before = self.snapshot(fixture, "doctor2")
+            attempts = [("PUT", "/report", {"findings": fixture.secret})] + [
+                ("POST", "/report/commit", {"action": action, "baseVersion": 0, "findings": fixture.secret})
+                for action in ("save", "approve", "addendum", "reset", "preliminary")
+            ]
+            for method, suffix, body in attempts:
+                with self.subTest(action=body.get("action", "draft")):
+                    result = self.stack.request(method, path + suffix, "doctor2", body)
+                    self.assert_status(result, 409)
+                    self.assertEqual(result.body.get("code"), "REPORT_HELD")
+                    self.assertEqual(result.body.get("holder"), actor)
+                    self.assertEqual(result.body.get("message"), f"{actor} 님이 판독 중입니다")
+            self.assert_snapshot_unchanged(fixture, "doctor2", before)
+
+    def test_hold_allows_same_actor_draft_and_commit(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request(
+                "PUT", path + "/report", "doctor", {"findings": fixture.secret},
+            ), 200)
+            self.approve(fixture)
+
+    def test_hold_admin_force_release_is_audited_and_keeps_drafts(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request(
+                "PUT", path + "/report", "doctor", {"findings": fixture.secret},
+            ), 200)
+            result = self.stack.request("POST", path + "/release/force", "jmryu")
+            self.assert_status(result, 200)
+            self.assertEqual(result.body, {"ok": True, "released": self.stack.actor("doctor")})
+            audits = self.stack.request("GET", f"/audit?uid={quote(fixture.uid)}", "jmryu")
+            self.assert_status(audits, 200)
+            rows = [r for r in audits.body if r["action"] == "hold.force-release"]
+            self.assertEqual(len(rows), 1)
+            detail = json.loads(rows[0]["detail"])
+            self.assertEqual(detail["holder"], self.stack.actor("doctor"))
+            self.assertTrue(detail["alive"])
+            self.assertIsNotNone(detail["heldAt"])
+            state = self.stack.request("GET", "/bootstrap", "doctor")
+            self.assert_status(state, 200)
+            self.assertEqual(state.body["states"][fixture.uid]["draft"]["findings"], fixture.secret)
+            self.assert_status(self.stack.request(
+                "PUT", path + "/report", "doctor2", {"findings": "after release"},
+            ), 200)
+            empty = self.stack.request("POST", path + "/release/force", "jmryu")
+            self.assert_status(empty, 200)
+            self.assertIsNone(empty.body["released"])
+            audits = self.stack.request("GET", f"/audit?uid={quote(fixture.uid)}", "jmryu")
+            self.assertEqual(len([r for r in audits.body if r["action"] == "hold.force-release"]), 2)
+
+    def test_hold_radiologist_cannot_force_release(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request("POST", path + "/release/force", "doctor2"), 403)
+            result = self.stack.request("POST", path + "/hold", "doctor2")
+            self.assert_status(result, 201)
+            self.assertEqual(result.body, {"holder": self.stack.actor("doctor"), "mine": False, "conflict": True})
+
     def test_filming_non_emergency_blocks_all_report_writes_but_allows_reads(self) -> None:
         with self.stack.fixture() as fixture:
             path = f"/studies/{quote(fixture.uid)}"
@@ -1558,6 +1626,8 @@ class LiveInvariantTests(unittest.TestCase):
             return self.stack.request("POST", f"/studies/{uid}/hold", user)
         if operation == "release":
             return self.stack.request("POST", f"/studies/{uid}/release", user)
+        if operation == "release-force":
+            return self.stack.request("POST", f"/studies/{uid}/release/force", user)
         if operation == "study-delete":
             return self.stack.request("DELETE", f"/studies/{uid}", user)
         raise AssertionError(f"REPORT 라우트에 호출 방법이 없습니다: {route}")
