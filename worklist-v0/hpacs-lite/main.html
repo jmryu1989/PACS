@@ -1680,9 +1680,10 @@
       s.ss = ss;
       appState[uid] = { ...appState[uid], ss };
       saveApp(uid, { ss }); render(); renderClinical();
+      if (uid === selectedUid) { loadReport(); updateReportButtons(); }
       toast(ss === "Verified"
-        ? "검사를 확인했습니다 — Radiology 탭에 올라갑니다"
-        : "확인을 해제했습니다 — Radiology 탭에서 내려갑니다", "info");
+        ? "검사를 확인했습니다 — 판독할 수 있습니다"
+        : "확인을 해제했습니다 — 촬영중으로 표시되고 판독이 잠깁니다 (응급 제외)", "info");
     }
     $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
     $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
@@ -1695,7 +1696,7 @@
     // DICOM Association을 맺고 C-STORE로 Orthanc(4242)에 인스턴스를 밀어넣는다.
     // 그러면 서버의 검사 목록에 새 검사가 생기고, 아래 폴링이 그걸 집어온다.
     //     python3 send_cstore.py --institution "한림병원"
-    // 도착한 검사는 SS=Unverified다. 기사가 Verify해야 Radiology 탭으로 올라간다.
+    // 도착 검사는 Radiology에 촬영중으로 보이고, 비응급은 Verify 뒤에 판독할 수 있다.
 
     // ── Modify Exam (8.1.2.1.5) ──
     function openModify() {
@@ -2428,11 +2429,11 @@
                * 내가 읽는 중에 남이 그 검사를 Prelim으로 넘기면 내용이 그대로 남고
                * 버튼도 활성인 채라, Save를 눌러야 403을 만났다. (남은버그 3-1)
                */
-              if (selectedUid === uid) { loadReport(); updateReportButtons(); }
             } else {
               appState[uid] = { ...appState[uid], ...st };
             }
             syncStudy(uid);
+            if (selectedUid === uid) { loadReport(); updateReportButtons(); }
           }
           render();
           pollFails = 0;
@@ -3205,6 +3206,7 @@ ${esc($("#recommendation").value)}
               s.em = s.em === "E" ? "N" : "E";
               appState[uid] = { ...appState[uid], em: s.em };
               saveApp(uid, { em: s.em }); render(); renderRelated();
+              if (uid === selectedUid) { loadReport(); updateReportButtons(); }
             } },
           { label: "Switch ReqHosp", act: () => {
               const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
