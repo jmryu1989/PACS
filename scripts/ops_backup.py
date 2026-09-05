@@ -64,14 +64,15 @@ def text(args, **kwargs):
     return run(args, **kwargs).stdout.decode("utf-8").strip()
 
 
-def temporary_run(args, *, timeout=600):
+def temporary_run(args, *, timeout=600, output=None):
     # A timed-out docker client can leave its container running. Give even tar
     # helpers an ownership label/name so finally can find and remove exactly it.
     token = uuid.uuid4().hex
     name = "kin-rehearsal-" + token[:16] + "-helper"
     try:
-        return text(["docker", "run", "--rm", "--name", name,
-                     "--label", "kin.ops.run=" + token, *args], timeout=timeout)
+        result = run(["docker", "run", "--rm", "--name", name,
+                      "--label", "kin.ops.run=" + token, *args], timeout=timeout, output=output)
+        return "" if output is not None else result.stdout.decode("utf-8").strip()
     finally:
         remove_owned_if_present("container", name, token)
 
@@ -225,10 +226,13 @@ def backup(output, ready_timeout=120):
             with (directory / (database + ".dump")).open("wb") as handle:
                 run(["docker", "exec", "kin-db", "pg_dump", "-U", "kin", "-d", database, "-Fc"], output=handle)
         stage = "archive Orthanc"
-        temporary_run(["--network", "none", "--read-only",
-             "--mount", f"type=volume,source={volume},target=/source,readonly",
-             "--mount", f"type=bind,source={directory},target=/backup",
-             "--entrypoint", "tar", manifest["postgres_image"], "-czf", "/backup/orthanc.tgz", "-C", "/source", "."], timeout=1800)
+        # The Docker helper runs as root on Linux. Stream to a host-owned file
+        # instead of creating a root-owned archive in a writable host bind mount.
+        with (directory / "orthanc.tgz").open("wb") as handle:
+            temporary_run(["--network", "none", "--read-only",
+                 "--mount", f"type=volume,source={volume},target=/source,readonly",
+                 "--entrypoint", "tar", manifest["postgres_image"], "-czf", "-", "-C", "/source", "."],
+                timeout=1800, output=handle)
         stage = "copy configuration and checksum"
         for name in FILES[3:]:
             shutil.copyfile(ROOT / name, directory / name)

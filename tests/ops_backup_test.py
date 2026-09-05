@@ -208,9 +208,7 @@ class BackupSafetyTests(unittest.TestCase):
             def fake_archive(args, **kwargs):
                 if "-sk" in args:
                     return "8 /source"
-                mount = next(value for value in args if value.startswith("type=bind,source="))
-                destination = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
-                (destination / "orthanc.tgz").write_bytes(b"fixture archive")
+                kwargs["output"].write(b"fixture archive")
                 return ""
 
             output = Path(temporary) / "backups"
@@ -224,6 +222,29 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertTrue(manifest["complete"])
             self.assertFalse(manifest["ready"])
             self.assertEqual(manifest["resume_failures"], [])
+
+    def test_15_binary_archive_stream_does_not_decode_or_buffer_stdout(self):
+        payload = b"\x1f\x8b\xff\x00binary archive"
+        with tempfile.TemporaryFile() as output:
+            def produce(args, **kwargs):
+                self.assertIs(kwargs["stdout"], output)
+                kwargs["stdout"].write(payload)
+                return SimpleNamespace(returncode=0, stdout=None, stderr=b"")
+
+            with patch.object(subprocess, "run", side_effect=produce), \
+                    patch.object(ops, "remove_owned_if_present") as cleanup:
+                self.assertEqual(ops.temporary_run(["fixture-image"], output=output), "")
+            output.seek(0)
+            self.assertEqual(output.read(), payload)
+            cleanup.assert_called_once()
+
+    def test_16_stream_timeout_still_cleans_the_owned_helper(self):
+        with tempfile.TemporaryFile() as output, \
+                patch.object(ops, "run", side_effect=subprocess.TimeoutExpired("docker", 1)), \
+                patch.object(ops, "remove_owned_if_present") as cleanup:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                ops.temporary_run(["fixture-image"], output=output, timeout=1)
+            cleanup.assert_called_once()
 
 
 if __name__ == "__main__":
