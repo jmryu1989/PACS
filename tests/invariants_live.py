@@ -24,6 +24,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
@@ -201,6 +202,49 @@ def _json_or_text(raw: bytes) -> tuple[Any, str]:
         return json.loads(text), text
     except json.JSONDecodeError:
         return text, text
+
+
+def psql(sql: str) -> list[str]:
+    """컨테이너 psql 한 문장. 시간 비교가 섞이므로 세션 시간대를 UTC로 고정한다 — Prisma가 UTC로 쓴다.
+
+    점유 TTL처럼 '5분 뒤'를 기다리는 대신 heldAt을 과거로 옮기고, 회원 감사 행은 /audit이 검사 uid
+    관문 뒤로 닫혀 API로 못 읽으므로 여기서 읽는다. 결과는 빈 줄을 뺀 줄 목록이다.
+    """
+    completed = subprocess.run(
+        ["docker", "compose", "exec", "-T", "-e", "PGTZ=UTC", "db", "psql", "-U", "kin", "-d", "kin",
+         "-v", "ON_ERROR_STOP=1", "-qAt", "-c", sql],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+    )
+    if completed.returncode:
+        raise RuntimeError("psql 실패: " + completed.stdout + completed.stderr)
+    return [line for line in completed.stdout.splitlines() if line.strip()]
+
+
+UUID_RE = r"^[0-9a-f-]{36}$"
+
+
+def user_audit(user_id: str) -> list[tuple[str, dict[str, Any]]]:
+    """Keycloak 사용자 id를 target으로 남은 회원 감사 행 (id 순)."""
+    if not re.fullmatch(UUID_RE, user_id):
+        raise RuntimeError(f"감사 조회를 거부한 비정상 사용자 id: {user_id}")
+    rows = psql(
+        f"SELECT action || E'\\t' || coalesce(detail, '') FROM \"AuditLog\" WHERE target='{user_id}' ORDER BY id;"
+    )
+    out = []
+    for row in rows:
+        action, _, detail = row.partition("\t")
+        out.append((action, json.loads(detail) if detail else {}))
+    return out
+
+
+def purge_user_audit(user_id: str) -> None:
+    """시험이 만든 회원 감사 행 정리. cleanup_fixture는 검사 uid 행만 지운다."""
+    if not re.fullmatch(UUID_RE, user_id):
+        raise RuntimeError(f"감사 정리를 거부한 비정상 사용자 id: {user_id}")
+    psql(f"DELETE FROM \"AuditLog\" WHERE target='{user_id}';")
+
+
+TEMPORARY_PASSWORD_RE = r"^[A-Za-z0-9_-]{24}aA1!$"
 
 
 class LiveStack:
@@ -1177,6 +1221,359 @@ process.stdout.write(JSON.stringify(value));
             deleted = self.admin("DELETE", f"/users/{quote(str(created.body))}")
             self.assertIn(deleted.status, (204, 404), deleted.text)
 
+    # ── v0.6.3 회원 승인 생애주기 헬퍼 ──
+
+    def group_id(self, name: str) -> str:
+        found = self.admin("GET", "/groups?search=" + quote(name))
+        self.assertEqual(found.status, 200, found.text)
+        exact = [group for group in found.body if group.get("name") == name]
+        self.assertEqual(len(exact), 1, name)
+        return exact[0]["id"]
+
+    def kc_user_summary(self, user_id: str) -> tuple[list[str], list[str]]:
+        """Keycloak이 실제로 들고 있는 (그룹, 앱 역할). 기본 역할(default-roles-kin 등)은 관리 대상이 아니라 뺀다."""
+        groups = self.admin("GET", f"/users/{quote(user_id)}/groups")
+        roles = self.admin("GET", f"/users/{quote(user_id)}/role-mappings/realm")
+        self.assertEqual((groups.status, roles.status), (200, 200), groups.text + roles.text)
+        app = {"radiologist", "technician", "admin"}
+        return sorted(g["name"] for g in groups.body), sorted(r["name"] for r in roles.body if r["name"] in app)
+
+    def admin_row(self, username: str) -> dict[str, Any]:
+        page = 1
+        while True:
+            listed = self.stack.request("GET", f"/admin/users?page={page}", "jmryu")
+            self.assertEqual(listed.status, 200, listed.text)
+            for row in listed.body["users"]:
+                if row["username"] == username:
+                    return row
+            if page * listed.body["pageSize"] >= listed.body["total"]:
+                self.fail(f"회원 목록에 {username}이 없습니다")
+            page += 1
+
+    def password_grant_status(self, username: str, password: str) -> int:
+        data = urlencode({
+            "client_id": self.stack.test_client_id, "grant_type": "password",
+            "username": username, "password": password,
+        }).encode("ascii")
+        request = Request(
+            self.stack.keycloak, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST",
+        )
+        try:
+            with self.stack._open(request) as response:
+                return response.status
+        except HTTPError as error:
+            return error.code
+
+    def delete_member(self, user_id: str | None) -> None:
+        if not user_id:
+            return
+        deleted = self.admin("DELETE", f"/users/{quote(user_id)}")
+        self.assertIn(deleted.status, (204, 404), deleted.text)
+        purge_user_audit(user_id)
+
+    def test_member_approval_round_trip_grants_and_revokes_access(self) -> None:
+        user_id = None
+        opener = None
+        try:
+            user_id, username, password = self.create_member(with_group=False)
+            path = f"/admin/users/{quote(user_id)}"
+            opener, _sid = self.bff_login(username, password)
+            pending = self.proxy(opener, "GET", "/api/me")
+            self.assertEqual((pending.status, pending.body.get("code")), (403, "INSTITUTION_PENDING"), pending.text)
+
+            approved = self.stack.request("PATCH", path, "jmryu", {
+                "approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"],
+            })
+            self.assertEqual(approved.status, 200, approved.text)
+            self.assertEqual(
+                (approved.body["approvalState"], approved.body["institution"], approved.body["roles"], approved.body["enabled"]),
+                ("APPROVED", "hallym", ["radiologist"], True),
+            )
+            # 자격이 바뀌면 그 전에 만든 세션은 죽는다 — isolate()가 승인 앞에 선다
+            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
+            opener, _sid = self.bff_login(username, password)
+            me = self.proxy(opener, "GET", "/api/me")
+            self.assertEqual(me.status, 200, me.text)
+            self.assertEqual(me.body["institution"], "hallym")
+            self.assertIn("radiologist", me.body["roles"])
+            self.assertEqual(self.kc_user_summary(user_id), (["hallym"], ["radiologist"]))
+            audit = user_audit(user_id)
+            self.assertEqual([action for action, _ in audit], ["admin.user.approve"])
+            self.assertEqual(
+                (audit[0][1]["before"]["approvalState"], audit[0][1]["after"]["approvalState"]),
+                ("PENDING", "APPROVED"),
+            )
+
+            cancelled = self.stack.request("PATCH", path, "jmryu", {"approvalState": "PENDING"})
+            self.assertEqual(cancelled.status, 200, cancelled.text)
+            self.assertEqual(
+                (cancelled.body["approvalState"], cancelled.body["institution"], cancelled.body["roles"], cancelled.body["enabled"]),
+                ("PENDING", None, [], True),
+            )
+            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
+            opener, _sid = self.bff_login(username, password)
+            back = self.proxy(opener, "GET", "/api/me")
+            self.assertEqual((back.status, back.body.get("code")), (403, "INSTITUTION_PENDING"), back.text)
+            self.assertEqual(self.kc_user_summary(user_id), ([], []))
+            self.assertEqual([action for action, _ in user_audit(user_id)], ["admin.user.approve", "admin.user.unapprove"])
+        finally:
+            if opener is not None:
+                self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
+            self.delete_member(user_id)
+
+    def test_member_management_rejects_invalid_inputs_without_side_effects(self) -> None:
+        user_id = None
+        try:
+            user_id, _username, _password = self.create_member(with_group=False)
+            path = f"/admin/users/{quote(user_id)}"
+            # roles 검사는 institution 뒤에 돌므로 유효한 기관을 같이 보내야 roles 규칙이 실제로 실행된다
+            bad = (
+                ({"approvalState": "APPROVED", "institution": "nowhere", "roles": ["radiologist"]}, "허용되지 않은 기관"),
+                ({"approvalState": "APPROVED", "institution": "hallym", "roles": []}, "roles"),
+                ({"approvalState": "APPROVED", "institution": "hallym", "roles": ["gateway"]}, "허용되지 않은 역할"),
+                ({"approvalState": "BANNED"}, "approvalState"),
+                ({"approvalState": "PENDING", "institution": "hallym"}, "섞을 수 없습니다"),
+                ({"approvalState": "PENDING", "enabled": True}, "enabled=true"),
+                ({"enabled": "yes"}, "boolean"),
+                ({}, "변경할 회원 상태가 없습니다"),
+                ({"verificationOverride": True}, "승인·자격 변경"),
+            )
+            for body, fragment in bad:
+                with self.subTest(body=body):
+                    result = self.stack.request("PATCH", path, "jmryu", body)
+                    self.assertEqual(result.status, 400, result.text)
+                    self.assertIn(fragment, result.body.get("message", ""), result.text)
+            # 비관리자는 대상이 있든 없든 403 — 404를 주면 존재 여부가 새는 오라클이 된다
+            ghost = str(uuid.uuid4())
+            self.assertEqual(self.stack.request("PATCH", f"/admin/users/{ghost}", "doctor", {"enabled": False}).status, 403)
+            self.assertEqual(self.stack.request("PATCH", path, "doctor", {"enabled": False}).status, 403)
+            self.assertEqual(self.stack.request("POST", f"/admin/users/{ghost}/reset-password", "doctor", {"mode": "temp"}).status, 403)
+            self.assertEqual(self.stack.request("POST", "/admin/users", "tech", {"username": "x"}).status, 403)
+            self.assertEqual(self.stack.request("PATCH", f"/admin/users/{ghost}", "jmryu", {"enabled": False}).status, 404)
+            self.assertEqual(self.stack.request("POST", f"/admin/users/{ghost}/reset-password", "jmryu", {"mode": "temp"}).status, 404)
+            own = self.stack.user_ids["jmryu"]
+            self.assertEqual(self.stack.request("PATCH", f"/admin/users/{quote(own)}", "jmryu", {"approvalState": "PENDING"}).status, 400)
+            self.assertEqual(self.stack.request("GET", "/me", "jmryu").status, 200)
+            self.assertEqual(self.stack.request("GET", "/admin/users?page=0", "jmryu").status, 400)
+            self.assertEqual(self.stack.request("GET", "/admin/users?page=abc", "jmryu").status, 400)
+
+            self.assertEqual(self.kc_user_summary(user_id), ([], []))
+            current = self.admin("GET", f"/users/{quote(user_id)}")
+            self.assertTrue(current.body.get("enabled"), current.text)
+            self.assertEqual(user_audit(user_id), [], "거절된 요청이 감사 행을 남겼습니다")
+        finally:
+            self.delete_member(user_id)
+
+    def test_member_invalid_states_cannot_be_activated_until_fixed(self) -> None:
+        for axis in ("group-without-roles", "two-groups"):
+            user_id = None
+            opener = None
+            with self.subTest(axis=axis):
+                try:
+                    user_id, username, password = self.create_member(with_group=True)
+                    path = f"/admin/users/{quote(user_id)}"
+                    if axis == "two-groups":
+                        joined = self.admin("PUT", f"/users/{quote(user_id)}/groups/{quote(self.group_id('kin-center'))}")
+                        self.assertEqual(joined.status, 204, joined.text)
+                        role = self.admin("GET", "/roles/radiologist")
+                        assigned = self.admin("POST", f"/users/{quote(user_id)}/role-mappings/realm", [role.body])
+                        self.assertEqual(assigned.status, 204, assigned.text)
+                    opener, _sid = self.bff_login(username, password)
+                    me = self.proxy(opener, "GET", "/api/me")
+                    self.assertEqual((me.status, me.body.get("code")), (403, "INSTITUTION_INVALID"), me.text)
+                    row = self.admin_row(username)
+                    # 그룹이 하나면 기관은 보이되 역할이 없어 INVALID, 둘이면 기관 자체가 정해지지 않는다
+                    expected_institution = "hallym" if axis == "group-without-roles" else None
+                    self.assertEqual((row["approvalState"], row["institution"]), ("INVALID", expected_institution), row)
+                    blocked = self.stack.request("PATCH", path, "jmryu", {"enabled": True})
+                    self.assertEqual(blocked.status, 400, blocked.text)
+                    self.assertIn("INVALID", blocked.body["message"])
+
+                    fixed = self.stack.request("PATCH", path, "jmryu", {
+                        "approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"],
+                    })
+                    self.assertEqual(fixed.status, 200, fixed.text)
+                    self.assertEqual((fixed.body["approvalState"], fixed.body["institution"]), ("APPROVED", "hallym"))
+                    self.assertEqual(self.kc_user_summary(user_id), (["hallym"], ["radiologist"]), "그룹이 하나로 수렴하지 않았습니다")
+                    self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401)
+                    opener, _sid = self.bff_login(username, password)
+                    me = self.proxy(opener, "GET", "/api/me")
+                    self.assertEqual((me.status, me.body.get("institution")), (200, "hallym"), me.text)
+                    audit = user_audit(user_id)
+                    # INVALID → APPROVED는 '승인'이 아니라 '교정'이다(action은 before가 PENDING일 때만 approve)
+                    self.assertEqual([action for action, _ in audit], ["admin.user.update"])
+                    self.assertEqual(audit[0][1]["before"]["approvalState"], "INVALID")
+                finally:
+                    if opener is not None:
+                        self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
+                    self.delete_member(user_id)
+
+    def test_member_create_starts_pending_or_approved_with_override(self) -> None:
+        created: list[str] = []
+        usernames: list[str] = []
+        try:
+            def body_for(username: str, **extra: Any) -> dict[str, Any]:
+                usernames.append(username)
+                return {"username": username, "email": username + "@local.test", "firstName": "KIN", "lastName": "Create", **extra}
+
+            plain = self.stack.request("POST", "/admin/users", "jmryu", body_for("kin-test-create-" + uuid.uuid4().hex[:10]))
+            self.assertEqual(plain.status, 201, plain.text)
+            created.append(plain.body["id"])
+            self.assertEqual(
+                (plain.body["approvalState"], plain.body["enabled"], plain.body["emailVerified"], plain.body["institution"], plain.body["roles"]),
+                ("PENDING", True, False, None, []),
+            )
+            self.assertRegex(plain.body["temporaryPassword"], TEMPORARY_PASSWORD_RE)
+
+            override = self.stack.request("POST", "/admin/users", "jmryu", body_for(
+                "kin-test-create-" + uuid.uuid4().hex[:10],
+                verificationOverride=True, institution="hallym", roles=["radiologist"],
+            ))
+            self.assertEqual(override.status, 201, override.text)
+            created.append(override.body["id"])
+            self.assertEqual(
+                (override.body["approvalState"], override.body["institution"], override.body["roles"], override.body["emailVerified"], override.body["enabled"]),
+                ("APPROVED", "hallym", ["radiologist"], False, True),
+            )
+            self.assertEqual(self.kc_user_summary(override.body["id"]), (["hallym"], ["radiologist"]))
+
+            rejected = (
+                (body_for("kin-test-create-" + uuid.uuid4().hex[:10], institution="hallym"), "verificationOverride"),
+                ({"username": "kin-test-create-" + uuid.uuid4().hex[:10], "email": "a@local.test", "firstName": "KIN"}, "lastName"),
+                (body_for("service-account-kin-test-" + uuid.uuid4().hex[:6]), "서비스 계정"),
+            )
+            for body, fragment in rejected:
+                with self.subTest(body=body):
+                    result = self.stack.request("POST", "/admin/users", "jmryu", body)
+                    self.assertEqual(result.status, 400, result.text)
+                    self.assertIn(fragment, result.body["message"])
+            self.assertEqual(self.stack.request("POST", "/admin/users", "doctor", body_for("kin-test-create-" + uuid.uuid4().hex[:10])).status, 403)
+            for username in usernames[2:]:
+                found = self.admin("GET", f"/users?username={quote(username)}&exact=true")
+                self.assertEqual([u for u in found.body if u.get("username") == username], [], f"거절된 생성이 사용자를 남겼습니다: {username}")
+
+            secrets = {plain.body["temporaryPassword"], override.body["temporaryPassword"]}
+            for user_id in created:
+                audit = user_audit(user_id)
+                self.assertEqual([action for action, _ in audit], ["admin.user.create"])
+                text = json.dumps(audit, ensure_ascii=False)
+                for secret in secrets:
+                    self.assertNotIn(secret, text, "감사로그에 임시 비밀번호가 남았습니다")
+        finally:
+            for user_id in created:
+                self.delete_member(user_id)
+            for username in usernames:
+                found = self.admin("GET", f"/users?username={quote(username)}&exact=true")
+                for user in found.body or []:
+                    if user.get("username") == username:
+                        self.delete_member(user["id"])
+
+    def test_member_verification_override_is_the_single_audited_bypass(self) -> None:
+        username = "kin-test-unverified-" + uuid.uuid4().hex[:12]
+        created = self.admin("POST", "/users", {
+            "username": username, "enabled": True, "emailVerified": False,
+            "email": username + "@local.test", "firstName": "Unverified", "lastName": "KIN",
+        })
+        self.assertEqual(created.status, 201, created.text)
+        user_id = str(created.body)
+        try:
+            path = f"/admin/users/{quote(user_id)}"
+            approve = {"approvalState": "APPROVED", "institution": "hallym", "roles": ["radiologist"]}
+            self.assertEqual(self.stack.request("PATCH", path, "jmryu", approve).status, 400)
+            self.assertEqual(self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": "yes"}).status, 400)
+            self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"verificationOverride": True}).status, 400)
+            self.assertEqual(self.stack.request("PATCH", path, "jmryu", {"enabled": True, "verificationOverride": True}).status, 400)
+            self.assertEqual(user_audit(user_id), [])
+
+            ok = self.stack.request("PATCH", path, "jmryu", {**approve, "verificationOverride": True})
+            self.assertEqual(ok.status, 200, ok.text)
+            self.assertEqual(
+                (ok.body["approvalState"], ok.body["institution"], ok.body["emailVerified"], ok.body["enabled"]),
+                ("APPROVED", "hallym", False, True),
+            )
+            # 우회는 검증을 위조하지 않는다 — Keycloak의 emailVerified는 그대로 false다
+            self.assertFalse(self.admin("GET", f"/users/{quote(user_id)}").body.get("emailVerified"))
+            audit = user_audit(user_id)
+            self.assertEqual([action for action, _ in audit], ["admin.user.approve"])
+            self.assertTrue(audit[0][1]["verificationOverride"])
+            self.assertEqual((audit[0][1]["before"]["approvalState"], audit[0][1]["after"]["approvalState"]), ("PENDING", "APPROVED"))
+        finally:
+            self.delete_member(user_id)
+
+    def test_member_credential_change_revokes_sessions_and_audits_update(self) -> None:
+        target = self.stack.user_ids["doctor2"]
+        path = f"/admin/users/{quote(target)}"
+        purge_user_audit(target)
+        openers = []
+        try:
+            opener, _sid = self.bff_login("doctor2", self.stack.passwords["doctor2"])
+            openers.append(opener)
+            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 200)
+            changed = self.stack.request("PATCH", path, "jmryu", {"roles": ["radiologist", "technician"]})
+            self.assertEqual(changed.status, 200, changed.text)
+            self.assertEqual(
+                (changed.body["roles"], changed.body["institution"], changed.body["approvalState"], changed.body["enabled"]),
+                (["radiologist", "technician"], "hallym", "APPROVED", True),
+            )
+            self.assertEqual(self.proxy(opener, "GET", "/api/me").status, 401, "자격 변경이 기존 세션을 끊지 않았습니다")
+            self.assertEqual(self.kc_user_summary(target), (["hallym"], ["radiologist", "technician"]))
+            audit = user_audit(target)
+            self.assertEqual([action for action, _ in audit], ["admin.user.update"])
+            self.assertEqual((audit[0][1]["before"]["roles"], audit[0][1]["after"]["roles"]), (["radiologist"], ["radiologist", "technician"]))
+            opener, _sid = self.bff_login("doctor2", self.stack.passwords["doctor2"])
+            openers.append(opener)
+            me = self.proxy(opener, "GET", "/api/me")
+            self.assertEqual(me.status, 200, me.text)
+            self.assertIn("technician", me.body["roles"])
+
+            # 정지 중 자격 변경은 정지를 유지한다 — targetEnabled는 요청이 말하지 않으면 이전 값이다
+            self.assertFalse(self.stack.request("PATCH", path, "jmryu", {"enabled": False}).body["enabled"])
+            suspended = self.stack.request("PATCH", path, "jmryu", {"roles": ["radiologist"]})
+            self.assertEqual(suspended.status, 200, suspended.text)
+            self.assertEqual((suspended.body["enabled"], suspended.body["roles"]), (False, ["radiologist"]))
+            self.assertTrue(self.stack.request("PATCH", path, "jmryu", {"enabled": True}).body["enabled"])
+            self.assertEqual(
+                [action for action, _ in user_audit(target)],
+                ["admin.user.update", "admin.user.suspend", "admin.user.update", "admin.user.activate"],
+            )
+        finally:
+            for opener in openers:
+                self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
+            restored = self.stack.request("PATCH", path, "jmryu", {"roles": ["radiologist"], "enabled": True})
+            self.assertEqual(restored.status, 200, restored.text)
+            self.admin("PUT", f"/users/{quote(target)}", {"enabled": True})
+            # 캐시된 Bearer는 서명만 검사되므로 살아 있지만 realm_access.roles가 낡았다 — 다음 사용자가 새로 받게 한다
+            self.stack.tokens.pop("doctor2", None)
+            self.stack.actors.pop("doctor2", None)
+            purge_user_audit(target)
+
+    def test_member_reset_password_is_admin_only_and_secret_is_never_audited(self) -> None:
+        doctor2 = self.stack.user_ids["doctor2"]
+        self.assertEqual(self.stack.request("POST", f"/admin/users/{quote(doctor2)}/reset-password", "doctor", {"mode": "temp"}).status, 403)
+        for body in ({}, {"mode": "sms"}):
+            self.assertEqual(self.stack.request("POST", f"/admin/users/{quote(doctor2)}/reset-password", "jmryu", body).status, 400, body)
+        clients = self.admin("GET", "/clients?clientId=kin-api")
+        service = self.admin("GET", f"/clients/{clients.body[0]['id']}/service-account-user")
+        self.assertEqual(self.stack.request("POST", f"/admin/users/{quote(service.body['id'])}/reset-password", "jmryu", {"mode": "temp"}).status, 403)
+
+        user_id = None
+        try:
+            user_id, username, password = self.create_member(with_group=False)
+            self.assertEqual(self.password_grant_status(username, password), 200)
+            reset = self.stack.request("POST", f"/admin/users/{quote(user_id)}/reset-password", "jmryu", {"mode": "temp"})
+            self.assertEqual(reset.status, 200, reset.text)
+            self.assertRegex(reset.body["temporaryPassword"], TEMPORARY_PASSWORD_RE)
+            self.assertEqual(reset.body["approvalState"], "PENDING")
+            # Keycloak은 자격 불일치를 401, 임시 비밀번호의 UPDATE_PASSWORD 필수 동작을 400으로 거절한다 — 둘 다 '옛 비밀번호로는 못 들어온다'
+            self.assertIn(self.password_grant_status(username, password), (400, 401), "옛 비밀번호가 아직 통합니다")
+            audit = user_audit(user_id)
+            self.assertEqual([action for action, _ in audit], ["admin.user.reset-password"])
+            self.assertEqual(audit[0][1]["mode"], "temp")
+            self.assertNotIn(reset.body["temporaryPassword"], json.dumps(audit, ensure_ascii=False))
+        finally:
+            self.delete_member(user_id)
+
     def test_zzz_break_glass_recovers_dedicated_admin_set(self) -> None:
         recovered_id = self.stack.user_ids["jmryu"]
         other_id = self.stack.create_test_identity("breakglass", ["admin"], "hallym")
@@ -1288,6 +1685,674 @@ class LiveInvariantTests(unittest.TestCase):
             content + f"\r\n--{boundary}--\r\n".encode("ascii")
         )
         return body, f'multipart/related; type="application/dicom"; boundary={boundary}'
+
+    # ── v0.6.3 회귀 확충 헬퍼 ──
+
+    def commit(self, fixture: Fixture, user: str, action: str, base_version: Any, **extra: Any) -> HttpResult:
+        """확정 한 번. 본문 기본값은 fixture.secret이라 응답·감사에 새는지 그대로 검사할 수 있다.
+        omit_base=True면 baseVersion 키를 아예 보내지 않는다(null과 '없음'은 서버에서 다른 답이다)."""
+        body: dict[str, Any] = {
+            "action": action,
+            "findings": extra.pop("findings", fixture.secret),
+            "conclusion": extra.pop("conclusion", ""),
+            "recommendation": extra.pop("recommendation", ""),
+        }
+        if not extra.pop("omit_base", False):
+            body["baseVersion"] = base_version
+        body.update(extra)
+        return self.stack.request("POST", f"/studies/{quote(fixture.uid)}/report/commit", user, body)
+
+    def state(self, fixture: Fixture, user: str) -> dict[str, Any] | None:
+        """bootstrap이 주는 toClient 행 전체. 기관 밖이면 None."""
+        result = self.stack.request("GET", "/bootstrap", user)
+        self.assert_status(result, 200)
+        return result.body["states"].get(fixture.uid)
+
+    def audit_rows(self, fixture: Fixture, user: str = "jmryu") -> list[dict[str, Any]]:
+        result = self.stack.request("GET", f"/audit?uid={quote(fixture.uid)}&take=500", user)
+        self.assert_status(result, 200)
+        return result.body
+
+    def audit_count(self, fixture: Fixture, action: str, user: str = "jmryu") -> int:
+        return len([row for row in self.audit_rows(fixture, user) if row["action"] == action])
+
+    def backdate_hold(self, uid: str, minutes: int) -> None:
+        """TTL을 기다리지 않는다. heldAt을 과거로 옮기면 holdAlive가 결정적으로 뒤집힌다."""
+        self.assertRegex(uid, r"^[0-9.]+$")
+        psql(f"UPDATE \"StudyState\" SET \"heldAt\" = now() - interval '{minutes} minutes' WHERE uid='{uid}';")
+
+    def hold_row(self, uid: str) -> str:
+        """DB의 holder|heldAt 원문. toClient는 만료분을 감추므로 '아무것도 안 썼다'는 여기서만 증명된다."""
+        self.assertRegex(uid, r"^[0-9.]+$")
+        rows = psql(
+            f"SELECT coalesce(holder, '') || '|' || coalesce(\"heldAt\"::text, '') "
+            f"FROM \"StudyState\" WHERE uid='{uid}';"
+        )
+        self.assertEqual(len(rows), 1, rows)
+        return rows[0]
+
+    @staticmethod
+    def today_set() -> set[str]:
+        """confirm은 서버의 UTC 날짜다. 호출 전후로 모아 자정 경계에서도 흔들리지 않게 한다."""
+        return {datetime.now(timezone.utc).date().isoformat(), date.today().isoformat()}
+
+    def prefix(self, user: str) -> str:
+        return self.stack.actor(user).split("@")[0]
+
+    # ── 판독 상태기계 W/T/P/A/H ──
+
+    def test_rs_transition_table_walks_every_state_and_rejects_illegal_cells(self) -> None:
+        """한 fixture로 상태기계를 끝까지 걷는다. 거절 칸은 상태·이력이 그대로여야 하고 허용 칸은 표대로 움직인다.
+        P 칸은 작성자·지정자만 부른다 — 제3자는 canReadPrelim 403이 먼저라 400을 볼 수 없다."""
+        with self.stack.fixture() as fixture:
+            def rejected(user: str, action: str, base: int, fragment: str, **extra: Any) -> None:
+                before = self.snapshot(fixture, "doctor")
+                result = self.commit(fixture, user, action, base, **extra)
+                self.assertEqual(result.status, 400, result.text)
+                self.assertIn(fragment, result.body.get("message", ""), result.text)
+                self.assert_snapshot_unchanged(fixture, "doctor", before)
+
+            def accepted(user: str, action: str, base: int, rs: str, **extra: Any) -> int:
+                result = self.commit(fixture, user, action, base, **extra)
+                self.assert_status(result, 201)
+                self.assertEqual(result.body["rs"], rs, f"{action}@v{base}: {result.text}")
+                return result.body["version"]
+
+            senior = self.stack.actor("jmryu")
+            with self.subTest(cell="W×addendum"):
+                rejected("doctor", "addendum", 0, "승인(RS: A)된")
+            with self.subTest(cell="W×reset(사유 없음)"):
+                rejected("doctor", "reset", 0, "사유")
+            v = accepted("doctor", "save", 0, "T")                                    # W→T
+            with self.subTest(cell="T×addendum"):
+                rejected("doctor", "addendum", v, "승인(RS: A)된")
+            v = accepted("doctor", "preliminary", v, "P", reviewer=senior)           # T→P
+            with self.subTest(cell="P×addendum(작성자)"):
+                rejected("doctor", "addendum", v, "승인(RS: A)된")
+            with self.subTest(cell="P×defer(지정자)"):
+                rejected("jmryu", "defer", v, "보류할 수 없습니다", reason="x")
+            v = accepted("doctor", "save", v, "P")                                    # P×save는 P 유지
+            v = accepted("jmryu", "approve", v, "A")                                  # P→A 지정자만
+            with self.subTest(cell="A×preliminary"):
+                rejected("doctor", "preliminary", v, "되돌릴 수 없습니다", reviewer=senior)
+            with self.subTest(cell="A×defer"):
+                rejected("doctor", "defer", v, "보류할 수 없습니다", reason="x")
+            v = accepted("doctor2", "addendum", v, "A", findings="addendum")          # A→A
+            v = accepted("doctor", "reset", v, "W", reason="표 검증")                  # A→W (discarded+reset)
+            v = accepted("doctor", "defer", v, "H", reason="prior 없음")              # W→H
+            with self.subTest(cell="H×addendum"):
+                rejected("doctor", "addendum", v, "승인(RS: A)된")
+            v = accepted("doctor2", "defer", v, "H", reason="영상 불량")              # H→H 사유 갱신
+            self.assertEqual(self.report_state(fixture, "doctor")["holdReason"], "영상 불량")
+            v = accepted("doctor", "save", v, "T")                                    # H→T
+            self.assertIsNone(self.report_state(fixture, "doctor")["holdReason"])
+            v = accepted("doctor", "defer", v, "H", reason="재촬영 필요")             # T→H
+            v = accepted("doctor2", "preliminary", v, "P", reviewer=self.stack.actor("doctor"))   # H→P
+            v = accepted("doctor", "reset", v, "W", reason="표 검증")                  # P→W 지정자의 사유 있는 취소
+            v = accepted("doctor", "defer", v, "H", reason="임상정보 부족")           # W→H
+            v = accepted("doctor", "approve", v, "A")                                 # H→A
+            self.assertEqual([row["version"] for row in self.versions(fixture, "doctor")], list(range(1, v + 1)))
+
+    def test_approve_addendum_reset_move_repdoc_confirm_and_designation_together(self) -> None:
+        with self.stack.fixture() as fixture:
+            prelim = self.preliminary(fixture, author="doctor", reviewer="jmryu")
+            state = self.report_state(fixture, "doctor")
+            self.assertEqual(
+                (state["preDoc"], state["preReviewer"], state["repDoc"], state["confirm"]),
+                (self.stack.actor("doctor"), self.stack.actor("jmryu"), None, None),
+            )
+            days = self.today_set()
+            approved = self.commit(fixture, "jmryu", "approve", prelim.body["version"])
+            days |= self.today_set()
+            self.assert_status(approved, 201)
+            self.assertEqual(approved.body["rs"], "A")
+            self.assertEqual(approved.body["repDoc"], self.prefix("jmryu"))
+            self.assertIn(approved.body["confirm"], days)
+            self.assertIsNone(approved.body["holder"])
+
+            # addendum도 승인의 한 종류다 — 추가기재자가 승인자 자리에 기록된다(코드 계약).
+            added = self.commit(fixture, "doctor2", "addendum", approved.body["version"], findings="addendum")
+            days |= self.today_set()
+            self.assert_status(added, 201)
+            self.assertEqual(added.body["rs"], "A")
+            self.assertEqual(added.body["version"], approved.body["version"] + 1)
+            self.assertEqual(added.body["repDoc"], self.prefix("doctor2"))
+            self.assertIn(added.body["confirm"], days)
+
+            reset = self.commit(fixture, "doctor", "reset", added.body["version"], reason="정정 필요")
+            self.assert_status(reset, 201)
+            self.assertEqual(reset.body["rs"], "W")
+            for key in ("repDoc", "confirm", "preDoc", "preReviewer", "holdReason", "holder"):
+                self.assertIsNone(reset.body[key], key)
+            self.assertEqual(reset.body["findings"], "")
+
+    def test_commit_rejects_missing_or_stale_base_version_and_keeps_hold(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            before = self.snapshot(fixture, "doctor")
+            missing = self.commit(fixture, "doctor", "save", 0, omit_base=True)
+            self.assert_status(missing, 400)
+            self.assertIn("baseVersion", missing.body["message"])
+            # null·문자열·낡은 값은 '없음'이 아니라 '틀림'이다 — 낙관적 락이 409로 잡는다.
+            for label, base in (("null", None), ("string", "0"), ("stale", 7)):
+                with self.subTest(base=label):
+                    result = self.commit(fixture, "doctor", "save", base)
+                    self.assert_status(result, 409)
+                    self.assertIn("저장했습니다", result.body["message"])
+            with self.subTest(case="addendum-on-W"):
+                self.assert_status(self.commit(fixture, "doctor", "addendum", 0), 400)
+            with self.subTest(case="reset-without-reason"):
+                self.assert_status(self.commit(fixture, "doctor", "reset", 0), 400)
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+            self.assertEqual(self.versions(fixture, "doctor"), [])
+
+            # 거절된 확정은 점유를 풀지 않는다 — holder:null은 성공한 트랜잭션 안에서만 쓰인다.
+            blocked = self.stack.request("PUT", path + "/report", "doctor2", {"findings": "x"})
+            self.assert_status(blocked, 409)
+            self.assertEqual(blocked.body.get("code"), "REPORT_HELD")
+            self.assertEqual(blocked.body.get("holder"), self.stack.actor("doctor"))
+            conflict = self.stack.request("POST", path + "/hold", "doctor2")
+            self.assertEqual(conflict.body, {"holder": self.stack.actor("doctor"), "mine": False, "conflict": True})
+            self.assertEqual(self.audit_count(fixture, "report.hold"), 1)
+
+            saved = self.commit(fixture, "doctor", "save", 0)
+            self.assert_status(saved, 201)
+            self.assertEqual((saved.body["version"], saved.body["holder"]), (1, None))
+
+    def test_version_history_is_contiguous_and_append_only_through_lifecycle(self) -> None:
+        with self.stack.fixture() as fixture:
+            doctor, doctor2 = self.stack.actor("doctor"), self.stack.actor("doctor2")
+            first_save = self.commit(fixture, "doctor", "save", 0, findings="first")
+            self.assert_status(first_save, 201)
+            self.assertEqual(first_save.body["version"], 1)
+            self.assert_status(self.commit(fixture, "doctor", "approve", 1), 201)
+            added = self.commit(fixture, "doctor2", "addendum", 2, findings="addendum text")
+            self.assert_status(added, 201)
+            self.assertEqual(added.body["version"], 3)
+            first_three = self.versions(fixture, "doctor")
+            self.assertEqual([row["version"] for row in first_three], [1, 2, 3])
+
+            reset = self.commit(fixture, "doctor", "reset", 3, reason="lifecycle")
+            self.assert_status(reset, 201)
+            self.assertEqual((reset.body["version"], reset.body["rs"]), (5, "W"))   # discarded 4 + reset 5
+            again = self.commit(fixture, "doctor", "save", 5, findings="again")
+            self.assert_status(again, 201)
+            self.assertEqual(again.body["version"], 6)
+
+            rows = self.versions(fixture, "doctor")
+            self.assertEqual([row["version"] for row in rows], list(range(1, 7)))
+            self.assertEqual(
+                [row["action"] for row in rows],
+                ["save", "approve", "addendum", "discarded", "reset", "save"],
+            )
+            # discarded의 저자는 지운 사람이 아니라 마지막으로 그 내용을 저장한 사람이다.
+            self.assertEqual([row["author"] for row in rows], [doctor, doctor, doctor2, doctor2, doctor, doctor])
+            discarded, reset_row = rows[3], rows[4]
+            self.assertEqual(discarded["findings"], "addendum text")
+            self.assertTrue(str(discarded["reason"]).startswith("판독 취소로 폐기"), discarded)
+            self.assertIn(doctor, str(discarded["reason"]))
+            self.assertEqual((reset_row["reason"], reset_row["findings"]), ("lifecycle", ""))
+            by_id = {row["id"]: row for row in rows}
+            for row in first_three:
+                self.assertEqual(by_id[row["id"]], row, "앞선 판이 뒤의 확정으로 바뀌었습니다")
+            state = self.report_state(fixture, "doctor")
+            self.assertEqual((state["version"], state["findings"], state["rs"]), (6, "again", "T"))
+
+    def test_third_radiologist_cannot_touch_preliminary_with_any_action(self) -> None:
+        with self.stack.fixture() as fixture:
+            self.preliminary(fixture, author="doctor", reviewer="jmryu")
+            before = self.snapshot(fixture, "doctor")
+            for action in ("approve", "addendum", "reset", "defer", "preliminary", "save"):
+                for user, status in (("doctor2", 403), ("tech", 403), ("kdoctor", 404)):
+                    with self.subTest(action=action, user=user):
+                        result = self.commit(
+                            fixture, user, action, 1,
+                            reason="x", reviewer=self.stack.actor("doctor"), findings="leak",
+                        )
+                        self.assertEqual(result.status, status, result.text)
+                        self.assertFalse(result.contains(fixture.secret), "거절 응답에 예비 판독 본문이 노출됐습니다")
+                        if user == "doctor2":
+                            self.assertIn("예비 판독(RS: P) 중입니다", result.body["message"])
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+            self.assertEqual(len(self.versions(fixture, "doctor")), 1)
+            report_actions = [row["action"] for row in self.audit_rows(fixture) if row["action"].startswith("report.")]
+            self.assertEqual(report_actions, ["report.preliminary"])
+            hidden = self.state(fixture, "doctor2")
+            self.assertEqual((hidden["prelimHidden"], hidden["findings"]), (True, ""))
+            shown = self.state(fixture, "doctor")
+            self.assertEqual((shown["prelimHidden"], shown["findings"]), (False, fixture.secret))
+
+    def test_preliminary_reviewer_must_be_a_same_institution_radiologist(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "draft"}), 200)
+            cases = [
+                ({"reviewer": self.stack.actor("tech")}, "이 기관의 판독의가 아닙니다"),
+                ({"reviewer": self.stack.actor("kdoctor")}, "이 기관의 판독의가 아닙니다"),
+                ({"reviewer": "nobody@local.test"}, "이 기관의 판독의가 아닙니다"),
+                ({"reviewer": self.stack.actor("doctor")}, "자기 자신"),
+                ({"reviewer": ""}, "상급 판독의를 지정"),
+                ({}, "상급 판독의를 지정"),
+            ]
+            for extra, fragment in cases:
+                with self.subTest(reviewer=extra.get("reviewer", "<absent>")):
+                    result = self.commit(fixture, "doctor", "preliminary", 0, **extra)
+                    self.assert_status(result, 400)
+                    self.assertIn(fragment, result.body["message"])
+                    state = self.report_state(fixture, "doctor")
+                    self.assertEqual((state["rs"], state["version"], state["preDoc"], state["preReviewer"]), ("W", 0, None, None))
+                    self.assertEqual(self.versions(fixture, "doctor"), [])
+                    self.assertEqual(self.state(fixture, "doctor")["draft"]["findings"], "draft")
+            ok = self.commit(fixture, "doctor", "preliminary", 0, reviewer=self.stack.actor("doctor2"))
+            self.assert_status(ok, 201)
+            self.assertEqual((ok.body["rs"], ok.body["preDoc"], ok.body["preReviewer"], ok.body["draft"]),
+                             ("P", self.stack.actor("doctor"), self.stack.actor("doctor2"), None))
+
+        # 원격판독 수신 판독의는 검사 소유 기관이 아니라 **자기 기관** 명단으로 검증된다.
+        with self.stack.fixture() as tele:
+            opened = self.stack.request(
+                "PATCH", f"/studies/{quote(tele.uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"},
+            )
+            self.assert_status(opened, 200)
+            foreign = self.commit(tele, "kdoctor", "preliminary", 0, reviewer=self.stack.actor("doctor2"))
+            self.assert_status(foreign, 400)
+            self.assertIn("이 기관의 판독의가 아닙니다", foreign.body["message"])
+            self.assert_status(self.commit(tele, "kdoctor", "preliminary", 0, reviewer=self.stack.actor("kdoctor")), 400)
+
+    def test_accepted_draft_never_changes_report_in_any_rs(self) -> None:
+        with self.stack.fixture() as fixture:   # A
+            self.approve(fixture)
+            path = f"/studies/{quote(fixture.uid)}"
+            before = self.snapshot(fixture, "doctor")
+            other = self.stack.request("PUT", path + "/report", "doctor2", {"findings": "draft-on-A", "baseVersion": 1})
+            self.assert_status(other, 200)
+            self.assertEqual(other.body["author"], self.stack.actor("doctor2"))
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+            seen = self.state(fixture, "doctor2")
+            self.assertEqual((seen["findings"], seen["version"], seen["rs"]), (fixture.secret, 1, "A"))
+            self.assertEqual(seen["draft"]["findings"], "draft-on-A")
+            self.assertIsNone(self.state(fixture, "doctor")["draft"], "남의 초안이 실려 나갔습니다")
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "doctor-draft", "baseVersion": 1}), 200)
+            self.assert_status(self.commit(fixture, "doctor2", "addendum", 1, findings="add"), 201)
+            self.assertEqual(self.state(fixture, "doctor")["draft"]["findings"], "doctor-draft", "확정이 남의 초안을 지웠습니다")
+            self.assertIsNone(self.state(fixture, "doctor2")["draft"])
+        with self.stack.fixture() as deferred:   # H
+            self.assert_status(self.commit(deferred, "doctor", "defer", 0, reason="r"), 201)
+            self.assert_status(self.stack.request("PUT", f"/studies/{quote(deferred.uid)}/report", "doctor2", {"findings": "x"}), 200)
+            state = self.report_state(deferred, "doctor")
+            self.assertEqual((state["rs"], state["holdReason"], state["version"]), ("H", "r", 1))
+        with self.stack.fixture() as prelim:   # P
+            self.preliminary(prelim, author="doctor", reviewer="jmryu")
+            path = f"/studies/{quote(prelim.uid)}/report"
+            self.assert_status(self.stack.request("PUT", path, "doctor", {"findings": "p-draft"}), 200)
+            self.assert_status(self.stack.request("PUT", path, "jmryu", {"findings": "r-draft"}), 200)
+            self.assert_status(self.stack.request("PUT", path, "doctor2", {"findings": "leak"}), 403)
+            state = self.report_state(prelim, "doctor")
+            self.assertEqual((state["rs"], state["findings"], state["version"]), ("P", prelim.secret, 1))
+        with self.stack.fixture() as waiting:   # W — Report 행이 아예 없다
+            self.assert_status(self.stack.request("PUT", f"/studies/{quote(waiting.uid)}/report", "doctor", {"findings": "w"}), 200)
+            state = self.report_state(waiting, "doctor")
+            self.assertEqual((state["rs"], state["version"]), ("W", 0))
+            self.assertEqual(self.versions(waiting, "doctor"), [])
+
+    # ── 점유 ──
+
+    def test_hold_expires_after_ttl_and_expired_holder_cannot_block(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.backdate_hold(fixture.uid, 6)
+            self.assertIsNone(self.state(fixture, "doctor2")["holder"], "만료된 점유가 화면에 자물쇠로 나갑니다")
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor2", {"findings": "x"}), 200)
+            taken = self.stack.request("POST", path + "/hold", "doctor2")
+            self.assertEqual(taken.body, {"holder": self.stack.actor("doctor2"), "mine": True, "conflict": False})
+            self.assertEqual(self.audit_count(fixture, "report.hold"), 2, "만료 뒤 재점유는 새 점유 세션이다")
+            blocked = self.stack.request("PUT", path + "/report", "doctor", {"findings": "late"})
+            self.assert_status(blocked, 409)
+            self.assertEqual(blocked.body.get("holder"), self.stack.actor("doctor2"))
+            stale = self.stack.request("POST", path + "/hold", "doctor")
+            self.assertEqual(stale.body, {"holder": self.stack.actor("doctor2"), "mine": False, "conflict": True})
+
+    def test_hold_release_clears_only_own_and_each_reacquisition_is_audited_once(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            for _ in range(2):   # 두 번째는 하트비트
+                self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assertEqual(self.audit_count(fixture, "report.hold"), 1)
+            noop = self.stack.request("POST", path + "/release", "doctor2")
+            self.assert_status(noop, 201)
+            self.assertEqual(noop.body, {"ok": True})
+            self.assertEqual(self.state(fixture, "doctor2")["holder"], self.stack.actor("doctor"), "남의 release가 점유를 풀었습니다")
+            self.assert_status(self.stack.request("POST", path + "/release", "doctor"), 201)
+            self.assertIsNone(self.state(fixture, "doctor")["holder"])
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assertEqual(self.audit_count(fixture, "report.hold"), 2)
+            saved = self.commit(fixture, "doctor", "save", 0)
+            self.assert_status(saved, 201)
+            self.assertIsNone(saved.body["holder"], "확정이 점유를 풀지 않았습니다")
+            taken = self.stack.request("POST", path + "/hold", "doctor2")
+            self.assertEqual(taken.body["mine"], True)
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor2"), 201)
+            self.assertEqual(self.audit_count(fixture, "report.hold"), 3)
+
+    def test_hold_conflict_is_inert_no_steal_no_refresh_no_audit(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.backdate_hold(fixture.uid, 2)   # 아직 살아 있지만, 갱신되면 값이 달라져 보인다
+            before_row = self.hold_row(fixture.uid)
+            self.assertTrue(before_row.startswith(self.stack.actor("doctor") + "|"), before_row)
+            conflict = self.stack.request("POST", path + "/hold", "doctor2")
+            self.assertEqual(conflict.body, {"holder": self.stack.actor("doctor"), "mine": False, "conflict": True})
+            self.assertEqual(self.hold_row(fixture.uid), before_row, "남의 점유에 대한 hold가 DB를 건드렸습니다")
+            holds = [row for row in self.audit_rows(fixture) if row["action"] == "report.hold"]
+            self.assertEqual([row["actor"] for row in holds], [self.stack.actor("doctor")])
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor2", {"findings": "y"}), 409)
+            mine = self.stack.request("POST", path + "/hold", "doctor")
+            self.assertEqual(mine.body["mine"], True)
+            after_row = self.hold_row(fixture.uid)
+            self.assertNotEqual(after_row, before_row, "주인의 하트비트가 heldAt을 갱신하지 않았습니다")
+            self.assertTrue(after_row.startswith(self.stack.actor("doctor") + "|"))
+            self.assertEqual(self.audit_count(fixture, "report.hold"), 1)
+
+    def test_hold_is_visible_and_enforced_across_tele_boundary_both_ways(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            doctor, kdoctor = self.stack.actor("doctor"), self.stack.actor("kdoctor")
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+            seen = self.state(fixture, "kdoctor")
+            self.assertEqual((seen["holder"], seen["teleInstitutionId"]), (doctor, "kin-center"))
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            row = next(item for item in listed.body["studies"] if item["uid"] == fixture.uid)
+            self.assertEqual((row["tele"], row["state"]["holder"]), (True, doctor))
+            blocked = self.stack.request("PUT", path + "/report", "kdoctor", {"findings": "x"})
+            self.assert_status(blocked, 409)
+            self.assertEqual((blocked.body.get("code"), blocked.body.get("holder")), ("REPORT_HELD", doctor))
+            self.assertEqual(self.stack.request("POST", path + "/hold", "kdoctor").body["conflict"], True)
+
+            self.assert_status(self.stack.request("POST", path + "/release", "doctor"), 201)
+            self.assertEqual(self.stack.request("POST", path + "/hold", "kdoctor").body["mine"], True)
+            self.assertEqual(self.state(fixture, "doctor")["holder"], kdoctor)
+            listed = self.stack.request("GET", "/studies", "doctor")
+            row = next(item for item in listed.body["studies"] if item["uid"] == fixture.uid)
+            self.assertEqual((row["tele"], row["state"]["holder"]), (False, kdoctor))
+            blocked = self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"})
+            self.assert_status(blocked, 409)
+            self.assertEqual(blocked.body.get("holder"), kdoctor)
+            self.assertEqual(self.state(fixture, "ktech")["holder"], kdoctor)   # holder는 읽기 필드, 역할 관문 없음
+            self.assert_status(self.stack.request("POST", path + "/hold", "ktech"), 403)
+
+            forced = self.stack.request("POST", path + "/release/force", "jmryu")
+            self.assert_status(forced, 200)
+            self.assertEqual(forced.body["released"], kdoctor)
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"}), 200)
+
+    def test_hold_requires_radiologist_and_prelim_access(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request("POST", path + "/hold", "tech"), 403)
+            self.preliminary(fixture, author="doctor", reviewer="jmryu")
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor2"), 403)
+            self.assertEqual(self.stack.request("POST", path + "/hold", "jmryu").body["mine"], True)
+
+    # ── 교차: 원격판독 상태머신 · 감사 · PATCH 우회 · 잔여 역할/기관 관문 ──
+
+    def test_tele_state_machine_gates_sides_rs_and_cancel_closes_channel(self) -> None:
+        with self.stack.fixture() as f1:
+            path = f"/studies/{quote(f1.uid)}"
+
+            def patch(user: str, body: dict[str, Any]) -> HttpResult:
+                return self.stack.request("PATCH", path, user, body)
+
+            self.assert_status(patch("tech", {"ts": "wait", "teleTo": "kin-center"}), 403)
+            for body, fragment in (
+                ({"ts": "sent", "teleTo": "kin-center"}, "허용되지 않는 TS 전이"),
+                ({"ts": "wait"}, "teleTo"),
+                ({"ts": "wait", "teleTo": "hallym"}, "자기 기관"),
+                ({"ts": "wait", "teleTo": "nowhere"}, "알 수 없는 기관"),
+            ):
+                with self.subTest(body=body):
+                    result = patch("doctor", body)
+                    self.assert_status(result, 400)
+                    self.assertIn(fragment, result.body["message"])
+            opened = patch("doctor", {"ts": "wait", "teleTo": "kin-center"})
+            self.assert_status(opened, 200)
+            self.assertEqual((opened.body["ts"], opened.body["teleInstitutionId"]), ("wait", "kin-center"))
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            self.assertTrue(next(item for item in listed.body["studies"] if item["uid"] == f1.uid)["tele"])
+            self.assert_status(patch("kdoctor", {"ts": "sending"}), 403)      # 의뢰 구간은 소유 기관만
+            self.assert_status(patch("kdoctor", {"ts": "inReading"}), 400)    # wait에서 건너뛰기 불가
+            saved = self.commit(f1, "kdoctor", "save", 0, findings="kin")
+            self.assert_status(saved, 201)
+            resend = patch("doctor", {"ts": "sending"})
+            self.assert_status(resend, 400)
+            self.assertIn("(현재 RS: T)", resend.body["message"])
+            closed = patch("doctor", {"ts": "cancelled"})
+            self.assert_status(closed, 200)
+            self.assertEqual((closed.body["ts"], closed.body["teleInstitutionId"]), ("cancelled", None))
+            # 통로가 닫히면 수신 기관은 아무것도 못 본다
+            self.assert_status(self.stack.request("POST", path + "/hold", "kdoctor"), 404)
+            self.assert_status(self.stack.request("GET", path + "/report/versions", "kdoctor"), 404)
+            self.assertIsNone(self.state(f1, "kdoctor"))
+            self.assertEqual(self.stack.dicom_request(f"/dicom-web/studies/{quote(f1.uid)}/metadata", "kdoctor").status, 403)
+            self.assert_status(patch("doctor", {"ts": "wait"}), 400)
+            details = [json.loads(row["detail"]) for row in self.audit_rows(f1) if row["action"] == "state.patch"]
+            self.assertIn({"ts": "wait", "teleInstitutionId": "kin-center", "by": "hallym"}, details)
+            self.assertIn({"ts": "cancelled", "teleInstitutionId": None, "by": "hallym"}, details)
+
+        with self.stack.fixture() as f2:
+            path = f"/studies/{quote(f2.uid)}"
+            for ts in ("wait", "sending", "sent"):
+                body = {"ts": ts, **({"teleTo": "kin-center"} if ts == "wait" else {})}
+                self.assert_status(self.stack.request("PATCH", path, "doctor", body), 200)
+            self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": "inReading"}), 403)   # 수신 구간은 수신 기관만
+            self.assert_status(self.stack.request("PATCH", path, "kdoctor", {"ts": "inReading"}), 200)
+            approved = self.commit(f2, "kdoctor", "approve", 0, findings="x")
+            self.assert_status(approved, 201)
+            self.assertEqual((approved.body["rs"], approved.body["ts"], approved.body["repDoc"]), ("A", "completed", self.prefix("kdoctor")))
+            added = self.commit(f2, "kdoctor", "addendum", 1, findings="add")
+            self.assert_status(added, 201)
+            self.assertEqual(added.body["ts"], "completed")
+            self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": "cancelled"}), 400)
+            seen = self.state(f2, "doctor2")
+            self.assertEqual((seen["rs"], seen["ts"], seen["findings"], seen["prelimHidden"]), ("A", "completed", "add", False))
+
+        with self.stack.fixture() as f3:   # 대조: 소유 기관 스스로 승인하면 completed가 아니다
+            self.assert_status(self.stack.request("PATCH", f"/studies/{quote(f3.uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+            owner = self.commit(f3, "doctor", "approve", 0)
+            self.assert_status(owner, 201)
+            self.assertEqual((owner.body["rs"], owner.body["ts"]), ("A", "wait"))
+
+    def test_audit_action_matrix_for_report_routes_is_complete_and_phi_free(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            count = lambda action: self.audit_count(fixture, action)   # noqa: E731
+
+            drafted = self.stack.request("PUT", path + "/report", "doctor", {"findings": fixture.secret, "conclusion": "c"})
+            self.assert_status(drafted, 200)
+            self.assertEqual(count("report.draft"), 1)
+            draft_row = next(row for row in self.audit_rows(fixture) if row["action"] == "report.draft")
+            self.assertEqual(json.loads(draft_row["detail"]), {"len": [len(fixture.secret), 1, 0]})
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {}), 200)
+            self.assertEqual(count("report.draft.clear"), 1)
+            self.assert_status(self.stack.request("DELETE", path + "/draft", "doctor"), 200)
+            self.assertEqual(count("report.draft.discard"), 0, "지운 초안이 없는데 폐기 감사가 남았습니다")
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {"findings": "x"}), 200)
+            self.assert_status(self.stack.request("DELETE", path + "/draft", "doctor"), 200)
+            self.assertEqual(count("report.draft.discard"), 1)
+            forced = self.stack.request("DELETE", path + "/draft/force", "jmryu")
+            self.assert_status(forced, 200)
+            self.assertEqual(forced.body["count"], 0)
+            self.assertEqual(count("report.draft.force-discard"), 1)
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request("POST", path + "/release", "doctor"), 201)
+            self.assertEqual(count("report.hold"), 1)
+
+            v = self.commit(fixture, "doctor", "save", 0).body["version"]
+            v = self.commit(fixture, "doctor", "preliminary", v, reviewer=self.stack.actor("jmryu")).body["version"]
+            v = self.commit(fixture, "jmryu", "approve", v).body["version"]
+            v = self.commit(fixture, "doctor", "addendum", v, findings=fixture.secret + " add").body["version"]
+            v = self.commit(fixture, "doctor", "reset", v, reason="r").body["version"]
+            v = self.commit(fixture, "doctor", "defer", v, reason="d").body["version"]
+            self.assertEqual(v, 7)   # save1 prelim2 approve3 addendum4 discarded5 reset6 defer7
+            actions = ("save", "preliminary", "approve", "addendum", "reset", "defer")
+            rows = self.audit_rows(fixture)
+            for action in actions:
+                self.assertEqual(count(f"report.{action}"), 1, action)
+            details = {row["action"]: json.loads(row["detail"]) for row in rows if row["action"] in {f"report.{a}" for a in actions}}
+            self.assertEqual(details["report.preliminary"]["reviewer"], self.stack.actor("jmryu"))
+            self.assertEqual(details["report.reset"]["reason"], "r")
+            self.assertEqual(details["report.defer"]["reason"], "d")
+            for action, detail in details.items():
+                self.assertEqual(detail["by"], "hallym", action)
+                self.assertEqual(len(detail["len"]), 3, action)
+                self.assertTrue(all(isinstance(n, int) for n in detail["len"]), action)
+            self.assertNotIn(fixture.secret, json.dumps(rows, ensure_ascii=False), "감사로그에 판독문 본문이 들어갔습니다")
+
+            forced = self.stack.request("POST", path + "/release/force", "jmryu")
+            self.assert_status(forced, 200)
+            self.assertEqual(count("hold.force-release"), 1)
+            force_detail = json.loads(next(row for row in self.audit_rows(fixture) if row["action"] == "hold.force-release")["detail"])
+            self.assertEqual((force_detail["holder"], force_detail["alive"]), (None, None))
+            self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Unverified"}), 200)
+            self.assertEqual(count("state.patch"), 2)   # fixture Verify + 이번
+
+            rows = self.audit_rows(fixture)
+            self.assertNotIn("unknown", {row["actor"] for row in rows})
+            expected = {
+                "state.patch", "report.draft", "report.draft.clear", "report.draft.discard",
+                "report.draft.force-discard", "report.hold", "hold.force-release",
+                *(f"report.{a}" for a in actions),
+            }
+            self.assertTrue(expected <= {row["action"] for row in rows}, expected - {row["action"] for row in rows})
+
+    def test_patch_bypass_matrix_rejects_owned_fields_and_post_w_patient_edits(self) -> None:
+        owned = [
+            {"repDoc": "x"}, {"confirm": "2020-01-01"}, {"matched": "M"}, {"orig": {}},
+            {"repDoc": None}, {"rs": "W", "ss": "Verified"}, {"holdReason": "h"},
+        ]
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            movers = (
+                ("W", None),
+                ("T", lambda: self.commit(fixture, "doctor", "save", 0)),
+                ("H", lambda: self.commit(fixture, "doctor", "defer", 1, reason="h")),
+                ("A", lambda: self.commit(fixture, "doctor", "approve", 2)),
+            )
+            for label, mover in movers:
+                if mover:
+                    self.assert_status(mover(), 201)
+                before = self.snapshot(fixture, "doctor")
+                for body in owned:
+                    with self.subTest(state=label, body=body):
+                        result = self.stack.request("PATCH", path, "jmryu", body)
+                        self.assert_status(result, 400)
+                        self.assertIn("전용 경로", result.body["message"])
+                self.assert_snapshot_unchanged(fixture, "doctor", before)
+                if label != "W":
+                    with self.subTest(state=label, body="ov"):
+                        result = self.stack.request("PATCH", path, "tech", {"ov": {"name": "X"}})
+                        self.assert_status(result, 400)
+                        self.assertIn("판독 전(RS: W)", result.body["message"])
+                        # 같은 요청에 실린 다른 필드도 함께 거절된다 — 부분 적용은 없다
+                        self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Unverified", "ov": {"name": "X"}}), 400)
+                        self.assertEqual(self.state(fixture, "doctor")["ss"], "Verified")
+            # 목록 밖 키는 소리 없이 무시된다 — 상태·경계 필드는 PATCH가 만질 수 없다
+            ignored = self.stack.request("PATCH", path, "jmryu", {
+                "ss": "Verified", "preReviewer": self.stack.actor("doctor2"), "holder": self.stack.actor("doctor2"),
+                "heldAt": "2020-01-01", "teleInstitutionId": "kin-center", "institutionId": "kin-center", "version": 99,
+            })
+            self.assert_status(ignored, 200)
+            self.assertEqual(
+                (ignored.body["preReviewer"], ignored.body["holder"], ignored.body["teleInstitutionId"],
+                 ignored.body["institutionId"], ignored.body["version"]),
+                (None, None, None, "hallym", 3),
+            )
+            self.assertIsNone(self.state(fixture, "kdoctor"))
+            orders = self.stack.request("GET", "/bootstrap", "jmryu").body["orders"]
+            oid = next(order["oid"] for order in orders if order["matched"] == "U")
+            matched = self.stack.request("POST", "/match", "tech", {"uid": fixture.uid, "oid": oid, "patient": {}})
+            self.assert_status(matched, 400)
+            self.assertIn("(현재 RS: A)", matched.body["message"])
+            orders = self.stack.request("GET", "/bootstrap", "jmryu").body["orders"]
+            self.assertEqual(next(order for order in orders if order["oid"] == oid)["matched"], "U")
+
+        with self.stack.fixture() as prelim:
+            self.preliminary(prelim, author="doctor", reviewer="jmryu")
+            path = f"/studies/{quote(prelim.uid)}"
+            for user in ("jmryu", "doctor2"):
+                result = self.stack.request("PATCH", path, user, {"repDoc": "x"})
+                self.assert_status(result, 400)
+                self.assertIn("전용 경로", result.body["message"])
+                self.assertFalse(result.contains(prelim.secret))
+            verify = self.stack.request("PATCH", path, "tech", {"ss": "Verified"})
+            self.assert_status(verify, 403)
+            self.assertIn("예비 판독(RS: P)", verify.body["message"])
+
+        with self.stack.fixture() as matched_study:
+            orders = self.stack.request("GET", "/bootstrap", "jmryu").body["orders"]
+            oid = next(order["oid"] for order in orders if order["matched"] == "U")
+            done = self.stack.request("POST", "/match", "tech", {"uid": matched_study.uid, "oid": oid, "patient": {}})
+            self.assert_status(done, 201)
+            self.assertEqual(done.body["matched"], "M")
+            self.assert_status(self.commit(matched_study, "doctor", "save", 0), 201)
+            undone = self.stack.request("POST", "/unmatch", "tech", {"uid": matched_study.uid})
+            self.assert_status(undone, 400)
+            self.assertIn("판독 전(RS: W)", undone.body["message"])
+            order = next(o for o in self.stack.request("GET", "/bootstrap", "jmryu").body["orders"] if o["oid"] == oid)
+            self.assertEqual((order["matched"], order["studyUid"]), ("M", matched_study.uid))
+
+    def test_role_and_tenant_residue_routes_reject_wrong_caller(self) -> None:
+        with self.stack.fixture() as fixture, self.stack.fixture() as other:
+            path = f"/studies/{quote(fixture.uid)}"
+            instance_id = self.stack.first_instance_id(fixture.uid)
+            tags = self.stack._orthanc_request("GET", f"/instances/{quote(instance_id)}/tags?simplify")
+            self.assertEqual(tags.status, 200, tags.text)
+            sop = tags.body["SOPInstanceUID"]
+            lookup = lambda user, study, sop_uid: self.stack.request(   # noqa: E731
+                "POST", "/dicom/lookup", user, {"studyUid": study, "sopUid": sop_uid})
+            found = lookup("doctor", fixture.uid, sop)
+            self.assert_status(found, 200)
+            self.assertEqual(found.body, {"id": instance_id})
+            self.assert_status(lookup("kdoctor", fixture.uid, sop), 403)
+            self.assert_status(lookup("doctor", other.uid, sop), 403)   # 다른 검사 UID로는 같은 인스턴스를 못 꺼낸다
+            self.assert_status(lookup("doctor", fixture.uid, "abc"), 400)
+            self.assert_status(self.stack.request("PATCH", path, "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+            self.assert_status(lookup("kdoctor", fixture.uid, sop), 200)
+
+            # 기사·관리자 전용 경로를 순수 판독의가 부르면 403 — need()가 불변조건 5의 유일한 장치다
+            before = self.snapshot(fixture, "doctor")
+            for method, suffix, body, role in (
+                ("PATCH", path, {"ss": "Verified"}, "technician"),
+                ("POST", "/match", {"uid": fixture.uid, "oid": "x", "patient": {}}, "technician"),
+                ("POST", "/unmatch", {"uid": fixture.uid}, "technician"),
+                ("DELETE", path, None, "technician"),
+                ("DELETE", path + "/draft/force", None, "admin"),
+                ("GET", "/unassigned", None, "admin"),
+                ("POST", path + "/assign", {"institutionId": "hallym"}, "admin"),
+            ):
+                with self.subTest(route=(method, suffix)):
+                    result = self.stack.request(method, suffix, "doctor", body)
+                    self.assert_status(result, 403)
+                    self.assertIn(f"{role} 권한", result.body["message"])
+            self.assert_status(self.stack.request("POST", "/templates", "tech", {"title": "x"}), 403)
+            self.assert_status(self.stack.request("DELETE", "/templates/1", "tech"), 403)
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+
+            # 남의 기관 오더는 우리 검사에 붙지 않고, 수신 기관은 받은 검사를 매칭하지 못한다
+            korders = self.stack.request("GET", "/bootstrap", "kdoctor").body["orders"]
+            koid = next((order["oid"] for order in korders if order["matched"] == "U"), None)
+            self.assertIsNotNone(koid, "kin-center 시드 오더가 없습니다")
+            foreign = self.stack.request("POST", "/match", "tech", {"uid": fixture.uid, "oid": koid, "patient": {}})
+            self.assert_status(foreign, 400)
+            self.assertIn("오더를 찾을 수 없습니다", foreign.body["message"])
+            receiver = self.stack.request("POST", "/match", "ktech", {"uid": fixture.uid, "oid": koid, "patient": {}})
+            self.assert_status(receiver, 403)
+            self.assertIn("보유 기관", receiver.body["message"])
+            korders = self.stack.request("GET", "/bootstrap", "kdoctor").body["orders"]
+            self.assertEqual(next(order for order in korders if order["oid"] == koid)["matched"], "U")
 
     def test_defer_requires_reason_and_records_unoccupied_h(self) -> None:
         with self.stack.fixture() as fixture:
