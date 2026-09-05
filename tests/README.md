@@ -117,6 +117,29 @@ Linux에서 백업 디렉터리 700·파일 600을 적용한다. 백업에는 �
 실패 결과도 백업 폴더의 `rehearsal-*.json`에 남긴다. 기존 DB/volume에 덮어쓰는 기능은 없다.
 
 `ops_backup_test.py`는 실패 뒤 서비스 재개·시크릿 출력 방지·변조 백업 거절·소유권 없는 자원 삭제
-거절·작업 잠금 등 8개 안전 시험이다(TEST-OPS-01~02). 실제 복원 리허설과 함께 통과해야 한다.
+거절·작업 잠금·daemon 장애·archive 경로 등 10개 안전 시험이다(TEST-OPS-01~02). 실제 복원 리허설과 함께 통과해야 한다.
 이 단계의 서버 내부 백업은 오프사이트 재해복구가 아니다. Gateway queue·인증서·Docker 이미지
 오프사이트 보관과 보존/암호화 정책은 별도다. 스크립트 자체가 cron을 설치하거나 오래된 백업을 삭제하지 않는다.
+
+## Run C — Prisma baseline과 시작
+
+기존 데이터베이스는 검증된 백업을 먼저 만들고, 초기 schema와 실제 DB가 일치할 때만
+`docker compose exec -T api node prisma/baseline.mjs`를 **한 번** 실행한다. 이후
+`docker compose up -d --build api`로 새 시작 명령을 적용한다. 새 빈 DB는 baseline 없이
+`migrate deploy`가 `0_init`을 실제 생성한다. baseline은 자동 부팅 명령에 넣지 않는다.
+API 의존성은 `package-lock.json`과 Dockerfile의 `npm ci`로 고정한다.
+
+`baseline.mjs`는 초기 schema·migration SHA-256·Prisma 5.22.0·DB drift·기존 migration
+이력을 확인하고, 이미 같은 baseline이면 재등록하지 않는다. 빈 DB/변형된 SQL/다른 이력은
+거부한다. 기존 테이블 행수도 전후 대조한다. `prisma migrate reset`·`db push`·`accept-data-loss`를
+실패 해결 절차로 사용하지 않는다. 새 변경에는 새 migration 파일과 별도 검토가 필요하다.
+
+```powershell
+python tests/migration_rehearsal.py <완료된-백업-디렉터리>
+```
+
+이 시험은 현재 API 이미지와 체크아웃의 Prisma 파일을 네트워크 격리된 임시 PostgreSQL에
+연결한다(TEST-OPS-03). 빈 DB baseline 무변경 거부, 빈 DB deploy/schema 일치,
+기존 DB baseline 반복/deploy/전체 테이블 행수 보존, drift 거부와 이력 미생성을 확인한다.
+살아 있는 DB 행수·migration metadata 불변과 임시 컨테이너 정리도 확인한다.
+새 초기 baseline을 채택하는 시점의 리허설이므로 baseline 적용 전 백업을 입력으로 쓴다.

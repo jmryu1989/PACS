@@ -91,21 +91,22 @@ docker compose up -d --build          # 첫 실행은 몇 분
 
 계정은 `README.md`의 표에 있다.
 
-검증은 **브라우저 콘솔에서 API를 직접 쏘는 방식**이 가장 빠르다.
-토큰은 Keycloak password grant로도 받을 수 있다(`kin-web` 클라이언트, direct access 켜져 있음).
+검증은 `python tests/invariants_live.py`(69개)와 `python tests/e2e/test_worklist.py`(14개)를 순차 실행한다.
+`kin-web`은 Authorization Code + PKCE 전용이다. 시험용 password grant는 LiveStack이
+생성·정리하는 임시 클라이언트만 사용한다. 기존 계정 비밀번호나 kin-web 정책을 바꾸지 않는다.
 
 ## 3. 밟기 쉬운 함정
 
 | 증상 | 원인 | 대응 |
 |---|---|---|
 | 코드를 고쳤는데 옛 코드가 돈다 | 윈도우 바인드 마운트는 inotify가 안 넘어와 `nest --watch`가 파일 변경을 못 잡는다 | `docker compose restart api` 후 **로그의 컴파일 시각이 내 수정보다 뒤인지 확인** |
-| `prisma.xxx` 가 undefined | 컨테이너 CMD의 `db push`는 `--skip-generate`라 새 모델을 클라이언트에 안 넣는다 | 스키마를 고쳤으면 `docker compose exec api npx prisma db push` **먼저**, 그 다음 restart |
+| `prisma.xxx` 가 undefined | 새 schema에 맞는 Prisma client가 이미지에 없다 | 검토된 migration과 schema를 함께 빌드(`docker compose build api`)하고 새 이미지로 기동한다. db push로 임시 수선하지 않는다 |
 | 스크립트가 성공했는데 종료코드는 실패 | 윈도우 콘솔이 CP949라, 출력에 못 옮기는 글자가 하나 있으면 `UnicodeEncodeError` | `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` |
 | 렐름을 고쳤는데 반영이 안 됨 | 렐름 JSON은 **컨테이너를 새로 만들 때만** import된다 | `docker compose up -d --force-recreate keycloak` |
 | 프록시 뒤에서 엉뚱한 포트로 리다이렉트 | nginx가 절대 URL을 만들 때 **자기가 듣는 포트**(컨테이너 안 443)를 쓴다 | `absolute_redirect off`. 뒷단이 절대 URL을 스스로 만들게 두지 않는다 |
 | 고쳤는데 화면이 그대로 | 브라우저 캐시 | 강력 새로고침부터 |
-| `db push`가 unique 추가를 거부 | Prisma는 **중복이 0건이어도** `@unique` 추가를 "잠재적 데이터 손실"로 분류한다 | 중복을 먼저 SQL로 세어 0을 확인한 뒤 `--accept-data-loss`. 행 삭제는 일어나지 않는다 |
-| API 컨테이너가 재시작 루프 | 컨테이너 CMD가 `db push && npm run start:dev`라, `db push`가 승인을 요구하면 **API가 아예 못 뜬다** | 실행 중 컨테이너에 `exec`할 수 없으므로 같은 이미지의 **일회성 컨테이너**로 `db push`를 먼저 적용하고 서비스를 다시 띄운다 |
+| migration의 unique 추가가 실패 | 기존 중복 또는 migration 전제 불일치 | 중복·영향을 먼저 조회하고 데이터 보존 변경안을 검토한다. `accept-data-loss`나 reset으로 통과시키지 않는다 |
+| 기존 DB에서 API 기동이 P3005로 실패 | 시작 명령은 `migrate deploy`이고 기존 DB의 baseline이 아직 없다 | 백업·drift 확인 후 `node prisma/baseline.mjs`를 한 번 실행한다. API가 내려가 있으면 `docker compose run --rm --no-deps api node prisma/baseline.mjs`. 빈 DB나 어긋난 schema는 스크립트가 거부한다 |
 | `Up`인데 접속이 안 된다 | `docker compose ps`의 STATUS가 `Up`이어도 **PORTS가 `443/tcp`처럼 화살표 없이** 찍혀 있으면 호스트에 게시되지 않은 것이다. 컨테이너가 compose의 `ports:` 없이 다시 만들어졌을 때 이렇게 된다 | **STATUS가 아니라 PORTS 칸에 `→`가 있는지**를 본다. `docker compose up -d --force-recreate <서비스>` |
 
 ### 컨테이너를 건드린 뒤에는 반드시
@@ -125,8 +126,8 @@ curl -sk https://localhost:9443/api/health   # 정식 입구로 한 번
 - **주석은 "무엇"이 아니라 "왜"를 적는다.** 특히 *왜 이 방식이고 다른 방식이 아닌지*,
   그리고 *예전에 어떻게 틀렸는지*. 이 저장소의 주석은 그 형식이고, 그게 자산이다.
   기능 설명만 다는 주석은 추가하지 않는다.
-- **외부에서 온 문자열은 `esc()`를 거쳐 화면에 넣는다.** 토큰이 sessionStorage에 있는 한
-  XSS는 곧 계정 탈취다. 특히 판독문 본문 — 남이 쓴 글을 내가 여는 자리다.
+- **외부에서 온 문자열은 `esc()` 또는 `textContent`로 표시한다.** HttpOnly BFF 쿠키여도
+  XSS는 사용자 권한으로 동작할 수 있다. 특히 판독문 본문 — 남이 쓴 글을 내가 여는 자리다.
 - **`toClient`가 내보내는 클리어 가능 필드는 `undefined`가 아니라 `null`이다.**
   `JSON.stringify`가 undefined 키를 지우면, 클라이언트의 `{...기존, ...응답}`이
   "비워졌다"를 못 받는다. **비움도 값이다.**

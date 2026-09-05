@@ -1,0 +1,4 @@
+# Prisma stores migration checksums; Windows and Linux must use the same bytes.
+api/prisma/migrations/** text eol=lf
+api/prisma/*.mjs text eol=lf
+api/prisma/baseline.json text eol=lf

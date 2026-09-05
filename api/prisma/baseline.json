@@ -1,0 +1,6 @@
+{
+  "migration": "0_init",
+  "prisma_version": "5.22.0",
+  "schema_sha256": "30dd9d2f3442b13555938f635889a2886c16df76efeb717e6e027eeb803f3227",
+  "sql_sha256": "858b154f34fd567359ce7031ee6b435f06a6800adca59420b9a62040e71a8e5e"
+}

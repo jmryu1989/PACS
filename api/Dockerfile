@@ -14,8 +14,8 @@ RUN apt-get update -y \
 WORKDIR /app
 
 # 의존성 먼저 — package.json이 안 바뀌면 이 레이어는 캐시된다 (빌드가 빨라진다)
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Prisma 클라이언트 생성에는 스키마가 필요하다
 COPY prisma ./prisma
@@ -26,6 +26,6 @@ COPY src ./src
 
 EXPOSE 3000
 
-# 개발 편의: 뜰 때 스키마를 DB에 반영하고 watch 모드로 실행.
-# 마이그레이션 파일 관리(prisma migrate)는 스키마가 안정되는 시점에 도입한다.
-CMD ["sh", "-c", "npx prisma db push --skip-generate && npm run start:dev"]
+# 부팅은 검토된 migration만 적용한다. 기존 DB는 baseline.mjs로 이력을 한 번
+# 등록해야 한다. 여기서 자동 resolve/db push를 하면 누락된 변경까지 적용으로 위장한다.
+CMD ["sh", "-c", "npx prisma migrate deploy && npm run start:dev"]
