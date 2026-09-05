@@ -1509,7 +1509,7 @@
         ? (rel.map(x => {
             return `
             <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid ? "related-selected" : ""}">
-              <td>${x.uid === relatedUid ? "👁 열람 중" : "열기"}</td>
+              <td>${x.uid === relatedUid ? "👁 열람 중" : "비교"}</td>
               <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
               <td>${x.rs === "A" ? "승인 판독문" : "판독문 없음"}</td>
@@ -2782,9 +2782,17 @@ ${esc($("#recommendation").value)}
 
     window.addEventListener("pagehide", () => rememberOhifRect());
 
-    function openFilmbox(uid) {
+    function autoPrior(uid) {
+      const s = studies.find(x => x.uid === uid);
+      if (!s?.sourcePatientKey) return null;
+      return studies.filter(x => x.sourcePatientKey === s.sourcePatientKey && x.uid !== uid && x.modality === s.modality)
+        .sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid))[0]?.uid ?? null;
+    }
+
+    function openFilmbox(uid, priorUid = null) {
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
-      const url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}`;
+      const url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}` +
+        (priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "");
       const seq = ++ohifOpenSeq;
       const stored = readStoredOhifRect();
       const initial = ohifPlacement(stored);
@@ -3091,7 +3099,7 @@ ${esc($("#recommendation").value)}
     });
     $("#rows").addEventListener("dblclick", e => {
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) openFilmbox(tr.dataset.uid);
+      if (tr?.dataset.uid) openFilmbox(tr.dataset.uid, autoPrior(tr.dataset.uid));
     });
 
     // ── 원격판독 의뢰 상태머신 (TS, 6.3.2) ──
@@ -3249,7 +3257,7 @@ ${esc($("#recommendation").value)}
     });
     $("#relrows").addEventListener("dblclick", e => {
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) openFilmbox(tr.dataset.uid);
+      if (tr?.dataset.uid) openFilmbox(selectedUid, tr.dataset.uid);
     });
 
     // ══════════ 시작 ══════════
