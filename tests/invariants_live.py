@@ -1287,6 +1287,53 @@ class LiveInvariantTests(unittest.TestCase):
         )
         return body, f'multipart/related; type="application/dicom"; boundary={boundary}'
 
+    def test_filming_non_emergency_blocks_all_report_writes_but_allows_reads(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request(
+                "PATCH", path, "tech", {"ss": "Unverified", "em": "N"},
+            ), 200)
+            before = self.snapshot(fixture, "doctor")
+            message = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다"
+            for method, suffix, body in [
+                ("PUT", "/report", {"findings": fixture.secret}),
+                ("POST", "/report/commit", {"action": "save", "baseVersion": 0, "findings": fixture.secret}),
+                ("POST", "/hold", None),
+            ]:
+                with self.subTest(route=suffix):
+                    result = self.stack.request(method, path + suffix, "doctor", body)
+                    self.assert_status(result, 409)
+                    self.assertEqual(result.body.get("message"), message)
+            # 판독문 조회는 별도 GET /report가 아니라 bootstrap과 versions로 제공된다.
+            self.assert_snapshot_unchanged(fixture, "doctor", before)
+
+    def test_filming_emergency_allows_report_writes_without_verify(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request(
+                "PATCH", path, "tech", {"ss": "Unverified", "em": "E"},
+            ), 200)
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request(
+                "PUT", path + "/report", "doctor", {"findings": fixture.secret},
+            ), 200)
+            self.approve(fixture)
+
+    def test_filming_verify_restores_non_emergency_report_writes(self) -> None:
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            self.assert_status(self.stack.request(
+                "PATCH", path, "tech", {"ss": "Unverified", "em": "N"},
+            ), 200)
+            self.assert_status(self.stack.request(
+                "PATCH", path, "tech", {"ss": "Verified"},
+            ), 200)
+            self.assert_status(self.stack.request("POST", path + "/hold", "doctor"), 201)
+            self.assert_status(self.stack.request(
+                "PUT", path + "/report", "doctor", {"findings": fixture.secret},
+            ), 200)
+            self.approve(fixture)
+
     def test_connect_source_patient_key_is_tenant_scoped_and_empty_safe(self) -> None:
         patient_id = "INV-SHARED-" + uuid.uuid4().hex[:10]
         with ExitStack() as fixtures:

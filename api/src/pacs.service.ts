@@ -485,8 +485,8 @@ export class PacsService implements OnModuleInit {
             data: {
               uid: n.uid, institutionId: n.institutionId, reqHosp: n.reqHosp,
               // 처음 보는 검사는 방금 장비에서 도착한 것이다 → **기사 확인 전(Unverified)**.
-              // Radiology 탭은 Verified만 보여주므로, 이게 판독 진입 관문이 된다.
-              // 도착하자마자 판독 목록에 뜨면 기사가 환자·검사정보를 고칠 틈이 없고,
+              // 도착 검사는 바로 보이되, 비응급 판독 쓰기는 Verify 뒤에만 허용한다.
+              // 도착하자마자 판독을 허용하면 기사가 환자·검사정보를 고칠 틈이 없고,
               // 그 상태로 판독이 붙으면 더는 고칠 수 없다(RS≠W 규칙).
               ss: 'Unverified',
             },
@@ -803,6 +803,8 @@ export class PacsService implements OnModuleInit {
   async putReport(uid: string, body: any, c: Caller) {
     need(c.roles, 'radiologist', '판독문 저장');
     const prev = await this.gate(uid, c);
+    if (prev?.ss === 'Unverified' && prev.em !== 'E')
+      throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
@@ -948,6 +950,8 @@ export class PacsService implements OnModuleInit {
       throw new BadRequestException(`알 수 없는 action: ${action}`);
 
     const prev = await this.gate(uid, c);
+    if (prev?.ss === 'Unverified' && prev.em !== 'E')
+      throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
     // 예비 판독 중인 검사는 지정된 두 사람 말고는 쓰지도 못한다.
@@ -1129,6 +1133,8 @@ export class PacsService implements OnModuleInit {
   async hold(uid: string, c: Caller) {
     need(c.roles, 'radiologist', '판독문 점유');
     const prev = await this.gate(uid, c);
+    if (prev?.ss === 'Unverified' && prev.em !== 'E')
+      throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');

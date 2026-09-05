@@ -90,6 +90,8 @@
     .filters input, .filters select { width: 100%; min-width: 30px; background: #14181f; border: 1px solid #3a4356; color: #cdd3dc; padding: 1px 3px; font-size: 11px; }
     tbody tr:hover td { background: #2b3547; }
     tbody tr.sel td { background: #34455f; }
+    tr.unv td { opacity: .55; }
+    tr.unv.sel td { opacity: .8; }
     td.num { text-align: right; }
     .empty { text-align: center; color: #667; padding: 30px !important; }
     .rs { display: inline-block; min-width: 16px; text-align: center; border-radius: 3px; font-weight: bold; cursor: pointer; }
@@ -1095,6 +1097,7 @@
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
         { k: "em", t: "EM", f: ["E", "N"] },
+        { k: "ss", t: "SS", f: ["Verified", "Unverified"] },
         { k: "rs", t: "RS", f: ["A", "H", "O", "P", "T", "W"] },
         { k: "acc", t: "Accession No", f: "text" },
         { k: "ts", t: "TS" },
@@ -1144,7 +1147,7 @@
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
       rs: s => `<span class="rs ${esc(s.rs)}">${esc(s.rs)}</span>`,
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
-      ss: s => `<span class="ss ${s.ss}">${s.ss}</span>`,
+      ss: s => `<span class="ss ${esc(s.ss)}">${mode === "Radiology" && s.ss === "Unverified" ? "촬영중" : esc(s.ss)}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
@@ -1366,8 +1369,6 @@
     function filtered() {
       const cols = COLS[mode].filter(c => c.f);
       return studies.filter(s => {
-        // Radiology 탭에는 기사가 확인(Verify)한 검사만 올라온다 — 8장 흐름의 관문
-        if (mode === "Radiology" && s.ss !== "Verified") return false;
         const kw = $("#quick").value.trim().toUpperCase();
         if (kw && !s.name.toUpperCase().includes(kw) && !s.id.toUpperCase().includes(kw)) return false;
         if (!withinDays(s.date, quickDays)) return false;
@@ -1382,7 +1383,7 @@
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
 
       $("#rows").innerHTML = list.map((s, i) => `
-        <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}">` +
+        <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
         cols.map(c => {
           // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
           const v = c.k === "no" ? i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
@@ -1408,7 +1409,8 @@
           `<span class="count"><span class="dot dot-a"></span>A:${n("rs","A")}</span>` +
           `<span class="count"><span class="dot dot-ho"></span>H,O:${n("rs","H") + n("rs","O")}</span>` +
           `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
-          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>`;
+          `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
+          `<span class="count">촬영중:${n("ss","Unverified")}</span>`;
       } else {
         $("#countlist").textContent =
           `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
@@ -1858,7 +1860,7 @@
         const el = $(sel);
         if (!preserveValue) el.value = locked ? "" : (src[sel.slice(1)] ?? "");
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
-        el.readOnly = locked || !KinAuth.has("radiologist");
+        el.readOnly = locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
       }
       renderDraftBar();
     }
@@ -2100,6 +2102,8 @@
     function updateReportButtons() {
       const s = cur();
       const rad = KinAuth.has("radiologist");
+      const filming = s?.ss === "Unverified" && s?.em !== "E";
+      const filmingTitle = "촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
@@ -2108,18 +2112,18 @@
       for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-unread", "#b-clear", "#b-paste"]) {
         const el = $(id);
         if (!el) continue;
-        el.disabled = !rad || locked;
-        el.title = locked ? "다른 판독의의 예비 판독(RS: P)입니다"
+        el.disabled = !rad || locked || filming;
+        el.title = filming ? filmingTitle : locked ? "다른 판독의의 예비 판독(RS: P)입니다"
           : !rad ? "판독의 권한이 필요합니다" : "";
       }
       // 승인된 판독문을 비우는 길은 사유가 남는 Reset뿐이다. Clear는 그 뒷문이었다.
-      if (s?.rs === "A" && rad && !locked) {
+      if (s?.rs === "A" && rad && !locked && !filming) {
         $("#b-clear").disabled = true;
         $("#b-clear").title = "승인된 판독문은 판독 취소(Reset)로만 비울 수 있습니다";
       }
       // Addendum은 승인된 판독문에만 붙는다
-      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked;
-      $("#b-addendum").title = s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
+      $("#b-addendum").disabled = s?.rs !== "A" || !rad || locked || filming;
+      $("#b-addendum").title = filming ? filmingTitle : s?.rs !== "A" ? "승인된 판독문에만 추가기재할 수 있습니다" : "";
       /**
        * Prelim은 "아직 확정 안 된 판독을 상급자에게 넘기는" 동작이다.
        * 이미 승인(A)된 것에는 의미가 없고, 이미 P인 것을 다시 넘기면 지정이 덮어써진다.
@@ -2127,11 +2131,14 @@
        */
       const b = $("#b-prelim");
       if (b) {
-        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || !serverMode;
-        b.title = !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
+        b.disabled = !rad || !s || s.rs === "A" || s.rs === "P" || locked || filming || !serverMode;
+        b.title = filming ? filmingTitle : !serverMode ? "서버에 연결돼 있을 때만 지정할 수 있습니다"
           : s?.rs === "P" ? "이미 예비 판독 중입니다"
           : s?.rs === "A" ? "이미 승인된 판독입니다"
           : "상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)";
+      }
+      for (const id of ["#findings", "#conclusion", "#recommendation"]) {
+        $(id).readOnly = !rad || locked || filming;
       }
     }
 
