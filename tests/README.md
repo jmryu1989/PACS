@@ -92,3 +92,31 @@ E2E는 로컬 `cstore` 전용이다. 운영 서버에서 실행하지 않는다.
 실패 스크린샷은 인증된 워크리스트만 `tests/e2e/artifacts/`에 저장하고 Git에서 제외한다.
 비밀번호·쿠키·토큰·storageState·네트워크 trace는 파일에 저장하지 않는다.
 실제 다중 모니터 권한과 모니터별 배치, 임상 화질 적합성은 이 시험의 검증 범위가 아니다.
+
+## Run C — 백업과 격리 복원
+
+```powershell
+python tests/ops_backup_test.py
+python scripts/ops_backup.py backup --output "$env:USERPROFILE/backups/kin-pacs"
+python scripts/ops_backup.py rehearse <출력된-백업-디렉터리>
+```
+
+서버에서는 저장소 폴더에서 `python3 scripts/ops_backup.py backup --output "$HOME/backups/kin-pacs"`를 쓴다.
+원격 Docker context는 거부한다. 백업 시 **API·Keycloak·Orthanc가 잠시 중단**되므로 E2E나 다른
+운영 작업과 동시에 실행하지 않는다. 약 1.1GB 로컬 영상의 첫 측정은 정지~재시작 명령 121초였다.
+`.kin-ops.lock`으로 이 스크립트끼리의 중복을 막는다. 강제 종료 뒤 남은 lock을 자동 삭제하지 않는다.
+
+두 DB의 custom dump, Orthanc SQLite 인덱스·첨부 전체 archive, Git SHA, Compose·.env,
+파일별 SHA-256과 모든 DB 테이블 행수를 저장한다. 실패해도 원래 켜져 있던 서비스만 재기동한다.
+API·OIDC·워크리스트 준비까지 확인한다. 부분 백업/재기동 실패는 성공으로 취급하지 않는다.
+Linux에서 백업 디렉터리 700·파일 600을 적용한다. 백업에는 시크릿이 있으므로 Git 밖에 보관한다.
+
+복원은 포트 게시/외부 네트워크가 없는 임시 PostgreSQL과 새 Orthanc volume에서만 실행한다.
+두 DB의 실제 restore·테이블별 행수, SQLite integrity_check·모든 첨부 파일 존재/크기를 확인한다.
+백업 당시의 로컬 Docker image ID가 필요하다. 임시 자원은 실행별 이름과 소유 label 확인 후 정리하며,
+실패 결과도 백업 폴더의 `rehearsal-*.json`에 남긴다. 기존 DB/volume에 덮어쓰는 기능은 없다.
+
+`ops_backup_test.py`는 실패 뒤 서비스 재개·시크릿 출력 방지·변조 백업 거절·소유권 없는 자원 삭제
+거절·작업 잠금 등 8개 안전 시험이다(TEST-OPS-01~02). 실제 복원 리허설과 함께 통과해야 한다.
+이 단계의 서버 내부 백업은 오프사이트 재해복구가 아니다. Gateway queue·인증서·Docker 이미지
+오프사이트 보관과 보존/암호화 정책은 별도다. 스크립트 자체가 cron을 설치하거나 오래된 백업을 삭제하지 않는다.

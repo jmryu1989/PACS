@@ -24,3 +24,4 @@ api/prisma/*.db
 
 # E2E failure screenshots and local run evidence may contain session-specific UI.
 tests/e2e/artifacts/
+.kin-ops.lock
