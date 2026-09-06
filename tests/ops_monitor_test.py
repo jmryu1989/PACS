@@ -222,6 +222,22 @@ class MonitorTest(unittest.TestCase):
             worker.join()
             server.server_close()
 
+    @unittest.skipUnless(os.name == 'posix', 'Linux umask exercised in Docker/CI')
+    def test_25_private_umask_normalizes_only_new_leaf(self):
+        old = os.umask(0o077)
+        try:
+            mon.prepare_dir(self.root / 'new-public', 0o755)
+            mon.prepare_dir(self.root / 'new-private', 0o700)
+            self.assertEqual((self.root / 'new-public').stat().st_mode & 0o777, 0o755)
+            self.assertEqual((self.root / 'new-private').stat().st_mode & 0o777, 0o700)
+            existing = self.root / 'existing'
+            existing.mkdir(mode=0o700)
+            with self.assertRaises(ValueError):
+                mon.prepare_dir(existing, 0o755)
+            self.assertEqual(existing.stat().st_mode & 0o777, 0o700)
+        finally:
+            os.umask(old)
+
 
 class FakeGitHub:
     def __init__(self, private=True, issues=None):

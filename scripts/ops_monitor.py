@@ -134,7 +134,14 @@ def prepare_dir(path, mode):
     # Dedicated output directories only. Never chmod a pre-existing user's folder.
     if any(p.is_symlink() for p in (path, *path.parents)):
         raise ValueError('Symlink directory refused')
-    path.mkdir(mode=mode, parents=True, exist_ok=True)
+    try:
+        path.mkdir(mode=mode, parents=True)
+    except FileExistsError:
+        pass
+    else:
+        # Only our newly created leaf is normalized; umask077 must not turn the
+        # public output into unreadable 0700, nor justify chmod of existing folders.
+        path.chmod(mode)
     info = path.stat()
     if not path.is_dir() or (os.name == 'posix' and
             (info.st_uid != os.geteuid() or (info.st_mode & 0o777) != mode)):
