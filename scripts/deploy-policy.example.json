@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "enabled": false,
+  "repository": "/srv/kin/repository",
+  "state_dir": "/var/lib/kin-deploy",
+  "compose_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "origin": "https://pacs.example.invalid",
+  "smoke": {
+    "token_file": "/etc/kin-deploy/smoke-token.json",
+    "frame_path": "/dicom-web/studies/1.2/series/1.3/instances/1.4/frames/1",
+    "bytes": 1,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "ca_file": null
+  },
+  "mail": {
+    "credentials": "/etc/kin-deploy/mail.env",
+    "recipient": "operator@example.invalid"
+  }
+}

@@ -101,6 +101,16 @@ def lock():
     descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         handle.write(token)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if os.name == "posix":
+        # A retained deployment lock must survive a host restart as well as a
+        # process exit; syncing only the journal in another directory is not enough.
+        directory = os.open(ROOT, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     lease = LockLease()
     try:
         yield lease

@@ -29,6 +29,8 @@ jobs:
         run: python3 tests/ops_deploy_preflight_test.py
       - name: Deployment state machine and retained operations lock
         run: python3 -B tests/ops_deploy_runner_test.py
+      - name: Protected deployment host files, UID boundary and synthetic HTTPS
+        run: sudo python3 -B tests/ops_deploy_host_test.py
       - name: Offline export inventory and image integrity
         run: python3 tests/ops_export_inventory_test.py
       - name: Offline storage listing and read-only index reconciliation
@@ -75,6 +77,8 @@ jobs:
           KIN_TEST_API_IMAGE: kin-api:ci
           KIN_EXPECTED_REVISION: ${{ github.sha }}
         run: python3 tests/production_image_test.py
+      - name: Disposable host adapter API replacement and database preservation
+        run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
       - name: Record exact image identity
         env:
           CODE_SHA: ${{ github.sha }}

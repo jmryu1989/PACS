@@ -15,7 +15,7 @@ import sys
 import ops_backup as ops
 
 COMPOSE = ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.monitor.yml"]
-PROTECTED = ["api/prisma", "keycloak", "config", "proxy", *COMPOSE]
+PROTECTED = ["api/prisma", "keycloak", "config", "proxy", "worklist-v0", "gateway", *COMPOSE]
 FIELDS = {"version", "previous_sha", "target_sha", "previous_api_image", "target_api_image", "compose_files"}
 SHA = re.compile(r"[0-9a-f]{40}")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -119,6 +119,7 @@ def observe(body):
     return {"preflight_passed": True, "deployment_authorized": False,
             "automatic_rollback_authorized": False, "schema_unchanged": True,
             "previous_sha": body["previous_sha"], "target_sha": body["target_sha"],
+            "previous_api_image": body["previous_api_image"],
             "target_api_image": body["target_api_image"], "compose_files": list(COMPOSE)}
 
 

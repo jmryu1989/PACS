@@ -620,3 +620,25 @@ two-image absence, non-root/network-none, owned cleanup and source hash checks
 apply. Only `synthetic_product_schema_restored` becomes true. SQL preservation
 does not prove service append-only enforcement, institution access, report state
 transitions, real Keycloak/API/viewer recovery, encryption/offsite or deployment.
+# Protected host deployment tests
+
+`python -B tests/ops_deploy_host_test.py` runs four portable refusal checks. In a
+disposable Linux root environment it also exercises private files, one-use
+synthetic attestations, durable journals/outboxes, UID denial and real local TLS.
+The fixed `/opt/kin-deploy` installation check is opt-in with
+`KIN_TEST_ISOLATED_INSTALL=1`; use a disposable container with private tmpfs mounts
+at `/opt/kin-deploy` and `/etc/kin-deploy`. Never enable it on an operational host.
+
+`sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py`
+is for an isolated Linux CI Docker daemon after building `kin-api:ci` and
+`kin-proxy:ci` and pulling `postgres:16-alpine`. It refuses any existing `kin-api`
+or `kin-proxy`, replaces a disposable product API twice, and verifies Prisma
+history and a synthetic database row survive. It checks actual nginx reload and
+health/auth refusal; full authenticated HTTPS/frame checks use the separate TLS
+fixture. It sends no mail and proves no operational offsite restore. Cleanup
+checks ownership labels and removes only the fixture's containers/network/tag.
+
+`scripts/deploy-policy.example.json` is disabled and contains unusable placeholders.
+The isolated `ops_deploy_entry.py` requires a separately provisioned root-owned
+policy/library/repository and request-bound operator evidence. Running scripts
+from a developer checkout does not grant deployment authority.

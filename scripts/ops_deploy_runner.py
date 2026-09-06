@@ -74,6 +74,7 @@ def check_observation(result, plan):
     expected = {"preflight_passed": True, "deployment_authorized": False,
                 "automatic_rollback_authorized": False, "schema_unchanged": True,
                 "previous_sha": plan.previous_sha, "target_sha": plan.target_sha,
+                "previous_api_image": plan.previous_api_image,
                 "target_api_image": plan.target_api_image, "compose_files": list(pre.COMPOSE)}
     pre.require(type(result) is dict and set(result) == set(expected), "Invalid preflight observation")
     pre.require(all(type(result[key]) is type(value) and result[key] == value
