@@ -355,7 +355,7 @@ class Linux(unittest.TestCase):
 
     def test_24_receipt_times_compare_instants_and_reject_reversed_order(self):
         original = collect.run_worker
-        end = '2026-09-06T00:00:00.5+00:00'
+        end = '2026-09-06T00:00:00.500+00:00'
         def changed(pending):
             original(pending)
             path = pending/'receipt.json'; body = json.loads(path.read_bytes())
@@ -363,7 +363,7 @@ class Linux(unittest.TestCase):
             path.unlink(); collect.write_json(path, body)
         with patch.object(collect, 'run_worker', side_effect=changed):
             self.assertTrue(self.run_collect()['collection_complete'])
-            end = '2026-09-06T00:00:00.4+00:00'
+            end = '2026-09-06T00:00:00.400+00:00'
             self.destination = self.folder/'reversed'
             with self.assertRaises(ValueError):
                 self.run_collect()
