@@ -142,12 +142,18 @@ class Pure(unittest.TestCase):
             self.assertEqual(resolve.call_count, 2); remove.assert_called_once_with(identity, TOKEN); absent.assert_not_called()
 
     def test_10_disk_shortage_precedes_build_or_load(self):
-        with patch.object(transfer.image_transfer, 'ci_context', return_value=CONTEXT), \
-             patch.object(transfer.shutil, 'disk_usage', return_value=Mock(free=transfer.DISK_RESERVE-1)), \
-             patch.object(orth, 'build_image') as build, patch.object(transfer, 'command') as calls:
-            with self.assertRaises(ValueError): transfer.produce(Path('not-created'))
-            with self.assertRaises(ValueError): transfer.consume(Path('absent'), '0'*64, '0'*64)
-            build.assert_not_called(); calls.assert_not_called()
+        for low in ('artifact', 'private_copy'):
+            def usage(path):
+                is_low = (path == 'artifact-filesystem') == (low == 'artifact')
+                return Mock(free=transfer.DISK_RESERVE + (-1 if is_low else 1))
+            with patch.object(transfer.image_transfer, 'ci_context', return_value=CONTEXT), \
+                 patch.dict(os.environ, {'RUNNER_TEMP': 'artifact-filesystem'}), \
+                 patch.object(transfer.shutil, 'disk_usage', side_effect=usage) as disk, \
+                 patch.object(orth, 'build_image') as build, patch.object(transfer, 'command') as calls:
+                with self.assertRaises(ValueError): transfer.produce(Path('not-created'))
+                with self.assertRaises(ValueError): transfer.consume(Path('absent'), '0'*64, '0'*64)
+                self.assertEqual(disk.call_count, 4)
+                build.assert_not_called(); calls.assert_not_called()
 
     def test_11_worker_strict_json_and_nonzero_stop(self):
         for raw in ('{"instance":1,"instance":2}', '{"a":NaN}', '{"a":Infinity}', ' '*8193):

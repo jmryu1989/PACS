@@ -28,9 +28,12 @@ SELECT = 'SELECT file_type,instance,sha256 FROM fixture_attachment ORDER BY file
 
 
 def disk_preflight():
-    free = shutil.disk_usage(tempfile.gettempdir()).free
+    # The artifact directory and Python's private copies can live on different
+    # filesystems; checking only /tmp would miss a full RUNNER_TEMP mount.
+    paths = {'artifact': os.environ['RUNNER_TEMP'], 'private_copy': tempfile.gettempdir()}
+    free = {key: shutil.disk_usage(path).free for key, path in paths.items()}
     print(json.dumps({'temporary_disk_free_bytes': free, 'minimum_free_bytes': DISK_RESERVE}), flush=True)
-    require(free >= DISK_RESERVE)
+    require(all(value >= DISK_RESERVE for value in free.values()))
 
 
 def expected_rows(snapshot):

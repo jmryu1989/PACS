@@ -552,7 +552,8 @@ success decision. The original download hashes must remain unchanged.
 Postgres and Orthanc retain their isolated UID70/UID65534, network-none,
 portless, read-only-root, bounded tmpfs profiles. They never connect to each
 other; the parent compares their synthetic results. Before build/load, the
-helper prints temporary disk space and requires 9GiB free. Image limits are
+helper checks both `RUNNER_TEMP` and Python's private temporary filesystem and
+requires 9GiB free on each. Image limits are
 512MiB/2GiB, dumps 16MiB each, store 32MiB, receipt 16KiB, jobs ten minutes.
 Producer image/dump/store pipes enforce the limit before each chunk is written,
 drain stderr with a 4KiB capture cap and kill/reap the CLI at the deadline. The
