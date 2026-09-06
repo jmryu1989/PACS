@@ -31,6 +31,13 @@ jobs:
         run: python3 tests/ops_export_inventory_test.py
       - name: Offline storage listing and read-only index reconciliation
         run: python3 -B tests/ops_storage_reconcile_test.py
+      - name: Pinned SDK collector against synthetic TLS only
+        run: |
+          umask 077
+          sdk_dir=$(mktemp -d "$RUNNER_TEMP/kin-sdk.XXXXXXXX")
+          python3 -m venv "$sdk_dir"
+          "$sdk_dir/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r scripts/requirements-storage-sdk.txt
+          "$sdk_dir/bin/python" -B tests/ops_storage_collect_test.py
       - name: Pinned age and local encrypted export preparation
         run: |
           umask 077

@@ -373,3 +373,59 @@ input or failed publication. Content, provider, snapshot consistency, restore,
 and migration authority always remain false. Bounds: index 512MiB, listing 64MiB,
 10000 pages, 100000 objects/index rows, plus a SQLite instruction/time budget.
 These bounds do not establish large-system performance or restoration readiness.
+
+## Bounded storage listing collector (C4U)
+
+`tests/ops_storage_collect_test.py` exercises the actual pinned SDK against a
+synthetic TLS server on loopback: 23 checks on Linux, 9 pure checks on Windows
+(14 Linux checks skipped). The fixture uses an ephemeral certificate and fake
+credentials. It never connects to a provider account. Install the seven locked
+wheels only in a dedicated Linux Python 3.10+ venv whose directory is mode 700:
+
+```bash
+umask 077
+python3 -m venv /private/storage-sdk
+/private/storage-sdk/bin/python -m pip install --only-binary=:all: --require-hashes \
+  -r scripts/requirements-storage-sdk.txt
+/private/storage-sdk/bin/python -B tests/ops_storage_collect_test.py
+/private/storage-sdk/bin/python scripts/ops_storage_collect.py collect \
+  --config /private/collector.json --config-sha256 "$CONFIG_SHA256" \
+  --destination /private/listings/new-listing
+```
+
+The operational command contacts the explicitly configured HTTPS endpoint. Only
+run it after the endpoint, bucket, prefix, owner, region and read-only credentials
+are established. No provider connection has been validated by these tests.
+Config and credential files require private 700 parents and owner-only regular
+files without symlinks/hardlinks. Config has exactly `schema: 1`, `endpoint`,
+`region`, `bucket`, `prefix`, `expected_owner` (12 digits), `credentials_file`
+(absolute path), and `storage_profile` (the C4S profile above). Optional private
+`ca_file` and `ca_sha256` must be supplied together; TLS verification remains on.
+Pin the config SHA independently. Credential JSON has `access_key_id`,
+`secret_access_key`, and optionally `session_token`; default AWS profiles and
+environment credentials are not used. The API runtime gets no SDK dependency.
+
+Every SDK transmission must be GET ListObjectsV2 for the exact endpoint, bucket,
+prefix, expected owner, and current opaque token. Hidden HeadBucket/GetObject,
+redirected hosts and extra query parameters are refused before transmission.
+Explicit URL encoding is decoded exactly once for keys/prefixes, never tokens.
+Each page and the final transcript pass the same C4S contract. No object bytes,
+versions, writes, deletions, requester-pays calls or migration are performed.
+
+A separate worker has 120 seconds wall time, 60 seconds CPU, 512MiB address space,
+and core dumps disabled. SDK connect/read timeouts are 3/5 seconds, at most two
+attempts per call and 20000 total sends; listing limits remain 10000 pages,
+100000 objects, 64MiB. The parent kills and reaps the worker on interruption or
+timeout before cleaning its own partial files. SDK error details are suppressed.
+Other failures retain a private failure marker; pre-existing pending/output
+directories are never overwritten. SIGKILL/power loss may retain private partial
+files requiring inspection. Code, venv and inputs assume a trusted OS account;
+permissions do not isolate a hostile same-user/root process.
+
+Only complete, revalidated `listing.json` and `receipt.json` are atomically
+published. Receipt records scope, config/SDK lock/listing hashes, SDK versions,
+times and request/page/object counts; it does not copy credentials. stdout has
+only counts/hash and limits on what is verified. Exit 0 means completed collection
+and publication, exit 1 means refusal/failure. The receipt is not a signature or
+proof of content, provider completeness, snapshot consistency, restore readiness
+or migration approval; all five authority fields remain false.

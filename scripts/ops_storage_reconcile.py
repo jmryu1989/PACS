@@ -59,13 +59,28 @@ def listing(raw, expected, bucket, prefix):
     require(type(body['profile']) is dict and body['profile'] == PROFILE and body['profile']['client_encryption'] is False)
     pages = body['pages']
     require(type(pages) is list and 0 < len(pages) <= PAGE_LIMIT)
-    objects, seen_tokens, requested = {}, set(), None
-    for number, envelope in enumerate(pages):
+    state = ListingState(bucket, prefix)
+    for envelope in pages:
+        state.add(envelope)
+    return state.finish()
+
+
+class ListingState:
+    """Apply the same transcript contract while collecting or reading offline."""
+    def __init__(self, bucket, prefix):
+        scope(bucket, prefix)
+        self.bucket, self.prefix = bucket, prefix
+        self.objects, self.seen_tokens, self.next_token = {}, set(), None
+        self.pages, self.done = 0, False
+
+    def add(self, envelope):
+        require(not self.done and self.pages < PAGE_LIMIT)
+        requested = self.next_token
         require(type(envelope) is dict and set(envelope) == {'request_token', 'response'})
         require(envelope['request_token'] == requested)
         page = envelope['response']
         require(type(page) is dict and set(page) <= PAGE_FIELDS)
-        require(page.get('Name') == bucket and page.get('Prefix') == prefix)
+        require(page.get('Name') == self.bucket and page.get('Prefix') == self.prefix)
         require(type(page.get('IsTruncated')) is bool)
         require(integer(page.get('MaxKeys'), 1, 1000))
         require(page.get('ContinuationToken') == requested)
@@ -75,18 +90,24 @@ def listing(raw, expected, bucket, prefix):
         for entry in entries:
             require(type(entry) is dict and {'Key', 'Size'} <= set(entry) <= OBJECT_FIELDS)
             key = entry['Key']
-            require(type(key) is str and key.startswith(prefix) and len(key.encode('utf-8')) <= 1024
-                    and all(ord(c) >= 32 for c in key) and key not in objects)
+            require(type(key) is str and key.startswith(self.prefix) and len(key.encode('utf-8')) <= 1024
+                    and all(ord(c) >= 32 for c in key) and key not in self.objects)
             require(integer(entry['Size'], 0, 2**63-1))
-            objects[key] = entry['Size']
-            require(len(objects) <= ITEM_LIMIT)
+            self.objects[key] = entry['Size']
+            require(len(self.objects) <= ITEM_LIMIT)
         if page['IsTruncated']:
             requested = page.get('NextContinuationToken')
-            require(token(requested) and requested not in seen_tokens and number < len(pages)-1)
-            seen_tokens.add(requested)
+            require(token(requested) and requested not in self.seen_tokens)
+            self.seen_tokens.add(requested)
+            self.next_token = requested
         else:
-            require('NextContinuationToken' not in page and number == len(pages)-1)
-    return objects, len(pages)
+            require('NextContinuationToken' not in page)
+            self.done = True
+        self.pages += 1
+
+    def finish(self):
+        require(self.done and self.pages > 0)
+        return self.objects, self.pages
 
 
 def rows_from_index(path):
