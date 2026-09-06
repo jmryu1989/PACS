@@ -571,3 +571,40 @@ Only `synthetic_combined_restored` can become true. Full PACS restoration,
 encrypted offsite backup and deployment authorization remain false. Real app
 schemas, API/Keycloak authentication, reporting/viewer recovery, TLS, cron,
 encryption keys and external destinations need separate evidence.
+
+### C12M product schema restore
+
+`python -B tests/ops_product_transfer_test.py` covers the separate v2 receipt,
+migration binding, every product row/column, sequence state, real-restore failure
+classification and inherited private-copy/image-absence boundaries. Linux runs
+14 tests; Windows runs 11 and explicitly skips three Linux cases. Docker calls
+in these unit tests are mocked. `restore-product.yml` runs the actual engine
+producer/consumer in different hosted VMs; it preserves the existing C12L format.
+
+The producer applies the exact Git migration SQL to a new isolated `kin` DB.
+Two institutions, one StudyState, one Report, two ReportVersions and two private
+ReportDrafts contain fixed SYNTHETIC values, using the actual DICOM StudyInstanceUID
+read before Orthanc stops. All columns and all ten tables (including five empty
+tables and empty AuthSession) are compared. Four SERIAL sequences include both
+last_value and is_called. The receipt binds migration order/digests, a bounded
+OID-free catalog of tables/columns/constraints/indexes/sequence settings, rows
+and sequences. Consumer checkout migration bytes and independently transported
+product/receipt hashes must agree. These hashes are producer declarations,
+not authentication against a hostile producer.
+
+The consumer restores real custom pg_dumps and compares the complete product
+metadata, then probes duplicate report version, Report-to-StudyState FK and draft
+composite PK in a rolled-back transaction with explicit IDs. It rechecks data
+and sequences afterwards. A separate job-local DB creates a valid dump with a
+different study/history; actual pg_restore must succeed before the same product
+checker rejects its rows. A restore/query failure cannot pass this negative test.
+The negative dump never joins the public artifact. Keycloak remains a synthetic
+three-attachment fixture, not a real realm/schema restore.
+
+The six filenames and image/dump/store caps match C12L; the new receipt cap is
+128KiB, SQL observations are capped at 256KiB/30 seconds, dump/restore at 120
+seconds, and each job at 15 minutes. Both temp filesystems need 9GiB. The same
+two-image absence, non-root/network-none, owned cleanup and source hash checks
+apply. Only `synthetic_product_schema_restored` becomes true. SQL preservation
+does not prove service append-only enforcement, institution access, report state
+transitions, real Keycloak/API/viewer recovery, encryption/offsite or deployment.
