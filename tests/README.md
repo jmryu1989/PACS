@@ -1,5 +1,17 @@
 # 살아 있는 불변조건 테스트
 
+C1 실행 계약: `python -B tests/ops_deploy_runner_test.py`.
+실제 임시 Git·durable journal·별도 프로세스 lock 경합을 사용하지만 Docker 교체·smoke·승인·알림은
+합성 호스트다. `ops_deploy_runner.py`는 고정 어댑터를 위한 상태기계 core이며 운영 어댑터/배포 CLI는
+제공하지 않는다. 요청에 결속한 승인·복원·앱 호환 근거를 검증하는 신뢰 어댑터가 필요하다.
+같은 backup lock 안에서 사전검사를 재관측하고 교체·전체 smoke·최대1회 앱 복귀까지 유지한다.
+`DEPLOYED`만 배포 성공이고 `ROLLED_BACK`은 배포 실패다. 작업 종료 미확인/timeout·복귀/기록 실패는
+`NEEDS_ATTENTION`과 lock 보존으로 끝난다. 보존 lock을 자동 삭제하지 않으며 실행 작업과 실제
+컨테이너 상태를 사람이 대조한 후 복구한다. DB 자동 복원은 없다. 알림 실패는 durable pending이고,
+accepted도 실제 수신을 증명하지 않는다. 기존 사전검사 CLI는 계속 읽기 전용이다.
+운영 연결 전에는 개발자가 수정할 수 없는 실행기/정책/승인 저장소, 실제 서버 밖 복원·호환 근거,
+기존 고정 메일 채널 연결과 실제 배포 smoke가 필요하다. 이 시험을 운영 배포 완료로 세지 않는다.
+
 C5-2 SMTP/outbox 안전 시험: `python tests/ops_email_monitor_test.py` (실제 메일 발송 없음).
 외부 호스트의 `scripts/ops_email_monitor.py`는 기존 HTTPS probe를 재사용하고 상태 전이 때만
 smtp.daum.net:465에 인증서 검증을 켜서 발송한다. `--origin`, `--recipient`, `--credentials`,

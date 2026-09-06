@@ -108,20 +108,25 @@ def inspect_one(args):
     return items[0]
 
 
+def observe(body):
+    """Recheck on the host; the caller must already own the operations lock."""
+    ops.require_local_docker()
+    trees = check_repository(body)
+    for prefix in ("previous", "target"):
+        identity = body[prefix + "_api_image"]
+        check_image(inspect_one(["image", "inspect", identity]), identity, trees[body[prefix + "_sha"]])
+    check_running_api(inspect_one(["inspect", "kin-api"]), body["previous_api_image"])
+    return {"preflight_passed": True, "deployment_authorized": False,
+            "automatic_rollback_authorized": False, "schema_unchanged": True,
+            "previous_sha": body["previous_sha"], "target_sha": body["target_sha"],
+            "target_api_image": body["target_api_image"], "compose_files": list(COMPOSE)}
+
+
 def preflight(body):
     # Share the backup lock, but do not issue a token that could be reused after
     # releasing it. A future deployer must recheck and keep this lock throughout.
     with ops.lock():
-        ops.require_local_docker()
-        trees = check_repository(body)
-        for prefix in ("previous", "target"):
-            identity = body[prefix + "_api_image"]
-            check_image(inspect_one(["image", "inspect", identity]), identity, trees[body[prefix + "_sha"]])
-        check_running_api(inspect_one(["inspect", "kin-api"]), body["previous_api_image"])
-        return {"preflight_passed": True, "deployment_authorized": False,
-                "automatic_rollback_authorized": False, "schema_unchanged": True,
-                "previous_sha": body["previous_sha"], "target_sha": body["target_sha"],
-                "target_api_image": body["target_api_image"], "compose_files": list(COMPOSE)}
+        return observe(body)
 
 
 def main():

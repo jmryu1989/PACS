@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -86,6 +87,13 @@ def require_local_docker():
         raise RuntimeError("Remote Docker context refused")
 
 
+@dataclass
+class LockLease:
+    # A timed-out deployment may still be changing containers after its caller
+    # returns. Keep the shared lock until an operator reconciles that operation.
+    retained: bool = False
+
+
 @contextmanager
 def lock():
     path = ROOT / ".kin-ops.lock"
@@ -93,12 +101,14 @@ def lock():
     descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         handle.write(token)
+    lease = LockLease()
     try:
-        yield
+        yield lease
     finally:
         if path.read_text() != token:
             raise RuntimeError("Operations lock ownership changed")
-        path.unlink()
+        if not lease.retained:
+            path.unlink()
 
 
 def write_json(path, body):
