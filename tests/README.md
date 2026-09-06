@@ -377,8 +377,8 @@ These bounds do not establish large-system performance or restoration readiness.
 ## Bounded storage listing collector (C4U)
 
 `tests/ops_storage_collect_test.py` exercises the actual pinned SDK against a
-synthetic TLS server on loopback: 23 checks on Linux, 9 pure checks on Windows
-(14 Linux checks skipped). The fixture uses an ephemeral certificate and fake
+synthetic TLS server on loopback: 24 checks on Linux, 9 pure checks on Windows
+(15 Linux checks skipped). The fixture uses an ephemeral certificate and fake
 credentials. It never connects to a provider account. Install the seven locked
 wheels only in a dedicated Linux Python 3.10+ venv whose directory is mode 700:
 
@@ -409,6 +409,8 @@ Every SDK transmission must be GET ListObjectsV2 for the exact endpoint, bucket,
 prefix, expected owner, and current opaque token. Hidden HeadBucket/GetObject,
 redirected hosts and extra query parameters are refused before transmission.
 Explicit URL encoding is decoded exactly once for keys/prefixes, never tokens.
+As in botocore, `+` becomes a space and `%2B` becomes a literal plus; percent
+escapes and UTF-8 are validated strictly. The real SDK/TLS fixture covers both.
 Each page and the final transcript pass the same C4S contract. No object bytes,
 versions, writes, deletions, requester-pays calls or migration are performed.
 

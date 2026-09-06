@@ -85,9 +85,9 @@ def bound_small(path, expected=None):
 
 def decode(value):
     # Explicit EncodingType=url disables botocore's automatic decoding. Tokens
-    # are opaque; only Prefix and Key pass through this exact-once conversion.
+    # are opaque; only Prefix and Key use botocore's unquote_plus semantics.
     require(type(value) is str and value.isascii() and not re.search(r'%(?![0-9A-Fa-f]{2})', value))
-    return unquote_to_bytes(value).decode('utf-8', errors='strict')
+    return unquote_to_bytes(value.replace('+', ' ')).decode('utf-8', errors='strict')
 
 
 def normalize(response, requested):
@@ -255,9 +255,10 @@ def collect(config_path, config_hash, destination):
         require(receipt['config_sha256'] == config_hash and receipt['sdk_lock_sha256'] == request['sdk_lock_sha256']
                 and receipt['sdk_versions'] == VERSIONS and receipt['scope'] == {k: config[k] for k in
                     ('endpoint', 'region', 'bucket', 'prefix', 'expected_owner')})
-        for field in ('started_at', 'ended_at'):
-            require(type(receipt[field]) is str and datetime.fromisoformat(receipt[field]).utcoffset().total_seconds() == 0)
-        require(receipt['ended_at'] >= receipt['started_at'])
+        require(all(type(receipt[field]) is str for field in ('started_at', 'ended_at')))
+        started, ended = (datetime.fromisoformat(receipt[field]) for field in ('started_at', 'ended_at'))
+        require(all(value.utcoffset() is not None and value.utcoffset().total_seconds() == 0
+                    for value in (started, ended)) and ended >= started)
         core.input_size(pending/'listing.json', core.LIST_LIMIT)
         with private.read_private(pending/'listing.json') as stream:
             listing_raw = stream.read(core.LIST_LIMIT+1)

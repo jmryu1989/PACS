@@ -13,7 +13,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, quote_plus, urlencode, urlsplit
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -21,7 +21,7 @@ import ops_storage_collect as collect
 
 BUCKET, PREFIX = 'kin-synthetic-only', 'kin/c4/'
 TOKEN = 'opaque+/%=='
-KEYS = [PREFIX+'sample%20 space-é.dcm', PREFIX+'second.unk', PREFIX+'third.unk']
+KEYS = [PREFIX+'sample%20 space+é.dcm', PREFIX+'second.unk', PREFIX+'third.unk']
 SECRET = {'access_key_id': 'SYNTHETIC-ONLY', 'secret_access_key': 'SYNTHETIC-SECRET-NO-ACCOUNT',
           'session_token': 'SYNTHETIC-TOKEN'}
 
@@ -55,6 +55,7 @@ class Pure(unittest.TestCase):
         page = collect.normalize(response(), None)
         self.assertEqual(page['response']['Contents'], [{'Key': KEYS[0], 'Size': 31}])
         self.assertEqual(collect.decode('%2520'), '%20')
+        self.assertEqual(collect.decode('a+b%2Bc%2520'), 'a b+c%20')
         for invalid in ('%', '%0', '%GG', '%ff', 'é'):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 collect.decode(invalid)
@@ -173,7 +174,7 @@ class Linux(unittest.TestCase):
                              '<Name>'+BUCKET+'</Name><Prefix>'+quote(PREFIX, safe='')+'</Prefix>',
                              '<EncodingType>url</EncodingType><MaxKeys>1000</MaxKeys><KeyCount>1</KeyCount>',
                              '<IsTruncated>'+('true' if index < 2 else 'false')+'</IsTruncated>',
-                             '<Contents><Key>'+quote(key, safe='')+'</Key><Size>31</Size>',
+                             '<Contents><Key>'+quote_plus(key, safe='')+'</Key><Size>31</Size>',
                              '<LastModified>2026-09-06T00:00:00Z</LastModified></Contents>']
                     if token is not None:
                         parts.append('<ContinuationToken>'+escape(token)+'</ContinuationToken>')
@@ -351,6 +352,23 @@ class Linux(unittest.TestCase):
             self.assertEqual(guard.attempts, 3)
         finally:
             client.close()
+
+    def test_24_receipt_times_compare_instants_and_reject_reversed_order(self):
+        original = collect.run_worker
+        end = '2026-09-06T00:00:00.5+00:00'
+        def changed(pending):
+            original(pending)
+            path = pending/'receipt.json'; body = json.loads(path.read_bytes())
+            body.update(started_at='2026-09-06T00:00:00.500000+00:00', ended_at=end)
+            path.unlink(); collect.write_json(path, body)
+        with patch.object(collect, 'run_worker', side_effect=changed):
+            self.assertTrue(self.run_collect()['collection_complete'])
+            end = '2026-09-06T00:00:00.4+00:00'
+            self.destination = self.folder/'reversed'
+            with self.assertRaises(ValueError):
+                self.run_collect()
+        self.assertFalse(self.destination.exists())
+        self.assertEqual({p.name for p in (self.folder/'.reversed.pending').iterdir()}, {'failure.json'})
 
 
 if __name__ == '__main__':
