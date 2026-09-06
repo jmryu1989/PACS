@@ -1,5 +1,14 @@
 # 살아 있는 불변조건 테스트
 
+C5-2 SMTP/outbox 안전 시험: `python tests/ops_email_monitor_test.py` (실제 메일 발송 없음).
+외부 호스트의 `scripts/ops_email_monitor.py`는 기존 HTTPS probe를 재사용하고 상태 전이 때만
+smtp.daum.net:465에 인증서 검증을 켜서 발송한다. `--origin`, `--recipient`, `--credentials`,
+`--state-dir`를 고정해 설치하며 최초 `--initialize`는 상태 파일을 배타 생성한다.
+`--mode drill-alert|drill-recover`는 별도 훈련 상태를 사용한다. 기존 상태가 사라지거나
+손상되면 자동 초기화하지 않는다. 발송 실패는 outbox를 보존하며 같은 Message-ID로 재시도한다.
+UTC일별 실감시 발송 시도 상한24, 훈련 예산 별도24. SMTP 수락 직후 저장 실패 때 중복 가능하며
+SMTP 수락만으로 받은편지함 도착이 검증되는 것은 아니다. credential·첨부·원본 로그는 메일에 넣지 않는다.
+
 C1-2a 배포 전 검사 안전 시험: `python tests/ops_deploy_preflight_test.py`.
 실제 임시 Git 저장소와 별도 프로세스 lock 경합을 포함하며 실행 서비스는 바꾸지 않는다.
 `scripts/ops_deploy_preflight.py request.json --request-sha256 <sha256>`은 기존 backup lock
