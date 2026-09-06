@@ -4,6 +4,11 @@ D03A 자동 과거 검사 선택: `node --test tests/worklist_prior_test.cjs` (�
 추가 실기: `python tests/e2e/test_prior_selection.py` (합성 CT의 실제 StudyDate·양 canvas/UID·수동 미래 비교와 개인 초안/이력 보존 2개).
 기존 `test_worklist.py` 14개와 별도로 실행한다. 로컬 대상 제한·임시 인증·소유 fixture 정리를 그대로 사용한다.
 
+D02A 세로 작업공간: `python tests/e2e/test_portrait_workspace.py` (별도 3개).
+900×1400·768×1024 패널/스크롤/크기 조절, 가로 복귀, 실제 썸네일→OHIF,
+상용구·개인 초안·승인 이력·촬영 잠금·Technician Verify를 검증한다.
+한 장의 합성 CT phantom과 임시 계정/상용구만 사용하며 원본 해시와 소유 데이터 정리를 확인한다.
+
 C1 실행 계약: `python -B tests/ops_deploy_runner_test.py`.
 실제 임시 Git·durable journal·별도 프로세스 lock 경합을 사용하지만 Docker 교체·smoke·승인·알림은
 합성 호스트다. `ops_deploy_runner.py`는 고정 어댑터를 위한 상태기계 core이며 운영 어댑터/배포 CLI는

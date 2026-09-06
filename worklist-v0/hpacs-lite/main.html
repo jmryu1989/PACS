@@ -226,13 +226,16 @@
     body.resizing-x, body.resizing-x * { cursor: col-resize !important; }
     body.resizing-y, body.resizing-y * { cursor: row-resize !important; }
 
-    /* 세로 판독 모니터는 워크리스트·prior·현재 판독문에 화면을 내준다. 영상은 전용 OHIF
-       모니터에서 보므로 썸네일/임상/상용구 행은 숨기고 네 작업 칸을 위아래로 쌓는다. */
+    /* 세로 화면에서도 검사 정보와 상용구가 사라지면 안 된다. 높이가 부족하면
+       작업공간을 스크롤해 판독 버튼까지 도달하고, 각 패널은 기존 DOM을 공유한다. */
+    body.portrait .menubar { height: auto; min-height: 52px; flex-wrap: wrap; padding-top: 4px; padding-bottom: 4px; }
+    body.portrait .menubar .tabs { height: auto; }
     body.portrait .split { flex-direction: column; }
-    body.portrait .left { width: 100%; min-width: 0; height: 32%; min-height: 180px; flex: none; }
-    body.portrait .right { min-height: 0; }
-    body.portrait .rw, body.portrait #resize-top { display: none; }
-    body.portrait .workrow { flex-direction: column; }
+    body.portrait .left { width: 100%; min-width: 0; height: 32%; min-height: 180px; max-height: calc(100% - 420px); flex: none; }
+    body.portrait .right { min-height: 0; overflow: auto; }
+    body.portrait .rw section { min-height: 0; }
+    body.portrait .rtabs { flex-wrap: wrap; }
+    body.portrait .workrow { flex-direction: column; flex: 1 0 480px; min-height: 480px; }
     body.portrait .related-p { width: 100%; height: 56%; min-height: 230px; flex: none; }
     body.portrait .report-p, body.portrait .order-p { min-height: 180px; }
     body.portrait #resize-main, body.portrait #resize-related { width: 100%; height: 6px; cursor: row-resize; }
@@ -3017,8 +3020,9 @@ ${esc($("#recommendation").value)}
         $(".left").style.width = clampPanel(e.clientX - box.left, 500, box.width - 426) + "px";
     });
     bindPanelResize("#resize-top", "y", e => {
-      const box = $(".right").getBoundingClientRect();
-      $(".rw").style.height = clampPanel(e.clientY - box.top, 140, box.height - 266) + "px";
+      const right = $(".right"), box = right.getBoundingClientRect();
+      // 세로 작업공간을 스크롤한 뒤에도 패널 자체의 높이를 조절한다.
+      $(".rw").style.height = clampPanel(e.clientY - box.top + right.scrollTop, 140, box.height - 266) + "px";
     });
     bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();
