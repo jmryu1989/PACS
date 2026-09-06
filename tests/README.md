@@ -168,6 +168,7 @@ python tests/production_image_test.py
 docker compose -f docker-compose.yml -f docker-compose.runtime-test.yml up -d --no-deps --no-build api
 docker exec kin-proxy nginx -t
 docker exec kin-proxy nginx -s reload
+python -c "import sys; sys.path.insert(0, 'scripts'); import ops_backup; ops_backup.wait_ready('https://localhost:9443')"
 python tests/invariants_live.py
 python tests/e2e/test_worklist.py
 ```
