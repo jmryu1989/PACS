@@ -9,6 +9,13 @@ D02A 세로 작업공간: `python tests/e2e/test_portrait_workspace.py` (별도 
 상용구·개인 초안·승인 이력·촬영 잠금·Technician Verify를 검증한다.
 한 장의 합성 CT phantom과 임시 계정/상용구만 사용하며 원본 해시와 소유 데이터 정리를 확인한다.
 
+D02B 배치 저장: `node --test tests/workspace_layout_test.cjs` (순수6)와
+`python tests/e2e/test_workspace_persistence.py` (별도 실제3).
+계정 A/B×브라우저 프로필 X/Y·재로그인·가로/세로 크기·초기화·불량값/저장소 거부를 검증한다.
+배치는 이 계정의 현재 origin/브라우저에만 저장되며 다른 기기와 자동 동기화되지 않는다.
+세로 검증 범위는900×1400·768×1024, 가로1600×1000이다. 더 짧은 창의 모든 패널 접근은 미검증이다.
+상용구 결합/영어 탭 등 UI 문구 변경 시 D02A/B 시험 기대값도 함께 검토한다.
+
 C1 실행 계약: `python -B tests/ops_deploy_runner_test.py`.
 실제 임시 Git·durable journal·별도 프로세스 lock 경합을 사용하지만 Docker 교체·smoke·승인·알림은
 합성 호스트다. `ops_deploy_runner.py`는 고정 어댑터를 위한 상태기계 core이며 운영 어댑터/배포 CLI는

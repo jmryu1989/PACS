@@ -60,6 +60,7 @@ const KinAuth = (() => {
     if (!response.ok) throw new Error(`세션 확인 실패 (HTTP ${response.status})`);
     cached = {
       state: 'approved',
+      sub: typeof body.sub === 'string' ? body.sub : null,
       user: body.user ?? body.actor ?? '',
       displayName: body.displayName ?? body.user ?? body.actor ?? '',
       roles: Array.isArray(body.roles) ? body.roles : [],

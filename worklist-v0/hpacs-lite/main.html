@@ -509,6 +509,8 @@
     <div class="spacer"></div>
     <button class="chip" id="refresh">Refresh</button>
     <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">배치: 자동</button>
+    <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">배치 초기화</button>
+    <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
     <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
     <button class="chip" id="savefilter">Save Filter</button>
     <button class="chip" id="clearfilter">Clear</button>
@@ -783,6 +785,7 @@
   </div>
 
   <script src="auth.js"></script>
+  <script src="workspace-layout.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -1465,6 +1468,7 @@
       // 탭 전환은 화면 전환이지 상태 초기화가 아니다 (교훈 §6 — HPACS가 세 번 낸 버그).
       if (sortKey && !COLS[m].some(c => c.k === sortKey)) { sortKey = null; sortDir = 0; }
       renderHeads(); render(); renderOrders();
+      applyLayout();
     }
     document.querySelector(".tabs").addEventListener("click", e => {
       const t = e.target.closest("div[data-tab]"); if (!t) return;
@@ -2979,6 +2983,8 @@ ${esc($("#recommendation").value)}
           handle.classList.remove("dragging");
           document.body.classList.remove("resizing", "resizing-x", "resizing-y");
           if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+          if (event.type === "pointerup") rememberPanelSize(selector);
+          else applyLayout();
         };
         handle.addEventListener("pointermove", move);
         handle.addEventListener("pointerup", end);
@@ -2987,7 +2993,32 @@ ${esc($("#recommendation").value)}
     }
     const clampPanel = (value, min, max) => Math.max(min, Math.min(max, value));
     let layoutMode = "auto";
+    let workspaceState = KinWorkspaceLayout.defaults(), workspaceOwner = null, workspaceStorage = null;
     const portraitLayout = () => document.body.classList.contains("portrait");
+    const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
+    function saveWorkspace() {
+      workspaceState.mode = layoutMode;
+      const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
+      $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
+    }
+    function rememberPanelSize(selector) {
+      const targets = { "#resize-main": ["main", ".left"], "#resize-top": ["top", ".rw"],
+        "#resize-related": ["related", ".related-p"], "#resize-prior": ["prior", ".related-list-pane"] };
+      const [name, panel] = targets[selector];
+      const dimension = !portraitLayout() && ["main", "related"].includes(name) ? "width" : "height";
+      workspaceState[workspaceAxis()][name] = Math.round($(panel).getBoundingClientRect()[dimension]);
+      saveWorkspace();
+    }
+    function restoreWorkspace() {
+      workspaceOwner = KinWorkspaceLayout.key(sess);
+      try { workspaceStorage = localStorage; } catch (_) { workspaceStorage = null; }
+      const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
+      workspaceState = result.state;
+      layoutMode = workspaceState.mode;
+      $("#layout-status").textContent = ({ restored: "배치 복원됨 · 이 브라우저", empty: "배치 · 이 브라우저",
+        disabled: "배치 · 이 창에서만 유지", invalid: "저장된 배치 오류 · 기본 배치", unavailable: "배치 저장소 사용 불가 · 기본 배치" })[result.status];
+      applyLayout();
+    }
     function applyLayout() {
       const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
       document.body.classList.toggle("portrait", portrait);
@@ -3004,12 +3035,39 @@ ${esc($("#recommendation").value)}
         $(".left").style.height = "";
         $(".related-p").style.height = "";
       }
+      // A temporary small window must not overwrite the user's preferred size.
+      // Reapply stored pixels within today's bounds, separately for each orientation.
+      const sizes = workspaceState[workspaceAxis()];
+      const left = $(".left"), related = $(".related-p"), top = $(".rw"), prior = $(".related-list-pane");
+      left.style[portrait ? "height" : "width"] = "";
+      related.style[portrait ? "height" : "width"] = "";
+      top.style.height = "";
+      prior.style.height = "";
+      prior.style.flex = "";
+      const split = $(".split").getBoundingClientRect();
+      if (sizes.main != null) left.style[portrait ? "height" : "width"] = clampPanel(sizes.main,
+        portrait ? 180 : 500, portrait ? split.height - 420 : split.width - 426) + "px";
+      if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
+      const row = $(".workrow").getBoundingClientRect();
+      if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
+        portrait ? 230 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
+      if (sizes.prior != null) {
+        prior.style.flex = "none";
+        prior.style.height = clampPanel(sizes.prior, 100, related.getBoundingClientRect().height - 136) + "px";
+      }
     }
     $("#layout-toggle").addEventListener("click", () => {
       layoutMode = layoutMode === "auto" ? "portrait" : layoutMode === "portrait" ? "landscape" : "auto";
       applyLayout();
+      saveWorkspace();
     });
-    window.addEventListener("resize", () => { if (layoutMode === "auto") applyLayout(); });
+    $("#layout-reset").addEventListener("click", () => {
+      const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
+      workspaceState = KinWorkspaceLayout.defaults(); layoutMode = "auto";
+      applyLayout();
+      $("#layout-status").textContent = removed ? "기본 배치 · 이 브라우저" : "초기화 저장 안 됨 · 이 창에서만 유지";
+    });
+    window.addEventListener("resize", applyLayout);
     applyLayout();
 
     bindPanelResize("#resize-main", () => portraitLayout() ? "y" : "x", (e, axis) => {
@@ -3618,6 +3676,7 @@ ${esc($("#recommendation").value)}
       renderHeads();
       renderTemplates();
       applyRoleUi();
+      restoreWorkspace();
       roleText = $("#roles").textContent;
       if (sess.demo) {
         serverMode = false; offline = false;
