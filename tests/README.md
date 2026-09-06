@@ -454,3 +454,30 @@ not an authorization boundary against a process with the same OS privileges.
 This verifies restoration of one synthetic executable image only. It does not
 verify the PACS service images, encrypted offsite backup, full restoration or
 deployment authorization. Those three authority fields remain false.
+
+## Synthetic database restoration across CI jobs (C12J)
+
+`python -B tests/ops_database_transfer_test.py` checks refusal, private streaming,
+full row comparison and cleanup (12 Linux checks; six pure on Windows with six
+Linux skips). Docker calls are mocked in these tests. `restore-database.yml`
+performs the actual two-job restoration using a pinned PostgreSQL 16 Alpine
+base with a unique fixture label. The producer creates two synthetic databases
+with three fixed rows each and exports custom-format dumps plus the image.
+The consumer requires a different boot ID and an absent image before validating
+and loading the image, restoring both dumps and comparing every ordered row.
+
+The four-file, one-day artifact is bound to the run/SHA/attempt and separately
+supplied receipt hash. Private streaming copies cap images at 512MiB, each dump
+at 16MiB and receipts at 8KiB. Hashes, image config/layers and fixed configuration
+are checked before load. Both databases run as UID70 with no network or host
+ports, a read-only root, dropped capabilities and bounded tmpfs/memory/CPU/PIDs.
+TCP readiness excludes PostgreSQL's temporary initialization server. Only owned
+containers and images are removed. Source hashes are compared after restoration.
+
+The public artifact contains synthetic data only, with no encryption keys or
+production inputs. This checks PostgreSQL image/dump restoration; it does not
+restore the real API schema, Keycloak realm, Orthanc or complete PACS services.
+Full restoration, encrypted offsite backup and deployment authority remain false.
+The CI environment guard is an accidental-use check, not a same-user security
+boundary. CLI timeout leaves a short interval before finally removes resources;
+runner/process termination can prevent that cleanup.
