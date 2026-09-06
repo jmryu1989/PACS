@@ -431,3 +431,26 @@ only counts/hash and limits on what is verified. Exit 0 means completed collecti
 and publication, exit 1 means refusal/failure. The receipt is not a signature or
 proof of content, provider completeness, snapshot consistency, restore readiness
 or migration approval; all five authority fields remain false.
+
+## Synthetic image restoration across CI jobs (C12I)
+
+`python -B tests/ops_image_transfer_test.py` runs 12 refusal/validation checks on
+Linux; Windows runs six pure checks and skips six Linux file-handling checks.
+Docker calls in these tests are mocked. The separate `restore-image.yml` workflow
+performs the real transfer between two hosted Ubuntu jobs: a fixed static probe
+in a scratch image is saved, uploaded with its receipt, downloaded by exact
+artifact ID, validated, loaded and executed in the receiving job. The image must
+be absent before load and the two observed Linux boot IDs must differ.
+
+Only `image.tar` and `receipt.json` are uploaded, with one-day retention. No real
+PACS data, configuration, keys or private documentation are included. A separate
+job output pins the receipt hash; run/SHA/attempt, archive size/hash and complete
+config/layer hashes are checked before load. The archive is limited to 16MiB.
+The container runs nonroot, read-only, without networking/capabilities, with
+memory/CPU/PID/time bounds. Cleanup checks ownership. The real fixture refuses
+ordinary local invocation; CI environment flags prevent accidental use but are
+not an authorization boundary against a process with the same OS privileges.
+
+This verifies restoration of one synthetic executable image only. It does not
+verify the PACS service images, encrypted offsite backup, full restoration or
+deployment authorization. Those three authority fields remain false.
