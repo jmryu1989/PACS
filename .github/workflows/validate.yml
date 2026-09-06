@@ -27,6 +27,8 @@ jobs:
         run: python3 tests/ops_backup_test.py
       - name: Deployment preflight refusal and shared lock
         run: python3 tests/ops_deploy_preflight_test.py
+      - name: Offline export inventory and image integrity
+        run: python3 tests/ops_export_inventory_test.py
       - name: Monitor failure and notification boundaries
         run: python3 tests/ops_monitor_test.py
       - name: SMTP outbox, TLS and duplicate suppression

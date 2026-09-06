@@ -233,3 +233,40 @@ commented on. Maintenance alone cannot close an incident. The owner must have em
 delivery enabled for participating/assigned issue notifications. A GitHub API
 notification or accepted issue is not proof of email inbox delivery. Schedule jobs
 can be delayed/dropped by GitHub, so this is not a five-minute availability SLA.
+
+## Offline export inventory (C12B-01)
+
+Run `python tests/ops_export_inventory_test.py` for 20 synthetic refusal/round-trip
+checks, including real complete/incremental Git bundles. This test does not invoke
+Docker or contact a server. POSIX ownership/mode checks require the Linux run.
+
+`python scripts/ops_export_inventory.py PRIVATE_DIRECTORY --inventory-sha256 HASH`
+checks an already assembled, quiescent staging directory. It never creates a
+snapshot, executes a host script, extracts image files, loads Docker images,
+restores databases or uploads data. `inventory_verified` proves only the checked
+component consistency. Encryption, offsite receipt, actual restore and deployment
+authority remain explicitly false. Freeze the staging files before verification;
+the returned hash is not a lock or authorization token for later work.
+
+`inventory.json` has exactly `schema: 1`, a 40-hex `git_sha`, `storage_mode: "local"`,
+`running_images` (the five `kin-*` service names to exact `sha256:` identities),
+and `files` (relative path to `{ "bytes": positive_integer, "sha256": hex64 }`).
+Files must be exactly the following, with private owner-only permissions and no
+symlinks, hardlinks, Windows reparse points, extra files or extra directories:
+
+- `snapshot/manifest.json` and the six `ops_backup.FILES` components.
+- `source.bundle`, complete in an empty Git repository, containing the named commit
+  and the three Compose files plus backup/monitor scripts as regular Git blobs.
+- `images/<64hex>.tar` per distinct running image ID. Only uncompressed Docker save
+  archives with a single `manifest.json` image entry are supported. Config/layer
+  hashes and OCI descriptor chains bind either classic config IDs or containerd
+  index/manifest IDs. Gzip layers are streamed; other compression fails closed.
+- `host/collector.sh`, `host/crontab.txt`, `host/settings.json`,
+  `host/tls-fullchain.pem`, `host/tls-privkey.pem`. Their bytes are inventoried;
+  certificate validity and host configuration semantics are not yet validated.
+
+Metadata is limited to 1MiB, each component to 128GiB, image archive members to
+8192, layers to 256 and each expanded layer to 8GiB. File/layer hashing is streamed.
+The input hash binds bytes, not the author's identity. An intact complete snapshot
+with failed source-service resumption remains eligible for this inspection:
+`source_services_ready` is false and it must not authorize deployment.
