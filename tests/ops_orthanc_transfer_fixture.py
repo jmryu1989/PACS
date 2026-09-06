@@ -4,10 +4,12 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import traceback
 import uuid
 
@@ -25,6 +27,46 @@ LIMITS = {'image.tar': 2*1024**3, 'store.tar': worker.LIMIT}
 FIELDS = {'schema', 'code_sha', 'run_id', 'run_attempt', 'producer_boot_id', 'token',
           'image_id', 'image_config_id', 'base_image', 'files', 'snapshot'}
 CMD = ['-c', 'import time; time.sleep(3600)']
+
+
+def bounded_output(args, target, limit, timeout=60):
+    # A post-write stat did not bound producer output on disk. Drain both pipes
+    # under one deadline; a noisy stderr must neither deadlock nor grow memory.
+    require(sys.platform == 'linux' and type(limit) is int and limit > 0 and timeout > 0)
+    with target.open('xb') as output:
+        os.fchmod(output.fileno(), 0o600)
+        process = subprocess.Popen(args, cwd=image_transfer.ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline, size, errors = time.monotonic()+timeout, 0, bytearray()
+        try:
+            with selectors.DefaultSelector() as ready:
+                for stream in (process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                    ready.register(stream, selectors.EVENT_READ)
+                while ready.get_map():
+                    remaining = deadline-time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    for key, _ in ready.select(remaining):
+                        chunk = os.read(key.fileobj.fileno(), 65536)
+                        if not chunk:
+                            ready.unregister(key.fileobj)
+                            continue
+                        if key.fileobj is process.stdout:
+                            require(size+len(chunk) <= limit)
+                            output.write(chunk)
+                            size += len(chunk)
+                        else:
+                            errors.extend(chunk[:4096-len(errors)])
+                status = process.wait(timeout=max(.001, deadline-time.monotonic()))
+                if status:
+                    raise subprocess.CalledProcessError(status, args, stderr=bytes(errors))
+                require(size > 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
 
 
 def parse_receipt(raw, expected, context):
@@ -137,10 +179,7 @@ def produce(destination):
         start_container(identity, name, token)
         snapshot = inventory.parse(command(['docker', 'exec', name, 'python3', '/fixture.py', 'produce'], timeout=90))
         worker.snapshot_contract(snapshot)
-        with (destination/'store.tar').open('xb') as output:
-            os.fchmod(output.fileno(), 0o600)
-            subprocess.run(['docker', 'exec', name, 'cat', '/work/store.tar'], check=True,
-                           stdout=output, stderr=subprocess.PIPE, timeout=30)
+        bounded_output(['docker', 'exec', name, 'cat', '/work/store.tar'], destination/'store.tar', worker.LIMIT, timeout=30)
         body = dict(schema=1, code_sha=context['code_sha'], run_id=context['run_id'], run_attempt=context['run_attempt'],
                     producer_boot_id=context['boot_id'], token=token, image_id=identity, image_config_id=config_id,
                     base_image=BASE, files={file: record(destination/file, cap) for file, cap in LIMITS.items()}, snapshot=snapshot)

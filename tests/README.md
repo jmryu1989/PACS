@@ -523,3 +523,50 @@ Only synthetic Orthanc restoration can become true. Full PACS restoration,
 encrypted offsite backup and deployment authorization remain false. API and
 Keycloak authentication, reporting/viewer recovery, real destinations and key
 custody require their own evidence.
+
+## Synthetic combined restoration across CI jobs (C12L)
+
+`python -B tests/ops_combined_transfer_test.py` covers snapshot binding, mixed
+components, both-image absence, partial failure cleanup, full restored rows,
+source mutation, disk preflight, strict worker JSON and bounded output. Linux
+runs 18 tests; Windows runs 11 and explicitly skips seven Linux FD/pipe tests.
+Docker calls in these tests are mocked. The pipe cases run real child processes.
+`restore-combined.yml` performs the actual two-job transfer and restoration.
+
+One producer freezes a synthetic Orthanc instance and attachments 1/1024/1025,
+then writes their instance ID and SHA256 into three `fixture_attachment` rows
+in each of two synthetic databases named `kin` and `keycloak`. These are fixture
+tables, not product or Keycloak schemas. The artifact contains exactly two image
+archives, two dumps, one store archive and one receipt. Receipt SHA and expected
+sorted-row SHA are passed separately as job outputs. Both are producer-supplied
+integrity bindings, not independent endorsements of a hostile producer.
+
+The consumer checks scope, different boot ID, all file/config/layer hashes and
+expected snapshot relation, then verifies that **both** exact image IDs are
+absent before loading either. An existing image prevents all loading and cleanup.
+After restore, every sorted DB row must match the frozen snapshot relation, and
+Orthanc REST must return the original instance and all three exact attachment
+byte sequences. Dump internal row content is checked after restore, before the
+success decision. The original download hashes must remain unchanged.
+
+Postgres and Orthanc retain their isolated UID70/UID65534, network-none,
+portless, read-only-root, bounded tmpfs profiles. They never connect to each
+other; the parent compares their synthetic results. Before build/load, the
+helper prints temporary disk space and requires 9GiB free. Image limits are
+512MiB/2GiB, dumps 16MiB each, store 32MiB, receipt 16KiB, jobs ten minutes.
+Producer image/dump/store pipes enforce the limit before each chunk is written,
+drain stderr with a 4KiB capture cap and kill/reap the CLI at the deadline. The
+C12K store producer also uses this receiver; its worker rejects duplicate JSON
+keys and nonfinite constants.
+
+Cleanup attempts all known containers and derived images even if one attempt
+fails. A build with no returned ID may resolve only its exact unique tag and
+validated ownership settings. Bases/build cache remain; host termination or a
+daemon build completing after the cleanup observation can leave resources.
+Cached-layer observation inconsistencies still fail closed. The base labels
+remain producer declarations; unreferenced cache absence is not proved.
+
+Only `synthetic_combined_restored` can become true. Full PACS restoration,
+encrypted offsite backup and deployment authorization remain false. Real app
+schemas, API/Keycloak authentication, reporting/viewer recovery, TLS, cron,
+encryption keys and external destinations need separate evidence.

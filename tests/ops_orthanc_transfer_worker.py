@@ -28,6 +28,19 @@ def digest(raw):
     return dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
 
 
+def strict_json(raw):
+    # The host already validates this JSON, but the standalone worker must not
+    # interpret duplicate keys or nonfinite constants differently from the host.
+    require(len(raw) <= 8192)
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result)
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique, parse_constant=lambda _: require(False))
+
+
 def store_path(uid):
     require(type(uid) is str and UUID.fullmatch(uid))
     return 'store/'+uid[:2]+'/'+uid[2:4]+'/'+uid
@@ -234,5 +247,5 @@ if __name__ == '__main__':
         result = produce()
     else:
         require(sys.argv[1] == 'consume' and len(sys.argv[2]) <= 8192)
-        result = consume(json.loads(sys.argv[2]), sys.stdin.buffer.read(LIMIT+1))
+        result = consume(strict_json(sys.argv[2]), sys.stdin.buffer.read(LIMIT+1))
     print(json.dumps(result, sort_keys=True))
