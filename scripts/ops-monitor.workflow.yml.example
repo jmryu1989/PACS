@@ -1,0 +1,59 @@
+# Install only in the private operations/docs repository, after fixed-SHA review.
+# Replace REVIEWED_CODE_SHA with the full reviewed public code commit.
+name: KIN availability and email notifications
+on:
+  workflow_dispatch:
+    inputs:
+      exercise:
+        type: choice
+        default: observe
+        options: [observe, alert, recover]
+# Activate schedule only after host installation and a real delivery/recovery drill.
+#  schedule:
+#    - cron: '2-57/5 * * * *'
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: kin-ops-monitor
+  cancel-in-progress: false
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: jmryu1989/PACS
+          ref: REVIEWED_CODE_SHA
+          persist-credentials: false
+          path: code
+      - name: Observe production or exercise the notification channel
+        env:
+          EXERCISE: ${{ inputs.exercise || 'observe' }}
+          KIN_ORIGIN: https://pacs.koreaimagingnetwork.com
+        run: |
+          case "$EXERCISE" in
+            observe) python3 code/scripts/ops_monitor.py probe --origin "$KIN_ORIGIN" --output report.json ;;
+            alert|recover)
+              python3 - <<'PY'
+          import json, os, time
+          ok = os.environ['EXERCISE'] == 'recover'
+          with open('report.json', 'w') as stream:
+              json.dump({'ok': ok, 'maintenance': False, 'checked_at': int(time.time()),
+                         'faults': [] if ok else ['notification_drill']}, stream)
+          PY
+              ;;
+            *) exit 2 ;;
+          esac
+      - name: Notify owner or record recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KIN_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXERCISE: ${{ inputs.exercise || 'observe' }}
+        run: |
+          if [ "$EXERCISE" = observe ]; then
+            python3 code/scripts/ops_notify.py --report report.json
+          else
+            python3 code/scripts/ops_notify.py --report report.json --drill
+          fi

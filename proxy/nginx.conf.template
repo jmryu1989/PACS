@@ -58,6 +58,16 @@ server {
 
     location = / { return 302 /worklist/hpacs-lite/index.html; }
 
+    # This directory contains only the collector's four-field public heartbeat.
+    # No backup/state/credential directory is mounted into nginx for monitoring.
+    location = /ops-status.json {
+        alias /var/run/kin-monitor-public/status.json;
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        limit_except GET HEAD { deny all; }
+    }
+
     # 가입 신청은 BFF가 state·PKCE를 만든 뒤 Keycloak으로 보낸다. 진입점과 실제 등록
     # 제출을 같은 제한 구역에 넣어 새 계정 생성 입력면을 양쪽에서 막는다.
     location = /api/auth/register {

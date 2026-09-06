@@ -25,6 +25,8 @@ jobs:
           persist-credentials: false
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
+      - name: Monitor failure and notification boundaries
+        run: python3 tests/ops_monitor_test.py
       - name: Reproduce a private deployment checkout
         # Production creates files under umask 077. Runtime readability must come
         # from the image build rather than the checkout host's file permissions.
@@ -35,6 +37,8 @@ jobs:
         run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
       - name: Prepare disposable database image
         run: docker pull postgres:16-alpine
+      - name: Observe an isolated real restart loop
+        run: python3 tests/ops_monitor_container_test.py
       - name: Production image migration, startup and refusal checks
         env:
           KIN_TEST_API_IMAGE: kin-api:ci

@@ -183,3 +183,36 @@ GitHub `Validate production image` runs the 17 backup safety tests and isolated
 production image tests for main, PRs and tags, recording the exact SHA/image ID.
 It does not deploy, publish a registry image or replace the 69+14 live/browser
 release gates and independent review. No production credentials are used in CI.
+
+## C5 host monitoring and external notification checks
+
+`python tests/ops_monitor_test.py` checks stale/failed backups, bounded maintenance,
+restart counters, external response validation and private issue notification
+boundaries. Linux flock/permission cases must run on Linux (CI or a disposable
+container); a Windows skipped result is not the full gate.
+
+The reviewed `scripts/ops_monitor.py collect` runs once per minute on the Docker
+host with explicit `--repo`, `--backups`, `--state-dir` (dedicated mode700) and
+`--public-dir` (dedicated mode755). The public directory contains only status.json:
+schema, checked_at, ok and maintenance_until. Mount it read-only into proxy with
+`docker-compose.monitor.yml` and `KIN_MONITOR_PUBLIC_DIR`; never mount backups or
+private state into nginx. Pin the installed collector SHA256 outside Git and check
+it before each cron invocation. It only reads services/backups and never restarts,
+restores or deletes them. Missing/expired status is an external failure.
+
+`scripts/ops_monitor.py probe --origin https://example.test --output report.json`
+validates TLS, status age (180 seconds), API authentication configuration, OIDC
+issuer and worklist content; it retries a failed observation once after 15 seconds.
+Maintenance requires a matching unfinished backup/operations lock and is bounded
+to 600 seconds. PostgreSQL/proxy failures and stale/failed backups are not suppressed.
+Three automatic restarts within five minutes, active restarting, or a stopped/
+unhealthy service fail the host check; a newly replaced container resets its counter.
+
+The workflow example is installed in a **private** operational repository with an
+exact reviewed public code SHA, without personal SMTP/SSH credentials. Alert/recover
+exercises use a separate marker from real incidents. Issues created by the Actions
+bot are assigned to the repository owner; existing incidents are not repeatedly
+commented on. Maintenance alone cannot close an incident. The owner must have email
+delivery enabled for participating/assigned issue notifications. A GitHub API
+notification or accepted issue is not proof of email inbox delivery. Schedule jobs
+can be delayed/dropped by GitHub, so this is not a five-minute availability SLA.

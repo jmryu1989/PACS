@@ -1,0 +1,10 @@
+# Production only: the host collector creates this public-only directory first.
+services:
+  proxy:
+    volumes:
+      - type: bind
+        source: ${KIN_MONITOR_PUBLIC_DIR:?Set a dedicated public-only monitor directory}
+        target: /var/run/kin-monitor-public
+        read_only: true
+        bind:
+          create_host_path: false
