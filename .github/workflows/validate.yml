@@ -29,6 +29,15 @@ jobs:
         run: python3 tests/ops_deploy_preflight_test.py
       - name: Offline export inventory and image integrity
         run: python3 tests/ops_export_inventory_test.py
+      - name: Pinned age and local encrypted export preparation
+        run: |
+          umask 077
+          age_dir=$(mktemp -d "$RUNNER_TEMP/kin-age.XXXXXXXX")
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --max-time 60 \
+            https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz -o "$age_dir/age.tar.gz"
+          echo "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  $age_dir/age.tar.gz" | sha256sum --check --strict
+          tar -xzf "$age_dir/age.tar.gz" -C "$age_dir" age/age age/age-keygen
+          KIN_TEST_AGE="$age_dir/age/age" python3 -B tests/ops_export_crypto_test.py
       - name: Monitor failure and notification boundaries
         run: python3 tests/ops_monitor_test.py
       - name: SMTP outbox, TLS and duplicate suppression

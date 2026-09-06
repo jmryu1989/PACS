@@ -199,15 +199,8 @@ def check_image(path, identity):
         require(found)
 
 
-def verify(root, expected_hash):
+def parse_inventory(raw, expected_hash):
     require(type(expected_hash) is str and HEX.fullmatch(expected_hash))
-    require(not any(p.is_symlink() or getattr(p.lstat(), 'st_file_attributes', 0) & 0x400
-                    for p in (root, *root.parents)))
-    root = root.resolve()
-    private(root, directory=True)
-    require(private(root / 'inventory.json').st_size <= META_LIMIT)
-    with (root / 'inventory.json').open('rb') as stream:
-        raw = stream.read(META_LIMIT + 1)
     require(hashlib.sha256(raw).hexdigest() == expected_hash)
     body = parse(raw)
     require(type(body) is dict and set(body) == {'schema', 'git_sha', 'storage_mode', 'running_images', 'files'})
@@ -219,6 +212,24 @@ def verify(root, expected_hash):
     expected = {'snapshot/' + name for name in (*FILES, 'manifest.json')} | HOST_FILES | {'source.bundle'}
     expected |= {'images/' + value[7:] + '.tar' for value in images.values()}
     require(type(files) is dict and set(files) == expected)
+    for name, record in files.items():
+        relative(name)
+        require(type(record) is dict and set(record) == {'bytes', 'sha256'})
+        require(type(record['bytes']) is int and 0 < record['bytes'] <= FILE_LIMIT)
+        require(type(record['sha256']) is str and HEX.fullmatch(record['sha256']))
+    return body
+
+
+def verify(root, expected_hash):
+    require(not any(p.is_symlink() or getattr(p.lstat(), 'st_file_attributes', 0) & 0x400
+                    for p in (root, *root.parents)))
+    root = root.resolve()
+    private(root, directory=True)
+    require(private(root / 'inventory.json').st_size <= META_LIMIT)
+    with (root / 'inventory.json').open('rb') as stream:
+        body = parse_inventory(stream.read(META_LIMIT + 1), expected_hash)
+    sha, images, files = body['git_sha'], body['running_images'], body['files']
+    expected = set(files)
     actual = set()
     for directory, dirs, names in os.walk(root, followlinks=False):
         private(Path(directory), directory=True)
@@ -233,10 +244,6 @@ def verify(root, expected_hash):
         require(len(actual) <= len(expected) + 1)
     require(actual == expected | {'inventory.json'})
     for name, record in files.items():
-        relative(name)
-        require(type(record) is dict and set(record) == {'bytes', 'sha256'})
-        require(type(record['bytes']) is int and record['bytes'] > 0)
-        require(type(record['sha256']) is str and HEX.fullmatch(record['sha256']))
         require(file_record(root / name) == record)
     snapshot = metadata(root / 'snapshot/manifest.json')
     require(type(snapshot.get('format')) is int and snapshot['format'] == 1 and snapshot.get('complete') is True)

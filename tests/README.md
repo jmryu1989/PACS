@@ -270,3 +270,50 @@ Metadata is limited to 1MiB, each component to 128GiB, image archive members to
 The input hash binds bytes, not the author's identity. An intact complete snapshot
 with failed source-service resumption remains eligible for this inspection:
 `source_services_ready` is false and it must not authorize deployment.
+
+## Local encrypted export preparation (C12F)
+
+`KIN_TEST_AGE=/protected/age python3 -B tests/ops_export_crypto_test.py` runs 24
+checks on Linux, including actual age 1.3.2 encryption/decryption, authenticated
+tail failure, concurrent input changes, disk errors and publication conflicts.
+The sibling `age-keygen` is required only for synthetic tests. Both binary hashes
+are pinned; CI checks the official Linux amd64 archive digest before extracting
+only these binaries. This is digest verification, not independent Sigsum verification.
+Windows runs four platform/schema checks and skips the 20 Linux preparation tests.
+In a disposable read-only Docker test container, mount `/tmp` with `exec` because
+the fixture copies the binaries into its own protected Linux temporary directory.
+
+The production wrapper is Linux amd64 only. Use an owner-only, quiescent inventory
+directory and a separate existing output parent with mode 700. Install the pinned
+age binary at a nonsymlink path owned by root or the caller and not group/world
+writable. Choose a new output name; the wrapper never replaces an existing result.
+
+```bash
+python3 scripts/ops_export_crypto.py seal --source /private/inventory \
+  --destination /private/output/sealed --age /protected/age \
+  --recipient "$AGE_RECIPIENT" --inventory-sha256 "$INVENTORY_SHA256"
+python3 scripts/ops_export_crypto.py unseal --source /private/output/sealed \
+  --destination /private/received/opened --age /protected/age \
+  --identity /private/keys/identity.txt --receipt-sha256 "$RECEIPT_SHA256"
+```
+
+Provide an X25519 recipient for seal and a separate owner-only identity file for
+unseal. The identity is never archived or copied into a named output file. Save
+the returned receipt digest through a separately trusted channel: receipt hashes
+bind bytes and do not authenticate the sender. Unseal requires that digest and
+the same verifier source hash. It verifies ciphertext, complete authenticated
+plaintext and every inventoried component before publishing `opened/staging`.
+Neither command uploads data, restores a database, loads an image, or authorizes
+deployment. Successful preparation still reports offsite/restore/deployment false.
+
+On a caught failure, only partial files inside this invocation's exclusively
+created `.NAME.pending` directory are removed, with a fixed failure marker left
+for inspection. Existing pending directories are refused. Abrupt termination or
+power loss can leave private partial files: inspect that pending directory before
+retrying; there is no automatic reclamation. If parent fsync fails after atomic
+publication, the command reports failure but preserves the complete published
+directory for inspection. Do not interpret a retry conflict as a new success.
+Input files must remain quiescent; stream hashes catch changed bytes but do not
+isolate a hostile process running as the same user/root. The total tar and cipher
+limit is 512GiB and each age invocation times out after 15 minutes; these are
+refusal limits, not demonstrated large-backup capacity or recovery performance.
