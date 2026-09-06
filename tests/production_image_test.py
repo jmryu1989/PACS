@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import time
 import unittest
 import uuid
@@ -148,6 +149,55 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
         """TEST-C1-03: packaging must retain the production authentication guard."""
         name = self.api("no-auth", AUTH_REQUIRED="false")
         self.assertIn("AUTH_REQUIRED=true", self.stopped_with_error(name))
+
+    def test_05_shutdown_finishes_an_active_database_request(self):
+        """TEST-C1-02: the actual Prisma lifecycle provider must outlive HTTP draining."""
+        self.psql("CREATE TABLE c1_drain(value integer);")
+        # Test-only Nest controller, using the image's real compiled Prisma provider.
+        # There is no test route or authentication exception in the product API.
+        script = """
+require('reflect-metadata');
+const {NestFactory}=require('@nestjs/core'), c=require('@nestjs/common');
+const {PrismaService}=require('./dist/prisma.service');
+class Probe {
+  constructor(db){this.db=db}
+  async wait(){await this.db.$executeRawUnsafe('INSERT INTO c1_drain SELECT 1 FROM pg_sleep(3) /* C1_ACTIVE_WRITE */');return {ok:true}}
+}
+c.Controller()(Probe);
+Reflect.defineMetadata('design:paramtypes',[PrismaService],Probe);
+c.Get('wait')(Probe.prototype,'wait',Object.getOwnPropertyDescriptor(Probe.prototype,'wait'));
+class ProbeModule{}
+c.Module({controllers:[Probe],providers:[PrismaService]})(ProbeModule);
+(async()=>{const app=await NestFactory.create(ProbeModule);app.enableShutdownHooks();await app.listen(3000,'0.0.0.0')})();
+"""
+        name = self.container("drain", ["--network", "container:" + self.db,
+            "-e", "DATABASE_URL=postgresql://postgres@127.0.0.1:5432/kin",
+            "--entrypoint", "node", self.image_id, "-e", script])
+        deadline = time.monotonic() + 30
+        while "Nest application successfully started" not in self.logs(name):
+            if time.monotonic() >= deadline:
+                self.fail("Test-only Nest lifecycle harness did not start")
+            time.sleep(0.2)
+        client = subprocess.Popen(["docker", "exec", self.db, "wget", "-qO-", "http://127.0.0.1:3000/wait"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 10
+            while self.psql("SELECT count(*) FROM pg_stat_activity WHERE state='active' "
+                            "AND query LIKE 'INSERT INTO c1_drain%';") != "1":
+                if time.monotonic() >= deadline:
+                    self.fail("Database write was not active before SIGTERM")
+                time.sleep(0.1)
+            ops.run(["docker", "stop", "--time", "10", name])
+            body, errors = client.communicate(timeout=15)
+            self.assertEqual(client.returncode, 0, errors.decode(errors="replace"))
+            self.assertEqual(json.loads(body), {"ok": True})
+            self.assertEqual(self.psql("SELECT value FROM c1_drain;"), "1")
+            state = json.loads(ops.text(["docker", "inspect", name]))[0]["State"]
+            self.assertNotEqual(state["ExitCode"], 137)
+        finally:
+            if client.poll() is None:
+                client.kill()
+                client.communicate(timeout=15)
 
 
 if __name__ == "__main__":
