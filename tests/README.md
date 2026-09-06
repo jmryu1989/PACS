@@ -481,3 +481,45 @@ Full restoration, encrypted offsite backup and deployment authority remain false
 The CI environment guard is an accidental-use check, not a same-user security
 boundary. CLI timeout leaves a short interval before finally removes resources;
 runner/process termination can prevent that cleanup.
+
+## Synthetic Orthanc restoration across CI jobs (C12K)
+
+`python -B tests/ops_orthanc_transfer_test.py` runs 14 checks on Linux and nine
+on Windows (five Linux file-handling checks are explicitly skipped). Docker
+calls are mocked in these refusal tests. `restore-orthanc.yml` performs the real
+two-job transfer of a pinned Orthanc 1.12.5 image and a frozen synthetic store.
+The producer creates one synthetic DICOM instance and attachments 1024/1025,
+gracefully stops and reaps Orthanc, then checks SQLite integrity and every stored
+attachment's size/MD5/SHA256. Only the index and three attachment files enter the
+store archive. Paths, member types, duplicates, extra files and sizes are checked
+before the consumer extracts individual files into its own tmpfs.
+
+The receiving hosted VM must have a different boot ID and lack the exact image.
+Run/SHA/attempt, a separately supplied receipt hash, image config/layers and all
+file hashes are verified before load. A fresh Orthanc process must return the
+original instance and all three attachment byte sequences exactly. Downloaded
+source artifact hashes remain unchanged. The public artifact contains only
+`image.tar`, `store.tar`, and `receipt.json`, with one-day retention and download
+by exact artifact ID. No production data, configuration or keys are read.
+
+The image archive cap is 2GiB: classic Docker saves the pinned layers expanded
+(about 1.75GB), while containerd saves compressed blobs (about 684MB). Store and
+receipt caps are 32MiB and 8KiB. The shared image checker separately limits each
+expanded layer to 8GiB; the job timeout is ten minutes. These bounds are for the
+fixed synthetic profile, not a large production restore. Before load, the
+consumer reports matching layers referenced by existing Docker images; it does
+not prove absence of unreferenced build-cache blobs. The base-image label is a
+producer declaration, not an independent signature.
+
+Containers use UID65534, no network or published ports, a read-only root,
+cap-drop ALL, no-new-privileges, PID128, 256MiB memory, one CPU and tmpfs limits
+of 128MiB for `/work` and 8MiB for `/tmp`. Plugins and the DICOM server are
+disabled; REST requests stay within the container. Only owned resources are
+removed, and cleanup errors cannot become success. SIGKILL or host termination
+can prevent cleanup. The CI environment guard prevents accidental local use;
+it does not isolate a hostile process with the same OS privileges.
+
+Only synthetic Orthanc restoration can become true. Full PACS restoration,
+encrypted offsite backup and deployment authorization remain false. API and
+Keycloak authentication, reporting/viewer recovery, real destinations and key
+custody require their own evidence.
