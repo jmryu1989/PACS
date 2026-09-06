@@ -49,7 +49,9 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
-COPY --chmod=644 start-production.sh ./start-production.sh
+COPY start-production.sh ./start-production.sh
+# 운영 서버의 legacy builder도 지원한다(COPY --chmod는 BuildKit 전용).
+RUN chmod 644 /app/start-production.sh
 USER node
 EXPOSE 3000
 CMD ["sh", "/app/start-production.sh"]
