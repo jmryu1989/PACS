@@ -320,3 +320,56 @@ refusal limits, not demonstrated large-backup capacity or recovery performance.
 GNU tar base-256 sizes remove USTAR's 8GiB member encoding limit while preserving
 the fixed regular-file allowlist. The boundary test encodes/decodes headers at
 8GiB and 128GiB; it does not allocate or encrypt payloads of those sizes.
+
+## Offline storage reconciliation (C4S)
+
+`python3 -B tests/ops_storage_reconcile_test.py` runs 26 synthetic checks on Linux.
+Windows runs the 15 pure/parser checks and skips 11 private SQLite checks. The
+tool never contacts a cloud provider, downloads objects, deletes orphans, modifies
+the source index, restores data, or changes storage configuration.
+
+```bash
+python3 scripts/ops_storage_reconcile.py --index /private/snapshot/index \
+  --index-sha256 "$INDEX_SHA256" --listing /private/listing.json \
+  --listing-sha256 "$LISTING_SHA256" --bucket kin-synthetic-only \
+  --prefix kin-c4-fixture/ --destination /private/reports/new-check
+```
+
+Actual file processing is Linux only. Both inputs and their parent directories
+must be owner-only (directories 700), with no symlinks/hardlinks. Freeze a complete
+SQLite snapshot without WAL/SHM/journal sidecars; the tool hashes a private copy
+before opening only that copy read-only/immutable. Do not point it at a live DB.
+The two expected SHA256 values must be fixed independently of these files.
+Use a new destination name under an existing 700 parent; reports never overwrite.
+
+The listing document has exactly `schema: 1`, `bucket`, `prefix`, `profile`, and
+`pages`. The supported profile is `{ "orthanc": "1.12.5", "storage_plugin":
+"2.5.0", "structure": "flat", "client_encryption": false }`. Each page is
+`{ "request_token": null_or_string, "response": ListObjectsV2_JSON }`.
+Response fields are `Name`, `Prefix`, `MaxKeys`, `KeyCount`, `IsTruncated`, optional
+`Contents`, and continuation tokens. `Contents` entries require `Key` and `Size`;
+standard ETag/checksum/owner/time/storage metadata is accepted but not trusted as
+content verification. No delimiter, StartAfter, CommonPrefixes, or EncodingType
+is supported. Every requested token must follow the prior returned token, match
+the response token, and lead to exactly one final non-truncated page. Duplicate
+keys, repeated/missing tokens and error envelopes are refused.
+
+This validates an offline transcript, not its authenticity or the provider's
+actual completeness. A future collector must preserve and verify that provenance.
+Index and listing hashes do not prove that the two snapshots share a point in
+time. General current-key listings do not verify object version histories.
+
+The first observed profile supports index fileTypes 1, 1024, and 1025 with the
+observed uncompressed representation. UUID and index fileType establish the
+association; suffixes are a separate support check, never a way to infer an
+orphan's type. Other types/compression, unexpected suffixes and ambiguous UUIDs
+are reported conservatively. The private `report.json` includes details; stdout
+contains only counts/types and scope limitations. Missing/orphan candidates,
+size mismatches and unsupported data can overlap in the counts.
+
+Exit 0 means only complete transcript parsing and no observed UUID/size/support
+differences; exit 2 publishes a report with differences; exit 1 refuses invalid
+input or failed publication. Content, provider, snapshot consistency, restore,
+and migration authority always remain false. Bounds: index 512MiB, listing 64MiB,
+10000 pages, 100000 objects/index rows, plus a SQLite instruction/time budget.
+These bounds do not establish large-system performance or restoration readiness.

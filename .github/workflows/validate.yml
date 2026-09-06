@@ -29,6 +29,8 @@ jobs:
         run: python3 tests/ops_deploy_preflight_test.py
       - name: Offline export inventory and image integrity
         run: python3 tests/ops_export_inventory_test.py
+      - name: Offline storage listing and read-only index reconciliation
+        run: python3 -B tests/ops_storage_reconcile_test.py
       - name: Pinned age and local encrypted export preparation
         run: |
           umask 077
