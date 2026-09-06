@@ -25,6 +25,8 @@ jobs:
           persist-credentials: false
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
+      - name: Deployment preflight refusal and shared lock
+        run: python3 tests/ops_deploy_preflight_test.py
       - name: Monitor failure and notification boundaries
         run: python3 tests/ops_monitor_test.py
       - name: Public proxy assets from private checkout

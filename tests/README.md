@@ -1,5 +1,13 @@
 # 살아 있는 불변조건 테스트
 
+C1-2a 배포 전 검사 안전 시험: `python tests/ops_deploy_preflight_test.py`.
+실제 임시 Git 저장소와 별도 프로세스 lock 경합을 포함하며 실행 서비스는 바꾸지 않는다.
+`scripts/ops_deploy_preflight.py request.json --request-sha256 <sha256>`은 기존 backup lock
+안에서 고정 요청·Git·로컬 이미지·현재 API를 조회한다. base+prod+monitor 세 파일이 필수다.
+성공은 관측 결과이며 운영 승인·배포·자동 복귀를 실행하지 않는다. 같은 개발 계정에서
+작성 가능한 요청/hash는 승인 권한 분리가 아니다. 향후 실행기는 같은 lock 안에서
+전제를 재검사하고, 서버 밖 복원·외부 감시·별도 승인·실제 앱 호환성을 갖춰야 한다.
+
 ```powershell
 docker compose up -d
 python tests/invariants_live.py
