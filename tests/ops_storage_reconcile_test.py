@@ -179,7 +179,9 @@ class LinuxTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_01_real_sqlite_private_report_and_unchanged_inputs(self):
-        result=self.run_compare()
+        with patch.object(reconcile.sqlite3,'connect',wraps=sqlite3.connect) as connect:
+            result=self.run_compare()
+        self.assertIs(connect.call_args.kwargs['uri'],True)
         self.assertTrue(result['comparison_consistent'])
         for field in ('content_verified','provider_verified','snapshot_consistency_verified','restore_verified','migration_authorized'):
             self.assertFalse(result[field])

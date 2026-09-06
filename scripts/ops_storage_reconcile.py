@@ -92,7 +92,7 @@ def listing(raw, expected, bucket, prefix):
 def rows_from_index(path):
     # Only an independently hash-checked copy is opened immutable. Never use
     # immutable on a live database whose WAL might contain committed records.
-    connection = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', timeout=1)
+    connection = sqlite3.connect(path.as_uri() + '?mode=ro&immutable=1', uri=True, timeout=1)
     deadline, steps = time.monotonic()+10, 0
     def progress():
         nonlocal steps
