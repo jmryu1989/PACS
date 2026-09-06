@@ -27,4 +27,9 @@ RUN sed -i 's/\r$//' /docker-entrypoint.d/10-selfsigned.sh \
                        /docker-entrypoint.d/25-nginx-test.sh \
  && chmod +x /docker-entrypoint.d/10-selfsigned.sh \
              /docker-entrypoint.d/15-kin-config.envsh \
-             /docker-entrypoint.d/25-nginx-test.sh
+             /docker-entrypoint.d/25-nginx-test.sh \
+ && chmod 644 /etc/nginx/templates/default.conf.template \
+ && chmod -R u=rwX,go=rX /usr/share/nginx/html/kin-brand
+
+# Private (umask077) deployment checkouts yield 600/700 assets. nginx workers
+# must be able to traverse/read the copied public branding regardless of host modes.

@@ -27,6 +27,11 @@ jobs:
         run: python3 tests/ops_backup_test.py
       - name: Monitor failure and notification boundaries
         run: python3 tests/ops_monitor_test.py
+      - name: Public proxy assets from private checkout
+        run: |
+          chmod -R go-rwx proxy
+          docker build -t kin-proxy:ci proxy
+          docker run --rm --network none --read-only --user nginx --entrypoint sh kin-proxy:ci -c 'test -r /usr/share/nginx/html/kin-brand/kin-favicon-32.png && test -r /usr/share/nginx/html/kin-brand/kin-emblem-j1.svg && test -r /etc/nginx/templates/default.conf.template'
       - name: Reproduce a private deployment checkout
         # Production creates files under umask 077. Runtime readability must come
         # from the image build rather than the checkout host's file permissions.
