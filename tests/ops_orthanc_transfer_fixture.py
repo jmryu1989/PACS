@@ -109,7 +109,10 @@ def build_image(token):
     with tempfile.TemporaryDirectory(prefix='kin-ci-orthanc-build-') as folder:
         folder = Path(folder)
         image_transfer.write(folder/'worker.py', Path(worker.__file__).read_bytes())
-        image_transfer.write(folder/'Dockerfile', ('FROM '+BASE+'\nCOPY worker.py /fixture.py\n'
+        # The private build input is 0600 on Linux. Explicit read-only image
+        # permissions keep the synthetic worker readable by UID65534 on both
+        # Linux and Windows build hosts without granting runtime root.
+        image_transfer.write(folder/'Dockerfile', ('FROM '+BASE+'\nCOPY --chmod=0444 worker.py /fixture.py\n'
             'USER 65534:65534\nENTRYPOINT ["python3"]\nCMD '+json.dumps(CMD)+'\n'
             'LABEL kin.ci.orthanc="'+token+'" kin.ci.base="'+BASE+'"\n').encode())
         command(['docker', 'build', '--pull', '--platform=linux/amd64', '--network=none',
