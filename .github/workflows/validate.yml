@@ -25,6 +25,10 @@ jobs:
           persist-credentials: false
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
+      - name: Reproduce a private deployment checkout
+        # Production creates files under umask 077. Runtime readability must come
+        # from the image build rather than the checkout host's file permissions.
+        run: chmod -R go-rwx api
       - name: Build the production target
         env:
           CODE_SHA: ${{ github.sha }}

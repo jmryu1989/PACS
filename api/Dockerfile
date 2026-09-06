@@ -34,7 +34,10 @@ CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && npm run start:dev
 
 FROM development AS build
 RUN npm run build \
- && npm prune --omit=dev --ignore-scripts
+ && npm prune --omit=dev --ignore-scripts \
+ # 운영 checkout의 umask 077이 package/schema까지 600으로 만들 수 있다.
+ # 이미지 내부 권한은 호스트에서 물려받지 않고, 실행 파일 비트만 보존한다.
+ && chmod -R u=rwX,go=rX /app
 
 # 빌드 도구·원본 TS를 함께 복사하면 운영에서도 watch/재컴파일이 가능해진다.
 # Prisma CLI만은 부팅 시 검토된 migration을 적용하므로 runtime dependency다.
@@ -46,7 +49,7 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
-COPY start-production.sh ./start-production.sh
+COPY --chmod=644 start-production.sh ./start-production.sh
 USER node
 EXPOSE 3000
 CMD ["sh", "/app/start-production.sh"]
