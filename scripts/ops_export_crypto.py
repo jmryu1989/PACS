@@ -204,7 +204,9 @@ class BoundReader:
 def pack(source, raw, body, target):
     require(sum(row['bytes'] for row in body['files'].values()) + len(raw) + 1024**2 <= MAX_TOTAL)
     with create_file(target) as out:
-        with tarfile.open(fileobj=out, mode='w|', format=tarfile.USTAR_FORMAT) as archive:
+        # USTAR cannot encode an 8GiB member although inventory permits larger
+        # components. GNU base-256 sizes preserve the fixed regular-file paths.
+        with tarfile.open(fileobj=out, mode='w|', format=tarfile.GNU_FORMAT) as archive:
             info = tarfile.TarInfo('inventory.json')
             info.mode, info.size = 0o600, len(raw)
             archive.addfile(info, io.BytesIO(raw))

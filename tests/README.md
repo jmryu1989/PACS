@@ -273,13 +273,13 @@ with failed source-service resumption remains eligible for this inspection:
 
 ## Local encrypted export preparation (C12F)
 
-`KIN_TEST_AGE=/protected/age python3 -B tests/ops_export_crypto_test.py` runs 24
+`KIN_TEST_AGE=/protected/age python3 -B tests/ops_export_crypto_test.py` runs 25
 checks on Linux, including actual age 1.3.2 encryption/decryption, authenticated
 tail failure, concurrent input changes, disk errors and publication conflicts.
 The sibling `age-keygen` is required only for synthetic tests. Both binary hashes
 are pinned; CI checks the official Linux amd64 archive digest before extracting
 only these binaries. This is digest verification, not independent Sigsum verification.
-Windows runs four platform/schema checks and skips the 20 Linux preparation tests.
+Windows runs four platform/schema checks and skips the 21 Linux preparation tests.
 In a disposable read-only Docker test container, mount `/tmp` with `exec` because
 the fixture copies the binaries into its own protected Linux temporary directory.
 
@@ -317,3 +317,6 @@ Input files must remain quiescent; stream hashes catch changed bytes but do not
 isolate a hostile process running as the same user/root. The total tar and cipher
 limit is 512GiB and each age invocation times out after 15 minutes; these are
 refusal limits, not demonstrated large-backup capacity or recovery performance.
+GNU tar base-256 sizes remove USTAR's 8GiB member encoding limit while preserving
+the fixed regular-file allowlist. The boundary test encodes/decodes headers at
+8GiB and 128GiB; it does not allocate or encrypt payloads of those sizes.
