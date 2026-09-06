@@ -25,6 +25,8 @@ jobs:
           persist-credentials: false
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
+      - name: Automatic prior calendar and identity boundaries
+        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
       - name: Deployment preflight refusal and shared lock
         run: python3 tests/ops_deploy_preflight_test.py
       - name: Deployment state machine and retained operations lock

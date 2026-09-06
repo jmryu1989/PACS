@@ -2879,10 +2879,21 @@ ${esc($("#recommendation").value)}
 
     window.addEventListener("pagehide", () => rememberOhifRect());
 
+    function validPriorDate(value) {
+      if (typeof value !== "string" || value.length !== 10 || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const [year, month, day] = value.split("-").map(Number);
+      const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
+    }
+
     function autoPrior(uid) {
       const s = studies.find(x => x.uid === uid);
-      if (!s?.sourcePatientKey) return null;
-      return studies.filter(x => x.sourcePatientKey === s.sourcePatientKey && x.uid !== uid && x.modality === s.modality)
+      if (!s?.sourcePatientKey || !validPriorDate(s.date)) return null;
+      // fmtD는 모양만 바꾼다. 달력 검증 없이 정렬하면 미래·불량 날짜가 prior가 된다.
+      // 같은 날의 선후는 StudyTime 근거가 없으므로 자동으로 추측하지 않는다.
+      return studies.filter(x => x.sourcePatientKey === s.sourcePatientKey && x.uid !== uid && x.modality === s.modality
+          && validPriorDate(x.date) && x.date < s.date)
         .sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid))[0]?.uid ?? null;
     }
 
