@@ -2,3 +2,4 @@
 api/prisma/migrations/** text eol=lf
 api/prisma/*.mjs text eol=lf
 api/prisma/baseline.json text eol=lf
+api/start-production.sh text eol=lf

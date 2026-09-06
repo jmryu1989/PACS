@@ -152,3 +152,33 @@ python tests/migration_rehearsal.py <완료된-백업-디렉터리>
 기존 DB baseline 반복/deploy/전체 테이블 행수 보존, drift 거부와 이력 미생성을 확인한다.
 살아 있는 DB 행수·migration metadata 불변과 임시 컨테이너 정리도 확인한다.
 새 초기 baseline을 채택하는 시점의 리허설이므로 baseline 적용 전 백업을 입력으로 쓴다.
+# C1 production image validation
+
+The isolated test uses a disposable PostgreSQL on a network namespace with no
+external networking or published ports. It checks real migrations, compiled
+startup, preserved rows/history on restart, authentication refusal, failed DB
+startup and Node signal handling. Its temporary resources carry unique ownership
+labels; it never connects to the shared PACS database.
+
+```powershell
+$env:KIN_REVISION = git rev-parse HEAD
+docker compose -f docker-compose.yml -f docker-compose.runtime-test.yml build api
+$env:KIN_EXPECTED_REVISION = $env:KIN_REVISION
+python tests/production_image_test.py
+docker compose -f docker-compose.yml -f docker-compose.runtime-test.yml up -d --no-deps --no-build api
+docker exec kin-proxy nginx -t
+docker exec kin-proxy nginx -s reload
+python tests/invariants_live.py
+python tests/e2e/test_worklist.py
+```
+
+Run on the local test stack only. Confirm HTTPS `/api/health` and published ports
+after replacement. To return to local source watching, use
+`docker compose up -d --no-deps --build api`, then validate/reload nginx and check
+health again. Operating the API in production does not require Nest CLI, a source
+mount or a TypeScript compiler. Prisma CLI remains installed for `migrate deploy`.
+
+GitHub `Validate production image` runs the 17 backup safety tests and isolated
+production image tests for main, PRs and tags, recording the exact SHA/image ID.
+It does not deploy, publish a registry image or replace the 69+14 live/browser
+release gates and independent review. No production credentials are used in CI.

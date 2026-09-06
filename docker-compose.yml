@@ -119,7 +119,9 @@ services:
     # API는 JWKS를 부팅이 아니라 **첫 요청 때** 가져오므로 Keycloak이 늦게 떠도 괜찮다.
 
   api:
-    build: ./api
+    build:
+      context: ./api
+      target: development
     container_name: kin-api
     restart: unless-stopped
     environment:

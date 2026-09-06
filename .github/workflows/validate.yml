@@ -1,0 +1,45 @@
+name: Validate production image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Public PR code runs without production credentials or a persisted Git token.
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Backup safety regressions
+        run: python3 tests/ops_backup_test.py
+      - name: Build the production target
+        env:
+          CODE_SHA: ${{ github.sha }}
+        run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
+      - name: Prepare disposable database image
+        run: docker pull postgres:16-alpine
+      - name: Production image migration, startup and refusal checks
+        env:
+          KIN_TEST_API_IMAGE: kin-api:ci
+          KIN_EXPECTED_REVISION: ${{ github.sha }}
+        run: python3 tests/production_image_test.py
+      - name: Record exact image identity
+        env:
+          CODE_SHA: ${{ github.sha }}
+        run: |
+          echo "Code SHA: $CODE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect kin-api:ci --format 'Image ID: {{.Id}}' >> "$GITHUB_STEP_SUMMARY"
+          echo 'CI checks runtime packaging and disposable-DB startup. The 69 live invariants, 14 browser tests and independent review remain separate release gates. No deployment is performed.' >> "$GITHUB_STEP_SUMMARY"

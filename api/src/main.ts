@@ -19,6 +19,9 @@ async function bootstrap() {
       }
 
   const app = await NestFactory.create(AppModule);
+  // PID 1 Node가 SIGTERM을 무시하면 Docker가 제한 시간 뒤 SIGKILL한다.
+  // 배포 때 진행 중 요청과 DB 연결을 닫고 종료하도록 Nest 종료 훅을 켠다.
+  app.enableShutdownHooks();
 
   // 프록시가 한 출처로 합쳤다. 예외적인 개발 출처가 필요할 때만 env 화이트리스트를 연다.
   const corsOrigins = (process.env.CORS_ORIGINS ?? '')
