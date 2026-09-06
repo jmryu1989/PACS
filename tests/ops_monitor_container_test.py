@@ -32,8 +32,11 @@ class ContainerMonitorTest(unittest.TestCase):
                 time.sleep(0.2)
             before[0]['id'] = raw['Id']
             _, history = ops_monitor.host_status(before, {}, int(time.time()), 0)
-            before[0].update(restarts=raw['RestartCount'], running=raw['State']['Running'],
-                             restarting=raw['State']['Restarting'])
+            observed = ops_monitor.inspect_containers((name,))[0]
+            self.assertEqual(observed['health'], 'none')
+            self.assertEqual(observed['restarts'], raw['RestartCount'])
+            before[0].update(restarts=observed['restarts'], running=observed['running'],
+                             restarting=observed['restarting'])
             faults, _ = ops_monitor.host_status(before, {'containers': history}, int(time.time()), 0)
             self.assertIn('restart_loop', faults)
             self.assertEqual(raw['HostConfig']['NetworkMode'], 'none')

@@ -93,12 +93,14 @@ def backup_status(root, lock_path, now):
     return faults, until
 
 
-def inspect_containers():
+def inspect_containers(names=NAMES):
     fmt = ('{"name":{{json .Name}},"id":{{json .Id}},'
            '"running":{{json .State.Running}},"restarting":{{json .State.Restarting}},'
            '"restarts":{{json .RestartCount}},'
-           '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}}}')
-    result = subprocess.run(['docker', 'inspect', '--format', fmt, *NAMES],
+           '"health":{{with index .State "Health"}}{{json .Status}}{{else}}"none"{{end}}}')
+    # Older Docker treats an absent .State.Health key as a template error;
+    # index returns nil, so services without Docker HEALTHCHECK remain observable.
+    result = subprocess.run(['docker', 'inspect', '--format', fmt, *names],
                             capture_output=True, timeout=20, check=True)
     return [json.loads(line) for line in result.stdout.decode().splitlines()]
 
