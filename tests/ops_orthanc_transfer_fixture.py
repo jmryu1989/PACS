@@ -19,7 +19,9 @@ ops, inventory = database.ops, database.inventory
 require, command = database.require, database.command
 record, copy_download = database.record, database.copy_download
 BASE = 'orthancteam/orthanc@sha256:31b5e84b5ce30e8c771337bdbb333999db90a9a53cf78f85b9a632ded0357b07'
-LIMITS = {'image.tar': 1024**3, 'store.tar': worker.LIMIT}
+# Classic Docker saves these pinned layers uncompressed (~1.75GB); containerd
+# saves compressed blobs (~684MB). Both must fit a finite, measured profile.
+LIMITS = {'image.tar': 2*1024**3, 'store.tar': worker.LIMIT}
 FIELDS = {'schema', 'code_sha', 'run_id', 'run_attempt', 'producer_boot_id', 'token',
           'image_id', 'image_config_id', 'base_image', 'files', 'snapshot'}
 CMD = ['-c', 'import time; time.sleep(3600)']
@@ -126,6 +128,7 @@ def produce(destination):
         identity = build_image(token)
         command(['docker', 'image', 'save', '--output', str(destination/'image.tar'), 'kin-ci-orthanc:'+token], timeout=120)
         (destination/'image.tar').chmod(0o600)
+        print(json.dumps({'observed_image_archive_bytes': (destination/'image.tar').stat().st_size}), flush=True)
         record(destination/'image.tar', LIMITS['image.tar'])
         config_id, _ = image_config(destination/'image.tar', identity, token)
         start_container(identity, name, token)
