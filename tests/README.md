@@ -16,6 +16,13 @@ D02B 배치 저장: `node --test tests/workspace_layout_test.cjs` (순수6)와
 세로 검증 범위는900×1400·768×1024, 가로1600×1000이다. 더 짧은 창의 모든 패널 접근은 미검증이다.
 상용구 결합/영어 탭 등 UI 문구 변경 시 D02A/B 시험 기대값도 함께 검토한다.
 
+D02C 썸네일 요청: `python tests/e2e/test_thumbnail_requests.py` (별도 실제3).
+32시리즈 합성 CT에서24/8 페이지·최대4 worker·페이지 재조회·A→B→A 취소·개별503/metadata503 복구를 검증한다.
+실제 CDP requestId 종결과 시험 nonce만 포함한 nginx 종료 행을 비교하며 로그/화면은 ignored artifacts에 둔다.
+현재 페이지 blob만 보관하고 페이지 이동/검사 전환/이탈의 URL 해제와 전체 합성 원본hash·개인초안/확정/이력을 확인한다.
+nginx200/499는 gateway 종결/연결 해제이며 upstream 계산 취소를 증명하지 않는다. OHIF loader는 별도 범위다.
+현재 페이지의24개 제한은 metadata 응답 바이트나 개별 preview의 크기 상한을 보장하지 않는다.
+
 C1 실행 계약: `python -B tests/ops_deploy_runner_test.py`.
 실제 임시 Git·durable journal·별도 프로세스 lock 경합을 사용하지만 Docker 교체·smoke·승인·알림은
 합성 호스트다. `ops_deploy_runner.py`는 고정 어댑터를 위한 상태기계 core이며 운영 어댑터/배포 CLI는

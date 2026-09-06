@@ -148,6 +148,7 @@
     .rtabs div.on { color: #4da3ff; }
     .s-thumb { width: 34%; }
     .thumbwrap { flex: 1; background: #000; overflow: auto; padding: 4px; }
+    .thumbwrap button:disabled { opacity: .35; cursor: default; }
     .thumbs { display: grid; gap: 3px; }
     .thumbs img { width: 100%; height: auto; object-fit: contain; background: #000; cursor: pointer; }
     .s-clinical { width: 30%; }
@@ -873,9 +874,10 @@
     // 화면이 정하는 값이 아니다 — 여기 있는 건 표시용이고, 진짜 필터는 서버에 있다.
     let myInstitution = null, myInstitutionName = "", institutions = [];
 
-    async function api(method, path, body) {
+    async function api(method, path, body, signal) {
       const res = await fetch(API + path, {
         method,
+        signal,
         headers: { "Content-Type": "application/json", "X-KIN-CSRF": "1" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
@@ -1570,43 +1572,106 @@
      * await가 있는 모든 지점 뒤에서, 화면에 쓰기 직전에 확인한다. 에러 표시도 마찬가지다 —
      * A의 실패 메시지가 B의 썸네일을 덮으면 그것도 같은 종류의 거짓말이다.
      */
-    let thumbSeq = 0;
-    async function renderThumbs() {
+    let thumbSeq = 0, thumbController = null, thumbDone = Promise.resolve(), thumbUrls = [];
+    function cancelThumbs() {
+      ++thumbSeq;
+      thumbController?.abort();
+      thumbController = null;
+      thumbUrls.forEach(url => URL.revokeObjectURL(url));
+      thumbUrls = [];
+    }
+    window.addEventListener("pagehide", cancelThumbs);
+    window.addEventListener("pageshow", e => { if (e.persisted) renderThumbs(); });
+    function renderThumbs(page = 0, cached = null) {
       const wrap = $("#thumbwrap");
       const uid = viewingUid();
+      cancelThumbs();
       if (!uid) { wrap.innerHTML = ""; return; }
-      const seq = ++thumbSeq;
-      const stale = () => seq !== thumbSeq || uid !== viewingUid();
+      const seq = thumbSeq;
+      const controller = thumbController = new AbortController();
+      const signal = controller.signal;
+      const stale = () => signal.aborted || seq !== thumbSeq || uid !== viewingUid();
       if (demoMode) {
         wrap.innerHTML = `<div class="thumbs" style="grid-template-columns:repeat(2,1fr)"><img src="${DEMO_IMG}"></div>`;
         return;
       }
       wrap.innerHTML = `<div style="color:#556;padding:20px">로딩…</div>`;
-      try {
-        const res = await fetch(`/dicom-web/studies/${uid}/instances`);
-        const inst = await res.json();
+      // 이전 fetch뿐 아니라 body 소비까지 끝내야 빠른 전환에도 worker 수가 누적되지 않는다.
+      thumbDone = thumbDone.then(async () => {
         if (stale()) return;
-        const bySeries = {};
-        for (const i of inst) (bySeries[tagv(i, "0020000E")] ??= []).push(i);
-        const reps = Object.values(bySeries).map(arr => {
-          arr.sort((a, b) => (+tagv(a, "00200013") || 0) - (+tagv(b, "00200013") || 0));
-          return tagv(arr[Math.floor(arr.length / 2)], "00080018");
-        });
-        const ids = await Promise.all(reps.map(async sop => {
-          const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: sop });
-          return lk.id;
-        }));
-        if (stale()) return;
-        const n = Math.max(Math.ceil(Math.sqrt(ids.length)), 2);
-        wrap.innerHTML = `<div class="thumbs" style="grid-template-columns:repeat(${n},1fr)">` +
-          ids.filter(Boolean).map(id => `<img src="/instances/${id}/preview" title="더블클릭: Film Box">`).join("") + `</div>`;
-        // 캡처한 uid를 쓴다. 이 그림이 실제로 보여주고 있는 검사가 그것이기 때문이다.
-        wrap.querySelectorAll("img").forEach(img =>
-          img.addEventListener("dblclick", () => openFilmbox(uid)));
-      } catch (e) {
-        if (stale()) return;
-        wrap.innerHTML = `<div style="color:#ff8080;padding:10px">썸네일 실패: ${esc(e.message)}</div>`;
-      }
+        try {
+          let reps = cached?.uid === uid ? cached.reps : null;
+          if (!reps) {
+            const res = await fetch(`/dicom-web/studies/${uid}/instances`, { signal, cache: "no-store" });
+            if (!res.ok) { await res.body?.cancel(); throw new Error(`HTTP ${res.status}`); }
+            const inst = await res.json();
+            if (stale()) return;
+            const bySeries = new Map();
+            for (const i of inst) {
+              const series = tagv(i, "0020000E");
+              if (!bySeries.has(series)) bySeries.set(series, []);
+              bySeries.get(series).push(i);
+            }
+            reps = [...bySeries.values()].map(arr => {
+              arr.sort((a, b) => (+tagv(a, "00200013") || 0) - (+tagv(b, "00200013") || 0));
+              return tagv(arr[Math.floor(arr.length / 2)], "00080018");
+            });
+          }
+          if (stale()) return;
+          const start = page * 24, batch = reps.slice(start, start + 24);
+          const n = Math.max(Math.ceil(Math.sqrt(batch.length)), 2);
+          wrap.innerHTML = `<div style="display:flex;gap:8px;align-items:center;padding:4px">
+            <button id="thumb-prev" class="chip" type="button" ${page === 0 ? "disabled" : ""}>이전</button>
+            <span id="thumb-range">시리즈 ${batch.length ? start + 1 : 0}–${start + batch.length} / ${reps.length}</span>
+            <button id="thumb-next" class="chip" type="button" ${start + 24 >= reps.length ? "disabled" : ""}>다음</button>
+            </div><div class="thumbs" style="grid-template-columns:repeat(${n},1fr)"></div>`;
+          wrap.querySelector("#thumb-prev").onclick = () => { if (!stale()) renderThumbs(page - 1, { uid, reps }); };
+          wrap.querySelector("#thumb-next").onclick = () => { if (!stale()) renderThumbs(page + 1, { uid, reps }); };
+          const grid = wrap.querySelector(".thumbs");
+          const cells = batch.map(() => {
+            const cell = document.createElement("div");
+            cell.textContent = "로딩…";
+            grid.appendChild(cell);
+            return cell;
+          });
+          let next = 0;
+          const worker = async () => {
+            while (!stale() && next < batch.length) {
+              const index = next++;
+              const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index] }, signal);
+              if (stale()) return;
+              try {
+                const res = await fetch(`/instances/${encodeURIComponent(lk.id)}/preview`, { signal, cache: "no-store" });
+                if (!res.ok) { await res.body?.cancel(); throw new Error(`HTTP ${res.status}`); }
+                const blob = await res.blob();
+                if (stale()) return;
+                const url = URL.createObjectURL(blob);
+                thumbUrls.push(url);
+                const img = document.createElement("img");
+                img.alt = `시리즈 ${start + index + 1}`;
+                img.title = "더블클릭: Film Box";
+                img.onerror = () => { if (!stale()) cells[index].textContent = "썸네일 표시 실패"; };
+                img.ondblclick = () => { if (!stale()) openFilmbox(uid); };
+                img.src = url;
+                cells[index].replaceChildren(img);
+              } catch (e) {
+                if (stale()) return;
+                cells[index].textContent = `썸네일 실패: ${e.message}`;
+              }
+            }
+          };
+          const results = await Promise.allSettled(Array.from({ length: Math.min(4, batch.length) }, worker));
+          if (stale()) return;
+          const failure = results.find(r => r.status === "rejected");
+          if (failure) throw failure.reason;
+        } catch (e) {
+          if (stale()) return;
+          thumbUrls.forEach(url => URL.revokeObjectURL(url));
+          thumbUrls = [];
+          wrap.innerHTML = `<div style="color:#ff8080;padding:10px">썸네일 실패: ${esc(e.message)}</div>`;
+        }
+      });
+      return thumbDone;
     }
 
     // ══════════ Order List (8.2.2) ══════════
