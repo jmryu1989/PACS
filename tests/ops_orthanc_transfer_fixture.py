@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import traceback
 import uuid
 
 import ops_database_transfer_fixture as database
@@ -208,6 +209,11 @@ def main():
         return 0
     except Exception as error:
         print(json.dumps({'synthetic_orthanc_restored': False, 'error_type': type(error).__name__}), file=sys.stderr)
+        # Only fixed synthetic commands enter this fixture. Preserve the failing
+        # validation location so a hosted-only format mismatch can be diagnosed.
+        traceback.print_exc()
+        if isinstance(error, subprocess.CalledProcessError):
+            print((error.stderr or b'')[-4096:].decode(errors='replace'), file=sys.stderr)
         return 1
 
 
