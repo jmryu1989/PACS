@@ -1,0 +1,63 @@
+name: Synthetic orthanc restore across jobs
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-orthanc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      receipt_sha256: ${{ steps.prepare.outputs.receipt_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Orthanc transfer refusals
+        run: python3 -B tests/ops_orthanc_transfer_test.py
+      - name: Build pinned image and freeze synthetic Orthanc store
+        id: prepare
+        run: python3 -B tests/ops_orthanc_transfer_fixture.py produce "$RUNNER_TEMP/kin-orthanc-transfer"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: synthetic-orthanc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/kin-orthanc-transfer/image.tar
+            ${{ runner.temp }}/kin-orthanc-transfer/store.tar
+            ${{ runner.temp }}/kin-orthanc-transfer/receipt.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+  consume:
+    needs: produce
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.produce.outputs.artifact_id }}
+          path: ${{ runner.temp }}/kin-orthanc-download
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Load absent image and restore Orthanc store in a separate VM
+        env:
+          RECEIPT_SHA256: ${{ needs.produce.outputs.receipt_sha256 }}
+        run: python3 -B tests/ops_orthanc_transfer_fixture.py consume "$RUNNER_TEMP/kin-orthanc-download" --receipt-sha256 "$RECEIPT_SHA256"
