@@ -1340,9 +1340,21 @@ export class PacsService implements OnModuleInit {
   async removeState(uid: string, c: Caller) {
     need(c.roles, 'technician', '검사 삭제');
     const me = inst(c);
-    const prev = await this.gate(uid, c);
+    await this.gate(uid, c);
+    return this.prisma.$transaction(async tx => {
+    await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+    await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
+    const parents = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
+    const prev = parents[0];
+    if (!prev) throw new NotFoundException('검사가 없습니다');
+    if (!this.visible(prev, me)) throw new ForbiddenException('검사에 접근할 수 없습니다');
     if (prev && prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 삭제할 수 없습니다');
+
+    // Creation takes this same parent lock. Hidden items still own immutable
+    // history; deleting their parent would remove the authorization boundary.
+    if (await tx.viewerItem.findFirst({ where: { studyUid: uid }, select: { id: true } }))
+      throw new ConflictException('표시 이력이 있는 검사는 삭제할 수 없습니다');
 
     /**
      * 삭제 가능 여부는 지금의 RS가 아니라 **사람의 기록이 생긴 적이 있는가**로 정한다.
@@ -1356,10 +1368,10 @@ export class PacsService implements OnModuleInit {
        * 그것은 판독 결정이 아니라 삭제 직전의 안전 사본이다. save/approve/reset 같은
        * 실제 생애주기 이력이 하나라도 있으면 이전과 똑같이 삭제를 막는다.
        */
-      this.prisma.reportVersion.findFirst({
+      tx.reportVersion.findFirst({
         where: { uid, action: { not: 'discarded' } }, select: { id: true },
       }),
-      this.prisma.reportDraft.findFirst({ where: { uid }, select: { author: true } }),
+      tx.reportDraft.findFirst({ where: { uid }, select: { author: true } }),
     ]);
     if (version)
       throw new BadRequestException(
@@ -1370,10 +1382,11 @@ export class PacsService implements OnModuleInit {
         `작성자(${draft.author})에게 확정 또는 폐기를 요청하거나 관리자에게 강제 해제를 요청하세요.`);
 
     if (prev?.orderOid)
-      await this.prisma.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });
-    await this.prisma.studyState.deleteMany({ where: { uid } });
-    await this.audit(c.actor, 'state.delete', uid, { by: me });
+      await tx.order.update({ where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null } });
+    await tx.studyState.delete({ where: { uid } });
+    await tx.auditLog.create({ data: { actor: c.actor, action: 'state.delete', target: uid, detail: JSON.stringify({ by: me }) } });
     return { ok: true };
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 });
   }
 
   /** 감사로그. 내 기관이 볼 수 있는 검사의 것만. */

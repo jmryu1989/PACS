@@ -76,6 +76,8 @@ jobs:
         run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
       - name: Prepare disposable database image
         run: docker pull postgres:16-alpine
+      - name: Compiled viewer input, Unicode and original-plane validation
+        run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs
       - name: Observe an isolated real restart loop
         run: python3 tests/ops_monitor_container_test.py
       - name: Production image migration, startup and refusal checks

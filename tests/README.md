@@ -609,6 +609,11 @@ encryption keys and external destinations need separate evidence.
 
 ### C12M product schema restore
 
+D05B1 extends this profile to fourteen tables and fourteen synthetic rows, including
+hidden viewer items, both immutable revisions, request-to-revision references and
+lifetime storage counters. Both versioned migration digests and all new foreign-key
+restrictions are included in the existing exact catalog/row restore comparison.
+
 `python -B tests/ops_product_transfer_test.py` covers the separate v2 receipt,
 migration binding, every product row/column, sequence state, real-restore failure
 classification and inherited private-copy/image-absence boundaries. Linux runs
@@ -682,3 +687,48 @@ Orthanc는 UserConfiguration을 시작할 때 읽으므로 설정 수정 후 재
 `window.kinViewerPrecision.state`의 ready는 adapter 설치 상태일 뿐 영구 저장 허용 신호가 아니다.
 확대 시작점과 pan에 따른 잔여 오차는 남으며, 이후 저장 API는 원본 DICOM geometry에
 맞지 않는 좌표를 서버에서 거절해야 한다. 이 시험은 다른 영상군·전체 확대 조합·임상 정확도를 보증하지 않는다.
+
+## D05B1 표시 항목 저장 API
+
+`POST/GET /studies/:uid/viewer-items`와 `POST/GET /studies/:uid/viewer-items/:id/revisions`는
+주석/키 이미지 표시 이력을 판독문과 별도로 저장한다. 아직 OHIF 저장/재열람 UI는 연결되지 않았다.
+POST는 `requestId` UUID와 완전한 `item`을 받으며 revision 추가는 `expectedRevision`,
+`action`(edit/hide/restore), 숨김/복원 시 `reason`을 받는다. 응답은 item ID, StudyUID,
+작성자 sub/actor, revision, 생성/변경 시각과 hidden을 포함한 item snapshot이다.
+첫 생성/재시도/수정 성공은 모두200이며 재시도는 원래 성공 revision을 반환한다.
+
+읽기에는 현재 source/tele 기관과 RS=P의 preDoc/preReviewer 제한을 적용한다.
+쓰기는 member+radiologist와 원 작성자 sub가 필요하며 admin 단독 쓰기는 거절한다.
+항목 kind/Study/Series/SOP/frame/FoR은 변경할 수 없다. 삭제한 계정·철회된 작성자의
+항목을 다른 사람에게 넘기거나 대신 숨기는 기능은 없어 해당 이력은 읽기전용으로 남는다.
+
+검사당 lifetime512항목/4096revision/16MiB와 snapshot8KiB를 적용한다.
+bytes는 PostgreSQL jsonb::text의 UTF-8이며 전체 디스크 사용량 상한은 아니다.
+숨김은 용량을 반환하지 않는다. revision/bytes가 가득 차면 숨김/복원도409
+`VIEWER_STORAGE_LIMIT`이다. 항목 개수만 가득 찼을 때는 추가 identity를 만들지 않는
+편집/숨김/복원이 revision/bytes 잔여 안에서 가능하다. raw 본문32KiB, 깊이16,
+중복 key·NUL·lone surrogate·비유한 수치·알 수 없는 필드는 거절한다.
+목록 기본50/최대100, UUID 오름차순 exclusive cursor; 이력은 revision 오름차순이다.
+여러 페이지는 하나의 장기 snapshot이 아니므로 동시 생성 UUID가 cursor 앞에 생기면
+새 첫 페이지에서 확인해야 한다. 삭제·숨김된 cursor 자체를 다시 찾을 필요는 없다.
+
+`python -B tests/viewer_api_test.py`는 임시 계정과 실제 Orthanc 합성 영상으로8개 묶음을
+검사한다. lifecycle/원래 성공 replay, 네 route 기관·역할·P·gateway, raw/canonical/
+no-store, 지원 SOP/frame/평면, 동시 revision/요청, 세 quota 마지막 자리, 감사 실패
+원자적 rollback, 실제 부모 lock wait 뒤 철회/P 재검사, 삭제 경쟁, pagination이다.
+quota 경계는 이 실행이 만든 검사에만 counter를 미리 채우며, 별도 lifecycle 시험이
+실제 저장 이력 합계와 counter를 대조한다. 원본 바이트와 판독/초안/판독 이력을 보존한다.
+감사 실패용 trigger는 해당 합성 StudyUID에만 적용하고 finally에서 제거한다.
+
+`tests/viewer_input_test.cjs`는 빌드된 `/app/dist`를 실행한다. Docker 이미지에서
+`node --test /tests/viewer_input_test.cjs`로8개 묶음(JSON/DTO/canonical/페이지/metadata/
+geometry/Orthanc 응답·크기/실제5초 timeout)을 실행한다. 외부 네트워크는 필요 없다.
+`python -B tests/viewer_migration_test.py`는 별도 PostgreSQL에서 기존 행 보존, DDL 실패
+전체 rollback,14표14행/4시퀀스의 실제 pg_dump/restore와 RESTRICT를 검사한다.
+`KIN_TEST_OLD_API_IMAGE=sha256:...`를 지정하면 고정 이전 API의 읽기·쓰기와 실제
+removeState 삭제 시도의 FK 거절도 검사한다. 입력이 없으면 이 마지막 시험만 skip한다.
+
+새 DB는 versioned migrate deploy, 기존 migration 관리 DB는 추가 migration만 적용한다.
+baseline.mjs는 최초 스키마 전용으로 유지했다. Migrate 이력이 없는 구 DB는 먼저
+직전 릴리스의 백업/drift/baseline 절차를 끝낸 뒤 업그레이드한다. 새 스키마에서 baseline
+기록을 다시 쓰거나 db push/reset을 사용하지 않는다. 이전 앱 복귀 시 새 표를 보존한다.

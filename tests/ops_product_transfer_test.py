@@ -88,7 +88,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 8)
+        self.assertEqual(sum(len(value) for value in rows.values()), 14)
         self.assertEqual({row['uid'] for table in ('StudyState', 'Report', 'ReportVersion', 'ReportDraft') for row in rows[table]}, {UID})
 
     def test_07_actual_observation_compares_every_section(self):

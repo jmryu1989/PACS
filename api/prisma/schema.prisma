@@ -88,6 +88,8 @@ model StudyState {
   createdAt DateTime @default(now())
 
   report Report?
+  viewerItems ViewerItem[]
+  viewerBudget ViewerStorageBudget?
 
   @@index([institutionId])
   @@index([teleInstitutionId])
@@ -242,4 +244,59 @@ model AuditLog {
 
   @@index([target])
   @@index([at])
+}
+
+/// 표시 이력은 판독문과 분리한다. 숨김도 원본 항목과 이전 판을 삭제하지 않는다.
+model ViewerItem {
+  id          String   @id @db.Uuid
+  studyUid    String
+  authorSub   String
+  authorActor String
+  revision    Int
+  hidden      Boolean  @default(false)
+  snapshot    Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime
+  study       StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  revisions   ViewerRevision[]
+
+  @@index([studyUid, id])
+}
+
+model ViewerRevision {
+  itemId       String   @db.Uuid
+  revision     Int
+  snapshot     Json
+  action       String
+  reason       String
+  actor        String
+  payloadBytes Int
+  at           DateTime @default(now())
+  item         ViewerItem @relation(fields: [itemId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  requests     ViewerRequest[]
+
+  @@id([itemId, revision])
+}
+
+/// lifetime 計数: hiding or shrinking the current item never recovers history budget.
+model ViewerStorageBudget {
+  studyUid      String @id
+  itemCount     Int
+  revisionCount Int
+  payloadBytes  Int
+  study         StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+}
+
+/// A request UUID is unique for the authenticated subject across all studies/items.
+/// Its immutable revision reference reproduces the original success after later edits.
+model ViewerRequest {
+  authorSub   String
+  requestId   String @db.Uuid
+  fingerprint String
+  itemId      String @db.Uuid
+  revision    Int
+  result      ViewerRevision @relation(fields: [itemId, revision], references: [itemId, revision], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([authorSub, requestId])
+  @@index([itemId, revision])
 }

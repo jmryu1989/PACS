@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, BadRequestException } from '@nestjs/common';
 
 /**
  * Orthanc(DICOMweb) 클라이언트.
@@ -24,6 +24,43 @@ export class OrthancService {
       throw new ServiceUnavailableException('ORTHANC_USER와 ORTHANC_PASS가 설정되지 않았습니다');
     }
     this.auth = 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
+  }
+
+  /** New persistence validates original tags without holding a database lock or buffering an unbounded response. */
+  private async viewerJson(path: string, body?: string): Promise<any> {
+    let response: Response;
+    try {
+      response = await fetch(this.base + path, {
+        method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
+        headers: { Authorization: this.auth, 'Content-Type': 'text/plain' }, body,
+      });
+      if (!response.ok || !response.body) {
+        await response.body?.cancel().catch(() => {});
+        throw new Error('response');
+      }
+      const reader = response.body.getReader(), chunks: Uint8Array[] = []; let total = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break;
+          total += value.byteLength;
+          if (total > 262144) throw new Error('limit');
+          chunks.push(value);
+        }
+        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+      } finally { await reader.cancel().catch(() => {}); }
+    } catch {
+      // Never echo tag values or Basic credentials in an error response.
+      throw new ServiceUnavailableException('원본 영상 참조를 확인할 수 없습니다');
+    }
+  }
+
+  async viewerReference(sopUid: string): Promise<any> {
+    const found = await this.viewerJson('/tools/lookup', sopUid);
+    if (!Array.isArray(found)) throw new BadRequestException('영상 참조가 올바르지 않습니다');
+    const instances = found.filter(x => x?.Type === 'Instance');
+    if (instances.length !== 1 || typeof instances[0].ID !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(instances[0].ID))
+      throw new BadRequestException('영상 참조가 없거나 중복입니다');
+    return this.viewerJson(`/instances/${instances[0].ID}/simplified-tags`);
   }
 
   private async get(path: string) {

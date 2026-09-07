@@ -18,7 +18,14 @@ async function bootstrap() {
         process.exit(1);
       }
 
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { rawBody: true });
+  // Register before Nest's body parser: malformed JSON can fail before controller
+  // middleware, and even those display-data error responses must not be cached.
+  app.use((req: any, res: any, next: () => void) => {
+    if (/^\/api\/studies\/[^/]+\/viewer-items(?:\/[^/]+\/revisions)?\/?$/.test(String(req.originalUrl ?? '').split('?')[0]))
+      res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   // PID 1 Node가 SIGTERM을 무시하면 Docker가 제한 시간 뒤 SIGKILL한다.
   // 배포 때 진행 중 요청과 DB 연결을 닫고 종료하도록 Nest 종료 훅을 켠다.
   app.enableShutdownHooks();

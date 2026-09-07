@@ -20,9 +20,11 @@ LIMITS = combined.LIMITS
 RECEIPT_LIMIT = 128*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
-MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql']
+MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
+              'api/prisma/migrations/20260907040000_viewer_history/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
-                 'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog'])
+                 'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
+                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -69,6 +71,20 @@ def expected_rows(uid):
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         updatedAt=STAMP) for number in (1, 2)]
+    item_id = '00000000-0000-4000-8000-000000000001'
+    snapshot = dict(schemaVersion=1, kind='key', seriesUid=uid+'.1', sopUid=uid+'.2',
+                    frame=1, title='SYNTHETIC key', description='', hidden=True)
+    # PostgreSQL jsonb::text uses a space after separators for this ASCII snapshot.
+    rows['ViewerItem'] = [dict(id=item_id, studyUid=uid, authorSub='SYNTHETIC-sub', authorActor='SYNTHETIC-reader',
+        revision=2, hidden=True, snapshot=snapshot, createdAt=STAMP, updatedAt=STAMP)]
+    snapshots = [{**snapshot, 'hidden': False}, snapshot]
+    rows['ViewerRevision'] = [dict(itemId=item_id, revision=n+1, snapshot=value,
+        action='create' if n==0 else 'hide', reason='' if n==0 else 'SYNTHETIC reason',
+        actor='SYNTHETIC-reader', payloadBytes=len(json.dumps(value).encode()), at=STAMP) for n,value in enumerate(snapshots)]
+    rows['ViewerStorageBudget'] = [dict(studyUid=uid, itemCount=1, revisionCount=2,
+        payloadBytes=sum(row['payloadBytes'] for row in rows['ViewerRevision']))]
+    rows['ViewerRequest'] = [dict(authorSub='SYNTHETIC-sub', requestId='00000000-0000-4000-8000-00000000000'+str(n),
+        fingerprint=str(n)*64, itemId=item_id, revision=n) for n in (1,2)]
     return rows
 
 
@@ -101,7 +117,8 @@ def create_product(name, db, uid):
     for raw in migration_sources():
         execute(name, db, raw.decode())
     data = expected_rows(uid)
-    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft'):
+    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft',
+                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -237,10 +254,17 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing report FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN INSERT INTO "ReportDraft" SELECT * FROM "ReportDraft" LIMIT 1;
         RAISE EXCEPTION 'missing draft PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN DELETE FROM "StudyState" WHERE uid=UID;
+        RAISE EXCEPTION 'missing viewer study restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN DELETE FROM "ViewerItem";
+        RAISE EXCEPTION 'missing viewer history restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN DELETE FROM "ViewerRevision";
+        RAISE EXCEPTION 'missing viewer replay restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)
-    return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True, rolled_back_unchanged=True)
+    return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True,
+                viewer_restrict=True, rolled_back_unchanged=True)
 
 
 def negative_restore(name, folder, product):
