@@ -151,6 +151,13 @@
     .thumbwrap button:disabled { opacity: .35; cursor: default; }
     .thumbs { display: grid; gap: 3px; }
     .thumbs img { width: 100%; height: auto; object-fit: contain; background: #000; cursor: pointer; }
+    .thumb-card { min-width: 0; overflow: hidden; background: #101a28; border: 1px solid #344258; border-radius: 3px; }
+    .thumb-preview { min-height: 20px; color: #d3dce8; font-size: 11px; overflow-wrap: anywhere; }
+    .thumb-preview img { display: block; }
+    .thumb-label { padding: 3px 5px; font-size: 11px; line-height: 1.5; }
+    .thumb-number, .thumb-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .thumb-number { color: #d3dce8; }
+    .thumb-description { color: #a5b9d3; }
     .s-clinical { width: 30%; }
     .clinical { flex: 1; padding: 6px 10px; overflow: auto; color: #aab2c0; }
     .clinical table td { border: none; padding: 2px 6px; }
@@ -1920,7 +1927,9 @@
             reps = [...bySeries.values()].map(arr => {
               arr.sort((a, b) => (+tagv(a, "00200013") || 0) - (+tagv(b, "00200013") || 0));
               const representative = arr[Math.floor(arr.length / 2)];
-              return { sopUid: tagv(representative, "00080018"), seriesUid: tagv(representative, "0020000E") };
+              // 순번은 DICOM 번호가 아니며, 표시 정보도 실제 preview의 대표 SOP와 함께 캐시해야 한다.
+              return { sopUid: tagv(representative, "00080018"), seriesUid: tagv(representative, "0020000E"),
+                number: tagv(representative, "00200011").trim(), description: tagv(representative, "0008103E").trim() };
             });
           }
           if (stale()) return;
@@ -1934,19 +1943,33 @@
           wrap.querySelector("#thumb-prev").onclick = () => { if (!stale()) renderThumbs(page - 1, { uid, reps }); };
           wrap.querySelector("#thumb-next").onclick = () => { if (!stale()) renderThumbs(page + 1, { uid, reps }); };
           const grid = wrap.querySelector(".thumbs");
-          const cells = batch.map(() => {
+          const cells = batch.map((rep, index) => {
             const cell = document.createElement("div");
-            cell.textContent = "로딩…";
+            cell.className = "thumb-card";
+            const heading = `항목 ${start + index + 1} · ${rep.number ? `번호 ${rep.number}` : "번호 없음"}`;
+            const description = rep.description || "설명 없음";
+            cell.title = `${heading}\n${description}\nSeries UID: ${rep.seriesUid || "없음"}\n더블클릭: Film Box`;
+            const preview = document.createElement("div");
+            preview.className = "thumb-preview";
+            preview.textContent = "로딩…";
+            const label = document.createElement("div");
+            label.className = "thumb-label";
+            const number = document.createElement("div"), detail = document.createElement("div");
+            number.className = "thumb-number"; number.textContent = heading;
+            detail.className = "thumb-description"; detail.textContent = description;
+            label.append(number, detail);
+            cell.append(label, preview);
             grid.appendChild(cell);
-            return cell;
+            return { preview, alt: `${heading} · ${description}` };
           });
           let next = 0;
           const worker = async () => {
             while (!stale() && next < batch.length) {
               const index = next++;
-              const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index].sopUid }, signal);
-              if (stale()) return;
               try {
+                // 한 항목의 조회 실패가 다른 영상과 실패한 항목의 식별 정보까지 지우면 대조할 수 없다.
+                const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index].sopUid }, signal);
+                if (stale()) return;
                 const res = await fetch(`/instances/${encodeURIComponent(lk.id)}/preview`, { signal, cache: "no-store" });
                 if (!res.ok) { await res.body?.cancel(); throw new Error(`HTTP ${res.status}`); }
                 const blob = await res.blob();
@@ -1954,15 +1977,14 @@
                 const url = URL.createObjectURL(blob);
                 thumbUrls.push(url);
                 const img = document.createElement("img");
-                img.alt = `시리즈 ${start + index + 1}`;
-                img.title = "더블클릭: Film Box";
-                img.onerror = () => { if (!stale()) cells[index].textContent = "썸네일 표시 실패"; };
+                img.alt = cells[index].alt;
+                img.onerror = () => { if (!stale()) cells[index].preview.textContent = "썸네일 표시 실패"; };
                 img.ondblclick = () => { if (!stale()) openFilmbox(uid, null, batch[index].seriesUid); };
                 img.src = url;
-                cells[index].replaceChildren(img);
+                cells[index].preview.replaceChildren(img);
               } catch (e) {
                 if (stale()) return;
-                cells[index].textContent = `썸네일 실패: ${e.message}`;
+                cells[index].preview.textContent = `썸네일 실패: ${e.message}`;
               }
             }
           };

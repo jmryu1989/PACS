@@ -803,3 +803,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Series thumbnail opening (D02E)
 
 `python tests/e2e/test_thumbnail_series.py` runs three local tests for real two-series CT thumbnail-to-viewport Study/Series/SOP identity and retained display sets; related/current report, private draft and hold preservation; cached paging, stale thumbnail handlers and missing/malformed Series UID refusal. The pagination response fixture tests identity plumbing without claiming 25 real loaded series. Existing whole-study/compare entry points remain separate.
+
+### Source series labels (D02F)
+
+`python tests/e2e/test_thumbnail_labels.py` runs three local tests for visible ordinal/source-number/description labels tied to real two-series CT metadata and viewport identity; missing, zero, duplicate and literal long text at 900×1400 with per-item lookup/preview failure identity; cached page labels, UID pairing and stale handlers. Labels describe the same representative SOP as the preview. Source-number sorting and metadata consistency validation are outside this contract. Response-only variants are distinguished from real C-STORE image checks; report, private draft, hold and original bytes are preserved. D02E and D02C remain separate regression suites.
