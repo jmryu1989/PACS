@@ -791,3 +791,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Related-study date context (D03B)
 
 `python tests/e2e/test_related_context.py` runs three local BFF/C-STORE UI tests for reporting-target identity, past/same-date/later/unknown labels, real manual comparison, uncertain-date response fixtures, and delayed related-report responses. It reuses the local fixture guard and checks original bytes/report rows.
+
+### Return from related viewing (D03C)
+
+`python tests/e2e/test_return_to_current.py` runs three local BFF/C-STORE UI tests: return to the report-target thumbnail/Clinical Info and real viewer; stale related replies and thumbnail cancellation; keyboard/small-window access with input, hold and report history preserved. It keeps normal autosave separate from the return action.
