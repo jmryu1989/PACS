@@ -665,3 +665,20 @@ checks ownership labels and removes only the fixture's containers/network/tag.
 The isolated `ops_deploy_entry.py` requires a separately provisioned root-owned
 policy/library/repository and request-bound operator evidence. Running scripts
 from a developer checkout does not grant deployment authority.
+# 뷰어 반전 정밀도
+
+`node --test tests/viewer_precision_test.cjs`는 고정 upstream 함수 fingerprint,
+버전/상속 불일치와 비동기 등록 충돌 거부, base/volume 보존, reset 네 조합,
+큰 좌표의 좌우/상하 반전 복귀를 확인한다. CI에서도 격리 Node 컨테이너로 실행한다.
+
+`python tests/e2e/test_viewer_precision.py`는 로컬 스택에서 합성 CT 2검사/4 SOP의
+좌우·상하·회전 후 반전과 pan/zoom, 주석 편집·초기화 12조건을 확인한다.
+제품 app-config를 그대로 사용하며 bundle 응답을 치환하지 않는다. 판독문·개인 초안·
+이력과 원본 hash 보존, 생성한 fixture/임시 인증만 정리한다. 결과는 workspace의
+`tmp/d05c5/`에 기록한다. 정식 입구와 로컬 테스트 자격증명을 사용하는 기존 E2E 준비가 필요하다.
+Orthanc는 UserConfiguration을 시작할 때 읽으므로 설정 수정 후 재시작·게시 포트/HTTPS 확인이 필요하다.
+
+적용 범위는 GPU StackViewport 반전/helper이며 CPU와 volume은 기존 경로다.
+`window.kinViewerPrecision.state`의 ready는 adapter 설치 상태일 뿐 영구 저장 허용 신호가 아니다.
+확대 시작점과 pan에 따른 잔여 오차는 남으며, 이후 저장 API는 원본 DICOM geometry에
+맞지 않는 좌표를 서버에서 거절해야 한다. 이 시험은 다른 영상군·전체 확대 조합·임상 정확도를 보증하지 않는다.
