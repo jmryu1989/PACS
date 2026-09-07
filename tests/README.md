@@ -816,3 +816,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Thumbnail common failures (D02G)
 
 `python tests/e2e/test_thumbnail_failures.py` runs three local tests for stopping new item scheduling after lookup/preview transport failure or HTTP401; bounded first-wave requests and unstarted-item labels; real BFF session revocation followed by the unchanged logout redirect; and continued per-item403/503 handling with explicit refresh recovery. Response-only25 identities and a logout observer are distinct from actual server401. Already in-flight items finish, so this is not immediate cancellation or global logout deduplication. D02F3 and D02C3 remain separate regression suites for real series/report identity and request lifecycle.
+
+### Accessible series identity and opening (D02I)
+
+`python tests/e2e/test_thumbnail_access.py` runs three local tests for native full-identity disclosure with keyboard/click and literal long text; Enter/Space/click opening of real current/related two-series CT with viewport identity and draft/hold preservation; cached paging, stale handlers, lookup/preview/decode/network failure disabling, recovery and invalid UID refusal. Response-only variants do not establish real 25-series image support. D02H3/D02G3/D02C3 remain relevant regressions.

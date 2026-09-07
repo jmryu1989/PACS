@@ -158,6 +158,11 @@
     .thumb-number, .thumb-description { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .thumb-number { color: #d3dce8; }
     .thumb-description { color: #a5b9d3; }
+    .thumb-details { padding: 3px 5px; font-size: 11px; line-height: 1.5; }
+    .thumb-details summary { cursor: pointer; }
+    .thumb-full { white-space: pre-wrap; overflow-wrap: anywhere; color: #d3dce8; }
+    .thumb-open { max-width: calc(100% - 8px); margin: 4px; white-space: normal; }
+    .thumb-details summary:focus-visible, .thumb-open:focus-visible { outline: 2px solid #8bc8ff; outline-offset: -2px; }
     .s-clinical { width: 30%; }
     .clinical { flex: 1; padding: 6px 10px; overflow: auto; color: #aab2c0; }
     .clinical table td { border: none; padding: 2px 6px; }
@@ -1984,9 +1989,18 @@
             number.className = "thumb-number"; number.textContent = heading;
             detail.className = "thumb-description"; detail.textContent = description;
             label.append(number, detail);
-            cell.append(label, preview);
+            // title과 생략 표시만으로는 키보드나 터치에서 전체 식별 정보를 읽을 수 없다.
+            const disclosure = document.createElement("details"), summary = document.createElement("summary"), full = document.createElement("div");
+            disclosure.className = "thumb-details"; summary.textContent = "상세 정보";
+            full.className = "thumb-full"; full.textContent = `${heading}\n${description}\nSeries UID: ${rep.seriesUid || "없음"}`;
+            disclosure.append(summary, full);
+            const open = document.createElement("button");
+            open.type = "button"; open.className = "chip thumb-open"; open.textContent = "시리즈 열기"; open.disabled = true;
+            open.setAttribute("aria-label", `시리즈 열기 · ${heading} · ${description} · Series UID: ${rep.seriesUid || "없음"}`);
+            open.onclick = () => { if (!stale() && !open.disabled) openFilmbox(uid, null, rep.seriesUid); };
+            cell.append(label, disclosure, preview, open);
             grid.appendChild(cell);
-            return { preview, alt: `${heading} · ${description}` };
+            return { preview, open, alt: `${heading} · ${description}` };
           });
           let next = 0, stopped = false;
           const worker = async () => {
@@ -2004,10 +2018,11 @@
                 thumbUrls.push(url);
                 const img = document.createElement("img");
                 img.alt = cells[index].alt;
-                img.onerror = () => { if (!stale()) cells[index].preview.textContent = "썸네일 표시 실패"; };
+                img.onerror = () => { if (!stale()) { cells[index].open.disabled = true; cells[index].preview.textContent = "썸네일 표시 실패"; } };
                 img.ondblclick = () => { if (!stale()) openFilmbox(uid, null, batch[index].seriesUid); };
                 img.src = url;
                 cells[index].preview.replaceChildren(img);
+                cells[index].open.disabled = false;
               } catch (e) {
                 if (stale()) return;
                 cells[index].preview.textContent = `썸네일 실패: ${e.message}`;
