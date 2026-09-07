@@ -613,6 +613,12 @@
         </section>
         <section class="s-clinical">
           <h3>Clinical Info <button id="sr-open" class="chip" type="button" disabled>SR 원문</button></h3>
+          <div style="padding:4px 10px;overflow-wrap:anywhere">
+            <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>환자 ID 복사</button>
+            <span style="font-size:11px">Ctrl+Alt+C</span>
+            <div id="copy-patient-context" style="font-size:11px">열람 검사를 선택하세요</div>
+            <div id="copy-patient-status" role="status" aria-live="polite" style="font-size:11px"></div>
+          </div>
           <div class="clinical" id="clinical">No clinical information provided.</div>
         </section>
         <section class="s-template">
@@ -1933,6 +1939,59 @@
     function viewingUid() { return viewed()?.uid ?? null; }
     function curOrder() { return orders.find(o => o.oid === selectedOid); }
 
+    let patientCopyContext = '', patientCopyEpoch = 0, patientCopyBusy = false, patientCopyEnded = false;
+    function patientCopyTarget() {
+      const s = viewed();
+      return !patientCopyEnded && serverMode && !demoMode && s?.uid && s.sourcePatientKey &&
+        typeof s.id === 'string' && s.id.trim() && s.institutionName ? s : null;
+    }
+    function renderPatientCopy() {
+      const s = patientCopyTarget();
+      const context = s ? JSON.stringify([s.uid, s.id, s.institutionName, s.name, s.date]) : '';
+      if (context !== patientCopyContext) {
+        patientCopyContext = context; patientCopyEpoch++;
+        $('#copy-patient-status').textContent = '';
+      }
+      $('#copy-patient-id').disabled = !s || patientCopyBusy;
+      $('#copy-patient-context').textContent = s
+        ? `열람 대상 · ${s.institutionName} · ${s.name} (${s.id}) · ${s.date || '날짜 없음'}`
+        : '복사할 환자 ID가 있는 열람 검사를 선택하세요';
+    }
+    async function copyViewedPatientId() {
+      renderPatientCopy();
+      const s = patientCopyTarget();
+      if (!s || patientCopyBusy) return;
+      const epoch = patientCopyEpoch;
+      if (!navigator.clipboard?.writeText) {
+        $('#copy-patient-status').textContent = '이 브라우저는 복사를 지원하지 않습니다. 표시된 ID를 직접 선택해 복사하세요.';
+        return;
+      }
+      patientCopyBusy = true; renderPatientCopy();
+      $('#copy-patient-status').textContent = '환자 ID 복사 중…';
+      try {
+        // Keep the user gesture and its exact ID together. An OS clipboard write
+        // cannot be recalled on navigation; only its late UI result is discarded.
+        await navigator.clipboard.writeText(s.id);
+        renderPatientCopy();
+        if (epoch === patientCopyEpoch) $('#copy-patient-status').textContent = '환자 ID를 복사했습니다.';
+      } catch (e) {
+        renderPatientCopy();
+        if (epoch === patientCopyEpoch) $('#copy-patient-status').textContent = '복사가 허용되지 않았거나 실패했습니다. 표시된 ID를 직접 선택해 복사하거나 다시 시도하세요.';
+      } finally {
+        patientCopyBusy = false; renderPatientCopy();
+      }
+    }
+    function endPatientCopy() { patientCopyEnded = true; patientCopyEpoch++; renderPatientCopy(); }
+    $('#copy-patient-id').addEventListener('click', copyViewedPatientId);
+    document.addEventListener('keydown', e => {
+      if (e.defaultPrevented || e.repeat || e.isComposing || e.metaKey || e.shiftKey ||
+          !e.ctrlKey || !e.altKey || e.code !== 'KeyC' ||
+          e.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]') ||
+          document.querySelector('dialog[open],.modal.show') || !patientCopyTarget()) return;
+      e.preventDefault(); copyViewedPatientId();
+    });
+    window.addEventListener('pagehide', endPatientCopy);
+
     function select(uid) {
       /**
        * **같은 검사를 다시 고르는 것은 이동이 아니다.**
@@ -1970,6 +2029,7 @@
 
     function renderClinical() {
       const s = viewed();
+      renderPatientCopy();
       if (srUid && srUid !== s?.uid) closeSR();
       $('#sr-open').disabled = !s || demoMode;
       $("#clinical").innerHTML = s ? `
@@ -3074,6 +3134,7 @@
       if (!confirm("로그아웃하시겠습니까?")) return;
       loggingOut = true;
       closeSR();
+      endPatientCopy();
       try {
         await stashReport();
         await releaseHold();   // 안 풀면 남은 사람에게 이 검사가 5분간 잠겨 보인다
