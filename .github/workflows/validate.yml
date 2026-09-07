@@ -33,6 +33,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_layout_test.cjs
       - name: CT position synchronization geometry boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_sync_test.cjs
+      - name: Cine preparation frame and pixel budget boundaries
+        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs
       - name: Pinned viewer precision and isolated stack method boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs
       - name: Deployment preflight refusal and shared lock

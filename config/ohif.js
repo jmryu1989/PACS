@@ -921,11 +921,155 @@ function kinCreateCTSync() {
   return { id: 'kin.ct-sync', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+function kinCineWithinBudget(ids, pixels) {
+  return ids.length >= 2 && ids.length <= 500 && pixels.length === ids.length &&
+    pixels.every(p => Number.isInteger(p?.rows) && p.rows > 0 && Number.isInteger(p?.columns) && p.columns > 0) &&
+    pixels.reduce((n, p) => n + p.rows * p.columns * 4, 0) <= 128 * 1024 * 1024;
+}
+
+function kinCreateCine() {
+  let services, dispose;
+  function mount() {
+    dispose?.();
+    const core = window.cornerstone, cine = services.cineService, grid = services.viewportGridService;
+    const nativePlay = cine.playClip, nativeStop = cine.stopClip;
+    const records = new Map(), subscriptions = [], listeners = [];
+    let ended = false, channel, selected, owner, sequence = 0, halting = false, wasEnabled = false;
+    const panel = document.createElement('div'); panel.id = 'kin-cine'; panel.hidden = true;
+    panel.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);z-index:42;max-width:65vw;display:flex;flex-wrap:wrap;gap:6px;padding:7px;background:#101e32;color:#e1ecfc;border-radius:6px;font:13px sans-serif';
+    // The native controls remain the playback/FPS entry point; these apply to the selected stack only.
+    const direction = document.createElement('select'); direction.setAttribute('aria-label', '재생 방향');
+    for (const [value, text] of [['forward', '정방향'], ['reverse', '역방향']]) {
+      const option = document.createElement('option'); option.value = value; option.textContent = text; direction.append(option);
+    }
+    const loop = document.createElement('input'); loop.type = 'checkbox'; loop.checked = true;
+    const label = document.createElement('label'); label.append(loop, ' 반복');
+    const status = document.createElement('span'); status.setAttribute('role', 'status');
+    const first = document.createElement('button'); first.textContent = '첫 프레임';
+    const last = document.createElement('button'); last.textContent = '끝 프레임';
+    panel.append('선택 화면 ', direction, label, first, last, status); document.body.append(panel);
+    for (const control of [direction, first, last]) control.style.cssText = 'background:#263c57;color:white;border:1px solid #6884a6;border-radius:3px;padding:2px 5px';
+    const listen = (target, type, fn, capture = false) => { target.addEventListener(type, fn, capture); listeners.push(() => target.removeEventListener(type, fn, capture)); };
+    const viewport = id => services.cornerstoneViewportService.getCornerstoneViewport(id);
+    const signature = v => JSON.stringify([grid.getState().viewports.get(v.id)?.displaySetInstanceUIDs, v.getImageIds?.()]);
+    function record(v) {
+      let r = records.get(v.id);
+      if (!r || r.element !== v.element) {
+        r = { element: v.element, reverse: false, loop: true, ticket: 0, signature: signature(v) }; records.set(v.id, r);
+        listen(v.element, core.Enums.Events.VIEWPORT_NEW_IMAGE_SET, () => { r.signature = signature(v); halt(v.id); r.reverse = false; r.loop = true; render(); });
+        listen(v.element, 'CORNERSTONE_CINE_TOOL_STOPPED', () => halt(v.id));
+      }
+      return r;
+    }
+    function halt(id) {
+      const r = records.get(id); if (r) { r.ticket = ++sequence; r.loading = false; r.authorized = false; nativeStop.call(cine, r.element, { viewportId: id }); }
+      if (cine.getState().cines?.[id]?.isPlaying) cine.setCine({ id, isPlaying: false });
+    }
+    function haltAll() { if (halting) return; halting = true; try { records.forEach((_, id) => halt(id)); } finally { halting = false; } }
+    function render() {
+      if (ended) return;
+      const id = grid.getActiveViewportId(), v = viewport(id), stack = v?.type === 'stack';
+      panel.hidden = !cine.getState().isCineEnabled || !stack;
+      panel.style.display = panel.hidden ? 'none' : 'flex';
+      if (!stack) return;
+      const r = record(v);
+      if (r.signature !== signature(v)) { r.signature = signature(v); halt(id); r.reverse = false; r.loop = true; }
+      direction.value = r.reverse ? 'reverse' : 'forward'; loop.checked = r.loop;
+      first.disabled = last.disabled = r.loading || !v.getImageIds?.().length;
+      status.textContent = r.message || (r.loading ? '프레임 준비 중' : '');
+    }
+    async function session() {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw Error('로그인 상태를 확인할 수 없습니다');
+        const me = await response.json();
+        const key = me?.kind === 'member' && me.institution && me.sub ? JSON.stringify([me.institution, me.sub]) : null;
+        if (!key || (owner && key !== owner)) throw Error('계정이 변경되었습니다');
+        owner = key;
+      } finally { clearTimeout(timer); }
+    }
+    cine.stopClip = function (element, options) {
+      const v = core.getEnabledElement(element)?.viewport, r = v && records.get(v.id);
+      if (r) { r.ticket = ++sequence; r.loading = false; }
+      return nativeStop.call(this, element, options);
+    };
+    cine.playClip = async function (element, options = {}) {
+      const v = core.getEnabledElement(element)?.viewport;
+      if (ended || document.hidden || !v) return;
+      if (v.type !== 'stack') return nativePlay.call(this, element, options);
+      const r = record(v), id = v.id, ticket = r.ticket = ++sequence, before = signature(v);
+      const current = () => !ended && !document.hidden && r.authorized && r.ticket === ticket && viewport(id) === v && signature(v) === before && grid.getActiveViewportId() === id && cine.getState().isCineEnabled;
+      if (!r.authorized || grid.getActiveViewportId() !== id) { halt(id); return; }
+      records.forEach((_, other) => { if (other !== id) halt(other); });
+      r.loading = true; r.message = ''; render();
+      try {
+        const ids = v.getImageIds(), pixels = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
+        if (!kinCineWithinBudget(ids, pixels)) throw Error('재생 준비 범위는 2~500 프레임·128 MiB 이내입니다');
+        await session(); if (!current()) return;
+        // Finish a bounded, four-worker preparation before the native timer starts, so stop/replace cannot be undone by a late frame load.
+        let next = 0;
+        await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
+          while (current() && next < ids.length) { const imageId = ids[next++]; await core.imageLoader.loadAndCacheImage(imageId); }
+        }));
+        if (!current()) return;
+        r.loading = false;
+        nativePlay.call(this, element, { ...options, framesPerSecond: Math.abs(options.framesPerSecond || 10) * (r.reverse ? -1 : 1), loop: r.loop });
+        // This pinned native API retains loop from its first play; update its public cine state on every explicit start.
+        window.cornerstoneTools.utilities.cine.getToolState(element).loop = r.loop;
+        render();
+      } catch (_) {
+        if (current()) { r.message = '재생을 준비할 수 없습니다. 로그인·영상과 500 프레임/128 MiB 제한을 확인하세요.'; halt(id); render(); }
+      }
+    };
+    const change = () => {
+      const v = viewport(grid.getActiveViewportId()); if (v?.type !== 'stack') return;
+      const r = record(v); r.reverse = direction.value === 'reverse'; r.loop = loop.checked; halt(v.id); r.message = '설정을 바꿨습니다. 재생을 눌러 시작하세요.'; render();
+    };
+    listen(direction, 'change', change); listen(loop, 'change', change);
+    listen(document, 'click', e => {
+      if (!e.target.closest?.('[data-cy="cine-player-play-pause"]')) return;
+      const v = viewport(grid.getActiveViewportId());
+      if (v?.type === 'stack') record(v).authorized = !cine.getState().cines?.[v.id]?.isPlaying;
+    }, true);
+    async function jump(end) {
+      const v = viewport(grid.getActiveViewportId()); if (v?.type !== 'stack') return;
+      halt(v.id); const r = record(v), ticket = r.ticket = ++sequence, before = signature(v);
+      const index = end ? v.getImageIds().length - 1 : 0, imageId = v.getImageIds()[index];
+      r.loading = true; r.message = ''; render();
+      try {
+        await core.imageLoader.loadAndCacheImage(imageId);
+        if (ended || r.ticket !== ticket || viewport(v.id) !== v || signature(v) !== before) return;
+        await core.utilities.jumpToSlice(v.element, { imageIndex: index });
+      } catch (_) { if (!ended && r.ticket === ticket) r.message = '프레임을 불러올 수 없습니다'; }
+      finally { if (!ended && r.ticket === ticket) { r.loading = false; render(); } }
+    }
+    listen(first, 'click', () => jump(false)); listen(last, 'click', () => jump(true));
+    for (const event of [grid.EVENTS.ACTIVE_VIEWPORT_ID_CHANGED, grid.EVENTS.GRID_STATE_CHANGED]) subscriptions.push(grid.subscribe(event, () => {
+      const id = grid.getActiveViewportId(); if (selected !== id) { haltAll(); selected = id; }
+      records.forEach((r, key) => { const v = viewport(key); if (!v || r.signature !== signature(v)) halt(key); }); render();
+    }));
+    subscriptions.push(cine.subscribe(cine.EVENTS.CINE_STATE_CHANGED, () => {
+      const enabled = cine.getState().isCineEnabled, closing = wasEnabled && !enabled; wasEnabled = enabled;
+      if (closing) haltAll(); if (!halting) render();
+    }));
+    const end = () => { haltAll(); ended = true; panel.style.display = 'none'; };
+    listen(document, 'visibilitychange', () => { if (document.hidden) haltAll(); });
+    listen(window, 'pagehide', end);
+    listen(window, 'storage', e => { if (e.key === 'kin-session-ended') end(); });
+    try { channel = new BroadcastChannel('kin-session'); listen(channel, 'message', e => { if (e.data?.type === 'session-ended') end(); }); } catch (_) {}
+    const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();
+    dispose = () => { end(); clearInterval(timer); listeners.forEach(off => off()); subscriptions.forEach(s => s.unsubscribe()); channel?.close(); cine.playClip = nativePlay; cine.stopClip = nativeStop; panel.remove(); };
+  }
+  return { id: 'kin.cine', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
+}
+
 window.config = {
-  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateCTSync()],
+  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateCTSync(), kinCreateCine()],
   modes: [],
   customizationService: {},
   showStudyList: true,
+  autoPlayCine: false,
 
   // [KIN 추가] 업스트림 소스를 건드리지 않고 헤더·검사 탭 수명주기를 교체한다.
   whiteLabeling: {
