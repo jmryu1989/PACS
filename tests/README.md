@@ -1,5 +1,9 @@
 # 살아 있는 불변조건 테스트
 
+D09D 개인 상용구 부위 필터: `python tests/e2e/test_template_filters.py` (별도 UI4).
+부위 정규화/미지정·검색/정확 Modality 조합·조건 유지/전체 보기·편집/삭제·계정 분리와 탐색 쓰기0을 검증한다.
+실제 CT와 합성 API Modality 변형을 구분하며 D09A/B/C·D02A·최종69→14를 유지한다.
+
 외부 백업 OFF/전송: `python -B tests/ops_offsite_backup_test.py`.
 기본 OFF에서는 SDK·자격증명·원본·네트워크에 접근하지 않는다. enabled 경로는 Linux private
 seal 산출물 검증·암호문/receipt 전송·전체 GET hash/size 대조·실패 시 원본 보존을 시험한다.

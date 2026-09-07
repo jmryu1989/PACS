@@ -157,6 +157,8 @@
     .clinical td:first-child { color: #667; }
     .s-template { flex: 1; }
     .tpl-opts { display: flex; gap: 8px; padding: 3px 8px; background: #171c25; color: #8892a4; font-size: 11px; flex: none; flex-wrap: wrap; }
+    .tpl-opts select { max-width: 145px; min-width: 0; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; font: inherit; }
+    .tpl-filter-status { padding: 3px 8px; color: #aab2c0; font-size: 11px; flex: none; overflow-wrap: anywhere; }
     .tpl-list { flex: 1; overflow: auto; }
     .tpl-list td { font-size: 11px; }
     .tpl-list tr { cursor: pointer; }
@@ -587,13 +589,15 @@
           <h3>Reading Template</h3>
           <div class="tpl-opts">
             <label><input type="checkbox" id="t-mod" checked> Modality</label>
-            <label><input type="checkbox" id="t-body"> Bodypart</label>
-            <label><input type="checkbox" id="t-desc"> Study Description</label>
+            <label>부위 <select id="t-body" aria-label="상용구 부위"><option value="">전체 부위</option></select></label>
+            <label title="검사명 자동 매칭은 준비 중입니다"><input type="checkbox" id="t-desc" disabled> Study Description (준비 중)</label>
           </div>
           <div class="tpl-search">
             <input id="tpl-search" type="search" maxlength="200" aria-label="상용구 검색" placeholder="제목·단축어·Modality·부위 검색">
             <button id="tpl-search-clear" class="chip" type="button">검색 해제</button>
+            <button id="tpl-filter-clear" class="chip" type="button">전체 보기</button>
           </div>
+          <div id="tpl-filter-status" class="tpl-filter-status" role="status" aria-live="polite"></div>
           <div class="tpl-list">
             <table style="width:100%">
               <thead><tr><th>Title</th><th>Shortcut</th><th>Modality</th><th>미리보기</th></tr></thead>
@@ -1032,14 +1036,37 @@
     };
     saveTemplatesLocal();
 
+    const templateClass = value => String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+    const templateModalities = value => String(value ?? "").split(",").map(templateClass).filter(Boolean);
+    function renderTemplateBodyparts() {
+      const select = $("#t-body"), chosen = select.value, label = select.selectedOptions[0]?.textContent;
+      const classes = new Map();
+      for (const t of templates) {
+        const key = templateClass(t.bodypart);
+        if (key && !classes.has(key)) classes.set(key, String(t.bodypart).trim().replace(/\s+/g, " "));
+      }
+      const options = [new Option("전체 부위", ""), new Option("미지정", JSON.stringify("")),
+        ...[...classes].sort(([a], [b]) => a.localeCompare(b)).map(([key, name]) => new Option(name, JSON.stringify(key)))];
+      // 마지막 항목의 부위를 바꿔도 사용자가 고른 조건을 몰래 '전체'로 넓히지 않는다.
+      if (chosen && !options.some(option => option.value === chosen)) options.push(new Option(label, chosen));
+      select.replaceChildren(...options); select.value = chosen;
+    }
     function renderTemplates() {
       const s = cur();
-      const useMod = $("#t-mod").checked;
+      const useMod = $("#t-mod").checked, modalities = templateModalities(s?.modality);
+      renderTemplateBodyparts();
+      const body = $("#t-body").value;
       const words = $("#tpl-search").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
       const list = templates.filter(t => {
         const text = [t.title, t.shortcut, t.modality, t.bodypart].map(v => String(v ?? "").toLowerCase()).join(" ");
-        return (!useMod || !s || !t.modality || s.modality.includes(t.modality)) && words.every(word => text.includes(word));
+        const kinds = templateModalities(t.modality);
+        // CT가 SCT 같은 다른 코드의 일부라는 이유로 분류에 들어오면 안 된다.
+        return (!useMod || !modalities.length || !kinds.length || kinds.some(kind => modalities.includes(kind)))
+          && (!body || JSON.stringify(templateClass(t.bodypart)) === body) && words.every(word => text.includes(word));
       });
+      const modStatus = !useMod ? "Modality 전체" : !s ? "검사 미선택 · Modality 미적용"
+        : !modalities.length ? "검사 Modality 없음 · 미적용" : "Modality: " + modalities.join(", ").toUpperCase();
+      $("#tpl-filter-status").textContent = `${list.length} / ${templates.length}개 · ${modStatus} · ${$("#t-body").selectedOptions[0].textContent}${words.length ? " · 검색 적용" : ""}`;
       $("#tplrows").innerHTML = list.map(t => `
         <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입${
           t.shortcut ? ` / 판독문에서 &quot;${esc(t.shortcut)}&quot; 입력 후 Tab` : ""} / 우클릭: 편집">
@@ -1074,6 +1101,11 @@
       insertTemplate(templates[+tr.dataset.i]);
     });
     $("#t-mod").addEventListener("change", renderTemplates);
+    $("#t-body").addEventListener("change", renderTemplates);
+    $("#tpl-filter-clear").addEventListener("click", () => {
+      $("#tpl-search").value = ""; $("#t-body").value = ""; $("#t-mod").checked = false;
+      renderTemplates(); $("#tpl-search").focus();
+    });
     $("#tpl-search").addEventListener("input", renderTemplates);
     $("#tpl-search-clear").addEventListener("click", () => {
       $("#tpl-search").value = ""; renderTemplates(); $("#tpl-search").focus();
