@@ -183,6 +183,8 @@
     .reltabs .spacer { flex: 1; }
     .reltabs button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; margin-right: 4px; }
     .reltabs label { color: #7f8899; font-size: 11px; padding: 0 6px; display: flex; align-items: center; gap: 3px; cursor: pointer; }
+    #related-current { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                       padding: 4px 10px; font-size: 11px; color: var(--kin-link); }
     .grid2 { overflow: auto; flex: 1; }
     #relrows tr[data-uid] { cursor: pointer; }
     #relrows tr.related-selected td { background: var(--kin-row-sel); }
@@ -617,6 +619,7 @@
             <span class="rel-title">Related Exam</span>
             <span class="spacer"></span>
           </div>
+          <div id="related-current" role="status" aria-live="polite">판독 대상을 선택하세요</div>
           <div class="grid2">
             <table>
               <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
@@ -628,7 +631,7 @@
              title="드래그하여 Related 목록과 이전 판독문 높이 조절"></div>
         <div class="prior-report-pane">
           <div class="prior-report-head">
-            <b>이전 판독문</b>
+            <b>관련 판독문</b>
             <span class="meta" id="prior-report-meta"></span>
             <span class="readonly">읽기 전용</span>
           </div>
@@ -1788,9 +1791,24 @@
         </table>` : "No clinical information provided.";
     }
 
+    function relatedDateLabel(target) {
+      const current = cur();
+      // 수동 비교에는 이후 검사도 들어온다. 날짜를 모르는 경우와 같은 날의 선후를 과거로 추측하지 않는다.
+      if (!current || !validPriorDate(current.date) || !validPriorDate(target.date)) return "날짜 미확인";
+      if (target.date === current.date) return "같은 날짜 · 선후 미확인";
+      return target.date < current.date ? "과거" : "이후";
+    }
+    function relatedReportMeta(s) {
+      return `${relatedDateLabel(s)} · ${s.name} (${s.id}) · ${s.date || "날짜 없음"} · ${s.modality} · ${shownStudyDesc(s)}`;
+    }
+
     // Related Exam: 서버가 원본 기관+PatientID로 만든 키가 같은 "다른" 검사만.
     function renderRelated() {
       const s = cur();
+      $("#related-current").textContent = s
+        ? `판독 대상 · ${s.date || "날짜 없음"} · ${s.modality} · ${s.name} (${s.id}) · ${shownStudyDesc(s)}`
+        : "판독 대상을 선택하세요";
+      $("#related-current").title = $("#related-current").textContent;
       let rel = [];
       if (s) {
         rel = studies.filter(x => s.sourcePatientKey && x.sourcePatientKey === s.sourcePatientKey && x.uid !== s.uid);
@@ -1800,7 +1818,7 @@
         ? (rel.map(x => {
             return `
             <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid ? "related-selected" : ""}">
-              <td>${x.uid === relatedUid ? "👁 열람 중" : "비교"}</td>
+              <td>${relatedDateLabel(x)} · ${x.uid === relatedUid ? "👁 열람 중" : "비교"}</td>
               <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
               <td>${x.rs === "A" ? "승인 판독문" : "판독문 없음"}</td>
@@ -2111,6 +2129,7 @@
 
     function clearRelatedReport(message = "Related Exam을 선택하세요") {
       $("#prior-report-meta").textContent = "";
+      $("#prior-report-meta").title = "";
       $("#prior-report-status").textContent = message;
       $("#prior-report-status").style.display = "";
       $("#prior-report-content").style.display = "none";
@@ -2132,7 +2151,8 @@
       const currentUid = selectedUid;
       const seq = ++relatedReportSeq;
       const stale = () => seq !== relatedReportSeq || uid !== relatedUid || selectedUid !== currentUid;
-      $("#prior-report-meta").textContent = `${s.date} · ${s.modality} · ${shownStudyDesc(s)}`;
+      $("#prior-report-meta").textContent = relatedReportMeta(s);
+      $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-report-status").textContent = s.rs === "A" ? "승인 판독문 불러오는 중…" : "판독문 없음";
       $("#prior-report-status").style.display = "";
       $("#prior-report-content").style.display = "none";
@@ -2159,7 +2179,8 @@
       if (stale()) return;
       if (!report) { $("#prior-report-status").textContent = "판독문 없음"; return; }
       $("#prior-report-meta").textContent =
-        `${s.date} · ${s.modality} · ${shownStudyDesc(s)} · 판독의 ${displayActor(report.author) || "-"}`;
+        `${relatedReportMeta(s)} · 판독의 ${displayActor(report.author) || "-"}`;
+      $("#prior-report-meta").title = $("#prior-report-meta").textContent;
       $("#prior-findings").textContent = report.findings ?? "";
       $("#prior-conclusion").textContent = report.conclusion ?? "";
       $("#prior-recommendation").textContent = report.recommendation ?? "";

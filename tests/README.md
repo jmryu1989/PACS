@@ -787,3 +787,7 @@ exponent values previously failed the immutable revision byte equality check
 when Prisma serialized an object differently. The live API reference suite
 checks these exact numeric values, original-success replay and stored byte equality.
 No schema, quota, permission or geometry tolerance is relaxed.
+
+### Related-study date context (D03B)
+
+`python tests/e2e/test_related_context.py` runs three local BFF/C-STORE UI tests for reporting-target identity, past/same-date/later/unknown labels, real manual comparison, uncertain-date response fixtures, and delayed related-report responses. It reuses the local fixture guard and checks original bytes/report rows.
