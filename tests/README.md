@@ -1,5 +1,11 @@
 # 살아 있는 불변조건 테스트
 
+D09B 개인 상용구 검색·미리보기: `python tests/e2e/test_template_preview.py` (별도 실제4).
+제목/단축어/Modality/부위의 리터럴 복수어 검색·해제·기존 modality 조건,
+세 칸의 읽기 전용 미리보기·키보드/짧은 창·XSS 문자열·현재/prior 삽입 대상,
+A→B→A 선택 변경의 미리보기 폐기·공유 삽입 관문·빈 내용 안내를 검증한다.
+실제 명시적 삽입의 점유/개인 초안과 합성 원본hash를 대조하고 D09A4·D02A3도 유지한다.
+
 D09A 개인 상용구 보존: `python tests/e2e/test_template_preservation.py` (별도 실제4).
 기존 부위/권고문/순서의 제목 편집 왕복, 취소/503/명시적 비움, 새 로그인·개인 소유,
 Recommendation 커서 Tab·세 칸 삽입·실제 판독 점유·현재 개인 초안/관련 확정본 분리,

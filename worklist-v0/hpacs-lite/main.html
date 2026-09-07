@@ -160,6 +160,14 @@
     .tpl-list { flex: 1; overflow: auto; }
     .tpl-list td { font-size: 11px; }
     .tpl-list tr { cursor: pointer; }
+    .tpl-search { display: flex; gap: 5px; padding: 4px 8px; flex: none; }
+    .tpl-search input { flex: 1; min-width: 0; background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; padding: 4px; font: inherit; }
+    .tpl-preview-body { overflow: auto; padding: 10px 12px; }
+    .tpl-preview-body h4 { color: #8892a4; font-size: 11px; margin: 10px 0 4px; }
+    .tpl-preview-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; margin: 0; }
+    #tpl-preview-meta, #tpl-preview-target, #tpl-preview-status { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 8px; }
+    #tpl-preview-target, #tpl-preview-status { flex: none; padding: 6px 12px; margin: 0; }
+    #tpl-preview-target { border-bottom: 1px solid #333c4d; }
 
     /* Related Exam + 이전 판독문 | 현재 판독문 — 나란히 두 기둥 */
     .workrow { flex: 1; display: flex; min-height: 0; }
@@ -256,7 +264,7 @@
     .modal .foot button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 14px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
     /* 상용구는 여러 줄인 것이 정상이다 — 입력칸도 여러 줄이어야 한다 */
-    #tplmodal .box { display: flex; flex-direction: column; max-height: 90vh; }
+    #tplmodal .box, #tpl-preview .box { display: flex; flex-direction: column; max-height: 90vh; }
     .modal .tplbody { align-items: start; overflow-y: auto; }
     .modal .tplbody label { padding-top: 5px; }
     .modal .tplbody textarea { background: #14181f; border: 1px solid #3a4356; color: #cdd3dc;
@@ -581,9 +589,13 @@
             <label><input type="checkbox" id="t-body"> Bodypart</label>
             <label><input type="checkbox" id="t-desc"> Study Description</label>
           </div>
+          <div class="tpl-search">
+            <input id="tpl-search" type="search" maxlength="200" aria-label="상용구 검색" placeholder="제목·단축어·Modality·부위 검색">
+            <button id="tpl-search-clear" class="chip" type="button">검색 해제</button>
+          </div>
           <div class="tpl-list">
             <table style="width:100%">
-              <thead><tr><th>Title</th><th>Shortcut</th><th>Modality</th></tr></thead>
+              <thead><tr><th>Title</th><th>Shortcut</th><th>Modality</th><th>미리보기</th></tr></thead>
               <tbody id="tplrows"></tbody>
             </table>
           </div>
@@ -750,6 +762,24 @@
       <div class="foot">
         <button id="tpl-cancel">취소</button>
         <button class="ok" id="tpl-save">저장</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="tpl-preview" role="dialog" aria-modal="true" aria-labelledby="tpl-preview-title">
+    <div class="box" style="width:640px;max-width:94vw">
+      <h3 id="tpl-preview-title">상용구 미리보기</h3>
+      <p id="tpl-preview-target"></p>
+      <div class="tpl-preview-body" tabindex="0" role="region" aria-label="상용구 내용">
+        <p id="tpl-preview-meta"></p>
+        <h4>Findings</h4><pre id="tpl-preview-findings"></pre>
+        <h4>Conclusion</h4><pre id="tpl-preview-conclusion"></pre>
+        <h4>Recommendation</h4><pre id="tpl-preview-recommendation"></pre>
+      </div>
+      <p id="tpl-preview-status" role="status"></p>
+      <div class="foot">
+        <button id="tpl-preview-close" type="button">닫기</button>
+        <button id="tpl-preview-insert" class="ok" type="button">현재 판독문에 삽입</button>
       </div>
     </div>
   </div>
@@ -1002,21 +1032,30 @@
     function renderTemplates() {
       const s = cur();
       const useMod = $("#t-mod").checked;
-      const list = templates.filter(t => !useMod || !s || !t.modality || s.modality.includes(t.modality));
+      const words = $("#tpl-search").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      const list = templates.filter(t => {
+        const text = [t.title, t.shortcut, t.modality, t.bodypart].map(v => String(v ?? "").toLowerCase()).join(" ");
+        return (!useMod || !s || !t.modality || s.modality.includes(t.modality)) && words.every(word => text.includes(word));
+      });
       $("#tplrows").innerHTML = list.map(t => `
         <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입${
           t.shortcut ? ` / 판독문에서 &quot;${esc(t.shortcut)}&quot; 입력 후 Tab` : ""} / 우클릭: 편집">
           <td>${esc(t.title)}</td><td>${esc(t.shortcut)}</td><td>${esc(t.modality)}</td>
-        </tr>`).join("") || `<tr><td class="empty" colspan="3">상용구 없음 — 우클릭해서 추가하세요</td></tr>`;
+          <td><button type="button" class="chip" data-tpl-preview aria-label="상용구 미리보기: ${esc(t.title)}">보기</button></td>
+        </tr>`).join("") || `<tr><td class="empty" colspan="4">${templates.length ? "조건에 맞는 상용구가 없습니다" : "상용구 없음 — 우클릭해서 추가하세요"}</td></tr>`;
+      updateTemplatePreview();
     }
-    $("#tplrows").addEventListener("dblclick", e => {
-      const tr = e.target.closest("tr[data-i]"); if (!tr) return;
+    function templateInsertionBlock(t) {
       const why = reportWriteBlock();
-      if (why) { toast(why, "err"); return; }
+      if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
-      if (RFIELDS.some(k => $("#" + k).readOnly)) { toast("현재 판독문은 편집할 수 없습니다", "err"); return; }
-      const t = templates[+tr.dataset.i];
-      if (!t) return;
+      if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
+      if (!t || RFIELDS.every(k => !t[k])) return "삽입할 내용이 없습니다";
+      return null;
+    }
+    function insertTemplate(t) {
+      const why = templateInsertionBlock(t);
+      if (why) { toast(why, "info"); return false; }
       for (const k of RFIELDS) {
         if (!t[k]) continue;
         const el = $("#" + k);
@@ -1024,8 +1063,74 @@
         // 목록 삽입도 타이핑/Tab처럼 점유를 시작해야 다른 판독의에게 편집 중임이 보인다.
         el.dispatchEvent(new Event("input", { bubbles: true }));
       }
+      return true;
+    }
+    $("#tplrows").addEventListener("dblclick", e => {
+      if (e.target.closest("button")) return;
+      const tr = e.target.closest("tr[data-i]"); if (!tr?.isConnected) return;
+      insertTemplate(templates[+tr.dataset.i]);
     });
     $("#t-mod").addEventListener("change", renderTemplates);
+    $("#tpl-search").addEventListener("input", renderTemplates);
+    $("#tpl-search-clear").addEventListener("click", () => {
+      $("#tpl-search").value = ""; renderTemplates(); $("#tpl-search").focus();
+    });
+
+    let templatePreview = null, templatePreviewReturn = null;
+    function closeTemplatePreview(returnFocus = true) {
+      if (!templatePreview) return;
+      templatePreview = null;
+      $("#tpl-preview").classList.remove("show");
+      $("#tpl-preview-insert").disabled = true;
+      delete $("#tpl-preview-target").dataset.uid;
+      for (const id of ["title", "meta", "target", "status", ...RFIELDS]) $("#tpl-preview-" + id).textContent = "";
+      if (returnFocus) (templatePreviewReturn?.isConnected ? templatePreviewReturn : $("#tpl-search")).focus();
+      templatePreviewReturn = null;
+    }
+    function updateTemplatePreview() {
+      if (!templatePreview) return;
+      if (templatePreview.uid !== selectedUid) { closeTemplatePreview(false); return; }
+      const s = cur(), why = templateInsertionBlock(templatePreview.template);
+      $("#tpl-preview-target").dataset.uid = selectedUid ?? "";
+      $("#tpl-preview-target").textContent = s ? `삽입 대상: ${s.name} (${s.id})\n${s.date} · ${shownStudyDesc(s)} · AccNo: ${s.acc || "없음"}` : "삽입 대상: 검사 미선택";
+      $("#tpl-preview-status").textContent = why ?? (s?.rs === "A"
+        ? "삽입은 개인 초안에 반영됩니다. 승인본에 추가하려면 Addendum을 사용하세요."
+        : "삽입은 개인 초안에 반영됩니다. 확정하려면 Save 또는 Approve를 사용하세요.");
+      $("#tpl-preview-insert").disabled = !!why;
+    }
+    $("#tplrows").addEventListener("click", e => {
+      const button = e.target.closest("[data-tpl-preview]"); if (!button) return;
+      const tr = button.closest("tr[data-i]"), t = templates[+tr.dataset.i]; if (!t) return;
+      // 목록이 새로 로드돼도, 삽입은 사람이 미리보기에서 읽은 문장과 같아야 한다.
+      templatePreview = { uid: selectedUid, template: Object.fromEntries(
+        ["title", "shortcut", "modality", "bodypart", ...RFIELDS].map(k => [k, String(t[k] ?? "")])) };
+      templatePreviewReturn = button;
+      const snapshot = templatePreview.template;
+      $("#tpl-preview-title").textContent = `상용구 미리보기 — ${snapshot.title}`;
+      $("#tpl-preview-meta").textContent = `단축어: ${snapshot.shortcut || "없음"} · Modality: ${snapshot.modality || "전체"} · Bodypart: ${snapshot.bodypart || "미지정"}`;
+      for (const k of RFIELDS) $("#tpl-preview-" + k).textContent = snapshot[k] || "(내용 없음)";
+      updateTemplatePreview();
+      $("#tpl-preview").classList.add("show");
+      $("#tpl-preview-close").focus();
+    });
+    $("#tpl-preview-close").addEventListener("click", () => closeTemplatePreview());
+    $("#tpl-preview-insert").addEventListener("click", () => {
+      if (!templatePreview || templatePreview.uid !== selectedUid) { closeTemplatePreview(false); return; }
+      if (insertTemplate(templatePreview.template)) closeTemplatePreview();
+      else updateTemplatePreview();
+    });
+    $("#tpl-preview").addEventListener("click", e => { if (e.target.id === "tpl-preview") closeTemplatePreview(); });
+    $("#tpl-preview").addEventListener("keydown", e => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeTemplatePreview(); }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        // 긴 문장을 키보드로 스크롤하면서도 삽입 대상은 계속 볼 수 있어야 한다.
+        const controls = [$("#tpl-preview .tpl-preview-body"), $("#tpl-preview-close"), $("#tpl-preview-insert")].filter(b => !b.disabled);
+        const index = controls.indexOf(document.activeElement);
+        controls[(index + (e.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+      }
+    });
+    window.addEventListener("pagehide", () => closeTemplatePreview(false));
 
     /**
      * **단축어(shortcut)를 실제로 동작시킨다.**
@@ -1518,6 +1623,8 @@
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
       if (uid === selectedUid) return;
+      // A→B→A로 돌아와도 이전 검사에서 읽던 미리보기의 삽입 버튼은 재사용하지 않는다.
+      closeTemplatePreview(false);
       // 사유를 고르는 동안 A→B→A로 이동해도 이전 모달의 결정을 새 선택에 적용하지 않는다.
       if (reasonResolve) reasonResolve(null);
       stashReport();
@@ -2287,6 +2394,7 @@
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
       }
+      updateTemplatePreview();
     }
 
     /**
