@@ -1,5 +1,9 @@
 # 살아 있는 불변조건 테스트
 
+D09E 복사한 상용구 편집문 보존: `python tests/e2e/test_template_snapshot.py` (별도 UI2).
+실제 지연된 초안 버리기 응답 후 원판독이 비어도 편집문3칸을 저장하며, 목록에서 출처가 사라지면 저장을 거절한다.
+원판독/이력·개인 owner·POST1회·새 로그인과 기존 D09C4/D09A4·최종69→14를 유지한다.
+
 D09D 개인 상용구 부위 필터: `python tests/e2e/test_template_filters.py` (별도 UI4).
 부위 정규화/미지정·검색/정확 Modality 조합·조건 유지/전체 보기·편집/삭제·계정 분리와 탐색 쓰기0을 검증한다.
 실제 CT와 합성 API Modality 변형을 구분하며 D09A/B/C·D02A·최종69→14를 유지한다.

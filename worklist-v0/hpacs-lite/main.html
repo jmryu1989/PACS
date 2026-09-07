@@ -1218,8 +1218,15 @@
     function currentTemplateText() {
       return Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
     }
+    function reportTemplateAccessBlock() {
+      const why = reportWriteBlock();
+      if (why) return why;
+      if (!cur()) return "출처 검사를 확인할 수 없습니다. Refresh로 다시 확인하세요";
+      if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
+      return null;
+    }
     function reportTemplateBlock() {
-      return templateInsertionBlock(currentTemplateText(), "상용구로 저장할 내용이 없습니다");
+      return reportTemplateAccessBlock() || (RFIELDS.every(k => !$("#" + k).value) ? "상용구로 저장할 내용이 없습니다" : null);
     }
     function updateReportTemplateButton() {
       const why = reportTemplateBlock();
@@ -1231,7 +1238,8 @@
     function updateTemplateEditor() {
       const session = templateEditor;
       if (!session) return;
-      const why = session.source ? reportTemplateBlock() : null;
+      // 늦은 초안 버리기 응답은 원판독을 비울 수 있다. 이미 복사한 편집문은 출처 접근 조건만 다시 검사한다.
+      const why = session.source ? reportTemplateAccessBlock() : null;
       for (const el of document.querySelectorAll("#tplmodal input, #tplmodal textarea")) el.disabled = session.pending;
       $("#tpl-cancel").disabled = session.pending;
       $("#tpl-save").disabled = session.pending || !!why;
@@ -1295,7 +1303,7 @@
       if (!KinAuth.has("radiologist")) { toast("판독의만 상용구를 편집할 수 있습니다", "err"); return; }
       if (session.source) {
         if (session.source.uid !== selectedUid) { closeTemplateEditor(false); return; }
-        const why = reportTemplateBlock();
+        const why = reportTemplateAccessBlock();
         if (why) { toast(why, "err"); updateTemplateEditor(); return; }
       }
       const t = session.editing;
