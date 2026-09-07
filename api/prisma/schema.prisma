@@ -300,3 +300,14 @@ model ViewerRequest {
   @@id([authorSub, requestId])
   @@index([itemId, revision])
 }
+
+/// Only display preferences roam. A cleared value keeps its revision to reject stale writes.
+model WorkspaceLayout {
+  institution String   @db.VarChar(256)
+  subject     String   @db.VarChar(256)
+  revision    Int
+  value       String?
+  updatedAt   DateTime @updatedAt
+
+  @@id([institution, subject])
+}

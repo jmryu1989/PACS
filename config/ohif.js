@@ -773,7 +773,7 @@ function kinCreateViewerLayout() {
           if (live()) status.textContent = '저장한 시리즈 배치를 적용했습니다. 영상 로딩 상태를 확인하세요.';
         }
       } catch (error) {
-        if (live()) status.textContent = error?.name === 'QuotaExceededError' || error?.name === 'SecurityError' ? '브라우저 저장소를 사용할 수 없습니다. 현재 화면은 유지됩니다.' : error instanceof SyntaxError ? '저장한 배치가 손상되었습니다. 현재 화면은 유지됩니다.' : error.message || '배치 작업에 실패했습니다.';
+        if (live()) status.textContent = error?.name === 'QuotaExceededError' || error?.name === 'SecurityError' ? '브라우저 저장소를 사용할 수 없습니다. 현재 화면은 유지됩니다.' : error instanceof SyntaxError ? '저장한 배치가 손상되었습니다. 현재 화면은 유지됩니다.' : error?.message || '배치 작업에 실패했습니다.';
       } finally { busy = false; refresh(); }
     }
     for (const [label, action] of [['최근 배치 저장', 'save'], ['최근 배치 복원', 'restore'], ['최근 배치 삭제', 'remove']]) {

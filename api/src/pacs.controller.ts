@@ -86,6 +86,21 @@ export class PacsController {
     return this.svc.prefs(caller(req));
   }
 
+  @Get('workspace-layout')
+  workspaceLayout(@Req() req: any) {
+    return this.svc.workspaceLayout(caller(req));
+  }
+
+  @Put('workspace-layout')
+  saveWorkspaceLayout(@Body() body: any, @Req() req: any) {
+    return this.svc.writeWorkspaceLayout(body, caller(req), false);
+  }
+
+  @Delete('workspace-layout')
+  clearWorkspaceLayout(@Body() body: any, @Req() req: any) {
+    return this.svc.writeWorkspaceLayout(body, caller(req), true);
+  }
+
   @Post('filters')
   saveFilter(@Body() body: any, @Req() req: any) {
     return this.svc.saveFilter(body, caller(req));

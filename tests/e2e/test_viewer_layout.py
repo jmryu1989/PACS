@@ -166,6 +166,8 @@ class ViewerLayoutE2E(ThumbnailSeriesE2E):
         page.evaluate('([k,v])=>localStorage.setItem(k,v)',[key,raw])
         page.evaluate("() => {window.originalLayoutSet=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new DOMException('blocked','QuotaExceededError');};}")
         self.action(page,'저장','저장소를 사용할 수 없습니다');self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),records)
+        page.evaluate('() => {Storage.prototype.setItem=function(){throw undefined;};}')
+        self.action(page,'저장','배치 작업에 실패했습니다');self.assertEqual(self.cells(page),before);self.assertEqual(self.records(page),records)
         page.evaluate('() => {Storage.prototype.setItem=originalLayoutSet;}')
         # Current display-set ambiguity is refused before any grid mutation.
         page.evaluate('''() => {window.originalSets=services.displaySetService.getActiveDisplaySets;services.displaySetService.getActiveDisplaySets=function(){const a=originalSets.call(this);return [...a,a[0]];};}''')

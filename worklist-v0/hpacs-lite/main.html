@@ -543,6 +543,16 @@
     <button class="chip" id="refresh">Refresh</button>
     <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">배치: 자동</button>
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">배치 초기화</button>
+    <details id="workspace-server-menu" style="position:relative">
+      <summary class="chip">계정 배치</summary>
+      <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
+        <p style="margin:0 0 8px">작업공간의 방향과 패널 크기를 다른 브라우저에서 불러옵니다. 영상·판독문은 포함하지 않습니다.</p>
+        <button class="chip" data-action="save" disabled>서버에 배치 저장</button>
+        <button class="chip" data-action="load" disabled>서버 배치 불러오기</button>
+        <button class="chip" data-action="clear" disabled>서버 배치 초기화</button>
+        <p id="workspace-server-status" role="status" style="margin-bottom:0"></p>
+      </div>
+    </details>
     <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
     <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
     <button class="chip" id="savefilter">Save Filter</button>
@@ -854,6 +864,7 @@
 
   <script src="auth.js"></script>
   <script src="workspace-layout.js"></script>
+  <script src="workspace-roaming.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -3429,6 +3440,7 @@ ${esc($("#recommendation").value)}
       const handle = $(selector);
       handle.addEventListener("pointerdown", e => {
         if (e.button !== 0) return;
+        workspaceGeneration++;
         e.preventDefault();
         const dragAxis = typeof axis === "function" ? axis() : axis;
         handle.setPointerCapture(e.pointerId);
@@ -3456,10 +3468,11 @@ ${esc($("#recommendation").value)}
     }
     const clampPanel = (value, min, max) => Math.max(min, Math.min(max, value));
     let layoutMode = "auto";
-    let workspaceState = KinWorkspaceLayout.defaults(), workspaceOwner = null, workspaceStorage = null;
+    let workspaceState = KinWorkspaceLayout.defaults(), workspaceOwner = null, workspaceStorage = null, workspaceGeneration = 0;
     const portraitLayout = () => document.body.classList.contains("portrait");
     const workspaceAxis = () => portraitLayout() ? "portrait" : "landscape";
     function saveWorkspace() {
+      workspaceGeneration++;
       workspaceState.mode = layoutMode;
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
       $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
@@ -3525,6 +3538,7 @@ ${esc($("#recommendation").value)}
       saveWorkspace();
     });
     $("#layout-reset").addEventListener("click", () => {
+      workspaceGeneration++;
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
       workspaceState = KinWorkspaceLayout.defaults(); layoutMode = "auto";
       applyLayout();
@@ -4147,6 +4161,17 @@ ${esc($("#recommendation").value)}
       renderTemplates();
       applyRoleUi();
       restoreWorkspace();
+      KinWorkspaceRoaming.mount({
+        owner: workspaceOwner ? [sess.institution, sess.sub] : null,
+        read: () => workspaceState, generation: () => workspaceGeneration,
+        model: KinWorkspaceLayout, endpoint: API + '/workspace-layout', sessionEndpoint: API + '/me',
+        apply: state => {
+          workspaceGeneration++; workspaceState = state; layoutMode = state.mode; applyLayout();
+          const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
+          $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
+          return saved;
+        },
+      });
       roleText = $("#roles").textContent;
       if (sess.demo) {
         serverMode = false; offline = false;

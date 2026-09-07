@@ -21,10 +21,11 @@ RECEIPT_LIMIT = 128*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
-              'api/prisma/migrations/20260907040000_viewer_history/migration.sql']
+              'api/prisma/migrations/20260907040000_viewer_history/migration.sql',
+              'api/prisma/migrations/20260908020000_workspace_layout/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
-                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest'])
+                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -85,6 +86,10 @@ def expected_rows(uid):
         payloadBytes=sum(row['payloadBytes'] for row in rows['ViewerRevision']))]
     rows['ViewerRequest'] = [dict(authorSub='SYNTHETIC-sub', requestId='00000000-0000-4000-8000-00000000000'+str(n),
         fingerprint=str(n)*64, itemId=item_id, revision=n) for n in (1,2)]
+    layout = dict(version=1, mode='auto', portrait=dict(top=280), landscape=dict(main=720))
+    rows['WorkspaceLayout'] = [dict(institution='SYNTHETIC-'+kind, subject='SYNTHETIC-sub', revision=revision,
+        value=value, updatedAt=STAMP) for kind,revision,value in
+        [('hospital', 2, json.dumps(layout, separators=(',', ':'))), ('tele', 3, None)]]
     return rows
 
 
@@ -118,7 +123,7 @@ def create_product(name, db, uid):
         execute(name, db, raw.decode())
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft',
-                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest'):
+                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -260,6 +265,12 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing viewer history restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN DELETE FROM "ViewerRevision";
         RAISE EXCEPTION 'missing viewer replay restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN INSERT INTO "WorkspaceLayout" SELECT * FROM "WorkspaceLayout" LIMIT 1;
+        RAISE EXCEPTION 'missing workspace owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "WorkspaceLayout" SET revision=0;
+        RAISE EXCEPTION 'missing workspace revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "WorkspaceLayout" SET value=repeat('x',2049);
+        RAISE EXCEPTION 'missing workspace byte constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)

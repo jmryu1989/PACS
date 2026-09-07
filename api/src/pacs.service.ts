@@ -608,6 +608,70 @@ export class PacsService implements OnModuleInit {
     };
   }
 
+  private workspaceOwner(c: Caller) {
+    if (c.kind !== 'member') throw new ForbiddenException('회원 전용 배치입니다');
+    need(c.roles, c.roles.includes('technician') ? 'technician' : 'radiologist', '작업공간 배치');
+    const institution = inst(c);
+    if (![institution, c.sub].every(x => typeof x === 'string' && x.length > 0 && x.length <= 256))
+      throw new ForbiddenException('계정 정보를 확인할 수 없습니다');
+    return { institution, subject: c.sub };
+  }
+
+  private workspaceValue(value: any) {
+    const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    if (!object(value) || Object.keys(value).sort().join(',') !== 'landscape,mode,portrait,version' ||
+        value.version !== 1 || !['auto', 'portrait', 'landscape'].includes(value.mode) || JSON.stringify(value).length > 2048)
+      throw new BadRequestException('작업공간 배치 형식이 잘못되었습니다');
+    const clean: any = { version: 1, mode: value.mode, portrait: {}, landscape: {} };
+    for (const axis of ['portrait', 'landscape']) {
+      if (!object(value[axis]) || Object.keys(value[axis]).some(k => !['main', 'top', 'related', 'prior'].includes(k)))
+        throw new BadRequestException('작업공간 패널 형식이 잘못되었습니다');
+      for (const [key, size] of Object.entries(value[axis])) {
+        if (typeof size !== 'number' || !Number.isFinite(size) || size < 1 || size > 16384)
+          throw new BadRequestException('작업공간 패널 크기가 잘못되었습니다');
+        clean[axis][key] = Math.round(size);
+      }
+    }
+    return clean;
+  }
+
+  private workspaceResult(owner: { institution: string; subject: string }, row: any) {
+    return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
+      layout: row?.value == null ? null : this.workspaceValue(JSON.parse(row.value)), updatedAt: row?.updatedAt ?? null };
+  }
+
+  async workspaceLayout(c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const row = await this.prisma.workspaceLayout.findUnique({ where: { institution_subject: owner } });
+    return this.workspaceResult(owner, row);
+  }
+
+  async writeWorkspaceLayout(body: any, c: Caller, clear: boolean) {
+    const owner = this.workspaceOwner(c);
+    const fields = clear ? 'expectedOwner,revision' : 'expectedOwner,layout,revision';
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== fields ||
+        !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('배치 저장 요청 형식이 잘못되었습니다');
+    // A stale tab must not write its old account's preferences under a newly logged-in session.
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
+      throw new ConflictException({ code: 'WORKSPACE_OWNER_CHANGED', message: '계정이 변경되었습니다. 다시 로그인한 뒤 여세요.' });
+    const value = clear ? null : JSON.stringify(this.workspaceValue(body.layout));
+    const conflict = () => new ConflictException({ code: 'WORKSPACE_CONFLICT', message: '다른 창에서 서버 배치가 변경되었습니다. 서버 배치를 불러온 뒤 다시 시도하세요.' });
+    try {
+      const row = await this.prisma.$transaction(async tx => {
+        if (body.revision === 0) return tx.workspaceLayout.create({ data: { ...owner, revision: 1, value } });
+        const updated = await tx.workspaceLayout.updateMany({ where: { ...owner, revision: body.revision },
+          data: { value, revision: { increment: 1 } } });
+        if (updated.count !== 1) throw conflict();
+        return tx.workspaceLayout.findUnique({ where: { institution_subject: owner } });
+      });
+      return this.workspaceResult(owner, row);
+    } catch (error) {
+      if ((error as any)?.code === 'P2002') throw conflict();
+      throw error;
+    }
+  }
+
   /** 필터 저장 (같은 이름이면 덮어쓴다 — 이름이 곧 사용자에게는 그 필터다) */
   async saveFilter(body: any, c: Caller) {
     const owner = c.actor;
