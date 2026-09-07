@@ -48,6 +48,7 @@ jobs:
           python3 -m venv "$sdk_dir"
           "$sdk_dir/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r scripts/requirements-storage-sdk.txt
           "$sdk_dir/bin/python" -B tests/ops_storage_collect_test.py
+          KIN_REQUIRE_STORAGE_SDK=1 "$sdk_dir/bin/python" -B tests/ops_offsite_backup_test.py
       - name: Pinned age and local encrypted export preparation
         run: |
           umask 077

@@ -1,5 +1,11 @@
 # 살아 있는 불변조건 테스트
 
+외부 백업 OFF/전송: `python -B tests/ops_offsite_backup_test.py`.
+기본 OFF에서는 SDK·자격증명·원본·네트워크에 접근하지 않는다. enabled 경로는 Linux private
+seal 산출물 검증·암호문/receipt 전송·전체 GET hash/size 대조·실패 시 원본 보존을 시험한다.
+실제 카카오 계정은 사용하지 않는다. CI의 기존 hash-pinned SDK 환경에서 Linux 전체 및 SDK stub을
+필수 실행하며 Windows는 OFF/파싱/요청 경계만 검사한다. OFF는 정상 skipped이고 실제 외부 복원은 미검증이다.
+
 D09C 현재 판독문에서 개인 상용구 만들기: `python tests/e2e/test_report_template.py` (별도 실제4).
 현재/prior 구분·세 칸과 출처·새 개인 항목/재로그인, 취소·503 입력 보존·짧은 창,
 A→B→A 폐기·저장 중 중복 클릭·늦은 응답·POST 성공 뒤 목록 갱신 실패를 검증한다.
