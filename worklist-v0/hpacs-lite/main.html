@@ -212,7 +212,7 @@
     #findings { flex: 3; min-height: 50px; }
     #conclusion { flex: 2; min-height: 34px; }
     #recommendation { flex: 1; min-height: 26px; }
-    .rfoot2 { display: flex; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }
+    .rfoot2 { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }
     /* 초안 표시줄 — 확정본이 아닌 것을 보고 있다는 안내. 경고(빨강)가 아니라 안내(노랑)다. */
     .draftbar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; flex: none;
                 background: #2a2617; border-top: 1px solid #5c5124; color: #d8b24a; font-size: 11px; }
@@ -265,6 +265,7 @@
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
     /* 상용구는 여러 줄인 것이 정상이다 — 입력칸도 여러 줄이어야 한다 */
     #tplmodal .box, #tpl-preview .box { display: flex; flex-direction: column; max-height: 90vh; }
+    #tpl-source { flex: none; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 6px 12px; border-bottom: 1px solid #333c4d; }
     .modal .tplbody { align-items: start; overflow-y: auto; }
     .modal .tplbody label { padding-top: 5px; }
     .modal .tplbody textarea { background: #14181f; border: 1px solid #3a4356; color: #cdd3dc;
@@ -673,6 +674,7 @@
           <textarea id="recommendation" placeholder="Please enter recommendation"></textarea>
         </div>
         <div class="rfoot2">
+          <button id="b-report-template" disabled>상용구로 저장</button>
           <button id="b-copy">Copy</button>
           <button id="b-paste">Paste</button>
           <button id="b-history" title="판독문 개정 이력">History</button>
@@ -747,17 +749,18 @@
     판독문 상용구는 여러 줄인 것이 정상이므로, 여러 줄을 넣을 수 없는 입력창은
     그 기능을 못 쓰게 만드는 것과 같다.
   -->
-  <div class="modal" id="tplmodal">
+  <div class="modal" id="tplmodal" role="dialog" aria-modal="true" aria-labelledby="tpl-title">
     <div class="box" style="width:560px;max-width:94vw">
       <h3 id="tpl-title">상용구</h3>
+      <p id="tpl-source" hidden></p>
       <div class="body tplbody">
-        <label>제목</label><input id="tpl-t" placeholder="예: Normal Brain CT">
-        <label>단축어</label><input id="tpl-s" placeholder="예: nbct — 판독문에서 입력 후 Tab">
-        <label>Modality</label><input id="tpl-m" placeholder="비우면 모든 검사에서 보입니다">
-        <label>Bodypart</label><input id="tpl-b" placeholder="상용구의 부위 분류">
-        <label>Findings</label><textarea id="tpl-f" rows="6"></textarea>
-        <label>Conclusion</label><textarea id="tpl-c" rows="3"></textarea>
-        <label>Recommendation</label><textarea id="tpl-r" rows="3"></textarea>
+        <label for="tpl-t">제목</label><input id="tpl-t" placeholder="예: Normal Brain CT">
+        <label for="tpl-s">단축어</label><input id="tpl-s" placeholder="예: nbct — 판독문에서 입력 후 Tab">
+        <label for="tpl-m">Modality</label><input id="tpl-m" placeholder="비우면 모든 검사에서 보입니다">
+        <label for="tpl-b">Bodypart</label><input id="tpl-b" placeholder="상용구의 부위 분류">
+        <label for="tpl-f">Findings</label><textarea id="tpl-f" rows="6"></textarea>
+        <label for="tpl-c">Conclusion</label><textarea id="tpl-c" rows="3"></textarea>
+        <label for="tpl-r">Recommendation</label><textarea id="tpl-r" rows="3"></textarea>
       </div>
       <div class="foot">
         <button id="tpl-cancel">취소</button>
@@ -1045,17 +1048,17 @@
         </tr>`).join("") || `<tr><td class="empty" colspan="4">${templates.length ? "조건에 맞는 상용구가 없습니다" : "상용구 없음 — 우클릭해서 추가하세요"}</td></tr>`;
       updateTemplatePreview();
     }
-    function templateInsertionBlock(t) {
+    function templateInsertionBlock(t, emptyMessage = "삽입할 내용이 없습니다") {
       const why = reportWriteBlock();
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
       if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
-      if (!t || RFIELDS.every(k => !t[k])) return "삽입할 내용이 없습니다";
+      if (!t || RFIELDS.every(k => !t[k])) return emptyMessage;
       return null;
     }
     function insertTemplate(t) {
       const why = templateInsertionBlock(t);
-      if (why) { toast(why, "info"); return false; }
+      if (why) { toast(why, why === "삽입할 내용이 없습니다" ? "info" : "err"); return false; }
       for (const k of RFIELDS) {
         if (!t[k]) continue;
         const el = $("#" + k);
@@ -1179,25 +1182,91 @@
      * 게다가 `?? ""` 때문에 중간에 Cancel을 눌러도 빈 값이 저장됐다 —
      * 취소가 취소가 아니라 삭제였다.
      */
-    let tplEditing = null;
-    function editTemplate(t) {
-      tplEditing = t;
-      $("#tpl-title").textContent = t ? `상용구 수정 — ${t.title}` : "새 상용구";
-      $("#tpl-t").value = t?.title ?? "";
-      $("#tpl-s").value = t?.shortcut ?? "";
-      $("#tpl-m").value = t?.modality ?? "";
-      $("#tpl-b").value = t?.bodypart ?? "";
-      $("#tpl-f").value = t?.findings ?? "";
-      $("#tpl-c").value = t?.conclusion ?? "";
-      $("#tpl-r").value = t?.recommendation ?? "";
+    let templateEditor = null;
+    function currentTemplateText() {
+      return Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
+    }
+    function reportTemplateBlock() {
+      return templateInsertionBlock(currentTemplateText(), "상용구로 저장할 내용이 없습니다");
+    }
+    function updateReportTemplateButton() {
+      const why = reportTemplateBlock();
+      $("#b-report-template").disabled = !!why;
+      $("#b-report-template").title = why ?? "현재 세 칸을 새 개인 상용구 편집창으로 가져옵니다";
+      if (templateEditor?.source && templateEditor.source.uid !== selectedUid) closeTemplateEditor(false);
+      updateTemplateEditor();
+    }
+    function updateTemplateEditor() {
+      const session = templateEditor;
+      if (!session) return;
+      const why = session.source ? reportTemplateBlock() : null;
+      for (const el of document.querySelectorAll("#tplmodal input, #tplmodal textarea")) el.disabled = session.pending;
+      $("#tpl-cancel").disabled = session.pending;
+      $("#tpl-save").disabled = session.pending || !!why;
+      $("#tpl-save").textContent = session.pending ? "저장 중…" : "저장";
+      $("#tpl-save").title = why ?? "";
+      if (session.source) $("#tpl-source").textContent = session.source.label + "\n"
+        + (why ?? "재사용할 문장만 남기고 제목을 입력하세요. 저장은 개인 상용구에만 반영됩니다.");
+    }
+    function closeTemplateEditor(returnFocus = true) {
+      const session = templateEditor;
+      if (!session) return;
+      templateEditor = null;
+      $("#tplmodal").classList.remove("show");
+      for (const el of document.querySelectorAll("#tplmodal input, #tplmodal textarea")) { el.value = ""; el.disabled = false; }
+      $("#tpl-source").textContent = ""; $("#tpl-source").hidden = true;
+      delete $("#tpl-source").dataset.uid;
+      $("#tpl-save").disabled = true; $("#tpl-save").textContent = "저장";
+      $("#tpl-cancel").disabled = false;
+      if (returnFocus && session.returnFocus?.isConnected) session.returnFocus.focus();
+    }
+    function editTemplate(t, source = null, seed = t) {
+      if (!KinAuth.has("radiologist")) { toast("판독의만 상용구를 편집할 수 있습니다", "err"); return; }
+      templateEditor = { editing: t, source, pending: false, returnFocus: document.activeElement };
+      $("#tpl-title").textContent = source ? "현재 판독문으로 새 상용구" : t ? `상용구 수정 — ${t.title}` : "새 상용구";
+      for (const [id, key] of [["t", "title"], ["s", "shortcut"], ["m", "modality"], ["b", "bodypart"],
+                               ["f", "findings"], ["c", "conclusion"], ["r", "recommendation"]]) {
+        $("#tpl-" + id).value = seed?.[key] ?? "";
+      }
+      $("#tpl-source").hidden = !source;
+      if (source) $("#tpl-source").dataset.uid = source.uid;
+      else { $("#tpl-source").textContent = ""; delete $("#tpl-source").dataset.uid; }
+      updateTemplateEditor();
       $("#tplmodal").classList.add("show");
       $("#tpl-t").focus();
     }
+    $("#b-report-template").addEventListener("click", () => {
+      const why = reportTemplateBlock();
+      if (why) { toast(why, why === "상용구로 저장할 내용이 없습니다" ? "info" : "err"); return; }
+      const s = cur(), text = currentTemplateText();
+      const modalities = String(s.modality ?? "").split(",").map(value => value.trim()).filter(Boolean);
+      // 환자 식별은 출처 확인에만 쓴다. 재사용 문장/제목에 검사 식별을 자동으로 섞지 않는다.
+      editTemplate(null, { uid: selectedUid,
+        label: `가져온 검사: ${s.name} (${s.id})\n${s.date} · ${shownStudyDesc(s)} · AccNo: ${s.acc || "없음"}` },
+        { ...text, modality: modalities.length === 1 ? modalities[0] : "" });
+    });
     // 취소는 아무것도 안 한다. 저장을 누른 것만이 저장이다.
-    $("#tpl-cancel").addEventListener("click", () => { $("#tplmodal").classList.remove("show"); tplEditing = null; });
+    $("#tpl-cancel").addEventListener("click", () => { if (!templateEditor?.pending) closeTemplateEditor(); });
     $("#tplmodal").addEventListener("click", e => { if (e.target.id === "tplmodal") $("#tpl-cancel").click(); });
+    $("#tplmodal").addEventListener("keydown", e => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); $("#tpl-cancel").click(); }
+      if (e.key === "Tab") {
+        const controls = [...document.querySelectorAll("#tplmodal input, #tplmodal textarea, #tplmodal button")].filter(el => !el.disabled);
+        e.preventDefault();
+        if (controls.length) controls[(controls.indexOf(document.activeElement) + (e.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+      }
+    });
+    window.addEventListener("pagehide", () => closeTemplateEditor(false));
     $("#tpl-save").addEventListener("click", async () => {
-      const t = tplEditing;
+      const session = templateEditor;
+      if (!session || session.pending) return;
+      if (!KinAuth.has("radiologist")) { toast("판독의만 상용구를 편집할 수 있습니다", "err"); return; }
+      if (session.source) {
+        if (session.source.uid !== selectedUid) { closeTemplateEditor(false); return; }
+        const why = reportTemplateBlock();
+        if (why) { toast(why, "err"); updateTemplateEditor(); return; }
+      }
+      const t = session.editing;
       const title = $("#tpl-t").value.trim();
       if (!title) { toast("제목은 비울 수 없습니다", "err"); $("#tpl-t").focus(); return; }
       const shortcut = $("#tpl-s").value.trim();
@@ -1211,15 +1280,32 @@
                      recommendation: $("#tpl-r").value,
                      // API는 전체 상용구를 저장한다. 제목만 고쳐도 생략한 분류/권고문/순서가 지워졌다.
                      ...(t ? { ord: t.ord ?? 0 } : {}) };
-      if (serverMode) {
-        try { await api("POST", "/templates", body); await reloadPrefs(); }
-        catch (e) { toast("상용구 저장 실패: " + e.message, "err"); return; }
-      } else {
-        if (t) Object.assign(t, body); else templates.push(body);
-        saveTemplatesLocal(); renderTemplates();
+      session.pending = true; updateTemplateEditor();
+      try {
+        if (serverMode) {
+          const saved = await api("POST", "/templates", body);
+          const index = templates.findIndex(x => x.id === saved.id);
+          if (index < 0) templates.push(saved); else templates[index] = saved;
+        } else {
+          if (t) Object.assign(t, body); else templates.push(body);
+          saveTemplatesLocal();
+        }
+      } catch (e) {
+        if (templateEditor === session) toast("상용구 저장 실패: " + e.message, "err");
+        return;
+      } finally {
+        session.pending = false;
+        if (templateEditor === session) updateTemplateEditor();
       }
-      $("#tplmodal").classList.remove("show"); tplEditing = null;
+      // 저장 응답이 늦어도 그동안 연 새 편집창을 닫거나 입력을 지우지 않는다.
+      if (templateEditor === session) closeTemplateEditor();
+      renderTemplates();
       toast(`상용구 "${body.title}" 저장`);
+      // POST 성공과 목록 갱신 실패를 합치면 '저장 실패' 재시도로 같은 문장을 두 번 만든다.
+      if (serverMode) {
+        try { await reloadPrefs(); }
+        catch (e) { toast("상용구는 저장됐지만 목록 갱신에 실패했습니다. Refresh로 다시 확인하세요", "err"); }
+      }
     });
 
     $("#tplrows").addEventListener("contextmenu", e => {
@@ -1623,6 +1709,7 @@
        * 우클릭 메뉴도 `select(uid)`를 먼저 부르므로 메뉴를 열 때마다 같은 일이 났다.
       */
       if (uid === selectedUid) return;
+      if (templateEditor?.source) closeTemplateEditor(false);
       // A→B→A로 돌아와도 이전 검사에서 읽던 미리보기의 삽입 버튼은 재사용하지 않는다.
       closeTemplatePreview(false);
       // 사유를 고르는 동안 A→B→A로 이동해도 이전 모달의 결정을 새 선택에 적용하지 않는다.
@@ -2094,6 +2181,7 @@
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
       }
       renderDraftBar();
+      updateReportTemplateButton();
     }
 
     /**
@@ -2395,6 +2483,7 @@
         $(id).readOnly = !rad || locked || filming || !!held;
       }
       updateTemplatePreview();
+      updateReportTemplateButton();
     }
 
     /**
@@ -2593,6 +2682,7 @@
     // 판독문에 두 글자 이상 쓰면 그때 점유가 시작된다
     ["#findings", "#conclusion", "#recommendation"].forEach(sel =>
       $(sel).addEventListener("input", () => {
+        updateReportTemplateButton();
         if (!selectedUid) return;
         const total = $("#findings").value.length + $("#conclusion").value.length + $("#recommendation").value.length;
         if (total >= HOLD_MIN_CHARS) claimHold(selectedUid);
