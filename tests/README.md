@@ -732,3 +732,26 @@ removeState 삭제 시도의 FK 거절도 검사한다. 입력이 없으면 이 
 baseline.mjs는 최초 스키마 전용으로 유지했다. Migrate 이력이 없는 구 DB는 먼저
 직전 릴리스의 백업/drift/baseline 절차를 끝낸 뒤 업그레이드한다. 새 스키마에서 baseline
 기록을 다시 쓰거나 db push/reset을 사용하지 않는다. 이전 앱 복귀 시 새 표를 보존한다.
+
+
+## D05D viewer save and reopen
+
+python -B tests/e2e/test_viewer_history.py runs six local browser suites against
+the actual pinned OHIF configuration and temporary BFF identities. It covers
+arrow create/edit/hide/restore/history and a new login, US multiframe keys and
+read-only authors, lost-response idempotent retry/409/quota/503, real 401 and
+preliminary-state access revocation, A-to-B-to-A delayed lists and logout, and
+large-origin oblique CT coordinates across pan/zoom/flip and reopening. Only
+the transition test appends the existing service observer; product config and
+network endpoints remain real. The 503 and lost-response cases use explicit
+browser network fault injection. Original bytes and report state are checked;
+owned ViewerStack children are cleaned before the parent fixture. No credentials
+or patient data are saved in browser storage. The UI offers explicit saving;
+reopening never automatically writes a revision.
+
+The viewer server now uses one canonical JSON string for byte accounting and
+both parameterized JSONB snapshot writes. Valid GPU coordinates containing tiny
+exponent values previously failed the immutable revision byte equality check
+when Prisma serialized an object differently. The live API reference suite
+checks these exact numeric values, original-success replay and stored byte equality.
+No schema, quota, permission or geometry tolerance is relaxed.

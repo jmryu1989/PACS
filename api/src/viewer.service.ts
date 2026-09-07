@@ -135,11 +135,17 @@ export class ViewerService {
       if (budget.itemCount + added > VIEWER_LIMITS.items || budget.revisionCount + 1 > VIEWER_LIMITS.revisions ||
           budget.payloadBytes + bytes > VIEWER_LIMITS.bytes) storageLimit();
       const now = new Date(), revision = head ? head.revision + 1 : 1;
-      if (head) head = await tx.viewerItem.update({ where: { id }, data: { snapshot, hidden, revision, updatedAt: now } });
-      else head = await tx.viewerItem.create({ data: { id: randomUUID(), studyUid: uid, authorSub: c.sub, authorActor: c.actor,
-        snapshot, hidden, revision, createdAt: now, updatedAt: now } });
-      await tx.viewerRevision.create({ data: { itemId: head.id, revision, snapshot, action: command.action,
-        reason: command.reason, actor: c.actor, payloadBytes: bytes, at: now } });
+      // Prisma's JSON number serialization can differ from JSON.stringify for
+      // fractional world coordinates. Use the exact JSON counted above for both
+      // copies: the database byte equality check must never be weakened to fit it.
+      if (head) [head] = await tx.$queryRaw<any[]>`UPDATE "ViewerItem" SET snapshot = ${serialized}::jsonb,
+        hidden = ${hidden}, revision = ${revision}, "updatedAt" = ${now} WHERE id = ${id}::uuid RETURNING *`;
+      else [head] = await tx.$queryRaw<any[]>`INSERT INTO "ViewerItem"
+        (id, "studyUid", "authorSub", "authorActor", snapshot, hidden, revision, "createdAt", "updatedAt")
+        VALUES (${randomUUID()}::uuid, ${uid}, ${c.sub}, ${c.actor}, ${serialized}::jsonb, ${hidden}, ${revision}, ${now}, ${now}) RETURNING *`;
+      await tx.$executeRaw`INSERT INTO "ViewerRevision"
+        ("itemId", revision, snapshot, action, reason, actor, "payloadBytes", at)
+        VALUES (${head.id}::uuid, ${revision}, ${serialized}::jsonb, ${command.action}, ${command.reason}, ${c.actor}, ${bytes}, ${now})`;
       await tx.viewerStorageBudget.update({ where: { studyUid: uid }, data: {
         itemCount: { increment: added }, revisionCount: { increment: 1 }, payloadBytes: { increment: bytes } } });
       await tx.auditLog.create({ data: { actor: c.actor, action: 'viewer.' + command.action, target: uid,

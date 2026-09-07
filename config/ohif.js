@@ -339,8 +339,312 @@ const kinStackPrecision = (() => {
   } };
 })();
 
+/* KIN persistence owns only explicit user commands. Cornerstone objects are
+ * session bindings, never wire payloads or durable identifiers. */
+function kinCreateViewerHistory() {
+  let services, stop;
+  function mount() {
+    stop?.();
+    const cs = window.cornerstone, ct = window.cornerstoneTools;
+    if (!cs || !ct?.annotation?.locking) return;
+    const entries = new Map(), annotations = new Map();
+    let scope = '', subject = '', me, generation = 0, readSequence = 0;
+    let controller = new AbortController(), ended = false, checking = false;
+    let lastAuth = 0, loading = false, navigation = 0;
+    const panel = document.createElement('details');
+    panel.id = 'kin-viewer-history'; panel.open = true;
+    panel.style.cssText = 'position:fixed;right:8px;bottom:30px;z-index:40;width:300px;max-height:58vh;overflow:auto;background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:10px;font:13px sans-serif';
+    const summary = document.createElement('summary'); summary.textContent = '저장한 주석 · 키 이미지'; panel.append(summary);
+    const status = document.createElement('p'); status.setAttribute('role', 'status'); panel.append(status);
+    const actions = document.createElement('div'), list = document.createElement('div'); panel.append(actions, list);
+    document.body.append(panel);
+    const clone = value => JSON.parse(JSON.stringify(value));
+    const itemOnly = head => { const item = clone(head.item); delete item.hidden; return item; };
+    const text = (parent, tag, value) => { const el = document.createElement(tag); el.textContent = value; parent.append(el); return el; };
+    const button = (parent, label, run, disabled = false) => {
+      const b = text(parent, 'button', label); b.type = 'button'; b.disabled = disabled;
+      b.style.cssText = 'margin:3px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px';
+      b.addEventListener('click', () => Promise.resolve().then(run).catch(() => { status.textContent = '작업을 완료하지 못했습니다. 현재 내용을 확인하세요.'; })); return b;
+    };
+    const input = (parent, label, value, change, disabled = false) => {
+      const wrap = text(parent, 'label', label), el = document.createElement('input');
+      el.value = value; el.disabled = disabled; el.setAttribute('aria-label', label);
+      el.style.cssText = 'display:block;width:100%;background:#0c1423;color:#fff;border:1px solid #657c9f;padding:4px';
+      el.addEventListener('input', () => change(el.value)); wrap.append(el); return el;
+    };
+    const viewport = () => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
+    const reference = imageId => {
+      const m = typeof imageId === 'string' && imageId.match(/\/studies\/([0-9.]+)\/series\/([0-9.]+)\/instances\/([0-9.]+)\/frames\/([1-9][0-9]*)(?:$|[?#])/);
+      return m ? { study: m[1], seriesUid: m[2], sopUid: m[3], frame: Number(m[4]) } : null;
+    };
+    const matches = (r, item) => r?.study === scope && r.seriesUid === item.seriesUid && r.sopUid === item.sopUid && r.frame === item.frame;
+    const current = () => reference(viewport()?.getCurrentImageId?.());
+    const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);
+    const writable = entry => me?.kind === 'member' && me.roles?.includes('radiologist') && (!entry.head || entry.head.authorSub === subject);
+    const render = () => { try { viewport()?.render(); } catch (_) {} };
+    const lock = (entry, locked) => { if (entry.annotationUID) ct.annotation.locking.setAnnotationLocked(entry.annotationUID, locked); };
+    function removeAnnotation(entry) {
+      if (!entry.annotationUID) return;
+      annotations.delete(entry.annotationUID);
+      ct.annotation.state.removeAnnotation(entry.annotationUID);
+      // Measurements can be created by later handle edits; remove the paired
+      // transient OHIF row too, without treating its removal as a server delete.
+      if (services.measurementService.getMeasurement(entry.annotationUID)) services.measurementService.remove(entry.annotationUID);
+      entry.annotationUID = null;
+    }
+    function reset(message) {
+      generation++; readSequence++; navigation++; controller.abort(); controller = new AbortController();
+      for (const e of entries.values()) removeAnnotation(e);
+      entries.clear(); annotations.clear(); list.replaceChildren(); loading = false;
+      status.textContent = message; render();
+    }
+    function end() {
+      if (ended) return;
+      reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); ended = true; me = null; subject = ''; actions.replaceChildren();
+      // A shared workstation must not retain unsaved labels after logout either.
+      for (const a of ct.annotation.state.getAllAnnotations()) if (a.metadata.toolName === 'ArrowAnnotate') ct.annotation.state.removeAnnotation(a.annotationUID);
+      render();
+    }
+    async function api(path, options = {}, ticket = generation) {
+      const parentSignal = controller.signal, request = new AbortController();
+      const abort = () => request.abort(); parentSignal.addEventListener('abort', abort, { once: true });
+      const timeout = setTimeout(abort, 30000);
+      try {
+      const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
+        headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+      if (!valid(ticket)) throw { stale: true };
+      if (res.status === 401 || res.status === 403) { end(); throw { stale: true }; }
+      const data = await res.json().catch(() => null);
+      if (!valid(ticket)) throw { stale: true };
+      if (!res.ok || !data) throw { status: res.status, code: data?.code };
+      return data;
+      } finally { clearTimeout(timeout); parentSignal.removeEventListener('abort', abort); }
+    }
+    async function authenticate(ticket) {
+      const user = await api('/me', {}, ticket);
+      if (!user.sub || (subject && subject !== user.sub)) { end(); throw { stale: true }; }
+      me = user; subject = user.sub; lastAuth = Date.now(); return user;
+    }
+    const path = () => '/studies/' + scope + '/viewer-items';
+    function errorMessage(error) {
+      if (error.code === 'VIEWER_STORAGE_LIMIT') return '저장 공간 한도입니다. 숨김으로 공간이 회수되지는 않습니다. 작성 내용은 미저장 상태로 남아 있습니다.';
+      if (error.status === 409) return '다른 판 또는 저장 조건과 충돌했습니다. 최신판을 확인한 뒤 다시 저장하세요.';
+      if (error.status === 400 || error.status === 413) return '지원 영상·원본 평면·입력 길이를 확인하세요. 작성 내용은 저장되지 않았습니다.';
+      return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
+    }
+    async function load() {
+      if (!scope || ended || loading) return;
+      const ticket = generation, seq = ++readSequence; loading = true;
+      status.textContent = '저장 항목 확인 중…';
+      try {
+        await authenticate(ticket);
+        const heads = []; let cursor = null;
+        do {
+          const page = await api(path() + '?includeHidden=true&limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
+          if (seq !== readSequence) return;
+          if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          heads.push(...page.items); cursor = page.nextCursor;
+        } while (cursor);
+        if (!valid(ticket) || seq !== readSequence) return;
+        for (const head of heads) {
+          let e = entries.get(head.id);
+          if (e && (e.editing || e.pending || e.busy)) {
+            if (head.revision !== e.head?.revision) { e.latest = head; e.message = '서버에 다른 판이 있습니다. 작성 내용은 유지됩니다.'; row(e); }
+            continue;
+          }
+          if (e) removeAnnotation(e);
+          else { e = { id: head.id }; entries.set(e.id, e); }
+          Object.assign(e, { head, draft: itemOnly(head), editing: false, latest: null, message: '' }); row(e);
+        }
+        status.textContent = heads.length + '개 저장 항목 · 저장은 판독 확정과 별개입니다.';
+        panel.dataset.studyUid = scope;
+        toolbar(); hydrate();
+      } catch (e) { if (!e.stale && valid(ticket)) status.textContent = '목록을 확인하지 못했습니다. 새로고침으로 다시 확인하세요.'; }
+      finally { if (ticket === generation) loading = false; }
+    }
+    function toolbar() {
+      actions.replaceChildren(); button(actions, '새로고침', load);
+      button(actions, '현재 프레임 키 저장', () => {
+        const r = current(); if (!r || r.study !== scope) return;
+        const e = { id: crypto.randomUUID(), editing: true, draft: { schemaVersion: 1, kind: 'key', seriesUid: r.seriesUid, sopUid: r.sopUid, frame: r.frame, title: '', description: '' } };
+        entries.set(e.id, e); row(e);
+      }, !writable({}));
+    }
+    function updateAnnotation(e) {
+      const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
+      if (a) { a.data.text = e.draft.label; a.invalidated = true; render(); }
+    }
+    function row(e) {
+      if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
+      const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
+      text(el, 'strong', (e.draft.kind === 'arrow' ? '화살표' : '키 이미지') + ' · ' + (e.head ? '저장됨 r' + e.head.revision : '미저장') + (e.head?.hidden ? ' · 숨김' : ''));
+      if (e.head) text(el, 'div', e.head.authorActor + (writable(e) ? ' · 내 항목' : ' · 읽기 전용'));
+      if (e.editing) {
+        input(el, e.draft.kind === 'arrow' ? '주석 문구' : '키 제목', e.draft.label ?? e.draft.title, value => {
+          e.draft[e.draft.kind === 'arrow' ? 'label' : 'title'] = value; updateAnnotation(e);
+        }, !!(e.busy || e.pending));
+        if (e.draft.kind === 'key') input(el, '키 설명', e.draft.description || '', value => { e.draft.description = value; }, !!(e.busy || e.pending));
+      } else {
+        text(el, 'p', e.draft.label ?? e.draft.title);
+        if (e.draft.description) text(el, 'p', e.draft.description);
+      }
+      text(el, 'div', '프레임 ' + e.draft.frame);
+      if (e.message) text(el, 'p', e.message);
+      button(el, '영상으로 이동', () => navigate(e));
+      if (writable(e)) {
+        if (e.pending) button(el, '같은 요청 재시도', () => save(e), !!e.busy);
+        else if (e.editing) button(el, '저장', () => save(e, 'edit'), !!e.busy || !!e.latest);
+        else if (!e.head?.hidden) button(el, '편집', () => { e.editing = true; lock(e, false); row(e); });
+        if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? '복원' : '숨김', () => {
+          const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
+          if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
+        }, !!e.busy);
+        if (e.latest && !e.pending) button(el, '최신판 기준으로 내 수정 유지', () => {
+          e.head = e.latest; e.latest = null;
+          if (e.head.hidden) { e.heldDraft = clone(e.draft); e.editing = false; e.draft = itemOnly(e.head); e.message = '서버에서 숨겨졌습니다. 미저장 수정은 보관되며 복원 후 다시 편집할 수 있습니다.'; }
+          else e.message = '최신판을 확인했습니다. 저장을 눌러야 내 수정이 반영됩니다.';
+          row(e);
+        });
+      }
+      if (e.head) button(el, '이력', async () => {
+        const ticket = generation; let cursor = null, count = 0;
+        const history = document.createElement('div'); el.append(history);
+        const more = async () => {
+          const data = await api(path() + '/' + e.head.id + '/revisions?limit=50' + (cursor ? '&cursor=' + cursor : ''), {}, ticket);
+          if (!valid(ticket) || !el.isConnected) return;
+          for (const r of data.revisions) text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + (r.item.label ?? r.item.title));
+          count += data.revisions.length; cursor = data.nextCursor;
+          if (cursor && count < 4096) button(history, '다음 이력', more);
+        };
+        await more();
+      });
+    }
+    async function save(e, action, reason) {
+      if (!writable(e) || e.busy || ended) return;
+      const ticket = generation; e.busy = true; lock(e, true);
+      if (!e.pending) {
+        const annotation = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
+        if (e.editing && annotation) {
+          e.draft.points = clone(annotation.data.handles.points);
+          e.draft.label = annotation.data.text;
+        }
+        const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
+        if (e.head) Object.assign(command, { expectedRevision: e.head.revision, action, ...(reason ? { reason } : {}) });
+        e.pending = { url: path() + (e.head ? '/' + e.head.id + '/revisions' : ''), body: JSON.stringify(command) };
+      }
+      row(e);
+      try {
+        await authenticate(ticket);
+        const head = await api(e.pending.url, { method: 'POST', body: e.pending.body }, ticket);
+        if (!valid(ticket) || !entries.has(e.id)) return;
+        entries.delete(e.id); e.id = head.id; entries.set(e.id, e);
+        Object.assign(e, { head, draft: itemOnly(head), pending: null, latest: null, editing: false, message: '저장 완료' });
+        if (!head.hidden && e.heldDraft) {
+          e.draft = e.heldDraft; e.heldDraft = null; e.editing = true;
+          e.message = '복원 완료. 보관한 수정은 아직 미저장 상태입니다.';
+          updateAnnotation(e);
+        }
+        if (head.hidden) removeAnnotation(e);
+        else lock(e, !e.editing);
+      } catch (error) {
+        if (error.stale || !valid(ticket)) return;
+        e.message = errorMessage(error);
+        if (error.status >= 400 && error.status < 500) { e.pending = null; lock(e, !e.editing); }
+        if (error.status === 409) await load();
+      } finally { if (valid(ticket) && entries.has(e.id)) { e.busy = false; row(e); } }
+    }
+    async function navigate(e) {
+      const ticket = generation, nav = ++navigation;
+      const sets = services.displaySetService.getActiveDisplaySets().filter(d => d.StudyInstanceUID === scope && d.SeriesInstanceUID === e.draft.seriesUid && (d.images || d.instances || []).some(i => i.SOPInstanceUID === e.draft.sopUid));
+      if (sets.length !== 1) { e.message = '현재 검사에서 원본 시리즈를 찾을 수 없습니다.'; row(e); return; }
+      const viewportId = services.viewportGridService.getActiveViewportId();
+      if (!(viewport()?.getImageIds?.() || []).some(id => matches(reference(id), e.draft))) {
+        services.viewportGridService.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [sets[0].displaySetInstanceUID] });
+      }
+      for (let n = 0; n < 100; n++) {
+        if (!valid(ticket) || nav !== navigation) return;
+        const v = services.cornerstoneViewportService.getCornerstoneViewport(viewportId);
+        const index = (v?.getImageIds?.() || []).findIndex(id => matches(reference(id), e.draft));
+        if (index >= 0) { await v.setImageIdIndex(index); if (valid(ticket) && nav === navigation) { v.render(); hydrate(); } return; }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (valid(ticket)) { e.message = '원본 프레임을 열지 못했습니다.'; row(e); }
+    }
+    function hydrate() {
+      const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
+      if (!r || r.study !== scope || !subject || ended) return;
+      const plane = cs.metaData.get('imagePlaneModule', imageId);
+      for (const e of entries.values()) {
+        if (!e.head || e.head.hidden || e.draft.kind !== 'arrow' || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        const uid = crypto.randomUUID(), camera = v.getCamera();
+        const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
+          metadata: { toolName: 'ArrowAnnotate', FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: camera.viewPlaneNormal, viewUp: camera.viewUp },
+          data: { text: e.draft.label, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
+        ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !e.editing); render();
+      }
+    }
+    function scan() {
+      if (ended) return;
+      const r = current();
+      // Switching display sets briefly removes the viewport. Mode exit, not
+      // that loading gap, owns teardown of drafts and in-flight commands.
+      if (!r) return;
+      if (r.study !== scope) {
+        reset('검사 확인 중…'); scope = r?.study || ''; me = null;
+        if (scope) load(); return;
+      }
+      if (!subject || !scope) return;
+      for (const e of entries.values()) {
+        const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
+        if (e.annotationUID && !a) { annotations.delete(e.annotationUID); e.annotationUID = null; }
+        if (a && e.head && !e.editing) {
+          a.data.text = e.draft.label;
+          a.data.handles.points = clone(e.draft.points);
+          lock(e, true);
+        }
+      }
+      hydrate();
+      for (const a of ct.annotation.state.getAllAnnotations()) {
+        if (a.metadata.toolName !== 'ArrowAnnotate' || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== 2 || typeof a.data.text !== 'string') continue;
+        let e = annotations.get(a.annotationUID);
+        if (!e) {
+          const ref = reference(a.metadata.referencedImageId);
+          e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
+            draft: { schemaVersion: 1, kind: 'arrow', seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text, points: clone(a.data.handles.points) } };
+          entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
+        } else if (e.editing && !e.busy && !e.pending) {
+          e.draft.points = clone(a.data.handles.points);
+          if (e.draft.label !== a.data.text) { e.draft.label = a.data.text; row(e); }
+        }
+      }
+      if (Date.now() - lastAuth > 15000 && !checking) {
+        checking = true; const ticket = generation;
+        authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket)).catch(() => {}).finally(() => { checking = false; });
+      }
+    }
+    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
+    const onFocus = () => { lastAuth = 0; };
+    const beforeUnload = e => { if ([...entries.values()].some(x => x.editing || x.pending)) { e.preventDefault(); e.returnValue = ''; } };
+    let channel;
+    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+    window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
+    // The pinned viewer changes active viewports through several services. A
+    // bounded observation timer also covers stack frame changes without patching them.
+    const timer = setInterval(() => { try { scan(); } catch (_) { status.textContent = '현재 영상 연결을 확인할 수 없습니다.'; } }, 250);
+    // Identity changes must invalidate immediately, even for A→B→A within one
+    // observation tick. Stack events and active-viewport events own that boundary.
+    const onImage = () => { try { scan(); } catch (_) {} };
+    const stackEvent = cs.Enums.Events.STACK_NEW_IMAGE;
+    document.addEventListener(stackEvent, onImage, true);
+    const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
+    stop = () => { end(); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); panel.remove(); };
+    scan();
+  }
+  return { id: 'kin.viewer-history', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+
 window.config = {
-  extensions: [kinStackPrecision],
+  extensions: [kinStackPrecision, kinCreateViewerHistory()],
   modes: [],
   customizationService: {},
   showStudyList: true,

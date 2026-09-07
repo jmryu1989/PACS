@@ -212,6 +212,15 @@ class ViewerAPI(unittest.TestCase):
         arrow={k:v for k,v in self.key.items() if k not in ['title','description']}
         arrow.update(kind='arrow',frameOfReferenceUid=str(self.ds.FrameOfReferenceUID),label='화살표',points=[ipp,ipp])
         self.create(arrow)
+        # Actual GPU stack points can contain near-zero exponent values. Counting
+        # one JSON serialization and persisting another used to violate the DB
+        # payload-byte equality constraint even for these valid CT coordinates.
+        fractional = {**arrow, 'points': [[ipp[0]+.125, ipp[1]+.25, ipp[2]+5.684341886080802e-14],
+                                        [ipp[0]+.375, ipp[1]+.5, ipp[2]+5.684341886080802e-14]]}
+        fractional_head, fractional_request = self.create(fractional)
+        self.assertEqual(fractional_head['item']['points'], fractional['points'])
+        self.assertEqual(self.call(body=fractional_request), fractional_head)
+        self.assertEqual(psql(f'SELECT count(*) FROM "ViewerRevision" WHERE "itemId"={literal(fractional_head["id"])}::uuid AND "payloadBytes"=octet_length(convert_to(snapshot::text,\'UTF8\'))'), ['1'])
         for change in [{'frameOfReferenceUid':'2.25.99'}, {'points':[[1e99,1e99,1e99],ipp]}]:
             self.create({**arrow,**change},status=400)
         for sop_class,frames in [('1.2.840.10008.5.1.4.1.1.4',1),('1.2.840.10008.5.1.4.1.1.1',1),
