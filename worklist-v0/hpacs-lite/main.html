@@ -175,7 +175,8 @@
     .workrow { flex: 1; display: flex; min-height: 0; }
     .panel { display: flex; flex-direction: column; min-height: 0; }
     .related-p { width: 44%; }
-    .related-list-pane { flex: 1; min-height: 100px; display: flex; flex-direction: column; }
+    /* 필터/숨김 안내 아래에도 고정 머리글과 실제 선택 행의 높이를 남긴다. */
+    .related-list-pane { flex: 1; min-height: 150px; display: flex; flex-direction: column; }
     .reltabs { display: flex; align-items: center; background: #1b212c; flex: none; }
     .reltabs .rel-title { padding: 4px 10px; color: var(--kin-text); font-size: 11px; white-space: nowrap; }
     .reltabs div { padding: 4px 12px; font-size: 11px; color: #7f8899; cursor: pointer; }
@@ -184,6 +185,10 @@
     .reltabs button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; margin-right: 4px; }
     .reltabs label { color: #7f8899; font-size: 11px; padding: 0 6px; display: flex; align-items: center; gap: 3px; cursor: pointer; }
     #related-return { flex: none; padding: 2px 5px; font-size: 11px; }
+    .related-filter { display: flex; flex: none; gap: 6px; align-items: center; padding: 2px 6px; }
+    #related-modality { min-width: 0; width: 110px; max-width: 65%; font-size: 11px; }
+    #related-filter-count { white-space: nowrap; font-size: 11px; }
+    #related-filter-hidden { flex: none; padding: 2px 6px; color: #ffc978; font-size: 11px; }
     #related-current { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
                        padding: 4px 10px; font-size: 11px; color: var(--kin-link); }
     .grid2 { overflow: auto; flex: 1; }
@@ -250,7 +255,7 @@
     body.portrait .rw section { min-height: 0; }
     body.portrait .rtabs { flex-wrap: wrap; }
     body.portrait .workrow { flex-direction: column; flex: 1 0 480px; min-height: 480px; }
-    body.portrait .related-p { width: 100%; height: 56%; min-height: 230px; flex: none; }
+    body.portrait .related-p { width: 100%; height: 56%; min-height: 286px; flex: none; }
     body.portrait .report-p, body.portrait .order-p { min-height: 180px; }
     body.portrait #resize-main, body.portrait #resize-related { width: 100%; height: 6px; cursor: row-resize; }
     body.portrait #resize-main::after, body.portrait #resize-related::after {
@@ -622,6 +627,11 @@
             <button id="related-return" type="button" disabled title="판독문은 유지하고 판독 대상의 영상과 정보를 봅니다">판독 대상 보기</button>
           </div>
           <div id="related-current" tabindex="-1" role="status" aria-live="polite">판독 대상을 선택하세요</div>
+          <div class="related-filter">
+            <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">전체 Modality</option></select>
+            <span id="related-filter-count" role="status" aria-live="polite">0 / 0</span>
+          </div>
+          <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
           <div class="grid2">
             <table>
               <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
@@ -1474,6 +1484,7 @@
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
     // 둘을 한 변수로 쓰면 prior를 클릭한 순간 저장·승인 대상까지 prior로 바뀐다.
     let relatedUid = null;
+    let relatedModality = "";
 
     const DEMO_IMG = "data:image/svg+xml," + encodeURIComponent(
       `<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='black'/><ellipse cx='60' cy='60' rx='42' ry='50' fill='%23555'/><ellipse cx='60' cy='60' rx='36' ry='44' fill='%23888'/><ellipse cx='60' cy='55' rx='10' ry='6' fill='%23333'/><text x='60' y='112' fill='%23666' font-size='9' text-anchor='middle'>DEMO</text></svg>`);
@@ -1766,6 +1777,7 @@
       relatedReportSeq += 1;
       clearRelatedReport();
       selectedUid = uid;
+      relatedModality = "";
       render(); refreshRight({ forceReport: true });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
     }
@@ -1805,6 +1817,9 @@
     }
 
     // Related Exam: 서버가 원본 기관+PatientID로 만든 키가 같은 "다른" 검사만.
+    function relatedModalities(study) {
+      return [...new Set(String(study.modality ?? "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean))];
+    }
     function renderRelated() {
       const s = cur();
       $("#related-return").disabled = !s || !relatedUid;
@@ -1817,6 +1832,24 @@
         rel = studies.filter(x => s.sourcePatientKey && x.sourcePatientKey === s.sourcePatientKey && x.uid !== s.uid);
         rel = [...rel].sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid));
       }
+      const total = rel.length;
+      const modality = $("#related-modality");
+      const tokens = [...new Set(rel.flatMap(relatedModalities))].sort();
+      const options = [new Option("전체 Modality", ""), new Option("미지정", JSON.stringify("")),
+        ...tokens.map(token => new Option(token, JSON.stringify(token)))];
+      // 마지막 일치 항목이 사라져도 사용자가 고른 조건을 몰래 전체로 넓히지 않는다.
+      if (relatedModality && !options.some(option => option.value === relatedModality))
+        options.push(new Option(JSON.parse(relatedModality), relatedModality));
+      modality.replaceChildren(...options);
+      modality.value = relatedModality;
+      modality.disabled = !s;
+      modality.title = modality.selectedOptions[0]?.textContent || "";
+      if (relatedModality) {
+        const token = JSON.parse(relatedModality);
+        rel = rel.filter(x => token ? relatedModalities(x).includes(token) : !relatedModalities(x).length);
+      }
+      $("#related-filter-count").textContent = `${rel.length} / ${total}`;
+      $("#related-filter-hidden").hidden = !s || !relatedUid || !relatedModality || rel.some(x => x.uid === relatedUid);
       $("#relrows").innerHTML = s
         ? (rel.map(x => {
             return `
@@ -1826,7 +1859,7 @@
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
               <td>${x.rs === "A" ? "승인 판독문" : "판독문 없음"}</td>
             </tr>`;
-          }).join("") || `<tr><td class="empty" colspan="7">관련 검사 없음</td></tr>`)
+          }).join("") || `<tr><td class="empty" colspan="7">${relatedModality ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
     }
 
@@ -3404,10 +3437,10 @@ ${esc($("#recommendation").value)}
       if (sizes.top != null) top.style.height = clampPanel(sizes.top, 140, $(".right").getBoundingClientRect().height - 266) + "px";
       const row = $(".workrow").getBoundingClientRect();
       if (sizes.related != null) related.style[portrait ? "height" : "width"] = clampPanel(sizes.related,
-        portrait ? 230 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
+        portrait ? 286 : 220, portrait ? row.height - 186 : row.width - 366) + "px";
       if (sizes.prior != null) {
         prior.style.flex = "none";
-        prior.style.height = clampPanel(sizes.prior, 100, related.getBoundingClientRect().height - 136) + "px";
+        prior.style.height = clampPanel(sizes.prior, 150, related.getBoundingClientRect().height - 136) + "px";
       }
     }
     $("#layout-toggle").addEventListener("click", () => {
@@ -3439,7 +3472,7 @@ ${esc($("#recommendation").value)}
     bindPanelResize("#resize-related", () => portraitLayout() ? "y" : "x", (e, axis) => {
       const box = $(".workrow").getBoundingClientRect();
       if (axis === "y")
-        $(".related-p").style.height = clampPanel(e.clientY - box.top, 230, box.height - 186) + "px";
+        $(".related-p").style.height = clampPanel(e.clientY - box.top, 286, box.height - 186) + "px";
       else
         $(".related-p").style.width = clampPanel(e.clientX - box.left, 220, box.width - 366) + "px";
     });
@@ -3447,7 +3480,7 @@ ${esc($("#recommendation").value)}
       const box = $(".related-p").getBoundingClientRect();
       const list = $(".related-list-pane");
       list.style.flex = "none";
-      list.style.height = clampPanel(e.clientY - box.top, 100, box.height - 136) + "px";
+      list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
 
     $("#quick").addEventListener("input", render);
@@ -3790,6 +3823,12 @@ ${esc($("#recommendation").value)}
     });
 
     $("#related-return").addEventListener("click", returnToReportStudy);
+    $("#related-modality").addEventListener("change", e => {
+      if (!cur()) return;
+      // 목록을 좁히는 동작이 현재 영상/판독문을 다시 읽거나 점유를 옮겨서는 안 된다.
+      relatedModality = e.target.value;
+      renderRelated();
+    });
     $("#relrows").addEventListener("click", e => {
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) previewRelated(tr.dataset.uid);

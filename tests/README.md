@@ -795,3 +795,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Return from related viewing (D03C)
 
 `python tests/e2e/test_return_to_current.py` runs three local BFF/C-STORE UI tests: return to the report-target thumbnail/Clinical Info and real viewer; stale related replies and thumbnail cancellation; keyboard/small-window access with input, hold and report history preserved. It keeps normal autosave separate from the return action.
+
+### Related-list modality filtering (D03D)
+
+`python tests/e2e/test_related_filter.py` runs three local BFF/C-STORE UI tests for exact compound modality tokens, patient-key scope, missing values and empty results; hidden related viewing with unchanged images/report/draft/hold; keyboard/small-window access, delayed reports and target-change reset. Non-CT modality values are owned list-response variants, not proof of non-CT image support. Filtering itself causes no image fetch or report write.
