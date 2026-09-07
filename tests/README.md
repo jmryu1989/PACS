@@ -820,3 +820,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Accessible series identity and opening (D02I)
 
 `python tests/e2e/test_thumbnail_access.py` runs three local tests for native full-identity disclosure with keyboard/click and literal long text; Enter/Space/click opening of real current/related two-series CT with viewport identity and draft/hold preservation; cached paging, stale handlers, lookup/preview/decode/network failure disabling, recovery and invalid UID refusal. Response-only variants do not establish real 25-series image support. D02H3/D02G3/D02C3 remain relevant regressions.
+
+### Series placement and recent layout restoration
+
+`python tests/e2e/test_viewer_layout.py` runs four local tests for native 1/2/4-cell CT drag placement, replacement and duplication; explicit account/browser recent-layout save and reopening with actual canvas/Study/Series/SOP checks; current/related reporting preservation; account/device separation, delayed access checks and logout; corrupt storage, missing/ambiguous references and unsupported viewport refusal. `node --test tests/viewer_layout_test.cjs` runs six model/storage tests. Values retain only one recent grid with study/series references and active cell per institution/subject, never transient display-set IDs, report text or images. Camera, frame, annotations, server roaming and specialized layouts remain outside this feature. Existing viewer-history6 and prior-selection2 are the related regressions.

@@ -643,8 +643,157 @@ function kinCreateViewerHistory() {
   return { id: 'kin.viewer-history', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+// Only a bounded recent grid is retained; transient display-set IDs never leave this session.
+const kinViewerLayoutModel = (() => {
+  const PREFIX = 'kin-viewer-layout-v1:';
+  const uid = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)*$/.test(s);
+  const exact = (x, keys) => x && typeof x === 'object' && !Array.isArray(x) && Object.keys(x).sort().join('|') === [...keys].sort().join('|');
+  function scope(search) {
+    const query = new URLSearchParams(search), raw = query.getAll('StudyInstanceUIDs');
+    if (raw.length !== 1) return null;
+    const values = raw[0].split(',');
+    return values.length >= 1 && values.length <= 2 && values.every(uid) && new Set(values).size === values.length ? values.sort() : null;
+  }
+  function owner(me) {
+    return me?.kind === 'member' && [me.sub, me.institution].every(x => typeof x === 'string' && x.length > 0 && x.length <= 256)
+      ? PREFIX + JSON.stringify([me.institution, me.sub]) : null;
+  }
+  function normalize(value) {
+    if (!exact(value, ['version', 'studies', 'rows', 'cols', 'active', 'cells']) || value.version !== 1) return null;
+    const { studies, rows, cols, active, cells } = value;
+    if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || !studies.every(uid) || new Set(studies).size !== studies.length) return null;
+    if (![1, 2].includes(rows) || ![1, 2].includes(cols) || !Number.isInteger(active) || active < 0 || active >= rows * cols) return null;
+    if (!Array.isArray(cells) || cells.length !== rows * cols || cells.every(x => x === null)) return null;
+    if (!cells.every(x => x === null || (exact(x, ['study', 'series']) && studies.includes(x.study) && uid(x.series)))) return null;
+    return { version: 1, studies: [...studies].sort(), rows, cols, active, cells: cells.map(x => x && ({ study: x.study, series: x.series })) };
+  }
+  function read(storage, key) {
+    if (!key) throw new Error('계정 정보를 확인할 수 없습니다.');
+    const raw = storage.getItem(key);
+    if (raw === null) return null;
+    const value = typeof raw === 'string' && raw.length <= 8192 ? normalize(JSON.parse(raw)) : null;
+    if (!value) throw new Error('저장한 배치가 손상되었거나 지원하지 않는 형식입니다.');
+    return value;
+  }
+  function write(storage, key, value) {
+    const clean = normalize(value);
+    if (!key || !clean) throw new Error('이 배치는 저장할 수 없습니다.');
+    storage.setItem(key, JSON.stringify(clean));
+  }
+  return { PREFIX, uid, scope, owner, normalize, read, write };
+})();
+
+function kinCreateViewerLayout() {
+  let services, stop;
+  function mount() {
+    stop?.();
+    const model = kinViewerLayoutModel, grid = services.viewportGridService;
+    const cs = services.cornerstoneViewportService, ds = services.displaySetService;
+    const search = location.search, studies = model.scope(search);
+    const panel = document.createElement('details'); panel.id = 'kin-viewer-layout'; panel.open = true;
+    panel.style.cssText = 'position:fixed;left:8px;bottom:30px;z-index:41;width:260px;max-width:calc(100vw - 16px);background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:8px;font:13px sans-serif';
+    const summary = document.createElement('summary'); summary.textContent = '최근 배치 · 이 브라우저'; panel.append(summary);
+    const note = document.createElement('p'); note.textContent = '최근 1건만 저장합니다. 영상 위치·확대·주석은 포함하지 않습니다.'; panel.append(note);
+    const status = document.createElement('p'); status.id = 'kin-viewer-layout-status'; status.setAttribute('role', 'status'); panel.append(status);
+    const controls = document.createElement('div'); panel.append(controls); document.body.append(panel);
+    let ended = false, busy = false, key = null, channel;
+    const controller = new AbortController();
+    const buttons = [];
+    const live = () => !ended && location.search === search;
+    const refresh = () => buttons.forEach(b => { b.disabled = ended || busy || !key || !studies; });
+    function end() { ended = true; controller.abort(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    async function get(path) {
+      const request = new AbortController(), abort = () => request.abort();
+      controller.signal.addEventListener('abort', abort, { once: true });
+      const timer = setTimeout(abort, 10000);
+      try {
+        const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
+        if (!live()) throw new Error('화면이 변경되어 배치를 적용하지 않았습니다.');
+        if (response.status === 401 || response.status === 403) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
+        if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
+        return await response.json();
+      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); }
+    }
+    async function authenticate() {
+      const next = model.owner(await get('/api/me'));
+      if (!live() || !next || (key && next !== key)) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
+      key = next;
+    }
+    const ordered = state => [...state.viewports.values()].sort((a, b) => a.y - b.y || a.x - b.x);
+    const signature = () => {
+      const state = grid.getState();
+      return JSON.stringify([state.layout, state.activeViewportId, ordered(state).map(v => [v.viewportId, v.x, v.y, v.width, v.height, v.displaySetInstanceUIDs])]);
+    };
+    function resolve(cell) {
+      if (!cell) return null;
+      const matches = ds.getActiveDisplaySets().filter(d => d.StudyInstanceUID === cell.study && d.SeriesInstanceUID === cell.series);
+      // Split series and non-stack objects cannot be silently replaced with a default display set.
+      if (matches.length !== 1 || matches[0].Modality !== 'CT' || !(matches[0].images?.length) ||
+          !matches[0].images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2')) throw new Error('시리즈를 찾을 수 없거나 지원하지 않는 영상입니다. 현재 배치를 유지합니다.');
+      return matches[0].displaySetInstanceUID;
+    }
+    function capture() {
+      const state = grid.getState(), views = ordered(state), { numRows: rows, numCols: cols, layoutType } = state.layout;
+      if (layoutType !== 'grid' || views.length !== rows * cols) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
+      const cells = views.map((v, i) => {
+        if (Math.abs(v.x - (i % cols) / cols) > 1e-6 || Math.abs(v.y - Math.floor(i / cols) / rows) > 1e-6 ||
+            Math.abs(v.width - 1 / cols) > 1e-6 || Math.abs(v.height - 1 / rows) > 1e-6) throw new Error('병합 또는 특수 배치는 저장할 수 없습니다.');
+        const ids = v.displaySetInstanceUIDs || [];
+        if (!ids.length) return null;
+        if (ids.length !== 1 || cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack') throw new Error('일반 CT 스택만 저장할 수 있습니다.');
+        const d = ds.getDisplaySetByUID(ids[0]), cell = { study: d?.StudyInstanceUID, series: d?.SeriesInstanceUID };
+        if (!studies.includes(cell.study) || resolve(cell) !== ids[0] || !cs.getCornerstoneViewport(v.viewportId)?.getCurrentImageId?.()) throw new Error('영상 로딩이 끝난 뒤 다시 저장하세요.');
+        return cell;
+      });
+      const value = model.normalize({ version: 1, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells });
+      if (!value) throw new Error('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다.');
+      return value;
+    }
+    async function run(action) {
+      if (busy || !live() || !key || !studies) return;
+      busy = true; refresh(); status.textContent = '계정과 검사 접근 확인 중…'; const before = signature();
+      try {
+        await authenticate();
+        const data = await get('/api/studies');
+        const rows = studies.map(uid => data.studies?.find(s => s.uid === uid));
+        if (rows.some(s => !s) || (rows.length > 1 && (!rows[0].sourcePatientKey || rows.some(s => s.sourcePatientKey !== rows[0].sourcePatientKey)))) throw new Error('현재 검사의 접근 권한과 같은 환자 여부를 확인할 수 없습니다.');
+        // A delayed permission response must not overwrite a newer manual layout or selection.
+        if (!live() || before !== signature()) throw new Error('화면 배치가 변경되어 작업을 적용하지 않았습니다. 다시 시도하세요.');
+        if (action === 'save') { model.write(localStorage, key, capture()); status.textContent = '최근 배치를 이 브라우저에 저장했습니다.'; }
+        else if (action === 'remove') { localStorage.removeItem(key); status.textContent = '이 계정의 최근 배치를 삭제했습니다. 현재 화면은 유지됩니다.'; }
+        else {
+          if (ordered(grid.getState()).some(v => v.displaySetInstanceUIDs?.length && cs.getCornerstoneViewport(v.viewportId)?.type !== 'stack')) throw new Error('일반 CT 화면에서 배치를 복원하세요. 현재 화면은 유지됩니다.');
+          const value = model.read(localStorage, key);
+          if (!value) throw new Error('이 계정에서 저장한 최근 배치가 없습니다.');
+          if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('다른 검사의 배치입니다. 저장한 검사를 먼저 여세요.');
+          const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-layout-' + crypto.randomUUID());
+          await grid.setLayout({ numRows: value.rows, numCols: value.cols, activeViewportId: ids[value.active], isHangingProtocolLayout: false,
+            findOrCreateViewport: index => ({ displaySetInstanceUIDs: sets[index] ? [sets[index]] : [], displaySetOptions: [{}],
+              viewportOptions: { viewportId: ids[index], viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
+          if (live()) status.textContent = '저장한 시리즈 배치를 적용했습니다. 영상 로딩 상태를 확인하세요.';
+        }
+      } catch (error) {
+        if (live()) status.textContent = error?.name === 'QuotaExceededError' || error?.name === 'SecurityError' ? '브라우저 저장소를 사용할 수 없습니다. 현재 화면은 유지됩니다.' : error instanceof SyntaxError ? '저장한 배치가 손상되었습니다. 현재 화면은 유지됩니다.' : error.message || '배치 작업에 실패했습니다.';
+      } finally { busy = false; refresh(); }
+    }
+    for (const [label, action] of [['최근 배치 저장', 'save'], ['최근 배치 복원', 'restore'], ['최근 배치 삭제', 'remove']]) {
+      const b = document.createElement('button'); b.textContent = label; b.type = 'button'; b.disabled = true;
+      b.style.cssText = 'margin:3px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px';
+      b.onclick = () => run(action); controls.append(b); buttons.push(b);
+    }
+    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
+    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
+    window.addEventListener('storage', onStorage);
+    try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
+    if (studies) authenticate().then(() => { if (live()) status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; }).catch(() => { if (live()) status.textContent = '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
+    else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
+    stop = () => { end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
+  }
+  return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+
 window.config = {
-  extensions: [kinStackPrecision, kinCreateViewerHistory()],
+  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout()],
   modes: [],
   customizationService: {},
   showStudyList: true,
