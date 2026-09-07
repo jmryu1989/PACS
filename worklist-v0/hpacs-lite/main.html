@@ -1919,7 +1919,8 @@
             }
             reps = [...bySeries.values()].map(arr => {
               arr.sort((a, b) => (+tagv(a, "00200013") || 0) - (+tagv(b, "00200013") || 0));
-              return tagv(arr[Math.floor(arr.length / 2)], "00080018");
+              const representative = arr[Math.floor(arr.length / 2)];
+              return { sopUid: tagv(representative, "00080018"), seriesUid: tagv(representative, "0020000E") };
             });
           }
           if (stale()) return;
@@ -1943,7 +1944,7 @@
           const worker = async () => {
             while (!stale() && next < batch.length) {
               const index = next++;
-              const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index] }, signal);
+              const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index].sopUid }, signal);
               if (stale()) return;
               try {
                 const res = await fetch(`/instances/${encodeURIComponent(lk.id)}/preview`, { signal, cache: "no-store" });
@@ -1956,7 +1957,7 @@
                 img.alt = `시리즈 ${start + index + 1}`;
                 img.title = "더블클릭: Film Box";
                 img.onerror = () => { if (!stale()) cells[index].textContent = "썸네일 표시 실패"; };
-                img.ondblclick = () => { if (!stale()) openFilmbox(uid); };
+                img.ondblclick = () => { if (!stale()) openFilmbox(uid, null, batch[index].seriesUid); };
                 img.src = url;
                 cells[index].replaceChildren(img);
               } catch (e) {
@@ -3291,10 +3292,17 @@ ${esc($("#recommendation").value)}
         .sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid))[0]?.uid ?? null;
     }
 
-    function openFilmbox(uid, priorUid = null) {
+    function openFilmbox(uid, priorUid = null, initialSeriesUid = null) {
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
+      // 썸네일에 Series 식별이 없으면 기본 시리즈를 대신 열어 선택이 맞는 것처럼 보이지 않는다.
+      if (initialSeriesUid !== null && (typeof initialSeriesUid !== "string" || initialSeriesUid.length > 64 ||
+          !/^\d+(?:\.\d+)+$/.test(initialSeriesUid))) {
+        toast("시리즈 정보를 확인할 수 없어 열지 않았습니다.", "err");
+        return;
+      }
       const url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}` +
-        (priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "");
+        (priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
+        (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`);
       const seq = ++ohifOpenSeq;
       const stored = readStoredOhifRect();
       const initial = ohifPlacement(stored);

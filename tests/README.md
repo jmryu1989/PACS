@@ -799,3 +799,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Related-list modality filtering (D03D)
 
 `python tests/e2e/test_related_filter.py` runs three local BFF/C-STORE UI tests for exact compound modality tokens, patient-key scope, missing values and empty results; hidden related viewing with unchanged images/report/draft/hold; keyboard/small-window access, delayed reports and target-change reset. Non-CT modality values are owned list-response variants, not proof of non-CT image support. Filtering itself causes no image fetch or report write.
+
+### Series thumbnail opening (D02E)
+
+`python tests/e2e/test_thumbnail_series.py` runs three local tests for real two-series CT thumbnail-to-viewport Study/Series/SOP identity and retained display sets; related/current report, private draft and hold preservation; cached paging, stale thumbnail handlers and missing/malformed Series UID refusal. The pagination response fixture tests identity plumbing without claiming 25 real loaded series. Existing whole-study/compare entry points remain separate.
