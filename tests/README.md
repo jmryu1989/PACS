@@ -827,3 +827,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 # Account workspace roaming
 
 `python tests/workspace_roaming_live.py` checks actual account/institution ownership, strict display-only payloads, concurrent revision conflicts, reset tombstones and denied identities. `python tests/e2e/test_workspace_roaming.py` exercises explicit save/load/reset across real BFF accounts and independent browser contexts, local layout priority, size clamping, delayed responses and reporting preservation. These are separate from the mandatory 69 then 14 gates. Fixtures remove only their own new workspace rows with full-row equality checks. Apply the additive workspace migration with `prisma migrate deploy`; never reset the database.
+
+### CT position synchronization
+
+`node --test tests/ct_sync_test.cjs` checks eight physical-plane matching boundaries. `python tests/e2e/test_ct_sync.py` exercises the pinned Image Slice Sync menu with synthetic classic CT, different spacing/order, actual keyboard navigation, explicit OFF/reopening, incompatible patient/FoR/orientation and out-of-range refusal, held image responses and replaced stacks, and actual logout. Native position navigation is guarded by visible sourcePatientKey and DICOM geometry; it does not perform registration across different FoRs or persist display/report changes. Existing viewer-layout4 and viewer-history6 remain separate regressions. Model-only invalid geometry and browser response delays are distinguished from actual DICOM fixture cases.

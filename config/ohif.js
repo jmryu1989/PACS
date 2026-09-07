@@ -792,8 +792,137 @@ function kinCreateViewerLayout() {
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+// Position matching is display navigation, not image registration or a measurement result.
+const kinCTSyncModel = (() => {
+  const eps = 1e-3, dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+  const sub = (a, b) => a.map((x, i) => x - b[i]);
+  const vector = v => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+  function normal(p) {
+    if (!p || !vector(p.imagePositionPatient) || !vector(p.rowCosines) || !vector(p.columnCosines) ||
+        p.isDefaultValueSetForRowCosine || p.isDefaultValueSetForColumnCosine) return null;
+    const r = p.rowCosines, c = p.columnCosines;
+    if (Math.abs(dot(r, r) - 1) > 1e-6 || Math.abs(dot(c, c) - 1) > 1e-6 || Math.abs(dot(r, c)) > 1e-6) return null;
+    return [r[1]*c[2]-r[2]*c[1], r[2]*c[0]-r[0]*c[2], r[0]*c[1]-r[1]*c[0]];
+  }
+  function match(source, target) {
+    const deny = reason => ({ reason, index: -1 });
+    if (!source?.patient || source.patient !== target?.patient) return deny('같은 환자를 확인할 수 없습니다');
+    if (!source.classic || !target.classic) return deny('일반 CT 스택만 위치 동기할 수 있습니다');
+    const a = source.planes?.[source.index], planes = target.planes;
+    if (!a?.frameOfReferenceUID || !Array.isArray(planes) || planes.length < 2 || planes.length > 2000 ||
+        planes.some(p => !p?.frameOfReferenceUID || p.frameOfReferenceUID !== a.frameOfReferenceUID)) return deny('좌표계가 다르거나 없습니다');
+    const n = normal(a), t = normal(planes[0]);
+    if (!n || !t || Math.abs(dot(n, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
+    const origin = planes[0].imagePositionPatient, values = [];
+    for (const p of planes) {
+      const pn = normal(p);
+      if (!pn || Math.abs(dot(pn, t)) < 1 - 1e-6) return deny('영상 방향 또는 위치가 맞지 않습니다');
+      const d = sub(p.imagePositionPatient, origin), z = dot(d, t);
+      if (Math.sqrt(dot(d, d) - Math.min(dot(d, d), z*z)) > eps) return deny('기울어진 스택은 위치 동기하지 않습니다');
+      values.push(z);
+    }
+    const sorted = [...values].sort((a, b) => a - b), gaps = sorted.slice(1).map((x, i) => x - sorted[i]);
+    if (gaps.some(x => x < eps)) return deny('같은 위치의 영상이 중복되어 있습니다');
+    const z = dot(sub(a.imagePositionPatient, origin), t);
+    if (z < sorted[0] - eps || z > sorted.at(-1) + eps) return deny('대상 영상의 위치 범위를 벗어났습니다');
+    // Preserve native nearest-position and stable first-index tie behavior, but refuse large gaps.
+    let index = 0;
+    for (let i = 1; i < values.length; i++) if (Math.abs(values[i]-z) < Math.abs(values[index]-z) - 1e-9) index = i;
+    if (Math.abs(values[index]-z) > Math.min(...gaps) / 2 + eps) return deny('대상 영상 위치 사이에 큰 공백이 있습니다');
+    return { index, reason: '' };
+  }
+  return { match };
+})();
+
+function kinCreateCTSync() {
+  let services, stop;
+  function mount() {
+    stop?.();
+    const core = window.cornerstone, groups = services.syncGroupService;
+    const creators = ['imageSlice', 'stackimage'].map(type => [type, groups.getSyncCreatorForType(type)]);
+    if (!core?.imageLoader || creators.some(([, fn]) => typeof fn !== 'function')) return;
+    const notice = document.createElement('div'); notice.id = 'kin-ct-sync-status'; notice.setAttribute('role', 'status');
+    notice.style.cssText = 'position:fixed;top:110px;left:50%;transform:translateX(-50%);z-index:42;max-width:70vw;padding:6px 10px;background:#101e32;color:#e1ecfc;border-radius:6px;font:13px sans-serif;pointer-events:none';
+    notice.hidden = true; document.body.append(notice);
+    const controller = new AbortController(), search = location.search, created = new Set();
+    let ended = false, channel, owner, checking, rows = [];
+    const say = text => { notice.textContent = text; notice.hidden = !text; };
+    const live = () => !ended && location.search === search;
+    const end = () => { ended = true; controller.abort(); created.forEach(s => s.setEnabled(false)); say('세션이 변경되어 위치 동기를 중지했습니다'); };
+    async function get(path) {
+      const request = new AbortController(), abort = () => request.abort();
+      controller.signal.addEventListener('abort', abort, { once: true });
+      const timer = setTimeout(abort, 10000);
+      try {
+        const r = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal });
+        if (!r.ok) throw Error('검사 접근 정보를 확인할 수 없습니다');
+        return await r.json();
+      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); }
+    }
+    const session = () => checking ||= get('/api/me').finally(() => { checking = null; });
+    const ownerOf = me => me?.kind === 'member' && me.institution && me.sub ? JSON.stringify([me.institution, me.sub]) : null;
+    const ready = (async () => {
+      owner = ownerOf(await get('/api/me'));
+      rows = (await get('/api/studies')).studies || [];
+      if (!owner || ownerOf(await get('/api/me')) !== owner) throw Error('계정이 변경되었습니다');
+    })().then(() => true, () => { end(); return false; });
+    function view(info) {
+      const v = services.cornerstoneViewportService.getCornerstoneViewport(info.viewportId);
+      const g = services.viewportGridService.getState().viewports.get(info.viewportId);
+      if (!v || !g || v.getRenderingEngine().id !== info.renderingEngineId) return null;
+      const ids = v.getImageIds?.() || [], sets = g.displaySetInstanceUIDs || [];
+      const d = sets.length === 1 && services.displaySetService.getDisplaySetByUID(sets[0]);
+      const patient = rows.find(r => r.uid === d?.StudyInstanceUID)?.sourcePatientKey;
+      const classic = v.type === 'stack' && d?.Modality === 'CT' && d?.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2' &&
+        d.images?.length === ids.length && d.images.every(i => i.SOPClassUID === '1.2.840.10008.5.1.4.1.1.2') &&
+        ids.length > 1 && ids.length <= 2000 && ids.every(id => id.includes('/studies/'+d.StudyInstanceUID+'/series/'+d.SeriesInstanceUID+'/'));
+      return { v, ids, patient, classic, index: v.getCurrentImageIdIndex?.(),
+        planes: classic ? ids.map(id => core.metaData.get('imagePlaneModule', id)) : [],
+        signature: JSON.stringify([sets, ids, v.getCurrentImageId?.()]) };
+    }
+    const current = (info, before) => before && view(info)?.signature === before.signature;
+    for (const [type, original] of creators) {
+      groups.addSynchronizerType(type, (id, options) => {
+        const sync = original(id, options), fire = sync.fireEvent;
+        created.add(sync); let serial = 0;
+        const destroy = sync.destroy;
+        sync.destroy = function (...args) { ++serial; created.delete(sync); say('위치 동기 꺼짐'); return destroy.apply(this, args); };
+        sync.fireEvent = async function (sourceInfo, event) {
+          if (!live() || sync.isDisabled()) return;
+          const ticket = ++serial, source = view(sourceInfo), targets = sync.getTargetViewports().filter(t => t.viewportId !== sourceInfo.viewportId);
+          const snapshots = targets.map(view);
+          if (!(await ready) || !live() || ticket !== serial || !current(sourceInfo, source)) return;
+          try {
+            const me = await session();
+            if (ownerOf(me) !== owner) { end(); return; }
+            if (!live() || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source)) return;
+            const matches = snapshots.map(t => kinCTSyncModel.match(source, t));
+            await Promise.all(matches.map((m, i) => m.index < 0 ? null : core.imageLoader.loadAndCacheImage(snapshots[i].ids[m.index])));
+            // Native movement now uses cached pixels. A late load cannot choose a replaced stack or an OFF group.
+            if (!live() || sync.isDisabled() || ticket !== serial || !current(sourceInfo, source) || targets.some((t, i) => !current(t, snapshots[i]) || !sync.hasTargetViewport(t.renderingEngineId, t.viewportId))) return;
+            matches.forEach((m, i) => {
+              sync.setOptions(targets[i].viewportId, { ...sync.getOptions(targets[i].viewportId), disabled: m.index < 0, useInitialPosition: true });
+              if (m.index >= 0) core.utilities.spatialRegistrationMetadataProvider.add([targets[i].viewportId, sourceInfo.viewportId], [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]);
+            });
+            const denied = matches.find(m => m.index < 0);
+            say(denied ? '위치 동기 제한: '+denied.reason : '같은 좌표계의 CT 위치 동기');
+            return fire.call(sync, sourceInfo, event);
+          } catch (_) { if (live()) say('위치 동기를 적용하지 못했습니다. 영상과 연결 상태를 확인하세요'); }
+        };
+        return sync;
+      });
+    }
+    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
+    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
+    window.addEventListener('storage', onStorage);
+    try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
+    stop = () => { end(); creators.forEach(([type, fn]) => groups.addSynchronizerType(type, fn)); window.removeEventListener('storage', onStorage); channel?.close(); notice.remove(); };
+  }
+  return { id: 'kin.ct-sync', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+}
+
 window.config = {
-  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout()],
+  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateCTSync()],
   modes: [],
   customizationService: {},
   showStudyList: true,
