@@ -1,5 +1,11 @@
 # 살아 있는 불변조건 테스트
 
+D09A 개인 상용구 보존: `python tests/e2e/test_template_preservation.py` (별도 실제4).
+기존 부위/권고문/순서의 제목 편집 왕복, 취소/503/명시적 비움, 새 로그인·개인 소유,
+Recommendation 커서 Tab·세 칸 삽입·실제 판독 점유·현재 개인 초안/관련 확정본 분리,
+촬영/타인 점유/P·기사 읽기 전용과 원본 DICOM hash를 검증한다.
+합성 텍스트와 소유 fixture만 사용하며 기존 69→14 및 D02A의 승인본/초안 경계를 유지한다.
+
 D03A 자동 과거 검사 선택: `node --test tests/worklist_prior_test.cjs` (날짜·기관 포함 환자키·modality·동률 6개 순수 시험).
 추가 실기: `python tests/e2e/test_prior_selection.py` (합성 CT의 실제 StudyDate·양 canvas/UID·수동 미래 비교와 개인 초안/이력 보존 2개).
 기존 `test_worklist.py` 14개와 별도로 실행한다. 로컬 대상 제한·임시 인증·소유 fixture 정리를 그대로 사용한다.

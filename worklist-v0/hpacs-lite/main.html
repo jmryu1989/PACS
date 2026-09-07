@@ -256,7 +256,8 @@
     .modal .foot button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 14px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
     /* 상용구는 여러 줄인 것이 정상이다 — 입력칸도 여러 줄이어야 한다 */
-    .modal .tplbody { align-items: start; }
+    #tplmodal .box { display: flex; flex-direction: column; max-height: 90vh; }
+    .modal .tplbody { align-items: start; overflow-y: auto; }
     .modal .tplbody label { padding-top: 5px; }
     .modal .tplbody textarea { background: #14181f; border: 1px solid #3a4356; color: #cdd3dc;
                                padding: 4px 6px; font: inherit; resize: vertical; width: 100%; }
@@ -741,8 +742,10 @@
         <label>제목</label><input id="tpl-t" placeholder="예: Normal Brain CT">
         <label>단축어</label><input id="tpl-s" placeholder="예: nbct — 판독문에서 입력 후 Tab">
         <label>Modality</label><input id="tpl-m" placeholder="비우면 모든 검사에서 보입니다">
+        <label>Bodypart</label><input id="tpl-b" placeholder="상용구의 부위 분류">
         <label>Findings</label><textarea id="tpl-f" rows="6"></textarea>
         <label>Conclusion</label><textarea id="tpl-c" rows="3"></textarea>
+        <label>Recommendation</label><textarea id="tpl-r" rows="3"></textarea>
       </div>
       <div class="foot">
         <button id="tpl-cancel">취소</button>
@@ -1010,9 +1013,17 @@
       const tr = e.target.closest("tr[data-i]"); if (!tr) return;
       const why = reportWriteBlock();
       if (why) { toast(why, "err"); return; }
+      // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
+      if (RFIELDS.some(k => $("#" + k).readOnly)) { toast("현재 판독문은 편집할 수 없습니다", "err"); return; }
       const t = templates[+tr.dataset.i];
-      $("#findings").value += (($("#findings").value && "\n") || "") + t.findings;
-      $("#conclusion").value += (($("#conclusion").value && "\n") || "") + t.conclusion;
+      if (!t) return;
+      for (const k of RFIELDS) {
+        if (!t[k]) continue;
+        const el = $("#" + k);
+        el.value += (el.value ? "\n" : "") + t[k];
+        // 목록 삽입도 타이핑/Tab처럼 점유를 시작해야 다른 판독의에게 편집 중임이 보인다.
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
     });
     $("#t-mod").addEventListener("change", renderTemplates);
 
@@ -1070,8 +1081,10 @@
       $("#tpl-t").value = t?.title ?? "";
       $("#tpl-s").value = t?.shortcut ?? "";
       $("#tpl-m").value = t?.modality ?? "";
+      $("#tpl-b").value = t?.bodypart ?? "";
       $("#tpl-f").value = t?.findings ?? "";
       $("#tpl-c").value = t?.conclusion ?? "";
+      $("#tpl-r").value = t?.recommendation ?? "";
       $("#tplmodal").classList.add("show");
       $("#tpl-t").focus();
     }
@@ -1088,7 +1101,11 @@
       if (dup) { toast(`단축어 "${shortcut}" 은(는) "${dup.title}" 이(가) 쓰고 있습니다`, "err"); return; }
       const body = { id: t?.id, title, shortcut,
                      modality: $("#tpl-m").value.trim(),
-                     findings: $("#tpl-f").value, conclusion: $("#tpl-c").value };
+                     bodypart: $("#tpl-b").value.trim(),
+                     findings: $("#tpl-f").value, conclusion: $("#tpl-c").value,
+                     recommendation: $("#tpl-r").value,
+                     // API는 전체 상용구를 저장한다. 제목만 고쳐도 생략한 분류/권고문/순서가 지워졌다.
+                     ...(t ? { ord: t.ord ?? 0 } : {}) };
       if (serverMode) {
         try { await api("POST", "/templates", body); await reloadPrefs(); }
         catch (e) { toast("상용구 저장 실패: " + e.message, "err"); return; }
