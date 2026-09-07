@@ -1064,8 +1064,49 @@ function kinCreateCine() {
   return { id: 'kin.cine', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { dispose?.(); dispose = null; } };
 }
 
+function kinApplyCTPreset(services, commands, presetIndex) {
+  const id = services.viewportGridService.getActiveViewportId();
+  const grid = services.viewportGridService.getState().viewports.get(id);
+  const viewport = services.cornerstoneViewportService.getCornerstoneViewport(id);
+  const ids = grid?.displaySetInstanceUIDs || [];
+  const displaySet = ids.length === 1 && services.displaySetService.getDisplaySetByUID(ids[0]);
+  const preset = Number.isInteger(presetIndex) && presetIndex >= 0 && presetIndex < 5 &&
+    services.customizationService.get('cornerstone.windowLevelPresets')?.presets?.CT?.[presetIndex];
+  const validNumber = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isFinite(Number(value));
+  if (viewport?.type !== 'stack' || displaySet?.Modality !== 'CT' || displaySet?.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' ||
+      !preset || !validNumber(preset.window) || Number(preset.window) <= 0 || !validNumber(preset.level)) {
+    services.uiNotificationService.show({ title: 'CT 표시 프리셋', message: '일반 CT 영상을 선택하고 프리셋 설정을 확인하세요.', type: 'info' });
+    return false;
+  }
+  commands.runCommand('setViewportWindowLevel', { viewportId: id, window: Number(preset.window), level: Number(preset.level) }, 'CORNERSTONE');
+  return true;
+}
+
+function kinCreateCTPresets() {
+  let restore;
+  return {
+    id: 'kin.ct-presets',
+    onModeEnter({ servicesManager, commandsManager }) {
+      restore?.();
+      const native = commandsManager.getCommand('setWindowLevel', 'CORNERSTONE');
+      if (!native?.commandFn) return;
+      // Mode hotkeys supply these five named CT presets; the viewport menu uses a separate native command.
+      const names = ['Soft tissue', 'Lung', 'Liver', 'Bone', 'Brain'];
+      const guarded = { ...native, commandFn(props) {
+        const index = names.indexOf(props.description);
+        return index < 0 ? native.commandFn(props) : kinApplyCTPreset(servicesManager.services, commandsManager, index);
+      } };
+      commandsManager.registerCommand('CORNERSTONE', 'setWindowLevel', guarded);
+      restore = () => {
+        if (commandsManager.getCommand('setWindowLevel', 'CORNERSTONE') === guarded) commandsManager.registerCommand('CORNERSTONE', 'setWindowLevel', native);
+      };
+    },
+    onModeExit() { restore?.(); restore = null; },
+  };
+}
+
 window.config = {
-  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateCTSync(), kinCreateCine()],
+  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
   modes: [],
   customizationService: {},
   showStudyList: true,
@@ -1099,29 +1140,4 @@ window.config = {
       console.warn(error);
     }
   },
-  hotkeys: [
-    { commandName: 'incrementActiveViewport', label: 'Next Viewport', keys: ['right'] },
-    { commandName: 'decrementActiveViewport', label: 'Previous Viewport', keys: ['left'] },
-    { commandName: 'rotateViewportCW', label: 'Rotate Right', keys: ['r'] },
-    { commandName: 'rotateViewportCCW', label: 'Rotate Left', keys: ['l'] },
-    { commandName: 'invertViewport', label: 'Invert', keys: ['i'] },
-    { commandName: 'flipViewportHorizontal', label: 'Flip Horizontally', keys: ['h'] },
-    { commandName: 'flipViewportVertical', label: 'Flip Vertically', keys: ['v'] },
-    { commandName: 'scaleUpViewport', label: 'Zoom In', keys: ['+'] },
-    { commandName: 'scaleDownViewport', label: 'Zoom Out', keys: ['-'] },
-    { commandName: 'fitViewportToWindow', label: 'Zoom to Fit', keys: ['='] },
-    { commandName: 'resetViewport', label: 'Reset', keys: ['space'] },
-    { commandName: 'nextImage', label: 'Next Image', keys: ['down'] },
-    { commandName: 'previousImage', label: 'Previous Image', keys: ['up'] },
-    { commandName: 'setToolActive', commandOptions: { toolName: 'Zoom' }, label: 'Zoom', keys: ['z'] },
-    { commandName: 'windowLevelPreset1', label: 'W/L Preset 1', keys: ['1'] },
-    { commandName: 'windowLevelPreset2', label: 'W/L Preset 2', keys: ['2'] },
-    { commandName: 'windowLevelPreset3', label: 'W/L Preset 3', keys: ['3'] },
-    { commandName: 'windowLevelPreset4', label: 'W/L Preset 4', keys: ['4'] },
-    { commandName: 'windowLevelPreset5', label: 'W/L Preset 5', keys: ['5'] },
-    { commandName: 'windowLevelPreset6', label: 'W/L Preset 6', keys: ['6'] },
-    { commandName: 'windowLevelPreset7', label: 'W/L Preset 7', keys: ['7'] },
-    { commandName: 'windowLevelPreset8', label: 'W/L Preset 8', keys: ['8'] },
-    { commandName: 'windowLevelPreset9', label: 'W/L Preset 9', keys: ['9'] },
-  ],
 };
