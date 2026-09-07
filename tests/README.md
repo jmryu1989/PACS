@@ -712,10 +712,10 @@ bytes는 PostgreSQL jsonb::text의 UTF-8이며 전체 디스크 사용량 상한
 여러 페이지는 하나의 장기 snapshot이 아니므로 동시 생성 UUID가 cursor 앞에 생기면
 새 첫 페이지에서 확인해야 한다. 삭제·숨김된 cursor 자체를 다시 찾을 필요는 없다.
 
-`python -B tests/viewer_api_test.py`는 임시 계정과 실제 Orthanc 합성 영상으로8개 묶음을
+`python -B tests/viewer_api_test.py`는 임시 계정과 실제 Orthanc 합성 영상으로9개 묶음을
 검사한다. lifecycle/원래 성공 replay, 네 route 기관·역할·P·gateway, raw/canonical/
 no-store, 지원 SOP/frame/평면, 동시 revision/요청, 세 quota 마지막 자리, 감사 실패
-원자적 rollback, 실제 부모 lock wait 뒤 철회/P 재검사, 삭제 경쟁, pagination이다.
+원자적 rollback, 실제 부모 lock wait 뒤 철회/P 재검사, 삭제 경쟁, pagination과 실제 DB lock timeout503의 무변경을 확인한다.
 quota 경계는 이 실행이 만든 검사에만 counter를 미리 채우며, 별도 lifecycle 시험이
 실제 저장 이력 합계와 counter를 대조한다. 원본 바이트와 판독/초안/판독 이력을 보존한다.
 감사 실패용 trigger는 해당 합성 StudyUID에만 적용하고 finally에서 제거한다.

@@ -110,8 +110,9 @@ class ViewerAPI(unittest.TestCase):
         original={t:psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE uid={literal(self.uid)} ORDER BY to_jsonb(t)::text')
                   for t in ['StudyState','Report','ReportDraft','ReportVersion']}
         head,create=self.create()
-        self.assertEqual(head['author']['sub'],self.stack.user_ids['doctor'])
+        self.assertEqual(head['authorSub'],self.stack.user_ids['doctor'])
         self.assertEqual(head['revision'],1)
+        self.assertEqual(self.call(method='GET')['items'],[head])
         before=self.snapshot()
         self.assertEqual(self.call(body=create),head); self.assertEqual(self.snapshot(),before)
         edited,_=self.revise(head,item={**self.key,'title':'편집😀'})
@@ -166,6 +167,11 @@ class ViewerAPI(unittest.TestCase):
         raw=json.dumps(command).replace('"frame": 1','"frame": 1e0').encode()
         response=self.stack.bearer_request('POST',self.path,token,raw,headers={'Content-Type':'application/json'})
         self.assertEqual(response.status,200); self.assertEqual(response.body,head)
+        equivalent=dict(item={k:v for k,v in reversed(list(self.key.items())) if k!='description'},requestId=command['requestId'])
+        self.assertEqual(self.call(body=equivalent),head)
+        unicode_raw=json.dumps(command,ensure_ascii=False).encode()
+        response=self.stack.bearer_request('POST',self.path,token,unicode_raw,headers={'Content-Type':'application/json'})
+        self.assertEqual(response.status,200);self.assertEqual(response.body,head)
         raw=json.dumps(command).encode()
         invalid=[raw[:-1]+b',"requestId":"'+str(uuid.uuid4()).encode()+b'"}',
                  raw[:-1]+b',"\\u0072equestId":"'+str(uuid.uuid4()).encode()+b'"}',
@@ -196,6 +202,8 @@ class ViewerAPI(unittest.TestCase):
             try: response=self.stack._open(Request(self.stack.api+path,headers=headers))
             except HTTPError as e: response=e
             with response: self.assertEqual(response.headers.get('Cache-Control'),'no-store')
+        _,nfc=self.create({**self.key,'title':'é'})
+        self.call(body={**nfc,'item':{**nfc['item'],'title':'é'}},status=409)
 
     def test_04_actual_dicom_reference_frame_and_geometry(self):
         for change in [{'seriesUid':'2.25.99'},{'sopUid':'2.25.99'},{'frame':2},{'frame':0},{'frame':1.5}]:
@@ -218,6 +226,14 @@ class ViewerAPI(unittest.TestCase):
             self.create({**arrow,'seriesUid':key['seriesUid'],'sopUid':key['sopUid']},status=400)
         other=self.stack.create_fixture();self.addCleanup(self.stack.cleanup_fixture,other.uid)
         self.call(path='/studies/'+other.uid+'/viewer-items',body=dict(requestId=str(uuid.uuid4()),item=self.key),status=400)
+        duplicate=copy.deepcopy(self.ds)
+        duplicate.StudyInstanceUID=other.uid;duplicate.SeriesInstanceUID=generate_uid()
+        duplicate.PatientID=other.patient_id;duplicate.PatientName='SYNTHETIC^D05B-DUPLICATE'
+        stream=io.BytesIO();duplicate.save_as(stream,write_like_original=False)
+        response=self.stack._orthanc_request('POST','/instances',stream.getvalue());self.assertEqual(response.status,200)
+        found=self.stack._orthanc_request('POST','/tools/lookup',self.key['sopUid'].encode())
+        self.assertEqual(len([x for x in found.body if x['Type']=='Instance']),2)
+        self.create(status=400)
 
     def test_05_concurrent_revision_replay_and_cross_target_request(self):
         head,command=self.create()
@@ -305,5 +321,16 @@ class ViewerAPI(unittest.TestCase):
         self.assertEqual(history['nextCursor'],1)
         tail=self.call(method='GET',path=path+'?limit=1&cursor=1')
         self.assertEqual(tail['revisions'][0]['revision'],2);self.assertIsNone(tail['nextCursor'])
+
+    def test_09_database_lock_timeout_is_retryable_and_inert(self):
+        head,command=self.create()
+        before=self.snapshot()
+        with ThreadPoolExecutor(1) as pool:
+            with self.parent_lock():
+                future=pool.submit(self.stack.request,'POST',self.path,'doctor',dict(requestId=str(uuid.uuid4()),item=self.key))
+                self.wait_blocked()
+                self.assertEqual(future.result(timeout=7).status,503)
+        self.assertEqual(self.snapshot(),before)
+        self.assertEqual(self.call(body=command),head)
 
 if __name__=='__main__': unittest.main(verbosity=2)

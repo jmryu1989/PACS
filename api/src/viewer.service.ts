@@ -17,10 +17,14 @@ function visible(study: any, c: Caller) {
   if (!study || (study.institutionId !== c.institution && study.teleInstitutionId !== c.institution) ||
       (study.rs === 'P' && study.preDoc !== c.actor && study.preReviewer !== c.actor)) denied();
 }
+function timestamp(value: Date | string) {
+  // PostgreSQL timestamp(3) JSON omits a zone; Prisma writes these columns as UTC.
+  return typeof value === 'string' ? new Date(value + 'Z') : value;
+}
 function result(head: any, revision?: any) {
-  return { id: head.id, studyUid: head.studyUid, author: { sub: head.authorSub, actor: head.authorActor },
-    revision: revision?.revision ?? head.revision, createdAt: head.createdAt,
-    updatedAt: revision?.at ?? head.updatedAt, item: revision?.snapshot ?? head.snapshot };
+  return { id: head.id, studyUid: head.studyUid, authorSub: head.authorSub, authorActor: head.authorActor,
+    revision: revision?.revision ?? head.revision, createdAt: timestamp(head.createdAt), hidden: (revision?.snapshot ?? head.snapshot).hidden,
+    updatedAt: timestamp(revision?.at ?? head.updatedAt), item: revision?.snapshot ?? head.snapshot };
 }
 
 @Injectable()
@@ -48,26 +52,36 @@ export class ViewerService {
   async list(uid: string, query: any, c: Caller, id?: string) {
     member(c); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const page = viewerPage(query, id !== undefined);
-    // Both permission and content reads share one MVCC snapshot. A later tele/P
-    // transition cannot make a second statement expose a different parent state.
+    // The permission predicate and page share a single SQL statement, including
+    // the distinction between a forbidden parent and an authorized empty page.
     return this.bounded(async tx => {
-      visible(await tx.studyState.findUnique({ where: { uid } }), c);
+      const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
+        AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
+        AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
       if (id !== undefined) {
-        const head = await tx.viewerItem.findFirst({ where: { id, studyUid: uid } });
-        if (!head) throw new NotFoundException('표시 항목이 없습니다');
-        const rows = await tx.viewerRevision.findMany({ where: { itemId: id,
-          ...(page.cursor === null ? {} : { revision: { gt: page.cursor as number } }) },
-          orderBy: { revision: 'asc' }, take: page.limit + 1 });
-        const revisions = rows.slice(0, page.limit).map(row => ({ revision: row.revision, action: row.action,
-          reason: row.reason, actor: row.actor, at: row.at, payloadBytes: row.payloadBytes, item: row.snapshot }));
-        return { revisions, nextCursor: rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
+        const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent}),
+          head AS (SELECT i.id FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid" WHERE i.id = ${id}::uuid)
+          SELECT EXISTS(SELECT 1 FROM parent) AS allowed, EXISTS(SELECT 1 FROM head) AS present,
+            COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.revision) FROM (
+              SELECT r.* FROM "ViewerRevision" r JOIN head h ON h.id = r."itemId"
+              WHERE (${page.cursor}::int IS NULL OR r.revision > ${page.cursor}::int)
+              ORDER BY r.revision LIMIT ${page.limit + 1}) page), '[]'::jsonb) AS rows`;
+        if (!pageRow.allowed) denied();
+        if (!pageRow.present) throw new NotFoundException('표시 항목이 없습니다');
+        const revisions = pageRow.rows.slice(0, page.limit).map(row => ({ revision: row.revision, action: row.action,
+          reason: row.reason, actor: row.actor, at: timestamp(row.at), payloadBytes: row.payloadBytes, item: row.snapshot }));
+        return { revisions, nextCursor: pageRow.rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
       }
-      const rows = await tx.viewerItem.findMany({ where: { studyUid: uid,
-        ...(page.includeHidden ? {} : { hidden: false }),
-        ...(page.cursor === null ? {} : { id: { gt: page.cursor as string } }) },
-        orderBy: { id: 'asc' }, take: page.limit + 1 });
-      const items = rows.slice(0, page.limit).map(row => result(row));
-      return { items, nextCursor: rows.length > page.limit ? items[items.length - 1].id : null };
+      const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})
+        SELECT EXISTS(SELECT 1 FROM parent) AS allowed,
+          COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
+            SELECT i.* FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid"
+            WHERE (${page.includeHidden} OR NOT i.hidden)
+              AND (${page.cursor}::uuid IS NULL OR i.id > ${page.cursor}::uuid)
+            ORDER BY i.id LIMIT ${page.limit + 1}) page), '[]'::jsonb) AS rows`;
+      if (!pageRow.allowed) denied();
+      const items = pageRow.rows.slice(0, page.limit).map(row => result(row));
+      return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null };
     }, true);
   }
 
