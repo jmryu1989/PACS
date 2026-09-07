@@ -1184,12 +1184,9 @@ process.stdout.write(JSON.stringify(value));
         self.assertEqual(me.status, 200, me.text)
         self.assertEqual(me.body.get("displayName"), "doctor KIN")
 
-        listed = self.stack.request("GET", "/admin/users?page=1", "jmryu")
-        self.assertEqual(listed.status, 200, listed.text)
-        doctor = next(
-            user for user in listed.body["users"]
-            if user["username"] == self.stack.username("doctor")
-        )
+        # Temporary users sort among existing members and can land past page1.
+        # Reuse the bounded real-page lookup; the name assertion stays identical.
+        doctor = self.admin_row(self.stack.username("doctor"))
         self.assertEqual(doctor["name"], "doctor KIN")
 
         colleagues = self.stack.request("GET", "/colleagues", "doctor")
