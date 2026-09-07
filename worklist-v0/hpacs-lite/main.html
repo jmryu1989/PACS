@@ -943,7 +943,10 @@
         headers: { "Content-Type": "application/json", "X-KIN-CSRF": "1" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      if (res.status === 401) { await KinAuth.logout(); throw new Error("세션이 만료되었습니다"); }
+      if (res.status === 401) {
+        await KinAuth.logout();
+        throw Object.assign(new Error("세션이 만료되었습니다"), { status: res.status });
+      }
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         if (res.status === 409 && j.code === "REPORT_HELD") {
@@ -1962,16 +1965,16 @@
             grid.appendChild(cell);
             return { preview, alt: `${heading} · ${description}` };
           });
-          let next = 0;
+          let next = 0, stopped = false;
           const worker = async () => {
-            while (!stale() && next < batch.length) {
+            while (!stopped && !stale() && next < batch.length) {
               const index = next++;
               try {
                 // 한 항목의 조회 실패가 다른 영상과 실패한 항목의 식별 정보까지 지우면 대조할 수 없다.
                 const lk = await api("POST", "/dicom/lookup", { studyUid: uid, sopUid: batch[index].sopUid }, signal);
                 if (stale()) return;
                 const res = await fetch(`/instances/${encodeURIComponent(lk.id)}/preview`, { signal, cache: "no-store" });
-                if (!res.ok) { await res.body?.cancel(); throw new Error(`HTTP ${res.status}`); }
+                if (!res.ok) { await res.body?.cancel(); throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status }); }
                 const blob = await res.blob();
                 if (stale()) return;
                 const url = URL.createObjectURL(blob);
@@ -1985,6 +1988,11 @@
               } catch (e) {
                 if (stale()) return;
                 cells[index].preview.textContent = `썸네일 실패: ${e.message}`;
+                // 연결/세션 전체의 실패를 24개 개별 결함처럼 재요청하지 않는다. 이미 시작한 항목은 마저 종결한다.
+                if (e instanceof TypeError || e.status === 401) {
+                  stopped = true;
+                  cells.slice(next).forEach(cell => { cell.preview.textContent = "요청 중단 · 새로고침하여 다시 시도하세요"; });
+                }
               }
             }
           };

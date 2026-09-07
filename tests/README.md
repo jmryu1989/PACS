@@ -807,3 +807,7 @@ No schema, quota, permission or geometry tolerance is relaxed.
 ### Source series labels (D02F)
 
 `python tests/e2e/test_thumbnail_labels.py` runs three local tests for visible ordinal/source-number/description labels tied to real two-series CT metadata and viewport identity; missing, zero, duplicate and literal long text at 900×1400 with per-item lookup/preview failure identity; cached page labels, UID pairing and stale handlers. Labels describe the same representative SOP as the preview. Source-number sorting and metadata consistency validation are outside this contract. Response-only variants are distinguished from real C-STORE image checks; report, private draft, hold and original bytes are preserved. D02E and D02C remain separate regression suites.
+
+### Thumbnail common failures (D02G)
+
+`python tests/e2e/test_thumbnail_failures.py` runs three local tests for stopping new item scheduling after lookup/preview transport failure or HTTP401; bounded first-wave requests and unstarted-item labels; real BFF session revocation followed by the unchanged logout redirect; and continued per-item403/503 handling with explicit refresh recovery. Response-only25 identities and a logout observer are distinct from actual server401. Already in-flight items finish, so this is not immediate cancellation or global logout deduplication. D02F3 and D02C3 remain separate regression suites for real series/report identity and request lifecycle.
