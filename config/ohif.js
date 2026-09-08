@@ -443,7 +443,10 @@ function kinCreateViewerHistory() {
       if (ended) return;
       reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); ended = true; me = null; subject = ''; actions.replaceChildren();
       // A shared workstation must not retain unsaved labels after logout either.
-      for (const a of ct.annotation.state.getAllAnnotations()) if (kinds[a.metadata.toolName]) ct.annotation.state.removeAnnotation(a.annotationUID);
+      for (const a of ct.annotation.state.getAllAnnotations()) if (kinds[a.metadata.toolName]) {
+        ct.annotation.state.removeAnnotation(a.annotationUID);
+        if (services.measurementService.getMeasurement(a.annotationUID)) services.measurementService.remove(a.annotationUID);
+      }
       render();
     }
     async function api(path, options = {}, ticket = generation) {
@@ -556,6 +559,7 @@ function kinCreateViewerHistory() {
         const tool = group.getToolInstance(tools[kind]), config = tool.configuration, add = tool.addNewAnnotation;
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
+          if (ended || !subject) { status.textContent = '로그인 확인 후 측정하세요.'; return; }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
           let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';

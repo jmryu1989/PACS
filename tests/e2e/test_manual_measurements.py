@@ -116,6 +116,11 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
             p.evaluate('''([field,value])=>{const v=cornerstone.getEnabledElements()[0].viewport;
                 cornerstone.metaData.get('instance',v.getCurrentImageId())[field]=value;}''',[field,old])
         self.assertEqual(self.saved(f),[])
+        p.get_by_role('button',name='수동 길이',exact=True).click()
+        p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
+        p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+50,y+25);p.mouse.up()
+        expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('로그인 확인')
+        self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>['Length','Angle','EllipticalROI'].includes(a.metadata.toolName)).length"),0)
 
 
 if __name__ == '__main__':

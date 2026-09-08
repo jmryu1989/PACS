@@ -84,13 +84,15 @@ export class ViewerService {
       return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null };
     }, true);
     if ('items' in pageResult) {
+      const references = new Map<string, Promise<any>>();
       // Only manual measurements need the current source digest. A failed
       // source lookup withholds that measurement, not the whole reading list.
       for (const head of pageResult.items) {
         if (!isManualMeasurement(head.item.kind)) continue;
         head.referenceStatus = 'unverified';
         try {
-          const tags = await this.orthanc.viewerReference(head.item.sopUid, true);
+          if (!references.has(head.item.sopUid)) references.set(head.item.sopUid, this.orthanc.viewerReference(head.item.sopUid, true));
+          const tags = await references.get(head.item.sopUid);
           verifyViewerReference(uid, head.item, tags);
           if (tags._kinSourceDigest === head.item.sourceDigest) head.referenceStatus = 'verified';
         } catch { /* The viewer must not present an old number as current. */ }
