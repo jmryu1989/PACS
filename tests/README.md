@@ -18,9 +18,10 @@
 
 ## 기능별 시험 카탈로그
 
-측정 저장 응답/목록 복구: `python tests/e2e/test_measurement_readback.py` (3개).
+측정 저장 응답/목록 복구: `python tests/e2e/test_measurement_readback.py` (4개).
 실제 BFF/OHIF에서 저장 응답 유실 후 같은 UUID 재시도, SVG 수치 유지와
 미검증 응답의 저장 완료/재확인 안내·표식 보류·새로고침 복구를 검사한다.
+숨김 충돌 뒤 실제 드래그한 좌표·새 baseline 복원, 보관한 미저장 수정의 이탈 경고도 확인한다.
 별도 Node 프로세스의 실제 제품 서비스/Prisma/합성 Orthanc를 사용해 SOP 조회 재사용,
 개별 실패, 최대4개 병렬/전체3초 제한, 대기 요청과 실제 HTTP 응답 본문 취소,
 replay digest 불일치/원본 장애, 조회 중 P/기관 권한 변경 거절과 중복 쓰기0을 확인한다.

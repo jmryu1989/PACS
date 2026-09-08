@@ -2,6 +2,7 @@
 """TEST-D04-MANUAL-READBACK: real saved receipts, source verification and UI."""
 from pathlib import Path
 import sys, json, unittest, uuid, subprocess
+import math
 from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal, base
 
 
@@ -86,7 +87,18 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         row.get_by_role('button', name='복원', exact=True).click()
         expect(row).to_contain_text('미저장 수정은 보관 중')
         expect(row).to_contain_text('재확인 필요')
+        self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
+        self.assertFalse(p.evaluate("()=>window.dispatchEvent(new Event('beforeunload',{cancelable:true}))"))
         p.unroute('**/viewer-items/*/revisions', unverified)
+        def unverified_list(route):
+            response=route.fetch(); body=response.json()
+            for head in body['items']: head['referenceStatus']='unverified'
+            route.fulfill(response=response, json=body)
+        p.route('**/viewer-items?*', unverified_list)
+        p.get_by_role('button', name='새로고침', exact=True).click()
+        expect(row).to_contain_text('미저장 수정은 보관 중')
+        self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
+        p.unroute('**/viewer-items?*', unverified_list)
         p.get_by_role('button', name='새로고침', exact=True).click()
         expect(row.get_by_label('주석 문구')).to_have_value('보관한 내 수정')
         expect(row).to_contain_text('보관한 수정은 아직 미저장')
@@ -113,11 +125,47 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         self.assertEqual((self.state(f), self.versions(f)), before)
         self.assertEqual(self.hashes(), original)
 
+    def test_04_verified_restore_preserves_dragged_geometry(self):
+        f=self.specimen(); w,p=self.open_viewer(f)
+        self.addCleanup(w.close); self.addCleanup(p.close)
+        row=self.draw_length(p)
+        row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('저장 완료')
+        head=self.saved(f)[0]; old=head['item']['points']
+        row.get_by_role('button',name='편집',exact=True).click()
+        xy=p.evaluate('''()=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
+            const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')[0].getViewports()[0];
+            const point=v.worldToCanvas(a.data.handles.points[1]),box=v.element.getBoundingClientRect();
+            return [point[0]+box.x,point[1]+box.y];}''')
+        p.mouse.move(*xy); p.mouse.down(); p.mouse.move(xy[0]+35,xy[1]+15,steps=12); p.mouse.up()
+        p.wait_for_function('''old=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
+            return a&&!a.invalidated&&JSON.stringify(a.data.handles.points)!==JSON.stringify(old)}''',arg=old)
+        changed=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length').data.handles.points")
+        self.assertNotEqual(changed,old)
+        item={k:v for k,v in head['item'].items() if k not in ['hidden','sourceDigest']}
+        hidden=self.stack.request('POST','/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions','doctor',
+            dict(requestId=str(uuid.uuid4()),expectedRevision=1,action='hide',reason='합성 다른 창 숨김',item=item))
+        self.assertEqual(hidden.status,200,hidden.text)
+        row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('서버에 다른 판')
+        row.get_by_role('button',name='최신판 기준으로 내 수정 유지').click()
+        # Settle the hidden-head scan, or accept an implementation that removes
+        # it immediately. The retained annotation used to carry the old points.
+        p.wait_for_function('''old=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
+            return !a||JSON.stringify(a.data.handles.points)===JSON.stringify(old)}''',arg=old)
+        p.once('dialog',lambda d:d.accept('보관 좌표 복원'))
+        row.get_by_role('button',name='복원',exact=True).click(); expect(row).to_contain_text('보관한 수정은 아직 미저장')
+        p.wait_for_function('''points=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
+            return a&&!a.invalidated&&JSON.stringify(a.data.handles.points)===JSON.stringify(points)}''',arg=changed,timeout=5000)
+        expect(p.locator('svg.svg-layer')).to_contain_text('mm')
+        row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('저장됨 r4')
+        saved=self.saved(f)[0]['item']; self.assertEqual(saved['points'],changed)
+        self.assertAlmostEqual(saved['baseline']['values'][0],math.dist(*changed),places=5)
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     suite = unittest.TestSuite(MeasurementReadbackE2E(name) for name in [
         'test_01_lost_receipt_replay_keeps_verified_measurement',
         'test_02_unverified_receipt_reports_saved_and_withholds_annotation',
-        'test_03_bounded_list_replay_and_current_permission'])
+        'test_03_bounded_list_replay_and_current_permission',
+        'test_04_verified_restore_preserves_dragged_geometry'])
     sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

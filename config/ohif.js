@@ -611,9 +611,11 @@ function kinCreateViewerHistory() {
     }
     function restoreHeldDraft(e) {
       if (!e.head?.hidden && e.heldDraft && (!manual(e.draft.kind) || e.head.referenceStatus === 'verified')) {
+        // The hidden head may have replaced the live handles with its older
+        // points. Rehydrate the held geometry instead of copying those back.
+        removeAnnotation(e);
         e.draft = e.heldDraft; e.heldDraft = null; e.editing = true;
         e.message = '복원 완료. 보관한 수정은 아직 미저장 상태입니다.';
-        updateAnnotation(e);
       }
     }
     function row(e) {
@@ -632,6 +634,7 @@ function kinCreateViewerHistory() {
       }
       text(el, 'div', '프레임 ' + e.draft.frame);
       if (e.message) text(el, 'p', e.message);
+      if (e.heldDraft) text(el, 'p', '미저장 수정은 보관 중입니다. 원본을 확인한 후 다시 편집할 수 있습니다.');
       button(el, '영상으로 이동', () => navigate(e));
       if (writable(e)) {
         if (e.pending) button(el, '같은 요청 재시도', () => save(e), !!e.busy);
@@ -688,8 +691,7 @@ function kinCreateViewerHistory() {
         Object.assign(e, { head, draft: itemOnly(head), pending: null, latest: null, editing: false, message: '저장 완료' });
         restoreHeldDraft(e);
         if (manual(e.draft.kind) && head.referenceStatus !== 'verified') {
-          e.message = '저장 완료 · 재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다. 새로고침으로 다시 확인하세요.' +
-            (e.heldDraft ? ' 미저장 수정은 보관 중입니다.' : '');
+          e.message = '저장 완료 · 재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다. 새로고침으로 다시 확인하세요.';
           removeAnnotation(e);
         } else if (head.hidden) removeAnnotation(e);
         else lock(e, !e.editing);
@@ -801,8 +803,8 @@ function kinCreateViewerHistory() {
     }
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
-    const beforeUnload = e => { if ([...entries.values()].some(x => x.editing || x.pending)) { e.preventDefault(); e.returnValue = ''; } };
-    const jobGuard = () => [...entries.values()].some(x => x.editing || x.pending || x.busy) ||
+    const beforeUnload = e => { if ([...entries.values()].some(x => x.editing || x.pending || x.heldDraft)) { e.preventDefault(); e.returnValue = ''; } };
+    const jobGuard = () => [...entries.values()].some(x => x.editing || x.pending || x.busy || x.heldDraft) ||
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
     window.kinViewerHistoryHasUnsaved = jobGuard;
     let channel;
