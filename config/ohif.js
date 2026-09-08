@@ -342,7 +342,7 @@ const kinStackPrecision = (() => {
 /* KIN persistence owns only explicit user commands. Cornerstone objects are
  * session bindings, never wire payloads or durable identifiers. */
 function kinCreateViewerHistory() {
-  let services, stop;
+  let services, commands, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
   const names = { arrow: '화살표', key: '키 이미지', length: '수동 길이', angle: '수동 각도', ellipse: '수동 ROI' };
@@ -420,6 +420,77 @@ function kinCreateViewerHistory() {
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
       return { calculator: 'kin-native-manual-v1', values };
+    }
+    const measurementService = services.measurementService;
+    const originalMeasurements = measurementService.getMeasurements;
+    const numericMeasurement = m => manual(kinds[m?.toolName]);
+    const unverifiedReport = () => ({ columns: ['Verification'], values: ['재확인 필요'] });
+    function checkedMeasurement(m) {
+      if (!m || ended) return null;
+      const a = ct.annotation.state.getAnnotation(m.uid);
+      if (!a || a.data.kinUnverified || !sample(a)) return null;
+      const mapping = measurementService.getSourceMappings(m.source?.name, m.source?.version)
+        ?.find(x => x.annotationType === a.metadata.toolName);
+      if (!mapping) return null;
+      // Native CSV functions capture numbers at mapping time. Map the current
+      // verified target on every read, including a previously captured export.
+      const target = 'imageId:' + a.metadata.referencedImageId;
+      try {
+        return mapping.toMeasurementSchema({ annotation: { ...a, data: {
+          ...a.data, cachedStats: { [target]: a.data.cachedStats[target] },
+        } } });
+      } catch (_) { return null; } // Display sets may disappear before their metadata.
+    }
+    function projectMeasurement(m) {
+      if (!numericMeasurement(m)) return m;
+      const checked = checkedMeasurement(m);
+      return { ...m, ...(checked || { data: null,
+        displayText: { primary: ['재확인 필요'], secondary: [] } }),
+        getReport: () => {
+          const current = measurementService.getMeasurement(m.uid);
+          return checkedMeasurement(current)?.getReport?.() || unverifiedReport();
+        },
+      };
+    }
+    const projectedMeasurements = function (...args) { return originalMeasurements.apply(this, args).map(projectMeasurement); };
+    measurementService.getMeasurements = projectedMeasurements;
+    const measurementViews = new Map();
+    function refreshMeasurementViews() {
+      const present = new Set();
+      for (const m of originalMeasurements.call(measurementService)) {
+        if (!numericMeasurement(m)) continue;
+        present.add(m.uid);
+        const view = projectMeasurement(m), signature = JSON.stringify([view.displayText, view.points]);
+        if (measurementViews.get(m.uid) === signature) continue;
+        measurementViews.set(m.uid, signature);
+        // Publish a view refresh without removing the annotation or changing
+        // geometry at the source (the native handler ignores false updates).
+        measurementService.update(m.uid, m, false);
+      }
+      for (const uid of measurementViews.keys()) if (!present.has(uid)) measurementViews.delete(uid);
+    }
+    const reportContext = 'CORNERSTONE_STRUCTURED_REPORT', reportRestores = [];
+    for (const name of ['downloadReport', 'storeMeasurements']) {
+      const original = commands?.getCommand(name, reportContext);
+      if (!original) continue;
+      const guarded = { ...original, commandFn: options => {
+        const blocked = options.measurementData?.some(m => {
+          const a = ct.annotation.state.getAnnotation(m.uid), current = measurementService.getMeasurement(m.uid);
+          if (!numericMeasurement(m) && !numericMeasurement(current) && !manual(kinds[a?.metadata.toolName])) return false;
+          // The pinned SR adapters use imageId:referencedImageId. An abandoned
+          // volume target must not prevent export of the verified source frame.
+          return !checkedMeasurement(current);
+        });
+        if (blocked) {
+          const message = '재확인 필요: 측정을 다시 확인한 후 SR을 생성하세요.';
+          status.textContent = message;
+          services.uiNotificationService.show({ title: '측정 확인', message, type: 'warning' });
+          throw new Error(message);
+        }
+        return original.commandFn(options);
+      } };
+      commands.registerCommand(reportContext, name, guarded);
+      reportRestores.push(() => { if (commands.getCommand(name, reportContext) === guarded) commands.registerCommand(reportContext, name, original); });
     }
     const text = (parent, tag, value) => { const el = document.createElement(tag); el.textContent = value; parent.append(el); return el; };
     const button = (parent, label, run, disabled = false) => {
@@ -800,6 +871,7 @@ function kinCreateViewerHistory() {
         checking = true; const ticket = generation;
         authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket)).catch(() => {}).finally(() => { checking = false; });
       }
+      refreshMeasurementViews();
     }
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
@@ -821,10 +893,15 @@ function kinCreateViewerHistory() {
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
     stop = () => { end(); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     const previousStop = stop;
-    stop = () => { if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved; previousStop(); };
+    stop = () => {
+      if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
+      if (measurementService.getMeasurements === projectedMeasurements) measurementService.getMeasurements = originalMeasurements;
+      reportRestores.reverse().forEach(restore => restore());
+      previousStop();
+    };
     scan();
   }
-  return { id: 'kin.viewer-history', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+  return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager }) { services = servicesManager.services; commands = commandsManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
 // Only a bounded recent grid is retained; transient display-set IDs never leave this session.
