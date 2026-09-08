@@ -114,6 +114,29 @@ async function run() {
   assert.equal(stalled.items.length, 11);
   assert.ok(stalled.items.filter(h=>h.item.kind==='length').every(h=>h.referenceStatus==='unverified'));
   assert.ok(stalled.items.some(h=>h.id===key.id)); assert.ok(stalled.items.some(h=>h.id===arrow.id));
+  // D-MEASURE2 C4a: repeated ordered pages starve the same later SOP; a
+  // non-author can read just that item without hide/restore or audit writes.
+  const slowSops = new Set(calls.keys());
+  const later = heads.find(h => !slowSops.has(h.item.sopUid)); assert.ok(later);
+  const stallFetch = global.fetch;
+  global.fetch = (url, options) => String(url).endsWith('/tools/lookup') && !slowSops.has(options?.body)
+    ? realFetch(url, options) : stallFetch(url, options);
+  const repeated = await service.list(uid, { limit: '100' }, caller);
+  assert.equal(repeated.items.find(h => h.id === later.id).referenceStatus, 'unverified');
+  const reader = { ...caller, sub: randomUUID(), actor: 'synthetic-read-only-colleague' };
+  const rechecked = await service.list(uid, { recheck: later.id, includeHidden: 'true' }, reader);
+  assert.deepEqual(rechecked.items, [later]); assert.equal(rechecked.nextCursor, null);
+  assert.deepEqual(await persisted(), baseline);
+  await assert.rejects(service.list(uid, { recheck: later.id }, { ...reader, institution: 'other' }), e => e.getStatus() === 403);
+  await assert.rejects(service.list(uid, { recheck: '../invalid' }, reader), e => e.getStatus() === 400);
+  await assert.rejects(service.list(uid, { recheck: later.id, cursor: later.id }, reader), e => e.getStatus() === 400);
+  global.fetch = stallFetch;
+  // C4b: the same source gets a 3s total budget before a new write, and
+  // during replay. A timeout cannot invent a revision or erase a receipt.
+  const newStarted = performance.now();
+  await assert.rejects(service.write(uid, raw({ ...commands[0], requestId: randomUUID() }), caller), e => e.getStatus() === 503 && e.message.includes('같은 요청으로 다시 시도'));
+  assert.ok(performance.now()-newStarted >= 2900 && performance.now()-newStarted < 4500);
+  assert.deepEqual(await persisted(), baseline);
   const outageReplay = await service.write(uid, raw(commands[0]), caller);
   assert.equal(outageReplay.referenceStatus, 'unverified');
   assert.deepEqual(outageReplay.item, heads[0].item);

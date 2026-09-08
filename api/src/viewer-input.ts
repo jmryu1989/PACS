@@ -143,7 +143,7 @@ export function viewerFingerprint(studyUid: string, id: string | null, command: 
   return createHash('sha256').update(canonical({ studyUid, id, ...body })).digest('hex');
 }
 export function viewerPage(query: any, revisions = false) {
-  object(query, [], revisions ? ['limit', 'cursor'] : ['limit', 'cursor', 'includeHidden']);
+  object(query, [], revisions ? ['limit', 'cursor'] : ['limit', 'cursor', 'includeHidden', 'recheck']);
   if (query.limit !== undefined && (typeof query.limit !== 'string' || !/^[1-9]\d{0,2}$/.test(query.limit))) invalid();
   const limit = query.limit === undefined ? 50 : Number(query.limit);
   if (limit > 100) invalid();
@@ -151,7 +151,9 @@ export function viewerPage(query: any, revisions = false) {
   if (query.cursor !== undefined) cursor = revisions
     ? (typeof query.cursor === 'string' && /^[1-9]\d{0,9}$/.test(query.cursor) ? positive(Number(query.cursor)) : invalid()) : viewerUuid(query.cursor);
   if (query.includeHidden !== undefined && !['true', 'false'].includes(query.includeHidden)) invalid();
-  return { limit, cursor, includeHidden: query.includeHidden === 'true' };
+  const recheck = query.recheck === undefined ? null : viewerUuid(query.recheck);
+  if (recheck && cursor !== null) invalid();
+  return { limit, cursor, includeHidden: query.includeHidden === 'true', recheck };
 }
 
 const CT = '1.2.840.10008.5.1.4.1.1.2', US_MULTI = '1.2.840.10008.5.1.4.1.1.3.1';

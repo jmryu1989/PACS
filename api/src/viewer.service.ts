@@ -124,6 +124,7 @@ export class ViewerService {
           COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
             SELECT i.* FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid"
             WHERE (${page.includeHidden} OR NOT i.hidden)
+              AND (${page.recheck}::uuid IS NULL OR i.id = ${page.recheck}::uuid)
               AND (${page.cursor}::uuid IS NULL OR i.id > ${page.cursor}::uuid)
             ORDER BY i.id LIMIT ${page.limit + 1}) page), '[]'::jsonb) AS rows`;
       if (!pageRow.allowed) denied();
@@ -146,9 +147,19 @@ export class ViewerService {
     const manual = isManualMeasurement(command.item.kind);
     let sourceDigest: string;
     if (!known) {
-      const tags = await this.orthanc.viewerReference(command.item.sopUid, manual);
-      verifyViewerReference(uid, command.item, tags);
-      if (manual) sourceDigest = tags._kinSourceDigest;
+      // D-MEASURE2 C4b: one shared source deadline for a new measurement,
+      // replay and read recheck, including all lookup/tag/digest requests.
+      const controller = new AbortController();
+      const timer = manual ? setTimeout(() => controller.abort(), 3000) : null;
+      try {
+        const tags = await this.orthanc.viewerReference(command.item.sopUid, manual, controller.signal);
+        if (controller.signal.aborted) throw new ServiceUnavailableException('원본 확인이 지연되었습니다. 같은 요청으로 다시 시도하세요');
+        verifyViewerReference(uid, command.item, tags);
+        if (manual) sourceDigest = tags._kinSourceDigest;
+      } catch (error) {
+        if (controller.signal.aborted) throw new ServiceUnavailableException('원본 확인이 지연되었습니다. 같은 요청으로 다시 시도하세요');
+        throw error;
+      } finally { if (timer) clearTimeout(timer); controller.abort(); }
     }
 
     let replayed = false;

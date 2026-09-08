@@ -16,6 +16,33 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  measurements:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: D-MEASURE2 disposable runner refusal and artifact redaction
+        run: python3 tests/measurement_ci_test.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/measurement-python"
+          "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
+      - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py
+      - name: Sanitized synthetic measurement evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-measurement-results
+          path: tests/e2e/artifacts/measurement-ci/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

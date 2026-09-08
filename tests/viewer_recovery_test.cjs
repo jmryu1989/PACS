@@ -259,12 +259,41 @@ test('A3 (11): same-revision unverified head keeps edits and blocks even a detac
   const posts = h.calls.filter(c => c.options.method === 'POST').length;
   staleSave.click(); await flush(); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, posts);
   await h.click('원본 다시 확인'); assert.deepEqual(h.values(), ['retained edit']);
+  assert.ok(h.calls.some(c => c.path.includes('recheck=saved')), 'C4a uses an item-scoped read, not the same starving page');
+  h.pages.set('1', []); await h.click('원본 다시 확인');
+  assert.match(h.text(), /선택한 저장 항목을 찾지 못했습니다/); assert.deepEqual(h.values(), ['retained edit']);
+  h.pages.set('1', [saved]);
   const link = h.document.body.all().find(e => e.tagName === 'a' && e.textContent === '새 뷰어에서 재측정');
   assert.equal(link.href, '/ohif/viewer?StudyInstanceUIDs=1'); assert.equal(link.rel, 'noopener noreferrer');
   assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
   saved.referenceStatus = 'verified'; await h.click('원본 다시 확인');
   assert.match(h.text(), /원본 확인 완료/);
   assert.equal(h.button('저장').disabled, false); assert.deepEqual(h.values(), ['retained edit']);
+});
+
+test('C3: both SR commands identify the blocked selected item without silently dropping it', async () => {
+  const { h, a } = await measured();
+  h.input('주석 문구', '<img src=x> blocked length');
+  a.data.handles.points[1][0] = 20;
+  const selection = [{ uid: 'foreign-key', toolName: 'KeyImage' }, ...h.measurements.values()];
+  const before = h.calls.length;
+  for (const command of h.commands.values()) assert.throws(() => command.commandFn({measurementData: selection}),
+    /<img src=x> blocked length.*\[length\].*계산이 완료되지/);
+  assert.equal(h.calls.length, before);
+  assert.equal(selection.length, 2);
+  a.invalidated = true; a.data.handles = {};
+  for (const command of h.commands.values()) assert.throws(() => command.commandFn({measurementData: selection}), /측정 위치가 완성되지/);
+  assert.equal(h.calls.length, before);
+});
+
+test('A5: replaced cache is rewrapped; old values stay untrusted until a new native assignment', async () => {
+  const { h, a } = await measured(), data = a.data, target = 'imageId:'+a.metadata.referencedImageId;
+  a.data.cachedStats = { [target]: { length: 10 } }; a.invalidated = false;
+  await h.tick();
+  assert.equal(a.data, data);
+  for (const command of h.commands.values()) assert.throws(()=>command.commandFn({measurementData:[...h.measurements.values()]}), /재확인 필요/);
+  a.data.cachedStats[target] = { length: 10 }; a.invalidated = false; await h.tick();
+  assert.equal(h.services.measurementService.getMeasurements()[0].displayText.primary[0], '10 mm');
 });
 
 test('A3 delta: verified read after storage-limit 409 retains the actionable failure', async () => {

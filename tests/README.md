@@ -18,7 +18,7 @@
 
 ## 기능별 시험 카탈로그
 
-D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (16개),
+D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (18개),
 `python tests/e2e/test_viewer_recovery.py` (5개).
 빠른 시험은 실제 `config/ohif.js` 확장을 VM에서 mount하고 DOM/HTTP 경계만 대체한다.
 A1(원문 §2-5)의 검사 왕복·늦은 응답·동일 UUID, A2(6)의 busy 경합,
@@ -29,8 +29,11 @@ C5(4)의 검사403 격리·재인가·다른 검사 보관본과 실제401 정�
 빠른 시험은 validate CI의 컨테이너 없는 명시 step으로 등록했다.
 브라우저 시험은 실제 비교 CT·측정 좌표 재열림·숨김 충돌과 커밋 후 주입한403 응답 복구를 확인한다.
 실제 서버의 replay 검증 중 권한 변경은 별도 `viewer_readback_fault.cjs`에서 검사한다.
-B1(13)은 부분 처리다. 기존 측정/readback/held/manual-SR 실스택6파일과 viewer-api의 CI 연결,
-native 도구별 신선도 경계의 빠른 시험 확충은 잔여다.
+B1(13)의 실스택 실행은 validate의 별도 `measurements` job과 `tests/measurement_ci.py`에 등록한다.
+GitHub 호스팅의 빈 Docker runner에서만 임시 비밀·합성 CT·DB/Keycloak/Orthanc/API/BFF/고정 뷰어를 만들며,
+측정 job의 API는 실제 `development` target/소스 mount로 컴파일한다. 기존 `runtime` job의 production image 검증과 구분한다.
+기존 readback/panel/held/manual-SR와 viewer-api, 재확인/세션회복/calibration 시험을 순서대로 실제 실행한다.
+두 fault.cjs는 해당 E2E가 소유 fixture와 실제 컴파일 서비스를 통해 실행한다. 등록과 실제 CI 성공은 구분한다.
 세션 내 보관본은 브라우저 저장소에 쓰지 않으며 명시적 재개 전에 현재 검사 접근을 조회한다.
 뷰어 모드 종료·로그아웃·로그인 주체 변경 시 폐기하며 페이지 이탈/Job 복구 경고에 포함한다.
 후속 A3/A4 빠른 시험은 같은 revision의 검증 실패와 분리된 편집문, 분리된 이전 저장 handler 거절,
@@ -47,8 +50,14 @@ B2(10)의 실제 컴파일된 viewerJson/reportPreviewStudy에 합성 localhost 
 고정 분류만의 경고, 민감값 부재·반복 제한과 verifyMeasurements의 실제3초/병렬4 상한·digest 음성/양성·최종권한 검사를 실행한다.
 validate CI의 production image에 별도 step으로 등록했다. DB·Orthanc 서비스가 없는 시험이며 컨테이너 없는 시험으로 세지 않는다.
 B3(14)의 실제 Prisma list 음성/양성·항목/이력/영수증/예산/감사 불변은 `test_measurement_readback.py`가 호출하는
-`viewer_readback_fault.cjs`에서도 검사한다. 이 추가가 실스택 CI 연결 완료를 뜻하지 않는다.
-A5(조건부 CT 이벤트 도달 확인), C3(SR 원인 항목 안내), C4(원문2/3의 읽기 공정성·예산)는 관련 후속으로 남는다.
+`viewer_readback_fault.cjs`에서도 검사한다.
+C4a/b(원문2/3)는 같은 뒤쪽 SOP가 반복 목록에서 굶는 결함 주입 후 비작성자의 `recheck=<item UUID>` 읽기 회복,
+잘못된/복수 query와 타 기관 거절, 최초 쓰기·replay의3초 원본 마감과 영수증/이력/감사 불변을 추가한다.
+목록 정렬·페이지 cursor·병렬4 상한은 유지한다. 재확인은 쓰기가 아니며 현재 접근권을 다시 검사한다.
+A5는 `test_measurement_calibration.py`의 실제 일반 CT 열기/재열기/프레임 왕복 이벤트 관찰과,
+별도로 명시 호출한 고정 번들 calibration handler의 캐시 교체 후 미저장 측정 회복을 구분한다.
+자연 이벤트가 관찰됐다고 자연 작업 소실까지 재현했다고 쓰지 않는다. 빠른 시험도 캐시 교체 후 재장착과
+기존 값의 신선도 불인정, C3의 두 SR command 원인 항목/사유와 선택 유지, 항목 단위 재확인 요청을 단언한다.
 
 판독문·키 이미지 출력: `python tests/e2e/test_report_preview.py` (7개).
 같은 조회 시점의 저장본/승인 정보·환자 오버레이·키 revision과 기관/P/역할·타 작성자 초안 제외를 확인한다.

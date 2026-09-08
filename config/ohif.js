@@ -641,8 +641,7 @@ function kinCreateViewerHistory() {
       return stats && calculatedGeometry.get(stats) === geometry(data);
     };
     function trackMeasurement(a) {
-      if (!manual(kinds[a.metadata.toolName]) || trackedMeasurements.has(a.data)) return;
-      trackedMeasurements.add(a.data);
+      if (!manual(kinds[a.metadata.toolName]) || trackedMeasurements.has(a.data.cachedStats)) return;
       // The pinned calculator clears invalidated even when its image lookup
       // fails. Only a newly assigned native result witnesses these coordinates;
       // the existing trailing throttle and native voxel calculation stay intact.
@@ -653,6 +652,9 @@ function kinCreateViewerHistory() {
           return true;
         },
       });
+      // Calibration replaces cachedStats while keeping data. Reattach to that
+      // new cache; existing values gain no witness until native recalculation.
+      trackedMeasurements.add(a.data.cachedStats);
     }
     function sample(a) {
       if (!a || a.invalidated) return null;
@@ -723,6 +725,22 @@ function kinCreateViewerHistory() {
       for (const uid of measurementViews.keys()) if (!present.has(uid)) { measurementViews.delete(uid); measurementViewReads.delete(uid); }
     }
     const reportContext = 'CORNERSTONE_STRUCTURED_REPORT', reportRestores = [], srRequests = new Map();
+    function srItemMessage(m, reason) {
+      const e = annotations.get(m?.uid), a = m?.uid && ct.annotation.state.getAnnotation(m.uid);
+      const label = String(e?.draft?.label || m?.label || names[kinds[a?.metadata?.toolName]] || m?.toolName || '측정').slice(0, 80);
+      const frame = e?.draft?.frame || m?.frameNumber;
+      return '재확인 필요: ' + label + (frame ? ' · 프레임 ' + frame : '') + ' [' + String(m?.uid || '항목 없음').slice(0, 12) + '] — ' + reason + ' SR에 포함할 항목을 명시적으로 다시 선택하세요.';
+    }
+    function srVerificationMessage(m) {
+      const e = annotations.get(m?.uid), a = m?.uid && ct.annotation.state.getAnnotation(m.uid);
+      const reason = e?.head && e.head.referenceStatus !== 'verified' ? '원본 다시 확인을 누르세요.' :
+        !a ? '현재 영상의 측정 표식을 찾을 수 없습니다.' :
+        !a.data?.handles?.points ? '측정 위치가 완성되지 않았습니다. 측정을 마치세요.' :
+        measurementReason(a.metadata.referencedImageId, kinds[a.metadata.toolName], a.data.handles.points) ||
+        (a.data.kinUnverified ? '저장 당시 측정과 다릅니다. 편집 후 다시 측정하세요.' :
+          !sample(a) ? '현재 위치의 계산이 완료되지 않았습니다. 측정을 마치고 다시 시도하세요.' : '현재 영상의 측정 변환을 확인할 수 없습니다.');
+      return srItemMessage(m, reason);
+    }
     let srBusy = false;
     async function manualSr(name, options) {
       if (srBusy) throw new Error('SR을 처리 중입니다. 결과를 기다려 주세요.');
@@ -732,13 +750,14 @@ function kinCreateViewerHistory() {
       try {
         await authenticate(ticket);
         const chosen = selected.map(m => annotations.get(m.uid));
-        if (chosen.some(e => !e || !manual(e.draft.kind) || !writable(e) || e.heldDraft || e.head?.hidden))
-          throw new Error('현재 검사에서 직접 작성한 측정만 SR로 저장할 수 있습니다.');
-        for (const e of chosen) {
-          if (!checkedMeasurement(measurementService.getMeasurement(e.annotationUID))) throw new Error('재확인 필요: 측정을 다시 확인하세요.');
+        const invalid = chosen.findIndex(e => !e || !manual(e.draft.kind) || !writable(e) || e.heldDraft || e.head?.hidden);
+        if (invalid !== -1)
+          throw new Error(srItemMessage(selected[invalid], '현재 검사에서 직접 작성한 측정만 SR로 저장할 수 있습니다. 숨김이나 보관 중인 수정도 먼저 정리하세요.'));
+        for (const [i, e] of chosen.entries()) {
+          if (!checkedMeasurement(measurementService.getMeasurement(e.annotationUID))) throw new Error(srVerificationMessage(selected[i]));
           if (e.editing || e.pending || !e.head) await save(e, e.head ? 'edit' : 'create');
           if (!valid(ticket) || !e.head || e.editing || e.pending || e.busy || e.head.referenceStatus !== 'verified')
-            throw new Error('측정 저장을 완료하지 못했습니다. 측정 패널의 안내를 확인하세요.');
+            throw new Error(srItemMessage(selected[i], '측정 저장을 완료하지 못했습니다. 측정 패널의 안내를 확인하세요.'));
         }
         const items = chosen.map(e => ({ id: e.head.id, revision: e.head.revision })).sort((a,b) => a.id.localeCompare(b.id));
         const key = scope + '|' + subject + '|' + JSON.stringify(items);
@@ -781,7 +800,7 @@ function kinCreateViewerHistory() {
       const original = commands?.getCommand(name, reportContext);
       if (!original) continue;
       const guarded = { ...original, commandFn: options => {
-        const blocked = options.measurementData?.some(m => {
+        const blocked = options.measurementData?.find(m => {
           const a = ct.annotation.state.getAnnotation(m.uid), current = measurementService.getMeasurement(m.uid);
           if (!numericMeasurement(m) && !numericMeasurement(current) && !manual(kinds[a?.metadata.toolName])) return false;
           // The pinned SR adapters use imageId:referencedImageId. An abandoned
@@ -791,7 +810,7 @@ function kinCreateViewerHistory() {
         if (blocked || ended || suspended || recovery.has(scope)) {
           const message = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' :
             suspended || recovery.has(scope) ? '현재 검사 접근을 확인하고 보관 작업을 재개한 후 SR을 생성하세요.' :
-            '재확인 필요: 측정을 다시 확인한 후 SR을 생성하세요.';
+            srVerificationMessage(blocked);
           status.textContent = message;
           services.uiNotificationService.show({ title: '측정 확인', message, type: 'warning' });
           throw new Error(message);
@@ -913,7 +932,7 @@ function kinCreateViewerHistory() {
       if (error.status === 400 || error.status === 413) return '지원 영상·원본 평면·입력 길이를 확인하세요. 작성 내용은 저장되지 않았습니다.';
       return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
     }
-    async function load(resume = false) {
+    async function load(resume = false, recheck = null) {
       if (!scope || ended || loading) return;
       const ticket = generation, seq = ++readSequence; loading = true;
       status.textContent = '저장 항목 확인 중…';
@@ -921,7 +940,7 @@ function kinCreateViewerHistory() {
         await authenticate(ticket);
         const heads = []; let cursor = null;
         do {
-          const page = await api(path() + '?includeHidden=true&limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
+          const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
           if (seq !== readSequence) return;
           if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
@@ -956,7 +975,7 @@ function kinCreateViewerHistory() {
           Object.assign(e, { head, draft: itemOnly(head), editing: false, latest: null, message: '' }); restoreHeldDraft(e); row(e);
         }
         for (const e of entries.values()) row(e);
-        status.textContent = heads.length + '개 저장 항목 · 저장은 판독 확정과 별개입니다.';
+        status.textContent = recheck ? (heads.some(h => h.id === recheck) ? '선택한 항목의 원본 확인을 마쳤습니다. 항목의 확인 상태를 보세요. 저장 이력은 바뀌지 않습니다.' : '선택한 저장 항목을 찾지 못했습니다. 목록을 새로고침하세요.') : heads.length + '개 저장 항목 · 저장은 판독 확정과 별개입니다.';
         panel.dataset.studyUid = scope;
         toolbar(); hydrate();
       } catch (e) { if (!e.stale && valid(ticket)) status.textContent = '목록을 확인하지 못했습니다. 새로고침으로 다시 확인하세요.'; }
@@ -1133,9 +1152,9 @@ function kinCreateViewerHistory() {
       button(el, '영상으로 이동', () => navigate(e));
       const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       if (sourceUnverified && !e.head.hidden) {
-        text(el, 'p', '원본을 다시 확인한 뒤 저장할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
+        text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
         if (!e.heldDraft) button(el, '원본 다시 확인', () => {
-          if (valid(generation) && entries.get(e.id) === e && !e.busy && !e.pending) return load();
+          if (valid(generation) && entries.get(e.id) === e && !e.busy && !e.pending) return load(false, e.head.id);
         }, !!(e.busy || e.pending));
         const link = text(el, 'a', '새 뷰어에서 재측정');
         link.href = '/ohif/viewer?StudyInstanceUIDs=' + encodeURIComponent(scope);
@@ -1163,7 +1182,7 @@ function kinCreateViewerHistory() {
         }, !!e.busy);
         if (e.heldDraft) {
           if (!e.head.hidden) button(el, '원본 다시 확인', () => {
-            if (heldActionReady(e)) return load();
+            if (heldActionReady(e)) return load(false, e.head.id);
           }, !!(e.busy || e.pending));
           button(el, '보관 수정 버리기', () => discardHeld(e), !!(e.busy || e.pending));
         }

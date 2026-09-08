@@ -38,7 +38,11 @@ test('canonical command semantic equality and significant text/array order', () 
 });
 test('page and identity fail closed including repeated query keys', () => {
   for (const q of [{ limit: '0' }, { limit: '101' }, { cursor: ['1'] }, { limit: ['1'] }, { cursor: '1.0' }, { extra: '1' }]) reject(() => v.viewerPage(q, true));
-  assert.deepEqual(v.viewerPage({ limit: '100', cursor: '9' }, true), { limit: 100, cursor: 9, includeHidden: false });
+  assert.deepEqual(v.viewerPage({ limit: '100', cursor: '9' }, true), { limit: 100, cursor: 9, includeHidden: false, recheck: null });
+  const id = '00000000-0000-4000-8000-000000000001';
+  assert.equal(v.viewerPage({ recheck: id }).recheck, id);
+  for (const q of [{recheck: [id]}, {recheck: ''}, {recheck: id, cursor: id}]) reject(()=>v.viewerPage(q));
+  reject(()=>v.viewerPage({recheck: id}, true));
   for (const uid of ['1', '1.02', '2.', '2.25.' + '1'.repeat(64), 'https://x', 1]) reject(() => v.viewerUid(uid));
 });
 test('actual metadata contract: missing/malformed identity, integer and frame tags', () => {
