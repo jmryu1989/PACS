@@ -52,6 +52,30 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   self.post(f,bad,status=400)
   bad=self.v2([f]);bad['snapshot']['cells'][0]['properties']['interpolationType']=3;self.post(f,bad,status=400)
 
+ def test_print_08_optional_asset_failure_and_save_size_guidance(self):
+  f=self.ct('JOBPRINT-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
+  self.assertEqual(p.evaluate('typeof window.kinViewerJobPrint'),'undefined')
+  self.saved(p,f);self.assertEqual(len(self.jobs(f)),1)
+  errors=[];p.on('pageerror',lambda error:errors.append(str(error)))
+  asset='**/worklist/hpacs-lite/viewer-job-print.js'
+  for body in [None,'void 0;']:
+   p.route(asset,lambda route:route.fulfill(status=404 if body is None else 200,content_type='application/javascript',body=body or ''))
+   self.click_job(p,'저장 영상 출력','출력 화면을 불러오지 못했습니다')
+   self.assertEqual(p.locator('#kin-job-print').count(),0)
+   self.click_job(p,'이 작업 복원','복원했습니다')
+   p.unroute(asset)
+  p.get_by_label('작업 제목',exact=True).fill('화면 크기 실패 뒤 보존')
+  for width,height,message in [(0,400,'영상 화면 크기가 준비되지'),(8192,4096,'브라우저 창 크기나 배율을 줄인')]:
+   p.evaluate('''([width,height])=>{const state=services.viewportGridService.getState();const v=services.cornerstoneViewportService.getCornerstoneViewport(state.activeViewportId);
+    window.__jobSizeViewport=v;window.__jobSizeGetCanvas=v.getCanvas;v.getCanvas=()=>({width,height});}''',[width,height])
+   try:
+    self.click_job(p,'새 비교 작업 저장',message)
+    expect(p.get_by_label('작업 제목',exact=True)).to_have_value('화면 크기 실패 뒤 보존')
+    self.assertEqual(len(self.jobs(f)),1)
+   finally:p.evaluate('()=>{window.__jobSizeViewport.getCanvas=window.__jobSizeGetCanvas;delete window.__jobSizeViewport;delete window.__jobSizeGetCanvas;}')
+  self.click_job(p,'새 비교 작업 저장','저장했습니다');self.assertEqual(len(self.jobs(f)),2)
+  self.output(p);self.assertEqual(p.locator('#kin-job-print').count(),1);self.assertEqual(errors,[])
+
  def test_print_02_saved_pixels_two_studies_other_screen_pdf(self):
   patient='JOBPRINT-'+uuid.uuid4().hex[:12];a=self.ct(patient,'current','20260801');b=self.ct(patient,'past','20260701')
   self.seed_report(a);originals=self.originals();reports={f.uid:self.report_rows(f) for f in [a,b]}

@@ -27,13 +27,36 @@ window.kinViewerJobs = function (services, model) {
     const path = '/studies/' + studies[0] + '/viewer-jobs';
     const ordered = () => [...grid.getState().viewports.values()].sort((a, b) => a.y-b.y || a.x-b.x);
     const writable = () => me?.roles?.includes('radiologist');
-    const printer = window.kinViewerJobPrint({ api, authenticate, live });
+    let printer, printLoading, openingPrint = false;
+    async function openPrint(row) {
+      if (!live() || openingPrint) return;
+      openingPrint = true;
+      try {
+        if (typeof window.kinViewerJobPrint !== 'function') {
+          // A print-only asset failure must leave saving/restoring available.
+          if (!printLoading) printLoading = new Promise((resolve, reject) => {
+            const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-job-print.js';
+            const cancel = () => finish(new Error('출력 화면 확인이 취소되었습니다.'));
+            const timer = setTimeout(() => finish(new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.')), 30000);
+            function finish(error) { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); }
+            script.onload = () => finish(typeof window.kinViewerJobPrint === 'function' ? null : new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
+            script.onerror = () => finish(new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
+            abort.signal.addEventListener('abort', cancel, { once: true }); document.head.append(script);
+          });
+          await printLoading;
+        }
+        if (!live()) return;
+        printer ||= window.kinViewerJobPrint({ api, authenticate, live });
+        printer.open(studies[0], row.id);
+      } catch (e) { if (live()) status.textContent = e.message; }
+      finally { printLoading = null; openingPrint = false; }
+    }
     function refresh() { for (const b of buttons) { if (!b.isConnected) { buttons.delete(b); continue; } b.disabled = !live() || busy || !me || b.dataset.write === 'true' && !writable(); } }
     function button(host, label, action, write = false) {
       const b = text('button', label, host); b.type = 'button'; b.dataset.write = String(write); b.style.cssText = 'margin:3px;padding:4px;border:1px solid #657c9f;border-radius:4px';
       b.onclick = action; buttons.add(b); return b;
     }
-    function end() { ended = true; serial++; printer.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    function end() { ended = true; serial++; printer?.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     async function api(url, options = {}) {
       const controller = new AbortController(), cancel = () => controller.abort(); abort.signal.addEventListener('abort', cancel, { once: true });
       options.signal?.addEventListener('abort', cancel, { once: true });
@@ -62,15 +85,22 @@ window.kinViewerJobs = function (services, model) {
           !matches[0].images.some(i => i.SOPInstanceUID === cell.sop)) throw new Error('저장한 원본 시리즈와 프레임을 찾을 수 없습니다.');
       return matches[0].displaySetInstanceUID;
     }
-    function capture() {
+    function capture(checkOutputSize = false) {
       const state = grid.getState(), views = ordered(), { numRows: rows, numCols: cols, layoutType } = state.layout;
       if (layoutType !== 'grid' || ![1, 2].includes(rows) || ![1, 2].includes(cols) || views.length !== rows*cols) throw new Error('현재 일반 CT 1·2·4화면 배치에서 저장할 수 있습니다.');
+      let totalPixels = 0;
       const cells = views.map((g, i) => {
         if (Math.abs(g.x-(i%cols)/cols)>1e-6 || Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6 || Math.abs(g.width-1/cols)>1e-6 || Math.abs(g.height-1/rows)>1e-6) throw new Error('병합 또는 특수 배치는 아직 저장할 수 없습니다.');
         const sets = g.displaySetInstanceUIDs || []; if (!sets.length) return null;
         const v = cs.getCornerstoneViewport(g.viewportId), id = v?.getCurrentImageId?.(), image = id && window.cornerstone.metaData.get('instance', id);
         if (sets.length !== 1 || v?.type !== 'stack' || !v.getDefaultActor?.()?.actor || !image || !studies.includes(image.StudyInstanceUID)) throw new Error('원본 영상 로딩을 마친 뒤 저장하세요.');
         const camera = v.getCamera(), properties = v.getProperties(), canvas = v.getCanvas();
+        if (checkOutputSize) {
+          const width = canvas?.width, height = canvas?.height; totalPixels += width * height;
+          if (![width, height].every(n => Number.isInteger(n) && n >= 1)) throw new Error('영상 화면 크기가 준비되지 않았습니다. 로딩을 마친 뒤 저장하세요.');
+          if (width > 8192 || height > 8192 || width * height > 16777216 || totalPixels > 33554432)
+            throw new Error('저장할 화면이 너무 큽니다. 브라우저 창 크기나 배율을 줄인 뒤 다시 저장하세요.');
+        }
         if (properties.colormap?.name && properties.colormap.name !== 'Grayscale') throw new Error('현재는 회색조 표시 상태를 저장합니다.');
         const cell = { study: image.StudyInstanceUID, series: image.SeriesInstanceUID, sop: image.SOPInstanceUID, frame: 1,
           viewport: { width: canvas.width, height: canvas.height },
@@ -91,7 +121,7 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · 숨김' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, '이 작업 복원', () => run('restore', row));
-        if (!row.hidden) button(item, '저장 영상 출력', () => printer.open(studies[0], row.id));
+        if (!row.hidden) button(item, '저장 영상 출력', () => openPrint(row));
         if (row.authorSub === me?.sub) {
           button(item, '제목·설명 수정', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
           button(item, row.hidden ? '숨김 해제' : '작업 숨김', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
@@ -163,7 +193,7 @@ window.kinViewerJobs = function (services, model) {
           if (action === 'save') {
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
-            pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot: capture() }), url: path };
+            pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot: capture(true) }), url: path };
           } else if (action === 'edit') {
             if (!editRow) throw new Error('수정할 작업의 제목·설명 수정 버튼을 누르세요.'); row = editRow;
             pending = { body: JSON.stringify({ expectedRevision: row.revision, title: title.value, description: description.value, hidden: row.hidden, reason: '' }), url: path + '/' + row.id + '/revisions' };
@@ -210,7 +240,7 @@ window.kinViewerJobs = function (services, model) {
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { end(); printer.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };
