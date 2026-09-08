@@ -88,9 +88,12 @@ function positive(value: any): number {
   return value;
 }
 export interface ViewerItemInput {
-  schemaVersion: 1; kind: 'arrow' | 'key'; seriesUid: string; sopUid: string; frame: number;
+  schemaVersion: 1; kind: 'arrow' | 'key' | 'length' | 'angle' | 'ellipse'; seriesUid: string; sopUid: string; frame: number;
   frameOfReferenceUid?: string; label?: string; points?: number[][]; title?: string; description?: string;
+  viewPlaneNormal?: number[]; viewUp?: number[];
+  baseline?: { calculator: string; values: number[] };
 }
+export const isManualMeasurement = (kind: string) => ['length', 'angle', 'ellipse'].includes(kind);
 export interface ViewerCommand {
   requestId: string; expectedRevision?: number; action: 'create' | 'edit' | 'hide' | 'restore'; reason: string; item: ViewerItemInput;
 }
@@ -104,15 +107,28 @@ export function viewerCommand(raw: Buffer, create: boolean): ViewerCommand {
   const item = body.item;
   const common = ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame'];
   if (item?.kind === 'arrow') object(item, [...common, 'frameOfReferenceUid', 'label', 'points']);
+  else if (isManualMeasurement(item?.kind)) object(item, [...common, 'frameOfReferenceUid', 'label', 'points', 'viewPlaneNormal', 'viewUp', 'baseline']);
   else if (item?.kind === 'key') object(item, [...common, 'title'], ['description']);
   else invalid();
   if (item.schemaVersion !== 1) invalid();
   const normalized: ViewerItemInput = { schemaVersion: 1, kind: item.kind,
     seriesUid: viewerUid(item.seriesUid), sopUid: viewerUid(item.sopUid), frame: positive(item.frame) };
-  if (item.kind === 'arrow') {
-    if (!Array.isArray(item.points) || item.points.length !== 2 || item.points.some(point =>
+  if (item.kind !== 'key') {
+    const count = item.kind === 'angle' ? 3 : item.kind === 'ellipse' ? 4 : 2;
+    if (!Array.isArray(item.points) || item.points.length !== count || item.points.some(point =>
       !Array.isArray(point) || point.length !== 3 || point.some(n => typeof n !== 'number' || !Number.isFinite(n)))) invalid();
     Object.assign(normalized, { frameOfReferenceUid: viewerUid(item.frameOfReferenceUid), label: text(item.label, 1000), points: item.points });
+    if (isManualMeasurement(item.kind)) {
+      object(item.baseline, ['calculator', 'values']);
+      if (item.baseline.calculator !== 'kin-native-manual-v1' || !Array.isArray(item.baseline.values) ||
+          item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) ||
+          item.baseline.values.some(n => typeof n !== 'number' || !Number.isFinite(n))) invalid('완료된 측정값이 필요합니다');
+      normalized.baseline = item.baseline;
+      for (const key of ['viewPlaneNormal', 'viewUp']) {
+        if (!Array.isArray(item[key]) || item[key].length !== 3 || item[key].some(n => typeof n !== 'number' || !Number.isFinite(n))) invalid();
+        normalized[key] = item[key];
+      }
+    }
   } else Object.assign(normalized, { title: text(item.title, 200), description: text(item.description === undefined ? '' : item.description, 1000) });
   return { requestId: viewerUuid(body.requestId), ...(create ? {} : { expectedRevision: positive(body.expectedRevision) }), action, reason, item: normalized };
 }
@@ -160,7 +176,7 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
   let frames = 1;
   if (tags.NumberOfFrames !== undefined) frames = metadataInteger(tags.NumberOfFrames);
   if ((sopClass === US_MULTI && tags.NumberOfFrames === undefined) || (SINGLE.has(sopClass) && frames !== 1) || item.frame > frames) invalid('영상 frame 범위가 올바르지 않습니다');
-  if (item.kind !== 'arrow') return;
+  if (item.kind === 'key') return;
   if (sopClass !== CT || item.frame !== 1 || viewerUid(tags.FrameOfReferenceUID) !== item.frameOfReferenceUid) invalid('주석 좌표 기준이 일치하지 않습니다');
   const rows = metadataInteger(tags.Rows), columns = metadataInteger(tags.Columns);
   if (rows > 65535 || columns > 65535) invalid();
@@ -172,6 +188,34 @@ export function verifyViewerReference(studyUid: string, item: ViewerItemInput, t
   if (Math.max(Math.abs(uu - 1), Math.abs(vv - 1), Math.abs(uv)) > 1e-4 || determinant <= 0) invalid();
   let normal = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
   const norm = Math.sqrt(dot(normal, normal)); normal = normal.map(x => x / norm);
+  if (isManualMeasurement(item.kind)) {
+    if (tags.Modality !== 'CT' || tags.PixelSpacingCalibrationType !== undefined) invalid('지원하지 않는 측정 보정입니다');
+    const pn = item.viewPlaneNormal, up = item.viewUp;
+    if (Math.max(Math.abs(dot(pn, pn) - 1), Math.abs(dot(up, up) - 1), Math.abs(dot(pn, up))) > 1e-4 ||
+        Math.abs(Math.abs(dot(pn, normal)) - 1) > 1e-4) invalid('측정 평면이 원본 영상과 일치하지 않습니다');
+    const delta = (a: number[], b: number[]) => a.map((n, i) => n - b[i]);
+    const size = (a: number[]) => Math.sqrt(dot(a, a));
+    const p = item.points;
+    if (item.kind === 'length' && size(delta(p[1], p[0])) <= 1e-6) invalid('길이의 두 점을 구분하세요');
+    if (item.kind === 'angle') {
+      const a = delta(p[0], p[1]), b = delta(p[2], p[1]);
+      if (size(a) <= 1e-6 || size(b) <= 1e-6 || Math.abs(dot(a, b) / size(a) / size(b)) >= 1 - 1e-12) invalid('완성된 각도를 지정하세요');
+    }
+    if (item.kind === 'ellipse') {
+      const a = delta(p[0], p[1]), b = delta(p[3], p[2]);
+      const centers = p[0].map((n, i) => (n + p[1][i] - p[2][i] - p[3][i]) / 2);
+      if (size(a) <= 1e-6 || size(b) <= 1e-6 || size(centers) > .001 || Math.abs(dot(a, b) / size(a) / size(b)) > 1e-4)
+        invalid('타원 핸들이 완전하지 않습니다');
+      // The pinned native ROI inclusion calculator is world-axis aligned.
+      // Until oblique inclusion is supported, reject it rather than storing a plausible wrong HU.
+      const axis = (a: number[]) => a.filter(n => Math.abs(n) > 1e-6).length === 1;
+      if (!axis(normal) || !axis(a) || !axis(b)) invalid('이 방향의 ROI 측정은 아직 지원하지 않습니다');
+      const slope = metadataNumbers(tags.RescaleSlope, 1)[0];
+      metadataNumbers(tags.RescaleIntercept, 1);
+      if (slope === 0 || tags.Modality !== 'CT' || tags.RescaleType !== 'HU' || tags.ModalityLUTSequence !== undefined)
+        invalid('HU 보정을 확인할 수 없습니다');
+    }
+  }
   for (const point of item.points) {
     const delta = point.map((x, i) => x - origin[i]);
     const plane = Math.abs(dot(delta, normal));

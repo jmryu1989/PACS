@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
-import { canonical, viewerCommand, viewerFingerprint, viewerPage, viewerUid, viewerUuid, verifyViewerReference, VIEWER_LIMITS } from './viewer-input';
+import { canonical, isManualMeasurement, viewerCommand, viewerFingerprint, viewerPage, viewerUid, viewerUuid, verifyViewerReference, VIEWER_LIMITS } from './viewer-input';
 
 const denied = () => { throw new ForbiddenException('표시 항목에 접근할 수 없습니다'); };
 const conflict = () => { throw new ConflictException('표시 항목 또는 요청이 변경되었습니다'); };
@@ -54,7 +54,7 @@ export class ViewerService {
     const page = viewerPage(query, id !== undefined);
     // The permission predicate and page share a single SQL statement, including
     // the distinction between a forbidden parent and an authorized empty page.
-    return this.bounded(async tx => {
+    const pageResult = await this.bounded(async tx => {
       const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
         AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
         AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
@@ -83,6 +83,20 @@ export class ViewerService {
       const items = pageRow.rows.slice(0, page.limit).map(row => result(row));
       return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null };
     }, true);
+    if ('items' in pageResult) {
+      // Only manual measurements need the current source digest. A failed
+      // source lookup withholds that measurement, not the whole reading list.
+      for (const head of pageResult.items) {
+        if (!isManualMeasurement(head.item.kind)) continue;
+        head.referenceStatus = 'unverified';
+        try {
+          const tags = await this.orthanc.viewerReference(head.item.sopUid, true);
+          verifyViewerReference(uid, head.item, tags);
+          if (tags._kinSourceDigest === head.item.sourceDigest) head.referenceStatus = 'verified';
+        } catch { /* The viewer must not present an old number as current. */ }
+      }
+    }
+    return pageResult;
   }
 
   async write(uid: string, raw: Buffer, c: Caller, id?: string) {
@@ -94,7 +108,13 @@ export class ViewerService {
     // A prior success is immutable; it may be replayed during an Orthanc outage.
     // This lookup is only an optimization. Current permission and the fingerprint
     // are checked again under the parent lock before returning anything.
-    if (!known) verifyViewerReference(uid, command.item, await this.orthanc.viewerReference(command.item.sopUid));
+    const manual = isManualMeasurement(command.item.kind);
+    let sourceDigest: string;
+    if (!known) {
+      const tags = await this.orthanc.viewerReference(command.item.sopUid, manual);
+      verifyViewerReference(uid, command.item, tags);
+      if (manual) sourceDigest = tags._kinSourceDigest;
+    }
 
     return this.bounded(async tx => {
       const studies = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
@@ -117,12 +137,13 @@ export class ViewerService {
       if (head) {
         if (head.revision !== command.expectedRevision) conflict();
         const old = head.snapshot as any;
+        if (manual && old.sourceDigest !== sourceDigest) conflict();
         for (const field of ['schemaVersion', 'kind', 'seriesUid', 'sopUid', 'frame', 'frameOfReferenceUid'])
           if (old[field] !== command.item[field]) conflict();
         if ((command.action === 'hide' && head.hidden) || (command.action === 'restore' && !head.hidden)) conflict();
       }
       const hidden = command.action === 'hide' || (command.action === 'edit' && head.hidden);
-      const snapshot = { ...command.item, hidden }, serialized = canonical(snapshot);
+      const snapshot = { ...command.item, ...(manual ? { sourceDigest } : {}), hidden }, serialized = canonical(snapshot);
       const sizes = await tx.$queryRaw<{ bytes: number }[]>`SELECT octet_length(convert_to(${serialized}::jsonb::text, 'UTF8')) AS bytes`;
       const bytes = sizes[0].bytes;
       if (bytes > VIEWER_LIMITS.snapshot) storageLimit();
@@ -151,7 +172,7 @@ export class ViewerService {
       await tx.auditLog.create({ data: { actor: c.actor, action: 'viewer.' + command.action, target: uid,
         detail: JSON.stringify({ itemId: head.id, revision, authorSub: c.sub, payloadBytes: bytes }) } });
       await tx.viewerRequest.create({ data: { ...requestKey, fingerprint, itemId: head.id, revision } });
-      return result(head);
+      return { ...result(head), ...(manual ? { referenceStatus: 'verified' } : {}) };
     });
   }
 }

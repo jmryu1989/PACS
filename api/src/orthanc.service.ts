@@ -54,13 +54,18 @@ export class OrthancService {
     }
   }
 
-  async viewerReference(sopUid: string): Promise<any> {
+  async viewerReference(sopUid: string, measurement = false): Promise<any> {
     const found = await this.viewerJson('/tools/lookup', sopUid);
     if (!Array.isArray(found)) throw new BadRequestException('영상 참조가 올바르지 않습니다');
     const instances = found.filter(x => x?.Type === 'Instance');
     if (instances.length !== 1 || typeof instances[0].ID !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(instances[0].ID))
       throw new BadRequestException('영상 참조가 없거나 중복입니다');
-    return this.viewerJson(`/instances/${instances[0].ID}/simplified-tags`);
+    const tags = await this.viewerJson(`/instances/${instances[0].ID}/simplified-tags`);
+    if (!measurement) return tags;
+    const info = await this.viewerJson(`/instances/${instances[0].ID}/attachments/dicom/info`);
+    if (typeof info?.UncompressedMD5 !== 'string' || !/^[a-f0-9]{32}$/i.test(info.UncompressedMD5))
+      throw new ServiceUnavailableException('측정 원본의 무결성을 확인할 수 없습니다');
+    return { ...tags, _kinSourceDigest: info.UncompressedMD5.toLowerCase() };
   }
 
   async connectStudyIdentity(studyUid: string): Promise<{ patientId: string }> {

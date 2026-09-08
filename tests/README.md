@@ -863,3 +863,8 @@ The reader uses existing study-scoped DICOMweb GET authorization and does not re
 `python tests/e2e/test_patient_id_copy.py` runs three cases for the explicit Clinical Info button and worklist Ctrl+Alt+C. Actual C-STORE PatientID, authenticated API data, displayed source institution/context and the secure-origin browser clipboard are compared, including leading zeros, Unicode and literal special characters. Related-study and other-patient selection, actual tenant denial, clipboard rejection/unavailability and retry, input/modal/IME/repeat exclusion, keyboard access, report/draft/hold/original preservation and logout/relogin are covered. Browser clipboard permissions are granted only in the isolated test context.
 
 One test performs a real clipboard write and holds only its Promise completion locally to exercise A→B→A stale-result suppression and duplicate-call prevention. This does not claim OS clipboard cancellation. The product copies the exact displayed API PatientID at the user's action, never reads or clears the clipboard, and does not automatically copy on selection or logout. Empty/unsupported target variants are local test state changes, not edits to stored DICOM. The shortcut applies to the worklist, not the separate OHIF window. Related regressions are related-context3, return-to-current3 and SR-reader4, separate from mandatory69→14.
+D 수동 측정: `python tests/e2e/test_manual_measurements.py`.
+비등방 합성 CT의 길이·각도·ROI 면적/mean/min/max/count를 독립 원본 계산과 대조하고,
+저장·새 로그인 좌표/재계산·잘못된 평면/기사 저장 거절·계산 비교값 불일치 안내를 검사한다.
+간격 누락/비-HU 표시는 브라우저 메타데이터 결함 주입으로 별도 확인한다.
+사선 ROI는 현재 제한이며 이 시험을 전체 modality·변환 정확도나 의사 확인으로 세지 않는다.

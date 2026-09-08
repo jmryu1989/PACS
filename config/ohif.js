@@ -343,6 +343,9 @@ const kinStackPrecision = (() => {
  * session bindings, never wire payloads or durable identifiers. */
 function kinCreateViewerHistory() {
   let services, stop;
+  const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
+  const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
+  const names = { arrow: '화살표', key: '키 이미지', length: '수동 길이', angle: '수동 각도', ellipse: '수동 ROI' };
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
@@ -354,12 +357,50 @@ function kinCreateViewerHistory() {
     const panel = document.createElement('details');
     panel.id = 'kin-viewer-history'; panel.open = true;
     panel.style.cssText = 'position:fixed;right:8px;bottom:30px;z-index:40;width:300px;max-height:58vh;overflow:auto;background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:10px;font:13px sans-serif';
-    const summary = document.createElement('summary'); summary.textContent = '저장한 주석 · 키 이미지'; panel.append(summary);
+    const summary = document.createElement('summary'); summary.textContent = '측정 · 저장한 주석 · 키 이미지'; panel.append(summary);
     const status = document.createElement('p'); status.setAttribute('role', 'status'); panel.append(status);
     const actions = document.createElement('div'), list = document.createElement('div'); panel.append(actions, list);
     document.body.append(panel);
     const clone = value => JSON.parse(JSON.stringify(value));
-    const itemOnly = head => { const item = clone(head.item); delete item.hidden; return item; };
+    const itemOnly = head => { const item = clone(head.item); delete item.hidden; delete item.sourceDigest; return item; };
+    const manual = kind => ['length', 'angle', 'ellipse'].includes(kind);
+    function measurementReason(imageId, kind, points) {
+      const image = cs.metaData.get('instance', imageId);
+      const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
+      const spacing = image?.PixelSpacing, orientation = image?.ImageOrientationPatient, origin = image?.ImagePositionPatient;
+      if (image?.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' || image.Modality !== 'CT' || Number(image.NumberOfFrames || 1) !== 1)
+        return '일반 CT 원본 프레임에서 지원합니다';
+      if (!Array.isArray(spacing) || spacing.length !== 2 || spacing.some(n => !finite(n) || Number(n) <= 0) ||
+          !Array.isArray(orientation) || orientation.length !== 6 || orientation.some(n => !finite(n)) ||
+          !Array.isArray(origin) || origin.length !== 3 || origin.some(n => !finite(n)) || !image.FrameOfReferenceUID ||
+          image.PixelSpacingCalibrationType || cs.cache.getImage(imageId)?.calibration?.type) return '원본 좌표·간격·보정을 확인할 수 없습니다';
+      const dot = (a, b) => a.reduce((s, n, i) => s + n * b[i], 0);
+      const u = orientation.slice(0, 3).map(Number), v = orientation.slice(3).map(Number);
+      const normal = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]];
+      if (Math.max(Math.abs(dot(u,u)-1), Math.abs(dot(v,v)-1), Math.abs(dot(u,v))) > 1e-4) return '원본 방향이 올바르지 않습니다';
+      if (kind === 'ellipse') {
+        if (!finite(image.RescaleSlope) || Number(image.RescaleSlope) === 0 || !finite(image.RescaleIntercept) || image.RescaleType !== 'HU' || image.ModalityLUTSequence)
+          return 'HU 보정을 확인할 수 없습니다';
+        const axis = a => a.filter(n => Math.abs(n) > 1e-6).length === 1;
+        if (!axis(normal) || points?.length === 4 && (!axis(points[0].map((n,i)=>n-points[1][i])) || !axis(points[3].map((n,i)=>n-points[2][i]))))
+          return '사선·회전 ROI는 아직 지원하지 않습니다';
+      }
+      if (points?.some(p => {
+        if (!Array.isArray(p) || p.length !== 3 || p.some(n => !Number.isFinite(n))) return true;
+        const d = p.map((n,i)=>n-Number(origin[i])), x=dot(d,u)/Number(spacing[1]), y=dot(d,v)/Number(spacing[0]);
+        return Math.abs(dot(d,normal)) > .001 || x < -.501 || y < -.501 || x > Number(image.Columns)-.499 || y > Number(image.Rows)-.499;
+      })) return '측정이 원본 영상 범위를 벗어났습니다';
+      return '';
+    }
+    function sample(a) {
+      if (!a || a.invalidated) return null;
+      const kind = kinds[a.metadata.toolName], s = a.data.cachedStats?.['imageId:' + a.metadata.referencedImageId];
+      if (!s || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
+      const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
+        [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
+      if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
+      return { calculator: 'kin-native-manual-v1', values };
+    }
     const text = (parent, tag, value) => { const el = document.createElement(tag); el.textContent = value; parent.append(el); return el; };
     const button = (parent, label, run, disabled = false) => {
       const b = text(parent, 'button', label); b.type = 'button'; b.disabled = disabled;
@@ -402,7 +443,7 @@ function kinCreateViewerHistory() {
       if (ended) return;
       reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); ended = true; me = null; subject = ''; actions.replaceChildren();
       // A shared workstation must not retain unsaved labels after logout either.
-      for (const a of ct.annotation.state.getAllAnnotations()) if (a.metadata.toolName === 'ArrowAnnotate') ct.annotation.state.removeAnnotation(a.annotationUID);
+      for (const a of ct.annotation.state.getAllAnnotations()) if (kinds[a.metadata.toolName]) ct.annotation.state.removeAnnotation(a.annotationUID);
       render();
     }
     async function api(path, options = {}, ticket = generation) {
@@ -464,24 +505,91 @@ function kinCreateViewerHistory() {
     }
     function toolbar() {
       actions.replaceChildren(); button(actions, '새로고침', load);
+      for (const kind of ['length', 'angle', 'ellipse']) button(actions, names[kind], () => {
+        const v = viewport(), group = v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId);
+        if (!group || v.type !== 'stack') { status.textContent = '원본 CT 프레임을 선택하세요.'; return; }
+        if (!group.getToolInstance(tools[kind])) group.addTool(tools[kind]);
+        configureMeasurements(group);
+        const previous = group.getActivePrimaryMouseButtonTool();
+        if (previous) group.setToolPassive(previous);
+        group.setToolActive(tools[kind], { bindings: [{ mouseButton: ct.Enums.MouseBindings.Primary }] });
+      }, !writable({}));
       button(actions, '현재 프레임 키 저장', () => {
         const r = current(); if (!r || r.study !== scope) return;
         const e = { id: crypto.randomUUID(), editing: true, draft: { schemaVersion: 1, kind: 'key', seriesUid: r.seriesUid, sopUid: r.sopUid, frame: r.frame, title: '', description: '' } };
         entries.set(e.id, e); row(e);
       }, !writable({}));
     }
+      const configured = new Map();
+    function configureMeasurements(group) {
+      if (!group || configured.has(group)) return;
+      const roi = group.getToolInstance('EllipticalROI');
+      if (!roi?.configuration?.statsCalculator) return;
+      const previous = roi.configuration;
+      const calculator = previous.statsCalculator;
+      // Preserve native voxel selection and statistics; expose the named min
+      // which this pinned release omits from its returned array.
+      const adapter = {
+        statsInit: options => calculator.statsInit?.(options),
+        statsCallback: value => calculator.statsCallback(value),
+        getStatistics: (...args) => {
+          const result = calculator.getStatistics(...args);
+          return { ...result, array: [...result.array.filter(s => s.name !== 'min'), result.min] };
+        },
+      };
+      roi.configuration = { ...previous, statsCalculator: adapter, getTextLines(data, target) {
+        if (data.kinUnverified) return ['재확인 필요: 측정값을 확인할 수 없습니다'];
+        const s = data.cachedStats[target]; if (!s) return [];
+        const min = s.statsArray?.find(x => x?.name === 'min')?.value;
+        const number = x => Math.sign(x) * Math.round(Math.abs(x));
+        const lines = [];
+        if (Number.isFinite(s.area)) lines.push('Area: ' + number(s.area) + ' ' + s.areaUnit);
+        if (s.modalityUnit === 'HU') {
+          for (const [name, value] of [['Mean', s.mean], ['Min', min], ['Max', s.max]])
+            if (Number.isFinite(value)) lines.push(name + ': ' + (name === 'Mean' ? number(value) : value) + ' HU');
+        }
+        return lines;
+      } };
+      const restores = [() => { roi.configuration = previous; }];
+      for (const kind of ['length', 'angle', 'ellipse']) {
+        if (!group.getToolInstance(tools[kind])) group.addTool(tools[kind]);
+        const tool = group.getToolInstance(tools[kind]), config = tool.configuration, add = tool.addNewAnnotation;
+        const lines = config.getTextLines;
+        tool.addNewAnnotation = function (event) {
+          const v = cs.getEnabledElement(event.detail.element).viewport;
+          const id = v.type === 'stack' && v.getCurrentImageId();
+          let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
+          if (!reason && kind === 'ellipse' && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
+            reason = '사선·회전 ROI는 아직 지원하지 않습니다';
+          if (reason) { status.textContent = reason; return; }
+          return add.call(this, event);
+        };
+        tool.configuration = { ...config, getTextLines(data, target) {
+          const id = target.startsWith('imageId:') && target.slice(8);
+          const reason = data.kinUnverified ? '재확인 필요: 저장 당시 측정과 다릅니다' :
+            id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
+          if (reason) return [reason];
+          if (kind === 'ellipse') return lines(data, target);
+          const value = data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
+          if (!Number.isFinite(value) || value <= 0) return ['측정을 완료하세요'];
+          return [(Math.round(value * 10) / 10).toFixed(1) + (kind === 'length' ? ' mm' : '°')];
+        } };
+        restores.push(() => { tool.configuration = config; tool.addNewAnnotation = add; });
+      }
+      configured.set(group, restores);
+    }
     function updateAnnotation(e) {
       const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
-      if (a) { a.data.text = e.draft.label; a.invalidated = true; render(); }
+      if (a) { a.data.text = e.draft.label; a.data.label = e.draft.label; if (!manual(e.draft.kind)) a.invalidated = true; render(); }
     }
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', (e.draft.kind === 'arrow' ? '화살표' : '키 이미지') + ' · ' + (e.head ? '저장됨 r' + e.head.revision : '미저장') + (e.head?.hidden ? ' · 숨김' : ''));
+      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? '저장됨 r' + e.head.revision : '미저장') + (e.head?.hidden ? ' · 숨김' : ''));
       if (e.head) text(el, 'div', e.head.authorActor + (writable(e) ? ' · 내 항목' : ' · 읽기 전용'));
       if (e.editing) {
-        input(el, e.draft.kind === 'arrow' ? '주석 문구' : '키 제목', e.draft.label ?? e.draft.title, value => {
-          e.draft[e.draft.kind === 'arrow' ? 'label' : 'title'] = value; updateAnnotation(e);
+        input(el, e.draft.kind !== 'key' ? '주석 문구' : '키 제목', e.draft.label ?? e.draft.title, value => {
+          e.draft[e.draft.kind !== 'key' ? 'label' : 'title'] = value; updateAnnotation(e);
         }, !!(e.busy || e.pending));
         if (e.draft.kind === 'key') input(el, '키 설명', e.draft.description || '', value => { e.draft.description = value; }, !!(e.busy || e.pending));
       } else {
@@ -521,12 +629,17 @@ function kinCreateViewerHistory() {
     }
     async function save(e, action, reason) {
       if (!writable(e) || e.busy || ended) return;
+      if (manual(e.draft.kind) && e.editing && !e.pending) {
+        const baseline = sample(e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID));
+        if (!baseline) { e.message = '측정을 마치고 계산 완료 후 저장하세요.'; row(e); return; }
+        e.draft.baseline = baseline;
+      }
       const ticket = generation; e.busy = true; lock(e, true);
       if (!e.pending) {
         const annotation = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
         if (e.editing && annotation) {
           e.draft.points = clone(annotation.data.handles.points);
-          e.draft.label = annotation.data.text;
+          e.draft.label = annotation.data.text ?? annotation.data.label ?? '';
         }
         const command = { requestId: crypto.randomUUID(), item: clone(e.draft) };
         if (e.head) Object.assign(command, { expectedRevision: e.head.revision, action, ...(reason ? { reason } : {}) });
@@ -573,13 +686,18 @@ function kinCreateViewerHistory() {
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended) return;
+      configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
-        if (!e.head || e.head.hidden || e.draft.kind !== 'arrow' || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (!e.head || e.head.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (manual(e.draft.kind) && e.head.referenceStatus !== 'verified') {
+          if (!e.message) { e.message = '재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.'; row(e); }
+          continue;
+        }
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
-          metadata: { toolName: 'ArrowAnnotate', FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: camera.viewPlaneNormal, viewUp: camera.viewUp },
-          data: { text: e.draft.label, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
+          metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
+          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind), handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !e.editing); render();
       }
     }
@@ -594,6 +712,8 @@ function kinCreateViewerHistory() {
         if (scope) load(); return;
       }
       if (!subject || !scope) return;
+      const v = viewport();
+      configureMeasurements(v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       for (const e of entries.values()) {
         const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
         if (e.annotationUID && !a) { annotations.delete(e.annotationUID); e.annotationUID = null; }
@@ -601,20 +721,34 @@ function kinCreateViewerHistory() {
           a.data.text = e.draft.label;
           a.data.handles.points = clone(e.draft.points);
           lock(e, true);
+          if (manual(e.draft.kind)) {
+            const actual = sample(a);
+            if (actual) {
+              const baseline = e.draft.baseline;
+              const mismatch = actual.calculator !== baseline?.calculator || actual.values.length !== baseline?.values?.length ||
+                actual.values.some((value, index) => value !== baseline.values[index]);
+              if (a.data.kinUnverified !== mismatch) { a.data.kinUnverified = mismatch; render(); }
+              if (mismatch && !e.message.startsWith('재확인 필요')) { e.message = '재확인 필요: 재계산 값이 저장 당시와 다릅니다.'; row(e); }
+            }
+          }
         }
       }
       hydrate();
       for (const a of ct.annotation.state.getAllAnnotations()) {
-        if (a.metadata.toolName !== 'ArrowAnnotate' || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== 2 || typeof a.data.text !== 'string') continue;
+        const kind = kinds[a.metadata.toolName];
+        const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : 2;
+        if (!kind || !matches(reference(a.metadata.referencedImageId), { ...reference(a.metadata.referencedImageId) }) || !Array.isArray(a.data.handles?.points) || a.data.handles.points.length !== count || kind === 'arrow' && typeof a.data.text !== 'string') continue;
         let e = annotations.get(a.annotationUID);
         if (!e) {
           const ref = reference(a.metadata.referencedImageId);
           e = { id: crypto.randomUUID(), annotationUID: a.annotationUID, editing: true,
-            draft: { schemaVersion: 1, kind: 'arrow', seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text, points: clone(a.data.handles.points) } };
+            draft: { schemaVersion: 1, kind, seriesUid: ref.seriesUid, sopUid: ref.sopUid, frame: ref.frame, frameOfReferenceUid: a.metadata.FrameOfReferenceUID, label: a.data.text ?? a.data.label ?? '', points: clone(a.data.handles.points),
+              ...(kind === 'arrow' ? {} : { viewPlaneNormal: clone(a.metadata.viewPlaneNormal), viewUp: clone(a.metadata.viewUp) }) } };
           entries.set(e.id, e); annotations.set(a.annotationUID, e); row(e);
         } else if (e.editing && !e.busy && !e.pending) {
           e.draft.points = clone(a.data.handles.points);
-          if (e.draft.label !== a.data.text) { e.draft.label = a.data.text; row(e); }
+          const label = a.data.text ?? a.data.label ?? '';
+          if (e.draft.label !== label) { e.draft.label = label; row(e); }
         }
       }
       if (Date.now() - lastAuth > 15000 && !checking) {
@@ -637,7 +771,7 @@ function kinCreateViewerHistory() {
     const stackEvent = cs.Enums.Events.STACK_NEW_IMAGE;
     document.addEventListener(stackEvent, onImage, true);
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
-    stop = () => { end(); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); panel.remove(); };
+    stop = () => { end(); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     scan();
   }
   return { id: 'kin.viewer-history', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
