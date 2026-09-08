@@ -18,7 +18,7 @@
 
 ## 기능별 시험 카탈로그
 
-D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (12개),
+D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (16개),
 `python tests/e2e/test_viewer_recovery.py` (5개).
 빠른 시험은 실제 `config/ohif.js` 확장을 VM에서 mount하고 DOM/HTTP 경계만 대체한다.
 A1(원문 §2-5)의 검사 왕복·늦은 응답·동일 UUID, A2(6)의 busy 경합,
@@ -30,10 +30,25 @@ C5(4)의 검사403 격리·재인가·다른 검사 보관본과 실제401 정�
 브라우저 시험은 실제 비교 CT·측정 좌표 재열림·숨김 충돌과 커밋 후 주입한403 응답 복구를 확인한다.
 실제 서버의 replay 검증 중 권한 변경은 별도 `viewer_readback_fault.cjs`에서 검사한다.
 B1(13)은 부분 처리다. 기존 측정/readback/held/manual-SR 실스택6파일과 viewer-api의 CI 연결,
-3초 transport·digest·native 도구별 신선도 경계의 빠른 시험 확충은 잔여다.
+native 도구별 신선도 경계의 빠른 시험 확충은 잔여다.
 세션 내 보관본은 브라우저 저장소에 쓰지 않으며 명시적 재개 전에 현재 검사 접근을 조회한다.
 뷰어 모드 종료·로그아웃·로그인 주체 변경 시 폐기하며 페이지 이탈/Job 복구 경고에 포함한다.
-이 묶음은 A3/A4 원본 재확인·재측정과 나머지 비차단 항목의 완료를 뜻하지 않는다.
+후속 A3/A4 빠른 시험은 같은 revision의 검증 실패와 분리된 편집문, 분리된 이전 저장 handler 거절,
+편집 진입만으로 관문 해제 불가·실제 현재 좌표 계산 후 회복을 추가한다.
+
+D-MEASURE2 원본 재확인·재측정: `python tests/e2e/test_measurement_recheck.py` (2개).
+A3(11)은 소유 합성 CT 한 장만 같은 SOP의 다른 pixel bytes로 교체해 실제409/list unverified를 확인한다.
+기존 수정·revision 보존, 저장 반복 차단, 새 뷰어에서 실제 새 pixel 읽기·새 측정 저장을 검사하고 합성 원본 bytes를 복원한다.
+A4(12)는 기존 baseline 불일치에서 편집→계산 전 차단→native 재계산 후 캔버스/패널/CSV 및 두 SR command 회복을 확인한다.
+SR 경로가 먼저 측정을 저장하는 기존 manualSr 경계도 유지한다.
+
+D-MEASURE2 원본 실패 관측: production image에서 `node --test /tests/viewer_source_test.cjs` (2개).
+B2(10)의 실제 컴파일된 viewerJson/reportPreviewStudy에 합성 localhost HTTP401/404/503·크기·UTF8/JSON·취소/5초 마감을 주입한다.
+고정 분류만의 경고, 민감값 부재·반복 제한과 verifyMeasurements의 실제3초/병렬4 상한·digest 음성/양성·최종권한 검사를 실행한다.
+validate CI의 production image에 별도 step으로 등록했다. DB·Orthanc 서비스가 없는 시험이며 컨테이너 없는 시험으로 세지 않는다.
+B3(14)의 실제 Prisma list 음성/양성·항목/이력/영수증/예산/감사 불변은 `test_measurement_readback.py`가 호출하는
+`viewer_readback_fault.cjs`에서도 검사한다. 이 추가가 실스택 CI 연결 완료를 뜻하지 않는다.
+A5(조건부 CT 이벤트 도달 확인), C3(SR 원인 항목 안내), C4(원문2/3의 읽기 공정성·예산)는 관련 후속으로 남는다.
 
 판독문·키 이미지 출력: `python tests/e2e/test_report_preview.py` (7개).
 같은 조회 시점의 저장본/승인 정보·환자 오버레이·키 revision과 기관/P/역할·타 작성자 초안 제외를 확인한다.

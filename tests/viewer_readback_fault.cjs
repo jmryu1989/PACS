@@ -65,7 +65,17 @@ async function run() {
   const changed = await service.write(uid, raw(commands[0]), caller);
   assert.equal(changed.referenceStatus, 'unverified');
   assert.deepEqual(changed.item, heads[0].item);
+  // D-MEASURE2 B3 (14): successful original responses with only the digest
+  // changed must also withhold the actual list path, not just replay/write.
+  const changedList = await service.list(uid, { limit: '100' }, caller);
+  assert.equal(changedList.items.length, 11);
+  assert.ok(changedList.items.filter(h => h.item.kind === 'length').every(h => h.referenceStatus === 'unverified'));
+  assert.deepEqual(await persisted(), baseline);
   global.fetch = realFetch;
+  const equalList = await service.list(uid, { limit: '100' }, caller);
+  assert.ok(equalList.items.filter(h => h.item.kind === 'length').every(h => h.referenceStatus === 'verified'));
+  assert.deepEqual(changedList.items.map(h => h.item), equalList.items.map(h => h.item));
+  assert.deepEqual(await persisted(), baseline);
 
   // First isolate one failed SOP while the others succeed, proving per-page
   // deduplication. Then stall every source to measure the queue/deadline bound.

@@ -199,7 +199,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
         p.get_by_role('button',name='수동 길이',exact=True).click()
         p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
         p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+50,y+25);p.mouse.up()
-        expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('로그인 확인')
+        expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('다시 로그인한 뒤 뷰어를 여세요')
         self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>['Length','Angle','EllipticalROI'].includes(a.metadata.toolName)).length"),0)
 
 

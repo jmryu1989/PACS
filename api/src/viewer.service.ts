@@ -1,9 +1,10 @@
-import { Injectable, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
+import { ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { canonical, isManualMeasurement, viewerCommand, viewerFingerprint, viewerPage, viewerUid, viewerUuid, verifyViewerReference, VIEWER_LIMITS } from './viewer-input';
 
 const denied = () => { throw new ForbiddenException('표시 항목에 접근할 수 없습니다'); };
@@ -56,12 +57,22 @@ export class ViewerService {
               try {
                 verifyViewerReference(uid, head.item, tags);
                 if (tags._kinSourceDigest === head.item.sourceDigest) head.referenceStatus = 'verified';
-              } catch { /* One invalid reference must not poison another item on this SOP. */ }
+                else warnViewerSource('digest_mismatch');
+              } catch (error) {
+                warnViewerSource(error instanceof BadRequestException ? 'reference_invalid' : 'unexpected');
+              }
             }
-          } catch { /* Receipt/list survives; these measurements remain unverified. */ }
+          } catch (error) {
+            // viewerJson has already logged a bounded, sanitized category.
+            if (!(error instanceof ViewerSourceUnavailable))
+              warnViewerSource(error instanceof BadRequestException ? 'reference_invalid' : 'unexpected');
+          }
         }
       }));
-    } finally { clearTimeout(timer); controller.abort(); }
+    } finally {
+      if (controller.signal.aborted) warnViewerSource('page_deadline');
+      clearTimeout(timer); controller.abort();
+    }
     // Source checks run outside DB locks. Do not release a delayed response
     // after the study's institution or pending-reading access has changed.
     visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);

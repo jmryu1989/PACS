@@ -1,4 +1,5 @@
 import { Injectable, ServiceUnavailableException, BadRequestException } from '@nestjs/common';
+import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 
 /**
  * Orthanc(DICOMweb) 클라이언트.
@@ -29,6 +30,7 @@ export class OrthancService {
   /** New persistence validates original tags without holding a database lock or buffering an unbounded response. */
   private async viewerJson(path: string, body?: string, signal?: AbortSignal): Promise<any> {
     let response: Response, reader: ReadableStreamDefaultReader<Uint8Array>;
+    let failure: ViewerSourceFailure = 'unexpected', timedOut = false;
     // Keep cancellation wired for the entire streamed body, not just until
     // response headers arrive. The page deadline and per-fetch limit both own
     // this controller; completion releases their listener/timer explicitly.
@@ -36,15 +38,17 @@ export class OrthancService {
       controller.abort();
       void reader?.cancel().catch(() => {});
     };
-    const timer = setTimeout(abort, 5000);
+    const timer = setTimeout(() => { timedOut = true; abort(); }, 5000);
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     try {
+      failure = 'transport';
       response = await fetch(this.base + path, {
         method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: controller.signal,
         headers: { Authorization: this.auth, 'Content-Type': 'text/plain' }, body,
       });
       if (!response.ok || !response.body) {
+        failure = !response.ok ? response.status === 401 ? 'http_401' : response.status === 404 ? 'http_404' : 'http_other' : 'missing_body';
         await response.body?.cancel().catch(() => {});
         throw new Error('response');
       }
@@ -54,15 +58,20 @@ export class OrthancService {
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
           total += value.byteLength;
-          if (total > 262144) throw new Error('limit');
+          if (total > 262144) { failure = 'size_limit'; throw new Error('limit'); }
           chunks.push(value);
         }
         controller.signal.throwIfAborted();
-        return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
+        failure = 'decode';
+        const decoded = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+        failure = 'parse';
+        return JSON.parse(decoded);
       } finally { await reader.cancel().catch(() => {}); }
-    } catch {
+    } catch (error) {
       // Never echo tag values or Basic credentials in an error response.
-      throw new ServiceUnavailableException('원본 영상 참조를 확인할 수 없습니다');
+      warnViewerSource(signal?.aborted ? 'parent_abort' : timedOut ? 'timeout' :
+        failure === 'transport' && !(error instanceof TypeError) && error?.name !== 'AbortError' ? 'unexpected' : failure);
+      throw new ViewerSourceUnavailable();
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 

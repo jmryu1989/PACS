@@ -947,7 +947,7 @@ function kinCreateViewerHistory() {
                 const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
                 if (e.editing && !e.pending && a) e.draft.points = clone(a.data.handles.points);
                 removeAnnotation(e); e.message = '재확인 필요: 원본을 확인하지 못했습니다. 작성 내용은 유지됩니다.';
-              }
+              } else if (manual(e.draft.kind) && e.message.startsWith('재확인 필요: 원본')) e.message = '원본 확인 완료. 작성 내용은 아직 미저장 상태입니다.';
             }
             continue;
           }
@@ -1044,7 +1044,9 @@ function kinCreateViewerHistory() {
         const tool = group.getToolInstance(tools[kind]), config = tool.configuration, add = tool.addNewAnnotation;
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
-          if (ended || !subject || suspended || recovery.has(scope)) { status.textContent = '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return; }
+          if (ended || !subject || suspended || recovery.has(scope)) {
+            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
+          }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
           let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
@@ -1129,9 +1131,19 @@ function kinCreateViewerHistory() {
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
       button(el, '영상으로 이동', () => navigate(e));
+      const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
+      if (sourceUnverified && !e.head.hidden) {
+        text(el, 'p', '원본을 다시 확인한 뒤 저장할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
+        if (!e.heldDraft) button(el, '원본 다시 확인', () => {
+          if (valid(generation) && entries.get(e.id) === e && !e.busy && !e.pending) return load();
+        }, !!(e.busy || e.pending));
+        const link = text(el, 'a', '새 뷰어에서 재측정');
+        link.href = '/ohif/viewer?StudyInstanceUIDs=' + encodeURIComponent(scope);
+        link.target = '_blank'; link.rel = 'noopener noreferrer';
+      }
       if (writable(e)) {
         if (e.pending) button(el, '같은 요청 재시도', () => save(e), !!e.busy);
-        else if (e.editing) button(el, '저장', () => save(e, 'edit'), !!e.busy || !!e.latest);
+        else if (e.editing) button(el, '저장', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
         else if (!e.head?.hidden) button(el, '편집', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? '복원' : '숨김', () => {
           const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
@@ -1171,6 +1183,11 @@ function kinCreateViewerHistory() {
     }
     async function save(e, action, reason) {
       if (!valid(generation) || entries.get(e.id) !== e || !writable(e) || e.busy || ended) return;
+      // A verdict can change without a revision. A retained draft must never
+      // bind itself to different source bytes by repeatedly retrying an edit.
+      if (!e.pending && e.editing && manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified') {
+        e.message = '재확인 필요: 원본을 다시 확인하거나 새 뷰어에서 재측정하세요. 작성 내용은 유지됩니다.'; row(e); return;
+      }
       if (manual(e.draft.kind) && e.editing && !e.pending) {
         const baseline = sample(e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID));
         if (!baseline) { e.message = '측정을 마치고 계산 완료 후 저장하세요.'; row(e); return; }
@@ -1285,16 +1302,19 @@ function kinCreateViewerHistory() {
           a.data.text = e.draft.label;
           a.data.handles.points = clone(e.draft.points);
           lock(e, true);
-          if (manual(e.draft.kind)) {
-            const actual = sample(a);
-            if (actual) {
-              const baseline = e.draft.baseline;
-              const mismatch = actual.calculator !== baseline?.calculator || actual.values.length !== baseline?.values?.length ||
-                actual.values.some((value, index) => value !== baseline.values[index]);
-              if (a.data.kinUnverified !== mismatch) { a.data.kinUnverified = mismatch; render(); }
-              if (mismatch && !e.message.startsWith('재확인 필요')) { e.message = '재확인 필요: 재계산 값이 저장 당시와 다릅니다.'; row(e); }
-            }
+        }
+        if (a && e.head && manual(e.draft.kind)) {
+          const actual = sample(a), baseline = e.head.item.baseline;
+          const remeasured = e.editing && geometry(a.data) !== JSON.stringify(e.head.item.points);
+          const mismatch = e.head.referenceStatus !== 'verified' || !actual || !remeasured &&
+            (actual.calculator !== baseline?.calculator || actual.values.length !== baseline?.values?.length ||
+            actual.values.some((value, index) => value !== baseline.values[index]));
+          if (a.data.kinUnverified !== mismatch) { a.data.kinUnverified = mismatch; render(); }
+          if (mismatch && actual && !e.message.startsWith('재확인 필요')) {
+            e.message = e.head.referenceStatus !== 'verified' ? '재확인 필요: 원본을 확인하지 못했습니다. 작성 내용은 유지됩니다.' :
+              '재확인 필요: 재계산 값이 저장 당시와 다릅니다. 편집 후 다시 측정하세요.'; row(e);
           }
+          else if (!mismatch && e.message.startsWith('재확인 필요')) { e.message = e.editing ? '재측정 확인 완료. 작성 내용은 아직 미저장 상태입니다.' : ''; row(e); }
         }
       }
       hydrate();

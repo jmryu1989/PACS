@@ -218,3 +218,68 @@ test('B1 panel regression: a public unverified read between ticks still emits th
   a.data.kinUnverified = false; await h.tick();
   assert.equal(updates,1); assert.equal(h.services.measurementService.getMeasurements()[0].displayText.primary[0], '10 mm');
 });
+
+async function savedMeasurement(mismatch = false) {
+  const result = await measured(), { h } = result;
+  const originalButton = h.button;
+  h.button = name => h.document.body.all().find(e => e.tagName === 'section' && e.dataset.kind === 'length')
+    ?.all().find(e => e.tagName === 'button' && e.textContent === name) || originalButton(name);
+  h.click = async name => { h.button(name).click(); await flush(); };
+  let saved;
+  h.setReply(async (path, options) => {
+    if (options.method !== 'POST') return h.defaultReply(path, options);
+    saved = { ...head('saved'), item: JSON.parse(options.body).item };
+    if (mismatch) saved.item.baseline.values[0] += 1;
+    h.pages.set('1', [saved]); return { status: 200, data: saved };
+  });
+  await h.click('저장'); await h.tick(); return { ...result, saved };
+}
+
+test('A4 (12): editing alone keeps mismatch; only fresh remeasured geometry recovers', async () => {
+  const { h, a } = await savedMeasurement(true);
+  assert.equal(a.data.kinUnverified, true); await h.click('편집'); await h.tick();
+  assert.equal(a.data.kinUnverified, true);
+  a.data.handles.points[1][0] = 20; a.invalidated = false; await h.tick();
+  assert.equal(a.data.kinUnverified, true);
+  for (const command of h.commands.values()) assert.throws(() => command.commandFn({ measurementData: [...h.measurements.values()] }), /재확인 필요/);
+  a.data.cachedStats['imageId:' + a.metadata.referencedImageId] = { length: 20 };
+  a.invalidated = false; await h.tick(); assert.equal(a.data.kinUnverified, false);
+  assert.doesNotMatch(h.services.measurementService.getMeasurements()[0].displayText.primary[0], /재확인 필요/);
+  await h.click('저장');
+  const command = JSON.parse(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body);
+  assert.deepEqual(command.item.points, [[0,0,0],[20,0,0]]);
+  assert.deepEqual(command.item.baseline.values, [20]);
+});
+
+test('A3 (11): same-revision unverified head keeps edits and blocks even a detached save handler', async () => {
+  const { h, saved } = await savedMeasurement(); await h.click('편집'); h.input('주석 문구', 'retained edit');
+  const staleSave = h.button('저장'); saved.referenceStatus = 'unverified';
+  await h.click('새로고침'); assert.equal(h.button('저장').disabled, true);
+  assert.deepEqual(h.values(), ['retained edit']); assert.equal(h.annotations.size, 0);
+  const posts = h.calls.filter(c => c.options.method === 'POST').length;
+  staleSave.click(); await flush(); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, posts);
+  await h.click('원본 다시 확인'); assert.deepEqual(h.values(), ['retained edit']);
+  const link = h.document.body.all().find(e => e.tagName === 'a' && e.textContent === '새 뷰어에서 재측정');
+  assert.equal(link.href, '/ohif/viewer?StudyInstanceUIDs=1'); assert.equal(link.rel, 'noopener noreferrer');
+  assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
+  saved.referenceStatus = 'verified'; await h.click('원본 다시 확인');
+  assert.match(h.text(), /원본 확인 완료/);
+  assert.equal(h.button('저장').disabled, false); assert.deepEqual(h.values(), ['retained edit']);
+});
+
+test('A3 delta: verified read after storage-limit 409 retains the actionable failure', async () => {
+  const { h } = await savedMeasurement(); await h.click('편집'); h.input('주석 문구', 'quota draft');
+  h.setReply(async (path, options) => options.method === 'POST' ? { status: 409, data: { code: 'VIEWER_STORAGE_LIMIT' } } : h.defaultReply(path, options));
+  await h.click('저장'); assert.match(h.text(), /저장 공간 한도/);
+  await h.click('새로고침'); assert.match(h.text(), /저장 공간 한도/);
+  assert.deepEqual(h.values(), ['quota draft']); assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
+});
+
+test('A4 delta: retained annotation with identical values reports failed source, not recalculation mismatch', async () => {
+  const { h, a, saved } = await savedMeasurement(); await h.click('편집');
+  h.pages.set('1', [{ ...saved, revision: 2, referenceStatus: 'unverified' }]);
+  await h.click('새로고침'); await h.click('최신판 기준으로 내 수정 유지'); await h.tick();
+  assert.equal(h.annotations.get(a.annotationUID), a); assert.equal(a.data.kinUnverified, true);
+  assert.match(h.text(), /원본을 확인하지 못했습니다/); assert.doesNotMatch(h.text(), /재계산 값이 저장 당시와 다릅니다/);
+  assert.equal(h.button('저장').disabled, true);
+});
