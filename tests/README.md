@@ -18,6 +18,23 @@
 
 ## 기능별 시험 카탈로그
 
+D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (12개),
+`python tests/e2e/test_viewer_recovery.py` (5개).
+빠른 시험은 실제 `config/ohif.js` 확장을 VM에서 mount하고 DOM/HTTP 경계만 대체한다.
+A1(원문 §2-5)의 검사 왕복·늦은 응답·동일 UUID, A2(6)의 busy 경합,
+C1(7)의 서버판 채택/취소, C2(9)의 종료 후 두 SR command 안내,
+C5(4)의 검사403 격리·재인가·다른 검사 보관본과 실제401 정리를 실행한다.
+삭제한 새 표식의 재생성 방지·늦은 영수증과 다른 편집의 공존·주체 변경 폐기,
+두 SR command의 계산 전 기하 변경 거절과 패널의 관찰 사이 상태 갱신도 검사한다.
+빠른 시험은 validate CI의 컨테이너 없는 명시 step으로 등록했다.
+브라우저 시험은 실제 비교 CT·측정 좌표 재열림·숨김 충돌과 커밋 후 주입한403 응답 복구를 확인한다.
+실제 서버의 replay 검증 중 권한 변경은 별도 `viewer_readback_fault.cjs`에서 검사한다.
+B1(13)은 부분 처리다. 기존 측정/readback/held/manual-SR 실스택6파일과 viewer-api의 CI 연결,
+3초 transport·digest·native 도구별 신선도 경계의 빠른 시험 확충은 잔여다.
+세션 내 보관본은 브라우저 저장소에 쓰지 않으며 명시적 재개 전에 현재 검사 접근을 조회한다.
+뷰어 모드 종료·로그아웃·로그인 주체 변경 시 폐기하며 페이지 이탈/Job 복구 경고에 포함한다.
+이 묶음은 A3/A4 원본 재확인·재측정과 나머지 비차단 항목의 완료를 뜻하지 않는다.
+
 판독문·키 이미지 출력: `python tests/e2e/test_report_preview.py` (7개).
 같은 조회 시점의 저장본/승인 정보·환자 오버레이·키 revision과 기관/P/역할·타 작성자 초안 제외를 확인한다.
 실제 미리보기/인쇄 창에서 미확정 편집문을 구분하고 다중 프레임 PNG를 원본 바이트와 대조한다.

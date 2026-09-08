@@ -134,9 +134,10 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         self.assertTrue(any(abs(value-expected)<.001 for value in numeric_values(result['report'])))
         p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
         self.assertEqual(p.evaluate('()=>panelReport().values'), ['재확인 필요'])
-        result = self.sr(p)
-        self.assertNotIn('report', result, result)
-        self.assertIn('재확인 필요', result['error'])
+        for command in ['downloadReport', 'storeMeasurements']:
+            result = self.sr(p, command)
+            self.assertNotIn('report', result, result)
+            self.assertIn('다시 로그인한 뒤 뷰어를 여세요', result['error'])
         self.assertTrue(p.evaluate('''()=>{
             const plugin=window.config.extensions.find(e=>e.id==='kin.viewer-history');
             const before=__d05c1.commands.getCommand('storeMeasurements','CORNERSTONE_STRUCTURED_REPORT');
@@ -182,7 +183,13 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         self.assertTrue(any(r.get('Angle (°)') and float(r['Angle (°)'])>0 for r in rows))
         self.assertIn('재확인 필요',self.sr(p)['error'])
         p.evaluate('()=>panelEllipse.data.kinUnverified=false')
-        expect(panel).not_to_contain_text('재확인 필요')
+        try:
+            expect(panel).not_to_contain_text('재확인 필요')
+        except Exception:
+            print('ELLIPSE RECOVERY',p.evaluate('''()=>({same:cornerstoneTools.annotation.state.getAnnotation(panelEllipse.annotationUID)===panelEllipse,
+              annotations:cornerstoneTools.annotation.state.getAllAnnotations().map(a=>({uid:a.annotationUID,tool:a.metadata.toolName,invalidated:a.invalidated,data:a.data})),
+              history:document.querySelector('#kin-viewer-history').innerText})'''))
+            raise
         sr=self.sr(p); self.assertIn('report',sr,sr)
         values=list(numeric_values(sr['report']))
         points=p.evaluate('''()=>Object.fromEntries(cornerstoneTools.annotation.state.getAllAnnotations()

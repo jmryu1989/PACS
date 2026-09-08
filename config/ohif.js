@@ -592,10 +592,10 @@ function kinCreateViewerHistory() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
     if (!cs || !ct?.annotation?.locking) return;
-    const entries = new Map(), annotations = new Map();
+    const entries = new Map(), annotations = new Map(), recovery = new Map();
     let scope = '', subject = '', me, generation = 0, readSequence = 0;
     let controller = new AbortController(), ended = false, checking = false;
-    let lastAuth = 0, loading = false, navigation = 0;
+    let lastAuth = 0, loading = false, navigation = 0, suspended = true;
     const panel = document.createElement('details');
     panel.id = 'kin-viewer-history'; panel.open = true;
     panel.style.cssText = 'position:fixed;right:8px;bottom:30px;z-index:40;width:300px;max-height:58vh;overflow:auto;background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:10px;font:13px sans-serif';
@@ -668,7 +668,7 @@ function kinCreateViewerHistory() {
     const numericMeasurement = m => manual(kinds[m?.toolName]);
     const unverifiedReport = () => ({ columns: ['Verification'], values: ['재확인 필요'] });
     function checkedMeasurement(m) {
-      if (!m || ended) return null;
+      if (!m || ended || suspended || recovery.has(scope)) return null;
       const a = ct.annotation.state.getAnnotation(m.uid);
       if (!a || a.data.kinUnverified || !sample(a)) return null;
       const mapping = measurementService.getSourceMappings(m.source?.name, m.source?.version)
@@ -694,22 +694,33 @@ function kinCreateViewerHistory() {
         },
       };
     }
-    const projectedMeasurements = function (...args) { return originalMeasurements.apply(this, args).map(projectMeasurement); };
+    const measurementViews = new Map(), measurementViewReads = new Set();
+    const viewSignature = view => JSON.stringify([view.displayText, view.points]);
+    const projectedMeasurements = function (...args) {
+      return originalMeasurements.apply(this, args).map(m => {
+        const view = projectMeasurement(m);
+        // Native panel/CSV reads can happen between observation ticks. Track
+        // the view actually returned, or a short unverified interval can leave
+        // the panel stale when the next tick matches its older good signature.
+        if (numericMeasurement(m) && measurementViews.get(m.uid) !== viewSignature(view)) measurementViewReads.add(m.uid);
+        return view;
+      });
+    };
     measurementService.getMeasurements = projectedMeasurements;
-    const measurementViews = new Map();
     function refreshMeasurementViews() {
       const present = new Set();
       for (const m of originalMeasurements.call(measurementService)) {
         if (!numericMeasurement(m)) continue;
         present.add(m.uid);
-        const view = projectMeasurement(m), signature = JSON.stringify([view.displayText, view.points]);
-        if (measurementViews.get(m.uid) === signature) continue;
+        const view = projectMeasurement(m), signature = viewSignature(view);
+        if (measurementViews.get(m.uid) === signature && !measurementViewReads.has(m.uid)) continue;
+        measurementViewReads.delete(m.uid);
         measurementViews.set(m.uid, signature);
         // Publish a view refresh without removing the annotation or changing
         // geometry at the source (the native handler ignores false updates).
         measurementService.update(m.uid, m, false);
       }
-      for (const uid of measurementViews.keys()) if (!present.has(uid)) measurementViews.delete(uid);
+      for (const uid of measurementViews.keys()) if (!present.has(uid)) { measurementViews.delete(uid); measurementViewReads.delete(uid); }
     }
     const reportContext = 'CORNERSTONE_STRUCTURED_REPORT', reportRestores = [], srRequests = new Map();
     let srBusy = false;
@@ -777,8 +788,10 @@ function kinCreateViewerHistory() {
           // volume target must not prevent export of the verified source frame.
           return !checkedMeasurement(current);
         });
-        if (blocked) {
-          const message = '재확인 필요: 측정을 다시 확인한 후 SR을 생성하세요.';
+        if (blocked || ended || suspended || recovery.has(scope)) {
+          const message = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' :
+            suspended || recovery.has(scope) ? '현재 검사 접근을 확인하고 보관 작업을 재개한 후 SR을 생성하세요.' :
+            '재확인 필요: 측정을 다시 확인한 후 SR을 생성하세요.';
           status.textContent = message;
           services.uiNotificationService.show({ title: '측정 확인', message, type: 'warning' });
           throw new Error(message);
@@ -808,7 +821,8 @@ function kinCreateViewerHistory() {
     const matches = (r, item) => r?.study === scope && r.seriesUid === item.seriesUid && r.sopUid === item.sopUid && r.frame === item.frame;
     const current = () => reference(viewport()?.getCurrentImageId?.());
     const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);
-    const writable = entry => me?.kind === 'member' && me.roles?.includes('radiologist') && (!entry.head || entry.head.authorSub === subject);
+    const writable = entry => !suspended && !recovery.has(scope) && me?.kind === 'member' && me.roles?.includes('radiologist') &&
+      (!entry.head || entry.head.authorSub === subject);
     const render = () => { try { viewport()?.render(); } catch (_) {} };
     const lock = (entry, locked) => { if (entry.annotationUID) ct.annotation.locking.setAnnotationLocked(entry.annotationUID, locked); };
     function removeAnnotation(entry) {
@@ -824,12 +838,45 @@ function kinCreateViewerHistory() {
       generation++; readSequence++; navigation++; controller.abort(); controller = new AbortController();
       srRequests.clear();
       for (const e of entries.values()) removeAnnotation(e);
-      entries.clear(); annotations.clear(); list.replaceChildren(); loading = false;
+      entries.clear(); annotations.clear(); list.replaceChildren(); actions.replaceChildren(); loading = false; suspended = true;
+      delete panel.dataset.studyUid;
       status.textContent = message; render();
+    }
+    const hasWork = e => e.editing || e.pending || e.heldDraft;
+    function park() {
+      if (!scope || !subject) return;
+      captureAnnotations();
+      const saved = [];
+      for (const e of entries.values()) {
+        if (!hasWork(e)) continue;
+        const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
+        if (e.editing && !e.pending && a) {
+          e.draft.points = clone(a.data.handles.points);
+          e.draft.label = a.data.text ?? a.data.label ?? '';
+        }
+        // Copy only session data. Detached handlers and late responses must not
+        // mutate a parked draft or attach its annotation to another study.
+        saved.push(clone({ id: e.id, head: e.head, draft: e.draft, editing: e.editing,
+          pending: e.pending, heldDraft: e.heldDraft, latest: e.latest, message: e.message }));
+      }
+      if (saved.length) recovery.set(scope, { subject, entries: saved });
+    }
+    function deny() {
+      park();
+      // An unfinished drawing may not yet have a history entry. Quarantine
+      // removes those transient marks too, without touching another study.
+      for (const a of ct.annotation.state.getAllAnnotations()) {
+        const study = reference(a.metadata.referencedImageId)?.study;
+        if (!kinds[a.metadata.toolName] || study && study !== scope) continue;
+        ct.annotation.state.removeAnnotation(a.annotationUID);
+        if (measurementService.getMeasurement(a.annotationUID)) measurementService.remove(a.annotationUID);
+      }
+      reset('이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
+      button(actions, '접근 다시 확인', () => load());
     }
     function end() {
       if (ended) return;
-      reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); ended = true; me = null; subject = ''; actions.replaceChildren();
+      recovery.clear(); reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); ended = true; me = null; subject = ''; actions.replaceChildren();
       window.dispatchEvent(new Event('kin-viewer-access-ended'));
       // A shared workstation must not retain unsaved labels after logout either.
       for (const a of ct.annotation.state.getAllAnnotations()) if (kinds[a.metadata.toolName]) {
@@ -846,7 +893,8 @@ function kinCreateViewerHistory() {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
         headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       if (!valid(ticket)) throw { stale: true };
-      if (res.status === 401 || res.status === 403) { end(); throw { stale: true }; }
+      if (res.status === 401 || res.status === 403 && path === '/me') { end(); throw { stale: true }; }
+      if (res.status === 403) { deny(); throw { stale: true }; }
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw { stale: true };
       if (!res.ok || !data) throw { status: res.status, code: data?.code };
@@ -865,7 +913,7 @@ function kinCreateViewerHistory() {
       if (error.status === 400 || error.status === 413) return '지원 영상·원본 평면·입력 길이를 확인하세요. 작성 내용은 저장되지 않았습니다.';
       return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
     }
-    async function load() {
+    async function load(resume = false) {
       if (!scope || ended || loading) return;
       const ticket = generation, seq = ++readSequence; loading = true;
       status.textContent = '저장 항목 확인 중…';
@@ -879,16 +927,35 @@ function kinCreateViewerHistory() {
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
         if (!valid(ticket) || seq !== readSequence) return;
+        suspended = false;
+        const parked = recovery.get(scope);
+        if (resume === true && parked && parked.subject === subject) {
+          for (const e of entries.values()) removeAnnotation(e);
+          entries.clear(); list.replaceChildren();
+          for (const e of clone(parked.entries)) { e.rehydrate = !e.head; entries.set(e.id, e); row(e); }
+          recovery.delete(scope);
+        }
         for (const head of heads) {
           let e = entries.get(head.id);
           if (e && (e.editing || e.pending || e.busy)) {
             if (head.revision !== e.head?.revision) { e.latest = head; e.message = '서버에 다른 판이 있습니다. 작성 내용은 유지됩니다.'; row(e); }
+            else {
+              // A read's source verdict can change without a new revision.
+              // Retain the draft, never treat a parked verdict as fresh proof.
+              e.head = head;
+              if (manual(e.draft.kind) && head.referenceStatus !== 'verified') {
+                const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
+                if (e.editing && !e.pending && a) e.draft.points = clone(a.data.handles.points);
+                removeAnnotation(e); e.message = '재확인 필요: 원본을 확인하지 못했습니다. 작성 내용은 유지됩니다.';
+              }
+            }
             continue;
           }
           if (e) removeAnnotation(e);
           else { e = { id: head.id }; entries.set(e.id, e); }
           Object.assign(e, { head, draft: itemOnly(head), editing: false, latest: null, message: '' }); restoreHeldDraft(e); row(e);
         }
+        for (const e of entries.values()) row(e);
         status.textContent = heads.length + '개 저장 항목 · 저장은 판독 확정과 별개입니다.';
         panel.dataset.studyUid = scope;
         toolbar(); hydrate();
@@ -896,7 +963,18 @@ function kinCreateViewerHistory() {
       finally { if (ticket === generation) loading = false; }
     }
     function toolbar() {
+      const ticket = generation;
       actions.replaceChildren(); button(actions, '새로고침', load);
+      if (recovery.has(scope)) {
+        text(actions, 'p', '이 검사의 미저장 작업이 보관 중입니다. 이 뷰어를 닫거나 로그아웃하면 폐기됩니다.');
+        button(actions, '보관 작업 재개', () => { if (valid(ticket)) return load(true); });
+        button(actions, '보관 작업 버리기', () => {
+          if (!valid(ticket) || suspended || !recovery.has(scope)) return;
+          if (!window.confirm('이 검사의 보관한 미저장 작업과 결과 미확인 요청을 버리시겠습니까? 서버 저장 이력은 유지됩니다.')) return;
+          recovery.delete(scope); toolbar(); hydrate();
+        });
+        return;
+      }
       for (const [label, command] of [['SR 다운로드', 'downloadReport'], ['SR 저장', 'storeMeasurements']]) {
         const control = button(actions, label, () => commands.runCommand(command, { measurementData: srSelection() }, reportContext), true);
         control.dataset.kinSr = command;
@@ -966,7 +1044,7 @@ function kinCreateViewerHistory() {
         const tool = group.getToolInstance(tools[kind]), config = tool.configuration, add = tool.addNewAnnotation;
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
-          if (ended || !subject) { status.textContent = '로그인 확인 후 측정하세요.'; return; }
+          if (ended || !subject || suspended || recovery.has(scope)) { status.textContent = '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return; }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
           let reason = id ? measurementReason(id, kind) : '일반 CT 원본 프레임을 선택하세요';
@@ -1013,7 +1091,8 @@ function kinCreateViewerHistory() {
     const heldActionReady = e => valid(generation) && entries.get(e.id) === e && writable(e) && e.heldDraft && !e.busy && !e.pending;
     function discardHeld(e) {
       if (!heldActionReady(e)) return;
-      if (!window.confirm('보관한 미저장 수정만 버리시겠습니까? 서버에 저장된 항목과 이력은 유지됩니다.')) return;
+      if (!window.confirm('보관한 미저장 수정을 버리고 서버판 r' + (e.latest || e.head).revision +
+          '을 채택하시겠습니까?' + (e.latest ? ' 아직 반영하지 않은 최신 서버판입니다.' : '') + ' 서버 저장 이력은 유지됩니다.')) return;
       if (!heldActionReady(e)) return;
       // A detached button can outlive a restore request. Never discard the
       // local recovery copy while that request's result is still uncertain.
@@ -1061,14 +1140,15 @@ function kinCreateViewerHistory() {
         if (e.latest && !e.pending) button(el, '최신판 기준으로 내 수정 유지', () => {
           e.head = e.latest; e.latest = null;
           if (e.head.hidden) {
-            e.heldDraft ??= clone(e.draft);
+            if (e.editing) e.heldDraft ??= clone(e.draft);
             removeAnnotation(e); render();
             e.editing = false; e.draft = itemOnly(e.head); e.message = '서버에서 숨겨졌습니다.';
           }
           else if (e.heldDraft) { e.draft = itemOnly(e.head); restoreHeldDraft(e); }
-          else e.message = '최신판을 확인했습니다. 저장을 눌러야 내 수정이 반영됩니다.';
+          else if (e.editing) e.message = '최신판을 확인했습니다. 저장을 눌러야 내 수정이 반영됩니다.';
+          else { e.draft = itemOnly(e.head); e.message = '최신 서버판을 반영했습니다.'; }
           row(e); hydrate(); render();
-        });
+        }, !!e.busy);
         if (e.heldDraft) {
           if (!e.head.hidden) button(el, '원본 다시 확인', () => {
             if (heldActionReady(e)) return load();
@@ -1090,7 +1170,7 @@ function kinCreateViewerHistory() {
       });
     }
     async function save(e, action, reason) {
-      if (!writable(e) || e.busy || ended) return;
+      if (!valid(generation) || entries.get(e.id) !== e || !writable(e) || e.busy || ended) return;
       if (manual(e.draft.kind) && e.editing && !e.pending) {
         const baseline = sample(e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID));
         if (!baseline) { e.message = '측정을 마치고 계산 완료 후 저장하세요.'; row(e); return; }
@@ -1112,6 +1192,15 @@ function kinCreateViewerHistory() {
         await authenticate(ticket);
         const head = await api(e.pending.url, { method: 'POST', body: e.pending.body }, ticket);
         if (!valid(ticket) || !entries.has(e.id)) return;
+        const duplicate = entries.get(head.id);
+        if (duplicate && duplicate !== e && hasWork(duplicate)) {
+          // A lost create receipt can be listed before its retry resolves.
+          // Keep edits started on that listed row instead of overwriting them.
+          removeAnnotation(e); e.element?.remove(); entries.delete(e.id);
+          duplicate.message = '같은 요청의 저장 결과를 확인했습니다. 이 항목의 작성 내용은 유지됩니다.';
+          row(duplicate); return;
+        }
+        if (duplicate && duplicate !== e) { removeAnnotation(duplicate); duplicate.element?.remove(); }
         entries.delete(e.id); e.id = head.id; entries.set(e.id, e);
         Object.assign(e, { head, draft: itemOnly(head), pending: null, latest: null, editing: false, message: '저장 완료' });
         restoreHeldDraft(e);
@@ -1128,6 +1217,7 @@ function kinCreateViewerHistory() {
       } finally { if (valid(ticket) && entries.has(e.id)) { e.busy = false; row(e); } }
     }
     async function navigate(e) {
+      if (!valid(generation) || suspended || recovery.has(scope) || entries.get(e.id) !== e) return;
       const ticket = generation, nav = ++navigation;
       const sets = services.displaySetService.getActiveDisplaySets().filter(d => d.StudyInstanceUID === scope && d.SeriesInstanceUID === e.draft.seriesUid && (d.images || d.instances || []).some(i => i.SOPInstanceUID === e.draft.sopUid));
       if (sets.length !== 1) { e.message = '현재 검사에서 원본 시리즈를 찾을 수 없습니다.'; row(e); return; }
@@ -1146,12 +1236,12 @@ function kinCreateViewerHistory() {
     }
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
-      if (!r || r.study !== scope || !subject || ended) return;
+      if (!r || r.study !== scope || !subject || ended || suspended || recovery.has(scope)) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
-        if (!e.head || e.head.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
-        if (manual(e.draft.kind) && e.head.referenceStatus !== 'verified') {
+        if (!e.head && !e.rehydrate || e.head?.hidden || !tools[e.draft.kind] || e.annotationUID || !matches(r, e.draft) || plane?.frameOfReferenceUID !== e.draft.frameOfReferenceUid) continue;
+        if (manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified') {
           if (!e.message) { e.message = '재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.'; row(e); }
           continue;
         }
@@ -1160,7 +1250,8 @@ function kinCreateViewerHistory() {
           metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         trackMeasurement(a);
-        ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !e.editing); render();
+        e.rehydrate = false;
+        ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !!(e.pending || e.busy || !e.editing)); render();
       }
     }
     function scan() {
@@ -1170,10 +1261,10 @@ function kinCreateViewerHistory() {
       // that loading gap, owns teardown of drafts and in-flight commands.
       if (!r) return;
       if (r.study !== scope) {
-        reset('검사 확인 중…'); scope = r?.study || ''; me = null;
+        park(); reset('검사 확인 중…'); scope = r?.study || ''; me = null;
         if (scope) load(); return;
       }
-      if (!subject || !scope) return;
+      if (!subject || !scope || suspended || recovery.has(scope)) return;
       const v = viewport();
       configureMeasurements(v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       for (const a of ct.annotation.state.getAllAnnotations()) {
@@ -1186,7 +1277,10 @@ function kinCreateViewerHistory() {
       }
       for (const e of entries.values()) {
         const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
-        if (e.annotationUID && !a) { annotations.delete(e.annotationUID); e.annotationUID = null; }
+        if (e.annotationUID && !a) {
+          annotations.delete(e.annotationUID); e.annotationUID = null;
+          if (!e.head && !e.pending) { entries.delete(e.id); e.element?.remove(); continue; }
+        }
         if (a && e.head && !e.editing) {
           a.data.text = e.draft.label;
           a.data.handles.points = clone(e.draft.points);
@@ -1204,6 +1298,15 @@ function kinCreateViewerHistory() {
         }
       }
       hydrate();
+      captureAnnotations();
+      if (Date.now() - lastAuth > 15000 && !checking) {
+        checking = true; const ticket = generation;
+        authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket)).catch(() => {}).finally(() => { checking = false; });
+      }
+      refreshMeasurementViews(); refreshSrButtons();
+    }
+    function captureAnnotations() {
+      if (suspended || recovery.has(scope)) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
         const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : 2;
@@ -1221,16 +1324,11 @@ function kinCreateViewerHistory() {
           if (e.draft.label !== label) { e.draft.label = label; row(e); }
         }
       }
-      if (Date.now() - lastAuth > 15000 && !checking) {
-        checking = true; const ticket = generation;
-        authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket)).catch(() => {}).finally(() => { checking = false; });
-      }
-      refreshMeasurementViews(); refreshSrButtons();
     }
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
-    const beforeUnload = e => { if ([...entries.values()].some(x => x.editing || x.pending || x.heldDraft)) { e.preventDefault(); e.returnValue = ''; } };
-    const jobGuard = () => [...entries.values()].some(x => x.editing || x.pending || x.busy || x.heldDraft) ||
+    const beforeUnload = e => { if (recovery.size || [...entries.values()].some(hasWork)) { e.preventDefault(); e.returnValue = ''; } };
+    const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) ||
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
     window.kinViewerHistoryHasUnsaved = jobGuard;
     let channel;
