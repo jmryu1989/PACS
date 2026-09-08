@@ -128,7 +128,12 @@ class ViewerJobsE2E(DisplayControlsE2E):
   self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('ArrowDown');p.keyboard.press('1');p.wait_for_timeout(200)
   before=self.display(p);p.get_by_label('작업 제목',exact=True).fill('현재·과거 비교');p.get_by_label('작업 설명',exact=True).fill('프레임·밝기·방향 저장')
   self.click_job(p,'새 비교 작업 저장','저장했습니다');self.assertEqual(len(self.jobs(a)),1)
-  p.close();p=self.launch_job([a]);self.click_job(p,'이 작업 복원','복원했습니다');p.wait_for_timeout(400)
+  p.close();p=self.launch_job([a])
+  p.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');canvas_ready(p,1)
+  try:self.click_job(p,'이 작업 복원','복원했습니다')
+  except Exception:
+   print('JOB RESTORE FAILURE',p.url,self.display(p),flush=True);raise
+  p.wait_for_timeout(400)
   self.assertIn('StudyInstanceUIDs='+a.uid+'%2C'+b.uid,p.url);self.assertIn('kinJob=',p.url)
   print('JOB restored observation '+json.dumps(dict(before=before,after=self.display(p))),flush=True);canvas_ready(p,2)
   after=self.display(p)

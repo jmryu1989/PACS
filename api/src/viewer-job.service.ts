@@ -3,10 +3,11 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
-import { canonical, viewerUid, viewerUuid } from './viewer-input';
+import { canonical, viewerUid, viewerUuid, verifyViewerReference, isManualMeasurement } from './viewer-input';
 import { jobCommand, jobFingerprint, verifyJobCell } from './viewer-job-input';
 const deny = (): never => { throw new ForbiddenException('비교 작업에 접근할 수 없습니다'); };
 const conflict = (): never => { throw new ConflictException('비교 작업이 변경되었습니다. 목록을 새로 확인하세요'); };
+const annotationKinds = ['arrow', 'length', 'angle', 'ellipse'];
 const allowed = (s: any, c: Caller) => !!s && !!c.institution && typeof s.rs === 'string' && (s.institutionId === c.institution || s.teleInstitutionId === c.institution) && (s.rs !== 'P' || s.preDoc === c.actor || s.preReviewer === c.actor);
 const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.authorSub, authorActor: j.authorActor, title: j.title,
   description: j.description, hidden: j.hidden, revision: j.revision, createdAt: j.createdAt, updatedAt: j.updatedAt });
@@ -26,7 +27,7 @@ export class ViewerJobService {
     } catch (e) {
       if (e instanceof Prisma.PrismaClientKnownRequestError) {
         if (['P2002', 'P2003', 'P2034'].includes(e.code)) conflict();
-        if (e.code === 'P2028' || e.code === 'P2010') throw new ServiceUnavailableException('저장 지연입니다. 같은 작업으로 다시 시도하세요');
+        if (e.code === 'P2028' || e.code === 'P2010' && ['55P03', '57014'].includes(String(e.meta?.code))) throw new ServiceUnavailableException('저장 지연입니다. 같은 작업으로 다시 시도하세요');
       }
       throw e;
     }
@@ -37,8 +38,8 @@ export class ViewerJobService {
     if (rows.length !== studies.length || rows.some(s => !allowed(s, c))) deny();
     return rows;
   }
-  private async sources(snapshot: any, old = false) {
-    const identity = new Map<string, string>(), sources = new Map<string, any>();
+  private async sources(snapshot: any, old = false, sources = new Map<string, any>()) {
+    const identity = new Map<string, string>();
     for (const uid of snapshot.studies) identity.set(uid, (await this.orthanc.connectStudyIdentity(uid)).patientId);
     if (new Set(identity.values()).size !== 1) throw new BadRequestException('같은 환자의 검사만 비교 작업으로 저장할 수 있습니다');
     const cells = [];
@@ -51,6 +52,46 @@ export class ViewerJobService {
       cells.push({ ...cell, sourceDigest: tags._kinSourceDigest });
     }
     return { ...snapshot, cells };
+  }
+  private async annotations(tx: any, snapshot: any, sources: Map<string, any>) {
+    const refs = snapshot.annotations;
+    if (!Array.isArray(refs) || refs.length > 64 || new Set(refs.map(r => r.id)).size !== refs.length)
+      throw new ConflictException('저장 주석 이력을 확인할 수 없습니다');
+    if (!refs.length) return [];
+    const revisions = await tx.viewerRevision.findMany({
+      where: { OR: refs.map(r => ({ itemId: r.id, revision: r.revision, item: { studyUid: r.study } })) },
+      include: { item: { select: { studyUid: true, authorActor: true } } },
+    });
+    const byRef = new Map(revisions.map(r => [r.itemId + '/' + r.revision, r]));
+    let size = 2;
+    const result = refs.map(ref => {
+      const revision: any = byRef.get(ref.id + '/' + ref.revision), item = revision?.snapshot;
+      const cell = snapshot.cells.find(c => c && c.study === ref.study && c.sop === item?.sopUid && c.series === item?.seriesUid && c.frame === item?.frame);
+      if (!revision || !cell || revision.item.studyUid !== ref.study || item.hidden || !annotationKinds.includes(item.kind))
+        throw new ConflictException('저장 주석의 원본 참조가 일치하지 않습니다');
+      const tags = sources.get(cell.sop); verifyViewerReference(ref.study, item, tags);
+      if (isManualMeasurement(item.kind) && item.sourceDigest !== cell.sourceDigest)
+        throw new ConflictException(`주석 ${ref.id} (r${ref.revision})의 측정 원본이 달라졌습니다. 해당 영상을 비교에서 제외하거나 영상만 저장하세요. 주석을 포함하려면 저장 당시 원본이 복구되어야 합니다`);
+      const expanded = { ...ref, authorActor: revision.item.authorActor, at: revision.at.toISOString(), item };
+      size += Buffer.byteLength(canonical(expanded)) + (size === 2 ? 0 : 1);
+      if (size > 262144) throw new ConflictException('비교 작업 주석 용량 한도를 초과했습니다. 주석이 더 적은 영상으로 구성하거나 영상만 저장하세요');
+      return expanded;
+    });
+    return result;
+  }
+  private async freezeAnnotations(tx: any, snapshot: any, sources: Map<string, any>) {
+    // Viewer writes hold these same study locks. The selected heads and the Job
+    // therefore commit as one moment, without modifying any annotation revision.
+    const heads = await tx.viewerItem.findMany({ where: { hidden: false,
+      AND: [{ OR: snapshot.cells.filter(Boolean).map(c => ({ studyUid: c.study, AND: [
+        { snapshot: { path: ['sopUid'], equals: c.sop } }, { snapshot: { path: ['seriesUid'], equals: c.series } },
+        { snapshot: { path: ['frame'], equals: c.frame } }] })) },
+        { OR: annotationKinds.map(kind => ({ snapshot: { path: ['kind'], equals: kind } })) }] }, orderBy: { id: 'asc' }, take: 65,
+      select: { id: true, studyUid: true, revision: true } });
+    if (heads.length > 64) throw new ConflictException('비교 작업에는 주석64개까지 함께 저장할 수 있습니다');
+    const frozen = { ...snapshot, annotations: heads.map(h => ({ id: h.id, study: h.studyUid, revision: h.revision })) };
+    await this.annotations(tx, frozen, sources);
+    return frozen;
   }
   private sameInstitution(rows: any[]) {
     if (!rows[0]?.institutionId || rows.some(s => s.institutionId !== rows[0].institutionId)) deny();
@@ -81,11 +122,13 @@ export class ViewerJobService {
     this.member(c); viewerUid(uid); viewerUuid(id);
     const j = await this.head(uid, id, c);
     if (j.hidden) conflict();
-    await this.sources(j.snapshot, true);
+    const sources = new Map<string, any>();
+    await this.sources(j.snapshot, true, sources);
+    const annotations = j.snapshot['version'] === 3 ? await this.annotations(this.prisma, j.snapshot, sources) : null;
     // Orthanc calls happen outside locks; permission and metadata revision must
     // still be current after those calls before returning a restorable snapshot.
-    const latest = await this.head(uid, id, c); if (latest.revision !== j.revision) conflict();
-    return { ...summary(latest), snapshot: latest.snapshot };
+    const latest = await this.head(uid, id, c); if (latest.hidden || latest.revision !== j.revision) conflict();
+    return { ...summary(latest), snapshot: latest.snapshot, ...(annotations ? { annotations } : {}) };
   }
   async create(uid: string, raw: Buffer, c: Caller) {
     this.member(c, true); viewerUid(uid);
@@ -93,7 +136,8 @@ export class ViewerJobService {
     if (b.snapshot.studies[0] !== uid) throw new BadRequestException('판독 대상 검사가 일치하지 않습니다');
     this.sameInstitution(await this.parents(this.prisma, b.snapshot.studies, c));
     const known = await this.prisma.viewerJob.findUnique({ where: { id: b.id } });
-    const snapshot = known ? null : await this.sources(b.snapshot);
+    const sources = new Map<string, any>();
+    const snapshot = known ? null : await this.sources(b.snapshot, false, sources);
     return this.transaction(async tx => {
       this.sameInstitution(await this.parents(tx, b.snapshot.studies, c, true));
       const replay = await tx.viewerJob.findUnique({ where: { id: b.id } });
@@ -103,9 +147,10 @@ export class ViewerJobService {
       }
       if (known) conflict();
       if (await tx.viewerJob.count({ where: { studyUid: uid } }) >= 200) throw new ConflictException('검사별 비교 작업 저장 한도에 도달했습니다');
+      const frozen = snapshot.version === 3 ? await this.freezeAnnotations(tx, snapshot, sources) : snapshot;
       const now = new Date();
       const j = await tx.viewerJob.create({ data: { id: b.id, studyUid: uid, authorSub: c.sub, authorActor: c.actor, studies: b.snapshot.studies,
-        fingerprint, snapshot, title: b.title, description: b.description, revision: 1, updatedAt: now } });
+        fingerprint, snapshot: frozen, title: b.title, description: b.description, revision: 1, updatedAt: now } });
       await this.history(tx, j, '', c); return summary(j);
     });
   }

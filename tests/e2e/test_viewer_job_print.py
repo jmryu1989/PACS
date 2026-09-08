@@ -85,6 +85,10 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('1');p.wait_for_timeout(200)
   expected=self.arrays(self.pngs(p));job=self.saved(p,a);p.close()
   p=self.launch_job([a]);p.set_viewport_size(dict(width=1100,height=850));canvas_ready(p,1)
+  # ResizeObserver/native rendering can finish after a nonblank old canvas.
+  # Complete that layout before taking the workspace-preservation baseline.
+  p.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+  canvas_ready(p,1)
   before=self.pngs(p);paper=self.output(p);actual=self.output_arrays(p,paper)
   errors=[]
   for x,y in zip(expected,actual):
@@ -190,7 +194,9 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   before=self.pngs(p);replace(raw,replacement)
   try:
    with p.expect_popup() as opened:p.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF').click()
-   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('원본과 달라');self.assertTrue(opened.value.is_closed())
+   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('원본과 달라')
+   if not opened.value.is_closed():opened.value.wait_for_event('close',timeout=15000)
+   self.assertTrue(opened.value.is_closed())
    p.locator('#kin-job-print').get_by_role('button',name='다시 확인').click();expect(p.locator('#kin-job-print [role=status]')).to_contain_text('원본과 달라')
    self.assertEqual(self.pngs(p),before)
   finally:replace(replacement,raw)

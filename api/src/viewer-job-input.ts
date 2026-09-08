@@ -25,15 +25,15 @@ export function jobCommand(raw: Buffer, create: boolean): any {
   viewerUuid(b.id);
   const s = b.snapshot;
   keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells']);
-  if (![1, 2].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  if (![1, 2, 3].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
   if (![1, 2].includes(s.rows) || ![1, 2].includes(s.cols) || !Number.isInteger(s.active) || s.active < 0 || s.active >= s.rows * s.cols ||
       !Array.isArray(s.cells) || s.cells.length !== s.rows * s.cols || s.cells.every(c => !c)) invalid();
   let pixels = 0;
   for (const c of s.cells) {
     if (c === null) continue;
-    keys(c, ['study', 'series', 'sop', 'frame', 'camera', 'properties', ...(s.version === 2 ? ['viewport'] : [])]);
-    if (s.version === 2) {
+    keys(c, ['study', 'series', 'sop', 'frame', 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
+    if (s.version >= 2) {
       keys(c.viewport, ['width', 'height']);
       for (const x of Object.values(c.viewport)) { number(x, 1, 8192); if (!Number.isInteger(x)) invalid(); }
       const area = c.viewport.width * c.viewport.height; pixels += area;
@@ -52,8 +52,8 @@ export function jobCommand(raw: Buffer, create: boolean): any {
     const delta = p.map((v, i) => v - f[i]), distance = Math.sqrt(dot(delta, delta));
     if (Math.max(Math.abs(dot(u, u) - 1), Math.abs(dot(n, n) - 1), Math.abs(dot(u, n))) > 1e-4 || distance < .0001 ||
         Math.abs(dot(delta, n) / distance - 1) > 1e-4) invalid();
-    keys(c.properties, ['voiRange', 'VOILUTFunction', 'invert', ...(s.version === 2 ? ['interpolationType'] : [])]); keys(c.properties.voiRange, ['lower', 'upper']);
-    if (s.version === 2 && ![0, 1, 2].includes(c.properties.interpolationType)) invalid();
+    keys(c.properties, ['voiRange', 'VOILUTFunction', 'invert', ...(s.version >= 2 ? ['interpolationType'] : [])]); keys(c.properties.voiRange, ['lower', 'upper']);
+    if (s.version >= 2 && ![0, 1, 2].includes(c.properties.interpolationType)) invalid();
     number(c.properties.voiRange.lower, -1e9, 1e9); number(c.properties.voiRange.upper, -1e9, 1e9);
     if (c.properties.voiRange.upper <= c.properties.voiRange.lower || !['LINEAR', 'LINEAR_EXACT', 'SIGMOID'].includes(c.properties.VOILUTFunction) || typeof c.properties.invert !== 'boolean') invalid();
   }

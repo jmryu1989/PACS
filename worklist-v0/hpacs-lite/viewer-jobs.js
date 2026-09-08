@@ -8,12 +8,14 @@ window.kinViewerJobs = function (services, model) {
     const studies = new URLSearchParams(search).get('StudyInstanceUIDs').split(',');
     const grid = services.viewportGridService, cs = services.cornerstoneViewportService, ds = services.displaySetService;
     const parent = document.querySelector('#kin-viewer-layout'); if (!parent) return;
-    parent.style.maxHeight = '64vh'; parent.style.overflow = 'auto';
+    parent.style.maxHeight = '40vh'; parent.style.overflow = 'auto';
     parent.querySelector('summary').textContent = '비교 작업 · 배치';
     const panel = document.createElement('details'); panel.id = 'kin-viewer-jobs'; panel.open = true;
     const text = (tag, value, host = panel) => { const e = document.createElement(tag); e.textContent = value; host.append(e); return e; };
     text('summary', '저장한 비교 작업 · 서버');
-    text('p', '영상 위치·표시·배치를 저장합니다. 표식은 별도 저장한 최신 이력을 읽습니다. 저장 영상 출력은 주석 미포함·실제 크기 아님입니다.');
+    text('p', '영상 위치·표시·배치를 저장합니다. 미저장 표식은 먼저 저장하세요.');
+    const help = document.createElement('details'); panel.append(help); text('summary', '주석 저장·복원·출력 안내', help);
+    text('p', '주석 함께 저장은 선택 프레임의 서버 저장 주석 이력을 고정합니다. 복원은 최신 주석, 출력은 고정한 주석을 사용하며 실제 크기 출력은 아닙니다.', help);
     const field = (label, tag, max) => { const l = text('label', label), e = document.createElement(tag); e.maxLength = max; e.setAttribute('aria-label', label); e.style.cssText = 'display:block;width:100%;color:#111;background:#fff'; l.append(e); return e; };
     const title = field('작업 제목', 'input', 120), description = field('작업 설명', 'textarea', 2000);
     const filters = text('div', ''), mine = text('select', '', filters); mine.setAttribute('aria-label', '작업 작성자 필터'); mine.style.cssText = 'color:#111;background:#fff';
@@ -190,10 +192,11 @@ window.kinViewerJobs = function (services, model) {
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
-          if (action === 'save') {
+          if (action === 'save' || action === 'saveAnnotations') {
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
-            pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot: capture(true) }), url: path };
+            const snapshot = capture(true); if (action === 'saveAnnotations') snapshot.version = 3;
+            pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot }), url: path };
           } else if (action === 'edit') {
             if (!editRow) throw new Error('수정할 작업의 제목·설명 수정 버튼을 누르세요.'); row = editRow;
             pending = { body: JSON.stringify({ expectedRevision: row.revision, title: title.value, description: description.value, hidden: row.hidden, reason: '' }), url: path + '/' + row.id + '/revisions' };
@@ -203,7 +206,7 @@ window.kinViewerJobs = function (services, model) {
           if (!pending) throw new Error('재시도할 요청이 없습니다.');
           await api(pending.url, { method: 'POST', body: pending.body }); pending = editRow = null;
           if (editSerial === edit && !['hide', 'retry'].includes(action)) { title.value = ''; description.value = ''; }
-          await load(); status.textContent = '비교 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.';
+          await load(); status.textContent = '비교 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' + (action === 'saveAnnotations' ? ' 저장된 주석 이력도 함께 고정했습니다.' : '');
         }
       } catch (e) {
         if (live()) { if (e.status >= 400 && e.status < 500) pending = null;
@@ -211,6 +214,7 @@ window.kinViewerJobs = function (services, model) {
       } finally { busy = false; applying = false; refresh(); }
     }
     button(controls, '새 비교 작업 저장', () => run('save'), true); button(controls, '변경 저장', () => run('edit'), true);
+    button(controls, '주석 함께 새 비교 작업 저장', () => run('saveAnnotations'), true);
     button(controls, '같은 요청 재시도', () => run('retry'), true); button(controls, '작업 목록 새로고침', () => run('list'));
     mine.onchange = hidden.onchange = () => run('list');
     title.oninput = description.oninput = () => { editSerial++; };
