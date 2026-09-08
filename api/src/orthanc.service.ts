@@ -166,6 +166,14 @@ export class OrthancService {
     );
   }
 
+  async reportPreviewStudy(uid: string): Promise<any> {
+    const rows = await this.viewerJson('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uid) +
+      '&includefield=00081030,00100030,00100040');
+    if (!Array.isArray(rows) || rows.length !== 1 || OrthancService.tag(rows[0], '0020000D') !== uid)
+      throw new BadRequestException('출력할 원본 검사를 확인할 수 없습니다');
+    return rows[0];
+  }
+
   /** SOP Instance UID를 Orthanc 내부 ID로 찾는다. 기관 판정은 호출자가 Study로 환원한 뒤 한다. */
   async lookupInstance(sopUid: string): Promise<any[]> {
     let res: Response;
