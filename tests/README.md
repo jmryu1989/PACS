@@ -981,6 +981,19 @@ The pinned mode already supplies its own preset hotkeys; the unused top-level ho
 
 ### Report key image output layout
 
+`python tests/e2e/test_report_window.py` adds seven focused scenarios for explicit
+CT print W/L: lossless PAM signed pixels and independently calculated output,
+UI and PDF image/setting equality, invalid/mixed selections and failure recovery,
+late-image suppression, LUT/source-change guards, unsigned fractional rescale,
+width 1/1.5/2/20000 boundaries, malformed PAM rejection and 32 distinct 512px keys.
+The manual path is limited to single-frame classic CT MONOCHROME2 with positive
+finite rescale slope and finite intercept, 16-bit samples and no complex LUT.
+Automatic preview remains the default. Manual output calculates DICOM LINEAR
+from decoded samples; Orthanc rendered clamps narrow widths and tiny slopes.
+Run the nine report-preview regressions below after changing the shared output
+module. These are focused local tests; physical printing and viewer annotation
+snapshots are not covered.
+
 `python tests/e2e/test_report_preview.py` runs nine focused actual-stack scenarios.
 The original seven cover report snapshot permissions, editor/source separation,
 key frames and print, stale/failure/session paths and output identity support.
