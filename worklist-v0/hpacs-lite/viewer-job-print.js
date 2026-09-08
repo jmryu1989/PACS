@@ -11,7 +11,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   const el = (tag, value, host) => { const e = document.createElement(tag); if (value !== undefined) e.textContent = value; host?.append(e); return e; };
   const dialog = el('dialog'); dialog.id = 'kin-job-print';
   dialog.style.cssText = 'width:min(1100px,94vw);height:90vh;padding:16px;background:#18212b;color:white';
-  el('h2', '저장한 비교 영상 출력', dialog);
+  const heading = el('h2', '저장한 비교 영상 출력', dialog);
   const caption = el('p', '저장 당시 영상 범위와 밝기입니다. 실제 크기 아님.', dialog);
   const status = el('p', '', dialog); status.setAttribute('role', 'status');
   const reportSource = el('select', undefined, dialog); reportSource.setAttribute('aria-label', '함께 출력할 판독문');
@@ -42,7 +42,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     const values = controlJob?.snapshot.cells.map((cell, index) => cell ? edits[index] || defaultEdit() : null).filter(Boolean) || [];
     const common = values.every(edit => equal(edit, values[0]));
     const edit = selection.value === 'all' ? common ? values[0] || defaultEdit() : defaultEdit() : edits[Number(selection.value)] || defaultEdit();
-    controlsHint.textContent = selection.value === 'all' && !common ? '셀마다 적용값이 다릅니다. 아래 값은 전체 적용을 위한 새 값이며, 실제 적용값은 각 영상 아래에 표시됩니다.' : '현재 적용값입니다. 확대·이동은 저장한 화면을 기준으로 합니다.';
+    controlsHint.textContent = selection.value === 'all' && !common ? '셀마다 적용값이 다릅니다. 아래 값은 전체 적용을 위한 새 값이며, 실제 적용값은 각 영상 아래에 표시됩니다.' : '현재 적용값입니다. 확대·이동은 ' + (current?.snapshot ? '처음 선택한 화면' : '저장한 화면') + '을 기준으로 합니다.';
     for (const key of ['zoom', 'x', 'y']) inputs[key].value = edit[key];
     windowMode.value = edit.window ? 'manual' : 'saved'; inputs.width.value = edit.window?.width ?? 400; inputs.center.value = edit.window?.center ?? 40;
     inputs.width.disabled = inputs.center.disabled = windowMode.value !== 'manual'; selection.disabled = false;
@@ -65,7 +65,10 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   function outputProperties(cell, edit) {
     return edit?.window ? { ...cell.properties, VOILUTFunction: 'LINEAR', voiRange: { lower: edit.window.center - edit.window.width / 2, upper: edit.window.center + edit.window.width / 2 - 1 } } : cell.properties;
   }
-  const valid = (ticket, signal) => { if (!live() || ticket !== serial || !dialog.open || signal.aborted) throw new Error('출력 확인이 취소되었습니다.'); };
+  function validCurrent(item) {
+    if (item?.snapshot && !item.unchanged()) throw new Error('현재 영상 표시가 바뀌었습니다. 닫은 뒤 현재 비교 화면 출력을 다시 여세요.');
+  }
+  const valid = (ticket, signal) => { if (!live() || ticket !== serial || !dialog.open || signal.aborted) throw new Error('출력 확인이 취소되었습니다.'); validCurrent(current); };
   async function bounded(work) {
     controller?.abort(); const c = controller = new AbortController(), timer = setTimeout(() => c.abort(), 30000);
     try { return await work(c.signal); } finally { clearTimeout(timer); c.abort(); if (controller === c) controller = null; }
@@ -80,8 +83,22 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     return new Uint8Array(await new Blob(chunks).arrayBuffer());
   }
   async function state(item, signal, includeReport) {
+    validCurrent(item);
     await authenticate(signal);
-    const job = await api('/studies/' + item.uid + '/viewer-jobs/' + item.id, { signal }), identities = [];
+    const readJob = async () => {
+      if (!item.snapshot) return api('/studies/' + item.uid + '/viewer-jobs/' + item.id, { signal });
+      const checked = await api('/studies/' + item.uid + '/viewer-jobs/preview', { signal, method: 'POST', body: JSON.stringify({ snapshot: item.snapshot }) });
+      // This transient adapter only feeds the renderer; it has no saved id.
+      const display = structuredClone(checked.snapshot);
+      if (display?.version !== 2 || !Array.isArray(display.cells)) throw new Error('현재 표시 확인 응답이 올바르지 않습니다.');
+      for (const cell of display.cells) if (cell) {
+        if (!/^[a-f0-9]{32}$/.test(cell.sourceDigest)) throw new Error('현재 원본 확인 값이 올바르지 않습니다.');
+        delete cell.sourceDigest;
+      }
+      if (!equal(display, item.snapshot)) throw new Error('현재 표시 확인 응답이 요청과 다릅니다.');
+      return { snapshot: checked.snapshot, transient: true, title: '현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
+    };
+    const job = await readJob(), identities = [];
     let report = null;
     for (const uid of job.snapshot.studies) {
       const data = await api('/studies/' + uid + '/report-preview', { signal });
@@ -95,7 +112,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
         !['findings', 'conclusion', 'recommendation', 'rs'].every(k => typeof report[k] === 'string')))
       throw new Error('출력 판독문 정보를 확인할 수 없습니다.');
     await authenticate(signal);
-    const latest = await api('/studies/' + item.uid + '/viewer-jobs/' + item.id, { signal });
+    const latest = await readJob(); validCurrent(item);
     if (!equal(latest, job)) throw new Error('작업이 변경되었습니다. 다시 확인하세요.');
     return { job, identities, report, reportUid: includeReport ? item.uid : null };
   }
@@ -279,9 +296,10 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   }
   function html(data, images, outputEdits) {
     const { job, identities } = data, main = el('main'), legends = [];
-    el('h1', 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
-    el('p', `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
-    el('p', '저장 상태에 아래 출력 조절값 적용 · ' + annotationMode(job) + ' · 실제 크기 아님', main);
+    const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
+    el('h1', job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
+    el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
+    el('p', basis + '에 아래 출력 조절값 적용 · ' + annotationMode(job) + ' · 실제 크기 아님', main);
     const reportLabel = data.report ? (!data.report.version ? '저장된 판독문 없음' :
       `${data.report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${data.report.version} · RS ${data.report.rs}`) : '';
     const summary = identities.map(s => `환자 ${s.name} (${s.id}) · 검사 ${s.date} · Acc ${s.acc || '-'}`).join('\n') +
@@ -304,10 +322,10 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     job.snapshot.cells.forEach((cell, index) => {
       const figure = el('section', undefined, grid); figure.className = 'cell'; el('strong', '셀 ' + (index + 1), figure);
       if (!cell) { el('p', '빈 셀', figure); return; }
-      const identity = identities.find(s => s.uid === cell.study), img = el('img', undefined, figure); img.src = images[index]; img.alt = '저장한 셀 ' + (index + 1);
+      const identity = identities.find(s => s.uid === cell.study), img = el('img', undefined, figure); img.src = images[index]; img.alt = '출력 셀 ' + (index + 1);
       el('p', `${identity.name} (${identity.id}) · ${identity.date} · ${identity.desc || identity.modality}`, figure);
       const edit = outputEdits[index] || defaultEdit(), properties = outputProperties(cell, edit);
-      el('p', `출력 조절: 저장 화면의 ${edit.zoom}% · 가로 ${edit.x}% · 세로 ${edit.y}% · ${edit.window ? 'W ' + edit.window.width + ' / L ' + edit.window.center : '저장 밝기'}`, figure).className = 'output-adjustment';
+      el('p', `출력 조절: ${basis}의 ${edit.zoom}% · 가로 ${edit.x}% · 세로 ${edit.y}% · ${edit.window ? 'W ' + edit.window.width + ' / L ' + edit.window.center : job.transient ? '처음 선택한 밝기' : '저장 밝기'}`, figure).className = 'output-adjustment';
       el('p', `프레임 ${cell.frame} · ${cell.viewport.width} × ${cell.viewport.height} · VOI ${properties.voiRange.lower} ~ ${properties.voiRange.upper} (${properties.VOILUTFunction})`, figure);
       el('p', `Study ${cell.study}\nSeries ${cell.series}\nSOP ${cell.sop}`, figure).className = 'reference';
       if (job.snapshot.version === 3) {
@@ -344,7 +362,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       verifyAnnotationSet(data.job);
       if (controlJob && !equal(controlJob.snapshot, snapshot)) edits = [];
       controlJob = data.job; const outputEdits = snapshot.cells.map((_, index) => structuredClone(edits[index] || defaultEdit()));
-      caption.textContent = '저장 상태를 기준으로 출력만 조절합니다 · ' + annotationMode(data.job) + ' · 실제 크기 아님.';
+      caption.textContent = (item.snapshot ? '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님 · Job 저장 안 함' : '저장 상태를 기준으로 출력만 조절합니다') + ' · ' + annotationMode(data.job) + ' · 실제 크기 아님.';
       let total = 0;
       for (const cell of snapshot.cells) if (cell) { const { width, height } = cell.viewport || {}; total += width * height;
         if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 8192) || width * height > 16777216 || total > 33554432) throw new Error('저장 화면 크기가 출력 한도를 초과했습니다.'); }
@@ -378,6 +396,13 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   for (const input of Object.values(inputs)) input.oninput = pendingControls;
   windowMode.onchange = () => { inputs.width.disabled = inputs.center.disabled = windowMode.value !== 'manual'; pendingControls(); };
   dialog.addEventListener('cancel', e => { e.preventDefault(); close(); });
-  return { open(uid, id) { close(); reportSource.value = 'none'; current = { uid, id }; dialog.showModal(); void prepare(); }, close,
+  function open(item) {
+    close(); reportSource.value = 'none'; current = item;
+    heading.textContent = item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
+    windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
+    dialog.showModal(); void prepare();
+  }
+  return { open(uid, id) { open({ uid, id }); }, openCurrent(uid, snapshot, unchanged) { open({ uid, snapshot: structuredClone(snapshot), unchanged }); }, close,
     destroy() { close(); dialog.remove(); core.metaData.removeProvider(provider); } };
 };

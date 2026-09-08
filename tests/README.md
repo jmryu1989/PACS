@@ -2,6 +2,8 @@
 
 ## 현재 실행 시점
 
+`python tests/e2e/test_live_print.py`는 TEST-D09-LIVE-PRINT의 저장 없는 현재 CT 비교 출력을 검사한다. 읽기 전용 preview의 엄격한 입력·기관/P·같은 환자·no-store·무저장, native 두 검사 화소와 실제 PDF2페이지, 현재 표시/digest 응답 변경·늦은 닫기, 빈 셀·미저장 주석·출력 조절 복귀·세션 종료를 확인한다. 원본 변경의 새 기능 시험은 digest 응답 주입이며 실제 DICOM 교체는 기존 저장 출력 회귀에서 구분한다. 주석 미포함·현재 설정으로 원본 재조회이며 전체 화면 캡처/다른 modality/물리 출력의 완료 증거가 아니다.
+
 `python tests/e2e/test_key_preview_controls.py`는 TEST-D09-KEY-PREVIEW의 출력 키 이미지 전체/선택 확대·이동·복귀, 독립 역좌표 RGB 비교, CT W/L·편집문·두 열 PDF, 선택/재선택·입력 오류·초기화·실패/지연과 조절 후 원본 digest 변경 응답의 인쇄 차단을 검사한다. 최근접 화소의 고정 출력 범위이며 주석/현재 화면 직접 캡처·전체 modality/서식/물리 크기 검증은 아니다.
 
 `python tests/e2e/test_preview_controls.py`는 TEST-D09-PREVIEW-CONTROLS의 저장 비교 출력 전체/선택 셀 확대·이동·W/L·초기화, native 화소/주석 좌표·PDF, 잘못된 입력·실패/지연·현재 화면과 저장 이력 보존을 검사한다.

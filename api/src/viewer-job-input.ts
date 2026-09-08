@@ -24,6 +24,17 @@ export function jobCommand(raw: Buffer, create: boolean): any {
   }
   viewerUuid(b.id);
   const s = b.snapshot;
+  validateJobSnapshot(s);
+  return b;
+}
+export function previewCommand(raw: Buffer): any {
+  const b = viewerJson(raw);
+  keys(b, ['snapshot']);
+  validateJobSnapshot(b.snapshot);
+  if (b.snapshot.version !== 2) invalid();
+  return b.snapshot;
+}
+function validateJobSnapshot(s: any) {
   keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells']);
   if (![1, 2, 3].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
@@ -58,7 +69,6 @@ export function jobCommand(raw: Buffer, create: boolean): any {
     if (c.properties.voiRange.upper <= c.properties.voiRange.lower || !['LINEAR', 'LINEAR_EXACT', 'SIGMOID'].includes(c.properties.VOILUTFunction) || typeof c.properties.invert !== 'boolean') invalid();
   }
   if (Buffer.byteLength(canonical(s)) > 16000) invalid();
-  return b;
 }
 export function verifyJobCell(c: any, tags: any) {
   verifyViewerReference(c.study, { schemaVersion: 1, kind: 'key', seriesUid: c.series, sopUid: c.sop, frame: c.frame }, tags);

@@ -34,6 +34,8 @@ window.kinViewerJobs = function (services, model) {
       if (!live() || openingPrint) return;
       openingPrint = true;
       try {
+        const snapshot = row ? null : capture(true);
+        const unchanged = () => live() && JSON.stringify(capture(true)) === JSON.stringify(snapshot);
         if (typeof window.kinViewerJobPrint !== 'function') {
           // A print-only asset failure must leave saving/restoring available.
           if (!printLoading) printLoading = new Promise((resolve, reject) => {
@@ -49,7 +51,8 @@ window.kinViewerJobs = function (services, model) {
         }
         if (!live()) return;
         printer ||= window.kinViewerJobPrint({ api, authenticate, live });
-        printer.open(studies[0], row.id);
+        if (row) printer.open(studies[0], row.id);
+        else { if (!unchanged()) throw new Error('현재 영상이 바뀌었습니다. 다시 출력하세요.'); printer.openCurrent(studies[0], snapshot, unchanged); }
       } catch (e) { if (live()) status.textContent = e.message; }
       finally { printLoading = null; openingPrint = false; }
     }
@@ -215,6 +218,7 @@ window.kinViewerJobs = function (services, model) {
     }
     button(controls, '새 비교 작업 저장', () => run('save'), true); button(controls, '변경 저장', () => run('edit'), true);
     button(controls, '주석 함께 새 비교 작업 저장', () => run('saveAnnotations'), true);
+    button(controls, '현재 비교 화면 출력 · 저장 안 함', () => openPrint(null));
     button(controls, '같은 요청 재시도', () => run('retry'), true); button(controls, '작업 목록 새로고침', () => run('list'));
     mine.onchange = hidden.onchange = () => run('list');
     title.oninput = description.oninput = () => { editSerial++; };

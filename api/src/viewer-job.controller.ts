@@ -8,6 +8,9 @@ const caller = (r: any): Caller => {
 @Controller()
 export class ViewerJobController {
   constructor(private svc: ViewerJobService) {}
+  @Post('studies/:uid/viewer-jobs/preview')
+  @HttpCode(200)
+  preview(@Param('uid') uid: string, @Req() r: any) { return this.svc.preview(uid, r.rawBody, caller(r)); }
   @Get('studies/:uid/viewer-jobs')
   list(@Param('uid') uid: string, @Query() q: any, @Req() r: any) { return this.svc.list(uid, q, caller(r)); }
   @Post('studies/:uid/viewer-jobs')

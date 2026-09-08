@@ -4,7 +4,7 @@ import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
 import { canonical, viewerUid, viewerUuid, verifyViewerReference, isManualMeasurement } from './viewer-input';
-import { jobCommand, jobFingerprint, verifyJobCell } from './viewer-job-input';
+import { jobCommand, jobFingerprint, verifyJobCell, previewCommand } from './viewer-job-input';
 const deny = (): never => { throw new ForbiddenException('비교 작업에 접근할 수 없습니다'); };
 const conflict = (): never => { throw new ConflictException('비교 작업이 변경되었습니다. 목록을 새로 확인하세요'); };
 const annotationKinds = ['arrow', 'length', 'angle', 'ellipse'];
@@ -129,6 +129,16 @@ export class ViewerJobService {
     // still be current after those calls before returning a restorable snapshot.
     const latest = await this.head(uid, id, c); if (latest.hidden || latest.revision !== j.revision) conflict();
     return { ...summary(latest), snapshot: latest.snapshot, ...(annotations ? { annotations } : {}) };
+  }
+  async preview(uid: string, raw: Buffer, c: Caller) {
+    this.member(c); viewerUid(uid);
+    const input = previewCommand(raw);
+    if (input.studies[0] !== uid) throw new BadRequestException('판독 대상 검사가 일치하지 않습니다');
+    this.sameInstitution(await this.parents(this.prisma, input.studies, c));
+    const snapshot = await this.sources(input);
+    // Recheck access after remote reads; no Job, annotation or audit write.
+    this.sameInstitution(await this.parents(this.prisma, input.studies, c));
+    return { snapshot };
   }
   async create(uid: string, raw: Buffer, c: Caller) {
     this.member(c, true); viewerUid(uid);
