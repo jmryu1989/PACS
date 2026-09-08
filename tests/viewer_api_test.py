@@ -37,6 +37,21 @@ class ViewerAPI(unittest.TestCase):
         cls.stack.require_stack()
         cls.stack.create_test_identity('adminonly', ['admin'], 'hallym')
         cls.stack.token('adminonly')
+        # Adjacent suites create different users through Keycloak, outside the
+        # product's 60s colleague cache invalidation. Observe this run's actual
+        # reviewers before testing P transitions; never retry a failed test as
+        # a substitute for proving that fixture precondition.
+        started = time.monotonic()
+        required = {cls.stack.actor(user) for user in ['jmryu', 'doctor2']}
+        while True:
+            peers = cls.stack.request('GET', '/colleagues', 'doctor')
+            if peers.status != 200:
+                raise RuntimeError(f'Colleague fixture readiness failed: HTTP {peers.status}')
+            if required.issubset({peer['id'] for peer in peers.body}): break
+            if time.monotonic()-started >= 70:
+                raise RuntimeError('This run\'s reviewers did not become visible before the readiness deadline')
+            time.sleep(1)
+        print(f'Colleague fixture readiness verified by API after {time.monotonic()-started:.2f}s', flush=True)
 
     def setUp(self):
         self.fixture = self.stack.create_fixture()

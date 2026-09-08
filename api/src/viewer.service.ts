@@ -31,6 +31,42 @@ function result(head: any, revision?: any) {
 export class ViewerService {
   constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
 
+  private async verifyMeasurements(uid: string, heads: any[], c: Caller) {
+    const groups = new Map<string, any[]>();
+    for (const head of heads) {
+      if (!isManualMeasurement(head.item.kind)) continue;
+      head.referenceStatus = 'unverified';
+      if (!groups.has(head.item.sopUid)) groups.set(head.item.sopUid, []);
+      groups.get(head.item.sopUid).push(head);
+    }
+    if (!groups.size) return;
+    // A slow source must not consume the browser's whole request timeout or
+    // hide unrelated keys/arrows. The deadline cancels real fetch/body reads;
+    // unstarted and failed measurements retain their explicit withheld status.
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 3000);
+    const queue = [...groups.entries()]; let next = 0;
+    try {
+      await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (!controller.signal.aborted && next < queue.length) {
+          const [sop, entries] = queue[next++];
+          try {
+            const tags = await this.orthanc.viewerReference(sop, true, controller.signal);
+            if (controller.signal.aborted) break;
+            for (const head of entries) {
+              try {
+                verifyViewerReference(uid, head.item, tags);
+                if (tags._kinSourceDigest === head.item.sourceDigest) head.referenceStatus = 'verified';
+              } catch { /* One invalid reference must not poison another item on this SOP. */ }
+            }
+          } catch { /* Receipt/list survives; these measurements remain unverified. */ }
+        }
+      }));
+    } finally { clearTimeout(timer); controller.abort(); }
+    // Source checks run outside DB locks. Do not release a delayed response
+    // after the study's institution or pending-reading access has changed.
+    visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+  }
+
   private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false): Promise<T> {
     try {
       return await this.prisma.$transaction(async tx => {
@@ -83,21 +119,7 @@ export class ViewerService {
       const items = pageRow.rows.slice(0, page.limit).map(row => result(row));
       return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null };
     }, true);
-    if ('items' in pageResult) {
-      const references = new Map<string, Promise<any>>();
-      // Only manual measurements need the current source digest. A failed
-      // source lookup withholds that measurement, not the whole reading list.
-      for (const head of pageResult.items) {
-        if (!isManualMeasurement(head.item.kind)) continue;
-        head.referenceStatus = 'unverified';
-        try {
-          if (!references.has(head.item.sopUid)) references.set(head.item.sopUid, this.orthanc.viewerReference(head.item.sopUid, true));
-          const tags = await references.get(head.item.sopUid);
-          verifyViewerReference(uid, head.item, tags);
-          if (tags._kinSourceDigest === head.item.sourceDigest) head.referenceStatus = 'verified';
-        } catch { /* The viewer must not present an old number as current. */ }
-      }
-    }
+    if ('items' in pageResult) await this.verifyMeasurements(uid, pageResult.items, c);
     return pageResult;
   }
 
@@ -118,12 +140,14 @@ export class ViewerService {
       if (manual) sourceDigest = tags._kinSourceDigest;
     }
 
-    return this.bounded(async tx => {
+    let replayed = false;
+    const output = await this.bounded(async tx => {
       const studies = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       visible(studies[0], c);
       const replay = await tx.viewerRequest.findUnique({ where: { authorSub_requestId: requestKey }, include: { result: { include: { item: true } } } });
       if (replay) {
         if (replay.fingerprint !== fingerprint || replay.result.item.studyUid !== uid || replay.result.item.authorSub !== c.sub) conflict();
+        replayed = true;
         return result(replay.result.item, replay.result);
       }
       // The request row can only disappear through administrative corruption;
@@ -176,5 +200,9 @@ export class ViewerService {
       await tx.viewerRequest.create({ data: { ...requestKey, fingerprint, itemId: head.id, revision } });
       return { ...result(head), ...(manual ? { referenceStatus: 'verified' } : {}) };
     });
+    // Persisted success and current source identity are separate facts. Never
+    // invent a verified status for a replay just because its write succeeded.
+    if (replayed && manual) await this.verifyMeasurements(uid, [output], c);
+    return output;
   }
 }

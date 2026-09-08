@@ -518,7 +518,7 @@ function kinCreateViewerHistory() {
           }
           if (e) removeAnnotation(e);
           else { e = { id: head.id }; entries.set(e.id, e); }
-          Object.assign(e, { head, draft: itemOnly(head), editing: false, latest: null, message: '' }); row(e);
+          Object.assign(e, { head, draft: itemOnly(head), editing: false, latest: null, message: '' }); restoreHeldDraft(e); row(e);
         }
         status.textContent = heads.length + '개 저장 항목 · 저장은 판독 확정과 별개입니다.';
         panel.dataset.studyUid = scope;
@@ -609,6 +609,13 @@ function kinCreateViewerHistory() {
       const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
       if (a) { a.data.text = e.draft.label; a.data.label = e.draft.label; if (!manual(e.draft.kind)) a.invalidated = true; render(); }
     }
+    function restoreHeldDraft(e) {
+      if (!e.head?.hidden && e.heldDraft && (!manual(e.draft.kind) || e.head.referenceStatus === 'verified')) {
+        e.draft = e.heldDraft; e.heldDraft = null; e.editing = true;
+        e.message = '복원 완료. 보관한 수정은 아직 미저장 상태입니다.';
+        updateAnnotation(e);
+      }
+    }
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
@@ -629,7 +636,7 @@ function kinCreateViewerHistory() {
       if (writable(e)) {
         if (e.pending) button(el, '같은 요청 재시도', () => save(e), !!e.busy);
         else if (e.editing) button(el, '저장', () => save(e, 'edit'), !!e.busy || !!e.latest);
-        else if (!e.head?.hidden) button(el, '편집', () => { e.editing = true; lock(e, false); row(e); });
+        else if (!e.head?.hidden) button(el, '편집', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
         if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? '복원' : '숨김', () => {
           const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
           if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
@@ -679,12 +686,12 @@ function kinCreateViewerHistory() {
         if (!valid(ticket) || !entries.has(e.id)) return;
         entries.delete(e.id); e.id = head.id; entries.set(e.id, e);
         Object.assign(e, { head, draft: itemOnly(head), pending: null, latest: null, editing: false, message: '저장 완료' });
-        if (!head.hidden && e.heldDraft) {
-          e.draft = e.heldDraft; e.heldDraft = null; e.editing = true;
-          e.message = '복원 완료. 보관한 수정은 아직 미저장 상태입니다.';
-          updateAnnotation(e);
-        }
-        if (head.hidden) removeAnnotation(e);
+        restoreHeldDraft(e);
+        if (manual(e.draft.kind) && head.referenceStatus !== 'verified') {
+          e.message = '저장 완료 · 재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다. 새로고침으로 다시 확인하세요.' +
+            (e.heldDraft ? ' 미저장 수정은 보관 중입니다.' : '');
+          removeAnnotation(e);
+        } else if (head.hidden) removeAnnotation(e);
         else lock(e, !e.editing);
       } catch (error) {
         if (error.stale || !valid(ticket)) return;
@@ -724,7 +731,7 @@ function kinCreateViewerHistory() {
         const uid = crypto.randomUUID(), camera = v.getCamera();
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
           metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
-          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind), handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
+          data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind) && !e.editing, handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
         trackMeasurement(a);
         ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !e.editing); render();
       }

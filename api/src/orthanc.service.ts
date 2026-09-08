@@ -27,18 +27,29 @@ export class OrthancService {
   }
 
   /** New persistence validates original tags without holding a database lock or buffering an unbounded response. */
-  private async viewerJson(path: string, body?: string): Promise<any> {
-    let response: Response;
+  private async viewerJson(path: string, body?: string, signal?: AbortSignal): Promise<any> {
+    let response: Response, reader: ReadableStreamDefaultReader<Uint8Array>;
+    // Keep cancellation wired for the entire streamed body, not just until
+    // response headers arrive. The page deadline and per-fetch limit both own
+    // this controller; completion releases their listener/timer explicitly.
+    const controller = new AbortController(), abort = () => {
+      controller.abort();
+      void reader?.cancel().catch(() => {});
+    };
+    const timer = setTimeout(abort, 5000);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     try {
       response = await fetch(this.base + path, {
-        method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
+        method: body === undefined ? 'GET' : 'POST', redirect: 'error', signal: controller.signal,
         headers: { Authorization: this.auth, 'Content-Type': 'text/plain' }, body,
       });
       if (!response.ok || !response.body) {
         await response.body?.cancel().catch(() => {});
         throw new Error('response');
       }
-      const reader = response.body.getReader(), chunks: Uint8Array[] = []; let total = 0;
+      reader = response.body.getReader();
+      const chunks: Uint8Array[] = []; let total = 0;
       try {
         while (true) {
           const { done, value } = await reader.read(); if (done) break;
@@ -46,23 +57,24 @@ export class OrthancService {
           if (total > 262144) throw new Error('limit');
           chunks.push(value);
         }
+        controller.signal.throwIfAborted();
         return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
       } finally { await reader.cancel().catch(() => {}); }
     } catch {
       // Never echo tag values or Basic credentials in an error response.
       throw new ServiceUnavailableException('원본 영상 참조를 확인할 수 없습니다');
-    }
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
   }
 
-  async viewerReference(sopUid: string, measurement = false): Promise<any> {
-    const found = await this.viewerJson('/tools/lookup', sopUid);
+  async viewerReference(sopUid: string, measurement = false, signal?: AbortSignal): Promise<any> {
+    const found = await this.viewerJson('/tools/lookup', sopUid, signal);
     if (!Array.isArray(found)) throw new BadRequestException('영상 참조가 올바르지 않습니다');
     const instances = found.filter(x => x?.Type === 'Instance');
     if (instances.length !== 1 || typeof instances[0].ID !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(instances[0].ID))
       throw new BadRequestException('영상 참조가 없거나 중복입니다');
-    const tags = await this.viewerJson(`/instances/${instances[0].ID}/simplified-tags`);
+    const tags = await this.viewerJson(`/instances/${instances[0].ID}/simplified-tags`, undefined, signal);
     if (!measurement) return tags;
-    const info = await this.viewerJson(`/instances/${instances[0].ID}/attachments/dicom/info`);
+    const info = await this.viewerJson(`/instances/${instances[0].ID}/attachments/dicom/info`, undefined, signal);
     if (typeof info?.UncompressedMD5 !== 'string' || !/^[a-f0-9]{32}$/i.test(info.UncompressedMD5))
       throw new ServiceUnavailableException('측정 원본의 무결성을 확인할 수 없습니다');
     return { ...tags, _kinSourceDigest: info.UncompressedMD5.toLowerCase() };
