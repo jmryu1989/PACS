@@ -18,6 +18,14 @@
 
 ## 기능별 시험 카탈로그
 
+외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
+실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.
+직접 그린 측정과 분리하고 SR hydration을 거절해 로컬 계산·저장 이력에 섞이지 않게 한다.
+같은 tracking UID를 쓰는 다른 문서·같은 시리즈의 최신 문서, 표시 전환·확대·직접 측정 저장,
+원문 0/소수/지수 값, 세션 종료·접근 실패 시 표식 제거와 기존 원본/판독 보존을 확인한다.
+숫자는 DICOMweb/dcmjs가 전달한 값이며 DS 원본 바이트의 문자 표기 보존을 뜻하지 않는다.
+관련 회귀는 sr-reader/manual-measurements/measurement-panel이다. 전체 SR 편집/반출 완료 시험은 아니다.
+
 보관 수정 취소/회복: `python tests/e2e/test_held_measurements.py` (6개).
 실제 수동 길이의 숨김 충돌 뒤 내용 미리보기·확인/취소·로컬 버리기를 검사한다.
 버리기는 서버 item/revision/request/budget 전체 필드를 바꾸지 않으며 다른 미저장 항목을 보호한다.
