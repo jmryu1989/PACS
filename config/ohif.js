@@ -681,13 +681,33 @@ function kinCreateViewerHistory() {
       if (a) { a.data.text = e.draft.label; a.data.label = e.draft.label; if (!manual(e.draft.kind)) a.invalidated = true; render(); }
     }
     function restoreHeldDraft(e) {
-      if (!e.head?.hidden && e.heldDraft && (!manual(e.draft.kind) || e.head.referenceStatus === 'verified')) {
+      if (!e.head?.hidden && e.heldDraft) {
+        if (manual(e.draft.kind) && e.head.referenceStatus !== 'verified') {
+          e.message = '재확인 필요: 원본을 확인하지 못했습니다. 보관한 수정은 유지됩니다.';
+          return;
+        }
         // The hidden head may have replaced the live handles with its older
         // points. Rehydrate the held geometry instead of copying those back.
         removeAnnotation(e);
         e.draft = e.heldDraft; e.heldDraft = null; e.editing = true;
-        e.message = '복원 완료. 보관한 수정은 아직 미저장 상태입니다.';
+        e.message = '복원 완료. 보관한 수정은 아직 미저장 상태입니다.' +
+          (matches(current(), e.draft) ? ' 위치를 확인한 후 저장하세요.' : ' 영상으로 이동해 위치를 확인한 후 저장하세요.');
       }
+    }
+    const heldActionReady = e => valid(generation) && entries.get(e.id) === e && writable(e) && e.heldDraft && !e.busy && !e.pending;
+    function discardHeld(e) {
+      if (!heldActionReady(e)) return;
+      if (!window.confirm('보관한 미저장 수정만 버리시겠습니까? 서버에 저장된 항목과 이력은 유지됩니다.')) return;
+      if (!heldActionReady(e)) return;
+      // A detached button can outlive a restore request. Never discard the
+      // local recovery copy while that request's result is still uncertain.
+      removeAnnotation(e);
+      e.head = e.latest || e.head; e.latest = null;
+      e.heldDraft = null; e.editing = false; e.draft = itemOnly(e.head);
+      e.message = '보관한 미저장 수정을 버렸습니다. 저장 이력은 유지됩니다.';
+      if (manual(e.draft.kind) && e.head.referenceStatus !== 'verified')
+        e.message += ' 재확인 필요: 원본 영상의 동일성을 확인할 수 없습니다.';
+      row(e); hydrate(); render();
     }
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
@@ -705,7 +725,14 @@ function kinCreateViewerHistory() {
       }
       text(el, 'div', '프레임 ' + e.draft.frame);
       if (e.message) text(el, 'p', e.message);
-      if (e.heldDraft) text(el, 'p', '미저장 수정은 보관 중입니다. 원본을 확인한 후 다시 편집할 수 있습니다.');
+      if (e.heldDraft) {
+        text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
+          '숨김을 복원하고 원본을 확인한 후 다시 편집할 수 있습니다.' : '원본을 다시 확인하면 보관한 수정으로 돌아갑니다.'));
+        const held = text(el, 'details', ''); text(held, 'summary', '보관 중인 수정 보기');
+        text(held, 'p', e.heldDraft.label ?? e.heldDraft.title);
+        if (e.heldDraft.description) text(held, 'p', e.heldDraft.description);
+        text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
+      }
       button(el, '영상으로 이동', () => navigate(e));
       if (writable(e)) {
         if (e.pending) button(el, '같은 요청 재시도', () => save(e), !!e.busy);
@@ -717,10 +744,21 @@ function kinCreateViewerHistory() {
         }, !!e.busy);
         if (e.latest && !e.pending) button(el, '최신판 기준으로 내 수정 유지', () => {
           e.head = e.latest; e.latest = null;
-          if (e.head.hidden) { e.heldDraft = clone(e.draft); e.editing = false; e.draft = itemOnly(e.head); e.message = '서버에서 숨겨졌습니다. 미저장 수정은 보관되며 복원 후 다시 편집할 수 있습니다.'; }
+          if (e.head.hidden) {
+            e.heldDraft ??= clone(e.draft);
+            removeAnnotation(e); render();
+            e.editing = false; e.draft = itemOnly(e.head); e.message = '서버에서 숨겨졌습니다.';
+          }
+          else if (e.heldDraft) { e.draft = itemOnly(e.head); restoreHeldDraft(e); }
           else e.message = '최신판을 확인했습니다. 저장을 눌러야 내 수정이 반영됩니다.';
-          row(e);
+          row(e); hydrate(); render();
         });
+        if (e.heldDraft) {
+          if (!e.head.hidden) button(el, '원본 다시 확인', () => {
+            if (heldActionReady(e)) return load();
+          }, !!(e.busy || e.pending));
+          button(el, '보관 수정 버리기', () => discardHeld(e), !!(e.busy || e.pending));
+        }
       }
       if (e.head) button(el, '이력', async () => {
         const ticket = generation; let cursor = null, count = 0;

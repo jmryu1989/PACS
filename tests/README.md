@@ -18,6 +18,14 @@
 
 ## 기능별 시험 카탈로그
 
+보관 수정 취소/회복: `python tests/e2e/test_held_measurements.py` (6개).
+실제 수동 길이의 숨김 충돌 뒤 내용 미리보기·확인/취소·로컬 버리기를 검사한다.
+버리기는 서버 item/revision/request/budget 전체 필드를 바꾸지 않으며 다른 미저장 항목을 보호한다.
+실제 멈춘 HTTP 요청/응답 유실에서 이전 DOM handler도 버리기를 거절하고 동일 UUID 재시도를 유지한다.
+다른 프레임의 원본 재확인 실패/회복·이동·저장, 반복 숨김/복원 충돌의 최초 보관 내용 유지,
+버리기 후 이미 조회한 최신판 채택과 숨김 수용 직후 실제 SVG 표식 제거를 확인한다.
+관련 회귀는 measurement-readback/history/measurement-panel이며 전체 후보 검증과 구분한다.
+
 추적 측정 패널/수치 내보내기: `python tests/e2e/test_measurement_panel.py` (4개).
 실제 OHIF 추적 행과 CSV 다운로드에서 기준 불일치·낡은 기하·지원 밖 보정은
 재확인 필요로 표시하고 수치를 제외하며, 재계산 후 현재 수치를 회복한다.
