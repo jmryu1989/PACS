@@ -7,6 +7,8 @@
     pre,p{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:5px 0}header{border-bottom:2px solid #34495c;padding-bottom:12px}
     .source{font-weight:bold}.keys{break-before:page}.key{break-inside:avoid;margin:16px 0 24px;border-top:1px solid #b4bdc5;padding-top:12px}
     .key img{display:block;max-width:100%;max-height:180mm;width:auto;height:auto;margin:8px auto;background:black}
+    .key-row{display:flex;gap:6mm;break-inside:avoid}.key-row .key{flex:0 0 calc((100% - 6mm)/2);min-width:0}
+    .key-row .key img{max-height:80mm}.key strong{overflow-wrap:anywhere}
     .reference{font-size:10px;color:#526171;overflow-wrap:anywhere}.note{font-size:12px;color:#526171}
     @page{size:A4;margin:12mm 12mm 22mm}
     .identity-example{border:1px solid #b4bdc5;padding:8px;margin-top:12px;font-size:12px}
@@ -26,6 +28,8 @@
     const title = el('strong', '판독문·키 이미지 미리보기', top); title.id = 'report-preview-title';
     const source = el('select', undefined, top); source.setAttribute('aria-label', '출력 판독문');
     for (const [value, label] of [['saved', '서버 저장본'], ['editor', '현재 편집문 · 미확정']]) { const option = el('option', label, source); option.value = value; }
+    const layout = el('select', undefined, top); layout.setAttribute('aria-label', '키 이미지 배치');
+    for (const [value, label] of [['single', '키 이미지 · 한 열'], ['double', '키 이미지 · 두 열']]) { const option = el('option', label, layout); option.value = value; }
     const refresh = el('button', '다시 확인', top), closeButton = el('button', '닫기', top);
     const middle = el('div', undefined, dialog); middle.style.cssText = 'display:flex;gap:12px;height:calc(100% - 130px);min-height:150px;padding:0 12px';
     const sidebar = el('div', undefined, middle); sidebar.style.cssText = 'flex:0 1 260px;min-width:140px;overflow:auto';
@@ -80,8 +84,11 @@
         const keys = el('section', undefined, root); keys.className = 'keys';
         el('h2', `저장한 키 이미지 · ${images.length}장`, keys);
         el('p', '저장한 원본 프레임의 미리보기입니다. 밝기 자동 조정 · 주석 미포함 · 실제 크기 아님.', keys).className = 'note';
-        for (const { key, url } of images) {
-          const figure = el('section', undefined, keys); figure.className = 'key';
+        el('p', layout.value === 'double' ? '두 열 · 왼쪽에서 오른쪽 순서. 실제 페이지 나눔은 인쇄 미리보기에서 확인하세요.' : '한 열 · 선택한 순서', keys).className = 'note';
+        let row = keys;
+        for (const [index, { key, url }] of images.entries()) {
+          if (layout.value === 'double' && index % 2 === 0) { row = el('div', undefined, keys); row.className = 'key-row'; }
+          const figure = el('section', undefined, row); figure.className = 'key';
           el('strong', key.item.title || '(제목 없음)', figure);
           el('p', key.item.description || '', figure);
           const img = el('img', undefined, figure); img.src = url; img.alt = key.item.title || '저장한 키 이미지';
@@ -175,11 +182,11 @@
     }
     async function reload() {
       const s = session; if (!s) return;
-      s.selectionEpoch++; releaseImages(); choices.replaceChildren(); status.textContent = '저장본과 키 이미지를 불러오는 중…'; source.disabled = true;
+      s.selectionEpoch++; releaseImages(); choices.replaceChildren(); status.textContent = '저장본과 키 이미지를 불러오는 중…'; source.disabled = true; layout.disabled = true;
       try {
         s.data = await bounded(signal => snapshot(s, signal)); s.editor = { ...check(s).editor };
         source.querySelector('[value=editor]').disabled = !s.data.canPreviewEditor;
-        if (!s.data.canPreviewEditor) source.value = 'saved'; source.disabled = false;
+        if (!s.data.canPreviewEditor) source.value = 'saved'; source.disabled = false; layout.disabled = false;
         for (const key of s.data.keys) {
           const label = el('label', undefined, choices); label.style.cssText = 'display:block;padding:8px 0;border-bottom:1px solid #465362;overflow-wrap:anywhere';
           const input = el('input', undefined, label); input.type = 'checkbox'; input.value = key.id; input.setAttribute('aria-label', key.item.title || '제목 없는 키 이미지');
@@ -213,17 +220,21 @@
           target.focus(); target.print();
           if (session === s) status.textContent = '인쇄 대화상자에서 인쇄하거나 PDF로 저장하세요. 취소해도 원본은 바뀌지 않습니다.';
         });
-      } catch (error) { if (!target.closed) target.close(); if (session === s) { releaseImages(); status.textContent = error.message; } }
-      finally { if (session === s && rendered) printButton.disabled = !supportsPageIdentity(); }
+      } catch (error) {
+        if (!target.closed) target.close();
+        // A late cancelled print owns only its captured output, not a newer layout.
+        if (session === s && rendered === ready) { releaseImages(); status.textContent = error.message; }
+      }
+      finally { if (session === s && rendered === ready) printButton.disabled = !supportsPageIdentity(); }
     }
-    closeButton.onclick = close; refresh.onclick = reload; source.onchange = prepare; printButton.onclick = print;
+    closeButton.onclick = close; refresh.onclick = reload; source.onchange = prepare; layout.onchange = prepare; printButton.onclick = print;
     dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
     window.addEventListener('beforeunload', close);
     window.addEventListener('storage', event => { if (event.key === 'kin-session-ended') close(); });
     return { close, open() {
       close(); const current = context();
       if (!current.uid || !current.online) { toast('검사를 선택하고 서버 연결을 확인하세요.', 'err'); return; }
-      focusBefore = document.activeElement; source.value = 'saved'; session = { uid: current.uid, epoch, selectionEpoch: 0 };
+      focusBefore = document.activeElement; source.value = 'saved'; layout.value = 'single'; session = { uid: current.uid, epoch, selectionEpoch: 0 };
       dialog.showModal(); void reload();
     } };
   };

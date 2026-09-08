@@ -979,6 +979,19 @@ The selected stack requires an explicit native play click after replacement, sel
 
 The pinned mode already supplies its own preset hotkeys; the unused top-level hotkeys configuration is removed. Only the five named CT preset commands gain a classic-CT selection guard. Other native window/level commands retain their existing behavior. Physical true size, measurements, all-selection changes, specialized modalities and clinical display accuracy remain outside this verification. Related regressions are viewer-layout4, viewer-history6 and cine6, separate from mandatory69→14.
 
+### Report key image output layout
+
+`python tests/e2e/test_report_preview.py` runs nine focused actual-stack scenarios.
+The original seven cover report snapshot permissions, editor/source separation,
+key frames and print, stale/failure/session paths and output identity support.
+TEST-D09-KEY-LAYOUT adds single/two-column selection, three keys with an odd final
+item, order/geometry, actual Chromium PDF text and repeated patient identity,
+reopening defaults, and cancellation of a pending print when layout changes.
+Report/draft/key histories and original DICOM remain unchanged. Render the PDF
+pages for visual inspection; text extraction alone does not establish layout.
+This is a focused local suite, not an added CI job. It does not verify physical
+printing, true size, editable modality templates or annotation/WL snapshots.
+
 ### External SR source reader
 
 `python tests/e2e/test_sr_reader.py` runs four focused tests using actual C-STORE Basic Text and Comprehensive SR alongside CT. It checks original nested text/code/numeric/unit/date/time/coordinate/image references, literal strings, current/related study identity, cancelled and delayed replies, actual BFF tenant denial/logout, explicit HTTP/malformed/oversized/identity/bulk-value failures and retry, keyboard/small-window access and report/draft/hold/original preservation. Response variants for failures and list/body limits are distinct from actual stored SR documents. `node --test tests/sr_tree_test.cjs` runs six pure identity, literal-value and structure-budget cases in CI.

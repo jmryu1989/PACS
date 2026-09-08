@@ -112,7 +112,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
         p.locator('#findings').evaluate("e=>e.value='현재 편집문 <b>그대로</b>'")
         p.locator('#b-print').click();self.ready(p)
-        p.locator('#report-preview select').select_option('editor');paper=self.ready(p)
+        p.get_by_role('combobox',name='출력 판독문',exact=True).select_option('editor');paper=self.ready(p)
         expect(paper.locator('header')).to_contain_text('현재 편집문 · 미확정')
         expect(paper.locator('pre').first).to_have_text('현재 편집문 <b>그대로</b>')
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
@@ -233,6 +233,96 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         p.locator('#report-preview').get_by_role('button',name='다시 확인').click()
         expect(p.locator('#report-preview [role=status]')).to_contain_text('페이지별 식별정보 출력을 지원하지 않습니다')
         expect(p.locator('#report-preview').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
+        self.assertEqual(self.saved_rows(f),before)
+
+
+    def test_08_key_layout_odd_selection_pdf_and_reset(self):
+        f=self.fixture();self.seed_report(f,action='approve');_,keys=self.add_keys(f)
+        extra={name:keys[0]['item'][name] for name in ['schemaVersion','kind','seriesUid','sopUid','frame']}
+        extra.update(title='마지막 홀수 이미지',description='긴 한국어 설명 '+('출력 확인 '*30))
+        added=self.stack.request('POST','/studies/'+f.uid+'/viewer-items','doctor',dict(requestId=str(uuid.uuid4()),item=extra))
+        self.assertEqual(added.status,200,added.text);keys.append(added.body)
+        p=self.login();self.select(p,f);before=self.saved_rows(f);original=self.hashes()
+        p.locator('#b-print').click();self.ready(p)
+        for key in keys:p.locator('#report-preview').get_by_role('checkbox',name=key['item']['title'],exact=True).check()
+        paper=self.ready(p)
+        expect(paper.locator('.key')).to_have_count(3)
+        expect(paper.locator('.key-row')).to_have_count(0)
+        order=paper.locator('.key strong').all_text_contents()
+        layout=p.get_by_role('combobox',name='키 이미지 배치',exact=True)
+        layout.select_option('double');paper=self.ready(p)
+        expect(paper.locator('.key-row')).to_have_count(2)
+        expect(paper.locator('.key-row').first.locator('.key')).to_have_count(2)
+        expect(paper.locator('.key-row').last.locator('.key')).to_have_count(1)
+        self.assertEqual(paper.locator('.key strong').all_text_contents(),order)
+        boxes=paper.locator('.key').evaluate_all('nodes=>nodes.map(n=>{const b=n.getBoundingClientRect();return {x:b.x,y:b.y,right:b.right}})')
+        self.assertAlmostEqual(boxes[0]['y'],boxes[1]['y'],delta=1)
+        self.assertLess(boxes[0]['right'],boxes[1]['x'])
+        self.assertGreater(boxes[2]['y'],boxes[0]['y'])
+        p.evaluate('''()=>{const open=window.open;window.open=(...args)=>{const w=open(...args);if(w)w.print=()=>w.__printed=true;return w;};}''')
+        with p.expect_popup() as opened:p.get_by_role('button',name='인쇄 / PDF',exact=True).click()
+        printed=opened.value;printed.wait_for_function('()=>window.__printed===true')
+        expect(printed.locator('.key')).to_have_count(3)
+        expect(printed.locator('.key-row')).to_have_count(2)
+        expect(printed.locator('.key-row').first.locator('.key')).to_have_count(2)
+        expect(printed.locator('.key-row').last.locator('.key')).to_have_count(1)
+        boxes=printed.locator('.key').evaluate_all('nodes=>nodes.map(n=>{const b=n.getBoundingClientRect();return {x:b.x,y:b.y,right:b.right}})')
+        self.assertAlmostEqual(boxes[0]['y'],boxes[1]['y'],delta=1)
+        self.assertLess(boxes[0]['right'],boxes[1]['x'])
+        self.assertGreater(boxes[2]['y'],boxes[0]['y'])
+        output=Path(__file__).parent/'artifacts/report-key-layout.pdf'
+        printed.pdf(path=str(output),prefer_css_page_size=True)
+        pdf=PdfReader(output)
+        for sheet in pdf.pages:self.assertIn(f.patient_id,sheet.extract_text())
+        text='\n'.join(sheet.extract_text() for sheet in pdf.pages)
+        for title in order:self.assertIn(title,text)
+        normalized=' '.join(text.split())
+        self.assertIn(' '.join(extra['description'].split()),normalized)
+        for key in keys:
+            self.assertIn('프레임 '+str(key['item']['frame'])+' · r'+str(key['revision']),normalized)
+            for prefix,uid in [('Study',f.uid),('Series',key['item']['seriesUid']),('SOP',key['item']['sopUid'])]:
+                self.assertIn(prefix+' '+uid,normalized)
+        self.assertEqual(text.count('마지막 홀수 이미지'),1)
+        printed.close()
+        layout.select_option('single');paper=self.ready(p)
+        expect(paper.locator('.key-row')).to_have_count(0)
+        self.assertEqual(paper.locator('.key strong').all_text_contents(),order)
+        layout.select_option('double');self.ready(p)
+        p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
+        p.locator('#b-print').click();self.ready(p)
+        expect(layout).to_have_value('single')
+        self.assertEqual(self.saved_rows(f),before);self.assertEqual(self.hashes(),original)
+
+
+    def test_09_layout_change_cancels_pending_print(self):
+        f=self.fixture();self.seed_report(f);_,keys=self.add_keys(f)
+        p=self.login();self.select(p,f);before=self.saved_rows(f)
+        p.locator('#b-print').click();self.ready(p)
+        p.locator('#report-preview').get_by_role('checkbox',name=keys[0]['item']['title'],exact=True).check()
+        paper=self.ready(p);expect(paper.locator('.key')).to_have_count(1)
+        # Hold one real response after the fetch, deliberately ignoring abort at
+        # this boundary to prove a late old completion cannot erase new output.
+        p.evaluate('''()=>{window.__printCalls=0;const open=window.open;window.open=(...args)=>{const w=open(...args);if(w)w.print=()=>window.__printCalls++;return w;};
+            const fetch=window.fetch;let hold=true;window.fetch=async(...args)=>{
+                const target=hold&&String(args[0]).includes('/report-preview');if(target)hold=false;
+                const response=await fetch(...args);
+                if(target)return await new Promise(resolve=>window.__releasePrint=()=>resolve(response));
+                return response;
+            };}''')
+        with p.expect_popup() as opened:
+            p.get_by_role('button',name='인쇄 / PDF',exact=True).click()
+        printed=opened.value
+        p.wait_for_function('()=>typeof window.__releasePrint === "function"')
+        p.get_by_role('combobox',name='키 이미지 배치',exact=True).select_option('double')
+        self.ready(p)
+        with printed.expect_event('close'):p.evaluate('()=>window.__releasePrint()')
+        self.assertTrue(printed.is_closed())
+        self.assertEqual(p.evaluate('window.__printCalls'),0)
+        expect(p.get_by_role('button',name='인쇄 / PDF',exact=True)).to_be_enabled()
+        expect(paper.locator('header')).to_contain_text(f.patient_id)
+        expect(paper.locator('.key')).to_have_count(1)
+        self.assertTrue(paper.locator('.key img').evaluate('img=>img.complete&&img.naturalWidth>0'))
+        p.get_by_role('button',name='닫기',exact=True).click()
         self.assertEqual(self.saved_rows(f),before)
 
 
