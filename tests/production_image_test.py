@@ -122,7 +122,8 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
         history = self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";')
         self.assertTrue(history.startswith("0_init|"))
         self.assertEqual(sorted(line.split('|')[0] for line in history.splitlines()),
-                         ['0_init', '20260907040000_viewer_history', '20260908020000_workspace_layout', '20260908081500_connect_gate'])
+                         ['0_init', '20260907040000_viewer_history', '20260908020000_workspace_layout',
+                          '20260908081500_connect_gate', '20260908180000_viewer_jobs'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"
