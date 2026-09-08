@@ -1,5 +1,13 @@
 # 살아 있는 불변조건 테스트
 
+E01-GATE 전송 근거/요청 관문: `python tests/connect_gate_test.py` (별도 API12).
+실제 C-STORE·임시 두 기관 계정으로 admin 근거/계약 기록과 철회, 기사 요청/철회,
+기관 격리·유효기간·원 PatientID·OPEN 접근권 없음·감사 실패 전체 rollback을 확인한다.
+실제 DB lock의 양쪽 순서·중복 OPEN·소유권/RS 재검사·만료 재요청·100행/cursor·FK/CHECK를 검증한다.
+소유 합성 행만 전체 필드와 행위자를 대조해 자식부터 정리한다. 외부 전송/수신함/Import/UI는 이 시험 범위 밖이다.
+복원 모델14는 `tests/ops_product_transfer_test.py`, production 이미지 계약5는 `tests/production_image_test.py`다.
+실제 네 migration/18개 사용자표/19개 합성 행의 DB·DICOM 결합 복원은 해당 Linux CI에서 확인한다.
+
 D02H 시리즈 번호 정렬: `python tests/e2e/test_thumbnail_sort.py` (별도 UI3).
 원래순서/번호오름·내림, 0/음수/동률/누락·불량번호·캐시25항목 페이지·오래된 handler를 대조한다.
 실제 두시리즈 CT 현재/관련검사의 정렬 후 OHIF Study/Series/SOP와 판독·초안·점유·원본 보존을 검증한다.

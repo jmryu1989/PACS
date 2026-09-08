@@ -22,10 +22,12 @@ QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260907040000_viewer_history/migration.sql',
-              'api/prisma/migrations/20260908020000_workspace_layout/migration.sql']
+              'api/prisma/migrations/20260908020000_workspace_layout/migration.sql',
+              'api/prisma/migrations/20260908081500_connect_gate/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
-                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout'])
+                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
+                 'TransferBasis', 'ProcessingAgreement', 'Transfer'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -90,6 +92,17 @@ def expected_rows(uid):
     rows['WorkspaceLayout'] = [dict(institution='SYNTHETIC-'+kind, subject='SYNTHETIC-sub', revision=revision,
         value=value, updatedAt=STAMP) for kind,revision,value in
         [('hospital', 2, json.dumps(layout, separators=(',', ':'))), ('tele', 3, None)]]
+    basis_id, agreement_id, transfer_id = ['00000000-0000-4000-8000-00000000010'+str(n) for n in (1,2,3)]
+    rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
+        reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
+        revokedBy=None,revokedAt=None,revokeReason=None)]
+    rows['ProcessingAgreement'] = [dict(id=agreement_id,fromInstitutionId='SYNTHETIC-hospital',toInstitutionId='SYNTHETIC-tele',
+        kind='CONTRACT',reference='SYNTHETIC agreement reference',validFrom=STAMP,validTo=None,status='active',
+        recordedBy='SYNTHETIC-admin',recordedAt=STAMP,terminatedBy=None,terminatedAt=None,terminationReason=None)]
+    rows['Transfer'] = [dict(id=transfer_id,studyUid=uid,fromInstitutionId='SYNTHETIC-hospital',toInstitutionId='SYNTHETIC-tele',
+        basisId=basis_id,agreementId=agreement_id,status='OPEN',sourcePatientKey='SYNTHETIC-hospital|SYNTHETIC-patient',
+        requestedBy='SYNTHETIC-tech',requestedAt=STAMP,expiresAt='2026-10-06T00:00:00.123',decidedBy=None,decidedAt=None,
+        decisionReason=None,localPatientId=None,importRequestedAt=None,importRequestedBy=None,importedAt=None)]
     return rows
 
 
@@ -123,7 +136,8 @@ def create_product(name, db, uid):
         execute(name, db, raw.decode())
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft',
-                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout'):
+                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
+                  'TransferBasis', 'ProcessingAgreement', 'Transfer'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -271,6 +285,15 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing workspace revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "WorkspaceLayout" SET value=repeat('x',2049);
         RAISE EXCEPTION 'missing workspace byte constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "Transfer" SET status='UNKNOWN';
+        RAISE EXCEPTION 'missing transfer status check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "Transfer" SELECT * FROM json_populate_record(NULL::"Transfer",
+        (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000199'))::json FROM "Transfer" t LIMIT 1));
+        RAISE EXCEPTION 'missing active transfer unique'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "Transfer" SET "basisId"='00000000-0000-4000-8000-000000000199';
+        RAISE EXCEPTION 'missing transfer basis FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN UPDATE "TransferBasis" SET "revokedAt"=now(),"revokedBy"='SYNTHETIC';
+        RAISE EXCEPTION 'missing revocation reason check'; EXCEPTION WHEN check_violation THEN NULL; END;
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)

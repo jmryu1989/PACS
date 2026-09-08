@@ -44,6 +44,11 @@ model Institution {
   type       String   @default("hospital")    // hospital | reading-center
   dicomNames String   @default("")            // InstitutionName 별칭, 콤마 구분
   createdAt  DateTime @default(now())
+  transferBases TransferBasis[]
+  agreementsFrom ProcessingAgreement[] @relation("AgreementFrom")
+  agreementsTo ProcessingAgreement[] @relation("AgreementTo")
+  transfersFrom Transfer[] @relation("TransferFrom")
+  transfersTo Transfer[] @relation("TransferTo")
 }
 
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
@@ -90,9 +95,81 @@ model StudyState {
   report Report?
   viewerItems ViewerItem[]
   viewerBudget ViewerStorageBudget?
+  transferBases TransferBasis[]
+  transfers Transfer[]
 
   @@index([institutionId])
   @@index([teleInstitutionId])
+}
+
+/// Evidence records precede any new institution-to-institution access grant.
+model TransferBasis {
+  id String @id @db.Uuid
+  studyUid String
+  institutionId String
+  kind String
+  reference String @db.VarChar(1000)
+  obtainedAt DateTime
+  expiresAt DateTime?
+  recordedBy String
+  recordedAt DateTime @default(now())
+  revokedBy String?
+  revokedAt DateTime?
+  revokeReason String? @db.VarChar(1000)
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict)
+  institution Institution @relation(fields: [institutionId], references: [id], onDelete: Restrict)
+  transfers Transfer[]
+  @@index([studyUid, id])
+}
+
+model ProcessingAgreement {
+  id String @id @db.Uuid
+  fromInstitutionId String
+  toInstitutionId String
+  kind String
+  reference String @db.VarChar(1000)
+  validFrom DateTime
+  validTo DateTime?
+  status String @default("active")
+  recordedBy String
+  recordedAt DateTime @default(now())
+  terminatedBy String?
+  terminatedAt DateTime?
+  terminationReason String? @db.VarChar(1000)
+  from Institution @relation("AgreementFrom", fields: [fromInstitutionId], references: [id], onDelete: Restrict)
+  to Institution @relation("AgreementTo", fields: [toInstitutionId], references: [id], onDelete: Restrict)
+  transfers Transfer[]
+  @@index([fromInstitutionId, toInstitutionId, status])
+}
+
+/// OPEN is a request only; this release does not create ACCEPTED access grants.
+model Transfer {
+  id String @id @db.Uuid
+  studyUid String
+  fromInstitutionId String
+  toInstitutionId String
+  basisId String @db.Uuid
+  agreementId String @db.Uuid
+  status String
+  sourcePatientKey String
+  requestedBy String
+  requestedAt DateTime @default(now())
+  expiresAt DateTime
+  decidedBy String?
+  decidedAt DateTime?
+  decisionReason String? @db.VarChar(1000)
+  localPatientId String?
+  importRequestedAt DateTime?
+  importRequestedBy String?
+  importedAt DateTime?
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict)
+  basis TransferBasis @relation(fields: [basisId], references: [id], onDelete: Restrict)
+  agreement ProcessingAgreement @relation(fields: [agreementId], references: [id], onDelete: Restrict)
+  from Institution @relation("TransferFrom", fields: [fromInstitutionId], references: [id], onDelete: Restrict)
+  to Institution @relation("TransferTo", fields: [toInstitutionId], references: [id], onDelete: Restrict)
+  @@index([studyUid])
+  @@index([fromInstitutionId, id])
+  @@index([toInstitutionId, status])
 }
 
 /// 판독문의 **현재 내용**. 화면이 빠르게 읽어가는 스냅샷.

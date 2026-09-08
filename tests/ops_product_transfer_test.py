@@ -88,7 +88,12 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 16)
+        self.assertEqual(sum(len(value) for value in rows.values()), 19)
+        basis,agreement,request=[rows[name][0] for name in ('TransferBasis','ProcessingAgreement','Transfer')]
+        self.assertEqual(request['basisId'],basis['id']);self.assertEqual(request['agreementId'],agreement['id'])
+        self.assertEqual(request['studyUid'],UID);self.assertEqual(request['status'],'OPEN')
+        self.assertEqual(request['fromInstitutionId'],basis['institutionId'])
+        self.assertEqual(request['toInstitutionId'],agreement['toInstitutionId'])
         workspaces=rows['WorkspaceLayout']
         self.assertEqual(len(workspaces),2)
         self.assertEqual(workspaces[0]['subject'],workspaces[1]['subject'])

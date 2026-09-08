@@ -20,9 +20,11 @@ async function bootstrap() {
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
   // Register before Nest's body parser: malformed JSON can fail before controller
-  // middleware, and even those display-data error responses must not be cached.
+  // middleware, and even display/evidence error responses must not be cached.
   app.use((req: any, res: any, next: () => void) => {
-    if (/^\/api\/studies\/[^/]+\/viewer-items(?:\/[^/]+\/revisions)?\/?$/.test(String(req.originalUrl ?? '').split('?')[0]))
+    const path = String(req.originalUrl ?? '').split('?')[0];
+    if (/^\/api\/studies\/[^/]+\/viewer-items(?:\/[^/]+\/revisions)?\/?$/.test(path) ||
+        /^\/api\/(?:admin\/agreements(?:\/[^/]+)?|studies\/[^/]+\/(?:basis(?:\/[^/]+\/revoke)?|transfers)|transfers(?:\/[^/]+\/revoke)?)\/?$/.test(path))
       res.setHeader('Cache-Control', 'no-store');
     next();
   });

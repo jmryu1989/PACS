@@ -63,6 +63,19 @@ export class OrthancService {
     return this.viewerJson(`/instances/${instances[0].ID}/simplified-tags`);
   }
 
+  async connectStudyIdentity(studyUid: string): Promise<{ patientId: string }> {
+    const found = await this.viewerJson('/tools/lookup', studyUid);
+    if (!Array.isArray(found)) throw new BadRequestException('원본 검사 식별을 확인할 수 없습니다');
+    const studies = found.filter(x => x?.Type === 'Study');
+    if (studies.length !== 1 || typeof studies[0].ID !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(studies[0].ID))
+      throw new BadRequestException('원본 검사가 없거나 중복입니다');
+    const study = await this.viewerJson(`/studies/${studies[0].ID}`);
+    const patientId = study?.PatientMainDicomTags?.PatientID;
+    if (study?.MainDicomTags?.StudyInstanceUID !== studyUid || typeof patientId !== 'string' || !patientId.trim() || patientId.length > 64)
+      throw new BadRequestException('원본 환자 식별을 확인할 수 없습니다');
+    return { patientId };
+  }
+
   private async get(path: string) {
     let res: Response;
     try {
