@@ -13,7 +13,7 @@ window.kinViewerJobs = function (services, model) {
     const panel = document.createElement('details'); panel.id = 'kin-viewer-jobs'; panel.open = true;
     const text = (tag, value, host = panel) => { const e = document.createElement(tag); e.textContent = value; host.append(e); return e; };
     text('summary', '저장한 비교 작업 · 서버');
-    text('p', '영상 위치·표시·배치를 저장합니다. 표식은 별도 저장한 최신 이력을 읽습니다.');
+    text('p', '영상 위치·표시·배치를 저장합니다. 표식은 별도 저장한 최신 이력을 읽습니다. 저장 영상 출력은 주석 미포함·실제 크기 아님입니다.');
     const field = (label, tag, max) => { const l = text('label', label), e = document.createElement(tag); e.maxLength = max; e.setAttribute('aria-label', label); e.style.cssText = 'display:block;width:100%;color:#111;background:#fff'; l.append(e); return e; };
     const title = field('작업 제목', 'input', 120), description = field('작업 설명', 'textarea', 2000);
     const filters = text('div', ''), mine = text('select', '', filters); mine.setAttribute('aria-label', '작업 작성자 필터'); mine.style.cssText = 'color:#111;background:#fff';
@@ -27,14 +27,17 @@ window.kinViewerJobs = function (services, model) {
     const path = '/studies/' + studies[0] + '/viewer-jobs';
     const ordered = () => [...grid.getState().viewports.values()].sort((a, b) => a.y-b.y || a.x-b.x);
     const writable = () => me?.roles?.includes('radiologist');
+    const printer = window.kinViewerJobPrint({ api, authenticate, live });
     function refresh() { for (const b of buttons) { if (!b.isConnected) { buttons.delete(b); continue; } b.disabled = !live() || busy || !me || b.dataset.write === 'true' && !writable(); } }
     function button(host, label, action, write = false) {
       const b = text('button', label, host); b.type = 'button'; b.dataset.write = String(write); b.style.cssText = 'margin:3px;padding:4px;border:1px solid #657c9f;border-radius:4px';
       b.onclick = action; buttons.add(b); return b;
     }
-    function end() { ended = true; serial++; abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    function end() { ended = true; serial++; printer.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     async function api(url, options = {}) {
       const controller = new AbortController(), cancel = () => controller.abort(); abort.signal.addEventListener('abort', cancel, { once: true });
+      options.signal?.addEventListener('abort', cancel, { once: true });
+      if (options.signal?.aborted || abort.signal.aborted) cancel();
       const timer = setTimeout(cancel, 30000);
       try {
         const r = await fetch('/api' + url, { ...options, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
@@ -45,10 +48,10 @@ window.kinViewerJobs = function (services, model) {
         if (!live()) throw new Error('화면이 변경되었습니다.');
         if (!r.ok || !value) { const e = new Error(typeof value?.message === 'string' ? value.message : '서버 연결을 확인한 뒤 다시 시도하세요.'); e.status = r.status; throw e; }
         return value;
-      } finally { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); }
+      } finally { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); options.signal?.removeEventListener('abort', cancel); }
     }
-    async function authenticate() {
-      const next = await api('/me');
+    async function authenticate(signal) {
+      const next = await api('/me', { signal });
       if (next.kind !== 'member' || !next.sub || !next.institution || me && (next.sub !== me.sub || next.institution !== me.institution)) { end(); throw new Error('계정이 변경되었습니다.'); }
       me = next; lastAuth = Date.now();
     }
@@ -67,16 +70,17 @@ window.kinViewerJobs = function (services, model) {
         const sets = g.displaySetInstanceUIDs || []; if (!sets.length) return null;
         const v = cs.getCornerstoneViewport(g.viewportId), id = v?.getCurrentImageId?.(), image = id && window.cornerstone.metaData.get('instance', id);
         if (sets.length !== 1 || v?.type !== 'stack' || !v.getDefaultActor?.()?.actor || !image || !studies.includes(image.StudyInstanceUID)) throw new Error('원본 영상 로딩을 마친 뒤 저장하세요.');
-        const camera = v.getCamera(), properties = v.getProperties();
+        const camera = v.getCamera(), properties = v.getProperties(), canvas = v.getCanvas();
         if (properties.colormap?.name && properties.colormap.name !== 'Grayscale') throw new Error('현재는 회색조 표시 상태를 저장합니다.');
         const cell = { study: image.StudyInstanceUID, series: image.SeriesInstanceUID, sop: image.SOPInstanceUID, frame: 1,
+          viewport: { width: canvas.width, height: canvas.height },
           camera: Object.fromEntries(['focalPoint', 'position', 'viewUp', 'viewPlaneNormal', 'parallelScale', 'rotation', 'flipHorizontal', 'flipVertical'].map(k => [k, camera[k]])),
-          properties: { voiRange: properties.voiRange, VOILUTFunction: properties.VOILUTFunction || 'LINEAR', invert: !!properties.invert } };
+          properties: { voiRange: properties.voiRange, VOILUTFunction: properties.VOILUTFunction || 'LINEAR', invert: !!properties.invert, interpolationType: properties.interpolationType ?? 1 } };
         if (resolve(cell) !== sets[0]) throw new Error('선택한 영상과 시리즈가 일치하지 않습니다.');
         return cell;
       });
       if (cells.every(c => !c)) throw new Error('저장할 영상이 없습니다.');
-      return JSON.parse(JSON.stringify({ version: 1, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells }));
+      return JSON.parse(JSON.stringify({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells }));
     }
     const signature = () => { try { return JSON.stringify(capture()); } catch (_) { return JSON.stringify(ordered().map(g => [g.viewportId, g.displaySetInstanceUIDs])); } };
     function show(rows) {
@@ -87,6 +91,7 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · 숨김' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, '이 작업 복원', () => run('restore', row));
+        if (!row.hidden) button(item, '저장 영상 출력', () => printer.open(studies[0], row.id));
         if (row.authorSub === me?.sub) {
           button(item, '제목·설명 수정', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
           button(item, row.hidden ? '숨김 해제' : '작업 숨김', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
@@ -205,7 +210,7 @@ window.kinViewerJobs = function (services, model) {
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { end(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { end(); printer.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };

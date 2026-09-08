@@ -111,6 +111,13 @@ replay digest 불일치/원본 장애, 조회 중 P/기관 권한 변경 거절�
 전송 결함은 시험 프로세스에만 주입하며 기존 원본·DB 행은 바꾸지 않는다.
 추적 측정 패널/CSV/SR 내보내기의 수치 관문은 위 `test_measurement_panel.py`에서 별도로 검사한다.
 
+저장한 비교 영상 출력: `python tests/e2e/test_viewer_job_print.py`.
+Job v2에 각 canvas의 화소 크기를 보존하고 현재 작업공간을 움직이지 않는 별도 native viewport에서
+새로 읽은 원본으로 저장 W/L·camera를 재현한다. 실제 전체 화소/PDF 영상 일치, 다른 화면 크기와
+배율·signed/rescale/비정방 화소·VOI, 빈 셀·미저장 입력·v1 호환/상한·원본 교체·권한/숨김/세션·실패 복구를 검사한다.
+출력은 주석 미포함·실제 크기 아님이며 과거 주석 revision 동결을 대신하지 않는다.
+시험 소유 합성 원본만 바이트 대조 후 교체/복원하고 기존 Job 정리 경로를 사용한다.
+
 비교 작업 저장/재열람: `python tests/e2e/test_viewer_jobs.py` (6개 업무/경계 시험).
 일반 CT 현재/과거 검사·원 SOP·1/2/4셀·W/L·camera·활성 셀을 서버에 저장하고
 새 브라우저에서 실제 canvas hash·좌표·프레임 표시·다음 스크롤을 대조한다.

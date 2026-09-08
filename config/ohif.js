@@ -1860,11 +1860,13 @@ function kinCreateCTPresets() {
 function kinCreateViewerJobs() {
   let ready, current, epoch = 0;
   return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
-    ready = new Promise((resolve, reject) => {
-      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-jobs.js';
-      script.onload = () => resolve(window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel));
+    const load = name => new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = resolve;
       script.onerror = () => reject(new Error('비교 작업 화면을 불러오지 못했습니다.')); document.head.append(script);
     });
+    ready = Promise.all(['viewer-job-print.js', 'viewer-jobs.js'].map(load))
+      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel));
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch;

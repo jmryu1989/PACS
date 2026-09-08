@@ -1,0 +1,170 @@
+/* Render immutable saved CT views without moving the reading workspace. */
+window.kinViewerJobPrint = function ({ api, authenticate, live }) {
+  const core = window.cornerstone;
+  const entries = new Map();
+  const scheme = 'kinjobprint';
+  // Only run-owned, freshly fetched pixels enter this loader. Never evict or
+  // replace the diagnostic viewport's shared image cache to force a reload.
+  core.imageLoader.registerImageLoader(scheme, id => ({ promise: Promise.resolve(entries.get(id)?.image) }));
+  const provider = (type, id) => entries.get(id)?.metadata[type];
+  core.metaData.addProvider(provider, 10000);
+  const el = (tag, value, host) => { const e = document.createElement(tag); if (value !== undefined) e.textContent = value; host?.append(e); return e; };
+  const dialog = el('dialog'); dialog.id = 'kin-job-print';
+  dialog.style.cssText = 'width:min(1100px,94vw);height:90vh;padding:16px;background:#18212b;color:white';
+  el('h2', '저장한 비교 영상 출력', dialog);
+  el('p', '저장 당시 영상 범위와 밝기입니다. 주석 미포함 · 실제 크기 아님.', dialog);
+  const status = el('p', '', dialog); status.setAttribute('role', 'status');
+  const refresh = el('button', '다시 확인', dialog), printButton = el('button', '인쇄 / PDF', dialog), closeButton = el('button', '닫기', dialog);
+  const paper = el('iframe', undefined, dialog); paper.title = '저장 비교 영상 출력 미리보기'; paper.setAttribute('sandbox', 'allow-same-origin');
+  paper.style.cssText = 'display:block;width:100%;height:72%;margin-top:12px;border:0;background:white';
+  document.body.append(dialog);
+  let serial = 0, controller, current, ready, outputWindow, urls = [];
+  function clear() { controller?.abort(); controller = null; ready = null; printButton.disabled = true; paper.srcdoc = ''; urls.forEach(URL.revokeObjectURL); urls = []; if (outputWindow && !outputWindow.closed) outputWindow.close(); outputWindow = null; }
+  function close() { serial++; clear(); current = null; if (outputWindow && !outputWindow.closed) outputWindow.close(); outputWindow = null; dialog.close(); }
+  const valid = (ticket, signal) => { if (!live() || ticket !== serial || !dialog.open || signal.aborted) throw new Error('출력 확인이 취소되었습니다.'); };
+  async function bounded(work) {
+    controller?.abort(); const c = controller = new AbortController(), timer = setTimeout(() => c.abort(), 30000);
+    try { return await work(c.signal); } finally { clearTimeout(timer); c.abort(); if (controller === c) controller = null; }
+  }
+  async function bytes(url, signal, max, budget, accept = 'application/json') {
+    const response = await fetch(url, { signal, cache: 'no-store', credentials: 'same-origin', headers: { Accept: accept } });
+    if (!response.ok || !response.body) throw new Error('출력 원본을 읽지 못했습니다. 다시 확인하세요.');
+    const reader = response.body.getReader(), chunks = []; let size = 0;
+    try { while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length; budget.bytes += part.value.length;
+      if (size > max || budget.bytes > 67108864) throw new Error('출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
+    } finally { await reader.cancel().catch(() => {}); }
+    return new Uint8Array(await new Blob(chunks).arrayBuffer());
+  }
+  async function state(item, signal) {
+    await authenticate(signal);
+    const job = await api('/studies/' + item.uid + '/viewer-jobs/' + item.id, { signal }), identities = [];
+    for (const uid of job.snapshot.studies) identities.push((await api('/studies/' + uid + '/report-preview', { signal })).study);
+    await authenticate(signal);
+    const latest = await api('/studies/' + item.uid + '/viewer-jobs/' + item.id, { signal });
+    if (!equal(latest, job)) throw new Error('작업이 변경되었습니다. 다시 확인하세요.');
+    return { job, identities };
+  }
+  const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  async function render(cell, ticket, signal, budget) {
+    const { width, height } = cell.viewport;
+    const location = await api('/dicom/lookup', { signal, method: 'POST', body: JSON.stringify({ studyUid: cell.study, sopUid: cell.sop }) });
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(location.id)) throw new Error('원본 참조가 올바르지 않습니다.');
+    const path = '/instances/' + location.id;
+    const read = async suffix => JSON.parse(new TextDecoder().decode(await bytes(path + suffix, signal, 524288, budget)));
+    const info = await read('/attachments/dicom/info');
+    if (info.UncompressedMD5?.toLowerCase() !== cell.sourceDigest) throw new Error('저장 당시 원본과 달라 출력하지 않았습니다.');
+    const tags = await read('/simplified-tags'); valid(ticket, signal);
+    const list = value => Array.isArray(value) ? value.map(Number) : String(value).split('\\').map(Number);
+    const rows = Number(tags.Rows), columns = Number(tags.Columns), slope = Number(tags.RescaleSlope), intercept = Number(tags.RescaleIntercept);
+    const orientation = list(tags.ImageOrientationPatient), position = list(tags.ImagePositionPatient), spacing = list(tags.PixelSpacing);
+    if (tags.StudyInstanceUID !== cell.study || tags.SeriesInstanceUID !== cell.series || tags.SOPInstanceUID !== cell.sop ||
+        tags.SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2' || tags.Modality !== 'CT' || tags.PhotometricInterpretation !== 'MONOCHROME2' ||
+        Number(tags.NumberOfFrames || 1) !== 1 || cell.frame !== 1 || Number(tags.BitsAllocated) !== 16 || Number(tags.SamplesPerPixel) !== 1 ||
+        ![0, 1].includes(Number(tags.PixelRepresentation)) || !Number.isInteger(rows) || !Number.isInteger(columns) || rows < 1 || columns < 1 || rows * columns > 16777216 ||
+        !String(tags.RescaleSlope ?? '').trim() || !String(tags.RescaleIntercept ?? '').trim() ||
+        !Number.isFinite(slope) || slope <= 0 || !Number.isFinite(intercept) || tags.ModalityLUTSequence !== undefined || tags.VOILUTSequence !== undefined ||
+        orientation.length !== 6 || position.length !== 3 || spacing.length !== 2 || [...orientation, ...position, ...spacing].some(n => !Number.isFinite(n)) || spacing.some(n => n <= 0))
+      throw new Error('저장 영상 출력은 일반16bit 흑백 CT에서 지원합니다.');
+    const signed = Number(tags.PixelRepresentation) === 1;
+    const raw = await bytes(path + '/frames/0/' + (signed ? 'image-int16' : 'image-uint16'), signal, 8388608, budget, 'image/x-portable-arbitrarymap');
+    if ((await read('/attachments/dicom/info')).UncompressedMD5?.toLowerCase() !== cell.sourceDigest) throw new Error('출력 원본이 변경되었습니다. 다시 확인하세요.');
+    const header = /^P7\nWIDTH (\d+)\nHEIGHT (\d+)\nDEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n/.exec(new TextDecoder().decode(raw.subarray(0, 512)));
+    if (!header || Number(header[1]) !== columns || Number(header[2]) !== rows || raw.length !== header[0].length + rows * columns * 2)
+      throw new Error('출력 원본 화소가 일치하지 않습니다.');
+    valid(ticket, signal);
+    budget.sourcePixels += rows * columns; if (budget.sourcePixels > 33554432) throw new Error('출력 원본 해상도 한도를 초과했습니다.');
+    const pixels = new Float32Array(rows * columns), data = new DataView(raw.buffer, header[0].length); let min = Infinity, max = -Infinity;
+    for (let i = 0; i < pixels.length; i++) {
+      pixels[i] = (signed ? data.getInt16(i * 2) : data.getUint16(i * 2)) * slope + intercept;
+      if (!Number.isFinite(pixels[i])) throw new Error('출력 원본의 보정 수치를 표시할 수 없습니다.');
+      min = Math.min(min, pixels[i]); max = Math.max(max, pixels[i]);
+    }
+    const id = scheme + ':' + crypto.randomUUID(), engine = new core.RenderingEngine('kin-print-' + crypto.randomUUID());
+    // Native canvases use device pixels. Browser zoom must not multiply the
+    // saved dimensions again; round CSS layout upward to its 1/64px quantum.
+    const dpr = window.devicePixelRatio || 1;
+    const host = el('div'); host.style.cssText = `position:fixed;left:-20000px;top:0;width:${Math.ceil(width / dpr * 64) / 64}px;height:${Math.ceil(height / dpr * 64) / 64}px`; document.body.append(host);
+    entries.set(id, { image: { imageId: id, width: columns, height: rows, rows, columns, color: false, rgba: false, numberOfComponents: 1,
+      slope, intercept, minPixelValue: min, maxPixelValue: max, windowCenter: 40, windowWidth: 400, rowPixelSpacing: spacing[0], columnPixelSpacing: spacing[1],
+      sizeInBytes: pixels.byteLength, getPixelData: () => pixels, imageFrame: {}, preScale: { scaled: true, scalingParameters: { rescaleSlope: slope, rescaleIntercept: intercept, modality: 'CT' } } },
+      metadata: { imagePlaneModule: { frameOfReferenceUID: tags.FrameOfReferenceUID, rows, columns, rowCosines: orientation.slice(0, 3), columnCosines: orientation.slice(3), imagePositionPatient: position,
+        rowPixelSpacing: spacing[0], columnPixelSpacing: spacing[1] }, generalSeriesModule: { modality: 'CT' }, modalityLutModule: { rescaleSlope: slope, rescaleIntercept: intercept },
+        voiLutModule: { windowCenter: [40], windowWidth: [400] }, imagePixelModule: { samplesPerPixel: 1, photometricInterpretation: 'MONOCHROME2', rows, columns, bitsAllocated: 16, bitsStored: Number(tags.BitsStored), highBit: Number(tags.HighBit), pixelRepresentation: signed ? 1 : 0 } } });
+    try {
+      // setViewports normalizes the canvas backing size after CSS layout;
+      // enableElement alone keeps getOrCreateCanvas's rounded-up extra pixel.
+      engine.setViewports([{ viewportId: id, type: core.Enums.ViewportType.STACK, element: host, defaultOptions: { background: [0, 0, 0] } }]);
+      const viewport = engine.getViewport(id); await viewport.setStack([id]); valid(ticket, signal);
+      viewport.setProperties({ ...cell.properties, colormap: { name: 'Grayscale', opacity: [] } });
+      viewport.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
+      const camera = { ...cell.camera }; delete camera.flipHorizontal; delete camera.flipVertical; viewport.setCamera(camera);
+      await new Promise((resolve, reject) => {
+        const cancel = () => finish(new Error('출력 확인이 취소되었습니다.')), done = () => finish();
+        function finish(error) { host.removeEventListener(core.Enums.Events.IMAGE_RENDERED, done); signal.removeEventListener('abort', cancel); error ? reject(error) : resolve(); }
+        host.addEventListener(core.Enums.Events.IMAGE_RENDERED, done, { once: true }); signal.addEventListener('abort', cancel, { once: true });
+        if (signal.aborted) cancel(); else viewport.render();
+      });
+      valid(ticket, signal);
+      const canvas = viewport.getCanvas();
+      if (canvas.width !== width || canvas.height !== height) throw new Error('저장 화면 크기를 재현하지 못했습니다.');
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png')); valid(ticket, signal);
+      if (!blob || blob.size > 8388608 || (budget.bytes += blob.size) > 67108864) throw new Error('출력 영상 용량 한도를 초과했습니다.');
+      const url = URL.createObjectURL(blob); urls.push(url); return url;
+    } finally { engine.destroy(); host.remove(); entries.delete(id); if (core.cache.getImageLoadObject(id)) core.cache.removeImageLoadObject(id); }
+  }
+  function html(data, images) {
+    const { job, identities } = data, main = el('main');
+    el('h1', 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
+    el('p', `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
+    el('p', '저장 당시 영상 범위·밝기 · 주석 미포함 · 실제 크기 아님', main);
+    const summary = identities.map(s => `환자 ${s.name} (${s.id}) · 검사 ${s.date} · Acc ${s.acc || '-'}`).join('\n');
+    el('p', summary, main);
+    const grid = el('div', undefined, main); grid.className = 'grid'; grid.style.gridTemplateColumns = `repeat(${job.snapshot.cols},minmax(0,1fr))`;
+    job.snapshot.cells.forEach((cell, index) => {
+      const figure = el('section', undefined, grid); figure.className = 'cell'; el('strong', '셀 ' + (index + 1), figure);
+      if (!cell) { el('p', '빈 셀', figure); return; }
+      const identity = identities.find(s => s.uid === cell.study), img = el('img', undefined, figure); img.src = images[index]; img.alt = '저장한 셀 ' + (index + 1);
+      el('p', `${identity.name} (${identity.id}) · ${identity.date} · ${identity.desc || identity.modality}`, figure);
+      el('p', `프레임 ${cell.frame} · ${cell.viewport.width} × ${cell.viewport.height} · VOI ${cell.properties.voiRange.lower} ~ ${cell.properties.voiRange.upper} (${cell.properties.VOILUTFunction})`, figure);
+      el('p', `Study ${cell.study}\nSeries ${cell.series}\nSOP ${cell.sop}`, figure).className = 'reference';
+    });
+    const cssString = '"' + Array.from(summary, char => '\\' + char.codePointAt(0).toString(16) + ' ').join('') + '"';
+    return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\';img-src blob:;style-src \'unsafe-inline\';base-uri \'none\'"><title>저장 비교 영상</title><style>' +
+      'body{margin:0;color:#18212b;background:white;font:13px/1.5 "Malgun Gothic",sans-serif}main{padding:12px}h1{font-size:21px}h2{font-size:16px}p{white-space:pre-wrap;overflow-wrap:anywhere}.grid{display:grid;gap:12px}.cell{min-width:0;break-inside:avoid;border-top:1px solid #aaa;padding-top:10px}.cell img{display:block;max-width:100%;max-height:145mm;width:auto;height:auto;margin:8px auto}.reference{font-size:9px}@page{size:A4;margin:12mm 12mm 24mm;@bottom-left{content:' + cssString + ';font:8px "Malgun Gothic",sans-serif;white-space:pre-wrap}@bottom-right{content:counter(page) " / " counter(pages);font:9px sans-serif}}@media print{main{padding:0}}' +
+      '</style></head><body>' + main.outerHTML + '</body></html>';
+  }
+  function supportsIdentity() { try { const css = new CSSStyleSheet(); css.replaceSync('@page{@bottom-left{content:"x"}}'); return css.cssRules[0]?.cssRules[0]?.name === 'bottom-left'; } catch { return false; } }
+  async function prepare() {
+    if (!current) return; const ticket = ++serial, item = current; clear(); status.textContent = '저장한 영상 상태를 확인하는 중…';
+    try { await bounded(async signal => {
+      const data = await state(item, signal); valid(ticket, signal); const snapshot = data.job.snapshot;
+      if (snapshot.version !== 2) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
+      let total = 0;
+      for (const cell of snapshot.cells) if (cell) { const { width, height } = cell.viewport || {}; total += width * height;
+        if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 8192) || width * height > 16777216 || total > 33554432) throw new Error('저장 화면 크기가 출력 한도를 초과했습니다.'); }
+      const images = [], budget = { bytes: 0, sourcePixels: 0 };
+      for (const cell of snapshot.cells) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget) : null); }
+      const latest = await state(item, signal); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보가 변경되었습니다. 다시 확인하세요.');
+      ready = { data, html: html(data, images) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
+      status.textContent = printButton.disabled ? '페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.' : '미리보기 내용을 확인하세요. 주석 미포함 · 실제 크기 아님.';
+    }); } catch (error) { if (ticket === serial) { clear(); status.textContent = error.message; } }
+  }
+  async function print() {
+    const captured = ready, ticket = serial, item = current; if (!captured || printButton.disabled) return;
+    if (outputWindow && !outputWindow.closed) outputWindow.close(); const target = outputWindow = window.open('', '_blank');
+    if (!target) { status.textContent = '팝업 허용 여부를 확인한 뒤 다시 인쇄하세요.'; return; }
+    printButton.disabled = true;
+    try { await bounded(async signal => {
+      const latest = await state(item, signal); valid(ticket, signal);
+      if (ready !== captured || !equal(latest, captured.data) || target.closed) throw new Error('출력 내용이 변경되었습니다. 다시 확인하세요.');
+      target.document.open(); target.document.write(captured.html); target.document.close();
+      await Promise.all([...target.document.images].map(i => i.decode())); valid(ticket, signal);
+      if (ready !== captured || target.closed) throw new Error('출력이 취소되었습니다.'); target.focus(); target.print();
+    }); } catch (error) { if (!target.closed) target.close(); if (ticket === serial) { clear(); status.textContent = error.message; } }
+    finally { if (ticket === serial && ready === captured) printButton.disabled = false; }
+  }
+  closeButton.onclick = close; refresh.onclick = prepare; printButton.onclick = print;
+  dialog.addEventListener('cancel', e => { e.preventDefault(); close(); });
+  return { open(uid, id) { close(); current = { uid, id }; dialog.showModal(); void prepare(); }, close,
+    destroy() { close(); dialog.remove(); core.metaData.removeProvider(provider); } };
+};
