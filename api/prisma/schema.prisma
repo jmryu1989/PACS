@@ -94,6 +94,7 @@ model StudyState {
 
   report Report?
   viewerItems ViewerItem[]
+  viewerJobs ViewerJob[]
   viewerBudget ViewerStorageBudget?
   transferBases TransferBasis[]
   transfers Transfer[]
@@ -387,4 +388,37 @@ model WorkspaceLayout {
   updatedAt   DateTime @updatedAt
 
   @@id([institution, subject])
+}
+
+/// Image state is immutable. Metadata revisions never rewrite a saved view.
+model ViewerJob {
+  id String @id @db.Uuid
+  studyUid String
+  authorSub String
+  authorActor String
+  studies String[]
+  fingerprint String
+  snapshot Json
+  title String @db.VarChar(120)
+  description String @db.VarChar(2000)
+  hidden Boolean @default(false)
+  revision Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  revisions ViewerJobRevision[]
+  @@index([studyUid, createdAt, id])
+}
+
+model ViewerJobRevision {
+  jobId String @db.Uuid
+  revision Int
+  title String @db.VarChar(120)
+  description String @db.VarChar(2000)
+  hidden Boolean
+  reason String @db.VarChar(1000)
+  actor String
+  at DateTime @default(now())
+  job ViewerJob @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  @@id([jobId, revision])
 }

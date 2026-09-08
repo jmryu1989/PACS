@@ -1419,6 +1419,8 @@ export class PacsService implements OnModuleInit {
     // history; deleting their parent would remove the authorization boundary.
     if (await tx.viewerItem.findFirst({ where: { studyUid: uid }, select: { id: true } }))
       throw new ConflictException('표시 이력이 있는 검사는 삭제할 수 없습니다');
+    if (await tx.viewerJob.findFirst({ where: { studies: { has: uid } }, select: { id: true } }))
+      throw new ConflictException('저장한 비교 작업에서 참조하는 검사는 삭제할 수 없습니다');
 
     /**
      * 삭제 가능 여부는 지금의 RS가 아니라 **사람의 기록이 생긴 적이 있는가**로 정한다.

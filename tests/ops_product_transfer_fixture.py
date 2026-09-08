@@ -23,11 +23,12 @@ PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260907040000_viewer_history/migration.sql',
               'api/prisma/migrations/20260908020000_workspace_layout/migration.sql',
-              'api/prisma/migrations/20260908081500_connect_gate/migration.sql']
+              'api/prisma/migrations/20260908081500_connect_gate/migration.sql',
+              'api/prisma/migrations/20260908180000_viewer_jobs/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
-                 'TransferBasis', 'ProcessingAgreement', 'Transfer'])
+                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -93,6 +94,14 @@ def expected_rows(uid):
         value=value, updatedAt=STAMP) for kind,revision,value in
         [('hospital', 2, json.dumps(layout, separators=(',', ':'))), ('tele', 3, None)]]
     basis_id, agreement_id, transfer_id = ['00000000-0000-4000-8000-00000000010'+str(n) for n in (1,2,3)]
+    job_id='00000000-0000-4000-8000-000000000201'
+    job_snapshot=dict(version=1,studies=[uid],rows=1,cols=1,active=0,cells=[dict(study=uid,series=uid+'.1',sop=uid+'.2',frame=1,
+        sourceDigest='a'*32,camera=dict(focalPoint=[1,2,0],position=[1,2,1000],viewUp=[0,-1,0],viewPlaneNormal=[0,0,1],parallelScale=128,rotation=0,flipHorizontal=False,flipVertical=False),
+        properties=dict(voiRange=dict(lower=-1000,upper=-1),VOILUTFunction='LINEAR',invert=False))])
+    rows['ViewerJob']=[dict(id=job_id,studyUid=uid,authorSub='SYNTHETIC-sub',authorActor='SYNTHETIC-reader',studies=[uid],fingerprint='a'*64,
+        snapshot=job_snapshot,title='SYNTHETIC job',description='SYNTHETIC description',hidden=True,revision=2,createdAt=STAMP,updatedAt=STAMP)]
+    rows['ViewerJobRevision']=[dict(jobId=job_id,revision=n,title='SYNTHETIC job',description='SYNTHETIC description',hidden=n==2,
+        reason='' if n==1 else 'SYNTHETIC hide',actor='SYNTHETIC-reader',at=STAMP) for n in (1,2)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]
@@ -137,7 +146,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
-                  'TransferBasis', 'ProcessingAgreement', 'Transfer'):
+                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.

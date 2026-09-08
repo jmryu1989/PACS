@@ -107,6 +107,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "transfers"): Route(Kind.TENANT),
     ("POST", "transfers/:id/revoke"): Route(Kind.TENANT),
     ("GET", "studies/:uid/viewer-items"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/viewer-jobs"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/viewer-jobs"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/viewer-jobs/:id"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/viewer-jobs/:id/revisions"): Route(Kind.TENANT),
     ("POST", "studies/:uid/viewer-items"): Route(Kind.TENANT),
     ("GET", "studies/:uid/viewer-items/:id/revisions"): Route(Kind.TENANT),
     ("POST", "studies/:uid/viewer-items/:id/revisions"): Route(Kind.TENANT),
@@ -279,6 +283,7 @@ class LiveStack:
         self.passwords: dict[str, str] = {}
         self.usernames: dict[str, str] = {}
         self.user_ids: dict[str, str] = {}
+        self.template_owners: set[str] = set()
         self.test_client_id = "kin-invariants-" + uuid.uuid4().hex[:12]
         self.test_client_uuid: str | None = None
         self.service_clients: dict[str, dict[str, str]] = {}
@@ -495,6 +500,11 @@ class LiveStack:
         if logical in self.user_ids:
             return self.user_ids[logical]
         username = f"kin-test-{uuid.uuid4().hex[:12]}-{logical}"
+        template_owner = username + "@local.test"
+        if not re.fullmatch(r"kin-test-[0-9a-f]{12}-[a-z0-9_-]+@local\.test", template_owner):
+            raise RuntimeError("Invalid temporary template owner")
+        if psql(f'SELECT count(*) FROM "ReadingTemplate" WHERE owner=\'{template_owner}\'') != ["0"]:
+            raise RuntimeError("Temporary template owner already has data; refusing reuse")
         password = uuid.uuid4().hex + "Aa1!"
         created = self.kc_admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": True,
@@ -504,6 +514,7 @@ class LiveStack:
             raise RuntimeError(f"로컬 시험 사용자 생성 실패({logical}): {created.status} {created.text}")
         user_id = str(created.body)
         self.user_ids[logical] = user_id
+        self.template_owners.add(template_owner)
         self.usernames[logical] = username
         self.passwords[logical] = password
 
@@ -556,6 +567,16 @@ class LiveStack:
         return self.usernames.get(logical, logical)
 
     def cleanup_test_identities(self) -> None:
+        # Only owners created by this instance, proven empty before provisioning.
+        # Bootstrap seeds templates even when a test never opens the editor.
+        for owner in sorted(self.template_owners):
+            rows = psql(f'SELECT to_jsonb(t)::text FROM "ReadingTemplate" t WHERE owner=\'{owner}\'')
+            for raw in rows:
+                saved = "'" + raw.replace("'", "''") + "'::jsonb"
+                psql(f'DELETE FROM "ReadingTemplate" t WHERE owner=\'{owner}\' AND to_jsonb(t)={saved}')
+            if psql(f'SELECT count(*) FROM "ReadingTemplate" WHERE owner=\'{owner}\'') != ["0"]:
+                raise RuntimeError("Temporary templates changed during cleanup")
+        self.template_owners.clear()
         if self.user_ids or self.test_client_uuid or self.service_clients or self.created_gateway_role:
             self._admin_login()
         failures = []

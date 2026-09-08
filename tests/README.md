@@ -18,6 +18,22 @@
 
 ## 기능별 시험 카탈로그
 
+비교 작업 저장/재열람: `python tests/e2e/test_viewer_jobs.py` (6개 업무/경계 시험).
+일반 CT 현재/과거 검사·원 SOP·1/2/4셀·W/L·camera·활성 셀을 서버에 저장하고
+새 브라우저에서 실제 canvas hash·좌표·프레임 표시·다음 스크롤을 대조한다.
+미저장 표식 차단, 저장한 최신 화살표/키 이미지와의 연결, 입력/판독/원본 보존,
+UUID 재시도·작성자 CAS·숨김 이력·기관/P/prior 거절·잠금 경쟁·감사 실패 rollback을 확인한다.
+원본 digest 불일치는 저장 snapshot의 결함 주입이며 실제 원본을 바꾼 시험으로 세지 않는다.
+고정 시점의 표식 revision, GSPS/KO, 비CT/volume·물리 다중모니터의 전체 Job은 잔여다.
+`viewer_jobs` migration은 기존 표에 데이터를 쓰지 않고 두 표만 추가한다. 원본/비교 검사의
+상태 삭제는 `removeState`의 같은 parent lock 관문에서 거절하며 숨김으로 해제되지 않는다.
+숨김은 기본 목록 제외이고 보안 경계가 아니다. 현재 두 검사 모두에 접근 가능한 사용자는
+전체/숨김 목록을 볼 수 있고 작성자만 설명 수정·사유 숨김/해제를 할 수 있다.
+표식과 Job의 본문/이력 보호는 서로 별도다. 본문은 서비스에서 수정 경로를 제공하지 않는다.
+관련 회귀는 viewer-layout/history/display, 저장 DB 확인은
+`python tests/viewer_migration_test.py ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`다.
+합성 복원 원장은 5개 migration·20개 사용자 표와22개 합성 행을 대조한다.
+
 E01-GATE 전송 근거/요청 관문: `python tests/connect_gate_test.py` (별도 API12).
 실제 C-STORE·임시 두 기관 계정으로 admin 근거/계약 기록과 철회, 기사 요청/철회,
 기관 격리·유효기간·원 PatientID·OPEN 접근권 없음·감사 실패 전체 rollback을 확인한다.

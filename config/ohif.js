@@ -763,6 +763,9 @@ function kinCreateViewerHistory() {
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
     const beforeUnload = e => { if ([...entries.values()].some(x => x.editing || x.pending)) { e.preventDefault(); e.returnValue = ''; } };
+    const jobGuard = () => [...entries.values()].some(x => x.editing || x.pending || x.busy) ||
+      ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
+    window.kinViewerHistoryHasUnsaved = jobGuard;
     let channel;
     try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
     window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
@@ -776,6 +779,8 @@ function kinCreateViewerHistory() {
     document.addEventListener(stackEvent, onImage, true);
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
     stop = () => { end(); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
+    const previousStop = stop;
+    stop = () => { if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved; previousStop(); };
     scan();
   }
   return { id: 'kin.viewer-history', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -1243,8 +1248,25 @@ function kinCreateCTPresets() {
   };
 }
 
+function kinCreateViewerJobs() {
+  let ready, current, epoch = 0;
+  return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
+    ready = new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-jobs.js';
+      script.onload = () => resolve(window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel));
+      script.onerror = () => reject(new Error('비교 작업 화면을 불러오지 못했습니다.')); document.head.append(script);
+    });
+    ready.catch(() => {});
+  }, onModeEnter() {
+    const ticket = ++epoch;
+    ready.then(extension => { if (ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+      if (ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = e.message; }
+    });
+  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+}
+
 window.config = {
-  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
+  extensions: [kinStackPrecision, kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
   modes: [],
   customizationService: {},
   showStudyList: true,
