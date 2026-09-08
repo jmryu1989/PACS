@@ -49,6 +49,8 @@ docker compose ps
 
 ## DB와 인증 설정 변경
 
+기존 Gateway 서비스 계정은 기관별 `gw-<institutionId>` 클라이언트로 구분한다. 렐름의 `gw-kin-center`는 시크릿 없는 비활성 템플릿이며, 실제 발급과 기관·역할 설정은 [Keycloak 안내](keycloak/README.md#gateway-서비스-계정)를 따른다. 이 기존 수신 계약의 유지는 기관 확장이나 운영 활성화를 뜻하지 않는다.
+
 API 시작은 버전 관리된 migration을 `prisma migrate deploy`로 적용한다. schema 변경은 검토된 migration과 Prisma client를 함께 빌드하며, 이미 적용한 migration은 수정하지 않는다. 기존 DB의 baseline은 백업과 drift 확인 후 [baseline 도구](api/prisma/baseline.mjs)의 조건을 따른다.
 
 `db push`, reset, 데이터 손실 허용이나 volume 삭제로 오류를 해결하지 않는다. 컨테이너 재생성과 realm import 파일 변경은 기존 Keycloak DB를 교체하는 절차가 아니다. 필요한 계정·realm 변경은 [Keycloak 안내](keycloak/README.md)에 따라 기존 상태를 확인하고 적용한다.
