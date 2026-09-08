@@ -18,6 +18,16 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   for (const [value, label] of [['none', '영상만 출력'], ['saved', '현재 검사의 서버 저장 판독문 함께 출력']]) {
     const option = el('option', label, reportSource); option.value = value;
   }
+  function syncReportOptions(data) {
+    const chosen = reportSource.value;
+    for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
+    const prior = data.identities.find(s => s.uid !== current.uid);
+    if (prior) {
+      el('option', `비교 과거 검사 (${prior.date} · ${prior.desc || prior.modality} · Acc ${prior.acc || '-'}) 저장 판독문`, reportSource).value = 'prior';
+      el('option', '현재·비교 과거 검사 저장 판독문 모두', reportSource).value = 'both';
+    }
+    reportSource.value = chosen;
+  }
   const refresh = el('button', '다시 확인', dialog), printButton = el('button', '인쇄 / PDF', dialog), closeButton = el('button', '닫기', dialog);
   const controls = el('fieldset', undefined, dialog); controls.style.cssText = 'margin-top:10px;display:flex;gap:8px;flex-wrap:wrap';
   el('legend', '출력용 영상 조절 · 현재 판독 화면과 저장 작업은 바뀌지 않습니다', controls);
@@ -82,7 +92,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     } finally { await reader.cancel().catch(() => {}); }
     return new Uint8Array(await new Blob(chunks).arrayBuffer());
   }
-  async function state(item, signal, includeReport) {
+  async function state(item, signal, reportChoice) {
     validCurrent(item);
     await authenticate(signal);
     const readJob = async () => {
@@ -98,23 +108,31 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       if (!equal(display, item.snapshot)) throw new Error('현재 표시 확인 응답이 요청과 다릅니다.');
       return { snapshot: checked.snapshot, transient: true, title: '현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
     };
-    const job = await readJob(), identities = [];
-    let report = null;
+    const job = await readJob(), identities = [], reports = [];
+    const studies = job.snapshot.studies;
+    if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || studies[0] !== item.uid || new Set(studies).size !== studies.length)
+      throw new Error('출력 비교 검사 정보를 확인할 수 없습니다.');
+    if (!['none', 'saved', 'prior', 'both'].includes(reportChoice) || ['prior', 'both'].includes(reportChoice) && studies.length !== 2)
+      throw new Error('선택한 판독문의 비교 검사를 확인할 수 없습니다.');
+    const reportUids = reportChoice === 'none' ? [] : reportChoice === 'saved' ? [item.uid] : reportChoice === 'prior' ? [studies[1]] : studies;
     for (const uid of job.snapshot.studies) {
       const data = await api('/studies/' + uid + '/report-preview', { signal });
       if (data.study?.uid !== uid) throw new Error('출력 검사 정보를 확인할 수 없습니다.');
       identities.push(data.study);
-      // A comparison's prior report must never become the reading target's
-      // report, even when its image is the active viewport.
-      if (includeReport && uid === item.uid) report = data.report;
+      // Selection is bound to the verified comparison, never to the active
+      // image cell or the worklist's independent report editor.
+      if (reportUids.includes(uid)) {
+        const report = data.report;
+        if (!report || !Number.isInteger(report.version) || report.version < 0 ||
+            !['findings', 'conclusion', 'recommendation', 'rs'].every(k => typeof report[k] === 'string'))
+          throw new Error('출력 판독문 정보를 확인할 수 없습니다.');
+        reports.push({ uid, report, label: uid === item.uid ? '현재 검사 판독문' : '비교 과거 검사 판독문' });
+      }
     }
-    if (includeReport && (!report || !Number.isInteger(report.version) || report.version < 0 ||
-        !['findings', 'conclusion', 'recommendation', 'rs'].every(k => typeof report[k] === 'string')))
-      throw new Error('출력 판독문 정보를 확인할 수 없습니다.');
     await authenticate(signal);
     const latest = await readJob(); validCurrent(item);
     if (!equal(latest, job)) throw new Error('작업이 변경되었습니다. 다시 확인하세요.');
-    return { job, identities, report, reportUid: includeReport ? item.uid : null };
+    return { job, identities, reports };
   }
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   function verifyAnnotationValues(viewport, engine, id, annotations, budget) {
@@ -300,18 +318,18 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     el('h1', job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
     el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
     el('p', basis + '에 아래 출력 조절값 적용 · ' + annotationMode(job) + ' · 실제 크기 아님', main);
-    const reportLabel = data.report ? (!data.report.version ? '저장된 판독문 없음' :
-      `${data.report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${data.report.version} · RS ${data.report.rs}`) : '';
+    const reportLabel = report => !report.version ? '저장된 판독문 없음' :
+      `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
     const summary = identities.map(s => `환자 ${s.name} (${s.id}) · 검사 ${s.date} · Acc ${s.acc || '-'}`).join('\n') +
-      (data.report ? '\n현재 검사 판독문: ' + reportLabel : '');
+      data.reports.map(entry => '\n' + entry.label + ': ' + identities.find(s => s.uid === entry.uid).date + ' · ' + reportLabel(entry.report)).join('');
     el('p', summary, main);
-    if (data.report) {
-      const report = data.report, identity = identities.find(s => s.uid === data.reportUid), section = el('section', undefined, main);
-      section.className = 'report';
-      el('h2', '현재 검사 판독문', section);
+    for (const entry of data.reports) {
+      const report = entry.report, identity = identities.find(s => s.uid === entry.uid), section = el('section', undefined, main);
+      section.className = 'report'; section.dataset.reportUid = entry.uid;
+      el('h2', entry.label, section);
       el('p', `${identity.name} (${identity.id}) · ${identity.date} · ${identity.desc || identity.modality} · Acc ${identity.acc || '-'}`, section);
       el('p', `Study ${identity.uid}`, section).className = 'reference';
-      el('p', reportLabel, section).className = 'report-source';
+      el('p', reportLabel(report), section).className = 'report-source';
       el('p', '출력 확인 시점의 서버 저장본입니다. 비교 작업 저장 당시 판독문이나 미저장 편집문이 아닙니다.', section);
       el('p', `작성자: ${report.author || '-'} · 승인 판독의: ${report.repDoc || '-'} · 승인일(UTC): ${report.confirm || '-'}`, section);
       for (const [key, label] of [['findings', '소견'], ['conclusion', '결론'], ['recommendation', '권고']]) {
@@ -350,14 +368,14 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\';img-src blob:;style-src \'unsafe-inline\';base-uri \'none\'"><title>저장 비교 영상</title><style>' +
       'body{margin:0;color:#18212b;background:white;font:13px/1.5 "Malgun Gothic",sans-serif}main{padding:12px}h1{font-size:21px}h2{font-size:16px}p{white-space:pre-wrap;overflow-wrap:anywhere}.grid{display:grid;gap:12px}.cell{min-width:0;break-inside:avoid;border-top:1px solid #aaa;padding-top:10px}.cell img{display:block;max-width:100%;max-height:145mm;width:auto;height:auto;margin:8px auto}.reference{font-size:9px}@page{size:A4;margin:12mm 12mm 24mm;@bottom-left{content:' + cssString + ';font:8px "Malgun Gothic",sans-serif;white-space:pre-wrap}@bottom-right{content:counter(page) " / " counter(pages);font:9px sans-serif}}@media print{main{padding:0}}' +
       '.annotations{margin-top:18px}.annotations>h2,.annotations>p{break-after:avoid;break-inside:avoid}.annotations>div{break-inside:avoid;border-top:1px solid #ccc;padding:8px 0;overflow-wrap:anywhere}.annotations strong{white-space:pre-wrap;overflow-wrap:anywhere}' +
-      '.report h2,.report h3{break-after:avoid}.report-source{font-weight:bold}.report+.grid{break-before:page}.report p{orphans:3;widows:3}' +
+      '.report h2,.report h3{break-after:avoid}.report-source{font-weight:bold}.report+.grid,.report+.report{break-before:page}.report p{orphans:3;widows:3}' +
       '</style></head><body>' + main.outerHTML + '</body></html>';
   }
   function supportsIdentity() { try { const css = new CSSStyleSheet(); css.replaceSync('@page{@bottom-left{content:"x"}}'); return css.cssRules[0]?.cssRules[0]?.name === 'bottom-left'; } catch { return false; } }
   async function prepare() {
-    if (!current) return; const ticket = ++serial, item = current, includeReport = reportSource.value === 'saved'; clear(); status.textContent = '저장한 영상 상태를 확인하는 중…';
+    if (!current) return; const ticket = ++serial, item = current, reportChoice = reportSource.value; clear(); status.textContent = '저장한 영상 상태를 확인하는 중…';
     try { await bounded(async signal => {
-      const data = await state(item, signal, includeReport); valid(ticket, signal); const snapshot = data.job.snapshot;
+      const data = await state(item, signal, reportChoice); valid(ticket, signal); const snapshot = data.job.snapshot;
       if (![2, 3].includes(snapshot.version)) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
       verifyAnnotationSet(data.job);
       if (controlJob && !equal(controlJob.snapshot, snapshot)) edits = [];
@@ -368,8 +386,9 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
         if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 8192) || width * height > 16777216 || total > 33554432) throw new Error('저장 화면 크기가 출력 한도를 초과했습니다.'); }
       const images = [], budget = { bytes: 0, sourcePixels: 0 };
       for (const [index, cell] of snapshot.cells.entries()) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget, cellAnnotations(data.job, cell), outputEdits[index]) : null); }
-      const latest = await state(item, signal, includeReport); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
-      ready = { data, includeReport, html: html(data, images, outputEdits) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
+      const latest = await state(item, signal, reportChoice); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
+      ready = { data, reportChoice, html: html(data, images, outputEdits) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
+      syncReportOptions(data);
       const selected = selection.value; selection.replaceChildren(); el('option', '전체 영상 셀', selection).value = 'all';
       snapshot.cells.forEach((cell, index) => { if (cell) el('option', '셀 ' + (index + 1), selection).value = String(index); });
       selection.value = [...selection.options].some(o => o.value === selected) ? selected : 'all';
@@ -383,7 +402,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     if (!target) { status.textContent = '팝업 허용 여부를 확인한 뒤 다시 인쇄하세요.'; return; }
     printButton.disabled = true;
     try { await bounded(async signal => {
-      const latest = await state(item, signal, captured.includeReport); valid(ticket, signal);
+      const latest = await state(item, signal, captured.reportChoice); valid(ticket, signal);
       if (ready !== captured || !equal(latest, captured.data) || target.closed) throw new Error('출력 내용이 변경되었습니다. 다시 확인하세요.');
       target.document.open(); target.document.write(captured.html); target.document.close();
       await Promise.all([...target.document.images].map(i => i.decode())); valid(ticket, signal);
@@ -398,6 +417,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   dialog.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function open(item) {
     close(); reportSource.value = 'none'; current = item;
+    for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
     heading.textContent = item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
