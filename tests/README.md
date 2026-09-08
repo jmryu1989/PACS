@@ -2,6 +2,8 @@
 
 ## 현재 실행 시점
 
+`python tests/e2e/test_key_preview_controls.py`는 TEST-D09-KEY-PREVIEW의 출력 키 이미지 전체/선택 확대·이동·복귀, 독립 역좌표 RGB 비교, CT W/L·편집문·두 열 PDF, 선택/재선택·입력 오류·초기화·실패/지연과 조절 후 원본 digest 변경 응답의 인쇄 차단을 검사한다. 최근접 화소의 고정 출력 범위이며 주석/현재 화면 직접 캡처·전체 modality/서식/물리 크기 검증은 아니다.
+
 `python tests/e2e/test_preview_controls.py`는 TEST-D09-PREVIEW-CONTROLS의 저장 비교 출력 전체/선택 셀 확대·이동·W/L·초기화, native 화소/주석 좌표·PDF, 잘못된 입력·실패/지연·현재 화면과 저장 이력 보존을 검사한다.
 
 `python tests/e2e/test_viewer_job_report.py`는 TEST-D09-JOB-REPORT의 현재 검사 저장 판독문+비교 영상/주석 PDF, prior/타인 초안 제외, 출력 전 판독 변경 거절, 누락/조회 실패, 구성 중 변경/닫기와 읽기 전용 보존을 검사한다.
