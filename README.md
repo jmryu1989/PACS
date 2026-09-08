@@ -1,322 +1,83 @@
-# KIN 0단계 실습 키트 — 내 손으로 미니 PACS 띄우기
+# KIN PACS 개발 안내
 
-목표는 하나: **브라우저에서 CT가 열리는 순간**을 오늘 경험하는 것.
-이 키트는 클라우드 샌드박스에서 실제로 기동·업로드·판독화면까지 검증된 구성입니다.
+Orthanc, NestJS/Prisma, PostgreSQL, Keycloak, nginx로 구성된 의료영상 시스템이다.
+업무 화면은 `worklist-v0/hpacs-lite/main.html`의 바닐라 JavaScript이며, 영상 표시는 고정 OHIF 구성을 사용한다.
 
-## 준비물
+개발 환경에서 의사가 직접 검사 조회·영상 비교·판독·저장·재열람을 사용하고, 그 피드백과 수정 결과를 확인하는 것이 우선이다. 이 확인을 거친 뒤 의료기관 도입 조건을 검토하며, 다른 기관으로의 확장은 후속 단계다. 자동 시험·코드 검토·태그 발행은 의사의 사용 평가나 도입 결정을 대신하지 않는다.
 
-- Docker Desktop 설치 ( https://www.docker.com/products/docker-desktop/ )
-- Python 3.9+ 와 `pip install pydicom requests numpy`
+## 작업을 시작하기 전에
 
-## 실행 순서 (약 15분)
+개발 규칙은 [AGENTS.md](AGENTS.md), 시험 실행과 제한은 [tests/README.md](tests/README.md)를 따른다. 인접한 비공개 `docs-repo`가 있으면 그 `README.md`가 안내하는 현행 상태·로드맵·평가 기준을 먼저 읽는다. 없으면 대화에서 제공된 범위를 따르고, 오래된 단계 번호로 다음 작업을 추정하지 않는다.
 
-```bash
-# 1. 실제 자격증명을 로컬 전용 .env에 넣는다 (.env는 Git에서 무시됨)
-cp .env.example .env
-# change-me 값을 모두 교체한다. 렐름 JSON의 시크릿 플레이스홀더에도 이 값이 주입된다.
+기존 작업 파일, DB, DICOM 원본, 계정과 설정을 보존한다. 작업 전에 Git 상태와 실행 중인 컨테이너를 확인하며, 문서 정리를 이유로 환경을 다시 만들지 않는다.
 
-# 2. 전체 기동 — Orthanc + PostgreSQL + Keycloak + KIN API
-#    (첫 실행은 이미지 다운로드와 API 빌드로 몇 분 걸림)
+## 로컬 개발 환경
+
+Docker Desktop과 Docker Compose가 필요하다. Python 기반 시험의 준비물은 [시험 안내](tests/README.md)를 따른다.
+
+새 환경에서만 `.env.example`을 로컬 `.env`로 복사하고 필요한 자격증명을 직접 설정한다. 기존 `.env`를 덮어쓰지 않으며 비밀번호·토큰·키를 저장소에 넣지 않는다.
+
+기동이 필요하면 저장소 루트에서 실행한다. 이미 실행 중인 환경은 변경에 필요한 서비스만 갱신한다.
+
+```sh
 docker compose up -d --build
-
-# 3. 승인된 DICOMLibrary 공개 샘플 투입
-cd scripts
-python3 import_public_samples.py --institution "한림병원"
+docker compose ps
 ```
 
-그리고 브라우저에서:
+기본 정식 입구는 **[https://localhost:9443/](https://localhost:9443/)** 이다. 로컬 인증서와 게시 포트 설정을 확인한 뒤 접속한다. `PUBLIC_ORIGIN`이나 `PUBLIC_PORT`를 변경한 환경에서는 그 환경의 정식 주소를 사용한다.
 
-| 주소 | 화면 |
+| 경로 | 용도 |
 |---|---|
-| http://localhost:8042 | Orthanc 관리 UI (Orthanc Explorer 2) |
-| http://localhost:8042/ohif/ | **OHIF 뷰어** |
-| http://localhost:8042/worklist/hpacs-lite/index.html | **HPACS-lite** — 판독 워크스페이스 |
-| http://localhost:8080 | Keycloak 관리 콘솔 |
-| http://localhost:3000/api/health | KIN API 살아있는지 확인 |
+| `/` | 로그인 화면으로 이동한 뒤 판독 업무 시작 |
+| `/ohif/` | 영상 뷰어 |
+| `/api/health` | API 상태 확인 |
+| `/auth/` | Keycloak 인증 경로 |
 
-로그인 계정은 관리자에게 문의하세요.
+`/api`, `/auth`, `/worklist`, `/ohif`, `/dicom-web`은 같은 출처를 사용한다. 8042·3000·8080 같은 서비스 포트는 디버깅용이며 일반 사용자의 접속 주소로 안내하지 않는다. 컨테이너의 `Up` 표시와 함께 정식 HTTPS의 API 상태 및 실제 로그인을 확인한다.
 
-| 인증 주체 | ID | 용도 |
-|---|---|---|
-| 사람 | 관리자 발급 계정 | 판독·검사 확인·회원 관리 |
-| Gateway 서비스 계정 | `gw-<institutionId>` | 자기 기관의 announce와 지정형 STOW만 |
+사람 계정은 가입 신청 또는 관리자 발급으로 준비하며, 사용 전에 이메일 검증·관리자 승인과 기관·역할 배정을 확인한다. 브라우저 인증은 BFF의 HttpOnly 세션과 OIDC Authorization Code + PKCE를 사용한다. Gateway 서비스 계정은 사람 계정과 분리하고 자기 기관의 허용된 수신 경로에만 사용한다. 설정은 [Keycloak 안내](keycloak/README.md)와 [Gateway 안내](gateway/README.md)를 참고한다.
 
-Gateway는 사람 계정이 아니다. Keycloak client credentials와 기관 그룹 하나, `gateway` 역할
-하나만 사용하며 시크릿은 저장소가 아닌 배포 환경에서 주입한다.
+## 판독과 영상 접근
 
-기관이 다르면 **서로의 검사가 보이지 않는다.** 원격판독으로 의뢰한 검사 하나만 넘어간다.
-`admin` 롤도 이 경계는 못 넘는다 (자세한 건 `keycloak/README.md`).
+- 기관 범위와 역할 권한은 서버에서 검사하며 관리자도 기관 경계를 우회하지 않는다.
+- 개인 초안은 검사와 작성자별로 분리된다. 확정 판독문과 개인 초안, 다른 작성자의 초안을 섞지 않는다.
+- 판독 이력은 추가만 한다. 승인된 판독문을 바꾸는 Addendum과 Reset은 이전 판을 남기며 Reset에는 사유가 필요하다.
+- 예비 판독 P의 접근과 승인은 지정된 판독 책임에 따른다. 작성자는 자기 예비 판독을 스스로 승인할 수 없다.
+- 판독 점유와 저장 충돌을 서버에서 검사한다. 화면의 버튼 상태만으로 권한이나 저장 성공을 판단하지 않는다.
 
-**데모 모드로 둘러보기**를 누르면 서버 없이 가짜 데이터로 열립니다(GitHub Pages 공유용).
+세부 상태 전이와 변경 규칙은 [AGENTS.md](AGENTS.md)를 따른다. 영상 표시·주석·저장 지원은 실제 검증한 객체와 동작 범위로 구분한다. 메뉴가 보이거나 영상 요청이 성공한 사실만으로 모든 영상군의 표시·측정 정확성을 선언하지 않는다.
 
-우측 상단 표시:
+## DB와 인증 설정 변경
 
-- 초록 **● DB 연결됨** — 판독문·상태가 PostgreSQL에 저장됨. 브라우저를 바꿔도 유지
-- 회색 **● 데모 모드** — 로그인하지 않은 둘러보기. 이 브라우저에만 남음
-- 노랑 **● 로컬 저장** — API 미연결 (`docker compose logs api`로 확인)
+API 시작은 버전 관리된 migration을 `prisma migrate deploy`로 적용한다. schema 변경은 검토된 migration과 Prisma client를 함께 빌드하며, 이미 적용한 migration은 수정하지 않는다. 기존 DB의 baseline은 백업과 drift 확인 후 [baseline 도구](api/prisma/baseline.mjs)의 조건을 따른다.
 
-## 운영 서버 최초 인증서와 기동
+`db push`, reset, 데이터 손실 허용이나 volume 삭제로 오류를 해결하지 않는다. 컨테이너 재생성과 realm import 파일 변경은 기존 Keycloak DB를 교체하는 절차가 아니다. 필요한 계정·realm 변경은 [Keycloak 안내](keycloak/README.md)에 따라 기존 상태를 확인하고 적용한다.
 
-운영 proxy는 Let's Encrypt 인증서가 없으면 `nginx -t`에서 멈춘다. 자체 서명 인증서로
-그 실패를 가리지 않는 것이 의도이므로, 최초 발급 때는 proxy를 내린 채 certbot이 80번을
-직접 듣게 한다. 아래 명령은 저장소 루트에서 실행한다.
+Windows bind mount에서 API 변경이 반영되지 않았다면 필요한 서비스의 재시작 후 컴파일 시각과 실행 코드를 확인한다. 전체 스택 초기화를 일반적인 문제 해결 방법으로 사용하지 않는다.
 
-```bash
-# 1. DNS가 서버 공인 IP를 가리키는지 먼저 확인한다.
-dig pacs.koreaimagingnetwork.com
+## 검증과 발행
 
-# 2. 최초 한 번만 standalone으로 발급한다. proxy가 80번을 잡고 있으면 안 된다.
-docker compose -f docker-compose.yml -f docker-compose.prod.yml stop proxy
-sudo certbot certonly --standalone -d pacs.koreaimagingnetwork.com
+제품 변경은 요구사항·위험·시험을 연결하고 관련 기능을 실제 스택에서 검증한다. 같은 최종 코드에서 아래 회귀를 순차 실행한다.
 
-# 3. 인증서 파일을 확인한 뒤 운영 스택을 올린다.
-sudo test -s /etc/letsencrypt/live/pacs.koreaimagingnetwork.com/fullchain.pem
-sudo test -s /etc/letsencrypt/live/pacs.koreaimagingnetwork.com/privkey.pem
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```sh
+python tests/invariants_live.py
+python tests/e2e/test_worklist.py
 ```
 
-운영의 DICOM 4242 포트는 Gateway 경로 실측 뒤에만 닫는다. 먼저 원내 장비 → Gateway → KIN
-워크리스트 수신을 확인하고, 그 다음 production override를 적용한 뒤 외부 호스트에서 4242 TCP
-연결이 거부되는지 확인한다. 로컬 실습 compose의 4242는 학습용으로 유지된다.
+시험 환경·소유 fixture 정리·기능별 추가 검증은 [tests/README.md](tests/README.md)에 있다. 문서만 바꾸면 문서 대조·링크·diff·독립 문서 검토를 수행한다. 필요 없는 제품 시험·재기동·태그를 만들지 않는다.
 
-최초 발급 뒤에는 nginx가 `/.well-known/acme-challenge/`를 서빙하므로 갱신만 webroot로 한다.
-갱신 성공 뒤에는 새 인증서를 읽도록 proxy를 reload한다.
+코드 발행, 사용 평가, 운영 반영은 각각 해당 조건을 확인한다. 운영 적용은 승인된 변경 범위, 기존 자료의 백업·복구 근거와 설치 조건을 갖춘 뒤 수행한다.
 
-```bash
-sudo certbot renew --webroot -w "$(pwd)/certbot/www"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec proxy nginx -s reload
-```
+## 주요 경로
 
-## 첫날 미션 체크리스트
-
-- [ ] OHIF에서 DICOMLibrary 스터디를 열고 전체 시리즈를 확인하기
-- [ ] CT 스터디에서 윈도잉(W/L)을 바꿔 연부조직·골조직을 확인하기
-- [ ] 측정 도구로 공개 영상의 식별 가능한 해부 구조를 재기
-- [ ] Orthanc 관리 UI에서 같은 스터디를 찾아 DICOM 태그 열람하기
-- [ ] `config/orthanc.json`과 `docker-compose.yml`을 한 줄씩 읽고, 이해 안 되는 단어 목록 만들기 → 이것이 2단계 교재
-
-## 이 키트의 구조
-
-```
-docker-compose.yml        # Orthanc + PostgreSQL + API 컨테이너 정의
-config/orthanc.json       # Orthanc 설정: 계정, DICOMweb, DICOM AE, ServeFolders
-scripts/import_public_samples.py # 승인된 DICOMLibrary 공개 샘플 투입
-sample-data/public/              # DICOMLibrary 공개 샘플 원본
-
-worklist-v0/              # 프론트엔드 (Orthanc가 /worklist 로 서빙)
-  worklist-v1~v3.html     #   워크리스트 재현 습작
-  hpacs-lite/             #   본편: 로그인 + 판독 워크스페이스
-    index.html            #     로그인 (가짜 인증 — 3단계 후반 Keycloak으로 교체)
-    main.html             #     Radiology / Technician 두 모드
-
-    auth.js               #     Keycloak OIDC (Authorization Code + PKCE)
-
-api/                      # 백엔드 (NestJS + Prisma + PostgreSQL) — 3단계
-  prisma/schema.prisma    #   StudyState, Report, Order, AuditLog
-  src/auth.guard.ts       #   JWT 검증 (서명·iss·aud·exp)
-  src/pacs.controller.ts  #   REST 엔드포인트
-  src/pacs.service.ts     #   상태 전이·매칭 트랜잭션·역할 검사·감사로그
-
-keycloak/                 # 인증 서버 설정
-  kin-realm.json          #   렐름·클라이언트·롤·개발용 계정 (자동 import)
-  README.md               #   주의사항 — JSON에 주석 금지 등
-```
-
-### 권한 모델
-
-Radiology / Technician 두 탭은 화면 분리가 아니라 **권한 분리**다.
-
-| | radiologist | technician |
-|---|---|---|
-| 판독문 저장·승인, RS 변경 | ✅ | ❌ |
-| Verify/Unverify, 오더 매칭, 검사정보 수정, 삭제 | ❌ | ✅ |
-
-`admin`은 둘 다. 화면에서도 버튼을 잠그지만 **진짜 방어선은 서버**다
-(`pacs.service.ts`의 `need()`). 화면은 안내일 뿐이다.
-
-### RS는 진행률이 아니라 책임의 소재다
-
-| RS | 뜻 | 누가 다음을 하나 |
-|---|---|---|
-| W | 판독 대기 | 아무 판독의나 |
-| T | 임시 저장 | 같은 기관 판독의 누구나 이어서 |
-| **P** | **예비 판독 (Preliminary)** | **지정된 상급 판독의만** |
-| A | 승인 완료 | Addendum만 가능 |
-
-`P`는 상태 표시가 아니라 **접근 제어**다. Prelim 버튼으로 상급 판독의를 지정하면
-그 사람과 작성자 외에는 판독문 내용을 볼 수 없다 — 워크리스트에 검사는 보이지만
-Findings 칸에 "누가 최종 판독 중"이라고만 뜬다. 이력 조회·임시저장·점유도 함께 막힌다.
-
-> 왜 가리나: 예비 판독은 상급자가 뒤집을 수 있는 소견이다. 확정되지 않은 내용이
-> 기관 전체에 퍼지면 나중에 정정해도 이미 읽은 사람의 판단까지 정정되지는 않는다.
-> (HPACS 매뉴얼 7.4.1.3-4.1 — "지정된 판독의만 판독 내용을 볼 수 있다")
-
-**작성자도 자기 예비 판독을 스스로 승인할 수 없다.** 그러면 감독이라는 절차가 사라진다.
-`Reset to Unread`로 되돌리면 지정도 함께 풀린다.
-
-지정 대상은 서버가 Keycloak에 물어 만든 실제 명단에서 고른다(`GET /api/colleagues`).
-접근 권한을 좌우하는 값을 자유 입력으로 받으면 오타 하나에 아무도 못 여는 판독문이 생긴다.
-
-`H`/`O`는 아직 없다. 릴리즈 노트 원문상 둘 다 "초안이 저장된" 상태이고, 우리 `T`가 사실상
-`O`(판독 중)에 해당한다. `H`는 보류로 추정하지만 정의가 어디에도 없어 지어내지 않았다.
-
-### Reset은 지우기 전에 남긴다
-
-`Reset to Unread`는 저장된 판독문을 지운다. 그런데 초안(`PUT .../report`)은 버전을 남기지
-않으므로, 그냥 지우면 그 내용이 어디에도 안 남는다 — 사유만 남고 무엇을 버렸는지는 모른다.
-그래서 지우기 **직전 내용을 `ReportVersion`에 `discarded`로 한 판 박고** 지운다.
-같은 트랜잭션이라 "지워졌는데 기록은 없다"가 생길 수 없다. 화면에는 안 보이고 이력에만 남는다.
-
-### 필터와 상용구는 브라우저가 아니라 계정에 붙는다
-
-판독의는 자기 필터를 하루 종일 쓴다. PC를 바꿨다고 초기화되면 깨지는 건 작업이 아니라 신뢰다.
-HPACS는 이 카테고리 버그를 5년간 반복했고(교훈 §6) 2024년에야 "계정별 저장"에 도달했다.
-
-- **사용자 필터** — Save Filter로 이름을 붙여 저장. 컬럼 필터·Quick Search·날짜·모드에 더해
-  **정렬(sortKey/sortDir)까지** 함께 저장한다. 필터가 같아도 정렬이 다르면 다른 화면이다.
-- **기본 필터(⚑)** — 칩 우클릭 → "기본 필터로 지정". 다음 로그인부터 자동으로 걸린다.
-  기본은 하나뿐이라, 새로 지정하면 이전 것이 풀린다.
-- **판독 상용구** — 목록에서 우클릭 → 새로 만들기 / 수정 / 삭제. 매뉴얼이
-  "Upload/Download **My** Template File"이라고 부르듯 기관 공용이 아니라 개인 것이다.
-  새 계정은 기본 3종을 받고 시작한다(빈 목록은 버그처럼 보인다).
-- 칩 우클릭이 바로 삭제하지 않고 메뉴를 띄운다. 되돌릴 수 없는 동작에 손이 미끄러질
-  자리를 주지 않는다(교훈 §5).
-
-> **모든 걸 계정에 두는 게 답은 아니다.** HPACS는 필름박스 Hanging Protocol만은
-> "계정 + 컴퓨터"별로 기억하도록 따로 만들었다 — 집의 1대 모니터와 병원의 3대 모니터에
-> 같은 레이아웃을 강요할 수 없기 때문. **사람에 딸린 것은 계정에, 기기에 딸린 것은 기기에.**
-
-### 검사는 어떻게 들어오나 — C-STORE
-
-실제 CT/MR 장비는 HTTP를 모른다. DICOM 상위 프로토콜로 TCP 연결(Association)을 맺고,
-어떤 SOP Class를 어떤 전송구문으로 보낼지 협상한 뒤, **C-STORE**로 인스턴스를 하나씩 민다.
-`scripts/send_cstore.py`가 DICOMLibrary 공개 CT의 픽셀을 재사용해 그 장비 역할을 한다
-(Orthanc의 DICOM 포트 4242, AET `KINLAB`). 환자·검사 식별자와 UID만 테스트용으로 바꾸며
-합성 팬텀은 만들지 않는다.
-
-```bash
-python3 send_cstore.py --name "ROUTE^TEST" --id INV-ROUTE
-python3 send_cstore.py --name "ROUTE^TEST" --id INV-ROUTE --institution "KIN 판독센터"
-python3 send_cstore.py --name "ROUTE^TEST" --id INV-ROUTE --verbose
-```
-
-DCMTK가 있다면 같은 일을 이렇게 한다: `storescu -aec KINLAB -aet HALLYM_CT localhost 4242 파일.dcm`
-
-도착한 검사는 **SS=Unverified**로 등록된다. 방사선사가 Technician 탭에서 Verify해야
-Radiology 탭에 올라온다 — 도착하자마자 판독 목록에 뜨면 기사가 환자·검사정보를 고칠 틈이 없고,
-판독이 붙은 뒤에는 더 고칠 수 없다(RS≠W 규칙).
-
-전송 성공과 저장 성공은 다른 사건이다. 스크립트는 C-STORE 응답 상태를 하나씩 확인하고,
-하나라도 0x0000이 아니면 실패로 끝낸다. 보낸 수와 저장된 수가 어긋나는 것이
-원격판독에서 가장 흔한 사고다(교훈 §10).
-
-### 기관 모델 (멀티 기관 테넌시)
-
-권한(무엇을 할 수 있나)과 기관(무엇을 볼 수 있나)은 **다른 축**이다.
-
-- 검사의 소속 기관은 DICOM `InstitutionName`(0008,0080)에서 판정한다. 영상에 찍혀 오는 사실이므로,
-  처음 목록에 올라올 때 `StudyState.institutionId`에 확정한다. 알아볼 수 없는 기관명은
-  아무 데나 밀어넣지 않고 **미배정**으로 둔다 — 조용히 섞이는 것이 가장 나쁘다.
-- 사용자의 기관은 Keycloak **그룹**에서 온다. 서명된 토큰의 `groups` 클레임이므로
-  클라이언트가 고칠 수 없다.
-- 브라우저는 더 이상 `/dicom-web/studies`를 직접 부르지 않는다. **API가 QIDO-RS를 대신 부른다.**
-  화면 필터는 경계가 아니라 커튼이다 — 주소창에 그 URL을 치면 다 보이기 때문.
-- 기관을 넘는 통로는 **`StudyState.teleInstitutionId` 하나뿐**이다. 원격판독을 의뢰하면
-  거기에 수신 기관이 박히고, 취소하면 지워진다. `none`/`wait`/`sending`/`sent`는 의뢰 기관이,
-  `inReading`/`completed`는 수신 기관이 민다.
-
-> **주의**: Orthanc는 아직 하나다. 지금 가른 것은 DB 레코드의 소속과 목록이고,
-> 영상 픽셀(WADO)·뷰어는 여전히 공용이다. 영상 자체의 기관 분리는 5단계(기관별 게이트웨이)의 몫.
-
-### API 엔드포인트
-
-| 메서드 | 경로 | 하는 일 |
-|---|---|---|
-| GET | `/api/bootstrap` | 프론트 시작 시 내 기관 상태·판독문·오더·기관 목록을 한 번에 |
-| GET | `/api/studies` | **검사 목록** — 서버가 Orthanc QIDO-RS를 대신 부르고 기관으로 걸러 준다 |
-| PATCH | `/api/studies/:uid` | RS·SS·EM·TS·Ward 등 부분 수정 |
-| PUT | `/api/studies/:uid/report` | 판독문 임시저장 (버전 안 남김) |
-| POST | `/api/studies/:uid/report/commit` | 판독문 확정 — `save`/`approve`/`addendum`/`reset` |
-| GET | `/api/studies/:uid/report/versions` | 판독문 개정 이력 |
-| POST | `/api/studies/:uid/hold` · `/release` | 판독문 점유 선언·하트비트 / 해제 |
-| POST | `/api/match` · `/api/unmatch` | 검사↔오더 매칭 (트랜잭션) |
-| GET | `/api/audit?uid=` | 감사 로그 |
-| GET | `/api/me` | 내 토큰의 주인·롤·기관 |
-| GET | `/api/colleagues` | 내 기관의 다른 판독의 (Preliminary 지정용, Keycloak에서 조회) |
-| GET | `/api/prefs` | 내 필터·판독 상용구 (계정에 저장) |
-| POST | `/api/filters` · DELETE `/api/filters/:id` | 필터 저장(이름이 같으면 덮어씀) / 삭제 |
-| PATCH | `/api/filters/:id/default` | 기본 필터(⚑) 지정·해제 |
-| POST | `/api/templates` · DELETE `/api/templates/:id` | 상용구 저장(id 있으면 수정) / 삭제 |
-
-### 판독문은 덮어쓰지 않는다
-
-`Report`는 현재 내용이고, `ReportVersion`은 **추가만 하는 역사**입니다.
-
-- 임시저장(검사를 옮겨다닐 때 자동)은 버전을 남기지 않습니다 — 손실 방지가 목적
-- Save / Approve / Addendum / Reset은 그때의 내용을 그대로 한 판으로 적립합니다
-- **Approve된 판독문을 고쳐도 이전 승인본은 남습니다.** Addendum은 승인본 위에 덧붙는 새 판입니다
-- **Reset to Unread에는 사유가 필수**입니다. 저장된 진술을 지우는 일이므로 사유가 기록에 남습니다
-
-판독문은 의무기록입니다. "누가 언제 무엇이라고 말했는가"가 나중에 뒤집히면 안 됩니다.
-
-### 두 사람이 같은 검사를 열면
-
-- **점유는 열람이 아니라 쓰기로 시작합니다.** 판독문에 두 글자 이상 입력하면 그때 잡힙니다.
-  검사를 열어보는 건 흔한 일이라 그걸 점유로 치면 경고가 남발되고, 남발된 경고는 무시됩니다
-- 점유자는 워크리스트 **Viewing** 열에 표시됩니다 (내가 잡으면 초록 `✎ 나`, 남이 잡으면 주황)
-- 점유는 **막지 않고 알려줍니다.** 응급 판독을 자물쇠로 세우는 건 위험합니다
-- **실제로 덮어쓰기를 막는 건 저장 시점의 버전 비교**입니다. 그 사이 남이 저장했으면 409로
-  거절하고, 내가 쓰던 내용은 클립보드에 넣은 뒤 서버 것을 보여줍니다
-- 점유는 5분 뒤 자동으로 풀립니다. 브라우저가 죽어도 검사가 영원히 잠기지 않게
-
-`/api/health`를 뺀 모든 요청은 `Authorization: Bearer <token>`이 필요합니다.
-서버는 서명·발급자(iss)·대상(aud)·만료를 모두 확인하고, **감사 로그의 actor를 토큰에서**
-꺼냅니다 — 클라이언트가 자기 이름을 정하지 못합니다.
-
-핵심 개념 미리보기: OHIF는 Orthanc의 **DICOMweb** API(`/dicom-web/...`)로 영상을
-가져옵니다. 지금 브라우저 개발자도구(Network 탭)를 열고 스터디를 열어보면
-`QIDO-RS`(검색)와 `WADO-RS`(픽셀 조회) 요청이 실제로 날아가는 게 보입니다 —
-2단계에서 배울 내용의 예고편입니다.
-
-## 다음 실험 (둘째 날 이후)
-
-```bash
-# REST API 맛보기 — PACS와 코드로 대화하기
-curl -u "$ORTHANC_USER:$ORTHANC_PASS" http://localhost:8042/studies
-curl -u "$ORTHANC_USER:$ORTHANC_PASS" http://localhost:8042/dicom-web/studies   # QIDO-RS
-
-# DICOM 프로토콜 맛보기 — DCMTK 설치 후 (brew install dcmtk / apt install dcmtk)
-storescu -aec KINLAB localhost 4242 sample-data/ct_030.dcm    # C-STORE 전송
-```
-
-## 문제 해결
-
-- **8042 포트가 이미 사용 중**: `docker-compose.yml`의 `"8042:8042"`를 `"8043:8042"`로
-  바꾸고 주소도 `localhost:8043`으로.
-- **/ohif/ 가 404**: `docker compose up -d` 후 플러그인 로드까지 몇 초 걸림.
-  `curl -u "$ORTHANC_USER:$ORTHANC_PASS" http://localhost:8042/plugins` 에 `"ohif"`가 보여야 정상 —
-  compose 파일의 `OHIF_PLUGIN_ENABLED: "true"`가 지워지지 않았는지 확인.
-- **업로드 스크립트 실패**: Orthanc가 아직 기동 중일 수 있음. 몇 초 뒤 재시도.
-- **HPACS-lite가 "로컬 저장"으로 뜸**: API가 안 떠 있음. `docker compose ps`로 `kin-api`
-  상태를 보고 `docker compose logs api`로 원인 확인. DB 준비 전에 API가 뜨면 재시작으로 해결.
-- **API 코드를 고쳤는데 반영이 안 됨**: `src/`는 마운트돼 있어 자동 재시작됩니다.
-  `prisma/schema.prisma`를 고쳤다면 `docker compose restart api` (스키마를 다시 push함).
-- **API 로그에 `Could not parse schema engine response` / `failed to detect the libssl`**:
-  Prisma 엔진은 네이티브 바이너리라 musl(alpine)에서 돌지 않습니다. `api/Dockerfile`의
-  베이스가 `node:22-slim`인지, `openssl` 패키지를 설치하는지 확인하고 `--build`로 다시 빌드.
-- **로그인 버튼이 "인증 서버 없음"**: Keycloak이 아직 뜨는 중(첫 기동 40초쯤). 잠시 뒤 새로고침.
-  `docker compose logs keycloak | Select-String Imported` 로 렐름이 들어왔는지 확인할 수 있다.
-- **로그인 후 `invalid_redirect_uri`**: 8042가 아닌 주소로 열었을 때. 렐름에 등록된 주소는
-  `http://localhost:8042/*` 뿐이다. `keycloak/kin-realm.json`의 `redirectUris`를 고치고
-  `docker compose down -v` 후 재기동하거나, 관리 콘솔에서 직접 추가.
-- **렐름 파일을 고쳤는데 반영 안 됨**: import는 빈 PostgreSQL DB에서만 실행된다. 기존 렐름은
-  관리 콘솔이나 Admin REST로 변경하고, 재구축 전에는 반드시 realm export를 남긴다.
-- **API가 401만 뱉음**: 토큰의 `iss`와 API의 `KC_ISSUER`가 달라진 경우. compose의
-  `KC_HOSTNAME`과 `KC_ISSUER`가 둘 다 `http://localhost:8080`인지 확인.
-- **처음부터 다시**: `docker compose down -v` (영상·DB·Keycloak 계정이 전부 삭제됨)
-
-## 이것이 사업의 미니어처인 이유
-
-지금 만든 구성 — 아카이브(Orthanc) + 표준 API(DICOMweb) + 뷰어(OHIF) — 는
-Korea Imaging Network 데이터센터의 최소 원형입니다. 3단계에서는 이 Orthanc를
-세 대로 늘려 "A병원 → 게이트웨이 → B병원" 라우팅을 만들게 됩니다.
+| 경로 | 역할 |
+|---|---|
+| `docker-compose.yml` | 로컬 개발 서비스와 정식 HTTPS 입구 |
+| `docker-compose.prod.yml` | 운영 구성 차이; 독립적인 운영 활성화 승인을 뜻하지 않음 |
+| `api/src/` | 인증·기관 권한·검사·판독·표시 저장·전송 API |
+| `api/prisma/` | schema·migration·기존 DB baseline 도구 |
+| `worklist-v0/hpacs-lite/` | 로그인과 판독 업무 화면 |
+| `config/` · `proxy/` | 영상 서버와 같은 출처 프록시 구성 |
+| `gateway/` | 기관별 영상 수신 경로 |
+| `scripts/` | 데이터 입출력·백업·복원·운영 도구 |
+| `tests/` | 회귀와 기능별 검증 |
