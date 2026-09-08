@@ -392,10 +392,30 @@ function kinCreateViewerHistory() {
       })) return '측정이 원본 영상 범위를 벗어났습니다';
       return '';
     }
+    const calculatedGeometry = new WeakMap(), trackedMeasurements = new WeakSet();
+    const geometry = data => JSON.stringify(data.handles.points);
+    const freshStats = (data, target) => {
+      const stats = data.cachedStats?.[target];
+      return stats && calculatedGeometry.get(stats) === geometry(data);
+    };
+    function trackMeasurement(a) {
+      if (!manual(kinds[a.metadata.toolName]) || trackedMeasurements.has(a.data)) return;
+      trackedMeasurements.add(a.data);
+      // The pinned calculator clears invalidated even when its image lookup
+      // fails. Only a newly assigned native result witnesses these coordinates;
+      // the existing trailing throttle and native voxel calculation stay intact.
+      a.data.cachedStats = new Proxy(a.data.cachedStats || {}, {
+        set(stats, target, value) {
+          stats[target] = value;
+          if (value && typeof value === 'object') calculatedGeometry.set(value, geometry(a.data));
+          return true;
+        },
+      });
+    }
     function sample(a) {
       if (!a || a.invalidated) return null;
-      const kind = kinds[a.metadata.toolName], s = a.data.cachedStats?.['imageId:' + a.metadata.referencedImageId];
-      if (!s || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
+      const kind = kinds[a.metadata.toolName], target = 'imageId:' + a.metadata.referencedImageId, s = a.data.cachedStats?.[target];
+      if (!freshStats(a.data, target) || measurementReason(a.metadata.referencedImageId, kind, a.data.handles.points)) return null;
       const values = kind === 'length' ? [s.length] : kind === 'angle' ? [s.angle] :
         [s.area, s.mean, s.statsArray?.find(x => x?.name === 'min')?.value, s.max, s.statsArray?.find(x => x?.name === 'count')?.value];
       if (values.some(n => !Number.isFinite(n)) || kind === 'ellipse' && s.modalityUnit !== 'HU') return null;
@@ -566,13 +586,16 @@ function kinCreateViewerHistory() {
           if (!reason && kind === 'ellipse' && v.getCamera().viewUp.filter(n => Math.abs(n) > 1e-6).length !== 1)
             reason = '사선·회전 ROI는 아직 지원하지 않습니다';
           if (reason) { status.textContent = reason; return; }
-          return add.call(this, event);
+          const annotation = add.call(this, event);
+          if (annotation) trackMeasurement(annotation);
+          return annotation;
         };
         tool.configuration = { ...config, getTextLines(data, target) {
           const id = target.startsWith('imageId:') && target.slice(8);
           const reason = data.kinUnverified ? '재확인 필요: 저장 당시 측정과 다릅니다' :
             id ? measurementReason(id, kind, data.handles.points) : '지원하지 않는 측정 평면입니다';
           if (reason) return [reason];
+          if (!freshStats(data, target)) return ['재확인 필요: 현재 좌표로 계산되지 않았습니다'];
           if (kind === 'ellipse') return lines(data, target);
           const value = data.cachedStats[target]?.[kind === 'length' ? 'length' : 'angle'];
           if (!Number.isFinite(value) || value <= 0) return ['측정을 완료하세요'];
@@ -702,6 +725,7 @@ function kinCreateViewerHistory() {
         const a = { annotationUID: uid, highlighted: false, invalidated: true, isLocked: true, isVisible: true,
           metadata: { toolName: tools[e.draft.kind], FrameOfReferenceUID: e.draft.frameOfReferenceUid, referencedImageId: imageId, viewPlaneNormal: e.draft.viewPlaneNormal || camera.viewPlaneNormal, viewUp: e.draft.viewUp || camera.viewUp },
           data: { text: e.draft.label, label: e.draft.label, kinUnverified: manual(e.draft.kind), handles: { points: clone(e.draft.points), activeHandleIndex: null, textBox: { hasMoved: false, worldPosition: [0, 0, 0], worldBoundingBox: { topLeft: [0, 0, 0], topRight: [0, 0, 0], bottomLeft: [0, 0, 0], bottomRight: [0, 0, 0] } } }, cachedStats: {} } };
+        trackMeasurement(a);
         ct.annotation.state.addAnnotation(a, v.element); e.annotationUID = uid; annotations.set(uid, e); lock(e, !e.editing); render();
       }
     }
@@ -718,6 +742,14 @@ function kinCreateViewerHistory() {
       if (!subject || !scope) return;
       const v = viewport();
       configureMeasurements(v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
+      for (const a of ct.annotation.state.getAllAnnotations()) {
+        if (!manual(kinds[a.metadata.toolName])) continue;
+        trackMeasurement(a);
+        if (a.metadata.referencedImageId === v.getCurrentImageId() &&
+            !freshStats(a.data, 'imageId:' + a.metadata.referencedImageId)) {
+          a.invalidated = true; render();
+        }
+      }
       for (const e of entries.values()) {
         const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
         if (e.annotationUID && !a) { annotations.delete(e.annotationUID); e.annotationUID = null; }
