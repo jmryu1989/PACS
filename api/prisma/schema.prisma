@@ -94,6 +94,7 @@ model StudyState {
 
   report Report?
   viewerItems ViewerItem[]
+  manualSrs ManualSr[]
   viewerJobs ViewerJob[]
   viewerBudget ViewerStorageBudget?
   transferBases TransferBasis[]
@@ -338,6 +339,28 @@ model ViewerItem {
   study       StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
   revisions   ViewerRevision[]
 
+  @@index([studyUid, id])
+}
+
+/// An immutable file and committed intent make Orthanc response-loss retry safe.
+model ManualSr {
+  id          String @id @db.Uuid
+  studyUid    String
+  authorSub   String
+  authorActor String
+  requestId   String @db.Uuid
+  fingerprint String
+  selection   Json
+  dataset     Json?
+  dicom       Bytes?
+  sha256      String
+  createdAt   DateTime @default(now())
+  storedAt    DateTime?
+  orthancId   String?
+  attemptedAt DateTime?
+  nextCheckAt DateTime?
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  @@unique([authorSub, requestId])
   @@index([studyUid, id])
 }
 

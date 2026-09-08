@@ -45,18 +45,15 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
             p.locator('[data-cy=trackedMeasurements-panel]').get_by_text('CSV', exact=True).click()
         return list(csv.DictReader(io.StringIO(download.value.path().read_text(encoding='utf-8'))))
 
-    def sr(self, p, command='storeMeasurements'):
-        # Run the actual pinned SR generator; capture its output at the final
-        # storage boundary, before it can add an SR to this study or metadata.
+    def sr(self, p, command='downloadReport'):
+        # Exercise the product's guarded server-generated download. Storage and
+        # independent binary readback are covered by test_manual_sr.py; there
+        # is no synthetic TEST_CAPTURED storage exception in this path now.
         return p.evaluate('''async command=>{
-            let calls=0, report;
             try {
-                await __d05c1.commands.runCommand(command, {measurementData:panelCaptured,
-                    additionalFindingTypes:[], dataSource:{store:{dicom:async dataset=>{
-                        calls++; report=dataset; throw new Error('TEST_CAPTURED');
-                    }}}}, 'CORNERSTONE_STRUCTURED_REPORT');
-                return {calls,report};
-            } catch(e) {return {calls,report,error:e.message};}
+                const report=await __d05c1.commands.runCommand(command, {measurementData:panelCaptured}, 'CORNERSTONE_STRUCTURED_REPORT');
+                return {report};
+            } catch(e) {return {error:e.message};}
         }''', command)
 
     def test_01_panel_and_csv_gate(self):
@@ -77,7 +74,7 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         self.assertEqual(p.evaluate('()=>panelReport().values'), ['재확인 필요'])
         for command in ['storeMeasurements', 'downloadReport']:
             result = self.sr(p, command)
-            self.assertEqual(result['calls'], 0, result)
+            self.assertNotIn('report', result, result)
             self.assertIn('재확인 필요', result.get('error',''), result)
         # SR identifies native annotations by UID. A copied selection's missing
         # toolName must not bypass the current native annotation check.
@@ -124,21 +121,21 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         self.assertNotEqual(actual, old); self.assertAlmostEqual(actual, math.dist(*points), places=8)
         captured=p.evaluate('()=>panelReport()')
         self.assertEqual(captured['values'][captured['columns'].index('Length')], actual)
-        self.assertEqual(self.sr(p)['calls'], 1)
+        self.assertIn('report', self.sr(p))
 
     def test_03_valid_sr_and_ended_session(self):
         f = self.specimen(); p = self.observed(f)
         self.tracked(p)
         result = self.sr(p)
-        self.assertEqual(result['calls'], 1, result)
-        self.assertEqual(result.get('error'), 'TEST_CAPTURED', result)
+        self.assertIn('report', result, result)
+        self.assertNotIn('error', result, result)
         self.assertEqual(result['report']['Modality'], 'SR')
         expected = math.dist(*p.evaluate('()=>panelAnnotation.data.handles.points'))
         self.assertTrue(any(abs(value-expected)<.001 for value in numeric_values(result['report'])))
         p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
         self.assertEqual(p.evaluate('()=>panelReport().values'), ['재확인 필요'])
         result = self.sr(p)
-        self.assertEqual(result['calls'], 0, result)
+        self.assertNotIn('report', result, result)
         self.assertIn('재확인 필요', result['error'])
         self.assertTrue(p.evaluate('''()=>{
             const plugin=window.config.extensions.find(e=>e.id==='kin.viewer-history');
@@ -186,7 +183,7 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
         self.assertIn('재확인 필요',self.sr(p)['error'])
         p.evaluate('()=>panelEllipse.data.kinUnverified=false')
         expect(panel).not_to_contain_text('재확인 필요')
-        sr=self.sr(p); self.assertEqual(sr['calls'],1,sr)
+        sr=self.sr(p); self.assertIn('report',sr,sr)
         values=list(numeric_values(sr['report']))
         points=p.evaluate('''()=>Object.fromEntries(cornerstoneTools.annotation.state.getAllAnnotations()
             .filter(a=>['Length','Angle','EllipticalROI'].includes(a.metadata.toolName))

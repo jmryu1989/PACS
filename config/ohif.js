@@ -347,6 +347,8 @@ function kinCreateSRProvenance() {
   let services, extensions, stop;
   const sequence = value => Array.isArray(value) ? value : value ? [value] : [];
   const first = value => sequence(value)[0];
+  const caption = instance => instance?.Manufacturer === 'KIN' && instance?.SoftwareVersions === 'kin-manual-sr-v1'
+    ? '수동 측정 SR 원문 · 읽기 전용' : '외부 SR 원문 · 읽기 전용';
   const sourceGroups = instance => {
     const groups = new Map(); groups.tracking = []; let budget = 2000, incomplete = false;
     function walk(items, group, depth = 0) {
@@ -396,7 +398,14 @@ function kinCreateSRProvenance() {
       // The native loader rewrites this flag after every load. Install the
       // policy before loading, so its async completion cannot reopen hydration.
       Object.defineProperty(ds, 'isRehydratable', { configurable: true, get: () => false, set: () => {} });
-      const load = ds.load; let loading;
+      const load = ds.load, addInstances = ds.addInstances; let loading, arrivals = [];
+      const measurementDescriptor = Object.getOwnPropertyDescriptor(ds, 'measurements');
+      let sourceMeasurements = ds.measurements;
+      const measurementRead = () => ended ? [] : sourceMeasurements;
+      // A native load can finish after this mode exits. Its subsequent source
+      // subscription must see no measurements from the retired document.
+      Object.defineProperty(ds, 'measurements', { configurable: true, enumerable: true,
+        get: measurementRead, set: value => { if (!ended) sourceMeasurements = value; } });
       const guardedLoad = function (...args) {
         if (ds.isLoaded) return Promise.resolve();
         for (const item of values(ds.instance).tracking || []) {
@@ -410,14 +419,60 @@ function kinCreateSRProvenance() {
         }
         // Both tracking context and SR viewport request this load. Coalesce
         // them so the same source does not add duplicate overlay annotations.
-        if (!loading) loading = Promise.resolve(load.apply(this, args)).finally(() => { loading = null; });
+        if (!loading) loading = Promise.resolve(load.apply(this, args)).finally(() => {
+          loading = null;
+          if (arrivals.length && !ended) { const pending = arrivals; arrivals = []; replaceInstances(...pending); }
+        });
         return loading;
       };
       ds.load = guardedLoad;
+      const replaceInstances = function (instances, service, selectedSop) {
+        if (ended) return ds;
+        // Let an older asynchronous loader finish against its own document.
+        // Publishing a new instance before it finishes mixes old coordinates
+        // with the new source labels in the native add-measurement hook.
+        if (loading) { arrivals = [arrivals.length ? [...arrivals[0], ...instances] : instances, service, selectedSop]; return ds; }
+        const previous = ds.instance?.SOPInstanceUID, wasLoaded = ds.isLoaded;
+        const result = addInstances.call(ds, instances, service);
+        if (selectedSop) ds.instance = ds.instances.find(instance => instance.SOPInstanceUID === selectedSop) || ds.instance;
+        if (ds.instance?.SOPInstanceUID === previous) { ds.isLoaded = wasLoaded; return result; }
+        for (const a of window.cornerstoneTools.annotation.state.getAllAnnotations())
+          if (String(a.annotationUID).startsWith('kin-sr:' + previous + ':')) window.cornerstoneTools.annotation.state.removeAnnotation(a.annotationUID);
+        ds.SOPInstanceUID = ds.instance.SOPInstanceUID; ds.measurements = []; ds.referencedImages = [];
+        signature = ''; panel.hidden = true; panel.replaceChildren();
+        const affected = [...services.viewportGridService.getState().viewports].filter(([, view]) => view.displaySetInstanceUIDs?.includes(ds.displaySetInstanceUID)).map(([id]) => id);
+        // The pinned React viewport keys its effects by display-set object
+        // identity, which native addInstances keeps unchanged. Unmount only
+        // those SR cells before reopening the new document; CT cells remain.
+        for (const viewportId of affected) services.viewportGridService.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [] });
+        const unmounted = new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        Promise.all([guardedLoad(), unmounted]).then(() => {
+          if (ended) return;
+          const grid = services.viewportGridService.getState();
+          for (const viewportId of affected) {
+            const view = grid.viewports.get(viewportId);
+            if (!view || view.displaySetInstanceUIDs?.length) continue;
+            services.viewportGridService.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [ds.displaySetInstanceUID] });
+          }
+          signature = '';
+          for (const entry of window.cornerstone.getEnabledElements()) entry.viewport.render();
+        }).catch(() => { if (!ended) { panel.hidden = false; panel.replaceChildren(); text(panel, 'summary', 'SR 문서를 다시 열어 주세요'); } });
+        return result;
+      };
+      if (typeof addInstances === 'function') ds.addInstances = replaceInstances;
+      const previousSelect = ds.kinSelectDocument;
+      ds.kinSelectDocument = sop => replaceInstances([], displaySets, sop);
       restores.push(() => {
         if (ds.load === guardedLoad) ds.load = load;
-        if (flag) Object.defineProperty(ds, 'isRehydratable', flag);
-        else delete ds.isRehydratable;
+        if (ds.addInstances === replaceInstances) ds.addInstances = addInstances;
+        if (previousSelect) ds.kinSelectDocument = previousSelect; else delete ds.kinSelectDocument;
+        const release = () => {
+          if (Object.getOwnPropertyDescriptor(ds, 'measurements')?.get !== measurementRead) return;
+          Object.defineProperty(ds, 'measurements', { ...measurementDescriptor, value: [], writable: true });
+          if (flag) Object.defineProperty(ds, 'isRehydratable', flag);
+          else delete ds.isRehydratable;
+        };
+        if (loading) void loading.finally(release).catch(() => {}); else release();
       });
       return ds;
     };
@@ -445,6 +500,7 @@ function kinCreateSRProvenance() {
     const addHook = { id: 'onBeforeSRAddMeasurement', value: ({ measurement, StudyInstanceUID, SeriesInstanceUID }) => {
       if (ended) throw new Error('로그인이 종료되어 SR 표식을 표시하지 않았습니다.');
       const ds = displaySets.getActiveDisplaySets().find(d => d.Modality === 'SR' && d.measurements?.includes(measurement));
+      if (!ds || !guarded.has(ds)) throw new Error('현재 SR 문서에 속하지 않는 표식입니다.');
       const sourceUID = measurement.kinSourceTrackingUID || measurement.TrackingUniqueIdentifier;
       const groups = values(ds?.instance), group = groups.get(sourceUID);
       // Only labels are projected. Original ContentSequence and native graphic
@@ -453,7 +509,7 @@ function kinCreateSRProvenance() {
       // available after DICOMweb/dcmjs decoding.
       // Keep the derived measurement identity: the loader records imageId and
       // loaded on this same object for the SR viewport's reference navigation.
-      measurement.labels = [{ label: '출처', value: '외부 SR 원문 · 읽기 전용' },
+      measurement.labels = [{ label: '출처', value: caption(ds.instance) },
         ...(group?.values || [{ label: '원문', value: groups.incomplete ? '표시 상한 초과: SR 원문을 확인하세요' : '수치는 SR 원문에서 확인하세요' }])];
       // Tracking UIDs may be reused in later source documents. Scope only the
       // derived overlay ID by SOP so another SR cannot overwrite this overlay.
@@ -479,14 +535,24 @@ function kinCreateSRProvenance() {
       const grid = services.viewportGridService.getState();
       const active = grid.viewports.get(grid.activeViewportId);
       const ds = active?.displaySetInstanceUIDs?.map(uid => displaySets.getDisplaySetByUID(uid)).find(d => d?.Modality === 'SR');
-      if (!ds) { panel.hidden = true; signature = ''; return; }
+      if (!ds || !ds.isLoaded) { panel.hidden = true; signature = ''; return; }
       protect(ds); const instance = ds.instance;
       const key = [ds.displaySetInstanceUID, instance?.SOPInstanceUID, ds.isLoaded].join('|');
       panel.hidden = false; if (signature === key) return; signature = key; panel.replaceChildren();
-      text(panel, 'summary', '외부 SR 원문 · 읽기 전용');
+      text(panel, 'summary', caption(instance));
+      if (ds.instances?.length > 1) {
+        const select = document.createElement('select'); select.setAttribute('aria-label', 'SR 문서 선택');
+        select.style.cssText = 'width:100%;background:#101e32;color:#e1ecfc';
+        for (const document of ds.instances) {
+          const option = window.document.createElement('option'); option.value = document.SOPInstanceUID;
+          option.textContent = '#' + document.InstanceNumber + ' · ' + (document.ContentDate || '') + ' ' + (document.ContentTime || '') + ' · ' + document.SOPInstanceUID;
+          option.selected = document.SOPInstanceUID === instance.SOPInstanceUID; select.append(option);
+        }
+        select.addEventListener('change', () => { if (!ended) ds.kinSelectDocument(select.value); }); panel.append(select);
+      }
       text(panel, 'p', '이 문서의 값과 표식을 그대로 열람합니다. 직접 작성한 측정과 저장 이력을 구분합니다.');
       for (const [label, value] of [['문서 SOP', instance?.SOPInstanceUID], ['작성 장치', instance?.Manufacturer],
-        ['문서 일시', [instance?.ContentDate, instance?.ContentTime].filter(Boolean).join(' ')], ['원문 검증 상태', instance?.VerificationFlag]])
+        ['문서 일시', [instance?.ContentDate, instance?.ContentTime, instance?.SoftwareVersions === 'kin-manual-sr-v1' ? '(UTC)' : ''].filter(Boolean).join(' ')], ['원문 검증 상태', instance?.VerificationFlag]])
         text(panel, 'p', label + ': ' + (value || '기록 없음'));
       const groups = values(instance);
       if (groups.incomplete) text(panel, 'p', '표시 상한을 초과했습니다. 수치는 업무 화면의 SR 원문에서 확인하세요.');
@@ -518,7 +584,7 @@ function kinCreateSRProvenance() {
 }
 
 function kinCreateViewerHistory() {
-  let services, commands, stop;
+  let services, commands, extensions, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
   const names = { arrow: '화살표', key: '키 이미지', length: '수동 길이', angle: '수동 각도', ellipse: '수동 ROI' };
@@ -645,7 +711,61 @@ function kinCreateViewerHistory() {
       }
       for (const uid of measurementViews.keys()) if (!present.has(uid)) measurementViews.delete(uid);
     }
-    const reportContext = 'CORNERSTONE_STRUCTURED_REPORT', reportRestores = [];
+    const reportContext = 'CORNERSTONE_STRUCTURED_REPORT', reportRestores = [], srRequests = new Map();
+    let srBusy = false;
+    async function manualSr(name, options) {
+      if (srBusy) throw new Error('SR을 처리 중입니다. 결과를 기다려 주세요.');
+      const selected = options.measurementData || [], ticket = generation; let requestKey;
+      if (ended || !selected.length || selected.length > 16) throw new Error('직접 작성한 측정을1~16개 선택하세요.');
+      srBusy = true; refreshSrButtons();
+      try {
+        await authenticate(ticket);
+        const chosen = selected.map(m => annotations.get(m.uid));
+        if (chosen.some(e => !e || !manual(e.draft.kind) || !writable(e) || e.heldDraft || e.head?.hidden))
+          throw new Error('현재 검사에서 직접 작성한 측정만 SR로 저장할 수 있습니다.');
+        for (const e of chosen) {
+          if (!checkedMeasurement(measurementService.getMeasurement(e.annotationUID))) throw new Error('재확인 필요: 측정을 다시 확인하세요.');
+          if (e.editing || e.pending || !e.head) await save(e, e.head ? 'edit' : 'create');
+          if (!valid(ticket) || !e.head || e.editing || e.pending || e.busy || e.head.referenceStatus !== 'verified')
+            throw new Error('측정 저장을 완료하지 못했습니다. 측정 패널의 안내를 확인하세요.');
+        }
+        const items = chosen.map(e => ({ id: e.head.id, revision: e.head.revision })).sort((a,b) => a.id.localeCompare(b.id));
+        const key = scope + '|' + subject + '|' + JSON.stringify(items);
+        requestKey = key;
+        if (!srRequests.has(key)) srRequests.set(key, crypto.randomUUID());
+        const stillCurrent = () => valid(ticket) && chosen.every((e, i) => !e.editing && !e.pending && !e.heldDraft &&
+          items.some(item => item.id === e.head?.id && item.revision === e.head?.revision) && checkedMeasurement(measurementService.getMeasurement(e.annotationUID)));
+        const endpoint = '/studies/' + scope + '/manual-sr';
+        status.textContent = '원본 측정으로 SR을 확인하고 있습니다…';
+        const prepared = await api(endpoint, { method: 'POST', body: JSON.stringify({ requestId: srRequests.get(key), items }) }, ticket);
+        if (!stillCurrent()) throw new Error('SR 준비 중 측정이 변경되었습니다. 현재 측정을 다시 확인하세요.');
+        if (name === 'downloadReport') {
+          const bytes = Uint8Array.from(atob(prepared.dicom), c => c.charCodeAt(0));
+          const url = URL.createObjectURL(new Blob([bytes], { type: 'application/dicom' }));
+          const a = document.createElement('a'); a.href = url; a.download = 'KIN-manual-' + prepared.id + '.dcm';
+          document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+          status.textContent = 'SR 파일을 다운로드했습니다. 검사에 저장하려면24시간 안에 SR 저장을 누르세요.';
+          return prepared.dataset;
+        }
+        const stored = await api(endpoint + '/' + prepared.id + '/store', { method: 'POST', body: '{}' }, ticket);
+        if (!stillCurrent()) throw new Error('SR 저장 응답을 받았습니다. 최신 측정과 저장 문서를 다시 확인하세요.');
+        const source = extensions.getActiveDataSource?.()[0];
+        source?.deleteStudyMetadataPromise?.(scope);
+        // Public display-set API dispatches the pinned SR SOP handler; no
+        // webpack module IDs or global DICOM serializer hooks are required.
+        services.displaySetService.makeDisplaySets([stored.dataset], true);
+        services.displaySetService.getActiveDisplaySets().find(ds => ds.SeriesInstanceUID === stored.dataset.SeriesInstanceUID)?.kinSelectDocument?.(stored.dataset.SOPInstanceUID);
+        status.textContent = 'SR 저장 완료 · 검사 목록에서 원문을 다시 열 수 있습니다.';
+        return stored.dataset;
+      } catch (error) {
+        if (error.status === 410 && requestKey) srRequests.delete(requestKey);
+        if (valid(ticket)) {
+          const message = error.message || (error.status === 410 ? 'SR 준비 파일의24시간 보관 기한이 지났습니다. 다시 누르면 새 파일을 준비합니다.' : error.status === 409 ? '측정이 변경되었거나 원본 재확인이 필요합니다.' : 'SR 처리를 완료하지 못했습니다. 같은 동작으로 다시 시도하세요.');
+          status.textContent = message; services.uiNotificationService.show({ title: 'SR', message, type: 'warning' });
+        }
+        throw error;
+      } finally { srBusy = false; refreshSrButtons(); }
+    }
     for (const name of ['downloadReport', 'storeMeasurements']) {
       const original = commands?.getCommand(name, reportContext);
       if (!original) continue;
@@ -663,7 +783,7 @@ function kinCreateViewerHistory() {
           services.uiNotificationService.show({ title: '측정 확인', message, type: 'warning' });
           throw new Error(message);
         }
-        return original.commandFn(options);
+        return manualSr(name, options);
       } };
       commands.registerCommand(reportContext, name, guarded);
       reportRestores.push(() => { if (commands.getCommand(name, reportContext) === guarded) commands.registerCommand(reportContext, name, original); });
@@ -702,6 +822,7 @@ function kinCreateViewerHistory() {
     }
     function reset(message) {
       generation++; readSequence++; navigation++; controller.abort(); controller = new AbortController();
+      srRequests.clear();
       for (const e of entries.values()) removeAnnotation(e);
       entries.clear(); annotations.clear(); list.replaceChildren(); loading = false;
       status.textContent = message; render();
@@ -776,6 +897,11 @@ function kinCreateViewerHistory() {
     }
     function toolbar() {
       actions.replaceChildren(); button(actions, '새로고침', load);
+      for (const [label, command] of [['SR 다운로드', 'downloadReport'], ['SR 저장', 'storeMeasurements']]) {
+        const control = button(actions, label, () => commands.runCommand(command, { measurementData: srSelection() }, reportContext), true);
+        control.dataset.kinSr = command;
+      }
+      refreshSrButtons();
       for (const kind of ['length', 'angle', 'ellipse']) button(actions, names[kind], () => {
         const v = viewport(), group = v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId);
         if (!group || v.type !== 'stack') { status.textContent = '원본 CT 프레임을 선택하세요.'; return; }
@@ -790,6 +916,19 @@ function kinCreateViewerHistory() {
         const e = { id: crypto.randomUUID(), editing: true, draft: { schemaVersion: 1, kind: 'key', seriesUid: r.seriesUid, sopUid: r.sopUid, frame: r.frame, title: '', description: '' } };
         entries.set(e.id, e); row(e);
       }, !writable({}));
+    }
+    function srSelection() {
+      return measurementService.getMeasurements().filter(m => annotations.has(m.uid) && manual(annotations.get(m.uid).draft.kind));
+    }
+    function refreshSrButtons() {
+      const selected = srSelection();
+      const ready = !ended && !srBusy && selected.length > 0 && selected.length <= 16 && selected.every(m => {
+        const e = annotations.get(m.uid);
+        return writable(e) && !e.heldDraft && !e.head?.hidden && !e.busy && checkedMeasurement(measurementService.getMeasurement(m.uid));
+      });
+      for (const b of actions.querySelectorAll('[data-kin-sr]')) {
+        b.disabled = !ready; b.title = ready ? '' : srBusy ? 'SR 처리 결과를 기다려 주세요.' : '원본 프레임에서 직접 작성한 측정의 확인이 끝나면 사용할 수 있습니다.';
+      }
     }
       const configured = new Map();
     function configureMeasurements(group) {
@@ -1086,7 +1225,7 @@ function kinCreateViewerHistory() {
         checking = true; const ticket = generation;
         authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket)).catch(() => {}).finally(() => { checking = false; });
       }
-      refreshMeasurementViews();
+      refreshMeasurementViews(); refreshSrButtons();
     }
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
@@ -1116,7 +1255,7 @@ function kinCreateViewerHistory() {
     };
     scan();
   }
-  return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager }) { services = servicesManager.services; commands = commandsManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
+  return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
 // Only a bounded recent grid is retained; transient display-set IDs never leave this session.

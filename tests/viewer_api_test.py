@@ -23,6 +23,7 @@ class ViewerStack(LiveStack):
         # RESTRICT is deliberately bypassed only in the owned fixture teardown,
         # deleting children in dependency order. Product routes have no DELETE.
         psql('BEGIN; '+
+             f'DELETE FROM "ManualSr" WHERE "studyUid"={literal(uid)}; '+
              f'DELETE FROM "ViewerRequest" WHERE "itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={literal(uid)}); '+
              f'DELETE FROM "ViewerRevision" WHERE "itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={literal(uid)}); '+
              f'DELETE FROM "ViewerItem" WHERE "studyUid"={literal(uid)}; '+

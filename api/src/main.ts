@@ -23,6 +23,7 @@ async function bootstrap() {
   // middleware, and even display/evidence error responses must not be cached.
   app.use((req: any, res: any, next: () => void) => {
     const path = String(req.originalUrl ?? '').split('?')[0];
+    if (/^\/api\/studies\/[^/]+\/manual-sr(?:\/[^/]+\/store)?\/?$/.test(path)) res.setHeader('Cache-Control', 'no-store');
     if (/^\/api\/studies\/[^/]+\/(?:viewer-items(?:\/[^/]+\/revisions)?|viewer-jobs(?:\/[^/]+(?:\/revisions)?)?)\/?$/.test(path) ||
         /^\/api\/(?:admin\/agreements(?:\/[^/]+)?|studies\/[^/]+\/(?:basis(?:\/[^/]+\/revoke)?|transfers)|transfers(?:\/[^/]+\/revoke)?)\/?$/.test(path))
       res.setHeader('Cache-Control', 'no-store');

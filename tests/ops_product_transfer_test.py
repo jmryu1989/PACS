@@ -88,7 +88,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 22)
+        self.assertEqual(sum(len(value) for value in rows.values()), 25)
         job=rows['ViewerJob'][0]
         self.assertEqual(job['snapshot']['cells'][0]['sop'],UID+'.2')
         self.assertEqual(job['studies'],[UID]);self.assertTrue(job['hidden'])

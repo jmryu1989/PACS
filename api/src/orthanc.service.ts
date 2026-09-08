@@ -80,6 +80,55 @@ export class OrthancService {
     return { ...tags, _kinSourceDigest: info.UncompressedMD5.toLowerCase() };
   }
 
+  private async srBytes(path: string, limit: number, body?: Buffer, accept = 'application/octet-stream', signal?: AbortSignal): Promise<Buffer> {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5000);
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
+    const abort = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
+    signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+    try {
+      const res = await fetch(this.base + path, { method: body ? 'POST' : 'GET', redirect: 'error', signal: controller.signal,
+        headers: { Authorization: this.auth, Accept: accept, 'Content-Type': 'application/dicom' }, body: body ? new Uint8Array(body).buffer : undefined });
+      if (!res.ok || !res.body) throw new Error('response');
+      reader = res.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
+      while (true) { const part = await reader.read(); if (part.done) break; bytes += part.value.length; if (bytes > limit) throw new Error('limit'); chunks.push(part.value); }
+      controller.signal.throwIfAborted(); return Buffer.concat(chunks);
+    } catch { throw new ServiceUnavailableException('SR 원본 조회 또는 저장을 확인할 수 없습니다. 같은 요청으로 다시 시도하세요'); }
+    finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); await reader?.cancel().catch(() => {}); }
+  }
+
+  async manualSrPixels(sopUid: string, signal?: AbortSignal): Promise<Buffer> {
+    const found = await this.viewerJson('/tools/lookup', sopUid, signal);
+    const instances = Array.isArray(found) ? found.filter(x => x?.Type === 'Instance') : [];
+    if (instances.length !== 1 || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(instances[0].ID)) throw new BadRequestException('측정 원본을 확인할 수 없습니다');
+    // Preserve decoded stored samples. Orthanc's default float32 rescale would
+    // round fractional HU before the independent double-precision calculation.
+    return this.srBytes(`/instances/${instances[0].ID}/numpy?rescale=0`, 33558528, undefined, 'application/octet-stream', signal);
+  }
+
+  async manualSrLocation(sopUid: string, bytes: Buffer, signal?: AbortSignal): Promise<string | null> {
+    const hash = (await import('node:crypto')).createHash('md5').update(bytes).digest('hex');
+      const found = await this.viewerJson('/tools/lookup', sopUid, signal);
+      if (!Array.isArray(found)) throw new ServiceUnavailableException('SR 저장을 확인할 수 없습니다');
+      const hits = found.filter(x => x?.Type === 'Instance');
+      if (hits.length > 1) throw new BadRequestException('SR 문서 식별이 중복입니다');
+      if (!hits.length) return null;
+      if (!/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(hits[0].ID)) throw new BadRequestException('SR 문서 식별이 올바르지 않습니다');
+      const info = await this.viewerJson(`/instances/${hits[0].ID}/attachments/dicom/info`, undefined, signal);
+      if (info?.UncompressedMD5 !== hash) throw new BadRequestException('동일 SR 식별자의 원문이 다릅니다');
+      return hits[0].ID as string;
+  }
+
+  async storeManualSr(sopUid: string, bytes: Buffer): Promise<string> {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 12000);
+    const locate = () => this.manualSrLocation(sopUid, bytes, controller.signal);
+    try {
+    const existing = await locate(); if (existing) return existing;
+    const result = JSON.parse((await this.srBytes('/instances', 4096, bytes, 'application/json', controller.signal)).toString('utf8'));
+    if (!['Success', 'AlreadyStored'].includes(result.Status)) throw new ServiceUnavailableException('SR 저장 결과를 확인할 수 없습니다');
+    const stored = await locate(); if (!stored) throw new ServiceUnavailableException('SR 저장을 다시 확인하세요'); return stored;
+    } finally { clearTimeout(timer); controller.abort(); }
+  }
+
   async connectStudyIdentity(studyUid: string): Promise<{ patientId: string }> {
     const found = await this.viewerJson('/tools/lookup', studyUid);
     if (!Array.isArray(found)) throw new BadRequestException('원본 검사 식별을 확인할 수 없습니다');

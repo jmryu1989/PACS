@@ -24,11 +24,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260907040000_viewer_history/migration.sql',
               'api/prisma/migrations/20260908020000_workspace_layout/migration.sql',
               'api/prisma/migrations/20260908081500_connect_gate/migration.sql',
-              'api/prisma/migrations/20260908180000_viewer_jobs/migration.sql']
+              'api/prisma/migrations/20260908120000_manual_sr/migration.sql',
+              'api/prisma/migrations/20260908180000_viewer_jobs/migration.sql',
+              'api/prisma/migrations/20260908200000_manual_sr_recovery/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
-                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision'])
+                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -102,6 +104,14 @@ def expected_rows(uid):
         snapshot=job_snapshot,title='SYNTHETIC job',description='SYNTHETIC description',hidden=True,revision=2,createdAt=STAMP,updatedAt=STAMP)]
     rows['ViewerJobRevision']=[dict(jobId=job_id,revision=n,title='SYNTHETIC job',description='SYNTHETIC description',hidden=n==2,
         reason='' if n==1 else 'SYNTHETIC hide',actor='SYNTHETIC-reader',at=STAMP) for n in (1,2)]
+    # Exercise bytea/JSON receipts, pending intent and expired tombstones in the
+    # actual dump/restore. These bytes are a synthetic DB marker, not a DICOM.
+    rows['ManualSr']=[dict(id='00000000-0000-4000-8000-00000000030'+str(n),studyUid=uid,
+        authorSub='SYNTHETIC-sub',authorActor='SYNTHETIC-reader',requestId='00000000-0000-4000-8000-00000000040'+str(n),
+        fingerprint=str(n)*64,selection=[dict(id=item_id,revision=2)],sha256='a'*64,createdAt=STAMP,
+        dataset=None if n==3 else dict(SOPInstanceUID=uid+'.'+str(n)),dicom=None if n==3 else '\\x'+('01'*132),
+        attemptedAt=STAMP if n<3 else None,nextCheckAt=STAMP if n==1 else None,
+        storedAt=STAMP if n==2 else None,orthancId='SYNTHETIC-stored' if n==2 else None) for n in (1,2,3)]
     rows['TransferBasis'] = [dict(id=basis_id,studyUid=uid,institutionId='SYNTHETIC-hospital',kind='PATIENT_CONSENT',
         reference='SYNTHETIC consent reference',obtainedAt=STAMP,expiresAt=None,recordedBy='SYNTHETIC-admin',recordedAt=STAMP,
         revokedBy=None,revokedAt=None,revokeReason=None)]
@@ -146,7 +156,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
-                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision'):
+                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.

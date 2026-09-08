@@ -18,6 +18,17 @@
 
 ## 기능별 시험 카탈로그
 
+직접 작성 측정 SR: `python tests/e2e/test_manual_sr.py` (7개).
+실제 길이·각도·타원 ROI의 Part10 다운로드와 서버의 원본 독립 계산을 pydicom/NumPy로 대조한다.
+다운로드만으로 Orthanc에 쓰지 않으며 별도 저장은 동일 bytes/SOP를 사용한다. 새 로그인 재열람,
+기관/작성자/P/revision/숨김·범용 STOW 거절, 감사 실패 후 측정/접근 변경과 백그라운드 영수증 복구,
+네트워크 저장 중 검사 잠금 해제, 임시 파일 24시간 만료/한도 회복·UUID tombstone,
+원본 조회 전체 10초 제한/실제 취소, 열린 시리즈의 문서 선택·늦은 load/이탈을 검사한다.
+전송 지연은 시험 프로세스 또는 브라우저에만 주입한다. 수신 SR 재계산/편집은 허용하지 않는다.
+DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`로
+7개 migration·21개 표·25개 합성 행의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
+관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
+
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.
 직접 그린 측정과 분리하고 SR hydration을 거절해 로컬 계산·저장 이력에 섞이지 않게 한다.
@@ -37,8 +48,8 @@
 추적 측정 패널/수치 내보내기: `python tests/e2e/test_measurement_panel.py` (4개).
 실제 OHIF 추적 행과 CSV 다운로드에서 기준 불일치·낡은 기하·지원 밖 보정은
 재확인 필요로 표시하고 수치를 제외하며, 재계산 후 현재 수치를 회복한다.
-이미 잡아 둔 CSV 함수/SR 선택도 호출 시점에 재검사한다. 내장 SR 생성기를
-실행해 길이·각도·ROI 면적을 독립 계산값과 대조하되 시험용 저장 경계에서 받아 실제 SR을 추가하지 않는다.
+이미 잡아 둔 CSV 함수/SR 선택도 호출 시점에 재검사한다. 실제 서버 SR 준비/다운로드의
+길이·각도·ROI 면적을 독립 계산값과 대조하며 다운로드만으로 실제 Orthanc SR을 추가하지 않는다.
 미검증 SR 생성/저장 거절, 세션 종료 후 과거 함수 거절과 모드 종료 시 관문 복원을 검사한다.
 외부 SR 원문 표시와 실제 반출/저장 지원 전체를 이 시험으로 완료 처리하지 않는다.
 
