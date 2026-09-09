@@ -1695,14 +1695,38 @@
       return d >= from && d < to;
     }
 
-    function testCol(s, c) {
-      const v = fval[c.k] ?? "";
-      if (!v) return true;
-      if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(v.toUpperCase());
-      return String(s[c.k]) === v;
+    function testCol(s, c, values = fval) {
+      const v = values?.[c.k] ?? "";
+      if (v === "") return true;
+      const wanted = String(v);
+      if (c.f === "text") return String(s[c.k] ?? "").toUpperCase().includes(wanted.toUpperCase());
+      return String(s[c.k]) === wanted;
+    }
+
+    function savedFilterDays(value) {
+      if (value === null || value === "" || typeof value === "boolean") return -1;
+      const days = Number(value);
+      return Number.isFinite(days) ? days : -1;
+    }
+
+    /** 저장된 필터도 현재 목록과 같은 규칙으로 센다. 화면 상태를 바꾸지 않으므로
+     * 다른 저장 필터의 건수를 보려고 지금 하던 검색이 흔들리지 않는다. */
+    function filteredFor(filter) {
+      const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
+      const cols = COLS[filterMode].filter(c => c.f);
+      const kw = String(filter?.quick ?? "").trim().toUpperCase();
+      const days = savedFilterDays(filter?.days);
+      const values = filter?.cols && typeof filter.cols === "object" ? filter.cols : {};
+      return studies.filter(s => {
+        if (kw && !String(s.name ?? "").toUpperCase().includes(kw)
+            && !String(s.id ?? "").toUpperCase().includes(kw)) return false;
+        if (!withinDays(s.date, days)) return false;
+        return cols.every(c => testCol(s, c, values));
+      });
     }
 
     function filtered() {
+      // 현재 목록은 기존 숫자 quickDays 경로를 그대로 둔다. 저장값 보정은 칩 건수에만 적용한다.
       const cols = COLS[mode].filter(c => c.f);
       return studies.filter(s => {
         const kw = $("#quick").value.trim().toUpperCase();
@@ -1752,6 +1776,7 @@
         $("#countlist").textContent =
           `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
       }
+      renderChips();
     }
 
     // ── 모드 전환 ──
@@ -3860,8 +3885,10 @@
     // 현재 필터 조합에 이름을 붙여 **계정에** 저장한다. 칩을 누르면 그대로 돌아온다.
     // 정렬(sortKey/sortDir)도 함께 저장한다 — 필터가 같아도 정렬이 다르면 다른 화면이다.
     // (HPACS도 2025년에야 "정렬을 적용하여 사용자 필터로 저장"을 넣었다)
+    const validUserFilters = value => Array.isArray(value)
+      ? value.filter(uf => uf && typeof uf === "object" && typeof uf.name === "string") : [];
     let userFilters = [];
-    try { userFilters = JSON.parse(localStorage.getItem("kin-filters") ?? "[]"); } catch (e) {}
+    try { userFilters = validUserFilters(JSON.parse(localStorage.getItem("kin-filters") ?? "[]")); } catch (e) {}
     const saveFiltersLocal = () => { try { localStorage.setItem("kin-filters", JSON.stringify(userFilters)); } catch (e) {} };
 
     const snapshotFilter = () => ({
@@ -3870,7 +3897,7 @@
     });
     function applyFilter(f) {
       $("#quick").value = f.quick ?? "";
-      quickDays = f.days ?? -1;
+      quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
       Object.keys(fval).forEach(k => delete fval[k]);
       Object.assign(fval, f.cols ?? {});
@@ -3890,8 +3917,23 @@
       renderHeads(); render();
     }
     function renderChips() {
-      $("#chips").innerHTML = userFilters.map((uf, i) =>
-        `<button class="chip" data-i="${i}" title="클릭: 적용 / 우클릭: 메뉴">${uf.isDefault ? "⚑ " : ""}${esc(uf.name)}</button>`).join("");
+      const holder = $("#chips");
+      if (!holder) return;
+      const rows = userFilters.map((uf, i) => {
+        const count = filteredFor(uf).length;
+        const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}`;
+        return { i, uf, count, label };
+      });
+      // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
+      // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
+      const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count]));
+      if (holder.dataset.renderSignature === signature) return;
+      holder.innerHTML = rows.map(({ i, uf, count, label }) =>
+        `<button class="chip" data-i="${i}" aria-label="${esc(label)}" ` +
+        `title="${esc(label)} · 클릭: 적용 / 우클릭: 메뉴">` +
+        `${uf.isDefault ? "⚑ " : ""}${esc(uf.name)} <span aria-hidden="true">(${count})</span></button>`
+      ).join("");
+      holder.dataset.renderSignature = signature;
     }
 
     /**
@@ -3910,7 +3952,7 @@
         toast("환경설정 응답이 올바르지 않아 이전 값을 유지합니다", "err");
         return;
       }
-      userFilters = p.filters; templates = p.templates;
+      userFilters = validUserFilters(p.filters); templates = p.templates;
       renderChips(); renderTemplates();
     }
 
@@ -3948,15 +3990,15 @@
       showCtx(e, [
         { label: "적용", act: () => applyFilter(f) },
         { label: f.isDefault ? "기본 필터 해제" : "기본 필터로 지정", act: async () => {
+            const on = !f.isDefault;
             if (serverMode) {
-              try { await api("PATCH", `/filters/${f.id}/default`, { on: !f.isDefault }); await reloadPrefs(); }
+              try { await api("PATCH", `/filters/${f.id}/default`, { on }); await reloadPrefs(); }
               catch (err) { toast("실패: " + err.message, "err"); return; }
             } else {
-              const on = !f.isDefault;
               userFilters.forEach(x => x.isDefault = false);
               f.isDefault = on; saveFiltersLocal(); renderChips();
             }
-            toast(f.isDefault ? "기본 필터에서 해제했습니다" : `"${f.name}" 을 기본 필터로 지정했습니다`);
+            toast(on ? `"${f.name}" 을 기본 필터로 지정했습니다` : "기본 필터에서 해제했습니다");
           } },
         { sep: 1 },
         { label: "삭제", act: async () => {
