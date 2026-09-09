@@ -335,7 +335,7 @@ window.KinReadingWorkspace = function (app) {
         }
         if (location.href === observedHref && doc.querySelector('.cornerstone-canvas') &&
             typeof w.kinViewerHistoryWorkspaceState === 'function' && typeof w.kinViewerJobWorkspaceState === 'function') {
-          window.KinViewerWorkspaceDock?.(w);
+          window.KinViewerWorkspaceDock?.(w,{owner:app.noteOwner,allowed:()=>!ended&&app.allowed()});
           // Keyboard events do not bubble out of an iframe. Bind each real
           // viewer document once, including documents replaced by job restore.
           if (!boundDocuments.has(doc)) {
