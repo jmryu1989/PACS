@@ -2,8 +2,8 @@
 window.KinReadingAppearanceAccount = function ({ owner, host, read, apply, generation, normalize, allowed, endpoint, sessionEndpoint }) {
   host.textContent='';
   const make = (tag, text, id) => { const el = document.createElement(tag); el.textContent = text; el.id = id; host.append(el); return el; };
-  const load = make('button', '글자 설정 불러오기', 'appearance-account-load');
-  const save = make('button', '글자 설정 계정 저장', 'appearance-account-save');
+  const load = make('button', '글자 크기 불러오기', 'appearance-account-load');
+  const save = make('button', '글자 크기 계정 저장', 'appearance-account-save');
   for (const b of [load, save]) { b.type = 'button'; b.className = 'chip'; }
   const status = make('span', '', 'appearance-account-status'); status.setAttribute('role', 'status');
   let revision = null, busy = false, ended = false, request, channel;
