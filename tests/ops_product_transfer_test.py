@@ -197,6 +197,13 @@ class Pure(unittest.TestCase):
              patch.object(transfer, 'execute') as execute:
             transfer.create_product('owned', 'kin', UID)
             sql = [call.args[2] for call in execute.call_args_list]
+            # Every expected nonempty table must actually be seeded. A receipt
+            # assembled from expectations alone missed new tables in hosted CI.
+            for table, rows in transfer.expected_rows(UID).items():
+                inserted=[text for text in sql if text.startswith('INSERT INTO "'+table+'" ')]
+                self.assertEqual(len(inserted),len(rows),table)
+                for statement,row in zip(inserted,rows):
+                    self.assertIn(transfer.sql_literal(json.dumps(row)),statement)
             state = next(i for i, text in enumerate(sql) if 'INSERT INTO "StudyState"' in text)
             report = next(i for i, text in enumerate(sql) if 'INSERT INTO "Report" ' in text)
             self.assertLess(state, report)
