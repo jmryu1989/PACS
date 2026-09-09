@@ -10,6 +10,8 @@
 
 ## 현재 실행 시점
 
+`python tests/e2e/test_reading_flow.py`는 REQ-D-WORKSPACE-FLOW → RISK-D-WORKSPACE-TARGET → TEST-D-WORKSPACE-FLOW다. 실제 목록 정렬과 이전/다음 검사 일치, 목록/영상/과거 판독/편집문 키보드 왕복, 입력·모달 중 이동 억제, 목록 끝/빈 목록, 미저장 판독·영상 보존과 복귀 후 화소를 검사한다. `KIN_EVIDENCE_DIR`로 이번 화면 기록 위치를 지정한다. 물리 키보드/OS·다중 모니터 전체 수용 검사는 아니다.
+
 `python tests/e2e/test_filter_organization.py`는 TEST-D01-FILTER-ORGANIZE의 개인 저장 검색 경로 계층·설명 찾기·표시 순서·분류 이동과 재로그인 복원, 계정 분리·과거 클라이언트 저장의 메타데이터 유지·잘못된 값 거부를 확인한다. 빈 폴더와 폴더 일괄 관리·기관 공유 폴더·고급 조건은 잔여다. 관련 관리 화면 회귀는 `test_saved_filter_manager.py`이며 `KIN_EVIDENCE_DIR`로 이번 실행의 캡처 위치를 지정한다.
 
 `python tests/e2e/test_saved_filter_manager.py`는 개인 저장 검색 관리의 생성·조건/정렬 편집·기본 지정/해제·새 로그인 복원·명시적 적용·삭제와 다른 계정의 목록/변경 거부를 확인한다. 실패 후 입력 보존, 요청 중 닫기/편집 차단, 계정 변경 시 쓰기 거부, Esc 취소/포커스 복귀, 900×600·600×900 접근을 검사한다. 기존 `test_saved_filter_counts.py`는 직접 회귀다. 폴더 트리·설명/순서·고급 조건 연산·대용량 성능은 별도 잔여다.

@@ -1739,11 +1739,17 @@
       });
     }
 
-    function render() {
-      const cols = COLS[mode];
-      let list = filtered();
+    // Navigation and its position indicator must use the same order the reader sees.
+    function orderedStudies() {
+      const list = filtered();
       if (sortDir !== 0 && sortKey)
         list.sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+      return list;
+    }
+
+    function render() {
+      const cols = COLS[mode];
+      const list = orderedStudies();
 
       $("#rows").innerHTML = list.map((s, i) => `
         <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
@@ -3380,7 +3386,7 @@
      * 목록 밖이면 방향에 맞게 끝에서 시작한다: Next는 첫 번째, Prev는 마지막.
      */
     function move(step) {
-      const list = filtered();
+      const list = orderedStudies();
       if (!list.length) return;
       const i = list.findIndex(s => s.uid === selectedUid);
       if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid); return; }
@@ -3732,7 +3738,7 @@
 
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
-      prior: autoPrior, move, select, layout: () => applyLayout(), popup: openOhifWindow,
+      prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
       allowed: () => !!sess && serverMode && !demoMode && !offline,
       notice: message => toast(message, 'err'),
     });

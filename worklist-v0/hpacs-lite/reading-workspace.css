@@ -1,7 +1,13 @@
-#reading-bar[hidden], #reading-viewer[hidden], #reading-report-target[hidden], #reading-recovery[hidden], #reading-frame[hidden] { display: none !important; }
+#reading-bar[hidden], #reading-viewer[hidden], #reading-report-target[hidden], #reading-recovery[hidden] { display: none !important; }
+/* Keep the retained viewer's geometry while another report is selected.
+   Zero-sized hidden viewports can corrupt their camera on an automatic resize. */
+#reading-frame[hidden] { display: block !important; visibility: hidden; pointer-events: none; }
 #reading-bar { padding: 8px 12px; background: #15243b; border-bottom: 1px solid #45658b; flex: none; }
 .reading-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .reading-actions .chip { padding: 6px 10px; font-size: 12px; }
+#reading-position { align-self: center; padding: 0 6px; color: #bbd4f7; font-size: 12px; }
+#reading-shortcuts { color: #9fb9dc; font-size: 11px; padding-top: 5px; }
+body.reading .prior-report-pane:focus-visible, body.reading #reading-frame:focus-visible { outline: 2px solid #93c5fd; outline-offset: -2px; }
 #reading-target, #reading-report-target { padding: 7px 0 0; color: #e5efff; overflow-wrap: anywhere; line-height: 1.5; }
 #reading-report-target { padding: 10px; background: #172b47; font-weight: 600; border-bottom: 1px solid #45658b; }
 #reading-viewer { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #060d18; }

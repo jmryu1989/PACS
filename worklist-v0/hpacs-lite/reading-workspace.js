@@ -18,10 +18,18 @@ window.KinReadingWorkspace = function (app) {
     document.body.classList.toggle('reading-list-open');
     list.setAttribute('aria-expanded', String(document.body.classList.contains('reading-list-open')));
     if (document.body.classList.contains('reading-list-open')) $('#quick').focus();
+    else list.focus();
   });
   list.setAttribute('aria-expanded', 'false');
-  button('이전 검사', () => app.move(-1)); button('다음 검사', () => app.move(1));
-  button('판독문 작성', () => $('#findings').focus());
+  const previous = button('이전 검사', () => app.move(-1));
+  const next = button('다음 검사', () => app.move(1));
+  const position = node('span', '', nav); position.id = 'reading-position'; position.setAttribute('role', 'status');
+  const imageFocus = button('영상으로', () => focusPane('image'));
+  const priorFocus = button('과거 판독문', () => focusPane('prior'));
+  const reportFocus = button('판독문 작성', () => focusPane('report'));
+  [[list, '1'], [imageFocus, '2'], [priorFocus, '3'], [reportFocus, '4'], [previous, 'ArrowLeft'], [next, 'ArrowRight']].forEach(([b, key]) => {
+    b.setAttribute('aria-keyshortcuts', 'Control+Alt+' + key);
+  });
   const context = button('검사 정보·상용구', () => {
     document.body.classList.toggle('reading-context-open');
     context.setAttribute('aria-expanded', String(document.body.classList.contains('reading-context-open')));
@@ -30,6 +38,8 @@ window.KinReadingWorkspace = function (app) {
   const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series); });
   button('목록 화면으로', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
+  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
+  hints.id = 'reading-shortcuts';
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
   host.setAttribute('aria-label', '영상 작업공간'); $('.split').prepend(host);
   const info = node('div', '', host); info.id = 'reading-images';
@@ -43,23 +53,95 @@ window.KinReadingWorkspace = function (app) {
   const reportTarget = node('div'); reportTarget.id = 'reading-report-target'; reportTarget.hidden = true;
   $('.report-p').prepend(reportTarget);
   let active = false, ended = false, frame = null, shown = null, pending = null, epoch = 0, timer = null, deadline = 0, loaded = false, failed = false, lastSelection;
+  const boundDocuments = new WeakSet();
+  const queueObserver = new MutationObserver(navigation);
+  queueObserver.observe($('#rows'), { childList: true });
+  function navigation() {
+    const queue = app.queue(), i = queue.findIndex(s => s.uid === app.current());
+    const unavailable = ended || !app.allowed() || !queue.length;
+    previous.disabled = unavailable || i === 0;
+    next.disabled = unavailable || i === queue.length - 1;
+    position.textContent = !queue.length ? '현재 목록 0건' : i < 0 ? '현재 검사: 목록 밖 · ' + queue.length + '건' : '현재 목록 ' + (i + 1) + ' / ' + queue.length;
+  }
+  function closeList() {
+    document.body.classList.remove('reading-list-open'); list.setAttribute('aria-expanded', 'false');
+  }
+  function focusPane(which) {
+    if (!active || ended || !app.allowed()) return;
+    if (which === 'image') {
+      if (!frame || !sameTarget() || !loaded || frame.inert) { status.textContent = '영상 연결을 확인한 뒤 이동하세요.'; return; }
+      closeList(); frame.focus(); frame.contentWindow.focus();
+    } else {
+      const pane = $(which === 'prior' ? '.prior-report-pane' : '#findings');
+      if (!pane || !pane.getClientRects().length) return;
+      closeList();
+      if (which === 'prior') pane.tabIndex = -1;
+      pane.focus(); pane.scrollIntoView({ block: 'nearest' });
+    }
+  }
+  function modalOpen(doc) {
+    return [...doc.querySelectorAll('dialog[open],.modal.show,[role="dialog"][aria-modal="true"]')].some(el => el.getClientRects().length);
+  }
+  function keyboard(e, doc = document) {
+    if (!active || ended || !app.allowed() || e.defaultPrevented || e.repeat || e.isComposing || e.getModifierState('AltGraph') || modalOpen(document) || modalOpen(doc)) return;
+    if (doc !== document && (!sameTarget() || !loaded || frame?.hidden || frame?.inert)) return;
+    if (e.key === 'Escape' && doc === document && document.body.classList.contains('reading-list-open')) {
+      e.preventDefault(); closeList(); list.focus(); return;
+    }
+    if (!e.ctrlKey || !e.altKey || e.shiftKey || e.metaKey) return;
+    const panes = { Digit2: 'image', Digit3: 'prior', Digit4: 'report' };
+    if (e.code === 'Digit1') {
+      e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
+    } else if (panes[e.code]) {
+      e.preventDefault(); focusPane(panes[e.code]);
+    } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      // Do not turn editor cursor/IME gestures into a change of patient context.
+      if (e.target.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
+      e.preventDefault(); navigation();
+      const b = e.code === 'ArrowLeft' ? previous : next;
+      if (!b.disabled) { b.focus(); b.click(); }
+    }
+  }
+  const parentKeyboard = e => keyboard(e);
+  document.addEventListener('keydown', parentKeyboard);
   function label(uid) {
     const s = app.study(uid);
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
   }
   const sameTarget = () => shown?.reportUid === app.current();
+  function redrawRetainedViewer() {
+    const retained = frame;
+    // A hidden iframe can keep its study/camera but lose its drawable canvas.
+    // Ask the existing viewer to redraw after layout; never reload its document.
+    requestAnimationFrame(() => {
+      if (!active || ended || !loaded || retained !== frame || !sameTarget() || frame.hidden) return;
+      try {
+        const w = frame.contentWindow;
+        w.dispatchEvent(new w.Event('resize'));
+        w.cornerstone?.getRenderingEngines?.().filter(engine => engine.id !== '_thumbnails')
+          .forEach(engine => engine.resize(true, true));
+      } catch (_) { /* Its loading/error state is handled by the document check. */ }
+    });
+  }
   function layout() {
     document.body.classList.toggle('reading', active); bar.hidden = host.hidden = reportTarget.hidden = !active;
-    if (!active) document.body.classList.remove('reading-list-open', 'reading-context-open');
+    if (!active) {
+      document.body.classList.remove('reading-list-open', 'reading-context-open');
+      list.setAttribute('aria-expanded', 'false'); context.setAttribute('aria-expanded', 'false');
+    }
     app.layout();
     if (frame) frame.hidden = !sameTarget();
+    if (frame && !frame.hidden) redrawRetainedViewer();
     separate.disabled = !frame || !sameTarget() || !loaded;
+    imageFocus.disabled = separate.disabled;
   }
   function identify() {
     const uid = app.current(); target.textContent = uid ? '판독 대상 · ' + label(uid) : '판독 대상을 선택하세요';
     reportTarget.textContent = target.textContent;
     info.textContent = shown && sameTarget() ? '영상 열람 · ' + label(shown.uid) + (shown.prior ? '\n비교 영상 · ' + label(shown.prior) : '') : '';
     separate.disabled = !frame || !sameTarget() || !loaded;
+    imageFocus.disabled = separate.disabled;
+    navigation();
   }
   function viewerState() {
     if (!frame) return { busy: false, dirty: false };
@@ -129,6 +211,11 @@ window.KinReadingWorkspace = function (app) {
         if (location.href === observedHref && doc.querySelector('.cornerstone-canvas') &&
             typeof w.kinViewerHistoryWorkspaceState === 'function' && typeof w.kinViewerJobWorkspaceState === 'function') {
           window.KinViewerWorkspaceDock?.(w);
+          // Keyboard events do not bubble out of an iframe. Bind each real
+          // viewer document once, including documents replaced by job restore.
+          if (!boundDocuments.has(doc)) {
+            doc.addEventListener('keydown', e => keyboard(e, doc)); boundDocuments.add(doc);
+          }
           if (!loaded) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }
@@ -161,6 +248,7 @@ window.KinReadingWorkspace = function (app) {
     document.body.classList.remove('reading-list-open'); list.setAttribute('aria-expanded', 'false');
     if (shown?.reportUid === uid && frame) {
       frame.hidden = false;
+      redrawRetainedViewer();
       if (!failed) { pending = null; recovery.hidden = true; status.textContent = loaded ? '기존 영상 작업으로 돌아왔습니다.' : '영상 작업공간을 불러오는 중…'; }
       identify(); return;
     }
@@ -169,7 +257,7 @@ window.KinReadingWorkspace = function (app) {
   }
   // Session invalidation must hide the embedded document even if its own request
   // has not yet noticed the expired account. Never reconnect it from a late load.
-  function end() { ended = true; epoch++; clearInterval(timer); timer = null; frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
+  function end() { ended = true; epoch++; clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
   let channel;
   try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
