@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
+import { ForbiddenException, BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { Public } from './auth.guard';
 
@@ -10,6 +10,13 @@ import { Public } from './auth.guard';
  * 로그를 보는 사람은 서버가 고장난 줄 알고 엉뚱한 데를 파게 된다.
  * 경계에서 걸러야 안쪽이 깨끗하다.
  */
+function noteCaller(req: any): Caller {
+  for (const [header, actual] of [['x-kin-subject', req.sub], ['x-kin-institution', req.institution]]) {
+    if (req.headers[header] !== undefined && req.headers[header] !== actual) throw new ForbiddenException('메모 계정이 변경되었습니다');
+  }
+  return caller(req);
+}
+
 function numId(raw: string): number {
   const n = Number(raw);
   if (!Number.isInteger(n) || n <= 0)
@@ -171,17 +178,17 @@ export class PacsController {
 
   @Get('studies/:uid/tech-note')
   techNote(@Param('uid') uid: string, @Req() req: any) {
-    return this.svc.techNote(uid, caller(req));
+    return this.svc.techNote(uid, noteCaller(req));
   }
 
   @Post('studies/:uid/tech-note')
   saveTechNote(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
-    return this.svc.saveTechNote(uid, body, caller(req));
+    return this.svc.saveTechNote(uid, body, noteCaller(req));
   }
 
   @Get('studies/:uid/tech-note/history')
   techNoteHistory(@Param('uid') uid: string, @Query('before') before: string, @Req() req: any) {
-    return this.svc.techNote(uid, caller(req), before ?? '2147483647');
+    return this.svc.techNote(uid, noteCaller(req), before ?? '2147483647');
   }
 
   /** 초안 저장 — 내 것에만 쓴다. 판(version)도 안 올리고 확정본도 안 건드린다 */

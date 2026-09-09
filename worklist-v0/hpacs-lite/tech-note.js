@@ -96,11 +96,17 @@ window.KinTechNote = function (app) {
   $('close').onclick = () => close(); d.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function end() { ended = true; close(true); }
   let channel; try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
-  window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
-  window.addEventListener('pagehide', () => { end(); channel?.close(); });
-  window.addEventListener('pageshow', e => { if (e.persisted) location.reload(); });
-  window.addEventListener('beforeunload', e => { if (d.open && (busy || dirty())) { e.preventDefault(); e.returnValue = ''; } });
-  return { open(study) {
+  const storage = e => { if (e.key === 'kin-session-ended') end(); };
+  const pagehide = () => { end(); channel?.close(); };
+  const pageshow = e => { if (e.persisted) location.reload(); };
+  const beforeunload = e => { if (d.open && (busy || dirty())) { e.preventDefault(); e.returnValue = ''; } };
+  window.addEventListener('storage', storage); window.addEventListener('pagehide', pagehide);
+  window.addEventListener('pageshow', pageshow); window.addEventListener('beforeunload', beforeunload);
+  return { dispose() {
+    end(); channel?.close(); d.remove();
+    window.removeEventListener('storage', storage); window.removeEventListener('pagehide', pagehide);
+    window.removeEventListener('pageshow', pageshow); window.removeEventListener('beforeunload', beforeunload);
+  }, open(study) {
     if (ended || d.open || !study || !app.allowed()) return;
     uid = study.uid; opener = document.activeElement; cursor = null; $('more').hidden = true;
     openerDocument = innerOpener = null;
