@@ -121,6 +121,8 @@ class WorklistColumnsE2E(base.WorklistE2E):
         expect(page.locator('#heads [data-key="desc"]')).to_have_count(1)
         page.once('dialog',lambda d:d.accept());page.locator('#wc-reload').click()
         expect(self.column(page,'age').locator('input')).not_to_be_checked()
+        page.locator('#wc-close').click();self.open_columns(page)
+        expect(self.column(page,'age').locator('input')).not_to_be_checked()
         page.evaluate("() => { window.originalColumnSet=Storage.prototype.setItem; Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-worklist-columns:'))throw new DOMException('full','QuotaExceededError');return window.originalColumnSet.call(this,k,v)}; }")
         self.column(page,'desc').locator('input').uncheck();page.locator('#wc-save').click()
         expect(page.locator('#wc-status')).to_contain_text('저장하지 못했습니다')

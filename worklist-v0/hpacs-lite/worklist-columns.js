@@ -51,7 +51,7 @@
         return { state: state || defaults(columns), raw, message: state ? '저장된 열 설정을 불러왔습니다.' : '저장 형식이 잘못되어 기본 열을 표시합니다. 기존 저장값은 아직 변경하지 않았습니다.' };
       } catch (_) { return { state: defaults(columns), raw, message: '저장 형식이 잘못되어 기본 열을 표시합니다. 기본값을 적용해 복구할 수 있습니다.' }; }
     }
-    let saved = read(), state = saved.state, lastRaw = saved.raw, draft, baseline, openedMode, opener, ended = false;
+    let saved = read(), state = saved.state, lastRaw = saved.raw, stateRaw = saved.raw, draft, baseline, openedMode, opener, ended = false;
     const dialog = document.createElement('dialog'); dialog.id = 'column-manager';
     dialog.setAttribute('aria-labelledby', 'wc-title');
     dialog.innerHTML = `<header><h2 id="wc-title">목록 열 설정</h2><button type="button" id="wc-close">닫기</button></header>
@@ -105,7 +105,7 @@
           const raw = JSON.stringify(next); storage.setItem(owner, raw); lastRaw = raw;
         } catch (_) { status('저장하지 못했습니다. 편집 내용은 유지했습니다. 이번 창에만 적용할 수 있습니다.'); return; }
       }
-      state = next; baseline = JSON.stringify(draft); changed(); dialog.close();
+      state = next; stateRaw = lastRaw; baseline = JSON.stringify(draft); changed(); dialog.close();
       document.querySelector('#columnsettings').title = persist ? '열 설정 저장됨 · 이 브라우저·계정별' : '열 설정 · 이번 창에만 적용됨';
     }
     $('save').addEventListener('click', () => apply(true));
@@ -128,8 +128,9 @@
     document.querySelector('#columnsettings').addEventListener('click', () => {
       if (ended || dialog.open) return;
       opener = document.activeElement; openedMode = mode(); saved = read();
-      // Do not overwrite a newer tab's preferences with this tab's stale state.
-      draft = copy(saved.raw !== lastRaw ? saved.state : state); lastRaw = saved.raw;
+      // Merely reading another tab's settings is not applying them. Keep the
+      // active-state baseline separate so cancel/reopen cannot restore stale data.
+      draft = copy(saved.raw !== stateRaw ? saved.state : state); lastRaw = saved.raw;
       baseline = JSON.stringify(draft); $('title').textContent = '목록 열 설정 · ' + (openedMode === 'Radiology' ? '판독' : '촬영');
       $('save').disabled = !owner; renderEditor(); status(saved.message); dialog.showModal(); $('close').focus();
     });
