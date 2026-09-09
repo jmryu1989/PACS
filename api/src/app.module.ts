@@ -19,6 +19,8 @@ import { ConnectService } from './connect.service';
 import { ManualSrController } from './manual-sr.controller';
 import { ManualSrService } from './manual-sr.service';
 import { ReportPreviewController } from './report-preview.controller';
+import { FavoriteController } from './favorite.controller';
+import { FavoriteService } from './favorite.service';
 
 function adminNoStore(_req: any, res: any, next: () => void) {
   res.setHeader('Cache-Control', 'no-store');
@@ -26,15 +28,15 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [PacsController, AuthController, AdminController, ViewerController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController],
+  controllers: [PacsController, AuthController, AdminController, ViewerController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController],
   providers: [
-    PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, ViewerJobService, ConnectService, ManualSrService,
+    PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, ViewerJobService, ConnectService, ManualSrService, FavoriteService,
     { provide: APP_GUARD, useClass: AuthGuard },
   ],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
-    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController);
+    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController);
   }
 }

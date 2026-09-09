@@ -442,6 +442,19 @@ model WorkspaceLayout {
   @@id([institution, subject])
 }
 
+/// Personal links only. Removing this record never removes a study or original.
+model FavoriteWorkspace {
+  institution String @db.VarChar(256)
+  subject String @db.VarChar(256)
+  revision Int
+  value String
+  lastRequest String? @db.Uuid
+  lastFingerprint String?
+  updatedAt DateTime @updatedAt
+
+  @@id([institution, subject])
+}
+
 /// Image state is immutable. Metadata revisions never rewrite a saved view.
 model ViewerJob {
   id String @id @db.Uuid

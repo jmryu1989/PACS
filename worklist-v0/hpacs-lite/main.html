@@ -565,6 +565,7 @@
     <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
     <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
     <button class="chip" id="savefilter">Save Filter</button>
+    <button class="chip" id="favorite-open" type="button">개인 즐겨찾기</button>
     <button class="chip" id="managefilters">검색 조건·저장 관리</button>
     <button class="chip" id="columnsettings">열 설정</button>
     <button class="chip" id="clearfilter">Clear</button>
@@ -899,6 +900,8 @@
   <script src="worklist-columns.js"></script>
   <script src="study-pages.js"></script>
   <script src="saved-filter-manager.js"></script>
+  <link rel="stylesheet" href="favorites.css">
+  <script src="favorites.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -3842,6 +3845,12 @@
       toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
 
+    const favorites = KinFavorites({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
+      identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
+      current: () => selectedUid, study: uid => studies.find(s => s.uid===uid), select,
+      notice: message => toast(message,'err'),
+    });
+    $('#favorite-open').onclick = () => favorites.open();
     const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
       changed: (uid, note) => { updateNoteSummary(uid, { version: note?.version ?? 0, present: !!note?.text }); readingWorkspace.refreshNote(); },
       restoreFocus: uid => $('#rows').querySelector(`[data-tech-note="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true }),
