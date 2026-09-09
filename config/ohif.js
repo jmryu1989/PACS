@@ -12,52 +12,13 @@
 
 const KIN_VIEWER_DEFAULT_TITLE = '판독 뷰어 — KOREA IMAGING NETWORK';
 
-/** DICOM JSON의 첫 값을 탭에 넣을 수 있는 평문으로 정규화한다. */
-function kinDicomValue(study, tag) {
-  const value = study?.[tag]?.Value?.[0];
-  if (value && typeof value === 'object') {
-    return String(value.Alphabetic ?? value.Ideographic ?? value.Phonetic ?? '');
-  }
-  return value == null ? '' : String(value);
-}
-
-/**
- * 장비마다 BodyPartExamined를 비우거나 영어 StudyDescription만 보내므로 둘을 함께 본다.
- * 탭에는 판독 맥락만 남기고 조영제·추적검사 같은 프로토콜 세부사항은 넣지 않는다.
- */
-function kinStudyBodyPart(study, modality) {
-  const raw = `${kinDicomValue(study, '00180015')} ${kinDicomValue(study, '00081030')}`.trim();
-  const names = [
-    [/\bbrain\b/i, '뇌'], [/\bhead\b/i, '머리'], [/\bchest\b|\bthorax\b/i, '흉부'],
-    [/\babdomen\b|\babdominal\b/i, '복부'], [/\bpelvis\b|\bpelvic\b/i, '골반'],
-    [/\bspine\b/i, '척추'], [/\bknee\b/i, '무릎'], [/\bshoulder\b/i, '어깨'],
-    [/\bneck\b/i, '경부'], [/\bbreast\b/i, '유방'], [/\bheart\b|\bcardiac\b/i, '심장'],
-  ];
-  const localized = names.find(([pattern]) => pattern.test(raw));
-  if (localized) return localized[1];
-
-  const modalityPattern = modality ? new RegExp(`\\b${modality.replace(/[^A-Z0-9]/gi, '')}\\b`, 'ig') : null;
-  return raw
-    .replace(modalityPattern ?? /$^/, '')
-    .replace(/\(synthetic\)|\bf\/?u\b|\bfollow[ -]?up\b|\bscreening\b|\bwith(?:out)? contrast\b/ig, '')
-    .replace(/\s+/g, ' ')
-    .trim() || '검사';
-}
-
-/**
- * whiteLabeling 컴포넌트의 mount/unmount를 검사 화면의 수명주기로 쓴다.
- * 별도 확장이나 뷰어 포크 없이도 로딩 완료 뒤 제목을 올리고, 화면 이탈 시 즉시 지운다.
- */
+/** Product branding only; loaded-image identity owns clinical window titles. */
 function KinViewerBrand({ React }) {
   React.useEffect(() => {
-    const abort = new AbortController();
-    let sessionEnded = false;
     let sessionChannel;
 
     const resetTitle = () => {
-      sessionEnded = true;
       document.title = KIN_VIEWER_DEFAULT_TITLE;
-      abort.abort();
     };
 
     // 공용 판독 PC에서 로그아웃한 워크리스트가 다른 뷰어 탭의 환자명도 함께 지운다.
@@ -103,28 +64,9 @@ function KinViewerBrand({ React }) {
     observer.observe(document.body, { childList: true, subtree: true });
 
     document.title = KIN_VIEWER_DEFAULT_TITLE;
-    const studyUid = new URLSearchParams(location.search).get('StudyInstanceUIDs')?.split(',')[0]?.trim();
-    if (studyUid) {
-      const query = new URLSearchParams({
-        StudyInstanceUID: studyUid,
-        includefield: '00081030,00180015,00080061,00100010',
-      });
-      fetch(`${location.origin}/dicom-web/studies?${query}`, { signal: abort.signal })
-        .then(response => response.ok ? response.json() : Promise.reject(new Error(`QIDO ${response.status}`)))
-        .then(studies => {
-          if (sessionEnded || !studies?.[0]) return;
-          const study = studies[0];
-          const patientName = kinDicomValue(study, '00100010').replace(/\^/g, ' ').replace(/\s+/g, ' ').trim();
-          const modality = kinDicomValue(study, '00080061').split('\\')[0].trim();
-          const bodyPart = kinStudyBodyPart(study, modality);
-          if (patientName && modality) document.title = `${patientName} · ${modality} ${bodyPart} — 판독 뷰어`;
-        })
-        .catch(error => error.name !== 'AbortError' && console.warn('KIN viewer title:', error));
-    }
 
     return () => {
       document.title = KIN_VIEWER_DEFAULT_TITLE;
-      abort.abort();
       observer.disconnect();
       window.removeEventListener('storage', onStorage);
       if (sessionChannel) {

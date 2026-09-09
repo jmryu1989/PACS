@@ -30,30 +30,35 @@ window.KinViewerIdentity=(()=>{
     return ()=>{window.removeEventListener('kin-viewer-identity-change',local);window.removeEventListener('storage',storage);try{parent?.removeEventListener('kin-viewer-identity-change',local);}catch(_){}channel?.close();};
   }
   function mount({services,resolve,owner,allowed,studies}){
-    const bound=JSON.stringify(owner());let value=read(bound),ended=false,observing=false;const labels=new Map(),loading=new Map();
+    const bound=JSON.stringify(owner());let value=read(bound),ended=false,observing=false;const labels=new Map(),loading=new Map(),titles=new Map();
+    const neutral='판독 뷰어 — KOREA IMAGING NETWORK';let frame;try{frame=window.frameElement;}catch(_){}
+    function setTitle(title){if(document.title!==title)document.title=title;if(frame?.isConnected&&frame.contentWindow===window)frame.title=title===neutral?'영상 뷰어':title;}
+    function syncTitle(){setTitle(titles.get(services.viewportGridService.getState().activeViewportId)||neutral);}
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
-    function clear(){for(const e of labels.values())e.remove();labels.clear();}
+    function clear(){for(const e of labels.values())e.remove();labels.clear();titles.clear();setTitle(neutral);}
     function refresh(wanted){
       try{
         if(ended||!observing||!allowed()||JSON.stringify(owner())!==bound){clear();return;}
         const ids=new Set(services.viewportGridService.getState().viewports.keys());
-        for(const [id,e] of labels)if(!ids.has(id)){e.remove();labels.delete(id);}
+        for(const [id,e] of labels)if(!ids.has(id)){e.remove();labels.delete(id);titles.delete(id);}
         for(const id of loading.keys())if(!ids.has(id))loading.delete(id);
         for(const id of ids){
           if(typeof wanted==='string'&&wanted!==id)continue;
-          if(loading.has(id)){labels.get(id)?.remove();labels.delete(id);continue;}
+          if(loading.has(id)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
           const current=resolve(id),m=current&&window.cornerstone.metaData.get('instance',current.image),v=services.cornerstoneViewportService.getCornerstoneViewport(id);
-          if(!current||!m||!v?.element||v.viewportStatus!==window.cornerstone.Enums.ViewportStatus.RENDERED||!studies.includes(current.uid)||m.StudyInstanceUID!==current.uid||m.SeriesInstanceUID!==current.series||m.SOPInstanceUID!==current.sop||typeof m.PatientID!=='string'||!m.PatientID.trim()||m.PatientID.length>64||(current.study.id&&current.study.id!==m.PatientID)){labels.get(id)?.remove();labels.delete(id);continue;}
+          if(!current||!m||!v?.element||v.viewportStatus!==window.cornerstone.Enums.ViewportStatus.RENDERED||!studies.includes(current.uid)||m.StudyInstanceUID!==current.uid||m.SeriesInstanceUID!==current.series||m.SOPInstanceUID!==current.sop||typeof m.PatientID!=='string'||!m.PatientID.trim()||m.PatientID.length>64||(current.study.id&&current.study.id!==m.PatientID)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
           let e=labels.get(id);if(!e||e.parentNode!==v.element){e?.remove();e=document.createElement('div');e.className='kin-viewer-identity';e.style.cssText='position:absolute;right:28px;top:38px;max-width:40%;max-height:32%;overflow:hidden;overflow-wrap:anywhere;text-align:right;pointer-events:none;background:#0b182bcc;padding:3px 6px;border-radius:3px;z-index:2;line-height:1.3';v.element.append(e);labels.set(id,e);}
           const role=current.uid===studies[0]?'current':'prior',p=value[role];e.dataset.role=role;e.dataset.study=current.uid;
           const parts=[(role==='current'?'기준 검사':'비교 검사')+' · '+m.PatientID];
           if(p.name)parts.push(text(m.PatientName).slice(0,128));if(p.date)parts.push(text(m.StudyDate).slice(0,16));if(p.description)parts.push(text(m.StudyDescription||m.SeriesDescription).slice(0,128));
+          titles.set(id,parts.concat(text(m.Modality).slice(0,16)).filter(Boolean).join(' · ')+' — 판독 뷰어');
           e.textContent=parts.filter(Boolean).join(' · ');e.style.fontSize=p.size+'px';e.style.fontFamily=fonts[p.font];e.style.color=colors[p.color];
           const bounds=v.element.getBoundingClientRect(),right=bounds.right-28,left=right-bounds.width*.4;
           const pane=v.element.closest('[data-cy="viewport-pane"]')||v.element.parentElement;let top=38;
           for(const native of pane?.querySelectorAll('[data-cy="viewport-overlay-top-left"],[data-cy="viewport-overlay-top-right"]')||[]){const b=native.getBoundingClientRect();if(native.textContent.trim()&&b.width&&b.height&&b.right>left&&b.left<right)top=Math.max(top,b.bottom-bounds.top+6);}
           e.style.top=top+'px';
         }
+        syncTitle();
       }catch(_){clear();}
     }
     // Clear before a replacement can paint; validate after the native state
@@ -61,7 +66,7 @@ window.KinViewerIdentity=(()=>{
     const pending=new Set();let queued=false,all=false;
     function changed(id){
       if(ended)return;
-      if(typeof id==='string'){labels.get(id)?.remove();labels.delete(id);pending.add(id);}else{clear();all=true;}
+      if(typeof id==='string'){labels.get(id)?.remove();labels.delete(id);titles.delete(id);pending.add(id);syncTitle();}else{clear();all=true;}
       if(queued)return;queued=true;queueMicrotask(()=>{queued=false;if(ended)return;const refreshAll=all;all=false;const ids=[...pending];pending.clear();if(refreshAll)refresh();else for(const id of ids)refresh(id);});
     }
     const coreEvents=window.cornerstone?.Enums?.Events;
