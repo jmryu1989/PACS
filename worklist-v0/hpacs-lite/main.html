@@ -1780,6 +1780,7 @@
           return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
         }).join("") + `</tr>`).join("")
         || `<tr><td class="empty" colspan="${shown.length}">No records found</td></tr>`;
+      columnPrefs?.decorate(mode);
 
       const active = [];
       // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —

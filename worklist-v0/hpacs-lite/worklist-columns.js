@@ -4,6 +4,17 @@
   const PREFIX = 'kin-worklist-columns:v1:';
   const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
   const copy = v => JSON.parse(JSON.stringify(v));
+  const COLORS = { default: '', cool: '#d9ecff', warm: '#ffe6c4' };
+  const FONTS = { default: '', sans: 'Arial, "Malgun Gothic", sans-serif', mono: 'Consolas, "Malgun Gothic", monospace' };
+  const appearanceDefault = () => ({ widths: {}, font: 'default', size: 13, color: 'default' });
+  function appearance(value, keys) {
+    if (!object(value) || Object.keys(value).sort().join() !== 'color,font,size,widths'
+      || typeof value.color !== 'string' || typeof value.font !== 'string'
+      || !Object.hasOwn(COLORS, value.color) || !Object.hasOwn(FONTS, value.font)
+      || !Number.isInteger(value.size) || value.size < 12 || value.size > 20 || !object(value.widths)
+      || Object.entries(value.widths).some(([k,w]) => !keys.includes(k) || !Number.isInteger(w) || w < 64 || w > 600)) return null;
+    return copy(value);
+  }
   function defaults(columns) {
     return { version: 1, modes: Object.fromEntries(MODES.map(mode => [mode,
       { order: columns[mode].map(c => c.k), hidden: [] }])) };
@@ -14,7 +25,7 @@
     const next = defaults(columns);
     for (const mode of MODES) {
       const part = value.modes[mode], allowed = new Set(next.modes[mode].order);
-      if (!object(part) || Object.keys(part).sort().join() !== 'hidden,order') return null;
+      if (!object(part) || !['hidden,order','appearance,hidden,order'].includes(Object.keys(part).sort().join())) return null;
       for (const key of ['order', 'hidden']) {
         const list = part[key];
         if (!Array.isArray(list) || list.length > 64 || new Set(list).size !== list.length
@@ -23,6 +34,10 @@
       if (part.hidden.some(k => REQUIRED.includes(k))) return null;
       // Newly introduced columns remain visible; existing order is preserved.
       next.modes[mode] = { order: [...part.order, ...[...allowed].filter(k => !part.order.includes(k))], hidden: [...part.hidden] };
+      if (Object.hasOwn(part, 'appearance')) {
+        const a = appearance(part.appearance, [...allowed]); if (!a) return null;
+        next.modes[mode].appearance = a;
+      }
     }
     return next;
   }
@@ -59,6 +74,11 @@
     dialog.innerHTML = `<header><h2 id="wc-title">목록 열 설정</h2><button type="button" id="wc-close">닫기</button></header>
       <p>판독/촬영 화면을 따로 저장합니다. 다른 컴퓨터에서는 계정 설정을 불러오세요. 자동 동기화하지 않습니다.</p>
       <p>ID·Name은 항상 표시합니다. 숨긴 열의 검색 조건과 정렬은 유지됩니다.</p>
+      <section id="wc-appearance" aria-label="목록 모양">
+      <label>글꼴 <select id="wc-font"><option value="default">기본</option><option value="sans">고딕</option><option value="mono">고정폭</option></select></label>
+      <label>글자 크기 <select id="wc-size">${Array.from({length:9},(_,i)=>`<option value="${i+12}">${i+12}px</option>`).join('')}</select></label>
+      <label>글자 색 <select id="wc-color"><option value="default">기본</option><option value="cool">밝은 청색</option><option value="warm">밝은 황색</option></select></label>
+      <p>열 내용 너비는 64–600px, 빈칸은 자동입니다. 상태 표식의 색은 유지됩니다.</p></section>
       <div id="wc-list"></div><p id="wc-status" role="status" aria-live="polite"></p>
       <section aria-label="계정 서버 열 설정"><p>계정 불러오기는 편집창에만 가져옵니다. 아래 적용 버튼으로 목록에 반영하세요.</p>
       <button type="button" id="wc-server-inspect">계정 저장 상태 확인</button><button type="button" id="wc-server-load">계정 설정 불러오기</button>
@@ -71,8 +91,15 @@
     const status = text => { $('status').textContent = text; };
     const dirty = () => JSON.stringify(draft) !== baseline;
     const mayLeave = () => !dirty() || confirm('적용하지 않은 열 설정 변경을 버릴까요?');
+    for (const name of ['font','size','color']) $(name).addEventListener('change', () => {
+      generation++;
+      const part = draft.modes[openedMode]; part.appearance ||= appearanceDefault();
+      part.appearance[name] = name === 'size' ? Number($(name).value) : $(name).value;
+    });
     function renderEditor(focus) {
       const part = draft.modes[openedMode];
+      const a = part.appearance || appearanceDefault();
+      for (const name of ['font','size','color']) $(name).value = a[name];
       $('list').replaceChildren(...part.order.map((key, index) => {
         const column = columns[openedMode].find(c => c.k === key);
         const row = document.createElement('div'); row.className = 'wc-row'; row.dataset.column = key;
@@ -84,6 +111,14 @@
           part.hidden = input.checked ? part.hidden.filter(k => k !== key) : [...part.hidden, key];
         });
         label.append(input, document.createTextNode(column.t + (REQUIRED.includes(key) ? ' (필수)' : ''))); row.append(label);
+        const width = document.createElement('input'); width.type = 'number'; width.min = '64'; width.max = '600'; width.step = '1';
+        width.className = 'wc-width'; width.placeholder = '자동'; width.value = a.widths[key] ?? '';
+        width.setAttribute('aria-label', column.t + ' 내용 너비(px)');
+        width.addEventListener('input', () => {
+          generation++; part.appearance ||= appearanceDefault();
+          if (width.value === '' && !width.validity.badInput) delete part.appearance.widths[key];
+          else part.appearance.widths[key] = width.valueAsNumber;
+        }); row.append(width);
         for (const [action, text, delta] of [['up', '위로', -1], ['down', '아래로', 1]]) {
           const button = document.createElement('button'); button.type = 'button'; button.dataset.move = action;
           button.textContent = text; button.setAttribute('aria-label', column.t + ' ' + text);
@@ -203,7 +238,20 @@
       $('save').disabled = !owner; renderEditor(); status(saved.message); dialog.showModal(); $('close').focus(); refreshServer();
       $('server-status').textContent = '계정 저장 상태를 확인하거나 불러오세요.';
     });
-    return { columns: m => visible(columns, state, m) };
+    const style = document.createElement('style'); document.head.append(style);
+    return { columns: m => visible(columns, state, m), decorate: m => {
+      const a = state.modes[m].appearance;
+      style.textContent = a ? `#rows td {font-size:${a.size}px;${FONTS[a.font] ? 'font-family:' + FONTS[a.font] + ';' : ''}${COLORS[a.color] ? 'color:' + COLORS[a.color] + ';' : ''}}` : '';
+      const shown = visible(columns, state, m);
+      for (const row of document.querySelectorAll('#rows tr[data-uid]')) {
+        shown.forEach((c,i) => {
+          const width = a?.widths[c.k]; if (!width) return;
+          const cell = row.cells[i], content = document.createElement('div');
+          content.className = 'wc-cell'; content.style.width = width + 'px';
+          content.append(...cell.childNodes); cell.append(content);
+        });
+      }
+    } };
   }
   const api = { defaults, normalize, key, visible, mount };
   if (typeof module === 'object' && module.exports) module.exports = api;

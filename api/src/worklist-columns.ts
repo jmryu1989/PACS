@@ -12,7 +12,7 @@ export function normalizeWorklistColumns(value: any) {
   const clean = { version: 1, modes: {} };
   for (const [mode, keys] of Object.entries(COLUMN_KEYS)) {
     const part = value.modes[mode];
-    if (!object(part) || Object.keys(part).sort().join() !== 'hidden,order') return null;
+    if (!object(part) || !['hidden,order','appearance,hidden,order'].includes(Object.keys(part).sort().join())) return null;
     for (const name of ['order', 'hidden']) {
       const list = part[name];
       if (!Array.isArray(list) || list.length > 64 || new Set(list).size !== list.length ||
@@ -20,6 +20,14 @@ export function normalizeWorklistColumns(value: any) {
     }
     if (part.hidden.some(k => k === 'id' || k === 'name')) return null;
     clean.modes[mode] = { order: [...part.order, ...keys.filter(k => !part.order.includes(k))], hidden: [...part.hidden] };
+    if (Object.prototype.hasOwnProperty.call(part, 'appearance')) {
+      const a = part.appearance;
+      if (!object(a) || Object.keys(a).sort().join() !== 'color,font,size,widths' ||
+          !['default','cool','warm'].includes(a.color) || !['default','sans','mono'].includes(a.font) ||
+          !Number.isInteger(a.size) || a.size < 12 || a.size > 20 || !object(a.widths) ||
+          Object.entries(a.widths).some(([k,w]) => !keys.includes(k) || !Number.isInteger(w) || Number(w) < 64 || Number(w) > 600)) return null;
+      clean.modes[mode].appearance = { widths: { ...a.widths }, font: a.font, size: a.size, color: a.color };
+    }
   }
   return clean;
 }

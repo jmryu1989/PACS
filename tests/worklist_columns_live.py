@@ -53,6 +53,15 @@ class WorklistColumnsLive(unittest.TestCase):
         bad.extend([None,[],{},dict(body,columns=None)])
         for b in bad:
             with self.subTest(body=b):self.assertEqual(self.write(b).status,400);self.assertEqual(self.get(),original)
+    def test_appearance_roundtrip_and_invalid_values_preserve_saved(self):
+        body=self.body()
+        body['columns']['modes']['Radiology']['appearance']=dict(widths={'name':240},font='mono',size=18,color='warm')
+        self.assertEqual(self.write(body).status,200)
+        saved=self.get();self.assertEqual(saved['columns']['modes']['Radiology']['appearance'],body['columns']['modes']['Radiology']['appearance'])
+        body['revision']=saved['revision']
+        for patch in [{'size':11},{'size':21},{'size':13.5},{'color':'#000000'},{'color':['warm']},{'font':'url(https://invalid)'},{'widths':{'name':63}},{'widths':{'name':601}},{'widths':{'name':None}},{'widths':{'name':'240'}},{'widths':{'patientId':240}}]:
+            bad=copy.deepcopy(body);bad['columns']['modes']['Radiology']['appearance'].update(patch)
+            self.assertEqual(self.write(bad).status,400);self.assertEqual(self.get(),saved)
     def test_04_concurrent_create_update_clear(self):
         body=self.body();self.stack.token('doctor')
         def race(items):

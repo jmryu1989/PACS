@@ -12,3 +12,8 @@
 #column-manager :focus-visible { outline: 2px solid #77c9ff; outline-offset: 2px; }
 #column-manager footer { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 #column-manager #wc-save { background: #236795; }
+#column-manager .wc-row .wc-width { width: 72px; flex: 0 0 72px; box-sizing: border-box; margin: 0; }
+#column-manager #wc-appearance { display: flex; flex-wrap: wrap; gap: 12px; }
+#column-manager #wc-appearance p { width: 100%; margin: 0 0 8px; }
+#column-manager select, #column-manager .wc-width { background: #101b2a; color: #dce5ef; border: 1px solid #526b89; padding: 6px; border-radius: 4px; }
+#rows .wc-cell { white-space: normal; overflow-wrap: anywhere; }
