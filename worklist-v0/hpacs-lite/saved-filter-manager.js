@@ -11,13 +11,17 @@
       <header><div><h2 id="sfm-title">저장 검색 관리</h2><p>자주 쓰는 검사 검색을 계정에 저장합니다.</p></div>
         <button type="button" id="sfm-close" aria-label="저장 검색 관리 닫기">닫기</button></header>
       <div class="sfm-body"><aside aria-label="저장 검색 목록">
-        <label for="sfm-search">저장 검색 찾기</label><input id="sfm-search" type="search" placeholder="검색 이름">
+        <label for="sfm-search">저장 검색 찾기</label><input id="sfm-search" type="search" placeholder="이름·설명·폴더">
         <button type="button" id="sfm-new">현재 조건으로 새 검색</button>
         <div id="sfm-list"></div><button type="button" id="sfm-reload">목록 다시 불러오기</button>
       </aside><form id="sfm-form"><fieldset id="sfm-fields">
         <legend id="sfm-heading">새 검색</legend>
         <label for="sfm-name">검색 이름</label><input id="sfm-name" required>
         <small id="sfm-name-hint">같은 이름을 저장하면 확인 후 해당 검색을 덮어씁니다.</small>
+        <label for="sfm-folder">폴더 경로</label><input id="sfm-folder" list="sfm-folders" maxlength="204" placeholder="예: 흉부/추적 검사"><datalist id="sfm-folders"></datalist>
+        <small>빈 값은 미분류입니다. /로 구분해 최대 5단계로 묶습니다. 빈 폴더는 별도로 저장하지 않습니다.</small>
+        <label for="sfm-description">검색 설명</label><textarea id="sfm-description" rows="2" maxlength="1000"></textarea>
+        <label for="sfm-ordinal">폴더 안 표시 순서 (작은 값 먼저)</label><input id="sfm-ordinal" type="number" min="0" max="9999" step="1" required>
         <div class="sfm-grid">
           <label>업무 화면<select id="sfm-mode"><option value="Radiology">판독</option><option value="Technician">촬영</option></select></label>
           <label>검사 날짜<select id="sfm-days"></select></label>
@@ -52,6 +56,7 @@
       dialog.querySelectorAll('[data-col]').forEach(input => { cols[input.dataset.col] = input.value; });
       const sortKey = $('sort').value || null;
       return { name: $('name').value.trim(), mode: $('mode').value, days: Number($('days').value),
+        folder: $('folder').value.trim(), description: $('description').value, ordinal: Number($('ordinal').value),
         quick: $('quick').value, cols, sortKey, sortDir: sortKey ? Number($('direction').value) : 0,
         isDefault: $('default').checked };
     }
@@ -60,7 +65,7 @@
     function lock(on) {
       busy = on;
       dialog.setAttribute('aria-busy', String(on));
-      dialog.querySelectorAll('button, input, select, fieldset').forEach(el => { el.disabled = on; });
+      dialog.querySelectorAll('button, input, select, textarea, fieldset').forEach(el => { el.disabled = on; });
       $('fields').disabled = on || !editable;
       $('save').disabled = on || !editable;
       $('delete').disabled = on || selected === null;
@@ -109,6 +114,9 @@
       $('name-hint').textContent = isNew ? '같은 이름을 저장하면 확인 후 해당 검색을 덮어씁니다.'
         : '기존 검색 이름은 유지됩니다. 조건을 바꾸고 저장하세요.';
       $('quick').value = filter.quick ?? ''; $('mode').value = filter.mode;
+      $('folder').value = typeof filter.folder === 'string' ? filter.folder : '';
+      $('description').value = typeof filter.description === 'string' ? filter.description : '';
+      $('ordinal').value = Number.isInteger(filter.ordinal) ? String(filter.ordinal) : '0';
       choices($('days'), [[-1, '전체 날짜'], [0, '오늘'], [3, '최근 3일'], [7, '최근 7일'],
         [30, '최근 30일'], [60, '최근 60일']], options.days(filter.days));
       $('default').checked = !!filter.isDefault;
@@ -117,16 +125,47 @@
     }
     function list() {
       const query = $('search').value.trim().toLocaleLowerCase();
-      const filters = options.list().filter(f => f.name.toLocaleLowerCase().includes(query));
-      const buttons = filters.map(f => {
+      const all = options.list();
+      const folderOf = f => typeof f.folder === 'string' ? f.folder : '';
+      $('folders').replaceChildren(...[...new Set(all.map(folderOf).filter(Boolean))].sort().map(path => {
+        const option = document.createElement('option'); option.value = path; return option;
+      }));
+      const filters = all.filter(f => [f.name, f.description, folderOf(f)].some(v =>
+        typeof v === 'string' && v.toLocaleLowerCase().includes(query)));
+      const collapsed = new Set([...$('list').querySelectorAll('details:not([open])')].map(el => el.dataset.folder));
+      const root = { children: new Map(), filters: [] };
+      for (const filter of filters) {
+        let node = root;
+        for (const part of folderOf(filter).split('/').filter(Boolean).slice(0, 5)) {
+          if (!node.children.has(part)) node.children.set(part, { children: new Map(), filters: [] });
+          node = node.children.get(part);
+        }
+        node.filters.push(filter);
+      }
+      function searchButton(f) {
         const button = document.createElement('button'); button.type = 'button'; button.dataset.name = f.name;
         button.setAttribute('aria-pressed', String(f.name === selected));
         button.textContent = `${f.isDefault ? '⚑ ' : ''}${f.name}`;
+        if (typeof f.description === 'string' && f.description) {
+          const hint = document.createElement('small'); hint.textContent = f.description; button.append(hint);
+        }
         button.addEventListener('click', () => { if (mayLeave() && edit(named(f.name))) { status(''); $('quick').focus(); } });
         return button;
-      });
-      $('list').replaceChildren(...buttons);
-      if (!buttons.length) $('list').textContent = query ? '일치하는 저장 검색이 없습니다.' : '저장한 검색이 없습니다.';
+      }
+      function branch(node, container, parentPath = '') {
+        for (const [name, child] of [...node.children].sort(([a], [b]) => a.localeCompare(b))) {
+          const path = parentPath ? parentPath + '/' + name : name;
+          const details = document.createElement('details'); details.dataset.folder = path;
+          details.open = !!query || !collapsed.has(path);
+          const summary = document.createElement('summary'); summary.textContent = name;
+          details.append(summary); branch(child, details, path); container.append(details);
+        }
+        node.filters.sort((a, b) => (Number.isInteger(a.ordinal) ? a.ordinal : 0) -
+          (Number.isInteger(b.ordinal) ? b.ordinal : 0) || a.name.localeCompare(b.name));
+        node.filters.forEach(f => container.append(searchButton(f)));
+      }
+      $('list').replaceChildren(); branch(root, $('list'));
+      if (!filters.length) $('list').textContent = query ? '일치하는 저장 검색이 없습니다.' : '저장한 검색이 없습니다.';
     }
     async function run(action) {
       if (busy) return;

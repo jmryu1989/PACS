@@ -678,7 +678,22 @@ export class PacsService implements OnModuleInit {
     const name = String(body.name ?? '').trim();
     if (!name) throw new BadRequestException('필터 이름이 필요합니다');
 
+    // Old clients omit these fields; undefined must preserve existing metadata.
+    let folder: string | undefined;
+    if (body.folder !== undefined) {
+      if (typeof body.folder !== 'string') throw new BadRequestException('폴더 경로를 확인하세요');
+      const parts = body.folder.trim() ? body.folder.trim().split('/').map((part: string) => part.trim()) : [];
+      if (parts.length > 5 || parts.some((part: string) => !part || part.length > 40 ||
+          part === '.' || part === '..' || /[\\\u0000-\u001f\u007f]/.test(part)))
+        throw new BadRequestException('폴더는 /로 구분한 5단계, 각 1~40자로 입력하세요');
+      folder = parts.join('/');
+    }
+    if (body.description !== undefined && (typeof body.description !== 'string' || body.description.length > 1000))
+      throw new BadRequestException('검색 설명은 1000자 이내로 입력하세요');
+    if (body.ordinal !== undefined && (!Number.isInteger(body.ordinal) || body.ordinal < 0 || body.ordinal > 9999))
+      throw new BadRequestException('표시 순서는 0~9999의 정수로 입력하세요');
     const data = {
+      folder, description: body.description, ordinal: body.ordinal,
       mode: body.mode ?? 'Radiology',
       quick: String(body.quick ?? ''),
       days: Number.isFinite(+body.days) ? +body.days : -1,

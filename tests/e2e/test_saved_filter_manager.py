@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import time
 import unittest
 import uuid
@@ -53,7 +55,7 @@ class SavedFilterManagerE2E(base.WorklistE2E):
         edited = self.save(page)
         self.assertEqual(edited['id'], saved['id'])
         self.assertEqual(edited['cols']['id'], second.patient_id)
-        evidence = base.ROOT.parent / 'tmp' / 'saved-filter-manager'
+        evidence = Path(os.environ.get('KIN_EVIDENCE_DIR', str(base.ROOT.parent / 'tmp' / 'saved-filter-manager')))
         evidence.mkdir(exist_ok=True)
         page.screenshot(path=str(evidence / 'manager.png'))
         page.locator('#sfm-close').click()

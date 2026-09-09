@@ -7,22 +7,28 @@
 #saved-filter-manager p { margin: 6px 0; line-height: 1.5; }
 #saved-filter-manager header p, #saved-filter-manager small { color: #aabacf; }
 #saved-filter-manager .sfm-body { display: grid; grid-template-columns: 240px minmax(0, 1fr); }
-#saved-filter-manager aside { padding: 16px; border-right: 1px solid #344862; min-width: 0; }
+#saved-filter-manager aside { padding: 16px; border-right: 1px solid #344862; min-width: 0;
+  position: sticky; top: 96px; align-self: start; max-height: calc(100dvh - 145px); overflow: auto; }
 #saved-filter-manager form { min-width: 0; padding: 16px 20px; }
 #saved-filter-manager fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 #saved-filter-manager legend { font-weight: 600; padding: 0 0 12px; }
 #saved-filter-manager label { display: block; font-size: 13px; line-height: 1.6; }
-#saved-filter-manager input:not([type=checkbox]), #saved-filter-manager select { width: 100%; box-sizing: border-box;
+#saved-filter-manager input:not([type=checkbox]), #saved-filter-manager select, #saved-filter-manager textarea { width: 100%; box-sizing: border-box;
   background: #101a29; border: 1px solid #496079; border-radius: 5px; padding: 8px; color: inherit; margin: 4px 0 8px; font: inherit; }
 #saved-filter-manager input[readonly] { color: #acbdd2; background: #202d3f; }
 #saved-filter-manager button { background: #283b53; border: 1px solid #526b89; border-radius: 5px; color: inherit; padding: 8px 12px; cursor: pointer; font: inherit; }
-#saved-filter-manager :is(input, select, button):focus-visible { outline: 2px solid #77c9ff; outline-offset: 2px; }
+#saved-filter-manager :is(input, select, textarea, button, summary):focus-visible { outline: 2px solid #77c9ff; outline-offset: 2px; }
 #saved-filter-manager button:disabled { opacity: .5; cursor: wait; }
 #saved-filter-manager .sfm-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; margin-top: 12px; }
 #saved-filter-manager .sfm-default { margin-top: 14px; }
 #saved-filter-manager #sfm-count { font-size: 12px; color: #a6c5e2; }
 #saved-filter-manager #sfm-list { display: grid; gap: 6px; margin: 16px 0; max-height: 360px; overflow: auto; }
 #saved-filter-manager #sfm-list button { text-align: left; overflow-wrap: anywhere; }
+#saved-filter-manager #sfm-list details { border-left: 1px solid #496079; padding-left: 8px; min-width: 0; }
+#saved-filter-manager #sfm-list summary { cursor: pointer; padding: 7px 0; overflow-wrap: anywhere; }
+#saved-filter-manager #sfm-list details button { display: block; width: 100%; margin: 5px 0; }
+#saved-filter-manager #sfm-list button small { display: block; font-size: 11px; white-space: pre-wrap; }
+#saved-filter-manager textarea { resize: vertical; }
 #saved-filter-manager #sfm-list button[aria-pressed=true] { background: #235984; border-color: #6fc5ff; }
 #saved-filter-manager footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 #saved-filter-manager #sfm-save { background: #236795; }
@@ -30,6 +36,6 @@
 #saved-filter-manager .sfm-error { color: #ffb7a9; }
 @media (max-width: 680px) {
   #saved-filter-manager .sfm-body { grid-template-columns: minmax(0, 1fr); }
-  #saved-filter-manager aside { border-right: 0; border-bottom: 1px solid #344862; }
+  #saved-filter-manager aside { border-right: 0; border-bottom: 1px solid #344862; position: static; max-height: none; }
   #saved-filter-manager #sfm-list { max-height: 150px; }
 }

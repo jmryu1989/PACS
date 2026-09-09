@@ -286,6 +286,9 @@ model UserFilter {
   cols      String   @default("{}")         // 컬럼별 필터 값 (JSON)
   sortKey   String?
   sortDir   Int      @default(0)
+  folder    String   @default("")           // 개인 검색 분류 경로 (슬래시 구분)
+  description String @default("")
+  ordinal   Int      @default(0)            // 폴더 내 표시 순서, 작은 값 먼저
   createdAt DateTime @default(now())
 
   @@unique([owner, name])
