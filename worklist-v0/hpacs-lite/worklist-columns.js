@@ -135,8 +135,8 @@
       if (ended || !identity || serverBusy || !dialog.open || (['save','clear'].includes(action) && serverRevision === null)) return;
       if (action === 'load' && !mayLeave()) return;
       if (action === 'clear' && !confirm('계정에 저장된 열 설정만 지울까요? 현재 목록과 브라우저 저장값은 유지합니다.')) return;
-      const before = generation, snapshot = normalize(draft, columns);
-      if (!snapshot) return;
+      const before = generation, snapshot = action === 'save' ? normalize(draft, columns) : null;
+      if (action === 'save' && !snapshot) { $('server-status').textContent = '편집 중인 열 설정 형식이 잘못되었습니다. 다시 불러오거나 기본값으로 설정하세요.'; return; }
       serverBusy = true; refreshServer(); $('server-status').textContent = '계정 설정 확인 중…';
       request = new AbortController(); const signal = request.signal, timer = setTimeout(() => request?.abort(), 10000);
       const active = () => !ended && dialog.open && !signal.aborted;
@@ -147,18 +147,20 @@
           headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: body && JSON.stringify(body), signal });
         if (!active()) return;
         if (r.status === 401 || r.status === 403) { stop(); return; }
-        const data = await r.json(); if (!active()) return;
         if (!r.ok) {
           serverRevision = null;
+          const data = await r.json().catch(() => null); if (!active()) return;
           if (data?.code === 'COLUMNS_OWNER_CHANGED') { stop(); return; }
-          throw new Error(r.status === 409 ? 'conflict' : 'save-failed');
+          throw new Error(r.status === 409 ? 'conflict' : r.status === 400 ? 'invalid-settings' : 'save-failed');
         }
+        const data = await r.json(); if (!active()) return;
         if (JSON.stringify(data.owner) !== JSON.stringify(identity)) { stop(); return; }
         if (!Number.isInteger(data.revision) || data.revision < 0 || data.revision > 2147483647 ||
             (data.columns !== null && !normalize(data.columns, columns))) throw new Error('format');
         const me = await fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', signal });
         if (!active()) return;
-        if (!me.ok) { stop(); return; }
+        if (me.status === 401 || me.status === 403) { stop(); return; }
+        if (!me.ok) throw new Error('session-unavailable');
         const current = await me.json(); if (!active()) return;
         if (current.kind !== 'member' || JSON.stringify([current.institution, current.sub]) !== JSON.stringify(identity)) { stop(); return; }
         if (action === 'load' && generation !== before) {
@@ -174,9 +176,15 @@
         else $('server-status').textContent = data.columns ? '계정에 저장된 열 설정이 있습니다.' : '계정에 저장된 열 설정이 없습니다. 현재 편집값은 유지합니다.';
       } catch (error) {
         serverRevision = null;
-        if (!ended && dialog.open) $('server-status').textContent = error?.message === 'conflict' ?
-          '다른 창에서 계정 설정이 변경됐습니다. 편집 내용은 유지했습니다. 저장 상태를 확인한 뒤 다시 시도하세요.' :
-          '계정 설정 응답을 확인할 수 없습니다. 편집 내용은 유지했습니다. 쓰기는 완료됐을 수 있으니 계정 설정을 불러와 확인하세요.';
+        if (!ended && dialog.open) {
+          const messages = {
+            conflict: '다른 창에서 계정 설정이 변경됐습니다. 편집 내용은 유지했습니다. 저장 상태를 확인한 뒤 다시 시도하세요.',
+            'invalid-settings': '서버가 열 설정 형식을 거절했습니다. 편집 내용은 유지했습니다. 기본값 또는 저장값을 확인하세요.',
+            format: '서버가 반환한 열 설정 형식을 확인할 수 없습니다. 현재 편집 내용은 유지했습니다.',
+            'session-unavailable': '계정 상태를 일시적으로 확인하지 못했습니다. 편집 내용은 유지했습니다. 쓰기는 완료됐을 수 있으니 다시 불러와 확인하세요.',
+          };
+          $('server-status').textContent = messages[error?.message] || '계정 설정 응답을 확인할 수 없습니다. 편집 내용은 유지했습니다. 쓰기는 완료됐을 수 있으니 계정 설정을 불러와 확인하세요.';
+        }
       } finally { clearTimeout(timer); request = null; serverBusy = false; refreshServer(); }
     }
     for (const action of ['inspect','load','save','clear']) $('server-' + action).addEventListener('click', () => server(action));

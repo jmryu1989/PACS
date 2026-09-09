@@ -1,8 +1,8 @@
 """REQ-D01-COLUMNS-ROAM -> RISK-OWNER/LOST-UPDATE/DISPLAY-ONLY -> TEST-D01-COLUMNS-API."""
-import copy,json,re,threading,unittest
+import copy,json,re,threading,unittest,uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from invariants_live import LiveStack
+from invariants_live import LiveStack,psql
 from workspace_roaming_support import cleanup_workspace
 
 class WorklistColumnsLive(unittest.TestCase):
@@ -79,5 +79,26 @@ class WorklistColumnsLive(unittest.TestCase):
         for mode in body['columns']['modes']:
             part=declaration.split(mode+': [',1)[1].split('\n      ],',1)[0]
             self.assertEqual(result.body['columns']['modes'][mode]['order'],re.findall(r'k: "([^"]+)"',part))
+
+    def test_07_applied_database_constraints_rollback_only(self):
+        # Dedicated synthetic owner and transaction: no existing preference row
+        # is updated even temporarily; exact new-table constraint probes mirror
+        # the isolated product restore fixture's three new checks.
+        subject=str(uuid.uuid4());institution='SYNTHETIC-columns-constraint'
+        where=f"institution='{institution}' AND subject='{subject}'"
+        self.assertEqual(psql(f'SELECT count(*) FROM "WorklistColumns" WHERE {where}'),['0'])
+        result=psql(f'''BEGIN;
+          INSERT INTO "WorklistColumns" (institution,subject,revision,value,"updatedAt")
+            VALUES ('{institution}','{subject}',1,NULL,now());
+          DO $$ BEGIN
+            BEGIN INSERT INTO "WorklistColumns" SELECT * FROM "WorklistColumns" WHERE {where};
+              RAISE EXCEPTION 'missing columns owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+            BEGIN UPDATE "WorklistColumns" SET revision=0 WHERE {where};
+              RAISE EXCEPTION 'missing columns revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+            BEGIN UPDATE "WorklistColumns" SET value=repeat('x',8193) WHERE {where};
+              RAISE EXCEPTION 'missing columns byte constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+          END $$; ROLLBACK;
+          SELECT count(*) FROM "WorklistColumns" WHERE {where};''')
+        self.assertEqual(result,['0']);print('Applied PK/revision/byte checks PASS; synthetic transaction rolled back')
 
 if __name__=='__main__':unittest.main(verbosity=2)

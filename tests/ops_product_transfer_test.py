@@ -39,9 +39,11 @@ class Pure(unittest.TestCase):
     def test_worklist_column_restore_contract(self):
         body, _, _, _ = fixture(); expected=body['product']
         self.assertEqual(len(expected['rows']['WorklistColumns']),2)
-        for field,value in [('value',None),('revision',1),('subject','wrong-owner')]:
+        actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+        with patch.object(transfer,'observe',return_value=actual):transfer.verify_product('owned','kin',expected)
+        for row,field,value in [(0,'value',None),(0,'revision',1),(0,'subject','wrong-owner'),(1,'value','{}'),(1,'revision',1)]:
             actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
-            actual['rows']['WorklistColumns'][0][field]=value
+            actual['rows']['WorklistColumns'][row][field]=value
             with patch.object(transfer,'observe',return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
 
