@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D-WORKSPACE-EMBEDDED-COPY → RISK-WRONG-IMAGE-COPY/OWNER/STALE-FRAME → TEST-EMBEDDED-PATIENT-COPY: `test_embedded_patient_copy.py`는 통합 영상 창에서 실제 현재/과거 영상의 환자 ID를 우클릭 메뉴·버튼·Ctrl+Alt+C로 복사하고 판독 대상·미저장 판독/제목·영상 상태를 유지하는지 검사한다. 부모 판독 화면의 계정·같은 대상·현재 프레임·표시/대화상자 상태도 함께 확인하며 숨김/inert·입력 중·선택 왕복·SOP 불일치·종료/재진입을 검사한다. 별도 창과 영상 식별·클립보드·메뉴/드래그 로직을 공유하고 `test_viewer_patient_copy.py`, `test_image_context_copy.py`, `test_viewer_tech_note.py`, `test_window_return.py`, `test_reading_note.py`로 직접 회귀한다. API·스키마·저장 경로는 바꾸지 않으며 다른 SOP 종류·전체 modality·물리 OS 검증은 잔여다.
+
 REQ-D-WORKSPACE-IMAGE-CONTEXT → RISK-WRONG-PATIENT-COPY/STALE-SELECTION/MEASUREMENT-MENU → TEST-IMAGE-CONTEXT-COPY: `test_image_context_copy.py`는 별도 영상 창의 빈 영상 영역 우클릭에서 실제 DICOM 환자 ID·검사일을 표시하고 복사하는지 검사한다. 메뉴를 연 뒤 빠른 선택/프레임 왕복은 거절하며 클립보드 실패/재시도·종료/재진입·미저장 판독과 영상 작업 보존을 확인한다. 기존 주석 삭제/라벨 메뉴와 우클릭 드래그 확대를 유지하며, mouseup 전에 발생하는 contextmenu의 드래그 거절은 합성 DOM 이벤트로 검사한다. `test_viewer_patient_copy.py`, `test_viewer_tech_note.py`, `test_window_return.py`가 직접 회귀다. 통합 창의 영상 문맥 메뉴·다른 SOP 종류·전체 modality·다른 OS의 물리 마우스 검증은 잔여다.
 
 REQ-D01-NESTED-PAGES → RISK-FILTER-BROADEN/TARGET/PREFERENCE-LOSS/UNBOUNDED-DOM → TEST-D01-NESTED-PAGES: `node --test tests/compound_filter_test.cjs`는 평면/중첩 AND·OR, 잘못된 분기/빈 그룹·전체 조건20개/항목40개/중첩5단계와 고정 matcher를 검사한다. `python tests/e2e/test_nested_pages.py`는 그룹 작성→계정 저장/기본값/재로그인·취소/실패, 미저장 판독과 1,001건 브라우저 합성 응답에서25/50/100건 표 렌더링·전체 정렬/건수·페이지 경계 검사 이동을 확인한다. 서버 조회 분할·병원 규모 성능은 범위 밖이며 표시 건수는 불러온 목록 기준이다. 관련 회귀는 compound-search/saved-filter-manager/reading-flow와69→14다.

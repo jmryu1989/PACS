@@ -374,6 +374,7 @@ window.KinReadingWorkspace = function (app) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }
           }
+          w.kinViewerEnablePatientCopy?.({owner:app.noteOwner,allowed:()=>!ended&&app.allowed()&&active&&sameTarget()&&currentFrame===frame&&!frame.hidden&&!frame.inert&&!modalOpen(document)});
           maybeAutoNote();
           return;
         }

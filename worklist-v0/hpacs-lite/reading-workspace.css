@@ -5,6 +5,10 @@
 #reading-bar { padding: 8px 12px; background: #15243b; border-bottom: 1px solid #45658b; flex: none; }
 .reading-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .reading-actions .chip { padding: 6px 10px; font-size: 12px; }
+/* Connection recovery must not resize the retained image by reflowing controls. */
+#reading-tech-note { inline-size: 18em; white-space: nowrap; }
+#reading-note-retry { inline-size: 12em; white-space: nowrap; }
+#reading-note-retry[hidden] { display: block !important; visibility: hidden; pointer-events: none; }
 #reading-position { align-self: center; padding: 0 6px; color: #bbd4f7; font-size: 12px; }
 #reading-shortcuts { color: #9fb9dc; font-size: 11px; padding-top: 5px; }
 body.reading .prior-report-pane:focus-visible, body.reading #reading-frame:focus-visible { outline: 2px solid #93c5fd; outline-offset: -2px; }
