@@ -15,6 +15,19 @@ test('QIDO comma list preserves exact values/order; empty skips IO and mixed/mis
  for(const bad of [['1','1'],['1*'],Array.from({length:101},(_,i)=>String(i))])await assert.rejects(o.studiesByUid(bad),e=>e.getStatus()===400);
  for(const bad of [[row('1')],[row('1'),row('1')],[row('1'),row('3')],[null,row('2')],{}]){o.get=async()=>bad;await assert.rejects(o.studiesByUid(['1','2']),e=>e.getStatus()===409);}
 });
+
+test('opaque lookup keys preserve case and bytes; unsafe syntax and object keys reject',async()=>{
+ const o=new OrthancService(),keys=['KIN_A-1.2','kin_a-1.2','A'.repeat(64)];let url;
+ o.get=async()=>keys.map(identity);
+ assert.deepEqual((await o.studyIdentities()).map(x=>x['0020000D'].Value[0]),keys);
+ o.get=async path=>{url=path;return [...keys].reverse().map(row);};
+ assert.deepEqual((await o.studiesByUid(keys)).map(x=>x['0020000D'].Value[0]),keys);
+ assert.equal(new URL('http://local'+url).searchParams.get('StudyInstanceUID'),keys.join(','));
+ for(const key of ['../1','1/2','1\\2','1,2','1*','1?','1%2f2','1#x','1&x','1"x','1 x','1\0','constructor','prototype','toString','__proto__',' 1','1 ','가','A'.repeat(65),null,42]){
+  o.get=async()=>[identity(key)];await assert.rejects(o.studyIdentities(),e=>e.getStatus()===503);
+  await assert.rejects(o.studiesByUid([key]),e=>e.getStatus()===400);
+ }
+});
 test('cold registration batches at100; warm page fetches only authorized page details',async()=>{
  const state=uid=>({uid,institutionId:uid==='2'?'other':'hallym',teleInstitutionId:null,rs:'W',preDoc:null,preReviewer:null});
  const rows=new Map([['1',state('1')],['2',state('2')]]),requests=[],audits=[];

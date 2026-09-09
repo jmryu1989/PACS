@@ -1,6 +1,14 @@
 import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 
+// A lookup key is not a DICOM conformance assertion. Preserve legacy opaque
+// keys verbatim, but exclude path/query syntax and plain-object map collisions.
+const reservedStudyKeys = new Set(['prototype', ...Object.getOwnPropertyNames(Object.prototype)]);
+function isStudyLookupKey(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value)
+    && !reservedStudyKeys.has(value);
+}
+
 /**
  * Orthanc(DICOMweb) 클라이언트.
  *
@@ -185,7 +193,7 @@ export class OrthancService {
     const seen = new Set<string>();
     return rows.map(row => {
       const uid = row?.RequestedTags?.StudyInstanceUID;
-      if (typeof uid !== 'string' || !/^[0-9]+(?:\.[0-9]+)*$/.test(uid) || uid.length > 64 || seen.has(uid))
+      if (!isStudyLookupKey(uid) || seen.has(uid))
         throw new ServiceUnavailableException('원본 검사 식별이 없거나 중복입니다');
       seen.add(uid);
       return { '0020000D': { Value:[uid] } };
@@ -194,7 +202,7 @@ export class OrthancService {
 
   async studiesByUid(uids: string[]): Promise<any[]> {
     if (!Array.isArray(uids) || uids.length > 100 || new Set(uids).size !== uids.length
-      || uids.some(uid => typeof uid !== 'string' || !/^[0-9]+(?:\.[0-9]+)*$/.test(uid) || uid.length > 64))
+      || uids.some(uid => !isStudyLookupKey(uid)))
       throw new BadRequestException('원본 검사 페이지 식별이 잘못되었습니다');
     if (!uids.length) return [];
     // QIDO UID-list matching uses commas, not DIMSE's backslash separator.
