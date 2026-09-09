@@ -3581,6 +3581,41 @@
       if (readingWorkspace.active()) return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);
     }
+    function ohifScope(value) {
+      try {
+        const location = new URL(value, window.location.origin);
+        if (location.origin !== window.location.origin || location.pathname !== "/ohif/viewer") return null;
+        const studies = (location.searchParams.get("StudyInstanceUIDs") || "").split(",");
+        if (studies.length < 1 || studies.length > 2 || studies.some(uid => !/^\d+(?:\.\d+)+$/.test(uid))) return null;
+        return { studies, series: location.searchParams.get("initialSeriesInstanceUID") || null };
+      } catch (_) { return null; }
+    }
+    function sameOhifScope(left, right) {
+      const a = ohifScope(left), b = ohifScope(right);
+      return !!a && !!b && a.series === b.series && JSON.stringify(a.studies) === JSON.stringify(b.studies);
+    }
+    function ohifPopupState(popup) {
+      try {
+        const href = popup.location.href;
+        if (href === "about:blank") return { kind: "blank", busy: false, dirty: false };
+        if (!ohifScope(href)) return { kind: "unknown", busy: true, dirty: true };
+        const history = popup.kinViewerHistoryWorkspaceState;
+        const jobs = popup.kinViewerJobWorkspaceState;
+        // A viewer document without both guards may still be loading or may
+        // have lost an asset. Uncertainty is not permission to replace it.
+        if (typeof history !== "function" || typeof jobs !== "function") {
+          return { kind: "viewer", href, busy: true, dirty: false, ready: false };
+        }
+        const annotationState = history(), jobState = jobs();
+        return { kind: "viewer", href, ready: true,
+          busy: !!(annotationState?.busy || jobState?.busy),
+          dirty: !!(annotationState?.dirty || jobState?.dirty) };
+      } catch (_) {
+        // Do not navigate a named window that no longer exposes the expected
+        // same-origin viewer; the user can close it explicitly and reopen.
+        return { kind: "unknown", busy: true, dirty: true };
+      }
+    }
     function openOhifWindow(uid, priorUid = null, initialSeriesUid = null) {
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
       // 썸네일에 Series 식별이 없으면 기본 시리즈를 대신 열어 선택이 맞는 것처럼 보이지 않는다.
@@ -3595,15 +3630,37 @@
       const seq = ++ohifOpenSeq;
       const stored = readStoredOhifRect();
       const initial = ohifPlacement(stored);
-      const isNewPopup = !ohifPopupHandle || ohifPopupHandle.closed;
       const popup = window.open(
         "",
         OHIF_WINDOW_NAME,
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
+        const previous = ohifPopupState(popup);
+        if (previous.kind === "viewer") {
+          if (sameOhifScope(previous.href, url)) {
+            popup.focus();
+            watchOhifRect(popup);
+            return;
+          }
+          if (previous.busy || previous.dirty || !previous.ready) {
+            popup.focus();
+            watchOhifRect(popup);
+            toast(!previous.ready
+              ? "기존 영상 창의 보호 상태를 확인할 수 없습니다. 로딩을 확인하고 계속되지 않으면 그 창을 닫은 뒤 다시 여세요."
+              : previous.busy
+              ? "기존 영상 창의 저장·복원 또는 상태 확인이 끝난 뒤 다른 검사를 여세요."
+              : "기존 영상 창에 저장하지 않은 표식이나 작업 내용이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.", "err", 8000);
+            return;
+          }
+          rememberOhifRect(popup);
+        } else if (previous.kind !== "blank") {
+          popup.focus();
+          toast("기존 영상 창의 상태를 확인할 수 없습니다. 그 창을 닫은 뒤 다시 여세요.", "err", 8000);
+          return;
+        }
         // feature는 안쪽 크기이므로 저장된 바깥 크기로 맞춰 재열기 누적을 막는다.
-        if (isNewPopup) {
+        if (previous.kind === "blank") {
           try {
             popup.resizeTo(initial.width, initial.height);
             popup.moveTo(initial.left, initial.top);
@@ -3619,7 +3676,7 @@
           toast("판독 창을 다른 화면에 열려면 툴바 [다른 모니터로]에서 허용하세요.", "info", 8000);
         }
         // 권한 응답이 늦어도 영상은 이미 로드 중이다. 저장 자리는 첫 배치로 덮지 않는다.
-        if (!stored && monitorPermissionGranted() && screen.isExtended === true) {
+        if (previous.kind === "blank" && !stored && monitorPermissionGranted() && screen.isExtended === true) {
           try {
             window.getScreenDetails().then(details => {
               if (seq !== ohifOpenSeq || popup.closed || !monitorPermissionGranted()) return;

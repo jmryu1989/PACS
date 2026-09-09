@@ -26,6 +26,15 @@ window.kinViewerJobs = function (services, model) {
     let ended = false, busy = false, me = null, serial = 0, editSerial = 0, pending = null, editRow = null, applying = false, channel, lastAuth = 0, checking = false;
     const workspaceState = () => ({ busy: !ended && (busy || applying), dirty: !ended && !!(pending || editRow || title.value || description.value) });
     window.kinViewerJobWorkspaceState = workspaceState;
+    // This panel also runs in the separate named viewer window, where the
+    // worklist's embedded-frame guard cannot protect an unfinished title,
+    // edit, or request when the window is closed directly.
+    const beforeUnload = e => {
+      const state = workspaceState();
+      if (state.busy || state.dirty) { e.preventDefault(); e.returnValue = ''; }
+    };
+    const ownsWindowUnload = window.top === window;
+    if (ownsWindowUnload) window.addEventListener('beforeunload', beforeUnload);
     const abort = new AbortController(), buttons = new Set();
     const live = () => !ended && location.search === search;
     const path = '/studies/' + studies[0] + '/viewer-jobs';
@@ -253,7 +262,7 @@ window.kinViewerJobs = function (services, model) {
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };
