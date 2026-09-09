@@ -4,6 +4,7 @@ window.KinFavorites = function (app) {
   d.innerHTML=`<h2 id="favorite-title">개인 즐겨찾기</h2><p>검사 링크를 계정에 저장합니다. 폴더·링크를 제거해도 원검사와 판독문은 유지됩니다.</p>
     <div class="favorite-layout"><aside><label>새 폴더 이름<input id="favorite-new-name" maxlength="120"></label><button id="favorite-create" type="button">폴더 만들기</button><div id="favorite-folders"></div></aside>
     <section><label>폴더 이름<input id="favorite-name" maxlength="120"></label><button id="favorite-rename" type="button">이름 변경</button> <button id="favorite-delete" type="button">폴더 삭제</button>
+    <button id="favorite-apply" type="button">이 폴더의 검사 목록 보기</button><p>기존 검색 조건과 함께 적용합니다. 목록의 범위 해제로 돌아갈 수 있습니다.</p>
     <p id="favorite-current"></p><button id="favorite-add" type="button">현재 선택 검사 추가</button><p id="favorite-count"></p><div id="favorite-links"></div></section></div>
     <p id="favorite-status" role="status"></p><footer><button id="favorite-retry" type="button" hidden>같은 요청 다시 시도</button><button id="favorite-reload" type="button">최신 목록 다시 읽기</button><button id="favorite-close" type="button">닫기</button></footer>`;
   document.body.append(d);const $=id=>d.querySelector('#favorite-'+id);
@@ -16,7 +17,7 @@ window.KinFavorites = function (app) {
   function controls(){
     d.querySelectorAll('button,input').forEach(el=>el.disabled=busy||!!pending);
     $('retry').hidden=!pending;$('retry').disabled=busy;
-    for(const id of ['create','rename','delete','add'])$(id).disabled=busy||!!pending||!same()||(id!=='create'&&!folder())||(id==='add'&&!current);
+    for(const id of ['create','rename','delete','add','apply'])$(id).disabled=busy||!!pending||!same()||(id!=='create'&&!folder())||(id==='add'&&!current);
     $('name').disabled=busy||!!pending||!folder();$('new-name').disabled=busy||!!pending;
     $('reload').disabled=busy;
     $('close').disabled=busy;
@@ -27,7 +28,7 @@ window.KinFavorites = function (app) {
     if(!value||!Number.isInteger(value.revision)||!Array.isArray(value.folders)
        ||value.folders.some(f=>typeof f.id!=='string'||typeof f.name!=='string'||!Array.isArray(f.uids)||f.uids.some(x=>typeof x!=='string')))
       throw new Error('즐겨찾기 계정·목록 형식을 확인할 수 없습니다');
-    state=value;
+    state=value;app.changed?.(value);
   }
   function button(text,action,parent){const b=document.createElement('button');b.type='button';b.textContent=text;b.onclick=action;parent.append(b);return b;}
   function draw(preserve=false){
@@ -67,6 +68,15 @@ window.KinFavorites = function (app) {
     }}
     finally{if(ticket===seq){busy=false;controls();}}
   }
+  async function applyFolder(){
+    if(busy||pending||!same()||!folder()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 목록을 볼까요?'))return;
+    const ticket=++seq,wanted=selected;busy=true;controls();message('폴더를 확인하는 중…');
+    try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);
+      if(!state.folders.some(f=>f.id===wanted)){draw();message('이 폴더는 삭제되었습니다. 다른 폴더를 선택하세요.');return;}
+      app.applyFolder(state,wanted);const focus=opener;busy=false;close(true);if(focus?.isConnected)focus.focus();
+    }catch(e){if(ticket===seq&&same())message('목록 적용 실패: '+e.message);}
+    finally{if(ticket===seq){busy=false;controls();}}
+  }
   async function choose(uid){
     if(busy||pending||!same()||dirty()&&!confirm('저장하지 않은 폴더 이름 입력을 버리고 검사를 선택할까요?'))return;const ticket=++seq,wanted=selected;busy=true;controls();
     try{const value=await request('GET');if(ticket!==seq||!same())return;adopt(value);
@@ -84,9 +94,10 @@ window.KinFavorites = function (app) {
   }
   $('create').onclick=()=>command('create',{name:$('new-name').value});$('rename').onclick=()=>command('rename',{name:$('name').value});
   $('delete').onclick=()=>{if(folder()&&confirm('이 폴더와 즐겨찾기 링크만 삭제합니다. 원검사와 판독문은 유지됩니다. 계속할까요?'))command('delete');};
+  $('apply').onclick=applyFolder;
   $('add').onclick=()=>command('add',{uid:current});$('retry').onclick=send;$('reload').onclick=load;$('close').onclick=()=>close();
   d.addEventListener('cancel',e=>{e.preventDefault();close();});
-  function end(){ended=true;close(true);}
+  function end(){ended=true;close(true);app.ended?.();}
   let channel;function connect(){try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}}connect();
   window.addEventListener('storage',e=>{if(e.key==='kin-session-ended')end();});window.addEventListener('pagehide',()=>{close(true);channel?.close();});
   window.addEventListener('pageshow',e=>{if(e.persisted){close(true);connect();}});

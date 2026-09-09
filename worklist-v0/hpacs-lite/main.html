@@ -566,6 +566,7 @@
     <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
     <button class="chip" id="savefilter">Save Filter</button>
     <button class="chip" id="favorite-open" type="button">개인 즐겨찾기</button>
+    <button class="chip" id="favorite-clear" type="button" hidden>즐겨찾기 범위 해제</button>
     <button class="chip" id="managefilters">검색 조건·저장 관리</button>
     <button class="chip" id="columnsettings">열 설정</button>
     <button class="chip" id="clearfilter">Clear</button>
@@ -901,6 +902,7 @@
   <script src="study-pages.js"></script>
   <script src="saved-filter-manager.js"></script>
   <link rel="stylesheet" href="favorites.css">
+  <script src="favorite-list.js"></script>
   <script src="favorites.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
@@ -1547,6 +1549,7 @@
 
     // ── 데이터 ──
     let studies = [];
+    let favoriteList = null;
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
@@ -1662,6 +1665,8 @@
         const r = await studyPageClient.read({ resume:!!options.resume, epoch, valid:() => !commitInFlight && epoch === commitEpoch });
         if (loadSequence !== listLoadSequence || commitInFlight || epoch !== commitEpoch) return;
         assertStudyOwner(r);
+        await favoriteList?.refresh();
+        if (loadSequence !== listLoadSequence || commitInFlight || epoch !== commitEpoch) return;
         /**
          * **가져오기와 그리기를 나눈다.**
          *
@@ -1801,7 +1806,8 @@
     }
 
     function filtered() {
-      return filteredFor({ mode, quick: $("#quick").value, days: quickDays, cols: fval });
+      const list = filteredFor({ mode, quick: $("#quick").value, days: quickDays, cols: fval });
+      return favoriteList ? favoriteList.filter(list) : list;
     }
 
     // Navigation and its position indicator must use the same order the reader sees.
@@ -1816,7 +1822,7 @@
     function render(revealUid) {
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
-      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir]);
+      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir, favoriteList?.key()]);
       if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
       if (typeof revealUid === 'string') {
         const index = list.findIndex(s => s.uid === revealUid);
@@ -1843,6 +1849,7 @@
       columnPrefs?.decorate(mode);
 
       const active = [];
+      if (favoriteList?.label()) active.push(favoriteList.label());
       // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —
       // 목록도, 카운트도, 필터 표시도 안 그려진다. 서버 필터가 0/3/7/30/60/-1 외의
       // days를 주면 어느 버튼도 `.on`이 아니라 실제로 도달한다.
@@ -3319,6 +3326,8 @@
           // 요청을 보낸 뒤 확정이 일어났다면 이 응답은 그 이전 사진이다. 버린다.
           if (commitInFlight || epoch !== commitEpoch) return;
           assertStudyOwner(r);
+          await favoriteList?.refresh();
+          if (commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           const known = new Set(studies.map(x => x.uid));
           const fresh = r.studies.filter(s => !known.has(s.uid));
@@ -3845,9 +3854,15 @@
       toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
 
+    favoriteList = KinFavoriteList({ api,
+      identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
+      changed: () => { $('#favorite-clear').hidden = !favoriteList.label(); render(); },
+    });
+    $('#favorite-clear').onclick = () => favoriteList.clear();
     const favorites = KinFavorites({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
       identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
       current: () => selectedUid, study: uid => studies.find(s => s.uid===uid), select,
+      applyFolder: (value,id) => favoriteList.apply(value,id), changed: value => favoriteList.adopt(value), ended: () => favoriteList.end(),
       notice: message => toast(message,'err'),
     });
     $('#favorite-open').onclick = () => favorites.open();
@@ -4211,6 +4226,7 @@
     renderChips();
 
     $("#clearfilter").addEventListener("click", () => {
+      favoriteList?.clear();
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
       quickDays = -1;
