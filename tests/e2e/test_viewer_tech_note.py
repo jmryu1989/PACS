@@ -50,5 +50,24 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#tech-note-dialog')).to_have_count(0)
   for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(dict(uid=a.uid,note=dict(studyUid=a.uid,text='LATE NOTE'),writable=False)))
   expect(v.locator('#tech-note-dialog')).to_have_count(0);expect(v.locator('#kin-viewer-note-open')).to_be_disabled()
+ def test_viewer_note_05_initial_connection_retry_preserves_view(self):
+  a=self.ct('VIEWER-RETRY-'+uuid.uuid4().hex[:10],'retry','20260801');self.note(a,'RECONNECTED NOTE')
+  p=self.login();fail=[True]
+  def intermittent(route):
+   if '/ohif/viewer' in route.request.frame.url and fail[0]:route.fulfill(status=503,content_type='application/json',body='{}')
+   else:route.continue_()
+  p.context.route('**/api/me',intermittent)
+  v=self.launch(p,[a]);canvas_ready(v,1)
+  expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
+  layout=v.locator('#kin-viewer-layout')
+  if layout.get_attribute('open') is None:layout.locator('summary').first.click()
+  v.get_by_label('작업 제목',exact=True).fill('KEEP RETRY JOB TITLE');before=self.snapshot(v);url=v.url
+  v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
+  expect(v.locator('#kin-viewer-note-retry')).to_be_focused();self.assertEqual(self.snapshot(v),before)
+  fail[0]=False;v.locator('#kin-viewer-note-retry').click();self.ready(v);expect(v.locator('#kin-viewer-note-open')).to_be_focused()
+  self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP RETRY JOB TITLE')
+  self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('RECONNECTED NOTE');v.locator('#tech-note-close').click()
+  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+  expect(v.locator('#kin-viewer-note-open')).to_be_disabled();expect(v.locator('#kin-viewer-note-retry')).to_be_disabled()
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ViewerTechNoteE2E(n) for n in loader.getTestCaseNames(ViewerTechNoteE2E) if n.startswith('test_viewer_note_'))
 if __name__=='__main__':unittest.main(verbosity=2)

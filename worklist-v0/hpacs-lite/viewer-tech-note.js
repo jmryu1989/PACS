@@ -28,9 +28,10 @@ window.kinViewerTechNote=function(services){
     const host=document.querySelector('#kin-viewer-layout');if(!host)return;
     const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
     const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
-    const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,status);host.append(panel);
-    function refresh(){button.disabled=!live()||busy||!owner;}
-    function end(){if(ended)return;ended=true;owner=null;for(const c of requests)c.abort();note.dispose();button.disabled=true;status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='메모 연결 다시 시도';retry.hidden=true;
+    const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,retry,status);host.append(panel);
+    function refresh(){button.disabled=!live()||busy||!owner;retry.disabled=!live()||busy;}
+    function end(){if(ended)return;ended=true;owner=null;for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
@@ -55,7 +56,14 @@ window.kinViewerTechNote=function(services){
     try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
     const timer=setInterval(()=>{if(!live())end();},500);
     stop=()=>{end();clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);channel?.close();panel.remove();};
-    refresh();authenticate().then(()=>{if(live()){status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';refresh();}}).catch(e=>{if(live())status.textContent=e.message;});
+    async function connect(){
+      if(!live()||busy)return;
+      const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
+      try{await authenticate();if(live()){retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
+      catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
+      finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?button:retry;target.focus({preventScroll:true});}}
+    }
+    retry.onclick=connect;connect();
   }
   return {mount,stop:()=>stop()};
 };
