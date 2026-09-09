@@ -58,6 +58,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
       - name: Compound search operators and malformed condition boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs
+      - name: Worklist column visibility and account storage model
+        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_columns_test.cjs
       - name: Account and browser workspace storage boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_layout_test.cjs
       - name: Explicit recent viewer layout storage boundaries

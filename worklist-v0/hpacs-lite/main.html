@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>워크리스트 — KOREA IMAGING NETWORK</title>
   <link rel="stylesheet" href="saved-filter-manager.css">
+  <link rel="stylesheet" href="worklist-columns.css">
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png">
   <style>
@@ -559,6 +560,7 @@
     <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
     <button class="chip" id="savefilter">Save Filter</button>
     <button class="chip" id="managefilters">검색 조건·저장 관리</button>
+    <button class="chip" id="columnsettings">열 설정</button>
     <button class="chip" id="clearfilter">Clear</button>
   </div>
 
@@ -880,6 +882,7 @@
   <link rel="stylesheet" href="tech-note.css">
   <script src="tech-note.js"></script>
   <script src="compound-filter.js"></script>
+  <script src="worklist-columns.js"></script>
   <script src="saved-filter-manager.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
@@ -1504,10 +1507,12 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
+    let columnPrefs = null;
+    const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     function renderHeads() {
-      $("#heads").innerHTML = COLS[mode].map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
-      $("#filterrow").innerHTML = COLS[mode].map(c => {
+      $("#heads").innerHTML = shownColumns().map(c => `<th data-key="${c.k}" class="${c.num ? "num" : ""}">${c.t}</th>`).join("");
+      $("#filterrow").innerHTML = shownColumns().map(c => {
         if (!c.f) return "<th></th>";
         if (c.f === "text")
           return `<th><input data-f="${c.k}" value="${esc(fval[c.k] ?? "")}"></th>`;
@@ -1763,18 +1768,18 @@
     }
 
     function render() {
-      const cols = COLS[mode];
+      const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
 
       $("#rows").innerHTML = list.map((s, i) => `
         <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
-        cols.map(c => {
+        shown.map(c => {
           // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
           const v = c.k === "no" ? i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
           const classes = [c.num ? "num" : "", c.k === "acc" ? "acc" : "", ["id", "birth"].includes(c.k) ? "dim" : ""];
           return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
         }).join("") + `</tr>`).join("")
-        || `<tr><td class="empty" colspan="${cols.length}">No records found</td></tr>`;
+        || `<tr><td class="empty" colspan="${shown.length}">No records found</td></tr>`;
 
       const active = [];
       // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —
@@ -1783,7 +1788,8 @@
       // 화면 한 줄을 못 쓰는 것과 화면 전체가 안 그려지는 것은 다른 사고다.
       if (quickDays >= 0)
         active.push(`StudyDate(${$("#qf .on")?.textContent ?? `최근 ${quickDays}일`})`);
-      cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})`); });
+      cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})${shown.includes(c) ? '' : ' [숨긴 열]'}`); });
+      if (sortKey && sortDir && !shown.some(c => c.k === sortKey)) active.push(`숨긴 열 정렬: ${COLS[mode].find(c => c.k === sortKey)?.t ?? sortKey} ${sortDir > 0 ? '오름차순' : '내림차순'}`);
       const compound = fval[KinCompoundFilter.KEY];
       const compoundError = KinCompoundFilter.validate(compound, cols);
       if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
@@ -4581,6 +4587,8 @@
       userDisplayName = sess.displayName || user;
       $("#user").textContent = userDisplayName;
       rememberActor(user, userDisplayName, user.split("@")[0]);
+      columnPrefs = KinWorklistColumns.mount({ columns: COLS, session: sess, mode: () => mode,
+        changed: () => { renderHeads(); render(); } });
       renderHeads();
       renderTemplates();
       applyRoleUi();

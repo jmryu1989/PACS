@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-COLUMNS: `node --test tests/worklist_columns_test.cjs`와 `python tests/e2e/test_worklist_columns.py`는 열 표시/순서·ID/Name 필수 유지, 숨긴 열 조건/정렬과 판독 입력 보존, 판독/촬영별 설정, 같은 브라우저의 계정별 복원/재로그인, 다른 창 충돌·저장 실패·손상 값 복구·취소/키보드/작은 창을 검사한다. 열 설정은 기관+불변 subject별 브라우저 저장소에 표시 항목만 보관한다. 서버 동기화·다른 컴퓨터 복원은 포함하지 않으며 UI에 범위를 표시한다. API/DB/판독·원본 저장 경로는 변경하지 않는다.
+
 ## 공통 실행 증거 기록
 
 단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.
