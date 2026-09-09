@@ -39,15 +39,15 @@ window.KinReadingAppearance = function (options) {
   const dialog=document.createElement('dialog');dialog.id='reading-appearance-dialog';dialog.setAttribute('aria-labelledby','reading-appearance-title');
   const element=(tag,text,parent)=>{const e=document.createElement(tag);e.textContent=text;if(parent)parent.append(e);return e;};
   const title=element('h2','글자 설정',dialog);title.id='reading-appearance-title';
-  element('p','글자 크기는 현재 브라우저에 기억하며, 계정에 저장한 뒤 다른 기기에서 불러올 수 있습니다.',dialog);
+  element('p','글자 크기·글꼴·글자색을 현재 브라우저에 기억합니다. 계정에 저장하면 다른 기기에서 함께 불러올 수 있습니다. 이전 크기 전용 설정은 글꼴·색상을 유지합니다.',dialog);
   const fields={};
   for(const [name,label] of [['list','검사 목록'],['current','작성 중 판독문'],['prior','과거 판독문']]){
     const row=element('label',label,dialog),select=element('select','',row);select.id='reading-text-'+name;
     for(const size of sizes){const option=element('option',size+' px',select);option.value=String(size);}
     fields[name]=select;select.onchange=()=>{if(!live()){end();return;}value={...value,[name]:Number(select.value)};apply();save();};
   }
-  const fontSection=element('fieldset','',dialog);element('legend','글꼴 · 이 브라우저',fontSection);
-  element('p','이 계정의 현재 브라우저에만 기억합니다. 설치되지 않은 글꼴은 기기의 대체 글꼴로 표시합니다.',fontSection);
+  const fontSection=element('fieldset','',dialog);element('legend','글꼴',fontSection);
+  element('p','설치되지 않은 글꼴은 기기의 대체 글꼴로 표시합니다.',fontSection);
   const fontFields={};
   for(const [name,label] of [['list','검사 목록 글꼴'],['current','작성 중 판독문 글꼴'],['prior','과거 판독문 글꼴']]){
     const row=element('label',label,fontSection),select=element('select','',row);select.id='reading-font-'+name;
@@ -57,8 +57,8 @@ window.KinReadingAppearance = function (options) {
   const fontStatus=element('p','',fontSection);fontStatus.id='reading-font-status';fontStatus.setAttribute('role','status');
   const fontReset=element('button','기본 글꼴',fontSection);fontReset.type='button';fontReset.id='reading-font-reset';
   fontReset.onclick=()=>{if(!live()){end();return;}fontValue=defaultFonts();applyFonts();saveFonts();};
-  const colorSection=element('fieldset','',dialog);element('legend','글자색 · 이 브라우저',colorSection);
-  element('p','기본 글자색만 바꿉니다. 검사 상태색과 선택 표시는 유지하며, 이 계정의 현재 브라우저에만 기억합니다.',colorSection);
+  const colorSection=element('fieldset','',dialog);element('legend','글자색',colorSection);
+  element('p','기본 글자색만 바꿉니다. 검사 상태색과 선택 표시는 유지합니다.',colorSection);
   const colorFields={};
   for(const [name,label] of [['list','검사 목록 글자색'],['current','작성 중 판독문 글자색'],['prior','과거 판독문 글자색']]){
     const row=element('label',label,colorSection),select=element('select','',row);select.id='reading-color-'+name;
@@ -78,12 +78,14 @@ window.KinReadingAppearance = function (options) {
   function applyFonts(){for(const name of ['list','current','prior']){document.documentElement.style.setProperty('--kin-'+name+'-font',fonts[fontValue[name]]);fontFields[name].value=fontValue[name];}}
   function saveFonts(){
     if(!live())return;
+    generation++;
     try{storage.setItem(fontKey,JSON.stringify(fontValue));fontStatus.textContent='글꼴을 기억했습니다 · 이 브라우저';}
     catch(_){fontStatus.textContent='저장소를 사용할 수 없어 글꼴을 이 창에만 적용합니다.';}
   }
   function applyColors(){for(const name of ['list','current','prior']){document.documentElement.style.setProperty('--kin-'+name+'-color',colors[colorValue[name]]);colorFields[name].value=colorValue[name];}}
   function saveColors(){
     if(!live())return;
+    generation++;
     try{storage.setItem(colorKey,JSON.stringify(colorValue));colorStatus.textContent='글자색을 기억했습니다 · 이 브라우저';}
     catch(_){colorStatus.textContent='저장소를 사용할 수 없어 글자색을 이 창에만 적용합니다.';}
   }
@@ -123,6 +125,15 @@ window.KinReadingAppearance = function (options) {
   apply();applyFonts();applyColors();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-  return {host:account,read:()=>({...value}),generation:()=>generation,normalize,allowed:live,
-    apply:next=>{const clean=normalize(next);if(!live()||!clean)return false;value=clean;apply();save();return true;}};
+  const normalizeAccount=v=>{
+    const legacy=normalize(v);if(legacy)return legacy;
+    if(!v||typeof v!=='object'||Array.isArray(v)||v.version!==2||Object.keys(v).sort().join(',')!=='colors,current,fonts,list,prior,version')return null;
+    const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
+    return clean&&f&&c?{...clean,version:2,fonts:f,colors:c}:null;
+  };
+  return {host:account,read:()=>({...value,version:2,fonts:{...fontValue},colors:{...colorValue}}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
+    apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
+      value={version:1,list:clean.list,current:clean.current,prior:clean.prior};
+      if(clean.version===2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}
+      apply();save();return true;}};
 };

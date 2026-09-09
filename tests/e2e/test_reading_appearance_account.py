@@ -26,6 +26,8 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   expect(other.locator('#reading-font-current')).to_have_value('default')
   expect(other.locator('#reading-color-current')).to_have_value('default')
   other.locator('#appearance-account-load').click();expect(other.locator('#findings')).to_have_css('font-size','20px')
+  expect(other.locator('#reading-font-current')).to_have_value('mono');expect(other.locator('#reading-color-current')).to_have_value('warm')
+  expect(other.locator('#findings')).to_have_css('color','rgb(255, 241, 214)')
   expect(other.locator('#reading-text-list')).to_have_value('16');expect(other.locator('#reading-text-prior')).to_have_value('18')
   other.locator('#reading-text-current').select_option('16');other.locator('#appearance-account-save').click()
   expect(other.locator('#appearance-account-status')).to_have_text('글자 설정을 계정에 저장했습니다.')
@@ -59,6 +61,32 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
   expect(p.locator('#appearance-account-save')).to_be_disabled();expect(p.locator('#reading-appearance-dialog')).not_to_be_visible()
   for route in pending:route.abort()
+ def test_roam_05_legacy_load_retains_local_font_color_then_upgrades(self):
+  p=self.login();self.ready(p);head=p.request.get(self.stack.api+'/reading-appearance').json()
+  legacy=dict(expectedOwner=head['owner'],revision=head['revision'],sizes=dict(version=1,list=16,current=18,prior=20))
+  r=p.request.put(self.stack.api+'/reading-appearance',headers={'X-KIN-CSRF':'1'},data=legacy);self.assertEqual(r.status,200,r.text())
+  p.locator('#reading-font-current').select_option('serif');p.locator('#reading-color-current').select_option('cool')
+  p.locator('#appearance-account-load').click();expect(p.locator('#findings')).to_have_css('font-size','18px')
+  expect(p.locator('#reading-font-current')).to_have_value('serif');expect(p.locator('#reading-color-current')).to_have_value('cool')
+  p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('글자 설정을 계정에 저장했습니다.')
+  saved=p.request.get(self.stack.api+'/reading-appearance').json()['sizes'];self.assertEqual(saved['version'],2);self.assertEqual(saved['fonts']['current'],'serif');self.assertEqual(saved['colors']['current'],'cool')
+
+ def test_roam_06_late_load_does_not_replace_new_font_or_color(self):
+  p=self.login();self.ready(p);p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('글자 설정을 계정에 저장했습니다.')
+  pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route))
+  for selector,value in [('#reading-font-current','mono'),('#reading-color-current','warm')]:
+   p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('글자 설정 확인 중…');p.locator(selector).select_option(value)
+   self.assertEqual(len(pending),1);pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'))
+   expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');expect(p.locator(selector)).to_have_value(value)
+  expect(p.locator('#reading-font-current')).to_have_value('mono')
+
+ def test_roam_07_save_reports_only_the_snapshot_sent(self):
+  p=self.login();self.ready(p);p.locator('#reading-color-current').select_option('warm')
+  pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('글자 설정 확인 중…')
+  p.locator('#reading-color-current').select_option('cool');self.assertEqual(len(pending),1);route=pending.pop();route.fulfill(response=route.fetch())
+  expect(p.locator('#appearance-account-status')).to_contain_text('요청 당시 설정을 저장했습니다');expect(p.locator('#reading-color-current')).to_have_value('cool')
+  self.assertEqual(p.request.get(self.stack.api+'/reading-appearance').json()['sizes']['colors']['current'],'warm')
+
  def test_roam_04_failed_write_empty_load_and_wrong_owner_response(self):
   a,b=self.pair();p=self.login();self.ready(p);p.locator('#reading-text-current').select_option('20')
   p.route('**/api/reading-appearance',lambda route:route.fulfill(status=500,content_type='application/json',body='{}'))

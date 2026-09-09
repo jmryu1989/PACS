@@ -34,4 +34,22 @@ class ReadingAppearanceLive(unittest.TestCase):
   invalid += [dict(b,revision=v) for v in [True,-1,2147483647]]+[dict(b,extra='no'),{}]
   for value in invalid:
    with self.subTest(value=value):self.assertEqual(self.write(value).status,400);self.assertEqual(self.get(),saved)
+ def test_04_combined_roundtrip_upgrade_and_legacy_refusal(self):
+  b=self.body();self.assertEqual(self.write(b).status,200)
+  b.update(revision=1,sizes=dict(b['sizes'],version=2,fonts=dict(version=1,list='sans',current='mono',prior='serif'),colors=dict(version=1,list='warm',current='white',prior='cool')))
+  r=self.write(b);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],b['sizes']);self.assertEqual(self.get(),r.body)
+  self.assertIsNone(self.get('doctor2')['sizes']);self.assertEqual(self.write(b,'doctor2').status,409)
+  saved=self.get();legacy=self.body();self.assertEqual(legacy['revision'],2)
+  self.assertEqual(self.write(legacy).status,409);self.assertEqual(self.get(),saved)
+  self.assertEqual(self.write(b).status,409);b['revision']=2;self.assertEqual(self.write(b).status,200)
+ def test_05_combined_invalid_values_are_atomic(self):
+  import copy
+  b=self.body();b['sizes'].update(version=2,fonts=dict(version=1,list='default',current='serif',prior='mono'),colors=dict(version=1,list='default',current='warm',prior='cool'))
+  self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=1
+  for field,bad in [('fonts',None),('fonts',{}),('colors',[]),('colors',dict(version=1,list='white',current='black',prior='cool'))]:
+   invalid=copy.deepcopy(b);invalid['sizes'][field]=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+  for field in ['fonts','colors']:
+   for bad in ['url(https://invalid.example/x)', '__proto__', ['default'], True, None]:
+    invalid=copy.deepcopy(b);invalid['sizes'][field]['current']=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+   invalid=copy.deepcopy(b);invalid['sizes'][field]['patient']='forbidden';self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
 if __name__=='__main__':unittest.main(verbosity=2)

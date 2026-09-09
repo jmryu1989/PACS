@@ -794,19 +794,28 @@ export class PacsService implements OnModuleInit {
   async saveReadingAppearance(body: any, c: Caller) {
     const owner = this.workspaceOwner(c);
     const object = (v: any) => v && typeof v === 'object' && !Array.isArray(v);
+    const choices = (v: any, allowed: string[]) => object(v) && Object.keys(v).sort().join(',') === 'current,list,prior,version' &&
+      v.version === 1 && ['list', 'current', 'prior'].every(k => typeof v[k] === 'string' && allowed.includes(v[k]));
+    const validAppearance = (v: any) => object(v) && ['list', 'current', 'prior'].every(k => [12, 14, 16, 18, 20].includes(v[k])) &&
+      (v.version === 1 ? Object.keys(v).sort().join(',') === 'current,list,prior,version' :
+        v.version === 2 && Object.keys(v).sort().join(',') === 'colors,current,fonts,list,prior,version' &&
+        choices(v.fonts, ['default', 'sans', 'serif', 'mono']) && choices(v.colors, ['default', 'warm', 'cool', 'white']));
     if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,sizes' ||
         !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647 ||
-        !object(body.sizes) || Object.keys(body.sizes).sort().join(',') !== 'current,list,prior,version' ||
-        body.sizes.version !== 1 || !['list', 'current', 'prior'].every(k => [12, 14, 16, 18, 20].includes(body.sizes[k])))
-      throw new BadRequestException('글자 크기 설정 형식을 확인하세요');
+        !validAppearance(body.sizes))
+      throw new BadRequestException('글자 설정 형식을 확인하세요');
     if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
       throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
-    const sizes = { version: 1, list: body.sizes.list, current: body.sizes.current, prior: body.sizes.prior };
+    const select = (v: any) => ({ version: 1, list: v.list, current: v.current, prior: v.prior });
+    const sizes = body.sizes.version === 1 ? select(body.sizes) :
+      { ...select(body.sizes), version: 2, fonts: select(body.sizes.fonts), colors: select(body.sizes.colors) };
     const conflict = () => new ConflictException('계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
     try {
       const row = await this.prisma.$transaction(async tx => {
         if (body.revision === 0) return tx.readingAppearance.create({ data: { ...owner, revision: 1, sizes } });
-        const changed = await tx.readingAppearance.updateMany({ where: { ...owner, revision: body.revision },
+        // A legacy size-only writer must not erase a newer combined font/color record.
+        const changed = await tx.readingAppearance.updateMany({ where: { ...owner, revision: body.revision,
+          ...(body.sizes.version === 1 ? { sizes: { path: ['version'], equals: 1 } } : {}) },
           data: { sizes, revision: { increment: 1 } } });
         if (changed.count !== 1) throw conflict();
         return tx.readingAppearance.findUnique({ where: { institution_subject: owner } });
