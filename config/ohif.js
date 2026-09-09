@@ -1880,18 +1880,37 @@ function kinCreateViewerJobs() {
 }
 
 function kinCreateViewerTechNote() {
-  let ready, current, epoch=0;
+  let ready, current, prepare, epoch=0, active=false, state='stopped';
+  function connect() {
+    if(!active||state==='loading'||state==='ready')return;
+    const ticket=epoch;state='loading';
+    prepare().then(extension=>{
+      if(!active||ticket!==epoch)return;
+      current=extension;
+      if(current.mount()!==true)throw new Error('Tech 메모 연결 대상을 확인하지 못했습니다.');
+      state='ready';
+    }).catch(e=>{
+      if(!active||ticket!==epoch)return;
+      state='failed';
+      if(window.top===window){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent='Tech 메모 화면을 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.';}
+    });
+  }
   return {id:'kin.viewer-tech-note',preRegistration({servicesManager}) {
     const load=name=>new Promise((resolve,reject)=>{
       const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+name;
-      const timer=setTimeout(()=>{script.remove();reject(new Error('Tech 메모 화면을 불러오지 못했습니다. 뷰어를 새로고침하세요.'));},20000);
-      script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=()=>{clearTimeout(timer);reject(new Error('Tech 메모 화면을 불러오지 못했습니다. 뷰어를 새로고침하세요.'));};document.head.append(script);
+      const fail=()=>{clearTimeout(timer);script.onload=script.onerror=null;script.remove();reject(new Error('Tech 메모 화면을 불러오지 못했습니다. 메모 연결을 다시 시도하세요.'));};
+      const timer=setTimeout(fail,20000);
+      script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=fail;document.head.append(script);
     });
     const standalone=window.top===window;
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
-    ready=(standalone?load('tech-note.js'):Promise.resolve()).then(()=>load('viewer-tech-note.js')).then(()=>window.kinViewerTechNote(servicesManager.services));ready.catch(()=>{});
-  },onModeEnter(){if(!ready)return;const ticket=++epoch;ready.then(extension=>{if(ticket===epoch){current=extension;current.mount();}}).catch(e=>{if(ticket===epoch){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent=e.message;}});
-  },onModeExit(){epoch++;current?.stop();current=null;}};
+    prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
+      .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
+      .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
+    window.kinViewerNoteConnectionState=()=>state;
+    window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
+  },onModeEnter(){if(!prepare)return;epoch++;active=true;state='stopped';connect();
+  },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }
 
 window.config = {

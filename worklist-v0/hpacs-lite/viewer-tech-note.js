@@ -23,7 +23,7 @@ window.kinViewerTechNote=function(services){
     if(window.top!==window){
       window.kinViewerSelectedNoteTarget=selected;
       stop=()=>{ended=true;if(window.kinViewerSelectedNoteTarget===selected)delete window.kinViewerSelectedNoteTarget;};
-      return;
+      return true;
     }
     const host=document.querySelector('#kin-viewer-layout');if(!host)return;
     const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
@@ -64,6 +64,7 @@ window.kinViewerTechNote=function(services){
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?button:retry;target.focus({preventScroll:true});}}
     }
     retry.onclick=connect;connect();
+    return true;
   }
   return {mount,stop:()=>stop()};
 };

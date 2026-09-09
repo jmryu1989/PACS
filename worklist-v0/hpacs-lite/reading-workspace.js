@@ -44,6 +44,9 @@ window.KinReadingWorkspace = function (app) {
   note.id = 'reading-tech-note';
   note.setAttribute('aria-keyshortcuts', 'Control+Alt+6');
   note.setAttribute('aria-describedby', 'reading-images');
+  const noteRetry = button('메모 연결 다시 시도', reconnectNote);
+  noteRetry.id = 'reading-note-retry'; noteRetry.hidden = true;
+  let noteRetryFocus = null;
   const autoLabel = node('label', '', nav);
   const autoNote = node('input', '', autoLabel); autoNote.type = 'checkbox'; autoNote.id = 'reading-note-auto';
   autoLabel.append(document.createTextNode(' 메모 자동 열기'));
@@ -148,21 +151,43 @@ window.KinReadingWorkspace = function (app) {
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
   }
   const sameTarget = () => shown?.reportUid === app.current();
-  function noteTarget() {
+  function noteWindow() {
     try {
       const w = frame?.contentWindow, url = new URL(w.location.href);
       if (url.origin !== window.location.origin || url.pathname !== '/ohif/viewer' ||
           url.searchParams.get('StudyInstanceUIDs') !== [shown.uid, shown.prior].filter(Boolean).join(',')) return null;
-      const selected = w.kinViewerSelectedNoteTarget?.();
+      return w;
+    } catch (_) { return null; }
+  }
+  function noteTarget() {
+    try {
+      const selected = noteWindow()?.kinViewerSelectedNoteTarget?.();
       return selected && [shown.uid, shown.prior].includes(selected.uid) && app.study(selected.uid) ? selected : null;
     } catch (_) { return null; }
   }
   function updateNote() {
     syncAutoNote();
     const selected = noteTarget();
-    note.disabled = ended || !active || !app.allowed() || !frame || !sameTarget() || !loaded || frame.inert || !selected;
+    const unavailable = ended || !active || !app.allowed() || !frame || !sameTarget() || !loaded || frame.inert;
+    note.disabled = unavailable || !selected;
+    const w = noteWindow(), connection = w?.kinViewerNoteConnectionState?.();
+    noteRetry.hidden = !['failed', 'loading'].includes(connection);
+    noteRetry.disabled = unavailable || connection !== 'failed';
+    noteRetry.textContent = connection === 'loading' ? '메모 연결 중…' : '메모 연결 다시 시도';
+    if (noteRetryFocus && (!w || w !== noteRetryFocus || unavailable || connection !== 'loading')) {
+      if (w === noteRetryFocus && !unavailable && connection === 'ready' &&
+          (document.activeElement === noteRetry || document.activeElement === document.body)) (note.disabled ? imageFocus : note).focus({preventScroll:true});
+      noteRetryFocus = null;
+    }
     const label = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(selected.uid) : '');
     if (note.textContent !== label) note.textContent = label;
+  }
+  function reconnectNote() {
+    updateNote(); if (noteRetry.disabled) return;
+    const w = noteWindow();
+    if (!w || typeof w.kinViewerNoteReconnect !== 'function') return;
+    noteRetryFocus = document.activeElement === noteRetry ? w : null;
+    w.kinViewerNoteReconnect(); updateNote();
   }
   function syncAutoNote() {
     const owner = !ended && app.allowed() && app.noteOwner();

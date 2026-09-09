@@ -66,11 +66,39 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
 
  def test_reading_note_04_bridge_failure_keeps_images(self):
-  a,b=self.pair();p=self.login();p.route('**/viewer-tech-note.js',lambda route:route.abort())
+  from test_viewer_tech_note import ViewerTechNoteE2E
+  a,b=self.pair();self.note(b,'RECOVERED SECOND IMAGE NOTE')
+  p=self.login();failed_loads=[]
+  def fail_asset(route):
+   failed_loads.append(route.request.url);route.abort()
+  p.route('**/viewer-tech-note.js',fail_asset)
   f=self.workspace(p,a);expect(p.locator('#reading-tech-note')).to_be_disabled()
   p.locator('#findings').fill('KEEP REPORT WITHOUT NOTES');p.keyboard.press('Control+Alt+2')
   expect(p.locator('#reading-frame')).to_be_focused();canvas_ready(f,2)
+  f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP VIEWER THROUGH ASSET RETRY')
+  before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
+  f.evaluate('() => window.noteRetryDocument = document')
+  retry=p.locator('#reading-note-retry');expect(retry).to_be_enabled();retry.click()
+  expect(retry).to_be_enabled();expect(p.locator('#reading-tech-note')).to_be_disabled()
+  self.assertEqual(len(failed_loads),2)
+  self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
+  p.unroute('**/viewer-tech-note.js');retry.click()
+  expect(p.locator('#reading-tech-note')).to_be_enabled();expect(retry).not_to_be_visible()
+  expect(p.locator('#reading-tech-note')).to_be_focused()
+  self.assertTrue(f.evaluate('() => window.noteRetryDocument === document'));self.assertEqual(f.url,url)
+  expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP VIEWER THROUGH ASSET RETRY')
   expect(p.locator('#findings')).to_have_value('KEEP REPORT WITHOUT NOTES')
+  self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
+  for cell in f.locator('[data-cy=viewport-grid] > div').all():
+   canvas=cell.locator('canvas')
+   if not canvas.count():continue
+   box=canvas.bounding_box();p.mouse.click(box['x']+box['width']*.5,box['y']+box['height']*.3)
+   if f.evaluate('() => kinViewerSelectedNoteTarget()?.uid')==b.uid:break
+  self.assertEqual(f.evaluate('() => kinViewerSelectedNoteTarget()?.uid'),b.uid)
+  p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
+  expect(p.locator('#tech-note-text')).to_have_value('RECOVERED SECOND IMAGE NOTE');p.keyboard.press('Escape')
+  p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+  expect(p.locator('#reading-tech-note')).to_be_disabled();expect(retry).to_be_disabled()
 
 def load_tests(loader,tests,pattern):
  return unittest.TestSuite(ReadingNoteE2E(n) for n in loader.getTestCaseNames(ReadingNoteE2E) if n.startswith('test_reading_note_'))
