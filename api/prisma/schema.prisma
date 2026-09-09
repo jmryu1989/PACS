@@ -442,6 +442,19 @@ model WorkspaceLayout {
   @@id([institution, subject])
 }
 
+/// Personal or institution vocabulary and study links; no original-file ownership.
+model StudyTagCatalog {
+  institution String @db.VarChar(256)
+  ownerSub String @db.VarChar(256)
+  revision Int
+  value String
+  lastRequest String? @db.Uuid
+  lastFingerprint String?
+  updatedAt DateTime @updatedAt
+
+  @@id([institution, ownerSub])
+}
+
 /// Personal links only. Removing this record never removes a study or original.
 model FavoriteWorkspace {
   institution String @db.VarChar(256)

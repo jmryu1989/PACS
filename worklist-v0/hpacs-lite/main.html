@@ -567,6 +567,8 @@
     <button class="chip" id="savefilter">Save Filter</button>
     <button class="chip" id="favorite-open" type="button">개인 즐겨찾기</button>
     <button class="chip" id="favorite-clear" type="button" hidden>즐겨찾기 범위 해제</button>
+    <button class="chip" id="study-tag-open" type="button">태그 관리·검색</button>
+    <button class="chip" id="study-tag-clear" type="button" hidden>태그 범위 해제</button>
     <button class="chip" id="managefilters">검색 조건·저장 관리</button>
     <button class="chip" id="columnsettings">열 설정</button>
     <button class="chip" id="clearfilter">Clear</button>
@@ -904,6 +906,8 @@
   <link rel="stylesheet" href="favorites.css">
   <script src="favorite-list.js"></script>
   <script src="favorites.js"></script>
+  <link rel="stylesheet" href="study-tags.css">
+  <script src="study-tags.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -1549,7 +1553,7 @@
 
     // ── 데이터 ──
     let studies = [];
-    let favoriteList = null;
+    let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
@@ -1665,7 +1669,7 @@
         const r = await studyPageClient.read({ resume:!!options.resume, epoch, valid:() => !commitInFlight && epoch === commitEpoch });
         if (loadSequence !== listLoadSequence || commitInFlight || epoch !== commitEpoch) return;
         assertStudyOwner(r);
-        await favoriteList?.refresh();
+        await Promise.all([favoriteList?.refresh(),studyTagList?.refresh()]);
         if (loadSequence !== listLoadSequence || commitInFlight || epoch !== commitEpoch) return;
         /**
          * **가져오기와 그리기를 나눈다.**
@@ -1807,7 +1811,8 @@
 
     function filtered() {
       const list = filteredFor({ mode, quick: $("#quick").value, days: quickDays, cols: fval });
-      return favoriteList ? favoriteList.filter(list) : list;
+      const favorites = favoriteList ? favoriteList.filter(list) : list;
+      return studyTagList ? studyTagList.filter(favorites) : favorites;
     }
 
     // Navigation and its position indicator must use the same order the reader sees.
@@ -1822,7 +1827,7 @@
     function render(revealUid) {
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
-      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir, favoriteList?.key()]);
+      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir, favoriteList?.key(), studyTagList?.key()]);
       if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
       if (typeof revealUid === 'string') {
         const index = list.findIndex(s => s.uid === revealUid);
@@ -1850,6 +1855,7 @@
 
       const active = [];
       if (favoriteList?.label()) active.push(favoriteList.label());
+      if (studyTagList?.label()) active.push(studyTagList.label());
       // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —
       // 목록도, 카운트도, 필터 표시도 안 그려진다. 서버 필터가 0/3/7/30/60/-1 외의
       // days를 주면 어느 버튼도 `.on`이 아니라 실제로 도달한다.
@@ -3326,7 +3332,7 @@
           // 요청을 보낸 뒤 확정이 일어났다면 이 응답은 그 이전 사진이다. 버린다.
           if (commitInFlight || epoch !== commitEpoch) return;
           assertStudyOwner(r);
-          await favoriteList?.refresh();
+          await Promise.all([favoriteList?.refresh(),studyTagList?.refresh()]);
           if (commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           const known = new Set(studies.map(x => x.uid));
@@ -3867,6 +3873,24 @@
       notice: message => toast(message,'err'),
     });
     $('#favorite-open').onclick = () => favorites.open();
+    function tagScopeState(data,scope){
+      const catalog=data?.catalogs?.find(c=>c.scope===scope);
+      if(!catalog||!Array.isArray(catalog.tags))throw new Error('태그 범위를 확인할 수 없습니다');
+      return {owner:data.owner,revision:catalog.revision,folders:catalog.tags.map(t=>({...t,name:(scope==='personal'?'[개인] ':'[기관] ')+t.name}))};
+    }
+    studyTagList=KinFavoriteList({api,label:'태그',noun:'태그',
+      identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.institution,s.sub]:null;},
+      read:async signal=>tagScopeState(await api('GET','/study-tags',undefined,signal),studyTagScope),
+      changed:()=>{$('#study-tag-clear').hidden=!studyTagList.label();render();},
+    });
+    const studyTags=KinStudyTags({api,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
+      identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.institution,s.sub]:null;},
+      current:()=>selectedUid,study:uid=>studies.find(s=>s.uid===uid),notice:message=>toast(message,'err'),
+      changed:data=>{if(studyTagList.key())studyTagList.adopt(tagScopeState(data,studyTagScope));},ended:()=>studyTagList.end(),
+      apply:(data,scope,id)=>{studyTagScope=scope;studyTagList.apply(tagScopeState(data,scope),id);},
+    });
+    $('#study-tag-open').onclick=()=>studyTags.open();$('#study-tag-clear').onclick=()=>studyTagList.clear();
+
     const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
       changed: (uid, note) => { updateNoteSummary(uid, { version: note?.version ?? 0, present: !!note?.text }); readingWorkspace.refreshNote(); },
       restoreFocus: uid => $('#rows').querySelector(`[data-tech-note="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true }),
@@ -4227,7 +4251,7 @@
     renderChips();
 
     $("#clearfilter").addEventListener("click", () => {
-      favoriteList?.clear();
+      favoriteList?.clear();studyTagList?.clear();
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
       quickDays = -1;
