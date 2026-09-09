@@ -101,6 +101,15 @@ export class PacsController {
     return this.svc.writeWorkspaceLayout(body, caller(req), true);
   }
 
+  @Get('worklist-columns')
+  worklistColumns(@Req() req: any) { return this.svc.worklistColumns(caller(req)); }
+
+  @Put('worklist-columns')
+  saveWorklistColumns(@Body() body: any, @Req() req: any) { return this.svc.writeWorklistColumns(body, caller(req), false); }
+
+  @Delete('worklist-columns')
+  clearWorklistColumns(@Body() body: any, @Req() req: any) { return this.svc.writeWorklistColumns(body, caller(req), true); }
+
   @Post('filters')
   saveFilter(@Body() body: any, @Req() req: any) {
     return this.svc.saveFilter(body, caller(req));

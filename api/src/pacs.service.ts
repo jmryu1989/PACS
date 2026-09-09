@@ -3,6 +3,7 @@ import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
+import { normalizeWorklistColumns } from './worklist-columns';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -739,6 +740,45 @@ export class PacsService implements OnModuleInit {
         return tx.workspaceLayout.findUnique({ where: { institution_subject: owner } });
       });
       return this.workspaceResult(owner, row);
+    } catch (error) {
+      if ((error as any)?.code === 'P2002') throw conflict();
+      throw error;
+    }
+  }
+
+  private columnsResult(owner: { institution: string; subject: string }, row: any) {
+    const columns = row?.value == null ? null : normalizeWorklistColumns(JSON.parse(row.value));
+    if (row?.value != null && !columns) throw new ServiceUnavailableException('저장된 열 설정 형식을 확인할 수 없습니다');
+    return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
+      columns, updatedAt: row?.updatedAt ?? null };
+  }
+
+  async worklistColumns(c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const row = await this.prisma.worklistColumns.findUnique({ where: { institution_subject: owner } });
+    return this.columnsResult(owner, row);
+  }
+
+  async writeWorklistColumns(body: any, c: Caller, clear: boolean) {
+    const owner = this.workspaceOwner(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).sort().join() !== (clear ? 'expectedOwner,revision' : 'columns,expectedOwner,revision') ||
+        !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('열 설정 저장 요청 형식이 잘못되었습니다');
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
+      throw new ConflictException({ code: 'COLUMNS_OWNER_CHANGED', message: '계정이 변경되었습니다. 다시 로그인하세요.' });
+    const columns = clear ? null : normalizeWorklistColumns(body.columns);
+    if (!clear && !columns) throw new BadRequestException('열 설정 형식이 잘못되었습니다');
+    const value = clear ? null : JSON.stringify(columns);
+    const conflict = () => new ConflictException({ code: 'COLUMNS_CONFLICT', message: '다른 창에서 열 설정이 변경되었습니다. 서버 설정을 다시 확인하세요.' });
+    try {
+      const row = await this.prisma.$transaction(async tx => {
+        if (body.revision === 0) return tx.worklistColumns.create({ data: { ...owner, revision: 1, value } });
+        const updated = await tx.worklistColumns.updateMany({ where: { ...owner, revision: body.revision }, data: { value, revision: { increment: 1 } } });
+        if (updated.count !== 1) throw conflict();
+        return tx.worklistColumns.findUnique({ where: { institution_subject: owner } });
+      });
+      return this.columnsResult(owner, row);
     } catch (error) {
       if ((error as any)?.code === 'P2002') throw conflict();
       throw error;

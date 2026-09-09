@@ -28,10 +28,11 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260908180000_viewer_jobs/migration.sql',
               'api/prisma/migrations/20260908200000_manual_sr_recovery/migration.sql',
               'api/prisma/migrations/20260909060000_saved_filter_organization/migration.sql',
-              'api/prisma/migrations/20260909100000_tech_note_revision/migration.sql']
+              'api/prisma/migrations/20260909100000_tech_note_revision/migration.sql',
+              'api/prisma/migrations/20260909180000_worklist_columns/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
-                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
+                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
@@ -101,6 +102,10 @@ def expected_rows(uid):
     rows['WorkspaceLayout'] = [dict(institution='SYNTHETIC-'+kind, subject='SYNTHETIC-sub', revision=revision,
         value=value, updatedAt=STAMP) for kind,revision,value in
         [('hospital', 2, json.dumps(layout, separators=(',', ':'))), ('tele', 3, None)]]
+    columns = dict(version=1, modes={mode:dict(order=['id','name','age'],hidden=['age']) for mode in ('Radiology','Technician')})
+    rows['WorklistColumns'] = [dict(institution='SYNTHETIC-'+kind, subject='SYNTHETIC-sub', revision=revision,
+        value=value, updatedAt=STAMP) for kind,revision,value in
+        [('hospital', 2, json.dumps(columns, separators=(',', ':'))), ('tele', 3, None)]]
     basis_id, agreement_id, transfer_id = ['00000000-0000-4000-8000-00000000010'+str(n) for n in (1,2,3)]
     job_id='00000000-0000-4000-8000-000000000201'
     job_snapshot=dict(version=1,studies=[uid],rows=1,cols=1,active=0,cells=[dict(study=uid,series=uid+'.1',sop=uid+'.2',frame=1,
@@ -161,7 +166,7 @@ def create_product(name, db, uid):
         execute(name, db, raw.decode())
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
-                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
+                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision'):
         rows = data[table]
         for row in rows:
@@ -310,6 +315,12 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing workspace revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "WorkspaceLayout" SET value=repeat('x',2049);
         RAISE EXCEPTION 'missing workspace byte constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "WorklistColumns" SELECT * FROM "WorklistColumns" LIMIT 1;
+        RAISE EXCEPTION 'missing columns owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "WorklistColumns" SET revision=0;
+        RAISE EXCEPTION 'missing columns revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "WorklistColumns" SET value=repeat('x',8193);
+        RAISE EXCEPTION 'missing columns byte constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "Transfer" SET status='UNKNOWN';
         RAISE EXCEPTION 'missing transfer status check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "Transfer" SELECT * FROM json_populate_record(NULL::"Transfer",

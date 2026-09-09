@@ -421,6 +421,17 @@ model ViewerRequest {
 }
 
 /// Only display preferences roam. A cleared value keeps its revision to reject stale writes.
+model WorklistColumns {
+  institution String   @db.VarChar(256)
+  subject     String   @db.VarChar(256)
+  revision    Int
+  value       String?
+  updatedAt   DateTime @updatedAt
+
+  @@id([institution, subject])
+}
+
+/// Monitor and panel placement remains separate from worklist columns.
 model WorkspaceLayout {
   institution String   @db.VarChar(256)
   subject     String   @db.VarChar(256)
