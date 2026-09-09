@@ -56,6 +56,8 @@ jobs:
         run: node --test tests/viewer_recovery_test.cjs
       - name: Automatic prior calendar and identity boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
+      - name: Compound search operators and malformed condition boundaries
+        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs
       - name: Account and browser workspace storage boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_layout_test.cjs
       - name: Explicit recent viewer layout storage boundaries

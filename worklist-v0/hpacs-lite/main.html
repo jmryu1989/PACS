@@ -558,7 +558,7 @@
     <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
     <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
     <button class="chip" id="savefilter">Save Filter</button>
-    <button class="chip" id="managefilters">저장 검색 관리</button>
+    <button class="chip" id="managefilters">검색 조건·저장 관리</button>
     <button class="chip" id="clearfilter">Clear</button>
   </div>
 
@@ -879,6 +879,7 @@
   <script src="reading-workspace.js"></script>
   <link rel="stylesheet" href="tech-note.css">
   <script src="tech-note.js"></script>
+  <script src="compound-filter.js"></script>
   <script src="saved-filter-manager.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
@@ -1744,19 +1745,13 @@
         if (kw && !String(s.name ?? "").toUpperCase().includes(kw)
             && !String(s.id ?? "").toUpperCase().includes(kw)) return false;
         if (!withinDays(s.date, days)) return false;
-        return cols.every(c => testCol(s, c, values));
+        return cols.every(c => testCol(s, c, values))
+          && KinCompoundFilter.matches(s, values[KinCompoundFilter.KEY], COLS[filterMode]);
       });
     }
 
     function filtered() {
-      // 현재 목록은 기존 숫자 quickDays 경로를 그대로 둔다. 저장값 보정은 칩 건수에만 적용한다.
-      const cols = COLS[mode].filter(c => c.f);
-      return studies.filter(s => {
-        const kw = $("#quick").value.trim().toUpperCase();
-        if (kw && !s.name.toUpperCase().includes(kw) && !s.id.toUpperCase().includes(kw)) return false;
-        if (!withinDays(s.date, quickDays)) return false;
-        return cols.every(c => testCol(s, c));
-      });
+      return filteredFor({ mode, quick: $("#quick").value, days: quickDays, cols: fval });
     }
 
     // Navigation and its position indicator must use the same order the reader sees.
@@ -1789,6 +1784,18 @@
       if (quickDays >= 0)
         active.push(`StudyDate(${$("#qf .on")?.textContent ?? `최근 ${quickDays}일`})`);
       cols.forEach(c => { if (fval[c.k]) active.push(`${c.t}(${fval[c.k]})`); });
+      const compound = fval[KinCompoundFilter.KEY];
+      const compoundError = KinCompoundFilter.validate(compound, cols);
+      if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
+      else if (compound?.rules.length) {
+        const fields = KinCompoundFilter.fields(cols);
+        const parts = compound.rules.map(rule => {
+          const field = fields.find(f => f.k === rule.field);
+          const label = KinCompoundFilter.operators(field).find(([op]) => op === rule.op)[1];
+          return `${field.t} ${label}${['empty', 'notEmpty'].includes(rule.op) ? '' : ' ' + rule.value}${rule.op === 'between' ? ' ~ ' + rule.value2 : ''}`;
+        });
+        active.push(`복합 (${parts.join(compound.join === 'or' ? ' OR ' : ' AND ')})`);
+      }
       $("#filterlist").textContent = "Filter : " + (active.join(", ") || "-");
 
       const n = (k, v) => list.filter(s => s[k] === v).length;
@@ -3980,6 +3987,8 @@
     $('#managefilters').addEventListener('click', () => savedFilterManager.open());
     function applyFilter(f) {
       if (!f || !Array.isArray(COLS[f.mode])) { toast('저장 검색의 업무 화면을 확인할 수 없습니다.', 'err'); return false; }
+      const compoundError = KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]);
+      if (compoundError) { toast('복합 조건을 적용하지 못했습니다: ' + compoundError, 'err'); return false; }
       $("#quick").value = f.quick ?? "";
       quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
@@ -4042,13 +4051,16 @@
     }
 
     $("#savefilter").addEventListener("click", async () => {
+      const current = snapshotFilter();
+      const compoundError = KinCompoundFilter.validate(current.cols[KinCompoundFilter.KEY], COLS[current.mode]);
+      if (compoundError) { toast('복합 조건을 저장하지 못했습니다: ' + compoundError, 'err'); return; }
       const name = prompt("필터 이름 (같은 이름이면 덮어씁니다):");
       if (!name?.trim()) return;
       // 기본 필터 = 로그인하면 자동으로 걸리는 필터. 릴리즈노트의 깃발(⚑) 기능.
       const isDefault = confirm(
         `"${name}" 을(를) 기본 필터로 지정할까요?\n\n` +
         `지정하면 다음 로그인부터 이 필터가 자동으로 적용됩니다.\n(취소를 누르면 그냥 저장만 합니다)`);
-      const f = { name: name.trim(), isDefault, ...snapshotFilter() };
+      const f = { name: name.trim(), isDefault, ...current };
       if (serverMode) {
         try { await api("POST", "/filters", f); await reloadPrefs(); }
         catch (e) { toast("필터 저장 실패: " + e.message, "err"); return; }
@@ -4076,6 +4088,9 @@
         { label: "적용", act: () => applyFilter(f) },
         { label: f.isDefault ? "기본 필터 해제" : "기본 필터로 지정", act: async () => {
             const on = !f.isDefault;
+            if (on && (!Array.isArray(COLS[f.mode]) || KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]))) {
+              toast('복합 조건 또는 업무 화면을 확인할 수 없어 기본 필터로 지정하지 못했습니다.', 'err'); return;
+            }
             if (serverMode) {
               try { await api("PATCH", `/filters/${f.id}/default`, { on }); await reloadPrefs(); }
               catch (err) { toast("실패: " + err.message, "err"); return; }
@@ -4607,23 +4622,22 @@
                 `(localStorage의 ${key}에 보관)`, "info");
         }
         goOnline(b);
+        // No await between starting polling and establishing the default: even
+        // Refresh during a delayed colleague lookup must keep the search scope.
+        const def = userFilters.find(f => f.isDefault);
+        if (def) {
+          if (applyFilter(def)) toast(`기본 필터 "${def.name}" 적용됨 — Clear를 누르면 풀립니다`, "info");
+          else {
+            fval[KinCompoundFilter.KEY] = null;
+            render();
+            toast('기본 검색 오류(업무 화면·복합 조건)로 목록을 숨겼습니다. 다른 저장 검색을 적용하거나 Clear로 해제하세요.', 'err');
+          }
+        }
         await loadActorNames();
       } catch (e) {
         goOffline(e);
       }
       await load();
-
-      /**
-       * 기본 필터(⚑)를 적용한다. "로그아웃 후 다시 로그인 하여도 해당 필터가 기본으로
-       * 적용됩니다" — 릴리즈노트의 그 동작이다.
-       *
-       * load() **뒤에** 건다. 앞에서 걸면 목록이 도착하면서 다시 그려져 필터가 풀린다.
-       */
-      const def = userFilters.find(f => f.isDefault);
-      if (def) {
-        applyFilter(def);
-        toast(`기본 필터 "${def.name}" 적용됨 — Clear를 누르면 풀립니다`, "info");
-      }
     }
     boot();
   </script>

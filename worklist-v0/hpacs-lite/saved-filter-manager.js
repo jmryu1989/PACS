@@ -8,7 +8,7 @@
     dialog.id = 'saved-filter-manager';
     dialog.setAttribute('aria-labelledby', 'sfm-title');
     dialog.innerHTML = `
-      <header><div><h2 id="sfm-title">저장 검색 관리</h2><p>자주 쓰는 검사 검색을 계정에 저장합니다.</p></div>
+      <header><div><h2 id="sfm-title">복합 검색·저장 관리</h2><p>조건으로 목록을 검색하고 자주 쓰는 검색을 계정에 저장합니다.</p></div>
         <button type="button" id="sfm-close" aria-label="저장 검색 관리 닫기">닫기</button></header>
       <div class="sfm-body"><aside aria-label="저장 검색 목록">
         <label for="sfm-search">저장 검색 찾기</label><input id="sfm-search" type="search" placeholder="이름·설명·폴더">
@@ -28,6 +28,16 @@
         </div>
         <label for="sfm-quick">환자 ID 또는 이름</label><input id="sfm-quick">
         <div id="sfm-cols" class="sfm-grid"></div>
+        <section class="sfm-compound" aria-labelledby="sfm-compound-title">
+          <h3 id="sfm-compound-title">복합 조건</h3>
+          <p><small>위 기본 조건을 모두 만족하는 검사 안에서 아래 조건을 적용합니다. 문자 대소문자는 구분하지 않으며, ‘비어 있음’은 미입력 값입니다. 부정 조건에는 미입력 값이 포함되지 않습니다.</small></p>
+          <label>아래 조건 결합<select id="sfm-join"><option value="and">모두 만족 (AND)</option><option value="or">하나 이상 만족 (OR)</option></select></label>
+          <div id="sfm-rules"></div>
+          <button type="button" id="sfm-add-rule">조건 추가</button>
+          <button type="button" id="sfm-clear-rules">복합 조건 비우기</button>
+          <small>최대 20개 · 검색 값은 한 줄로 입력합니다. 날짜 범위는 시작일과 종료일을 포함합니다.</small>
+          <p><small>‘편집 조건으로 검색’은 목록에만 적용합니다. 계정에 보관하려면 검색 이름을 입력하고 ‘저장’을 누르세요.</small></p>
+        </section>
         <div class="sfm-grid">
           <label>정렬 열<select id="sfm-sort"></select></label>
           <label>정렬 방향<select id="sfm-direction"><option value="0">기본 순서</option><option value="1">오름차순</option><option value="-1">내림차순</option></select></label>
@@ -36,6 +46,7 @@
         <p id="sfm-count" role="status"></p>
       </fieldset><footer>
         <button type="button" id="sfm-delete">삭제</button>
+        <button type="button" id="sfm-preview">편집 조건으로 검색</button>
         <button type="button" id="sfm-apply">저장된 조건 적용</button>
         <button type="submit" id="sfm-save">저장</button>
       </footer></form></div>
@@ -47,6 +58,7 @@
     let selected = null, source = {}, baseline = '', busy = false, opener = null, editable = true;
     const collapsed = new Set();
     const copy = value => JSON.parse(JSON.stringify(value));
+    const compound = KinCompoundFilter;
     const named = name => options.list().find(f => f.name === name);
     const status = (message, error = false) => {
       $('status').textContent = message;
@@ -57,6 +69,14 @@
       // Keep columns from the other worklist mode; changing tabs must not erase them.
       const cols = { ...source.cols };
       dialog.querySelectorAll('[data-col]').forEach(input => { cols[input.dataset.col] = input.value; });
+      const rules = [...$('rules').children].map(row => {
+        const rule = { field: row.querySelector('[data-rule-field]').value, op: row.querySelector('[data-rule-op]').value };
+        if (!['empty', 'notEmpty'].includes(rule.op)) rule.value = row.querySelector('[data-rule-value]').value;
+        if (rule.op === 'between') rule.value2 = row.querySelector('[data-rule-value2]').value;
+        return rule;
+      });
+      if (rules.length) cols[compound.KEY] = { version: 1, join: $('join').value, rules };
+      else delete cols[compound.KEY];
       const sortKey = $('sort').value || null;
       return { name: $('name').value.trim(), mode: $('mode').value, days: Number($('days').value),
         folder: $('folder').value.trim(), description: $('description').value, ordinal: Number($('ordinal').value),
@@ -71,6 +91,7 @@
       dialog.querySelectorAll('button, input, select, textarea, fieldset').forEach(el => { el.disabled = on; });
       $('fields').disabled = on || !editable;
       $('save').disabled = on || !editable;
+      $('preview').disabled = on || !editable;
       $('delete').disabled = on || selected === null;
       $('apply').disabled = on || selected === null;
     }
@@ -99,14 +120,62 @@
       choices($('sort'), [['', '기본 순서'], ...cols.map(c => [c.k, c.t])], sort);
       $('direction').value = sort ? String(filter.sortDir || 0) : '0';
     }
+    function ruleRow(rule) {
+      const row = document.createElement('div'); row.className = 'sfm-rule';
+      const fields = compound.fields(options.columns[$('mode').value]);
+      const field = fields.find(f => f.k === rule.field);
+      const make = (text, element, key) => {
+        const label = document.createElement('label'); label.textContent = text;
+        element.dataset[key] = ''; label.append(element); row.append(label); return element;
+      };
+      const fieldInput = make('항목', document.createElement('select'), 'ruleField');
+      choices(fieldInput, fields.map(f => [f.k, f.t]), rule.field);
+      const operator = make('비교', document.createElement('select'), 'ruleOp');
+      choices(operator, field ? compound.operators(field) : [[rule.op, rule.op]], rule.op);
+      const input = make('값', document.createElement(field?.type === 'select' ? 'select' : 'input'), 'ruleValue');
+      if (field?.type === 'select') choices(input, [['', '값 선택'], ...field.values.map(v => [v, v])], rule.value ?? '');
+      else { input.type = field?.type === 'date' ? 'date' : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
+      const end = make('종료일', document.createElement('input'), 'ruleValue2');
+      end.type = 'date'; end.value = rule.value2 ?? '';
+      const remove = document.createElement('button'); remove.type = 'button'; remove.dataset.ruleRemove = '';
+      remove.textContent = '삭제'; remove.setAttribute('aria-label', '복합 조건 삭제'); row.append(remove);
+      const visibility = () => {
+        input.parentElement.hidden = ['empty', 'notEmpty'].includes(operator.value);
+        end.parentElement.hidden = operator.value !== 'between';
+      };
+      visibility();
+      operator.addEventListener('change', () => { visibility(); count(); });
+      fieldInput.addEventListener('change', () => {
+        const nextField = fields.find(f => f.k === fieldInput.value);
+        const next = ruleRow({ field: nextField.k, op: compound.operators(nextField)[0][0], value: '' });
+        row.replaceWith(next); next.querySelector('[data-rule-field]').focus(); count();
+      });
+      remove.addEventListener('click', () => { row.remove(); count(); $('add-rule').focus(); });
+      return row;
+    }
+    function rules(filter) {
+      const expression = filter.cols?.[compound.KEY];
+      $('join').value = expression?.join ?? 'and';
+      $('rules').replaceChildren(...(expression?.rules ?? []).map(ruleRow));
+    }
     function count() {
-      $('count').textContent = `편집 중 조건: 로드된 목록 기준 ${options.count(value())}건 · 모든 열 조건을 함께 적용합니다.`;
+      const filter = value();
+      const error = compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
+      $('count').textContent = error ? '복합 조건 오류: ' + error
+        : `편집 중 조건: 로드된 목록 기준 ${options.count(filter)}건 · 기본 조건 AND 복합 조건을 적용합니다.`;
+      $('count').classList.toggle('sfm-error', !!error);
     }
     function edit(filter, isNew = false) {
       // Reject unsupported stored modes instead of presenting an editable substitute.
       if (!filter || !Array.isArray(options.columns[filter.mode])) {
         editable = false; selected = null; $('fields').hidden = true; lock(false); list();
         status('이 검색이 변경됐거나 업무 화면을 확인할 수 없습니다. 목록을 다시 불러오거나 현재 조건으로 새 검색을 만드세요.', true);
+        return false;
+      }
+      const error = compound.validate(filter.cols?.[compound.KEY], options.columns[filter.mode]);
+      if (error) {
+        editable = false; selected = null; $('fields').hidden = true; lock(false); list();
+        status('저장된 복합 조건을 확인할 수 없습니다: ' + error + ' 현재 조건으로 새 검색을 만들거나 목록에서 해당 검색을 삭제하세요.', true);
         return false;
       }
       editable = true; $('fields').hidden = false;
@@ -123,7 +192,7 @@
       choices($('days'), [[-1, '전체 날짜'], [0, '오늘'], [3, '최근 3일'], [7, '최근 7일'],
         [30, '최근 30일'], [60, '최근 60일']], options.days(filter.days));
       $('default').checked = !!filter.isDefault;
-      columns(filter); baseline = JSON.stringify(value()); lock(false); count(); list();
+      columns(filter); rules(filter); baseline = JSON.stringify(value()); lock(false); count(); list();
       return true;
     }
     function list() {
@@ -189,6 +258,8 @@
     $('form').addEventListener('submit', e => {
       e.preventDefault(); if (busy || !editable || !$('form').reportValidity()) return;
       const next = value();
+      const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
+      if (error) { status('복합 조건을 저장하지 못했습니다: ' + error, true); return; }
       if (!next.name) { status('검색 이름을 입력하세요.', true); $('name').focus(); return; }
       const existing = selected === null ? named(next.name) : null;
       if (existing) {
@@ -221,7 +292,23 @@
       if (options.apply(filter) === false) { status('저장 검색을 적용하지 못했습니다. 조건을 확인하세요.', true); return; }
       baseline = JSON.stringify(value()); dialog.close();
     });
-    $('mode').addEventListener('change', () => { source = value(); columns(source); count(); });
+    $('preview').addEventListener('click', () => {
+      if (busy || !editable) return;
+      const next = value();
+      const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
+      if (error) { status('복합 조건을 적용하지 못했습니다: ' + error, true); return; }
+      if (options.apply(next) === false) { status('검색 조건을 적용하지 못했습니다.', true); return; }
+      baseline = JSON.stringify(next); dialog.close();
+    });
+    $('add-rule').addEventListener('click', () => {
+      if (busy || !editable) return;
+      if ($('rules').children.length >= 20) { status('복합 조건은 최대 20개입니다.', true); return; }
+      const field = compound.fields(options.columns[$('mode').value]).find(f => f.k === 'id');
+      const row = ruleRow({ field: field.k, op: 'contains', value: '' });
+      $('rules').append(row); row.querySelector('[data-rule-field]').focus(); count();
+    });
+    $('clear-rules').addEventListener('click', () => { $('rules').replaceChildren(); count(); });
+    $('mode').addEventListener('change', () => { source = value(); columns(source); rules(source); count(); });
     $('form').addEventListener('input', e => {
       if (!['sfm-name', 'sfm-folder', 'sfm-description', 'sfm-ordinal', 'sfm-default'].includes(e.target.id)) count();
     });

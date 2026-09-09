@@ -18,9 +18,11 @@ Tech 메모의 목록 연결 시험은 같은 `test_tech_note.py`의 06~08이다
 
 `python tests/e2e/test_reading_flow.py`는 REQ-D-WORKSPACE-FLOW → RISK-D-WORKSPACE-TARGET → TEST-D-WORKSPACE-FLOW다. 실제 목록 정렬과 이전/다음 검사 일치, 목록/영상/과거 판독/편집문 키보드 왕복, 입력·모달 중 이동 억제, 목록 끝/빈 목록, 미저장 판독·영상 보존과 복귀 후 화소를 검사한다. `KIN_EVIDENCE_DIR`로 이번 화면 기록 위치를 지정한다. 물리 키보드/OS·다중 모니터 전체 수용 검사는 아니다.
 
-`python tests/e2e/test_filter_organization.py`는 TEST-D01-FILTER-ORGANIZE의 개인 저장 검색 경로 계층·설명 찾기·표시 순서·분류 이동과 재로그인 복원, 계정 분리·과거 클라이언트 저장의 메타데이터 유지·잘못된 값 거부를 확인한다. 빈 폴더와 폴더 일괄 관리·기관 공유 폴더·고급 조건은 잔여다. 관련 관리 화면 회귀는 `test_saved_filter_manager.py`이며 `KIN_EVIDENCE_DIR`로 이번 실행의 캡처 위치를 지정한다.
+`python tests/e2e/test_filter_organization.py`는 TEST-D01-FILTER-ORGANIZE의 개인 저장 검색 경로 계층·설명 찾기·표시 순서·분류 이동과 재로그인 복원, 계정 분리·과거 클라이언트 저장의 메타데이터 유지·잘못된 값 거부를 확인한다. 빈 폴더와 폴더 일괄 관리·기관 공유 폴더는 잔여다. 관련 관리 화면 회귀는 `test_saved_filter_manager.py`이며 `KIN_EVIDENCE_DIR`로 이번 실행의 캡처 위치를 지정한다.
 
-`python tests/e2e/test_saved_filter_manager.py`는 개인 저장 검색 관리의 생성·조건/정렬 편집·기본 지정/해제·새 로그인 복원·명시적 적용·삭제와 다른 계정의 목록/변경 거부를 확인한다. 실패 후 입력 보존, 요청 중 닫기/편집 차단, 계정 변경 시 쓰기 거부, Esc 취소/포커스 복귀, 900×600·600×900 접근을 검사한다. 기존 `test_saved_filter_counts.py`는 직접 회귀다. 폴더 트리·설명/순서·고급 조건 연산·대용량 성능은 별도 잔여다.
+REQ-D01-COMPOUND-SEARCH → RISK-D01-FILTER-BROADEN/WRONG-CONTEXT/PREFERENCE-LOSS → TEST-D01-COMPOUND-SEARCH: `node tests/compound_filter_test.cjs`와 `python tests/e2e/test_compound_search.py`로 문자 정확/부분/부정/미입력, 날짜 범위와 AND/OR, 잘못된 조건 거부, 편집 조건 검색→개인 저장/기본값/재로그인·건수, 판독 대상/미저장 입력 유지, 실패 입력 보존을 확인한다. 복합 조건은 기존 개인 `cols` JSON의 예약 키 `$compound`에 버전 1로 보존한다. 기본 조건 전체 AND (복합 조건 1그룹의 AND 또는 OR)이며 최대 20개다. 부정 비교는 미입력을 포함하지 않는다. 없는/불량 날짜는 날짜 비교에서 제외하고 미입력 연산은 null/undefined/빈 문자열에만 일치한다. 알 수 없는 버전/항목/연산은 조건 없이 전체 목록을 보여주지 않는다. 서버 기관 범위/권한·원검사·판독 저장 경로는 변경하지 않는다. 임의 중첩 그룹·추가 페이지/대량 결과 성능·기관 공유 조건은 잔여다.
+
+`python tests/e2e/test_saved_filter_manager.py`는 개인 저장 검색 관리의 생성·조건/정렬 편집·기본 지정/해제·새 로그인 복원·명시적 적용·삭제와 다른 계정의 목록/변경 거부를 확인한다. 실패 후 입력 보존, 요청 중 닫기/편집 차단, 계정 변경 시 쓰기 거부, Esc 취소/포커스 복귀, 900×600·600×900 접근을 검사한다. 기존 `test_saved_filter_counts.py`는 직접 회귀다. 폴더 분류는 `test_filter_organization.py`, 한 줄 복합 조건은 위 `test_compound_search.py`에서 별도 확인한다. 임의 중첩 조건·대용량 성능은 잔여다.
 
 `python tests/e2e/test_reading_workspace.py`는 TEST-D-WORKSPACE의 실제 CT 비교 영상과 판독문 동시 배치, 판독 대상 유지, 별도 영상 창, 이전/다음 검사와 개인 초안, 미저장 영상 작업의 보존/명시적 폐기, 문서 연결 실패 후 재시도, 세션 종료 정리와 좁은 화면 배치를 검사한다. 판독 작업공간의 첫 통합이며 전체 도구 배치·물리 다중 모니터·의사 사용 확인은 완료 범위가 아니다.
 
