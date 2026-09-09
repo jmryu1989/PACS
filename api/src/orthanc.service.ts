@@ -185,18 +185,21 @@ export class OrthancService {
     );
   }
 
-  /** Indexed UID inventory only; patient tags and computed counts are fetched for the chosen page. */
+  /** Indexed identity/institution only; patient tags and counts belong to the chosen page. */
   async studyIdentities(): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
-      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID'] });
+      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName'] });
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
     const seen = new Set<string>();
     return rows.map(row => {
       const uid = row?.RequestedTags?.StudyInstanceUID;
       if (!isStudyLookupKey(uid) || seen.has(uid))
         throw new ServiceUnavailableException('원본 검사 식별이 없거나 중복입니다');
+      const institution = row?.RequestedTags?.InstitutionName;
+      if (institution != null && typeof institution !== 'string')
+        throw new ServiceUnavailableException('원본 기관 형식을 확인할 수 없습니다');
       seen.add(uid);
-      return { '0020000D': { Value:[uid] } };
+      return { '0020000D': { Value:[uid] }, '00080080': { Value:[institution ?? ''] } };
     });
   }
 

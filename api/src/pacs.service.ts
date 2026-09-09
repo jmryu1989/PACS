@@ -532,23 +532,15 @@ export class PacsService implements OnModuleInit {
   async listStudies(c: Caller, query?: any) {
     const me = inst(c);
     const owner = [me, c.sub, c.actor], page = studyPageQuery(query, owner);
-    let qido = page ? await this.orthanc.studyIdentities() : await this.orthanc.studies();
+    const qido = page ? await this.orthanc.studyIdentities() : await this.orthanc.studies();
 
     const states = page ? await this.prisma.studyState.findMany({
       select: { uid:true, institutionId:true, teleInstitutionId:true },
     }) : await this.prisma.studyState.findMany();
     const byUid = new Map(states.map(s => [s.uid, s as any]));
 
-    if (page) {
-      // Existing scoped rows need no original institution lookup. Cold/unassigned
-      // rows still resolve from original DICOM before any institution receives them.
-      const missing = qido.map(st => OrthancService.tag(st, '0020000D')).filter(uid => !byUid.get(uid)?.institutionId);
-      const originals = new Map<string, any>();
-      for (let offset = 0; offset < missing.length; offset += 100)
-        for (const row of await this.orthanc.studiesByUid(missing.slice(offset, offset + 100)))
-          originals.set(OrthancService.tag(row, '0020000D'), row);
-      qido = qido.map(row => originals.get(OrthancService.tag(row, '0020000D')) ?? row);
-    }
+    // Both source paths carry indexed InstitutionName. Cold/unassigned rows
+    // resolve from that original tag without fetching patient details for all.
 
     // 아직 등록 안 된 검사에 기관을 박는다 (한 번만 일어난다)
     const news: any[] = [];
