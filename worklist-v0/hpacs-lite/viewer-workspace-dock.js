@@ -61,6 +61,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     w.requestAnimationFrame(()=>w.dispatchEvent(new w.Event('resize')));
   }
   function save(){
+    window.dispatchEvent(new window.CustomEvent('kin-dock-preference-changed',{detail:{owner:initialOwner,value:{version:1,placement,panel:selected}}}));
     if(!key){status.textContent='도구 영역 · 이 창';return;}
     try{storage.setItem(key,JSON.stringify({version:1,placement,panel:selected}));status.textContent='도구 영역을 기억했습니다 · 이 브라우저';}
     catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}
@@ -81,6 +82,8 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     });
   };
   dock.end=end;
+  dock.applyPreference=next=>{const clean=normalize(next);if(!live()||!clean)return false;placement=clean.placement;selected=clean.panel;apply();save();return true;};
+  dock.preference=()=>live()?{version:1,placement,panel:selected}:null;
   dock.dispose=()=>{
     end();
     for(const origin of origins){const p=origin.panel;if(p.parentNode!==dock)continue;const parent=origin.parent.isConnected?origin.parent:d.body;parent.insertBefore(p,origin.next?.parentNode===parent?origin.next:null);p.open=origin.open;p.hidden=origin.hidden;}
@@ -90,6 +93,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   d.body.append(dock); d.body.classList.add('kin-docked');
   apply();w.addEventListener('storage',onStorage);w.addEventListener('pagehide',end);
   try{channel=new w.BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+  window.dispatchEvent(new window.CustomEvent('kin-dock-preference-mounted',{detail:{owner:initialOwner,value:{version:1,placement,panel:selected}}}));
   return dock;
 };
 window.KinViewerWorkspaceDock.normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='panel,placement,version'&&v.version===1&&['bottom','top'].includes(v.placement)&&[-1,0,1].includes(v.panel)?{version:1,placement:v.placement,panel:v.panel}:null;

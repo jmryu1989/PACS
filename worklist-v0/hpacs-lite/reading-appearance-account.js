@@ -2,8 +2,8 @@
 window.KinReadingAppearanceAccount = function ({ owner, host, read, apply, generation, normalize, allowed, endpoint, sessionEndpoint }) {
   host.textContent='';
   const make = (tag, text, id) => { const el = document.createElement(tag); el.textContent = text; el.id = id; host.append(el); return el; };
-  const load = make('button', '글자 설정 불러오기', 'appearance-account-load');
-  const save = make('button', '글자 설정 계정 저장', 'appearance-account-save');
+  const load = make('button', '표시 설정 불러오기', 'appearance-account-load');
+  const save = make('button', '표시 설정 계정 저장', 'appearance-account-save');
   for (const b of [load, save]) { b.type = 'button'; b.className = 'chip'; }
   const status = make('span', '', 'appearance-account-status'); status.setAttribute('role', 'status');
   let revision = null, busy = false, ended = false, request, channel;
@@ -18,7 +18,7 @@ window.KinReadingAppearanceAccount = function ({ owner, host, read, apply, gener
     if (ended || busy || !owner || !allowed() || action === 'save' && revision === null) return;
     const before = generation(), value = read(); busy = true; refresh();
     request = new AbortController(); const timer = setTimeout(() => request.abort(), 10000);
-    status.textContent = '글자 설정 확인 중…';
+    status.textContent = '표시 설정 확인 중…';
     try {
       const response = await fetch(endpoint, { method: action === 'save' ? 'PUT' : 'GET', credentials: 'same-origin', cache: 'no-store',
         signal: request.signal, headers: { 'X-KIN-CSRF': '1', 'Content-Type': 'application/json' },
@@ -39,9 +39,12 @@ window.KinReadingAppearanceAccount = function ({ owner, host, read, apply, gener
       if (me.kind !== 'member' || JSON.stringify([me.institution,me.sub]) !== JSON.stringify(owner)) { sessionEnd(); return; }
       if (action !== 'save' && before !== generation()) { status.textContent = '현재 설정이 바뀌어 적용하지 않았습니다. 다시 불러오세요.'; return; }
       revision = data.revision;
-      if (action === 'load' && data.sizes !== null) { status.textContent = apply(data.sizes) ? '계정의 글자 설정을 불러왔습니다.' : '현재 화면에는 적용하지 않았습니다. 계정 상태를 확인하세요.'; }
-      else if (action === 'save') status.textContent = before === generation() ? '글자 설정을 계정에 저장했습니다.' : '요청 당시 설정을 저장했습니다. 이후 변경은 저장되지 않았습니다.';
-      else status.textContent = data.sizes === null ? '계정에 저장된 글자 설정이 없습니다.' : '계정 설정이 있습니다. 불러오기를 누르면 적용합니다.';
+      if (action === 'load' && data.sizes !== null) {
+        if(apply(data.sizes))status.textContent='계정의 표시 설정을 불러왔습니다.';
+        else{revision=null;status.textContent='화면 설정을 적용하지 못했습니다. 영상 창 상태를 확인한 뒤 다시 불러오세요.';}
+      }
+      else if (action === 'save') status.textContent = before === generation() ? '표시 설정을 계정에 저장했습니다.' : '요청 당시 설정을 저장했습니다. 이후 변경은 저장되지 않았습니다.';
+      else status.textContent = data.sizes === null ? '계정에 저장된 표시 설정이 없습니다.' : '계정 설정이 있습니다. 불러오기를 누르면 적용합니다.';
     } catch (e) {
       if (!ended) { revision = null; status.textContent = e?.name === 'AbortError' || e instanceof TypeError ? '응답을 확인하지 못했습니다. 불러와 확인하세요.' : (e instanceof SyntaxError ? '계정 설정 응답 형식을 확인하지 못했습니다.' : e.message); }
     } finally { clearTimeout(timer); request = null; busy = false; refresh(); }

@@ -21,6 +21,8 @@ window.KinReadingAppearance = function (options) {
   const normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&v.version===1&&
     Object.keys(v).length===4&&['list','current','prior'].every(k=>sizes.includes(v[k]))?{version:1,list:v.list,current:v.current,prior:v.prior}:null;
   let value=defaults(),ended=false,storage,channel,generation=0;
+  const dockKey=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null,normalizeDock=window.KinViewerWorkspaceDock.normalize;
+  let dockValue={version:1,placement:'bottom',panel:-1};
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
     #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,12px); font-family:var(--kin-list-font,inherit); }
@@ -38,8 +40,8 @@ window.KinReadingAppearance = function (options) {
   `;document.head.append(style);
   const dialog=document.createElement('dialog');dialog.id='reading-appearance-dialog';dialog.setAttribute('aria-labelledby','reading-appearance-title');
   const element=(tag,text,parent)=>{const e=document.createElement(tag);e.textContent=text;if(parent)parent.append(e);return e;};
-  const title=element('h2','글자 설정',dialog);title.id='reading-appearance-title';
-  element('p','글자 크기·글꼴·글자색을 현재 브라우저에 기억합니다. 계정에 저장하면 다른 기기에서 함께 불러올 수 있습니다. 이전 크기 전용 설정은 글꼴·색상을 유지합니다.',dialog);
+  const title=element('h2','글자·도구 설정',dialog);title.id='reading-appearance-title';
+  element('p','글자 크기·글꼴·색과 도구 위치를 계정에 저장하고 다른 기기에서 함께 불러올 수 있습니다. 이전 설정에 없는 항목은 현재 값을 유지합니다.',dialog);
   const fields={};
   for(const [name,label] of [['list','검사 목록'],['current','작성 중 판독문'],['prior','과거 판독문']]){
     const row=element('label',label,dialog),select=element('select','',row);select.id='reading-text-'+name;
@@ -68,6 +70,27 @@ window.KinReadingAppearance = function (options) {
   const colorStatus=element('p','',colorSection);colorStatus.id='reading-color-status';colorStatus.setAttribute('role','status');
   const colorReset=element('button','기본 글자색',colorSection);colorReset.type='button';colorReset.id='reading-color-reset';
   colorReset.onclick=()=>{if(!live()){end();return;}colorValue=defaultColors();applyColors();saveColors();};
+  const dockSection=element('fieldset','',dialog);element('legend','영상 도구 영역',dockSection);
+  element('p','현재 통합 영상과 다음 영상 창에 적용합니다. 이미 열린 다른 영상 창은 유지합니다.',dockSection);
+  const dockFields={};
+  for(const [name,label,choices] of [['placement','도구 위치',[['bottom','아래'],['top','위']]],['panel','열 도구',[['-1','접기'],['0','측정·주석'],['1','비교 작업·배치']]]]){
+    const row=element('label',label,dockSection),select=element('select','',row);select.id='reading-dock-'+name;dockFields[name]=select;
+    for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
+    select.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,[name]:name==='panel'?Number(select.value):select.value});};
+  }
+  const dockStatus=element('p','',dockSection);dockStatus.id='reading-dock-status';dockStatus.setAttribute('role','status');
+  function showDock(){dockFields.placement.value=dockValue.placement;dockFields.panel.value=String(dockValue.panel);}
+  function setDock(next){
+    const clean=normalizeDock(next);if(!live()||!clean)return false;
+    const dock=options.getDock?.();
+    if(dock){if(!dock.applyPreference(clean))return false;generation++;dockValue=clean;showDock();dockStatus.textContent=dock.querySelector('#kin-dock-preference-status').textContent;return true;}
+    dockValue=clean;generation++;showDock();
+    try{storage.setItem(dockKey,JSON.stringify(clean));dockStatus.textContent='다음 영상 창에 적용합니다 · 이 브라우저';}
+    catch(_){dockStatus.textContent='저장소를 사용할 수 없어 설정을 이 창에만 유지합니다.';}
+    return true;
+  }
+  function dockChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=normalizeDock(e.detail.value);if(!clean)return;if(e.type==='kin-dock-preference-changed'||JSON.stringify(clean)!==JSON.stringify(dockValue))generation++;dockValue=clean;showDock();}
+  window.addEventListener('kin-dock-preference-changed',dockChanged);window.addEventListener('kin-dock-preference-mounted',dockChanged);
   const status=element('p','',dialog);status.id='reading-appearance-status';status.setAttribute('role','status');
   const account=element('section','계정 저장 기능을 연결하지 못했습니다. 현재 브라우저 설정은 사용할 수 있습니다.',dialog);
   account.id='reading-appearance-account';account.style.cssText='border-top:1px solid #819bb7;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px';
@@ -104,9 +127,16 @@ window.KinReadingAppearance = function (options) {
     if(dialog.open)dialog.close();value=defaults();apply();fontValue=defaultFonts();applyFonts();
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
     colorValue=defaultColors();applyColors();for(const f of Object.values(colorFields))f.disabled=true;colorReset.disabled=true;
+    for(const f of Object.values(dockFields))f.disabled=true;
+    window.removeEventListener('kin-dock-preference-changed',dockChanged);window.removeEventListener('kin-dock-preference-mounted',dockChanged);
     window.removeEventListener('storage',onStorage);window.removeEventListener('pagehide',end);channel?.close();
   }
-  function onStorage(e){if(e.key==='kin-session-ended')end();else if(e.key===key)status.textContent='다른 창에서 글자 크기가 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===fontKey)fontStatus.textContent='다른 창에서 글꼴이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===colorKey)colorStatus.textContent='다른 창에서 글자색이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';}
+  function onStorage(e){if(e.key==='kin-session-ended')end();else if(dockKey&&e.key===dockKey){
+    // A child iframe's own write also emits storage in this parent. Its custom
+    // change event already updated the live value and generation synchronously.
+    let matches=false;try{const clean=e.newValue?.length<=128?normalizeDock(JSON.parse(e.newValue)):null;matches=clean&&JSON.stringify(clean)===JSON.stringify(dockValue);}catch(_){}
+    if(!matches){generation++;dockStatus.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}
+  }else if(e.key===key)status.textContent='다른 창에서 글자 크기가 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===fontKey)fontStatus.textContent='다른 창에서 글꼴이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===colorKey)colorStatus.textContent='다른 창에서 글자색이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';}
   try{
     storage=localStorage;const raw=key?storage.getItem(key):null;
     if(raw!==null){const clean=raw.length<=256?normalize(JSON.parse(raw)):null;if(clean){value=clean;status.textContent='기억한 글자 크기를 불러왔습니다.';}else status.textContent='저장된 글자 크기 오류 · 기본 크기를 적용했습니다.';}
@@ -122,18 +152,21 @@ window.KinReadingAppearance = function (options) {
     if(raw!==null){const clean=raw.length<=256?normalizeColors(JSON.parse(raw)):null;if(clean){colorValue=clean;colorStatus.textContent='기억한 글자색을 불러왔습니다.';}else colorStatus.textContent='저장된 글자색 오류 · 기본 글자색을 적용했습니다.';}
     else colorStatus.textContent='기본 글자색입니다.';
   }catch(_){colorStatus.textContent='저장된 글자색을 읽지 못해 기본 글자색을 적용했습니다.';}
-  apply();applyFonts();applyColors();opener.disabled=!live();
+  try{const raw=dockKey?storage.getItem(dockKey):null;if(raw!==null){const clean=raw.length<=128?normalizeDock(JSON.parse(raw)):null;if(clean)dockValue=clean;else dockStatus.textContent='저장된 도구 설정 오류 · 기본값';}}catch(_){dockStatus.textContent='도구 설정을 읽지 못해 기본값을 표시합니다.';}
+  apply();applyFonts();applyColors();showDock();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||v.version!==2||Object.keys(v).sort().join(',')!=='colors,current,fonts,list,prior,version')return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
-    return clean&&f&&c?{...clean,version:2,fonts:f,colors:c}:null;
+    const dock=v.version===3?normalizeDock(v.dock):null;
+    return clean&&f&&c&&(v.version===2||dock)?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{})}:null;
   };
-  return {host:account,read:()=>({...value,version:2,fonts:{...fontValue},colors:{...colorValue}}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
+  return {host:account,read:()=>({...value,version:3,fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue}}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
+      if(clean.version===3&&!setDock(clean.dock))return false;
       value={version:1,list:clean.list,current:clean.current,prior:clean.prior};
-      if(clean.version===2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}
+      if(clean.version>=2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}
       apply();save();return true;}};
 };

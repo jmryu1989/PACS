@@ -552,7 +552,7 @@
     <button class="chip" id="refresh">Refresh</button>
     <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">배치: 자동</button>
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">배치 초기화</button>
-    <button class="chip" id="reading-appearance-open" type="button" disabled>글자 설정</button>
+    <button class="chip" id="reading-appearance-open" type="button" disabled>글자·도구 설정</button>
     <details id="workspace-server-menu" style="position:relative">
       <summary class="chip">계정 배치</summary>
       <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
@@ -4747,7 +4747,7 @@
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
       try {
-        const appearance=KinReadingAppearance({owner:()=>{
+        const appearance=KinReadingAppearance({getDock:()=>{try{const dock=$('#reading-frame')?.contentWindow?.document.getElementById('kin-workspace-dock');return dock&&dock.preference()!==null?dock:null;}catch(_){return null;}},owner:()=>{
           const key=KinWorkspaceLayout.key(KinAuth.session());
           return key?key.slice(KinWorkspaceLayout.PREFIX.length):null;
         }});

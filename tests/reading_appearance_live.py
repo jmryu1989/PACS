@@ -52,4 +52,22 @@ class ReadingAppearanceLive(unittest.TestCase):
    for bad in ['url(https://invalid.example/x)', '__proto__', ['default'], True, None]:
     invalid=copy.deepcopy(b);invalid['sizes'][field]['current']=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
    invalid=copy.deepcopy(b);invalid['sizes'][field]['patient']='forbidden';self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+ def dock_body(self):
+  b=self.body();b['sizes'].update(version=3,fonts=dict(version=1,list='sans',current='mono',prior='serif'),colors=dict(version=1,list='warm',current='white',prior='cool'),dock=dict(version=1,placement='top',panel=1));return b
+ def test_06_dock_roundtrip_old_writers_and_conflict(self):
+  b=self.dock_body();r=self.write(b);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],b['sizes']);saved=self.get()
+  for version in [1,2]:
+   legacy=self.body();legacy['sizes']['version']=version
+   if version==2:legacy['sizes'].update(fonts=b['sizes']['fonts'],colors=b['sizes']['colors'])
+   self.assertEqual(self.write(legacy).status,409);self.assertEqual(self.get(),saved)
+  self.assertEqual(self.write(b).status,409);self.assertEqual(self.write(b,'doctor2').status,409);self.assertIsNone(self.get('doctor2')['sizes'])
+  b['revision']=1;b['sizes']['dock']=dict(version=1,placement='bottom',panel=-1);self.assertEqual(self.write(b).status,200);self.assertEqual(self.get()['sizes'],b['sizes'])
+ def test_07_invalid_dock_never_partially_updates_text(self):
+  import copy
+  b=self.dock_body();self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=1;b['sizes']['current']=12
+  for dock in [None,{},[],dict(version=1,placement='left',panel=0),dict(version=1,placement='top',panel=True),dict(version=1,placement='top',panel=2),dict(version=2,placement='top',panel=0),dict(version=1,placement='top',panel=0,uid='forbidden')]:
+   invalid=copy.deepcopy(b);invalid['sizes']['dock']=dock;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+  invalid=copy.deepcopy(b);del invalid['sizes']['dock'];self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+  cleanup_workspace(self.stack,'ReadingAppearance');old=self.body();old['sizes'].update(version=2,fonts=b['sizes']['fonts'],colors=b['sizes']['colors']);self.assertEqual(self.write(old).status,200)
+  b['revision']=1;self.assertEqual(self.write(b).status,200);self.assertEqual(self.get()['sizes'],b['sizes'])
 if __name__=='__main__':unittest.main(verbosity=2)
