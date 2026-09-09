@@ -118,13 +118,17 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
     def test_02_migrate_boot_restart_preserves_data_and_history(self):
         """TEST-C1-02/03: real Prisma engines, empty migration, auth guard and exec signal path."""
         name = self.api("healthy")
+        # A failed migration assertion must not leave port3000 occupied for the drain test.
+        self.addCleanup(ops.run, ["docker", "stop", "--time", "10", name])
         self.wait_running_api(name)
         history = self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";')
         self.assertTrue(history.startswith("0_init|"))
         self.assertEqual(sorted(line.split('|')[0] for line in history.splitlines()),
                          ['0_init', '20260907040000_viewer_history', '20260908020000_workspace_layout',
                           '20260908081500_connect_gate', '20260908120000_manual_sr',
-                          '20260908180000_viewer_jobs', '20260908200000_manual_sr_recovery'])
+                          '20260908180000_viewer_jobs', '20260908200000_manual_sr_recovery',
+                          '20260909060000_saved_filter_organization', '20260909100000_tech_note_revision',
+                          '20260909180000_worklist_columns'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"
@@ -141,7 +145,6 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
         self.assertEqual(self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";'), history)
         self.assertEqual(self.psql("SELECT value FROM c1_probe;"), "preserved")
         self.assertIn("No pending migrations to apply", ops.text(["docker", "logs", name]))
-        ops.run(["docker", "stop", "--time", "10", name])
 
     def test_03_unreachable_database_prevents_api_start(self):
         """TEST-C1-02: a failed migration cannot fall through to Node startup."""
