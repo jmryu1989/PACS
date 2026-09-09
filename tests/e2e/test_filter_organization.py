@@ -35,6 +35,9 @@ class FilterOrganizationE2E(manager.SavedFilterManagerE2E):
         expect(branch.locator('button').first).not_to_be_visible()
         page.locator('#sfm-search').fill('needle')
         expect(page.locator('#sfm-list button')).to_have_count(1)
+        page.locator('#sfm-search').fill('')
+        expect(page.locator(f'details[data-folder="{prefix}/CT"] button').first).not_to_be_visible()
+        page.locator('#sfm-search').fill('needle')
         page.locator('#sfm-list button').click()
         page.locator('#sfm-folder').fill(prefix + '/MR/추적')
         moved = self.save(page)
@@ -54,6 +57,7 @@ class FilterOrganizationE2E(manager.SavedFilterManagerE2E):
         # At the save controls, the folder navigation remains reachable alongside the editor.
         fresh.locator('#sfm-save').scroll_into_view_if_needed()
         expect(fresh.locator('#sfm-search')).to_be_in_viewport()
+        self.assertTrue(fresh.locator('#sfm-search').evaluate('el => { const r=el.getBoundingClientRect(); return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)===el; }'))
         fresh.locator('#sfm-folder').fill('')
         ungrouped = self.save(fresh)
         self.assertEqual(ungrouped['folder'], '')
@@ -93,6 +97,35 @@ class FilterOrganizationE2E(manager.SavedFilterManagerE2E):
         expect(page.locator('#sfm-status')).to_contain_text('폴더는')
         expect(page.locator('#sfm-folder')).to_have_value('a//b')
         expect(page.locator('#sfm-description')).to_have_value(original['description'])
+
+    def test_organization_same_name_overwrite_preserves_untouched_metadata(self):
+        page = self.login(); self.open_manager(page)
+        name = 'ORG-overwrite-' + uuid.uuid4().hex[:8]
+        page.locator('#sfm-name').fill(name)
+        page.locator('#sfm-folder').fill('개인/CT')
+        page.locator('#sfm-description').fill('keep description')
+        page.locator('#sfm-ordinal').fill('23')
+        first = self.save(page)
+        page.locator('#sfm-new').click()
+        page.locator('#sfm-name').fill(name)
+        page.locator('#sfm-quick').fill('replace criteria')
+        messages = []
+        def confirm(dialog):
+            messages.append(dialog.message); dialog.accept()
+        page.once('dialog', confirm)
+        saved = self.save(page)
+        self.assertIn('폴더·설명·순서', messages[0])
+        self.assertEqual(saved['id'], first['id'])
+        self.assertEqual((saved['folder'],saved['description'],saved['ordinal']), ('개인/CT','keep description',23))
+        self.assertEqual(saved['quick'], 'replace criteria')
+        page.locator('#sfm-new').click(); page.locator('#sfm-name').fill(name)
+        page.locator('#sfm-folder').fill('개인/MR')
+        page.once('dialog', lambda dialog: dialog.dismiss())
+        page.locator('#sfm-save').click()
+        expect(page.locator('#sfm-folder')).to_have_value('개인/MR')
+        page.once('dialog', confirm)
+        changed = self.save(page)
+        self.assertEqual((changed['folder'],changed['description'],changed['ordinal']), ('개인/MR','keep description',23))
 
 
 def load_tests(loader, tests, pattern):

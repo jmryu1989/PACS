@@ -41,8 +41,11 @@
       </footer></form></div>
       <p id="sfm-status" role="status" aria-live="polite"></p>`;
     document.body.append(dialog);
+    const header = dialog.querySelector('header');
+    new ResizeObserver(() => dialog.style.setProperty('--sfm-header-height', header.offsetHeight + 'px')).observe(header);
     const $ = id => dialog.querySelector('#sfm-' + id);
     let selected = null, source = {}, baseline = '', busy = false, opener = null, editable = true;
+    const collapsed = new Set();
     const copy = value => JSON.parse(JSON.stringify(value));
     const named = name => options.list().find(f => f.name === name);
     const status = (message, error = false) => {
@@ -111,7 +114,7 @@
       $('heading').textContent = isNew ? '새 검색' : '저장 조건 편집';
       $('name').value = isNew ? '' : filter.name;
       $('name').readOnly = !isNew;
-      $('name-hint').textContent = isNew ? '같은 이름을 저장하면 확인 후 해당 검색을 덮어씁니다.'
+      $('name-hint').textContent = isNew ? '같은 계정에서는 폴더가 달라도 이름이 같으면 기존 검색을 덮어씁니다. 변경하지 않은 분류 정보는 유지합니다.'
         : '기존 검색 이름은 유지됩니다. 조건을 바꾸고 저장하세요.';
       $('quick').value = filter.quick ?? ''; $('mode').value = filter.mode;
       $('folder').value = typeof filter.folder === 'string' ? filter.folder : '';
@@ -132,7 +135,6 @@
       }));
       const filters = all.filter(f => [f.name, f.description, folderOf(f)].some(v =>
         typeof v === 'string' && v.toLocaleLowerCase().includes(query)));
-      const collapsed = new Set([...$('list').querySelectorAll('details:not([open])')].map(el => el.dataset.folder));
       const root = { children: new Map(), filters: [] };
       for (const filter of filters) {
         let node = root;
@@ -145,6 +147,7 @@
       function searchButton(f) {
         const button = document.createElement('button'); button.type = 'button'; button.dataset.name = f.name;
         button.setAttribute('aria-pressed', String(f.name === selected));
+        button.setAttribute('aria-label', `${f.isDefault ? '기본 검색 ' : ''}${f.name}`);
         button.textContent = `${f.isDefault ? '⚑ ' : ''}${f.name}`;
         if (typeof f.description === 'string' && f.description) {
           const hint = document.createElement('small'); hint.textContent = f.description; button.append(hint);
@@ -157,6 +160,11 @@
           const path = parentPath ? parentPath + '/' + name : name;
           const details = document.createElement('details'); details.dataset.folder = path;
           details.open = !!query || !collapsed.has(path);
+          details.addEventListener('toggle', () => {
+            if (details.isConnected && !$('search').value.trim()) {
+              if (details.open) collapsed.delete(path); else collapsed.add(path);
+            }
+          });
           const summary = document.createElement('summary'); summary.textContent = name;
           details.append(summary); branch(child, details, path); container.append(details);
         }
@@ -182,7 +190,16 @@
       e.preventDefault(); if (busy || !editable || !$('form').reportValidity()) return;
       const next = value();
       if (!next.name) { status('검색 이름을 입력하세요.', true); $('name').focus(); return; }
-      if (selected === null && named(next.name) && !confirm(`저장 검색 "${next.name}"의 조건을 덮어쓸까요?`)) return;
+      const existing = selected === null ? named(next.name) : null;
+      if (existing) {
+        // Starting from current criteria must not erase classification merely
+        // because the new-search form began with empty metadata defaults.
+        const initial = JSON.parse(baseline);
+        for (const key of ['folder', 'description', 'ordinal']) {
+          if (next[key] === initial[key]) next[key] = existing[key] ?? initial[key];
+        }
+        if (!confirm(`저장 검색 "${next.name}"을 덮어쓸까요? 검색 조건과 변경한 폴더·설명·순서를 저장합니다.\n저장할 폴더: ${next.folder || '미분류'} · 순서: ${next.ordinal}\n설명: ${next.description || '(없음)'}`)) return;
+      }
       run(async signal => {
         const saved = await options.save(next, signal);
         if (edit(saved)) status(`"${saved.name}" 저장 완료. 목록에 적용하려면 ‘저장된 조건 적용’을 누르세요.`);
@@ -205,7 +222,9 @@
       baseline = JSON.stringify(value()); dialog.close();
     });
     $('mode').addEventListener('change', () => { source = value(); columns(source); count(); });
-    $('form').addEventListener('input', count);
+    $('form').addEventListener('input', e => {
+      if (!['sfm-name', 'sfm-folder', 'sfm-description', 'sfm-ordinal', 'sfm-default'].includes(e.target.id)) count();
+    });
     $('search').addEventListener('input', list);
     $('new').addEventListener('click', () => {
       if (mayLeave()) { edit(options.snapshot(), true); status(''); $('name').focus(); }
