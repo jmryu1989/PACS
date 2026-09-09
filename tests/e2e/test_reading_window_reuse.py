@@ -61,7 +61,7 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
         self.assertEqual(parse_qs(urlsplit(popup.url).query)["StudyInstanceUIDs"], [current.uid + "," + past.uid])
         popup.evaluate("window.kinViewerJobWorkspaceState = window.__kinOriginalJobState")
         page.get_by_role("button", name="영상 새 창", exact=True).click()
-        expect(popup).to_have_url(re.compile(r"[?&]StudyInstanceUIDs=" + re.escape(past.uid) + r"(?:&|$)"), timeout=60000)
+        expect(popup).to_have_url(re.compile(r"[?&]StudyInstanceUIDs=" + re.escape(past.uid) + r"(?:[&#]|$)"), timeout=60000)
         canvas_ready(popup, 1)
         self.assertIs(popup, original_popup)
         self.assertEqual(parse_qs(urlsplit(popup.url).query)["StudyInstanceUIDs"], [past.uid])

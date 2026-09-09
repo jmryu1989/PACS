@@ -52,6 +52,8 @@ REQ-D-WORKSPACE-DOCK-ROAM → RISK-DOCK-OWNER/LOST-UPDATE/LATE-APPLY/WORK-LOSS �
 
 `python tests/e2e/test_reading_window_reuse.py`는 별도 named 영상 창을 같은 검사에서 재로딩하지 않고 재사용하는지, 다른 검사로 바꿀 때 실제 미저장 작업 제목과 주입한 busy 상태를 자식 guard로 차단하는지 검사한다. 별도 최상위 창의 깨끗한 상태/미저장 상태에 합성 `beforeunload` 이벤트를 보내 비교 작업 입력의 이탈 guard도 확인한다. 닫힌 새 창에 이 브라우저가 저장한 좌표·크기를 적용하는 경로는 모의 window로 확인한다. 실제 미저장 표식·진행 중 저장/복원 race, 물리 다중 모니터 배치를 검증한 것은 아니다.
 
+REQ-D-WORKSPACE-WINDOW-RETURN → RISK-WRONG-REPORT-FOCUS/WORK-LOSS/STALE-WINDOW → TEST-WINDOW-RETURN: `test_window_return.py`는 별도 영상 창의 Ctrl+Alt+4/판독문 복귀 버튼, 같은 창의 재연결·무재로딩, 실제 CT/미저장 판독·제목과 `opener=null` 보존을 검사한다. 임시 창 연결은 캡처한 계정·검사 범위·현재 판독 대상을 대조하며, 모달·대상 변경·응답 지연·빠른 영상 왕복·세션 종료를 거절한다. 부모 문서의 실제 초점을 확인한 응답만 복귀로 표시하고, 브라우저가 창 전환을 막으면 판독문 위치 준비와 목록 창 직접 선택을 안내한다. 물리 OS·다중 모니터 초점 수용 검사가 아니며 검사 선택/저장은 수행하지 않는다. 창 재사용·별도 메모/도구·통합 초점 시험이 직접 회귀다.
+
 `python tests/e2e/test_saved_filter_counts.py`는 저장한 개인 검사 필터가 현재 검색을 바꾸지 않은 채 최신 목록 기준 건수를 표시하고, 새 검사가 들어온 뒤 Refresh에서 건수를 갱신하며, 명시적으로 눌렀을 때만 Quick Search와 컬럼 조건을 적용하는지 검사한다. 따옴표·HTML 문자가 있는 이름의 속성 안전 표시, 접근 가능한 건수 이름, 같은 건수 재렌더링의 키보드 포커스, 기본 필터 지정 요청/안내도 확인한다. 저장 검색의 폴더 트리·설명/순서·전체 고급 조건을 완료한 시험은 아니다.
 
 `python tests/e2e/test_live_print.py`는 TEST-D09-LIVE-PRINT의 저장 없는 현재 CT 비교 출력을 검사한다. 읽기 전용 preview의 엄격한 입력·기관/P·같은 환자·no-store·무저장, native 두 검사 화소와 실제 PDF2페이지, 현재 표시/digest 응답 변경·늦은 닫기, 빈 셀·미저장 주석·출력 조절 복귀·세션 종료를 확인한다. 원본 변경의 새 기능 시험은 digest 응답 주입이며 실제 DICOM 교체는 기존 저장 출력 회귀에서 구분한다. 주석 미포함·현재 설정으로 원본 재조회이며 전체 화면 캡처/다른 modality/물리 출력의 완료 증거가 아니다.

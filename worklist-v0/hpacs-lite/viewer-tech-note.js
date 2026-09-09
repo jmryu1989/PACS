@@ -34,16 +34,45 @@ window.kinViewerTechNote=function(services){
     function arrangeTools(){
       if(!live()||!owner)return;
       dock=window.KinViewerWorkspaceDock?.(window,{owner:()=>owner&&JSON.stringify(owner),allowed:()=>live()&&!!owner});
-      if(dock)arrange.hidden=true;
+      if(dock){arrange.hidden=true;dock.querySelector('nav').append(returnStatus);}
       else status.textContent='도구 영역을 연결하지 못했습니다. 다시 시도하세요.';
     }
     arrange.onclick=()=>{arrangeTools();const tab=dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]');if(tab){if(tab.getAttribute('aria-expanded')!=='true')tab.click();tab.focus({preventScroll:true});}};
     const toolBar=document.createElement('div');toolBar.id='kin-viewer-tool-focus';panel.prepend(toolBar);
     const toolButtons=new Map();
-    for(const [code,label] of [['Digit7','측정 도구로'],['Digit8','비교 작업 도구로'],['Digit2','선택 영상으로']]){
+    for(const [code,label] of [['Digit7','측정 도구로'],['Digit8','비교 작업 도구로'],['Digit2','선택 영상으로'],['Digit4','판독문으로 돌아가기']]){
       const b=document.createElement('button');b.type='button';b.textContent=label;b.id='kin-viewer-focus-'+code.slice(-1);b.setAttribute('aria-keyshortcuts','Control+Alt+'+code.slice(-1));b.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px';b.onclick=()=>focusTool(code);toolBar.append(b);toolButtons.set(code,b);
     }
-    const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 2 선택 영상';toolBar.append(toolHint);
+    const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 2 선택 영상 · 4 판독문으로';toolBar.append(toolHint);
+    const returnStatus=document.createElement('span');returnStatus.id='kin-viewer-return-status';returnStatus.setAttribute('role','status');returnStatus.style.cssText='display:inline-block;margin-left:8px;font-size:12px';(host.querySelector(':scope > summary')||toolBar).append(returnStatus);
+    let readingChannel=null,pendingReturn=null,returnTimer=null,returnEpoch=0,returnSignature='';
+    function refreshReturnSelection(){const current=selected(),signature=current?JSON.stringify([current.viewportId,current.image,current.uid]):'';if(signature!==returnSignature){returnSignature=signature;returnEpoch++;}}
+    function finishReturn(message){clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent=message;refresh();if(returnStatus.getClientRects().length)returnStatus.scrollIntoView({block:'nearest',inline:'nearest'});}
+    function bindReturn(){
+      const cancelled=!!pendingReturn;readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;
+      if(!live())return;
+      const params=new URLSearchParams(location.hash.slice(1)),tokens=params.getAll('kin-reading-return'),token=tokens.length===1?tokens[0]:'';
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(token)){returnStatus.textContent='판독 화면의 영상 새 창으로 열면 돌아갈 수 있습니다.';refresh();return;}
+      try{
+        readingChannel=new BroadcastChannel('kin-reading-return:'+token);
+        readingChannel.onmessage=e=>{
+          const m=e.data,p=pendingReturn;if(!p||m?.type!=='result'||m.request!==p.request)return;
+          refreshReturnSelection();
+          if(!live()||JSON.stringify(owner)!==p.owner||returnEpoch!==p.epoch){finishReturn('영상 선택이나 세션이 바뀌어 복귀 결과를 적용하지 않았습니다.');return;}
+          const messages={focused:'판독문으로 돌아왔습니다.',ready:'판독문 위치를 준비했습니다. 목록 창을 선택하세요.',session:'세션이 바뀌었습니다. 판독 화면에서 다시 연결하세요.',context:'판독 대상이나 화면이 바뀌었습니다. 목록 창에서 확인하세요.',modal:'판독 화면의 대화상자를 닫은 뒤 다시 시도하세요.',unavailable:'판독문 입력란을 확인한 뒤 다시 시도하세요.'};
+          if(Object.hasOwn(messages,m.result))finishReturn(messages[m.result]);
+        };
+        returnStatus.textContent=cancelled?'이전 복귀 요청은 취소되었습니다. 다시 눌러 돌아가세요.':'연결된 판독문으로 · Ctrl+Alt+4';
+      }catch(_){returnStatus.textContent='이 브라우저에서 창 연결을 사용할 수 없습니다. 목록 창을 직접 선택하세요.';}
+      refresh();
+    }
+    function returnToReading(){
+      if(!live()||!owner||!copyTracked||!readingChannel||pendingReturn||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
+      const current=selected();if(!current){returnStatus.textContent='불러온 스택 영상 칸을 선택한 뒤 돌아가세요.';return;}
+      refreshReturnSelection();const request=crypto.randomUUID();pendingReturn={request,owner:JSON.stringify(owner),epoch:returnEpoch};returnStatus.textContent='판독 화면에 복귀 요청 중…';refresh();
+      try{readingChannel.postMessage({type:'request',request,owner:pendingReturn.owner,studies,activeUid:current.uid});returnTimer=setTimeout(()=>finishReturn('판독 화면의 응답이 없습니다. 목록 창에서 영상 새 창을 다시 눌러 연결하세요.'),2500);}
+      catch(_){finishReturn('판독 화면 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.');}
+    }
     const copy=document.createElement('button');copy.id='kin-viewer-copy-id';copy.type='button';copy.textContent='선택 영상 환자 ID 복사';copy.setAttribute('aria-keyshortcuts','Control+Alt+C');copy.setAttribute('aria-describedby','kin-viewer-copy-context');toolBar.append(copy);
     const copyContext=document.createElement('p');copyContext.id='kin-viewer-copy-context';toolBar.append(copyContext);
     const copyStatus=document.createElement('p');copyStatus.id='kin-viewer-copy-status';copyStatus.setAttribute('role','status');toolBar.append(copyStatus);
@@ -79,7 +108,7 @@ window.kinViewerTechNote=function(services){
       finally{copyBusy=false;refreshCopy();}
     }
     copy.onclick=copyPatientId;
-    const copyChanged=()=>{copyEpoch++;copyStatus.textContent='';refreshCopy();};
+    const copyChanged=()=>{copyEpoch++;refreshReturnSelection();copyStatus.textContent='';refreshCopy();};
     const copySubscriptions=[];const copyStackEvent=window.cornerstone?.Enums?.Events?.STACK_NEW_IMAGE;
     try{
       const grid=services.viewportGridService,events=Object.values(grid.EVENTS);
@@ -88,6 +117,7 @@ window.kinViewerTechNote=function(services){
       document.addEventListener(copyStackEvent,copyChanged,true);copyTracked=true;
     }catch(_){copySubscriptions.forEach(s=>s.unsubscribe());copySubscriptions.length=0;}
     function focusTool(code){
+      if(code==='Digit4'){returnToReading();return;}
       if(!live()||!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
       const current=selected();if(!current){status.textContent='불러온 스택 영상 칸을 선택한 뒤 도구로 이동하세요.';return;}
       let target;
@@ -96,8 +126,8 @@ window.kinViewerTechNote=function(services){
       if(code==='Digit2'&&!target.hasAttribute('tabindex'))target.tabIndex=-1;
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
     }
-    function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const b of toolButtons.values())b.disabled=!live()||!owner;refreshCopy();}
-    function end(){if(ended)return;ended=true;owner=null;dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const [code,b] of toolButtons){b.disabled=!live()||!owner||(code==='Digit4'&&(!readingChannel||!copyTracked));if(code==='Digit4'){b.setAttribute('aria-busy',String(!!pendingReturn));b.setAttribute('aria-disabled',String(b.disabled||!!pendingReturn));}}refreshCopy();}
+    function end(){if(ended)return;ended=true;owner=null;readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
@@ -122,8 +152,8 @@ window.kinViewerTechNote=function(services){
     button.onclick=open;document.addEventListener('keydown',key);
     const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
     try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-    const timer=setInterval(()=>{if(!live())end();else refreshCopy();},500);
-    stop=()=>{end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();panel.remove();};
+    const timer=setInterval(()=>{if(!live())end();else{refreshReturnSelection();refreshCopy();}},500);
+    stop=()=>{end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();returnStatus.remove();panel.remove();};
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
@@ -131,7 +161,7 @@ window.kinViewerTechNote=function(services){
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }
-    retry.onclick=connect;connect();
+    window.addEventListener('hashchange',bindReturn);window.addEventListener('kin-reading-link-changed',bindReturn);bindReturn();retry.onclick=connect;connect();
     return true;
   }
   return {mount,stop:()=>stop()};

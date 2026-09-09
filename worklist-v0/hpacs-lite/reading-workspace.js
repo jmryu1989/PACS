@@ -65,7 +65,7 @@ window.KinReadingWorkspace = function (app) {
     catch (_) { app.notice('자동 열기 설정을 저장하지 못했습니다. 현재 화면에서만 적용됩니다.'); }
     maybeAutoNote();
   };
-  const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series); });
+  const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series, returnLink()); });
   button('목록 화면으로', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
   const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · 7 영상 도구 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
@@ -84,6 +84,35 @@ window.KinReadingWorkspace = function (app) {
   $('.report-p').prepend(reportTarget);
   let active = false, ended = false, frame = null, shown = null, pending = null, epoch = 0, timer = null, deadline = 0, loaded = false, failed = false, lastSelection;
   const boundDocuments = new WeakSet();
+  let returnChannel=null;
+  function returnLink(){
+    returnChannel?.close();returnChannel=null;
+    if(ended||!active||!app.allowed()||!sameTarget())return null;
+    const owner=app.noteOwner?.(),report=app.current(),studies=[shown.uid,...(shown.prior?[shown.prior]:[])];
+    if(!owner)return null;
+    try{
+      const token=crypto.randomUUID(),link=new BroadcastChannel('kin-reading-return:'+token);returnChannel=link;
+      link.onmessage=e=>{
+        const m=e.data;if(!m||m.type!=='request'||typeof m.request!=='string'||!/^[0-9a-f-]{36}$/.test(m.request))return;
+        const reply=result=>{if(returnChannel===link)link.postMessage({type:'result',request:m.request,result});};
+        const matchingScope=()=>sameTarget()&&shown&&JSON.stringify([shown.uid,...(shown.prior?[shown.prior]:[])])===JSON.stringify(studies)&&Array.isArray(m.studies)&&m.studies.length===studies.length&&m.studies.every((uid,i)=>uid===studies[i])&&studies.includes(m.activeUid);
+        if(ended||!app.allowed()||app.noteOwner?.()!==owner||m.owner!==owner){reply('session');return;}
+        if(!active||app.current()!==report||!matchingScope()){reply('context');return;}
+        if(modalOpen(document)){reply('modal');return;}
+        const field=$('#findings');if(!field||!field.getClientRects().length||field.disabled||field.closest('[inert]')){reply('unavailable');return;}
+        focusPane('report');window.focus();
+        // A background/occluded window may not receive animation frames. Still
+        // answer with the manual-selection fallback if focus was not granted.
+        setTimeout(()=>{
+          if(ended||!app.allowed()||app.noteOwner?.()!==owner){reply('session');return;}
+          if(!active||app.current()!==report||!matchingScope()||modalOpen(document)){reply('context');return;}
+          if(!field.isConnected||!field.getClientRects().length||field.disabled||field.closest('[inert]')){reply('unavailable');return;}
+          reply(document.hasFocus()&&document.activeElement===field?'focused':'ready');
+        },0);
+      };
+      return token;
+    }catch(_){return null;}
+  }
   const queueObserver = new MutationObserver(navigation);
   queueObserver.observe($('#rows'), { childList: true });
   function navigation() {
@@ -388,7 +417,7 @@ window.KinReadingWorkspace = function (app) {
   }
   // Session invalidation must hide the embedded document even if its own request
   // has not yet noticed the expired account. Never reconnect it from a late load.
-  function end() { ended = true; epoch++; clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
+  function end() { ended = true; epoch++; returnChannel?.close();returnChannel=null;clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
   let channel;
   try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
