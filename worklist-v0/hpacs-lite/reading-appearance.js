@@ -12,6 +12,12 @@ window.KinReadingAppearance = function (options) {
   const normalizeFonts=v=>v&&typeof v==='object'&&!Array.isArray(v)&&v.version===1&&Object.keys(v).length===4&&
     ['list','current','prior'].every(k=>typeof v[k]==='string'&&Object.hasOwn(fonts,v[k]))?{version:1,list:v.list,current:v.current,prior:v.prior}:null;
   let fontValue=defaultFonts();
+  const colorKey=initialOwner?'kin-reading-color:v1:'+initialOwner:null;
+  const colors={default:'var(--kin-text)',warm:'#fff1d6',cool:'#d7f3ff',white:'#ffffff'};
+  const defaultColors=()=>({version:1,list:'default',current:'default',prior:'default'});
+  const normalizeColors=v=>v&&typeof v==='object'&&!Array.isArray(v)&&v.version===1&&Object.keys(v).length===4&&
+    ['list','current','prior'].every(k=>typeof v[k]==='string'&&Object.hasOwn(colors,v[k]))?{version:1,list:v.list,current:v.current,prior:v.prior}:null;
+  let colorValue=defaultColors();
   const normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&v.version===1&&
     Object.keys(v).length===4&&['list','current','prior'].every(k=>sizes.includes(v[k]))?{version:1,list:v.list,current:v.current,prior:v.prior}:null;
   let value=defaults(),ended=false,storage,channel,generation=0;
@@ -20,7 +26,10 @@ window.KinReadingAppearance = function (options) {
     #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,12px); font-family:var(--kin-list-font,inherit); }
     .redit textarea { font-size:var(--kin-current-text,12px); font-family:var(--kin-current-font,inherit); }
     .prior-report-value { font-size:var(--kin-prior-text,12px); font-family:var(--kin-prior-font,inherit); }
-    #reading-appearance-dialog { width:360px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;box-sizing:border-box;background:#172333;color:#dce7f5;border:1px solid #819bb7;border-radius:8px;padding:20px;font:14px 'Malgun Gothic','Segoe UI',sans-serif; }
+    #rows td, #relrows td { color:var(--kin-list-color,var(--kin-text)); }
+    .redit textarea { color:var(--kin-current-color,var(--kin-text)); }
+    .prior-report-value { color:var(--kin-prior-color,var(--kin-text)); }
+    #reading-appearance-dialog { width:440px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;box-sizing:border-box;background:#172333;color:#dce7f5;border:1px solid #819bb7;border-radius:8px;padding:20px;font:14px 'Malgun Gothic','Segoe UI',sans-serif; }
     #reading-appearance-dialog::backdrop { background:#0008; }
     #reading-appearance-dialog label { display:flex;justify-content:space-between;align-items:center;gap:16px;margin:14px 0; }
     #reading-appearance-dialog select, #reading-appearance-dialog button { font:inherit;padding:6px 10px;background:#263b53;color:#e1ebf7;border:1px solid #849bb4;border-radius:4px; }
@@ -48,6 +57,17 @@ window.KinReadingAppearance = function (options) {
   const fontStatus=element('p','',fontSection);fontStatus.id='reading-font-status';fontStatus.setAttribute('role','status');
   const fontReset=element('button','기본 글꼴',fontSection);fontReset.type='button';fontReset.id='reading-font-reset';
   fontReset.onclick=()=>{if(!live()){end();return;}fontValue=defaultFonts();applyFonts();saveFonts();};
+  const colorSection=element('fieldset','',dialog);element('legend','글자색 · 이 브라우저',colorSection);
+  element('p','기본 글자색만 바꿉니다. 검사 상태색과 선택 표시는 유지하며, 이 계정의 현재 브라우저에만 기억합니다.',colorSection);
+  const colorFields={};
+  for(const [name,label] of [['list','검사 목록 글자색'],['current','작성 중 판독문 글자색'],['prior','과거 판독문 글자색']]){
+    const row=element('label',label,colorSection),select=element('select','',row);select.id='reading-color-'+name;
+    for(const [id,text] of [['default','기본'],['warm','따뜻한 흰색'],['cool','차가운 흰색'],['white','흰색']]){const option=element('option',text,select);option.value=id;}
+    colorFields[name]=select;select.onchange=()=>{if(!live()){end();return;}const clean=normalizeColors({...colorValue,[name]:select.value});if(!clean)return;colorValue=clean;applyColors();saveColors();};
+  }
+  const colorStatus=element('p','',colorSection);colorStatus.id='reading-color-status';colorStatus.setAttribute('role','status');
+  const colorReset=element('button','기본 글자색',colorSection);colorReset.type='button';colorReset.id='reading-color-reset';
+  colorReset.onclick=()=>{if(!live()){end();return;}colorValue=defaultColors();applyColors();saveColors();};
   const status=element('p','',dialog);status.id='reading-appearance-status';status.setAttribute('role','status');
   const account=element('section','계정 저장 기능을 연결하지 못했습니다. 현재 브라우저 설정은 사용할 수 있습니다.',dialog);
   account.id='reading-appearance-account';account.style.cssText='border-top:1px solid #819bb7;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px';
@@ -60,6 +80,12 @@ window.KinReadingAppearance = function (options) {
     if(!live())return;
     try{storage.setItem(fontKey,JSON.stringify(fontValue));fontStatus.textContent='글꼴을 기억했습니다 · 이 브라우저';}
     catch(_){fontStatus.textContent='저장소를 사용할 수 없어 글꼴을 이 창에만 적용합니다.';}
+  }
+  function applyColors(){for(const name of ['list','current','prior']){document.documentElement.style.setProperty('--kin-'+name+'-color',colors[colorValue[name]]);colorFields[name].value=colorValue[name];}}
+  function saveColors(){
+    if(!live())return;
+    try{storage.setItem(colorKey,JSON.stringify(colorValue));colorStatus.textContent='글자색을 기억했습니다 · 이 브라우저';}
+    catch(_){colorStatus.textContent='저장소를 사용할 수 없어 글자색을 이 창에만 적용합니다.';}
   }
   function save(){
     const clean=normalize(value);if(!live()||!clean){end();return;}
@@ -75,9 +101,10 @@ window.KinReadingAppearance = function (options) {
     ended=true;opener.disabled=true;for(const f of Object.values(fields))f.disabled=true;reset.disabled=true;
     if(dialog.open)dialog.close();value=defaults();apply();fontValue=defaultFonts();applyFonts();
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
+    colorValue=defaultColors();applyColors();for(const f of Object.values(colorFields))f.disabled=true;colorReset.disabled=true;
     window.removeEventListener('storage',onStorage);window.removeEventListener('pagehide',end);channel?.close();
   }
-  function onStorage(e){if(e.key==='kin-session-ended')end();else if(e.key===key)status.textContent='다른 창에서 글자 크기가 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===fontKey)fontStatus.textContent='다른 창에서 글꼴이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';}
+  function onStorage(e){if(e.key==='kin-session-ended')end();else if(e.key===key)status.textContent='다른 창에서 글자 크기가 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===fontKey)fontStatus.textContent='다른 창에서 글꼴이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===colorKey)colorStatus.textContent='다른 창에서 글자색이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';}
   try{
     storage=localStorage;const raw=key?storage.getItem(key):null;
     if(raw!==null){const clean=raw.length<=256?normalize(JSON.parse(raw)):null;if(clean){value=clean;status.textContent='기억한 글자 크기를 불러왔습니다.';}else status.textContent='저장된 글자 크기 오류 · 기본 크기를 적용했습니다.';}
@@ -88,7 +115,12 @@ window.KinReadingAppearance = function (options) {
     if(raw!==null){const clean=raw.length<=256?normalizeFonts(JSON.parse(raw)):null;if(clean){fontValue=clean;fontStatus.textContent='기억한 글꼴을 불러왔습니다.';}else fontStatus.textContent='저장된 글꼴 오류 · 기본 글꼴을 적용했습니다.';}
     else fontStatus.textContent='기본 글꼴입니다.';
   }catch(_){fontStatus.textContent='저장된 글꼴을 읽지 못해 기본 글꼴을 적용했습니다.';}
-  apply();applyFonts();opener.disabled=!live();
+  try{
+    const raw=colorKey?storage.getItem(colorKey):null;
+    if(raw!==null){const clean=raw.length<=256?normalizeColors(JSON.parse(raw)):null;if(clean){colorValue=clean;colorStatus.textContent='기억한 글자색을 불러왔습니다.';}else colorStatus.textContent='저장된 글자색 오류 · 기본 글자색을 적용했습니다.';}
+    else colorStatus.textContent='기본 글자색입니다.';
+  }catch(_){colorStatus.textContent='저장된 글자색을 읽지 못해 기본 글자색을 적용했습니다.';}
+  apply();applyFonts();applyColors();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   return {host:account,read:()=>({...value}),generation:()=>generation,normalize,allowed:live,
