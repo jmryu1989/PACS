@@ -798,10 +798,14 @@ export class PacsService implements OnModuleInit {
       v.version === 1 && ['list', 'current', 'prior'].every(k => typeof v[k] === 'string' && allowed.includes(v[k]));
     const validDock = (v: any) => object(v) && Object.keys(v).sort().join(',') === 'panel,placement,version' &&
       v.version === 1 && ['top', 'bottom'].includes(v.placement) && [-1, 0, 1].includes(v.panel);
+    const validViewer = (v: any) => object(v) && v.version === 1 && Object.keys(v).sort().join(',') === 'current,prior,version' &&
+      ['current', 'prior'].every(role => { const p = v[role]; return object(p) && Object.keys(p).sort().join(',') === 'color,date,description,font,name,size' &&
+        [12,14,16,18,20].includes(p.size) && ['default','sans','serif','mono'].includes(p.font) && ['default','warm','cool','white'].includes(p.color) &&
+        ['name','date','description'].every(k => typeof p[k] === 'boolean'); });
     const validAppearance = (v: any) => object(v) && ['list', 'current', 'prior'].every(k => [12, 14, 16, 18, 20].includes(v[k])) &&
       (v.version === 1 ? Object.keys(v).sort().join(',') === 'current,list,prior,version' :
-        [2, 3].includes(v.version) && Object.keys(v).sort().join(',') === (v.version === 3 ? 'colors,current,dock,fonts,list,prior,version' : 'colors,current,fonts,list,prior,version') &&
-        (v.version !== 3 || validDock(v.dock)) &&
+        [2, 3, 4].includes(v.version) && Object.keys(v).sort().join(',') === (v.version === 4 ? 'colors,current,dock,fonts,list,prior,version,viewer' : v.version === 3 ? 'colors,current,dock,fonts,list,prior,version' : 'colors,current,fonts,list,prior,version') &&
+        (v.version < 3 || validDock(v.dock)) && (v.version !== 4 || validViewer(v.viewer)) &&
         choices(v.fonts, ['default', 'sans', 'serif', 'mono']) && choices(v.colors, ['default', 'warm', 'cool', 'white']));
     if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,sizes' ||
         !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647 ||
@@ -812,7 +816,9 @@ export class PacsService implements OnModuleInit {
     const select = (v: any) => ({ version: 1, list: v.list, current: v.current, prior: v.prior });
     const sizes = body.sizes.version === 1 ? select(body.sizes) :
       { ...select(body.sizes), version: body.sizes.version, fonts: select(body.sizes.fonts), colors: select(body.sizes.colors),
-        ...(body.sizes.version === 3 ? { dock: { version: 1, placement: body.sizes.dock.placement, panel: body.sizes.dock.panel } } : {}) };
+        ...(body.sizes.version >= 3 ? { dock: { version: 1, placement: body.sizes.dock.placement, panel: body.sizes.dock.panel } } : {}),
+        ...(body.sizes.version === 4 ? { viewer: { version: 1, ...Object.fromEntries(['current','prior'].map(role => { const p = body.sizes.viewer[role];
+          return [role, { size:p.size, font:p.font, color:p.color, name:p.name, date:p.date, description:p.description }]; })) } } : {}) };
     const conflict = () => new ConflictException('계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
     try {
       const row = await this.prisma.$transaction(async tx => {

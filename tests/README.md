@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D-WORKSPACE-VIEWER-IDENTITY → RISK-WRONG-VIEWER-LABEL/PREFERENCE-LOSS/LATE-OWNER → TEST-VIEWER-IDENTITY: `test_viewer_identity.py`는 기준/비교 영상의 크기·글꼴·색·선택 표시 항목을 통합/별도 창과 다른 브라우저의 계정 복원에 연결하고, 실제 원본 식별·환자 ID 필수 표시·미저장 판독/제목·영상 보존을 검사한다. 메타데이터 불일치·세션 종료·늦은 계정 응답/창 알림·저장소 실패를 구분한다. 네이티브 로더를 지연시킨 뒤 애니메이션 프레임에서 표시가 없는지 확인하고, 성공한 영상의 실제 렌더링 후 복원·기존 글자와의 간격·검사 교체·계정 변경 거절을 검사한다. `reading_appearance_live.py`는 표시 설정 v4의 엄격한 값 검사·계정 분리·CAS와 이전 버전의 필드 삭제 거절·v3 업그레이드를 확인한다. 스키마 변경은 없으며 실제 모니터·전체 modality·대용량 성능과 전체 후보는 잔여다.
+
 REQ-D-WORKSPACE-VOLUME-COPY → RISK-MIXED-SOURCE-ID/FUSION-FIRST-ACTOR/STALE-PLANE → TEST-VOLUME-PATIENT-COPY: `test_volume_patient_copy.py`는 실제 Layout→MPR 세 단면에서 단일 볼륨 원본 전체의 환자 ID 일치를 확인해 복사하고, 마지막 원본의 ID/SOP 불일치·미완료/부분 로딩·추가 actor·카메라 왕복·부모 대화상자·세션 종료를 거절하는지 검사한다. 영상 픽셀·VOI·원본 목록과 미저장 판독/제목은 그대로이며, 기본 MPR 선택이 재계산하는 카메라 부동소수점은 1e-9 이내로 대조한다. 기존 스택 메모/판독 복귀 대상은 확장하지 않는다. 전체 MPR 정확도·VR·다른 modality·대용량 성능·의사 후보 확인은 별도 잔여다.
 
 REQ-D-WORKSPACE-EMBEDDED-COPY → RISK-WRONG-IMAGE-COPY/OWNER/STALE-FRAME → TEST-EMBEDDED-PATIENT-COPY: `test_embedded_patient_copy.py`는 통합 영상 창에서 실제 현재/과거 영상의 환자 ID를 우클릭 메뉴·버튼·Ctrl+Alt+C로 복사하고 판독 대상·미저장 판독/제목·영상 상태를 유지하는지 검사한다. 부모 판독 화면의 계정·같은 대상·현재 프레임·표시/대화상자 상태도 함께 확인하며 숨김/inert·입력 중·선택 왕복·SOP 불일치·종료/재진입을 검사한다. 별도 창과 영상 식별·클립보드·메뉴/드래그 로직을 공유하고 `test_viewer_patient_copy.py`, `test_image_context_copy.py`, `test_viewer_tech_note.py`, `test_window_return.py`, `test_reading_note.py`로 직접 회귀한다. API·스키마·저장 경로는 바꾸지 않으며 다른 SOP 종류·전체 modality·물리 OS 검증은 잔여다.

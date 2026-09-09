@@ -1,6 +1,6 @@
 /* Shared loaded-image clipboard UI, used in the viewer's own document. */
 window.kinCreateViewerPatientCopy=function(options){
-  let ended=false,channel;
+  let ended=false,channel,identity;
   const {services,selected}=options,owner=options.owner,live=()=>!ended&&options.live();
   const blocked=()=>options.blocked?.()||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show');
   const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
@@ -25,6 +25,7 @@ window.kinCreateViewerPatientCopy=function(options){
       if(signature!==copySignature){copySignature=signature;copyEpoch++;copyStatus.textContent='';}
       copy.disabled=!current;copy.setAttribute('aria-disabled',String(!current||copyBusy));copy.setAttribute('aria-busy',String(copyBusy));
       copyContext.textContent=current?(current.sourceSignature?'선택 볼륨 원본':'선택 영상')+' · '+current.study.name+' ('+current.patientId+') · '+current.study.date+' · 검사 '+current.uid:'환자 ID가 확인되는 영상 칸을 선택하세요.';
+      if(!identity&&live()&&owner())identity=window.KinViewerIdentity?.mount({services,resolve:selected,owner,allowed:live,studies:options.studies});
     }
     async function copyPatientId(expected=null){
       refreshCopy();const current=copyTarget();
@@ -103,7 +104,7 @@ window.kinCreateViewerPatientCopy=function(options){
   const timer=setInterval(refreshCopy,500);
   const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-  function end(){if(ended)return;ended=true;copyTracked=false;clearInterval(timer);restoreCopyMenu();document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);for(const event of volumeEvents)document.removeEventListener(event,volumeChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();refreshCopy();}
+  function end(){if(ended)return;ended=true;identity?.dispose();copyTracked=false;clearInterval(timer);restoreCopyMenu();document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);for(const event of volumeEvents)document.removeEventListener(event,volumeChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();refreshCopy();}
   refreshCopy();return {refresh:refreshCopy,tracked:()=>copyTracked,end,dispose(){end();toolBar.remove();}};
 };
 
@@ -118,10 +119,10 @@ window.kinViewerTechNote=function(services){
     const live=()=>!ended&&location.search===search;
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
-    function selected(){
+    function selected(viewportId){
       if(!live())return null;
       try{
-        const grid=services.viewportGridService.getState(),id=grid.activeViewportId,cell=grid.viewports.get(id),ids=cell?.displaySetInstanceUIDs;
+        const grid=services.viewportGridService.getState(),id=viewportId??grid.activeViewportId,cell=grid.viewports.get(id),ids=cell?.displaySetInstanceUIDs;
         const viewport=services.cornerstoneViewportService.getCornerstoneViewport(id),image=viewport?.type==='stack'&&viewport.getCurrentImageId?.();
         const match=typeof image==='string'&&image.match(/\/studies\/([0-9.]+)\/series\/([0-9.]+)\/instances\/([0-9.]+)\/frames\/([1-9][0-9]*)(?:$|[?#])/);
         if(!match||ids?.length!==1||!studies.includes(match[1]))return null;
@@ -132,13 +133,13 @@ window.kinViewerTechNote=function(services){
     // Reconstructed planes need not coincide with any original slice. Resolve
     // clipboard identity from every source of one loaded volume, independently
     // of the stack-only note/return target. Never choose the first fusion actor.
-    function selectedCopy(){
-      const stack=selected();if(stack)return stack;
+    function selectedCopy(viewportId){
+      const stack=selected(viewportId);if(stack)return stack;
       if(!live())return null;
       try{
         const core=window.cornerstone,events=core?.Enums?.Events;
         if(!events?.VOLUME_NEW_IMAGE||!events.CAMERA_MODIFIED)return null;
-        const grid=services.viewportGridService.getState(),id=grid.activeViewportId,cell=grid.viewports.get(id),sets=cell?.displaySetInstanceUIDs;
+        const grid=services.viewportGridService.getState(),id=viewportId??grid.activeViewportId,cell=grid.viewports.get(id),sets=cell?.displaySetInstanceUIDs;
         const v=services.cornerstoneViewportService.getCornerstoneViewport(id);
         if(!['orthographic','volume3d'].includes(v?.type)||sets?.length!==1)return null;
         const actors=v.getActors(),volumeId=v.getVolumeId();
@@ -169,7 +170,7 @@ window.kinViewerTechNote=function(services){
         let bound,identity;try{bound=options.owner();identity=JSON.parse(bound);}catch(_){return false;}
         if(!Array.isArray(identity)||identity.length!==2||identity.some(v=>typeof v!=='string'||!v))return false;
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
-        patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,host,owner:()=>identity,live:contextLive});
+        patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive});
         return true;
       };
       window.kinViewerEnablePatientCopy=enable;
@@ -224,7 +225,7 @@ window.kinViewerTechNote=function(services){
       try{readingChannel.postMessage({type:'request',request,owner:pendingReturn.owner,studies,activeUid:current.uid});returnTimer=setTimeout(()=>finishReturn('판독 화면의 응답이 없습니다. 목록 창에서 영상 새 창을 다시 눌러 연결하세요.'),2500);}
       catch(_){finishReturn('판독 화면 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.');}
     }
-    const patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,owner:()=>owner,live,host:toolBar,onSelection:refreshReturnSelection});
+    const patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,owner:()=>owner,live,host:toolBar,onSelection:refreshReturnSelection});
     function focusTool(code){
       if(code==='Digit4'){returnToReading();return;}
       if(!live()||!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;

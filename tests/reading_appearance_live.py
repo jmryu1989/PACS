@@ -70,4 +70,21 @@ class ReadingAppearanceLive(unittest.TestCase):
   invalid=copy.deepcopy(b);del invalid['sizes']['dock'];self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
   cleanup_workspace(self.stack,'ReadingAppearance');old=self.body();old['sizes'].update(version=2,fonts=b['sizes']['fonts'],colors=b['sizes']['colors']);self.assertEqual(self.write(old).status,200)
   b['revision']=1;self.assertEqual(self.write(b).status,200);self.assertEqual(self.get()['sizes'],b['sizes'])
+ def viewer_body(self):
+  b=self.dock_body();b['sizes'].update(version=4,viewer=dict(version=1,current=dict(size=20,font='mono',color='warm',name=True,date=True,description=False),prior=dict(size=14,font='serif',color='cool',name=False,date=True,description=True)));return b
+ def test_08_viewer_roundtrip_legacy_writers_and_owner(self):
+  b=self.viewer_body();r=self.write(b);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],b['sizes']);saved=self.get()
+  legacy=self.dock_body();self.assertEqual(legacy['revision'],1);self.assertEqual(self.write(legacy).status,409);self.assertEqual(self.get(),saved)
+  self.assertEqual(self.write(b,'doctor2').status,409);self.assertIsNone(self.get('doctor2')['sizes']);self.assertEqual(self.write(b).status,409)
+  b['revision']=1;b['sizes']['viewer']['current']['size']=16;self.assertEqual(self.write(b).status,200);self.assertEqual(self.get()['sizes'],b['sizes'])
+ def test_09_invalid_viewer_is_atomic(self):
+  import copy
+  b=self.viewer_body();self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=1;b['sizes']['current']=12
+  for field,bad in [('size',True),('size','20'),('size',21),('font','url(https://invalid.example/x)'),('font',['mono']),('color','black'),('name',1),('date',None),('description','true'),('patient','forbidden')]:
+   invalid=copy.deepcopy(b);invalid['sizes']['viewer']['current'][field]=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+  for value in [None,[],{},dict(version=2,current=b['sizes']['viewer']['current'],prior=b['sizes']['viewer']['prior'])]:
+   invalid=copy.deepcopy(b);invalid['sizes']['viewer']=value;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+ def test_10_viewer_upgrade_from_v3(self):
+  old=self.dock_body();self.assertEqual(self.write(old).status,200);self.assertEqual(self.get()['sizes']['version'],3)
+  new=self.viewer_body();self.assertEqual(new['revision'],1);r=self.write(new);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],new['sizes']);self.assertEqual(self.get(),r.body)
 if __name__=='__main__':unittest.main(verbosity=2)
