@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D-WORKSPACE-IMAGE-CONTEXT → RISK-WRONG-PATIENT-COPY/STALE-SELECTION/MEASUREMENT-MENU → TEST-IMAGE-CONTEXT-COPY: `test_image_context_copy.py`는 별도 영상 창의 빈 영상 영역 우클릭에서 실제 DICOM 환자 ID·검사일을 표시하고 복사하는지 검사한다. 메뉴를 연 뒤 빠른 선택/프레임 왕복은 거절하며 클립보드 실패/재시도·종료/재진입·미저장 판독과 영상 작업 보존을 확인한다. 기존 주석 삭제/라벨 메뉴와 우클릭 드래그 확대를 유지하며, mouseup 전에 발생하는 contextmenu의 드래그 거절은 합성 DOM 이벤트로 검사한다. `test_viewer_patient_copy.py`, `test_viewer_tech_note.py`, `test_window_return.py`가 직접 회귀다. 통합 창의 영상 문맥 메뉴·다른 SOP 종류·전체 modality·다른 OS의 물리 마우스 검증은 잔여다.
+
 REQ-D01-NESTED-PAGES → RISK-FILTER-BROADEN/TARGET/PREFERENCE-LOSS/UNBOUNDED-DOM → TEST-D01-NESTED-PAGES: `node --test tests/compound_filter_test.cjs`는 평면/중첩 AND·OR, 잘못된 분기/빈 그룹·전체 조건20개/항목40개/중첩5단계와 고정 matcher를 검사한다. `python tests/e2e/test_nested_pages.py`는 그룹 작성→계정 저장/기본값/재로그인·취소/실패, 미저장 판독과 1,001건 브라우저 합성 응답에서25/50/100건 표 렌더링·전체 정렬/건수·페이지 경계 검사 이동을 확인한다. 서버 조회 분할·병원 규모 성능은 범위 밖이며 표시 건수는 불러온 목록 기준이다. 관련 회귀는 compound-search/saved-filter-manager/reading-flow와69→14다.
 
 REQ-D01-APPEARANCE → RISK-PREFERENCE-LOSS/READABILITY/TARGET → TEST-D01-APPEARANCE: `python tests/e2e/test_worklist_appearance.py`는 모드별 열 내용 너비(64–600px)·목록 본문 글꼴/12–20px/색 선택의 명시적 적용, 독립 브라우저 계정 불러오기/재열기, 상태 색·판독 입력 보존, 범위 오류/취소/초기화·작은 창을 검사한다. `worklist_columns_test.cjs`와 `worklist_columns_live.py`는 선택적 appearance의 정상/불량 값과 서버 저장 불변을 확인한다. 기존 표시/순서 값은 호환되며 임의 CSS·셀 내용은 저장하지 않는다. 기존 열 설정/계정 저장 E2E가 직접 회귀다. `KIN_EVIDENCE_DIR`로 캡처 위치를 지정한다.
