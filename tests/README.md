@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D01-NESTED-PAGES → RISK-FILTER-BROADEN/TARGET/PREFERENCE-LOSS/UNBOUNDED-DOM → TEST-D01-NESTED-PAGES: `node --test tests/compound_filter_test.cjs`는 평면/중첩 AND·OR, 잘못된 분기/빈 그룹·전체 조건20개/항목40개/중첩5단계와 고정 matcher를 검사한다. `python tests/e2e/test_nested_pages.py`는 그룹 작성→계정 저장/기본값/재로그인·취소/실패, 미저장 판독과 1,001건 브라우저 합성 응답에서25/50/100건 표 렌더링·전체 정렬/건수·페이지 경계 검사 이동을 확인한다. 서버 조회 분할·병원 규모 성능은 범위 밖이며 표시 건수는 불러온 목록 기준이다. 관련 회귀는 compound-search/saved-filter-manager/reading-flow와69→14다.
+
 REQ-D01-APPEARANCE → RISK-PREFERENCE-LOSS/READABILITY/TARGET → TEST-D01-APPEARANCE: `python tests/e2e/test_worklist_appearance.py`는 모드별 열 내용 너비(64–600px)·목록 본문 글꼴/12–20px/색 선택의 명시적 적용, 독립 브라우저 계정 불러오기/재열기, 상태 색·판독 입력 보존, 범위 오류/취소/초기화·작은 창을 검사한다. `worklist_columns_test.cjs`와 `worklist_columns_live.py`는 선택적 appearance의 정상/불량 값과 서버 저장 불변을 확인한다. 기존 표시/순서 값은 호환되며 임의 CSS·셀 내용은 저장하지 않는다. 기존 열 설정/계정 저장 E2E가 직접 회귀다. `KIN_EVIDENCE_DIR`로 캡처 위치를 지정한다.
 
 REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-COLUMNS: `node --test tests/worklist_columns_test.cjs`와 `python tests/e2e/test_worklist_columns.py`는 열 표시/순서·ID/Name 필수 유지, 숨긴 열 조건/정렬과 판독 입력 보존, 판독/촬영별 설정, 같은 브라우저의 계정별 복원/재로그인, 다른 창 충돌·저장 실패·손상 값 복구·취소/키보드/작은 창을 검사한다. 열 설정은 기관+불변 subject별 브라우저 저장소에 표시 항목만 보관한다. 서버 동기화·다른 컴퓨터 복원은 포함하지 않으며 UI에 범위를 표시한다. API/DB/판독·원본 저장 경로는 변경하지 않는다.

@@ -34,8 +34,9 @@
           <label>아래 조건 결합<select id="sfm-join"><option value="and">모두 만족 (AND)</option><option value="or">하나 이상 만족 (OR)</option></select></label>
           <div id="sfm-rules"></div>
           <button type="button" id="sfm-add-rule">조건 추가</button>
+          <button type="button" id="sfm-add-group">조건 그룹 추가</button>
           <button type="button" id="sfm-clear-rules">복합 조건 비우기</button>
-          <small>최대 20개 · 검색 값은 한 줄로 입력합니다. 날짜 범위는 시작일과 종료일을 포함합니다.</small>
+          <small>조건 합계 20개 · 그룹 중첩 5단계 · 빈 그룹은 검색할 수 없습니다. 검색 값은 한 줄이며 날짜 범위는 양 끝을 포함합니다.</small>
           <p><small>‘편집 조건으로 검색’은 목록에만 적용합니다. 계정에 보관하려면 검색 이름을 입력하고 ‘저장’을 누르세요.</small></p>
         </section>
         <div class="sfm-grid">
@@ -69,12 +70,17 @@
       // Keep columns from the other worklist mode; changing tabs must not erase them.
       const cols = { ...source.cols };
       dialog.querySelectorAll('[data-col]').forEach(input => { cols[input.dataset.col] = input.value; });
-      const rules = [...$('rules').children].map(row => {
+      function readRules(container) { return [...container.children].map(row => {
+        if (row.classList.contains('sfm-group')) return {
+          join: row.querySelector(':scope > .sfm-group-join').value,
+          rules: readRules(row.querySelector(':scope > .sfm-group-rules')),
+        };
         const rule = { field: row.querySelector('[data-rule-field]').value, op: row.querySelector('[data-rule-op]').value };
         if (!['empty', 'notEmpty'].includes(rule.op)) rule.value = row.querySelector('[data-rule-value]').value;
         if (rule.op === 'between') rule.value2 = row.querySelector('[data-rule-value2]').value;
         return rule;
-      });
+      }); }
+      const rules = readRules($('rules'));
       if (rules.length) cols[compound.KEY] = { version: 1, join: $('join').value, rules };
       else delete cols[compound.KEY];
       const sortKey = $('sort').value || null;
@@ -156,7 +162,37 @@
     function rules(filter) {
       const expression = filter.cols?.[compound.KEY];
       $('join').value = expression?.join ?? 'and';
-      $('rules').replaceChildren(...(expression?.rules ?? []).map(ruleRow));
+      $('rules').replaceChildren(...(expression?.rules ?? []).map(node => nodeRow(node, 1)));
+    }
+    function nodeRow(node, depth) {
+      if (!Object.prototype.hasOwnProperty.call(node, 'rules')) return ruleRow(node);
+      const group = document.createElement('section'); group.className = 'sfm-group';
+      group.setAttribute('aria-label', '조건 그룹 ' + depth + '단계');
+      const join = document.createElement('select'); join.className = 'sfm-group-join'; join.setAttribute('aria-label', '그룹 조건 결합');
+      choices(join, [['and','그룹 안 모두 만족 (AND)'],['or','그룹 안 하나 이상 만족 (OR)']], node.join);
+      const children = document.createElement('div'); children.className = 'sfm-group-rules';
+      children.append(...node.rules.map(child => nodeRow(child, depth + 1)));
+      group.append(join, children);
+      for (const [action, label] of [['rule','그룹에 조건 추가'],['group','하위 그룹 추가'],['remove','그룹 삭제']]) {
+        const button = document.createElement('button'); button.type = 'button'; button.dataset.groupAction = action; button.textContent = label;
+        button.addEventListener('click', () => {
+          if (busy || !editable) return;
+          if (action === 'remove') { group.remove(); count(); $('add-group').focus(); return; }
+          addNode(children, action, depth + 1);
+        });
+        group.append(button);
+      }
+      return group;
+    }
+    function addNode(container, kind, depth) {
+      if (busy || !editable) return;
+      if ($('rules').querySelectorAll('.sfm-rule,.sfm-group').length >= 40
+        || (kind === 'rule' && $('rules').querySelectorAll('.sfm-rule').length >= 20)
+        || (kind === 'group' && depth > 5)) {
+        status('조건 20개·항목/그룹 합계 40개·중첩 5단계 제한을 확인하세요.', true); return;
+      }
+      const row = nodeRow(kind === 'group' ? { join:'or', rules:[] } : { field:'id', op:'contains', value:'' }, depth);
+      container.append(row); row.querySelector('select').focus(); count();
     }
     function count() {
       const filter = value();
@@ -301,12 +337,9 @@
       baseline = JSON.stringify(next); dialog.close();
     });
     $('add-rule').addEventListener('click', () => {
-      if (busy || !editable) return;
-      if ($('rules').children.length >= 20) { status('복합 조건은 최대 20개입니다.', true); return; }
-      const field = compound.fields(options.columns[$('mode').value]).find(f => f.k === 'id');
-      const row = ruleRow({ field: field.k, op: 'contains', value: '' });
-      $('rules').append(row); row.querySelector('[data-rule-field]').focus(); count();
+      addNode($('rules'), 'rule', 1);
     });
+    $('add-group').addEventListener('click', () => addNode($('rules'), 'group', 1));
     $('clear-rules').addEventListener('click', () => { $('rules').replaceChildren(); count(); });
     $('mode').addEventListener('change', () => { source = value(); columns(source); rules(source); count(); });
     $('form').addEventListener('input', e => {

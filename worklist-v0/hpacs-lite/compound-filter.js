@@ -63,7 +63,18 @@
     }
     if (!Array.isArray(columns)) return '검색 모드의 열 정보를 확인할 수 없습니다.';
     const available = new Map(fields(columns).map(field => [field.k, field]));
-    for (const rule of expression.rules) {
+    let nodes = 0, leaves = 0;
+    function visit(group, depth) {
+      if (depth > 5 || !record(group) || !['and','or'].includes(group.join)
+        || !Array.isArray(group.rules) || (depth > 0 && (!group.rules.length
+          || Object.keys(group).sort().join() !== 'join,rules'))) return '조건 그룹은 비어 있을 수 없으며 최대 5단계까지 중첩할 수 있습니다.';
+      for (const rule of group.rules) {
+        if (++nodes > 40) return '복합 검색 항목과 그룹은 합계 40개까지 사용할 수 있습니다.';
+        if (record(rule) && own(rule, 'rules')) {
+          const error = visit(rule, depth + 1); if (error) return error;
+          continue;
+        }
+        if (++leaves > 20) return '복합 검색 조건은 전체 그룹 합계 20개까지 사용할 수 있습니다.';
       if (!record(rule) || !own(rule, 'field') || !own(rule, 'op')
         || Object.keys(rule).some(key => !['field', 'op', 'value', 'value2'].includes(key))) {
         return '손상된 검색 조건이 있습니다. 해당 조건을 다시 설정해 주세요.';
@@ -92,19 +103,24 @@
           if (first > last) return '시작일은 종료일보다 늦을 수 없습니다.';
         }
       }
+      }
+      return null;
     }
-    return null;
+    return visit(expression, 0);
   }
 
   function matches(study, expression, columns) {
-    if (expression === undefined) return true;
-    // Validate every rule before short-circuit evaluation: a bad OR branch must
-    // never broaden results just because another branch already matched.
-    if (validate(expression, columns) !== null) return false;
-    if (!expression.rules.length) return true;
-    if (!record(study)) return false;
+    return compile(expression, columns)(study);
+  }
+
+  function compile(expression, columns) {
+    if (expression === undefined) return () => true;
+    // Validate all branches once before any short circuit can broaden results.
+    if (validate(expression, columns) !== null) return () => false;
+    expression = JSON.parse(JSON.stringify(expression));
+    if (!expression.rules.length) return () => true;
     const available = new Map(fields(columns).map(field => [field.k, field]));
-    function matchRule(rule) {
+    function matchRule(study, rule) {
       const value = own(study, rule.field) ? study[rule.field] : undefined;
       if (rule.op === 'empty') return blank(value);
       if (rule.op === 'notEmpty') return !blank(value);
@@ -131,8 +147,25 @@
         default: return false;
       }
     }
-    return expression.join === 'and' ? expression.rules.every(matchRule) : expression.rules.some(matchRule);
+    function groupMatch(study, group) {
+      const match = node => own(node, 'rules') ? groupMatch(study, node) : matchRule(study, node);
+      return group.join === 'and' ? group.rules.every(match) : group.rules.some(match);
+    }
+    return study => record(study) && groupMatch(study, expression);
   }
 
-  return { KEY, fields, operators, validate, matches };
+  function describe(expression, columns) {
+    if (validate(expression, columns)) return '복합 조건 오류';
+    if (!expression?.rules.length) return '';
+    const available = new Map(fields(columns).map(field => [field.k, field]));
+    function groupText(group) {
+      return '(' + group.rules.map(rule => {
+        if (own(rule, 'rules')) return groupText(rule);
+        const field = available.get(rule.field), op = operators(field).find(([op]) => op === rule.op)[1];
+        return `${field.t} ${op}${['empty','notEmpty'].includes(rule.op) ? '' : ' ' + rule.value}${rule.op === 'between' ? ' ~ ' + rule.value2 : ''}`;
+      }).join(group.join === 'or' ? ' OR ' : ' AND ') + ')';
+    }
+    return groupText(expression);
+  }
+  return { KEY, fields, operators, validate, matches, compile, describe };
 });

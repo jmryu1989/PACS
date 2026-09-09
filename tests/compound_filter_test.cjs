@@ -192,3 +192,19 @@ test('TEST-W-COMPOUND-LIMITS: twenty rules and 1,000 characters allowed without 
     invalid(expr([rule('id', 'eq', value)]));
   }
 });
+
+test('TEST-D01-NESTED: groups preserve parentheses and validate even unmatched branches',()=>{
+  const group=(rules,join='or')=>({join,rules});
+  const condition=expr([group([rule('modality','eq','CT'),rule('modality','eq','MR')]),group([rule('name','contains','A'),rule('id','eq','B')])]);
+  valid(condition);
+  for(const [study,wanted] of [[{modality:'CT',name:'A'},true],[{modality:'MR',id:'B'},true],[{modality:'CT',id:'C'},false],[{modality:'US',name:'A'},false]])assert.equal(match(study,condition),wanted);
+  assert.equal(matcher.describe(condition,columns),'((Modality 같음 CT OR Modality 같음 MR) AND (Name 포함 A OR ID 같음 B))');
+  for(const node of [group([]),group([rule('id','regex','.*')]),{join:'or',rules:[rule('id','eq','alpha')],extra:true}])invalid(expr([rule('id','eq','alpha'),node],'or'));
+  let deep=rule('id','eq','alpha');for(let i=0;i<5;i++)deep=group([deep]);valid(expr([deep]));invalid(expr([group([deep])]));
+  invalid(expr([group(Array.from({length:21},()=>rule('id','eq','alpha')))]));
+  const forty=expr(Array.from({length:20},()=>group([rule('id','eq','alpha')])));valid(forty);
+  forty.rules[0]=group([forty.rules[0]]);invalid(forty);
+  const cycle=group([]);cycle.rules.push(cycle);invalid(expr([cycle]));
+  const compiled=matcher.compile(condition,columns);condition.rules[0].rules[0].value='US';
+  assert.equal(compiled({modality:'CT',name:'A'}),true);assert.equal(match({modality:'CT',name:'A'},condition),false);
+});

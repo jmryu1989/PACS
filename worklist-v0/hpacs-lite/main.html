@@ -423,6 +423,11 @@
     .ctxbar { background: var(--kin-bg); border-bottom-color: var(--kin-line); }
     .grid { background: var(--kin-bg); }
     .left .grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    #worklist-pages { flex-shrink: 0; background: var(--kin-panel2); color: var(--kin-muted); font-size: 12px; }
+    #worklist-pages button, #worklist-pages select { border: 1px solid var(--kin-line2); border-radius: 4px; padding: 5px 7px; color: var(--kin-text); background: var(--kin-panel); }
+    #worklist-pages button:not(:disabled) { cursor: pointer; }
+    #worklist-pages button:disabled { opacity: .45; }
+    #worklist-pages :focus-visible { outline: 2px solid #77c9ff; outline-offset: 2px; }
     .left .grid th,
     .left .grid td { padding: 9px 12px; border: 0; border-bottom: 1px solid var(--kin-line); color: var(--kin-text); }
     .left .grid thead th {
@@ -594,6 +599,11 @@
         </table>
       </div>
 
+      <nav id="worklist-pages" aria-label="검색 결과 페이지" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border-top:1px solid var(--kin-line)">
+        <button id="page-prev" type="button">이전 페이지</button><span id="page-status" role="status"></span><button id="page-next" type="button">다음 페이지</button>
+        <label>페이지당 <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select>건</label>
+        <button id="page-current" type="button">선택 검사 페이지</button>
+      </nav>
       <div class="statusbar">
         <span id="countlist"></span>
         <span id="filterlist">Filter : -</span>
@@ -1746,12 +1756,13 @@
       const kw = String(filter?.quick ?? "").trim().toUpperCase();
       const days = savedFilterDays(filter?.days);
       const values = filter?.cols && typeof filter.cols === "object" ? filter.cols : {};
+      const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
       return studies.filter(s => {
         if (kw && !String(s.name ?? "").toUpperCase().includes(kw)
             && !String(s.id ?? "").toUpperCase().includes(kw)) return false;
         if (!withinDays(s.date, days)) return false;
         return cols.every(c => testCol(s, c, values))
-          && KinCompoundFilter.matches(s, values[KinCompoundFilter.KEY], COLS[filterMode]);
+          && matchCompound(s);
       });
     }
 
@@ -1767,15 +1778,30 @@
       return list;
     }
 
-    function render() {
+    let resultPage = 0, resultQuery = '', resultPageSize = 100;
+    function render(revealUid) {
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
+      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir]);
+      if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
+      if (typeof revealUid === 'string') {
+        const index = list.findIndex(s => s.uid === revealUid);
+        if (index >= 0) resultPage = Math.floor(index / resultPageSize);
+      }
+      const pages = Math.max(1, Math.ceil(list.length / resultPageSize));
+      resultPage = Math.max(0, Math.min(resultPage, pages - 1));
+      const offset = resultPage * resultPageSize;
+      // Keep restored form-control values consistent with the actual page size.
+      $('#page-size').value = String(resultPageSize);
+      $('#page-prev').disabled = resultPage === 0; $('#page-next').disabled = resultPage >= pages - 1;
+      $('#page-current').disabled = !list.some(s => s.uid === selectedUid);
+      $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지`;
 
-      $("#rows").innerHTML = list.map((s, i) => `
+      $("#rows").innerHTML = list.slice(offset, offset + resultPageSize).map((s, i) => `
         <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
         shown.map(c => {
           // CELL[]은 우리가 만든 HTML이라 그대로, 나머지는 전부 외부 문자열이라 이스케이프
-          const v = c.k === "no" ? i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
+          const v = c.k === "no" ? offset + i + 1 : (CELL[c.k] ? CELL[c.k](s) : esc(s[c.k] ?? ""));
           const classes = [c.num ? "num" : "", c.k === "acc" ? "acc" : "", ["id", "birth"].includes(c.k) ? "dim" : ""];
           return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
         }).join("") + `</tr>`).join("")
@@ -1795,13 +1821,7 @@
       const compoundError = KinCompoundFilter.validate(compound, cols);
       if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
       else if (compound?.rules.length) {
-        const fields = KinCompoundFilter.fields(cols);
-        const parts = compound.rules.map(rule => {
-          const field = fields.find(f => f.k === rule.field);
-          const label = KinCompoundFilter.operators(field).find(([op]) => op === rule.op)[1];
-          return `${field.t} ${label}${['empty', 'notEmpty'].includes(rule.op) ? '' : ' ' + rule.value}${rule.op === 'between' ? ' ~ ' + rule.value2 : ''}`;
-        });
-        active.push(`복합 (${parts.join(compound.join === 'or' ? ' OR ' : ' AND ')})`);
+        active.push('복합 ' + KinCompoundFilter.describe(compound, cols));
       }
       $("#filterlist").textContent = "Filter : " + (active.join(", ") || "-");
 
@@ -2089,7 +2109,7 @@
       clearRelatedReport();
       selectedUid = uid;
       relatedModality = "";
-      render(); refreshRight({ forceReport: true });
+      render(uid); refreshRight({ forceReport: true });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
     }
     function refreshRight({ forceReport = false } = {}) {
@@ -3930,6 +3950,14 @@
 
     $("#quick").addEventListener("input", render);
     $("#refresh").addEventListener("click", load);
+    $('#page-prev').addEventListener('click', () => { resultPage--; render(); });
+    $('#page-next').addEventListener('click', () => { resultPage++; render(); });
+    $('#page-current').addEventListener('click', () => render(selectedUid));
+    $('#page-size').addEventListener('change', () => {
+      const size = Number($('#page-size').value);
+      if (![25,50,100].includes(size)) return;
+      resultPage = Math.floor(resultPage * resultPageSize / size); resultPageSize = size; render();
+    });
     $("#m-home").addEventListener("click", load);
     $("#m-filmbox").addEventListener("click", () => { if (selectedUid) openFilmbox(selectedUid); });
 
