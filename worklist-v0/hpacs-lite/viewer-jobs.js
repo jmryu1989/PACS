@@ -24,6 +24,8 @@ window.kinViewerJobs = function (services, model) {
     const controls = text('div', ''), status = text('p', '계정 확인 중…'), list = text('div', ''); status.id = 'kin-viewer-jobs-status'; status.setAttribute('role', 'status');
     parent.insertBefore(panel, parent.children[1]);
     let ended = false, busy = false, me = null, serial = 0, editSerial = 0, pending = null, editRow = null, applying = false, channel, lastAuth = 0, checking = false;
+    const workspaceState = () => ({ busy: !ended && (busy || applying), dirty: !ended && !!(pending || editRow || title.value || description.value) });
+    window.kinViewerJobWorkspaceState = workspaceState;
     const abort = new AbortController(), buttons = new Set();
     const live = () => !ended && location.search === search;
     const path = '/studies/' + studies[0] + '/viewer-jobs';
@@ -167,7 +169,7 @@ window.kinViewerJobs = function (services, model) {
       }
       if (!current()) throw new Error('화면이 변경되었습니다.'); grid.setActiveViewportId(ids[value.active]);
     }
-    async function run(action, row, reason) {
+    async function run(action, row, reason, initialRestore = false) {
       if (!live() || busy || !me) return;
       busy = true; refresh(); const ticket = ++serial, edit = editSerial, before = signature(); status.textContent = '비교 작업 확인 중…';
       try {
@@ -176,7 +178,10 @@ window.kinViewerJobs = function (services, model) {
         if (action === 'restore') {
           if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요.');
           const job = await api(path + '/' + row.id); await authenticate();
-          if (!live() || ticket !== serial || before !== signature()) throw new Error('영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
+          // On a fresh kinJob document, native hanging-protocol initialization
+          // can change the grid while the saved job is fetched. User interaction
+          // still advances serial; only that initial automatic layout is allowed.
+          if (!live() || ticket !== serial || !initialRestore && before !== signature()) throw new Error('영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
           if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식이 있어 복원하지 않았습니다.');
           if (JSON.stringify(job.snapshot.studies) !== JSON.stringify(studies)) {
             if (title.value || description.value) throw new Error('작성 중인 작업 제목·설명을 저장하거나 비운 뒤 비교 검사를 여세요.');
@@ -241,14 +246,14 @@ window.kinViewerJobs = function (services, model) {
         if (!live() || ticket !== serial) return;
         const loaded = new Set(ds.getActiveDisplaySets().map(d => d.StudyInstanceUID));
         if (studies.every(s => loaded.has(s)) && ordered().some(g => cs.getCornerstoneViewport(g.viewportId)?.getDefaultActor?.()?.actor)) {
-          await run('restore', { id: requested }); return;
+          await run('restore', { id: requested }, undefined, true); return;
         }
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };

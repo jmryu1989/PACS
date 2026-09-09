@@ -499,6 +499,7 @@
     .redit textarea { color: var(--kin-text); background: var(--kin-bg); border-color: var(--kin-line2); }
     .redit textarea:focus { border-color: var(--kin-accent); box-shadow: 0 0 0 3px var(--kin-focus-ring); }
   </style>
+  <link rel="stylesheet" href="reading-workspace.css">
 </head>
 <body>
 
@@ -509,7 +510,7 @@
       <div data-tab="Technician">Technician</div>
     </div>
     <div class="item" id="m-home">⌂ Home</div>
-    <div class="item" title="추후 구현">▤ Report</div>
+    <button class="item" id="m-reading" type="button">영상 + 판독</button>
     <div class="item" title="추후 구현">⚙ Config</div>
     <div class="item" title="추후 구현">? Help</div>
     <div class="item" id="m-filmbox">⇄ Filmbox</div>
@@ -872,6 +873,7 @@
   <script src="workspace-layout.js"></script>
   <script src="workspace-roaming.js"></script>
   <script src="report-preview.js"></script>
+  <script src="reading-workspace.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -2027,6 +2029,7 @@
       else clearRelatedReport();
       loadReport({ force: forceReport });
       updateReportButtons();
+      readingWorkspace.selectionChanged();
     }
 
     function renderClinical() {
@@ -3574,6 +3577,10 @@
     }
 
     function openFilmbox(uid, priorUid = null, initialSeriesUid = null) {
+      if (readingWorkspace.active()) return readingWorkspace.open(uid, priorUid, initialSeriesUid);
+      return openOhifWindow(uid, priorUid, initialSeriesUid);
+    }
+    function openOhifWindow(uid, priorUid = null, initialSeriesUid = null) {
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
       // 썸네일에 Series 식별이 없으면 기본 시리즈를 대신 열어 선택이 맞는 것처럼 보이지 않는다.
       if (initialSeriesUid !== null && (typeof initialSeriesUid !== "string" || initialSeriesUid.length > 64 ||
@@ -3636,6 +3643,17 @@
       fallback.remove();
       toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
+
+    const readingWorkspace = KinReadingWorkspace({
+      current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
+      prior: autoPrior, move, select, layout: () => applyLayout(), popup: openOhifWindow,
+      allowed: () => !!sess && serverMode && !demoMode && !offline,
+      notice: message => toast(message, 'err'),
+    });
+    $('#m-reading').addEventListener('click', () => {
+      if (!selectedUid) { toast('판독할 검사를 먼저 선택하세요.', 'info'); return; }
+      readingWorkspace.resume(selectedUid, relatedUid || autoPrior(selectedUid));
+    });
 
     // ── 패널 크기 조절 ──
     function bindPanelResize(selector, axis, resize) {

@@ -1370,6 +1370,8 @@ function kinCreateViewerHistory() {
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) ||
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
     window.kinViewerHistoryHasUnsaved = jobGuard;
+    const workspaceState = () => ({ dirty: jobGuard(), busy: [...entries.values()].some(x => x.busy || x.pending) });
+    window.kinViewerHistoryWorkspaceState = workspaceState;
     let channel;
     try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
     window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
@@ -1386,6 +1388,7 @@ function kinCreateViewerHistory() {
     const previousStop = stop;
     stop = () => {
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
+      if (window.kinViewerHistoryWorkspaceState === workspaceState) delete window.kinViewerHistoryWorkspaceState;
       if (measurementService.getMeasurements === projectedMeasurements) measurementService.getMeasurements = originalMeasurements;
       reportRestores.reverse().forEach(restore => restore());
       previousStop();
