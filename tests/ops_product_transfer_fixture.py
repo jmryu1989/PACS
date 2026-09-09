@@ -27,11 +27,12 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260908120000_manual_sr/migration.sql',
               'api/prisma/migrations/20260908180000_viewer_jobs/migration.sql',
               'api/prisma/migrations/20260908200000_manual_sr_recovery/migration.sql',
-              'api/prisma/migrations/20260909060000_saved_filter_organization/migration.sql']
+              'api/prisma/migrations/20260909060000_saved_filter_organization/migration.sql',
+              'api/prisma/migrations/20260909100000_tech_note_revision/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
-                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr'])
+                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -64,6 +65,7 @@ def migration_records():
 def expected_rows(uid):
     uid_contract(uid)
     rows = {name: [] for name in TABLES}
+    rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP)]
     rows['Institution'] = [dict(id='SYNTHETIC-'+kind, name='SYNTHETIC '+kind, type=kind,
         dicomNames='SYNTHETIC', createdAt=STAMP) for kind in ('hospital', 'tele')]
     rows['StudyState'] = [dict(uid=uid, institutionId='SYNTHETIC-hospital', teleInstitutionId='SYNTHETIC-tele',
@@ -160,7 +162,7 @@ def create_product(name, db, uid):
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
-                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr'):
+                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.

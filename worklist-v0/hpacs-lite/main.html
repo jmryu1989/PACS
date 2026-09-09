@@ -615,7 +615,7 @@
           </div>
         </section>
         <section class="s-clinical">
-          <h3>Clinical Info <button id="sr-open" class="chip" type="button" disabled>SR 원문</button></h3>
+          <h3>Clinical Info <button id="sr-open" class="chip" type="button" disabled>SR 원문</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech 메모</button></h3>
           <div style="padding:4px 10px;overflow-wrap:anywhere">
             <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>환자 ID 복사</button>
             <span style="font-size:11px">Ctrl+Alt+C</span>
@@ -877,6 +877,8 @@
   <script src="report-preview.js"></script>
   <script src="viewer-workspace-dock.js"></script>
   <script src="reading-workspace.js"></script>
+  <link rel="stylesheet" href="tech-note.css">
+  <script src="tech-note.js"></script>
   <script src="saved-filter-manager.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
@@ -2072,6 +2074,7 @@
       renderPatientCopy();
       if (srUid && srUid !== s?.uid) closeSR();
       $('#sr-open').disabled = !s || demoMode;
+      $('#tech-note-open').disabled = !s || demoMode || !serverMode || offline;
       $("#clinical").innerHTML = s ? `
         <div class="clinical-scope">${s.uid === selectedUid ? '판독 대상 검사 정보' : '관련 검사 정보 · 판독 대상은 바뀌지 않습니다'}</div>
         <table>
@@ -3738,6 +3741,8 @@
       toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
 
+    const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline });
+    $('#tech-note-open').onclick = () => techNote.open(viewed());
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,

@@ -87,6 +87,9 @@ class Route:
 # 이 표가 진입점의 단일 진실원천이다. 컨트롤러에 라우트를 추가하고 여기에 선언하지
 # 않으면 test_every_controller_route_is_declared가 살아 있는 스택을 건드리기도 전에 실패한다.
 ROUTES: dict[tuple[str, str], Route] = {
+    ("GET", "studies/:uid/tech-note"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/tech-note"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/tech-note/history"): Route(Kind.TENANT),
     ("GET", "health"): Route(Kind.NEITHER),
     ("GET", "auth/login"): Route(Kind.NEITHER),
     ("GET", "auth/register"): Route(Kind.NEITHER),
@@ -828,6 +831,7 @@ class LiveStack:
                 f"UPDATE \"Order\" SET matched='U', \"studyUid\"=NULL WHERE \"studyUid\"='{uid}'; "
                 f"DELETE FROM \"ReportDraft\" WHERE uid='{uid}'; "
                 f"DELETE FROM \"Report\" WHERE uid='{uid}'; "
+                f"DELETE FROM \"TechNoteRevision\" WHERE \"studyUid\"='{uid}'; "
                 f"DELETE FROM \"StudyState\" WHERE uid='{uid}'; "
                 f"DELETE FROM \"ReportVersion\" WHERE uid='{uid}'; "
                 f"DELETE FROM \"AuditLog\" WHERE target='{uid}'; COMMIT;"

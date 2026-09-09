@@ -1,0 +1,9 @@
+#tech-note-dialog { width: min(720px, 92vw); max-height: 88vh; box-sizing: border-box; overflow: auto; color: #dbeafe; background: #111e32; border: 1px solid #6586ac; border-radius: 8px; padding: 20px; }
+#tech-note-dialog::backdrop { background: #0009; }
+#tech-note-dialog label { display: block; margin: 12px 0; }
+#tech-note-dialog textarea, #tech-note-dialog input { display: block; box-sizing: border-box; width: 100%; margin-top: 6px; color: #e5efff; background: #091321; border: 1px solid #526782; padding: 8px; }
+#tech-note-dialog p, #tech-note-meta { font-size: 12px; color: #a8bfda; }
+#tech-note-target, #tech-note-status, #tech-note-dialog pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+.tech-note-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+#tech-note-dialog button { padding: 7px 10px; }
+#tech-note-history-items section { border-top: 1px solid #526782; padding: 8px 0; }

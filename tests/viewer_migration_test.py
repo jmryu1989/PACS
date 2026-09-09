@@ -12,6 +12,19 @@ import ops_backup as ops
 ROOT=Path(__file__).resolve().parents[1]
 
 class ViewerMigration(unittest.TestCase):
+    def test_tech_note_additive_and_restrict(self):
+        self.create('tech_note_before')
+        for source in self.sources[:-1]: self.sql('tech_note_before',source)
+        self.sql('tech_note_before', 'INSERT INTO "StudyState" (uid,"institutionId","updatedAt") VALUES '+f"('{self.uid}','SYNTHETIC-hospital','2026-09-09')")
+        tables=self.sql('tech_note_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def original():
+            return {name:self.sql('tech_note_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=original();self.sql('tech_note_before',self.sources[-1]);self.assertEqual(original(),before)
+        self.sql('tech_note_before',self.sources[-1],success=False);self.assertEqual(original(),before)
+        self.sql('tech_note_before','INSERT INTO "TechNoteRevision" ("studyUid",version,text,reason,author,"authorSub","institutionId") VALUES '+f"('{self.uid}',1,'SYNTHETIC','','tech','sub','SYNTHETIC-hospital')")
+        self.sql('tech_note_before',f'''DELETE FROM "StudyState" WHERE uid='{self.uid}' ''',success=False)
+        self.assertEqual(original(),before)
+
     @classmethod
     def setUpClass(cls):
         cls.token=uuid.uuid4().hex

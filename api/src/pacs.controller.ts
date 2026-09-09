@@ -158,6 +158,21 @@ export class PacsController {
     return this.svc.patchState(uid, body, caller(req));
   }
 
+  @Get('studies/:uid/tech-note')
+  techNote(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.techNote(uid, caller(req));
+  }
+
+  @Post('studies/:uid/tech-note')
+  saveTechNote(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.saveTechNote(uid, body, caller(req));
+  }
+
+  @Get('studies/:uid/tech-note/history')
+  techNoteHistory(@Param('uid') uid: string, @Query('before') before: string, @Req() req: any) {
+    return this.svc.techNote(uid, caller(req), before ?? '2147483647');
+  }
+
   /** 초안 저장 — 내 것에만 쓴다. 판(version)도 안 올리고 확정본도 안 건드린다 */
   @Put('studies/:uid/report')
   report(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {

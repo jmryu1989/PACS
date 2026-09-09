@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
@@ -56,6 +56,12 @@ function inst(c: Caller): string {
 }
 
 const TECHNICIAN_FIELDS = ['ss', 'ward', 'reqHosp', 'em', 'ov'];
+const NOTE_PUBLIC_FIELDS = { studyUid: true, version: true, text: true, reason: true, author: true, createdAt: true } as const;
+function noteTransactionError(error: any): never {
+  if (error?.code === 'P2028' || error?.code === 'P2010' && ['55P03', '57014'].includes(error?.meta?.code))
+    throw new ServiceUnavailableException('검사 처리 중입니다. 잠시 후 최신 메모를 확인하고 다시 시도하세요');
+  throw error;
+}
 
 /** JSON 문자열 컬럼 ↔ 객체 변환. 서버가 깨진 값을 받아도 죽지 않게 감싼다. */
 const parse = (s?: string) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
@@ -451,6 +457,64 @@ export class PacsService implements OnModuleInit {
   }
 
   // ══════════════════ 조회 ══════════════════
+
+  // REQ-D01-TECH-NOTE -> RISK-D01-NOTE-IDENTITY/HISTORY -> TEST-D01-TECH-NOTE.
+  // The parent lock serializes note revisions with transfer cancellation/deletion.
+  private async noteScope(tx: any, uid: string, c: Caller, writing: boolean) {
+    if (typeof uid !== 'string' || uid.length > 64 || !/^\d+(?:\.\d+)+$/.test(uid))
+      throw new BadRequestException('검사 UID를 확인하세요');
+    if (c.kind !== 'member') throw new ForbiddenException('회원 전용입니다');
+    need(c.roles, writing ? 'technician' : c.roles.includes('technician') ? 'technician' : 'radiologist', 'Tech 메모');
+    const me = inst(c);
+    const rows = writing
+      ? await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`
+      : await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR SHARE`;
+    const study = rows[0];
+    if (!study || !this.visible(study, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+    if (writing && study.institutionId !== me) throw new ForbiddenException('촬영 기관에서만 Tech 메모를 작성할 수 있습니다');
+    return study;
+  }
+
+  async techNote(uid: string, c: Caller, before?: string) {
+    if (before !== undefined && (!/^[1-9]\d{0,9}$/.test(before) || Number(before) > 2147483647))
+      throw new BadRequestException('이력 위치를 확인하세요');
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      const study = await this.noteScope(tx, uid, c, false);
+      const writable = study.institutionId === c.institution && (c.roles.includes('technician') || c.roles.includes('admin'));
+      if (before !== undefined) {
+        const items = await tx.techNoteRevision.findMany({ where: { studyUid: uid, version: { lt: Number(before) } }, orderBy: { version: 'desc' }, take: 51, select: NOTE_PUBLIC_FIELDS });
+        const more = items.length > 50; if (more) items.pop();
+        return { uid, items, nextBefore: more ? items[items.length - 1].version : null };
+      }
+      const note = await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, orderBy: { version: 'desc' }, select: NOTE_PUBLIC_FIELDS });
+      return { uid, note: note ?? null, writable };
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch(noteTransactionError);
+  }
+
+  async saveTechNote(uid: string, body: any, c: Caller) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(k => !['baseVersion', 'text', 'reason'].includes(k)) ||
+        !Number.isInteger(body.baseVersion) || body.baseVersion < 0 || body.baseVersion >= 2147483646 ||
+        typeof body.text !== 'string' || body.text.length > 10000 || body.text.includes('\0') ||
+        typeof body.reason !== 'string' || body.reason.length > 1000 || body.reason.includes('\0'))
+      throw new BadRequestException('메모·수정 사유·기준 버전을 확인하세요');
+    if (/[\uD800-\uDFFF]/u.test(body.text) || /[\uD800-\uDFFF]/u.test(body.reason))
+      throw new BadRequestException('잘못된 문자 인코딩입니다');
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      await this.noteScope(tx, uid, c, true);
+      const prev = await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, orderBy: { version: 'desc' } });
+      if ((prev?.version ?? 0) !== body.baseVersion) throw new ConflictException('메모가 변경되었습니다. 이력을 확인한 뒤 다시 작성하세요');
+      if (prev && !body.reason.trim()) throw new BadRequestException('수정·비우기에는 사유가 필요합니다');
+      if (!prev && !body.text.trim()) throw new BadRequestException('메모 내용을 입력하세요');
+      if (prev?.text === body.text) throw new BadRequestException('변경된 내용이 없습니다');
+      const note = await tx.techNoteRevision.create({ data: { studyUid: uid, version: body.baseVersion + 1,
+        text: body.text, reason: body.reason.trim(), author: c.actor, authorSub: c.sub, institutionId: inst(c) }, select: NOTE_PUBLIC_FIELDS });
+      await tx.auditLog.create({ data: { actor: c.actor, action: 'tech-note.revise', target: uid,
+        detail: JSON.stringify({ version: note.version, institutionId: c.institution }) } });
+      return { uid, note, writable: true };
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch(noteTransactionError);
+  }
 
   /**
    * 검사 목록. **예전엔 브라우저가 Orthanc를 직접 불렀다.**
@@ -1434,6 +1498,8 @@ export class PacsService implements OnModuleInit {
     // history; deleting their parent would remove the authorization boundary.
     if (await tx.viewerItem.findFirst({ where: { studyUid: uid }, select: { id: true } }))
       throw new ConflictException('표시 이력이 있는 검사는 삭제할 수 없습니다');
+    if (await tx.techNoteRevision.findFirst({ where: { studyUid: uid }, select: { version: true } }))
+      throw new ConflictException('Tech 메모 이력이 있는 검사는 삭제할 수 없습니다');
     if (await tx.viewerJob.findFirst({ where: { studies: { has: uid } }, select: { id: true } }))
       throw new ConflictException('저장한 비교 작업에서 참조하는 검사는 삭제할 수 없습니다');
 

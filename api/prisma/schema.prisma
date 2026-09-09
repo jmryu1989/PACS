@@ -93,6 +93,7 @@ model StudyState {
   createdAt DateTime @default(now())
 
   report Report?
+  techNotes TechNoteRevision[]
   viewerItems ViewerItem[]
   manualSrs ManualSr[]
   viewerJobs ViewerJob[]
@@ -102,6 +103,20 @@ model StudyState {
 
   @@index([institutionId])
   @@index([teleInstitutionId])
+}
+
+/// Append-only communication history, separate from report and DICOM content.
+model TechNoteRevision {
+  studyUid String
+  version Int
+  text String @db.VarChar(10000)
+  reason String @db.VarChar(1000)
+  author String
+  authorSub String
+  institutionId String
+  createdAt DateTime @default(now())
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict)
+  @@id([studyUid, version])
 }
 
 /// Evidence records precede any new institution-to-institution access grant.
