@@ -44,6 +44,21 @@ window.KinReadingWorkspace = function (app) {
   note.id = 'reading-tech-note';
   note.setAttribute('aria-keyshortcuts', 'Control+Alt+6');
   note.setAttribute('aria-describedby', 'reading-images');
+  const autoLabel = node('label', '', nav);
+  const autoNote = node('input', '', autoLabel); autoNote.type = 'checkbox'; autoNote.id = 'reading-note-auto';
+  autoLabel.append(document.createTextNode(' 메모 자동 열기'));
+  autoLabel.title = '이 브라우저의 현재 계정 설정 · 연결할 때 한 번 확인하며 입력·미저장 작업 중에는 건너뜁니다';
+  let autoOwner = null, autoLast = null;
+  autoNote.onchange = () => {
+    const wanted = autoNote.checked, previousOwner = autoOwner;
+    syncAutoNote();
+    if (autoOwner !== previousOwner) { app.notice('계정이 바뀌었습니다. 자동 열기 설정을 다시 확인하세요.'); return; }
+    autoNote.checked = wanted; autoLast = null;
+    if (!autoOwner) return;
+    try { localStorage.setItem(autoOwner, autoNote.checked ? 'true' : 'false'); }
+    catch (_) { app.notice('자동 열기 설정을 저장하지 못했습니다. 현재 화면에서만 적용됩니다.'); }
+    maybeAutoNote();
+  };
   const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series); });
   button('목록 화면으로', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
@@ -133,8 +148,36 @@ window.KinReadingWorkspace = function (app) {
   }
   const sameTarget = () => shown?.reportUid === app.current();
   function updateNote() {
+    syncAutoNote();
     note.disabled = ended || !active || !app.allowed() || !frame || !sameTarget() || !loaded || frame.inert || !app.study(shown.uid);
-    note.textContent = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(shown.uid) : '');
+    const label = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(shown.uid) : '');
+    if (note.textContent !== label) note.textContent = label;
+  }
+  function syncAutoNote() {
+    const owner = !ended && app.allowed() && app.noteOwner();
+    const key = owner ? 'kin-reading-note-auto:v1:' + owner : null;
+    autoNote.disabled = !key;
+    if (key === autoOwner) return;
+    autoOwner = key; autoLast = null; autoNote.checked = false;
+    try { if (key) autoNote.checked = localStorage.getItem(key) === 'true'; } catch (_) {}
+  }
+  function maybeAutoNote() {
+    updateNote();
+    const key = shown && JSON.stringify([epoch, shown.reportUid, shown.uid]);
+    if (!autoNote.checked || note.disabled || autoLast === key) return;
+    // Consume this connection even when editing: never surprise the user later.
+    autoLast = key;
+    const summary = app.hasNote(shown.uid);
+    if (summary === undefined) { app.notice('메모 상태가 미확인입니다. 현재 영상 Tech 메모에서 확인하세요.'); return; }
+    if (!summary) return;
+    if (document.visibilityState !== 'visible' || modalOpen(document)) return;
+    try {
+      const doc = frame.contentDocument;
+      const editing = el => el?.matches('textarea,select,input:not([type="checkbox"]):not([type="button"]):not([type="submit"]),[contenteditable]:not([contenteditable="false"]),[role="textbox"]');
+      const state = viewerState();
+      if (modalOpen(doc) || editing(document.activeElement) || editing(doc.activeElement) || state.busy || state.dirty) return;
+    } catch (_) { return; }
+    if (showNote()) autoLast = key;
   }
   function showNote() {
     updateNote(); if (note.disabled) return;
@@ -144,7 +187,7 @@ window.KinReadingWorkspace = function (app) {
       if (location.origin !== window.location.origin || location.pathname !== '/ohif/viewer'
           || location.searchParams.get('StudyInstanceUIDs')?.split(',')[0] !== shown.uid) return;
     } catch (_) { return; }
-    app.openNote(shown.uid);
+    app.openNote(shown.uid); autoLast = JSON.stringify([epoch, shown.reportUid, shown.uid]); return true;
   }
   function redrawRetainedViewer() {
     const retained = frame;
@@ -258,6 +301,7 @@ window.KinReadingWorkspace = function (app) {
           if (!loaded) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }
+            maybeAutoNote();
           }
           return;
         }

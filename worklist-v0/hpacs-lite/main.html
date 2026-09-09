@@ -3851,6 +3851,8 @@
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
       noteLabel, openNote: uid => techNote.open(studies.find(s => s.uid === uid)),
+      hasNote: uid => noteSummaries.get(uid)?.present,
+      noteOwner: () => { const key = KinWorkspaceLayout.key(KinAuth.session()); return key ? key.slice(KinWorkspaceLayout.PREFIX.length) : null; },
       allowed: () => !!sess && serverMode && !demoMode && !offline,
       notice: message => toast(message, 'err'),
     });
