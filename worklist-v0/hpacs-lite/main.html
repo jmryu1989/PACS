@@ -1920,7 +1920,7 @@
       // 양쪽에 다 있는 컬럼까지 풀리는 건 그냥 손해다.
       // 탭 전환은 화면 전환이지 상태 초기화가 아니다 (교훈 §6 — HPACS가 세 번 낸 버그).
       if (sortKey && !COLS[m].some(c => c.k === sortKey)) { sortKey = null; sortDir = 0; }
-      renderHeads(); render(); renderOrders();
+      renderHeads(); render(); renderOrders(); renderRelated();
       applyLayout();
     }
     document.querySelector(".tabs").addEventListener("click", e => {
@@ -2275,6 +2275,7 @@
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="7">${relatedModality ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
+      columnPrefs?.decorateRelated(mode);
     }
 
     /**
@@ -4751,7 +4752,7 @@
       $("#user").textContent = userDisplayName;
       rememberActor(user, userDisplayName, user.split("@")[0]);
       columnPrefs = KinWorklistColumns.mount({ columns: COLS, session: sess, mode: () => mode,
-        changed: () => { renderHeads(); render(); } });
+        changed: () => { renderHeads(); render(); renderRelated(); } });
       renderHeads();
       renderTemplates();
       applyRoleUi();

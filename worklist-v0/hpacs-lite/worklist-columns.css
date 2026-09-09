@@ -4,7 +4,7 @@
 #column-manager h2 { margin: 0; font-size: 19px; }
 #column-manager p { line-height: 1.5; color: #bbcadc; }
 #column-manager #wc-list { max-height: 45dvh; overflow: auto; border: 1px solid #344862; }
-#column-manager .wc-row { display: flex; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid #344862; }
+#column-manager .wc-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px; border-bottom: 1px solid #344862; }
 #column-manager .wc-row label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 #column-manager input { margin-right: 8px; }
 #column-manager button { padding: 7px 10px; border: 1px solid #526b89; border-radius: 5px; background: #283b53; color: inherit; cursor: pointer; }
@@ -16,4 +16,4 @@
 #column-manager #wc-appearance { display: flex; flex-wrap: wrap; gap: 12px; }
 #column-manager #wc-appearance p { width: 100%; margin: 0 0 8px; }
 #column-manager select, #column-manager .wc-width { background: #101b2a; color: #dce5ef; border: 1px solid #526b89; padding: 6px; border-radius: 4px; }
-#rows .wc-cell { white-space: normal; overflow-wrap: anywhere; }
+#rows .wc-cell, #relrows .wc-cell { white-space: normal; overflow-wrap: anywhere; }

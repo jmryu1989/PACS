@@ -25,10 +25,10 @@ window.KinReadingAppearance = function (options) {
   let dockValue={version:1,placement:'bottom',panel:-1};
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
-    #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,12px); font-family:var(--kin-list-font,inherit); }
+    #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,12px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
     .redit textarea { font-size:var(--kin-current-text,12px); font-family:var(--kin-current-font,inherit); }
     .prior-report-value { font-size:var(--kin-prior-text,12px); font-family:var(--kin-prior-font,inherit); }
-    #rows td, #relrows td { color:var(--kin-list-color,var(--kin-text)); }
+    #rows td, #relrows td { color:var(--kin-list-color,var(--kin-column-color,var(--kin-text))); }
     .redit textarea { color:var(--kin-current-color,var(--kin-text)); }
     .prior-report-value { color:var(--kin-prior-color,var(--kin-text)); }
     #reading-appearance-dialog { width:440px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;box-sizing:border-box;background:#172333;color:#dce7f5;border:1px solid #819bb7;border-radius:8px;padding:20px;font:14px 'Malgun Gothic','Segoe UI',sans-serif; }
@@ -114,15 +114,17 @@ window.KinReadingAppearance = function (options) {
   const footer=element('footer','',dialog),reset=element('button','기본 크기',footer),close=element('button','닫기',footer);
   reset.type=close.type='button';reset.id='reading-appearance-reset';close.id='reading-appearance-close';
   document.body.append(dialog);
-  function apply(){for(const name of ['list','current','prior']){document.documentElement.style.setProperty('--kin-'+name+'-text',value[name]+'px');fields[name].value=String(value[name]);}}
-  function applyFonts(){for(const name of ['list','current','prior']){document.documentElement.style.setProperty('--kin-'+name+'-font',fonts[fontValue[name]]);fontFields[name].value=fontValue[name];}}
+  // An absent global preference must not silently replace saved column typography.
+  // Explicit edits/account loads (including defaults) retain global precedence.
+  function apply(explicit=true){for(const name of ['list','current','prior']){const property='--kin-'+name+'-text';if(name==='list'&&!explicit)document.documentElement.style.removeProperty(property);else document.documentElement.style.setProperty(property,value[name]+'px');fields[name].value=String(value[name]);}}
+  function applyFonts(explicit=true){for(const name of ['list','current','prior']){const property='--kin-'+name+'-font';if(name==='list'&&!explicit)document.documentElement.style.removeProperty(property);else document.documentElement.style.setProperty(property,name==='list'&&fontValue[name]==='default'?getComputedStyle(document.body).fontFamily:fonts[fontValue[name]]);fontFields[name].value=fontValue[name];}}
   function saveFonts(){
     if(!live())return;
     generation++;
     try{storage.setItem(fontKey,JSON.stringify(fontValue));fontStatus.textContent='글꼴을 기억했습니다 · 이 브라우저';}
     catch(_){fontStatus.textContent='저장소를 사용할 수 없어 글꼴을 이 창에만 적용합니다.';}
   }
-  function applyColors(){for(const name of ['list','current','prior']){document.documentElement.style.setProperty('--kin-'+name+'-color',colors[colorValue[name]]);colorFields[name].value=colorValue[name];}}
+  function applyColors(explicit=true){for(const name of ['list','current','prior']){const property='--kin-'+name+'-color';if(name==='list'&&!explicit)document.documentElement.style.removeProperty(property);else document.documentElement.style.setProperty(property,colors[colorValue[name]]);colorFields[name].value=colorValue[name];}}
   function saveColors(){
     if(!live())return;
     generation++;
@@ -155,23 +157,27 @@ window.KinReadingAppearance = function (options) {
     let matches=false;try{const clean=e.newValue?.length<=128?normalizeDock(JSON.parse(e.newValue)):null;matches=clean&&JSON.stringify(clean)===JSON.stringify(dockValue);}catch(_){}
     if(!matches){generation++;dockStatus.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}
   }else if(e.key===key)status.textContent='다른 창에서 글자 크기가 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===fontKey)fontStatus.textContent='다른 창에서 글꼴이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';else if(e.key===colorKey)colorStatus.textContent='다른 창에서 글자색이 바뀌었습니다. 현재 창은 유지하며 페이지를 다시 열 때 불러옵니다.';}
+  let hasText=true,hasFont=true,hasColor=true;
   try{
     storage=localStorage;const raw=key?storage.getItem(key):null;
+    hasText=raw!==null;
     if(raw!==null){const clean=raw.length<=256?normalize(JSON.parse(raw)):null;if(clean){value=clean;status.textContent='기억한 글자 크기를 불러왔습니다.';}else status.textContent='저장된 글자 크기 오류 · 기본 크기를 적용했습니다.';}
     else status.textContent='기본 글자 크기입니다.';
   }catch(_){status.textContent='저장된 설정을 읽지 못해 기본 크기를 적용했습니다.';}
   try{
     const raw=fontKey?storage.getItem(fontKey):null;
+    hasFont=raw!==null;
     if(raw!==null){const clean=raw.length<=256?normalizeFonts(JSON.parse(raw)):null;if(clean){fontValue=clean;fontStatus.textContent='기억한 글꼴을 불러왔습니다.';}else fontStatus.textContent='저장된 글꼴 오류 · 기본 글꼴을 적용했습니다.';}
     else fontStatus.textContent='기본 글꼴입니다.';
   }catch(_){fontStatus.textContent='저장된 글꼴을 읽지 못해 기본 글꼴을 적용했습니다.';}
   try{
     const raw=colorKey?storage.getItem(colorKey):null;
+    hasColor=raw!==null;
     if(raw!==null){const clean=raw.length<=256?normalizeColors(JSON.parse(raw)):null;if(clean){colorValue=clean;colorStatus.textContent='기억한 글자색을 불러왔습니다.';}else colorStatus.textContent='저장된 글자색 오류 · 기본 글자색을 적용했습니다.';}
     else colorStatus.textContent='기본 글자색입니다.';
   }catch(_){colorStatus.textContent='저장된 글자색을 읽지 못해 기본 글자색을 적용했습니다.';}
   try{const raw=dockKey?storage.getItem(dockKey):null;if(raw!==null){const clean=raw.length<=128?normalizeDock(JSON.parse(raw)):null;if(clean)dockValue=clean;else dockStatus.textContent='저장된 도구 설정 오류 · 기본값';}}catch(_){dockStatus.textContent='도구 설정을 읽지 못해 기본값을 표시합니다.';}
-  apply();applyFonts();applyColors();showDock();opener.disabled=!live();
+  apply(hasText);applyFonts(hasFont);applyColors(hasColor);showDock();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{

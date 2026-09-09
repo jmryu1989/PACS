@@ -6,6 +6,7 @@
   const copy = v => JSON.parse(JSON.stringify(v));
   const COLORS = { default: '', cool: '#d9ecff', warm: '#ffe6c4' };
   const FONTS = { default: '', sans: 'Arial, "Malgun Gothic", sans-serif', mono: 'Consolas, "Malgun Gothic", monospace' };
+  const RELATED = { date: 1, modality: 2, desc: 3, count: 4, rs: 5 };
   const appearanceDefault = () => ({ widths: {}, font: 'default', size: 13, color: 'default' });
   function appearance(value, keys) {
     if (!object(value) || Object.keys(value).sort().join() !== 'color,font,size,widths'
@@ -78,7 +79,10 @@
       <label>글꼴 <select id="wc-font"><option value="default">기본</option><option value="sans">고딕</option><option value="mono">고정폭</option></select></label>
       <label>글자 크기 <select id="wc-size">${Array.from({length:9},(_,i)=>`<option value="${i+12}">${i+12}px</option>`).join('')}</select></label>
       <label>글자 색 <select id="wc-color"><option value="default">기본</option><option value="cool">밝은 청색</option><option value="warm">밝은 황색</option></select></label>
-      <p>열 내용 너비는 64–600px, 빈칸은 자동입니다. 상태 표식의 색은 유지됩니다.</p></section>
+      <p>열 내용 너비는 64–600px, 빈칸은 자동입니다. 상태 표식의 색은 유지됩니다.</p>
+      <p>글자·도구 설정에 저장하거나 직접 적용한 목록 글자 설정이 있으면 이곳의 글자 설정보다 우선합니다.</p>
+      <p>내용 맞춤은 현재 페이지의 목록·관련 검사 내용을 기준으로 합니다. 날짜·Modality·설명·Count·RS는 두 목록에 같은 너비를 적용합니다. 다른 페이지는 포함하지 않으며 긴 내용은 줄바꿈합니다.</p>
+      <button type="button" id="wc-fit-all">표시된 열 내용 맞춤</button></section>
       <div id="wc-list"></div><p id="wc-status" role="status" aria-live="polite"></p>
       <section aria-label="계정 서버 열 설정"><p>계정 불러오기는 편집창에만 가져옵니다. 아래 적용 버튼으로 목록에 반영하세요.</p>
       <button type="button" id="wc-server-inspect">계정 저장 상태 확인</button><button type="button" id="wc-server-load">계정 설정 불러오기</button>
@@ -96,6 +100,35 @@
       const part = draft.modes[openedMode]; part.appearance ||= appearanceDefault();
       part.appearance[name] = name === 'size' ? Number($(name).value) : $(name).value;
     });
+    function cellsFor(key) {
+      const index = visible(columns, state, openedMode).findIndex(c => c.k === key);
+      const cells = index < 0 ? [] : [...document.querySelectorAll('#rows tr[data-uid]')].map(row => row.cells[index]);
+      if (Object.hasOwn(RELATED, key)) for (const row of document.querySelectorAll('#relrows tr[data-uid]')) cells.push(row.cells[RELATED[key]]);
+      return cells.filter(Boolean);
+    }
+    function fit(keys) {
+      if (ended || !dialog.open || openedMode !== mode()) return;
+      const context = document.createElement('canvas').getContext('2d');
+      if (!context) { status('내용 너비를 계산할 수 없습니다. 직접 입력하거나 빈칸으로 자동 너비를 사용하세요.'); return; }
+      const part = draft.modes[openedMode], a = part.appearance || appearanceDefault(); let fitted = 0;
+      for (const key of keys) {
+        const cells = cellsFor(key); if (!cells.length) continue;
+        let width = 64;
+        for (const cell of cells) {
+          const css = getComputedStyle(cell), text = cell.textContent.replace(/\s+/g, ' ').trim();
+          // Use the rendered font as well as the draft font: shared reading-text
+          // preferences can override column typography. Never shrink below either.
+          for (const font of [css.font, `${css.fontWeight} ${a.size}px ${FONTS[a.font] || css.fontFamily}`]) {
+            context.font = font; width = Math.max(width, context.measureText(text).width + 20);
+          }
+          context.font = css.font; width = Math.max(width, context.measureText(columns[openedMode].find(c => c.k === key).t).width + 20);
+        }
+        part.appearance ||= appearanceDefault(); part.appearance.widths[key] = Math.min(600, Math.ceil(width)); fitted++;
+      }
+      if (fitted) { generation++; renderEditor(); }
+      status(fitted ? `${fitted}개 열의 내용 너비를 준비했습니다. 적용 버튼으로 반영하세요. 다른 페이지의 내용은 포함하지 않았습니다.` : '현재 페이지에 맞출 내용이 없습니다. 기존 너비는 유지했습니다.');
+    }
+    $('fit-all').addEventListener('click', () => fit(draft.modes[openedMode].order.filter(k => !draft.modes[openedMode].hidden.includes(k))));
     function renderEditor(focus) {
       const part = draft.modes[openedMode];
       const a = part.appearance || appearanceDefault();
@@ -119,6 +152,9 @@
           if (width.value === '' && !width.validity.badInput) delete part.appearance.widths[key];
           else part.appearance.widths[key] = width.valueAsNumber;
         }); row.append(width);
+        const fitButton = document.createElement('button'); fitButton.type = 'button'; fitButton.dataset.fit = key;
+        fitButton.textContent = '내용 맞춤'; fitButton.setAttribute('aria-label', column.t + ' 내용 맞춤');
+        fitButton.addEventListener('click', () => { fit([key]); $('list').querySelector(`[data-fit="${key}"]`)?.focus(); }); row.append(fitButton);
         for (const [action, text, delta] of [['up', '위로', -1], ['down', '아래로', 1]]) {
           const button = document.createElement('button'); button.type = 'button'; button.dataset.move = action;
           button.textContent = text; button.setAttribute('aria-label', column.t + ' ' + text);
@@ -134,7 +170,7 @@
       if (focus) {
         const row = $('list').querySelector(`[data-column="${focus.key}"]`);
         const button = row.querySelector(`[data-move="${focus.action}"]`);
-        (button.disabled ? row.querySelector('button:not(:disabled)') : button)?.focus();
+        (button.disabled ? row.querySelector('[data-move]:not(:disabled)') : button)?.focus();
       }
     }
     function apply(persist) {
@@ -241,7 +277,7 @@
     const style = document.createElement('style'); document.head.append(style);
     return { columns: m => visible(columns, state, m), decorate: m => {
       const a = state.modes[m].appearance;
-      style.textContent = a ? `#rows td {font-size:${a.size}px;${FONTS[a.font] ? 'font-family:' + FONTS[a.font] + ';' : ''}${COLORS[a.color] ? 'color:' + COLORS[a.color] + ';' : ''}}` : '';
+      style.textContent = a ? `#rows {--kin-column-text:${a.size}px;--kin-column-font:${FONTS[a.font] || 'inherit'};--kin-column-color:${COLORS[a.color] || 'var(--kin-text)'};} #rows td {font-size:var(--kin-list-text,var(--kin-column-text));font-family:var(--kin-list-font,var(--kin-column-font));color:var(--kin-list-color,var(--kin-column-color));}` : '';
       const shown = visible(columns, state, m);
       for (const row of document.querySelectorAll('#rows tr[data-uid]')) {
         shown.forEach((c,i) => {
@@ -250,6 +286,14 @@
           content.className = 'wc-cell'; content.style.width = width + 'px';
           content.append(...cell.childNodes); cell.append(content);
         });
+      }
+    }, decorateRelated: m => {
+      const widths = state.modes[m].appearance?.widths || {};
+      for (const row of document.querySelectorAll('#relrows tr[data-uid]')) for (const [key,index] of Object.entries(RELATED)) {
+        if (!widths[key]) continue;
+        const cell = row.cells[index], content = document.createElement('div');
+        content.className = 'wc-cell'; content.style.width = widths[key] + 'px';
+        content.append(...cell.childNodes); cell.append(content);
       }
     } };
   }
