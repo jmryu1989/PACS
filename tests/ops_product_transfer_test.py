@@ -36,6 +36,19 @@ def check(body, product_sha=None):
 
 
 class Pure(unittest.TestCase):
+    def test_current_git_migrations_are_covered(self):
+        self.assertEqual(len(transfer.migration_sources()),len(transfer.MIGRATIONS))
+
+    def test_workspace_catalog_assignment_restore_contract(self):
+        body, _, _, _ = fixture(); expected=body['product']
+        for table,field,value in [('FavoriteWorkspace','value','[]'),('FavoriteWorkspace','subject','wrong-owner'),
+                ('StudyTagCatalog','ownerSub','wrong-owner'),('StudyTagCatalog','lastRequest','00000000-0000-4000-8000-000000000999'),
+                ('ReaderAssignment','readerSub',None),('ReaderAssignment','revision',1),('ReaderAssignment','lastFingerprint','0'*64)]:
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows'][table][0][field]=value
+            with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+
     def test_worklist_column_restore_contract(self):
         body, _, _, _ = fixture(); expected=body['product']
         self.assertEqual(len(expected['rows']['WorklistColumns']),2)
@@ -112,7 +125,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 29)
+        self.assertEqual(sum(len(value) for value in rows.values()), 33)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
         self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
         job=rows['ViewerJob'][0]

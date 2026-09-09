@@ -29,11 +29,15 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260908200000_manual_sr_recovery/migration.sql',
               'api/prisma/migrations/20260909060000_saved_filter_organization/migration.sql',
               'api/prisma/migrations/20260909100000_tech_note_revision/migration.sql',
-              'api/prisma/migrations/20260909180000_worklist_columns/migration.sql']
+              'api/prisma/migrations/20260909180000_worklist_columns/migration.sql',
+              'api/prisma/migrations/20260909220000_favorite_workspace/migration.sql',
+              'api/prisma/migrations/20260909233000_study_tags/migration.sql',
+              'api/prisma/migrations/20260910000500_reader_assignment/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
-                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision'])
+                 'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -115,6 +119,18 @@ def expected_rows(uid):
         snapshot=job_snapshot,title='SYNTHETIC job',description='SYNTHETIC description',hidden=True,revision=2,createdAt=STAMP,updatedAt=STAMP)]
     rows['ViewerJobRevision']=[dict(jobId=job_id,revision=n,title='SYNTHETIC job',description='SYNTHETIC description',hidden=n==2,
         reason='' if n==1 else 'SYNTHETIC hide',actor='SYNTHETIC-reader',at=STAMP) for n in (1,2)]
+    # Include ownership, replay receipts and saved-view references in the exact
+    # dump comparison, rather than accepting empty newly added product tables.
+    rows['FavoriteWorkspace']=[dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=3,
+        value=json.dumps([dict(id='00000000-0000-4000-8000-000000000501',name='SYNTHETIC folder',uids=[uid],views={uid:job_id})]),
+        lastRequest='00000000-0000-4000-8000-000000000502',lastFingerprint='b'*64,updatedAt=STAMP)]
+    rows['StudyTagCatalog']=[dict(institution='SYNTHETIC-hospital',ownerSub=owner,revision=n,
+        value=json.dumps([dict(id='00000000-0000-4000-8000-00000000060'+str(n),name='SYNTHETIC tag '+str(n),uids=[uid])]),
+        lastRequest=None if n==1 else '00000000-0000-4000-8000-000000000603',
+        lastFingerprint=None if n==1 else 'c'*64,updatedAt=STAMP) for n,owner in [(1,'SYNTHETIC-sub'),(2,'')]]
+    rows['ReaderAssignment']=[dict(studyUid=uid,institutionId='SYNTHETIC-hospital',revision=4,
+        readerSub='SYNTHETIC-sub',readerActor='SYNTHETIC-reader',readerName='SYNTHETIC reader',changedBy='SYNTHETIC-admin',
+        lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP)]
     # Exercise bytea/JSON receipts, pending intent and expired tombstones in the
     # actual dump/restore. These bytes are a synthetic DB marker, not a DICOM.
     rows['ManualSr']=[dict(id='00000000-0000-4000-8000-00000000030'+str(n),studyUid=uid,
