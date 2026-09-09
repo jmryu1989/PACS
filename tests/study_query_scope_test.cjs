@@ -6,7 +6,7 @@ const qido=states.map(s=>({'0020000D':{Value:[s.uid]},'00080080':{Value:[s.insti
 function setup(changeAt,change){
  const calls=[];let read=0;
  const prisma={studyState:{findMany:async arg=>{calls.push(['state',arg]);read++;let rows=structuredClone(states);if(arg?.where?.uid)rows=rows.filter(s=>arg.where.uid.in.includes(s.uid));else if(arg?.where)rows=rows.filter(s=>s.institutionId==='hallym');if(read===changeAt)rows[0]={...rows[0],...change};if(arg?.select)rows=rows.map(s=>Object.fromEntries(Object.keys(arg.select).map(k=>[k,s[k]])));return rows;}},report:{findMany:async arg=>{calls.push(['report',arg]);return [{uid:'1',version:1,findings:'report'},{uid:'2',version:2,findings:'private prelim'}];}},reportDraft:{findMany:async arg=>{calls.push(['draft',arg]);return [{uid:'1',findings:'draft',baseVersion:1}];}},order:{findMany:async()=>[]},$queryRaw:async(strings,...values)=>{calls.push(['note',values]);return [];}};
- const svc=new PacsService(prisma,{studies:async()=>qido},{});svc.institutions=[{id:'hallym',name:'hallym'},{id:'other',name:'other'}];svc.prefs=async()=>({filters:[],templates:[]});return {svc,calls};
+ const svc=new PacsService(prisma,{studies:async()=>qido,studyIdentities:async()=>qido,studiesByUid:async uids=>qido.filter(s=>uids.includes(s['0020000D'].Value[0]))},{});svc.institutions=[{id:'hallym',name:'hallym'},{id:'other',name:'other'}];svc.prefs=async()=>({filters:[],templates:[]});return {svc,calls};
 }
 test('lean bootstrap never reads study/report/draft; legacy keeps private state rules',async()=>{
  const {svc,calls}=setup();const lean=await svc.bootstrap(caller,{states:'omit'});assert.deepEqual(lean.states,{});assert.equal(lean.statesOmitted,true);assert.deepEqual(calls,[]);

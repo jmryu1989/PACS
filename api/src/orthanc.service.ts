@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException, BadRequestException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, BadRequestException, ConflictException } from '@nestjs/common';
 import { ViewerSourceFailure, ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 
 /**
@@ -151,10 +151,12 @@ export class OrthancService {
     return { patientId };
   }
 
-  private async get(path: string) {
+  private async get(path: string, body?: unknown) {
     let res: Response;
     try {
-      res = await fetch(this.base + path, { headers: { Authorization: this.auth } });
+      res = await fetch(this.base + path, { method: body === undefined ? 'GET' : 'POST',
+        headers: { Authorization: this.auth, 'Content-Type':'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body) });
     } catch (e: any) {
       throw new ServiceUnavailableException(`Orthanc에 연결할 수 없습니다: ${e.message}`);
     }
@@ -173,6 +175,41 @@ export class OrthancService {
     return this.get(
       '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080,00100020',
     );
+  }
+
+  /** Indexed UID inventory only; patient tags and computed counts are fetched for the chosen page. */
+  async studyIdentities(): Promise<any[]> {
+    const rows = await this.get('/tools/find', { Level:'Study', Query:{},
+      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID'] });
+    if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
+    const seen = new Set<string>();
+    return rows.map(row => {
+      const uid = row?.RequestedTags?.StudyInstanceUID;
+      if (typeof uid !== 'string' || !/^[0-9]+(?:\.[0-9]+)*$/.test(uid) || uid.length > 64 || seen.has(uid))
+        throw new ServiceUnavailableException('원본 검사 식별이 없거나 중복입니다');
+      seen.add(uid);
+      return { '0020000D': { Value:[uid] } };
+    });
+  }
+
+  async studiesByUid(uids: string[]): Promise<any[]> {
+    if (!Array.isArray(uids) || uids.length > 100 || new Set(uids).size !== uids.length
+      || uids.some(uid => typeof uid !== 'string' || !/^[0-9]+(?:\.[0-9]+)*$/.test(uid) || uid.length > 64))
+      throw new BadRequestException('원본 검사 페이지 식별이 잘못되었습니다');
+    if (!uids.length) return [];
+    // QIDO UID-list matching uses commas, not DIMSE's backslash separator.
+    const rows = await this.get('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uids.join(','))
+      + '&includefield=00081030,00201206,00201208,00080080,00100020');
+    const byUid = new Map<string, any>();
+    if (Array.isArray(rows)) for (const row of rows) {
+      if (!row || typeof row !== 'object') break;
+      const uid = OrthancService.tag(row, '0020000D');
+      if (!uids.includes(uid) || byUid.has(uid)) break;
+      byUid.set(uid, row);
+    }
+    if (!Array.isArray(rows) || rows.length !== uids.length || byUid.size !== uids.length)
+      throw new ConflictException({ code:'STUDY_LIST_CHANGED', message:'원본 검사 목록이 바뀌었습니다. 새로고침하세요.' });
+    return uids.map(uid => byUid.get(uid));
   }
 
   async reportPreviewStudy(uid: string): Promise<any> {
