@@ -45,6 +45,33 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   p.evaluate("() => {const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
   expect(p.locator('#reading-tech-note')).to_be_disabled();expect(p.locator('#tech-note-dialog')).not_to_be_visible()
 
+ def test_reading_note_03_active_second_image(self):
+  from test_viewer_tech_note import ViewerTechNoteE2E
+  a,b=self.pair();self.note(b,'SECOND NOTE')
+  p=self.login();f=self.workspace(p,a);p.locator('#findings').fill('KEEP ACTIVE REPORT')
+  f.wait_for_function('() => typeof kinViewerSelectedNoteTarget === "function"')
+  selector='[data-cy=viewport-grid] > div'
+  for cell in f.locator(selector).all():
+   canvas=cell.locator('canvas')
+   if not canvas.count():continue
+   box=canvas.bounding_box();p.mouse.click(box['x']+box['width']*.5,box['y']+box['height']*.3)
+   if f.evaluate('() => kinViewerSelectedNoteTarget()?.uid')==b.uid:break
+  self.assertEqual(f.evaluate('() => kinViewerSelectedNoteTarget()?.uid'),b.uid)
+  expect(p.locator('#reading-tech-note')).to_have_text('현재 영상 Tech 메모 · 있음')
+  before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2)
+  p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
+  expect(p.locator('#tech-note-text')).to_have_value('SECOND NOTE')
+  p.keyboard.press('Escape');expect(p.locator('#reading-tech-note')).to_be_focused()
+  expect(p.locator('#reading-target')).to_contain_text(a.uid);expect(p.locator('#findings')).to_have_value('KEEP ACTIVE REPORT')
+  self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
+
+ def test_reading_note_04_bridge_failure_keeps_images(self):
+  a,b=self.pair();p=self.login();p.route('**/viewer-tech-note.js',lambda route:route.abort())
+  f=self.workspace(p,a);expect(p.locator('#reading-tech-note')).to_be_disabled()
+  p.locator('#findings').fill('KEEP REPORT WITHOUT NOTES');p.keyboard.press('Control+Alt+2')
+  expect(p.locator('#reading-frame')).to_be_focused();canvas_ready(f,2)
+  expect(p.locator('#findings')).to_have_value('KEEP REPORT WITHOUT NOTES')
+
 def load_tests(loader,tests,pattern):
  return unittest.TestSuite(ReadingNoteE2E(n) for n in loader.getTestCaseNames(ReadingNoteE2E) if n.startswith('test_reading_note_'))
 if __name__=='__main__':unittest.main(verbosity=2)

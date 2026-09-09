@@ -147,10 +147,20 @@ window.KinReadingWorkspace = function (app) {
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
   }
   const sameTarget = () => shown?.reportUid === app.current();
+  function noteTarget() {
+    try {
+      const w = frame?.contentWindow, url = new URL(w.location.href);
+      if (url.origin !== window.location.origin || url.pathname !== '/ohif/viewer' ||
+          url.searchParams.get('StudyInstanceUIDs') !== [shown.uid, shown.prior].filter(Boolean).join(',')) return null;
+      const selected = w.kinViewerSelectedNoteTarget?.();
+      return selected && [shown.uid, shown.prior].includes(selected.uid) && app.study(selected.uid) ? selected : null;
+    } catch (_) { return null; }
+  }
   function updateNote() {
     syncAutoNote();
-    note.disabled = ended || !active || !app.allowed() || !frame || !sameTarget() || !loaded || frame.inert || !app.study(shown.uid);
-    const label = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(shown.uid) : '');
+    const selected = noteTarget();
+    note.disabled = ended || !active || !app.allowed() || !frame || !sameTarget() || !loaded || frame.inert || !selected;
+    const label = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(selected.uid) : '');
     if (note.textContent !== label) note.textContent = label;
   }
   function syncAutoNote() {
@@ -166,8 +176,10 @@ window.KinReadingWorkspace = function (app) {
     const key = shown && JSON.stringify([epoch, shown.reportUid, shown.uid]);
     if (!autoNote.checked || note.disabled || autoLast === key) return;
     // Consume this connection even when editing: never surprise the user later.
+    const selected = noteTarget();
+    if (!selected) return;
     autoLast = key;
-    const summary = app.hasNote(shown.uid);
+    const summary = app.hasNote(selected.uid);
     if (summary === undefined) { app.notice('메모 상태가 미확인입니다. 현재 영상 Tech 메모에서 확인하세요.'); return; }
     if (!summary) return;
     if (document.visibilityState !== 'visible' || modalOpen(document)) return;
@@ -180,14 +192,10 @@ window.KinReadingWorkspace = function (app) {
     if (showNote()) autoLast = key;
   }
   function showNote() {
-    updateNote(); if (note.disabled) return;
-    // The viewer may navigate between its periodic identity checks.
-    try {
-      const location = new URL(frame.contentWindow.location.href);
-      if (location.origin !== window.location.origin || location.pathname !== '/ohif/viewer'
-          || location.searchParams.get('StudyInstanceUIDs')?.split(',')[0] !== shown.uid) return;
-    } catch (_) { return; }
-    app.openNote(shown.uid); autoLast = JSON.stringify([epoch, shown.reportUid, shown.uid]); return true;
+    updateNote(); if (note.disabled) return false;
+    const selected = noteTarget();
+    if (!selected) { app.notice('불러온 스택 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.'); return false; }
+    app.openNote(selected.uid); autoLast = JSON.stringify([epoch, shown.reportUid, shown.uid]); return true;
   }
   function redrawRetainedViewer() {
     const retained = frame;
@@ -301,8 +309,8 @@ window.KinReadingWorkspace = function (app) {
           if (!loaded) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }
-            maybeAutoNote();
           }
+          maybeAutoNote();
           return;
         }
       } catch (_) {}

@@ -16,6 +16,8 @@ REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-CO
 
 ## 현재 실행 시점
 
+REQ-D01-WORKSPACE-ACTIVE-NOTE → RISK-D01-NOTE-IDENTITY/HISTORY/VIEW-LOSS → TEST-D01-WORKSPACE-ACTIVE-NOTE: `python tests/e2e/test_reading_note.py`는 통합 작업공간의 실제 선택 스택 검사(두 번째 비교 영상 포함) 메모 열기와 판독 대상·미저장 판독문·두 CT의 화소/카메라/밝기 보존을 확인한다. 대상은 imageId/displaySet/URL 범위를 대조하며 불명확한 영상칸은 거절한다. 자동 열기와 별도창 회귀는 `test_reading_note_auto.py`, `test_viewer_tech_note.py`다. 계정 서버 자동 열기 설정·전체 modality는 별도 잔여다.
+
 Tech 메모의 목록 연결 시험은 같은 `test_tech_note.py`의 06~08이다. 본문 없는 유무/버전 응답, 다른 행의 메모를 열 때 판독 대상·입력 유지, 키보드 열기/복귀, 저장·비움·재로그인 표시와 오래된 목록 응답의 되돌림 거부를 확인한다. `invariants_live.py`는 생성 전 감사 이력 0건을 확인한 임시 계정의 잔존 감사만 전체 행 원문을 stdout에 남긴 뒤 정확히 일치하는 행을 정리한다. 실행 기록기를 통해 원문을 보존한다.
 
 `python tests/e2e/test_tech_note.py`는 REQ-D01-TECH-NOTE → RISK-D01-NOTE-IDENTITY/HISTORY → TEST-D01-TECH-NOTE다. 촬영 기관 방사선사/관리자 작성·판독의 읽기 전용·타 기관 거부/원격 읽기, 충돌/수정 사유/이력 페이지·메모가 있는 검사 삭제 거부, 실제 저장·재열람·실패 입력 보존·세션 종료와 늦은 응답을 확인한다. 판독문과 분리된 소통 기록이며 ER 메모·응급의 역할은 구현하지 않는다. DB 추가/복원 시험은 `viewer_migration_test.ViewerMigration.test_tech_note_additive_and_restrict` 및 기존 `test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`다.

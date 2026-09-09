@@ -1882,14 +1882,14 @@ function kinCreateViewerJobs() {
 function kinCreateViewerTechNote() {
   let ready, current, epoch=0;
   return {id:'kin.viewer-tech-note',preRegistration({servicesManager}) {
-    if(window.top!==window)return;
     const load=name=>new Promise((resolve,reject)=>{
       const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+name;
       const timer=setTimeout(()=>{script.remove();reject(new Error('Tech 메모 화면을 불러오지 못했습니다. 뷰어를 새로고침하세요.'));},20000);
       script.onload=()=>{clearTimeout(timer);resolve();};script.onerror=()=>{clearTimeout(timer);reject(new Error('Tech 메모 화면을 불러오지 못했습니다. 뷰어를 새로고침하세요.'));};document.head.append(script);
     });
-    const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);
-    ready=load('tech-note.js').then(()=>load('viewer-tech-note.js')).then(()=>window.kinViewerTechNote(servicesManager.services));ready.catch(()=>{});
+    const standalone=window.top===window;
+    if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
+    ready=(standalone?load('tech-note.js'):Promise.resolve()).then(()=>load('viewer-tech-note.js')).then(()=>window.kinViewerTechNote(servicesManager.services));ready.catch(()=>{});
   },onModeEnter(){if(!ready)return;const ticket=++epoch;ready.then(extension=>{if(ticket===epoch){current=extension;current.mount();}}).catch(e=>{if(ticket===epoch){const p=document.querySelector('#kin-viewer-layout-status');if(p)p.textContent=e.message;}});
   },onModeExit(){epoch++;current?.stop();current=null;}};
 }

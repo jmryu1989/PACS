@@ -2,13 +2,9 @@
 window.kinViewerTechNote=function(services){
   let stop=()=>{};
   function mount(){
-    stop();if(window.top!==window)return;
+    stop();
     const search=location.search,query=new URLSearchParams(search),values=query.getAll('StudyInstanceUIDs'),studies=values.length===1?values[0].split(','):[];
     if(!studies.length||studies.length>2||new Set(studies).size!==studies.length||studies.some(uid=>uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid)))return;
-    const host=document.querySelector('#kin-viewer-layout');if(!host)return;
-    const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
-    const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
-    const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,status);host.append(panel);
     let ended=false,busy=false,owner=null,channel;const requests=new Set();
     const live=()=>!ended&&location.search===search;
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -24,6 +20,15 @@ window.kinViewerTechNote=function(services){
         return {viewportId:id,uid:match[1],study:{uid:match[1],name:text(ds.PatientName),id:text(ds.PatientID),date:text(ds.StudyDate),desc:text(ds.StudyDescription||ds.SeriesDescription)}};
       }catch(_){return null;}
     }
+    if(window.top!==window){
+      window.kinViewerSelectedNoteTarget=selected;
+      stop=()=>{ended=true;if(window.kinViewerSelectedNoteTarget===selected)delete window.kinViewerSelectedNoteTarget;};
+      return;
+    }
+    const host=document.querySelector('#kin-viewer-layout');if(!host)return;
+    const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
+    const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
+    const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,status);host.append(panel);
     function refresh(){button.disabled=!live()||busy||!owner;}
     function end(){if(ended)return;ended=true;owner=null;for(const c of requests)c.abort();note.dispose();button.disabled=true;status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
