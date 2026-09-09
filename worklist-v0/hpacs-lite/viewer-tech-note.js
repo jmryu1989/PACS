@@ -30,7 +30,22 @@ window.kinViewerTechNote=function(services){
     const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
     const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='메모 연결 다시 시도';retry.hidden=true;
     const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,retry,status);host.append(panel);
-    function refresh(){button.disabled=!live()||busy||!owner;retry.disabled=!live()||busy;}
+    const toolBar=document.createElement('div');toolBar.id='kin-viewer-tool-focus';panel.prepend(toolBar);
+    const toolButtons=new Map();
+    for(const [code,label] of [['Digit7','측정 도구로'],['Digit8','비교 작업 도구로'],['Digit2','선택 영상으로']]){
+      const b=document.createElement('button');b.type='button';b.textContent=label;b.id='kin-viewer-focus-'+code.slice(-1);b.setAttribute('aria-keyshortcuts','Control+Alt+'+code.slice(-1));b.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px';b.onclick=()=>focusTool(code);toolBar.append(b);toolButtons.set(code,b);
+    }
+    const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 2 선택 영상';toolBar.append(toolHint);
+    function focusTool(code){
+      if(!live()||!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
+      const current=selected();if(!current){status.textContent='불러온 스택 영상 칸을 선택한 뒤 도구로 이동하세요.';return;}
+      let target;
+      try{target=code==='Digit2'?services.cornerstoneViewportService.getCornerstoneViewport(current.viewportId)?.element:document.querySelector(code==='Digit7'?'#kin-viewer-history > summary':'#kin-viewer-layout > summary');}catch(_){}
+      if(!target||!target.isConnected||!target.getClientRects().length||target.closest('[inert]')){status.textContent='영상 도구 연결을 확인한 뒤 이동하세요.';return;}
+      if(code==='Digit2'&&!target.hasAttribute('tabindex'))target.tabIndex=-1;
+      target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
+    }
+    function refresh(){button.disabled=!live()||busy||!owner;retry.disabled=!live()||busy;for(const b of toolButtons.values())b.disabled=!live()||!owner;}
     function end(){if(ended)return;ended=true;owner=null;for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
@@ -50,7 +65,7 @@ window.kinViewerTechNote=function(services){
       try{await authenticate();const current=selected();if(!live()||!current||target.uid!==current.uid||target.viewportId!==current.viewportId)throw new Error('선택 영상이 바뀌었습니다. 대상을 확인하고 다시 누르세요');busy=false;refresh();if(focus?.isConnected)focus.focus({preventScroll:true});note.open(target.study);status.textContent='메모 대상 검사 · '+target.uid;}
       catch(e){if(live())status.textContent=e.message;}finally{busy=false;refresh();}
     }
-    const key=e=>{if(e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||!e.altKey||e.shiftKey||e.metaKey||e.code!=='Digit6'||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]'))return;e.preventDefault();open();};
+    const key=e=>{if(e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||!e.altKey||e.shiftKey||e.metaKey||!['Digit6',...toolButtons.keys()].includes(e.code)||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]'))return;e.preventDefault();if(e.code==='Digit6')open();else focusTool(e.code);};
     button.onclick=open;document.addEventListener('keydown',key);
     const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
     try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
