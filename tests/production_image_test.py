@@ -121,7 +121,10 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
         # A failed migration assertion must not leave port3000 occupied for the drain test.
         self.addCleanup(ops.run, ["docker", "stop", "--time", "10", name])
         self.wait_running_api(name)
-        history = self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";')
+        # Heap order can change when Prisma marks a migration finished. Compare
+        # the same ordered history before and after restart, independent of locale.
+        history_query = 'SELECT migration_name,checksum,finished_at FROM "_prisma_migrations" ORDER BY migration_name COLLATE "C";'
+        history = self.psql(history_query)
         self.assertTrue(history.startswith("0_init|"))
         self.assertEqual(sorted(line.split('|')[0] for line in history.splitlines()),
                          ['0_init', '20260907040000_viewer_history', '20260908020000_workspace_layout',
@@ -142,7 +145,7 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
         self.assertNotEqual(state["ExitCode"], 137, "Shutdown needed SIGKILL")
         ops.run(["docker", "start", name])
         self.wait_running_api(name)
-        self.assertEqual(self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";'), history)
+        self.assertEqual(self.psql(history_query), history)
         self.assertEqual(self.psql("SELECT value FROM c1_probe;"), "preserved")
         self.assertIn("No pending migrations to apply", ops.text(["docker", "logs", name]))
 
