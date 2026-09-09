@@ -12,28 +12,44 @@ import ops_backup as ops
 ROOT=Path(__file__).resolve().parents[1]
 
 class ViewerMigration(unittest.TestCase):
+    def test_reading_appearance_additive_and_owner_key(self):
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910023000_reading_appearance' in p)
+        self.create('appearance_before')
+        for source in self.sources[:index]:self.sql('appearance_before',source)
+        self.sql('appearance_before', '''INSERT INTO "ReadingPreferences" (institution,subject,revision,"autoNote","updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',1,true,'2026-09-10')''')
+        tables=self.sql('appearance_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def old():return {name:self.sql('appearance_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=old();self.sql('appearance_before',self.sources[index]);self.assertEqual(old(),before)
+        self.sql('appearance_before',self.sources[index],success=False);self.assertEqual(old(),before)
+        row='''INSERT INTO "ReadingAppearance" (institution,subject,revision,sizes,"updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',1,'{"version":1,"list":16,"current":18,"prior":20}','2026-09-10')'''
+        self.sql('appearance_before',row);self.sql('appearance_before',row,success=False)
+        self.sql('appearance_before',row.replace('SYNTHETIC-hospital','SYNTHETIC-other'))
+        self.assertEqual(self.sql('appearance_before','SELECT count(*) FROM "ReadingAppearance"'),'2');self.assertEqual(old(),before)
+
     def test_reading_preferences_additive_and_owner_key(self):
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910013000_reading_preferences' in p)
         self.create('preferences_before')
-        for source in self.sources[:-1]:self.sql('preferences_before',source)
+        for source in self.sources[:index]:self.sql('preferences_before',source)
         self.sql('preferences_before', '''INSERT INTO "WorkspaceLayout" (institution,subject,revision,value,"updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',3,'{}','2026-09-10')''')
         tables=self.sql('preferences_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
         def old():return {name:self.sql('preferences_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
-        before=old();self.sql('preferences_before',self.sources[-1]);self.assertEqual(old(),before)
-        self.sql('preferences_before',self.sources[-1],success=False);self.assertEqual(old(),before)
+        before=old();self.sql('preferences_before',self.sources[index]);self.assertEqual(old(),before)
+        self.sql('preferences_before',self.sources[index],success=False);self.assertEqual(old(),before)
         row='''INSERT INTO "ReadingPreferences" (institution,subject,revision,"autoNote","updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',1,true,'2026-09-10')'''
         self.sql('preferences_before',row);self.sql('preferences_before',row,success=False)
         self.sql('preferences_before',row.replace('SYNTHETIC-hospital','SYNTHETIC-other'))
         self.assertEqual(self.sql('preferences_before','SELECT count(*) FROM "ReadingPreferences"'),'2');self.assertEqual(old(),before)
 
     def test_tech_note_additive_and_restrict(self):
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260909100000_tech_note_revision' in p)
         self.create('tech_note_before')
-        for source in self.sources[:-1]: self.sql('tech_note_before',source)
+        for source in self.sources[:index]: self.sql('tech_note_before',source)
         self.sql('tech_note_before', 'INSERT INTO "StudyState" (uid,"institutionId","updatedAt") VALUES '+f"('{self.uid}','SYNTHETIC-hospital','2026-09-09')")
         tables=self.sql('tech_note_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
         def original():
             return {name:self.sql('tech_note_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
-        before=original();self.sql('tech_note_before',self.sources[-1]);self.assertEqual(original(),before)
-        self.sql('tech_note_before',self.sources[-1],success=False);self.assertEqual(original(),before)
+        before=original();self.sql('tech_note_before',self.sources[index]);self.assertEqual(original(),before)
+        self.sql('tech_note_before',self.sources[index],success=False);self.assertEqual(original(),before)
         self.sql('tech_note_before','INSERT INTO "TechNoteRevision" ("studyUid",version,text,reason,author,"authorSub","institutionId") VALUES '+f"('{self.uid}',1,'SYNTHETIC','','tech','sub','SYNTHETIC-hospital')")
         self.sql('tech_note_before',f'''DELETE FROM "StudyState" WHERE uid='{self.uid}' ''',success=False)
         self.assertEqual(original(),before)

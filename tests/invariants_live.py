@@ -135,6 +135,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "workspace-layout"): Route(Kind.USER),
     ("GET", "reading-preferences"): Route(Kind.USER),
     ("PUT", "reading-preferences"): Route(Kind.USER),
+    ("GET", "reading-appearance"): Route(Kind.USER),
+    ("PUT", "reading-appearance"): Route(Kind.USER),
     ("PUT", "workspace-layout"): Route(Kind.USER),
     ("DELETE", "workspace-layout"): Route(Kind.USER),
     ("POST", "filters"): Route(Kind.USER),

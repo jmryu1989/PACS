@@ -18,7 +18,9 @@ REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-CO
 
 REQ-D01-READING-PREFERENCES → RISK-PREFERENCE-OWNER/LOST-UPDATE/LATE-APPLY → TEST-D01-READING-PREFERENCES: `tests/reading_preferences_live.py`와 `tests/e2e/test_reading_preferences.py`는 메모 자동 열기의 명시적 계정 저장/불러오기, 기관+subject 분리·CAS·불량 입력, 다른 브라우저의 켜기/끄기, 충돌/실패/늦은 불러오기·세션 종료와 판독문/CT 표시 보존을 확인한다. 로컬 자동 열기는 유지하고 서버 값을 자동 적용하지 않는다. 새 ReadingPreferences 표는 boolean과 revision만 저장하며 기존 작업공간 배치와 분리한다. `viewer_migration_test.py`의 해당 추가/전체 dump 복원과 고정 제품 CI migration/합성 행도 함께 대조한다.
 
-REQ-D-WORKSPACE-TEXT-SIZE → RISK-TEXT-OWNER/WORK-LOSS/INVALID → TEST-READING-APPEARANCE: `python tests/e2e/test_reading_appearance.py`는 목록·현재/과거 판독문의 독립 글자 크기, 이 브라우저 기관+계정별 보존·재접속·초기화, 불량 설정·저장소 거부·세션 종료와 실제 CT/미저장 작업 보존을 확인한다. 다른 브라우저로의 설정 이동·글꼴 종류·색 설정은 별도 잔여다.
+REQ-D-WORKSPACE-TEXT-SIZE → RISK-TEXT-OWNER/WORK-LOSS/INVALID → TEST-READING-APPEARANCE: `python tests/e2e/test_reading_appearance.py`는 목록·현재/과거 판독문의 독립 글자 크기, 이 브라우저 기관+계정별 보존·재접속·초기화, 불량 설정·저장소 거부·세션 종료와 실제 CT/미저장 작업 보존을 확인한다. 글꼴 종류·색 설정은 별도 잔여다.
+
+REQ-D-WORKSPACE-TEXT-ROAM → RISK-TEXT-OWNER/LOST-UPDATE/LATE-APPLY → TEST-TEXT-ROAM-API/BROWSER/MIGRATION: `tests/reading_appearance_live.py`와 `tests/e2e/test_reading_appearance_account.py`는 명시적 계정 저장/다른 브라우저 불러오기, 엄격한 크기 형식·기관/계정 분리·revision 충돌·실패/늦은 응답·현재 세션 재확인과 편집/영상 보존을 확인한다. ReadingAppearance는 표시 숫자만 저장하며 기존 메모/배치와 분리한다. `viewer_migration_test.py`의 해당 추가 시험과 전체 dump 복원, 제품 CI의 migration 목록·실제 합성 행을 함께 갱신한다. 전체 열 260개를 위해 복원 도구의 열 목록만 512개로 제한하고 다른 목록 256개·출력 바이트 한도·완전 대조는 유지한다.
 
 REQ-D01-WORKSPACE-ACTIVE-NOTE → RISK-D01-NOTE-IDENTITY/HISTORY/VIEW-LOSS → TEST-D01-WORKSPACE-ACTIVE-NOTE: `python tests/e2e/test_reading_note.py`는 통합 작업공간의 실제 선택 스택 검사(두 번째 비교 영상 포함) 메모 열기와 판독 대상·미저장 판독문·두 CT의 화소/카메라/밝기 보존을 확인한다. 대상은 imageId/displaySet/URL 범위를 대조하며 불명확한 영상칸은 거절한다. 자동 열기와 별도창 회귀는 `test_reading_note_auto.py`, `test_viewer_tech_note.py`다. 전체 modality는 별도 잔여다.
 

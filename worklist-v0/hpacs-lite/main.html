@@ -895,6 +895,7 @@
   <script src="auth.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="reading-appearance.js"></script>
+  <script src="reading-appearance-account.js"></script>
   <script src="workspace-roaming.js"></script>
   <script src="report-preview.js"></script>
   <script src="viewer-workspace-dock.js"></script>
@@ -4746,10 +4747,12 @@
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
       try {
-        KinReadingAppearance({owner:()=>{
+        const appearance=KinReadingAppearance({owner:()=>{
           const key=KinWorkspaceLayout.key(KinAuth.session());
           return key?key.slice(KinWorkspaceLayout.PREFIX.length):null;
         }});
+        window.KinReadingAppearanceAccount?.({...appearance,owner:workspaceOwner?[sess.institution,sess.sub]:null,
+          endpoint:API+'/reading-appearance',sessionEndpoint:API+'/me'});
       } catch (_) {
         $('#reading-appearance-open').disabled=true;
         $('#reading-appearance-open').title='글자 크기 설정을 불러오지 못했습니다. 판독 작업은 계속할 수 있습니다.';

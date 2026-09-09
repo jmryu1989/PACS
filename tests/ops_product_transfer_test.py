@@ -36,6 +36,16 @@ def check(body, product_sha=None):
 
 
 class Pure(unittest.TestCase):
+    def test_catalog_column_budget_supports_current_schema_and_stays_bounded(self):
+        catalog=fixture()[0]['product']['catalog']
+        catalog['columns']=[dict(column_name='synthetic') for _ in range(260)]
+        transfer.catalog_contract(catalog)
+        catalog['columns']*=2
+        with self.assertRaises(ValueError):transfer.catalog_contract(catalog)
+        catalog['columns']=[dict(column_name='synthetic')]
+        catalog['constraints']=[dict(name='synthetic') for _ in range(257)]
+        with self.assertRaises(ValueError):transfer.catalog_contract(catalog)
+
     def test_current_git_migrations_are_covered(self):
         self.assertEqual(len(transfer.migration_sources()),len(transfer.MIGRATIONS))
 
@@ -125,7 +135,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 34)
+        self.assertEqual(sum(len(value) for value in rows.values()), 35)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
         self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
         job=rows['ViewerJob'][0]

@@ -442,6 +442,17 @@ model ReadingPreferences {
   @@id([institution, subject])
 }
 
+/// Account text sizes contain display preferences only.
+model ReadingAppearance {
+  institution String @db.VarChar(256)
+  subject String @db.VarChar(256)
+  revision Int
+  sizes Json
+  updatedAt DateTime @updatedAt
+
+  @@id([institution, subject])
+}
+
 /// Monitor and panel placement remains separate from reading preferences.
 model WorkspaceLayout {
   institution String   @db.VarChar(256)

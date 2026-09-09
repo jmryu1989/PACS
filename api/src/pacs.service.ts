@@ -781,6 +781,43 @@ export class PacsService implements OnModuleInit {
     }
   }
 
+  private appearanceResult(owner: { institution: string; subject: string }, row: any) {
+    return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0, sizes: row?.sizes ?? null };
+  }
+
+  async readingAppearance(c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const row = await this.prisma.readingAppearance.findUnique({ where: { institution_subject: owner } });
+    return this.appearanceResult(owner, row);
+  }
+
+  async saveReadingAppearance(body: any, c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const object = (v: any) => v && typeof v === 'object' && !Array.isArray(v);
+    if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,sizes' ||
+        !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647 ||
+        !object(body.sizes) || Object.keys(body.sizes).sort().join(',') !== 'current,list,prior,version' ||
+        body.sizes.version !== 1 || !['list', 'current', 'prior'].every(k => [12, 14, 16, 18, 20].includes(body.sizes[k])))
+      throw new BadRequestException('글자 크기 설정 형식을 확인하세요');
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
+      throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
+    const sizes = { version: 1, list: body.sizes.list, current: body.sizes.current, prior: body.sizes.prior };
+    const conflict = () => new ConflictException('계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
+    try {
+      const row = await this.prisma.$transaction(async tx => {
+        if (body.revision === 0) return tx.readingAppearance.create({ data: { ...owner, revision: 1, sizes } });
+        const changed = await tx.readingAppearance.updateMany({ where: { ...owner, revision: body.revision },
+          data: { sizes, revision: { increment: 1 } } });
+        if (changed.count !== 1) throw conflict();
+        return tx.readingAppearance.findUnique({ where: { institution_subject: owner } });
+      });
+      return this.appearanceResult(owner, row);
+    } catch (e) {
+      if ((e as any)?.code === 'P2002') throw conflict();
+      throw e;
+    }
+  }
+
   private workspaceResult(owner: { institution: string; subject: string }, row: any) {
     return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
       layout: row?.value == null ? null : this.workspaceValue(JSON.parse(row.value)), updatedAt: row?.updatedAt ?? null };
