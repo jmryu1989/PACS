@@ -18,6 +18,8 @@ REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-CO
 
 REQ-D01-READING-PREFERENCES → RISK-PREFERENCE-OWNER/LOST-UPDATE/LATE-APPLY → TEST-D01-READING-PREFERENCES: `tests/reading_preferences_live.py`와 `tests/e2e/test_reading_preferences.py`는 메모 자동 열기의 명시적 계정 저장/불러오기, 기관+subject 분리·CAS·불량 입력, 다른 브라우저의 켜기/끄기, 충돌/실패/늦은 불러오기·세션 종료와 판독문/CT 표시 보존을 확인한다. 로컬 자동 열기는 유지하고 서버 값을 자동 적용하지 않는다. 새 ReadingPreferences 표는 boolean과 revision만 저장하며 기존 작업공간 배치와 분리한다. `viewer_migration_test.py`의 해당 추가/전체 dump 복원과 고정 제품 CI migration/합성 행도 함께 대조한다.
 
+REQ-D-WORKSPACE-TEXT-SIZE → RISK-TEXT-OWNER/WORK-LOSS/INVALID → TEST-READING-APPEARANCE: `python tests/e2e/test_reading_appearance.py`는 목록·현재/과거 판독문의 독립 글자 크기, 이 브라우저 기관+계정별 보존·재접속·초기화, 불량 설정·저장소 거부·세션 종료와 실제 CT/미저장 작업 보존을 확인한다. 다른 브라우저로의 설정 이동·글꼴 종류·색 설정은 별도 잔여다.
+
 REQ-D01-WORKSPACE-ACTIVE-NOTE → RISK-D01-NOTE-IDENTITY/HISTORY/VIEW-LOSS → TEST-D01-WORKSPACE-ACTIVE-NOTE: `python tests/e2e/test_reading_note.py`는 통합 작업공간의 실제 선택 스택 검사(두 번째 비교 영상 포함) 메모 열기와 판독 대상·미저장 판독문·두 CT의 화소/카메라/밝기 보존을 확인한다. 대상은 imageId/displaySet/URL 범위를 대조하며 불명확한 영상칸은 거절한다. 자동 열기와 별도창 회귀는 `test_reading_note_auto.py`, `test_viewer_tech_note.py`다. 전체 modality는 별도 잔여다.
 
 REQ-D01-NOTE-ASSET-RETRY → RISK-NOTE-RELOAD-LOSS/STALE-CONTEXT → TEST-READING-NOTE-04/TEST-VIEWER-NOTE-CONNECTION: 위 통합창 시험의 메모 파일 실패·반복 재시도·복구는 같은 영상 document, 두 CT 화소/카메라/밝기, 미저장 판독문/작업 제목과 활성 비교 검사 메모를 대조한다. `node --test tests/viewer_note_connection_test.cjs`는 중복 요청, 시간 초과, 모드 종료 뒤 늦은 완료와 재진입의 단일 연결을 확인한다.
