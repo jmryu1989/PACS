@@ -746,6 +746,41 @@ export class PacsService implements OnModuleInit {
     return clean;
   }
 
+  private readingPreferencesResult(owner: { institution: string; subject: string }, row: any) {
+    return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
+      autoNote: row?.autoNote ?? null };
+  }
+
+  async readingPreferences(c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const row = await this.prisma.readingPreferences.findUnique({ where: { institution_subject: owner } });
+    return this.readingPreferencesResult(owner, row);
+  }
+
+  async saveReadingPreferences(body: any, c: Caller) {
+    const owner = this.workspaceOwner(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).sort().join(',') !== 'autoNote,expectedOwner,revision' ||
+        typeof body.autoNote !== 'boolean' || !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('메모 자동 열기 설정 형식을 확인하세요');
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
+      throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
+    const conflict = () => new ConflictException('계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
+    try {
+      const row = await this.prisma.$transaction(async tx => {
+        if (body.revision === 0) return tx.readingPreferences.create({ data: { ...owner, revision: 1, autoNote: body.autoNote } });
+        const changed = await tx.readingPreferences.updateMany({ where: { ...owner, revision: body.revision },
+          data: { autoNote: body.autoNote, revision: { increment: 1 } } });
+        if (changed.count !== 1) throw conflict();
+        return tx.readingPreferences.findUnique({ where: { institution_subject: owner } });
+      });
+      return this.readingPreferencesResult(owner, row);
+    } catch (e) {
+      if ((e as any)?.code === 'P2002') throw conflict();
+      throw e;
+    }
+  }
+
   private workspaceResult(owner: { institution: string; subject: string }, row: any) {
     return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
       layout: row?.value == null ? null : this.workspaceValue(JSON.parse(row.value)), updatedAt: row?.updatedAt ?? null };

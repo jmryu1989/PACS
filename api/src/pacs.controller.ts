@@ -98,6 +98,12 @@ export class PacsController {
     return this.svc.workspaceLayout(caller(req));
   }
 
+  @Get('reading-preferences')
+  readingPreferences(@Req() req: any) { return this.svc.readingPreferences(caller(req)); }
+
+  @Put('reading-preferences')
+  saveReadingPreferences(@Body() body: any, @Req() req: any) { return this.svc.saveReadingPreferences(body, caller(req)); }
+
   @Put('workspace-layout')
   saveWorkspaceLayout(@Body() body: any, @Req() req: any) {
     return this.svc.writeWorkspaceLayout(body, caller(req), false);

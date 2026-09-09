@@ -12,6 +12,19 @@ import ops_backup as ops
 ROOT=Path(__file__).resolve().parents[1]
 
 class ViewerMigration(unittest.TestCase):
+    def test_reading_preferences_additive_and_owner_key(self):
+        self.create('preferences_before')
+        for source in self.sources[:-1]:self.sql('preferences_before',source)
+        self.sql('preferences_before', '''INSERT INTO "WorkspaceLayout" (institution,subject,revision,value,"updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',3,'{}','2026-09-10')''')
+        tables=self.sql('preferences_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def old():return {name:self.sql('preferences_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=old();self.sql('preferences_before',self.sources[-1]);self.assertEqual(old(),before)
+        self.sql('preferences_before',self.sources[-1],success=False);self.assertEqual(old(),before)
+        row='''INSERT INTO "ReadingPreferences" (institution,subject,revision,"autoNote","updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',1,true,'2026-09-10')'''
+        self.sql('preferences_before',row);self.sql('preferences_before',row,success=False)
+        self.sql('preferences_before',row.replace('SYNTHETIC-hospital','SYNTHETIC-other'))
+        self.assertEqual(self.sql('preferences_before','SELECT count(*) FROM "ReadingPreferences"'),'2');self.assertEqual(old(),before)
+
     def test_tech_note_additive_and_restrict(self):
         self.create('tech_note_before')
         for source in self.sources[:-1]: self.sql('tech_note_before',source)

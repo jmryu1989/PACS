@@ -128,7 +128,7 @@ assert(!fs.readFileSync('start-production.sh').includes(13));
                           '20260908081500_connect_gate', '20260908120000_manual_sr',
                           '20260908180000_viewer_jobs', '20260908200000_manual_sr_recovery',
                           '20260909060000_saved_filter_organization', '20260909100000_tech_note_revision',
-                           '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment'])
+                           '20260909180000_worklist_columns', '20260909220000_favorite_workspace', '20260909233000_study_tags', '20260910000500_reader_assignment', '20260910013000_reading_preferences'])
         self.psql("CREATE TABLE c1_probe(value text); INSERT INTO c1_probe VALUES ('preserved');")
         ops.run(["docker", "exec", name, "node", "-e",
             "fetch('http://127.0.0.1:3000/api/me').then(r=>{if(r.status!==401)process.exit(1)})"

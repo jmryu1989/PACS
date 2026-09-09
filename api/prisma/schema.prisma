@@ -431,7 +431,18 @@ model WorklistColumns {
   @@id([institution, subject])
 }
 
-/// Monitor and panel placement remains separate from worklist columns.
+/// Account-owned reading behavior, separate from monitor placement and clinical data.
+model ReadingPreferences {
+  institution String @db.VarChar(256)
+  subject String @db.VarChar(256)
+  revision Int
+  autoNote Boolean
+  updatedAt DateTime @updatedAt
+
+  @@id([institution, subject])
+}
+
+/// Monitor and panel placement remains separate from reading preferences.
 model WorkspaceLayout {
   institution String   @db.VarChar(256)
   subject     String   @db.VarChar(256)

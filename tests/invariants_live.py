@@ -133,6 +133,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("PUT", "worklist-columns"): Route(Kind.USER),
     ("DELETE", "worklist-columns"): Route(Kind.USER),
     ("GET", "workspace-layout"): Route(Kind.USER),
+    ("GET", "reading-preferences"): Route(Kind.USER),
+    ("PUT", "reading-preferences"): Route(Kind.USER),
     ("PUT", "workspace-layout"): Route(Kind.USER),
     ("DELETE", "workspace-layout"): Route(Kind.USER),
     ("POST", "filters"): Route(Kind.USER),

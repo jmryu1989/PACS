@@ -899,6 +899,7 @@
   <script src="reading-workspace.js"></script>
   <link rel="stylesheet" href="tech-note.css">
   <script src="tech-note.js"></script>
+  <script src="reading-preferences.js"></script>
   <script src="compound-filter.js"></script>
   <script src="worklist-columns.js"></script>
   <script src="study-pages.js"></script>
@@ -4741,6 +4742,9 @@
       renderTemplates();
       applyRoleUi();
       restoreWorkspace();
+      KinReadingPreferences({ ...readingWorkspace.preferences,
+        owner: workspaceOwner ? [sess.institution, sess.sub] : null,
+        endpoint: API + '/reading-preferences', sessionEndpoint: API + '/me' });
       KinWorkspaceRoaming.mount({
         owner: workspaceOwner ? [sess.institution, sess.sub] : null,
         read: () => workspaceState, generation: () => workspaceGeneration,

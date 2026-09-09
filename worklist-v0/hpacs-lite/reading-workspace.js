@@ -48,8 +48,9 @@ window.KinReadingWorkspace = function (app) {
   const autoNote = node('input', '', autoLabel); autoNote.type = 'checkbox'; autoNote.id = 'reading-note-auto';
   autoLabel.append(document.createTextNode(' 메모 자동 열기'));
   autoLabel.title = '이 브라우저의 현재 계정 설정 · 연결할 때 한 번 확인하며 입력·미저장 작업 중에는 건너뜁니다';
-  let autoOwner = null, autoLast = null;
+  let autoOwner = null, autoLast = null, preferenceGeneration = 0;
   autoNote.onchange = () => {
+    preferenceGeneration++;
     const wanted = autoNote.checked, previousOwner = autoOwner;
     syncAutoNote();
     if (autoOwner !== previousOwner) { app.notice('계정이 바뀌었습니다. 자동 열기 설정을 다시 확인하세요.'); return; }
@@ -359,5 +360,7 @@ window.KinReadingWorkspace = function (app) {
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
   window.addEventListener('beforeunload', e => { const s = viewerState(); if (s.busy || s.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, openJob, resume, selectionChanged, refreshNote: updateNote, active: () => active, end };
+  return { open, openJob, resume, selectionChanged, refreshNote: updateNote, active: () => active, end,
+    preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,
+      apply: value => { syncAutoNote(); if (autoNote.disabled) return false; autoNote.checked = value; autoNote.onchange(); return true; } } };
 };
