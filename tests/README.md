@@ -1,5 +1,13 @@
 # 살아 있는 불변조건 테스트
 
+## 공통 실행 증거 기록
+
+단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.
+저장소 루트에서 `python scripts/record-run.py --run-dir <새-실행-폴더> --cwd . --file scripts/record-run.py --file tests/record_run_test.py -- python -B tests/record_run_test.py`로 실행한다.
+`--file`은 작업 디렉터리 기준으로 반복 지정한다. 새 폴더의 `run.json`에는 명령 인자·cwd·UTC 시작/종료·실제 자식 exit·전후 파일 SHA256·조회 가능한 Git HEAD를, `stdout.log`/`stderr.log`에는 원문 바이트를 남긴다.
+기존 실행 폴더는 거절하며 명령 실패 코드를 유지한다. 실행 불가는 자식 exit를 `null`로 기록하고 127, 기록 실패는 125로 종료한다. 원래 명령의 실패를 시험 통과로 해석하지 않는다.
+명령 인자와 출력은 가리지 않고 그대로 보존하므로 비밀값·환자 자료를 입력/출력하지 않게 하고, 게시 전 별도로 확인한다. 환경변수 전체 수집·자동 게시·Git 쓰기는 하지 않는다. 이 기록기는 DB/DICOM 보존 검사나 실제 시험을 대신하지 않는다.
+
 ## 현재 실행 시점
 
 `python tests/e2e/test_filter_organization.py`는 TEST-D01-FILTER-ORGANIZE의 개인 저장 검색 경로 계층·설명 찾기·표시 순서·분류 이동과 재로그인 복원, 계정 분리·과거 클라이언트 저장의 메타데이터 유지·잘못된 값 거부를 확인한다. 빈 폴더와 폴더 일괄 관리·기관 공유 폴더·고급 조건은 잔여다. 관련 관리 화면 회귀는 `test_saved_filter_manager.py`이며 `KIN_EVIDENCE_DIR`로 이번 실행의 캡처 위치를 지정한다.
