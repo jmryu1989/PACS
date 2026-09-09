@@ -5,7 +5,7 @@ window.kinViewerTechNote=function(services){
     stop();
     const search=location.search,query=new URLSearchParams(search),values=query.getAll('StudyInstanceUIDs'),studies=values.length===1?values[0].split(','):[];
     if(!studies.length||studies.length>2||new Set(studies).size!==studies.length||studies.some(uid=>uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid)))return;
-    let ended=false,busy=false,owner=null,channel;const requests=new Set();
+    let ended=false,busy=false,owner=null,channel,dock;const requests=new Set();
     const live=()=>!ended&&location.search===search;
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
@@ -30,6 +30,14 @@ window.kinViewerTechNote=function(services){
     const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
     const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='메모 연결 다시 시도';retry.hidden=true;
     const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,retry,status);host.append(panel);
+    const arrange=document.createElement('button');arrange.id='kin-viewer-dock-enable';arrange.type='button';arrange.textContent='도구 영역으로 모으기';panel.prepend(arrange);
+    function arrangeTools(){
+      if(!live()||!owner)return;
+      dock=window.KinViewerWorkspaceDock?.(window,{owner:()=>owner&&JSON.stringify(owner),allowed:()=>live()&&!!owner});
+      if(dock)arrange.hidden=true;
+      else status.textContent='도구 영역을 연결하지 못했습니다. 다시 시도하세요.';
+    }
+    arrange.onclick=()=>{arrangeTools();const tab=dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]');if(tab){if(tab.getAttribute('aria-expanded')!=='true')tab.click();tab.focus({preventScroll:true});}};
     const toolBar=document.createElement('div');toolBar.id='kin-viewer-tool-focus';panel.prepend(toolBar);
     const toolButtons=new Map();
     for(const [code,label] of [['Digit7','측정 도구로'],['Digit8','비교 작업 도구로'],['Digit2','선택 영상으로']]){
@@ -83,13 +91,13 @@ window.kinViewerTechNote=function(services){
       if(!live()||!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
       const current=selected();if(!current){status.textContent='불러온 스택 영상 칸을 선택한 뒤 도구로 이동하세요.';return;}
       let target;
-      try{target=code==='Digit2'?services.cornerstoneViewportService.getCornerstoneViewport(current.viewportId)?.element:document.querySelector(code==='Digit7'?'#kin-viewer-history > summary':'#kin-viewer-layout > summary');}catch(_){}
+      try{const id=code==='Digit7'?'kin-viewer-history':'kin-viewer-layout';target=code==='Digit2'?services.cornerstoneViewportService.getCornerstoneViewport(current.viewportId)?.element:document.querySelector('#kin-workspace-dock nav button[aria-controls="'+id+'"]')||document.querySelector('#'+id+' > summary');}catch(_){}
       if(!target||!target.isConnected||!target.getClientRects().length||target.closest('[inert]')){status.textContent='영상 도구 연결을 확인한 뒤 이동하세요.';return;}
       if(code==='Digit2'&&!target.hasAttribute('tabindex'))target.tabIndex=-1;
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
     }
-    function refresh(){button.disabled=!live()||busy||!owner;retry.disabled=!live()||busy;for(const b of toolButtons.values())b.disabled=!live()||!owner;refreshCopy();}
-    function end(){if(ended)return;ended=true;owner=null;for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const b of toolButtons.values())b.disabled=!live()||!owner;refreshCopy();}
+    function end(){if(ended)return;ended=true;owner=null;dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
@@ -115,13 +123,13 @@ window.kinViewerTechNote=function(services){
     const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
     try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
     const timer=setInterval(()=>{if(!live())end();else refreshCopy();},500);
-    stop=()=>{end();clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();panel.remove();};
+    stop=()=>{end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);if(copyStackEvent)document.removeEventListener(copyStackEvent,copyChanged,true);copySubscriptions.forEach(s=>s.unsubscribe());channel?.close();panel.remove();};
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
+      try{await authenticate();if(live()){let remembered=false;try{const raw=localStorage.getItem('kin-viewer-dock:v1:'+JSON.stringify(owner));remembered=raw!==null&&raw.length<=128&&!!window.KinViewerWorkspaceDock?.normalize(JSON.parse(raw));}catch(_){}if(remembered)arrangeTools();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
-      finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?button:retry;target.focus({preventScroll:true});}}
+      finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }
     retry.onclick=connect;connect();
     return true;

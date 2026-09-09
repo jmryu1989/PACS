@@ -11,7 +11,15 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   cells=self.cells(p);index=next(i for i,c in enumerate(cells) if '/studies/'+uid+'/' in (c['image'] or ''));DisplayControlsE2E.choose(self,p,index)
  def snapshot(self,p):
   return p.evaluate("""()=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports()).filter(v=>v.getCurrentImageId?.()).map(v=>{const c=v.element.querySelector('canvas'),pixels=c.getContext('2d').getImageData(0,0,c.width,c.height).data;let hash=2166136261;for(let n=0;n<pixels.length;n+=4)hash=Math.imul(hash^pixels[n],16777619)>>>0;return {image:v.getCurrentImageId(),camera:v.getCamera(),voi:v.getProperties().voiRange,pixelHash:hash}})""")
- def ready(self,p):expect(p.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
+ def tools(self,p):
+  tab=p.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
+  if tab.count():
+   if tab.get_attribute('aria-expanded')!='true':tab.click()
+  else:p.locator('#kin-viewer-layout').evaluate('(e)=>e.open=true')
+ def ready(self,p):
+  expect(p.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
+  if p.locator('#kin-viewer-dock-enable').is_visible():p.locator('#kin-viewer-dock-enable').click()
+  self.tools(p)
  def open_note(self,p):p.locator('#kin-viewer-note-open').click();expect(p.locator('#tech-note-meta')).not_to_be_empty()
  def test_viewer_note_01_active_prior_focus_and_report(self):
   a,b=self.pair();self.note(a,'CURRENT NOTE');self.note(b,'PRIOR ACTIVE NOTE');original=self.originals();p=self.login();f=self.workspace(p,a)
@@ -64,7 +72,7 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   v.get_by_label('작업 제목',exact=True).fill('KEEP RETRY JOB TITLE');before=self.snapshot(v);url=v.url
   v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
   expect(v.locator('#kin-viewer-note-retry')).to_be_focused();self.assertEqual(self.snapshot(v),before)
-  fail[0]=False;v.locator('#kin-viewer-note-retry').click();self.ready(v);expect(v.locator('#kin-viewer-note-open')).to_be_focused()
+  fail[0]=False;v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-open')).to_be_focused();expect(v.locator('#kin-viewer-note-open')).to_be_enabled()
   self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP RETRY JOB TITLE')
   self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('RECONNECTED NOTE');v.locator('#tech-note-close').click()
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")

@@ -5,12 +5,13 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   preferences=preferences||{};
   const d = w.document;
   const existing = d.getElementById('kin-workspace-dock');
-  if (existing) { existing.refreshPanels(); return; }
+  if (existing) { existing.refreshPanels(); return existing; }
   const root = d.getElementById('root');
   const panels = ['kin-viewer-history', 'kin-viewer-layout'].map(id => d.getElementById(id));
   if (!root || panels.some(p => !p)) return;
+  const origins=panels.map(p=>({panel:p,parent:p.parentNode,next:p.nextSibling,open:p.open,hidden:p.hidden}));
   const initialOwner=preferences.owner?.(),key=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null;
-  const normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='panel,placement,version'&&v.version===1&&['bottom','top'].includes(v.placement)&&[-1,0,1].includes(v.panel)?{version:1,placement:v.placement,panel:v.panel}:null;
+  const normalize=window.KinViewerWorkspaceDock.normalize;
   let ended=false,placement='bottom',selected=-1,storage,channel,initialMessage='도구 영역 · 이 창';
   const live=()=>!ended&&preferences.allowed?.()!==false&&(!initialOwner||preferences.owner?.()===initialOwner);
   try{storage=w.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=128?normalize(JSON.parse(raw)):null;if(value){placement=value.placement;selected=value.panel;initialMessage='기억한 도구 영역';}else initialMessage='저장값 오류 · 기본 도구 영역';}else if(key)initialMessage='도구 영역 · 이 브라우저';}catch(_){initialMessage='저장소 사용 불가 · 이 창';}
@@ -74,11 +75,21 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     ['kin-viewer-history', 'kin-viewer-layout'].forEach((id, i) => {
       const next = d.getElementById(id);
       if (next && next !== panels[i]) {
+        origins.push({panel:next,parent:next.parentNode,next:next.nextSibling,open:next.open,hidden:next.hidden});
         panels[i] = next; next.hidden = selected !== i; next.open = true; dock.append(next);
       }
     });
   };
+  dock.end=end;
+  dock.dispose=()=>{
+    end();
+    for(const origin of origins){const p=origin.panel;if(p.parentNode!==dock)continue;const parent=origin.parent.isConnected?origin.parent:d.body;parent.insertBefore(p,origin.next?.parentNode===parent?origin.next:null);p.open=origin.open;p.hidden=origin.hidden;}
+    dock.remove();style.remove();d.body.classList.remove('kin-docked','kin-dock-open','kin-dock-top');
+    w.requestAnimationFrame(()=>w.dispatchEvent(new w.Event('resize')));
+  };
   d.body.append(dock); d.body.classList.add('kin-docked');
   apply();w.addEventListener('storage',onStorage);w.addEventListener('pagehide',end);
   try{channel=new w.BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+  return dock;
 };
+window.KinViewerWorkspaceDock.normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='panel,placement,version'&&v.version===1&&['bottom','top'].includes(v.placement)&&[-1,0,1].includes(v.panel)?{version:1,placement:v.placement,panel:v.panel}:null;

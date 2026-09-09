@@ -1905,6 +1905,7 @@ function kinCreateViewerTechNote() {
     const standalone=window.top===window;
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
     prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
+      .then(()=>standalone&&typeof window.KinViewerWorkspaceDock!=='function'?load('viewer-workspace-dock.js'):undefined)
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
       .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;

@@ -44,7 +44,9 @@ REQ-D01-COMPOUND-SEARCH → RISK-D01-FILTER-BROADEN/WRONG-CONTEXT/PREFERENCE-LOS
 
 같은 시험은 저장 작업 복원으로 iframe의 비교 검사가 바뀔 때 부모 식별과 별도 창의 일치, 작업 패널 script 실패 후 검사 이동도 확인한다. `python tests/e2e/test_reading_workspace_guard.py`는 초기 자동 복원의 실제 서버 응답을 지연하고 방향키로 영상을 조작하여, 늦은 복원이 사용자의 변경을 덮어쓰지 않는지 검사한다.
 
-`python tests/e2e/test_reading_workspace_dock.py`는 통합 영상 아래의 도구 영역을 펼치고 접으면서 실제 CT 화소와 패널 비겹침, 창 크기 변경, 미저장 제목의 검사 왕복 보호, 실제 비교 작업 저장과 수동 길이 측정/저장을 검사한다. 별도 OHIF 창의 기존 패널은 유지하며 전체 도구 배치·물리 모니터 수용을 뜻하지 않는다.
+`python tests/e2e/test_reading_workspace_dock.py`는 통합 영상 아래의 도구 영역을 펼치고 접으면서 실제 CT 화소와 패널 비겹침, 창 크기 변경, 미저장 제목의 검사 왕복 보호, 실제 비교 작업 저장과 수동 길이 측정/저장을 검사한다. 전체 도구 배치·물리 모니터 수용을 뜻하지 않는다.
+
+REQ-D-WORKSPACE-DOCK-PREF → RISK-DOCK-OWNER/OCCLUSION/UNSAVED → TEST-STANDALONE-DOCK: `test_dock_preferences.py`와 `test_standalone_dock.py`는 도구 영역의 위/아래 위치·열린 패널을 기관+subject별 이 브라우저에서 기억하고 통합/별도 창에서 복원하는지 확인한다. 별도 창은 ‘도구 영역으로 모으기’를 명시적으로 선택하거나 기억한 설정이 있을 때 도구 영역을 연결한다. 열린 다른 창에는 변경을 강제로 적용하지 않는다. 실제 CT 화소/카메라/밝기·미저장 제목/판독 보존, 비겹침, 재열기·초기화·저장 실패·좁은 창·세션 종료와 메모 확장 재진입을 검사한다. 직접 회귀는 별도창 메모·환자 ID 복사·도구 초점 시험과 `viewer_note_connection_test.cjs`다. 계정 서버 복원·전체 modality·물리 다중 모니터는 잔여다.
 
 `python tests/e2e/test_reading_window_reuse.py`는 별도 named 영상 창을 같은 검사에서 재로딩하지 않고 재사용하는지, 다른 검사로 바꿀 때 실제 미저장 작업 제목과 주입한 busy 상태를 자식 guard로 차단하는지 검사한다. 별도 최상위 창의 깨끗한 상태/미저장 상태에 합성 `beforeunload` 이벤트를 보내 비교 작업 입력의 이탈 guard도 확인한다. 닫힌 새 창에 이 브라우저가 저장한 좌표·크기를 적용하는 경로는 모의 window로 확인한다. 실제 미저장 표식·진행 중 저장/복원 race, 물리 다중 모니터 배치를 검증한 것은 아니다.
 

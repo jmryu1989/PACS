@@ -3,11 +3,12 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 
-function fixture(){
+function fixture(standalone=false){
   const source=fs.readFileSync(require('node:path').join(__dirname,'../config/ohif.js'),'utf8');
   const scripts=[],timers=new Set();let mounts=0,stops=0;
   const window={top:{}};
-  const context={window,document:{createElement:()=>({remove(){this.removed=true;}}),head:{append:s=>scripts.push(s)}},
+  if(standalone)window.top=window;
+  const context={window,document:{querySelector:()=>null,createElement:()=>({remove(){this.removed=true;}}),head:{append:s=>scripts.push(s)}},
     setTimeout:f=>{timers.add(f);return f;},clearTimeout:f=>timers.delete(f)};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('function kinCreateViewerTechNote()'),source.indexOf('\nwindow.config =')),context);
@@ -16,6 +17,16 @@ function fixture(){
   return {extension,window,scripts,timers,install,mounts:()=>mounts,stops:()=>stops};
 }
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
+test('standalone dock asset failure retries without mounting a partial bridge',async()=>{
+  const f=fixture(true);f.window.KinTechNote=()=>{};f.extension.onModeEnter();await flush();
+  const dock=f.scripts.find(s=>s.src?.endsWith('/viewer-workspace-dock.js'));assert.ok(dock);
+  dock.onerror();await flush();assert.equal(f.window.kinViewerNoteConnectionState(),'failed');assert.equal(f.mounts(),0);
+  f.window.kinViewerNoteReconnect();await flush();
+  const retry=f.scripts.filter(s=>s.src?.endsWith('/viewer-workspace-dock.js')).at(-1);assert.notEqual(retry,dock);
+  f.window.KinViewerWorkspaceDock=()=>{};retry.onload();await flush();
+  const bridge=f.scripts.find(s=>s.src?.endsWith('/viewer-tech-note.js'));assert.ok(bridge);f.install();bridge.onload();await flush();assert.equal(f.mounts(),1);
+  f.extension.onModeExit();assert.equal(f.stops(),1);assert.equal(f.timers.size,0);
+});
 test('failed asset retries once, mounts once and ignores repeated ready retries',async()=>{
   const f=fixture();f.extension.onModeEnter();await flush();assert.equal(f.scripts.length,1);
   f.scripts[0].onerror();await flush();assert.equal(f.window.kinViewerNoteConnectionState(),'failed');
