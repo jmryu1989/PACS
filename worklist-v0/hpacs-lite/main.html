@@ -2125,7 +2125,7 @@
     });
     window.addEventListener('pagehide', endPatientCopy);
 
-    function select(uid) {
+    function select(uid, { deferViewer = false } = {}) {
       /**
        * **같은 검사를 다시 고르는 것은 이동이 아니다.**
        *
@@ -2150,16 +2150,16 @@
       clearRelatedReport();
       selectedUid = uid;
       relatedModality = "";
-      render(uid); refreshRight({ forceReport: true });
+      render(uid); refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
     }
-    function refreshRight({ forceReport = false } = {}) {
+    function refreshRight({ forceReport = false, deferViewer = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
       if (relatedUid) loadRelatedReport();
       else clearRelatedReport();
       loadReport({ force: forceReport });
       updateReportButtons();
-      readingWorkspace.selectionChanged();
+      readingWorkspace.selectionChanged(deferViewer);
     }
 
     function renderClinical() {
@@ -3863,6 +3863,7 @@
       identity: () => { const s=KinAuth.session(); return s?.state==='approved' ? [s.institution,s.sub] : null; },
       current: () => selectedUid, study: uid => studies.find(s => s.uid===uid), select,
       applyFolder: (value,id) => favoriteList.apply(value,id), changed: value => favoriteList.adopt(value), ended: () => favoriteList.end(),
+      openSavedView: (uid,job) => { select(uid,{deferViewer:true});readingWorkspace.openJob(uid,job); },
       notice: message => toast(message,'err'),
     });
     $('#favorite-open').onclick = () => favorites.open();

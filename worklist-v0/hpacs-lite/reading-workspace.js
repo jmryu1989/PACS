@@ -324,7 +324,12 @@ window.KinReadingWorkspace = function (app) {
   }
   function open(uid, prior = null, series = null) { return attempt(request(uid, prior, series), false); }
   function resume(uid, prior = null) { return shown?.reportUid === app.current() && !failed ? attempt(shown, false) : open(uid, prior); }
-  function selectionChanged() {
+  function openJob(uid,job) {
+    const ids=job?.snapshot?.studies;
+    if(job?.studyUid!==uid||!Array.isArray(ids)||ids[0]!==uid||ids.length<1||ids.length>2||typeof job.id!=='string'||!/^([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.test(job.id)){app.notice('저장 보기의 검사 정보를 확인할 수 없습니다.');return false;}
+    const r=request(uid,ids[1]??null);if(!r)return false;r.job=job.id;return attempt(r,false);
+  }
+  function selectionChanged(deferOpen = false) {
     identify(); const uid = app.current(), changed = uid !== lastSelection; lastSelection = uid;
     if (!active || ended || !changed) return;
     if (frame) frame.hidden = !sameTarget();
@@ -335,7 +340,7 @@ window.KinReadingWorkspace = function (app) {
       if (!failed) { pending = null; recovery.hidden = true; status.textContent = loaded ? '기존 영상 작업으로 돌아왔습니다.' : '영상 작업공간을 불러오는 중…'; }
       identify(); return;
     }
-    if (uid) open(uid, app.prior(uid));
+    if (uid && !deferOpen) open(uid, app.prior(uid));
     else { pending = null; recovery.hidden = true; status.textContent = '판독 대상을 선택하세요'; }
   }
   // Session invalidation must hide the embedded document even if its own request
@@ -346,5 +351,5 @@ window.KinReadingWorkspace = function (app) {
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
   window.addEventListener('beforeunload', e => { const s = viewerState(); if (s.busy || s.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, resume, selectionChanged, refreshNote: updateNote, active: () => active, end };
+  return { open, openJob, resume, selectionChanged, refreshNote: updateNote, active: () => active, end };
 };
