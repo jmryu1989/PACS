@@ -12,7 +12,7 @@ window.KinTechNote = function (app) {
     <div id="tech-note-history-items"></div><button id="tech-note-more" type="button" hidden>이전 이력 더 보기</button>`;
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
-  let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', cursor = null, opener;
+  let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', cursor = null, opener, openerDocument, innerOpener;
   const dirty = () => $('text').value !== saved || !!$('reason').value;
   const status = text => { $('status').textContent = text; };
   function controls() {
@@ -81,7 +81,17 @@ window.KinTechNote = function (app) {
     ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0;
     $('text').value = $('reason').value = ''; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
     if (d.open) d.close();
-    if (!force) { if (opener?.isConnected) opener.focus(); else app.restoreFocus?.(closedUid); }
+    if (!force) {
+      if (opener?.isConnected) {
+        opener.focus();
+        try {
+          if (openerDocument && opener.contentDocument === openerDocument && innerOpener?.isConnected) {
+            opener.contentWindow.focus(); innerOpener.focus({ preventScroll: true });
+          }
+        } catch (_) { /* A navigated/cross-origin document cannot receive old focus. */ }
+      } else app.restoreFocus?.(closedUid);
+    }
+    opener = openerDocument = innerOpener = null;
   }
   $('close').onclick = () => close(); d.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function end() { ended = true; close(true); }
@@ -93,6 +103,10 @@ window.KinTechNote = function (app) {
   return { open(study) {
     if (ended || d.open || !study || !app.allowed()) return;
     uid = study.uid; opener = document.activeElement; cursor = null; $('more').hidden = true;
+    openerDocument = innerOpener = null;
+    try {
+      if (opener?.tagName === 'IFRAME') { openerDocument = opener.contentDocument; innerOpener = openerDocument?.activeElement; }
+    } catch (_) { /* Only same-origin iframe focus can be retained. */ }
     $('target').textContent = [study.name, study.id, study.date, study.desc, study.uid].filter(Boolean).join(' · ');
     writable = false; controls(); d.showModal(); read();
   } };

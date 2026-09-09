@@ -40,10 +40,14 @@ window.KinReadingWorkspace = function (app) {
   $('.right > .rw').id = 'reading-context';
   const contextReturn = button('정보 닫고 판독문으로', () => focusPane('report'), $('.s-clinical'));
   contextReturn.id = 'reading-context-return';
+  const note = button('현재 영상 Tech 메모', showNote);
+  note.id = 'reading-tech-note';
+  note.setAttribute('aria-keyshortcuts', 'Control+Alt+6');
+  note.setAttribute('aria-describedby', 'reading-images');
   const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series); });
   button('목록 화면으로', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
-  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
+  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
   hints.id = 'reading-shortcuts';
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
   host.setAttribute('aria-label', '영상 작업공간'); $('.split').prepend(host);
@@ -111,6 +115,8 @@ window.KinReadingWorkspace = function (app) {
       e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
     } else if (panes[e.code]) {
       e.preventDefault(); focusPane(panes[e.code]);
+    } else if (e.code === 'Digit6') {
+      e.preventDefault(); showNote();
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       // Do not turn editor cursor/IME gestures into a change of patient context.
       if (e.target.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
@@ -126,6 +132,20 @@ window.KinReadingWorkspace = function (app) {
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
   }
   const sameTarget = () => shown?.reportUid === app.current();
+  function updateNote() {
+    note.disabled = ended || !active || !app.allowed() || !frame || !sameTarget() || !loaded || frame.inert || !app.study(shown.uid);
+    note.textContent = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(shown.uid) : '');
+  }
+  function showNote() {
+    updateNote(); if (note.disabled) return;
+    // The viewer may navigate between its periodic identity checks.
+    try {
+      const location = new URL(frame.contentWindow.location.href);
+      if (location.origin !== window.location.origin || location.pathname !== '/ohif/viewer'
+          || location.searchParams.get('StudyInstanceUIDs')?.split(',')[0] !== shown.uid) return;
+    } catch (_) { return; }
+    app.openNote(shown.uid);
+  }
   function redrawRetainedViewer() {
     const retained = frame;
     // A hidden iframe can keep its study/camera but lose its drawable canvas.
@@ -151,6 +171,7 @@ window.KinReadingWorkspace = function (app) {
     if (frame && !frame.hidden) redrawRetainedViewer();
     separate.disabled = !frame || !sameTarget() || !loaded;
     imageFocus.disabled = separate.disabled;
+    updateNote();
   }
   function identify() {
     const uid = app.current(); target.textContent = uid ? '판독 대상 · ' + label(uid) : '판독 대상을 선택하세요';
@@ -158,6 +179,7 @@ window.KinReadingWorkspace = function (app) {
     info.textContent = shown && sameTarget() ? '영상 열람 · ' + label(shown.uid) + (shown.prior ? '\n비교 영상 · ' + label(shown.prior) : '') : '';
     separate.disabled = !frame || !sameTarget() || !loaded;
     imageFocus.disabled = separate.disabled;
+    updateNote();
     navigation();
   }
   function viewerState() {
@@ -280,5 +302,5 @@ window.KinReadingWorkspace = function (app) {
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
   window.addEventListener('beforeunload', e => { const s = viewerState(); if (s.busy || s.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, resume, selectionChanged, active: () => active, end };
+  return { open, resume, selectionChanged, refreshNote: updateNote, active: () => active, end };
 };
