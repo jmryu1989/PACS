@@ -155,7 +155,8 @@ class ContainerTests(unittest.TestCase):
             before = self.inspect("kin-api")["Id"]
             database_id = self.inspect(self.db)["Id"]
             self.psql("CREATE TABLE host_probe(value text); INSERT INTO host_probe VALUES ('preserved');")
-            migration = self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";')
+            history_query = 'SELECT migration_name,checksum,finished_at FROM "_prisma_migrations" ORDER BY migration_name COLLATE "C";'
+            migration = self.psql(history_query)
             self.assertTrue(migration.startswith("0_init|"))
             adapter.authorize(plan)
             self.assertTrue(adapter.observe(plan)["preflight_passed"])
@@ -169,7 +170,7 @@ class ContainerTests(unittest.TestCase):
                 self.assertEqual(self.git("rev-parse", "HEAD"), sha)
                 self.assertEqual(self.inspect(self.db)["Id"], database_id)
                 self.assertEqual(self.psql("SELECT value FROM host_probe;"), "preserved")
-                self.assertEqual(self.psql('SELECT migration_name,checksum,finished_at FROM "_prisma_migrations";'), migration)
+                self.assertEqual(self.psql(history_query), migration)
                 before = container["Id"]
         print(json.dumps({"actual_api_replacements": 2, "database_preserved": True, "migration_preserved": True,
                           "full_product_https_smoke": False, "smtp_sent": False}), flush=True)
