@@ -622,7 +622,7 @@
             <div id="copy-patient-context" style="font-size:11px">열람 검사를 선택하세요</div>
             <div id="copy-patient-status" role="status" aria-live="polite" style="font-size:11px"></div>
           </div>
-          <div class="clinical" id="clinical">No clinical information provided.</div>
+          <div class="clinical" id="clinical" tabindex="-1" role="region" aria-label="열람 검사 정보">No clinical information provided.</div>
         </section>
         <section class="s-template">
           <h3>Reading Template</h3>
@@ -2073,6 +2073,7 @@
       if (srUid && srUid !== s?.uid) closeSR();
       $('#sr-open').disabled = !s || demoMode;
       $("#clinical").innerHTML = s ? `
+        <div class="clinical-scope">${s.uid === selectedUid ? '판독 대상 검사 정보' : '관련 검사 정보 · 판독 대상은 바뀌지 않습니다'}</div>
         <table>
           <tr><td>Patient</td><td>${esc(s.name)} (${esc(s.id)})</td></tr>
           <tr><td>Sex/Age</td><td>${esc(s.sex)} / ${esc(s.age)}</td></tr>
@@ -2083,6 +2084,7 @@
           <tr><td>Img/Se</td><td>${esc(s.count)} / ${esc(s.series)}</td></tr>
           <tr><td>SS / Mt</td><td>${esc(s.ss)} / ${s.matched === "M" ? "Matched" : "Unmatched"}</td></tr>
           <tr><td>Ward</td><td>${esc(s.ward) || "-"}</td></tr>
+          <tr><td>Study UID</td><td>${esc(s.uid)}</td></tr>
         </table>` : "No clinical information provided.";
     }
 

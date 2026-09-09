@@ -31,14 +31,19 @@ window.KinReadingWorkspace = function (app) {
     b.setAttribute('aria-keyshortcuts', 'Control+Alt+' + key);
   });
   const context = button('검사 정보·상용구', () => {
-    document.body.classList.toggle('reading-context-open');
-    context.setAttribute('aria-expanded', String(document.body.classList.contains('reading-context-open')));
+    if (document.body.classList.contains('reading-context-open')) { closeContext(); context.focus(); }
+    else focusPane('context');
   });
   context.setAttribute('aria-expanded', 'false');
+  context.setAttribute('aria-controls', 'reading-context');
+  context.setAttribute('aria-keyshortcuts', 'Control+Alt+5');
+  $('.right > .rw').id = 'reading-context';
+  const contextReturn = button('정보 닫고 판독문으로', () => focusPane('report'), $('.s-clinical'));
+  contextReturn.id = 'reading-context-return';
   const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series); });
   button('목록 화면으로', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
-  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
+  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
   hints.id = 'reading-shortcuts';
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
   host.setAttribute('aria-label', '영상 작업공간'); $('.split').prepend(host);
@@ -66,12 +71,21 @@ window.KinReadingWorkspace = function (app) {
   function closeList() {
     document.body.classList.remove('reading-list-open'); list.setAttribute('aria-expanded', 'false');
   }
+  function closeContext() {
+    document.body.classList.remove('reading-context-open'); context.setAttribute('aria-expanded', 'false');
+    redrawRetainedViewer();
+  }
   function focusPane(which) {
     if (!active || ended || !app.allowed()) return;
+    if (which === 'context') {
+      closeList(); document.body.classList.add('reading-context-open'); context.setAttribute('aria-expanded', 'true');
+      $('#clinical').focus(); $('#clinical').scrollIntoView({ block: 'nearest' }); redrawRetainedViewer(); return;
+    }
     if (which === 'image') {
       if (!frame || !sameTarget() || !loaded || frame.inert) { status.textContent = '영상 연결을 확인한 뒤 이동하세요.'; return; }
       closeList(); frame.focus(); frame.contentWindow.focus();
     } else {
+      if (which === 'report') closeContext();
       const pane = $(which === 'prior' ? '.prior-report-pane' : '#findings');
       if (!pane || !pane.getClientRects().length) return;
       closeList();
@@ -88,8 +102,11 @@ window.KinReadingWorkspace = function (app) {
     if (e.key === 'Escape' && doc === document && document.body.classList.contains('reading-list-open')) {
       e.preventDefault(); closeList(); list.focus(); return;
     }
+    if (e.key === 'Escape' && doc === document && document.body.classList.contains('reading-context-open') && e.target.closest?.('#reading-context')) {
+      e.preventDefault(); closeContext(); context.focus(); return;
+    }
     if (!e.ctrlKey || !e.altKey || e.shiftKey || e.metaKey) return;
-    const panes = { Digit2: 'image', Digit3: 'prior', Digit4: 'report' };
+    const panes = { Digit2: 'image', Digit3: 'prior', Digit4: 'report', Digit5: 'context' };
     if (e.code === 'Digit1') {
       e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
     } else if (panes[e.code]) {
