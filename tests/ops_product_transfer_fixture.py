@@ -26,7 +26,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260908081500_connect_gate/migration.sql',
               'api/prisma/migrations/20260908120000_manual_sr/migration.sql',
               'api/prisma/migrations/20260908180000_viewer_jobs/migration.sql',
-              'api/prisma/migrations/20260908200000_manual_sr_recovery/migration.sql']
+              'api/prisma/migrations/20260908200000_manual_sr_recovery/migration.sql',
+              'api/prisma/migrations/20260909060000_saved_filter_organization/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
@@ -77,6 +78,9 @@ def expected_rows(uid):
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         updatedAt=STAMP) for number in (1, 2)]
+    rows['UserFilter'] = [dict(id=1, owner='SYNTHETIC-reader', name='SYNTHETIC saved search',
+        mode='Radiology', isDefault=True, quick='SYNTHETIC', days=-1, cols='{}', sortKey='date',
+        sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]
     item_id = '00000000-0000-4000-8000-000000000001'
     snapshot = dict(schemaVersion=1, kind='key', seriesUid=uid+'.1', sopUid=uid+'.2',
                     frame=1, title='SYNTHETIC key', description='', hidden=True)
@@ -127,7 +131,7 @@ def expected_rows(uid):
 
 def expected_sequences():
     return {name: dict(last_value=2 if name == 'ReportVersion_id_seq' else 1,
-                       is_called=name == 'ReportVersion_id_seq') for name in SEQUENCES}
+                       is_called=name in ('ReportVersion_id_seq', 'UserFilter_id_seq')) for name in SEQUENCES}
 
 
 def sql_literal(text):
@@ -154,13 +158,13 @@ def create_product(name, db, uid):
     for raw in migration_sources():
         execute(name, db, raw.decode())
     data = expected_rows(uid)
-    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft',
+    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
-            fields = [key for key in row if not (table == 'ReportVersion' and key == 'id')]
+            fields = [key for key in row if not (table in ('ReportVersion', 'UserFilter') and key == 'id')]
             quoted = ','.join('"'+key+'"' for key in fields)
             execute(name, db, 'INSERT INTO "'+table+'" ('+quoted+') SELECT '+quoted+
                 ' FROM json_populate_record(NULL::"'+table+'", '+sql_literal(json.dumps(row))+')')

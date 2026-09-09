@@ -36,6 +36,19 @@ def check(body, product_sha=None):
 
 
 class Pure(unittest.TestCase):
+    def test_saved_filter_metadata_restore_contract(self):
+        body, _, _, _ = fixture()
+        expected = body['product']
+        row = expected['rows']['UserFilter'][0]
+        self.assertEqual((row['folder'], row['description'], row['ordinal']),
+                         ('SYNTHETIC/CT', 'SYNTHETIC follow-up', 7))
+        self.assertEqual(expected['sequences']['UserFilter_id_seq'], dict(last_value=1, is_called=True))
+        for field, value in (('folder',''), ('description','changed'), ('ordinal',0)):
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['UserFilter'][0][field] = value
+            with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
     def test_01_non_ci_refused_before_any_mutation(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(transfer, 'command') as calls, \
              patch.object(transfer.combined, 'disk_preflight') as disk, tempfile.TemporaryDirectory() as folder:
@@ -77,7 +90,7 @@ class Pure(unittest.TestCase):
                      lambda p: p['rows']['ReportDraft'].pop(),
                      lambda p: p['rows']['AuthSession'].append(dict(sid='SYNTHETIC')),
                      lambda p: p['sequences']['ReportVersion_id_seq'].update(last_value=True),
-                     lambda p: p['sequences']['UserFilter_id_seq'].update(is_called=True),
+                     lambda p: p['sequences']['UserFilter_id_seq'].update(is_called=False),
                      lambda p: p['catalog']['tables'].append('foreign')]
         for mutate in mutations:
             changed = copy.deepcopy(body); mutate(changed['product'])
@@ -88,7 +101,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 25)
+        self.assertEqual(sum(len(value) for value in rows.values()), 26)
         job=rows['ViewerJob'][0]
         self.assertEqual(job['snapshot']['cells'][0]['sop'],UID+'.2')
         self.assertEqual(job['studies'],[UID]);self.assertTrue(job['hidden'])
