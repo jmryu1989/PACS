@@ -5,7 +5,7 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 기존 구조를 유지하고 요청 없는 프레임워크 전환·의존성 추가·일괄 리팩터링은 하지 않는다.
 
 현재 진행·실행 순서·완료 SHA는 이 파일에 쌓지 않는다. 인접한 비공개 `docs-repo`가 있으면
-그 `README.md`의 읽기 순서에 따라 현행 상태·로드맵·기능표·해당 작업지시·검토큐를 확인한다.
+새 세션·인계 때는 `새세션-시작.md`와 이 파일, 운영방식 §0~§7, 로드맵 「평가 전 실행 순서」, 현재 묶음의 D 작업지시 절만 읽는다. 기능요구사항 원장·검토큐 전체는 묶음 착수/종료·검토 요청 처리 때만 연다.
 없으면 대화에서 주어진 범위를 따르며 오래된 단계 번호로 다음 작업을 추정하지 않는다.
 기존 승인 범위는 이어받되 최신 사용자 중지/우선순위와 현재 업무 묶음을 먼저 적용한다.
 과거 작업지시의 다음 단계나 비차단 개선을 근거로 보류된 운영 강화·기관 확장을 자동 시작하지 않는다.
@@ -16,9 +16,9 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 - 최신 사용자 지시로 **Notion 갱신은 별도 요청 전까지 중단**한다. 이전 게시 승인은 자동 갱신 지시가 아니다. 주간 자료가 쌓여도 자동 게시·주간 예약을 만들지 않는다.
 - 작업 단위는 검사 열기→비교→판독→다음 검사 같은 사용 흐름이다. 관련 화면·API를 함께 연결하고 변경 화면과 실제 수행 결과로 진척을 설명한다. 작은 옵션마다 별도 검토·문서 마감 단계를 만들지 않는다.
 - 일상 구현은 필요한 코드/관련 시험/실행 기록/커밋·push와 짧은 현재 상태 갱신으로 이어간다. 승인된 구현이 남으면 문서 정리·CI 확인만으로 개발을 대체하지 않는다. 실제 차단·사용자 중지·범위 완료는 구분해 보고한다.
-- 독립 검토는 업무 통합 지점과 최종 후보에서 수행한다. 권한·판독·원본/저장·DB 경계 변경이나 영향 불명확/실제 결함에는 즉시 해당 시험과 필요한 표적 검토를 한다. 검토 중에는 고정 Git blob을 유지하고 충돌 없는 구현을 이어가며, 대기를 완료/통과로 처리하지 않는다. 자동 CI와 최종 후보 관문은 유지한다.
-- 기록은 `scripts/record-run.py` 같은 공용 도구로 실행 시점에 남긴다. 새 실행 디렉터리를 쓰며 원문 로그·실패·exit·전후 소스 해시를 보존한다. 단위별 기록/검토/발행 도구를 반복해서 새로 만들지 않는다. 원시 증거는 비공개 저장소에 보존하고 최소 manifest를 관련 커밋에 함께 게시하되 별도 서술형 마감 작업으로 확대하지 않는다.
-- 현재 작업은 비공개 상태 문서 한 곳만 갱신한다. 로드맵은 순서/범위가 바뀔 때, 기능표는 업무 묶음이 끝날 때, 검토큐는 실제 검토 요청/결과가 있을 때 갱신한다. 과거 인계·완료 이력을 매 실행마다 다시 읽거나 동기화하지 않는다.
+- 독립 검토는 업무 통합 지점과 최종 후보에서 수행한다. **즉시 표적 검토·증거 게시 대상은 커밋이 `api/src`·`api/prisma`·`config/ohif.js`·`tests/invariants_live.py`를 건드리거나 권한·판독·원본/저장·DB 경계에 닿는 경우다.** 그 밖의 UI·시험 전용 커밋은 관련 시험과 실행 기록만 남기고 검토·증거 게시는 해당 업무 묶음의 통합 지점에 모은다. 영향 불명확/실제 결함에는 즉시 해당 시험과 필요한 표적 검토를 한다. 검토 중에는 고정 Git blob을 유지하고 충돌 없는 구현을 이어가며, 대기를 완료/통과로 처리하지 않는다. 자동 CI와 최종 후보 관문은 유지한다.
+- 기록은 `scripts/record-run.py` 같은 공용 도구로 실행 시점에 남긴다. 새 실행 디렉터리를 쓰며 원문 로그·실패·exit·전후 소스 해시를 보존한다. 단위별 기록/검토/발행 도구를 반복해서 새로 만들지 않는다. 실행 기록은 로컬 `tmp/<단위>/`에 남기고 관문 대상 커밋 또는 업무 묶음 통합 지점에서 원시 증거와 최소 manifest를 비공개 저장소에 모아 게시한다. 원시 증거의 비공개 저장소 보존은 유지하며 별도 서술형 마감 작업으로 확대하지 않는다.
+- 현재 작업은 비공개 상태 문서 한 곳만 갱신한다. 로드맵은 순서/범위가 바뀔 때, 기능표는 업무 묶음이 끝날 때, 검토큐는 실제 검토 요청/결과가 있을 때 갱신한다. 과거 인계·완료 이력을 매 실행마다 다시 읽거나 동기화하지 않는다. 상태 문서의 「현재 작업」은 최신 SHA 한 건·다음 묶음·미완료만 유지하고 이전 변경 문단을 남기지 않으며, 시험 소요 시간 같은 수치는 manifest에만 둔다. 자체 CLI 검토 판정은 `evidence/<단위>/review-assessment.json`에 두고 검토큐에는 「주실행자 자체 검토 이력」 절에 한 줄만 남긴다.
 
 **승인 재요청 금지:** 사용자는 기존 PACS 작업 범위의 개발·검토·문서 정리·커밋/push·Notion 게시/수정·heartbeat 관리와 필요한 연결 설정을 명시적으로 승인했으며, 이 승인은 이후 턴과 인계에서도 유지한다. 비공개 개발 문서라는 이유나 도구의 기본 승인 설정 때문에 같은 작업의 허락을 다시 요구하지 않는다. 도구 설정이 기존 승인과 맞지 않으면 해당 작업에 필요한 설정을 정확히 바로잡고 계속한다. 실제 실행 실패를 승인 부족으로 오인하거나 미완료를 완료로 보고하지 않는다. 최신 중지·우선순위·외부 백업 OFF 등 사용자가 정한 별도 조건과 자료 보존 규칙은 함께 적용한다.
 
@@ -27,6 +27,20 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 병원 간 Connect 확장은 먼 후속 단계로 보류한다. 전달 전 중간 버전은 사용자가 사용하지 않는 개발 상태다.
 화면만 완성된 것으로 세지 않으며 검사 조회·영상 조작/비교·판독·저장·재열람의 연결과 실패 복구를 함께 완성한다.
 의사 평가가 시작되면 평가 버전과 데이터를 안정적으로 유지하고, 백엔드 작업은 별도 브랜치·환경에서 진행한다.
+
+## 파일 지도
+
+새 세션·인계 때 경로를 추측하지 말고 이 표와 `rg --files`로 확인한다(2026-09-09 인계 3건의 사유가 경로 추측 오류였다).
+
+| 영역 | 파일 | 시험 |
+|---|---|---|
+| 업무 화면(목록·판독) | `worklist-v0/hpacs-lite/main.html` + 기능별 `*.js`(compound-filter·saved-filter-manager·worklist-columns·favorites·favorite-list·study-tags·reader-assignment·tech-note·reading-workspace·study-pages·workspace-layout/roaming·viewer-jobs) | `tests/e2e/test_*.py`(컨테이너 스택 필요), 순수 모델 `tests/*_test.cjs`(`node --test`) |
+| 뷰어(고정 OHIF) 확장 | `config/ohif.js`의 `kinCreate*` 확장, 별도 창 스크립트 `worklist-v0/hpacs-lite/viewer-tech-note.js`·`viewer-workspace-dock.js` | `tests/viewer_*_test.cjs`·`tests/ct_*_test.cjs`·`tests/cine_budget_test.cjs`(`/app/dist` require 시험은 컨테이너 전용) |
+| API 목록·판독·hold·권한 | `api/src/pacs.controller.ts`·`pacs.service.ts`(`visible()`·`need()`·`commitReport`·`hold`), `auth.guard.ts` | `tests/invariants_live.py`(69, 라우트 선언표 `ROUTES`는 컨트롤러 데코레이터와 정확 일치해야 함), `tests/e2e/test_worklist.py`(14) |
+| API 기능별 | `favorite.*`·`study-tags.*`·`reader-assignment.*`·`viewer-job.*`·`manual-sr.*`·`connect.*`·`admin.*`·`report-preview.controller.ts`, 원본 조회 `orthanc.service.ts`·`study-page.ts`, 계정 `keycloak.service.ts` | 해당 `tests/e2e/test_<기능>.py`, `tests/*_live.py` |
+| DB | `api/prisma/schema.prisma`, `api/prisma/migrations/<시각>_<이름>/migration.sql` | migration을 추가하면 같은 커밋에서 `tests/production_image_test.py`의 기대 목록과 복원 fixture(`tests/ops_product_transfer_*.py`)를 갱신한다(2026-09-09 누락으로 CI `runtime` 12커밋 실패) |
+| 운영·CI | `.github/workflows/validate.yml`(build/runtime/measurements)·`restore-*.yml`, `scripts/ops_*.py`, `docker-compose*.yml`, `proxy/` | `tests/ops_*_test.py`, `tests/production_image_test.py` |
+| 실행 기록 | `scripts/record-run.py` → 로컬 `tmp/<단위>/` → 비공개 `docs-repo/evidence/<단위>/` | `tests/record_run_test.py` |
 
 ## 1. 판독·권한 불변조건
 
