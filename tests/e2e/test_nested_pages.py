@@ -2,6 +2,7 @@
 import copy,json,unittest,uuid
 from playwright.sync_api import expect
 from test_compound_search import CompoundSearchE2E
+from study_page_stub import fulfill_page
 
 class NestedPagesE2E(CompoundSearchE2E):
     def fill_rule(self,row,field,op,value):
@@ -54,7 +55,8 @@ class NestedPagesE2E(CompoundSearchE2E):
             if i in (24,25):item=by_uid[a.uid if i==24 else b.uid]
             items.append(item)
         # Browser-only synthetic scale response: no dummy study or report is stored.
-        page.route('**/api/studies',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps({'studies':items})))
+        me=page.request.get(self.stack.api+'/me').json();owner=[me['institution'],me['sub']]
+        page.route('**/api/studies?*',lambda route:fulfill_page(route,items,owner))
         page.locator('#refresh').click();page.locator('#quick').fill(prefix)
         page.locator('#heads [data-key=id]').click();page.locator('#page-size').select_option('25')
         expect(page.locator('#page-status')).to_contain_text('1–25 / 1001건')

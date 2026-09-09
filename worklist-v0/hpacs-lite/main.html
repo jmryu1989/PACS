@@ -199,13 +199,14 @@
     .reltabs button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; margin-right: 4px; }
     .reltabs label { color: #7f8899; font-size: 11px; padding: 0 6px; display: flex; align-items: center; gap: 3px; cursor: pointer; }
     #related-return { flex: none; padding: 2px 5px; font-size: 11px; }
-    .related-filter { display: flex; flex: none; gap: 6px; align-items: center; padding: 2px 6px; }
+    .related-filter { display: flex; flex: none; flex-wrap: wrap; gap: 6px; align-items: center; padding: 2px 6px; }
     #related-modality { min-width: 0; width: 110px; max-width: 65%; font-size: 11px; }
     #related-filter-count { white-space: nowrap; font-size: 11px; }
     #related-filter-hidden { flex: none; padding: 2px 6px; color: #ffc978; font-size: 11px; }
     #related-current { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
                        padding: 4px 10px; font-size: 11px; color: var(--kin-link); }
     .grid2 { overflow: auto; flex: 1; }
+    .related-list-pane .grid2 { min-height: 66px; }
     #relrows tr[data-uid] { cursor: pointer; }
     #relrows tr.related-selected td { background: var(--kin-row-sel); }
     .prior-report-pane { height: 46%; min-height: 130px; display: flex; flex-direction: column; }
@@ -424,7 +425,7 @@
     .grid { background: var(--kin-bg); }
     .left .grid table { width: 100%; border-collapse: collapse; font-size: 13px; }
     #worklist-pages { flex-shrink: 0; background: var(--kin-panel2); color: var(--kin-muted); font-size: 12px; }
-    #worklist-pages button, #worklist-pages select { border: 1px solid var(--kin-line2); border-radius: 4px; padding: 5px 7px; color: var(--kin-text); background: var(--kin-panel); }
+    #worklist-pages button, #worklist-pages select, #study-fetch button, .related-filter button { border: 1px solid var(--kin-line2); border-radius: 4px; padding: 5px 7px; color: var(--kin-text); background: var(--kin-panel); }
     #worklist-pages button:not(:disabled) { cursor: pointer; }
     #worklist-pages button:disabled { opacity: .45; }
     #worklist-pages :focus-visible { outline: 2px solid #77c9ff; outline-offset: 2px; }
@@ -604,6 +605,7 @@
         <label>페이지당 <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select>건</label>
         <button id="page-current" type="button">선택 검사 페이지</button>
       </nav>
+      <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">이어받기</button> <button id="study-fetch-cancel" type="button">불러오기 중지</button></div>
       <div class="statusbar">
         <span id="countlist"></span>
         <span id="filterlist">Filter : -</span>
@@ -673,6 +675,8 @@
           <div class="related-filter">
             <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">전체 Modality</option></select>
             <span id="related-filter-count" role="status" aria-live="polite">0 / 0</span>
+            <span id="related-pages" hidden><button id="related-page-prev" type="button">이전</button><span id="related-page-status" role="status"></span><button id="related-page-next" type="button">다음</button>
+            <button id="related-page-current" type="button">열람 검사 페이지</button></span>
           </div>
           <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
           <div class="grid2">
@@ -893,6 +897,7 @@
   <script src="tech-note.js"></script>
   <script src="compound-filter.js"></script>
   <script src="worklist-columns.js"></script>
+  <script src="study-pages.js"></script>
   <script src="saved-filter-manager.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
@@ -1004,7 +1009,7 @@
             toast(`${displayActor(j.holder)} 님이 판독 중입니다 — 저장되지 않았습니다`, "err");
           }
         }
-        throw Object.assign(new Error(j.message ?? `HTTP ${res.status}`), { code: j.code });
+        throw Object.assign(new Error(j.message ?? `HTTP ${res.status}`), { code: j.code, status: res.status });
       }
       return res.json();
     }
@@ -1615,7 +1620,26 @@
       });
     }
 
-    async function load() {
+    let listLoadSequence = 0;
+    const studyPageClient = KinStudyPages.create({
+      request: (path, signal) => api('GET', path, undefined, signal),
+      identity: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution,s.sub] : null; },
+      changed: state => {
+        $('#study-fetch').hidden = !state.busy && !state.resumable && !state.message;
+        $('#study-fetch-status').textContent = state.message + (state.total == null ? '' : ` (${state.received}/${state.total}건 받음 · 완료 후 목록 반영)`);
+        $('#study-fetch-resume').hidden = state.busy || !state.resumable; $('#study-fetch-cancel').hidden = !state.busy;
+      },
+    });
+    $('#study-fetch-resume').addEventListener('click', () => load({ resume:true }));
+    $('#study-fetch-cancel').addEventListener('click', () => { listLoadSequence++; studyPageClient.cancel(); });
+    window.addEventListener('pagehide', () => studyPageClient.clear(), {once:true});
+    function assertStudyOwner(result) {
+      const session = KinAuth.session();
+      if (session?.state !== 'approved' || JSON.stringify(result.owner) !== JSON.stringify([session.institution, session.sub]))
+        throw Object.assign(new Error('Study account changed before applying the list.'), {ownerChanged:true});
+    }
+    async function load(options = {}) {
+      const loadSequence = ++listLoadSequence, epoch = commitEpoch;
       /**
        * **서버가 죽었다고 Orthanc를 직접 부르지 않는다.**
        *
@@ -1632,7 +1656,9 @@
       }
       try {
         if (!serverMode) throw new Error("no-server");
-        const r = await api("GET", "/studies");
+        const r = await studyPageClient.read({ resume:!!options.resume, epoch, valid:() => !commitInFlight && epoch === commitEpoch });
+        if (loadSequence !== listLoadSequence || commitInFlight || epoch !== commitEpoch) return;
+        assertStudyOwner(r);
         /**
          * **가져오기와 그리기를 나눈다.**
          *
@@ -1641,7 +1667,12 @@
          * 그걸 "목록 실패"로 처리하고 `studies = []`로 **성공한 데이터를 버렸다.**
          * 화면 그리기 버그가 데이터 없음으로 둔갑하면, 원인을 서버에서 찾게 된다.
          */
+        const editing = selectedUid ? { ...appState[selectedUid] } : null;
         studies = r.studies.map(fromApi);
+        if (editing && appState[selectedUid]) {
+          appState[selectedUid] = { ...appState[selectedUid], version:editing.version ?? 0, draft:editing.draft ?? null }; syncStudy(selectedUid);
+        }
+        $('#err').textContent = '';
         try {
           const st = await (await fetch("/statistics")).json();
           $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB 사용";
@@ -1651,14 +1682,14 @@
         catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
         return;
       } catch (e) {
+        if (loadSequence !== listLoadSequence) return;
+        if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
         // 서버 모드에서 목록이 실패하면 **가짜 데이터로 내려가지 않는다.**
-        // 빈 화면 + 빨간 메시지가, 남의 병원 검사나 데모 환자를 진짜인 척
-        // 보여주는 것보다 훨씬 낫다. (인계문서 §4-7과 같은 원칙)
+        // Incomplete page batches never replace the last complete list or report input.
         if (serverMode) {
-          studies = [];
-          $("#err").textContent = "검사 목록을 불러오지 못했습니다 — " + e.message;
+          $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;
           toast("검사 목록 실패: " + e.message, "err");
-          render(); refreshRight();
+          render();
           return;
         }
       }
@@ -2158,7 +2189,11 @@
     function relatedModalities(study) {
       return [...new Set(String(study.modality ?? "").split(",").map(x => x.trim().toUpperCase()).filter(Boolean))];
     }
-    function renderRelated() {
+    let relatedPage = 0, relatedPageQuery = '';
+    $('#related-page-prev').addEventListener('click', () => { relatedPage--; renderRelated(); });
+    $('#related-page-next').addEventListener('click', () => { relatedPage++; renderRelated(); });
+    $('#related-page-current').addEventListener('click', () => renderRelated(true));
+    function renderRelated(reveal = false) {
       const s = cur();
       $("#related-return").disabled = !s || !relatedUid;
       $("#related-current").textContent = s
@@ -2188,8 +2223,17 @@
       }
       $("#related-filter-count").textContent = `${rel.length} / ${total}`;
       $("#related-filter-hidden").hidden = !s || !relatedUid || !relatedModality || rel.some(x => x.uid === relatedUid);
+      const pageQuery = JSON.stringify([selectedUid, relatedModality]);
+      if (pageQuery !== relatedPageQuery) { relatedPage = 0; relatedPageQuery = pageQuery; }
+      const viewed = rel.findIndex(x => x.uid === relatedUid), pages = Math.max(1, Math.ceil(rel.length / 50));
+      if (reveal === true && viewed >= 0) relatedPage = Math.floor(viewed / 50);
+      relatedPage = Math.max(0, Math.min(relatedPage, pages - 1));
+      $('#related-pages').hidden = pages <= 1;
+      $('#related-page-prev').disabled = relatedPage === 0; $('#related-page-next').disabled = relatedPage >= pages - 1;
+      $('#related-page-current').disabled = viewed < 0;
+      $('#related-page-status').textContent = `${relatedPage + 1}/${pages}페이지`;
       $("#relrows").innerHTML = s
-        ? (rel.map(x => {
+        ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
             return `
             <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid ? "related-selected" : ""}">
               <td>${relatedDateLabel(x)} · ${x.uid === relatedUid ? "👁 열람 중" : "비교"}</td>
@@ -3247,7 +3291,7 @@
     function startPolling() {
       clearInterval(poll);
       poll = setInterval(async () => {
-        if (!serverMode || document.hidden) return;
+        if (!serverMode || document.hidden || studyPageClient.busy || studyPageClient.paused) return;
         /**
          * 확정이 나가 있으면 이번 회차는 건너뛴다.
          * 폴링 요청이 확정보다 **먼저 나가고 나중에 도착**하면, 방금 승인한 rs=A를
@@ -3268,9 +3312,11 @@
            * /studies는 목록과 상태를 함께 주므로 도착·원격판독 수신·상태 변화를
            * 한 번에 잡는다. (오더는 자주 안 바뀌므로 여기서 갱신하지 않는다)
            */
-          const r = await api("GET", "/studies");
+          const r = await studyPageClient.read({ epoch, valid:() => !commitInFlight && epoch === commitEpoch });
           // 요청을 보낸 뒤 확정이 일어났다면 이 응답은 그 이전 사진이다. 버린다.
           if (commitInFlight || epoch !== commitEpoch) return;
+          assertStudyOwner(r);
+          pollFails = 0;
           const known = new Set(studies.map(x => x.uid));
           const fresh = r.studies.filter(s => !known.has(s.uid));
 
@@ -3326,6 +3372,8 @@
           render();
           pollFails = 0;
         } catch (e) {
+          if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
+          if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           /**
            * **일하는 도중에 서버가 죽는 경우.**
            *

@@ -4,6 +4,7 @@ import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
+import { studyPageQuery, studyPageSlice } from './study-page';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -527,8 +528,9 @@ export class PacsService implements OnModuleInit {
    * Orthanc에 기관을 물어보는 것이다. 기관은 영상에 찍혀 오는 사실이고
    * 한 번 판정하면 변하지 않으므로, 처음 보는 순간 DB에 확정한다.
    */
-  async listStudies(c: Caller) {
+  async listStudies(c: Caller, query?: any) {
     const me = inst(c);
+    const owner = [me, c.sub, c.actor], page = studyPageQuery(query, owner);
     const qido = await this.orthanc.studies();
 
     const states = await this.prisma.studyState.findMany();
@@ -561,11 +563,16 @@ export class PacsService implements OnModuleInit {
       byUid.set(n.uid, row as any);
     }
 
-    const reports = await this.prisma.report.findMany();
+    const window = studyPageSlice(qido.filter(st => {
+      const state = byUid.get(OrthancService.tag(st, '0020000D'));
+      return state && this.visible(state, me);
+    }), st => OrthancService.tag(st, '0020000D'), page, owner);
+    const pageUids = window.rows.map(st => OrthancService.tag(st, '0020000D'));
+    const reports = await this.prisma.report.findMany({ where: { uid: { in: pageUids } } });
     const repByUid = new Map(reports.map(r => [r.uid, r]));
     // 목록에도 내 초안을 함께 싣는다. 30초 폴링 응답이 초안 없이 오면
     // 클라이언트 병합이 쓰고 있던 초안을 지운다.
-    const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
+    const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor, uid: { in: pageUids } } });
     const draftByUid = new Map(drafts.map(d => [d.uid, d]));
 
     // Only presence/version leaves this query, never the note body or author.
@@ -577,7 +584,7 @@ export class PacsService implements OnModuleInit {
     const noteByUid = new Map(noteRows.map(n => [n.studyUid, { version: n.version, present: n.present }]));
 
     const out: any[] = [];
-    for (const st of qido) {
+    for (const st of window.rows) {
       const uid = OrthancService.tag(st, '0020000D');
       const s = byUid.get(uid);
       if (!s || !this.visible(s, me)) continue;   // ← 기관 경계. 여기가 전부다.
@@ -605,7 +612,13 @@ export class PacsService implements OnModuleInit {
         state: toClient(s, repByUid.get(uid), c.actor, draftByUid.get(uid)),
       });
     }
-    return { studies: out, serverTime: new Date().toISOString() };
+    if (page) {
+      const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } } });
+      if (current.length !== pageUids.length || current.some(state => !this.visible(state, me)
+        || state.institutionId !== byUid.get(state.uid)?.institutionId || state.teleInstitutionId !== byUid.get(state.uid)?.teleInstitutionId))
+        throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 접근 범위가 바뀌었습니다. 새로고침하세요.' });
+    }
+    return { studies: out, serverTime: new Date().toISOString(), ...(page ? { pagination: window.pagination } : {}) };
   }
 
   /** 프론트가 켜질 때 한 번에 받아가는 묶음 — 전부 내 기관 것만 */

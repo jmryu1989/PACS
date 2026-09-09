@@ -21,7 +21,7 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
         return page.locator(f'#relrows tr[data-uid="{fixture.uid}"]')
 
     def refresh(self, page):
-        with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith("/api/studies")):
+        with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?")[0].endswith("/api/studies")):
             page.locator("#refresh").click()
 
     def source_writes(self, page):
@@ -91,8 +91,8 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
                     row["date"] = variants[row["uid"]]
                     row["name"] = row["desc"] = literal
             route.fulfill(response=response, json=data)
-        page = self.login(); page.route("**/api/studies", dates)
-        self.addCleanup(page.unroute, "**/api/studies")
+        page = self.login(); page.route("**/api/studies?*", dates)
+        self.addCleanup(page.unroute, "**/api/studies?*")
         self.refresh(page); self.select(page, current)
         expect(self.related(page, unrelated)).to_have_count(0)
         expect(page.locator("#related-current")).to_contain_text(literal)

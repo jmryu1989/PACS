@@ -150,8 +150,9 @@ class ReturnToCurrentE2E(previous.RelatedContextE2E):
         def missing_current(route):
             response = route.fetch(); data = response.json()
             data["studies"] = [s for s in data["studies"] if s["uid"] != current.uid]
+            data["pagination"]["total"] = len(data["studies"])
             route.fulfill(response=response,json=data)
-        page.route("**/api/studies",missing_current); self.addCleanup(page.unroute,"**/api/studies")
+        page.route("**/api/studies?*",missing_current); self.addCleanup(page.unroute,"**/api/studies?*")
         self.refresh(page)
         expect(page.locator("#related-current")).to_have_text("판독 대상을 선택하세요")
         expect(page.locator("#related-return")).to_be_disabled()

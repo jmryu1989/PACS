@@ -1097,3 +1097,11 @@ D 수동 측정: `python tests/e2e/test_manual_measurements.py`.
 거짓 저장 baseline의 캔버스 라벨과 원본 digest 불일치의 API unverified/표식 미복원도 단언한다.
 digest 결함은 이번 실행의 저장 참조에만 주입하고 완전한 snapshot 대조 후 복구한다.
 사선 ROI는 현재 제한이며 이 시험을 전체 modality·변환 정확도나 의사 확인으로 세지 않는다.
+
+
+### Bounded study transfers and related pages
+
+REQ-D01-PAGE-TRANSFER → RISK-TENANT-LEAK/STALE-REPORT/PARTIAL-LIST/UNBOUNDED-DOM → TEST-D01-PAGE-TRANSFER.
+`node --test tests/study_pages_client_test.cjs` covers checkpoint retry, final identity failure, malformed order, stale epochs, cancellation, superseded requests and request timeout. `tests/study_page_test.cjs` runs against the built API module inside the container and checks signed owner/size/expiry/membership cursors and legacy query-less behavior. `python tests/study_pages_live.py` checks actual tenant sets, draft/report visibility and cursor refusal in three cases.
+`python tests/e2e/test_study_page_transfer.py` checks atomic replacement after a failed page, explicit resume/cancel, 50-row related pages, owner logout, automatic poll recovery/two-failure offline detection and a completion-to-application commit race. The 201-row response is a browser fixture variant backed by two selectable studies; it is not a server scale benchmark. Existing related/search regressions and sequential69→14 cover shared paths.
+The API slices only the already-authorized list and rechecks page access before response. Each request allows60seconds; signed cursors expire after5minutes or process restart. A cancelled batch waits for explicit user action; a transient failure allows the next automatic poll to fetch fresh pages. Explicit resume may retain earlier row states until the next refresh. Membership changes reject the batch; continuous arrivals may repeatedly restart it. Orthanc enumeration, initial bootstrap and the complete browser array remain whole-list operations. Hospital-scale performance and point-in-time state snapshots are unverified.

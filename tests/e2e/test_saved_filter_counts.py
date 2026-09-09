@@ -58,7 +58,7 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         expect(chip).to_contain_text("(2)")
 
         third = self.fixture(patient_id=shared_id)
-        with page.expect_response(lambda r: r.request.method == "GET" and r.url.endswith("/api/studies")):
+        with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?")[0].endswith("/api/studies")):
             page.locator("#refresh").click()
         expect(chip).to_contain_text("(3)")
         chip.locator("span").click()

@@ -17,8 +17,8 @@ class RelatedFilterE2E(previous.ReturnToCurrentE2E):
             for row in data["studies"]:
                 if row["uid"] in changes:row.update(changes[row["uid"]])
             route.fulfill(response=response, json=data)
-        page.route("**/api/studies", reply)
-        self.addCleanup(page.unroute, "**/api/studies")
+        page.route("**/api/studies?*", reply)
+        self.addCleanup(page.unroute, "**/api/studies?*")
         self.refresh(page)
 
     def filter(self, page, token=None):

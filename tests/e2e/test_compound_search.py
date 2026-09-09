@@ -319,7 +319,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
                 fresh.reload()
             expect(fresh.locator('#dbstat')).to_contain_text('DB 연결됨')
             with fresh.expect_response(lambda response: response.request.method == 'GET'
-                                       and response.url.endswith('/api/studies')):
+                                       and response.url.split('?')[0].endswith('/api/studies')):
                 fresh.locator('#refresh').click()
             fresh.wait_for_function(
                 'uids => uids.every(uid => studies.some(study => study.uid === uid))',

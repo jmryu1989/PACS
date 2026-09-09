@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, HttpCode, Param, Patch, Post, Put, Query, Req } from '@nestjs/common';
 import { PacsService, Caller } from './pacs.service';
 import { Public } from './auth.guard';
 
@@ -146,8 +146,9 @@ export class PacsController {
    * 브라우저는 더 이상 /dicom-web/studies 를 직접 부르지 않는다.
    */
   @Get('studies')
-  studies(@Req() req: any) {
-    return this.svc.listStudies(caller(req));
+  @Header('Cache-Control', 'no-store')
+  studies(@Req() req: any, @Query() query: any) {
+    return this.svc.listStudies(caller(req), query);
   }
 
   /** 기관을 못 알아본 검사 — 관리자 전용 통로. 워크리스트에는 안 섞인다 */
