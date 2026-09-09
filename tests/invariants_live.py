@@ -512,6 +512,8 @@ class LiveStack:
             raise RuntimeError("Invalid temporary template owner")
         if psql(f'SELECT count(*) FROM "ReadingTemplate" WHERE owner=\'{template_owner}\'') != ["0"]:
             raise RuntimeError("Temporary template owner already has data; refusing reuse")
+        if psql(f'SELECT count(*) FROM "AuditLog" WHERE actor=\'{template_owner}\'') != ["0"]:
+            raise RuntimeError("Temporary actor already has audit history; refusing reuse")
         password = uuid.uuid4().hex + "Aa1!"
         created = self.kc_admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": True,
@@ -577,6 +579,18 @@ class LiveStack:
         # Only owners created by this instance, proven empty before provisioning.
         # Bootstrap seeds templates even when a test never opens the editor.
         for owner in sorted(self.template_owners):
+            if not re.fullmatch(r"kin-test-[0-9a-f]{12}-[a-z0-9_-]+@local\.test", owner):
+                raise RuntimeError("Invalid owned test actor; refusing cleanup")
+            # Admin list/suspension audits target users, not fixture StudyUIDs.
+            # Archive these exact owned rows before removing the temporary actor.
+            audits = psql(f'SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE actor=\'{owner}\' ORDER BY id')
+            if audits:
+                print('OWNED TEST AUDIT CLEANUP ' + json.dumps(audits, ensure_ascii=True), flush=True)
+            for raw in audits:
+                saved = "'" + raw.replace("'", "''") + "'::jsonb"
+                psql(f'DELETE FROM "AuditLog" t WHERE actor=\'{owner}\' AND to_jsonb(t)={saved}')
+            if psql(f'SELECT count(*) FROM "AuditLog" WHERE actor=\'{owner}\'') != ["0"]:
+                raise RuntimeError("Temporary audits changed during cleanup")
             rows = psql(f'SELECT to_jsonb(t)::text FROM "ReadingTemplate" t WHERE owner=\'{owner}\'')
             for raw in rows:
                 saved = "'" + raw.replace("'", "''") + "'::jsonb"

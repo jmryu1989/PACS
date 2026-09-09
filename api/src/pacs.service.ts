@@ -567,6 +567,14 @@ export class PacsService implements OnModuleInit {
     const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
     const draftByUid = new Map(drafts.map(d => [d.uid, d]));
 
+    // Only presence/version leaves this query, never the note body or author.
+    const noteRows = await this.prisma.$queryRaw<{ studyUid: string; version: number; present: boolean }[]>`
+      SELECT DISTINCT ON (n."studyUid") n."studyUid", n.version, (n.text <> '') AS present
+      FROM "TechNoteRevision" n JOIN "StudyState" s ON s.uid = n."studyUid"
+      WHERE s."institutionId" = ${me} OR s."teleInstitutionId" = ${me}
+      ORDER BY n."studyUid", n.version DESC`;
+    const noteByUid = new Map(noteRows.map(n => [n.studyUid, { version: n.version, present: n.present }]));
+
     const out: any[] = [];
     for (const st of qido) {
       const uid = OrthancService.tag(st, '0020000D');
@@ -578,6 +586,7 @@ export class PacsService implements OnModuleInit {
       const patientId = OrthancService.tag(st, '00100020');
       out.push({
         uid,
+        techNote: noteByUid.get(uid) ?? { version: 0, present: false },
         count: +OrthancService.tag(st, '00201208') || 0,
         series: +OrthancService.tag(st, '00201206') || 0,
         acc: OrthancService.tag(st, '00080050'),

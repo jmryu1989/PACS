@@ -1,5 +1,7 @@
 # coding: utf-8
 """REQ-D01-TECH-NOTE / RISK-D01-NOTE-IDENTITY/HISTORY / TEST-D01-TECH-NOTE."""
+# List integration also covers badge-only payloads, preserved report selection,
+# keyboard opening, clear/history status and rejection of older list versions.
 import json, os, sys, unittest, subprocess, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -123,6 +125,49 @@ class TechNoteE2E(WorklistE2E):
   p.locator('#tech-note-close').click();p.get_by_role('button',name='정보 닫고 판독문으로',exact=True).click()
   expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('UNSAVED REPORT WITH TECH NOTE')
   canvas_ready(frame,1)
+
+ def test_note_06_list_badge_open_preserves_report_and_refreshes(self):
+  a=self.fixture();b=self.fixture(patient_id=a.patient_id);p=self.login('tech');self.select(p,a)
+  badge=p.locator(f'[data-tech-note="{b.uid}"]')
+  expect(badge).to_have_text('없음');badge.focus();p.keyboard.press('Enter')
+  expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
+  expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',a.uid)
+  p.locator('#tech-note-text').fill('SYNTHETIC LIST NOTE');p.locator('#tech-note-save').click()
+  expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1')
+  expect(badge).to_have_text('있음');p.locator('#tech-note-close').click();expect(badge).to_be_focused()
+  badge.click();expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC LIST NOTE')
+  p.locator('#tech-note-text').fill('');p.locator('#tech-note-reason').fill('clear list note');p.locator('#tech-note-save').click()
+  expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2');expect(badge).to_have_text('비움·이력')
+  p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB 연결됨');p.locator('#quick').fill(a.patient_id)
+  expect(badge).to_have_text('비움·이력')
+  reader=self.login();self.select(reader,a);reader.locator('#findings').fill('UNSAVED READING TARGET')
+  reader.locator(f'[data-tech-note="{b.uid}"]').click();expect(reader.locator('#tech-note-status')).to_contain_text('읽기 전용')
+  expect(reader.locator('#rows tr.sel')).to_have_attribute('data-uid',a.uid)
+  reader.locator('#tech-note-close').click();expect(reader.locator('#findings')).to_have_value('UNSAVED READING TARGET')
+  folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);reader.screenshot(path=str(folder/'tech-note-list.png'))
+
+ def test_note_07_summary_tenant_and_payload(self):
+  f=self.fixture();self.assertEqual(self.write(f,'SYNTHETIC HIDDEN BODY').status,201)
+  result=self.stack.request('GET','/studies','doctor');self.assertEqual(result.status,200)
+  row=next(r for r in result.body['studies'] if r['uid']==f.uid)
+  self.assertEqual(row['techNote'],dict(version=1,present=True));self.assertNotIn('SYNTHETIC HIDDEN BODY',result.text)
+  result=self.stack.request('GET','/studies','kadmin');self.assertEqual(result.status,200)
+  self.assertNotIn(f.uid,[r['uid'] for r in result.body['studies']])
+  self.assertNotIn('SYNTHETIC HIDDEN BODY',result.text)
+
+ def test_note_08_old_list_response_cannot_rollback_saved_badge(self):
+  f=self.fixture();p=self.login('tech');self.select(p,f)
+  badge=p.locator(f'[data-tech-note="{f.uid}"]');badge.click()
+  p.locator('#tech-note-text').fill('SYNTHETIC local save');p.locator('#tech-note-save').click()
+  expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v1');p.locator('#tech-note-close').click()
+  def old_list(route):
+   response=route.fetch();body=response.json()
+   row=next(r for r in body['studies'] if r['uid']==f.uid)
+   row['techNote']=dict(version=0,present=False);row['desc']='SYNTHETIC stale list applied'
+   route.fulfill(response=response,json=body)
+  p.route('**/api/studies',old_list);p.locator('#refresh').click()
+  expect(p.locator(f'#rows tr[data-uid="{f.uid}"]')).to_contain_text('SYNTHETIC stale list applied')
+  expect(badge).to_have_text('있음');p.unroute('**/api/studies')
 
 
 def load_tests(loader,tests,pattern):

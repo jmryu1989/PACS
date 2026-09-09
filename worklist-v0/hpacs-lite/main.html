@@ -1431,6 +1431,7 @@
     const COLS = {
       Radiology: [
         { k: "pf", t: "PF" },
+        { k: "techNote", t: "Tech 메모" },
         { k: "no", t: "No", num: 1 },
         { k: "viewing", t: "Viewing" },
         { k: "count", t: "Count", num: 1 },
@@ -1454,6 +1455,7 @@
         { k: "preReviewer", t: "PreReviewer", f: "text" },
       ],
       Technician: [
+        { k: "techNote", t: "Tech 메모" },
         { k: "no", t: "No", num: 1 },
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
@@ -1483,6 +1485,7 @@
 
     // 특수 렌더링이 필요한 칸만 함수로
     const CELL = {
+      techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
       rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
@@ -1564,7 +1567,22 @@
      * 기관 개념이 없으므로 전부 "(로컬)"로 보인다 — 진짜처럼 보이면 안 되니까.
      */
     /** API가 준 검사 하나를 화면이 쓰는 모양으로 */
+    const noteSummaries = new Map();
+    function noteLabel(uid) {
+      const note = noteSummaries.get(uid);
+      return !note ? '미확인' : note.present ? '있음' : note.version ? '비움·이력' : '없음';
+    }
+    function updateNoteSummary(uid, value) {
+      if (!value || !Number.isInteger(value.version) || value.version < 0 || typeof value.present !== 'boolean') return;
+      // A list poll started before a local save must not roll the badge backward.
+      if ((noteSummaries.get(uid)?.version ?? -1) > value.version) return;
+      noteSummaries.set(uid, value);
+      const study = studies.find(s => s.uid === uid);
+      const button = $('#rows').querySelector(`[data-tech-note="${CSS.escape(uid)}"]`);
+      if (button && study) { button.textContent = noteLabel(uid); button.setAttribute('aria-label', study.id + ' Tech 메모 ' + noteLabel(uid)); }
+    }
     function fromApi(s) {
+      updateNoteSummary(s.uid, s.techNote);
       appState[s.uid] = { ...appState[s.uid], ...s.state };
       return applyState({
         uid: s.uid, pf: "·",
@@ -3245,6 +3263,7 @@
 
           for (const s of r.studies) {
             const uid = s.uid, st = s.state;
+            updateNoteSummary(uid, s.techNote);
             if (uid === selectedUid) {
               // 지금 편집 중인 검사는 두 가지만 보호한다:
               //   version — baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래
@@ -3741,7 +3760,10 @@
       toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
     }
 
-    const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline });
+    const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
+      changed: (uid, note) => updateNoteSummary(uid, { version: note?.version ?? 0, present: !!note?.text }),
+      restoreFocus: uid => $('#rows').querySelector(`[data-tech-note="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true }),
+    });
     $('#tech-note-open').onclick = () => techNote.open(viewed());
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
@@ -4116,11 +4138,13 @@
       const tr = e.target.closest("tr");
       if (!tr?.dataset.uid) return;
       const uid = tr.dataset.uid;
+      if (e.target.closest('[data-tech-note]')) { techNote.open(studies.find(s => s.uid === uid)); return; }
       select(uid);
       // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다.
       $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true });
     });
     $("#rows").addEventListener("keydown", e => {
+      if (e.target.closest('[data-tech-note]')) return;
       if (e.key !== "Enter" || e.isComposing || mode !== "Radiology") return;
       const tr = e.target.closest("tr[data-uid]");
       if (!tr || tr.dataset.uid !== selectedUid) return;
@@ -4128,6 +4152,7 @@
       $("#findings").focus();
     });
     $("#rows").addEventListener("dblclick", e => {
+      if (e.target.closest('[data-tech-note]')) return;
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) openFilmbox(tr.dataset.uid, autoPrior(tr.dataset.uid));
     });

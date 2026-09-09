@@ -25,6 +25,7 @@ window.KinTechNote = function (app) {
     if (result.uid !== uid || result.note && result.note.studyUid !== uid) throw new Error('메모 대상이 일치하지 않습니다');
     writable = result.writable === true; version = result.note?.version ?? 0; saved = result.note?.text ?? '';
     $('text').value = saved; $('reason').value = '';
+    app.changed?.(uid, result.note);
     $('meta').textContent = result.note ? `v${version} · ${result.note.author} · ${new Date(result.note.createdAt).toLocaleString()}` : '저장된 메모 없음';
     status(writable ? '내용을 확인한 뒤 명시적으로 저장하세요.' : '읽기 전용 · 촬영 기관의 작성 권한이 필요합니다.');
   }
@@ -76,9 +77,11 @@ window.KinTechNote = function (app) {
   $('history').onclick = () => history(false); $('more').onclick = () => history(true);
   function close(force = false) {
     if (!force && (busy || dirty() && !confirm('저장하지 않은 메모 입력을 버리고 닫을까요?'))) return;
+    const closedUid = uid;
     ++seq; uid = null; busy = false; writable = false; saved = ''; version = 0;
     $('text').value = $('reason').value = ''; $('history-items').replaceChildren(); $('target').textContent = $('meta').textContent = ''; status('');
-    if (d.open) d.close(); if (!force && opener?.isConnected) opener.focus();
+    if (d.open) d.close();
+    if (!force) { if (opener?.isConnected) opener.focus(); else app.restoreFocus?.(closedUid); }
   }
   $('close').onclick = () => close(); d.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function end() { ended = true; close(true); }
