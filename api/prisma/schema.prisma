@@ -500,3 +500,17 @@ model ViewerJobRevision {
   job ViewerJob @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   @@id([jobId, revision])
 }
+
+/// Advisory distribution only; does not grant report access or change authorship.
+model ReaderAssignment {
+  studyUid String @id
+  institutionId String @db.VarChar(256)
+  revision Int
+  readerSub String? @db.VarChar(256)
+  readerActor String? @db.VarChar(256)
+  readerName String? @db.VarChar(256)
+  changedBy String @db.VarChar(256)
+  lastRequest String @db.Uuid
+  lastFingerprint String
+  updatedAt DateTime @updatedAt
+}

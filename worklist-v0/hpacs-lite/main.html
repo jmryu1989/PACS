@@ -908,6 +908,8 @@
   <script src="favorites.js"></script>
   <link rel="stylesheet" href="study-tags.css">
   <script src="study-tags.js"></script>
+  <link rel="stylesheet" href="reader-assignment.css">
+  <script src="reader-assignment.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -1459,6 +1461,7 @@
     const COLS = {
       Radiology: [
         { k: "pf", t: "PF" },
+        { k: "assignedReader", t: "배정 판독의", f: "text" },
         { k: "techNote", t: "Tech 메모" },
         { k: "no", t: "No", num: 1 },
         { k: "viewing", t: "Viewing" },
@@ -1483,6 +1486,7 @@
         { k: "preReviewer", t: "PreReviewer", f: "text" },
       ],
       Technician: [
+        { k: "assignedReader", t: "배정 판독의", f: "text" },
         { k: "techNote", t: "Tech 메모" },
         { k: "no", t: "No", num: 1 },
         { k: "count", t: "Count", num: 1 },
@@ -1513,6 +1517,7 @@
 
     // 특수 렌더링이 필요한 칸만 함수로
     const CELL = {
+      assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline||s.tele?'disabled':''}>${esc(s.assignedReader||'미배정')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
       rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
@@ -1612,11 +1617,17 @@
       const button = $('#rows').querySelector(`[data-tech-note="${CSS.escape(uid)}"]`);
       if (button && study) { button.textContent = noteLabel(uid); button.setAttribute('aria-label', study.id + ' Tech 메모 ' + noteLabel(uid)); }
     }
+    const readerAssignments=new Map();
+    function updateReaderAssignment(uid,value){
+      const previous=readerAssignments.get(uid);if(value&&previous&&value.revision<previous.revision)return;
+      readerAssignments.set(uid,value);const study=studies.find(s=>s.uid===uid);if(study)study.assignedReader=value?.reader?[value.reader.name,value.reader.actor].filter(Boolean).join(' · '):'';
+    }
     function fromApi(s) {
+      updateReaderAssignment(s.uid,s.readerAssignment);
       updateNoteSummary(s.uid, s.techNote);
       appState[s.uid] = { ...appState[s.uid], ...s.state };
       return applyState({
-        uid: s.uid, pf: "·",
+        uid: s.uid, pf: "·", assignedReader:readerAssignments.get(s.uid)?.reader?[readerAssignments.get(s.uid).reader.name,readerAssignments.get(s.uid).reader.actor].filter(Boolean).join(" · "):"",
         count: s.count, series: s.series, acc: s.acc,
         id: s.id, name: s.name, sourcePatientKey: s.sourcePatientKey,
         age: (s.birth && s.date) ? Math.floor((+s.date - +s.birth) / 10000) : "",
@@ -3362,6 +3373,7 @@
           for (const s of r.studies) {
             const uid = s.uid, st = s.state;
             updateNoteSummary(uid, s.techNote);
+            updateReaderAssignment(uid, s.readerAssignment);
             if (uid === selectedUid) {
               // 지금 편집 중인 검사는 두 가지만 보호한다:
               //   version — baseVersion은 "내가 화면에서 본 판"이어야 한다. 폴링이 몰래
@@ -3890,6 +3902,12 @@
       apply:(data,scope,id)=>{studyTagScope=scope;studyTagList.apply(tagScopeState(data,scope),id);},
     });
     $('#study-tag-open').onclick=()=>studyTags.open();$('#study-tag-clear').onclick=()=>studyTagList.clear();
+    const readerAssignment=KinReaderAssignment({api,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
+      identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.institution,s.sub]:null;},
+      changed:(uid,value)=>{updateReaderAssignment(uid,value);render();},
+    });
+    $('#rows').addEventListener('click',event=>{const button=event.target.closest('[data-reader-assignment]');if(!button)return;event.stopPropagation();readerAssignment.open(studies.find(s=>s.uid===button.dataset.readerAssignment));},true);
+
 
     const techNote = KinTechNote({ api, allowed: () => !!sess && serverMode && !demoMode && !offline,
       changed: (uid, note) => { updateNoteSummary(uid, { version: note?.version ?? 0, present: !!note?.text }); readingWorkspace.refreshNote(); },

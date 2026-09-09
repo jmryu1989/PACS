@@ -47,8 +47,10 @@ class WorklistColumnsE2E(base.WorklistE2E):
         self.open_columns(page)
         for key in ('id','name'):expect(self.column(page,key).locator('input[type=checkbox]')).to_be_disabled()
         self.column(page,'desc').locator('input[type=checkbox]').uncheck()
-        self.column(page,'techNote').locator('[data-move="up"]').click()
-        expect(self.column(page,'techNote').locator('[data-move="down"]')).to_be_focused()
+        # Move the second column to the first position, regardless of new columns.
+        edge=original[1]
+        self.column(page,edge).locator('[data-move="up"]').click()
+        expect(self.column(page,edge).locator('[data-move="down"]')).to_be_focused()
         page.locator('#wc-save').click()
         expect(page.locator('#column-manager')).not_to_be_visible()
         expected=[key for key in original if key!='desc'];expected[0],expected[1]=expected[1],expected[0]

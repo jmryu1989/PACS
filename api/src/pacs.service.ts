@@ -601,6 +601,8 @@ export class PacsService implements OnModuleInit {
       ORDER BY n."studyUid", n.version DESC`;
     const noteByUid = new Map(noteRows.map(n => [n.studyUid, { version: n.version, present: n.present }]));
 
+    const assignments = await this.prisma.readerAssignment.findMany({where:{studyUid:{in:pageUids},institutionId:me}});
+    const assignmentByUid=new Map(assignments.map(a=>[a.studyUid,a]));
     const sourceRows = page ? await this.orthanc.studiesByUid(pageUids) : window.rows;
     const out: any[] = [];
     for (const st of sourceRows) {
@@ -614,6 +616,7 @@ export class PacsService implements OnModuleInit {
       out.push({
         uid,
         techNote: noteByUid.get(uid) ?? { version: 0, present: false },
+        readerAssignment: s.institutionId===me ? (()=>{const a=assignmentByUid.get(uid);return {revision:a?.revision??0,reader:a?.readerSub?{sub:a.readerSub,actor:a.readerActor,name:a.readerName}:null};})() : null,
         count: +OrthancService.tag(st, '00201208') || 0,
         series: +OrthancService.tag(st, '00201206') || 0,
         acc: OrthancService.tag(st, '00080050'),
@@ -1396,22 +1399,20 @@ export class PacsService implements OnModuleInit {
    */
   async hold(uid: string, c: Caller) {
     need(c.roles, 'radiologist', '판독문 점유');
-    const prev = await this.gate(uid, c);
-    if (prev?.ss === 'Unverified' && prev.em !== 'E')
-      throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
-    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    if (!canReadPrelim(prev, c.actor))
-      throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
-    const other = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
-
-    // 남이 잡고 있으면 뺏지 않는다. 뺏으면 그쪽 화면의 자물쇠가 조용히 풀린다.
-    if (!other) {
-      await this.prisma.studyState.update({
-        where: { uid }, data: { holder: c.actor, heldAt: new Date() },
-      });
-      if (!holdAlive(prev)) await this.audit(c.actor, 'report.hold', uid);
-    }
-    return { holder: other ?? c.actor, mine: !other, conflict: !!other };
+    return this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      const rows=await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid=${uid} FOR UPDATE`;
+      const prev=rows[0];
+      if(!prev||!this.visible(prev,inst(c)))throw new NotFoundException('검사를 찾을 수 없습니다');
+      if(prev.ss==='Unverified'&&prev.em!=='E')throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
+      if(!canReadPrelim(prev,c.actor))throw new ForbiddenException('예비 판독(RS: P) 중인 검사입니다');
+      const other=holdAlive(prev)&&prev.holder!==c.actor?prev.holder:null;
+      if(!other){
+        await tx.studyState.update({where:{uid},data:{holder:c.actor,heldAt:new Date()}});
+        if(!holdAlive(prev))await tx.auditLog.create({data:{actor:c.actor,action:'report.hold',target:uid}});
+      }
+      return {holder:other??c.actor,mine:!other,conflict:!!other};
+    },{maxWait:4000,timeout:8000}).catch(noteTransactionError);
   }
 
   /** 점유 해제 (검사를 옮기거나 판독을 확정할 때) */

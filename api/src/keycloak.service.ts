@@ -270,4 +270,22 @@ export class KeycloakService {
     this.cache.set(key, { at: Date.now(), users });
     return users;
   }
+  /** Assignment picker: no cached role/group decisions or silent 500-user truncation. */
+  async assignmentReaders(institution: string) {
+    const groups: any[] = await this.adm('/groups?briefRepresentation=true&max=500') ?? [];
+    const group = groups.find(g => g.name === institution || g.path === '/' + institution);
+    if (!group) return [];
+    const readers: KeycloakUser[] = [];
+    for (let first=0; first<1000; first+=100) {
+      const batch:any[] = await this.adm(`/groups/${encodeURIComponent(group.id)}/members?briefRepresentation=true&first=${first}&max=100`) ?? [];
+      // Bounded batches keep this path from opening hundreds of Admin requests at once.
+      for (let offset=0; offset<batch.length; offset+=10) {
+        const users=await Promise.all(batch.slice(offset,offset+10).map(u=>this.getUser(u.id)));
+        readers.push(...users.filter((u):u is KeycloakUser=>!!u&&u.enabled&&!u.serviceAccountClientId&&u.groups.length===1&&u.groups[0]===institution&&u.roles.includes('radiologist')));
+      }
+      if(batch.length<100)return readers;
+    }
+    throw new ServiceUnavailableException('기관 사용자 수가 조회 한도를 넘었습니다');
+  }
+
 }
