@@ -137,8 +137,9 @@ export class PacsController {
   }
 
   @Get('bootstrap')
-  bootstrap(@Req() req: any) {
-    return this.svc.bootstrap(caller(req));
+  @Header('Cache-Control', 'no-store')
+  bootstrap(@Req() req: any, @Query() query: any) {
+    return this.svc.bootstrap(caller(req), query);
   }
 
   /**

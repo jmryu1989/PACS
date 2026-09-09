@@ -4470,7 +4470,7 @@
     async function fetchBootstrap(tries = 3) {
       let last;
       for (let i = 0; i < tries; i++) {
-        try { return await api("GET", "/bootstrap"); }
+        try { return await api("GET", "/bootstrap?states=omit"); }
         catch (e) {
           last = e;
           if (e.message.includes("세션") || e.message.includes("로그인")) throw e;

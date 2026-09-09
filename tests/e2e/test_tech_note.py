@@ -165,9 +165,9 @@ class TechNoteE2E(WorklistE2E):
    row=next(r for r in body['studies'] if r['uid']==f.uid)
    row['techNote']=dict(version=0,present=False);row['desc']='SYNTHETIC stale list applied'
    route.fulfill(response=response,json=body)
-  p.route('**/api/studies',old_list);p.locator('#refresh').click()
+  p.route('**/api/studies?*',old_list);p.locator('#refresh').click()
   expect(p.locator(f'#rows tr[data-uid="{f.uid}"]')).to_contain_text('SYNTHETIC stale list applied')
-  expect(badge).to_have_text('있음');p.unroute('**/api/studies')
+  expect(badge).to_have_text('있음');p.unroute('**/api/studies?*')
 
 
 def load_tests(loader,tests,pattern):

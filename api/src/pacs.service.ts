@@ -1,4 +1,5 @@
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
@@ -533,7 +534,9 @@ export class PacsService implements OnModuleInit {
     const owner = [me, c.sub, c.actor], page = studyPageQuery(query, owner);
     const qido = await this.orthanc.studies();
 
-    const states = await this.prisma.studyState.findMany();
+    const states = page ? await this.prisma.studyState.findMany({
+      select: { uid:true, institutionId:true, teleInstitutionId:true },
+    }) : await this.prisma.studyState.findMany();
     const byUid = new Map(states.map(s => [s.uid, s as any]));
 
     // 아직 등록 안 된 검사에 기관을 박는다 (한 번만 일어난다)
@@ -568,6 +571,17 @@ export class PacsService implements OnModuleInit {
       return state && this.visible(state, me);
     }), st => OrthancService.tag(st, '0020000D'), page, owner);
     const pageUids = window.rows.map(st => OrthancService.tag(st, '0020000D'));
+    const changedAccess = (rows: any[]) => rows.length !== pageUids.length || rows.some(state => !this.visible(state, me)
+      || state.institutionId !== byUid.get(state.uid)?.institutionId || state.teleInstitutionId !== byUid.get(state.uid)?.teleInstitutionId
+      || (byUid.get(state.uid)?.rs !== undefined && (state.rs !== byUid.get(state.uid).rs
+        || state.preDoc !== byUid.get(state.uid).preDoc || state.preReviewer !== byUid.get(state.uid).preReviewer)));
+    const accessConflict = () => new ConflictException({ code:'STUDY_LIST_CHANGED', message:'검사 접근 범위가 바뀌었습니다. 새로고침하세요.' });
+    if (page) {
+      // Enumerate only identity/scope first; report state and overlays belong to the selected page.
+      const details = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } } });
+      if (changedAccess(details)) throw accessConflict();
+      for (const state of details) byUid.set(state.uid, state);
+    }
     const reports = await this.prisma.report.findMany({ where: { uid: { in: pageUids } } });
     const repByUid = new Map(reports.map(r => [r.uid, r]));
     // 목록에도 내 초안을 함께 싣는다. 30초 폴링 응답이 초안 없이 오면
@@ -576,10 +590,11 @@ export class PacsService implements OnModuleInit {
     const draftByUid = new Map(drafts.map(d => [d.uid, d]));
 
     // Only presence/version leaves this query, never the note body or author.
-    const noteRows = await this.prisma.$queryRaw<{ studyUid: string; version: number; present: boolean }[]>`
+    const noteRows = !pageUids.length ? [] : await this.prisma.$queryRaw<{ studyUid: string; version: number; present: boolean }[]>`
       SELECT DISTINCT ON (n."studyUid") n."studyUid", n.version, (n.text <> '') AS present
       FROM "TechNoteRevision" n JOIN "StudyState" s ON s.uid = n."studyUid"
-      WHERE s."institutionId" = ${me} OR s."teleInstitutionId" = ${me}
+      WHERE (s."institutionId" = ${me} OR s."teleInstitutionId" = ${me})
+        AND n."studyUid" IN (${Prisma.join(pageUids)})
       ORDER BY n."studyUid", n.version DESC`;
     const noteByUid = new Map(noteRows.map(n => [n.studyUid, { version: n.version, present: n.present }]));
 
@@ -612,34 +627,36 @@ export class PacsService implements OnModuleInit {
         state: toClient(s, repByUid.get(uid), c.actor, draftByUid.get(uid)),
       });
     }
-    if (page) {
-      const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } } });
-      if (current.length !== pageUids.length || current.some(state => !this.visible(state, me)
-        || state.institutionId !== byUid.get(state.uid)?.institutionId || state.teleInstitutionId !== byUid.get(state.uid)?.teleInstitutionId))
-        throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 접근 범위가 바뀌었습니다. 새로고침하세요.' });
-    }
+    // A concurrent Preliminary transition can change who may read the report too.
+    const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } },
+      select: { uid:true, institutionId:true, teleInstitutionId:true, rs:true, preDoc:true, preReviewer:true } });
+    if (changedAccess(current)) throw accessConflict();
     return { studies: out, serverTime: new Date().toISOString(), ...(page ? { pagination: window.pagination } : {}) };
   }
 
   /** 프론트가 켜질 때 한 번에 받아가는 묶음 — 전부 내 기관 것만 */
-  async bootstrap(c: Caller) {
+  async bootstrap(c: Caller, query?: any) {
     const me = inst(c);
+    const omitStates = query?.states === 'omit';
+    if (query && (Object.keys(query).some(key => key !== 'states') || (Object.keys(query).length && !omitStates)))
+      throw new BadRequestException('초기 목록 요청 형식이 잘못되었습니다');
     const [states, orders] = await Promise.all([
-      this.prisma.studyState.findMany({
+      omitStates ? Promise.resolve([]) : this.prisma.studyState.findMany({
         where: { OR: [{ institutionId: me }, { teleInstitutionId: me }] },
       }),
       this.prisma.order.findMany({ where: { institutionId: me }, orderBy: { sched: 'asc' } }),
     ]);
-    const reports = await this.prisma.report.findMany({
+    const reports = omitStates ? [] : await this.prisma.report.findMany({
       where: { uid: { in: states.map(s => s.uid) } },
     });
     const byUid = Object.fromEntries(reports.map(r => [r.uid, r]));
     // 켤 때 내 초안도 함께 — "어제 쓰다 만 것"이 PC를 바꿔도 따라온다.
     // 필터·상용구를 계정에 붙인 것과 같은 이유다 (§6-A-4).
-    const drafts = await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
+    const drafts = omitStates ? [] : await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
     const draftByUid = Object.fromEntries(drafts.map(d => [d.uid, d]));
     const prefs = await this.prefs(c);   // 필터·상용구도 첫 요청에 함께 (왕복을 늘리지 않는다)
     return {
+      ...(omitStates ? { statesOmitted:true } : {}),
       me: { actor: c.actor, roles: c.roles, institution: me, institutionName: this.instName(me) },
       filters: prefs.filters,
       templates: prefs.templates,
