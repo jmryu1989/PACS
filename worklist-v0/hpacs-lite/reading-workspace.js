@@ -128,6 +128,7 @@ window.KinReadingWorkspace = function (app) {
         }
         if (location.href === observedHref && doc.querySelector('.cornerstone-canvas') &&
             typeof w.kinViewerHistoryWorkspaceState === 'function' && typeof w.kinViewerJobWorkspaceState === 'function') {
+          window.KinViewerWorkspaceDock?.(w);
           if (!loaded) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }

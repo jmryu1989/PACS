@@ -69,6 +69,7 @@ class ReadingWorkspaceE2E(ViewerJobReportE2E):
 
  def test_workspace_03_unsaved_viewer_hidden_and_restored(self):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
+  f.get_by_role('button',name='비교 작업·배치',exact=True).click()
   f.get_by_label('작업 제목',exact=True).fill('KEEP UNSAVED VIEWER')
   self.choose(p,b)
   expect(p.locator('#reading-target')).to_contain_text(b.uid);expect(p.locator('#reading-frame')).not_to_be_visible()
@@ -119,6 +120,7 @@ class ReadingWorkspaceE2E(ViewerJobReportE2E):
   source.get_by_label('작업 제목',exact=True).fill('WORKSPACE RESTORE')
   self.click_job(source,'새 비교 작업 저장','저장했습니다');saved=self.jobs(a)[0];source.close()
   p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
+  f.get_by_role('button',name='비교 작업·배치',exact=True).click()
   f.locator('#kin-viewer-jobs').get_by_role('button',name='이 작업 복원',exact=True).first.click()
   f.wait_for_url('**kinJob='+saved['id'])
   try:

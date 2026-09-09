@@ -6,6 +6,8 @@
 
 같은 시험은 저장 작업 복원으로 iframe의 비교 검사가 바뀔 때 부모 식별과 별도 창의 일치, 작업 패널 script 실패 후 검사 이동도 확인한다. `python tests/e2e/test_reading_workspace_guard.py`는 초기 자동 복원의 실제 서버 응답을 지연하고 방향키로 영상을 조작하여, 늦은 복원이 사용자의 변경을 덮어쓰지 않는지 검사한다.
 
+`python tests/e2e/test_reading_workspace_dock.py`는 통합 영상 아래의 도구 영역을 펼치고 접으면서 실제 CT 화소와 패널 비겹침, 창 크기 변경, 미저장 제목의 검사 왕복 보호, 실제 비교 작업 저장과 수동 길이 측정/저장을 검사한다. 별도 OHIF 창의 기존 패널은 유지하며 전체 도구 배치·물리 모니터 수용을 뜻하지 않는다.
+
 `python tests/e2e/test_live_print.py`는 TEST-D09-LIVE-PRINT의 저장 없는 현재 CT 비교 출력을 검사한다. 읽기 전용 preview의 엄격한 입력·기관/P·같은 환자·no-store·무저장, native 두 검사 화소와 실제 PDF2페이지, 현재 표시/digest 응답 변경·늦은 닫기, 빈 셀·미저장 주석·출력 조절 복귀·세션 종료를 확인한다. 원본 변경의 새 기능 시험은 digest 응답 주입이며 실제 DICOM 교체는 기존 저장 출력 회귀에서 구분한다. 주석 미포함·현재 설정으로 원본 재조회이며 전체 화면 캡처/다른 modality/물리 출력의 완료 증거가 아니다.
 
 `python tests/e2e/test_key_preview_controls.py`는 TEST-D09-KEY-PREVIEW의 출력 키 이미지 전체/선택 확대·이동·복귀, 독립 역좌표 RGB 비교, CT W/L·편집문·두 열 PDF, 선택/재선택·입력 오류·초기화·실패/지연과 조절 후 원본 digest 변경 응답의 인쇄 차단을 검사한다. 최근접 화소의 고정 출력 범위이며 주석/현재 화면 직접 캡처·전체 modality/서식/물리 크기 검증은 아니다.

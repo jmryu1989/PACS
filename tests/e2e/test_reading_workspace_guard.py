@@ -14,6 +14,7 @@ class ReadingWorkspaceGuardE2E(ReadingWorkspaceE2E):
    if 'kinJob=' in route.request.frame.url:held.append((route,route.fetch()))
    else:route.continue_()
   p.route(pattern,hold)
+  f.get_by_role('button',name='비교 작업·배치',exact=True).click()
   f.locator('#kin-viewer-jobs').get_by_role('button',name='이 작업 복원',exact=True).first.click()
   f.wait_for_url('**kinJob='+saved['id'])
   for _ in range(200):
