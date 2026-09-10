@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
@@ -14,7 +15,7 @@ const summary = (j: any) => ({ id: j.id, studyUid: j.studyUid, authorSub: j.auth
 
 @Injectable()
 export class ViewerJobService {
-  constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
   private member(c: Caller, write = false) {
     if (c.kind !== 'member' || !c.sub || !c.actor || !c.institution || write && !c.roles.includes('radiologist')) deny();
   }
@@ -33,9 +34,11 @@ export class ViewerJobService {
     }
   }
   private async parents(tx: any, studies: string[], c: Caller, lock = false) {
+    await this.studyAccess.snapshot(c,tx);
     const rows = lock ? await tx.$queryRaw`SELECT uid, "institutionId", "teleInstitutionId", rs, "preDoc", "preReviewer" FROM "StudyState" WHERE uid IN (${Prisma.join([...studies].sort())}) ORDER BY uid FOR UPDATE`
       : await tx.studyState.findMany({ where: { uid: { in: studies } } });
     if (rows.length !== studies.length || rows.some(s => !allowed(s, c))) deny();
+    await this.studyAccess.require(c,studies,tx);
     return rows;
   }
   private async sources(snapshot: any, old = false, sources = new Map<string, any>()) {
@@ -96,7 +99,7 @@ export class ViewerJobService {
   private sameInstitution(rows: any[]) {
     if (!rows[0]?.institutionId || rows.some(s => s.institutionId !== rows[0].institutionId)) deny();
   }
-  async list(uid: string, q: any, c: Caller) {
+  async list(uid: string, q: any, c: Caller) { await this.studyAccess.prepare(c);
     this.member(c); viewerUid(uid);
     if (Object.keys(q).some(k => !['mine', 'includeHidden'].includes(k)) || Object.values(q).some(v => !['true', 'false'].includes(v as string))) throw new BadRequestException('목록 조건이 올바르지 않습니다');
     return this.transaction(async tx => {
@@ -105,8 +108,9 @@ export class ViewerJobService {
       const refs = [...new Set(jobs.flatMap(j => j.studies))];
       const parents = await tx.studyState.findMany({ where: { uid: { in: refs } } });
       const byUid = new Map(parents.map(s => [s.uid, s]));
+      const permitted=await this.studyAccess.allowed(c,refs,tx);
       // Even titles and descriptions may refer to a prior whose permission was revoked.
-      return { jobs: jobs.filter(j => j.studies.every(s => allowed(byUid.get(s), c))).map(summary) };
+      return { jobs: jobs.filter(j => j.studies.every(s => permitted.has(s)&&allowed(byUid.get(s), c))).map(summary) };
     }, true);
   }
   private async head(uid: string, id: string, c: Caller) {
@@ -118,7 +122,7 @@ export class ViewerJobService {
       return j;
     }, true);
   }
-  async get(uid: string, id: string, c: Caller) {
+  async get(uid: string, id: string, c: Caller) { await this.studyAccess.prepare(c);
     this.member(c); viewerUid(uid); viewerUuid(id);
     const j = await this.head(uid, id, c);
     if (j.hidden) conflict();
@@ -168,7 +172,7 @@ export class ViewerJobService {
     await tx.viewerJobRevision.create({ data: { jobId: j.id, revision: j.revision, title: j.title, description: j.description, hidden: j.hidden, reason, actor: c.actor } });
     await tx.auditLog.create({ data: { actor: c.actor, target: j.studyUid, action: 'viewer.job', detail: canonical({ jobId: j.id, revision: j.revision, hidden: j.hidden }) } });
   }
-  async revise(uid: string, id: string, raw: Buffer, c: Caller) {
+  async revise(uid: string, id: string, raw: Buffer, c: Caller) { await this.studyAccess.prepare(c);
     this.member(c, true); viewerUid(uid); viewerUuid(id); const b = jobCommand(raw, false);
     const head = await this.head(uid, id, c);
     return this.transaction(async tx => {

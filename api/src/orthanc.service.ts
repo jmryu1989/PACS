@@ -181,14 +181,15 @@ export class OrthancService {
    */
   studies(): Promise<any[]> {
     return this.get(
-      '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080,00100020',
+      '/dicom-web/studies?includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061',
     );
   }
 
   /** Indexed identity/institution only; patient tags and counts belong to the chosen page. */
-  async studyIdentities(): Promise<any[]> {
+  async studyIdentities(accessMetadata = false): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
-      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName'] });
+      ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName',
+        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : [])] });
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
     const seen = new Set<string>();
     return rows.map(row => {
@@ -199,8 +200,25 @@ export class OrthancService {
       if (institution != null && typeof institution !== 'string')
         throw new ServiceUnavailableException('원본 기관 형식을 확인할 수 없습니다');
       seen.add(uid);
-      return { '0020000D': { Value:[uid] }, '00080080': { Value:[institution ?? ''] } };
+      const source = { '0020000D': { Value:[uid] }, '00080080': { Value:[institution ?? ''] } };
+      if(accessMetadata){
+        const tags=row.RequestedTags;
+        for(const name of ['PatientID','StudyDate','ModalitiesInStudy'])
+          if(tags[name]!=null&&typeof tags[name]!=='string')throw new ServiceUnavailableException('원본 접근 조건 태그를 확인할 수 없습니다');
+        Object.assign(source,{'00100020':{Value:[tags.PatientID??'']},'00080020':{Value:[tags.StudyDate??'']},
+          '00080061':{Value:(tags.ModalitiesInStudy??'').split('\\').map((v:string)=>v.trim().toUpperCase()).filter(Boolean)}});
+      }
+      return source;
     });
+  }
+
+  async studyAccessMetadata(uid:string):Promise<any> {
+    const rows=await this.viewerJson('/dicom-web/studies?StudyInstanceUID='+encodeURIComponent(uid)+
+      '&includefield=00100020,00080020,00080061');
+    if(Array.isArray(rows)&&rows.length===0)return null;
+    if(!Array.isArray(rows)||rows.length!==1||OrthancService.tag(rows[0],'0020000D')!==uid)
+      throw new ServiceUnavailableException('원본 접근 조건의 검사 소속을 확인할 수 없습니다');
+    return rows[0];
   }
 
   async studiesByUid(uids: string[]): Promise<any[]> {
@@ -210,7 +228,7 @@ export class OrthancService {
     if (!uids.length) return [];
     // QIDO UID-list matching uses commas, not DIMSE's backslash separator.
     const rows = await this.get('/dicom-web/studies?StudyInstanceUID=' + encodeURIComponent(uids.join(','))
-      + '&includefield=00081030,00201206,00201208,00080080,00100020');
+      + '&includefield=00081030,00201206,00201208,00080080,00100020,00080020,00080061');
     const byUid = new Map<string, any>();
     if (Array.isArray(rows)) for (const row of rows) {
       if (!row || typeof row !== 'object') break;

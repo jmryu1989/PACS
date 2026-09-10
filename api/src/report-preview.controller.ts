@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Controller, ForbiddenException, Get, Param, Req } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
@@ -5,7 +6,7 @@ import { viewerUid } from './viewer-input';
 
 @Controller()
 export class ReportPreviewController {
-  constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
 
   @Get('studies/:uid/report-preview')
   async read(@Param('uid') uid: string, @Req() caller: any) {
@@ -21,12 +22,14 @@ export class ReportPreviewController {
         throw new ForbiddenException('판독문 미리보기에 접근할 수 없습니다');
     };
     allowed(await this.prisma.studyState.findUnique({ where: { uid } }));
+    await this.studyAccess.require(caller,[uid]);
     const original = await this.orthanc.reportPreviewStudy(uid);
     // Fetch DICOM outside the database transaction; then bind the current
     // permission, report version, patient overlay and key revisions together.
     return this.prisma.$transaction(async tx => {
       const state = await tx.studyState.findUnique({ where: { uid } });
       allowed(state);
+      await this.studyAccess.require(caller,[uid],tx);
       const report = await tx.report.findUnique({ where: { uid } });
       const version = report ? await tx.reportVersion.findUnique({ where: { uid_version: { uid, version: report.version } } }) : null;
       const heads = await tx.viewerItem.findMany({ where: { studyUid: uid, hidden: false,

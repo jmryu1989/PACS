@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { createHash } from 'node:crypto';
@@ -9,12 +10,12 @@ const uid=(v:any)=>typeof v==='string'&&v.length<=64&&/^\d+(?:\.\d+)+$/.test(v);
 const conflict=()=>new ConflictException('태그 목록이 바뀌었습니다. 최신 목록을 읽고 다시 시도하세요');
 @Injectable()
 export class StudyTagsService {
-  constructor(private prisma:PrismaService) {}
+  constructor(private prisma:PrismaService, private studyAccess:StudyAccessService) {}
   private member(c:Caller){
     if(c.kind!=='member'||!c.roles.some(r=>['admin','radiologist','technician'].includes(r))||![c.institution,c.sub].every(x=>typeof x==='string'&&x.length>0&&x.length<=256))throw new ForbiddenException('소속 기관이 있는 회원 전용입니다');
   }
-  private async run<T>(fn:(tx:any)=>Promise<T>):Promise<T>{
-    try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;return fn(tx);},{maxWait:4000,timeout:8000});}
+  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T>{
+    try{return await this.prisma.$transaction(async tx=>{await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);return fn(tx);},{maxWait:4000,timeout:8000});}
     catch(e:any){if(['P2028','P2034'].includes(e?.code)||e?.code==='P2010'&&['55P03','57014','40P01'].includes(e?.meta?.code))throw new ServiceUnavailableException('태그 처리 중입니다. 같은 요청으로 다시 시도하세요');throw e;}
   }
   private async visible(tx:any,uids:string[],c:Caller,lock=false):Promise<Set<string>>{
@@ -22,16 +23,17 @@ export class StudyTagsService {
     const rows=await tx.$queryRaw(Prisma.sql`SELECT uid FROM "StudyState" WHERE uid IN (${Prisma.join([...new Set(uids)].sort())})
       AND ("institutionId"=${c.institution} OR "teleInstitutionId"=${c.institution})
       AND (rs<>'P' OR "preDoc"=${c.actor} OR "preReviewer"=${c.actor}) ORDER BY uid ${lock?Prisma.sql`FOR SHARE`:Prisma.empty}`);
-    return new Set(rows.map((x:any)=>x.uid));
+    return this.studyAccess.allowed(c,rows.map((x:any)=>x.uid),tx);
   }
   private async result(tx:any,c:Caller){
+    const restricted=(await this.studyAccess.snapshot(c,tx)).policy.restricted;
     const rows=await tx.studyTagCatalog.findMany({where:{institution:c.institution,ownerSub:{in:[c.sub,'']}}});
     const catalogs=['personal','institution'].map(scope=>{const row=rows.find((r:any)=>r.ownerSub===(scope==='personal'?c.sub:''));return {scope,revision:row?.revision??0,tags:(row?JSON.parse(row.value):[]) as Tag[]};});
     const seen=await this.visible(tx,catalogs.flatMap(x=>x.tags.flatMap(t=>t.uids)),c);
-    return {owner:[c.institution,c.sub],canManageInstitution:c.roles.includes('admin'),catalogs:catalogs.map(x=>({...x,tags:x.tags.map(t=>({id:t.id,name:t.name,uids:t.uids.filter(x=>seen.has(x)),unavailable:t.uids.filter(x=>!seen.has(x)).length}))}))};
+    return {owner:[c.institution,c.sub],canManageInstitution:c.roles.includes('admin'),catalogs:catalogs.map(x=>({...x,tags:x.tags.map(t=>({id:t.id,name:t.name,uids:t.uids.filter(x=>seen.has(x)),unavailable:restricted?0:t.uids.filter(x=>!seen.has(x)).length}))}))};
   }
-  async read(c:Caller){this.member(c);return this.run(tx=>this.result(tx,c));}
-  async write(c:Caller,b:any){
+  async read(c:Caller){ await this.studyAccess.prepare(c);this.member(c);return this.run(c,tx=>this.result(tx,c));}
+  async write(c:Caller,b:any){ await this.studyAccess.prepare(c);
     this.member(c);const action=b?.action,extras=['create','rename'].includes(action)?['name']:['add','remove'].includes(action)?['uid']:[];
     const fields=['expectedOwner','scope','revision','requestId','tagId','action',...extras].sort();
     if(!b||typeof b!=='object'||Array.isArray(b)||Object.keys(b).sort().join()!==fields.join()||!['personal','institution'].includes(b.scope)||!['create','rename','delete','add','remove'].includes(action)||!uuid(b.requestId)||!uuid(b.tagId)||!Number.isInteger(b.revision)||b.revision<0||b.revision>=2147483647
@@ -41,7 +43,7 @@ export class StudyTagsService {
     const owner={institution:c.institution!,ownerSub:b.scope==='personal'?c.sub:''};
     const command={subject:c.sub,scope:b.scope,action,tagId:b.tagId.toLowerCase(),revision:b.revision,...(extras.includes('name')?{name:b.name.trim()}:{}),...(extras.includes('uid')?{uid:b.uid}:{})};
     const requestId=b.requestId.toLowerCase(),fingerprint=createHash('sha256').update(JSON.stringify(command)).digest('hex');
-    return this.run(async tx=>{
+    return this.run(c,async tx=>{
       await tx.$executeRaw`INSERT INTO "StudyTagCatalog" (institution,"ownerSub",revision,value,"updatedAt") VALUES (${owner.institution},${owner.ownerSub},0,'[]',NOW()) ON CONFLICT DO NOTHING`;
       const rows=await tx.$queryRaw`SELECT * FROM "StudyTagCatalog" WHERE institution=${owner.institution} AND "ownerSub"=${owner.ownerSub} FOR UPDATE`;
       const row=rows[0];if(!row)throw conflict();

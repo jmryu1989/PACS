@@ -41,12 +41,14 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910090000_filter_folders/migration.sql',
               'api/prisma/migrations/20260910100000_shared_filters/migration.sql',
               'api/prisma/migrations/20260910110000_study_consultation/migration.sql',
-              'api/prisma/migrations/20260910123000_consultation_predicates/migration.sql']
+              'api/prisma/migrations/20260910123000_consultation_predicates/migration.sql',
+              'api/prisma/migrations/20260910130000_study_access/migration.sql',
+              'api/prisma/migrations/20260910133000_study_access_subject/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation'])
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -155,6 +157,9 @@ def expected_rows(uid):
         value=json.dumps([dict(id='00000000-0000-4000-8000-00000000060'+str(n),name='SYNTHETIC tag '+str(n),uids=[uid])]),
         lastRequest=None if n==1 else '00000000-0000-4000-8000-000000000603',
         lastFingerprint=None if n==1 else 'c'*64,updatedAt=STAMP) for n,owner in [(1,'SYNTHETIC-sub'),(2,'')]]
+    access_policy=dict(version=1,restricted=True,startsAt=None,endsAt='2099-01-01T00:00:00.000Z',rules=[dict(patientId=None,modalities=['CT'],dateFrom=None,dateTo=None,studyUids=[uid])])
+    rows['StudyAccessPolicy']=[dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=1,policy=access_policy,reason='SYNTHETIC restriction',updatedBy='SYNTHETIC-admin',updatedAt=STAMP)]
+    rows['StudyAccessRevision']=[dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=1,policy=access_policy,reason='SYNTHETIC restriction',authorSub='SYNTHETIC-admin-sub',author='SYNTHETIC-admin',requestId='00000000-0000-4000-8000-000000000951',fingerprint='d'*64,at=STAMP)]
     rows['StudyConsultation']=[dict(id='00000000-0000-4000-8000-000000000901',studyUid=uid,
         institutionId='SYNTHETIC-hospital',requesterSub='SYNTHETIC-sub',requesterActor='SYNTHETIC-reader',
         recipientSub='SYNTHETIC-consultant',recipientActor='SYNTHETIC-consultant',recipientName='SYNTHETIC consultant',
@@ -217,7 +222,7 @@ def create_product(name, db, uid):
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation'):
+                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -382,6 +387,16 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing transfer basis FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN UPDATE "TransferBasis" SET "revokedAt"=now(),"revokedBy"='SYNTHETIC';
         RAISE EXCEPTION 'missing revocation reason check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyAccessPolicy" SET policy='{}'::jsonb;
+        RAISE EXCEPTION 'missing access shape'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyAccessPolicy" SET revision=0;
+        RAISE EXCEPTION 'missing access revision'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN DELETE FROM "StudyAccessPolicy";
+        RAISE EXCEPTION 'missing access history restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN INSERT INTO "StudyAccessRevision" SELECT * FROM "StudyAccessRevision" LIMIT 1;
+        RAISE EXCEPTION 'missing access history PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "StudyAccessPolicy" SET institution='SYNTHETIC-missing';
+        RAISE EXCEPTION 'missing access institution FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Bogus';
         RAISE EXCEPTION 'missing consultation state'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET revision=0;

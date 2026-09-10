@@ -128,6 +128,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs
       - name: D-MEASURE2 source failures, safe warnings and real read deadlines
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_source_test.cjs
+      - name: Study access policy, fail-closed storage and stale response boundaries
+        run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_access_policy_test.cjs /tests/study_access_service_test.cjs
       - name: Observe an isolated real restart loop
         run: python3 tests/ops_monitor_container_test.py
       - name: Production image migration, startup and refusal checks

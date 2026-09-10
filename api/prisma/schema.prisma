@@ -49,6 +49,7 @@ model Institution {
   agreementsTo ProcessingAgreement[] @relation("AgreementTo")
   transfersFrom Transfer[] @relation("TransferFrom")
   transfersTo Transfer[] @relation("TransferTo")
+  studyAccessPolicies StudyAccessPolicy[]
 }
 
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
@@ -590,4 +591,37 @@ model StudyConsultation {
 
   @@index([institutionId, recipientSub, createdAt, id])
   @@index([institutionId, requesterSub, createdAt, id])
+}
+
+/// Additional per-member restrictions; clearing retains revision and history.
+model StudyAccessPolicy {
+  institution String @db.VarChar(256)
+  subject String @db.VarChar(256)
+  revision Int
+  policy Json
+  reason String @db.VarChar(2000)
+  updatedBy String @db.VarChar(256)
+  updatedAt DateTime @updatedAt
+  institutionRecord Institution @relation(fields:[institution], references:[id], onDelete:Restrict, onUpdate:Restrict)
+  history StudyAccessRevision[]
+
+  @@id([institution,subject])
+  @@index([subject])
+}
+
+model StudyAccessRevision {
+  institution String @db.VarChar(256)
+  subject String @db.VarChar(256)
+  revision Int
+  policy Json
+  reason String @db.VarChar(2000)
+  authorSub String @db.VarChar(256)
+  author String @db.VarChar(256)
+  requestId String @db.Uuid
+  fingerprint String
+  at DateTime @default(now())
+  head StudyAccessPolicy @relation(fields:[institution,subject], references:[institution,subject], onDelete:Restrict, onUpdate:Restrict, map:"StudyAccessRevision_policy_fkey")
+
+  @@id([institution,subject,revision])
+  @@unique([institution,subject,requestId], map:"StudyAccessRevision_request_key")
 }

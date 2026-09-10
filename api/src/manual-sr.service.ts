@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, ServiceUnavailableException, GoneException, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID, createHash } from 'node:crypto';
@@ -30,7 +31,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
   private preparing = 0;
   private recoveryTimer: ReturnType<typeof setInterval>;
   private recovering = false;
-  constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
 
   onModuleInit() {
     // Reconciliation never initiates an upload. It attributes bytes already
@@ -169,11 +170,13 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
   private async prepareFile(uid: string, raw: Buffer, c: Caller) {
     viewerUid(uid); const command = selection(raw);
     access(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+    await this.studyAccess.require(c,[uid]);
     const fingerprint = createHash('sha256').update(canonical({ uid, items: command.items })).digest('hex');
     const before = await this.heads(this.prisma, uid, command.items, c);
     const source = await this.sources(uid, before, true);
     await this.expire(uid);
     return this.transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
       const [study] = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`; access(study, c);
       const current = await this.heads(tx, uid, command.items, c);
       if (canonical(current.map(x => x.snapshot)) !== canonical(before.map(x => x.snapshot))) conflict();
@@ -209,11 +212,13 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     // release no receipt/content until the caller passes today's read gates.
     const recovered = await this.reconcile(row);
     access(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+    await this.studyAccess.require(c,[uid]);
     if (recovered) return this.receipt(recovered);
     this.receipt(row);
     const heads = await this.heads(this.prisma, uid, row.selection as any[], c);
     await this.sources(uid, heads, false);
     const intent = await this.transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
       const [study] = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`; access(study, c);
       const current = await this.heads(tx, uid, row.selection as any[], c);
       if (canonical(current.map(x => x.snapshot)) !== canonical(heads.map(x => x.snapshot))) conflict();
@@ -235,6 +240,7 @@ export class ManualSrService implements OnModuleInit, OnModuleDestroy {
     const orthancId = await this.orthanc.storeManualSr((intent.dataset as any).SOPInstanceUID, Buffer.from(intent.dicom));
     const saved = await this.reconcile(intent, orthancId);
     access(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+    await this.studyAccess.require(c,[uid]);
     return this.receipt(saved);
   }
 }

@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -30,7 +31,7 @@ function result(head: any, revision?: any) {
 
 @Injectable()
 export class ViewerService {
-  constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
 
   private async verifyMeasurements(uid: string, heads: any[], c: Caller) {
     const groups = new Map<string, any[]>();
@@ -76,6 +77,7 @@ export class ViewerService {
     // Source checks run outside DB locks. Do not release a delayed response
     // after the study's institution or pending-reading access has changed.
     visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+    await this.studyAccess.require(c,[uid]);
   }
 
   private async bounded<T>(work: (tx: Prisma.TransactionClient) => Promise<T>, read = false): Promise<T> {
@@ -89,7 +91,7 @@ export class ViewerService {
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError) {
         if (['P2002', 'P2003', 'P2034'].includes(error.code)) conflict();
-        if (error.code === 'P2028' || (error.code === 'P2010' && ['55P03', '57014'].includes(String(error.meta?.code))))
+        if (error.code === 'P2028' || (error.code === 'P2010' && ['55P03', '57014', '40P01'].includes(String(error.meta?.code))))
           throw new ServiceUnavailableException('표시 저장이 지연되었습니다. 같은 요청 ID로 다시 시도하세요');
       }
       throw error;
@@ -97,7 +99,7 @@ export class ViewerService {
   }
 
   async list(uid: string, query: any, c: Caller, id?: string) {
-    member(c); viewerUid(uid); if (id !== undefined) viewerUuid(id);
+    member(c); viewerUid(uid); visible(await this.prisma.studyState.findUnique({where:{uid}}),c); await this.studyAccess.require(c,[uid]); if (id !== undefined) viewerUuid(id);
     const page = viewerPage(query, id !== undefined);
     // The permission predicate and page share a single SQL statement, including
     // the distinction between a forbidden parent and an authorized empty page.
@@ -139,6 +141,7 @@ export class ViewerService {
     member(c, true); viewerUid(uid); if (id !== undefined) viewerUuid(id);
     const command = viewerCommand(raw, id === undefined), fingerprint = viewerFingerprint(uid, id ?? null, command);
     visible(await this.prisma.studyState.findUnique({ where: { uid } }), c);
+    await this.studyAccess.require(c,[uid]);
     const requestKey = { authorSub: c.sub, requestId: command.requestId };
     const known = await this.prisma.viewerRequest.findUnique({ where: { authorSub_requestId: requestKey } });
     // A prior success is immutable; it may be replayed during an Orthanc outage.
@@ -164,6 +167,7 @@ export class ViewerService {
 
     let replayed = false;
     const output = await this.bounded(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
       const studies = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       visible(studies[0], c);
       const replay = await tx.viewerRequest.findUnique({ where: { authorSub_requestId: requestKey }, include: { result: { include: { item: true } } } });

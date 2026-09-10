@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from './prisma.service';
@@ -185,8 +186,7 @@ export class PacsService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private orthanc: OrthancService,
-    private keycloak: KeycloakService,
-  ) {}
+    private keycloak: KeycloakService, private studyAccess:StudyAccessService) {}
 
   /** 기관 목록 캐시. 몇 개 안 되고 거의 안 바뀌므로 메모리에 둔다. */
   private institutions: any[] = [];
@@ -272,7 +272,7 @@ export class PacsService implements OnModuleInit {
     inst(c);   // 소속이 없는 계정은 admin이어도 여기서 막힌다
     const orphans = await this.prisma.studyState.findMany({ where: { institutionId: null } });
     if (!orphans.length) return { studies: [], institutions: this.institutions.map(i => ({ id: i.id, name: i.name })) };
-    const set = new Set(orphans.map(o => o.uid));
+    const set = await this.studyAccess.allowed(c,orphans.map(o=>o.uid));
     const qido = await this.orthanc.studies();
     const studies = qido
       .filter(st => set.has(OrthancService.tag(st, '0020000D')))
@@ -296,20 +296,23 @@ export class PacsService implements OnModuleInit {
    * 바뀐다. 이 통로는 "고아를 집에 보내는" 것 하나만 한다.
    */
   async assignInstitution(uid: string, institutionId: string, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'admin', '검사 기관 배정');
     inst(c);
+    await this.studyAccess.require(c,[uid],tx);
     if (!this.institutions.some(i => i.id === institutionId))
       throw new BadRequestException(`알 수 없는 기관입니다: ${institutionId}`);
-    const s = await this.prisma.studyState.findUnique({ where: { uid } });
+    const s = await tx.studyState.findUnique({ where: { uid } });
     if (!s) throw new NotFoundException('검사를 찾을 수 없습니다');
     if (s.institutionId)
       throw new BadRequestException(
         `이미 ${this.instName(s.institutionId)}에 배정된 검사입니다. 기관 이동은 이 통로로 하지 않습니다.`);
-    const saved = await this.prisma.studyState.update({
+    const saved = await tx.studyState.update({
       where: { uid }, data: { institutionId, reqHosp: this.instName(institutionId) },
     });
-    await this.audit(c.actor, 'study.assign', uid, { institutionId });
-    return toClient(saved, await this.prisma.report.findUnique({ where: { uid } }), c.actor, null);
+    await audit(c.actor, 'study.assign', uid, { institutionId });
+    return toClient(saved, await tx.report.findUnique({ where: { uid } }), c.actor, null);
+    });
   }
 
   /**
@@ -339,7 +342,10 @@ export class PacsService implements OnModuleInit {
     // 서버 정보는 관리자만. 프론트 사용처 없음 — 버전 정보는 표면 축소가 이득이다.
     if (path === '/system') { need(c.roles, 'admin', '서버 정보 조회'); return; }
     // 로그인만으로 충분한 경로 — PHI 없음
-    if (path === '/statistics') return;
+    if (path === '/statistics') {
+      if((await this.studyAccess.snapshot(c)).policy.restricted)throw new ForbiddenException('전체 검사 통계를 열람할 수 없습니다');
+      return;
+    }
 
     // /dicom-web/studies/{uid}/... — 경로의 UID로 관문
     let m = /^\/dicom-web\/studies\/([0-9.]+)(?:\/|$)/.exec(path);
@@ -348,6 +354,8 @@ export class PacsService implements OnModuleInit {
     // /dicom-web/studies?StudyInstanceUID=... — 쿼리의 UID로 관문 (OHIF 초기 조회)
     if (!uid && path === '/dicom-web/studies') {
       const q = new URLSearchParams(query);
+      if(q.getAll('StudyInstanceUID').length+q.getAll('0020000D').length!==1)
+        throw new ForbiddenException('검사 UID를 하나만 지정하세요');
       uid = q.get('StudyInstanceUID') ?? q.get('0020000D') ?? undefined;
       // UID 없는 전체 열거는 이 관문이 막으려는 바로 그것이다. 목록은 /api/studies가 기관을 걸러 준다.
       if (!uid) throw new ForbiddenException('전체 목록은 워크리스트 API를 사용하세요');
@@ -369,6 +377,7 @@ export class PacsService implements OnModuleInit {
     const s = await this.prisma.studyState.findUnique({ where: { uid } });
     // 미등록(기관 미확정) 검사는 기본 거부 — 워크리스트를 한 번 열면 lazy 등록이 기관을 박는다.
     if (!s || !this.visible(s, me)) throw new ForbiddenException('열람 권한이 없습니다');
+    try{await this.studyAccess.require(c,[uid]);}catch(e){throw new ForbiddenException('열람 권한이 없습니다');}
   }
 
   /**
@@ -437,6 +446,7 @@ export class PacsService implements OnModuleInit {
 
     const study = await this.prisma.studyState.findUnique({ where: { uid: actualUid } });
     if (!study || !this.visible(study, me)) throw new ForbiddenException('열람 권한이 없습니다');
+    await this.studyAccess.require(c,[actualUid]);
     return { id: instances[0].ID };
   }
 
@@ -449,15 +459,26 @@ export class PacsService implements OnModuleInit {
    * 사라지는 것이다. §14("비움도 값이다")의 정확히 반대편 함정이고,
    * 같은 실수를 `holder`에서 한 번, `toClient`의 7개 필드에서 또 했다.
    */
-  private myDraft(uid: string, actor: string) {
-    return this.prisma.reportDraft.findUnique({ where: { uid_author: { uid, author: actor } } });
+  private myDraft(uid: string, actor: string, db:any=this.prisma) {
+    return db.reportDraft.findUnique({ where: { uid_author: { uid, author: actor } } });
   }
 
-  private async gate(uid: string, c: Caller) {
+  private async scopeWrite<T>(uid:string,c:Caller,work:(tx:Prisma.TransactionClient,audit:(actor:string,action:string,target:string,detail?:any)=>Promise<any>)=>Promise<T>):Promise<T> {
+    await this.studyAccess.prepare(c,[uid]);
+    return this.prisma.$transaction(async tx=>{
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      await this.studyAccess.require(c,[uid],tx);
+      const audit=(actor:string,action:string,target:string,detail?:any)=>tx.auditLog.create({data:{actor:actor||'unknown',action,target,detail:dump(detail)}});
+      return work(tx,audit);
+    },{maxWait:4000,timeout:8000}).catch(noteTransactionError);
+  }
+
+  private async gate(uid: string, c: Caller, db:any=this.prisma) {
     const me = inst(c);
-    const s = await this.prisma.studyState.findUnique({ where: { uid } });
+    const s = await db.studyState.findUnique({ where: { uid } });
     if (s && !this.visible(s, me))
       throw new NotFoundException('검사를 찾을 수 없습니다');
+    if(s)await this.studyAccess.require(c,[uid],db===this.prisma?undefined:db);
     return s;
   }
 
@@ -471,11 +492,13 @@ export class PacsService implements OnModuleInit {
     if (c.kind !== 'member') throw new ForbiddenException('회원 전용입니다');
     need(c.roles, writing ? 'technician' : c.roles.includes('technician') ? 'technician' : 'radiologist', 'Tech 메모');
     const me = inst(c);
+    await this.studyAccess.snapshot(c,tx);
     const rows = writing
       ? await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`
       : await tx.$queryRaw`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR SHARE`;
     const study = rows[0];
     if (!study || !this.visible(study, me)) throw new NotFoundException('검사를 찾을 수 없습니다');
+    await this.studyAccess.require(c,[uid],tx);
     if (writing && study.institutionId !== me) throw new ForbiddenException('촬영 기관에서만 Tech 메모를 작성할 수 있습니다');
     return study;
   }
@@ -483,6 +506,7 @@ export class PacsService implements OnModuleInit {
   async techNote(uid: string, c: Caller, before?: string) {
     if (before !== undefined && (!/^[1-9]\d{0,9}$/.test(before) || Number(before) > 2147483647))
       throw new BadRequestException('이력 위치를 확인하세요');
+    await this.studyAccess.prepare(c,[uid]);
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       const study = await this.noteScope(tx, uid, c, false);
@@ -505,6 +529,7 @@ export class PacsService implements OnModuleInit {
       throw new BadRequestException('메모·수정 사유·기준 버전을 확인하세요');
     if (/[\uD800-\uDFFF]/u.test(body.text) || /[\uD800-\uDFFF]/u.test(body.reason))
       throw new BadRequestException('잘못된 문자 인코딩입니다');
+    await this.studyAccess.prepare(c,[uid]);
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
       await this.noteScope(tx, uid, c, true);
@@ -533,8 +558,9 @@ export class PacsService implements OnModuleInit {
    */
   async listStudies(c: Caller, query?: any) {
     const me = inst(c);
-    const owner = [me, c.sub, c.actor], page = studyPageQuery(query, owner);
-    const qido = page ? await this.orthanc.studyIdentities() : await this.orthanc.studies();
+    const access=await this.studyAccess.snapshot(c);
+    const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(query, owner);
+    const qido = page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access)) : await this.orthanc.studies();
 
     const states = page ? await this.prisma.studyState.findMany({
       select: { uid:true, institutionId:true, teleInstitutionId:true },
@@ -573,7 +599,7 @@ export class PacsService implements OnModuleInit {
 
     const window = studyPageSlice(qido.filter(st => {
       const state = byUid.get(OrthancService.tag(st, '0020000D'));
-      return state && this.visible(state, me);
+      return state && this.visible(state, me) && this.studyAccess.matches(access,OrthancService.tag(st,'0020000D'),st);
     }), st => OrthancService.tag(st, '0020000D'), page, owner);
     const pageUids = window.rows.map(st => OrthancService.tag(st, '0020000D'));
     const changedAccess = (rows: any[]) => rows.length !== pageUids.length || rows.some(state => !this.visible(state, me)
@@ -640,6 +666,7 @@ export class PacsService implements OnModuleInit {
     const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } },
       select: { uid:true, institutionId:true, teleInstitutionId:true, rs:true, preDoc:true, preReviewer:true } });
     if (changedAccess(current)) throw accessConflict();
+    await this.studyAccess.unchanged(c,access);
     return { studies: out, serverTime: new Date().toISOString(), ...(page ? { pagination: window.pagination } : {}) };
   }
 
@@ -649,12 +676,16 @@ export class PacsService implements OnModuleInit {
     const omitStates = query?.states === 'omit';
     if (query && (Object.keys(query).some(key => key !== 'states') || (Object.keys(query).length && !omitStates)))
       throw new BadRequestException('초기 목록 요청 형식이 잘못되었습니다');
-    const [states, orders] = await Promise.all([
+    const access=await this.studyAccess.snapshot(c);
+    const [stateRows, orderRows] = await Promise.all([
       omitStates ? Promise.resolve([]) : this.prisma.studyState.findMany({
         where: { OR: [{ institutionId: me }, { teleInstitutionId: me }] },
       }),
       this.prisma.order.findMany({ where: { institutionId: me }, orderBy: { sched: 'asc' } }),
     ]);
+    const permitted=await this.studyAccess.allowed(c,[...stateRows.map(s=>s.uid),...orderRows.flatMap(o=>o.studyUid?[o.studyUid]:[])]);
+    const states=stateRows.filter(s=>permitted.has(s.uid));
+    const orders=orderRows.filter(o=>o.studyUid?permitted.has(o.studyUid):!access.policy.restricted);
     const reports = omitStates ? [] : await this.prisma.report.findMany({
       where: { uid: { in: states.map(s => s.uid) } },
     });
@@ -663,6 +694,7 @@ export class PacsService implements OnModuleInit {
     // 필터·상용구를 계정에 붙인 것과 같은 이유다 (§6-A-4).
     const drafts = omitStates ? [] : await this.prisma.reportDraft.findMany({ where: { author: c.actor } });
     const draftByUid = Object.fromEntries(drafts.map(d => [d.uid, d]));
+    await this.studyAccess.unchanged(c,access);
     const prefs = await this.prefs(c);   // 필터·상용구도 첫 요청에 함께 (왕복을 늘리지 않는다)
     return {
       ...(omitStates ? { statesOmitted:true } : {}),
@@ -1257,6 +1289,7 @@ export class PacsService implements OnModuleInit {
 
   /** 검사 상태 부분 수정 (RS 토글, Verify, Switch EM/ReqHosp, TS 전이 …) */
   async patchState(uid: string, body: any, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     const me = inst(c);
 
     /**
@@ -1271,7 +1304,7 @@ export class PacsService implements OnModuleInit {
     // 무엇을 바꾸려 하는가에 따라 필요한 권한이 다르다
     if (TECHNICIAN_FIELDS.some(k => body[k] !== undefined)) need(c.roles, 'technician', '검사 정보 변경');
 
-    const prev = await this.gate(uid, c);
+    const prev = await this.gate(uid,c,tx);
     // 쓰기 경로는 행을 만들지 않는다. 생성은 DICOM 기관명을 검증하는 listStudies 한 곳뿐이다.
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
 
@@ -1346,10 +1379,11 @@ export class PacsService implements OnModuleInit {
         throw new BadRequestException(`판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: ${rs})`);
     }
 
-    const saved = await this.prisma.studyState.update({ where: { uid }, data });
-    await this.audit(c.actor, 'state.patch', uid, { ...data, by: me });
-    const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(saved, r, c.actor, await this.myDraft(uid, c.actor));
+    const saved = await tx.studyState.update({ where: { uid }, data });
+    await audit(c.actor, 'state.patch', uid, { ...data, by: me });
+    const r = await tx.report.findUnique({ where: { uid } });
+    return toClient(saved, r, c.actor, await this.myDraft(uid,c.actor,tx));
+    });
   }
 
   /**
@@ -1368,8 +1402,9 @@ export class PacsService implements OnModuleInit {
    * 물어볼 수 있는 자리다. 낙관적 락은 `commitReport` 한 곳에만 있으면 된다.
    */
   async putReport(uid: string, body: any, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'radiologist', '판독문 저장');
-    const prev = await this.gate(uid, c);
+    const prev = await this.gate(uid,c,tx);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
       throw new ConflictException('촬영 중(미확인) 검사입니다 — 기사 확인(Verify) 뒤 판독할 수 있습니다');
     const heldByOther = holdAlive(prev) && prev.holder !== c.actor ? prev.holder : null;
@@ -1393,21 +1428,22 @@ export class PacsService implements OnModuleInit {
      * "초안이 없다"와 "초안이 비어 있다"는 화면에서 같은 뜻이어야 한다.
      */
     if (empty) {
-      await this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } });
-      await this.audit(c.actor, 'report.draft.clear', uid, {});
+      await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
+      await audit(c.actor, 'report.draft.clear', uid, {});
       return { uid, author: c.actor, cleared: true };
     }
 
-    const saved = await this.prisma.reportDraft.upsert({
+    const saved = await tx.reportDraft.upsert({
       where: { uid_author: { uid, author: c.actor } },
       create: { uid, author: c.actor, ...content, baseVersion: body.baseVersion ?? 0 },
       update: { ...content, baseVersion: body.baseVersion ?? 0 },
     });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
-    await this.audit(c.actor, 'report.draft', uid, {
+    await audit(c.actor, 'report.draft', uid, {
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
     });
     return saved;
+    });
   }
 
   /**
@@ -1416,13 +1452,15 @@ export class PacsService implements OnModuleInit {
    * 내 초안만 지운다. 남의 초안은 애초에 보이지도 않는다.
    */
   async discardDraft(uid: string, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'radiologist', '판독문 저장');
-    await this.gate(uid, c);
-    const r = await this.prisma.reportDraft.deleteMany({ where: { uid, author: c.actor } });
-    if (r.count) await this.audit(c.actor, 'report.draft.discard', uid, {});
-    const s = await this.prisma.studyState.findUnique({ where: { uid } });
-    const rep = await this.prisma.report.findUnique({ where: { uid } });
+    await this.gate(uid,c,tx);
+    const r = await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
+    if (r.count) await audit(c.actor, 'report.draft.discard', uid, {});
+    const s = await tx.studyState.findUnique({ where: { uid } });
+    const rep = await tx.report.findUnique({ where: { uid } });
     return toClient(s, rep, c.actor, null);
+    });
   }
 
   /**
@@ -1443,6 +1481,7 @@ export class PacsService implements OnModuleInit {
     await this.gate(uid, c);
 
     const run = () => this.prisma.$transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
       await tx.$queryRaw`
         SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const drafts = await tx.$queryRaw<any[]>`
@@ -1645,6 +1684,7 @@ export class PacsService implements OnModuleInit {
     let results: [any, number];
     try {
       results = await this.prisma.$transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
         // 첫 확정에는 아직 Report 행이 없어 FOR UPDATE만으로 잠글 수 없다. B 적용 후
         // 항상 존재하는 StudyState를 먼저 잠가 첫 판부터 같은 uid의 확정을 직렬화한다.
         await tx.$queryRaw`
@@ -1727,8 +1767,10 @@ export class PacsService implements OnModuleInit {
    */
   async hold(uid: string, c: Caller) {
     need(c.roles, 'radiologist', '판독문 점유');
+    await this.studyAccess.prepare(c,[uid]);
     return this.prisma.$transaction(async tx => {
       await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      await this.studyAccess.require(c,[uid],tx);
       const rows=await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid=${uid} FOR UPDATE`;
       const prev=rows[0];
       if(!prev||!this.visible(prev,inst(c)))throw new NotFoundException('검사를 찾을 수 없습니다');
@@ -1745,23 +1787,27 @@ export class PacsService implements OnModuleInit {
 
   /** 점유 해제 (검사를 옮기거나 판독을 확정할 때) */
   async release(uid: string, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'radiologist', '판독문 점유 해제');   // hold와 같은 역할 경계
-    const prev = await this.gate(uid, c);
+    const prev = await this.gate(uid,c,tx);
     if (!prev || prev.holder !== c.actor) return { ok: true };   // 내 것이 아니면 건드리지 않는다
-    await this.prisma.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    await tx.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
     return { ok: true };
+    });
   }
 
   async forceRelease(uid: string, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'admin', '판독 점유 강제 해제');
-    const prev = await this.gate(uid, c);
+    const prev = await this.gate(uid,c,tx);
     if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
-    await this.prisma.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
+    await tx.studyState.update({ where: { uid }, data: { holder: null, heldAt: null } });
     // 점유가 없었어도 관리자 조치의 호출 흔적은 남긴다.
-    await this.audit(c.actor, 'hold.force-release', uid, {
+    await audit(c.actor, 'hold.force-release', uid, {
       by: inst(c), holder: prev.holder ?? null, heldAt: prev.heldAt ?? null, alive: holdAlive(prev),
     });
     return { ok: true, released: prev.holder ?? null };
+    });
   }
 
   /** 판독문 이력 (최신순) */
@@ -1820,6 +1866,7 @@ export class PacsService implements OnModuleInit {
     let state;
     try {
       state = await this.prisma.$transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
         /**
          * 먼저 읽은 `matched` 값은 두 요청이 함께 U를 봐버릴 수 있다. 조건부 갱신은
          * "아직 U일 때만 내가 M으로 바꾼다"를 DB 한 문장으로 만들고, 행 잠금 뒤의
@@ -1865,9 +1912,10 @@ export class PacsService implements OnModuleInit {
 
   /** Unmatch (8.1.2.1.2): 검사·오더 양쪽을 동시에 해제 */
   async unmatch(uid: string, c: Caller) {
+    return this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'technician', '매칭 해제');
     const me = inst(c);
-    const prev = await this.gate(uid, c);
+    const prev = await this.gate(uid,c,tx);
     if (!prev || prev.matched !== 'M') throw new BadRequestException('매칭된 검사가 아닙니다');
     // Match와 같은 규칙을 해제에도 건다. 승인 뒤 환자·오더 연결을 바꾸면 진술의 근거가 사라진다.
     if (prev.rs !== 'W')
@@ -1876,19 +1924,20 @@ export class PacsService implements OnModuleInit {
       throw new ForbiddenException('원격판독으로 받은 검사는 매칭을 풀 수 없습니다 (보유 기관의 일입니다)');
 
     const ops: any[] = [
-      this.prisma.studyState.update({
+      tx.studyState.update({
         where: { uid }, data: { matched: 'U', orderOid: null, ov: null },
       }),
     ];
     if (prev.orderOid)
-      ops.push(this.prisma.order.update({
+      ops.push(tx.order.update({
         where: { oid: prev.orderOid }, data: { matched: 'U', studyUid: null },
       }));
 
-    const [state] = await this.prisma.$transaction(ops);
-    await this.audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
-    const r = await this.prisma.report.findUnique({ where: { uid } });
-    return toClient(state, r, c.actor, await this.myDraft(uid, c.actor));
+    const [state] = await Promise.all(ops);
+    await audit(c.actor, 'unmatch', uid, { oid: prev.orderOid, by: me });
+    const r = await tx.report.findUnique({ where: { uid } });
+    return toClient(state, r, c.actor, await this.myDraft(uid,c.actor,tx));
+    });
   }
 
   /** 검사 상태 행 삭제 (장비 수신 시뮬로 만든 가짜 검사 정리용) */
@@ -1897,6 +1946,7 @@ export class PacsService implements OnModuleInit {
     const me = inst(c);
     await this.gate(uid, c);
     return this.prisma.$transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
     await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
     await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
     const parents = await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
@@ -1963,7 +2013,7 @@ export class PacsService implements OnModuleInit {
       select: { uid: true },
     });
     return this.prisma.auditLog.findMany({
-      where: { target: { in: mine.map(s => s.uid) } },
+      where: { target: { in: [...await this.studyAccess.allowed(c,mine.map(s=>s.uid))] } },
       orderBy: { at: 'desc' },
       take: Math.min(take, 500),
     });

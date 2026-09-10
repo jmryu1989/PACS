@@ -580,6 +580,7 @@
     <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
     <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
     <button class="chip" id="consultations-open" type="button" hidden disabled>Consultations</button>
+    <button class="chip" id="study-access-open" type="button" disabled>Study Access</button>
     <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
     <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
     <details id="workspace-server-menu" style="position:relative">
@@ -938,6 +939,7 @@
   <script src="related-parts.js"></script>
   <script src="study-priority.js"></script>
   <script src="worklist-alerts.js"></script>
+  <script src="study-access-status.js"></script>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
@@ -1785,7 +1787,7 @@
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
         try { render(); refreshRight(); worklistStartup?.afterList(); }
         catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
-        return;
+        return true;
       } catch (e) {
         if (loadSequence !== listLoadSequence) return;
         if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
@@ -5109,6 +5111,7 @@
         owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
         changed:()=>startPolling()});
       worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},refresh:()=>load(),available:()=>serverMode&&!offline});
+      KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.

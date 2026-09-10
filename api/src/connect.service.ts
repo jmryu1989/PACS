@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ForbiddenException, NotFoundException, ConflictException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -38,12 +39,12 @@ function paged(rows: any[], take: number) { return { items: rows.slice(0, take),
 
 @Injectable()
 export class ConnectService {
-  constructor(private prisma: PrismaService, private orthanc: OrthancService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
 
   private async transaction<T>(c: Caller, work: (tx: Prisma.TransactionClient) => Promise<T>, write = true): Promise<T> {
     try {
       return await this.prisma.$transaction(async tx => {
-        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+        await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx);
         await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
         // Evidence changes and opens for one sender share a lock, so a revoked
         // basis/agreement cannot be read just before a concurrent request commits.
@@ -63,7 +64,7 @@ export class ConnectService {
   private async owner(tx: Prisma.TransactionClient, studyUid: string, c: Caller, lock = true) {
     const rows = lock ? await tx.$queryRaw<any[]>`SELECT * FROM "StudyState" WHERE uid=${studyUid} FOR UPDATE`
       : [await tx.studyState.findUnique({ where: { uid: studyUid } })];
-    const s = rows[0]; if (!s || s.institutionId !== c.institution) missing(); return s;
+    const s = rows[0]; if (!s || s.institutionId !== c.institution) missing(); await this.studyAccess.require(c,[studyUid],tx); return s;
   }
   private async destination(tx: Prisma.TransactionClient, to: any, c: Caller) {
     if (typeof to !== 'string' || to.length > 100 || to === c.institution || !await tx.institution.findUnique({ where: { id: to } })) bad();
@@ -85,14 +86,14 @@ export class ConnectService {
         json_build_object('transferId',id,'basisId',"basisId",'agreementId',"agreementId",'before',before,'after','REVOKED')::text,${at} FROM changed`;
   }
 
-  async listBasis(studyUid: string, query: any, c: Caller) {
+  async listBasis(studyUid: string, query: any, c: Caller) { await this.studyAccess.prepare(c,[studyUid]);
     member(c, 'admin'); uid(studyUid); const p = page(query);
     return this.transaction(c, async tx => {
       await this.owner(tx, studyUid, c, false);
       return paged(await tx.transferBasis.findMany({ where: { studyUid, institutionId: c.institution, id: p.cursor ? { gt: p.cursor } : undefined }, orderBy: { id: 'asc' }, take: p.take + 1 }), p.take);
     }, false);
   }
-  async recordBasis(studyUid: string, body: any, c: Caller) {
+  async recordBasis(studyUid: string, body: any, c: Caller) { await this.studyAccess.prepare(c,[studyUid]);
     member(c, 'admin'); uid(studyUid); fields(body, ['kind', 'reference', 'obtainedAt', 'expiresAt']);
     if (!['PATIENT_CONSENT', 'LEGAL_BASIS'].includes(body.kind)) bad();
     const reference = text(body.reference), p = period(body.obtainedAt, body.expiresAt); if (p.from.getTime() > Date.now()) bad();
@@ -102,7 +103,7 @@ export class ConnectService {
       await this.audit(tx, c, 'basis.record', studyUid, { basisId: row.id, kind: row.kind }, at); return row;
     });
   }
-  async revokeBasis(studyUid: string, id: string, body: any, c: Caller) {
+  async revokeBasis(studyUid: string, id: string, body: any, c: Caller) { await this.studyAccess.prepare(c,[studyUid]);
     member(c, 'admin'); uid(studyUid); id = uuid(id); fields(body, ['reason']); const reason = text(body.reason);
     return this.transaction(c, async tx => {
       await this.owner(tx, studyUid, c);
@@ -137,7 +138,7 @@ export class ConnectService {
       await this.audit(tx, c, 'agreement.terminate', id, { agreementId: id, before: 'active', after: 'terminated' }, at); return row;
     });
   }
-  async openTransfer(studyUid: string, body: any, c: Caller) {
+  async openTransfer(studyUid: string, body: any, c: Caller) { await this.studyAccess.prepare(c,[studyUid]);
     member(c, 'technician'); uid(studyUid); fields(body, ['to', 'basisId']);
     // Avoid an Orthanc query for foreign or nonexistent studies; recheck under the
     // parent lock after the bounded source read, before granting even an OPEN row.
@@ -170,13 +171,16 @@ export class ConnectService {
   }
   async listOutgoing(query: any, c: Caller) {
     member(c); const p = page(query, true), now = new Date();
-    const rows = await this.prisma.transfer.findMany({ where: { fromInstitutionId: c.institution, id: p.cursor ? { gt: p.cursor } : undefined }, orderBy: { id: 'asc' }, take: p.take + 1 });
+    const policy=await this.studyAccess.snapshot(c);
+    const scope=policy.policy.restricted?[...await this.studyAccess.allowed(c,(await this.prisma.studyState.findMany({where:{institutionId:c.institution},select:{uid:true}})).map(s=>s.uid))]:undefined;
+    const rows = await this.prisma.transfer.findMany({ where: { studyUid:scope?{in:scope}:undefined, fromInstitutionId: c.institution, id: p.cursor ? { gt: p.cursor } : undefined }, orderBy: { id: 'asc' }, take: p.take + 1 });
     return paged(rows.map(row => ({ ...row, status: row.status === 'OPEN' && row.expiresAt <= now ? 'EXPIRED' : row.status })), p.take);
   }
-  async revokeTransfer(id: string, body: any, c: Caller) {
+  async revokeTransfer(id: string, body: any, c: Caller) { await this.studyAccess.prepare(c,undefined);
     member(c, 'technician'); id = uuid(id); fields(body, ['reason']); const reason = text(body.reason);
     return this.transaction(c, async tx => {
       const before = await tx.transfer.findUnique({ where: { id } }); if (!before || before.fromInstitutionId !== c.institution) missing();
+      await this.studyAccess.require(c,[before.studyUid],tx);
       if (!['OPEN', 'ACCEPTED'].includes(before.status)) conflict('TRANSFER_NOT_OPEN'); const at = new Date();
       const row = await tx.transfer.update({ where: { id }, data: { status: 'REVOKED', decidedAt: at, decidedBy: c.actor, decisionReason: reason } });
       await this.audit(tx, c, 'transfer.revoke', row.studyUid, { transferId: id, basisId: row.basisId, agreementId: row.agreementId, before: before.status, after: 'REVOKED' }, at); return row;

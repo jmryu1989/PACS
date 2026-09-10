@@ -177,6 +177,7 @@
   </dialog>
 
   <script src="auth.js"></script>
+  <script src="study-access-admin.js"></script>
   <script>
     (() => {
       const API = `${location.origin}/api`;
@@ -341,6 +342,7 @@
           actions.append(user.enabled
             ? action("정지", () => mutate(user, { enabled: false }), "danger")
             : action("활성", () => mutate(user, { enabled: true })));
+          if(user.enabled && user.institution===KinAuth.session()?.institution && user.approvalState==="APPROVED")actions.append(action("Study Access",()=>KinStudyAccessAdmin.open(user)));
           row.append(actions);
           body.append(row);
         });

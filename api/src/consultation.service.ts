@@ -1,3 +1,4 @@
+import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { PrismaService } from './prisma.service';
@@ -12,7 +13,7 @@ const conflict = () => new ConflictException('자문 의뢰가 변경되었습�
 
 @Injectable()
 export class ConsultationService {
-  constructor(private prisma:PrismaService, private keycloak:KeycloakService) {}
+  constructor(private prisma:PrismaService, private keycloak:KeycloakService, private studyAccess:StudyAccessService) {}
   private member(c:Caller) {
     if (c.kind !== 'member' || !c.roles.some(r=>['admin','radiologist'].includes(r))
       || ![c.institution,c.sub,c.actor].every(v=>typeof v==='string' && v.length>0 && v.length<=256)) {
@@ -29,9 +30,9 @@ export class ConsultationService {
       .filter(u=>this.eligible(u,c)).map(u=>({sub:u.id,actor:u.email||u.username,
         name:([u.lastName,u.firstName].filter(Boolean).join(' ')||u.username).slice(0,256)}))};
   }
-  private async run<T>(fn:(tx:any)=>Promise<T>):Promise<T> {
+  private async run<T>(c:Caller,fn:(tx:any)=>Promise<T>):Promise<T> {
     try { return await this.prisma.$transaction(async tx=>{
-      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; return fn(tx);
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`; await this.studyAccess.snapshot(c,tx); return fn(tx);
     },{maxWait:4000,timeout:8000}); }
     catch(e:any) {
       if (e?.code==='P2002') throw conflict();
@@ -46,7 +47,7 @@ export class ConsultationService {
     const rows = lock ? await tx.$queryRaw`SELECT uid,"institutionId" FROM "StudyState" WHERE uid=${uid} FOR UPDATE`
       : await tx.$queryRaw`SELECT uid,"institutionId" FROM "StudyState" WHERE uid=${uid}`;
     if (!rows[0] || rows[0].institutionId!==c.institution) throw new NotFoundException('검사를 찾을 수 없습니다');
-    return rows[0];
+    await this.studyAccess.require(c,[uid],tx===this.prisma?undefined:tx); return rows[0];
   }
   private access(row:any,c:Caller) {
     if (!row || row.institutionId!==c.institution || !c.roles.includes('admin') && row.requesterSub!==c.sub && row.recipientSub!==c.sub) {
@@ -57,9 +58,9 @@ export class ConsultationService {
     const {creationFingerprint,lastFingerprint,lastRequest,...item}=row;
     return {owner:[c.institution,c.sub],item};
   }
-  async read(id:string,c:Caller) {
+  async read(id:string,c:Caller) { await this.studyAccess.prepare(c);
     this.member(c); if (!uuid(id)) throw new NotFoundException('자문 의뢰를 찾을 수 없습니다');
-    return this.run(async tx=>{
+    return this.run(c,async tx=>{
       const row=await tx.studyConsultation.findUnique({where:{id:id.toLowerCase()}});
       this.access(row,c); await this.study(tx,row.studyUid,c); return this.result(row,c);
     });
@@ -69,12 +70,14 @@ export class ConsultationService {
     if (!object(q) || Object.keys(q).some(k=>!['direction','cursor'].includes(k)) || !['received','sent'].includes(q.direction)) {
       throw new BadRequestException('자문 목록 구분을 확인하세요');
     }
+    const accessPolicy=await this.studyAccess.snapshot(c);
+    const scope=accessPolicy.policy.restricted?[...await this.studyAccess.allowed(c,(await this.prisma.studyState.findMany({where:{institutionId:c.institution},select:{uid:true}})).map(s=>s.uid))]:[];
     let cursor:any=null;
     if (q.cursor !== undefined) {
       try {
         if (typeof q.cursor!=='string' || q.cursor.length>256 || !/^[A-Za-z0-9_-]+$/.test(q.cursor)) throw Error();
         cursor=JSON.parse(Buffer.from(q.cursor,'base64url').toString('utf8'));
-        if (!object(cursor) || Object.keys(cursor).sort().join()!=='at,id' || !uuid(cursor.id)
+        if (!object(cursor) || Object.keys(cursor).sort().join()!=='at,id,r' || cursor.r!==accessPolicy.revision || !uuid(cursor.id)
           || typeof cursor.at!=='string' || new Date(cursor.at).toISOString()!==cursor.at) throw Error();
       } catch (_) { throw new BadRequestException('자문 목록 페이지를 확인하세요'); }
     }
@@ -83,13 +86,13 @@ export class ConsultationService {
     const beforeId=cursor?.id??'ffffffff-ffff-ffff-ffff-ffffffffffff';
     const rows:any[]=await this.prisma.$queryRaw`SELECT c.* FROM "StudyConsultation" c
       JOIN "StudyState" s ON s.uid=c."studyUid" AND s."institutionId"=c."institutionId"
-      WHERE c."institutionId"=${c.institution} AND
+      WHERE c."institutionId"=${c.institution} AND (NOT ${accessPolicy.policy.restricted} OR c."studyUid"=ANY(${scope}::text[])) AND
         ((${received} AND c."recipientSub"=${c.sub}) OR (NOT ${received} AND c."requesterSub"=${c.sub}))
         AND (c."createdAt",c.id)<((${before}::timestamptz AT TIME ZONE 'UTC'),${beforeId}::uuid)
       ORDER BY c."createdAt" DESC,c.id DESC LIMIT 51`;
     const items=rows.slice(0,50), last=items[items.length-1];
     return {owner:[c.institution,c.sub],direction:q.direction,items:items.map(row=>this.result(row,c).item),
-      nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id})).toString('base64url'):null};
+      nextCursor:rows.length>50?Buffer.from(JSON.stringify({at:last.createdAt.toISOString(),id:last.id,r:accessPolicy.revision})).toString('base64url'):null};
   }
   async create(uid:string,c:Caller,b:any) {
     this.member(c);
@@ -106,7 +109,7 @@ export class ConsultationService {
     }
     const recipient=await this.keycloak.getUser(recipientSub);
     if (!this.eligible(recipient,c) || recipient!.id!==recipientSub) throw new BadRequestException('본인을 제외한 같은 기관의 활성 판독의를 선택하세요');
-    return this.run(async tx=>{
+    return this.run(c,async tx=>{
       await this.study(tx,uid,c,true);
       const duplicate=await tx.studyConsultation.findUnique({where:{id}});
       if (duplicate) { this.access(duplicate,c); if(duplicate.creationFingerprint!==mark)throw conflict();return this.result(duplicate,c); }
@@ -122,7 +125,7 @@ export class ConsultationService {
       return this.result(row,c);
     });
   }
-  async change(id:string,c:Caller,b:any) {
+  async change(id:string,c:Caller,b:any) { await this.studyAccess.prepare(c);
     this.member(c);
     if (!uuid(id) || !object(b) || Object.keys(b).sort().join()!=='action,expectedOwner,note,requestId,revision'
       || !uuid(b.requestId) || !Number.isInteger(b.revision) || b.revision<1 || b.revision>=2147483647
@@ -132,7 +135,7 @@ export class ConsultationService {
     if (JSON.stringify(b.expectedOwner)!==JSON.stringify([c.institution,c.sub])) throw conflict();
     id=id.toLowerCase(); const requestId=b.requestId.toLowerCase();
     const mark=fingerprint({id,institution:c.institution,subject:c.sub,revision:b.revision,action:b.action,note:b.note});
-    return this.run(async tx=>{
+    return this.run(c,async tx=>{
       const first=await tx.studyConsultation.findUnique({where:{id}});this.access(first,c);
       await this.study(tx,first.studyUid,c,true);
       const row=await tx.studyConsultation.findUnique({where:{id}});this.access(row,c);
