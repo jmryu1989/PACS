@@ -22,7 +22,7 @@ window.KinReadingAppearance = function (options) {
     Object.keys(v).length===4&&['list','current','prior'].every(k=>sizes.includes(v[k]))?{version:1,list:v.list,current:v.current,prior:v.prior}:null;
   let value=defaults(),ended=false,storage,channel,generation=0;
   const dockKey=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null,normalizeDock=window.KinViewerWorkspaceDock.normalize;
-  let dockValue={version:1,placement:'bottom',panel:-1};
+  let dockValue={version:2,placement:'bottom',panel:-1,autoHide:false};
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
     #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,12px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
@@ -78,6 +78,8 @@ window.KinReadingAppearance = function (options) {
     for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
     select.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,[name]:name==='panel'?Number(select.value):select.value});};
   }
+  const autoLabel=element('label','도구 패널 자동 숨김 ',dockSection),autoInput=element('input','',autoLabel);autoInput.type='checkbox';autoInput.id='reading-dock-autohide';dockFields.autoHide=autoInput;
+  autoInput.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,autoHide:autoInput.checked});};
   const dockStatus=element('p','',dockSection);dockStatus.id='reading-dock-status';dockStatus.setAttribute('role','status');
   const viewer=window.KinViewerIdentity;let viewerValue=viewer.read(initialOwner);
   const viewerFields={},viewerSection=element('fieldset','',dialog);element('legend','영상 식별 표시',viewerSection);
@@ -96,9 +98,9 @@ window.KinReadingAppearance = function (options) {
   function setViewer(next){const clean=viewer.normalize(next);if(!live()||!clean)return false;viewerValue=clean;generation++;showViewer();const saved=viewer.publish(initialOwner,clean);viewerStatus.textContent=saved?'영상 표시를 기억했습니다 · 이 브라우저':'저장소를 사용할 수 없어 현재 화면에만 적용합니다.';return true;}
   function changeViewer(role,field,value){if(!live()){end();return;}setViewer({...viewerValue,[role]:{...viewerValue[role],[field]:value}});}
   const stopViewer=viewer.subscribe(initialOwner,next=>{if(!live())return;if(JSON.stringify(viewerValue)!==JSON.stringify(next)){viewerValue=next;generation++;showViewer();viewerStatus.textContent='같은 계정의 영상 표시 변경을 적용했습니다.';}});showViewer();
-  function showDock(){dockFields.placement.value=dockValue.placement;dockFields.panel.value=String(dockValue.panel);}
+  function showDock(){dockFields.placement.value=dockValue.placement;dockFields.panel.value=String(dockValue.panel);dockFields.autoHide.checked=!!dockValue.autoHide;}
   function setDock(next){
-    const clean=normalizeDock(next);if(!live()||!clean)return false;
+    let clean=normalizeDock(next);if(!live()||!clean)return false;clean={...clean,version:2,autoHide:clean.autoHide??dockValue.autoHide};
     const dock=options.getDock?.();
     if(dock){if(!dock.applyPreference(clean))return false;generation++;dockValue=clean;showDock();dockStatus.textContent=dock.querySelector('#kin-dock-preference-status').textContent;return true;}
     dockValue=clean;generation++;showDock();
@@ -106,7 +108,7 @@ window.KinReadingAppearance = function (options) {
     catch(_){dockStatus.textContent='저장소를 사용할 수 없어 설정을 이 창에만 유지합니다.';}
     return true;
   }
-  function dockChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=normalizeDock(e.detail.value);if(!clean)return;if(e.type==='kin-dock-preference-changed'||JSON.stringify(clean)!==JSON.stringify(dockValue))generation++;dockValue=clean;showDock();}
+  function dockChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;let clean=normalizeDock(e.detail.value);if(!clean)return;clean={...clean,version:2,autoHide:clean.autoHide??dockValue.autoHide};if(e.type==='kin-dock-preference-changed'||JSON.stringify(clean)!==JSON.stringify(dockValue))generation++;dockValue=clean;showDock();}
   window.addEventListener('kin-dock-preference-changed',dockChanged);window.addEventListener('kin-dock-preference-mounted',dockChanged);
   const status=element('p','',dialog);status.id='reading-appearance-status';status.setAttribute('role','status');
   const account=element('section','계정 저장 기능을 연결하지 못했습니다. 현재 브라우저 설정은 사용할 수 있습니다.',dialog);
@@ -176,21 +178,21 @@ window.KinReadingAppearance = function (options) {
     if(raw!==null){const clean=raw.length<=256?normalizeColors(JSON.parse(raw)):null;if(clean){colorValue=clean;colorStatus.textContent='기억한 글자색을 불러왔습니다.';}else colorStatus.textContent='저장된 글자색 오류 · 기본 글자색을 적용했습니다.';}
     else colorStatus.textContent='기본 글자색입니다.';
   }catch(_){colorStatus.textContent='저장된 글자색을 읽지 못해 기본 글자색을 적용했습니다.';}
-  try{const raw=dockKey?storage.getItem(dockKey):null;if(raw!==null){const clean=raw.length<=128?normalizeDock(JSON.parse(raw)):null;if(clean)dockValue=clean;else dockStatus.textContent='저장된 도구 설정 오류 · 기본값';}}catch(_){dockStatus.textContent='도구 설정을 읽지 못해 기본값을 표시합니다.';}
+  try{const raw=dockKey?storage.getItem(dockKey):null;if(raw!==null){const clean=raw.length<=128?normalizeDock(JSON.parse(raw)):null;if(clean)dockValue={...clean,version:2,autoHide:clean.autoHide??false};else dockStatus.textContent='저장된 도구 설정 오류 · 기본값';}}catch(_){dockStatus.textContent='도구 설정을 읽지 못해 기본값을 표시합니다.';}
   apply(hasText);applyFonts(hasFont);applyColors(hasColor);showDock();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version===4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
-    const dock=v.version>=3?normalizeDock(v.dock):null,view=v.version===4?viewer.normalize(v.viewer):null;
-    return clean&&f&&c&&(v.version===2||dock)&&(v.version!==4||view)?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{})}:null;
+    const dock=v.version>=3?normalizeDock(v.dock):null,view=v.version>=4?viewer.normalize(v.viewer):null;
+    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<3||dock?.version===(v.version===5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{})}:null;
   };
-  return {host:account,read:()=>({...value,version:4,fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
+  return {host:account,read:()=>({...value,version:5,fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
       if(clean.version>=3&&!setDock(clean.dock))return false;
-      if(clean.version===4&&!setViewer(clean.viewer))return false;
+      if(clean.version>=4&&!setViewer(clean.viewer))return false;
       value={version:1,list:clean.list,current:clean.current,prior:clean.prior};
       if(clean.version>=2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}
       apply();save();return true;}};

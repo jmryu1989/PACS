@@ -87,4 +87,19 @@ class ReadingAppearanceLive(unittest.TestCase):
  def test_10_viewer_upgrade_from_v3(self):
   old=self.dock_body();self.assertEqual(self.write(old).status,200);self.assertEqual(self.get()['sizes']['version'],3)
   new=self.viewer_body();self.assertEqual(new['revision'],1);r=self.write(new);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],new['sizes']);self.assertEqual(self.get(),r.body)
+ def auto_body(self):
+  b=self.viewer_body();b['sizes'].update(version=5,dock=dict(version=2,placement='top',panel=1,autoHide=True));return b
+ def test_11_autohide_roundtrip_upgrade_and_old_writer_refusal(self):
+  old=self.viewer_body();self.assertEqual(self.write(old).status,200);b=self.auto_body();r=self.write(b);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],b['sizes']);saved=self.get()
+  old['revision']=saved['revision'];self.assertEqual(self.write(old).status,409);self.assertEqual(self.get(),saved)
+  self.assertEqual(self.write(b).status,409);self.assertEqual(self.write(b,'doctor2').status,409);self.assertIsNone(self.get('doctor2')['sizes'])
+  b['revision']=saved['revision'];b['sizes']['dock']['autoHide']=False;self.assertEqual(self.write(b).status,200);self.assertEqual(self.get()['sizes'],b['sizes'])
+ def test_12_invalid_autohide_is_atomic(self):
+  import copy
+  b=self.auto_body();self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=saved['revision'];b['sizes']['current']=12
+  for bad in [1,0,'true',None,[],{}]:
+   invalid=copy.deepcopy(b);invalid['sizes']['dock']['autoHide']=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+  for bad in [dict(version=1,placement='top',panel=1),dict(version=2,placement='top',panel=1),dict(version=2,placement='top',panel=True,autoHide=True),dict(version=2,placement='top',panel=1,autoHide=True,patient='forbidden')]:
+   invalid=copy.deepcopy(b);invalid['sizes']['dock']=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+  invalid=copy.deepcopy(b);invalid['sizes']['version']=4;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
 if __name__=='__main__':unittest.main(verbosity=2)

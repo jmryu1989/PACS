@@ -27,7 +27,7 @@ class DockPreferencesE2E(ReadingWorkspaceE2E):
 
  def test_dock_pref_02_reload_owner_isolation_reset_corrupt(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);f.get_by_role('button',name='측정·주석',exact=True).click();f.locator('#kin-dock-placement').select_option('top');saved=self.stored(p);self.assertEqual(len(saved),1)
-  self.assertEqual(json.loads(next(iter(saved.values()))),dict(version=1,placement='top',panel=0))
+  self.assertEqual(json.loads(next(iter(saved.values()))),dict(version=2,placement='top',panel=0,autoHide=False))
   f.evaluate('(key)=>window.dispatchEvent(new StorageEvent("storage",{key}))',next(iter(saved)));expect(f.locator('#kin-dock-preference-status')).to_contain_text('현재 창 유지');expect(f.locator('#kin-dock-placement')).to_have_value('top')
   p.reload();f=self.workspace(p,a);expect(f.locator('#kin-dock-placement')).to_have_value('top');expect(f.get_by_role('button',name='측정·주석',exact=True)).to_have_attribute('aria-expanded','true');self.bounds(f,True)
   other=self.login('doctor2');other.evaluate('(v)=>{for(const [k,s] of Object.entries(v))localStorage.setItem(k,s)}',saved);g=self.workspace(other,a);expect(g.locator('#kin-dock-placement')).to_have_value('bottom')
