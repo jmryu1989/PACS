@@ -97,6 +97,18 @@ export class OrthancService {
     return { ...tags, _kinSourceDigest: info.UncompressedMD5.toLowerCase() };
   }
 
+  async viewerSeriesManifest(seriesUid: string, signal?: AbortSignal): Promise<string[]> {
+    const found = await this.viewerJson('/tools/lookup', seriesUid, signal);
+    const hits = Array.isArray(found) ? found.filter(x => x?.Type === 'Series') : [];
+    if (hits.length !== 1 || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(hits[0]?.ID || ''))
+      throw new BadRequestException('원본 시리즈가 없거나 중복입니다');
+    const series = await this.viewerJson('/series/' + hits[0].ID, undefined, signal);
+    if (series?.MainDicomTags?.SeriesInstanceUID !== seriesUid || !Array.isArray(series.Instances) || series.Instances.length < 2 || series.Instances.length > 256 ||
+        new Set(series.Instances).size !== series.Instances.length || series.Instances.some(id => typeof id !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(id)))
+      throw new BadRequestException('MPR 작업은 원본2~256프레임의 완전한 시리즈에서 저장할 수 있습니다');
+    return [...series.Instances].sort();
+  }
+
   private async srBytes(path: string, limit: number, body?: Buffer, accept = 'application/octet-stream', signal?: AbortSignal): Promise<Buffer> {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 5000);
     let reader: ReadableStreamDefaultReader<Uint8Array>;

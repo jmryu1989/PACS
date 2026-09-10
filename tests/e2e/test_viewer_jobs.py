@@ -205,6 +205,7 @@ class ViewerJobsE2E(DisplayControlsE2E):
   f=self.multiple('JOB-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);originals=self.originals();reports=self.report_rows(f)
   row=ViewerHistoryE2E.draw(self,p,'Job saved arrow');p.get_by_label('Job Title',exact=True).fill('네 화면과 표식')
   self.click_job(p,'Save New Job','미저장 표식');self.assertEqual(self.jobs(f),[])
+  ViewerHistoryE2E.open_measurement_tools(self,p)
   row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
   ViewerHistoryE2E.key(self,p,'Job key')
   points=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='ArrowAnnotate').data.handles.points")
@@ -215,8 +216,10 @@ class ViewerJobsE2E(DisplayControlsE2E):
   p.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='ArrowAnnotate')")
   self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='ArrowAnnotate').data.handles.points"),points)
   expect(p.locator('#kin-viewer-history')).to_contain_text('Job key');expect(p.locator('#kin-viewer-history')).to_contain_text('Job saved arrow')
+  ViewerHistoryE2E.open_measurement_tools(self,p)
   before=self.cells(p);row=p.locator('#kin-viewer-history section[data-kind=arrow]');row.get_by_role('button',name='Edit',exact=True).click();row.get_by_label('Annotation Text').fill('unsaved retained')
   self.click_job(p,'Restore Job','미저장 표식');self.assertEqual(self.cells(p),before);expect(row.get_by_label('Annotation Text')).to_have_value('unsaved retained')
+  ViewerHistoryE2E.open_measurement_tools(self,p)
   row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('Saved r2')
   self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),reports)
 

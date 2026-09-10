@@ -1809,7 +1809,7 @@ function kinCreateViewerJobs() {
       script.onload = resolve;
       script.onerror = () => reject(new Error('비교 작업 화면을 불러오지 못했습니다.')); document.head.append(script);
     });
-    ready = load('viewer-jobs.js')
+    ready = load('viewer-volume-job.js').catch(() => {}).then(() => load('viewer-jobs.js'))
       .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel));
     ready.catch(() => {});
   }, onModeEnter() {

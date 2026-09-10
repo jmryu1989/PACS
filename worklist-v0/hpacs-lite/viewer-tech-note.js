@@ -187,10 +187,26 @@ window.kinCreateViewerToolbarPreferences=function(options){
   window.kinViewerToolbarPreferences=controller;notify('mounted');return controller;
 };
 
+function kinPrepareVolumeAverage(viewport,volume){
+  const mapper=viewport.getActors()[0].actor.getMapper();
+        // The pinned streaming texture omits vtk's range metadata. Without it,
+        // Average's shader leaves its scalar-range uniforms at zero (black CT).
+        const info=mapper.getScalarTexture?.()?.getVolumeInfo(),range=volume.voxelManager?.getRange?.();
+        if(!info||!Number.isFinite(info.scale?.[0])||info.scale[0]<=0||!Number.isFinite(info.offset?.[0])||!Array.isArray(range)||range.length!==2||range.some(n=>!Number.isFinite(n))||range[1]<range[0])throw Error('평균 투영의 픽셀 범위를 확인하지 못했습니다.');
+        if(!info.dataComputedScale?.length){
+          info.dataComputedScale=[Math.max(1,range[1]-range[0]),1,1,1];
+          info.dataComputedOffset=[range[0],0,0,0];
+        }
+        if(!Number.isFinite(info.dataComputedScale[0])||info.dataComputedScale[0]<=0||!Number.isFinite(info.dataComputedOffset?.[0]))throw Error('평균 투영의 픽셀 변환을 확인하지 못했습니다.');
+        // Include half-float rounding at the endpoints; this is an unfiltered mean.
+        const padding=Math.max(1,Math.abs(range[0]),Math.abs(range[1]))/512/info.dataComputedScale[0];
+        mapper.setIpScalarRange(-padding,1+padding);
+}
+
 function kinCreateVolumeProjection({services,selected,live,allowed=live,host}){
   const panel=document.createElement('section');panel.id='kin-volume-projection';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';
   panel.innerHTML='<strong>Volume Projection</strong><p class="target"></p><label>Mode <select aria-label="Projection Mode"><option value="0">MPR</option><option value="1">MIP</option><option value="2">MinIP</option><option value="3">Average</option></select></label> <label>Total Thickness (mm) <input aria-label="Total Thickness (mm)" type="number" min="0.2" max="1000" step="0.1" style="width:80px"></label> <button type="button">Apply to Active Plane</button><p role="status"></p><p></p>';
-  panel.lastElementChild.textContent='선택한 평면에만 적용합니다. 변경은 이 창에만 유지되며 저장된 비교 작업에는 포함되지 않습니다.';
+  panel.lastElementChild.textContent='선택한 평면에만 적용합니다. 3평면 MPR 표시는 Save New Job으로 저장한 뒤 다시 열 수 있습니다.';
   host.append(panel);
   const mode=panel.querySelector('select'),thickness=panel.querySelector('input'),apply=panel.querySelector('button'),status=panel.querySelector('[role=status]'),caption=panel.querySelector('.target');
   const names=['MPR','MIP','MinIP','Average'],labels=new Map();let ended=false,shown=null,propertyKey='';
@@ -258,20 +274,7 @@ function kinCreateVolumeProjection({services,selected,live,allowed=live,host}){
       const t=target(true);if(!t||key(t)!==shown)throw Error('선택한 평면이나 원본이 바뀌었습니다. 대상을 확인하고 다시 적용하세요.');
       const blend=Number(mode.value),total=blend===0?.2:Number(thickness.value);
       if(!names[blend]||!Number.isFinite(total)||total<.2||total>t.max)throw Error('두께를 0.2~'+Number(t.max.toFixed(1))+' mm 범위로 입력하세요.');
-      if(blend===3){
-        // The pinned streaming texture omits vtk's range metadata. Without it,
-        // Average's shader leaves its scalar-range uniforms at zero (black CT).
-        const info=t.mapper.getScalarTexture?.()?.getVolumeInfo(),range=t.volume.voxelManager?.getRange?.();
-        if(!info||!Number.isFinite(info.scale?.[0])||info.scale[0]<=0||!Number.isFinite(info.offset?.[0])||!Array.isArray(range)||range.length!==2||range.some(n=>!Number.isFinite(n))||range[1]<range[0])throw Error('평균 투영의 픽셀 범위를 확인하지 못했습니다.');
-        if(!info.dataComputedScale?.length){
-          info.dataComputedScale=[Math.max(1,range[1]-range[0]),1,1,1];
-          info.dataComputedOffset=[range[0],0,0,0];
-        }
-        if(!Number.isFinite(info.dataComputedScale[0])||info.dataComputedScale[0]<=0||!Number.isFinite(info.dataComputedOffset?.[0]))throw Error('평균 투영의 픽셀 변환을 확인하지 못했습니다.');
-        // Include half-float rounding at the endpoints; this is an unfiltered mean.
-        const padding=Math.max(1,Math.abs(range[0]),Math.abs(range[1]))/512/info.dataComputedScale[0];
-        t.mapper.setIpScalarRange(-padding,1+padding);
-      }
+      if(blend===3)kinPrepareVolumeAverage(t.v,t.volume);
       try{
         t.v.setBlendMode(blend);t.v.setSlabThickness(total/2);
         if(t.mapper.getBlendMode()!==blend||Math.abs(t.v.getSlabThickness()*2-total)>1e-6)throw Error('투영 표시를 확인하지 못했습니다. 현재 평면을 다시 확인하세요.');

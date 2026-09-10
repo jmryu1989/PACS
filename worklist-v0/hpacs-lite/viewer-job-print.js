@@ -109,6 +109,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       return { snapshot: checked.snapshot, transient: true, title: '현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
     };
     const job = await readJob(), identities = [], reports = [];
+    if(job.snapshot?.version===4)throw new Error('MPR 작업은 저장·복원을 지원합니다. 재구성 영상 출력은 아직 지원하지 않습니다.');
     const studies = job.snapshot.studies;
     if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || studies[0] !== item.uid || new Set(studies).size !== studies.length)
       throw new Error('출력 비교 검사 정보를 확인할 수 없습니다.');
