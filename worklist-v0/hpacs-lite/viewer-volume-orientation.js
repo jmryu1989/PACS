@@ -70,5 +70,6 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const guard=e=>{if(busy&&!panel.contains(e.target)){e.preventDefault();e.stopImmediatePropagation();}};
   for(const name of ['pointerdown','wheel','keydown'])document.addEventListener(name,guard,{capture:true,passive:false});
   const timer=setInterval(refresh,500);refresh();
-  return {dispose(){ended=true;clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  const crosshair=window.KinVolumeCrosshair&&window.kinCreateVolumeCrosshair?.({target,permitted,alive,host});
+  return {dispose(){ended=true;crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

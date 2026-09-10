@@ -45,9 +45,19 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     const active=views.findIndex(v=>v.viewportId===state.activeViewportId);if(active<0)throw Error('활성 MPR 평면을 선택한 뒤 저장하세요.');
     return JSON.parse(JSON.stringify({version:4,studies,rows,cols,active,volume:reference,cells}));
   }
+  function holdCrosshairReset(){
+    const group=window.cornerstoneTools?.ToolGroupManager?.getToolGroup('mpr'),tool=group?.getToolInstance('Crosshairs');
+    if(!tool||typeof tool.onResetCamera!=='function')return {release(){}};
+    const original=tool.onResetCamera;let held=true;
+    const guarded=function(...args){if(!held)return original.apply(this,args);};tool.onResetCamera=guarded;
+    return {group,tool,release(){held=false;if(tool.onResetCamera===guarded)tool.onResetCamera=original;}};
+  }
   async function apply(value,current) {
     if(JSON.stringify(value.studies)!==JSON.stringify(studies))throw Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
     const set=resolve(value),ids=value.cells.map(()=> 'kin-volume-job-'+crypto.randomUUID());
+    // Native reset callbacks reset every linked plane while OHIF replaces one
+    // viewport. Hold that propagation through both initialization and failure.
+    const crosshair=holdCrosshairReset();try{
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
       findOrCreateViewport:index=>({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:['axial','sagittal','coronal'][index],allowUnmatchedView:true}})});
     const loaded=[],deadline=Date.now()+60000;
@@ -80,20 +90,45 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     // saved physical camera is assigned. A loaded volume alone is insufficient.
     await rendered();
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');
+    const settled=async()=>{
+      let signature='',since=Date.now();
+      while(Date.now()<deadline){
+        if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');
+        const state=grid.getState(),ready=loaded.every(({v})=>cs.getCornerstoneViewport(v.id)===v&&state.viewports.get(v.id)?.isReady);
+        const next=JSON.stringify(loaded.map(({v})=>{const c=v.getCanvas(),camera=v.getCamera();delete camera.rotation;return [c.width,c.height,c.clientWidth,c.clientHeight,camera];}));
+        if(!ready||next!==signature){signature=next;since=Date.now();}else if(Date.now()-since>=600)return;
+        await new Promise(r=>setTimeout(r,50));
+      }
+      throw Error('MPR 화면 배치가 안정되지 않아 복원하지 못했습니다.');
+    };
+    let matched=false;
+    for(let attempt=0;attempt<3&&!matched;attempt++){
     for(let i=0;i<loaded.length;i++){
       const v=loaded[i].v,cell=value.cells[i];
       v.setCamera({flipHorizontal:cell.camera.flipHorizontal,flipVertical:cell.camera.flipVertical});
       const camera={...cell.camera};delete camera.flipHorizontal;delete camera.flipVertical;delete camera.rotation;v.setCamera(camera);v.render();
     }
     await rendered();
+    // A cached volume can become ready before delayed resize/presentation work.
+    // Reapply only after that work settles, retaining the strict camera oracle.
+    await settled();
+    if(crosshair.tool&&crosshair.group.getToolOptions('Crosshairs')?.mode!=='Disabled')crosshair.tool.computeToolCenter();
+    await rendered();matched=true;
     for(let i=0;i<loaded.length;i++){
       const actual=loaded[i].v.getCamera(),expected=value.cells[i].camera;
       for(const [key,want] of Object.entries(expected)){
+        // Native oblique rotation derives a sign from a nearly-zero dot product
+        // against initialViewUp (335 vs 25 for identical physical vectors).
+        // v4 orientation is verified by viewUp/normal, position and focalPoint.
+        if(key==='rotation')continue;
         const got=actual[key],same=Array.isArray(want)?Array.isArray(got)&&want.every((n,j)=>Math.abs(n-got[j])<1e-6):typeof want==='number'?Math.abs(want-got)<1e-6:want===got;
-        if(!same)throw Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+        if(!same)matched=false;
       }
     }
+    }
+    if(!matched)throw Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
+    }finally{crosshair.release();}
   }
   return {capture,resolve,apply};
 };
