@@ -943,6 +943,7 @@
   <script src="study-access-status.js"></script>
   <script src="worklist-selection.js"></script>
   <script src="worklist-image-preview.js"></script>
+  <script src="worklist-search.js"></script>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1598,7 +1599,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, imagePreview = null;
+    let columnPrefs = null, multiSelection = null, imagePreview = null, worklistSearch = null;
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     function renderHeads() {
@@ -1615,6 +1616,7 @@
     $("#filterrow").addEventListener("input", e => {
       const el = e.target.closest("[data-f]"); if (!el) return;
       fval[el.dataset.f] = el.value.trim();
+      worklistSearch?.change();
       render();
     });
 
@@ -1908,8 +1910,10 @@
     }
 
     let consultationFilter = null, consultationFilterSequence = 0;
+    const searchCriteria = () => ({mode,quick:$('#quick').value,days:quickDays,cols:JSON.parse(JSON.stringify(fval))});
     function filtered() {
-      const list = filteredFor({ mode, quick: $("#quick").value, days: quickDays, cols: fval });
+      const search = worklistSearch?.read(searchCriteria());
+      const list = search?.empty ? [] : filteredFor(search?.criteria || searchCriteria());
       const favorites = favoriteList ? favoriteList.filter(list) : list;
       const tagged = studyTagList ? studyTagList.filter(favorites) : favorites;
       return consultationFilter ? tagged.filter(s => consultationFilter.uids.has(s.uid)) : tagged;
@@ -1927,7 +1931,8 @@
     function render(revealUid) {
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
-      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir, favoriteList?.key(), studyTagList?.key(), consultationFilter?.revision ?? 0]);
+      const appliedSearch = worklistSearch?.read(searchCriteria());
+      const query = JSON.stringify([appliedSearch?.criteria || searchCriteria(), appliedSearch?.empty, sortKey, sortDir, favoriteList?.key(), studyTagList?.key(), consultationFilter?.revision ?? 0]);
       if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
       if (typeof revealUid === 'string') {
         const index = list.findIndex(s => s.uid === revealUid);
@@ -1953,6 +1958,7 @@
         || `<tr><td class="empty" colspan="${shown.length}">No records found</td></tr>`;
       columnPrefs?.decorate(mode);
       multiSelection?.sync();
+      worklistSearch?.show();
 
       const active = [];
       if (consultationFilter) {
@@ -1978,7 +1984,7 @@
       else if (compound?.rules.length) {
         active.push('복합 ' + KinCompoundFilter.describe(compound, cols));
       }
-      $("#filterlist").textContent = "Filter : " + (active.join(", ") || "-");
+      $("#filterlist").textContent = (appliedSearch?.pending ? "Draft Filter (not applied) : " : "Filter : ") + (active.join(", ") || "-");
 
       const n = (k, v) => list.filter(s => s[k] === v).length;
       if (mode === "Radiology") {
@@ -2012,6 +2018,7 @@
       // 양쪽에 다 있는 컬럼까지 풀리는 건 그냥 손해다.
       // 탭 전환은 화면 전환이지 상태 초기화가 아니다 (교훈 §6 — HPACS가 세 번 낸 버그).
       if (sortKey && !COLS[m].some(c => c.k === sortKey)) { sortKey = null; sortDir = 0; }
+      worklistSearch?.apply();
       renderHeads(); render(); renderOrders(); renderRelated();
       applyLayout();
     }
@@ -4330,13 +4337,17 @@
       list.style.height = clampPanel(e.clientY - box.top, 150, box.height - 136) + "px";
     });
 
-    $("#quick").addEventListener("input", render);
+    $("#quick").addEventListener("input", () => { worklistSearch?.change(); render(); });
+    for (const host of [$('#quick'),$('#filterrow')]) host.addEventListener('keydown',e=>{
+      if(e.key==='Enter'&&!e.isComposing){e.preventDefault();worklistSearch?.apply();}
+    });
     $("#quick-match").addEventListener("change", () => {
       try {
         const next = KinCompoundFilter.withQuickMode(fval[KinCompoundFilter.KEY], $("#quick-match").value, COLS[mode]);
         if (next) fval[KinCompoundFilter.KEY] = next; else delete fval[KinCompoundFilter.KEY];
         activeFilterName = null;
       } catch (error) { toast(error.message, 'err'); }
+      worklistSearch?.change();
       render();
     });
     $("#refresh").addEventListener("click", load);
@@ -4504,6 +4515,7 @@
       const okSort = f.sortKey && COLS[mode].some(c => c.k === f.sortKey);
       sortKey = okSort ? f.sortKey : null;
       sortDir = okSort ? (f.sortDir ?? 0) : 0;
+      worklistSearch?.apply();
       renderHeads(); render();
       return true;
     }
@@ -4619,13 +4631,14 @@
       Object.keys(fval).forEach(k => delete fval[k]);
       quickDays = -1;
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", x.dataset.days === "-1"));
+      worklistSearch?.clear();
       renderHeads(); render();
     });
 
     $("#qf").addEventListener("click", e => {
       const b = e.target.closest("button"); if (!b || !b.dataset.days) return;
       document.querySelectorAll("#qf button").forEach(x => x.classList.remove("on"));
-      b.classList.add("on"); quickDays = +b.dataset.days; render();
+      b.classList.add("on"); quickDays = +b.dataset.days; worklistSearch?.change(); render();
     });
 
     $("#heads").addEventListener("click", e => {
@@ -5123,6 +5136,7 @@
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior)});
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
+      worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
