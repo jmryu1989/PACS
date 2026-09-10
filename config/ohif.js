@@ -1671,8 +1671,11 @@ function kinCreateCine() {
     function record(v) {
       let r = records.get(v.id);
       if (!r || r.element !== v.element) {
-        if(r){clearInterval(r.volumeTimer);nativeStop.call(cine,r.element,{viewportId:v.id});}
+        const previous=r;
         r = { element: v.element, reverse: false, loop: true, ticket: 0, signature: signature(v), content:contentSignature(v) }; records.set(v.id, r);
+        // stopClip broadcasts synchronously. Publish the replacement first so
+        // its render callback cannot retire the same old viewport recursively.
+        if(previous){clearInterval(previous.volumeTimer);nativeStop.call(cine,previous.element,{viewportId:v.id});}
         const owns=()=>records.get(v.id)===r;
         listen(v.element, core.Enums.Events.VIEWPORT_NEW_IMAGE_SET, () => { if(!owns())return;r.signature = signature(v); halt(v.id); r.reverse = false; r.loop = true; render(); });
         if(v.type==='orthographic') {
