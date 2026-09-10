@@ -11,7 +11,7 @@ class EmbeddedPatientCopyE2E(ViewerTechNoteE2E):
  def opened(self,a):
   p=self.login();p.context.grant_permissions(['clipboard-read','clipboard-write'],origin=self.stack.proxy);f=self.workspace(p,a);expect(f.locator('#kin-viewer-copy-id')).to_be_enabled(timeout=45000);self.tools(f);self.active(f,a.uid);return p,f
  def menu(self,p,f,index=0):
-  b=f.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box();p.mouse.click(b['x']+b['width']*.5,b['y']+b['height']*.3,button='right');return f.locator('[data-cy=context-menu-item]').filter(has_text='환자 ID 복사 ·')
+  b=f.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box();p.mouse.click(b['x']+b['width']*.5,b['y']+b['height']*.3,button='right');return f.locator('[data-cy=context-menu-item]').filter(has_text='Copy Patient ID ·')
  def clipboard(self,f):return f.page.evaluate('()=>navigator.clipboard.readText()')
 
  def test_embedded_01_active_prior_context_keyboard_and_preserved_work(self):

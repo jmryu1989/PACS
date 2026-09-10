@@ -10,7 +10,7 @@ class ViewerPatientCopyE2E(ViewerTechNoteE2E):
  def popup(self,a):
   p=self.login();p.context.grant_permissions(['clipboard-read','clipboard-write'],origin=self.stack.proxy);self.workspace(p,a)
   with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
-  v=opened.value;canvas_ready(v,2);self.ready(v);self.active(v,a.uid);v.locator('#kin-viewer-layout').evaluate('(e)=>e.open=true')
+  v=opened.value;canvas_ready(v,2);self.ready(v);self.active(v,a.uid);self.tools(v)
   try:expect(v.locator('#kin-viewer-copy-id')).to_be_enabled()
   except Exception:
    sys.stdout.reconfigure(encoding='utf-8',errors='replace')

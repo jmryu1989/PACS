@@ -44,7 +44,7 @@ class NativeToolbarE2E(ViewerTechNoteE2E):
   v.keyboard.press('Control+Alt+9');expect(self.zoom(v)).to_be_focused();self.assertEqual(self.snapshot(v),before)
   v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_have_text(re.compile(r'판독문으로 돌아왔습니다\.|판독문 위치를 준비했습니다\. 목록 창을 선택하세요\.'));expect(p.locator('#findings')).to_have_value('KEEP POPUP NATIVE REPORT')
   v.evaluate("()=>{window.oldNativeFocus=kinViewerFocusNativeToolbar;window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()}")
-  self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"));self.assertFalse(v.evaluate('()=>oldNativeFocus()'));expect(self.zoom(v)).not_to_have_attribute('aria-label','확대·축소')
+  self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"));self.assertFalse(v.evaluate('()=>oldNativeFocus()'));expect(self.zoom(v)).not_to_have_attribute('aria-label','Zoom')
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");self.ready(v);v.locator('#kin-viewer-focus-9').click();expect(self.zoom(v)).to_be_focused();self.assertEqual(self.snapshot(v),before)
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-9')).to_be_disabled();self.assertFalse(v.evaluate("()=>typeof kinViewerFocusNativeToolbar==='function'"))
 

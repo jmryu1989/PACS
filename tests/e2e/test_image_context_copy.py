@@ -10,7 +10,7 @@ from test_viewer_tech_note import canvas_ready
 class ImageContextCopyE2E(ViewerPatientCopyE2E):
  def right_click(self,v,index=0):
   b=v.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box();v.mouse.click(b['x']+b['width']*.5,b['y']+b['height']*.3,button='right')
- def item(self,v):return v.locator('[data-cy=context-menu-item]').filter(has_text='환자 ID 복사 ·')
+ def item(self,v):return v.locator('[data-cy=context-menu-item]').filter(has_text='Copy Patient ID ·')
 
  def test_context_01_native_menu_actual_id_prior_and_unsaved_work(self):
   a,b=self.pair();p,v=self.popup(a);p.locator('#findings').fill('KEEP CONTEXT REPORT');v.get_by_label('Job Title',exact=True).fill('KEEP CONTEXT TITLE');before=self.snapshot(v);url=v.url

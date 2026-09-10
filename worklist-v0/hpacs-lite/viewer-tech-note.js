@@ -5,7 +5,7 @@ window.kinCreateViewerPatientCopy=function(options){
   const blocked=()=>options.blocked?.()||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show');
   const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
   const toolBar=document.createElement('section');toolBar.id='kin-viewer-patient-copy';options.host.append(toolBar);
-    const copy=document.createElement('button');copy.id='kin-viewer-copy-id';copy.type='button';copy.textContent='선택 영상 환자 ID 복사';copy.setAttribute('aria-keyshortcuts','Control+Alt+C');copy.setAttribute('aria-describedby','kin-viewer-copy-context');toolBar.append(copy);
+    const copy=document.createElement('button');copy.id='kin-viewer-copy-id';copy.type='button';copy.textContent='Copy Patient ID';copy.setAttribute('aria-keyshortcuts','Control+Alt+C');copy.setAttribute('aria-describedby','kin-viewer-copy-context');toolBar.append(copy);
     const copyContext=document.createElement('p');copyContext.id='kin-viewer-copy-context';toolBar.append(copyContext);
     const copyStatus=document.createElement('p');copyStatus.id='kin-viewer-copy-status';copyStatus.setAttribute('role','status');toolBar.append(copyStatus);
     let copyBusy=false,copyEpoch=0,copySignature='',copyTracked=false,copyMenuOpen=false,restoreCopyMenu=()=>{};
@@ -75,7 +75,7 @@ window.kinCreateViewerPatientCopy=function(options){
       const expected={epoch:copyEpoch,signature:copySignature,owner:JSON.stringify(owner())};
       e.preventDefault();copyMenuOpen=true;
       try{menuCommands.runCommand('showContextMenu',{event:{detail:{element,currentPoints:{client:[e.clientX,e.clientY]}}},element,menuId:'kin-patient-copy',menus:[{id:'kin-patient-copy',items:[{
-        label:(current.sourceSignature?'볼륨 원본 · ':'')+'환자 ID 복사 · '+current.patientId+' · '+current.study.date,
+        label:(current.sourceSignature?'Volume Source · ':'')+'Copy Patient ID · '+current.patientId+' · '+current.study.date,
         action:(_item,props)=>{props.onClose();copyMenuOpen=false;copyPatientId(expected);}
       }]}]});}catch(_){copyMenuOpen=false;copyStatus.textContent='메뉴를 열지 못했습니다. 복사 버튼이나 Ctrl+Alt+C를 사용하세요.';}
     };
@@ -251,7 +251,7 @@ window.kinViewerTechNote=function(services){
       const targets=[...document.querySelectorAll('#root button[data-cy="Zoom"]')].filter(b=>!b.disabled&&b.getAttribute('aria-disabled')!=='true'&&b.getClientRects().length&&!b.closest('[inert],[hidden],[aria-hidden="true"]')&&getComputedStyle(b).visibility==='visible');
       if(targets.length!==1)return false;
       const target=targets[0];
-      if(!target.hasAttribute('aria-label')){target.setAttribute('aria-label','확대·축소');nativeLabels.set(target,'확대·축소');}
+      if(!target.hasAttribute('aria-label')){target.setAttribute('aria-label','Zoom');nativeLabels.set(target,'Zoom');}
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest',inline:'nearest'});
       return document.activeElement===target;
     }
