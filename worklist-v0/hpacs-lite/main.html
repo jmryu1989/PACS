@@ -924,6 +924,7 @@
   <script src="auth.js"></script>
   <script src="reading-panel-layout.js"></script>
   <script src="viewer-opening.js"></script>
+  <script src="worklist-startup.js"></script>
   <script src="worklist-alerts.js"></script>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1744,7 +1745,7 @@
           $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB used";
         } catch (e) {}
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
-        try { render(); refreshRight(); }
+        try { render(); refreshRight(); worklistStartup?.afterList(); }
         catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
         return;
       } catch (e) {
@@ -3796,7 +3797,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null;
+    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null, worklistStartup = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
@@ -5043,6 +5044,13 @@
       applyRoleUi();
       $('#consultations-open').hidden=!(KinAuth.has('radiologist')||KinAuth.has('admin'));
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
+      try {
+        worklistStartup = KinWorklistStartup.mount({host:$('#image-opening-dialog'),
+          owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
+          current:()=>selectedUid,rows:orderedStudies,select:uid=>select(uid,{deferViewer:true}),
+          allowed:()=>serverMode&&!offline&&!demoMode});
+      } catch (_) { toast('시작 선택 설정을 불러오지 못해 자동 선택을 껐습니다.', 'err'); }
+
       worklistRefresh = KinWorklistRefresh.mount({select:$('#worklist-refresh'),status:$('#worklist-refresh-status'),
         owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
         changed:()=>startPolling()});
