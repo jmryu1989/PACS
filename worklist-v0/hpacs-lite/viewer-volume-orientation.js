@@ -1,4 +1,4 @@
-window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,host}){
+window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,owner=()=>null,host}){
   const panel=document.createElement('section');panel.id='kin-volume-orientation';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';
   panel.innerHTML='<strong>MPR Orientation</strong><p class="target"></p><label>Axis <select aria-label="MPR Rotation Axis"><option value="0">Patient L/R</option><option value="1">Patient A/P</option><option value="2">Patient H/F</option></select></label> <label>Degrees <input type="number" aria-label="MPR Rotation Degrees" min="-180" max="180" step="5" value="15" style="width:80px"></label> <button type="button">Rotate Three Planes</button> <button type="button">Reset Planes</button><p role="status"></p><p>세 평면의 교점을 유지해 회전합니다. Reset Planes는 이 배치에서 시작한 방향·위치·확대로 돌아갑니다. Save New Job으로 표시를 저장할 수 있습니다.</p>';
   host.append(panel);
@@ -71,7 +71,8 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   for(const name of ['pointerdown','wheel','keydown'])document.addEventListener(name,guard,{capture:true,passive:false});
   const timer=setInterval(refresh,500);refresh();
   const crosshair=window.KinVolumeCrosshair&&window.kinCreateVolumeCrosshair?.({target,permitted,alive,host});
+  const batch=window.KinVolumeBatch&&window.kinCreateVolumeBatch?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

@@ -1910,7 +1910,9 @@ function kinCreateViewerTechNote() {
         window.KinVolumeOrientation?Promise.resolve():load('volume-orientation.js'),
         typeof window.kinCreateVolumeOrientation==='function'?Promise.resolve():load('viewer-volume-orientation.js'),
         window.KinVolumeCrosshair?Promise.resolve():load('volume-crosshair.js'),
-        typeof window.kinCreateVolumeCrosshair==='function'?Promise.resolve():load('viewer-volume-crosshair.js')]))
+        typeof window.kinCreateVolumeCrosshair==='function'?Promise.resolve():load('viewer-volume-crosshair.js'),
+        window.KinVolumeBatch?Promise.resolve():load('volume-batch.js'),
+        typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
       .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
