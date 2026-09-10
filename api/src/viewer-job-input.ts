@@ -35,10 +35,15 @@ export function previewCommand(raw: Buffer): any {
   return b.snapshot;
 }
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...(s?.version === 4 ? ['volume'] : [])]);
-  if (![1, 2, 3, 4].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5].includes(s?.version) ? ['volume'] : []), ...(s?.version===5?['batch']:[])]);
+  if (![1, 2, 3, 4, 5].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
-  const volume = s.version === 4;
+  const volume = [4,5].includes(s.version);
+  if(s.version===5){
+    keys(s.batch,['cell','offset','interval','count','reverse']);
+    number(s.batch.offset,-1e7,1e7);number(s.batch.interval,.1,1000);number(s.batch.count,2,128);
+    if(!Number.isInteger(s.batch.count)||typeof s.batch.reverse!=='boolean')invalid();
+  }
   if (volume) {
     keys(s.volume, ['study', 'series', 'sops']);
     if (!s.studies.includes(s.volume.study)) invalid(); viewerUid(s.volume.series);
@@ -48,14 +53,18 @@ function validateJobSnapshot(s: any) {
   if ((volume ? !(s.rows === 1 && s.cols === 3 || s.rows === 3 && s.cols === 1) : ![1, 2].includes(s.rows) || ![1, 2].includes(s.cols)) || !Number.isInteger(s.active) || s.active < 0 || s.active >= s.rows * s.cols ||
       !Array.isArray(s.cells) || s.cells.length !== s.rows * s.cols || s.cells.every(c => !c)) invalid();
   let pixels = 0;
-  for (const c of s.cells) {
+  for (const c of [...s.cells,...(s.version===5?[s.batch.cell]:[])]) {
     if (c === null) { if (volume) invalid(); continue; }
     keys(c, ['study', 'series', ...(volume ? ['projection'] : ['sop', 'frame']), 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
     if (s.version >= 2) {
       keys(c.viewport, ['width', 'height']);
       for (const x of Object.values(c.viewport)) { number(x, 1, 8192); if (!Number.isInteger(x)) invalid(); }
-      const area = c.viewport.width * c.viewport.height; pixels += area;
+      const area = c.viewport.width * c.viewport.height; if(c!==s.batch?.cell)pixels += area;
       if (area > 16777216 || pixels > 33554432) invalid();
+      if(c===s.batch?.cell){
+        const scale=512/Math.max(c.viewport.width,c.viewport.height);
+        if(Math.max(1,Math.floor(c.viewport.width*scale))*Math.max(1,Math.floor(c.viewport.height*scale))*s.batch.count*4>64*1024*1024)invalid();
+      }
     }
     if (!s.studies.includes(c.study)) invalid(); viewerUid(c.series);
     if (volume) {
@@ -77,6 +86,7 @@ function validateJobSnapshot(s: any) {
     const delta = p.map((v, i) => v - f[i]), distance = Math.sqrt(dot(delta, delta));
     if (Math.max(Math.abs(dot(u, u) - 1), Math.abs(dot(n, n) - 1), Math.abs(dot(u, n))) > 1e-4 || distance < .0001 ||
         Math.abs(dot(delta, n) / distance - 1) > 1e-4) invalid();
+    if(c===s.batch?.cell&&Math.max(Math.abs(dot(u,u)-1),Math.abs(dot(n,n)-1),Math.abs(dot(u,n)))>1e-6)invalid();
     keys(c.properties, ['voiRange', 'VOILUTFunction', 'invert', ...(s.version >= 2 ? ['interpolationType'] : [])]); keys(c.properties.voiRange, ['lower', 'upper']);
     if (s.version >= 2 && ![0, 1, 2].includes(c.properties.interpolationType)) invalid();
     number(c.properties.voiRange.lower, -1e9, 1e9); number(c.properties.voiRange.upper, -1e9, 1e9);

@@ -43,6 +43,12 @@ export function verifyVolumeReference(snapshot: any, tags: any[], patient: strin
     }
   }
   const max=Math.min(1000,Math.hypot((Number(tags[0].Columns)-1)*spacing[1],(Number(tags[0].Rows)-1)*spacing[0],Math.hypot(...step)*(tags.length-1)));
-  for(const cell of snapshot.cells)if(cell.projection.thickness>max)invalid();
+  for(const cell of [...snapshot.cells,...(snapshot.version===5?[snapshot.batch.cell]:[])])if(cell.projection.thickness>max)invalid();
+  if(snapshot.version===5){
+    const b=snapshot.batch,o=values(tags[0].ImageOrientationPatient),n=b.cell.camera.viewPlaneNormal;
+    const corners=[0,Number(tags[0].Columns)-1].flatMap(x=>[0,Number(tags[0].Rows)-1].flatMap(y=>[0,tags.length-1].map(z=>origin.map((v,i)=>v+o[i]*x*spacing[1]+o[i+3]*y*spacing[0]+step[i]*z))));
+    const distances=corners.map(p=>dot(p,n)),lo=Math.min(...distances),hi=Math.max(...distances),start=dot(b.cell.camera.focalPoint,n)+b.offset,end=start+(b.reverse?-1:1)*b.interval*(b.count-1);
+    if([start,end].some(p=>p<lo-1e-6||p>hi+1e-6))invalid();
+  }
   return createHash('sha256').update(canonical(tags.map(t=>[t.SOPInstanceUID,t._kinSourceDigest]))).digest('hex');
 }

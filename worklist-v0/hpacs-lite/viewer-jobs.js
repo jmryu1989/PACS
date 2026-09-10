@@ -48,7 +48,7 @@ window.kinViewerJobs = function (services, model) {
       openingPrint = true;
       try {
         const snapshot = row ? null : capture(true);
-        if(snapshot?.version===4||row?.snapshotVersion===4)throw new Error('MPR 작업은 현재 저장·복원을 지원합니다. 재구성 영상 출력은 아직 지원하지 않습니다.');
+        if([4,5].includes(snapshot?.version)||[4,5].includes(row?.snapshotVersion))throw new Error('MPR 작업은 현재 저장·복원을 지원합니다. 재구성 영상 출력은 아직 지원하지 않습니다.');
         const unchanged = () => live() && JSON.stringify(capture(true)) === JSON.stringify(snapshot);
         if (typeof window.kinViewerJobPrint !== 'function') {
           // A print-only asset failure must leave saving/restoring available.
@@ -141,8 +141,8 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && row.snapshotVersion!==4) button(item, 'Print Saved Images', () => openPrint(row));
-        if(row.snapshotVersion===4)text('p','MPR · 재구성 표시 작업',item);
+        if (!row.hidden && ![4,5].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if([4,5].includes(row.snapshotVersion))text('p',(row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
           button(item, row.hidden ? 'Unhide Job' : 'Hide Job', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
@@ -151,7 +151,7 @@ window.kinViewerJobs = function (services, model) {
     }
     async function load() { const result = await api(path + '?mine=' + mine.value + '&includeHidden=' + hidden.checked); if (live()) show(result.jobs); }
     async function apply(value, ticket) {
-      if(value.version===4)return volumeTools().apply(value,()=>live()&&serial===ticket);
+      if([4,5].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const current = () => live() && serial === ticket;
@@ -207,11 +207,11 @@ window.kinViewerJobs = function (services, model) {
             next.searchParams.set('StudyInstanceUIDs', job.snapshot.studies.join(',')); next.searchParams.set('kinJob', job.id);
             location.assign(next.href); return;
           }
-          const previous = capture(); if(job.snapshot.version===4)volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
+          const previous = capture(); if([4,5].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
           try { await apply(job.snapshot, ticket); }
           catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
           finally { applying = false; }
-          status.textContent = job.snapshot.version===4 ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
+          status.textContent = [4,5].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
@@ -219,7 +219,7 @@ window.kinViewerJobs = function (services, model) {
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true); if (action === 'saveAnnotations') {
-              if(snapshot.version===4)throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
             pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot }), url: path };

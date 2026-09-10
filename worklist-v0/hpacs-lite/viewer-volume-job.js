@@ -43,7 +43,8 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
         properties:{voiRange:properties.voiRange,VOILUTFunction:properties.VOILUTFunction||'LINEAR',invert:!!properties.invert,interpolationType:properties.interpolationType??1}};
     });
     const active=views.findIndex(v=>v.viewportId===state.activeViewportId);if(active<0)throw Error('활성 MPR 평면을 선택한 뒤 저장하세요.');
-    return JSON.parse(JSON.stringify({version:4,studies,rows,cols,active,volume:reference,cells}));
+    const batch=window.kinVolumeBatchState?.capture(reference);
+    return JSON.parse(JSON.stringify({version:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(batch?{batch}:{})}));
   }
   function holdCrosshairReset(){
     const group=window.cornerstoneTools?.ToolGroupManager?.getToolGroup('mpr'),tool=group?.getToolInstance('Crosshairs');
@@ -55,11 +56,16 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
   async function apply(value,current) {
     if(JSON.stringify(value.studies)!==JSON.stringify(studies))throw Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
     const set=resolve(value),ids=value.cells.map(()=> 'kin-volume-job-'+crypto.randomUUID());
+    window.kinVolumeBatchState?.clear();
     // Native reset callbacks reset every linked plane while OHIF replaces one
     // viewport. Hold that propagation through both initialization and failure.
     const crosshair=holdCrosshairReset();try{
+    // Native position-cache keys use viewportOptions.id, not viewportId. A
+    // cached oblique reference recurses through setOrientation/resetCamera on
+    // a fresh axial viewport. Initialize a new presentation for this Job;
+    // the verified saved cameras below are the sole position source.
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
-      findOrCreateViewport:index=>({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:['axial','sagittal','coronal'][index],allowUnmatchedView:true}})});
+      findOrCreateViewport:index=>({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:['axial','sagittal','coronal'][index],allowUnmatchedView:true}})});
     const loaded=[],deadline=Date.now()+60000;
     for(let i=0;i<ids.length;i++){
       while(Date.now()<deadline){
@@ -128,6 +134,10 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     }
     if(!matched)throw Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
+    if(value.version===5){
+      if(!window.kinVolumeBatchState)throw Error('단면 묶음 도구 로딩을 마친 뒤 다시 복원하세요.');
+      await rendered();await window.kinVolumeBatchState.restore(value.batch,current);
+    }
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};
