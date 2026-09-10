@@ -40,7 +40,7 @@ TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVe
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance'])
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -76,6 +76,12 @@ def expected_rows(uid):
     rows['ReadingAppearance'] = [dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=3,sizes=dict(version=3,list=16,current=18,prior=20,
         fonts=dict(version=1,list='sans',current='mono',prior='serif'),colors=dict(version=1,list='warm',current='white',prior='cool'),dock=dict(version=1,placement='top',panel=1)),updatedAt=STAMP)]
     rows['ReadingPreferences'] = [dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=2,autoNote=True,updatedAt=STAMP)]
+    shortcuts = dict(list='Digit1',image='Digit2',prior='Digit3',report='KeyR',context='Digit5',
+        note='Digit6',tools='Digit7',nativeTools='Digit9',previous='ArrowLeft',next='ArrowRight')
+    rows['WorkspaceShortcuts'] = [dict(institution=institution,subject=subject,revision=revision,
+        bindings=dict(shortcuts,report=report),updatedAt=STAMP) for institution,subject,revision,report in
+        [('SYNTHETIC-hospital','SYNTHETIC-sub',2,'KeyR'), ('SYNTHETIC-tele','SYNTHETIC-sub',3,'KeyT'),
+         ('SYNTHETIC-hospital','SYNTHETIC-other',4,'KeyY')]]
     rows['TechNoteRevision'] = [dict(studyUid=uid, version=1, text='SYNTHETIC tech note', reason='', author='SYNTHETIC-tech', authorSub='SYNTHETIC-sub', institutionId='SYNTHETIC-hospital', createdAt=STAMP)]
     rows['Institution'] = [dict(id='SYNTHETIC-'+kind, name='SYNTHETIC '+kind, type=kind,
         dicomNames='SYNTHETIC', createdAt=STAMP) for kind in ('hospital', 'tele')]
@@ -190,7 +196,7 @@ def create_product(name, db, uid):
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance'):
+                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.

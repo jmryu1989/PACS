@@ -59,6 +59,23 @@ class Pure(unittest.TestCase):
             with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
 
+    def test_workspace_shortcuts_preserve_bindings_owner_and_revision(self):
+        body, _, _, _ = fixture(); expected=body['product']
+        rows=expected['rows']['WorkspaceShortcuts']
+        self.assertEqual({(row['institution'],row['subject']) for row in rows},
+            {('SYNTHETIC-hospital','SYNTHETIC-sub'),('SYNTHETIC-tele','SYNTHETIC-sub'),
+             ('SYNTHETIC-hospital','SYNTHETIC-other')})
+        for index,field,value in [(0,'bindings',{}),(0,'revision',1),(1,'institution','wrong-owner'),
+                (2,'subject','wrong-owner'),(2,'bindings',rows[0]['bindings'])]:
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['WorkspaceShortcuts'][index][field]=value
+            with self.subTest(index=index,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+        actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+        actual['rows']['WorkspaceShortcuts']=[]
+        with patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+            transfer.verify_product('owned','kin',expected)
+
     def test_worklist_column_restore_contract(self):
         body, _, _, _ = fixture(); expected=body['product']
         self.assertEqual(len(expected['rows']['WorklistColumns']),2)
@@ -135,7 +152,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 35)
+        self.assertEqual(sum(len(value) for value in rows.values()), 38)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
         self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
         job=rows['ViewerJob'][0]
