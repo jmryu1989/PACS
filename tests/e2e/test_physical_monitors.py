@@ -74,6 +74,66 @@ class PhysicalMonitorsE2E(ThumbnailSeriesE2E):
         print(json.dumps({'permission':'denied','viewer':popup.evaluate('({left:screenX,top:screenY,width:outerWidth,height:outerHeight})'),'scope':'Real browser permission denial; viewer remains usable'}),flush=True)
         popup.close()
 
+    def test_physical_03_delayed_document_preserves_saved_position_and_manual_recovery(self):
+        self.delayed_document_recovery()
+
+    def test_physical_04_permission_revoked_during_load_preserves_saved_position(self):
+        self.delayed_document_recovery(revoke=True)
+
+    def test_physical_05_minimized_timeout_restores_position_saving(self):
+        self.delayed_document_recovery(minimize=True)
+
+    def delayed_document_recovery(self,revoke=False,minimize=False):
+        f=self.ct('SYNTHETIC-MONITOR-'+uuid.uuid4().hex[:12],'current','20260801');self.seed_report(f)
+        p=self.login();self.select(p,f);self.thumbs(p,1)
+        cdp=p.context.new_cdp_session(p);context_id=cdp.send('Target.getTargetInfo')['targetInfo']['browserContextId']
+        cdp.send('Browser.setPermission',{'permission':{'name':'window-management'},'setting':'granted','origin':self.stack.proxy,'browserContextId':context_id})
+        p.evaluate('initMonitorPermission()')
+        target=p.evaluate('async()=>{const d=await getScreenDetails();const s=d.screens.find(s=>s.left!==d.currentScreen.left);return {left:s.availLeft+80,top:s.availTop+60,width:1000,height:800};}')
+        p.evaluate('rect=>localStorage.setItem(OHIF_RECT_KEY,JSON.stringify(rect))',target)
+        p.locator('#findings').fill('SYNTHETIC DELAYED WINDOW UNSAVED')
+        held=[]
+        def delay(route):
+            if route.request.is_navigation_request():held.append(route)
+            else:route.continue_()
+        pattern='**/ohif/viewer?**';p.context.route(pattern,delay)
+        with p.context.expect_page() as opened:p.locator('#thumbwrap img').first.dblclick()
+        popup=opened.value
+        p.wait_for_function('ohifPopupHandle && ohifPlacementWrites.get(ohifPopupHandle)?.pending===true')
+        # Refocusing the same loading window must not cancel its pending placement.
+        sequence=p.evaluate('ohifPopupSequences.get(ohifPopupHandle)');p.locator('#thumbwrap img').first.dblclick()
+        self.assertEqual(p.evaluate('ohifPopupSequences.get(ohifPopupHandle)'),sequence)
+        p.wait_for_timeout(2500)
+        self.assertEqual(p.evaluate('JSON.parse(localStorage.getItem(OHIF_RECT_KEY))'),target)
+        if revoke:
+            cdp.send('Browser.setPermission',{'permission':{'name':'window-management'},'setting':'denied','origin':self.stack.proxy,'browserContextId':context_id})
+        if minimize:
+            popup_cdp=p.context.new_cdp_session(popup);window_id=popup_cdp.send('Browser.getWindowForTarget')['windowId']
+            popup_cdp.send('Browser.setWindowBounds',{'windowId':window_id,'bounds':{'windowState':'minimized'}})
+        p.wait_for_function('ohifPlacementWrites.get(ohifPopupHandle)?.pending===false',timeout=22000)
+        self.assertEqual(p.evaluate('JSON.parse(localStorage.getItem(OHIF_RECT_KEY))'),target)
+        if minimize:
+            popup_cdp.send('Browser.setWindowBounds',{'windowId':window_id,'bounds':{'windowState':'normal'}})
+            popup.bring_to_front()
+            p.wait_for_timeout(2500)
+            self.assertEqual(p.evaluate('JSON.parse(localStorage.getItem(OHIF_RECT_KEY))'),target)
+        self.assertEqual(len(held),1)
+        # Resume the original browser request. Replaying a separately fetched
+        # HTML response while removing interception stalled deferred scripts in
+        # consecutive Chromium contexts; that is not the window recovery path.
+        held[0].continue_()
+        popup.wait_for_url('**/ohif/viewer?**');canvas_ready(popup,1)
+        p.context.unroute(pattern,delay)
+        self.assertIn(f.uid,popup.url)
+        self.assertEqual(p.evaluate('JSON.parse(localStorage.getItem(OHIF_RECT_KEY))'),target)
+        popup.evaluate('()=>{moveTo(screen.availLeft+120,screen.availTop+100);resizeTo(900,700);}')
+        popup.wait_for_timeout(250)
+        moved=popup.evaluate('({left:screenX,top:screenY,width:outerWidth,height:outerHeight})')
+        p.wait_for_function('rect=>JSON.stringify(JSON.parse(localStorage.getItem(OHIF_RECT_KEY)))===JSON.stringify(rect)',arg=moved)
+        expect(p.locator('#findings')).to_have_value('SYNTHETIC DELAYED WINDOW UNSAVED')
+        print(json.dumps({'delayedSaved':target,'manualRecovery':moved,'permissionRevoked':revoke,'minimized':minimize,'scope':'Actual delayed document, pending-window focus, placement cancellation and manual position-save recovery'}),flush=True)
+        popup.close()
+
 def load_tests(loader,tests,pattern):
     return unittest.TestSuite(PhysicalMonitorsE2E(name) for name in PhysicalMonitorsE2E.__dict__ if name.startswith('test_physical_'))
 

@@ -3669,6 +3669,7 @@
     const OHIF_RECT_KEY = "kin.ohif.current.rect";
     let ohifPopupHandle = null;
     const ohifRectPolls = new Map(), ohifPopupSlots = new WeakMap(), ohifPopupSequences = new WeakMap();
+    const ohifPlacementWrites = new WeakMap();
     let ohifOpenSeq = 0;
     let monitorPermission = null;
     let monitorQueryUnsupported = false;
@@ -3827,18 +3828,29 @@
       return defaultOhifRect(currentScreenRect());
     }
 
+    function popupRect(popup) {
+      try {
+        if (!popup || popup.closed) return null;
+        const rect = {left:Number(popup.screenX),top:Number(popup.screenY),width:Number(popup.outerWidth),height:Number(popup.outerHeight)};
+        return Object.values(rect).every(Number.isFinite) && rect.left > -30000 && rect.top > -30000 && rect.width >= 320 && rect.height >= 240 ? rect : null;
+      } catch (_) { return null; }
+    }
     function rememberOhifRect(popup = ohifPopupHandle) {
       try {
         if (!popup || popup.closed) return false;
         // 최소화·닫힘 전이의 좌표로 마지막 정상 자리를 덮지 않는다.
         try { if (popup.document.visibilityState === "hidden") return false; } catch (_) {}
-        const rect = {
-          left: Number(popup.screenX), top: Number(popup.screenY),
-          width: Number(popup.outerWidth), height: Number(popup.outerHeight),
-        };
-        if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) ||
-            rect.left <= -30000 || rect.top <= -30000 ||
-            rect.width < 320 || rect.height < 240) return false;
+        const rect = popupRect(popup);if (!rect) return false;
+        const suspended = ohifPlacementWrites.get(popup);
+        if (suspended) {
+          if (suspended.pending) return false;
+          // A minimized/unreadable window has no baseline. Establish one after
+          // restoration, preserving the saved position until a subsequent move.
+          if (!suspended.baseline) { suspended.baseline = rect; return false; }
+          if (Object.keys(rect).every(k => rect[k] === suspended.baseline[k])) return false;
+          // After a failed placement, an actual user move resumes position saving.
+          ohifPlacementWrites.delete(popup);
+        }
         const slot = ohifPopupSlots.get(popup) || 0;
         localStorage.setItem(slot ? OHIF_RECT_KEY + ':' + slot : OHIF_RECT_KEY, JSON.stringify(rect));
         return true;
@@ -3957,7 +3969,7 @@
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
-        viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index); ohifPopupSequences.set(popup, seq);
+        viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index);
         // Reopening a named window can restore its opener even without navigation.
         try{popup.opener=null;}catch(_){toast('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return;}
         if (choice.pending) {
@@ -3966,6 +3978,9 @@
           return;
         }
         const previous = ohifPopupState(popup);
+        const deferredPlacement = previous.kind === 'blank' && monitorPermissionGranted() && screen.isExtended === true;
+        const placementWrite = deferredPlacement ? {pending:true,baseline:null} : null;
+        if (placementWrite) ohifPlacementWrites.set(popup, placementWrite);
         if (previous.kind === "viewer") {
           if (sameOhifScope(previous.href, url)) {
             if(popup.location.hash!==new URL(url,location.origin).hash){
@@ -4014,6 +4029,7 @@
           } catch (_) {}
         }
         const previousDocument = popup.document;
+        ohifPopupSequences.set(popup, seq);
         popup.location.href = url;
         viewerWindows.navigating(choice, url, previousDocument);
         popup.focus();
@@ -4024,15 +4040,26 @@
         }
         // about:blank에서 opener를 분리한 직후에는 Chrome이 다른 화면 좌표를
         // 현재 화면으로 제한한다. 실제 뷰어 문서가 준비된 뒤 한 번 배치한다.
-        if (previous.kind === "blank" && monitorPermissionGranted() && screen.isExtended === true) {
+        if (deferredPlacement) {
           const placementOwner = KinViewerOpening.key(KinAuth.session()), deadline = Date.now() + 15000;
+          const currentPlacement = () => ohifPlacementWrites.get(popup) === placementWrite;
+          const validPlacement = () => {
+            try { return seq === ohifPopupSequences.get(popup) && !popup.closed && monitorPermissionGranted() &&
+              placementOwner && placementOwner === KinViewerOpening.key(KinAuth.session()); }
+            catch (_) { return false; }
+          };
+          const stopPlacement = () => {
+            if (currentPlacement()) { placementWrite.pending = false; placementWrite.baseline = popupRect(popup); }
+          };
+          // This timer also bounds a screen-details promise that never settles.
+          const expiry = setTimeout(stopPlacement, 15000);
           try {
             window.getScreenDetails().then(details => {
               cacheMonitorScreens(details);
               const rect = ohifPlacement(stored, details);
               const place = () => {
-                if (Date.now() > deadline || seq !== ohifPopupSequences.get(popup) || popup.closed || !monitorPermissionGranted() ||
-                    !placementOwner || placementOwner !== KinViewerOpening.key(KinAuth.session())) return;
+                if (!currentPlacement() || !placementWrite.pending) return;
+                if (Date.now() >= deadline || !validPlacement()) { clearTimeout(expiry);stopPlacement();return; }
                 try {
                   if (popup.document === previousDocument || popup.document.readyState === 'loading' || !sameOhifScope(popup.location.href, url)) {
                     if (Date.now() < deadline) setTimeout(place, 100);
@@ -4043,12 +4070,22 @@
                   popup.moveTo(rect.left, rect.top);
                   popup.resizeTo(rect.width, rect.height);
                   popup.moveTo(rect.left, rect.top);
-                  rememberOhifRect(popup);
-                } catch (_) { /* A closed or replaced document cannot receive the old placement. */ }
+                  const settled = () => {
+                    try {
+                    if (!currentPlacement() || !placementWrite.pending) return;
+                    if (Date.now() >= deadline || !validPlacement() || !sameOhifScope(popup.location.href,url)) { clearTimeout(expiry);stopPlacement();return; }
+                    const actual = popupRect(popup);
+                    if (actual && Object.keys(rect).every(k => Math.abs(actual[k]-rect[k]) <= 16)) {
+                      clearTimeout(expiry);ohifPlacementWrites.delete(popup);rememberOhifRect(popup);
+                    } else setTimeout(settled,100);
+                    } catch (_) { clearTimeout(expiry);stopPlacement(); }
+                  };
+                  setTimeout(settled,100);
+                } catch (_) { clearTimeout(expiry);stopPlacement(); }
               };
               place();
-            }).catch(() => {});
-          } catch (_) {}
+            }).catch(() => { clearTimeout(expiry);stopPlacement(); });
+          } catch (_) { clearTimeout(expiry);stopPlacement(); }
         }
         return;
       }
