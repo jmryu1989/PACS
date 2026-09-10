@@ -726,8 +726,9 @@
             <div id="related-parts-status" role="status" style="font-size:11px;padding:2px 6px"></div>
           </div>
           <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
+          <div id="related-keyboard-help" style="font-size:12px">↑/↓ · Home/End 이동 · Enter 미리보기 · Tab 영상 버튼</div>
           <div class="grid2">
-            <table>
+            <table aria-describedby="related-keyboard-help">
               <thead><tr><th>Viewing</th><th>StudyDate</th><th>Modality</th><th>StudyDesc</th><th>Count</th><th>RS</th><th>Report</th></tr></thead>
               <tbody id="relrows"><tr><td class="empty" colspan="7">-</td></tr></tbody>
             </table>
@@ -947,7 +948,7 @@
   <script src="worklist-search.js"></script>
   <script src="worklist-row-navigation.js"></script>
   <script src="viewer-display-layout.js"></script>
-  <style>#rows tr[data-uid]:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
+  <style>#rows tr[data-uid]:focus-visible,#relrows tr[data-uid]:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1603,7 +1604,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, imagePreview = null, worklistSearch = null, rowNavigation = null;
+    let columnPrefs = null, multiSelection = null, imagePreview = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     function renderHeads() {
@@ -2335,6 +2336,7 @@
     $('#related-page-next').addEventListener('click', () => { relatedPage++; renderRelated(); });
     $('#related-page-current').addEventListener('click', () => renderRelated(true));
     function renderRelated(reveal = false) {
+      relatedRowNavigation?.beforeRender();
       const s = cur();
       relatedParts.sync(s?.uid||'');
       $('#related-include-current').checked=relatedIncludeCurrent;$('#related-include-current').disabled=!s;
@@ -2385,6 +2387,7 @@
       $('#related-page-prev').disabled = relatedPage === 0; $('#related-page-next').disabled = relatedPage >= pages - 1;
       $('#related-page-current').disabled = viewed < 0;
       $('#related-page-status').textContent = `${relatedPage + 1}/${pages}페이지`;
+      relatedRows = rel;
       $("#relrows").innerHTML = s
         ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
             return `
@@ -2392,11 +2395,12 @@
               <td>${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 열람 중" : "비교"}</td>
               <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${x.rs === "A" ? "Approved" : "No Report"}</td>
+              <td>${x.rs === "A" ? "Approved" : "No Report"} <button class="chip" type="button" data-related-open="${esc(x.uid)}">${x.uid === s.uid ? 'Open Images' : 'Compare Images'}</button></td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
       columnPrefs?.decorateRelated(mode);
+      relatedRowNavigation?.sync();
     }
 
     /**
@@ -5001,13 +5005,21 @@
       renderRelated();
     });
     $("#relrows").addEventListener("click", e => {
+      const open = e.target.closest('[data-related-open]');
+      if (open) { openRelatedImages(open.dataset.relatedOpen); return; }
       const tr = e.target.closest("tr");
       if (tr?.dataset.uid) { if(tr.dataset.uid === selectedUid)returnToReportStudy();else previewRelated(tr.dataset.uid); }
     });
     $("#relrows").addEventListener("dblclick", e => {
+      if (e.target.closest('button')) return;
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) openFilmbox(selectedUid, tr.dataset.uid === selectedUid ? null : tr.dataset.uid);
+      if (tr?.dataset.uid) openRelatedImages(tr.dataset.uid);
     });
+    function openRelatedImages(uid) {
+      if (!cur() || !relatedRows.some(row=>row.uid===uid)) return;
+      if(uid===selectedUid)returnToReportStudy();else previewRelated(uid);
+      openFilmbox(selectedUid,uid===selectedUid?null:uid);
+    }
 
     // ══════════ 시작 ══════════
     // 서버가 살아 있으면 서버 상태로 시작하고, 죽어 있으면 localStorage로 계속 굴러간다.
@@ -5265,6 +5277,10 @@
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>{select(uid);if(mode==='Radiology')$('#findings').focus();}});
+      relatedRowNavigation = KinWorklistRowNavigation.mount({tbody:$('#relrows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:()=>relatedRows,
+        current:()=>relatedUid||selectedUid,fallback:()=>$('#related-modality').disabled?$('#related-current'):$('#related-modality'),
+        reveal:uid=>{const index=relatedRows.findIndex(row=>row.uid===uid);if(index>=0){relatedPage=Math.floor(index/50);renderRelated();}},
+        activate:uid=>uid===selectedUid?returnToReportStudy():previewRelated(uid)});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.

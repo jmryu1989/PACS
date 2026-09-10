@@ -7,7 +7,7 @@
     if(i<0)return rows[0].uid;
     return rows[Math.max(0,Math.min(rows.length-1,i+(key==='ArrowDown'?1:-1)))].uid;
   }
-  function mount({tbody,owner,rows,current,reveal,activate}){
+  function mount({tbody,owner,rows,current,reveal,activate,fallback=()=>document.querySelector('#quick')}){
     const bound=owner();let ended=false,last=null,restore=null;
     const live=()=>!ended&&bound&&owner()===bound;
     const elements=()=>[...tbody.querySelectorAll('tr[data-uid]')];
@@ -26,12 +26,12 @@
       tabStops(target);
       if(restore){const previous=restore;restore=null;const row=find(previous.uid)||target;
         if(row){const destination=previous.control?row.querySelector(previous.control)||row:row;destination.focus({preventScroll:true});}
-        else if(tbody.contains(document.activeElement)||document.activeElement===document.body)document.querySelector('#quick')?.focus({preventScroll:true});
+        else if(tbody.contains(document.activeElement)||document.activeElement===document.body)fallback()?.focus({preventScroll:true});
       }
     }
     function beforeRender(){
       const active=document.activeElement,row=active?.closest('tr[data-uid]');
-      const control=['[data-tech-note]','[data-reader-assignment]'].find(selector=>active?.closest(selector));
+      const control=['[data-tech-note]','[data-reader-assignment]','[data-related-open]'].find(selector=>active?.closest(selector));
       restore=row&&tbody.contains(row)?{uid:row.dataset.uid,control}:null;
     }
     function focused(e){const row=e.target.closest('tr[data-uid]');if(live()&&row){last=row.dataset.uid;tabStops(row);}}
@@ -47,7 +47,7 @@
       if(target){
         target.focus({preventScroll:true});
         // A wide table row must not pan away from the patient ID columns.
-        const grid=tbody.closest('.grid');
+        const grid=tbody.closest('.grid,.grid2');
         if(grid){const bounds=grid.getBoundingClientRect(),rect=target.getBoundingClientRect();
           const header=grid.querySelector('thead'),top=Math.max(bounds.top,header?.getBoundingClientRect().bottom||bounds.top);
           if(rect.top<top)grid.scrollTop+=rect.top-top;
