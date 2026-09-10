@@ -102,4 +102,18 @@ class ReadingAppearanceLive(unittest.TestCase):
   for bad in [dict(version=1,placement='top',panel=1),dict(version=2,placement='top',panel=1),dict(version=2,placement='top',panel=True,autoHide=True),dict(version=2,placement='top',panel=1,autoHide=True,patient='forbidden')]:
    invalid=copy.deepcopy(b);invalid['sizes']['dock']=bad;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
   invalid=copy.deepcopy(b);invalid['sizes']['version']=4;self.assertEqual(self.write(invalid).status,400);self.assertEqual(self.get(),saved)
+ def toolbar_body(self):
+  b=self.auto_body();b['sizes'].update(version=6,toolbar=dict(version=1,order=['MeasurementTools','WindowLevel','Zoom','Pan','TrackballRotate','Capture','Layout','Crosshairs','MoreTools'],hidden=['Pan']));return b
+ def test_13_toolbar_upgrade_roundtrip_old_writer_and_owner(self):
+  old=self.auto_body();self.assertEqual(self.write(old).status,200);b=self.toolbar_body();r=self.write(b);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],b['sizes']);saved=self.get()
+  old['revision']=saved['revision'];self.assertEqual(self.write(old).status,409);self.assertEqual(self.get(),saved);self.assertEqual(self.write(b).status,409);self.assertEqual(self.write(b,'doctor2').status,409);self.assertIsNone(self.get('doctor2')['sizes'])
+  b['revision']=saved['revision'];b['sizes']['toolbar']['hidden']=[];self.assertEqual(self.write(b).status,200);self.assertEqual(self.get()['sizes'],b['sizes'])
+ def test_14_invalid_toolbar_never_partially_updates(self):
+  import copy
+  b=self.toolbar_body();self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=saved['revision'];b['sizes']['current']=12
+  original=b['sizes']['toolbar']
+  invalid=[None,[],{},dict(original,version=2),dict(original,order=original['order'][:-1]),dict(original,order=['Zoom']*9),dict(original,hidden=['Zoom']),dict(original,hidden=['Pan','Pan']),dict(original,hidden=['__proto__']),dict(original,hidden=[True]),dict(original,hidden='Pan'),dict(original,patient='forbidden')]
+  for value in invalid:
+   payload=copy.deepcopy(b);payload['sizes']['toolbar']=value;self.assertEqual(self.write(payload).status,400);self.assertEqual(self.get(),saved)
+  payload=copy.deepcopy(b);payload['sizes']['version']=5;self.assertEqual(self.write(payload).status,400);self.assertEqual(self.get(),saved)
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -23,6 +23,12 @@ window.KinReadingAppearance = function (options) {
   let value=defaults(),ended=false,storage,channel,generation=0;
   const dockKey=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null,normalizeDock=window.KinViewerWorkspaceDock.normalize;
   let dockValue={version:2,placement:'bottom',panel:-1,autoHide:false};
+  const toolbarIds=['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools'];
+  const toolbarLabels=['측정 도구','확대·축소','이동','3D 회전','밝기·대조','영상 캡처','영상 배치','교차선','추가 도구'];
+  const toolbarKey=initialOwner?'kin-viewer-toolbar:v1:'+initialOwner:null;
+  const defaultToolbar=()=>({version:1,order:toolbarIds.slice(),hidden:[]});
+  const normalizeToolbar=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='hidden,order,version'&&v.version===1&&Array.isArray(v.order)&&v.order.length===toolbarIds.length&&new Set(v.order).size===toolbarIds.length&&v.order.every(id=>toolbarIds.includes(id))&&Array.isArray(v.hidden)&&new Set(v.hidden).size===v.hidden.length&&v.hidden.every(id=>toolbarIds.includes(id)&&id!=='Zoom')?{version:1,order:v.order.slice(),hidden:v.hidden.slice()}:null;
+  let toolbarValue=defaultToolbar();
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
     #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,12px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
@@ -81,6 +87,22 @@ window.KinReadingAppearance = function (options) {
   const autoLabel=element('label','도구 패널 자동 숨김 ',dockSection),autoInput=element('input','',autoLabel);autoInput.type='checkbox';autoInput.id='reading-dock-autohide';dockFields.autoHide=autoInput;
   autoInput.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,autoHide:autoInput.checked});};
   const dockStatus=element('p','',dockSection);dockStatus.id='reading-dock-status';dockStatus.setAttribute('role','status');
+  const toolbarSection=element('fieldset','',dialog);element('legend','기본 영상 도구 모음',toolbarSection);
+  element('p','영상의 비교 작업·배치 패널에서 순서·표시를 편집합니다. 계정에서 불러오면 현재 통합 영상과 다음 영상 창에 적용하며 열린 다른 창은 유지합니다.',toolbarSection);
+  const toolbarSummary=element('p','',toolbarSection);toolbarSummary.id='reading-toolbar-summary';
+  const toolbarStatus=element('p','',toolbarSection);toolbarStatus.id='reading-toolbar-status';toolbarStatus.setAttribute('role','status');
+  const toolbarReset=element('button','기본 도구 순서·표시',toolbarSection);toolbarReset.type='button';toolbarReset.id='reading-toolbar-reset';toolbarReset.onclick=()=>setToolbar(defaultToolbar());
+  function showToolbar(){toolbarSummary.textContent=toolbarValue.order.filter(id=>!toolbarValue.hidden.includes(id)).map(id=>toolbarLabels[toolbarIds.indexOf(id)]).join(' → ');}
+  function setToolbar(next){
+    const clean=normalizeToolbar(next);if(!live()||!clean)return false;
+    const controller=options.getToolbar?.();if(controller&&!controller.applyPreference(clean)){toolbarStatus.textContent='영상의 도구 편집을 마친 뒤 다시 불러오세요.';return false;}
+    toolbarValue=clean;generation++;showToolbar();
+    try{storage.setItem(toolbarKey,JSON.stringify(clean));toolbarStatus.textContent=controller?'현재 영상 도구 모음에 적용했습니다.':'다음 영상 창에 적용합니다 · 이 브라우저';}
+    catch(_){toolbarStatus.textContent='저장소를 사용할 수 없어 이 화면에만 유지합니다.';}
+    return true;
+  }
+  function toolbarChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=normalizeToolbar(e.detail.value);if(!clean)return;if(e.type==='kin-toolbar-preference-changed'||JSON.stringify(clean)!==JSON.stringify(toolbarValue))generation++;toolbarValue=clean;showToolbar();}
+  window.addEventListener('kin-toolbar-preference-changed',toolbarChanged);window.addEventListener('kin-toolbar-preference-mounted',toolbarChanged);
   const viewer=window.KinViewerIdentity;let viewerValue=viewer.read(initialOwner);
   const viewerFields={},viewerSection=element('fieldset','',dialog);element('legend','영상 식별 표시',viewerSection);
   element('p','기준 검사와 비교 검사의 글자를 따로 설정합니다. 환자 ID와 기준/비교 표시는 항상 유지합니다. 설치되지 않은 글꼴은 기기의 대체 글꼴을 사용합니다.',viewerSection);
@@ -150,10 +172,14 @@ window.KinReadingAppearance = function (options) {
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
     colorValue=defaultColors();applyColors();for(const f of Object.values(colorFields))f.disabled=true;colorReset.disabled=true;
     for(const f of Object.values(dockFields))f.disabled=true;
+    toolbarReset.disabled=true;window.removeEventListener('kin-toolbar-preference-changed',toolbarChanged);window.removeEventListener('kin-toolbar-preference-mounted',toolbarChanged);
     window.removeEventListener('kin-dock-preference-changed',dockChanged);window.removeEventListener('kin-dock-preference-mounted',dockChanged);
     window.removeEventListener('storage',onStorage);window.removeEventListener('pagehide',end);channel?.close();
   }
-  function onStorage(e){if(e.key==='kin-session-ended')end();else if(dockKey&&e.key===dockKey){
+  function onStorage(e){if(e.key==='kin-session-ended')end();else if(toolbarKey&&e.key===toolbarKey){
+    let matches=false;try{const clean=e.newValue?.length<=2048?normalizeToolbar(JSON.parse(e.newValue)):null;matches=clean&&JSON.stringify(clean)===JSON.stringify(toolbarValue);}catch(_){}
+    if(!matches){generation++;toolbarStatus.textContent='다른 창의 도구 모음 변경 · 현재 창 유지';}
+  }else if(dockKey&&e.key===dockKey){
     // A child iframe's own write also emits storage in this parent. Its custom
     // change event already updated the live value and generation synchronously.
     let matches=false;try{const clean=e.newValue?.length<=128?normalizeDock(JSON.parse(e.newValue)):null;matches=clean&&JSON.stringify(clean)===JSON.stringify(dockValue);}catch(_){}
@@ -179,19 +205,23 @@ window.KinReadingAppearance = function (options) {
     else colorStatus.textContent='기본 글자색입니다.';
   }catch(_){colorStatus.textContent='저장된 글자색을 읽지 못해 기본 글자색을 적용했습니다.';}
   try{const raw=dockKey?storage.getItem(dockKey):null;if(raw!==null){const clean=raw.length<=128?normalizeDock(JSON.parse(raw)):null;if(clean)dockValue={...clean,version:2,autoHide:clean.autoHide??false};else dockStatus.textContent='저장된 도구 설정 오류 · 기본값';}}catch(_){dockStatus.textContent='도구 설정을 읽지 못해 기본값을 표시합니다.';}
+  try{const raw=toolbarKey?storage.getItem(toolbarKey):null;if(raw!==null){const clean=raw.length<=2048?normalizeToolbar(JSON.parse(raw)):null;if(clean)toolbarValue=clean;else toolbarStatus.textContent='저장된 도구 모음 오류 · 기본값';}}catch(_){toolbarStatus.textContent='도구 모음을 읽지 못해 기본값을 표시합니다.';}showToolbar();
   apply(hasText);applyFonts(hasFont);applyColors(hasColor);showDock();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
     const dock=v.version>=3?normalizeDock(v.dock):null,view=v.version>=4?viewer.normalize(v.viewer):null;
-    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<3||dock?.version===(v.version===5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{})}:null;
+    const toolbar=v.version===6?normalizeToolbar(v.toolbar):null;
+    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{})}:null;
   };
-  return {host:account,read:()=>({...value,version:5,fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
+  return {host:account,read:()=>({...value,version:6,fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
+      if(clean.version===6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
       if(clean.version>=3&&!setDock(clean.dock))return false;
+      if(clean.version===6&&!setToolbar(clean.toolbar))return false;
       if(clean.version>=4&&!setViewer(clean.viewer))return false;
       value={version:1,list:clean.list,current:clean.current,prior:clean.prior};
       if(clean.version>=2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}

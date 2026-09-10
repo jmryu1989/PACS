@@ -121,6 +121,8 @@ window.kinCreateViewerToolbarPreferences=function(options){
   const initialOwner=JSON.stringify(options.owner()),key='kin-viewer-toolbar:v1:'+initialOwner;
   let ended=false,applying=false,suspended=false,current=defaults(),draft,applied=baseline.slice(),opener,channel;
   const live=()=>!ended&&options.live()&&JSON.stringify(options.owner())===initialOwner;
+  function notify(type){for(const target of window.parent===window?[window]:[window,window.parent])try{target.dispatchEvent(new target.CustomEvent('kin-toolbar-preference-'+type,{detail:{owner:initialOwner,value:normalize(current)}}));}catch(_){} }
+  function persist(){notify('changed');try{localStorage.setItem(key,JSON.stringify(current));status.textContent='도구 모음을 기억했습니다 · 이 브라우저';}catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}}
   const box=document.createElement('section');box.id='kin-native-toolbar-settings';options.host.append(box);
   const button=document.createElement('button');button.type='button';button.id='kin-native-toolbar-edit';button.textContent='기본 도구 모음 편집';box.append(button);
   const status=document.createElement('span');status.id='kin-native-toolbar-status';status.setAttribute('role','status');status.textContent='이 브라우저 · 현재 계정';box.append(status);
@@ -157,7 +159,7 @@ window.kinCreateViewerToolbarPreferences=function(options){
   action('kin-native-toolbar-apply','적용',()=>{
     if(!live()||suspended){status.textContent='현재 영상과 계정을 확인한 뒤 다시 여세요.';close();return;}
     const next=normalize(draft);if(!next||!write(next))return;
-    try{localStorage.setItem(key,JSON.stringify(current));status.textContent='도구 모음을 기억했습니다 · 이 브라우저';}catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}
+    persist();
     close();
   });
   action('kin-native-toolbar-cancel','취소',close);
@@ -170,15 +172,19 @@ window.kinCreateViewerToolbarPreferences=function(options){
   let subscription;
   function end(){
     if(ended)return;ended=true;subscription?.unsubscribe();window.removeEventListener('storage',storage);channel?.close();
+    if(window.kinViewerToolbarPreferences===controller)delete window.kinViewerToolbarPreferences;
     if(same(read(),applied)&&!same(applied,baseline)){applying=true;try{service.clearButtonSection('primary');service.createButtonSection('primary',baseline.slice());}catch(_){}finally{applying=false;}}
     dialog.remove();box.remove();
   }
-  function storage(e){if(e.key==='kin-session-ended')end();else if(e.key===key)status.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}
+  function storage(e){if(e.key==='kin-session-ended')end();else if(e.key===key){let matches=false;try{matches=e.newValue?.length<=2048&&same(normalize(JSON.parse(e.newValue)),current);}catch(_){}if(!matches)status.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}}
   try{const raw=localStorage.getItem(key);if(raw!==null){const value=raw.length<=2048?normalize(JSON.parse(raw)):null;if(value){if(write(value))status.textContent='기억한 도구 모음 · 이 브라우저';}else status.textContent='저장값 오류 · 기본 도구 모음';}}catch(_){status.textContent='저장소 사용 불가 · 이 창';}
   subscription=service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED,()=>{if(!ended&&!applying&&!same(read(),applied)){suspended=true;button.disabled=true;status.textContent='도구 모음이 변경되었습니다. 영상을 다시 연 뒤 편집하세요.';}});
   window.addEventListener('storage',storage);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
-  return {dispose:end};
+  const canApply=next=>live()&&!suspended&&!dialog.open&&!!normalize(next)&&same(read(),applied);
+  const controller={dispose:end,preference:()=>ended?null:normalize(current),canApply,
+    applyPreference:next=>{if(!canApply(next)||!write(normalize(next)))return false;persist();return true;}};
+  window.kinViewerToolbarPreferences=controller;notify('mounted');return controller;
 };
 
 /* Standalone viewer note bridge: active loaded stack identity, never URL-first guessing. */
@@ -266,7 +272,7 @@ window.kinViewerTechNote=function(services){
         if(!Array.isArray(identity)||identity.length!==2||identity.some(v=>typeof v!=='string'||!v))return false;
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
         patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive});
-        toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:contextLive});
+        toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:()=>{try{return live()&&options.owner()===bound&&(options.toolbarAllowed||options.allowed)();}catch(_){return false;}}});
         return true;
       };
       window.kinViewerEnablePatientCopy=enable;

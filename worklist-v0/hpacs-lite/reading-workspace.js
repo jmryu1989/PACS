@@ -285,6 +285,11 @@ window.KinReadingWorkspace = function (app) {
     });
   }
   function layout() {
+    // The native viewer observes its container size even while hidden. Preserve
+    // that size off screen so returning from the list cannot produce a NaN camera.
+    if(!active&&frame&&!host.hidden){const r=host.getBoundingClientRect();if(r.width>0&&r.height>0){host.style.setProperty('--kin-retained-width',r.width+'px');host.style.setProperty('--kin-retained-height',r.height+'px');}}
+    host.classList.toggle('kin-retained-viewer',!active&&!!frame&&!!host.style.getPropertyValue('--kin-retained-width'));
+    host.inert=!active;host.setAttribute('aria-hidden',String(!active));
     document.body.classList.toggle('reading', active); bar.hidden = host.hidden = reportTarget.hidden = !active;
     if (!active) {
       document.body.classList.remove('reading-list-open', 'reading-context-open');
@@ -383,7 +388,9 @@ window.KinReadingWorkspace = function (app) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }
           }
-          w.kinViewerEnablePatientCopy?.({owner:app.noteOwner,allowed:()=>!ended&&app.allowed()&&active&&sameTarget()&&currentFrame===frame&&!frame.hidden&&!frame.inert&&!modalOpen(document)});
+          // Display preferences also apply to a retained hidden viewer. Clinical
+          // actions keep the active/current/visible checks in allowed().
+          w.kinViewerEnablePatientCopy?.({owner:app.noteOwner,allowed:()=>!ended&&app.allowed()&&active&&sameTarget()&&currentFrame===frame&&!frame.hidden&&!frame.inert&&!modalOpen(document),toolbarAllowed:()=>!ended&&app.allowed()&&currentFrame===frame});
           maybeAutoNote();
           return;
         }

@@ -69,7 +69,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   p.locator('#appearance-account-load').click();expect(p.locator('#findings')).to_have_css('font-size','18px')
   expect(p.locator('#reading-font-current')).to_have_value('serif');expect(p.locator('#reading-color-current')).to_have_value('cool')
   p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
-  saved=p.request.get(self.stack.api+'/reading-appearance').json()['sizes'];self.assertEqual(saved['version'],5);self.assertEqual(saved['fonts']['current'],'serif');self.assertEqual(saved['colors']['current'],'cool')
+  saved=p.request.get(self.stack.api+'/reading-appearance').json()['sizes'];self.assertEqual(saved['version'],6);self.assertEqual(saved['fonts']['current'],'serif');self.assertEqual(saved['colors']['current'],'cool')
 
  def test_roam_06_late_load_does_not_replace_new_font_or_color(self):
   p=self.login();self.ready(p);p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')

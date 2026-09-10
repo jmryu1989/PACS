@@ -59,11 +59,17 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const reset=d.createElement('button');reset.type='button';reset.id='kin-dock-reset';reset.textContent='도구 영역 초기화';nav.append(reset);
   reset.onclick=()=>{if(!live()){end();return;}placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();save();};
   const status=d.createElement('span');status.id='kin-dock-preference-status';status.setAttribute('role','status');status.textContent=initialMessage;nav.append(status);
+  function resizeVisible(){
+    // Resizing a hidden iframe's zero-size image can corrupt its camera scale.
+    // The workspace redraws the retained viewer when it becomes visible again.
+    const frame=w.frameElement,r=root.getBoundingClientRect();
+    if(r.width>0&&r.height>0&&(!frame||frame.getBoundingClientRect().width>0&&frame.getBoundingClientRect().height>0))w.dispatchEvent(new w.Event('resize'));
+  }
   function apply(){
     const visible=autoHidden?-1:selected;
     panels.forEach((p,n)=>{p.hidden=visible!==n;p.open=true;buttons[n].setAttribute('aria-expanded',String(visible===n));});
     d.body.classList.toggle('kin-dock-open',visible!==-1);d.body.classList.toggle('kin-dock-top',placement==='top');location.value=placement;auto.checked=autoHide;
-    w.requestAnimationFrame(()=>w.dispatchEvent(new w.Event('resize')));
+    w.requestAnimationFrame(resizeVisible);
     schedule();
   }
   const value=()=>({version:2,placement,panel:selected,autoHide});
@@ -112,7 +118,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     end();
     for(const origin of origins){const p=origin.panel;if(p.parentNode!==dock)continue;const parent=origin.parent.isConnected?origin.parent:d.body;parent.insertBefore(p,origin.next?.parentNode===parent?origin.next:null);p.open=origin.open;p.hidden=origin.hidden;}
     dock.remove();style.remove();d.body.classList.remove('kin-docked','kin-dock-open','kin-dock-top');
-    w.requestAnimationFrame(()=>w.dispatchEvent(new w.Event('resize')));
+    w.requestAnimationFrame(resizeVisible);
   };
   d.body.append(dock); d.body.classList.add('kin-docked');
   apply();w.addEventListener('storage',onStorage);w.addEventListener('pagehide',end);

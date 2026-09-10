@@ -4759,7 +4759,7 @@
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
       try {
-        const appearance=KinReadingAppearance({getDock:()=>{try{const dock=$('#reading-frame')?.contentWindow?.document.getElementById('kin-workspace-dock');return dock&&dock.preference()!==null?dock:null;}catch(_){return null;}},owner:()=>{
+        const appearance=KinReadingAppearance({getToolbar:()=>{try{return $('#reading-frame')?.contentWindow?.kinViewerToolbarPreferences||null;}catch(_){return null;}},getDock:()=>{try{const dock=$('#reading-frame')?.contentWindow?.document.getElementById('kin-workspace-dock');return dock&&dock.preference()!==null?dock:null;}catch(_){return null;}},owner:()=>{
           const key=KinWorkspaceLayout.key(KinAuth.session());
           return key?key.slice(KinWorkspaceLayout.PREFIX.length):null;
         }});

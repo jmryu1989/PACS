@@ -1,4 +1,5 @@
 #reading-bar[hidden], #reading-viewer[hidden], #reading-report-target[hidden], #reading-recovery[hidden] { display: none !important; }
+#reading-viewer.kin-retained-viewer[hidden] { display:flex !important;position:fixed;left:-100000px;top:0;width:var(--kin-retained-width);height:var(--kin-retained-height);visibility:hidden;pointer-events:none;overflow:hidden; }
 /* Keep the retained viewer's geometry while another report is selected.
    Zero-sized hidden viewports can corrupt their camera on an automatic resize. */
 #reading-frame[hidden] { display: block !important; visibility: hidden; pointer-events: none; }
