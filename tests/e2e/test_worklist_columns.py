@@ -30,7 +30,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
             page.locator('#kc-login').click()
         except Exception: raise RuntimeError('Same-browser login form failed') from None
         page.wait_for_url('**/worklist/hpacs-lite/main.html',timeout=30000)
-        expect(page.locator('#dbstat')).to_contain_text('DB 연결됨')
+        expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         self.assertNotEqual(next(c['value'] for c in page.context.cookies() if c['name']=='kin_sid'),old_sid)
         self.assertEqual(page.context.request.get(self.stack.api+'/me').json()['actor'],self.stack.actor(actor))
 
@@ -115,7 +115,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         key=page.evaluate('KinWorklistColumns.key(KinAuth.session())')
         # A separate same-origin tab writes its own settings, producing a conflict.
         peer=page.context.new_page();peer.goto(page.url)
-        expect(peer.locator('#dbstat')).to_contain_text('DB 연결됨')
+        expect(peer.locator('#dbstat')).to_contain_text('DB Connected')
         self.open_columns(peer);self.column(peer,'age').locator('input[type=checkbox]').uncheck();peer.locator('#wc-save').click()
         page.locator('#wc-save').click()
         expect(page.locator('#wc-status')).to_contain_text('다른 창')
@@ -133,7 +133,7 @@ class WorklistColumnsE2E(base.WorklistE2E):
         expect(page.locator('#heads [data-key="desc"]')).to_have_count(0)
         self.assertNotIn('desc',page.evaluate('key=>JSON.parse(localStorage.getItem(key)).modes.Radiology.hidden',key))
         page.evaluate('key=>{Storage.prototype.setItem=window.originalColumnSet;localStorage.setItem(key,"{broken");}',key)
-        page.reload();expect(page.locator('#dbstat')).to_contain_text('DB 연결됨')
+        page.reload();expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         expect(page.locator('#heads [data-key="desc"]')).to_have_count(1)
         self.open_columns(page);expect(page.locator('#wc-status')).to_contain_text('형식이 잘못')
         page.locator('#wc-reset').click();page.locator('#wc-save').click()

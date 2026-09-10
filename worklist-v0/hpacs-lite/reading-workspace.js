@@ -14,27 +14,27 @@ window.KinReadingWorkspace = function (app) {
   const button = (label, action, parent = nav) => {
     const b = node('button', label, parent); b.type = 'button'; b.className = 'chip'; b.onclick = action; return b;
   };
-  const list = button('검사 목록', () => {
+  const list = button('Worklist', () => {
     document.body.classList.toggle('reading-list-open');
     list.setAttribute('aria-expanded', String(document.body.classList.contains('reading-list-open')));
     if (document.body.classList.contains('reading-list-open')) $('#quick').focus();
     else list.focus();
   });
   list.setAttribute('aria-expanded', 'false');
-  const previous = button('이전 검사', () => app.move(-1));
-  const next = button('다음 검사', () => app.move(1));
+  const previous = button('Previous Study', () => app.move(-1));
+  const next = button('Next Study', () => app.move(1));
   const position = node('span', '', nav); position.id = 'reading-position'; position.setAttribute('role', 'status');
-  const imageFocus = button('영상으로', () => focusPane('image'));
-  const priorFocus = button('과거 판독문', () => focusPane('prior'));
-  const reportFocus = button('판독문 작성', () => focusPane('report'));
-  const toolsFocus = button('영상 도구로', () => focusPane('tools'));
+  const imageFocus = button('Image', () => focusPane('image'));
+  const priorFocus = button('Related Report', () => focusPane('prior'));
+  const reportFocus = button('Report Editor', () => focusPane('report'));
+  const toolsFocus = button('Image Tools', () => focusPane('tools'));
   toolsFocus.id = 'reading-tools-focus';
-  const nativeToolsFocus = button('기본 영상 도구로', () => focusPane('nativeTools'));
+  const nativeToolsFocus = button('Viewer Toolbar', () => focusPane('nativeTools'));
   nativeToolsFocus.id = 'reading-native-tools-focus';
   [[list, '1'], [imageFocus, '2'], [priorFocus, '3'], [reportFocus, '4'], [toolsFocus, '7'], [nativeToolsFocus, '9'], [previous, 'ArrowLeft'], [next, 'ArrowRight']].forEach(([b, key]) => {
     b.setAttribute('aria-keyshortcuts', 'Control+Alt+' + key);
   });
-  const context = button('검사 정보·상용구', () => {
+  const context = button('Study Info & Templates', () => {
     if (document.body.classList.contains('reading-context-open')) { closeContext(); context.focus(); }
     else focusPane('context');
   });
@@ -42,18 +42,18 @@ window.KinReadingWorkspace = function (app) {
   context.setAttribute('aria-controls', 'reading-context');
   context.setAttribute('aria-keyshortcuts', 'Control+Alt+5');
   $('.right > .rw').id = 'reading-context';
-  const contextReturn = button('정보 닫고 판독문으로', () => focusPane('report'), $('.s-clinical'));
+  const contextReturn = button('Back to Report', () => focusPane('report'), $('.s-clinical'));
   contextReturn.id = 'reading-context-return';
-  const note = button('현재 영상 Tech 메모', showNote);
+  const note = button('Image Tech Note', showNote);
   note.id = 'reading-tech-note';
   note.setAttribute('aria-keyshortcuts', 'Control+Alt+6');
   note.setAttribute('aria-describedby', 'reading-images');
-  const noteRetry = button('메모 연결 다시 시도', reconnectNote);
+  const noteRetry = button('Reconnect Note', reconnectNote);
   noteRetry.id = 'reading-note-retry'; noteRetry.hidden = true;
   let noteRetryFocus = null;
   const autoLabel = node('label', '', nav);
   const autoNote = node('input', '', autoLabel); autoNote.type = 'checkbox'; autoNote.id = 'reading-note-auto';
-  autoLabel.append(document.createTextNode(' 메모 자동 열기'));
+  autoLabel.append(document.createTextNode(' Auto-open Note'));
   autoLabel.title = '이 브라우저의 현재 계정 설정 · 연결할 때 한 번 확인하며 입력·미저장 작업 중에는 건너뜁니다';
   let autoOwner = null, autoLast = null, preferenceGeneration = 0;
   autoNote.onchange = () => {
@@ -67,8 +67,8 @@ window.KinReadingWorkspace = function (app) {
     catch (_) { app.notice('자동 열기 설정을 저장하지 못했습니다. 현재 화면에서만 적용됩니다.'); }
     maybeAutoNote();
   };
-  const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series, returnLink()); });
-  button('목록 화면으로', () => { active = false; layout(); });
+  const separate = button('Open Viewer Window', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series, returnLink()); });
+  button('Back to Worklist', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
   const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · 7 작업 패널 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
   hints.id = 'reading-shortcuts';
@@ -82,9 +82,9 @@ window.KinReadingWorkspace = function (app) {
   const info = node('div', '', host); info.id = 'reading-images';
   const status = node('div', '', host); status.id = 'reading-status'; status.setAttribute('role', 'status');
   const recovery = node('div', '', host); recovery.id = 'reading-recovery'; recovery.hidden = true;
-  const back = button('이전 영상 작업으로 돌아가기', () => { if (shown) app.select(shown.reportUid); }, recovery);
-  const retry = button('영상 다시 열기', () => { if (pending) attempt(pending, false); }, recovery);
-  const discard = button('미저장 영상 작업 버리고 열기', () => {
+  const back = button('Return to Previous Viewer', () => { if (shown) app.select(shown.reportUid); }, recovery);
+  const retry = button('Reopen Viewer', () => { if (pending) attempt(pending, false); }, recovery);
+  const discard = button('Discard Viewer Changes & Open', () => {
     if (pending && confirm('이전 영상의 저장하지 않은 표식과 작업 제목·설명을 버리고 선택한 영상을 엽니다. 판독문 초안은 별도로 유지됩니다. 계속할까요?')) attempt(pending, true);
   }, recovery);
   const reportTarget = node('div'); reportTarget.id = 'reading-report-target'; reportTarget.hidden = true;
@@ -236,13 +236,13 @@ window.KinReadingWorkspace = function (app) {
     const w = noteWindow(), connection = w?.kinViewerNoteConnectionState?.();
     noteRetry.hidden = !['failed', 'loading'].includes(connection);
     noteRetry.disabled = unavailable || connection !== 'failed';
-    noteRetry.textContent = connection === 'loading' ? '메모 연결 중…' : '메모 연결 다시 시도';
+    noteRetry.textContent = connection === 'loading' ? 'Connecting Note…' : 'Reconnect Note';
     if (noteRetryFocus && (!w || w !== noteRetryFocus || unavailable || connection !== 'loading')) {
       if (w === noteRetryFocus && !unavailable && connection === 'ready' &&
           (document.activeElement === noteRetry || document.activeElement === document.body)) (note.disabled ? imageFocus : note).focus({preventScroll:true});
       noteRetryFocus = null;
     }
-    const label = '현재 영상 Tech 메모' + (!note.disabled ? ' · ' + app.noteLabel(selected.uid) : '');
+    const label = 'Image Tech Note' + (!note.disabled ? ' · ' + app.noteLabel(selected.uid) : '');
     if (note.textContent !== label) note.textContent = label;
   }
   function reconnectNote() {

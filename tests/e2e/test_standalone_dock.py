@@ -10,7 +10,7 @@ class StandaloneDockE2E(ViewerTechNoteE2E):
  def test_standalone_dock_01_parent_popup_preferences_and_work(self):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP DOCK PARENT REPORT');f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.locator('#kin-dock-placement').select_option('top')
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);expect(v.locator('#kin-dock-placement')).to_have_value('top',timeout=45000);expect(v.locator('#kin-viewer-layout')).to_be_visible();self.ready(v)
   v.get_by_label('작업 제목',exact=True).fill('KEEP POPUP TITLE');before=self.snapshot(v);url=v.url
   v.locator('#kin-dock-placement').select_option('bottom');canvas_ready(v,2);DockPreferencesE2E.bounds(self,v,False);self.assertEqual(self.snapshot(v),before)

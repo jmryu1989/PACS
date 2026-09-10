@@ -13,7 +13,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
  def test_reading_note_01_shortcut_preserves_viewer_and_report(self):
   a,b=self.pair();self.note(a,'CURRENT IMAGE NOTE');self.note(b,'PRIOR IMAGE NOTE')
   original=self.originals();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
-  button=p.locator('#reading-tech-note');expect(button).to_have_text('현재 영상 Tech 메모 · 있음')
+  button=p.locator('#reading-tech-note');expect(button).to_have_text('Image Tech Note · 있음')
   p.locator('#findings').fill('UNSAVED REPORT NOTE ROUNDTRIP')
   f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('UNSAVED VIEWER NOTE ROUNDTRIP')
   view="() => cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports().map(v=>({image:v.getCurrentImageId?.(),camera:v.getCamera(),voi:v.getProperties().voiRange})))"
@@ -38,7 +38,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   p.keyboard.press('Control+Alt+5');p.locator('.thumb-open').first.click()
   expect(p.locator('#reading-status')).to_have_text('영상 작업공간 연결됨',timeout=60000)
   f=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(f,1)
-  expect(p.locator('#reading-tech-note')).to_have_text('현재 영상 Tech 메모 · 있음')
+  expect(p.locator('#reading-tech-note')).to_have_text('Image Tech Note · 있음')
   p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
   expect(p.locator('#tech-note-text')).to_have_value('RELATED IMAGE NOTE');expect(p.locator('#reading-target')).to_contain_text(a.uid)
   p.locator('#tech-note-close').click();expect(p.locator('#findings')).to_have_value('KEEP REPORT TARGET')
@@ -57,7 +57,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
    box=canvas.bounding_box();p.mouse.click(box['x']+box['width']*.5,box['y']+box['height']*.3)
    if f.evaluate('() => kinViewerSelectedNoteTarget()?.uid')==b.uid:break
   self.assertEqual(f.evaluate('() => kinViewerSelectedNoteTarget()?.uid'),b.uid)
-  expect(p.locator('#reading-tech-note')).to_have_text('현재 영상 Tech 메모 · 있음')
+  expect(p.locator('#reading-tech-note')).to_have_text('Image Tech Note · 있음')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2)
   p.locator('#reading-tech-note').click();expect(p.locator('#tech-note-target')).to_contain_text(b.uid)
   expect(p.locator('#tech-note-text')).to_have_value('SECOND NOTE')

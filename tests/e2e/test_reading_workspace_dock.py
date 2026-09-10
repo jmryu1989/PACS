@@ -38,7 +38,7 @@ class ReadingDockE2E(ReadingWorkspaceE2E):
   f.get_by_label('작업 제목',exact=True).fill('HIDDEN UNSAVED');job.click()
   self.choose(p,b);expect(p.locator('#reading-frame')).not_to_be_visible()
   expect(p.locator('#reading-status')).to_contain_text('저장하지 않은 작업')
-  p.get_by_role('button',name='이전 영상 작업으로 돌아가기',exact=True).click()
+  p.get_by_role('button',name='Return to Previous Viewer',exact=True).click()
   job.click();expect(f.get_by_label('작업 제목',exact=True)).to_have_value('HIDDEN UNSAVED')
   self.assertEqual(self.jobs(a),[])
 

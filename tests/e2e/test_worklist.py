@@ -170,7 +170,7 @@ class WorklistE2E(unittest.TestCase):
             # Playwright's call log can include fill() values; never print credentials.
             raise RuntimeError("Real BFF login form could not be submitted") from None
         page.wait_for_url("**/worklist/hpacs-lite/main.html", timeout=30000)
-        expect(page.locator("#dbstat")).to_contain_text("DB 연결됨")
+        expect(page.locator("#dbstat")).to_contain_text("DB Connected")
         expect(page.locator("#roles")).to_contain_text("technician" if actor == "tech" else "radiologist")
         return page
 

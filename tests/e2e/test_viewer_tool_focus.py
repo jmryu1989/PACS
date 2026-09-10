@@ -8,7 +8,7 @@ from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 class ViewerToolFocusE2E(ViewerTechNoteE2E):
  def test_tool_01_standalone_tools_image_and_edit_roundtrip(self):
   a,b=self.pair();p=self.login();self.workspace(p,a);p.locator('#findings').fill('KEEP PARENT REPORT')
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);self.active(v,a.uid);self.assertTrue(v.evaluate('()=>window.opener===null'))
   v.locator('#kin-viewer-layout').evaluate('(e)=>e.open=true');v.get_by_label('작업 제목',exact=True).fill('KEEP STANDALONE TOOLS')
   before=self.snapshot(v);self.assertEqual(len(before),2);url=v.url

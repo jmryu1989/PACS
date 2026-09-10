@@ -317,7 +317,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         try:
             with fresh.expect_request('**/api/colleagues'):
                 fresh.reload()
-            expect(fresh.locator('#dbstat')).to_contain_text('DB 연결됨')
+            expect(fresh.locator('#dbstat')).to_contain_text('DB Connected')
             with fresh.expect_response(lambda response: response.request.method == 'GET'
                                        and response.url.split('?')[0].endswith('/api/studies')):
                 fresh.locator('#refresh').click()

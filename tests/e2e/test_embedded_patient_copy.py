@@ -25,7 +25,7 @@ class EmbeddedPatientCopyE2E(ViewerTechNoteE2E):
   a,b=self.pair();p,f=self.opened(a);f.evaluate('()=>navigator.clipboard.writeText("KEEP EMBEDDED GUARD")');item=self.menu(p,f);expect(item).to_be_visible();p.locator('#reading-appearance-open').click();expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();item.dispatch_event('click');self.assertEqual(self.clipboard(f),'KEEP EMBEDDED GUARD');p.locator('#reading-appearance-close').click();expect(f.locator('#kin-viewer-copy-id')).to_be_enabled()
   f.get_by_label('작업 제목',exact=True).fill('KEEP EMBEDDED INPUT');f.get_by_label('작업 제목',exact=True).focus();p.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(f),'KEEP EMBEDDED GUARD');expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP EMBEDDED INPUT')
   p.locator('#reading-frame').evaluate('(e)=>e.inert=true');expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.locator('#kin-viewer-copy-id').dispatch_event('click');self.assertEqual(self.clipboard(f),'KEEP EMBEDDED GUARD');p.locator('#reading-frame').evaluate('(e)=>e.inert=false');expect(f.locator('#kin-viewer-copy-id')).to_be_enabled()
-  p.get_by_role('button',name='목록 화면으로',exact=True).click();expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.locator('#kin-viewer-copy-id').dispatch_event('click');self.assertEqual(self.clipboard(f),'KEEP EMBEDDED GUARD')
+  p.get_by_role('button',name='Back to Worklist',exact=True).click();expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.locator('#kin-viewer-copy-id').dispatch_event('click');self.assertEqual(self.clipboard(f),'KEEP EMBEDDED GUARD')
 
  def test_embedded_03_stale_selection_metadata_and_lifecycle(self):
   a,b=self.pair();p,f=self.opened(a);f.evaluate('()=>navigator.clipboard.writeText("KEEP EMBEDDED ABA")');item=self.menu(p,f);expect(item).to_be_visible()
@@ -38,7 +38,7 @@ class EmbeddedPatientCopyE2E(ViewerTechNoteE2E):
  def test_embedded_04_hidden_report_target_and_owner_failure_recover(self):
   a,b=self.pair();p,f=self.opened(a);f.get_by_label('작업 제목',exact=True).fill('KEEP HIDDEN COPY');f.evaluate('()=>navigator.clipboard.writeText("KEEP HIDDEN CLIPBOARD")');self.choose(p,b)
   expect(p.locator('#reading-frame')).not_to_be_visible();expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.locator('#kin-viewer-copy-id').dispatch_event('click');self.assertEqual(self.clipboard(f),'KEEP HIDDEN CLIPBOARD')
-  p.get_by_role('button',name='이전 영상 작업으로 돌아가기',exact=True).click();expect(p.locator('#reading-target')).to_contain_text(a.uid);expect(f.locator('#kin-viewer-copy-id')).to_be_enabled();expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP HIDDEN COPY')
+  p.get_by_role('button',name='Return to Previous Viewer',exact=True).click();expect(p.locator('#reading-target')).to_contain_text(a.uid);expect(f.locator('#kin-viewer-copy-id')).to_be_enabled();expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP HIDDEN COPY')
   p.evaluate("()=>{window.syntheticOwnerKey=KinWorkspaceLayout.key;KinWorkspaceLayout.key=()=>{throw new Error('synthetic owner unavailable')}}");expect(f.locator('#kin-viewer-copy-id')).to_be_disabled();f.locator('#kin-viewer-copy-id').dispatch_event('click');self.assertEqual(self.clipboard(f),'KEEP HIDDEN CLIPBOARD');p.evaluate('()=>KinWorkspaceLayout.key=window.syntheticOwnerKey');expect(f.locator('#kin-viewer-copy-id')).to_be_enabled()
   self.tools(f);f.locator('#kin-viewer-copy-id').click();expect(f.locator('#kin-viewer-copy-status')).to_have_text('환자 ID를 복사했습니다.');self.assertEqual(self.clipboard(f),a.patient_id)
 

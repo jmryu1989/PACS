@@ -33,7 +33,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         except Exception:
             raise RuntimeError('D02B real login failed') from None
         page.wait_for_url('**/worklist/hpacs-lite/main.html', timeout=30000)
-        expect(page.locator('#dbstat')).to_contain_text('DB 연결됨')
+        expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         me = page.context.request.get(self.stack.api + '/me').json()
         self.assertEqual(page.evaluate('KinAuth.session().sub'), me['sub'])
         self.assertTrue(me['sub'])
@@ -190,7 +190,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
         owner=self.owner(page)
         page.evaluate('(key)=>localStorage.setItem(key,JSON.stringify({version:1,mode:"portrait",portrait:{main:-999},landscape:{}}))',owner)
         page.reload()
-        expect(page.locator('#dbstat')).to_contain_text('DB 연결됨')
+        expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         self.mode_is(page,'auto')
         expect(page.locator('#layout-status')).to_contain_text('기본 배치')
         page.context.add_init_script("""(() => {
@@ -203,7 +203,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
           }
         })();""")
         page.reload()
-        expect(page.locator('#dbstat')).to_contain_text('DB 연결됨')
+        expect(page.locator('#dbstat')).to_contain_text('DB Connected')
         expect(page.locator('#layout-status')).to_contain_text('저장소 사용 불가')
         page.locator('#layout-toggle').click()
         self.mode_is(page,'portrait')

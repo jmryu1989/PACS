@@ -28,7 +28,7 @@ class ToolbarPreferencesE2E(NativeToolbarE2E):
 
  def test_toolbar_02_popup_remember_other_window_and_lifecycle(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);self.editor(f);self.customize(f);self.applied(f);saved=self.section(f)
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);expect(v.locator('#kin-native-toolbar-status')).to_contain_text('기억한 도구');self.assertEqual(self.section(v),saved)
   self.editor(v);v.locator('#kin-native-toolbar-default').click();self.applied(v);self.assertEqual(self.section(v),BASE);self.assertEqual(self.section(f),saved);expect(f.locator('#kin-native-toolbar-status')).to_contain_text('현재 창 유지')
   self.editor(v);self.customize(v);self.applied(v);v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(v.locator('#kin-native-toolbar-dialog')).to_have_count(0);self.assertEqual(self.section(v),BASE)

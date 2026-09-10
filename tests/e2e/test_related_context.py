@@ -65,7 +65,7 @@ class RelatedContextE2E(previous.PriorSelectionE2E):
                              page.locator("#prior-report-meta").inner_text())
             expect(page.locator("#related-current")).to_have_text(expected_current)
             expect(page.locator("#findings")).to_have_value(draft)
-        expect(page.locator(".prior-report-head b")).to_have_text("관련 판독문")
+        expect(page.locator(".prior-report-head b")).to_have_text("Related Report")
         self.viewer(page, self.related(page, future), [current, future])
         expect(page.locator(f'#rows tr[data-uid="{current.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
         expect(page.locator("#related-current")).to_have_text(expected_current)

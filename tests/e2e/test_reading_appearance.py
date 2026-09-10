@@ -60,7 +60,7 @@ class ReadingAppearanceE2E(ReadingWorkspaceE2E):
 
  def test_text_04_missing_display_asset_keeps_clinical_workspace(self):
   a,b=self.pair();p=self.login();p.route('**/reading-appearance.js',lambda route:route.abort());p.reload()
-  expect(p.locator('#dbstat')).to_contain_text('DB 연결됨');expect(p.locator('#reading-appearance-open')).to_be_disabled()
+  expect(p.locator('#dbstat')).to_contain_text('DB Connected');expect(p.locator('#reading-appearance-open')).to_be_disabled()
   expect(p.locator('#reading-appearance-open')).to_have_attribute('title','글자 크기 설정을 불러오지 못했습니다. 판독 작업은 계속할 수 있습니다.')
   self.workspace(p,a);p.locator('#findings').fill('KEEP WORK WITHOUT DISPLAY SETTINGS')
   expect(p.locator('#findings')).to_have_value('KEEP WORK WITHOUT DISPLAY SETTINGS')

@@ -57,7 +57,7 @@ class FavoriteViewE2E(ViewerJobsE2E):
   for value in actual:self.assertAlmostEqual(value['lower'],-1000,delta=0.01);self.assertAlmostEqual(value['upper'],-1,delta=0.01)
   self.assertEqual(len(self.versions(a)),1);self.assertEqual(len(self.versions(b)),1)
   p.locator('#favorite-open').click();p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(p.locator('#reading-target')).to_contain_text(a.uid)
-  p.get_by_role('button',name='검사 목록',exact=True).click()
+  p.get_by_role('button',name='Worklist',exact=True).click()
   p.locator(f'#rows tr[data-uid="{b.uid}"]').click();expect(p.locator('#findings')).to_have_value('KEEP FAVORITE VIEW REPORT')
   other.bring_to_front();frame.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');canvas_ready(frame,2)
   expected=self.stack.request('GET',f'/studies/{a.uid}/viewer-jobs/{job["id"]}','doctor').body['snapshot']
@@ -84,10 +84,10 @@ class FavoriteViewE2E(ViewerJobsE2E):
   p=self.login();self.select(p,b);p.locator('#findings').fill('KEEP DIRTY PREVIOUS REPORT');p.locator('#m-reading').click()
   expect(p.locator('#reading-frame')).to_be_visible();frame=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,1)
   frame.get_by_role('button',name='비교 작업·배치',exact=True).click();frame.get_by_label('작업 제목',exact=True).fill('KEEP UNSAVED PREVIOUS VIEW')
-  src=p.locator('#reading-frame').get_attribute('src');p.get_by_role('button',name='검사 목록',exact=True).click();p.locator('#favorite-open').click()
+  src=p.locator('#reading-frame').get_attribute('src');p.get_by_role('button',name='Worklist',exact=True).click();p.locator('#favorite-open').click()
   p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(p.locator('#reading-status')).to_contain_text('저장하지 않은 작업')
   self.assertEqual(p.locator('#reading-frame').get_attribute('src'),src);expect(frame.get_by_label('작업 제목',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW')
-  p.get_by_role('button',name='이전 영상 작업으로 돌아가기',exact=True).click();expect(p.locator('#findings')).to_have_value('KEEP DIRTY PREVIOUS REPORT')
+  p.get_by_role('button',name='Return to Previous Viewer',exact=True).click();expect(p.locator('#findings')).to_have_value('KEEP DIRTY PREVIOUS REPORT')
   expect(frame.get_by_label('작업 제목',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW');self.assertEqual(len(self.jobs(b)),0)
 
 

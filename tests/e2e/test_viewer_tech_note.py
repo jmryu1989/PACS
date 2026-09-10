@@ -24,7 +24,7 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
  def test_viewer_note_01_active_prior_focus_and_report(self):
   a,b=self.pair();self.note(a,'CURRENT NOTE');self.note(b,'PRIOR ACTIVE NOTE');original=self.originals();p=self.login();f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP POPUP REPORT')
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);self.active(v,b.uid)
   layout=v.locator('#kin-viewer-layout')
   if layout.get_attribute('open') is None:layout.locator('summary').first.click()

@@ -8,7 +8,7 @@ from test_viewer_tech_note import ViewerTechNoteE2E,canvas_ready
 class WindowReturnE2E(ViewerTechNoteE2E):
  def popup(self,a):
   p=self.login();f=self.workspace(p,a)
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);expect(v.locator('#kin-viewer-focus-4')).to_be_enabled();return p,f,v
  def returned(self,p,v):
   p.wait_for_function("()=>document.activeElement===document.querySelector('#findings')");expect(v.locator('#kin-viewer-return-status')).to_contain_text('판독문')
@@ -26,7 +26,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   p.bring_to_front();p.keyboard.press('Control+Alt+2');expect(p.locator('#reading-frame')).to_be_focused();p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused()
   history=v.evaluate('()=>window.history.length');active=v.evaluate('()=>services.viewportGridService.getState().activeViewportId')
   requests=[];v.on('request',lambda r:requests.append(r.url) if r.is_navigation_request() else None);v.evaluate("()=>window.syntheticReturnMarker='KEEP DOCUMENT'")
-  p.get_by_role('button',name='영상 새 창',exact=True).click();v.wait_for_function('(old)=>location.href!==old',arg=old_url);self.assertEqual(v.url.split('#')[0],old_url.split('#')[0]);self.assertEqual(v.evaluate('()=>window.syntheticReturnMarker'),'KEEP DOCUMENT');self.assertEqual(requests,[])
+  p.get_by_role('button',name='Open Viewer Window',exact=True).click();v.wait_for_function('(old)=>location.href!==old',arg=old_url);self.assertEqual(v.url.split('#')[0],old_url.split('#')[0]);self.assertEqual(v.evaluate('()=>window.syntheticReturnMarker'),'KEEP DOCUMENT');self.assertEqual(requests,[])
   v.bring_to_front();v.keyboard.press('Control+Alt+4');self.returned(p,v);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP RETURN VIEWER');self.assertEqual(v.evaluate('()=>window.history.length'),history);self.assertEqual(v.evaluate('()=>services.viewportGridService.getState().activeViewportId'),active);self.assertTrue(v.evaluate('()=>window.opener===null'))
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'returned-editor.png'))
 
@@ -57,12 +57,12 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);v.get_by_role('button',name='측정·주석',exact=True).click();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4')
   expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();expect(v.locator('#kin-viewer-history')).to_be_visible();p.locator('#reading-appearance-close').click()
   p.evaluate("()=>{window.syntheticReplies=[];const send=BroadcastChannel.prototype.postMessage;window.syntheticSend=send;BroadcastChannel.prototype.postMessage=function(m){if(m.type==='result')window.syntheticReplies.push([this,m]);else send.call(this,m)}}")
-  v.keyboard.press('Control+Alt+4');p.wait_for_function('()=>window.syntheticReplies.length===1');p.get_by_role('button',name='영상 새 창',exact=True).click();expect(v.locator('#kin-viewer-return-status')).to_contain_text('이전 복귀 요청은 취소');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','false')
+  v.keyboard.press('Control+Alt+4');p.wait_for_function('()=>window.syntheticReplies.length===1');p.get_by_role('button',name='Open Viewer Window',exact=True).click();expect(v.locator('#kin-viewer-return-status')).to_contain_text('이전 복귀 요청은 취소');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','false')
   p.evaluate('()=>{for(const [c,m] of window.syntheticReplies.splice(0)){try{window.syntheticSend.call(c,m)}catch(_){}}}');expect(v.locator('#kin-viewer-return-status')).to_contain_text('이전 복귀 요청은 취소')
 
  def test_return_07_native_closed_panel_keeps_feedback_visible(self):
   a,b=self.pair();p=self.login();self.workspace(p,a)
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000);expect(v.locator('#kin-workspace-dock')).to_have_count(0);self.active(v,a.uid)
   v.locator('#kin-viewer-layout > summary').click();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible()
 

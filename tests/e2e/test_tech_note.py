@@ -122,7 +122,7 @@ class TechNoteE2E(WorklistE2E):
   p.keyboard.press('Control+Alt+5');p.locator('#tech-note-open').click()
   expect(p.locator('#tech-note-target')).to_contain_text(f.uid)
   expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC reading context note')
-  p.locator('#tech-note-close').click();p.get_by_role('button',name='정보 닫고 판독문으로',exact=True).click()
+  p.locator('#tech-note-close').click();p.get_by_role('button',name='Back to Report',exact=True).click()
   expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('UNSAVED REPORT WITH TECH NOTE')
   canvas_ready(frame,1)
 
@@ -138,7 +138,7 @@ class TechNoteE2E(WorklistE2E):
   badge.click();expect(p.locator('#tech-note-text')).to_have_value('SYNTHETIC LIST NOTE')
   p.locator('#tech-note-text').fill('');p.locator('#tech-note-reason').fill('clear list note');p.locator('#tech-note-save').click()
   expect(p.locator('#tech-note-status')).to_have_text('저장되었습니다. v2');expect(badge).to_have_text('비움·이력')
-  p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB 연결됨');p.locator('#quick').fill(a.patient_id)
+  p.locator('#tech-note-close').click();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');p.locator('#quick').fill(a.patient_id)
   expect(badge).to_have_text('비움·이력')
   reader=self.login();self.select(reader,a);reader.locator('#findings').fill('UNSAVED READING TARGET')
   reader.locator(f'[data-tech-note="{b.uid}"]').click();expect(reader.locator('#tech-note-status')).to_contain_text('읽기 전용')

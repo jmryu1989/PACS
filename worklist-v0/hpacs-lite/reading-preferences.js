@@ -1,8 +1,8 @@
 /* Explicit account restore must not overwrite a newer local checkbox choice. */
 window.KinReadingPreferences = function ({ owner, host, read, apply, generation, endpoint, sessionEndpoint }) {
   const make = (tag, text, id) => { const el = document.createElement(tag); el.textContent = text; el.id = id; host.append(el); return el; };
-  const load = make('button', '메모 설정 불러오기', 'reading-prefs-load');
-  const save = make('button', '메모 설정 계정 저장', 'reading-prefs-save');
+  const load = make('button', 'Load Note Preferences', 'reading-prefs-load');
+  const save = make('button', 'Save Note Preferences', 'reading-prefs-save');
   for (const b of [load, save]) { b.type = 'button'; b.className = 'chip'; }
   const status = make('span', '', 'reading-prefs-status'); status.setAttribute('role', 'status');
   let revision = null, busy = false, ended = false, request, channel;

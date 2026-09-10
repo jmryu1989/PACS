@@ -32,7 +32,7 @@ class AppearanceE2E(ColumnsRoamingE2E):
         expect(other.locator('#wc-size')).to_have_value('18');expect(other.locator('#rows .wc-cell')).to_have_count(0)
         other.locator('#wc-save').click()
         self.assertEqual(other.locator('#rows .wc-cell').first.evaluate('e=>e.getBoundingClientRect().width'),240)
-        other.reload();expect(other.locator('#dbstat')).to_contain_text('DB 연결됨')
+        other.reload();expect(other.locator('#dbstat')).to_contain_text('DB Connected')
         self.assertEqual(other.locator('#rows .wc-cell').first.evaluate('e=>e.getBoundingClientRect().width'),240)
         other.locator('[data-tab="Technician"]').click();expect(other.locator('#rows .wc-cell')).to_have_count(0)
         other.locator('[data-tab="Radiology"]').click()

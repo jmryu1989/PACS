@@ -19,7 +19,7 @@ class DockAccountE2E(AppearanceAccountE2E):
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,g),before);expect(g.get_by_label('작업 제목',exact=True)).to_have_value('KEEP ROAM DOCK TITLE');expect(other.locator('#findings')).to_have_value('KEEP ROAM REPORT');self.assertEqual(self.jobs(a),[]);expect(other.locator('#reading-dock-status')).not_to_contain_text('다른 창')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'account-dock.png'))
   other.locator('#reading-appearance-close').click()
-  with other.context.expect_page() as opened:other.get_by_role('button',name='영상 새 창',exact=True).click()
+  with other.context.expect_page() as opened:other.get_by_role('button',name='Open Viewer Window',exact=True).click()
   popup=opened.value;canvas_ready(popup,2);expect(popup.locator('#kin-dock-placement')).to_have_value('top',timeout=45000)
   self.settings(other);other.locator('#reading-dock-placement').select_option('bottom');expect(g.locator('#kin-dock-placement')).to_have_value('bottom');expect(popup.locator('#kin-dock-placement')).to_have_value('top');expect(popup.locator('#kin-dock-preference-status')).to_contain_text('현재 창 유지')
 
@@ -53,7 +53,7 @@ class DockAccountE2E(AppearanceAccountE2E):
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');p.locator('#reading-dock-placement').select_option('bottom')
   self.assertEqual(len(pending),1);pending.pop().fulfill(response=p.request.get(self.stack.api+'/reading-appearance'));expect(p.locator('#appearance-account-status')).to_contain_text('현재 설정이 바뀌어 적용하지 않았습니다');p.unroute('**/api/reading-appearance')
   p.locator('#reading-appearance-close').click();f=self.workspace(p,a)
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   popup=opened.value;canvas_ready(popup,2);expect(popup.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000)
   if popup.locator('#kin-viewer-dock-enable').is_visible():popup.locator('#kin-viewer-dock-enable').click()
   self.settings(p);p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…');popup.locator('#kin-dock-placement').select_option('top')

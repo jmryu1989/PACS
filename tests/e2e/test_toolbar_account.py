@@ -21,7 +21,7 @@ class ToolbarAccountE2E(ToolbarPreferencesE2E):
   other=self.login();g=self.workspace(other,a);self.tools(g);g.get_by_label('작업 제목',exact=True).fill('KEEP TOOLBAR ROAM JOB');other.locator('#findings').fill('KEEP TOOLBAR ROAM REPORT');before=self.snapshot(g);self.account_ready(other);self.assertEqual(self.section(g),BASE)
   other.locator('#appearance-account-load').click();self.loaded(other);self.assertEqual(self.section(g),wanted);self.assertEqual(self.snapshot(g),before);expect(other.locator('#findings')).to_have_value('KEEP TOOLBAR ROAM REPORT');expect(g.get_by_label('작업 제목',exact=True)).to_have_value('KEEP TOOLBAR ROAM JOB');self.assertEqual(self.jobs(a),[])
   other.locator('#reading-appearance-close').click()
-  with other.context.expect_page() as opened:other.get_by_role('button',name='영상 새 창',exact=True).click()
+  with other.context.expect_page() as opened:other.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);self.assertEqual(self.section(v),wanted)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);self.settings(other);other.screenshot(path=str(folder/'toolbar-account.png'))
 
@@ -33,7 +33,7 @@ class ToolbarAccountE2E(ToolbarPreferencesE2E):
 
  def test_account_06_retained_hidden_viewer_loads_without_losing_work(self):
   a,b=self.pair();p=self.login();f=self.customized(p,a);wanted=self.section(f);p.locator('#reading-toolbar-reset').click();self.assertEqual(self.section(f),BASE);p.locator('#reading-appearance-close').click();self.tools(f);f.get_by_label('작업 제목',exact=True).fill('KEEP HIDDEN ROAM TITLE');p.locator('#findings').fill('KEEP HIDDEN ROAM REPORT');before=self.snapshot(f);url=f.url
-  p.get_by_role('button',name='목록 화면으로',exact=True).click();expect(p.locator('#reading-viewer')).not_to_be_visible();expect(p.locator('#reading-viewer')).to_have_attribute('aria-hidden','true');self.assertTrue(p.locator('#reading-viewer').evaluate('e=>e.inert'));self.settings(p);p.locator('#appearance-account-load').click();self.loaded(p);self.assertEqual(self.section(f),wanted);expect(p.locator('#findings')).to_have_value('KEEP HIDDEN ROAM REPORT')
+  p.get_by_role('button',name='Back to Worklist',exact=True).click();expect(p.locator('#reading-viewer')).not_to_be_visible();expect(p.locator('#reading-viewer')).to_have_attribute('aria-hidden','true');self.assertTrue(p.locator('#reading-viewer').evaluate('e=>e.inert'));self.settings(p);p.locator('#appearance-account-load').click();self.loaded(p);self.assertEqual(self.section(f),wanted);expect(p.locator('#findings')).to_have_value('KEEP HIDDEN ROAM REPORT')
   p.locator('#reading-appearance-close').click();p.locator('#m-reading').click();expect(p.locator('#reading-viewer')).to_be_visible()
   self.assertFalse(p.locator('#reading-viewer').evaluate('e=>e.inert'));expect(p.locator('#reading-viewer')).to_have_attribute('aria-hidden','false')
   print('RESUMED CANVASES',f.evaluate("()=>({all:[...document.querySelectorAll('.cornerstone-canvas')].map(c=>[c.width,c.height]),loaded:cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports()).map(v=>({id:v.id,image:v.getCurrentImageId?.(),camera:v.getCamera()}))})"),flush=True)
@@ -56,7 +56,7 @@ class ToolbarAccountE2E(ToolbarPreferencesE2E):
 
  def test_account_05_other_window_invalidates_late_load_without_live_change(self):
   a,b=self.pair();p=self.login();f=self.customized(p,a);wanted=self.section(f);p.locator('#reading-appearance-close').click()
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);self.assertEqual(self.section(v),wanted);self.account_ready(p)
   pending=[];p.route('**/api/reading-appearance',lambda route:pending.append(route));p.locator('#appearance-account-load').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정 확인 중…')
   self.editor(v);v.locator('#kin-native-toolbar-default').click();self.applied(v);expect(p.locator('#reading-toolbar-status')).to_contain_text('다른 창');self.assertEqual(self.section(f),wanted);self.assertEqual(self.section(v),BASE);self.assertEqual(len(pending),1)

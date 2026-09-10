@@ -48,7 +48,7 @@ class RelatedFilterE2E(previous.ReturnToCurrentE2E):
         self.shown(page,[ct,mr,mixed,oct_,empty,literal_])
         expect(page.locator("#related-filter-count")).to_have_text("6 / 6")
         options = page.locator("#related-modality option").all_text_contents()
-        self.assertEqual(set(options),{"전체 Modality","미지정","CT","MR","OCT",literal})
+        self.assertEqual(set(options),{"All Modalities","Unspecified","CT","MR","OCT",literal})
         for token,expected in (("CT",[ct,mixed]),("MR",[mr,mixed]),("OCT",[oct_]),("",[empty]),(literal,[literal_])):
             self.filter(page,token); self.shown(page,expected)
             expect(page.locator("#related-filter-count")).to_have_text(f"{len(expected)} / 6")

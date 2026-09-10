@@ -12,9 +12,9 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
   p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   stored=p.evaluate("() => Object.keys(localStorage).filter(k=>k.startsWith('kin-reading-note-auto:v1:')).map(k=>[k,localStorage.getItem(k)])")
   self.assertEqual(len(stored),1);self.assertEqual(stored[0][1],'true');self.assertNotIn(a.uid,json.dumps(stored))
-  p.reload();expect(p.locator('#dbstat')).to_contain_text('DB 연결됨');self.workspace(p,a)
+  p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(p,a)
   expect(toggle).to_be_checked();expect(p.locator('#tech-note-text')).to_have_value('AUTO NOTE CURRENT');p.locator('#tech-note-close').click()
-  toggle.uncheck();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB 연결됨');self.workspace(p,a)
+  toggle.uncheck();p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(p,a)
   expect(toggle).not_to_be_checked();expect(p.locator('#tech-note-dialog')).not_to_be_visible()
 
  def test_auto_note_02_editing_defers_and_manual_open_does_not_repeat(self):
@@ -43,7 +43,7 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
   other.evaluate("() => {const original=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){if(k.startsWith('kin-reading-note-auto:v1:'))throw new Error('Synthetic storage refusal');return original.call(this,k,v)}}")
   other.locator('#reading-note-auto').check();expect(other.locator('#tech-note-text')).to_have_value('LOCAL SETTING NOTE')
   other.locator('#tech-note-close').click();expect(other.locator('body')).to_contain_text('현재 화면에서만 적용됩니다.')
-  other.reload();expect(other.locator('#dbstat')).to_contain_text('DB 연결됨');self.workspace(other,a)
+  other.reload();expect(other.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(other,a)
   expect(other.locator('#reading-note-auto')).not_to_be_checked();expect(other.locator('#tech-note-dialog')).not_to_be_visible()
 
  def test_auto_note_04_unsaved_viewer_defers_but_manual_still_works(self):
@@ -60,7 +60,7 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
    for row in body.get('studies',[]):
     if row.get('uid')==a.uid:row.pop('techNote',None)
    route.fulfill(response=response,json=body)
-  p.route('**/api/studies?*',omit);p.reload();expect(p.locator('#dbstat')).to_contain_text('DB 연결됨');self.workspace(p,a)
+  p.route('**/api/studies?*',omit);p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');self.workspace(p,a)
   expect(p.locator('#reading-tech-note')).to_contain_text('미확인');p.locator('#reading-note-auto').check()
   expect(p.locator('body')).to_contain_text('메모 상태가 미확인입니다.');expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   p.unroute('**/api/studies?*');p.locator('#refresh').click();expect(p.locator('#reading-tech-note')).to_contain_text('있음')

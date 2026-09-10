@@ -86,7 +86,7 @@ class CTSyncE2E(ViewerLayoutE2E):
   self.jump(p,0,8);p.wait_for_timeout(150);self.assertTrue(pending);self.drag(p,'D03A past',1);canvas_ready(p,2);before=self.snapshot(p)[1]
   for r in pending:r.fulfill(response=r.fetch())
   p.unroute(pattern);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p)[1],before)
-  work=p.context.new_page();work.goto(self.stack.proxy+'/worklist/hpacs-lite/main.html');expect(work.locator('#dbstat')).to_contain_text('DB 연결됨');work.once('dialog',lambda d:d.accept());work.locator('#logout').click();work.wait_for_url('**/index.html')
+  work=p.context.new_page();work.goto(self.stack.proxy+'/worklist/hpacs-lite/main.html');expect(work.locator('#dbstat')).to_contain_text('DB Connected');work.once('dialog',lambda d:d.accept());work.locator('#logout').click();work.wait_for_url('**/index.html')
   expect(p.locator('#kin-ct-sync-status')).to_contain_text('세션이 변경')
   self.jump(p,0,9);p.wait_for_timeout(250);self.assertEqual(self.snapshot(p)[1],before)
   self.assertEqual(self.report_rows(f),rows);self.assertEqual(self.originals(),originals)

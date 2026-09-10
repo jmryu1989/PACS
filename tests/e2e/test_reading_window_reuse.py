@@ -15,7 +15,7 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
     def open_separate(self, page, fixture):
         frame = self.workspace(page, fixture)
         with page.context.expect_page() as opened:
-            page.get_by_role("button", name="영상 새 창", exact=True).click()
+            page.get_by_role("button", name="Open Viewer Window", exact=True).click()
         popup = opened.value
         popup.wait_for_url("**/ohif/viewer?**")
         canvas_ready(popup, 2)
@@ -46,7 +46,7 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
 
         self.choose(page, past)
         expect(page.locator("#reading-status")).to_have_text("영상 작업공간 연결됨", timeout=60000)
-        page.get_by_role("button", name="영상 새 창", exact=True).click()
+        page.get_by_role("button", name="Open Viewer Window", exact=True).click()
         expect(page.locator("#toast")).to_contain_text("저장하지 않은 표식이나 작업 내용")
         self.assertEqual(parse_qs(urlsplit(popup.url).query)["StudyInstanceUIDs"], [current.uid + "," + past.uid])
         expect(popup.get_by_label("작업 제목", exact=True)).to_have_value("KEEP SEPARATE WINDOW")
@@ -56,11 +56,11 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
           window.__kinOriginalJobState = window.kinViewerJobWorkspaceState;
           window.kinViewerJobWorkspaceState = () => ({busy: true, dirty: false});
         }""")
-        page.get_by_role("button", name="영상 새 창", exact=True).click()
+        page.get_by_role("button", name="Open Viewer Window", exact=True).click()
         expect(page.locator("#toast")).to_contain_text("저장·복원 또는 상태 확인")
         self.assertEqual(parse_qs(urlsplit(popup.url).query)["StudyInstanceUIDs"], [current.uid + "," + past.uid])
         popup.evaluate("window.kinViewerJobWorkspaceState = window.__kinOriginalJobState")
-        page.get_by_role("button", name="영상 새 창", exact=True).click()
+        page.get_by_role("button", name="Open Viewer Window", exact=True).click()
         expect(popup).to_have_url(re.compile(r"[?&]StudyInstanceUIDs=" + re.escape(past.uid) + r"(?:[&#]|$)"), timeout=60000)
         canvas_ready(popup, 1)
         self.assertIs(popup, original_popup)
@@ -69,7 +69,7 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
         navigations = []
         popup.on("request", lambda request: navigations.append(request.url) if request.is_navigation_request() else None)
         popup.evaluate("window.__kinSameScopeMarker = 'preserved'")
-        page.get_by_role("button", name="영상 새 창", exact=True).click()
+        page.get_by_role("button", name="Open Viewer Window", exact=True).click()
         popup.wait_for_timeout(500)
         self.assertEqual(popup.evaluate("window.__kinSameScopeMarker"), "preserved")
         self.assertEqual(navigations, [])

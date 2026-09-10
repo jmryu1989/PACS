@@ -39,7 +39,7 @@ class NativeToolbarE2E(ViewerTechNoteE2E):
 
  def test_native_03_popup_return_and_mode_cleanup(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);p.locator('#findings').fill('KEEP POPUP NATIVE REPORT')
-  with p.context.expect_page() as opened:p.get_by_role('button',name='영상 새 창',exact=True).click()
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);self.ready(v);before=self.snapshot(v)
   v.keyboard.press('Control+Alt+9');expect(self.zoom(v)).to_be_focused();self.assertEqual(self.snapshot(v),before)
   v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_have_text(re.compile(r'판독문으로 돌아왔습니다\.|판독문 위치를 준비했습니다\. 목록 창을 선택하세요\.'));expect(p.locator('#findings')).to_have_value('KEEP POPUP NATIVE REPORT')

@@ -518,22 +518,22 @@
       <div data-tab="Technician">Technician</div>
     </div>
     <div class="item" id="m-home">⌂ Home</div>
-    <button class="item" id="m-reading" type="button">영상 + 판독</button>
+    <button class="item" id="m-reading" type="button">Reading Workspace</button>
     <div class="item" title="추후 구현">⚙ Config</div>
     <div class="item" title="추후 구현">? Help</div>
     <div class="item" id="m-filmbox">⇄ Filmbox</div>
     <!-- 기관을 못 알아본 검사. 관리자에게만 보인다 — 평소엔 0건이라 숨어 있다. -->
     <div class="item" id="m-unassigned" style="display:none;color:#d8b24a"
-         title="DICOM 기관명을 알아보지 못해 어느 워크리스트에도 안 뜨는 검사">⚠ 미배정</div>
+         title="DICOM 기관명을 알아보지 못해 어느 워크리스트에도 안 뜨는 검사">⚠ Unmatched Studies</div>
     <div class="spacer"></div>
     <div class="mright">Prefetch <input type="checkbox" checked></div>
     <div class="mright" id="storage">0.0GB / -</div>
     <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
     <div class="mright" id="user"></div>
     <div class="mright" id="roles" style="color:#4da3ff" title="Keycloak 렐름 롤"></div>
-    <a class="mright member-link" id="member-link" href="admin.html" style="display:none">회원</a>
-    <div class="mright"><select style="background:#14181f;color:#aab2c0;border:1px solid #3a4356"><option>한국어</option><option>English</option></select></div>
-    <div class="mright logout" id="logout">로그아웃</div>
+    <a class="mright member-link" id="member-link" href="admin.html" style="display:none">Members</a>
+    <div class="mright" title="메뉴·버튼은 영어, 설명·오류 안내는 한국어로 표시합니다.">EN</div>
+    <div class="mright logout" id="logout">Log out</div>
   </div>
 
   <!-- 사용자 필터 영역 (6.2): Quick Search + 날짜 퀵필터 + Save/Clear -->
@@ -550,28 +550,28 @@
     <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
     <div class="spacer"></div>
     <button class="chip" id="refresh">Refresh</button>
-    <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">배치: 자동</button>
-    <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">배치 초기화</button>
-    <button class="chip" id="reading-appearance-open" type="button" disabled>글자·도구 설정</button>
+    <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
+    <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
+    <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
     <details id="workspace-server-menu" style="position:relative">
-      <summary class="chip">계정 배치</summary>
+      <summary class="chip">Account Layout</summary>
       <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
         <p style="margin:0 0 8px">작업공간의 방향과 패널 크기를 다른 브라우저에서 불러옵니다. 영상·판독문은 포함하지 않습니다.</p>
-        <button class="chip" data-action="save" disabled>서버에 배치 저장</button>
-        <button class="chip" data-action="load" disabled>서버 배치 불러오기</button>
-        <button class="chip" data-action="clear" disabled>서버 배치 초기화</button>
+        <button class="chip" data-action="save" disabled>Save to Account</button>
+        <button class="chip" data-action="load" disabled>Load from Account</button>
+        <button class="chip" data-action="clear" disabled>Reset Account Layout</button>
         <p id="workspace-server-status" role="status" style="margin-bottom:0"></p>
       </div>
     </details>
     <span id="layout-status" role="status" style="font-size:11px;color:var(--kin-muted)" title="계정별로 이 브라우저에 배치를 기억합니다. 작은 세로 창은 768×1024 이상에서 확인했습니다."></span>
-    <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">다른 모니터로</button>
+    <button class="chip" id="b-monitor" style="display:none" title="이 브라우저에서 판독 창을 다른 모니터에 배치하도록 허용합니다. 허용하면 다음 열기부터 적용됩니다.">Move to Monitor</button>
     <button class="chip" id="savefilter">Save Filter</button>
-    <button class="chip" id="favorite-open" type="button">개인 즐겨찾기</button>
-    <button class="chip" id="favorite-clear" type="button" hidden>즐겨찾기 범위 해제</button>
-    <button class="chip" id="study-tag-open" type="button">태그 관리·검색</button>
-    <button class="chip" id="study-tag-clear" type="button" hidden>태그 범위 해제</button>
-    <button class="chip" id="managefilters">검색 조건·저장 관리</button>
-    <button class="chip" id="columnsettings">열 설정</button>
+    <button class="chip" id="favorite-open" type="button">Favorites</button>
+    <button class="chip" id="favorite-clear" type="button" hidden>Clear Favorite Filter</button>
+    <button class="chip" id="study-tag-open" type="button">Study Tags</button>
+    <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
+    <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
+    <button class="chip" id="columnsettings">Columns</button>
     <button class="chip" id="clearfilter">Clear</button>
   </div>
 
@@ -606,11 +606,11 @@
       </div>
 
       <nav id="worklist-pages" aria-label="검색 결과 페이지" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;border-top:1px solid var(--kin-line)">
-        <button id="page-prev" type="button">이전 페이지</button><span id="page-status" role="status"></span><button id="page-next" type="button">다음 페이지</button>
+        <button id="page-prev" type="button">Previous Page</button><span id="page-status" role="status"></span><button id="page-next" type="button">Next Page</button>
         <label>페이지당 <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select>건</label>
-        <button id="page-current" type="button">선택 검사 페이지</button>
+        <button id="page-current" type="button">Selected Study Page</button>
       </nav>
-      <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">이어받기</button> <button id="study-fetch-cancel" type="button">불러오기 중지</button></div>
+      <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">Resume</button> <button id="study-fetch-cancel" type="button">Stop Loading</button></div>
       <div class="statusbar">
         <span id="countlist"></span>
         <span id="filterlist">Filter : -</span>
@@ -634,9 +634,9 @@
           </div>
         </section>
         <section class="s-clinical">
-          <h3>Clinical Info <button id="sr-open" class="chip" type="button" disabled>SR 원문</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech 메모</button></h3>
+          <h3>Clinical Info <button id="sr-open" class="chip" type="button" disabled>Source SR</button> <button id="tech-note-open" class="chip" type="button" disabled>Tech Note</button></h3>
           <div style="padding:4px 10px;overflow-wrap:anywhere">
-            <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>환자 ID 복사</button>
+            <button id="copy-patient-id" class="chip" type="button" aria-keyshortcuts="Control+Alt+C" aria-describedby="copy-patient-context" disabled>Copy Patient ID</button>
             <span style="font-size:11px">Ctrl+Alt+C</span>
             <div id="copy-patient-context" style="font-size:11px">열람 검사를 선택하세요</div>
             <div id="copy-patient-status" role="status" aria-live="polite" style="font-size:11px"></div>
@@ -652,13 +652,13 @@
           </div>
           <div class="tpl-search">
             <input id="tpl-search" type="search" maxlength="200" aria-label="상용구 검색" placeholder="제목·단축어·Modality·부위 검색">
-            <button id="tpl-search-clear" class="chip" type="button">검색 해제</button>
-            <button id="tpl-filter-clear" class="chip" type="button">전체 보기</button>
+            <button id="tpl-search-clear" class="chip" type="button">Clear Search</button>
+            <button id="tpl-filter-clear" class="chip" type="button">Show All</button>
           </div>
           <div id="tpl-filter-status" class="tpl-filter-status" role="status" aria-live="polite"></div>
           <div class="tpl-list">
             <table style="width:100%">
-              <thead><tr><th>Title</th><th>Shortcut</th><th>Modality</th><th>미리보기</th></tr></thead>
+              <thead><tr><th>Title</th><th>Shortcut</th><th>Modality</th><th>Preview</th></tr></thead>
               <tbody id="tplrows"></tbody>
             </table>
           </div>
@@ -674,14 +674,14 @@
           <div class="reltabs" id="reltabs">
             <span class="rel-title">Related Exam</span>
             <span class="spacer"></span>
-            <button id="related-return" type="button" disabled title="판독문은 유지하고 판독 대상의 영상과 정보를 봅니다">판독 대상 보기</button>
+            <button id="related-return" type="button" disabled title="판독문은 유지하고 판독 대상의 영상과 정보를 봅니다">Reading Target</button>
           </div>
           <div id="related-current" tabindex="-1" role="status" aria-live="polite">판독 대상을 선택하세요</div>
           <div class="related-filter">
-            <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">전체 Modality</option></select>
+            <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">All Modalities</option></select>
             <span id="related-filter-count" role="status" aria-live="polite">0 / 0</span>
-            <span id="related-pages" hidden><button id="related-page-prev" type="button">이전</button><span id="related-page-status" role="status"></span><button id="related-page-next" type="button">다음</button>
-            <button id="related-page-current" type="button">열람 검사 페이지</button></span>
+            <span id="related-pages" hidden><button id="related-page-prev" type="button">Previous</button><span id="related-page-status" role="status"></span><button id="related-page-next" type="button">Next</button>
+            <button id="related-page-current" type="button">Viewed Study Page</button></span>
           </div>
           <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
           <div class="grid2">
@@ -695,9 +695,9 @@
              title="드래그하여 Related 목록과 이전 판독문 높이 조절"></div>
         <div class="prior-report-pane">
           <div class="prior-report-head">
-            <b>관련 판독문</b>
+            <b>Related Report</b>
             <span class="meta" id="prior-report-meta"></span>
-            <span class="readonly">읽기 전용</span>
+            <span class="readonly">Read only</span>
           </div>
           <div class="prior-report-body">
             <div class="prior-report-status" id="prior-report-status">Related Exam을 선택하세요</div>
@@ -731,8 +731,8 @@
           <span id="draftmsg"></span>
           <span class="spacer"></span>
           <button id="b-report-reload" style="display:none"
-                  title="현재 화면의 내용을 버리고 서버에서 받은 최신 판독문을 표시합니다">서버 내용 불러오기</button>
-          <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">초안 버리기</button>
+                  title="현재 화면의 내용을 버리고 서버에서 받은 최신 판독문을 표시합니다">Reload Report</button>
+          <button id="b-draft-discard" title="쓰다 만 내용을 버리고 저장된 판독문으로 돌아갑니다">Discard Draft</button>
         </div>
         <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
         <div class="draftbar" id="deferbar" style="display:none"><span id="defermsg"></span></div>
@@ -745,12 +745,12 @@
           <textarea id="recommendation" placeholder="Please enter recommendation"></textarea>
         </div>
         <div class="rfoot2">
-          <button id="b-report-template" disabled>상용구로 저장</button>
+          <button id="b-report-template" disabled>Save as Template</button>
           <button id="b-copy">Copy</button>
           <button id="b-paste">Paste</button>
           <button id="b-history" title="판독문 개정 이력">History</button>
           <button id="b-unread">Reset to Unread</button>
-          <button id="b-defer">보류</button>
+          <button id="b-defer">Defer</button>
           <button id="b-clear">Clear</button>
           <button id="b-prev">◀ Prev</button>
           <button id="b-next">Next ▶</button>
@@ -790,16 +790,16 @@
   <!-- 판독문 개정 이력 -->
   <div class="modal" id="histmodal">
     <div class="box" style="width:640px;max-width:92vw">
-      <h3>판독문 개정 이력</h3>
+      <h3>Report History</h3>
       <div class="hist" id="hist-body"></div>
-      <div class="foot"><button class="ok" id="hist-close">닫기</button></div>
+      <div class="foot"><button class="ok" id="hist-close">Close</button></div>
     </div>
   </div>
 
   <!-- 미배정 검사 (관리자) -->
   <div class="modal" id="unmodal">
     <div class="box" style="width:720px;max-width:94vw">
-      <h3>미배정 검사 — 기관을 알아보지 못한 검사</h3>
+      <h3>Unmatched Studies</h3>
       <div style="padding:8px 12px;color:#8892a4;font-size:11px;line-height:1.6">
         DICOM <code>InstitutionName(0008,0080)</code>이 등록된 별칭과 안 맞아 어느 기관에도
         속하지 않은 검사입니다. <b>어느 워크리스트에도 안 뜹니다.</b><br>
@@ -807,7 +807,7 @@
         (<code>Institution.dicomNames</code>)을 고치세요.
       </div>
       <div class="hist" id="un-body" style="padding:0 12px"></div>
-      <div class="foot"><button class="ok" id="un-close">닫기</button></div>
+      <div class="foot"><button class="ok" id="un-close">Close</button></div>
     </div>
   </div>
 
@@ -822,7 +822,7 @@
   -->
   <div class="modal" id="tplmodal" role="dialog" aria-modal="true" aria-labelledby="tpl-title">
     <div class="box" style="width:560px;max-width:94vw">
-      <h3 id="tpl-title">상용구</h3>
+      <h3 id="tpl-title">Reading Template</h3>
       <p id="tpl-source" hidden></p>
       <div class="body tplbody">
         <label for="tpl-t">제목</label><input id="tpl-t" placeholder="예: Normal Brain CT">
@@ -834,15 +834,15 @@
         <label for="tpl-r">Recommendation</label><textarea id="tpl-r" rows="3"></textarea>
       </div>
       <div class="foot">
-        <button id="tpl-cancel">취소</button>
-        <button class="ok" id="tpl-save">저장</button>
+        <button id="tpl-cancel">Cancel</button>
+        <button class="ok" id="tpl-save">Save</button>
       </div>
     </div>
   </div>
 
   <div class="modal" id="tpl-preview" role="dialog" aria-modal="true" aria-labelledby="tpl-preview-title">
     <div class="box" style="width:640px;max-width:94vw">
-      <h3 id="tpl-preview-title">상용구 미리보기</h3>
+      <h3 id="tpl-preview-title">Template Preview</h3>
       <p id="tpl-preview-target"></p>
       <div class="tpl-preview-body" tabindex="0" role="region" aria-label="상용구 내용">
         <p id="tpl-preview-meta"></p>
@@ -852,8 +852,8 @@
       </div>
       <p id="tpl-preview-status" role="status"></p>
       <div class="foot">
-        <button id="tpl-preview-close" type="button">닫기</button>
-        <button id="tpl-preview-insert" class="ok" type="button">현재 판독문에 삽입</button>
+        <button id="tpl-preview-close" type="button">Close</button>
+        <button id="tpl-preview-insert" class="ok" type="button">Insert into Report</button>
       </div>
     </div>
   </div>
@@ -886,8 +886,8 @@
         <label for="reason-extra">기타/추가 설명</label><textarea id="reason-extra" maxlength="200" rows="3"></textarea>
       </div>
       <div class="foot">
-        <button id="reason-cancel">취소</button>
-        <button class="ok" id="reason-ok" disabled>확인</button>
+        <button id="reason-cancel">Cancel</button>
+        <button class="ok" id="reason-ok" disabled>Confirm</button>
       </div>
     </div>
   </div>
@@ -1163,7 +1163,7 @@
         <tr data-i="${templates.indexOf(t)}" title="더블클릭: 판독문에 삽입${
           t.shortcut ? ` / 판독문에서 &quot;${esc(t.shortcut)}&quot; 입력 후 Tab` : ""} / 우클릭: 편집">
           <td>${esc(t.title)}</td><td>${esc(t.shortcut)}</td><td>${esc(t.modality)}</td>
-          <td><button type="button" class="chip" data-tpl-preview aria-label="상용구 미리보기: ${esc(t.title)}">보기</button></td>
+          <td><button type="button" class="chip" data-tpl-preview aria-label="상용구 미리보기: ${esc(t.title)}">View</button></td>
         </tr>`).join("") || `<tr><td class="empty" colspan="4">${templates.length ? "조건에 맞는 상용구가 없습니다" : "상용구 없음 — 우클릭해서 추가하세요"}</td></tr>`;
       updateTemplatePreview();
     }
@@ -1467,8 +1467,8 @@
     const COLS = {
       Radiology: [
         { k: "pf", t: "PF" },
-        { k: "assignedReader", t: "배정 판독의", f: "text" },
-        { k: "techNote", t: "Tech 메모" },
+        { k: "assignedReader", t: "Assigned Reader", f: "text" },
+        { k: "techNote", t: "Tech Note" },
         { k: "no", t: "No", num: 1 },
         { k: "viewing", t: "Viewing" },
         { k: "count", t: "Count", num: 1 },
@@ -1492,8 +1492,8 @@
         { k: "preReviewer", t: "PreReviewer", f: "text" },
       ],
       Technician: [
-        { k: "assignedReader", t: "배정 판독의", f: "text" },
-        { k: "techNote", t: "Tech 메모" },
+        { k: "assignedReader", t: "Assigned Reader", f: "text" },
+        { k: "techNote", t: "Tech Note" },
         { k: "no", t: "No", num: 1 },
         { k: "count", t: "Count", num: 1 },
         { k: "series", t: "Series", num: 1 },
@@ -1523,12 +1523,12 @@
 
     // 특수 렌더링이 필요한 칸만 함수로
     const CELL = {
-      assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline||s.tele?'disabled':''}>${esc(s.assignedReader||'미배정')}</button>`,
+      assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline||s.tele?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
       rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
-      ss: s => `<span class="ss ${esc(s.ss)}">${mode === "Radiology" && s.ss === "Unverified" ? "촬영중" : esc(s.ss)}</span>`,
+      ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
       matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
@@ -1704,7 +1704,7 @@
         $('#err').textContent = '';
         try {
           const st = await (await fetch("/statistics")).json();
-          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB 사용";
+          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB used";
         } catch (e) {}
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
         try { render(); refreshRight(); }
@@ -1745,7 +1745,7 @@
         render(); refreshRight();
         try {
           const st = await (await fetch("/statistics")).json();
-          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB 사용";
+          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB used";
         } catch (e) {}
       } catch (e) {
         // ── 데모 모드: Orthanc 없이 열람 시 (GitHub Pages 등) 가짜 데이터로 전환 ──
@@ -1898,7 +1898,7 @@
           `<span class="count"><span class="dot dot-ho"></span>O:${n("rs","O")}</span>` +
           `<span class="count"><span class="dot dot-t"></span>T:${n("rs","T")}</span>` +
           `<span class="count"><span class="dot dot-p"></span>P:${n("rs","P")}</span>` +
-          `<span class="count">촬영중:${n("ss","Unverified")}</span>`;
+          `<span class="count">Unverified:${n("ss","Unverified")}</span>`;
       } else {
         $("#countlist").textContent =
           `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
@@ -1981,9 +1981,9 @@
     srDialog.style.cssText = 'width:min(900px,94vw);max-height:88vh;background:#141c29;color:#dae6f6;border:1px solid #6683aa;border-radius:8px;padding:16px;overflow:auto';
     srDialog.innerHTML = `<h2 id="sr-title" style="margin:0 0 8px">외부 SR 원문 · 읽기 전용</h2><div id="sr-context" style="overflow-wrap:anywhere"></div>
       <p>외부 문서의 값과 참조를 그대로 표시합니다. 판독 저장·확정과 별개입니다.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap"><button id="sr-reload" type="button">목록 새로고침</button><button id="sr-close" type="button">닫기</button></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button id="sr-reload" type="button">Refresh List</button><button id="sr-close" type="button">Close</button></div>
       <p><label>SR 시리즈 <select id="sr-series" style="max-width:100%"></select></label></p>
-      <p><label>SR 문서 <select id="sr-document" style="max-width:100%"></select></label> <button id="sr-read" type="button" disabled>원문 읽기</button></p>
+      <p><label>SR 문서 <select id="sr-document" style="max-width:100%"></select></label> <button id="sr-read" type="button" disabled>Read Source</button></p>
       <p id="sr-status" role="status" aria-live="polite"></p><div id="sr-tree" style="overflow-wrap:anywhere;white-space:pre-wrap"></div>`;
     document.body.append(srDialog);
     let srEpoch = 0, srAbort = null, srUid = null, srSeries = [], srDocuments = [];
@@ -2241,7 +2241,7 @@
       const total = rel.length;
       const modality = $("#related-modality");
       const tokens = [...new Set(rel.flatMap(relatedModalities))].sort();
-      const options = [new Option("전체 Modality", ""), new Option("미지정", JSON.stringify("")),
+      const options = [new Option("All Modalities", ""), new Option("Unspecified", JSON.stringify("")),
         ...tokens.map(token => new Option(token, JSON.stringify(token)))];
       // 마지막 일치 항목이 사라져도 사용자가 고른 조건을 몰래 전체로 넓히지 않는다.
       if (relatedModality && !options.some(option => option.value === relatedModality))
@@ -2272,7 +2272,7 @@
               <td>${relatedDateLabel(x)} · ${x.uid === relatedUid ? "👁 열람 중" : "비교"}</td>
               <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
-              <td>${x.rs === "A" ? "승인 판독문" : "판독문 없음"}</td>
+              <td>${x.rs === "A" ? "Approved" : "No Report"}</td>
             </tr>`;
           }).join("") || `<tr><td class="empty" colspan="7">${relatedModality ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
@@ -2358,9 +2358,9 @@
           const start = page * 24, batch = orderedThumbs(reps).slice(start, start + 24);
           const n = Math.max(Math.ceil(Math.sqrt(batch.length)), 2);
           wrap.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:4px">
-            <button id="thumb-prev" class="chip" type="button" ${page === 0 ? "disabled" : ""}>이전</button>
+            <button id="thumb-prev" class="chip" type="button" ${page === 0 ? "disabled" : ""}>Previous</button>
             <span id="thumb-range">시리즈 ${batch.length ? start + 1 : 0}–${start + batch.length} / ${reps.length}</span>
-            <button id="thumb-next" class="chip" type="button" ${start + 24 >= reps.length ? "disabled" : ""}>다음</button>
+            <button id="thumb-next" class="chip" type="button" ${start + 24 >= reps.length ? "disabled" : ""}>Next</button>
             <label>정렬 <select id="thumb-sort" aria-label="시리즈 정렬" style="max-width:100%;background:#14181f;color:#cdd3dc;border:1px solid #3a4356;font:inherit">
               <option value="source">원래 순서</option><option value="number-asc">번호 오름차순</option><option value="number-desc">번호 내림차순</option>
             </select></label>
@@ -2561,7 +2561,7 @@
       if (uid === selectedUid) { loadReport(); updateReportButtons(); }
       toast(ss === "Verified"
         ? "검사를 확인했습니다 — 판독할 수 있습니다"
-        : "확인을 해제했습니다 — 촬영중으로 표시되고 판독이 잠깁니다 (응급 제외)", "info");
+        : "확인을 해제했습니다 — Unverified로 표시되고 판독이 잠깁니다 (응급 제외)", "info");
     }
     $("#t-verify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Verified") : alert("검사를 선택하세요."));
     $("#t-unverify").addEventListener("click", () => selectedUid ? setSs(selectedUid, "Unverified") : alert("검사를 선택하세요."));
@@ -3011,7 +3011,7 @@
       $("#holdbar").style.display = held ? "flex" : "none";
       $("#holdmsg").textContent = held ? `✎ ${heldTitle} — 잠금이 풀리면 이어서 판독할 수 있습니다` : "";
       $("#deferbar").style.display = s?.rs === "H" ? "flex" : "none";
-      $("#defermsg").textContent = s?.rs === "H" ? `⏸ 보류 — ${s.holdReason ?? ""}` : "";
+      $("#defermsg").textContent = s?.rs === "H" ? `⏸ On Hold — ${s.holdReason ?? ""}` : "";
       // 남의 예비 판독은 읽지도 쓰지도 못한다. 서버가 막지만 회색으로 보이는 편이 낫다 —
       // 눌러보고 거절당하는 건 "왜 안 되지"를 만들고, 회색은 "내 것이 아니구나"를 만든다.
       const locked = !!appState[selectedUid]?.prelimHidden;
@@ -4009,7 +4009,7 @@
       const portrait = layoutMode === "portrait" || (layoutMode === "auto" && innerHeight > innerWidth);
       document.body.classList.toggle("portrait", portrait);
       $("#layout-toggle").textContent = {
-        auto: "배치: 자동", portrait: "배치: 세로 고정", landscape: "배치: 가로 고정",
+        auto: "Layout: Auto", portrait: "Layout: Portrait", landscape: "Layout: Landscape",
       }[layoutMode];
       $("#layout-toggle").setAttribute("aria-label", `화면 배치 ${layoutMode}`);
       $("#resize-main").setAttribute("aria-orientation", portrait ? "horizontal" : "vertical");
@@ -4598,7 +4598,7 @@
       templates = Array.isArray(b.templates) ? b.templates : [];
       try { localStorage.removeItem("kin-filters"); localStorage.removeItem("kin-templates"); } catch (e) {}
       renderChips(); renderTemplates();
-      $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB 연결됨`;
+      $("#dbstat").innerHTML = `<span style="color:#4ac06a">●</span> DB Connected`;
       $("#dbstat").title = `상태·판독문이 서버(${API})에 저장됩니다 — 브라우저를 바꿔도 유지됩니다`;
       // 어느 기관으로 로그인했는지 항상 보이게. 두 기관을 오가며 시험할 때
       // "지금 누구로 보고 있는지"를 모르면 필터가 되는지 안 되는지도 알 수 없다.
