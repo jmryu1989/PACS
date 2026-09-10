@@ -11,7 +11,7 @@ class VolumePatientCopyE2E(ImageContextCopyE2E):
   if hasattr(v,'page'):EmbeddedPatientCopyE2E.active(self,v,uid)
   else:super().active(v,uid)
  def mpr(self,v):
-  v.locator('[data-cy=Layout]').click();v.get_by_text('MPR',exact=True).click()
+  v.locator('[data-cy=Layout]').click();v.locator('#react-portal').get_by_text('MPR',exact=True).click()
   v.wait_for_function("""()=>{const g=services.viewportGridService.getState();return g.viewports.size===3&&[...g.viewports.keys()].every(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id);return v?.type==='orthographic'&&cornerstone.cache.getVolume(v.getVolumeId())?.loadStatus.loaded})}""")
   expect(v.locator('#kin-viewer-copy-id')).to_be_enabled();self.tools(v)
   # The initial MPR canvas is rounded up, then the queued native resize uses

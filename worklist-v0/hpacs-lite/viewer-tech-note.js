@@ -187,6 +187,107 @@ window.kinCreateViewerToolbarPreferences=function(options){
   window.kinViewerToolbarPreferences=controller;notify('mounted');return controller;
 };
 
+function kinCreateVolumeProjection({services,selected,live,allowed=live,host}){
+  const panel=document.createElement('section');panel.id='kin-volume-projection';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';
+  panel.innerHTML='<strong>Volume Projection</strong><p class="target"></p><label>Mode <select aria-label="Projection Mode"><option value="0">MPR</option><option value="1">MIP</option><option value="2">MinIP</option><option value="3">Average</option></select></label> <label>Total Thickness (mm) <input aria-label="Total Thickness (mm)" type="number" min="0.2" max="1000" step="0.1" style="width:80px"></label> <button type="button">Apply to Active Plane</button><p role="status"></p><p></p>';
+  panel.lastElementChild.textContent='선택한 평면에만 적용합니다. 변경은 이 창에만 유지되며 저장된 비교 작업에는 포함되지 않습니다.';
+  host.append(panel);
+  const mode=panel.querySelector('select'),thickness=panel.querySelector('input'),apply=panel.querySelector('button'),status=panel.querySelector('[role=status]'),caption=panel.querySelector('.target');
+  const names=['MPR','MIP','MinIP','Average'],labels=new Map();let ended=false,shown=null,propertyKey='';
+  const near=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((n,i)=>Number.isFinite(Number(n))&&Math.abs(Number(n)-Number(b[i]))<1e-3);
+  const key=t=>JSON.stringify([t.source.viewportId,t.source.uid,t.source.selectionEpoch]);
+  function target(verify=false){
+    if(ended||!live()||verify&&!allowed())return null;
+    try{
+      const source=selected();if(source?.kind!=='volume')return null;
+      const v=services.cornerstoneViewportService.getCornerstoneViewport(source.viewportId),cell=services.viewportGridService.getState().viewports.get(source.viewportId);
+      const ds=services.displaySetService.getDisplaySetByUID(cell.displaySetInstanceUIDs[0]);
+      if(v.type!=='orthographic'||ds.Modality!=='CT')return null;
+      const volume=window.cornerstone.cache.getVolume(v.getVolumeId()),actor=v.getActors()[0],mapper=actor.actor.getMapper();
+      const dimensions=volume.dimensions,spacing=volume.spacing;
+      if(!Array.isArray(dimensions)||dimensions.length!==3||dimensions.some(n=>!Number.isInteger(n)||n<2)||!Array.isArray(spacing)||spacing.length!==3||spacing.some(n=>!Number.isFinite(n)||n<=0))return null;
+      const max=Math.min(1000,Math.hypot(...dimensions.map((n,i)=>(n-1)*spacing[i]))),blend=mapper.getBlendMode(),total=2*v.getSlabThickness();
+      if(![0,1,2,3].includes(blend)||!Number.isFinite(total)||total<=0||max<.2)return null;
+      if(verify){
+        const direction=Array.from(volume.direction||[]),dot=(a,b)=>a.reduce((sum,n,i)=>sum+n*b[i],0);
+        if(direction.length!==9||direction.some(n=>!Number.isFinite(n)))throw Error('CT 원본 좌표를 확인할 수 없습니다.');
+        const axes=[direction.slice(0,3),direction.slice(3,6),direction.slice(6,9)];
+        if(axes.some(a=>Math.abs(dot(a,a)-1)>1e-3)||Math.abs(dot(axes[0],axes[1]))>1e-3||Math.abs(dot(axes[0],axes[2]))>1e-3||Math.abs(dot(axes[1],axes[2]))>1e-3)throw Error('직교 CT 원본 좌표를 확인한 뒤 적용하세요.');
+        let first;const images=volume.imageIds;
+        if(images.length!==dimensions[2])throw Error('일반 CT 원본 프레임과 볼륨 크기가 일치하지 않습니다.');
+        for(let i=0;i<images.length;i++){
+          const m=window.cornerstone.metaData.get('instance',images[i]);
+          if(m?.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'||m.Modality!=='CT'||Number(m.Rows)!==dimensions[1]||Number(m.Columns)!==dimensions[0]||!near(m.PixelSpacing,[spacing[1],spacing[0]])||!near(m.ImageOrientationPatient,Array.from(volume.direction).slice(0,6))||!near(m.ImagePositionPatient,Array.from(volume.imageData.indexToWorld([0,0,i])))||!Number.isFinite(Number(m.RescaleSlope))||Number(m.RescaleSlope)===0||!Number.isFinite(Number(m.RescaleIntercept)))throw Error('일정한 간격의 일반 CT 원본 좌표를 확인한 뒤 적용하세요.');
+          if(Number(m.SamplesPerPixel)!==1||m.PhotometricInterpretation!=='MONOCHROME2')throw Error('단일 성분 MONOCHROME2 CT 원본만 투영할 수 있습니다.');
+          const identity=JSON.stringify([m.ImageOrientationPatient,m.RescaleSlope,m.RescaleIntercept]);
+          if(first&&identity!==first)throw Error('CT 원본의 방향이나 픽셀 변환 조건이 서로 다릅니다.');first=identity;
+        }
+      }
+      return {source,v,volume,actor,mapper,blend,total,max};
+    }catch(error){if(verify)throw error;return null;}
+  }
+  function updateLabels(){
+    const visible=new Set();
+    if(!ended&&live())try{
+      for(const [id,cell] of services.viewportGridService.getState().viewports){
+        const v=services.cornerstoneViewportService.getCornerstoneViewport(id);if(v?.type!=='orthographic'||v.getActors().length!==1)continue;
+        if(cell.displaySetInstanceUIDs?.length!==1||services.displaySetService.getDisplaySetByUID(cell.displaySetInstanceUIDs[0])?.Modality!=='CT')continue;
+        const blend=v.getActors()[0].actor.getMapper().getBlendMode(),total=2*v.getSlabThickness();if(!names[blend]||!Number.isFinite(total))continue;
+        let label=labels.get(id);if(!label||label.parentElement!==v.element){label?.remove();label=document.createElement('span');label.className='kin-volume-projection-label';label.style.cssText='position:absolute;bottom:28px;left:10px;pointer-events:none;color:#6de6ff;background:#00131dcc;padding:2px 4px;font-size:12px';v.element.append(label);labels.set(id,label);}
+        const info=blend===3?v.getActors()[0].actor.getMapper().getScalarTexture?.()?.getVolumeInfo():null;
+        const unverified=blend===3&&(!Number.isFinite(info?.dataComputedScale?.[0])||info.dataComputedScale[0]<=0||!Number.isFinite(info?.dataComputedOffset?.[0]));
+        label.textContent=names[blend]+' · '+Number(total.toFixed(3))+' mm'+(unverified?' · 평균 표시 확인 필요 — 다시 적용':'');visible.add(id);
+      }
+    }catch(_){}
+    for(const [id,label] of labels)if(!visible.has(id)){label.remove();labels.delete(id);}
+  }
+  function refresh(){
+    if(ended)return;
+    const t=target(),active=document.activeElement;
+    let v;try{const grid=services.viewportGridService.getState();v=services.cornerstoneViewportService.getCornerstoneViewport(grid.activeViewportId);}catch(_){}
+    panel.hidden=!live()||v?.type!=='orthographic';
+    apply.disabled=mode.disabled=!t||!allowed();thickness.disabled=!t||!allowed()||mode.value==='0';
+    if(!t){shown=null;caption.textContent='완전히 로드된 단일 일반 CT 볼륨을 선택하세요.';updateLabels();return;}
+    const next=key(t),properties=JSON.stringify([t.blend,t.total]);
+    if(next!==shown||properties!==propertyKey&&active!==mode&&active!==thickness){mode.value=String(t.blend);thickness.value=String(Number(t.total.toFixed(3)));propertyKey=properties;shown=next;thickness.disabled=!allowed()||t.blend===0;}
+    caption.textContent=t.source.study.id+' · '+t.source.uid+' · 선택 평면';thickness.max=String(t.max);updateLabels();
+  }
+  mode.onchange=()=>{thickness.disabled=mode.value==='0';if(mode.value!=='0'&&Number(thickness.value)<.2)thickness.value=String(Math.min(10,target()?.max||10));};
+  apply.onclick=()=>{
+    try{
+      const t=target(true);if(!t||key(t)!==shown)throw Error('선택한 평면이나 원본이 바뀌었습니다. 대상을 확인하고 다시 적용하세요.');
+      const blend=Number(mode.value),total=blend===0?.2:Number(thickness.value);
+      if(!names[blend]||!Number.isFinite(total)||total<.2||total>t.max)throw Error('두께를 0.2~'+Number(t.max.toFixed(1))+' mm 범위로 입력하세요.');
+      if(blend===3){
+        // The pinned streaming texture omits vtk's range metadata. Without it,
+        // Average's shader leaves its scalar-range uniforms at zero (black CT).
+        const info=t.mapper.getScalarTexture?.()?.getVolumeInfo(),range=t.volume.voxelManager?.getRange?.();
+        if(!info||!Number.isFinite(info.scale?.[0])||info.scale[0]<=0||!Number.isFinite(info.offset?.[0])||!Array.isArray(range)||range.length!==2||range.some(n=>!Number.isFinite(n))||range[1]<range[0])throw Error('평균 투영의 픽셀 범위를 확인하지 못했습니다.');
+        if(!info.dataComputedScale?.length){
+          info.dataComputedScale=[Math.max(1,range[1]-range[0]),1,1,1];
+          info.dataComputedOffset=[range[0],0,0,0];
+        }
+        if(!Number.isFinite(info.dataComputedScale[0])||info.dataComputedScale[0]<=0||!Number.isFinite(info.dataComputedOffset?.[0]))throw Error('평균 투영의 픽셀 변환을 확인하지 못했습니다.');
+        // Include half-float rounding at the endpoints; this is an unfiltered mean.
+        const padding=Math.max(1,Math.abs(range[0]),Math.abs(range[1]))/512/info.dataComputedScale[0];
+        t.mapper.setIpScalarRange(-padding,1+padding);
+      }
+      try{
+        t.v.setBlendMode(blend);t.v.setSlabThickness(total/2);
+        if(t.mapper.getBlendMode()!==blend||Math.abs(t.v.getSlabThickness()*2-total)>1e-6)throw Error('투영 표시를 확인하지 못했습니다. 현재 평면을 다시 확인하세요.');
+      }catch(error){
+        try{t.v.setBlendMode(t.blend);t.v.setSlabThickness(t.total/2);t.v.render();}catch(_){}
+        updateLabels();throw Error((error.message||'투영 표시 변경 실패')+' 현재 모드와 두께를 영상의 표시에서 확인하세요.');
+      }
+      t.v.render();
+      if(t.mapper.getBlendMode()!==blend||Math.abs(t.v.getSlabThickness()*2-total)>1e-6)throw Error('투영 표시를 확인하지 못했습니다. 현재 평면을 다시 확인하세요.');
+      propertyKey='';status.textContent=names[blend]+' · 전체 두께 '+total+' mm를 선택 평면에 적용했습니다.';refresh();
+    }catch(error){status.textContent=error.message||'투영 표시를 적용하지 못했습니다.';}
+  };
+  const timer=setInterval(refresh,500);refresh();
+  return {dispose(){ended=true;clearInterval(timer);panel.remove();for(const label of labels.values())label.remove();labels.clear();}};
+}
+
 /* Viewer study bridge: verified loaded source identity, never URL-first guessing. */
 window.kinViewerTechNote=function(services){
   let stop=()=>{};
@@ -294,7 +395,7 @@ window.kinViewerTechNote=function(services){
     }
     if(window.top!==window){
       window.kinViewerSelectedNoteTarget=selectedStudy;
-      let patientCopy,toolbarPreferences;
+      let patientCopy,toolbarPreferences,projection;
       const enable=options=>{
         if(patientCopy)return true;
         const host=document.querySelector('#kin-viewer-layout');if(!host||typeof options?.owner!=='function'||typeof options?.allowed!=='function')return false;
@@ -302,15 +403,16 @@ window.kinViewerTechNote=function(services){
         if(!Array.isArray(identity)||identity.length!==2||identity.some(v=>typeof v!=='string'||!v))return false;
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
         patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive,onSelection:event=>event?.contextOnly?observeStudyContext():selectedStudy()});
+        projection=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>{try{return live()&&options.owner()===bound;}catch(_){return false;}},allowed:contextLive,host});
         toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:()=>{try{return live()&&options.owner()===bound&&(options.toolbarAllowed||options.allowed)();}catch(_){return false;}}});
         return true;
       };
       window.kinViewerEnablePatientCopy=enable;
-      stop=()=>{ended=true;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selectedStudy)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
+      stop=()=>{ended=true;projection?.dispose();toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selectedStudy)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
       return true;
     }
     const host=document.querySelector('#kin-viewer-layout');if(!host){disposeNativeFocus();return;}
-    let toolbarPreferences;
+    let toolbarPreferences,projection;
     const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
     const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='Tech Note';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
     const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='Retry Connection';retry.hidden=true;
@@ -378,7 +480,7 @@ window.kinViewerTechNote=function(services){
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
     }
     function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const [code,b] of toolButtons){b.disabled=!live()||!owner||(code==='Digit4'&&(!readingChannel||!patientCopy.tracked()));if(code==='Digit4'){b.setAttribute('aria-busy',String(!!pendingReturn));b.setAttribute('aria-disabled',String(b.disabled||!!pendingReturn));}}patientCopy.refresh();}
-    function end(){if(ended)return;ended=true;windowLink?.dispose();owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    function end(){if(ended)return;ended=true;projection?.dispose();windowLink?.dispose();owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
@@ -424,7 +526,7 @@ window.kinViewerTechNote=function(services){
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){windowLink||=window.KinViewerWindows?.connect({owner:()=>owner,live});toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
+      try{await authenticate();if(live()){windowLink||=window.KinViewerWindows?.connect({owner:()=>owner,live});projection||=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }
