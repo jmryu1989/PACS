@@ -43,6 +43,15 @@ class MeasurementCalibrationE2E(MeasurementPanelE2E):
             p.evaluate('''async()=>{const v=cornerstone.getEnabledElements()[0].viewport;
               const start=v.getCurrentImageIdIndex(); await v.setImageIdIndex((start+1)%v.getImageIds().length);await v.setImageIdIndex(start);}''')
             expect(p.locator('svg.svg-layer')).to_contain_text('mm')
+            # The old SVG label can survive navigation while the native cache
+            # is still invalidated. Wait for the referenced frame's actual
+            # calculation, just as draw_length does before the first save.
+            p.wait_for_function('''()=>{
+              const v=cornerstone.getEnabledElements()[0].viewport;
+              const a=cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').at(-1);
+              const s=a?.data.cachedStats?.['imageId:'+a.metadata.referencedImageId];
+              return a && !a.invalidated && v.getCurrentImageId()===a.metadata.referencedImageId && Number.isFinite(s?.length);
+            }''')
             row.get_by_role('button',name='Save',exact=True).click()
             expect(row).to_contain_text('저장 완료')
             current = p.evaluate('()=>calibrationObservation')
