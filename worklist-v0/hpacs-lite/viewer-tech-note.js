@@ -282,10 +282,10 @@ window.kinViewerTechNote=function(services){
     const host=document.querySelector('#kin-viewer-layout');if(!host){disposeNativeFocus();return;}
     let toolbarPreferences;
     const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
-    const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
-    const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='메모 연결 다시 시도';retry.hidden=true;
+    const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='Tech Note';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
+    const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='Retry Connection';retry.hidden=true;
     const status=document.createElement('p');status.id='kin-viewer-note-status';status.setAttribute('role','status');panel.append(button,retry,status);host.append(panel);
-    const arrange=document.createElement('button');arrange.id='kin-viewer-dock-enable';arrange.type='button';arrange.textContent='도구 영역으로 모으기';panel.prepend(arrange);
+    const arrange=document.createElement('button');arrange.id='kin-viewer-dock-enable';arrange.type='button';arrange.textContent='Open Tools';panel.prepend(arrange);
     function arrangeTools(){
       if(!live()||!owner)return;
       dock=window.KinViewerWorkspaceDock?.(window,{owner:()=>owner&&JSON.stringify(owner),allowed:()=>live()&&!!owner});
@@ -295,7 +295,7 @@ window.kinViewerTechNote=function(services){
     arrange.onclick=()=>{arrangeTools();const tab=dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]');if(tab){if(tab.getAttribute('aria-expanded')!=='true')tab.click();tab.focus({preventScroll:true});}};
     const toolBar=document.createElement('div');toolBar.id='kin-viewer-tool-focus';panel.prepend(toolBar);
     const toolButtons=new Map();
-    for(const [code,label] of [['Digit7','측정 도구로'],['Digit8','비교 작업 도구로'],['Digit9','기본 영상 도구로'],['Digit2','선택 영상으로'],['Digit4','판독문으로 돌아가기']]){
+    for(const [code,label] of [['Digit7','Focus Measurements'],['Digit8','Focus Comparison'],['Digit9','Image Tools'],['Digit2','Active Image'],['Digit4','Return to Report']]){
       const b=document.createElement('button');b.type='button';b.textContent=label;b.id='kin-viewer-focus-'+code.slice(-1);b.setAttribute('aria-keyshortcuts','Control+Alt+'+code.slice(-1));b.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px';b.onclick=()=>focusTool(code);toolBar.append(b);toolButtons.set(code,b);
     }
     const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · 2 선택 영상 · 4 판독문으로';toolBar.append(toolHint);
@@ -370,7 +370,7 @@ window.kinViewerTechNote=function(services){
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});let remembered=false;try{const raw=localStorage.getItem('kin-viewer-dock:v1:'+JSON.stringify(owner));remembered=raw!==null&&raw.length<=128&&!!window.KinViewerWorkspaceDock?.normalize(JSON.parse(raw));}catch(_){}if(remembered)arrangeTools();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
+      try{await authenticate();if(live()){toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }

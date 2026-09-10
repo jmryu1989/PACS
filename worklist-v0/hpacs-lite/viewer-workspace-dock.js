@@ -14,7 +14,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const normalize=window.KinViewerWorkspaceDock.normalize;
   let ended=false,placement='bottom',selected=-1,autoHide=false,autoHidden=false,hover=false,held=false,pointerButton=null,timer,storage,channel,initialMessage='도구 영역 · 이 창';
   const live=()=>!ended&&preferences.allowed?.()!==false&&(!initialOwner||preferences.owner?.()===initialOwner);
-  try{storage=w.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=128?normalize(JSON.parse(raw)):null;if(value){placement=value.placement;selected=value.panel;autoHide=value.autoHide??false;initialMessage='기억한 도구 영역';}else initialMessage='저장값 오류 · 기본 도구 영역';}else if(key)initialMessage='도구 영역 · 이 브라우저';}catch(_){initialMessage='저장소 사용 불가 · 이 창';}
+  try{storage=w.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=128?normalize(JSON.parse(raw)):null;if(value){placement=value.placement;selected=value.panel;autoHide=value.autoHide??false;initialMessage='기억한 도구 영역';}else initialMessage='저장값 오류 · 기본 도구 영역';}else if(key)initialMessage='도구 영역 · 이 브라우저';}catch(e){initialMessage=e instanceof SyntaxError?'저장값 오류 · 기본 도구 영역':'저장소 사용 불가 · 이 창';}
   const style = d.createElement('style');
   style.textContent = `
     body.kin-docked { --kin-dock-height: 42px; }
@@ -24,7 +24,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     body.kin-docked #root > div { height: 100%; display: flex; flex-direction: column; }
     body.kin-docked #root > div > * { flex-shrink: 0; }
     body.kin-docked #root > div > .flex { flex: 1; min-height: 0; height: auto !important; }
-    #kin-workspace-dock { position: fixed; bottom: 0; left: 0; right: 0; height: var(--kin-dock-height); display: flex; flex-direction: column; background: #101e32; color: #e1ecfc; border-top: 1px solid #657c9f; font: 13px sans-serif; }
+    #kin-workspace-dock { position: fixed; bottom: 0; left: 0; right: 0; height: var(--kin-dock-height); display: flex; flex-direction: column; background: #0d1726; color: #dce6f3; border-top: 1px solid #34465f; font: 13px sans-serif; }
     body.kin-dock-top #kin-workspace-dock { top: 0; bottom: auto; border-top: 0; border-bottom: 1px solid #657c9f; }
     #kin-workspace-dock nav { display: flex; gap: 8px; align-items: center; height: 42px; padding: 4px 10px; flex: none; overflow-x: auto; white-space: nowrap; }
     #kin-workspace-dock nav > * { flex-shrink: 0; }
@@ -33,7 +33,31 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     #kin-workspace-dock > details { position: static !important; width: 100% !important; max-width: none !important; max-height: none !important; min-height: 0; flex: 1; overflow: auto !important; border: 0 !important; border-radius: 0 !important; margin: 0; }
     #kin-workspace-dock > details[hidden] { display: none !important; }
     #kin-workspace-dock > details > summary { display: none; }
+    #kin-workspace-dock *, #kin-workspace-dock *::before { box-sizing: border-box; }
     #kin-workspace-dock label { max-width: 650px; display: block; }
+    #kin-workspace-dock nav { gap: 6px; }
+    #kin-workspace-dock nav > label { display: flex; align-items: center; gap: 6px; margin-left: 10px; color: #aabbd0; }
+    #kin-workspace-dock button { cursor: pointer; min-height: 30px; }
+    #kin-workspace-dock button:hover:not(:disabled) { background: #223b59; }
+    #kin-workspace-dock button:focus-visible, #kin-workspace-dock select:focus-visible { outline: 2px solid #68b8ff; outline-offset: 2px; }
+    #kin-workspace-dock button:disabled { opacity: .5; cursor: default; }
+    #kin-workspace-dock nav button[aria-expanded=true] { border-color: #68b8ff; background: #193b5e; color: #fff; }
+    #kin-workspace-dock [role=status] { color: #9caec4; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+    #kin-workspace-dock > details { padding: 16px !important; background: #0d1726 !important; }
+    #kin-workspace-dock > details p { line-height: 1.5; margin: 6px 0 10px; }
+    #kin-workspace-dock #kin-viewer-layout:not([hidden])::details-content { display: grid; grid-auto-flow: dense; grid-template-columns: minmax(300px, 1.3fr) minmax(240px, 1fr); align-content: start; align-items: start; gap: 10px 24px; }
+    #kin-workspace-dock #kin-viewer-layout > * { min-width: 0; grid-column: 2; }
+    #kin-workspace-dock #kin-viewer-layout > #kin-viewer-jobs { grid-column: 1; grid-row: 1 / span 8; border-right: 1px solid #2b3c52; padding-right: 24px; }
+    #kin-workspace-dock details > summary { color: #dce6f3; font-weight: 600; padding: 4px 0; cursor: pointer; }
+    #kin-workspace-dock input:not([type=checkbox]), #kin-workspace-dock textarea { border: 1px solid #405875; border-radius: 4px; padding: 6px 8px; margin: 4px 0 10px; max-width: 100%; background: #101e32 !important; color: #e1ecfc !important; }
+    #kin-workspace-dock #kin-viewer-tool-focus { display: block; }
+    #kin-workspace-dock #kin-viewer-tool-focus > p { flex-basis: 100%; }
+    #kin-workspace-dock #kin-viewer-tech-note { border-top: 1px solid #2b3c52; padding-top: 12px; }
+    @media (max-width: 700px) {
+      #kin-workspace-dock #kin-viewer-layout:not([hidden])::details-content { display: block; }
+      #kin-workspace-dock #kin-viewer-layout > #kin-viewer-jobs { border-right: 0; padding-right: 0; margin-bottom: 18px; }
+      #kin-workspace-dock nav { padding-inline: 6px; }
+    }
   `;
   d.head.append(style);
   const dock = d.createElement('section'); dock.id = 'kin-workspace-dock'; dock.setAttribute('aria-label', 'Viewer Tools');
