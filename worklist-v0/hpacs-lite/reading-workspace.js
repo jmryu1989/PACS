@@ -29,7 +29,9 @@ window.KinReadingWorkspace = function (app) {
   const reportFocus = button('판독문 작성', () => focusPane('report'));
   const toolsFocus = button('영상 도구로', () => focusPane('tools'));
   toolsFocus.id = 'reading-tools-focus';
-  [[list, '1'], [imageFocus, '2'], [priorFocus, '3'], [reportFocus, '4'], [toolsFocus, '7'], [previous, 'ArrowLeft'], [next, 'ArrowRight']].forEach(([b, key]) => {
+  const nativeToolsFocus = button('기본 영상 도구로', () => focusPane('nativeTools'));
+  nativeToolsFocus.id = 'reading-native-tools-focus';
+  [[list, '1'], [imageFocus, '2'], [priorFocus, '3'], [reportFocus, '4'], [toolsFocus, '7'], [nativeToolsFocus, '9'], [previous, 'ArrowLeft'], [next, 'ArrowRight']].forEach(([b, key]) => {
     b.setAttribute('aria-keyshortcuts', 'Control+Alt+' + key);
   });
   const context = button('검사 정보·상용구', () => {
@@ -68,7 +70,7 @@ window.KinReadingWorkspace = function (app) {
   const separate = button('영상 새 창', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series, returnLink()); });
   button('목록 화면으로', () => { active = false; layout(); });
   const target = node('div', '', bar); target.id = 'reading-target';
-  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · 7 영상 도구 · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
+  const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · 7 작업 패널 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
   hints.id = 'reading-shortcuts';
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
   host.setAttribute('aria-label', '영상 작업공간'); $('.split').prepend(host);
@@ -135,8 +137,15 @@ window.KinReadingWorkspace = function (app) {
       closeList(); document.body.classList.add('reading-context-open'); context.setAttribute('aria-expanded', 'true');
       $('#clinical').focus(); $('#clinical').scrollIntoView({ block: 'nearest' }); redrawRetainedViewer(); return;
     }
-    if (which === 'image' || which === 'tools') {
+    if (which === 'image' || which === 'tools' || which === 'nativeTools') {
       if (!frame || !sameTarget() || !loaded || frame.inert) { status.textContent = '영상 연결을 확인한 뒤 이동하세요.'; return; }
+      if (which === 'nativeTools') {
+        try {
+          if (!frame.contentWindow.kinViewerFocusNativeToolbar?.()) { status.textContent = '기본 영상 도구 연결을 확인한 뒤 이동하세요.'; return; }
+          closeList();
+        } catch (_) { status.textContent = '기본 영상 도구 연결을 확인한 뒤 이동하세요.'; }
+        return;
+      }
       let tool = null;
       if (which === 'tools') {
         try { tool = frame.contentDocument?.querySelector('#kin-workspace-dock nav button:not(:disabled)'); }
@@ -167,7 +176,7 @@ window.KinReadingWorkspace = function (app) {
       e.preventDefault(); closeContext(); context.focus(); return;
     }
     if (!e.ctrlKey || !e.altKey || e.shiftKey || e.metaKey) return;
-    const panes = { Digit2: 'image', Digit3: 'prior', Digit4: 'report', Digit5: 'context', Digit7: 'tools' };
+    const panes = { Digit2: 'image', Digit3: 'prior', Digit4: 'report', Digit5: 'context', Digit7: 'tools', Digit9: 'nativeTools' };
     if (e.code === 'Digit1') {
       e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
     } else if (panes[e.code]) {
