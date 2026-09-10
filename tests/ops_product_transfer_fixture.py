@@ -36,12 +36,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910013000_reading_preferences/migration.sql',
               'api/prisma/migrations/20260910023000_reading_appearance/migration.sql',
               'api/prisma/migrations/20260910044500_workspace_shortcuts/migration.sql',
-              'api/prisma/migrations/20260910090000_filter_folders/migration.sql']
+              'api/prisma/migrations/20260910090000_filter_folders/migration.sql',
+              'api/prisma/migrations/20260910100000_shared_filters/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection'])
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -103,6 +104,11 @@ def expected_rows(uid):
         sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]
     rows['UserFilterCollection'] = [dict(owner='SYNTHETIC-reader', revision=3, folders=[
         dict(path='SYNTHETIC/Empty', description='SYNTHETIC empty folder', ordinal=2)])]
+    rows['SharedFilterLibrary'] = [dict(institution='SYNTHETIC-owner', revision=4,
+        folders=[dict(path='SYNTHETIC/Shared', description='Shared metadata', ordinal=3)],
+        filters=[dict(id=805, name='SYNTHETIC shared search', mode='Radiology', quick='', days=-1,
+            cols={'mod':'CT'}, sortKey='date', sortDir=-1, folder='SYNTHETIC/Shared', description='Shared criteria', ordinal=2)],
+        updatedBy='SYNTHETIC-reader', updatedAt=STAMP)]
     item_id = '00000000-0000-4000-8000-000000000001'
     snapshot = dict(schemaVersion=1, kind='key', seriesUid=uid+'.1', sopUid=uid+'.2',
                     frame=1, title='SYNTHETIC key', description='', hidden=True)
@@ -201,7 +207,7 @@ def create_product(name, db, uid):
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection'):
+                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.

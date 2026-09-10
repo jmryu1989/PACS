@@ -134,6 +134,16 @@ class Pure(unittest.TestCase):
             with self.subTest(field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
 
+    def test_shared_search_library_preserves_institution_revision_metadata_and_criteria(self):
+        expected = fixture()[0]['product']
+        self.assertEqual(expected['rows']['SharedFilterLibrary'][0]['filters'][0]['cols'], {'mod':'CT'})
+        for field, value in [('institution','foreign'),('revision',0),('folders',[]),('filters',[]),
+                             ('updatedBy','foreign'),('updatedAt','2020-01-01T00:00:00')]:
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['SharedFilterLibrary'][0][field] = value
+            with self.subTest(field=field), patch.object(transfer,'observe',return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+
     def test_01_non_ci_refused_before_any_mutation(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(transfer, 'command') as calls, \
              patch.object(transfer.combined, 'disk_preflight') as disk, tempfile.TemporaryDirectory() as folder:
@@ -186,7 +196,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 39)
+        self.assertEqual(sum(len(value) for value in rows.values()), 40)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
         self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
         job=rows['ViewerJob'][0]

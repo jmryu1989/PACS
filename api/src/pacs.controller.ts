@@ -146,6 +146,15 @@ export class PacsController {
   @Post('filter-folders')
   writeFilterFolders(@Body() body: any, @Req() req: any) { return this.svc.writeFilterFolders(body, caller(req)); }
 
+  @Get('shared-filters')
+  readSharedFilters(@Req() req: any) { return this.svc.readSharedFilters(caller(req)); }
+
+  @Post('shared-filters')
+  writeSharedFilters(@Body() body: any, @Req() req: any) { return this.svc.writeSharedFilters(body, caller(req)); }
+
+  @Post('shared-filters/copy')
+  copySharedFilters(@Body() body: any, @Req() req: any) { return this.svc.copySharedFilters(body, caller(req)); }
+
   /** 기본 필터 지정/해제 — 로그인하면 자동으로 걸리는 그 필터 */
   @Patch('filters/:id/default')
   setDefaultFilter(@Param('id') id: string, @Body() body: any, @Req() req: any) {

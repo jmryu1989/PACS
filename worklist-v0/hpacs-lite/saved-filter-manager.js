@@ -119,7 +119,8 @@
         isDefault: $('default').checked };
     }
     const dirty = () => editable && JSON.stringify(value()) !== baseline;
-    const mayLeave = () => !busy && (!(dirty() || folderDirty()) || confirm('저장하지 않은 검색 조건 또는 폴더 변경을 버릴까요?'));
+    const organizerDirty = () => folderDirty() || sharing.dirty();
+    const mayLeave = () => !busy && (!(dirty() || organizerDirty()) || confirm('저장하지 않은 검색 조건 또는 폴더 변경을 버릴까요?'));
     function focusAvailable(...targets) {
       if (!dialog.open) return;
       for (const target of targets) {
@@ -140,6 +141,7 @@
       $('delete').disabled = on || selected === null;
       $('apply').disabled = on || selected === null;
       for (const id of ['folder-save', 'folder-move', 'folder-remove', 'bulk-move', 'bulk-delete']) $(id).disabled = on || !collection;
+      sharing.lock(on);
       navigation();
     }
     function choices(select, entries, selectedValue) {
@@ -416,7 +418,8 @@
     $('folder-path').addEventListener('change', () => {
       const initial = JSON.parse(folderBaseline);
       if ($('folder-description').value !== initial[1] || $('folder-order').value !== initial[2]) return;
-      const folder = collection?.folders.find(folder => folder.path === $('folder-path').value.trim());
+      const path = $('folder-path').value.trim().split('/').map(part => part.trim()).join('/');
+      const folder = collection?.folders.find(folder => folder.path === path);
       $('folder-description').value = folder?.description || ''; $('folder-order').value = String(folder?.ordinal || 0);
       if (folder) {
         initial[0] = $('folder-path').value; initial[1] = $('folder-description').value; initial[2] = $('folder-order').value;
@@ -429,7 +432,13 @@
       const expected = collection;
       run(async signal => {
         const snapshot = await options.writeFolders({ expectedOwner: expected.owner, revision: expected.revision, command }, signal);
-        acceptCollection(snapshot); folderBaseline = folderValue(); status('검색 모음 변경을 저장했습니다. 현재 목록 조건과 판독문은 유지됩니다.');
+        acceptCollection(snapshot);
+        const initial = JSON.parse(folderBaseline), current = JSON.parse(folderValue());
+        const acknowledged = { 'save-folder': [0,1,2], 'move-folder': [0,3], 'remove-folder': [0],
+          'move-searches': [3], 'delete-searches': [] }[command.action];
+        for (const index of acknowledged) initial[index] = current[index];
+        folderBaseline = JSON.stringify(initial);
+        status('검색 모음 변경을 저장했습니다. 현재 목록 조건과 판독문은 유지됩니다.');
       });
     }
     $('folder-save').addEventListener('click', () => folderCommand({ action: 'save-folder', path: $('folder-path').value,
@@ -448,10 +457,12 @@
     $('bulk-move').addEventListener('click', () => bulk('move-searches'));
     $('bulk-delete').addEventListener('click', () => bulk('delete-searches'));
     $('bulk-clear').addEventListener('click', () => { checked.clear(); list(); });
+    const sharing = KinSharedFilterManager.mount({ host: dialog.querySelector('aside'), api: options, run, status,
+      personal: () => collection, acceptPersonal: acceptCollection });
     $('form').addEventListener('submit', e => {
       e.preventDefault(); if (busy || !editable || !$('form').reportValidity()) return;
       const applyAfterSave = e.submitter === $('save-apply');
-      if (applyAfterSave && folderDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
+      if (applyAfterSave && organizerDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
       const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
       if (error) { status('복합 조건을 저장하지 못했습니다: ' + error, true); return; }
@@ -519,7 +530,7 @@
     });
     $('preview').addEventListener('click', () => {
       if (busy || !editable) return;
-      if (folderDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
+      if (organizerDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
       const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
       if (error) { status('복합 조건을 적용하지 못했습니다: ' + error, true); return; }
@@ -567,12 +578,13 @@
       else opener?.focus();
     });
     window.addEventListener('beforeunload', e => {
-      if (dialog.open && (busy || dirty() || folderDirty())) { e.preventDefault(); e.returnValue = ''; }
+      if (dialog.open && (busy || dirty() || organizerDirty())) { e.preventDefault(); e.returnValue = ''; }
     });
     return { open({ name } = {}) {
       if (dialog.open) return;
       opener = document.activeElement; $('search').value = ''; status('');
       collection = null; checked.clear();
+      sharing.reset();
       for (const id of ['folder-path', 'folder-description', 'folder-destination']) $(id).value = '';
       $('folder-order').value = '0'; folderBaseline = folderValue();
       const filter = name === undefined ? options.snapshot() : named(name);

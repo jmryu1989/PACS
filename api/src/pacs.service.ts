@@ -7,6 +7,7 @@ import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
 import { folderAction, folderEntries, folderPath } from './filter-folders';
+import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -1063,11 +1064,11 @@ export class PacsService implements OnModuleInit {
     return { ok: true };
   }
 
-  private lockFilterCollection(tx: Prisma.TransactionClient, owner: string) {
+  private lockFilterCollection(tx: Prisma.TransactionClient, owner: string, increment = 1) {
     // A single PostgreSQL upsert locks this owner's row until the transaction ends.
     return tx.userFilterCollection.upsert({
-      where: { owner }, create: { owner, revision: 1, folders: [] },
-      update: { revision: { increment: 1 } },
+      where: { owner }, create: { owner, revision: increment, folders: [] },
+      update: { revision: { increment } },
     });
   }
 
@@ -1113,6 +1114,100 @@ export class PacsService implements OnModuleInit {
         if (changed.count !== result.deletes.length) throw new ConflictException('선택한 검색이 변경되었습니다');
       }
       await tx.userFilterCollection.update({ where: { owner: c.actor }, data: { folders: result.folders } });
+      return this.filterCollectionSnapshot(tx, c);
+    });
+  }
+
+  private lockSharedFilters(tx: Prisma.TransactionClient, c: Caller, increment: number) {
+    return tx.sharedFilterLibrary.upsert({
+      where: { institution: inst(c) },
+      create: { institution: inst(c), revision: increment, folders: [], filters: [], updatedBy: increment ? c.actor : '' },
+      update: { revision: { increment }, ...(increment ? { updatedBy: c.actor, updatedAt: new Date() } : {}) },
+    });
+  }
+
+  private sharedFilterSnapshot(row: any, c: Caller) {
+    return { owner: this.filterCollectionOwner(c), revision: row?.revision ?? 0,
+      canManage: c.roles.includes('admin'), updatedBy: row?.updatedBy || '', updatedAt: row?.updatedAt || null,
+      ...sharedLibrary(row?.folders ?? [], row?.filters ?? []) };
+  }
+
+  async readSharedFilters(c: Caller) {
+    this.filterCollectionOwner(c);
+    return this.sharedFilterSnapshot(await this.prisma.sharedFilterLibrary.findUnique({ where: { institution: inst(c) } }), c);
+  }
+
+  private sharedFilterRequest(body: any, c: Caller, fields: string) {
+    const owner = this.filterCollectionOwner(c);
+    if (!sharedKeys(body, fields) || !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('기관 검색 요청 형식을 확인하세요');
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify(owner)) throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
+  }
+
+  async writeSharedFilters(body: any, c: Caller) {
+    this.sharedFilterRequest(body, c, 'command,expectedOwner,revision');
+    need(c.roles, 'admin', '기관 검색 배포');
+    const publish = body.command?.action === 'publish-folder';
+    if (publish && (!sharedKeys(body.command, 'action,from,namePrefix,replace,sourceRevision,to') ||
+        !Number.isInteger(body.command.sourceRevision) || body.command.sourceRevision < 0 ||
+        typeof body.command.replace !== 'boolean')) throw new BadRequestException('폴더 배포 요청 형식을 확인하세요');
+    return this.prisma.$transaction(async tx => {
+      // Every operation needing both locks uses personal -> institution order.
+      const personal = publish ? await this.lockFilterCollection(tx, c.actor, 0) : null;
+      if (publish && personal.revision !== body.command.sourceRevision)
+        throw new ConflictException('개인 검색이 변경되었습니다. 개인 폴더를 다시 불러오세요');
+      const row = await this.lockSharedFilters(tx, c, 1);
+      if (row.revision !== body.revision + 1) throw new ConflictException('기관 검색이 변경되었습니다. 공유 목록을 다시 불러오세요');
+      let library = sharedLibrary(row.folders, row.filters);
+      if (publish) {
+        const from = folderPath(body.command.from, true);
+        const owned = await tx.userFilter.findMany({ where: { owner: c.actor } });
+        const sources = owned.filter(filter => !from || filter.folder === from || filter.folder.startsWith(from + '/'))
+          .map(filter => sharedSearch(filter, filter.id));
+        const copied = copySearchFolder(folderEntries(personal.folders), sources, from, body.command.to, body.command.namePrefix);
+        const folders = mergeCopiedFolders(library.folders, library.filters, copied.folders, body.command.replace);
+        const filters = new Map(library.filters.map(filter => [filter.name, filter]));
+        let nextId = row.revision * 201;
+        for (const copy of copied.filters) {
+          const existing = filters.get(copy.name);
+          if (existing && !body.command.replace) throw new ConflictException('같은 이름의 기관 검색이 있습니다. 이름 접두사 또는 명시적 교체를 사용하세요');
+          filters.set(copy.name, { ...copy, id: existing?.id ?? ++nextId });
+        }
+        library = sharedLibrary(folders, [...filters.values()]);
+      } else {
+        const changes = folderAction(library.folders, library.filters, body.command);
+        const moves = new Map(changes.moves.map(move => [move.id, move.folder]));
+        const deleted = new Set(changes.deletes);
+        library = sharedLibrary(changes.folders, library.filters.filter(filter => !deleted.has(filter.id))
+          .map(filter => moves.has(filter.id) ? { ...filter, folder: moves.get(filter.id) } : filter));
+      }
+      const saved = await tx.sharedFilterLibrary.update({ where: { institution: inst(c) }, data: library });
+      return this.sharedFilterSnapshot(saved, c);
+    });
+  }
+
+  async copySharedFilters(body: any, c: Caller) {
+    this.sharedFilterRequest(body, c, 'expectedOwner,from,namePrefix,personalRevision,revision,to');
+    if (!Number.isInteger(body.personalRevision) || body.personalRevision < 0 || body.personalRevision >= 2147483647)
+      throw new BadRequestException('개인 검색 버전을 확인하세요');
+    return this.prisma.$transaction(async tx => {
+      const personal = await this.lockFilterCollection(tx, c.actor);
+      if (personal.revision !== body.personalRevision + 1) throw new ConflictException('개인 검색이 변경되었습니다. 개인 폴더를 다시 불러오세요');
+      const row = await this.lockSharedFilters(tx, c, 0);
+      if (row.revision !== body.revision) throw new ConflictException('기관 검색이 변경되었습니다. 공유 목록을 다시 불러오세요');
+      const library = sharedLibrary(row.folders, row.filters);
+      if (row.revision === 0 && !library.folders.length && !library.filters.length)
+        throw new NotFoundException('배포된 기관 검색이 없습니다');
+      const copied = copySearchFolder(library.folders, library.filters, body.from, body.to, body.namePrefix);
+      const owned = await tx.userFilter.findMany({ where: { owner: c.actor } });
+      const folders = mergeCopiedFolders(folderEntries(personal.folders), owned, copied.folders, false);
+      const names = new Set(owned.map(filter => filter.name));
+      if (copied.filters.some(filter => names.has(filter.name))) throw new ConflictException('같은 이름의 개인 검색이 있습니다. 이름 접두사를 입력하세요');
+      for (const filter of copied.filters) {
+        const { id, cols, ...definition } = filter;
+        await tx.userFilter.create({ data: { ...definition, owner: c.actor, cols: JSON.stringify(cols), isDefault: false } });
+      }
+      await tx.userFilterCollection.update({ where: { owner: c.actor }, data: { folders } });
       return this.filterCollectionSnapshot(tx, c);
     });
   }

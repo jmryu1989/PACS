@@ -382,7 +382,26 @@ class WorklistE2E(unittest.TestCase):
         self.wait_state(first, fixture, lambda s: s.get("holder") == self.stack.actor("doctor"))
         self.select(second, fixture)
         second.locator("#refresh").click()
-        expect(second.locator("#holdbar")).to_be_visible()
+        try:
+            expect(second.locator("#holdbar")).to_be_visible()
+        except AssertionError:
+            diagnostic = second.evaluate("""() => ({
+                error: document.querySelector('#err')?.textContent,
+                holdDisplay: document.querySelector('#holdbar')?.style.display,
+                holdMessage: document.querySelector('#holdmsg')?.textContent,
+                selected: document.querySelector('#rows tr.sel')?.dataset.uid,
+                findingsReadOnly: document.querySelector('#findings')?.readOnly,
+                visibility: document.visibilityState,
+                ancestors: (() => { const result=[]; for(let el=document.querySelector('#holdbar');el;el=el.parentElement)
+                    result.push({id:el.id,display:getComputedStyle(el).display,visibility:getComputedStyle(el).visibility}); return result; })()
+            })""")
+            diagnostic['ownerState'] = self.state(fixture)
+            diagnostic['secondState'] = self.state(fixture, 'doctor2')
+            print('TWO_ACCOUNT_HOLD_DIAGNOSTIC ' + json.dumps(diagnostic, ensure_ascii=True), flush=True)
+            evidence = Path(os.environ.get('KIN_EVIDENCE_DIR', str(ROOT.parent / 'tmp' / 'worklist')))
+            evidence.mkdir(parents=True, exist_ok=True)
+            second.screenshot(path=str(evidence / 'two-account-hold-failure.png'))
+            raise
         self.locked(second)
         second.locator(f'#rows tr[data-uid="{fixture.uid}"]').click(button="right")
         expect(second.locator("#ctx").get_by_text("점유 강제 해제 (관리자)", exact=True)).to_have_count(0)

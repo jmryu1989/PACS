@@ -42,6 +42,14 @@
 #saved-filter-manager #sfm-organize { margin-top: 14px; border-top: 1px solid #496079; padding-top: 10px; }
 #saved-filter-manager #sfm-organize summary { cursor: pointer; }
 #saved-filter-manager #sfm-organize button { margin: 4px 0; width: 100%; }
+#saved-filter-manager #sfm-shared { margin-top: 14px; border-top: 1px solid #496079; padding-top: 10px; }
+#saved-filter-manager #sfm-shared summary { cursor: pointer; overflow-wrap: anywhere; }
+#saved-filter-manager #sfm-shared button { margin: 4px 0; width: 100%; }
+#saved-filter-manager #sfs-list { max-height: 280px; overflow: auto; margin: 10px 0; overflow-wrap: anywhere; }
+#saved-filter-manager #sfs-list details { border-left: 1px solid #496079; padding-left: 8px; }
+#saved-filter-manager #sfs-list label { margin: 6px 0; }
+#saved-filter-manager #sfs-admin h3 { font-size: 15px; }
+#saved-filter-manager #sfs-admin[hidden] { display: none; }
 #saved-filter-manager textarea { resize: vertical; }
 #saved-filter-manager #sfm-list button[aria-pressed=true] { background: #235984; border-color: #6fc5ff; }
 #saved-filter-manager footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 12px 20px;

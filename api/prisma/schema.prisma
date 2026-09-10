@@ -296,6 +296,15 @@ model UserFilterCollection {
   folders  Json   @default("[]")
 }
 
+model SharedFilterLibrary {
+  institution String   @id
+  revision    Int      @default(0)
+  folders     Json     @default("[]")
+  filters     Json     @default("[]")
+  updatedBy   String   @default("")
+  updatedAt   DateTime @default(now())
+}
+
 model UserFilter {
   id        Int      @id @default(autoincrement())
   owner     String                          // 토큰의 actor. 이 사람 것만 보인다
