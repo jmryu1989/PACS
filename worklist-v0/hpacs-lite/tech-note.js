@@ -2,14 +2,14 @@
 window.KinTechNote = function (app) {
   const d = document.createElement('dialog'); d.id = 'tech-note-dialog';
   d.setAttribute('aria-labelledby', 'tech-note-title');
-  d.innerHTML = `<h2 id="tech-note-title">Tech 메모 · 검사 소통 기록</h2>
+  d.innerHTML = `<h2 id="tech-note-title">Tech Note</h2>
     <div id="tech-note-target"></div><p>판독문·원본 영상과 별도로 저장됩니다. 촬영 기관의 방사선사·관리자가 작성하며 수정 전 내용은 이력에 남습니다.</p>
-    <div id="tech-note-meta"></div><label>메모<textarea id="tech-note-text" maxlength="10000" rows="7"></textarea></label>
-    <label>수정·비우기 사유<input id="tech-note-reason" maxlength="1000"></label>
+    <div id="tech-note-meta"></div><label>Note<textarea id="tech-note-text" maxlength="10000" rows="7"></textarea></label>
+    <label>Reason for Change<input id="tech-note-reason" maxlength="1000"></label>
     <div id="tech-note-status" role="status"></div><div class="tech-note-actions">
-    <button id="tech-note-save" type="button">메모 저장</button><button id="tech-note-reload" type="button">최신 메모 다시 읽기</button>
-    <button id="tech-note-history" type="button">변경 이력</button><button id="tech-note-close" type="button">닫기</button></div>
-    <div id="tech-note-history-items"></div><button id="tech-note-more" type="button" hidden>이전 이력 더 보기</button>`;
+    <button id="tech-note-save" type="button">Save Note</button><button id="tech-note-reload" type="button">Reload Note</button>
+    <button id="tech-note-history" type="button">History</button><button id="tech-note-close" type="button">Close</button></div>
+    <div id="tech-note-history-items"></div><button id="tech-note-more" type="button" hidden>Load More</button>`;
   document.body.append(d);
   const $ = id => d.querySelector('#tech-note-' + id);
   let uid = null, seq = 0, busy = false, ended = false, writable = false, version = 0, saved = '', cursor = null, opener, openerDocument, innerOpener;
