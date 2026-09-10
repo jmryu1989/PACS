@@ -1,3 +1,4 @@
+const {StudyAccessService}=require('/app/dist/study-access.service');
 // Invoked only by test_measurement_readback.py with its owned fixture. Real
 // compiled services/Prisma/Orthanc; HTTP faults live in this process alone.
 const assert = require('node:assert/strict');
@@ -6,7 +7,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { ViewerService } = require('/app/dist/viewer.service');
 const prisma = new PrismaService(), orthanc = new OrthancService();
-const service = new ViewerService(prisma, orthanc), realFetch = global.fetch;
+const service = new ViewerService(prisma, orthanc, new StudyAccessService(prisma,orthanc,{})), realFetch = global.fetch;
 const { uid, caller } = fixture;
 const raw = command => Buffer.from(JSON.stringify(command));
 let phase = 'setup';
@@ -171,7 +172,7 @@ async function run() {
   phase = 'HTTP listening'; console.log(phase);
   try {
     const slow = new OrthancService(); slow.base = 'http://127.0.0.1:'+server.address().port;
-    const bodyResult = await new ViewerService(prisma, slow).list(uid, { limit: '100' }, caller);
+    const bodyResult = await new ViewerService(prisma, slow, new StudyAccessService(prisma,slow,{})).list(uid, { limit: '100' }, caller);
     phase = 'HTTP body closure'; console.log(phase);
     assert.equal(bodyResult.items.length, 11);
     assert.ok(bodyResult.items.filter(h=>h.item.kind==='length').every(h=>h.referenceStatus==='unverified'));

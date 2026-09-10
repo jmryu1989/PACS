@@ -1,3 +1,4 @@
+const {StudyAccessService}=require('/app/dist/study-access.service');
 // D-MEASURE2 B1/B2/B3: compiled services, synthetic local HTTP only. No DB,
 // credentials or external network. Full list/Prisma coverage remains E2E.
 const test = require('node:test'), assert = require('node:assert/strict');
@@ -77,9 +78,9 @@ test('B1/B2/B3: actual verification deadline, digest comparison and final access
     FrameOfReferenceUID: item.frameOfReferenceUid, SOPClassUID: '1.2.840.10008.5.1.4.1.1.2', Modality: 'CT',
     Rows: '32', Columns: '32', ImagePositionPatient: '0\\0\\0', ImageOrientationPatient: '1\\0\\0\\0\\1\\0', PixelSpacing: '1\\1', _kinSourceDigest: item.sourceDigest };
   let access = true, checks = 0;
-  const prisma = { studyState: { findUnique: async () => { checks++; return { institutionId: access ? 'ours' : 'other' }; } } };
-  const source = { viewerReference: async () => tags }, service = new ViewerService(prisma, source);
-  const head = () => ({ item: structuredClone(item) }), caller = { institution: 'ours' };
+  const prisma = { $queryRaw:async()=>[], studyState: { findUnique: async () => { checks++; return { institutionId: access ? 'ours' : 'other' }; } } };
+  const source = { viewerReference: async () => tags }, service = new ViewerService(prisma, source, new StudyAccessService(prisma,source,{}));
+  const head = () => ({ item: structuredClone(item) }), caller = { institution: 'ours',kind:'member',sub:'synthetic',actor:'synthetic',roles:['radiologist'] };
   try {
     const equal = head(); await service.verifyMeasurements(uid, [equal], caller);
     assert.equal(equal.referenceStatus, 'verified'); assert.deepEqual(warnings, []);

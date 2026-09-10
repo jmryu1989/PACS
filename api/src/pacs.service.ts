@@ -1479,6 +1479,7 @@ export class PacsService implements OnModuleInit {
     need(c.roles, 'admin', '판독문 초안 강제 해제');
     const me = inst(c);
     await this.gate(uid, c);
+    await this.studyAccess.prepare(c,[uid]);
 
     const run = () => this.prisma.$transaction(async tx => {
       await this.studyAccess.require(c,[uid],tx);
@@ -1851,6 +1852,7 @@ export class PacsService implements OnModuleInit {
     if (order.institutionId !== me) throw new BadRequestException('오더를 찾을 수 없습니다');
 
     const prev = await this.gate(uid, c);
+    await this.studyAccess.prepare(c,[uid]);
     if (prev && prev.institutionId !== me)
       throw new ForbiddenException('원격판독으로 받은 검사는 매칭할 수 없습니다 (보유 기관의 일입니다)');
     // Match도 환자 정보를 덮어쓰는 동작이므로 같은 규칙을 받는다
@@ -1945,6 +1947,7 @@ export class PacsService implements OnModuleInit {
     need(c.roles, 'technician', '검사 삭제');
     const me = inst(c);
     await this.gate(uid, c);
+    await this.studyAccess.prepare(c,[uid]);
     return this.prisma.$transaction(async tx => {
       await this.studyAccess.require(c,[uid],tx);
     await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;

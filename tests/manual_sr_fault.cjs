@@ -1,3 +1,4 @@
+const {StudyAccessService}=require('/app/dist/study-access.service');
 // Real compiled services, Prisma and owned synthetic DICOM; injected delays
 // affect only this separate test process, never the running API's transport.
 const assert = require('node:assert/strict');
@@ -6,7 +7,7 @@ const { PrismaService } = require('/app/dist/prisma.service');
 const { OrthancService } = require('/app/dist/orthanc.service');
 const { ManualSrService } = require('/app/dist/manual-sr.service');
 const prisma = new PrismaService(), orthanc = new OrthancService();
-const service = new ManualSrService(prisma, orthanc), realFetch = global.fetch;
+const service = new ManualSrService(prisma, orthanc, new StudyAccessService(prisma,orthanc,{})), realFetch = global.fetch;
 const { uid, caller, items } = fixture;
 const raw = x => Buffer.from(JSON.stringify(x));
 let phase = 'setup';
