@@ -936,6 +936,7 @@
   <script src="viewer-opening.js"></script>
   <script src="worklist-startup.js"></script>
   <script src="related-parts.js"></script>
+  <script src="study-priority.js"></script>
   <script src="worklist-alerts.js"></script>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1570,10 +1571,11 @@
     }
 
     // 특수 렌더링이 필요한 칸만 함수로
+    let studyPriority = null;
     const CELL = {
       assignedReader:s=>`<button type="button" class="chip" data-reader-assignment="${esc(s.uid)}" ${!serverMode||demoMode||offline||s.tele?'disabled':''}>${esc(s.assignedReader||'Unassigned')}</button>`,
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
-      em: s => s.em === "E" ? `<span class="em-e">E</span>` : "",
+      em: s => {const phase=studyPriority?.get(s.uid)?.phase;return phase?`<span title="${phase==='saving'?'응급 상태를 저장 중입니다':'저장 결과 미확인 — 문맥 메뉴의 Refresh Status로 확인하세요'}">${phase==='saving'?'Saving':'Unverified'}</span>`:s.em === "E" ? `<span class="em-e">E</span>` : "";},
       rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
       ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
@@ -1703,6 +1705,23 @@
     }
 
     let listLoadSequence = 0;
+    studyPriority=KinStudyPriority.create({
+      owner:()=>KinViewerOpening.key(KinAuth.session()),
+      allowed:uid=>serverMode&&!offline&&!demoMode&&!commitInFlight&&KinAuth.has('technician')&&!!studies.find(s=>s.uid===uid&&!s.tele),
+      request:async(uid,em)=>{const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
+        try{return await api('PATCH','/studies/'+encodeURIComponent(uid),{em},controller.signal);}finally{clearTimeout(timeout);}},
+      apply:(uid,em)=>{appState[uid]={...appState[uid],em};syncStudy(uid);},
+      invalidate:()=>{commitEpoch++;listLoadSequence++;},
+      changed:()=>{render();renderRelated();updateReportButtons();},
+      notify:(message,error)=>toast(message,error?'err':'')
+    });
+    function emergencyMenu(uid) {
+      const s=studies.find(s=>s.uid===uid),state=studyPriority.get(uid),desired=s?.em==='E'?'N':'E';
+      if(state?.phase==='unknown')return {label:'Refresh Status',dis:offline||!serverMode,act:()=>load()};
+      return {label:state?.phase==='saving'?'Saving Emergency Status':s?.em==='E'?'Switch to Normal':'Switch to Emergency',
+        dis:!!state||!studyPriority.active()||!serverMode||offline||demoMode||commitInFlight||!KinAuth.has('technician')||!s||s.tele,
+        act:()=>studyPriority.set(uid,desired)};
+    }
     const studyPageClient = KinStudyPages.create({
       request: (path, signal) => api('GET', path, undefined, signal),
       identity: () => { const s = KinAuth.session(); return s?.state === 'approved' ? [s.institution,s.sub] : null; },
@@ -1753,6 +1772,7 @@
          */
         const editing = selectedUid ? { ...appState[selectedUid] } : null;
         studies = r.studies.map(fromApi);
+        studyPriority.observed(r.studies.map(s=>s.uid));
         worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
         if (editing && appState[selectedUid]) {
           appState[selectedUid] = { ...appState[selectedUid], version:editing.version ?? 0, draft:editing.draft ?? null }; syncStudy(selectedUid);
@@ -2993,6 +3013,7 @@
       if (!selectedUid) return;
       // 확정은 겹쳐 부르지 않는다. 더블클릭이 만든 판 하나가 더 쌓이는 걸 여기서 막는다.
       if (commitInFlight) return;
+      if(studyPriority?.get(selectedUid)){toast('응급 상태를 확인한 뒤 판독을 저장하세요. 저장 결과 미확인은 Technician 메뉴의 Refresh Status로 확인할 수 있습니다.','err');return;}
       // 서버가 죽었는데 로컬에 확정을 쌓으면, 그건 확정이 아니라 이 브라우저의 메모다.
       if (offline) {
         toast("서버 연결이 끊겨 저장할 수 없습니다. 쓰던 내용을 복사해 두고 연결을 기다리세요.", "err");
@@ -3137,6 +3158,9 @@
       }
       for (const id of ["#findings", "#conclusion", "#recommendation"]) {
         $(id).readOnly = !rad || locked || filming || !!held;
+      }
+      if(studyPriority?.get(selectedUid))for(const id of ['#b-save','#b-approve','#b-transcribe','#b-unread','#b-addendum','#b-prelim','#b-defer']) {
+        const button=$(id);if(button){button.disabled=true;button.title='응급 상태 저장 결과를 확인한 뒤 판독을 저장하세요';}
       }
       updateTemplatePreview();
       updateReportTemplateButton();
@@ -4778,12 +4802,7 @@
           { label: "Unverify", dis: s.ss === "Unverified", act: () => setSs(uid, "Unverified") },
           { label: "Modify Exam", dis: s.rs !== "W", act: openModify },
           { sep: 1 },
-          { label: s.em === "E" ? "Switch to Normal" : "Switch to Emergency", act: () => {
-              s.em = s.em === "E" ? "N" : "E";
-              appState[uid] = { ...appState[uid], em: s.em };
-              saveApp(uid, { em: s.em }); render(); renderRelated();
-              if (uid === selectedUid) { loadReport(); updateReportButtons(); }
-            } },
+          emergencyMenu(uid),
           { label: "Switch ReqHosp", act: () => {
               const v = prompt("의뢰 병원(ReqHosp):", s.reqHosp);
               if (v == null) return;
