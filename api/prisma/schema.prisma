@@ -156,7 +156,7 @@ model ProcessingAgreement {
   from Institution @relation("AgreementFrom", fields: [fromInstitutionId], references: [id], onDelete: Restrict)
   to Institution @relation("AgreementTo", fields: [toInstitutionId], references: [id], onDelete: Restrict)
   transfers Transfer[]
-  @@index([fromInstitutionId, toInstitutionId, status])
+  @@index([fromInstitutionId, toInstitutionId, status], map: "ProcessingAgreement_fromInstitutionId_toInstitutionId_status_id")
 }
 
 /// OPEN is a request only; this release does not create ACCEPTED access grants.

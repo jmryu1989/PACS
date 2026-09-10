@@ -22,7 +22,7 @@ class ReadingDockE2E(ReadingWorkspaceE2E):
   self.bounds(f);canvas_ready(f,2)
   history.click();expect(f.locator('#kin-viewer-history')).to_be_visible();expect(f.locator('#kin-viewer-layout')).not_to_be_visible()
   history.click();expect(history).to_have_attribute('aria-expanded','false');self.bounds(f)
-  p.set_viewport_size(dict(width=800,height=1100));job.click();self.bounds(f);canvas_ready(f,2)
+  p.set_viewport_size(dict(width=800,height=1100));p.locator('#reading-frame').scroll_into_view_if_needed();job.click();self.bounds(f);canvas_ready(f,2)
   expect(f.get_by_label('작업 제목',exact=True)).to_have_value('DOCK RETAINED JOB')
   p.set_viewport_size(dict(width=1680,height=1100));self.bounds(f);canvas_ready(f,2)
   self.click_job(f,'새 비교 작업 저장','저장했습니다')
