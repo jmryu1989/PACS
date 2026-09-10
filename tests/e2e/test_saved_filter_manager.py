@@ -196,6 +196,81 @@ class SavedFilterManagerE2E(base.WorklistE2E):
         self.save(page)
 
 
+    def test_manager_05_copy_edits_preserve_source_and_reject_raced_name(self):
+        prefix = 'SFM-copy-' + uuid.uuid4().hex[:10]
+        first = self.fixture(patient_id=prefix + '-A')
+        second = self.fixture(patient_id=prefix + '-B')
+        self.seed_report(first)
+        page = self.login(); self.select(page, first)
+        page.locator('#quick').fill(prefix)
+        self.open_manager(page)
+        page.locator('#sfm-name').fill(prefix)
+        page.locator('#sfm-folder').fill('Synthetic/Copy')
+        page.locator('#sfm-description').fill('source description')
+        page.locator('#sfm-default').check()
+        original = self.save(page)
+        page.locator('#sfm-col-id').fill(second.patient_id)
+        page.locator('#sfm-copy').click()
+        expect(page.locator('#sfm-name')).to_have_value(prefix + ' (Copy)')
+        expect(page.locator('#sfm-default')).not_to_be_checked()
+        expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
+        expect(page.locator('#sfm-folder')).to_have_value('Synthetic/Copy')
+        page.once('dialog', lambda d: d.dismiss()); page.keyboard.press('Escape')
+        expect(page.locator('#saved-filter-manager')).to_be_visible()
+        page.locator('#sfm-name').fill(prefix)
+        page.locator('#sfm-save').click()
+        expect(page.locator('#sfm-status')).to_contain_text('같은 이름')
+        name = prefix + ' (Copy)'
+        page.locator('#sfm-name').fill(name)
+        # A second tab creates the chosen name after this dialog's list loaded.
+        raced = self.stack.request('POST', '/filters', 'doctor', dict(name=name, mode='Radiology', days=-1, cols={}, quick='RACED'))
+        self.assertEqual(raced.status, 201); self.addCleanup(self.remove_filter, raced.body['id'])
+        page.locator('#sfm-default').check()
+        with page.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/api/filters')) as reply:
+            page.locator('#sfm-save').click()
+        self.assertEqual(reply.value.status, 409)
+        expect(page.locator('#sfm-status')).to_contain_text('같은 이름')
+        with page.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/api/filters')) as repeated:
+            page.locator('#sfm-save').click()
+        self.assertEqual(repeated.value.status, 409)
+        expect(page.locator('#sfm-status')).to_contain_text('같은 이름')
+        expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
+        prefs = self.stack.request('GET', '/prefs', 'doctor').body['filters']
+        self.assertEqual(next(f for f in prefs if f['id'] == original['id']), original)
+        self.assertEqual(next(f for f in prefs if f['id'] == raced.body['id']), raced.body)
+        page.locator('#sfm-default').uncheck()
+        page.locator('#sfm-name').fill(prefix + '-Variant')
+        page.route('**/api/filters', lambda r: r.abort())
+        page.locator('#sfm-save').click()
+        expect(page.locator('#sfm-status')).not_to_contain_text('처리 중')
+        expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
+        page.unroute('**/api/filters')
+        copied = self.save(page)
+        self.assertNotEqual(copied['id'], original['id'])
+        self.assertEqual(copied['cols']['id'], second.patient_id)
+        self.assertFalse(copied['isDefault'])
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(2)
+        expect(page.locator('#findings')).to_have_value(first.secret)
+        fresh = self.login(); self.open_manager(fresh)
+        fresh.locator('#sfm-search').fill(prefix + '-Variant')
+        fresh.locator('#sfm-list button').click(); fresh.locator('#sfm-apply').click()
+        expect(fresh.locator('#rows tr[data-uid]')).to_have_count(1)
+        expect(fresh.locator(f'#rows tr[data-uid="{second.uid}"]')).to_be_visible()
+        prefs = self.stack.request('GET', '/prefs', 'doctor').body['filters']
+        self.assertEqual(next(f for f in prefs if f['id'] == original['id']), original)
+        self.assertFalse(any(f['name'].startswith(prefix) for f in self.stack.request('GET', '/prefs', 'doctor2').body['filters']))
+        other = self.stack.request('POST', '/filters', 'doctor2', dict(name=prefix, createOnly=True, isDefault=True, mode='Radiology', cols={}))
+        self.assertEqual(other.status, 201)
+        self.addCleanup(lambda: self.stack.request('DELETE', '/filters/' + str(other.body['id']), 'doctor2'))
+        new_default = self.stack.request('POST', '/filters', 'doctor', dict(name=prefix+'-Default', createOnly=True, isDefault=True, mode='Radiology', cols={}))
+        self.assertEqual(new_default.status, 201); self.addCleanup(self.remove_filter, new_default.body['id'])
+        prefs = self.stack.request('GET', '/prefs', 'doctor').body['filters']
+        self.assertEqual([f['id'] for f in prefs if f['isDefault']], [new_default.body['id']])
+        self.assertFalse(next(f for f in prefs if f['id'] == original['id'])['isDefault'])
+        self.assertTrue(next(f for f in self.stack.request('GET', '/prefs', 'doctor2').body['filters'] if f['id'] == other.body['id'])['isDefault'])
+
+
+
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(SavedFilterManagerE2E(name) for name in loader.getTestCaseNames(SavedFilterManagerE2E)
                               if name.startswith('test_manager_'))

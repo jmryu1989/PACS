@@ -991,6 +991,23 @@ export class PacsService implements OnModuleInit {
       isDefault: !!body.isDefault,
     };
 
+    // Copies are create-only even when another tab just claimed the name.
+    if (body.createOnly === true) {
+      try {
+        const saved = await this.prisma.$transaction(async tx => {
+          const created = await tx.userFilter.create({ data: { owner, name, ...data } });
+          if (data.isDefault) await tx.userFilter.updateMany({
+            where: { owner, id: { not: created.id } }, data: { isDefault: false },
+          });
+          return created;
+        });
+        return { ...saved, cols: parse(saved.cols) ?? {} };
+      } catch (error) {
+        if ((error as any)?.code === 'P2002') throw new ConflictException('같은 이름의 검색이 있습니다. 다른 이름으로 저장하세요. 기존 검색은 변경하지 않았습니다.');
+        throw error;
+      }
+    }
+
     // 기본 필터는 하나뿐이다. 새로 지정하면 이전 것이 풀린다 —
     // 두 개가 기본이면 로그인할 때마다 어느 쪽이 걸릴지 모른다.
     if (data.isDefault)

@@ -46,6 +46,7 @@
         <label class="sfm-default"><input type="checkbox" id="sfm-default"> 로그인할 때 이 검색 적용</label>
         <p id="sfm-count" role="status"></p>
       </fieldset><footer>
+        <button type="button" id="sfm-copy">Save As New</button>
         <button type="button" id="sfm-delete">삭제</button>
         <button type="button" id="sfm-preview">편집 조건으로 검색</button>
         <button type="button" id="sfm-apply">저장된 조건 적용</button>
@@ -57,6 +58,7 @@
     new ResizeObserver(() => dialog.style.setProperty('--sfm-header-height', header.offsetHeight + 'px')).observe(header);
     const $ = id => dialog.querySelector('#sfm-' + id);
     let selected = null, source = {}, baseline = '', busy = false, opener = null, editable = true;
+    let copying = false;
     const collapsed = new Set();
     const copy = value => JSON.parse(JSON.stringify(value));
     const compound = KinCompoundFilter;
@@ -97,6 +99,7 @@
       dialog.querySelectorAll('button, input, select, textarea, fieldset').forEach(el => { el.disabled = on; });
       $('fields').disabled = on || !editable;
       $('save').disabled = on || !editable;
+      $('copy').disabled = on || !editable || selected === null;
       $('preview').disabled = on || !editable;
       $('delete').disabled = on || selected === null;
       $('apply').disabled = on || selected === null;
@@ -202,6 +205,7 @@
       $('count').classList.toggle('sfm-error', !!error);
     }
     function edit(filter, isNew = false) {
+      copying = false;
       // Reject unsupported stored modes instead of presenting an editable substitute.
       if (!filter || !Array.isArray(options.columns[filter.mode])) {
         editable = false; selected = null; $('fields').hidden = true; lock(false); list();
@@ -298,6 +302,8 @@
       if (error) { status('복합 조건을 저장하지 못했습니다: ' + error, true); return; }
       if (!next.name) { status('검색 이름을 입력하세요.', true); $('name').focus(); return; }
       const existing = selected === null ? named(next.name) : null;
+      if (copying && existing) { status('같은 이름의 검색이 있습니다. 다른 이름으로 저장하세요. 원본 검색은 유지됩니다.', true); $('name').focus(); return; }
+      if (copying) next.createOnly = true;
       if (existing) {
         // Starting from current criteria must not erase classification merely
         // because the new-search form began with empty metadata defaults.
@@ -311,6 +317,21 @@
         const saved = await options.save(next, signal);
         if (edit(saved)) status(`"${saved.name}" 저장 완료. 목록에 적용하려면 ‘저장된 조건 적용’을 누르세요.`);
       });
+    });
+    $('copy').addEventListener('click', () => {
+      if (busy || !editable || selected === null) return;
+      const original = selected, draft = value();
+      // Include edits already in the form, without changing the saved source.
+      draft.isDefault = false;
+      if (!edit(draft, true)) return;
+      copying = true;
+      let suffix = 1, candidate = original + ' (Copy)';
+      while (named(candidate)) candidate = original + ' (Copy ' + (++suffix) + ')';
+      $('name').value = candidate;
+      $('heading').textContent = 'Save As New';
+      $('name-hint').textContent = '새 이름으로 저장합니다. 원본 검색과 기존 기본 검색은 유지하며, 같은 이름은 덮어쓰지 않습니다.';
+      status('편집 중인 조건을 복사했습니다. 이름과 조건을 확인한 뒤 저장하세요.');
+      $('name').focus(); $('name').select();
     });
     $('delete').addEventListener('click', () => {
       if (busy || selected === null) return;
