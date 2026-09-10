@@ -262,6 +262,24 @@ class Pure(unittest.TestCase):
             with self.assertRaises(ValueError): transfer.parse_receipt(data, transfer.image_transfer.sha(data), '0'*64, CONTEXT)
         with self.assertRaises(ValueError): transfer.parse_receipt(raw, '0'*64, '0'*64, CONTEXT)
         with self.assertRaises(ValueError): check(body, '0'*64)
+        # Trailing whitespace keeps the receipt valid JSON with a correct hash:
+        # rejecting cap+1 must depend on the byte budget, not malformed input.
+        exact = raw + b' ' * (transfer.RECEIPT_LIMIT-len(raw))
+        product_sha = transfer.image_transfer.sha(transfer.canonical(body['product']))
+        with patch.object(transfer, 'migration_records', return_value=MIGRATIONS):
+            self.assertEqual(transfer.parse_receipt(exact, transfer.image_transfer.sha(exact), product_sha, CONTEXT), body)
+            over = exact+b' '
+            with self.assertRaises(ValueError):
+                transfer.parse_receipt(over, transfer.image_transfer.sha(over), product_sha, CONTEXT)
+
+    def test_expanded_catalog_receipt_roundtrips_above_old_cap(self):
+        body, _, _, _ = fixture()
+        body['product']['catalog']['columns'] = [dict(column_name='synthetic-'+str(i),
+            column_default='X'*450) for i in range(293)]
+        raw = transfer.canonical(body)
+        self.assertGreater(len(raw), 128*1024)
+        self.assertLessEqual(len(raw), transfer.RECEIPT_LIMIT)
+        self.assertEqual(check(body), body)
 
     def test_11_producer_seed_orders_fk_and_exercises_serial(self):
         with patch.object(transfer, 'command'), patch.object(transfer, 'migration_sources', return_value=[b'SELECT 1']), \

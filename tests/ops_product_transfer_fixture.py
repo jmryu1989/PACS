@@ -17,7 +17,9 @@ orth, pg = combined.orth, combined.pg
 image_transfer, inventory = combined.image_transfer, combined.inventory
 require, command, record = combined.require, combined.command, combined.record
 LIMITS = combined.LIMITS
-RECEIPT_LIMIT = 128*1024
+# The 32-table catalog plus synthetic rows now exceeds 128 KiB (136,191
+# bytes measured). Keep producer, bounded copy and parser on one finite cap.
+RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
 MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
