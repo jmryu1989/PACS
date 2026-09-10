@@ -4022,16 +4022,31 @@
           monitorHintShown = true;
           toast("판독 창을 다른 화면에 열려면 툴바 [다른 모니터로]에서 허용하세요.", "info", 8000);
         }
-        // 권한 응답이 늦어도 영상은 이미 로드 중이다. 저장 자리는 첫 배치로 덮지 않는다.
-        if (previous.kind === "blank" && !stored && monitorPermissionGranted() && screen.isExtended === true) {
+        // about:blank에서 opener를 분리한 직후에는 Chrome이 다른 화면 좌표를
+        // 현재 화면으로 제한한다. 실제 뷰어 문서가 준비된 뒤 한 번 배치한다.
+        if (previous.kind === "blank" && monitorPermissionGranted() && screen.isExtended === true) {
+          const placementOwner = KinViewerOpening.key(KinAuth.session()), deadline = Date.now() + 15000;
           try {
             window.getScreenDetails().then(details => {
-              if (seq !== ohifPopupSequences.get(popup) || popup.closed || !monitorPermissionGranted()) return;
               cacheMonitorScreens(details);
-              const rect = ohifPlacement(null, details);
-              popup.moveTo(rect.left, rect.top);
-              popup.resizeTo(rect.width, rect.height);
-              rememberOhifRect(popup);
+              const rect = ohifPlacement(stored, details);
+              const place = () => {
+                if (Date.now() > deadline || seq !== ohifPopupSequences.get(popup) || popup.closed || !monitorPermissionGranted() ||
+                    !placementOwner || placementOwner !== KinViewerOpening.key(KinAuth.session())) return;
+                try {
+                  if (popup.document === previousDocument || popup.document.readyState === 'loading' || !sameOhifScope(popup.location.href, url)) {
+                    if (Date.now() < deadline) setTimeout(place, 100);
+                    return;
+                  }
+                  // Move before resizing so a smaller primary display cannot cap
+                  // the saved size intended for a larger secondary display.
+                  popup.moveTo(rect.left, rect.top);
+                  popup.resizeTo(rect.width, rect.height);
+                  popup.moveTo(rect.left, rect.top);
+                  rememberOhifRect(popup);
+                } catch (_) { /* A closed or replaced document cannot receive the old placement. */ }
+              };
+              place();
             }).catch(() => {});
           } catch (_) {}
         }
