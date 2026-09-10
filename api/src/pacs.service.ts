@@ -6,6 +6,7 @@ import { KeycloakService } from './keycloak.service';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
+import { folderAction, folderEntries, folderPath } from './filter-folders';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -991,14 +992,7 @@ export class PacsService implements OnModuleInit {
 
     // Old clients omit these fields; undefined must preserve existing metadata.
     let folder: string | undefined;
-    if (body.folder !== undefined) {
-      if (typeof body.folder !== 'string') throw new BadRequestException('폴더 경로를 확인하세요');
-      const parts = body.folder.trim() ? body.folder.trim().split('/').map((part: string) => part.trim()) : [];
-      if (parts.length > 5 || parts.some((part: string) => !part || part.length > 40 ||
-          part === '.' || part === '..' || /[\\\u0000-\u001f\u007f]/.test(part)))
-        throw new BadRequestException('폴더는 /로 구분한 5단계, 각 1~40자로 입력하세요');
-      folder = parts.join('/');
-    }
+    if (body.folder !== undefined) folder = folderPath(body.folder, true);
     if (body.description !== undefined && (typeof body.description !== 'string' || body.description.length > 1000))
       throw new BadRequestException('검색 설명은 1000자 이내로 입력하세요');
     if (body.ordinal !== undefined && (!Number.isInteger(body.ordinal) || body.ordinal < 0 || body.ordinal > 9999))
@@ -1018,6 +1012,7 @@ export class PacsService implements OnModuleInit {
     if (body.createOnly === true) {
       try {
         const saved = await this.prisma.$transaction(async tx => {
+          await this.lockFilterCollection(tx, owner);
           const created = await tx.userFilter.create({ data: { owner, name, ...data } });
           if (data.isDefault) await tx.userFilter.updateMany({
             where: { owner, id: { not: created.id } }, data: { isDefault: false },
@@ -1033,13 +1028,13 @@ export class PacsService implements OnModuleInit {
 
     // 기본 필터는 하나뿐이다. 새로 지정하면 이전 것이 풀린다 —
     // 두 개가 기본이면 로그인할 때마다 어느 쪽이 걸릴지 모른다.
-    if (data.isDefault)
-      await this.prisma.userFilter.updateMany({ where: { owner }, data: { isDefault: false } });
-
-    const saved = await this.prisma.userFilter.upsert({
-      where: { owner_name: { owner, name } },
-      create: { owner, name, ...data },
-      update: data,
+    const saved = await this.prisma.$transaction(async tx => {
+      await this.lockFilterCollection(tx, owner);
+      if (data.isDefault) await tx.userFilter.updateMany({ where: { owner }, data: { isDefault: false } });
+      return tx.userFilter.upsert({
+        where: { owner_name: { owner, name } },
+        create: { owner, name, ...data }, update: data,
+      });
     });
     return { ...saved, cols: parse(saved.cols) ?? {} };
   }
@@ -1047,19 +1042,79 @@ export class PacsService implements OnModuleInit {
   /** 기본 필터 지정/해제 */
   async setDefaultFilter(id: number, on: boolean, c: Caller) {
     const owner = c.actor;
-    const f = await this.prisma.userFilter.findUnique({ where: { id } });
-    if (!f || f.owner !== owner) throw new NotFoundException('필터를 찾을 수 없습니다');
-    if (on) await this.prisma.userFilter.updateMany({ where: { owner }, data: { isDefault: false } });
-    await this.prisma.userFilter.update({ where: { id }, data: { isDefault: on } });
+    await this.prisma.$transaction(async tx => {
+      await this.lockFilterCollection(tx, owner);
+      const f = await tx.userFilter.findUnique({ where: { id } });
+      if (!f || f.owner !== owner) throw new NotFoundException('필터를 찾을 수 없습니다');
+      if (on) await tx.userFilter.updateMany({ where: { owner }, data: { isDefault: false } });
+      await tx.userFilter.update({ where: { id }, data: { isDefault: on } });
+    });
     return { ok: true };
   }
 
   async deleteFilter(id: number, c: Caller) {
     // 남의 것을 지우지 못하게 owner를 조건에 넣는다. 찾아서 검사하고 지우면
     // 그 사이가 벌어질 수 있으므로 조건을 삭제문 안에 둔다.
-    const r = await this.prisma.userFilter.deleteMany({ where: { id, owner: c.actor } });
-    if (!r.count) throw new NotFoundException('필터를 찾을 수 없습니다');
+    await this.prisma.$transaction(async tx => {
+      await this.lockFilterCollection(tx, c.actor);
+      const r = await tx.userFilter.deleteMany({ where: { id, owner: c.actor } });
+      if (!r.count) throw new NotFoundException('필터를 찾을 수 없습니다');
+    });
     return { ok: true };
+  }
+
+  private lockFilterCollection(tx: Prisma.TransactionClient, owner: string) {
+    // A single PostgreSQL upsert locks this owner's row until the transaction ends.
+    return tx.userFilterCollection.upsert({
+      where: { owner }, create: { owner, revision: 1, folders: [] },
+      update: { revision: { increment: 1 } },
+    });
+  }
+
+  private filterCollectionOwner(c: Caller) {
+    if (c.kind !== 'member' || !c.sub || !c.actor) throw new ForbiddenException('개인 계정으로 로그인하세요');
+    return [inst(c), c.sub];
+  }
+
+  private async filterCollectionSnapshot(tx: Prisma.TransactionClient, c: Caller) {
+    const collection = await tx.userFilterCollection.findUnique({ where: { owner: c.actor } });
+    const filters = await tx.userFilter.findMany({ where: { owner: c.actor }, orderBy: { id: 'asc' } });
+    return { owner: this.filterCollectionOwner(c), revision: collection?.revision ?? 0,
+      folders: folderEntries(collection?.folders ?? []),
+      filters: filters.map(filter => ({ ...filter, cols: parse(filter.cols) ?? {} })) };
+  }
+
+  async readFilterFolders(c: Caller) {
+    this.filterCollectionOwner(c);
+    return this.prisma.$transaction(tx => this.filterCollectionSnapshot(tx, c),
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead });
+  }
+
+  async writeFilterFolders(body: any, c: Caller) {
+    const owner = this.filterCollectionOwner(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).sort().join(',') !== 'command,expectedOwner,revision' ||
+        !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('검색 모음 요청 형식을 확인하세요');
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify(owner))
+      throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
+    return this.prisma.$transaction(async tx => {
+      const collection = await this.lockFilterCollection(tx, c.actor);
+      if (collection.revision !== body.revision + 1)
+        throw new ConflictException('다른 화면에서 검색 모음이 변경되었습니다. 편집 내용을 확인한 뒤 다시 불러오세요');
+      const searches = await tx.userFilter.findMany({ where: { owner: c.actor }, select: { id: true, folder: true } });
+      const result = folderAction(collection.folders, searches, body.command);
+      for (const move of result.moves) {
+        const changed = await tx.userFilter.updateMany({ where: { id: move.id, owner: c.actor }, data: { folder: move.folder } });
+        if (changed.count !== 1) throw new ConflictException('선택한 검색이 변경되었습니다');
+      }
+      if (result.deletes.length) {
+        const changed = await tx.userFilter.deleteMany({ where: { owner: c.actor, id: { in: result.deletes } } });
+        if (changed.count !== result.deletes.length) throw new ConflictException('선택한 검색이 변경되었습니다');
+      }
+      await tx.userFilterCollection.update({ where: { owner: c.actor }, data: { folders: result.folders } });
+      return this.filterCollectionSnapshot(tx, c);
+    });
   }
 
   private async nextTemplateOrd(owner: string) {

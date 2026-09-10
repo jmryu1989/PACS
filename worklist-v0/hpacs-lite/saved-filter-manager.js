@@ -18,12 +18,28 @@
           <button type="button" id="sfm-next" aria-controls="sfm-fields">Next</button>
         </nav><p id="sfm-position" role="status" aria-live="polite" tabindex="-1"></p>
         <div id="sfm-list"></div><button type="button" id="sfm-reload">Reload List</button>
+        <details id="sfm-organize"><summary>Folders &amp; Bulk Actions</summary>
+          <p><small>폴더는 검색이 없어도 보관됩니다. 폴더 작업 전 ‘Load Folders’를 눌러 최신 검색 모음을 확인하세요.</small></p>
+          <button type="button" id="sfm-load-folders">Load Folders</button>
+          <label for="sfm-folder-path">Folder to Edit</label><input id="sfm-folder-path" list="sfm-folders" maxlength="204">
+          <label for="sfm-folder-description">Folder Description</label><textarea id="sfm-folder-description" maxlength="1000" rows="2"></textarea>
+          <label for="sfm-folder-order">Folder Order</label><input id="sfm-folder-order" type="number" min="0" max="9999" value="0">
+          <button type="button" id="sfm-folder-save">Save Folder</button>
+          <label for="sfm-folder-destination">Destination Path</label><input id="sfm-folder-destination" list="sfm-folders" maxlength="204">
+          <small>폴더 이동은 새 전체 경로를 입력합니다. 선택 검색 이동에서 빈 값은 미분류입니다.</small>
+          <button type="button" id="sfm-folder-move">Move Folder</button>
+          <button type="button" id="sfm-folder-remove">Remove Folder</button>
+          <p id="sfm-bulk-count" role="status">0 selected</p>
+          <button type="button" id="sfm-bulk-clear">Clear Selection</button>
+          <button type="button" id="sfm-bulk-move">Move Selected</button>
+          <button type="button" id="sfm-bulk-delete">Delete Selected</button>
+        </details>
       </aside><form id="sfm-form"><fieldset id="sfm-fields">
         <legend id="sfm-heading">New Search</legend>
         <label for="sfm-name">Search Name</label><input id="sfm-name" required aria-describedby="sfm-name-hint">
         <small id="sfm-name-hint">같은 이름을 저장하면 확인 후 해당 검색을 덮어씁니다.</small>
         <label for="sfm-folder">Folder Path</label><input id="sfm-folder" list="sfm-folders" maxlength="204" placeholder="예: 흉부/추적 검사"><datalist id="sfm-folders"></datalist>
-        <small>빈 값은 미분류입니다. /로 구분해 최대 5단계로 묶습니다. 빈 폴더는 별도로 저장하지 않습니다.</small>
+        <small>빈 값은 미분류입니다. /로 구분해 최대 5단계로 묶습니다. ‘Folders &amp; Bulk Actions’에서 빈 폴더도 보관할 수 있습니다.</small>
         <label for="sfm-description">Description</label><textarea id="sfm-description" rows="2" maxlength="1000"></textarea>
         <label for="sfm-ordinal">Folder Order</label><input id="sfm-ordinal" type="number" min="0" max="9999" step="1" required aria-describedby="sfm-order-hint">
         <small id="sfm-order-hint">작은 값부터 표시합니다.</small>
@@ -64,6 +80,10 @@
     let selected = null, source = {}, baseline = '', busy = false, opener = null, editable = true;
     let copying = false, visibleNames = [], missingName = null, cursor = null;
     const collapsed = new Set();
+    const checked = new Set();
+    let collection = null, folderBaseline = '';
+    const folderValue = () => JSON.stringify(['folder-path', 'folder-description', 'folder-order', 'folder-destination'].map(id => $(id).value));
+    const folderDirty = () => folderBaseline && folderValue() !== folderBaseline;
     const copy = value => JSON.parse(JSON.stringify(value));
     const compound = KinCompoundFilter;
     const operatorLabels = { contains: 'Contains', eq: 'Equals', notContains: 'Does Not Contain',
@@ -99,7 +119,7 @@
         isDefault: $('default').checked };
     }
     const dirty = () => editable && JSON.stringify(value()) !== baseline;
-    const mayLeave = () => !busy && (!dirty() || confirm('저장하지 않은 검색 조건 변경을 버릴까요?'));
+    const mayLeave = () => !busy && (!(dirty() || folderDirty()) || confirm('저장하지 않은 검색 조건 또는 폴더 변경을 버릴까요?'));
     function focusAvailable(...targets) {
       if (!dialog.open) return;
       for (const target of targets) {
@@ -119,6 +139,7 @@
       $('preview').disabled = on || !editable;
       $('delete').disabled = on || selected === null;
       $('apply').disabled = on || selected === null;
+      for (const id of ['folder-save', 'folder-move', 'folder-remove', 'bulk-move', 'bulk-delete']) $(id).disabled = on || !collection;
       navigation();
     }
     function choices(select, entries, selectedValue) {
@@ -258,12 +279,21 @@
       const query = $('search').value.trim().toLocaleLowerCase();
       const all = options.list();
       const folderOf = f => typeof f.folder === 'string' ? f.folder : '';
-      $('folders').replaceChildren(...[...new Set(all.map(folderOf).filter(Boolean))].sort().map(path => {
+      const metadata = new Map((collection?.folders || []).map(folder => [folder.path, folder]));
+      $('folders').replaceChildren(...[...new Set([...all.map(folderOf).filter(Boolean), ...metadata.keys()])].sort().map(path => {
         const option = document.createElement('option'); option.value = path; return option;
       }));
       const filters = all.filter(f => [f.name, f.description, folderOf(f)].some(v =>
         typeof v === 'string' && v.toLocaleLowerCase().includes(query)));
       const root = { children: new Map(), filters: [] };
+      for (const folder of metadata.values()) {
+        if (query && ![folder.path, folder.description].some(text => text.toLocaleLowerCase().includes(query))) continue;
+        let node = root;
+        for (const part of folder.path.split('/')) {
+          if (!node.children.has(part)) node.children.set(part, { children: new Map(), filters: [] });
+          node = node.children.get(part);
+        }
+      }
       for (const filter of filters) {
         let node = root;
         for (const part of folderOf(filter).split('/').filter(Boolean).slice(0, 5)) {
@@ -282,10 +312,19 @@
           const hint = document.createElement('small'); hint.textContent = f.description; button.append(hint);
         }
         button.addEventListener('click', () => selectSearch(f.name));
-        return button;
+        const row = document.createElement('div'); row.className = 'sfm-search-row';
+        const check = document.createElement('input'); check.type = 'checkbox'; check.disabled = busy || !Number.isInteger(f.id);
+        check.setAttribute('aria-label', 'Select Search: ' + f.name); check.checked = checked.has(f.id);
+        check.addEventListener('change', () => {
+          if (check.checked) checked.add(f.id); else checked.delete(f.id);
+          $('bulk-count').textContent = `${checked.size} selected`;
+        });
+        row.append(check, button); return row;
       }
       function branch(node, container, parentPath = '') {
-        for (const [name, child] of [...node.children].sort(([a], [b]) => a.localeCompare(b))) {
+        const childPath = name => parentPath ? parentPath + '/' + name : name;
+        for (const [name, child] of [...node.children].sort(([a], [b]) =>
+          (metadata.get(childPath(a))?.ordinal || 0) - (metadata.get(childPath(b))?.ordinal || 0) || a.localeCompare(b))) {
           const path = parentPath ? parentPath + '/' + name : name;
           const details = document.createElement('details'); details.dataset.folder = path;
           details.open = !!query || !collapsed.has(path);
@@ -296,6 +335,7 @@
             navigation();
           });
           const summary = document.createElement('summary'); summary.textContent = name;
+          if (metadata.get(path)?.description) summary.title = metadata.get(path).description;
           details.append(summary); branch(child, details, path); container.append(details);
         }
         node.filters.sort((a, b) => (Number.isInteger(a.ordinal) ? a.ordinal : 0) -
@@ -303,7 +343,8 @@
         node.filters.forEach(f => container.append(searchButton(f)));
       }
       $('list').replaceChildren(); branch(root, $('list'));
-      if (!filters.length) $('list').textContent = query ? '일치하는 저장 검색이 없습니다.' : '저장한 검색이 없습니다.';
+      if (!filters.length && !root.children.size) $('list').textContent = query ? '일치하는 저장 검색이 없습니다.' : '저장한 검색이 없습니다.';
+      $('bulk-count').textContent = `${checked.size} selected`;
       navigation();
     }
     function navigation() {
@@ -351,9 +392,66 @@
           requestFocus === $('delete') ? $('new') : $('save'), $('reload'), $('status'));
       }
     }
+    function acceptCollection(snapshot) {
+      collection = snapshot;
+      for (const id of checked) if (!snapshot.filters.some(filter => filter.id === id)) checked.delete(id);
+      // Preserve edited criteria. Only synchronize a folder field the user has not edited.
+      if (selected !== null) {
+        const saved = named(selected), initial = JSON.parse(baseline);
+        if (saved && $('folder').value === initial.folder) {
+          $('folder').value = saved.folder || ''; source.folder = saved.folder || '';
+          initial.folder = saved.folder || ''; baseline = JSON.stringify(initial);
+        } else if (!saved) {
+          selected = null; copying = true; $('name').readOnly = false;
+          $('heading').textContent = 'Save As New';
+          $('name-hint').textContent = '저장된 검색은 삭제됐습니다. 편집 조건은 유지되며 새 검색으로 저장할 수 있습니다.';
+        }
+      }
+      list();
+    }
+    $('load-folders').addEventListener('click', () => run(async signal => {
+      const snapshot = await options.readFolders(signal);
+      acceptCollection(snapshot); status('검색 모음을 불러왔습니다. 선택과 편집 내용은 유지했습니다.');
+    }));
+    $('folder-path').addEventListener('change', () => {
+      const initial = JSON.parse(folderBaseline);
+      if ($('folder-description').value !== initial[1] || $('folder-order').value !== initial[2]) return;
+      const folder = collection?.folders.find(folder => folder.path === $('folder-path').value.trim());
+      $('folder-description').value = folder?.description || ''; $('folder-order').value = String(folder?.ordinal || 0);
+      if (folder) {
+        initial[0] = $('folder-path').value; initial[1] = $('folder-description').value; initial[2] = $('folder-order').value;
+        folderBaseline = JSON.stringify(initial);
+      }
+    });
+    function folderCommand(command, message) {
+      if (busy || !collection) return;
+      if (!confirm(message)) return;
+      const expected = collection;
+      run(async signal => {
+        const snapshot = await options.writeFolders({ expectedOwner: expected.owner, revision: expected.revision, command }, signal);
+        acceptCollection(snapshot); folderBaseline = folderValue(); status('검색 모음 변경을 저장했습니다. 현재 목록 조건과 판독문은 유지됩니다.');
+      });
+    }
+    $('folder-save').addEventListener('click', () => folderCommand({ action: 'save-folder', path: $('folder-path').value,
+      description: $('folder-description').value, ordinal: Number($('folder-order').value) }, `폴더 "${$('folder-path').value}"의 설명과 순서를 저장할까요?`));
+    $('folder-move').addEventListener('click', () => folderCommand({ action: 'move-folder', from: $('folder-path').value,
+      to: $('folder-destination').value }, `폴더 "${$('folder-path').value}"와 하위 검색을 "${$('folder-destination').value}"로 이동할까요?`));
+    $('folder-remove').addEventListener('click', () => folderCommand({ action: 'remove-folder', path: $('folder-path').value },
+      `폴더 "${$('folder-path').value}"와 하위 폴더를 제거할까요? 포함된 검색은 모두 부모 폴더로 옮기며 검색 자체는 삭제하지 않습니다.`));
+    function bulk(action) {
+      const filters = options.list().filter(filter => checked.has(filter.id));
+      if (!filters.length || filters.length > 200) { status('검색을 1~200개 선택하세요.', true); return; }
+      const command = { action, ids: filters.map(filter => filter.id) };
+      if (action === 'move-searches') command.to = $('folder-destination').value;
+      folderCommand(command, `${filters.length}개 검색을 ${action === 'delete-searches' ? '삭제' : '"' + (command.to || '미분류') + '"로 이동'}할까요?\n${filters.map(filter => filter.name).join('\n')}\n검사와 판독문은 변경하지 않습니다.`);
+    }
+    $('bulk-move').addEventListener('click', () => bulk('move-searches'));
+    $('bulk-delete').addEventListener('click', () => bulk('delete-searches'));
+    $('bulk-clear').addEventListener('click', () => { checked.clear(); list(); });
     $('form').addEventListener('submit', e => {
       e.preventDefault(); if (busy || !editable || !$('form').reportValidity()) return;
       const applyAfterSave = e.submitter === $('save-apply');
+      if (applyAfterSave && folderDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
       const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
       if (error) { status('복합 조건을 저장하지 못했습니다: ' + error, true); return; }
@@ -421,6 +519,7 @@
     });
     $('preview').addEventListener('click', () => {
       if (busy || !editable) return;
+      if (folderDirty() && !confirm('검색을 적용하고 닫으면 저장하지 않은 폴더 변경은 버립니다. 계속할까요?')) return;
       const next = value();
       const error = compound.validate(next.cols[compound.KEY], options.columns[next.mode]);
       if (error) { status('복합 조건을 적용하지 못했습니다: ' + error, true); return; }
@@ -468,11 +567,14 @@
       else opener?.focus();
     });
     window.addEventListener('beforeunload', e => {
-      if (dialog.open && (busy || dirty())) { e.preventDefault(); e.returnValue = ''; }
+      if (dialog.open && (busy || dirty() || folderDirty())) { e.preventDefault(); e.returnValue = ''; }
     });
     return { open({ name } = {}) {
       if (dialog.open) return;
       opener = document.activeElement; $('search').value = ''; status('');
+      collection = null; checked.clear();
+      for (const id of ['folder-path', 'folder-description', 'folder-destination']) $(id).value = '';
+      $('folder-order').value = '0'; folderBaseline = folderValue();
       const filter = name === undefined ? options.snapshot() : named(name);
       if (filter && name !== undefined) {
         let path = '';

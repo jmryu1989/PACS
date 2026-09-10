@@ -142,6 +142,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("PUT", "workspace-layout"): Route(Kind.USER),
     ("DELETE", "workspace-layout"): Route(Kind.USER),
     ("POST", "filters"): Route(Kind.USER),
+    ("GET", "filter-folders"): Route(Kind.USER),
+    ("POST", "filter-folders"): Route(Kind.USER),
     ("PATCH", "filters/:id/default"): Route(Kind.USER),
     ("DELETE", "filters/:id"): Route(Kind.USER),
     ("POST", "templates"): Route(Kind.USER),
@@ -531,6 +533,9 @@ class LiveStack:
         if psql(f'SELECT count(*) FROM "AuditLog" WHERE actor=\'{template_owner}\'') != ["0"]:
             raise RuntimeError("Temporary actor already has audit history; refusing reuse")
         password = uuid.uuid4().hex + "Aa1!"
+        for table in ('UserFilter', 'UserFilterCollection'):
+            if psql(f'SELECT count(*) FROM "{table}" WHERE owner=\'{template_owner}\'') != ["0"]:
+                raise RuntimeError("Temporary actor already has saved searches; refusing reuse")
         created = self.kc_admin("POST", "/users", {
             "username": username, "enabled": True, "emailVerified": True,
             "email": username + "@local.test", "firstName": "KIN", "lastName": logical,
@@ -613,6 +618,13 @@ class LiveStack:
                 psql(f'DELETE FROM "ReadingTemplate" t WHERE owner=\'{owner}\' AND to_jsonb(t)={saved}')
             if psql(f'SELECT count(*) FROM "ReadingTemplate" WHERE owner=\'{owner}\'') != ["0"]:
                 raise RuntimeError("Temporary templates changed during cleanup")
+            for table in ('UserFilter', 'UserFilterCollection'):
+                rows = psql(f'SELECT to_jsonb(t)::text FROM "{table}" t WHERE owner=\'{owner}\'')
+                for raw in rows:
+                    saved = "'" + raw.replace("'", "''") + "'::jsonb"
+                    psql(f'DELETE FROM "{table}" t WHERE owner=\'{owner}\' AND to_jsonb(t)={saved}')
+                if psql(f'SELECT count(*) FROM "{table}" WHERE owner=\'{owner}\'') != ["0"]:
+                    raise RuntimeError("Temporary saved searches changed during cleanup")
         self.template_owners.clear()
         if self.user_ids or self.test_client_uuid or self.service_clients or self.created_gateway_role:
             self._admin_login()

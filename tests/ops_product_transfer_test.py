@@ -124,6 +124,16 @@ class Pure(unittest.TestCase):
             with patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', expected)
 
+    def test_empty_folder_owner_revision_and_metadata_restore_contract(self):
+        expected = fixture()[0]['product']
+        self.assertEqual(expected['rows']['UserFilterCollection'][0]['folders'][0]['path'], 'SYNTHETIC/Empty')
+        for field, value in [('owner', 'wrong-owner'), ('revision', 0), ('folders', []),
+                             ('folders', [dict(path='SYNTHETIC/Empty', description='changed', ordinal=2)])]:
+            actual = {key: copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['UserFilterCollection'][0][field] = value
+            with self.subTest(field=field), patch.object(transfer, 'observe', return_value=actual), self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned', 'kin', expected)
+
     def test_01_non_ci_refused_before_any_mutation(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(transfer, 'command') as calls, \
              patch.object(transfer.combined, 'disk_preflight') as disk, tempfile.TemporaryDirectory() as folder:

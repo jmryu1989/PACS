@@ -4291,6 +4291,20 @@
     const savedFilterManager = KinSavedFilterManager.mount({
       columns: COLS, days: savedFilterDays, list: () => userFilters, snapshot: snapshotFilter,
       count: f => filteredFor(f).length, apply: applyFilter,
+      async readFolders(signal) {
+        if (await filterWriteReady(signal)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
+        const snapshot = await api('GET', '/filter-folders', undefined, signal);
+        if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
+          throw new Error('계정 또는 검색 모음 응답을 확인할 수 없습니다. 다시 로그인하세요.');
+        userFilters = validUserFilters(snapshot.filters); renderChips(); return snapshot;
+      },
+      async writeFolders(body, signal) {
+        if (await filterWriteReady(signal)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
+        const snapshot = await api('POST', '/filter-folders', body, signal);
+        if (JSON.stringify(snapshot?.owner) !== JSON.stringify([sess.institution, sess.sub]) || !Array.isArray(snapshot.filters) || !Array.isArray(snapshot.folders))
+          throw new Error('응답을 확인할 수 없습니다. 검색 모음을 다시 불러오세요.');
+        userFilters = validUserFilters(snapshot.filters); renderChips(); return snapshot;
+      },
       restoreFocus(opener) {
         if (opener?.isConnected && !opener.disabled && !opener.closest('[hidden]')) opener.focus();
         else if (opener?.id === 'edit-active-filter') $('#clearfilter').focus();

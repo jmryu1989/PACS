@@ -140,6 +140,12 @@ export class PacsController {
     return this.svc.saveFilter(body, caller(req));
   }
 
+  @Get('filter-folders')
+  readFilterFolders(@Req() req: any) { return this.svc.readFilterFolders(caller(req)); }
+
+  @Post('filter-folders')
+  writeFilterFolders(@Body() body: any, @Req() req: any) { return this.svc.writeFilterFolders(body, caller(req)); }
+
   /** 기본 필터 지정/해제 — 로그인하면 자동으로 걸리는 그 필터 */
   @Patch('filters/:id/default')
   setDefaultFilter(@Param('id') id: string, @Body() body: any, @Req() req: any) {
