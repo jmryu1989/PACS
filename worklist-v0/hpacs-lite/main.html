@@ -946,6 +946,7 @@
   <script src="worklist-image-preview.js"></script>
   <script src="worklist-search.js"></script>
   <script src="worklist-row-navigation.js"></script>
+  <script src="viewer-display-layout.js"></script>
   <style>#rows tr:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
@@ -4105,12 +4106,67 @@
       dialog.innerHTML = '<h2 id="viewer-windows-title">Viewer Windows</h2><p>이 목록에 연결된 영상 창입니다. 창 닫기는 저장 중이거나 미저장 작업이 있으면 거절합니다. 확인되지 않은 창은 Focus로 상태를 확인합니다.</p><nav aria-label="Opened viewer navigation"><button class="chip" id="viewer-windows-prev" type="button">Previous Window</button> <button class="chip" id="viewer-windows-next" type="button">Next Window</button></nav><p>이 목록에서 마지막으로 연 창 또는 Focus한 창을 기준으로 이동합니다. 판독 대상과 영상 내용은 바꾸지 않습니다.</p><div id="viewer-windows-list"></div><p id="viewer-windows-status" role="status"></p><button class="chip" id="viewer-windows-done" type="button">Done</button>';
       document.body.append(dialog);
       const list = $('#viewer-windows-list'), status = $('#viewer-windows-status'); let signature = '';
+      let displayScreens = [], displaySequence = 0;
+      const detectDisplays = document.createElement('button');detectDisplays.type='button';detectDisplays.className='chip';
+      detectDisplays.id='viewer-windows-displays';detectDisplays.textContent='Detect Displays';
+      detectDisplays.title='화면 접근 권한을 확인합니다. 번호는 좌표 순의 브라우저 목록이며 OS 설정 번호와 다를 수 있습니다.';
+      list.before(detectDisplays);
+      detectDisplays.onclick=async()=>{
+        const request=++displaySequence,owner=KinViewerOpening.key(KinAuth.session());detectDisplays.disabled=true;
+        try{
+          if(!viewerWindows.available()||typeof window.getScreenDetails!=='function')throw Error('unsupported');
+          const details=await window.getScreenDetails();await initMonitorPermission();
+          if(request!==displaySequence||owner!==KinViewerOpening.key(KinAuth.session())||!viewerWindows.available())return;
+          cacheMonitorScreens(details);displayScreens=KinViewerDisplayLayout.screens(details);render();
+          status.textContent=displayScreens.length?'이동할 화면을 선택하세요. 화면 번호는 좌표 순이며 OS 설정 번호와 다를 수 있습니다.':'사용 가능한 화면을 확인하지 못했습니다.';
+        }catch(_){if(request===displaySequence){displayScreens=[];render();status.textContent='화면 권한을 허용한 뒤 다시 확인하세요. 이 브라우저가 지원하지 않으면 창을 직접 이동할 수 있습니다.';}}
+        finally{detectDisplays.disabled=false;}
+      };
+      async function moveDisplay(index,chosen){
+        const request=++displaySequence,owner=KinViewerOpening.key(KinAuth.session());
+        const row=viewerWindows.rows().find(r=>r.index===index),popup=row?.popup;
+        if(!popup||row.pending||!row.status?.ready||row.status.busy||ohifPlacementWrites.get(popup)?.pending){status.textContent='창을 불러오는 중이거나 작업 중입니다. 완료 후 다시 이동하세요.';return;}
+        const href=row.status.href,sequence=ohifPopupSequences.get(popup);
+        const valid=()=>{
+          try{const current=viewerWindows.rows().find(r=>r.index===index),state=ohifPopupState(popup);
+            return request===displaySequence&&owner&&owner===KinViewerOpening.key(KinAuth.session())&&viewerWindows.available()&&
+              current?.popup===popup&&!current.pending&&sequence===ohifPopupSequences.get(popup)&&state.ready&&!state.busy&&state.href===href&&!popup.closed;
+          }catch(_){return false;}
+        };
+        status.textContent='창을 이동하고 있습니다.';
+        try{
+          const details=await window.getScreenDetails();
+          if(!valid())return;
+          const fresh=KinViewerDisplayLayout.screens(details),target=fresh.find(s=>KinViewerDisplayLayout.identity(s)===KinViewerDisplayLayout.identity(chosen));
+          if(!target||!monitorPermissionGranted()){displayScreens=fresh;render();status.textContent='화면 구성이나 권한이 바뀌었습니다. 화면을 다시 확인한 뒤 선택하세요.';return;}
+          const rect=KinViewerDisplayLayout.fit(popupRect(popup),target);
+          if(!rect){status.textContent='창을 복원한 뒤 다시 이동하세요.';return;}
+          const gate={pending:true,baseline:null};ohifPlacementWrites.set(popup,gate);
+          const moved=await new Promise(resolve=>{
+            let finished=false;
+            const finish=ok=>{if(finished)return;finished=true;clearTimeout(timeout);
+              let saved=false;
+              if(ohifPlacementWrites.get(popup)===gate){if(ok){ohifPlacementWrites.delete(popup);saved=rememberOhifRect(popup);}else{gate.pending=false;gate.baseline=popupRect(popup);}}
+              resolve({moved:ok,saved});
+            };
+            const timeout=setTimeout(()=>finish(false),2500);
+            const check=()=>{if(finished)return;
+              if(!valid()||!monitorPermissionGranted()||ohifPlacementWrites.get(popup)!==gate){finish(false);return;}
+              const actual=popupRect(popup);
+              if(actual&&Object.keys(rect).every(k=>Math.abs(actual[k]-rect[k])<=16))finish(true);else setTimeout(check,100);
+            };
+            try{popup.focus();popup.moveTo(rect.left,rect.top);popup.resizeTo(rect.width,rect.height);popup.moveTo(rect.left,rect.top);setTimeout(check,100);}
+            catch(_){finish(false);}
+          });
+          if(request===displaySequence)status.textContent=moved.saved?'지정 화면으로 이동하고 창 위치를 저장했습니다.':moved.moved?'창을 이동했지만 위치를 저장하지 못했습니다. 브라우저 저장소를 확인하세요.':'창 이동을 확인하지 못해 이전 저장 위치를 유지했습니다. 창을 직접 이동하거나 다시 시도하세요.';
+        }catch(_){if(request===displaySequence)status.textContent='화면에 접근하지 못했습니다. 권한과 창 상태를 확인한 뒤 다시 시도하세요.';}
+      }
       function render() {
         const rows = viewerWindows?.rows() || [], limit = imageOpening?.snapshot().maxWindows || 1;
         button.textContent = 'Viewer Windows · ' + rows.length + '/' + limit;
         $('#viewer-windows-prev').disabled = $('#viewer-windows-next').disabled = !rows.length;
         const values = rows.map(row => ({ index: row.index, scope: row.scope, state: row.pending ? 'Loading' : !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
-        const next = JSON.stringify(values); if (next === signature) return; signature = next;
+        const next = JSON.stringify([values,displayScreens]); if (next === signature) return; signature = next;
         const focused = document.activeElement, focusIndex = focused?.dataset.windowIndex, focusAction = focused?.dataset.windowAction;
         list.replaceChildren();
         for (const row of values) {
@@ -4125,6 +4181,13 @@
             control.textContent = action === 'focus' ? 'Focus' : 'Close Window'; control.dataset.windowIndex = String(row.index); control.dataset.windowAction = action;
             control.onclick = () => operate(row.index, action); section.append(control);
           }
+          displayScreens.forEach((screen,i)=>{
+            const control=document.createElement('button');control.type='button';control.className='chip';
+            control.textContent='Move to Display '+(i+1)+(screen.primary?' · Primary':'');
+            control.title=`사용 가능 영역 ${screen.left}, ${screen.top} · ${screen.width} × ${screen.height}`;
+            control.dataset.windowIndex=String(row.index);control.dataset.windowAction='display-'+i;
+            control.disabled=!['Open','Unsaved'].includes(row.state);control.onclick=()=>moveDisplay(row.index,screen);section.append(control);
+          });
           list.append(section);
         }
         if (!rows.length) list.textContent = '연결된 영상 창이 없습니다.';
@@ -4167,10 +4230,10 @@
       }
       $('#viewer-windows-prev').onclick = () => cycle(-1); $('#viewer-windows-next').onclick = () => cycle(1);
       button.onclick = () => { viewerWindows.refresh(); render(); status.textContent = viewerWindows.error() || ''; dialog.showModal(); $('#viewer-windows-done').focus(); };
-      $('#viewer-windows-done').onclick = () => dialog.close(); dialog.addEventListener('close', () => { if (!button.disabled) button.focus(); });
+      $('#viewer-windows-done').onclick = () => dialog.close(); dialog.addEventListener('close', () => { ++displaySequence;if (!button.disabled) button.focus(); });
       const timer = setInterval(() => { viewerWindows.refresh(); render(); }, 2000);
       let channel;
-      const end = () => { clearInterval(timer); viewerWindows.end(); button.disabled = true; dialog.close(); list.replaceChildren(); channel?.close(); };
+      const end = () => { ++displaySequence;displayScreens=[];clearInterval(timer); viewerWindows.end(); button.disabled = true; dialog.close(); list.replaceChildren(); channel?.close(); };
       try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
       window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); }); window.addEventListener('pagehide', end);
       render();
