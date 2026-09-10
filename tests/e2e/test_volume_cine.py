@@ -37,6 +37,27 @@ class VolumeCineE2E(VolumeOrientationE2E):
   a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);before=self.volume_state(v)
   v.evaluate("()=>{window.cineSetCamera=cineView.setCamera;window.cineFailures=0;cineView.setCamera=function(camera,...args){if(camera.focalPoint&&cineFailures++===0){cineSetCamera.call(this,{focalPoint:camera.focalPoint});throw Error('Synthetic partial cine camera failure')}return cineSetCamera.call(this,camera,...args)}}")
   self.cine_play(v);expect(v.locator('#kin-cine [role=status]')).to_contain_text('Synthetic partial cine camera failure');v.wait_for_timeout(200);self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));v.evaluate('()=>cineView.setCamera=cineSetCamera');self.preserved_volume(before,self.volume_state(v));self.assertEqual(len(self.versions(a)),1)
+ def test_volume_cine_07_late_permission_after_native_layout_replacement(self):
+  a,p,v=self.starting();self.cine_open(v);original=self.originals();p.locator('#findings').fill('KEEP REPLACED CINE REPORT')
+  v.evaluate("""()=>{
+   const fetch=window.fetch,play=services.cineService.playClip;let first=true,inside=false;
+   window.fetch=(...args)=>{const hold=inside&&first&&String(args[0])==='/api/me';return fetch(...args).then(async response=>{if(hold){window.oldCineResponse=true;await new Promise(resolve=>window.releaseOldCine=resolve)}return response})};
+   services.cineService.playClip=function(...args){inside=true;let result;try{result=play.apply(this,args)}finally{inside=false}if(first){first=false;window.oldCinePlay=result}return result};
+   const g=services.viewportGridService.getState();window.originalCineIds=[...g.viewports.keys()];window.cineSet=g.viewports.get(g.activeViewportId).displaySetInstanceUIDs[0];window.retiredCineView=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');
+  }""")
+  self.cine_play(v);v.wait_for_function('()=>window.oldCineResponse===true')
+  for restore in [False,True]:
+   v.evaluate("""async restore=>{
+    const grid=services.viewportGridService,ids=restore?originalCineIds:originalCineIds.map(()=> 'kin-cine-test-'+crypto.randomUUID());window.remountCineIds=ids;
+    await grid.setLayout({numRows:1,numCols:3,activeViewportId:ids[0],isHangingProtocolLayout:false,findOrCreateViewport:index=>({displaySetInstanceUIDs:[cineSet],displaySetOptions:[{}],viewportOptions:{id:'kin-cine-presentation-'+crypto.randomUUID(),viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:['axial','sagittal','coronal'][index],allowUnmatchedView:true}})});
+   }""",restore)
+   v.wait_for_function("()=>remountCineIds.every(id=>services.viewportGridService.getState().viewports.get(id)?.isReady&&services.cornerstoneViewportService.getCornerstoneViewport(id)?.getActors().length===1)")
+  self.choose_volume(v,v,0);v.wait_for_function("()=>kinGetVolumeCineTarget(services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial'))?.allowed")
+  self.assertTrue(v.evaluate("()=>{const now=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');return now!==retiredCineView&&now.element!==retiredCineView.element&&now.id===retiredCineView.id}"))
+  self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');count=v.evaluate('()=>cinePositions.length')
+  v.evaluate('async()=>{releaseOldCine();await oldCinePlay}');v.wait_for_timeout(250)
+  self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertGreater(v.evaluate('()=>cinePositions.length'),count);self.cine_play(v)
+  expect(p.locator('#findings')).to_have_value('KEEP REPLACED CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_06_fps_change_waiting_for_permission(self):
   a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=4');pending=[];pattern='**/api/me';v.route(pattern,lambda r:pending.append(r))
   v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-left-arrow"]').click();v.wait_for_timeout(180);self.assertTrue(pending);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(150);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)

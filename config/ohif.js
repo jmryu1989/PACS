@@ -1675,7 +1675,7 @@ function kinCreateCine() {
         r = { element: v.element, reverse: false, loop: true, ticket: 0, signature: signature(v), content:contentSignature(v) }; records.set(v.id, r);
         // stopClip broadcasts synchronously. Publish the replacement first so
         // its render callback cannot retire the same old viewport recursively.
-        if(previous){clearInterval(previous.volumeTimer);nativeStop.call(cine,previous.element,{viewportId:v.id});}
+        if(previous){clearInterval(previous.volumeTimer);nativeStop.call(cine,previous.element,{viewportId:v.id});if(cine.getState().cines?.[v.id]?.isPlaying)cine.setCine({id:v.id,isPlaying:false});}
         const owns=()=>records.get(v.id)===r;
         listen(v.element, core.Enums.Events.VIEWPORT_NEW_IMAGE_SET, () => { if(!owns())return;r.signature = signature(v); halt(v.id); r.reverse = false; r.loop = true; render(); });
         if(v.type==='orthographic') {
@@ -1718,7 +1718,10 @@ function kinCreateCine() {
       } finally { clearTimeout(timer); }
     }
     cine.stopClip = function (element, options) {
-      const v = core.getEnabledElement(element)?.viewport, r = v && records.get(v.id);
+      const v = core.getEnabledElement(element)?.viewport, r = records.get(v?.id || options?.viewportId);
+      // A late native unmount may still carry the retired element (or only its
+      // viewport id). Neither it nor nativeStop's id fallback owns a new view.
+      if (r && r.element !== element) return;
       if (r) { r.ticket = ++sequence; r.loading = false; clearInterval(r.volumeTimer); r.volumeTimer=undefined; }
       return nativeStop.call(this, element, options);
     };
@@ -1767,7 +1770,7 @@ function kinCreateCine() {
       } catch (error) {
         if (current()) { r.message = v.type==='orthographic'?(error.message||'MPR 재생을 준비할 수 없습니다.'):'재생을 준비할 수 없습니다. 로그인·영상과 500 프레임/128 MiB 제한을 확인하세요.'; halt(id); render(); }
       } finally {
-        if(v.type==='orthographic'&&r.ticket===ticket&&!current()){halt(id);render();}
+        if(v.type==='orthographic'&&records.get(id)===r&&r.ticket===ticket&&!current()){halt(id);render();}
       }
     };
     const change = () => {
