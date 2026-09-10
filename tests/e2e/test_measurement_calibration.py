@@ -43,7 +43,7 @@ class MeasurementCalibrationE2E(MeasurementPanelE2E):
             p.evaluate('''async()=>{const v=cornerstone.getEnabledElements()[0].viewport;
               const start=v.getCurrentImageIdIndex(); await v.setImageIdIndex((start+1)%v.getImageIds().length);await v.setImageIdIndex(start);}''')
             expect(p.locator('svg.svg-layer')).to_contain_text('mm')
-            row.get_by_role('button',name='저장',exact=True).click()
+            row.get_by_role('button',name='Save',exact=True).click()
             expect(row).to_contain_text('저장 완료')
             current = p.evaluate('()=>calibrationObservation')
             current['opening']=opening; observations.append(current)
@@ -68,7 +68,7 @@ class MeasurementCalibrationE2E(MeasurementPanelE2E):
         }''')
         expect(panel).to_contain_text('mm'); expect(panel).not_to_contain_text('재확인 필요')
         p.wait_for_function('()=>panelAnnotation.data===calibrationOldData && !panelAnnotation.invalidated && panelCaptured[0].getReport().values[0]!=="재확인 필요"')
-        row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
+        row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
         self.assertEqual(self.saved(f)[0]['item']['points'],before)
 
 

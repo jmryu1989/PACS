@@ -52,7 +52,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
             self.assertEqual(skipped,dict(invalidated=False,unchanged=True))
             expect(p.locator('svg.svg-layer')).to_contain_text('재확인 필요')
             row=p.locator('#kin-viewer-history section[data-kind='+kind+']')
-            row.get_by_role('button',name='저장',exact=True).click()
+            row.get_by_role('button',name='Save',exact=True).click()
             expect(row).to_contain_text('계산 완료')
             self.assertEqual(len(self.saved(f)),index)
             p.evaluate('''()=>{const {tool,original,throttled}=window.kinTestNativeLookup;
@@ -64,7 +64,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
                 return Math.abs(s.angle-Math.acos(u.reduce((s,n,i)=>s+n*v[i],0)/Math.hypot(...u)/Math.hypot(...v))*180/Math.PI)<1e-5;
             }''',arg=tool)
             expect(p.locator('svg.svg-layer')).not_to_contain_text('재확인 필요')
-            row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
+            row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
             head=next(h for h in self.saved(f) if h['item']['kind']==kind)
             value=p.evaluate('''tool=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName===tool);
                 const s=Object.values(a.data.cachedStats)[0];return tool==='Length'?s.length:s.angle;}''',tool)
@@ -117,8 +117,8 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
                 self.assertAlmostEqual(a['stats']['area'], math.pi*ru*rv, delta=.01)
                 self.assertIn('Min:', p.locator('body').inner_text())
             row = p.locator('#kin-viewer-history section[data-kind='+kind+']')
-            row.get_by_label('주석 문구').fill('합성 '+kind)
-            row.get_by_role('button', name='저장', exact=True).click()
+            row.get_by_label('Annotation Text').fill('합성 '+kind)
+            row.get_by_role('button', name='Save', exact=True).click()
             expect(row).to_contain_text('저장 완료')
             snapshots[kind] = a['points']
         heads = self.saved(f)
@@ -156,7 +156,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
         response = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor',
             {'requestId':str(uuid.uuid4()), 'expectedRevision':head['revision'], 'action':'edit', 'item':item})
         self.assertEqual(response.status, 200, response.text)
-        p.get_by_role('button', name='새로고침', exact=True).click()
+        p.get_by_role('button', name='Refresh', exact=True).click()
         expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_contain_text('재확인 필요')
         expect(p.locator('svg.svg-layer')).to_contain_text('재확인 필요')
         # Corrupt only this run's stored digest witness, never the source DICOM.
@@ -170,7 +170,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
         try:
             changed=next(h for h in self.saved(f) if h['id']==head['id'])
             self.assertEqual(changed['referenceStatus'],'unverified')
-            p.get_by_role('button',name='새로고침',exact=True).click()
+            p.get_by_role('button',name='Refresh',exact=True).click()
             expect(p.locator('#kin-viewer-history section[data-kind=length]')).to_contain_text('원본 영상의 동일성')
             self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"),0)
         finally:

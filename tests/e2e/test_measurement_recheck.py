@@ -12,20 +12,20 @@ class MeasurementRecheckE2E(MeasurementPanelE2E):
     def test_recheck_01_editing_recalculation_recovers_both_sr_commands(self):
         f = self.specimen(); p = self.observed(f)
         row, panel = self.tracked(p)
-        row.get_by_role('button', name='저장', exact=True).click(); expect(row).to_contain_text('저장 완료')
+        row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('저장 완료')
         head = self.saved(f)[0]
         item = {k:v for k,v in head['item'].items() if k not in ['hidden','sourceDigest']}
         item['baseline']['values'][0] += 10
         response = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor',
             dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=item))
         self.assertEqual(response.status, 200, response.text)
-        p.get_by_role('button', name='새로고침', exact=True).click()
+        p.get_by_role('button', name='Refresh', exact=True).click()
         expect(row).to_contain_text('재계산 값이 저장 당시와 다릅니다')
         p.evaluate('''()=>{
             panelAnnotation=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
             panelCaptured=__d05c1.services.measurementService.getMeasurements();
         }''')
-        row.get_by_role('button', name='편집', exact=True).click()
+        row.get_by_role('button', name='Edit', exact=True).click()
         self.assertTrue(p.evaluate('()=>panelAnnotation.data.kinUnverified'))
         # Hold native calculation, not the guard: changed handles alone cannot recover.
         p.evaluate('''()=>{
@@ -50,7 +50,7 @@ class MeasurementRecheckE2E(MeasurementPanelE2E):
         for command in ['downloadReport','storeMeasurements']:
             result = self.sr(p, command); self.assertIn('report', result, result)
         # manualSr already saves the fresh edit before preparing its document.
-        expect(row).to_contain_text('저장됨 r3')
+        expect(row).to_contain_text('Saved r3')
         saved = self.saved(f)[0]
         self.assertEqual(saved['item']['points'], points)
         self.assertAlmostEqual(saved['item']['baseline']['values'][0], math.dist(*points), places=8)
@@ -59,9 +59,9 @@ class MeasurementRecheckE2E(MeasurementPanelE2E):
         f = self.specimen(slices=2); w,p = self.open_viewer(f)
         self.addCleanup(w.close); self.addCleanup(p.close)
         row = self.draw_length(p)
-        row.get_by_role('button', name='저장', exact=True).click(); expect(row).to_contain_text('저장 완료')
+        row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('저장 완료')
         head = self.saved(f)[0]; baseline = self.state(f), self.versions(f); originals = self.hashes()
-        row.get_by_role('button', name='편집', exact=True).click(); row.get_by_label('주석 문구').fill('원본 변경 중 보존할 내 수정')
+        row.get_by_role('button', name='Edit', exact=True).click(); row.get_by_label('Annotation Text').fill('원본 변경 중 보존할 내 수정')
         old_pixel = p.evaluate('''()=>{const v=cornerstone.getEnabledElements()[0].viewport;
             return cornerstone.cache.getImage(v.getCurrentImageId()).getPixelData()[0];}''')
         hits = self.stack._orthanc_request('POST','/tools/lookup',head['item']['sopUid'].encode()).body
@@ -84,19 +84,19 @@ class MeasurementRecheckE2E(MeasurementPanelE2E):
         replace(raw,replacement)
         try:
             with p.expect_response(lambda r:r.request.method=='POST' and r.url.endswith('/revisions')) as response:
-                row.get_by_role('button', name='저장', exact=True).click()
+                row.get_by_role('button', name='Save', exact=True).click()
             self.assertEqual(response.value.status,409)
-            expect(row.get_by_role('button',name='저장',exact=True)).to_be_disabled()
-            expect(row.get_by_label('주석 문구')).to_have_value('원본 변경 중 보존할 내 수정')
+            expect(row.get_by_role('button',name='Save',exact=True)).to_be_disabled()
+            expect(row.get_by_label('Annotation Text')).to_have_value('원본 변경 중 보존할 내 수정')
             self.assertEqual(self.saved(f)[0]['revision'],head['revision'])
             self.assertEqual(self.saved(f)[0]['item'],head['item'])
             posts=[]; p.on('request', lambda r: posts.append(r.url) if r.method=='POST' and '/viewer-items' in r.url else None)
             for _ in range(2):
                 with p.expect_response(lambda r:r.request.method=='GET' and '/viewer-items?' in r.url):
-                    row.get_by_role('button',name='원본 다시 확인',exact=True).click()
+                    row.get_by_role('button',name='Recheck Source',exact=True).click()
             self.assertEqual(posts,[])
             with p.context.expect_page() as popup:
-                row.get_by_role('link',name='새 뷰어에서 재측정').click()
+                row.get_by_role('link',name='Remeasure in New Viewer').click()
             q=popup.value; self.addCleanup(q.close); canvas_ready(q,1)
             expect(q.locator('#kin-viewer-history [role=status]')).to_contain_text('개 저장 항목')
             # The new tab must really fetch new pixels, rather than calculate on
@@ -105,13 +105,13 @@ class MeasurementRecheckE2E(MeasurementPanelE2E):
                 return cornerstone.cache.getImage(v.getCurrentImageId()).getPixelData()[0];}''')
             self.assertEqual(new_pixel,old_pixel+37)
             fresh=self.draw_length(q)
-            fresh.get_by_role('button',name='저장',exact=True).click(); expect(fresh).to_contain_text('저장 완료')
+            fresh.get_by_role('button',name='Save',exact=True).click(); expect(fresh).to_contain_text('저장 완료')
             heads=self.saved(f); self.assertEqual(len(heads),2)
             new=next(h for h in heads if h['id']!=head['id'])
             self.assertEqual(new['referenceStatus'],'verified')
             self.assertEqual(new['item']['sourceDigest'],hashlib.md5(replacement).hexdigest())
             self.assertEqual(next(h for h in heads if h['id']==head['id'])['item'],head['item'])
-            expect(row.get_by_label('주석 문구')).to_have_value('원본 변경 중 보존할 내 수정')
+            expect(row.get_by_label('Annotation Text')).to_have_value('원본 변경 중 보존할 내 수정')
             self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
         finally: replace(replacement,raw)
         self.assertEqual(self.hashes(),originals)

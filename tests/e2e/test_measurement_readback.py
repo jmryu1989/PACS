@@ -31,7 +31,7 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
             response = route.fetch(); self.assertEqual(response.status, 200)
             route.abort('failed')
         p.route('**/viewer-items', lost)
-        row.get_by_role('button', name='저장', exact=True).click()
+        row.get_by_role('button', name='Save', exact=True).click()
         expect(row).to_contain_text('저장 결과를 확인하지 못했습니다')
         self.assertEqual(len(self.saved(f)), 1)
         def rows():
@@ -40,7 +40,7 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         persisted = rows()
         p.unroute('**/viewer-items', lost)
         with p.expect_response(lambda r: r.request.method=='POST' and r.url.endswith('/viewer-items')) as response:
-            row.get_by_role('button', name='같은 요청 재시도').click()
+            row.get_by_role('button', name='Retry Request').click()
         receipt = response.value
         self.assertEqual(receipt.request.post_data, seen[0])
         self.assertEqual(receipt.json().get('referenceStatus'), 'verified')
@@ -61,31 +61,31 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
             body = response.json(); body['referenceStatus'] = 'unverified'
             route.fulfill(response=response, json=body)
         p.route('**/viewer-items', unverified)
-        row.get_by_role('button', name='저장', exact=True).click()
+        row.get_by_role('button', name='Save', exact=True).click()
         expect(row).to_contain_text('저장 완료')
         expect(row).to_contain_text('재확인 필요')
-        expect(row.get_by_role('button', name='편집', exact=True)).to_be_disabled()
+        expect(row.get_by_role('button', name='Edit', exact=True)).to_be_disabled()
         self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"), 0)
         self.assertEqual(len(self.saved(f)), 1)
         p.unroute('**/viewer-items', unverified)
-        p.get_by_role('button', name='새로고침', exact=True).click()
+        p.get_by_role('button', name='Refresh', exact=True).click()
         expect(p.locator('svg.svg-layer')).to_contain_text('mm')
-        expect(row.get_by_role('button', name='편집', exact=True)).to_be_enabled()
+        expect(row.get_by_role('button', name='Edit', exact=True)).to_be_enabled()
         # A hidden-head conflict may hold local edits while restore's response
         # is unverified. Refresh must recover those edits, not discard them.
-        row.get_by_role('button', name='편집', exact=True).click()
-        row.get_by_label('주석 문구').fill('보관한 내 수정')
+        row.get_by_role('button', name='Edit', exact=True).click()
+        row.get_by_label('Annotation Text').fill('보관한 내 수정')
         head = self.saved(f)[0]
         item = {k:v for k,v in head['item'].items() if k not in ['hidden', 'sourceDigest']}
         hidden = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor',
             dict(requestId=str(uuid.uuid4()), expectedRevision=head['revision'], action='hide', reason='다른 창 숨김', item=item))
         self.assertEqual(hidden.status, 200, hidden.text)
-        row.get_by_role('button', name='저장', exact=True).click()
+        row.get_by_role('button', name='Save', exact=True).click()
         expect(row).to_contain_text('서버에 다른 판')
-        row.get_by_role('button', name='최신판 기준으로 내 수정 유지').click()
+        row.get_by_role('button', name='Use Latest & Keep Changes').click()
         p.route('**/viewer-items/*/revisions', unverified)
         p.once('dialog', lambda dialog: dialog.accept('보관한 수정 복원'))
-        row.get_by_role('button', name='복원', exact=True).click()
+        row.get_by_role('button', name='Restore', exact=True).click()
         expect(row).to_contain_text('미저장 수정은 보관 중')
         expect(row).to_contain_text('재확인 필요')
         self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
@@ -96,16 +96,16 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
             for head in body['items']: head['referenceStatus']='unverified'
             route.fulfill(response=response, json=body)
         p.route('**/viewer-items?*', unverified_list)
-        p.get_by_role('button', name='새로고침', exact=True).click()
+        p.get_by_role('button', name='Refresh', exact=True).click()
         expect(row).to_contain_text('미저장 수정은 보관 중')
         self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
         p.unroute('**/viewer-items?*', unverified_list)
-        p.get_by_role('button', name='새로고침', exact=True).click()
-        expect(row.get_by_label('주석 문구')).to_have_value('보관한 내 수정')
+        p.get_by_role('button', name='Refresh', exact=True).click()
+        expect(row.get_by_label('Annotation Text')).to_have_value('보관한 내 수정')
         expect(row).to_contain_text('보관한 수정은 아직 미저장')
         expect(p.locator('svg.svg-layer')).to_contain_text('mm')
-        row.get_by_role('button', name='저장', exact=True).click()
-        expect(row).to_contain_text('저장됨 r4')
+        row.get_by_role('button', name='Save', exact=True).click()
+        expect(row).to_contain_text('Saved r4')
         self.assertEqual(self.saved(f)[0]['item']['label'], '보관한 내 수정')
 
     def test_03_bounded_list_replay_and_current_permission(self):
@@ -130,9 +130,9 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         f=self.specimen(); w,p=self.open_viewer(f)
         self.addCleanup(w.close); self.addCleanup(p.close)
         row=self.draw_length(p)
-        row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('저장 완료')
+        row.get_by_role('button',name='Save',exact=True).click(); expect(row).to_contain_text('저장 완료')
         head=self.saved(f)[0]; old=head['item']['points']
-        row.get_by_role('button',name='편집',exact=True).click()
+        row.get_by_role('button',name='Edit',exact=True).click()
         xy=p.evaluate('''()=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
             const v=cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails')[0].getViewports()[0];
             const point=v.worldToCanvas(a.data.handles.points[1]),box=v.element.getBoundingClientRect();
@@ -146,18 +146,18 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         hidden=self.stack.request('POST','/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions','doctor',
             dict(requestId=str(uuid.uuid4()),expectedRevision=1,action='hide',reason='합성 다른 창 숨김',item=item))
         self.assertEqual(hidden.status,200,hidden.text)
-        row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('서버에 다른 판')
-        row.get_by_role('button',name='최신판 기준으로 내 수정 유지').click()
+        row.get_by_role('button',name='Save',exact=True).click(); expect(row).to_contain_text('서버에 다른 판')
+        row.get_by_role('button',name='Use Latest & Keep Changes').click()
         # Settle the hidden-head scan, or accept an implementation that removes
         # it immediately. The retained annotation used to carry the old points.
         p.wait_for_function('''old=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
             return !a||JSON.stringify(a.data.handles.points)===JSON.stringify(old)}''',arg=old)
         p.once('dialog',lambda d:d.accept('보관 좌표 복원'))
-        row.get_by_role('button',name='복원',exact=True).click(); expect(row).to_contain_text('보관한 수정은 아직 미저장')
+        row.get_by_role('button',name='Restore',exact=True).click(); expect(row).to_contain_text('보관한 수정은 아직 미저장')
         p.wait_for_function('''points=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');
             return a&&!a.invalidated&&JSON.stringify(a.data.handles.points)===JSON.stringify(points)}''',arg=changed,timeout=5000)
         expect(p.locator('svg.svg-layer')).to_contain_text('mm')
-        row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('저장됨 r4')
+        row.get_by_role('button',name='Save',exact=True).click(); expect(row).to_contain_text('Saved r4')
         saved=self.saved(f)[0]['item']; self.assertEqual(saved['points'],changed)
         self.assertAlmostEqual(saved['baseline']['values'][0],math.dist(*changed),places=5)
 

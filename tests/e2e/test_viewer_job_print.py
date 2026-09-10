@@ -137,7 +137,7 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   for page in pdf.pages:self.assertIn(f.patient_id,page.extract_text())
   print('JOBPRINT four cells PDF '+json.dumps(dict(pages=len(pdf.pages))),flush=True)
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()
-  expect(row.get_by_label('주석 문구')).to_have_value('출력 중 보존할 미저장 표식')
+  expect(row.get_by_label('Annotation Text')).to_have_value('출력 중 보존할 미저장 표식')
   expect(p.get_by_label('Job Title',exact=True)).to_have_value('아직 저장하지 않은 제목');self.assertTrue(p.evaluate('()=>kinViewerHistoryHasUnsaved()'))
   self.assertEqual(p.evaluate("()=>cornerstone.getRenderingEngines().filter(e=>e.id.startsWith('kin-print-')).length"),0)
 

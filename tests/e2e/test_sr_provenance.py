@@ -115,7 +115,7 @@ class SRProvenanceE2E(MeasurementReadbackE2E):
         self.assertFalse(p.evaluate('()=>kinViewerHistoryHasUnsaved()'))
         p.get_by_role('button',name='CT D05C5 readback S:1 info-series 1',exact=True).dblclick()
         expect(p.locator('#kin-sr-provenance')).not_to_be_visible()
-        row=self.draw_length(p); row.get_by_role('button',name='저장',exact=True).click(); expect(row).to_contain_text('저장 완료')
+        row=self.draw_length(p); row.get_by_role('button',name='Save',exact=True).click(); expect(row).to_contain_text('저장 완료')
         self.assertEqual(len(self.saved(f)),1)
         self.assertNotEqual(self.saved(f)[0]['item']['baseline']['values'][0],123.456789)
         self.open_sr(p,b); expect(p.locator('svg.svg-layer')).to_contain_text('987.654321 mm')

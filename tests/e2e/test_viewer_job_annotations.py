@@ -86,8 +86,8 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
    except Exception:
     print('MANUAL DRAW FAILURE',kind,p.locator('#kin-viewer-history').inner_text(),p.evaluate('()=>cornerstoneTools.annotation.state.getAllAnnotations().map(a=>({tool:a.metadata.toolName,invalidated:a.invalidated,points:a.data.handles?.points,stats:a.data.cachedStats}))'),flush=True)
     p.screenshot(path=str(Path(__file__).parent/'artifacts/job-annotation-manual-failure.png'));raise
-   row=p.locator('#kin-viewer-history section[data-kind='+kind+']');row.get_by_label('주석 문구').fill('한글 저장 '+kind)
-   row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
+   row=p.locator('#kin-viewer-history section[data-kind='+kind+']');row.get_by_label('Annotation Text').fill('한글 저장 '+kind)
+   row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
   for key in ['r','h','v']:p.keyboard.press(key)
   p.get_by_label('Job Title',exact=True).fill('수치가 확인되는 과거 작업');self.click_job(p,'Save Job with Annotations','고정했습니다')
   job=self.get_job(f,self.jobs(f)[0]);self.assertEqual(len(job['annotations']),3)
@@ -185,7 +185,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
   p.mouse.move(*coords[0]);p.mouse.down();p.mouse.move(*coords[1],steps=15);p.mouse.up()
   p.wait_for_function('''()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId),t=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId).getToolInstance('EllipticalROI');
    const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='EllipticalROI');return !t.isDrawing&&a&&!a.invalidated&&Object.keys(a.data.cachedStats).length}''')
-  row=p.locator('#kin-viewer-history section[data-kind=ellipse]');row.get_by_label('주석 문구').fill('연산 한도 ROI');row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
+  row=p.locator('#kin-viewer-history section[data-kind=ellipse]');row.get_by_label('Annotation Text').fill('연산 한도 ROI');row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
   p.get_by_label('Job Title',exact=True).fill('ROI 예외 복구');self.click_job(p,'Save Job with Annotations','고정했습니다')
   job=self.get_job(f,self.jobs(f)[0]);item=copy.deepcopy(job['annotations'][0]['item']);item.pop('hidden');item.pop('sourceDigest')
   p.evaluate('''()=>{const c=new cornerstoneTools.EllipticalROITool().configuration.statsCalculator;window.__jobStats={c,callback:c.statsCallback,prior:Object.fromEntries(['max','min','sum','count','runMean','m2','pointsInShape'].map(k=>[k,c[k]]))};c.statsCallback=()=>{throw Error('owned calculator fault')}}''')

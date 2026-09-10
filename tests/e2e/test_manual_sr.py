@@ -139,7 +139,7 @@ class ManualSrE2E(SRProvenanceE2E):
 
     def test_03_api_authority_conflict_and_recovery(self):
         f=self.specimen();original=self.hashes();before=self.state(f),self.versions(f);p=self.observed(f)
-        row=self.draw_length(p);row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
+        row=self.draw_length(p);row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
         head=self.saved(f)[0];items=[dict(id=head['id'],revision=head['revision'])]
         for user in ['tech','doctor2','kdoctor']:
             self.post(f,items,user=user,status=403)

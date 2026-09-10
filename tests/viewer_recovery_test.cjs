@@ -74,79 +74,79 @@ async function harness() {
 
 test('A1 (5): A→B→A keeps edited and held work, explicit resume and cancel are inert', async () => {
   const h = await harness();
-  await h.click('편집'); h.input('키 제목', 'my A');
+  await h.click('Edit'); h.input('Key Title', 'my A');
   await h.switch('2'); assert.doesNotMatch(h.text(), /my A/);
   assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
   assert.equal(h.window.dispatchEvent(new Event('beforeunload', { cancelable: true })), false);
-  await h.click('편집'); h.input('키 제목', 'my B');
+  await h.click('Edit'); h.input('Key Title', 'my B');
   await h.switch('1'); assert.doesNotMatch(h.text(), /my B/); assert.equal(h.values().length, 0);
-  h.window.answer = false; await h.click('보관 작업 버리기');
-  await h.click('보관 작업 재개'); assert.ok(h.values().includes('my A'));
+  h.window.answer = false; await h.click('Discard Held Work');
+  await h.click('Resume Held Work'); assert.ok(h.values().includes('my A'));
   h.pages.set('1', [head('a', 2, 'hidden server', true)]);
-  await h.click('저장'); await h.click('최신판 기준으로 내 수정 유지');
+  await h.click('Save'); await h.click('Use Latest & Keep Changes');
   assert.match(h.text(), /my A/);
-  await h.switch('2'); await h.click('보관 작업 재개'); assert.ok(h.values().includes('my B'));
-  await h.switch('1'); await h.click('보관 작업 재개'); assert.match(h.text(), /my A/);
+  await h.switch('2'); await h.click('Resume Held Work'); assert.ok(h.values().includes('my B'));
+  await h.switch('1'); await h.click('Resume Held Work'); assert.match(h.text(), /my A/);
   h.logout(); assert.equal(h.window.kinViewerHistoryHasUnsaved(), false); assert.doesNotMatch(h.text(), /my [AB]/);
 });
 
 test('A2 (6): busy-only hide conflict does not invent local edits or roll back latest content', async () => {
   const h = await harness(); h.pages.set('1', [head('a', 2, 'new hidden server', true)]);
-  await h.click('숨김'); await h.click('최신판 기준으로 내 수정 유지');
-  assert.doesNotMatch(h.text(), /보관 중인 수정 보기/); assert.equal(h.window.kinViewerHistoryHasUnsaved(), false);
+  await h.click('Hide'); await h.click('Use Latest & Keep Changes');
+  assert.doesNotMatch(h.text(), /Held Changes/); assert.equal(h.window.kinViewerHistoryHasUnsaved(), false);
   assert.match(h.text(), /new hidden server/);
   h.setReply(async (path, options) => options.method === 'POST' ? { status: 200, data: head('a', 3, 'new hidden server') } : h.defaultReply(path, options));
-  await h.click('복원');
+  await h.click('Restore');
   const body = JSON.parse(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body);
   assert.equal(body.item.title, 'new hidden server'); assert.equal(h.values().length, 0);
 });
 
 test('C1 (7): discard states revision adoption, cancellation changes neither copy', async () => {
-  const h = await harness(); await h.click('편집'); h.input('키 제목', 'local');
-  h.pages.set('1', [head('a', 2, 'hidden', true)]); await h.click('저장'); await h.click('최신판 기준으로 내 수정 유지');
-  h.window.answer = false; await h.click('보관 수정 버리기');
+  const h = await harness(); await h.click('Edit'); h.input('Key Title', 'local');
+  h.pages.set('1', [head('a', 2, 'hidden', true)]); await h.click('Save'); await h.click('Use Latest & Keep Changes');
+  h.window.answer = false; await h.click('Discard Held Changes');
   assert.match(h.dialogs.at(-1), /서버판 r2.*채택/); assert.match(h.text(), /local/);
   const count = h.calls.filter(c => c.options.method === 'POST').length;
-  h.window.answer = true; await h.click('보관 수정 버리기'); assert.doesNotMatch(h.text(), /local/);
+  h.window.answer = true; await h.click('Discard Held Changes'); assert.doesNotMatch(h.text(), /local/);
   assert.equal(h.calls.filter(c => c.options.method === 'POST').length, count);
 });
 
 test('C5 (4): study 403 quarantines its pending bytes, preserves other drafts, reauthorizes before resume', async () => {
-  const h = await harness(); await h.click('편집'); h.input('키 제목', 'private A'); await h.switch('2');
-  await h.click('편집'); h.input('키 제목', 'private B');
+  const h = await harness(); await h.click('Edit'); h.input('Key Title', 'private A'); await h.switch('2');
+  await h.click('Edit'); h.input('Key Title', 'private B');
   h.setReply(async (path, options) => path.includes('/studies/2/') ? { status: 403, data: {} } : h.defaultReply(path, options));
-  await h.click('저장'); assert.doesNotMatch(h.text(), /private [AB]|server/);
+  await h.click('Save'); assert.doesNotMatch(h.text(), /private [AB]|server/);
   assert.match(h.text(), /접근할 수 없습니다/); assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
-  await h.click('접근 다시 확인'); assert.doesNotMatch(h.text(), /private B/);
-  await h.switch('1'); await h.click('보관 작업 재개'); assert.ok(h.values().includes('private A'));
+  await h.click('Recheck Access'); assert.doesNotMatch(h.text(), /private B/);
+  await h.switch('1'); await h.click('Resume Held Work'); assert.ok(h.values().includes('private A'));
   h.setReply(h.defaultReply); await h.switch('2'); assert.doesNotMatch(h.text(), /private B/);
-  await h.click('보관 작업 재개'); assert.ok(h.values().includes('private B'));
+  await h.click('Resume Held Work'); assert.ok(h.values().includes('private B'));
   const pending = h.calls.find(c => c.options.method === 'POST').options.body;
-  await h.click('같은 요청 재시도'); assert.equal(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body, pending);
+  await h.click('Retry Request'); assert.equal(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body, pending);
 });
 
 test('A1/C5: late committed create cannot cross A→B→A; same UUID retry coalesces loaded server row', async () => {
-  const h = await harness(); h.pages.set('1', []); await h.click('새로고침');
-  await h.click('Add Key Image'); h.input('키 제목', 'new A');
+  const h = await harness(); h.pages.set('1', []); await h.click('Refresh');
+  await h.click('Add Key Image'); h.input('Key Title', 'new A');
   let release; h.setReply(async (path, options) => options.method === 'POST' ? new Promise(resolve => { release = resolve; }) : h.defaultReply(path, options));
-  const detached = h.button('저장'); detached.click(); await flush();
+  const detached = h.button('Save'); detached.click(); await flush();
   const pending = h.calls.find(c => c.options.method === 'POST').options.body;
   await h.switch('2'); await h.switch('1');
   h.pages.set('1', [head('created', 1, 'new A')]); release({ status: 200, data: head('created', 1, 'new A') }); await flush();
   assert.equal(h.values().length, 0); detached.click(); await flush();
   assert.equal(h.calls.filter(c => c.options.method === 'POST').length, 1);
-  await h.click('보관 작업 재개');
+  await h.click('Resume Held Work');
   h.setReply(async (path, options) => options.method === 'POST' ? { status: 200, data: head('created', 1, 'new A') } : h.defaultReply(path, options));
-  await h.click('같은 요청 재시도');
+  await h.click('Retry Request');
   assert.equal(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body, pending);
   assert.equal(h.document.body.all().filter(e => e.tagName === 'section').length, 1);
   assert.equal(h.window.kinViewerHistoryHasUnsaved(), false);
 });
 
 test('C2 (9): actual session end clears recovery and both captured SR commands explain re-entry', async () => {
-  const h = await harness(); await h.click('편집'); h.input('키 제목', 'private'); await h.switch('2');
+  const h = await harness(); await h.click('Edit'); h.input('Key Title', 'private'); await h.switch('2');
   const captured = [...h.commands.values()];
-  h.setReply(async () => ({ status: 401, data: {} })); await h.click('새로고침');
+  h.setReply(async () => ({ status: 401, data: {} })); await h.click('Refresh');
   assert.equal(h.window.kinViewerHistoryHasUnsaved(), false);
   for (const command of captured) assert.throws(() => command.commandFn({ measurementData: [{ uid: 'x', toolName: 'Length' }] }), /다시 로그인한 뒤 뷰어/);
   assert.equal(h.notices.length, 2); assert.doesNotMatch(h.text(), /private/);
@@ -167,23 +167,23 @@ test('C5 delta: denied study loses incomplete annotations; other-study marks are
   for (const uid of ['1', '2']) h.annotations.set(uid, { annotationUID: uid, metadata: { toolName: 'ArrowAnnotate',
     referencedImageId: `/studies/${uid}/series/1.2/instances/1.3/frames/1` }, data: { handles: { points: [[0,0,0]] } } });
   h.setReply(async (path, options) => path.includes('/studies/1/') ? { status: 403, data: {} } : h.defaultReply(path, options));
-  await h.click('새로고침'); assert.equal(h.annotations.has('1'), false); assert.equal(h.annotations.has('2'), true);
+  await h.click('Refresh'); assert.equal(h.annotations.has('1'), false); assert.equal(h.annotations.has('2'), true);
 });
 
 test('A1/C5 delta: pending create does not block another edit or overwrite its changes when replay resolves', async () => {
-  const h = await harness(); await h.click('Add Key Image'); h.input('키 제목', 'created');
+  const h = await harness(); await h.click('Add Key Image'); h.input('Key Title', 'created');
   h.setReply(async (path, options) => options.method === 'POST' ? { status: 503, data: {} } : h.defaultReply(path, options));
-  await h.click('저장'); const body = h.calls.find(c => c.options.method === 'POST').options.body;
-  h.pages.set('1', [head('created', 1, 'created')]); await h.switch('2'); await h.switch('1'); await h.click('보관 작업 재개');
-  await h.click('편집'); h.input('키 제목', 'edit after commit');
+  await h.click('Save'); const body = h.calls.find(c => c.options.method === 'POST').options.body;
+  h.pages.set('1', [head('created', 1, 'created')]); await h.switch('2'); await h.switch('1'); await h.click('Resume Held Work');
+  await h.click('Edit'); h.input('Key Title', 'edit after commit');
   h.setReply(async (path, options) => options.method === 'POST' ? { status: 200, data: head('created', 1, 'created') } : h.defaultReply(path, options));
-  await h.click('같은 요청 재시도'); assert.equal(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body, body);
+  await h.click('Retry Request'); assert.equal(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body, body);
   assert.ok(h.values().includes('edit after commit')); assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
   assert.equal(h.document.body.all().filter(e => e.tagName === 'section').length, 1);
 });
 
 test('A1 delta: a changed login subject purges parked work before any resume', async () => {
-  const h = await harness(); await h.click('편집'); h.input('키 제목', 'private'); await h.switch('2');
+  const h = await harness(); await h.click('Edit'); h.input('Key Title', 'private'); await h.switch('2');
   h.setMe({ sub: 'another', kind: 'member', roles: ['radiologist'] }); await h.switch('1');
   assert.match(h.text(), /로그인이 종료/); assert.equal(h.window.kinViewerHistoryHasUnsaved(), false);
 });
@@ -232,12 +232,12 @@ async function savedMeasurement(mismatch = false) {
     if (mismatch) saved.item.baseline.values[0] += 1;
     h.pages.set('1', [saved]); return { status: 200, data: saved };
   });
-  await h.click('저장'); await h.tick(); return { ...result, saved };
+  await h.click('Save'); await h.tick(); return { ...result, saved };
 }
 
 test('A4 (12): editing alone keeps mismatch; only fresh remeasured geometry recovers', async () => {
   const { h, a } = await savedMeasurement(true);
-  assert.equal(a.data.kinUnverified, true); await h.click('편집'); await h.tick();
+  assert.equal(a.data.kinUnverified, true); await h.click('Edit'); await h.tick();
   assert.equal(a.data.kinUnverified, true);
   a.data.handles.points[1][0] = 20; a.invalidated = false; await h.tick();
   assert.equal(a.data.kinUnverified, true);
@@ -245,35 +245,35 @@ test('A4 (12): editing alone keeps mismatch; only fresh remeasured geometry reco
   a.data.cachedStats['imageId:' + a.metadata.referencedImageId] = { length: 20 };
   a.invalidated = false; await h.tick(); assert.equal(a.data.kinUnverified, false);
   assert.doesNotMatch(h.services.measurementService.getMeasurements()[0].displayText.primary[0], /재확인 필요/);
-  await h.click('저장');
+  await h.click('Save');
   const command = JSON.parse(h.calls.filter(c => c.options.method === 'POST').at(-1).options.body);
   assert.deepEqual(command.item.points, [[0,0,0],[20,0,0]]);
   assert.deepEqual(command.item.baseline.values, [20]);
 });
 
 test('A3 (11): same-revision unverified head keeps edits and blocks even a detached save handler', async () => {
-  const { h, saved } = await savedMeasurement(); await h.click('편집'); h.input('주석 문구', 'retained edit');
-  const staleSave = h.button('저장'); saved.referenceStatus = 'unverified';
-  await h.click('새로고침'); assert.equal(h.button('저장').disabled, true);
+  const { h, saved } = await savedMeasurement(); await h.click('Edit'); h.input('Annotation Text', 'retained edit');
+  const staleSave = h.button('Save'); saved.referenceStatus = 'unverified';
+  await h.click('Refresh'); assert.equal(h.button('Save').disabled, true);
   assert.deepEqual(h.values(), ['retained edit']); assert.equal(h.annotations.size, 0);
   const posts = h.calls.filter(c => c.options.method === 'POST').length;
   staleSave.click(); await flush(); assert.equal(h.calls.filter(c => c.options.method === 'POST').length, posts);
-  await h.click('원본 다시 확인'); assert.deepEqual(h.values(), ['retained edit']);
+  await h.click('Recheck Source'); assert.deepEqual(h.values(), ['retained edit']);
   assert.ok(h.calls.some(c => c.path.includes('recheck=saved')), 'C4a uses an item-scoped read, not the same starving page');
-  h.pages.set('1', []); await h.click('원본 다시 확인');
+  h.pages.set('1', []); await h.click('Recheck Source');
   assert.match(h.text(), /선택한 저장 항목을 찾지 못했습니다/); assert.deepEqual(h.values(), ['retained edit']);
   h.pages.set('1', [saved]);
-  const link = h.document.body.all().find(e => e.tagName === 'a' && e.textContent === '새 뷰어에서 재측정');
+  const link = h.document.body.all().find(e => e.tagName === 'a' && e.textContent === 'Remeasure in New Viewer');
   assert.equal(link.href, '/ohif/viewer?StudyInstanceUIDs=1'); assert.equal(link.rel, 'noopener noreferrer');
   assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
-  saved.referenceStatus = 'verified'; await h.click('원본 다시 확인');
+  saved.referenceStatus = 'verified'; await h.click('Recheck Source');
   assert.match(h.text(), /원본 확인 완료/);
-  assert.equal(h.button('저장').disabled, false); assert.deepEqual(h.values(), ['retained edit']);
+  assert.equal(h.button('Save').disabled, false); assert.deepEqual(h.values(), ['retained edit']);
 });
 
 test('C3: both SR commands identify the blocked selected item without silently dropping it', async () => {
   const { h, a } = await measured();
-  h.input('주석 문구', '<img src=x> blocked length');
+  h.input('Annotation Text', '<img src=x> blocked length');
   a.data.handles.points[1][0] = 20;
   const selection = [{ uid: 'foreign-key', toolName: 'KeyImage' }, ...h.measurements.values()];
   const before = h.calls.length;
@@ -297,18 +297,18 @@ test('A5: replaced cache is rewrapped; old values stay untrusted until a new nat
 });
 
 test('A3 delta: verified read after storage-limit 409 retains the actionable failure', async () => {
-  const { h } = await savedMeasurement(); await h.click('편집'); h.input('주석 문구', 'quota draft');
+  const { h } = await savedMeasurement(); await h.click('Edit'); h.input('Annotation Text', 'quota draft');
   h.setReply(async (path, options) => options.method === 'POST' ? { status: 409, data: { code: 'VIEWER_STORAGE_LIMIT' } } : h.defaultReply(path, options));
-  await h.click('저장'); assert.match(h.text(), /저장 공간 한도/);
-  await h.click('새로고침'); assert.match(h.text(), /저장 공간 한도/);
+  await h.click('Save'); assert.match(h.text(), /저장 공간 한도/);
+  await h.click('Refresh'); assert.match(h.text(), /저장 공간 한도/);
   assert.deepEqual(h.values(), ['quota draft']); assert.equal(h.window.kinViewerHistoryHasUnsaved(), true);
 });
 
 test('A4 delta: retained annotation with identical values reports failed source, not recalculation mismatch', async () => {
-  const { h, a, saved } = await savedMeasurement(); await h.click('편집');
+  const { h, a, saved } = await savedMeasurement(); await h.click('Edit');
   h.pages.set('1', [{ ...saved, revision: 2, referenceStatus: 'unverified' }]);
-  await h.click('새로고침'); await h.click('최신판 기준으로 내 수정 유지'); await h.tick();
+  await h.click('Refresh'); await h.click('Use Latest & Keep Changes'); await h.tick();
   assert.equal(h.annotations.get(a.annotationUID), a); assert.equal(a.data.kinUnverified, true);
   assert.match(h.text(), /원본을 확인하지 못했습니다/); assert.doesNotMatch(h.text(), /재계산 값이 저장 당시와 다릅니다/);
-  assert.equal(h.button('저장').disabled, true);
+  assert.equal(h.button('Save').disabled, true);
 });

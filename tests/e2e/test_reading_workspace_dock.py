@@ -52,9 +52,9 @@ class ReadingDockE2E(ReadingWorkspaceE2E):
   f.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='Length'&&!a.invalidated&&Object.keys(a.data.cachedStats||{}).length)")
   measurement=f.evaluate("()=>{const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='Length');return {points:a.data.handles.points,length:Object.values(a.data.cachedStats)[0].length}}")
   self.assertAlmostEqual(measurement['length'],math.dist(*measurement['points']),places=5)
-  row=f.locator('#kin-viewer-history section[data-kind=length]');row.get_by_label('주석 문구').fill('DOCK LENGTH')
-  history.click();history.click();expect(row.get_by_label('주석 문구')).to_have_value('DOCK LENGTH')
-  row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
+  row=f.locator('#kin-viewer-history section[data-kind=length]');row.get_by_label('Annotation Text').fill('DOCK LENGTH')
+  history.click();history.click();expect(row.get_by_label('Annotation Text')).to_have_value('DOCK LENGTH')
+  row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
   self.bounds(f);canvas_ready(f,2);self.assertEqual(self.originals(),original)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ReadingDockE2E(n) for n in loader.getTestCaseNames(ReadingDockE2E) if n.startswith('test_dock_'))

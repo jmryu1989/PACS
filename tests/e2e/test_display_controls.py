@@ -101,7 +101,7 @@ class DisplayControlsE2E(ViewerLayoutE2E):
   arrows=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))")
   self.choose(p,0);p.keyboard.press('2');p.keyboard.press('r');p.keyboard.press('h');p.keyboard.press('Space');p.wait_for_timeout(150)
   self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text}))"),arrows)
-  p.get_by_role('button',name='Add Key Image',exact=True).click();title=p.locator('#kin-viewer-history section[data-kind=key]').last.get_by_label('키 제목');title.fill('')
+  p.get_by_role('button',name='Add Key Image',exact=True).click();title=p.locator('#kin-viewer-history section[data-kind=key]').last.get_by_label('Key Title');title.fill('')
   before=self.display(p);title.press_sequentially('12345');expect(title).to_have_value('12345');self.assertEqual(self.display(p),before)
   self.assertEqual(self.originals(),original);self.assertEqual(self.report_rows(f),rows)
   p.screenshot(path=str(Path(__file__).parent/'artifacts/DISPLAY-input.png'));p.close()

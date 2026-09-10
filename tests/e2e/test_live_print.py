@@ -121,7 +121,7 @@ class LivePrintE2E(ViewerJobPrintE2E):
   p.get_by_role('button',name='선택 범위 처음 화면으로',exact=True).click();expect(p.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인')
   for a,b in zip(initial,self.output_arrays(p,paper)):self.assertTrue(np.array_equal(a,b))
   self.assertEqual(self.pngs(p),pixels);self.assertEqual(self.rows(),before)
-  p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();expect(row.get_by_label('주석 문구')).to_have_value('보존할 미저장 표식')
+  p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click();expect(row.get_by_label('Annotation Text')).to_have_value('보존할 미저장 표식')
   self.live_output(p);p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))")
   expect(p.locator('#kin-job-print')).not_to_be_visible();self.assertEqual(self.rows(),before)
 

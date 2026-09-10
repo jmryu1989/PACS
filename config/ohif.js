@@ -528,7 +528,7 @@ function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
-  const names = { arrow: '화살표', key: '키 이미지', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
+  const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
@@ -832,7 +832,7 @@ function kinCreateViewerHistory() {
         if (measurementService.getMeasurement(a.annotationUID)) measurementService.remove(a.annotationUID);
       }
       reset('이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
-      button(actions, '접근 다시 확인', () => load());
+      button(actions, 'Recheck Access', () => load());
     }
     function end() {
       if (ended) return;
@@ -924,11 +924,11 @@ function kinCreateViewerHistory() {
     }
     function toolbar() {
       const ticket = generation;
-      actions.replaceChildren(); button(actions, '새로고침', load);
+      actions.replaceChildren(); button(actions, 'Refresh', load);
       if (recovery.has(scope)) {
         text(actions, 'p', '이 검사의 미저장 작업이 보관 중입니다. 이 뷰어를 닫거나 로그아웃하면 폐기됩니다.');
-        button(actions, '보관 작업 재개', () => { if (valid(ticket)) return load(true); });
-        button(actions, '보관 작업 버리기', () => {
+        button(actions, 'Resume Held Work', () => { if (valid(ticket)) return load(true); });
+        button(actions, 'Discard Held Work', () => {
           if (!valid(ticket) || suspended || !recovery.has(scope)) return;
           if (!window.confirm('이 검사의 보관한 미저장 작업과 결과 미확인 요청을 버리시겠습니까? 서버 저장 이력은 유지됩니다.')) return;
           recovery.delete(scope); toolbar(); hydrate();
@@ -1069,13 +1069,13 @@ function kinCreateViewerHistory() {
     function row(e) {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
-      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? '저장됨 r' + e.head.revision : '미저장') + (e.head?.hidden ? ' · 숨김' : ''));
-      if (e.head) text(el, 'div', e.head.authorActor + (writable(e) ? ' · 내 항목' : ' · 읽기 전용'));
+      text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head) text(el, 'div', e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
-        input(el, e.draft.kind !== 'key' ? '주석 문구' : '키 제목', e.draft.label ?? e.draft.title, value => {
+        input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
           e.draft[e.draft.kind !== 'key' ? 'label' : 'title'] = value; updateAnnotation(e);
         }, !!(e.busy || e.pending));
-        if (e.draft.kind === 'key') input(el, '키 설명', e.draft.description || '', value => { e.draft.description = value; }, !!(e.busy || e.pending));
+        if (e.draft.kind === 'key') input(el, 'Key Description', e.draft.description || '', value => { e.draft.description = value; }, !!(e.busy || e.pending));
       } else {
         text(el, 'p', e.draft.label ?? e.draft.title);
         if (e.draft.description) text(el, 'p', e.draft.description);
@@ -1085,31 +1085,31 @@ function kinCreateViewerHistory() {
       if (e.heldDraft) {
         text(el, 'p', '미저장 수정은 보관 중입니다. ' + (e.head.hidden ?
           '숨김을 복원하고 원본을 확인한 후 다시 편집할 수 있습니다.' : '원본을 다시 확인하면 보관한 수정으로 돌아갑니다.'));
-        const held = text(el, 'details', ''); text(held, 'summary', '보관 중인 수정 보기');
+        const held = text(el, 'details', ''); text(held, 'summary', 'Held Changes');
         text(held, 'p', e.heldDraft.label ?? e.heldDraft.title);
         if (e.heldDraft.description) text(held, 'p', e.heldDraft.description);
         text(held, 'p', '프레임 ' + e.heldDraft.frame + ' · 아직 저장되지 않은 내용입니다.');
       }
-      button(el, '영상으로 이동', () => navigate(e));
+      button(el, 'Go to Image', () => navigate(e));
       const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
       if (sourceUnverified && !e.head.hidden) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
-        if (!e.heldDraft) button(el, '원본 다시 확인', () => {
+        if (!e.heldDraft) button(el, 'Recheck Source', () => {
           if (valid(generation) && entries.get(e.id) === e && !e.busy && !e.pending) return load(false, e.head.id);
         }, !!(e.busy || e.pending));
-        const link = text(el, 'a', '새 뷰어에서 재측정');
+        const link = text(el, 'a', 'Remeasure in New Viewer');
         link.href = '/ohif/viewer?StudyInstanceUIDs=' + encodeURIComponent(scope);
         link.target = '_blank'; link.rel = 'noopener noreferrer';
       }
       if (writable(e)) {
-        if (e.pending) button(el, '같은 요청 재시도', () => save(e), !!e.busy);
-        else if (e.editing) button(el, '저장', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
-        else if (!e.head?.hidden) button(el, '편집', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
-        if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? '복원' : '숨김', () => {
+        if (e.pending) button(el, 'Retry Request', () => save(e), !!e.busy);
+        else if (e.editing) button(el, 'Save', () => save(e, 'edit'), !!e.busy || !!e.latest || !!sourceUnverified);
+        else if (!e.head?.hidden) button(el, 'Edit', () => { e.editing = true; lock(e, false); row(e); }, manual(e.draft.kind) && e.head?.referenceStatus !== 'verified');
+        if (e.head && !e.editing && !e.pending) button(el, e.head.hidden ? 'Restore' : 'Hide', () => {
           const reason = window.prompt((e.head.hidden ? '복원' : '숨김') + ' 사유');
           if (reason?.trim()) save(e, e.head.hidden ? 'restore' : 'hide', reason);
         }, !!e.busy);
-        if (e.latest && !e.pending) button(el, '최신판 기준으로 내 수정 유지', () => {
+        if (e.latest && !e.pending) button(el, 'Use Latest & Keep Changes', () => {
           e.head = e.latest; e.latest = null;
           if (e.head.hidden) {
             if (e.editing) e.heldDraft ??= clone(e.draft);
@@ -1122,13 +1122,13 @@ function kinCreateViewerHistory() {
           row(e); hydrate(); render();
         }, !!e.busy);
         if (e.heldDraft) {
-          if (!e.head.hidden) button(el, '원본 다시 확인', () => {
+          if (!e.head.hidden) button(el, 'Recheck Source', () => {
             if (heldActionReady(e)) return load(false, e.head.id);
           }, !!(e.busy || e.pending));
-          button(el, '보관 수정 버리기', () => discardHeld(e), !!(e.busy || e.pending));
+          button(el, 'Discard Held Changes', () => discardHeld(e), !!(e.busy || e.pending));
         }
       }
-      if (e.head) button(el, '이력', async () => {
+      if (e.head) button(el, 'History', async () => {
         const ticket = generation; let cursor = null, count = 0;
         const history = document.createElement('div'); el.append(history);
         const more = async () => {
@@ -1136,7 +1136,7 @@ function kinCreateViewerHistory() {
           if (!valid(ticket) || !el.isConnected) return;
           for (const r of data.revisions) text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + (r.item.label ?? r.item.title));
           count += data.revisions.length; cursor = data.nextCursor;
-          if (cursor && count < 4096) button(history, '다음 이력', more);
+          if (cursor && count < 4096) button(history, 'Load More History', more);
         };
         await more();
       });
