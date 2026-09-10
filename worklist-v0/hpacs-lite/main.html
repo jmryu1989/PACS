@@ -572,6 +572,8 @@
     </span>
     <div class="spacer"></div>
     <button class="chip" id="refresh">Refresh</button>
+    <label>Auto Refresh <select class="chip" id="worklist-refresh" aria-describedby="worklist-refresh-status" disabled><option value="0">Manual</option><option value="30">30 Seconds</option><option value="60">1 Minute</option><option value="120">2 Minutes</option><option value="300">5 Minutes</option></select></label>
+    <small id="worklist-refresh-status" role="status" aria-live="polite"></small>
     <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
     <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
@@ -921,6 +923,7 @@
   <script src="reading-panel-layout.js"></script>
   <script src="viewer-opening.js"></script>
   <script src="worklist-alerts.js"></script>
+  <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
@@ -3353,12 +3356,15 @@
     });
 
     // 다른 사람이 잡거나 놓은 걸 보려면 주기적으로 확인해야 한다.
-    // 지금은 30초 폴링. 실시간(SSE)은 사람이 늘어나면 그때.
-    let poll = null;
+    // 기본 30초. 간격 변경은 진행 중인 이전 조회도 무효화한다.
+    let poll = null, pollGeneration = 0;
     function startPolling() {
-      clearInterval(poll);
+      clearInterval(poll); poll = null;
+      const generation = ++pollGeneration;
+      const seconds = worklistRefresh?.seconds() ?? 30;
+      if (!serverMode || !seconds) return;
       poll = setInterval(async () => {
-        if (!serverMode || document.hidden || studyPageClient.busy || studyPageClient.paused) return;
+        if (generation !== pollGeneration || !serverMode || document.hidden || studyPageClient.busy || studyPageClient.paused) return;
         /**
          * 확정이 나가 있으면 이번 회차는 건너뛴다.
          * 폴링 요청이 확정보다 **먼저 나가고 나중에 도착**하면, 방금 승인한 rs=A를
@@ -3379,12 +3385,12 @@
            * /studies는 목록과 상태를 함께 주므로 도착·원격판독 수신·상태 변화를
            * 한 번에 잡는다. (오더는 자주 안 바뀌므로 여기서 갱신하지 않는다)
            */
-          const r = await studyPageClient.read({ epoch, valid:() => !commitInFlight && epoch === commitEpoch });
+          const r = await studyPageClient.read({ epoch, valid:() => generation === pollGeneration && !commitInFlight && epoch === commitEpoch });
           // 요청을 보낸 뒤 확정이 일어났다면 이 응답은 그 이전 사진이다. 버린다.
-          if (commitInFlight || epoch !== commitEpoch) return;
+          if (generation !== pollGeneration || commitInFlight || epoch !== commitEpoch) return;
           assertStudyOwner(r);
           await Promise.all([favoriteList?.refresh(),studyTagList?.refresh()]);
-          if (commitInFlight || epoch !== commitEpoch) return;
+          if (generation !== pollGeneration || commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
           const known = new Set(studies.map(x => x.uid));
@@ -3443,6 +3449,7 @@
           render();
           pollFails = 0;
         } catch (e) {
+          if (generation !== pollGeneration) return;
           if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
           /**
@@ -3450,11 +3457,11 @@
            *
            * 예전엔 폴링의 catch가 통째로 비어 있어서, API가 죽어도 화면은 아무 말도
            * 안 했다. 판독의는 계속 쓰고 Save를 누를 때가 되어서야 알게 됐다.
-           * 두 번 연속 실패하면(=1분) 고장으로 본다. 한 번은 blip일 수 있다.
+           * 두 번 연속 실패하면 고장으로 본다. 한 번은 blip일 수 있다.
            */
           if (++pollFails >= 2) goOffline(e);
         }
-      }, 30000);
+      }, seconds * 1000);
     }
     let pollFails = 0;
 
@@ -3779,7 +3786,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null;
+    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null, worklistRefresh = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
@@ -4866,7 +4873,7 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
-      clearInterval(poll); poll = null;
+      clearInterval(poll); poll = null; ++pollGeneration;
       $("#dbstat").innerHTML = `<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)`;
       $("#dbstat").title = `API에 연결하지 못했습니다 (${e?.message ?? ""}).\n` +
         `이 상태에서는 아무것도 저장되지 않습니다. 쓰던 판독문은 복사해 두세요.\n` +
@@ -5008,6 +5015,9 @@
       renderTemplates();
       applyRoleUi();
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
+      worklistRefresh = KinWorklistRefresh.mount({select:$('#worklist-refresh'),status:$('#worklist-refresh-status'),
+        owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
+        changed:()=>startPolling()});
       worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},available:()=>serverMode&&!offline});
       mountViewerWindows();
       restoreWorkspace();
