@@ -3896,6 +3896,11 @@
               : "기존 영상 창에 저장하지 않은 표식이나 작업 내용이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.", "err", 8000);
             return;
           }
+          if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
+            popup.focus(); toast('기존 영상 창을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.', 'info'); return;
+          }
+          const rechecked = ohifPopupState(popup);
+          if (popup.location.href !== previous.href || !rechecked.ready || rechecked.busy || rechecked.dirty) return;
           rememberOhifRect(popup);
         } else if (previous.kind !== "blank") {
           popup.focus();
@@ -3985,6 +3990,11 @@
             status.textContent = '창을 닫지 않았습니다. 해당 창의 저장·복원 또는 미저장 작업을 확인하고 열린 대화상자를 닫은 뒤 다시 시도하세요.';
             popup.focus(); return;
           }
+          if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
+            status.textContent = '창을 닫지 않았습니다. Frame Coverage와 원본 영상을 확인하세요.'; return;
+          }
+          const rechecked = ohifPopupState(popup);
+          if (popup.location.href !== state.href || !rechecked.ready || rechecked.busy || rechecked.dirty) { status.textContent = '창 상태가 바뀌어 닫지 않았습니다. 다시 확인하세요.'; return; }
           rememberOhifRect(popup); popup.close(); render();
           status.textContent = popup.closed ? '영상 창을 닫았습니다.' : '브라우저에서 창을 닫지 못했습니다. 해당 창에서 닫으세요.';
         } else { viewerWindowCursor = index; dialog.close(); popup.focus(); watchOhifRect(popup, index); }

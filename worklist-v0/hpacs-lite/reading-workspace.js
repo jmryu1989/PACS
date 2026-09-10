@@ -510,6 +510,16 @@ window.KinReadingWorkspace = function (app) {
       status.textContent = state.busy ? '영상의 저장·복원 또는 상태 확인 중입니다. 작업을 확인한 뒤 다시 여세요.' : sameTarget() ? '현재 영상에 저장하지 않은 작업이 있습니다. 저장하거나 명시적으로 버린 뒤 다른 영상을 여세요.' : '이전 영상에 저장하지 않은 작업이 있습니다. 이전 검사로 돌아가 저장하거나, 명시적으로 버린 뒤 여세요.';
       recovery.hidden = false; discard.hidden = !!state.busy; back.hidden = !shown || sameTarget(); retry.hidden = false; return false;
     }
+    if (frame && loaded) {
+      let accepted=false;
+      try { accepted=frame.contentWindow.kinViewerFrameCoverageConfirm?.(message=>confirm(message))===true; } catch (_) {}
+      if (!accepted) {
+        frame.hidden=!sameTarget(); status.textContent='이전 영상을 유지했습니다. Frame Coverage와 원본 영상을 확인하세요.';
+        recovery.hidden=false; discard.hidden=true; back.hidden=!shown||sameTarget(); retry.hidden=false; return false;
+      }
+      const checked=viewerState();
+      if(r.reportUid!==app.current()||!app.allowed()||checked.busy||checked.dirty&&!abandon)return false;
+    }
     const ticket = ++epoch; clearInterval(timer); timer = null;
     frame?.remove(); frame = node('iframe', '', host); frame.id = 'reading-frame'; frame.title = '영상 뷰어';
     frame.setAttribute('allow', 'fullscreen'); frame.referrerPolicy = 'no-referrer'; frame.inert = true;
@@ -599,7 +609,7 @@ window.KinReadingWorkspace = function (app) {
   try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
-  window.addEventListener('beforeunload', e => { const s = viewerState(); if (s.busy || s.dirty) { e.preventDefault(); e.returnValue = ''; } });
+  window.addEventListener('beforeunload', e => { const s = viewerState(); let warn=false;try{warn=frame?.contentWindow.kinViewerFrameCoverageState?.().warn;}catch(_){}if (s.busy || s.dirty || warn) { e.preventDefault(); e.returnValue = ''; } });
   return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels,
     preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,
       apply: value => { syncAutoNote(); if (autoNote.disabled) return false; autoNote.checked = value; autoNote.onchange(); return true; } } };
