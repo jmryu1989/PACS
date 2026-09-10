@@ -631,7 +631,7 @@
             <tr id="heads"></tr>
             <tr class="filters" id="filterrow"></tr>
           </thead>
-          <tbody id="rows"></tbody>
+          <tbody id="rows" aria-describedby="row-keyboard-help"></tbody>
         </table>
       </div>
 
@@ -639,6 +639,7 @@
         <button id="page-prev" type="button">Previous Page</button><span id="page-status" role="status"></span><button id="page-next" type="button">Next Page</button>
         <label>페이지당 <select id="page-size"><option>25</option><option>50</option><option selected>100</option></select>건</label>
         <button id="page-current" type="button">Selected Study Page</button>
+        <span id="row-keyboard-help">↑/↓ · Home/End 이동 · Space 선택 · Enter 판독 진입</span>
       </nav>
       <div id="worklist-selection" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;font-size:12px"></div>
       <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">Resume</button> <button id="study-fetch-cancel" type="button">Stop Loading</button></div>
@@ -944,6 +945,8 @@
   <script src="worklist-selection.js"></script>
   <script src="worklist-image-preview.js"></script>
   <script src="worklist-search.js"></script>
+  <script src="worklist-row-navigation.js"></script>
+  <style>#rows tr:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1599,7 +1602,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, imagePreview = null, worklistSearch = null;
+    let columnPrefs = null, multiSelection = null, imagePreview = null, worklistSearch = null, rowNavigation = null;
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     function renderHeads() {
@@ -1947,6 +1950,7 @@
       $('#page-current').disabled = !list.some(s => s.uid === selectedUid);
       $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지`;
 
+      rowNavigation?.beforeRender();
       $("#rows").innerHTML = list.slice(offset, offset + resultPageSize).map((s, i) => `
         <tr data-uid="${esc(s.uid)}" tabindex="-1" class="st-${esc(String(s.rs).toLowerCase())}${s.uid === selectedUid ? " sel" : ""}${mode === "Radiology" && s.ss === "Unverified" && s.em !== "E" ? " unv" : ""}">` +
         shown.map(c => {
@@ -1958,6 +1962,7 @@
         || `<tr><td class="empty" colspan="${shown.length}">No records found</td></tr>`;
       columnPrefs?.decorate(mode);
       multiSelection?.sync();
+      rowNavigation?.sync();
       worklistSearch?.show();
 
       const active = [];
@@ -5189,6 +5194,8 @@
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior)});
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
+      rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
+        current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>{select(uid);if(mode==='Radiology')$('#findings').focus();}});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.

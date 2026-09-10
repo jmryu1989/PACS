@@ -308,7 +308,7 @@ window.KinReadingWorkspace = function (app) {
     return [...doc.querySelectorAll('dialog[open],.modal.show,[role="dialog"][aria-modal="true"]')].some(el => el.getClientRects().length);
   }
   function keyboard(e, doc = document) {
-    if (!active || ended || !app.allowed() || e.defaultPrevented || e.repeat || e.isComposing || e.getModifierState('AltGraph') || modalOpen(document) || modalOpen(doc)) return;
+    if (ended || !app.allowed() || e.defaultPrevented || e.repeat || e.isComposing || e.getModifierState('AltGraph') || modalOpen(document) || modalOpen(doc)) return;
     if (doc !== document && (!sameTarget() || !loaded || frame?.hidden || frame?.inert)) return;
     if (e.key === 'Escape' && doc === document && document.body.classList.contains('reading-list-open')) {
       e.preventDefault(); closeList(); list.focus(); return;
@@ -317,6 +317,16 @@ window.KinReadingWorkspace = function (app) {
       e.preventDefault(); closeContext(); context.focus(); return;
     }
     const command = shortcuts.action(e);
+    if (!active) {
+      // List/report navigation is also useful before opening the integrated
+      // viewer. Only focus a visible local pane; do not open or retarget images.
+      const selector = {list:'#quick',report:'#findings',prior:'.prior-report-pane',context:'#clinical'}[command];
+      const target = doc === document && selector && $(selector);
+      if (!target || target.disabled || target.closest('[inert]') || !target.getClientRects().length) return;
+      e.preventDefault();e.stopImmediatePropagation();
+      if (command === 'prior' || command === 'context') target.tabIndex = -1;
+      target.focus({preventScroll:true});return;
+    }
     // Capture precedes the embedded viewer's fixed legacy shortcuts. After a
     // remap, the old chord must not trigger a second, differently named action.
     if (!command) {
