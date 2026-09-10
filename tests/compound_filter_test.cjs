@@ -208,3 +208,42 @@ test('TEST-D01-NESTED: groups preserve parentheses and validate even unmatched b
   const compiled=matcher.compile(condition,columns);condition.rules[0].rules[0].value='US';
   assert.equal(compiled({modality:'CT',name:'A'}),true);assert.equal(match({modality:'CT',name:'A'},condition),false);
 });
+
+
+test('TEST-QUICK-MATCH: literal case-insensitive separate fields, blank and all three modes', () => {
+  const rows = [{id:'ABC'}, {id:'ABCD'}, {id:'XABC'}, {id:'NO',name:'abc'}, {id:'A',name:'BC'}];
+  for (const [mode, expected] of [['contains',[0,1,2,3]], ['prefix',[0,1,3]], ['exact',[0,3]]]) {
+    const expression = matcher.withQuickMode(undefined, mode, columns);
+    assert.deepEqual(rows.map((row,i) => matcher.compileQuick(' abc ',expression,columns)(row) ? i : -1).filter(i=>i>=0),expected);
+    assert.ok(rows.every(matcher.compileQuick('  ',expression,columns)));
+    assert.equal(matcher.compileQuick('.*',expression,columns)({id:'anything'}),false);
+    assert.equal(matcher.compileQuick('.*',expression,columns)({id:'.*'}),true);
+  }
+});
+
+test('TEST-QUICK-MATCH: versioned criteria preserve nested rules and downgrade explicitly', () => {
+  const original=expr([{join:'or',rules:[rule('modality','eq','CT'),rule('modality','eq','MR')]}]);
+  const saved=JSON.stringify(original), exact=matcher.withQuickMode(original,'exact',columns);
+  assert.equal(exact.version,2); assert.equal(exact.quickMatch,'exact'); valid(exact);
+  assert.equal(JSON.stringify(original),saved);
+  assert.deepEqual(matcher.withQuickMode(exact,'contains',columns),original);
+  const quick=matcher.compileQuick('abc',exact,columns), detail=matcher.compile(exact,columns);
+  assert.equal(quick({id:'abc',modality:'CT'})&&detail({id:'abc',modality:'CT'}),true);
+  assert.equal(quick({id:'abcd',modality:'CT'})&&detail({id:'abcd',modality:'CT'}),false);
+  assert.equal(quick({id:'abc',modality:'US'})&&detail({id:'abc',modality:'US'}),false);
+  assert.equal(matcher.withQuickMode(matcher.withQuickMode(undefined,'prefix',columns),'contains',columns),undefined);
+  // Freeze the previously shipped validator: it must reject version 2, not broaden it.
+  const oldRootAccepts = root => root.version === 1 && Object.keys(root).every(key=>['version','join','rules'].includes(key));
+  assert.equal(oldRootAccepts(original),true);
+  assert.equal(oldRootAccepts(exact),false);
+});
+
+test('TEST-QUICK-MATCH: corrupt modes fail closed even for blank input and cannot normalize', () => {
+  for(const expression of [null, {...expr(),version:2}, {...expr(),version:2,quickMatch:'contains'},
+    {...expr(),version:2,quickMatch:'wildcard'}, {...expr(),quickMatch:'exact'},
+    {...expr(),version:2,quickMatch:'exact',extra:true}, {...expr(),version:3,quickMatch:'exact'}]) {
+    invalid(expression);
+    assert.equal(matcher.compileQuick('',expression,columns)({id:'abc'}),false);
+    assert.throws(()=>matcher.withQuickMode(expression,'contains',columns));
+  }
+});

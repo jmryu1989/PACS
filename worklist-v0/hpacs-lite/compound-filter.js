@@ -54,8 +54,9 @@
   function validate(expression, columns) {
     if (expression === undefined) return null;
     if (!record(expression) || !['version', 'join', 'rules'].every(key => own(expression, key))
-      || Object.keys(expression).some(key => !['version', 'join', 'rules'].includes(key))
-      || expression.version !== 1 || !['and', 'or'].includes(expression.join)) {
+      || Object.keys(expression).some(key => !['version', 'join', 'rules', ...(expression.version === 2 ? ['quickMatch'] : [])].includes(key))
+      || ![1, 2].includes(expression.version)
+      || (expression.version === 2 && (!own(expression, 'quickMatch') || !['prefix', 'exact'].includes(expression.quickMatch))) || !['and', 'or'].includes(expression.join)) {
       return '지원하지 않거나 손상된 복합 검색 조건입니다. 조건을 다시 설정해 주세요.';
     }
     if (!Array.isArray(expression.rules) || expression.rules.length > 20) {
@@ -107,6 +108,33 @@
       return null;
     }
     return visit(expression, 0);
+  }
+
+  function quickMode(expression) {
+    return expression === undefined || expression?.version === 1 ? 'contains' : expression?.quickMatch;
+  }
+
+  function withQuickMode(expression, mode, columns) {
+    if (validate(expression, columns) || !['contains', 'prefix', 'exact'].includes(mode)) {
+      throw new Error('검색 조건을 확인할 수 없습니다. Clear로 해제한 뒤 다시 설정하세요.');
+    }
+    const next = expression ? JSON.parse(JSON.stringify(expression)) : { version: 1, join: 'and', rules: [] };
+    if (mode === 'contains') {
+      next.version = 1; delete next.quickMatch;
+      return next.rules.length ? next : undefined;
+    }
+    next.version = 2; next.quickMatch = mode;
+    return next;
+  }
+
+  function compileQuick(query, expression, columns) {
+    if (validate(expression, columns)) return () => false;
+    const wanted = String(query ?? '').trim().toUpperCase(), mode = quickMode(expression);
+    if (!wanted) return () => true;
+    return study => record(study) && ['id', 'name'].some(key => {
+      const actual = String(study[key] ?? '').toUpperCase();
+      return mode === 'exact' ? actual === wanted : mode === 'prefix' ? actual.startsWith(wanted) : actual.includes(wanted);
+    });
   }
 
   function matches(study, expression, columns) {
@@ -167,5 +195,5 @@
     }
     return groupText(expression);
   }
-  return { KEY, fields, operators, validate, matches, compile, describe };
+  return { KEY, fields, operators, validate, matches, compile, describe, quickMode, withQuickMode, compileQuick };
 });

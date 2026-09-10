@@ -216,6 +216,33 @@ class SharedFiltersE2E(manager.SavedFilterManagerE2E):
         self.assertTrue(dialogs);expect(page.locator('#sfm-folder-description')).to_have_value('unsaved personal folder description')
 
 
+    def test_shared_09_quick_match_copy_keeps_exact_results(self):
+        first=self.fixture(patient_id=self.prefix)
+        second=self.fixture(patient_id=self.prefix+'-tail')
+        expression=dict(version=2,quickMatch='exact',join='and',rules=[])
+        source=self.prefix+'/Personal'
+        result=self.stack.request('POST','/filters','jmryu',dict(name=self.prefix+' Exact',folder=source,
+            mode='Radiology',quick=self.prefix,days=-1,cols={'$compound':expression},sortKey=None,sortDir=0,isDefault=False))
+        self.assertEqual(result.status,201,result.text)
+        published=self.publish(self.library(),self.personal(),source,self.prefix+'/Shared')
+        copied=self.copy_library(self.library('doctor'),self.personal('doctor'),self.prefix+'/Shared',self.prefix+'/Copy')
+        saved=next(f for f in copied['filters'] if f['name']==self.prefix+' Exact')
+        self.assertEqual(saved['cols']['$compound'],expression)
+        page=self.login()
+        page.locator('#quick').fill(self.prefix)
+        expect(page.locator(f'#rows tr[data-uid="{first.uid}"]')).to_be_visible()
+        self.open_manager(page)
+        page.locator('#sfm-search').fill(saved['name'])
+        page.locator('#sfm-list button',has_text=saved['name']).click()
+        expect(page.locator('#sfm-quick-match')).to_have_value('exact')
+        expect(page.locator('#sfm-count')).to_contain_text('목록 기준 1건')
+        page.locator('#sfm-apply').click()
+        expect(page.locator('#rows tr[data-uid]')).to_have_count(1)
+        expect(page.locator(f'#rows tr[data-uid="{first.uid}"]')).to_be_visible()
+        expect(page.locator(f'#rows tr[data-uid="{second.uid}"]')).to_have_count(0)
+        expect(page.locator('#quick-match')).to_have_value('exact')
+
+
 def load_tests(loader,tests,pattern):
     return unittest.TestSuite(SharedFiltersE2E(name) for name in loader.getTestCaseNames(SharedFiltersE2E) if name.startswith('test_shared_'))
 

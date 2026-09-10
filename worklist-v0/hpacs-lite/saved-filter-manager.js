@@ -48,6 +48,8 @@
           <label>Study Date<select id="sfm-days"></select></label>
         </div>
         <label for="sfm-quick">Patient ID or Name</label><input id="sfm-quick">
+        <label for="sfm-quick-match">Patient Search Match</label><select id="sfm-quick-match"><option value="contains">Contains</option><option value="prefix">Starts With</option><option value="exact">Exact</option></select>
+        <small>이름 또는 ID 한 항목을 대소문자 구분 없이 비교합니다. 검색어가 비어 있으면 제한하지 않습니다.</small>
         <div id="sfm-cols" class="sfm-grid"></div>
         <section class="sfm-compound" aria-labelledby="sfm-compound-title">
           <h3 id="sfm-compound-title">Compound Criteria</h3>
@@ -110,7 +112,11 @@
         return rule;
       }); }
       const rules = readRules($('rules'));
-      if (rules.length) cols[compound.KEY] = { version: 1, join: $('join').value, rules };
+      const match = $('quick-match').value;
+      if (rules.length || match !== 'contains') cols[compound.KEY] = {
+        version: match === 'contains' ? 1 : 2, join: $('join').value, rules,
+        ...(match === 'contains' ? {} : { quickMatch: match }),
+      };
       else delete cols[compound.KEY];
       const sortKey = $('sort').value || null;
       return { name: $('name').value.trim(), mode: $('mode').value, days: Number($('days').value),
@@ -268,6 +274,7 @@
       $('name-hint').textContent = isNew ? '같은 계정에서는 폴더가 달라도 이름이 같으면 기존 검색을 덮어씁니다. 변경하지 않은 분류 정보는 유지합니다.'
         : '기존 검색 이름은 유지됩니다. 조건을 바꾸고 ‘Save’를 누르세요.';
       $('quick').value = filter.quick ?? ''; $('mode').value = filter.mode;
+      $('quick-match').value = compound.quickMode(filter.cols?.[compound.KEY]);
       $('folder').value = typeof filter.folder === 'string' ? filter.folder : '';
       $('description').value = typeof filter.description === 'string' ? filter.description : '';
       $('ordinal').value = Number.isInteger(filter.ordinal) ? String(filter.ordinal) : '0';

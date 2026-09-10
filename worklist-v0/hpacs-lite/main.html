@@ -392,6 +392,7 @@
       border-bottom: 1px solid var(--kin-line);
     }
     .userfilter input#quick,
+    .userfilter select#quick-match,
     .chip,
     .qf button,
     .ctxbar button {
@@ -410,6 +411,7 @@
     }
     .userfilter input#quick { width: 190px; border-radius: 7px; outline: none; }
     .userfilter input#quick:focus,
+    .userfilter select#quick-match:focus,
     .filters input:focus,
     .filters select:focus {
       border-color: var(--kin-accent);
@@ -553,7 +555,8 @@
 
   <!-- 사용자 필터 영역 (6.2): Quick Search + 날짜 퀵필터 + Save/Clear -->
   <div class="userfilter">
-    <input id="quick" placeholder="ID or Name">
+    <input id="quick" placeholder="ID or Name" aria-label="Patient ID or Name">
+    <select id="quick-match" aria-label="Patient Search Match"><option value="contains">Contains</option><option value="prefix">Starts With</option><option value="exact">Exact</option></select>
     <div class="qf" id="qf">
       <button data-days="0">Today</button>
       <button data-days="3">3 Days</button>
@@ -1841,13 +1844,12 @@
     function filteredFor(filter) {
       const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
       const cols = COLS[filterMode].filter(c => c.f);
-      const kw = String(filter?.quick ?? "").trim().toUpperCase();
       const days = savedFilterDays(filter?.days);
       const values = filter?.cols && typeof filter.cols === "object" ? filter.cols : {};
       const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
+      const matchQuick = KinCompoundFilter.compileQuick(filter?.quick, values[KinCompoundFilter.KEY], COLS[filterMode]);
       return studies.filter(s => {
-        if (kw && !String(s.name ?? "").toUpperCase().includes(kw)
-            && !String(s.id ?? "").toUpperCase().includes(kw)) return false;
+        if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
         return cols.every(c => testCol(s, c, values))
           && matchCompound(s);
@@ -1911,6 +1913,8 @@
       if (sortKey && sortDir && !shown.some(c => c.k === sortKey)) active.push(`숨긴 열 정렬: ${COLS[mode].find(c => c.k === sortKey)?.t ?? sortKey} ${sortDir > 0 ? '오름차순' : '내림차순'}`);
       const compound = fval[KinCompoundFilter.KEY];
       const compoundError = KinCompoundFilter.validate(compound, cols);
+      $("#quick-match").value = compoundError ? "" : KinCompoundFilter.quickMode(compound);
+      if (!compoundError && compound?.version === 2) active.push("Patient Search: " + (compound.quickMatch === "exact" ? "Exact" : "Starts With"));
       if (compoundError) active.push(`복합 조건 오류: ${compoundError} · 조건을 수정하거나 Clear로 해제하세요`);
       else if (compound?.rules.length) {
         active.push('복합 ' + KinCompoundFilter.describe(compound, cols));
@@ -4228,6 +4232,14 @@
     });
 
     $("#quick").addEventListener("input", render);
+    $("#quick-match").addEventListener("change", () => {
+      try {
+        const next = KinCompoundFilter.withQuickMode(fval[KinCompoundFilter.KEY], $("#quick-match").value, COLS[mode]);
+        if (next) fval[KinCompoundFilter.KEY] = next; else delete fval[KinCompoundFilter.KEY];
+        activeFilterName = null;
+      } catch (error) { toast(error.message, 'err'); }
+      render();
+    });
     $("#refresh").addEventListener("click", load);
     $('#page-prev').addEventListener('click', () => { resultPage--; render(); });
     $('#page-next').addEventListener('click', () => { resultPage++; render(); });
