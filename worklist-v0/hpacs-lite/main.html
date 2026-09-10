@@ -573,6 +573,7 @@
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
     <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
     <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
+    <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
     <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
     <details id="workspace-server-menu" style="position:relative">
       <summary class="chip">Account Layout</summary>
@@ -916,6 +917,7 @@
   <script src="auth.js"></script>
   <script src="reading-panel-layout.js"></script>
   <script src="viewer-opening.js"></script>
+  <script src="worklist-alerts.js"></script>
   <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
@@ -1723,6 +1725,7 @@
          */
         const editing = selectedUid ? { ...appState[selectedUid] } : null;
         studies = r.studies.map(fromApi);
+        worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
         if (editing && appState[selectedUid]) {
           appState[selectedUid] = { ...appState[selectedUid], version:editing.version ?? 0, draft:editing.draft ?? null }; syncStudy(selectedUid);
         }
@@ -3379,6 +3382,7 @@
           await Promise.all([favoriteList?.refresh(),studyTagList?.refresh()]);
           if (commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
+          worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
           const known = new Set(studies.map(x => x.uid));
           const fresh = r.studies.filter(s => !known.has(s.uid));
 
@@ -3771,7 +3775,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null;
+    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null, worklistAlerts = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
@@ -4992,6 +4996,7 @@
       renderTemplates();
       applyRoleUi();
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
+      worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},available:()=>serverMode&&!offline});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
