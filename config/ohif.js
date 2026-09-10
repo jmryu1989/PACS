@@ -37,7 +37,6 @@ function KinViewerBrand({ React }) {
     // 내장 정보 창의 링크와 버전 정보는 유지하되, 화면에 노출되는 제품명만 중립화한다.
     const replaceBrandText = root => {
       const replacements = new Map([
-        ['Patient', '환자'],
         ['About', '오픈소스 정보'],
         ['About OHIF Viewer', '오픈소스 정보'],
         ['OHIF Viewer', 'KIN 판독 뷰어'],

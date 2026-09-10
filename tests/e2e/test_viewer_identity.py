@@ -12,6 +12,18 @@ class ViewerIdentityE2E(ViewerPatientCopyE2E):
  def settings(self,p):
   p.locator('#reading-appearance-open').click();expect(p.locator('#appearance-account-save')).to_be_enabled()
  def label(self,v,uid):return v.locator('.kin-viewer-identity[data-study="'+uid+'"]')
+ def test_identity_04_patient_header_stays_english_after_toggle(self):
+  a,b=self.pair();p,v=self.popup(a);before=self.snapshot(v)
+  label=v.get_by_text('Patient',exact=True).first
+  expect(label).to_be_visible()
+  label.evaluate("e=>(e.closest('button')||e.parentElement.parentElement).setAttribute('data-kin-patient-toggle','true')")
+  toggle=v.locator('[data-kin-patient-toggle=true]')
+  for _ in range(2):
+   toggle.click();expect(toggle).to_contain_text('SYNTHETIC');expect(v.get_by_text('환자',exact=True)).to_have_count(0)
+   toggle.click();expect(label).to_be_visible();expect(v.get_by_text('환자',exact=True)).to_have_count(0)
+  self.assertEqual(self.snapshot(v),before)
+  folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'patient-header.png'))
+
  def test_identity_01_live_current_prior_account_restore_preserves_work(self):
   a,b=self.pair();p,v=self.popup(a);expect(self.label(v,a.uid)).to_contain_text('기준 검사');expect(self.label(v,b.uid)).to_contain_text('비교 검사')
   p.locator('#findings').fill('KEEP IDENTITY REPORT');v.get_by_label('Job Title',exact=True).fill('KEEP IDENTITY TITLE');before=self.snapshot(v);self.settings(p)
