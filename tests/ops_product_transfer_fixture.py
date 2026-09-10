@@ -34,7 +34,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260909233000_study_tags/migration.sql',
               'api/prisma/migrations/20260910000500_reader_assignment/migration.sql',
               'api/prisma/migrations/20260910013000_reading_preferences/migration.sql',
-              'api/prisma/migrations/20260910023000_reading_appearance/migration.sql']
+              'api/prisma/migrations/20260910023000_reading_appearance/migration.sql',
+              'api/prisma/migrations/20260910044500_workspace_shortcuts/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',

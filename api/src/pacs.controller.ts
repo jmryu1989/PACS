@@ -104,6 +104,12 @@ export class PacsController {
   @Put('reading-preferences')
   saveReadingPreferences(@Body() body: any, @Req() req: any) { return this.svc.saveReadingPreferences(body, caller(req)); }
 
+  @Get('workspace-shortcuts')
+  workspaceShortcuts(@Req() req: any) { return this.svc.workspaceShortcuts(caller(req)); }
+
+  @Put('workspace-shortcuts')
+  saveWorkspaceShortcuts(@Body() body: any, @Req() req: any) { return this.svc.saveWorkspaceShortcuts(body, caller(req)); }
+
   @Get('reading-appearance')
   readingAppearance(@Req() req: any) { return this.svc.readingAppearance(caller(req)); }
 

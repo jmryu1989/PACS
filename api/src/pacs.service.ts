@@ -781,6 +781,47 @@ export class PacsService implements OnModuleInit {
     }
   }
 
+  private validShortcutBindings(v: any) {
+    const names = ['list','image','prior','report','context','note','tools','nativeTools','previous','next'];
+    return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).sort().join(',') === names.slice().sort().join(',') && new Set(Object.values(v)).size === names.length && Object.values(v).every((key: any) => typeof key === 'string' && /^(Digit[1-9]|Key[A-Z]|ArrowLeft|ArrowRight)$/.test(key) && !['KeyC','Digit8'].includes(key));
+  }
+
+  private shortcutPreferencesResult(owner: { institution: string; subject: string }, row: any) {
+    const invalid = !!row && !this.validShortcutBindings(row.bindings);
+    return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0,
+      bindings: invalid ? null : row?.bindings ?? null, invalid };
+  }
+
+  async workspaceShortcuts(c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const row = await this.prisma.workspaceShortcuts.findUnique({ where: { institution_subject: owner } });
+    return this.shortcutPreferencesResult(owner, row);
+  }
+
+  async saveWorkspaceShortcuts(body: any, c: Caller) {
+    const owner = this.workspaceOwner(c);
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).sort().join(',') !== 'bindings,expectedOwner,revision' ||
+        !this.validShortcutBindings(body.bindings) || !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('단축키 설정 형식을 확인하세요');
+    if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
+      throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
+    const conflict = () => new ConflictException('계정 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
+    try {
+      const row = await this.prisma.$transaction(async tx => {
+        if (body.revision === 0) return tx.workspaceShortcuts.create({ data: { ...owner, revision: 1, bindings: body.bindings } });
+        const changed = await tx.workspaceShortcuts.updateMany({ where: { ...owner, revision: body.revision },
+          data: { bindings: body.bindings, revision: { increment: 1 } } });
+        if (changed.count !== 1) throw conflict();
+        return tx.workspaceShortcuts.findUnique({ where: { institution_subject: owner } });
+      });
+      return this.shortcutPreferencesResult(owner, row);
+    } catch (e) {
+      if ((e as any)?.code === 'P2002') throw conflict();
+      throw e;
+    }
+  }
+
   private appearanceResult(owner: { institution: string; subject: string }, row: any) {
     return { owner: [owner.institution, owner.subject], revision: row?.revision ?? 0, sizes: row?.sizes ?? null };
   }

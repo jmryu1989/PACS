@@ -1,7 +1,7 @@
 """Delete only this synthetic run's new workspace rows with full-row equality guards."""
 import json,subprocess,uuid
 def cleanup_workspace(stack, table='WorkspaceLayout'):
-    if table not in ('WorkspaceLayout', 'WorklistColumns', 'ReadingPreferences', 'ReadingAppearance'):raise ValueError('Unsupported preference table')
+    if table not in ('WorkspaceLayout', 'WorklistColumns', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts'):raise ValueError('Unsupported preference table')
     subjects=list(stack.user_ids.values())
     for sub in subjects:
         if str(uuid.UUID(sub))!=sub:raise RuntimeError('Invalid synthetic subject')

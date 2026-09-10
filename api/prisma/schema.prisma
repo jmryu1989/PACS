@@ -536,3 +536,14 @@ model ReaderAssignment {
   lastFingerprint String
   updatedAt DateTime @updatedAt
 }
+
+/// Navigation bindings only; no patient data or clinical commands.
+model WorkspaceShortcuts {
+  institution String @db.VarChar(256)
+  subject String @db.VarChar(256)
+  revision Int
+  bindings Json
+  updatedAt DateTime @updatedAt
+
+  @@id([institution, subject])
+}

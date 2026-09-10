@@ -12,6 +12,20 @@ import ops_backup as ops
 ROOT=Path(__file__).resolve().parents[1]
 
 class ViewerMigration(unittest.TestCase):
+    def test_workspace_shortcuts_additive_and_owner_key(self):
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910044500_workspace_shortcuts' in p)
+        self.create('shortcuts_before')
+        for source in self.sources[:index]:self.sql('shortcuts_before',source)
+        self.sql('shortcuts_before', '''INSERT INTO "ReadingPreferences" (institution,subject,revision,"autoNote","updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',1,true,'2026-09-10')''')
+        tables=self.sql('shortcuts_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def old():return {name:self.sql('shortcuts_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=old();self.sql('shortcuts_before',self.sources[index]);self.assertEqual(old(),before)
+        self.sql('shortcuts_before',self.sources[index],success=False);self.assertEqual(old(),before)
+        row='''INSERT INTO "WorkspaceShortcuts" (institution,subject,revision,bindings,"updatedAt") VALUES ('SYNTHETIC-hospital','SYNTHETIC-sub',1,'{"version":1,"list":16,"current":18,"prior":20}','2026-09-10')'''
+        self.sql('shortcuts_before',row);self.sql('shortcuts_before',row,success=False)
+        self.sql('shortcuts_before',row.replace('SYNTHETIC-hospital','SYNTHETIC-other'))
+        self.assertEqual(self.sql('shortcuts_before','SELECT count(*) FROM "WorkspaceShortcuts"'),'2');self.assertEqual(old(),before)
+
     def test_reading_appearance_additive_and_owner_key(self):
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910023000_reading_appearance' in p)
         self.create('appearance_before')
