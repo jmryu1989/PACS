@@ -70,9 +70,23 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   layout=v.locator('#kin-viewer-layout')
   if layout.get_attribute('open') is None:layout.locator('summary').first.click()
   v.get_by_label('Job Title',exact=True).fill('KEEP RETRY JOB TITLE');before=self.snapshot(v);url=v.url
+  before_box=v.locator('.cornerstone-canvas').first.bounding_box()
   v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
   expect(v.locator('#kin-viewer-note-retry')).to_be_focused();self.assertEqual(self.snapshot(v),before)
-  fail[0]=False;v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-open')).to_be_focused();expect(v.locator('#kin-viewer-note-open')).to_be_enabled()
+  fail[0]=False;v.locator('#kin-viewer-note-retry').click()
+  # Successful authentication now mounts the automatic dock. Focus must land
+  # on its visible Comparison control before reopening the preserved contents.
+  tab=v.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]');expect(tab).to_be_focused();tab.click();expect(v.locator('#kin-viewer-note-open')).to_be_enabled()
+  # The dock reserves image space. Compare pixels at the same canvas size,
+  # preserving the original camera/VOI/image/pixel assertions after recovery.
+  for _ in range(3):
+   v.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+   after_box=v.locator('.cornerstone-canvas').first.bounding_box();size=v.viewport_size
+   if all(after_box[k]==before_box[k] for k in ['width','height']):break
+   v.set_viewport_size(dict(width=round(size['width']+before_box['width']-after_box['width']),height=round(size['height']+before_box['height']-after_box['height'])))
+   canvas_ready(v,1)
+  after_box=v.locator('.cornerstone-canvas').first.bounding_box()
+  self.assertEqual([after_box[k] for k in ['width','height']],[before_box[k] for k in ['width','height']])
   self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP RETRY JOB TITLE')
   self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('RECONNECTED NOTE');v.locator('#tech-note-close').click()
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")

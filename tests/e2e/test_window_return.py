@@ -62,6 +62,9 @@ class WindowReturnE2E(ViewerTechNoteE2E):
 
  def test_return_07_native_closed_panel_keeps_feedback_visible(self):
   a,b=self.pair();p=self.login();self.workspace(p,a)
+  # Automatic docking is now the default. Exercise the retained native-panel
+  # fallback explicitly, including a mode exit/re-entry with no dock instance.
+  p.context.route('**/viewer-workspace-dock.js',lambda route:route.fulfill(status=200,content_type='application/javascript',body='window.KinViewerWorkspaceDock=()=>null;'))
   with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
   v=opened.value;canvas_ready(v,2);expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000);expect(v.locator('#kin-workspace-dock')).to_have_count(0);self.active(v,a.uid)
   v.locator('#kin-viewer-layout > summary').click();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible()

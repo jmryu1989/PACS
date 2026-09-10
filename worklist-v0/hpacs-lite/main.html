@@ -504,6 +504,11 @@
     #image-opening-dialog p { color: var(--kin-muted); line-height: 1.5; }
     #image-opening-dialog select { max-width: 100%; background: var(--kin-bg); color: var(--kin-text); border: 1px solid var(--kin-muted); border-radius: 4px; padding: 6px; }
     .image-opening-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    #viewer-windows-dialog { width: 620px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; color: var(--kin-text); background: var(--kin-panel); border: 1px solid var(--kin-muted); border-radius: 8px; padding: 20px; }
+    #viewer-windows-dialog::backdrop { background: #0009; }
+    .viewer-window-row { border-top: 1px solid var(--kin-line2); padding: 12px 0; overflow-wrap: anywhere; }
+    .viewer-window-row p { margin: 0 0 8px; line-height: 1.5; }
+    .viewer-window-row button { margin-right: 8px; }
     .right { background: var(--kin-bg); }
     .rw { border-bottom-color: var(--kin-line2); }
     .rw section, .related-p { border-color: var(--kin-line2); }
@@ -568,6 +573,7 @@
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
     <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
     <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
+    <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
     <details id="workspace-server-menu" style="position:relative">
       <summary class="chip">Account Layout</summary>
       <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
@@ -910,6 +916,7 @@
   <script src="auth.js"></script>
   <script src="reading-panel-layout.js"></script>
   <script src="viewer-opening.js"></script>
+  <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
   <script src="reading-appearance.js"></script>
@@ -3557,11 +3564,10 @@
     $("#b-next").addEventListener("click", () => move(1));
 
     // ── 공통 이벤트 ──
-    const OHIF_WINDOW_NAME = "kin-ohif-current";
     // 판독 창 위치는 계정 데이터가 아니라 이 브라우저·이 장비의 작업환경 설정이다.
     const OHIF_RECT_KEY = "kin.ohif.current.rect";
     let ohifPopupHandle = null;
-    let ohifRectPoll = null;
+    const ohifRectPolls = new Map(), ohifPopupSlots = new WeakMap(), ohifPopupSequences = new WeakMap();
     let ohifOpenSeq = 0;
     let monitorPermission = null;
     let monitorQueryUnsupported = false;
@@ -3625,7 +3631,7 @@
         const details = await window.getScreenDetails();
         if (monitorQueryUnsupported) monitorSessionGranted = true;
         cacheMonitorScreens(details);
-        localStorage.removeItem(OHIF_RECT_KEY);
+        for (let i = 0; i < 4; i++) localStorage.removeItem(i ? OHIF_RECT_KEY + ':' + i : OHIF_RECT_KEY);
         updateMonitorButton();
         toast("모니터 배치 허용됨 — 판독 창이 다른 모니터에 열립니다", "info");
       } catch (_) {
@@ -3661,9 +3667,9 @@
       };
     }
 
-    function readStoredOhifRect() {
+    function readStoredOhifRect(slot = 0) {
       try {
-        const value = JSON.parse(localStorage.getItem(OHIF_RECT_KEY) || "null");
+        const value = JSON.parse(localStorage.getItem(slot ? OHIF_RECT_KEY + ':' + slot : OHIF_RECT_KEY) || "null");
         const rect = {
           left: Number(value?.left), top: Number(value?.top),
           width: Number(value?.width), height: Number(value?.height),
@@ -3732,26 +3738,28 @@
         if (![rect.left, rect.top, rect.width, rect.height].every(Number.isFinite) ||
             rect.left <= -30000 || rect.top <= -30000 ||
             rect.width < 320 || rect.height < 240) return false;
-        localStorage.setItem(OHIF_RECT_KEY, JSON.stringify(rect));
+        const slot = ohifPopupSlots.get(popup) || 0;
+        localStorage.setItem(slot ? OHIF_RECT_KEY + ':' + slot : OHIF_RECT_KEY, JSON.stringify(rect));
         return true;
       } catch (_) { return false; }
     }
 
-    function watchOhifRect(popup) {
+    function watchOhifRect(popup, slot = ohifPopupSlots.get(popup) || 0) {
       ohifPopupHandle = popup;
-      if (ohifRectPoll) clearInterval(ohifRectPoll);
+      ohifPopupSlots.set(popup, slot);
       rememberOhifRect(popup);
-      ohifRectPoll = setInterval(() => {
+      if (ohifRectPolls.has(popup)) return;
+      const timer = setInterval(() => {
         if (popup.closed) {
-          clearInterval(ohifRectPoll);
-          ohifRectPoll = null;
+          clearInterval(timer); ohifRectPolls.delete(popup);
           return;
         }
         rememberOhifRect(popup);
       }, 2000);
+      ohifRectPolls.set(popup, timer);
     }
 
-    window.addEventListener("pagehide", () => rememberOhifRect());
+    window.addEventListener("pagehide", () => { for (const [popup, timer] of ohifRectPolls) { rememberOhifRect(popup); clearInterval(timer); } ohifRectPolls.clear(); });
 
     function validPriorDate(value) {
       if (typeof value !== "string" || value.length !== 10 || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -3761,7 +3769,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null;
+    let imageOpening = null, viewerWindows = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
@@ -3796,6 +3804,9 @@
         const href = popup.location.href;
         if (href === "about:blank") return { kind: "blank", busy: false, dirty: false };
         if (!ohifScope(href)) return { kind: "unknown", busy: true, dirty: true };
+        const key = KinViewerOpening.key(KinAuth.session()), owner = key && key.slice(KinViewerOpening.PREFIX.length);
+        if (!owner || typeof popup.kinViewerWindowOwner !== 'function' || popup.kinViewerWindowOwner() !== owner)
+          return { kind: 'viewer', href, busy: true, dirty: false, ready: false };
         const history = popup.kinViewerHistoryWorkspaceState;
         const jobs = popup.kinViewerJobWorkspaceState;
         // A viewer document without both guards may still be loading or may
@@ -3805,7 +3816,7 @@
         }
         const annotationState = history(), jobState = jobs();
         return { kind: "viewer", href, ready: true,
-          busy: !!(annotationState?.busy || jobState?.busy),
+          busy: !!(annotationState?.busy || jobState?.busy || popup.document.querySelector('dialog[open]')),
           dirty: !!(annotationState?.dirty || jobState?.dirty) };
       } catch (_) {
         // Do not navigate a named window that no longer exposes the expected
@@ -3822,30 +3833,39 @@
         return;
       }
       const returnHash=typeof readingReturn==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(readingReturn)?'#kin-reading-return='+readingReturn:'';
-      const url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}` +
+      let url = `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(uid)}` +
         (priorUid && priorUid !== uid ? `,${encodeURIComponent(priorUid)}&hangingProtocolId=@ohif/hpCompare` : "") +
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash;
       const seq = ++ohifOpenSeq;
-      const stored = readStoredOhifRect();
+      if (!viewerWindows) { toast('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return; }
+      const choice = viewerWindows.choose(url, imageOpening?.snapshot().maxWindows || 1);
+      if (choice.error) { toast(choice.error, 'err', 8000); if (choice.full) $('#viewer-windows-open').click(); return; }
+      url = viewerWindows.linked(url, choice.index);
+      const stored = readStoredOhifRect(choice.index);
       const initial = ohifPlacement(stored);
       const popup = window.open(
         "",
-        OHIF_WINDOW_NAME,
+        choice.name,
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
+        viewerWindows.attach(choice, popup); ohifPopupSlots.set(popup, choice.index); ohifPopupSequences.set(popup, seq);
         // Reopening a named window can restore its opener even without navigation.
         try{popup.opener=null;}catch(_){toast('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return;}
         const previous = ohifPopupState(popup);
         if (previous.kind === "viewer") {
           if (sameOhifScope(previous.href, url)) {
-            if(returnHash&&popup.location.hash!==returnHash){
+            if(popup.location.hash!==new URL(url,location.origin).hash){
               try{
                 // Hash navigation can re-enter OHIF's mode and clear live job
                 // inputs. Replace only this link metadata, then notify its bridge.
-                const linked=new URL(popup.location.href);linked.hash=returnHash;
+                const linked=new URL(popup.location.href), hash=new URLSearchParams(linked.hash.slice(1));
+                const previousReturn=hash.get('kin-reading-return');
+                for(const [key,value] of new URLSearchParams(new URL(url,location.origin).hash.slice(1)))hash.set(key,value);
+                linked.hash=hash.toString();
                 popup.history.replaceState(popup.history.state,'',linked.href);
-                popup.dispatchEvent(new popup.Event('kin-reading-link-changed'));
+                if(previousReturn!==hash.get('kin-reading-return'))popup.dispatchEvent(new popup.Event('kin-reading-link-changed'));
+                popup.dispatchEvent(new popup.Event('kin-window-link-changed'));
               }catch(_){toast('판독문 복귀 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.','info');}
             }
             popup.focus();
@@ -3858,7 +3878,7 @@
             toast(!previous.ready
               ? "기존 영상 창의 보호 상태를 확인할 수 없습니다. 로딩을 확인하고 계속되지 않으면 그 창을 닫은 뒤 다시 여세요."
               : previous.busy
-              ? "기존 영상 창의 저장·복원 또는 상태 확인이 끝난 뒤 다른 검사를 여세요."
+              ? "기존 영상 창의 저장·복원 또는 상태 확인을 마치고 열린 대화상자를 닫은 뒤 다른 검사를 여세요."
               : "기존 영상 창에 저장하지 않은 표식이나 작업 내용이 있습니다. 저장하거나 비운 뒤 다른 검사를 여세요.", "err", 8000);
             return;
           }
@@ -3886,7 +3906,7 @@
         if (previous.kind === "blank" && !stored && monitorPermissionGranted() && screen.isExtended === true) {
           try {
             window.getScreenDetails().then(details => {
-              if (seq !== ohifOpenSeq || popup.closed || !monitorPermissionGranted()) return;
+              if (seq !== ohifPopupSequences.get(popup) || popup.closed || !monitorPermissionGranted()) return;
               cacheMonitorScreens(details);
               const rect = ohifPlacement(null, details);
               popup.moveTo(rect.left, rect.top);
@@ -3898,15 +3918,72 @@
         return;
       }
 
-      // 팝업 정책이 크기 지정 창을 거절해도 사용자가 누른 링크 자체는 새 탭으로 살린다.
-      const fallback = document.createElement("a");
-      fallback.href = url;
-      fallback.target = "_blank";
-      fallback.rel = "noopener";
-      document.body.appendChild(fallback);
-      fallback.click();
-      fallback.remove();
-      toast("팝업이 차단되어 OHIF를 새 탭으로 열었습니다", "info");
+      viewerWindows.blocked(choice);
+      toast('팝업이 차단되었습니다. 브라우저에서 팝업을 허용하거나 Image Opening에서 Reading Workspace를 선택하세요.', 'err', 8000);
+    }
+
+    function mountViewerWindows() {
+      const button = $('#viewer-windows-open'), dialog = document.createElement('dialog'); dialog.id = 'viewer-windows-dialog';
+      dialog.setAttribute('aria-labelledby', 'viewer-windows-title');
+      dialog.innerHTML = '<h2 id="viewer-windows-title">Viewer Windows</h2><p>이 목록에 연결된 영상 창입니다. 창 닫기는 저장 중이거나 미저장 작업이 있으면 거절합니다. 확인되지 않은 창은 Focus로 상태를 확인합니다.</p><div id="viewer-windows-list"></div><p id="viewer-windows-status" role="status"></p><button class="chip" id="viewer-windows-done" type="button">Done</button>';
+      document.body.append(dialog);
+      const list = $('#viewer-windows-list'), status = $('#viewer-windows-status'); let signature = '';
+      function render() {
+        const rows = viewerWindows?.rows() || [], limit = imageOpening?.snapshot().maxWindows || 1;
+        button.textContent = 'Viewer Windows · ' + rows.length + '/' + limit;
+        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
+        const next = JSON.stringify(values); if (next === signature) return; signature = next;
+        const focused = document.activeElement, focusIndex = focused?.dataset.windowIndex, focusAction = focused?.dataset.windowAction;
+        list.replaceChildren();
+        for (const row of values) {
+          const section = document.createElement('section'); section.className = 'viewer-window-row';
+          const label = document.createElement('p'), study = studies.find(s => s.uid === row.scope?.studies[0]);
+          label.textContent = 'Window ' + (row.index + 1) + ' · ' + row.state + ' · ' +
+            (study ? [study.name, study.date, study.desc, study.uid].filter(Boolean).join(' · ') : row.scope?.studies.join(' / ') || 'Unverified');
+          if (row.scope?.studies.length === 2) { const prior = studies.find(s => s.uid === row.scope.studies[1]); label.textContent += ' · Prior: ' + (prior ? [prior.date, prior.uid].join(' · ') : row.scope.studies[1]); }
+          section.append(label);
+          for (const action of ['focus', 'close']) {
+            const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
+            control.textContent = action === 'focus' ? 'Focus' : 'Close Window'; control.dataset.windowIndex = String(row.index); control.dataset.windowAction = action;
+            control.onclick = () => operate(row.index, action); section.append(control);
+          }
+          list.append(section);
+        }
+        if (!rows.length) list.textContent = '연결된 영상 창이 없습니다.';
+        if (dialog.open && focusIndex !== undefined) (list.querySelector('[data-window-index="' + focusIndex + '"][data-window-action="' + focusAction + '"]') || $('#viewer-windows-done')).focus();
+      }
+      function operate(index, action) {
+        if (!viewerWindows?.available()) { status.textContent = viewerWindows?.error() || '현재 계정을 확인한 뒤 다시 여세요.'; return; }
+        const row = viewerWindows.rows().find(r => r.index === index); if (!row) { render(); return; }
+        let popup = row.popup;
+        if (!popup) {
+          popup = window.open('', row.name, 'popup=yes,resizable=yes,scrollbars=yes');
+          if (!popup) { status.textContent = '팝업이 차단되어 창 상태를 확인하지 못했습니다.'; return; }
+          viewerWindows.attach(row, popup); ohifPopupSlots.set(popup, index);
+          try { popup.opener = null; if (popup.location.href === 'about:blank') { popup.close(); render(); status.textContent = '이미 닫힌 창의 연결을 정리했습니다.'; return; } } catch (_) {}
+        }
+        const state = ohifPopupState(popup);
+        if (action === 'close') {
+          if (state.kind !== 'viewer' || !state.ready || state.busy || state.dirty) {
+            status.textContent = '창을 닫지 않았습니다. 해당 창의 저장·복원 또는 미저장 작업을 확인하고 열린 대화상자를 닫은 뒤 다시 시도하세요.';
+            popup.focus(); return;
+          }
+          rememberOhifRect(popup); popup.close(); render();
+          status.textContent = popup.closed ? '영상 창을 닫았습니다.' : '브라우저에서 창을 닫지 못했습니다. 해당 창에서 닫으세요.';
+        } else { dialog.close(); popup.focus(); watchOhifRect(popup, index); }
+      }
+      let storage; try { storage = sessionStorage; } catch (_) {}
+      viewerWindows = KinViewerWindows.create({ storage, owner: () => { const key = KinViewerOpening.key(KinAuth.session()); return key ? key.slice(KinViewerOpening.PREFIX.length) : null; },
+        newId: () => crypto.randomUUID(), origin: location.origin, describe: ohifPopupState, changed: render });
+      button.disabled = false;
+      button.onclick = () => { viewerWindows.refresh(); render(); status.textContent = viewerWindows.error() || ''; dialog.showModal(); $('#viewer-windows-done').focus(); };
+      $('#viewer-windows-done').onclick = () => dialog.close(); dialog.addEventListener('close', () => { if (!button.disabled) button.focus(); });
+      const timer = setInterval(() => { viewerWindows.refresh(); render(); }, 2000);
+      let channel;
+      const end = () => { clearInterval(timer); viewerWindows.end(); button.disabled = true; dialog.close(); list.replaceChildren(); channel?.close(); };
+      try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+      window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); }); window.addEventListener('pagehide', end);
+      render();
     }
 
     favoriteList = KinFavoriteList({ api,
@@ -4848,6 +4925,7 @@
       renderTemplates();
       applyRoleUi();
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
+      mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
       try {
