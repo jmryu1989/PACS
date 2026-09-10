@@ -325,7 +325,7 @@ window.KinReadingWorkspace = function (app) {
       if (!target || target.disabled || target.closest('[inert]') || !target.getClientRects().length) return;
       e.preventDefault();e.stopImmediatePropagation();
       if (command === 'prior' || command === 'context') target.tabIndex = -1;
-      target.focus({preventScroll:true});return;
+      target.focus({preventScroll:true});target.scrollIntoView({block:'nearest',inline:'nearest'});return;
     }
     // Capture precedes the embedded viewer's fixed legacy shortcuts. After a
     // remap, the old chord must not trigger a second, differently named action.

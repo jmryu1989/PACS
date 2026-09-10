@@ -626,12 +626,12 @@
       </div>
 
       <div class="grid">
-        <table>
+        <table aria-describedby="row-keyboard-help">
           <thead>
             <tr id="heads"></tr>
             <tr class="filters" id="filterrow"></tr>
           </thead>
-          <tbody id="rows" aria-describedby="row-keyboard-help"></tbody>
+          <tbody id="rows"></tbody>
         </table>
       </div>
 
@@ -947,7 +947,7 @@
   <script src="worklist-search.js"></script>
   <script src="worklist-row-navigation.js"></script>
   <script src="viewer-display-layout.js"></script>
-  <style>#rows tr:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
+  <style>#rows tr[data-uid]:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1949,6 +1949,7 @@
       $('#page-size').value = String(resultPageSize);
       $('#page-prev').disabled = resultPage === 0; $('#page-next').disabled = resultPage >= pages - 1;
       $('#page-current').disabled = !list.some(s => s.uid === selectedUid);
+      $('#row-keyboard-help').textContent='↑/↓ · Home/End 이동 · Space 선택 · Enter '+(mode==='Radiology'?'판독 진입':'검사 선택');
       $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지`;
 
       rowNavigation?.beforeRender();

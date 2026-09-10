@@ -95,6 +95,18 @@ class WorklistRowNavigationE2E(ReadingWorkspaceE2E):
         self.assertEqual(p.evaluate('document.activeElement.dataset.uid'),'keyboard-dom-24')
         p.keyboard.press('End');self.assertEqual(p.evaluate('document.activeElement.dataset.uid'),'keyboard-dom-30')
         p.keyboard.press('Home');self.assertEqual(p.evaluate('document.activeElement.dataset.uid'),'keyboard-dom-0')
+        # Keep same-page DOM/focus stable and the active row below sticky headers.
+        p.evaluate('''()=>{const row=document.querySelector('#rows tr[data-uid="keyboard-dom-10"]'),grid=row.closest('.grid');
+          window.__rowNode=row;row.focus({preventScroll:true});
+          grid.scrollTop+=row.getBoundingClientRect().top-grid.querySelector('thead').getBoundingClientRect().bottom;}''')
+        p.keyboard.press('ArrowUp')
+        self.assertTrue(p.evaluate('document.contains(window.__rowNode)'))
+        bounds=p.evaluate('''()=>({row:document.activeElement.getBoundingClientRect().top,
+          header:document.querySelector('.left .grid thead').getBoundingClientRect().bottom})''')
+        self.assertGreaterEqual(bounds['row'],bounds['header']-1)
+        vertical=p.locator('.left .grid').evaluate('grid=>grid.scrollTop');p.keyboard.press('Space')
+        self.assertEqual(p.locator('.left .grid').evaluate('grid=>grid.scrollTop'),vertical)
+        self.assertEqual(p.evaluate('getComputedStyle(document.activeElement).outlineWidth'),'2px')
         folder=Path('../tmp/worklist-row-navigation/screens');folder.mkdir(parents=True,exist_ok=True)
         p.screenshot(path=str(folder/'keyboard-list.png'))
         print(json.dumps({'scope':'31 DOM-only paging rows; no report activation or server data fabricated'}),flush=True)

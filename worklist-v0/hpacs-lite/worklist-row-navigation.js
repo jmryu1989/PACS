@@ -43,13 +43,14 @@
         if(rows().some(item=>item.uid===row.dataset.uid))activate(row.dataset.uid);return;
       }
       const uid=nextUid(rows(),row.dataset.uid,e.key);if(!uid)return;
-      e.preventDefault();e.stopImmediatePropagation();last=uid;reveal(uid);const target=find(uid);
+      e.preventDefault();e.stopImmediatePropagation();last=uid;if(!find(uid))reveal(uid);const target=find(uid);
       if(target){
         target.focus({preventScroll:true});
         // A wide table row must not pan away from the patient ID columns.
         const grid=tbody.closest('.grid');
         if(grid){const bounds=grid.getBoundingClientRect(),rect=target.getBoundingClientRect();
-          if(rect.top<bounds.top)grid.scrollTop+=rect.top-bounds.top;
+          const header=grid.querySelector('thead'),top=Math.max(bounds.top,header?.getBoundingClientRect().bottom||bounds.top);
+          if(rect.top<top)grid.scrollTop+=rect.top-top;
           else if(rect.bottom>bounds.bottom)grid.scrollTop+=rect.bottom-bounds.bottom;
         }
       }
