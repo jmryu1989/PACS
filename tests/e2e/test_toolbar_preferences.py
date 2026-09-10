@@ -11,15 +11,15 @@ class ToolbarPreferencesE2E(NativeToolbarE2E):
  def editor(self,f):
   self.tools(f);expect(f.locator('#kin-native-toolbar-edit')).to_be_visible(timeout=45000);f.locator('#kin-native-toolbar-edit').click();expect(f.locator('#kin-native-toolbar-dialog')).to_be_visible()
  def customize(self,f):
-  f.get_by_label('이동 표시',exact=True).uncheck()
-  for _ in range(3):f.get_by_role('button',name='밝기·대조 앞으로',exact=True).click()
+  f.get_by_label('Show Pan',exact=True).uncheck()
+  for _ in range(3):f.get_by_role('button',name='Window / Level Move Up',exact=True).click()
  def applied(self,f):f.locator('#kin-native-toolbar-apply').click();expect(f.locator('#kin-native-toolbar-dialog')).not_to_be_visible()
  def stored(self,f):return f.evaluate("()=>Object.fromEntries(Object.keys(localStorage).filter(k=>k.startsWith('kin-viewer-toolbar:v1:')).map(k=>[k,JSON.parse(localStorage.getItem(k))]))")
 
  def test_toolbar_01_draft_apply_native_controls_and_preserved_work(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);self.tools(f);f.get_by_label('작업 제목',exact=True).fill('KEEP TOOLBAR JOB');p.locator('#findings').fill('KEEP TOOLBAR REPORT');before=self.snapshot(f);active=self.active_tools(f)
   self.editor(f);self.customize(f);self.assertEqual(self.section(f),BASE);p.keyboard.press('ArrowDown');self.assertEqual(self.snapshot(f),before);self.assertEqual(self.active_tools(f),active);p.keyboard.press('Escape');expect(f.locator('#kin-native-toolbar-dialog')).not_to_be_visible();expect(f.locator('#kin-native-toolbar-edit')).to_be_focused();self.assertEqual(self.stored(f),{})
-  self.editor(f);self.customize(f);expect(f.get_by_label('확대·축소 표시',exact=True)).to_be_disabled();self.applied(f)
+  self.editor(f);self.customize(f);expect(f.get_by_label('Show Zoom',exact=True)).to_be_disabled();self.applied(f)
   wanted=['MeasurementTools','WindowLevel','Zoom','TrackballRotate','Capture','Layout','Crosshairs','MoreTools'];self.assertEqual(self.section(f),wanted);expect(f.locator('#root button[data-cy="Pan"]')).to_have_count(0);self.assertEqual(self.snapshot(f),before);self.assertEqual(self.active_tools(f),active)
   native_order=f.locator('#root button[data-cy]').evaluate_all('(buttons)=>buttons.map(b=>b.dataset.cy)');self.assertLess(native_order.index('WindowLevel'),native_order.index('Zoom'));print('NATIVE TOOL ORDER',native_order,flush=True)
   p.keyboard.press('Control+Alt+9');expect(self.zoom(f)).to_be_focused();p.keyboard.press('Enter');self.assertEqual(self.active_tools(f)['tools']['Zoom']['mode'],'Active');p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP TOOLBAR REPORT');expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP TOOLBAR JOB');self.assertEqual(self.jobs(a),[])

@@ -111,7 +111,7 @@ window.kinCreateViewerPatientCopy=function(options){
 /* Change only the native primary section's IDs. Button definitions, command
  * bindings, evaluation and active tools remain owned by the pinned viewer. */
 window.kinCreateViewerToolbarPreferences=function(options){
-  const catalog=[['MeasurementTools','측정 도구'],['Zoom','확대·축소'],['Pan','이동'],['TrackballRotate','3D 회전'],['WindowLevel','밝기·대조'],['Capture','영상 캡처'],['Layout','영상 배치'],['Crosshairs','교차선'],['MoreTools','추가 도구']];
+  const catalog=[['MeasurementTools','Measurements'],['Zoom','Zoom'],['Pan','Pan'],['TrackballRotate','3D Rotate'],['WindowLevel','Window / Level'],['Capture','Capture'],['Layout','Layout'],['Crosshairs','Crosshairs'],['MoreTools','More Tools']];
   const ids=catalog.map(x=>x[0]),labels=Object.fromEntries(catalog),service=options.services.toolbarService;
   const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b),read=()=>service.getButtonSection('primary').map(b=>b?.id);
   const defaults=()=>({version:1,order:ids.slice(),hidden:[]});
@@ -124,11 +124,11 @@ window.kinCreateViewerToolbarPreferences=function(options){
   function notify(type){for(const target of window.parent===window?[window]:[window,window.parent])try{target.dispatchEvent(new target.CustomEvent('kin-toolbar-preference-'+type,{detail:{owner:initialOwner,value:normalize(current)}}));}catch(_){} }
   function persist(){notify('changed');try{localStorage.setItem(key,JSON.stringify(current));status.textContent='도구 모음을 기억했습니다 · 이 브라우저';}catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}}
   const box=document.createElement('section');box.id='kin-native-toolbar-settings';options.host.append(box);
-  const button=document.createElement('button');button.type='button';button.id='kin-native-toolbar-edit';button.textContent='기본 도구 모음 편집';box.append(button);
+  const button=document.createElement('button');button.type='button';button.id='kin-native-toolbar-edit';button.textContent='Edit Toolbar';box.append(button);
   const status=document.createElement('span');status.id='kin-native-toolbar-status';status.setAttribute('role','status');status.textContent='이 브라우저 · 현재 계정';box.append(status);
   const dialog=document.createElement('dialog');dialog.id='kin-native-toolbar-dialog';dialog.setAttribute('aria-labelledby','kin-native-toolbar-title');
   dialog.style.cssText='background:#101e32;color:#e1ecfc;border:1px solid #718eaa;border-radius:8px;max-height:85vh;max-width:90vw;overflow:auto;padding:18px';document.body.append(dialog);
-  const title=document.createElement('h2');title.id='kin-native-toolbar-title';title.textContent='기본 영상 도구 모음';dialog.append(title);
+  const title=document.createElement('h2');title.id='kin-native-toolbar-title';title.textContent='Image Toolbar';dialog.append(title);
   const hint=document.createElement('p');hint.textContent='표시할 도구와 순서를 정한 뒤 적용하세요. 숨겨도 현재 조작은 바뀌지 않습니다. 확대·축소는 키보드 진입을 위해 유지합니다.';hint.style.maxWidth='560px';dialog.append(hint);
   const rows=document.createElement('div');rows.id='kin-native-toolbar-rows';dialog.append(rows);
   const action=(id,text,fn)=>{const b=document.createElement('button');b.type='button';b.id=id;b.textContent=text;b.style.cssText='margin:6px;padding:6px;border:1px solid #718eaa';b.onclick=fn;dialog.append(b);return b;};
@@ -137,9 +137,9 @@ window.kinCreateViewerToolbarPreferences=function(options){
     rows.replaceChildren();
     draft.order.forEach((id,index)=>{
       const row=document.createElement('div');row.dataset.tool=id;row.style.cssText='display:flex;gap:8px;align-items:center;margin:6px 0';rows.append(row);
-      const label=document.createElement('label');label.style.cssText='flex:1;min-width:170px';const check=document.createElement('input');check.type='checkbox';check.checked=!draft.hidden.includes(id);check.disabled=id==='Zoom';check.setAttribute('aria-label',labels[id]+' 표시');label.append(check,document.createTextNode(' '+labels[id]));row.append(label);
+      const label=document.createElement('label');label.style.cssText='flex:1;min-width:170px';const check=document.createElement('input');check.type='checkbox';check.checked=!draft.hidden.includes(id);check.disabled=id==='Zoom';check.setAttribute('aria-label','Show '+labels[id]);label.append(check,document.createTextNode(' '+labels[id]));row.append(label);
       check.onchange=()=>{draft.hidden=draft.hidden.filter(x=>x!==id);if(!check.checked)draft.hidden.push(id);};
-      for(const [step,text] of [[-1,'앞으로'],[1,'뒤로']]){
+      for(const [step,text] of [[-1,'Move Up'],[1,'Move Down']]){
         const b=document.createElement('button');b.type='button';b.textContent=text;b.dataset.move=String(step);b.setAttribute('aria-label',labels[id]+' '+text);b.disabled=index+step<0||index+step>=draft.order.length;b.style.cssText='padding:4px;border:1px solid #718eaa';row.append(b);
         b.onclick=()=>{const next=index+step;if(next<0||next>=draft.order.length)return;[draft.order[index],draft.order[next]]=[draft.order[next],draft.order[index]];render({id,step});};
       }
@@ -155,14 +155,14 @@ window.kinCreateViewerToolbarPreferences=function(options){
     catch(_){try{service.clearButtonSection('primary');service.createButtonSection('primary',before);}catch(_){}suspended=true;status.textContent='도구 모음을 적용하지 못했습니다. 영상을 다시 열어 확인하세요.';return false;}
     finally{applying=false;}
   }
-  action('kin-native-toolbar-default','기본 순서·표시',()=>{draft=defaults();render();});
-  action('kin-native-toolbar-apply','적용',()=>{
+  action('kin-native-toolbar-default','Reset to Default',()=>{draft=defaults();render();});
+  action('kin-native-toolbar-apply','Apply',()=>{
     if(!live()||suspended){status.textContent='현재 영상과 계정을 확인한 뒤 다시 여세요.';close();return;}
     const next=normalize(draft);if(!next||!write(next))return;
     persist();
     close();
   });
-  action('kin-native-toolbar-cancel','취소',close);
+  action('kin-native-toolbar-cancel','Cancel',close);
   dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
   // The viewer's document hotkeys otherwise consume Escape and may operate
   // on the image while a native settings dialog has keyboard focus.
