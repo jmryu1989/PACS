@@ -10,7 +10,7 @@ class ToolFocusE2E(ReadingWorkspaceE2E):
   from test_viewer_tech_note import ViewerTechNoteE2E
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP TOOL FOCUS REPORT')
-  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP TOOL FOCUS VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP TOOL FOCUS VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   p.locator('#findings').focus();p.keyboard.press('Control+Alt+7')
   measurement=f.get_by_role('button',name='Measurements',exact=True);jobs=f.get_by_role('button',name='Comparison',exact=True)
@@ -18,8 +18,8 @@ class ToolFocusE2E(ReadingWorkspaceE2E):
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   p.keyboard.press('Enter');expect(measurement).to_have_attribute('aria-expanded','true')
   p.keyboard.press('Tab');expect(jobs).to_be_focused();p.keyboard.press('Enter');expect(jobs).to_have_attribute('aria-expanded','true')
-  expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP TOOL FOCUS VIEWER')
-  f.get_by_label('작업 제목',exact=True).focus();p.keyboard.press('Control+Alt+7');expect(measurement).to_be_focused()
+  expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP TOOL FOCUS VIEWER')
+  f.get_by_label('Job Title',exact=True).focus();p.keyboard.press('Control+Alt+7');expect(measurement).to_be_focused()
   p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP TOOL FOCUS REPORT')
   p.locator('#reading-tools-focus').click();expect(measurement).to_be_focused()
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before);self.assertEqual(self.jobs(a),[]);self.assertEqual(len(self.versions(a)),1)

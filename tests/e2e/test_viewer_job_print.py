@@ -18,11 +18,11 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   return command
 
  def saved(self,p,f):
-  p.get_by_label('작업 제목',exact=True).fill('저장 화면 <img src=x onerror=alert(1)>')
-  self.click_job(p,'새 비교 작업 저장','저장했습니다');return self.jobs(f)[0]
+  p.get_by_label('Job Title',exact=True).fill('저장 화면 <img src=x onerror=alert(1)>')
+  self.click_job(p,'Save New Job','저장했습니다');return self.jobs(f)[0]
 
  def output(self,p):
-  p.get_by_role('button',name='저장 영상 출력',exact=True).first.click()
+  p.get_by_role('button',name='Print Saved Images',exact=True).first.click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=45000)
   return p.frame_locator('#kin-job-print iframe')
 
@@ -60,20 +60,20 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   asset='**/worklist/hpacs-lite/viewer-job-print.js'
   for body in [None,'void 0;']:
    p.route(asset,lambda route:route.fulfill(status=404 if body is None else 200,content_type='application/javascript',body=body or ''))
-   self.click_job(p,'저장 영상 출력','출력 화면을 불러오지 못했습니다')
+   self.click_job(p,'Print Saved Images','출력 화면을 불러오지 못했습니다')
    self.assertEqual(p.locator('#kin-job-print').count(),0)
-   self.click_job(p,'이 작업 복원','복원했습니다')
+   self.click_job(p,'Restore Job','복원했습니다')
    p.unroute(asset)
-  p.get_by_label('작업 제목',exact=True).fill('화면 크기 실패 뒤 보존')
+  p.get_by_label('Job Title',exact=True).fill('화면 크기 실패 뒤 보존')
   for width,height,message in [(0,400,'영상 화면 크기가 준비되지'),(8192,4096,'브라우저 창 크기나 배율을 줄인')]:
    p.evaluate('''([width,height])=>{const state=services.viewportGridService.getState();const v=services.cornerstoneViewportService.getCornerstoneViewport(state.activeViewportId);
     window.__jobSizeViewport=v;window.__jobSizeGetCanvas=v.getCanvas;v.getCanvas=()=>({width,height});}''',[width,height])
    try:
-    self.click_job(p,'새 비교 작업 저장',message)
-    expect(p.get_by_label('작업 제목',exact=True)).to_have_value('화면 크기 실패 뒤 보존')
+    self.click_job(p,'Save New Job',message)
+    expect(p.get_by_label('Job Title',exact=True)).to_have_value('화면 크기 실패 뒤 보존')
     self.assertEqual(len(self.jobs(f)),1)
    finally:p.evaluate('()=>{window.__jobSizeViewport.getCanvas=window.__jobSizeGetCanvas;delete window.__jobSizeViewport;delete window.__jobSizeGetCanvas;}')
-  self.click_job(p,'새 비교 작업 저장','저장했습니다');self.assertEqual(len(self.jobs(f)),2)
+  self.click_job(p,'Save New Job','저장했습니다');self.assertEqual(len(self.jobs(f)),2)
   self.output(p);self.assertEqual(p.locator('#kin-job-print').count(),1);self.assertEqual(errors,[])
 
  def test_print_02_saved_pixels_two_studies_other_screen_pdf(self):
@@ -116,14 +116,14 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   self.grid(p,4);self.drag(p,'D03A current',0);self.drag(p,'D03A current',1);self.drag(p,'D03A current',3)
   self.choose(p,1);p.keyboard.press('ArrowDown');self.choose(p,3);p.keyboard.press('ArrowDown');p.keyboard.press('ArrowDown');p.wait_for_timeout(200)
   expected=[x for x in self.arrays(self.pngs(p)) if x is not None]
-  p.get_by_label('작업 설명',exact=True).fill('긴 한국어 비교 작업 설명\n'*45);self.saved(p,f)
+  p.get_by_label('Description',exact=True).fill('긴 한국어 비교 작업 설명\n'*45);self.saved(p,f)
   self.choose(p,0)
   p.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();p.get_by_text('Annotation',exact=True).click()
   box=p.locator('.cornerstone-canvas').first.bounding_box();x,y=box['x']+box['width']*.47,box['y']+box['height']*.47
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+45,y+28,steps=8);p.mouse.up()
   p.get_by_placeholder('Enter label').fill('출력 중 보존할 미저장 표식');p.get_by_role('button',name='Save',exact=True).click()
   row=p.locator('#kin-viewer-history section[data-kind=arrow]').last
-  p.get_by_label('작업 제목',exact=True).fill('아직 저장하지 않은 제목');p.get_by_label('작업 설명',exact=True).fill('내 설명')
+  p.get_by_label('Job Title',exact=True).fill('아직 저장하지 않은 제목');p.get_by_label('Description',exact=True).fill('내 설명')
   before=self.pngs(p);paper=self.output(p);actual=self.output_arrays(p,paper)
   self.assertEqual(len(actual),3);expect(paper.locator('.cell')).to_have_count(4);expect(paper.locator('.cell').nth(2)).to_contain_text('빈 셀')
   for x,y in zip(expected,actual):self.assertTrue(np.array_equal(x,y))
@@ -138,14 +138,14 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   print('JOBPRINT four cells PDF '+json.dumps(dict(pages=len(pdf.pages))),flush=True)
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()
   expect(row.get_by_label('주석 문구')).to_have_value('출력 중 보존할 미저장 표식')
-  expect(p.get_by_label('작업 제목',exact=True)).to_have_value('아직 저장하지 않은 제목');self.assertTrue(p.evaluate('()=>kinViewerHistoryHasUnsaved()'))
+  expect(p.get_by_label('Job Title',exact=True)).to_have_value('아직 저장하지 않은 제목');self.assertTrue(p.evaluate('()=>kinViewerHistoryHasUnsaved()'))
   self.assertEqual(p.evaluate("()=>cornerstone.getRenderingEngines().filter(e=>e.id.startsWith('kin-print-')).length"),0)
 
  def test_print_04_failure_retry_close_late_response_and_v1(self):
   f=self.ct('JOBPRINT-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);self.saved(p,f)
   pattern='**/instances/*/frames/0/image-uint16'
   def fail(route):route.fulfill(status=503,body='synthetic unavailable')
-  p.route(pattern,fail);p.get_by_role('button',name='저장 영상 출력',exact=True).click()
+  p.route(pattern,fail);p.get_by_role('button',name='Print Saved Images',exact=True).click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('읽지 못했습니다');expect(p.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
   p.unroute(pattern,fail);p.locator('#kin-job-print').get_by_role('button',name='다시 확인').click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인')
@@ -159,8 +159,8 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   held[0][0].fulfill(response=held[0][1]);p.unroute(pattern,hold)
   expect(p.locator('#kin-job-print')).not_to_be_visible();self.assertEqual(p.locator('#kin-job-print iframe').get_attribute('srcdoc'),'')
   self.assertEqual(p.evaluate("()=>cornerstone.getRenderingEngines().filter(e=>e.id.startsWith('kin-print-')).length"),0)
-  legacy=self.post(f,self.command([f]));self.click_job(p,'작업 목록 새로고침','목록입니다.')
-  p.get_by_role('button',name='저장 영상 출력',exact=True).first.click()
+  legacy=self.post(f,self.command([f]));self.click_job(p,'Refresh Jobs','목록입니다.')
+  p.get_by_role('button',name='Print Saved Images',exact=True).first.click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('이전 작업에는 화면 크기가 없습니다')
   expect(p.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF')).to_be_disabled()
 

@@ -22,12 +22,12 @@ class VolumePatientCopyE2E(ImageContextCopyE2E):
  def choose_volume(self,page,v,index):
   b=v.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box();page.mouse.click(b['x']+b['width']*.5,b['y']+b['height']*.3)
  def test_volume_01_native_mpr_planes_copy_and_preserve(self):
-  a,b=self.pair();p,v=self.popup(a);p.locator('#findings').fill('KEEP MPR REPORT');v.get_by_label('작업 제목',exact=True).fill('KEEP MPR TITLE');self.mpr(v)
+  a,b=self.pair();p,v=self.popup(a);p.locator('#findings').fill('KEEP MPR REPORT');v.get_by_label('Job Title',exact=True).fill('KEEP MPR TITLE');self.mpr(v)
   before=self.volume_state(v);self.assertEqual(len(before),3);self.assertTrue(all(s['max']>s['min'] for s in before));self.assertIsNone(before[1]['image']);self.assertIsNone(before[2]['image'])
   for index in range(3):
    self.choose_volume(v,v,index);expect(v.locator('#kin-viewer-copy-context')).to_contain_text('선택 볼륨 원본');v.locator('#kin-viewer-copy-id').focus();v.keyboard.press('Control+Alt+c');self.copied(v);self.assertEqual(self.clipboard(v),a.patient_id)
   self.right_click(v,2);expect(self.item(v)).to_contain_text(a.patient_id);self.item(v).click();self.copied(v);self.assertEqual(self.clipboard(v),a.patient_id)
-  v.locator('#kin-viewer-note-open').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('메모 대상을 확인할 수 없습니다');expect(v.locator('#tech-note-dialog')).not_to_be_visible();expect(p.locator('#findings')).to_have_value('KEEP MPR REPORT');expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP MPR TITLE');after=self.volume_state(v);print('MPR before/after '+json.dumps(dict(before=before,after=after)),flush=True)
+  v.locator('#kin-viewer-note-open').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('메모 대상을 확인할 수 없습니다');expect(v.locator('#tech-note-dialog')).not_to_be_visible();expect(p.locator('#findings')).to_have_value('KEEP MPR REPORT');expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP MPR TITLE');after=self.volume_state(v);print('MPR before/after '+json.dumps(dict(before=before,after=after)),flush=True)
   for left,right in zip(before,after):
    self.assertEqual({k:value for k,value in left.items() if k!='camera'},{k:value for k,value in right.items() if k!='camera'})
    self.assertEqual(left['camera'].keys(),right['camera'].keys())

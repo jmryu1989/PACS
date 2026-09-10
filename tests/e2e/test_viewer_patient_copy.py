@@ -21,12 +21,12 @@ class ViewerPatientCopyE2E(ViewerTechNoteE2E):
 
  def test_copy_01_actual_dicom_literal_id_active_prior_and_preservation(self):
   patient='0007-한글<&-'+uuid.uuid4().hex[:8];a=self.ct(patient,'current','20260801');b=self.ct(patient,'past','20260701');self.seed_report(a);self.seed_report(b,action='approve')
-  p,v=self.popup(a);p.locator('#findings').fill('KEEP COPY PARENT');v.get_by_label('작업 제목',exact=True).fill('KEEP COPY VIEWER');before=self.snapshot(v);url=v.url
+  p,v=self.popup(a);p.locator('#findings').fill('KEEP COPY PARENT');v.get_by_label('Job Title',exact=True).fill('KEEP COPY VIEWER');before=self.snapshot(v);url=v.url
   original=pydicom.dcmread(io.BytesIO(self.stack.orthanc_bytes('/instances/'+self.stack.first_instance_id(a.uid)+'/file')))
   row=next(s for s in p.context.request.get(self.stack.api+'/studies').json()['studies'] if s['uid']==a.uid)
   v.locator('#kin-viewer-copy-id').click();self.copied(v);self.assertEqual(self.clipboard(v),str(original.PatientID));self.assertEqual(self.clipboard(v),row['id']);self.assertEqual(self.clipboard(v),patient)
   self.active(v,b.uid);expect(v.locator('#kin-viewer-copy-context')).to_contain_text(b.uid);v.locator('#kin-viewer-copy-id').focus();v.keyboard.press('Control+Alt+c');self.copied(v);self.assertEqual(self.clipboard(v),patient);expect(v.locator('#kin-viewer-copy-id')).to_be_focused()
-  expect(v.locator('#kin-viewer-copy-context')).to_contain_text(patient);expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP COPY VIEWER');expect(p.locator('#findings')).to_have_value('KEEP COPY PARENT')
+  expect(v.locator('#kin-viewer-copy-context')).to_contain_text(patient);expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP COPY VIEWER');expect(p.locator('#findings')).to_have_value('KEEP COPY PARENT')
   self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);self.assertEqual(self.jobs(a),[])
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'selected-image-copy.png'))
 
@@ -51,7 +51,7 @@ class ViewerPatientCopyE2E(ViewerTechNoteE2E):
   v.evaluate('''()=>{const g=services.viewportGridService.getState();window.copyDisplay=services.displaySetService.getDisplaySetByUID(g.viewports.get(g.activeViewportId).displaySetInstanceUIDs[0]);window.originalDisplayId=copyDisplay.PatientID;copyDisplay.PatientID='WRONG';}''');expect(v.locator('#kin-viewer-copy-id')).to_be_disabled()
   v.evaluate('()=>{copyDisplay.PatientID=originalDisplayId;copyMeta.PatientID="X".repeat(65)}');expect(v.locator('#kin-viewer-copy-id')).to_be_disabled()
   v.evaluate('()=>copyMeta.PatientID=copyOriginalId');expect(v.locator('#kin-viewer-copy-id')).to_be_enabled()
-  field=v.get_by_label('작업 제목',exact=True);field.fill('KEEP COPY INPUT');field.focus();v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');expect(field).to_have_value('KEEP COPY INPUT')
+  field=v.get_by_label('Job Title',exact=True);field.fill('KEEP COPY INPUT');field.focus();v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');expect(field).to_have_value('KEEP COPY INPUT')
   self.open_note(v);v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');v.locator('#tech-note-close').click()
   v.evaluate('()=>{window.copyNativeDialog=document.createElement("dialog");document.body.append(copyNativeDialog);copyNativeDialog.showModal()}');v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED');v.evaluate('()=>copyNativeDialog.remove()')
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-copy-id')).to_be_disabled();expect(v.locator('#kin-viewer-copy-context')).not_to_contain_text(a.patient_id);v.keyboard.press('Control+Alt+c');self.assertEqual(self.clipboard(v),'UNCHANGED')

@@ -14,7 +14,7 @@ class ReadingFontsE2E(ReadingAppearanceE2E):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP FONT REPORT 한글 123');p.locator(f'#relrows tr[data-uid="{b.uid}"]').click()
   expect(p.locator('#prior-findings')).to_have_text('PRIOR '+b.uid)
-  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP FONT VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP FONT VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   self.settings(p)
   for name,font in [('list','sans'),('current','mono'),('prior','serif')]:p.locator('#reading-font-'+name).select_option(font)
@@ -24,7 +24,7 @@ class ReadingFontsE2E(ReadingAppearanceE2E):
   self.assertTrue(p.locator('#findings').evaluate('(e)=>getComputedStyle(e).fontFamily').endswith('monospace'))
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'font-settings.png'))
   p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused()
-  expect(p.locator('#findings')).to_have_value('KEEP FONT REPORT 한글 123');expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP FONT VIEWER')
+  expect(p.locator('#findings')).to_have_value('KEEP FONT REPORT 한글 123');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP FONT VIEWER')
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
   self.assertEqual(json.loads(next(iter(self.font_storage(p).values()))),dict(version=1,list='sans',current='mono',prior='serif'))

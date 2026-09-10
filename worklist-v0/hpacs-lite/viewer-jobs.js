@@ -9,18 +9,18 @@ window.kinViewerJobs = function (services, model) {
     const grid = services.viewportGridService, cs = services.cornerstoneViewportService, ds = services.displaySetService;
     const parent = document.querySelector('#kin-viewer-layout'); if (!parent) return;
     parent.style.maxHeight = '40vh'; parent.style.overflow = 'auto';
-    parent.querySelector('summary').textContent = '비교 작업 · 배치';
+    parent.querySelector('summary').textContent = 'Comparison & Layout';
     const panel = document.createElement('details'); panel.id = 'kin-viewer-jobs'; panel.open = true;
     const text = (tag, value, host = panel) => { const e = document.createElement(tag); e.textContent = value; host.append(e); return e; };
-    text('summary', '저장한 비교 작업 · 서버');
+    text('summary', 'Saved Comparison Jobs');
     text('p', '영상 위치·표시·배치를 저장합니다. 미저장 표식은 먼저 저장하세요.');
-    const help = document.createElement('details'); panel.append(help); text('summary', '주석 저장·복원·출력 안내', help);
+    const help = document.createElement('details'); panel.append(help); text('summary', 'Annotation Help', help);
     text('p', '주석 함께 저장은 선택 프레임의 서버 저장 주석 이력을 고정합니다. 복원은 최신 주석, 출력은 고정한 주석을 사용하며 실제 크기 출력은 아닙니다.', help);
     const field = (label, tag, max) => { const l = text('label', label), e = document.createElement(tag); e.maxLength = max; e.setAttribute('aria-label', label); e.style.cssText = 'display:block;width:100%;color:#111;background:#fff'; l.append(e); return e; };
-    const title = field('작업 제목', 'input', 120), description = field('작업 설명', 'textarea', 2000);
-    const filters = text('div', ''), mine = text('select', '', filters); mine.setAttribute('aria-label', '작업 작성자 필터'); mine.style.cssText = 'color:#111;background:#fff';
-    for (const [value, label] of [['true', '내 작업'], ['false', '전체 작업']]) { const o = text('option', label, mine); o.value = value; }
-    const hiddenLabel = text('label', ' 숨김 포함', filters), hidden = document.createElement('input'); hidden.type = 'checkbox'; hidden.setAttribute('aria-label', '숨김 작업 포함'); hiddenLabel.prepend(hidden);
+    const title = field('Job Title', 'input', 120), description = field('Description', 'textarea', 2000);
+    const filters = text('div', ''), mine = text('select', '', filters); mine.setAttribute('aria-label', 'Job Author'); mine.style.cssText = 'color:#111;background:#fff';
+    for (const [value, label] of [['true', 'My Jobs'], ['false', 'All Jobs']]) { const o = text('option', label, mine); o.value = value; }
+    const hiddenLabel = text('label', ' Include Hidden', filters), hidden = document.createElement('input'); hidden.type = 'checkbox'; hidden.setAttribute('aria-label', 'Include Hidden Jobs'); hiddenLabel.prepend(hidden);
     const controls = text('div', ''), status = text('p', '계정 확인 중…'), list = text('div', ''); status.id = 'kin-viewer-jobs-status'; status.setAttribute('role', 'status');
     parent.insertBefore(panel, parent.children[1]);
     let ended = false, busy = false, me = null, serial = 0, editSerial = 0, pending = null, editRow = null, applying = false, channel, lastAuth = 0, checking = false;
@@ -134,13 +134,13 @@ window.kinViewerJobs = function (services, model) {
       if (!rows.length) { text('p', '저장한 비교 작업이 없습니다.', list); return; }
       for (const row of rows) {
         const item = text('div', '', list); item.style.cssText = 'border-top:1px solid #657c9f;padding:8px 0';
-        text('strong', row.title + (row.hidden ? ' · 숨김' : ''), item);
+        text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
-        if (!row.hidden) button(item, '이 작업 복원', () => run('restore', row));
-        if (!row.hidden) button(item, '저장 영상 출력', () => openPrint(row));
+        if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
+        if (!row.hidden) button(item, 'Print Saved Images', () => openPrint(row));
         if (row.authorSub === me?.sub) {
-          button(item, '제목·설명 수정', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
-          button(item, row.hidden ? '숨김 해제' : '작업 숨김', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
+          button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
+          button(item, row.hidden ? 'Unhide Job' : 'Hide Job', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
         }
       }
     }
@@ -230,10 +230,10 @@ window.kinViewerJobs = function (services, model) {
           status.textContent = (e.name === 'AbortError' ? '응답을 확인하지 못했습니다. 같은 요청을 재시도하세요.' : e.message) + ' 입력은 유지됩니다.'; }
       } finally { busy = false; applying = false; refresh(); }
     }
-    button(controls, '새 비교 작업 저장', () => run('save'), true); button(controls, '변경 저장', () => run('edit'), true);
-    button(controls, '주석 함께 새 비교 작업 저장', () => run('saveAnnotations'), true);
-    button(controls, '현재 비교 화면 출력 · 저장 안 함', () => openPrint(null));
-    button(controls, '같은 요청 재시도', () => run('retry'), true); button(controls, '작업 목록 새로고침', () => run('list'));
+    button(controls, 'Save New Job', () => run('save'), true); button(controls, 'Save Changes', () => run('edit'), true);
+    button(controls, 'Save Job with Annotations', () => run('saveAnnotations'), true);
+    button(controls, 'Print Current View', () => openPrint(null));
+    button(controls, 'Retry Request', () => run('retry'), true); button(controls, 'Refresh Jobs', () => run('list'));
     mine.onchange = hidden.onchange = () => run('list');
     title.oninput = description.oninput = () => { editSerial++; };
     const interaction = e => { if (panel.contains(e.target)) return; if (applying) { e.preventDefault(); e.stopImmediatePropagation(); return; } serial++; };

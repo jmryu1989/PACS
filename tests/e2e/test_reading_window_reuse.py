@@ -35,7 +35,7 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
           return event.defaultPrevented;
         }""")
         self.assertFalse(clean_event)
-        popup.get_by_label("작업 제목", exact=True).fill("KEEP SEPARATE WINDOW")
+        popup.get_by_label("Job Title", exact=True).fill("KEEP SEPARATE WINDOW")
         event = popup.evaluate("""() => {
           const event = new Event('beforeunload', { cancelable: true });
           window.dispatchEvent(event);
@@ -49,9 +49,9 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
         page.get_by_role("button", name="Open Viewer Window", exact=True).click()
         expect(page.locator("#toast")).to_contain_text("저장하지 않은 표식이나 작업 내용")
         self.assertEqual(parse_qs(urlsplit(popup.url).query)["StudyInstanceUIDs"], [current.uid + "," + past.uid])
-        expect(popup.get_by_label("작업 제목", exact=True)).to_have_value("KEEP SEPARATE WINDOW")
+        expect(popup.get_by_label("Job Title", exact=True)).to_have_value("KEEP SEPARATE WINDOW")
 
-        popup.get_by_label("작업 제목", exact=True).fill("")
+        popup.get_by_label("Job Title", exact=True).fill("")
         popup.evaluate("""() => {
           window.__kinOriginalJobState = window.kinViewerJobWorkspaceState;
           window.kinViewerJobWorkspaceState = () => ({busy: true, dirty: false});

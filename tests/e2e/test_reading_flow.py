@@ -42,7 +42,7 @@ class ReadingFlowE2E(ReadingWorkspaceE2E):
   expect(p.locator('#findings')).to_be_focused()
   expect(p.locator('#findings')).to_have_value('KEYBOARD UNSAVED REPORT')
   f.get_by_role('button',name='Comparison',exact=True).click()
-  f.get_by_label('작업 제목',exact=True).fill('KEYBOARD UNSAVED VIEWER')
+  f.get_by_label('Job Title',exact=True).fill('KEYBOARD UNSAVED VIEWER')
   canvas_ready(f,2)
   view_state="() => cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports().map(v=>({image:v.getCurrentImageId?.(),camera:v.getCamera(),voi:v.getProperties().voiRange})))"
   before_view=f.evaluate(view_state)
@@ -61,7 +61,7 @@ class ReadingFlowE2E(ReadingWorkspaceE2E):
   expect(p.locator('#reading-status')).to_contain_text('저장하지 않은 작업')
   p.get_by_role('button',name='Return to Previous Viewer',exact=True).click()
   expect(p.locator('#findings')).to_have_value('KEYBOARD UNSAVED REPORT')
-  expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEYBOARD UNSAVED VIEWER')
+  expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEYBOARD UNSAVED VIEWER')
   print('RETAINED VIEWPORT STATE',dict(before=before_view,after=f.evaluate(view_state)),flush=True)
   canvas_ready(f,2)
   self.assertEqual(f.evaluate(view_state),before_view)

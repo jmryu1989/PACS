@@ -15,7 +15,7 @@ class ReadingColorsE2E(ReadingAppearanceE2E):
   from test_viewer_tech_note import ViewerTechNoteE2E
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP COLOR REPORT');p.locator(f'#relrows tr[data-uid="{b.uid}"]').click();expect(p.locator('#prior-findings')).to_have_text('PRIOR '+b.uid)
-  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP COLOR VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP COLOR VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url;states=self.status_colors(p);self.assertTrue(states)
   selection=p.locator('#rows tr.sel td').first.evaluate('(e)=>({bg:getComputedStyle(e).backgroundColor,mark:getComputedStyle(e).boxShadow})')
   self.settings(p)
@@ -24,7 +24,7 @@ class ReadingColorsE2E(ReadingAppearanceE2E):
   self.assertEqual(self.status_colors(p),states);self.assertEqual(p.locator('#rows tr.sel td').first.evaluate('(e)=>({bg:getComputedStyle(e).backgroundColor,mark:getComputedStyle(e).boxShadow})'),selection)
   p.locator('#reading-font-current').select_option('mono');p.locator('#reading-text-current').select_option('18');expect(p.locator('#findings')).to_have_css('color','rgb(255, 255, 255)')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'color-settings.png'))
-  p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP COLOR REPORT');expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP COLOR VIEWER')
+  p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP COLOR REPORT');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP COLOR VIEWER')
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before);self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
 
  def test_colors_02_reload_owner_reset_and_invalid_values(self):

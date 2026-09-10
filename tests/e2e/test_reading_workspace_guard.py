@@ -15,7 +15,7 @@ class ReadingWorkspaceGuardE2E(ReadingWorkspaceE2E):
    else:route.continue_()
   p.route(pattern,hold)
   f.get_by_role('button',name='Comparison',exact=True).click()
-  f.locator('#kin-viewer-jobs').get_by_role('button',name='이 작업 복원',exact=True).first.click()
+  f.locator('#kin-viewer-jobs').get_by_role('button',name='Restore Job',exact=True).first.click()
   f.wait_for_url('**kinJob='+saved['id'])
   for _ in range(200):
    if held:break

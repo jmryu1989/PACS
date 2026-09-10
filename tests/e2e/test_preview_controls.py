@@ -57,7 +57,7 @@ class PreviewControlsE2E(ViewerJobReportE2E):
   p.evaluate('''async sop=>{const s=services.viewportGridService.getState(),v=services.cornerstoneViewportService.getCornerstoneViewport(s.activeViewportId);
    const i=v.getImageIds().findIndex(id=>cornerstone.metaData.get('instance',id).SOPInstanceUID===sop);if(i<0)throw Error('missing SOP');await v.setImageIdIndex(i);v.scroll(i-v.getTargetImageIdIndex(),false)}''',head['item']['sopUid'])
   for key in ['r','h']:p.keyboard.press(key)
-  p.get_by_label('작업 제목',exact=True).fill('출력 조절 주석');self.click_job(p,'주석 함께 새 비교 작업 저장','고정했습니다');job=self.jobs(f)[0]
+  p.get_by_label('Job Title',exact=True).fill('출력 조절 주석');self.click_job(p,'Save Job with Annotations','고정했습니다');job=self.jobs(f)[0]
   self.seed_report(f,action='approve',findings='출력 조절 판독문');before=self.pngs(p);rows=self.report_rows(f);original=self.originals();frozen=self.get_job(f,job)
   expected=self.reference(p,125,-7,5,points=head['item']['points']);self.output(p);self.adjust(p,zoom=125,x=-7,y=5)
   paper=self.include_report(p);image=self.output_arrays(p,paper)[0];gold=(image[:,:,0]>220)&(image[:,:,1]>170)&(image[:,:,2]<80)

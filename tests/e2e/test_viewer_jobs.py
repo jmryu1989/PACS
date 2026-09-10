@@ -52,9 +52,14 @@ class ViewerJobsE2E(DisplayControlsE2E):
  def revised(self,j,**changes):return dict(expectedRevision=j['revision'],title=j['title'],description=j['description'],hidden=j['hidden'],reason='',**changes)
 
  def launch_job(self,fixtures):
-  p=self.launch(self.login(),fixtures);expect(p.locator('#kin-viewer-jobs-status')).to_contain_text('목록입니다.');return p
+  p=self.launch(self.login(),fixtures);expect(p.locator('#kin-viewer-jobs-status')).to_contain_text('목록입니다.');expect(p.locator('#kin-workspace-dock')).to_have_count(1,timeout=45000)
+  tab=p.locator('#kin-workspace-dock nav button[aria-controls=kin-viewer-layout]')
+  if tab.get_attribute('aria-expanded')!='true':tab.click()
+  return p
 
  def click_job(self,p,label,message):
+  tab=p.locator('#kin-workspace-dock nav button[aria-controls=kin-viewer-layout]')
+  if tab.count() and tab.get_attribute('aria-expanded')!='true':tab.click()
   p.locator('#kin-viewer-jobs').get_by_role('button',name=label,exact=True).first.click()
   expect(p.locator('#kin-viewer-jobs-status')).to_contain_text(message,timeout=45000)
 
@@ -126,11 +131,11 @@ class ViewerJobsE2E(DisplayControlsE2E):
   # Soft-tissue keeps this phantom visible; Liver clips every fixture pixel to
   # black and cannot exercise the spatial canvas restoration oracle.
   self.choose(p,1);p.keyboard.press('ArrowDown');p.keyboard.press('ArrowDown');p.keyboard.press('1');p.wait_for_timeout(200)
-  before=self.display(p);p.get_by_label('작업 제목',exact=True).fill('현재·과거 비교');p.get_by_label('작업 설명',exact=True).fill('프레임·밝기·방향 저장')
-  self.click_job(p,'새 비교 작업 저장','저장했습니다');self.assertEqual(len(self.jobs(a)),1)
+  before=self.display(p);p.get_by_label('Job Title',exact=True).fill('현재·과거 비교');p.get_by_label('Description',exact=True).fill('프레임·밝기·방향 저장')
+  self.click_job(p,'Save New Job','저장했습니다');self.assertEqual(len(self.jobs(a)),1)
   p.close();p=self.launch_job([a])
   p.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');canvas_ready(p,1)
-  try:self.click_job(p,'이 작업 복원','복원했습니다')
+  try:self.click_job(p,'Restore Job','복원했습니다')
   except Exception:
    print('JOB RESTORE FAILURE',p.url,self.display(p),flush=True);raise
   p.wait_for_timeout(400)
@@ -151,33 +156,33 @@ class ViewerJobsE2E(DisplayControlsE2E):
   p.screenshot(path=str(Path(__file__).parent/'artifacts/JOB-restored.png'))
   self.choose(p,1);p.keyboard.press('ArrowDown');p.wait_for_timeout(120)
   self.assertEqual(self.display(p)[1]['index'],3);expect(p.locator('[data-cy=viewport-grid] > div').nth(1)).to_contain_text('(4/4)')
-  self.click_job(p,'제목·설명 수정','편집 후');p.get_by_label('작업 설명',exact=True).fill('수정된 설명');self.click_job(p,'변경 저장','저장했습니다')
+  self.click_job(p,'Edit Details','편집 후');p.get_by_label('Description',exact=True).fill('수정된 설명');self.click_job(p,'Save Changes','저장했습니다')
   self.assertEqual(self.jobs(a)[0]['description'],'수정된 설명')
   for f in [a,b]:self.assertEqual(self.report_rows(f),rows[f.uid])
   self.assertEqual(self.originals(),originals)
 
  def test_job_04_delayed_restore_retry_input_and_session(self):
   f=self.ct('JOB-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);self.choose(p,0)
-  p.get_by_label('작업 제목',exact=True).fill('실패 재시도')
+  p.get_by_label('Job Title',exact=True).fill('실패 재시도')
   pattern='**/api/studies/*/viewer-jobs'
   def lost(route):
    if route.request.method=='POST':route.fetch();route.abort()
    else:route.continue_()
-  p.route(pattern,lost);self.click_job(p,'새 비교 작업 저장','입력은 유지');expect(p.get_by_label('작업 제목',exact=True)).to_have_value('실패 재시도')
-  self.assertEqual(len(self.jobs(f)),1);p.unroute(pattern,lost);self.click_job(p,'같은 요청 재시도','저장했습니다');self.assertEqual(len(self.jobs(f)),1)
+  p.route(pattern,lost);self.click_job(p,'Save New Job','입력은 유지');expect(p.get_by_label('Job Title',exact=True)).to_have_value('실패 재시도')
+  self.assertEqual(len(self.jobs(f)),1);p.unroute(pattern,lost);self.click_job(p,'Retry Request','저장했습니다');self.assertEqual(len(self.jobs(f)),1)
   held=[]
   def hold(route):held.append((route,route.fetch()))
   p.route('**/api/studies/*/viewer-jobs/*',hold)
-  p.get_by_role('button',name='이 작업 복원',exact=True).click()
+  p.get_by_role('button',name='Restore Job',exact=True).click()
   for _ in range(100):
    if held:break
    p.wait_for_timeout(50)
   self.assertTrue(held);self.choose(p,0);p.keyboard.press('ArrowDown');p.wait_for_timeout(150);changed=self.display(p)
   held[0][0].fulfill(response=held[0][1]);expect(p.locator('#kin-viewer-jobs-status')).to_contain_text('영상 조작이 변경')
   self.assertEqual(self.display(p),changed);p.unroute('**/api/studies/*/viewer-jobs/*',hold)
-  p.get_by_label('작업 제목',exact=True).fill('logout clears this')
+  p.get_by_label('Job Title',exact=True).fill('logout clears this')
   work=p.context.new_page();self.relog(work,'doctor2')
-  self.click_job(p,'작업 목록 새로고침','세션이 변경');expect(p.get_by_label('작업 제목',exact=True)).to_have_value('');self.assertEqual(len(self.jobs(f)),1)
+  self.click_job(p,'Refresh Jobs','세션이 변경');expect(p.get_by_label('Job Title',exact=True)).to_have_value('');self.assertEqual(len(self.jobs(f)),1)
 
  def test_job_05_locked_permission_recheck_and_audit_rollback(self):
   f=self.ct('JOB-'+uuid.uuid4().hex[:12],'current','20260801');self.uid=f.uid;c=self.command([f]);originals=self.originals()
@@ -198,20 +203,20 @@ class ViewerJobsE2E(DisplayControlsE2E):
 
  def test_job_06_four_cells_saved_annotations_and_unsaved_guard(self):
   f=self.multiple('JOB-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);originals=self.originals();reports=self.report_rows(f)
-  row=ViewerHistoryE2E.draw(self,p,'Job saved arrow');p.get_by_label('작업 제목',exact=True).fill('네 화면과 표식')
-  self.click_job(p,'새 비교 작업 저장','미저장 표식');self.assertEqual(self.jobs(f),[])
+  row=ViewerHistoryE2E.draw(self,p,'Job saved arrow');p.get_by_label('Job Title',exact=True).fill('네 화면과 표식')
+  self.click_job(p,'Save New Job','미저장 표식');self.assertEqual(self.jobs(f),[])
   row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
   ViewerHistoryE2E.key(self,p,'Job key')
   points=p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='ArrowAnnotate').data.handles.points")
   self.grid(p,4);self.drag(p,'D03A current',0);self.drag(p,'D02E second series',1);self.drag(p,'D03A current',3)
   refs=self.fixture_refs(p,f);one=next(r for r in refs if any(i['0020000E']['Value'][0]==r['series'] and i['0008103E']['Value'][0]=='D03A current' for i in self.metadata(p,f)))
   two=next(r for r in refs if r!=one);expected=[one,two,None,one];self.identity(p,expected)
-  self.click_job(p,'새 비교 작업 저장','저장했습니다');p.close();p=self.launch_job([f]);self.click_job(p,'이 작업 복원','복원했습니다');self.identity(p,expected)
+  self.click_job(p,'Save New Job','저장했습니다');p.close();p=self.launch_job([f]);self.click_job(p,'Restore Job','복원했습니다');self.identity(p,expected)
   p.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='ArrowAnnotate')")
   self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='ArrowAnnotate').data.handles.points"),points)
   expect(p.locator('#kin-viewer-history')).to_contain_text('Job key');expect(p.locator('#kin-viewer-history')).to_contain_text('Job saved arrow')
   before=self.cells(p);row=p.locator('#kin-viewer-history section[data-kind=arrow]');row.get_by_role('button',name='편집',exact=True).click();row.get_by_label('주석 문구').fill('unsaved retained')
-  self.click_job(p,'이 작업 복원','미저장 표식');self.assertEqual(self.cells(p),before);expect(row.get_by_label('주석 문구')).to_have_value('unsaved retained')
+  self.click_job(p,'Restore Job','미저장 표식');self.assertEqual(self.cells(p),before);expect(row.get_by_label('주석 문구')).to_have_value('unsaved retained')
   row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장됨 r2')
   self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),reports)
 

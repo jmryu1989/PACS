@@ -15,7 +15,7 @@ class ReadingAppearanceE2E(ReadingWorkspaceE2E):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP TEXT SIZE REPORT');p.locator(f'#relrows tr[data-uid="{b.uid}"]').click()
   expect(p.locator('#prior-findings')).to_have_text('PRIOR '+b.uid)
-  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP TEXT SIZE VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP TEXT SIZE VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   self.settings(p)
   for name,size in [('list','16'),('current','20'),('prior','18')]:p.locator('#reading-text-'+name).select_option(size)
@@ -26,7 +26,7 @@ class ReadingAppearanceE2E(ReadingWorkspaceE2E):
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'text-size-settings.png'))
   p.keyboard.press('Escape');expect(p.locator('#reading-appearance-open')).to_be_focused()
   expect(p.locator('#findings')).to_have_value('KEEP TEXT SIZE REPORT')
-  expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP TEXT SIZE VIEWER')
+  expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP TEXT SIZE VIEWER')
   self.assertEqual(f.url,url);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   self.assertEqual(len(self.versions(a)),1);self.assertEqual(self.jobs(a),[])
   saved=list(self.stored(p).values());self.assertEqual(len(saved),1)

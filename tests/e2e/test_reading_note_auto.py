@@ -48,10 +48,10 @@ class ReadingNoteAutoE2E(ReadingNoteE2E):
 
  def test_auto_note_04_unsaved_viewer_defers_but_manual_still_works(self):
   a,b=self.pair();self.note(a,'NOTE WITH UNSAVED VIEWER');p=self.login();f=self.workspace(p,a)
-  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP UNSAVED VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP UNSAVED VIEWER')
   p.locator('#reading-note-auto').check();p.wait_for_timeout(750);expect(p.locator('#tech-note-dialog')).not_to_be_visible()
   p.keyboard.press('Control+Alt+6');expect(p.locator('#tech-note-text')).to_have_value('NOTE WITH UNSAVED VIEWER')
-  p.locator('#tech-note-close').click();expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP UNSAVED VIEWER')
+  p.locator('#tech-note-close').click();expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP UNSAVED VIEWER')
 
  def test_auto_note_05_unknown_summary_warns_without_later_popup(self):
   a,b=self.pair();self.note(a,'NOTE WITH UNKNOWN SUMMARY');p=self.login()

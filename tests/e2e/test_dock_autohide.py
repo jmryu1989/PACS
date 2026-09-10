@@ -15,7 +15,7 @@ class DockAutohideE2E(DockAccountE2E):
  def held_frames(self,f):
   samples=f.evaluate("""()=>new Promise(resolve=>{const samples=[],start=performance.now();function frame(){samples.push(document.body.classList.contains('kin-dock-open'));if(performance.now()-start>=1600)resolve(samples);else requestAnimationFrame(frame)}requestAnimationFrame(frame)})""");self.assertGreater(len(samples),3);self.assertTrue(all(samples));print('OPEN GUARD FRAMES',len(samples),flush=True)
  def test_auto_01_input_pointer_collapse_and_focus_reopen_preserve_work(self):
-  a,b=self.pair();p=self.login();f=self.opened(p,a);p.locator('#findings').fill('KEEP AUTO REPORT');field=f.get_by_label('작업 제목',exact=True);field.fill('KEEP AUTO JOB');f.locator('#kin-dock-autohide').check();field.focus();self.held_frames(f);before=ViewerTechNoteE2E.snapshot(self,f)
+  a,b=self.pair();p=self.login();f=self.opened(p,a);p.locator('#findings').fill('KEEP AUTO REPORT');field=f.get_by_label('Job Title',exact=True);field.fill('KEEP AUTO JOB');f.locator('#kin-dock-autohide').check();field.focus();self.held_frames(f);before=ViewerTechNoteE2E.snapshot(self,f)
   box=self.outside(p,f)
   for _ in range(6):p.keyboard.press('Shift');p.wait_for_timeout(300);expect(self.tab(f)).to_have_attribute('aria-expanded','true')
   p.mouse.down();self.held_frames(f);p.mouse.up();expect(self.tab(f)).to_have_attribute('aria-expanded','false',timeout=10000)
@@ -30,7 +30,7 @@ class DockAutohideE2E(DockAccountE2E):
   f.locator('#kin-dock-autohide').check();pending=[];path='**/api/studies/'+a.uid+'/viewer-jobs*'
   p.route(path,lambda route:pending.append(route))
   try:
-   f.get_by_role('button',name='작업 목록 새로고침',exact=True).click();expect(f.locator('#kin-viewer-jobs-status')).to_contain_text('확인 중')
+   f.get_by_role('button',name='Refresh Jobs',exact=True).click();expect(f.locator('#kin-viewer-jobs-status')).to_contain_text('확인 중')
    for _ in range(100):
     if pending:break
     p.wait_for_timeout(50)

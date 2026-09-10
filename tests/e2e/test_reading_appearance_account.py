@@ -15,7 +15,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   from test_viewer_tech_note import ViewerTechNoteE2E
   a,b=self.pair();p=self.login();f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP ACCOUNT FONT REPORT')
-  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP ACCOUNT FONT VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP ACCOUNT FONT VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);self.ready(p)
   p.locator('#reading-font-current').select_option('mono')
   p.locator('#reading-color-current').select_option('warm')
@@ -36,7 +36,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   expect(p.locator('#reading-color-current')).to_have_value('warm')
   expect(p.locator('#findings')).to_have_css('color','rgb(255, 241, 214)')
   self.assertTrue(p.locator('#findings').evaluate('(e)=>getComputedStyle(e).fontFamily').endswith('monospace'))
-  expect(p.locator('#findings')).to_have_value('KEEP ACCOUNT FONT REPORT');expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP ACCOUNT FONT VIEWER')
+  expect(p.locator('#findings')).to_have_value('KEEP ACCOUNT FONT REPORT');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP ACCOUNT FONT VIEWER')
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'account-text-sizes.png'))
  def test_roam_02_conflict_preserves_local_choice(self):

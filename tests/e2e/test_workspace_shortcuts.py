@@ -13,7 +13,7 @@ class WorkspaceShortcutsE2E(ViewerTechNoteE2E):
 
  def test_shortcuts_01_remap_image_report_list_and_preserve(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);self.tools(f)
-  p.locator('#findings').fill('KEEP SHORTCUT REPORT');f.get_by_label('작업 제목',exact=True).fill('KEEP SHORTCUT JOB')
+  p.locator('#findings').fill('KEEP SHORTCUT REPORT');f.get_by_label('Job Title',exact=True).fill('KEEP SHORTCUT JOB')
   f.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');before=self.snapshot(f)
   print('before canvas sizes',f.locator('.cornerstone-canvas').evaluate_all('es=>es.map(e=>[e.width,e.height])'),flush=True)
   self.editor(p);self.assign(p,'report','Control+Alt+R');self.assign(p,'image','Control+Alt+I');self.assign(p,'list','Control+Alt+L');self.apply(p)
@@ -21,7 +21,7 @@ class WorkspaceShortcutsE2E(ViewerTechNoteE2E):
   p.keyboard.press('Control+Alt+R');expect(p.locator('#findings')).to_be_focused();p.keyboard.press('Control+Alt+L');expect(p.locator('#quick')).to_be_focused()
   p.keyboard.press('Control+Alt+R');expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP SHORTCUT REPORT')
   p.keyboard.press('Control+Alt+I');p.keyboard.press('Control+Alt+4');self.assertEqual(p.evaluate('()=>document.activeElement.id'),'reading-frame')
-  p.keyboard.press('Control+Alt+R');expect(p.locator('#findings')).to_be_focused();expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP SHORTCUT JOB')
+  p.keyboard.press('Control+Alt+R');expect(p.locator('#findings')).to_be_focused();expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP SHORTCUT JOB')
   f.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
   print('after canvas sizes',f.locator('.cornerstone-canvas').evaluate_all('es=>es.map(e=>[e.width,e.height])'),flush=True);self.assertEqual(self.snapshot(f),before)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);self.editor(p);p.screenshot(path=str(folder/'workspace-shortcuts.png'));p.locator('#workspace-shortcuts-cancel').click()

@@ -106,7 +106,7 @@ class CompareReportsE2E(ViewerJobReportE2E):
  def test_compare_reports_04_current_output_and_single_study_reopen(self):
   a,b,_=self.pair();p=self.launch_job([a,b]);canvas_ready(p,1)
   before={f.uid:self.report_rows(f) for f in [a,b]};original=self.originals()
-  p.get_by_role('button',name='현재 비교 화면 출력 · 저장 안 함',exact=True).click()
+  p.get_by_role('button',name='Print Current View',exact=True).click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=45000)
   paper=self.select_reports(p,'both');expect(paper.locator('.report')).to_have_count(2)
   printed=self.print_popup(p);printed.wait_for_function('()=>window.__printed===true')
@@ -115,7 +115,7 @@ class CompareReportsE2E(ViewerJobReportE2E):
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()
   # Navigate the same browser tab, so a previous two-study choice cannot leak.
   self.launch(p,[a]);canvas_ready(p,1)
-  p.get_by_role('button',name='현재 비교 화면 출력 · 저장 안 함',exact=True).click()
+  p.get_by_role('button',name='Print Current View',exact=True).click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=45000)
   expect(p.get_by_label('함께 출력할 판독문',exact=True)).to_have_value('none')
   expect(p.get_by_label('함께 출력할 판독문',exact=True).locator('option[value=prior],option[value=both]')).to_have_count(0)

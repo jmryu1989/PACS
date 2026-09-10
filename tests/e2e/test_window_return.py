@@ -17,17 +17,17 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   if result['status']=='판독문으로 돌아왔습니다.':self.assertTrue(result['parentFocused'])
   print('RETURN_FOCUS',json.dumps(result,ensure_ascii=True),flush=True)
  def test_return_01_active_prior_live_work_and_reuse(self):
-  a,b=self.pair();p,f,v=self.popup(a);p.locator('#findings').fill('KEEP RETURN REPORT');v.get_by_label('작업 제목',exact=True).fill('KEEP RETURN VIEWER');self.active(v,b.uid)
+  a,b=self.pair();p,f,v=self.popup(a);p.locator('#findings').fill('KEEP RETURN REPORT');v.get_by_label('Job Title',exact=True).fill('KEEP RETURN VIEWER');self.active(v,b.uid)
   before=self.snapshot(v);parent_before=self.snapshot(f);self.assertEqual(len(before),2);old_url=v.url;self.assertTrue(v.evaluate('()=>window.opener===null'))
   if os.environ.get('KIN_E2E_HEADED')=='1':
    for page in [p,v]:page.context.new_cdp_session(page).send('Emulation.setFocusEmulationEnabled',{'enabled':False})
    v.bring_to_front()
-  v.keyboard.press('Control+Alt+4');self.returned(p,v);expect(p.locator('#findings')).to_have_value('KEEP RETURN REPORT');expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP RETURN VIEWER');self.assertEqual(self.snapshot(v),before);self.assertEqual(self.snapshot(f),parent_before);self.assertEqual(self.jobs(a),[])
+  v.keyboard.press('Control+Alt+4');self.returned(p,v);expect(p.locator('#findings')).to_have_value('KEEP RETURN REPORT');expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP RETURN VIEWER');self.assertEqual(self.snapshot(v),before);self.assertEqual(self.snapshot(f),parent_before);self.assertEqual(self.jobs(a),[])
   p.bring_to_front();p.keyboard.press('Control+Alt+2');expect(p.locator('#reading-frame')).to_be_focused();p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused()
   history=v.evaluate('()=>window.history.length');active=v.evaluate('()=>services.viewportGridService.getState().activeViewportId')
   requests=[];v.on('request',lambda r:requests.append(r.url) if r.is_navigation_request() else None);v.evaluate("()=>window.syntheticReturnMarker='KEEP DOCUMENT'")
   p.get_by_role('button',name='Open Viewer Window',exact=True).click();v.wait_for_function('(old)=>location.href!==old',arg=old_url);self.assertEqual(v.url.split('#')[0],old_url.split('#')[0]);self.assertEqual(v.evaluate('()=>window.syntheticReturnMarker'),'KEEP DOCUMENT');self.assertEqual(requests,[])
-  v.bring_to_front();v.keyboard.press('Control+Alt+4');self.returned(p,v);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP RETURN VIEWER');self.assertEqual(v.evaluate('()=>window.history.length'),history);self.assertEqual(v.evaluate('()=>services.viewportGridService.getState().activeViewportId'),active);self.assertTrue(v.evaluate('()=>window.opener===null'))
+  v.bring_to_front();v.keyboard.press('Control+Alt+4');self.returned(p,v);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP RETURN VIEWER');self.assertEqual(v.evaluate('()=>window.history.length'),history);self.assertEqual(v.evaluate('()=>services.viewportGridService.getState().activeViewportId'),active);self.assertTrue(v.evaluate('()=>window.opener===null'))
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'returned-editor.png'))
 
  def test_return_02_target_and_modal_refusal(self):

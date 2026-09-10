@@ -12,7 +12,7 @@ class NativeToolbarE2E(ViewerTechNoteE2E):
 
  def test_native_01_keyboard_activate_manipulate_and_return(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);self.tools(f)
-  f.get_by_label('작업 제목',exact=True).fill('KEEP NATIVE TOOL TITLE');p.locator('#findings').fill('KEEP NATIVE REPORT')
+  f.get_by_label('Job Title',exact=True).fill('KEEP NATIVE TOOL TITLE');p.locator('#findings').fill('KEEP NATIVE REPORT')
   before=self.snapshot(f);tools=self.active_tools(f);p.keyboard.press('Control+Alt+9');expect(self.zoom(f)).to_be_focused()
   self.assertEqual(self.snapshot(f),before);self.assertEqual(self.active_tools(f),tools)
   self.assertEqual(self.zoom(f).evaluate('e=>getComputedStyle(e).outlineStyle'),'solid')
@@ -21,7 +21,7 @@ class NativeToolbarE2E(ViewerTechNoteE2E):
   box=f.locator('.cornerstone-canvas').first.bounding_box();x,y=box['x']+box['width']*.5,box['y']+box['height']*.5
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x,y+40,steps=10);p.mouse.up();canvas_ready(f,2)
   after=self.snapshot(f);self.assertNotEqual(after[0]['camera']['parallelScale'],before[0]['camera']['parallelScale']);self.assertEqual(after[1],before[1])
-  p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP NATIVE REPORT');expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP NATIVE TOOL TITLE')
+  p.keyboard.press('Control+Alt+4');expect(p.locator('#findings')).to_be_focused();expect(p.locator('#findings')).to_have_value('KEEP NATIVE REPORT');expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP NATIVE TOOL TITLE')
   p.locator('#reading-native-tools-focus').click();expect(self.zoom(f)).to_be_focused();self.assertEqual(self.snapshot(f),after);self.assertEqual(self.jobs(a),[])
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'native-toolbar-focus.png'))
 

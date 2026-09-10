@@ -18,10 +18,10 @@ class DockPreferencesE2E(ReadingWorkspaceE2E):
  def test_dock_pref_01_move_retains_live_images_and_edits(self):
   from test_viewer_tech_note import ViewerTechNoteE2E
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
-  p.locator('#findings').fill('KEEP DOCK POSITION REPORT');f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP DOCK POSITION VIEWER')
+  p.locator('#findings').fill('KEEP DOCK POSITION REPORT');f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('Job Title',exact=True).fill('KEEP DOCK POSITION VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   f.locator('#kin-dock-placement').select_option('top');canvas_ready(f,2);self.bounds(f,True)
-  expect(f.get_by_label('작업 제목',exact=True)).to_have_value('KEEP DOCK POSITION VIEWER');expect(p.locator('#findings')).to_have_value('KEEP DOCK POSITION REPORT');self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
+  expect(f.get_by_label('Job Title',exact=True)).to_have_value('KEEP DOCK POSITION VIEWER');expect(p.locator('#findings')).to_have_value('KEEP DOCK POSITION REPORT');self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'top-tools.png'))
   f.locator('#kin-dock-placement').select_option('bottom');canvas_ready(f,2);self.bounds(f,False);self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before);self.assertEqual(f.url,url);self.assertEqual(self.jobs(a),[])
 

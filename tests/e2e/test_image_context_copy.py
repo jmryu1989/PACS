@@ -13,12 +13,12 @@ class ImageContextCopyE2E(ViewerPatientCopyE2E):
  def item(self,v):return v.locator('[data-cy=context-menu-item]').filter(has_text='환자 ID 복사 ·')
 
  def test_context_01_native_menu_actual_id_prior_and_unsaved_work(self):
-  a,b=self.pair();p,v=self.popup(a);p.locator('#findings').fill('KEEP CONTEXT REPORT');v.get_by_label('작업 제목',exact=True).fill('KEEP CONTEXT TITLE');before=self.snapshot(v);url=v.url
+  a,b=self.pair();p,v=self.popup(a);p.locator('#findings').fill('KEEP CONTEXT REPORT');v.get_by_label('Job Title',exact=True).fill('KEEP CONTEXT TITLE');before=self.snapshot(v);url=v.url
   self.right_click(v);expect(self.item(v)).to_be_visible();expect(self.item(v)).to_contain_text(a.patient_id);expect(self.item(v)).to_contain_text('20260801')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'image-context-copy.png'))
   self.item(v).click();self.copied(v);self.assertEqual(self.clipboard(v),a.patient_id);expect(v.locator('[data-cy=context-menu]')).to_have_count(0)
   self.active(v,b.uid);self.right_click(v,1);expect(self.item(v)).to_contain_text('20260701');self.item(v).click();self.copied(v);self.assertEqual(self.clipboard(v),b.patient_id)
-  expect(p.locator('#findings')).to_have_value('KEEP CONTEXT REPORT');expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP CONTEXT TITLE');self.assertEqual(self.snapshot(v),before);self.assertEqual(v.url,url);self.assertTrue(v.evaluate('()=>window.opener===null'));self.assertEqual(self.jobs(a),[])
+  expect(p.locator('#findings')).to_have_value('KEEP CONTEXT REPORT');expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP CONTEXT TITLE');self.assertEqual(self.snapshot(v),before);self.assertEqual(v.url,url);self.assertTrue(v.evaluate('()=>window.opener===null'));self.assertEqual(self.jobs(a),[])
 
  def test_context_02_menu_ticket_rejects_aba_and_denial_retries(self):
   a,b=self.pair();p,v=self.popup(a);v.evaluate('()=>navigator.clipboard.writeText("KEEP CLIPBOARD")');self.right_click(v);expect(self.item(v)).to_be_visible()

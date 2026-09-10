@@ -14,14 +14,14 @@ class ViewerIdentityE2E(ViewerPatientCopyE2E):
  def label(self,v,uid):return v.locator('.kin-viewer-identity[data-study="'+uid+'"]')
  def test_identity_01_live_current_prior_account_restore_preserves_work(self):
   a,b=self.pair();p,v=self.popup(a);expect(self.label(v,a.uid)).to_contain_text('기준 검사');expect(self.label(v,b.uid)).to_contain_text('비교 검사')
-  p.locator('#findings').fill('KEEP IDENTITY REPORT');v.get_by_label('작업 제목',exact=True).fill('KEEP IDENTITY TITLE');before=self.snapshot(v);self.settings(p)
+  p.locator('#findings').fill('KEEP IDENTITY REPORT');v.get_by_label('Job Title',exact=True).fill('KEEP IDENTITY TITLE');before=self.snapshot(v);self.settings(p)
   for role,size,font,color in [('current','20','mono','warm'),('prior','14','serif','cool')]:
    for field,value in [('size',size),('font',font),('color',color)]:p.locator('#viewer-identity-'+role+'-'+field).select_option(value)
   p.locator('#viewer-identity-prior-name').uncheck();p.locator('#viewer-identity-current-description').check()
   expect(self.label(v,a.uid)).to_have_css('font-size','20px');expect(self.label(v,b.uid)).to_have_css('font-size','14px');expect(self.label(v,a.uid)).to_have_css('color','rgb(255, 241, 214)');expect(self.label(v,b.uid)).to_have_css('color','rgb(215, 243, 255)');expect(self.label(v,b.uid)).not_to_contain_text('SYNTHETIC');expect(self.label(v,b.uid)).to_contain_text(b.patient_id)
   p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.');p.locator('#reading-appearance-close').click()
   f=p.locator('#reading-frame').content_frame;expect(self.label(f,a.uid)).to_have_css('font-size','20px');expect(self.label(f,b.uid)).to_have_css('font-size','14px')
-  self.active(v,b.uid);expect(self.label(v,b.uid)).to_contain_text('비교 검사');expect(self.label(v,a.uid)).to_contain_text('기준 검사');expect(p.locator('#findings')).to_have_value('KEEP IDENTITY REPORT');expect(p.locator('#findings')).to_have_css('font-size','12px');expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP IDENTITY TITLE');self.assertEqual(self.snapshot(v),before)
+  self.active(v,b.uid);expect(self.label(v,b.uid)).to_contain_text('비교 검사');expect(self.label(v,a.uid)).to_contain_text('기준 검사');expect(p.locator('#findings')).to_have_value('KEEP IDENTITY REPORT');expect(p.locator('#findings')).to_have_css('font-size','12px');expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP IDENTITY TITLE');self.assertEqual(self.snapshot(v),before)
   other=self.login();self.workspace(other,a);self.settings(other);expect(other.locator('#viewer-identity-current-size')).to_have_value('12');other.locator('#appearance-account-load').click();expect(other.locator('#viewer-identity-current-size')).to_have_value('20');other.locator('#reading-appearance-close').click();of=other.locator('#reading-frame').content_frame;expect(self.label(of,a.uid)).to_have_css('font-size','20px');expect(self.label(of,b.uid)).not_to_contain_text('SYNTHETIC')
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'current-prior-identity.png'));self.assertEqual(self.jobs(a),[]);self.assertEqual(len(self.versions(a)),1)
  def test_identity_02_wrong_metadata_and_owner_session_clear(self):

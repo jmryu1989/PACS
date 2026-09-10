@@ -19,7 +19,7 @@ class LivePrintE2E(ViewerJobPrintE2E):
    ['ViewerJob','ViewerJobRevision','ViewerItem','ViewerRevision','ViewerRequest','Report','ReportVersion','ReportDraft','AuditLog']}
 
  def live_output(self,p):
-  p.get_by_role('button',name='현재 비교 화면 출력 · 저장 안 함',exact=True).click()
+  p.get_by_role('button',name='Print Current View',exact=True).click()
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=45000)
   return p.frame_locator('#kin-job-print iframe')
 
@@ -55,7 +55,7 @@ class LivePrintE2E(ViewerJobPrintE2E):
   self.choose(p,0);p.keyboard.press('ArrowDown');self.gesture(p,'Zoom',0,30);self.gesture(p,'Pan',30,20)
   for key in ['2','r','h','v','i']:p.keyboard.press(key)
   self.choose(p,1);p.keyboard.press('1');p.wait_for_timeout(200)
-  p.get_by_label('작업 제목',exact=True).fill('미저장 제목');p.get_by_label('작업 설명',exact=True).fill('미저장 설명')
+  p.get_by_label('Job Title',exact=True).fill('미저장 제목');p.get_by_label('Description',exact=True).fill('미저장 설명')
   expected=self.arrays(self.pngs(p));before=self.rows();originals=self.originals();paper=self.live_output(p)
   actual=self.output_arrays(p,paper);self.assertEqual(len(actual),2)
   errors=[]
@@ -76,7 +76,7 @@ class LivePrintE2E(ViewerJobPrintE2E):
   self.assertEqual(self.rows(),before);self.assertEqual(self.originals(),originals)
   self.assertEqual(self.jobs(a),[])
   p.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()
-  expect(p.get_by_label('작업 제목',exact=True)).to_have_value('미저장 제목');expect(p.get_by_label('작업 설명',exact=True)).to_have_value('미저장 설명')
+  expect(p.get_by_label('Job Title',exact=True)).to_have_value('미저장 제목');expect(p.get_by_label('Description',exact=True)).to_have_value('미저장 설명')
   for x,y in zip(expected,self.arrays(self.pngs(p))):self.assertTrue(np.array_equal(x,y))
   print('LIVEPRINT native max RGB errors '+json.dumps(errors)+'; PDF pages '+str(len(pdf.pages)),flush=True)
 

@@ -28,10 +28,10 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   v=opened.value;canvas_ready(v,2);self.ready(v);self.active(v,b.uid)
   layout=v.locator('#kin-viewer-layout')
   if layout.get_attribute('open') is None:layout.locator('summary').first.click()
-  v.get_by_label('작업 제목',exact=True).fill('KEEP POPUP JOB TITLE');before=self.snapshot(v);self.assertEqual(len(before),2);self.assertEqual({x['image'].split('/studies/')[1].split('/')[0] for x in before},{a.uid,b.uid});url=v.url
+  v.get_by_label('Job Title',exact=True).fill('KEEP POPUP JOB TITLE');before=self.snapshot(v);self.assertEqual(len(before),2);self.assertEqual({x['image'].split('/studies/')[1].split('/')[0] for x in before},{a.uid,b.uid});url=v.url
   v.keyboard.press('Control+Alt+6');expect(v.locator('#tech-note-target')).to_contain_text(b.uid);expect(v.locator('#tech-note-text')).to_have_value('PRIOR ACTIVE NOTE');expect(v.locator('#tech-note-save')).to_be_disabled()
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'viewer-tech-note.png'))
-  v.keyboard.press('Escape');expect(v.locator('#tech-note-dialog')).not_to_be_visible();expect(v.get_by_label('작업 제목',exact=True)).to_be_focused();expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP POPUP JOB TITLE');self.assertEqual(self.snapshot(v),before);self.assertEqual(v.url,url);expect(p.locator('#findings')).to_have_value('KEEP POPUP REPORT')
+  v.keyboard.press('Escape');expect(v.locator('#tech-note-dialog')).not_to_be_visible();expect(v.get_by_label('Job Title',exact=True)).to_be_focused();expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP POPUP JOB TITLE');self.assertEqual(self.snapshot(v),before);self.assertEqual(v.url,url);expect(p.locator('#findings')).to_have_value('KEEP POPUP REPORT')
   self.active(v,a.uid);self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('CURRENT NOTE');v.locator('#tech-note-close').click();expect(v.locator('#kin-viewer-note-open')).to_be_focused();self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
  def test_viewer_note_02_technician_save_conflict_and_history(self):
   a=self.ct('VIEWER-NOTE-'+uuid.uuid4().hex[:10],'note','20260801');v=self.launch(self.login('tech'),[a]);self.ready(v);self.open_note(v);expect(v.locator('#tech-note-text')).to_be_editable();v.locator('#tech-note-text').fill('STANDALONE TECH NOTE');v.locator('#tech-note-save').click();expect(v.locator('#tech-note-status')).to_contain_text('저장되었습니다. v1')
@@ -69,11 +69,11 @@ class ViewerTechNoteE2E(ReadingNoteE2E):
   expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
   layout=v.locator('#kin-viewer-layout')
   if layout.get_attribute('open') is None:layout.locator('summary').first.click()
-  v.get_by_label('작업 제목',exact=True).fill('KEEP RETRY JOB TITLE');before=self.snapshot(v);url=v.url
+  v.get_by_label('Job Title',exact=True).fill('KEEP RETRY JOB TITLE');before=self.snapshot(v);url=v.url
   v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-status')).to_contain_text('다시 시도하세요')
   expect(v.locator('#kin-viewer-note-retry')).to_be_focused();self.assertEqual(self.snapshot(v),before)
   fail[0]=False;v.locator('#kin-viewer-note-retry').click();expect(v.locator('#kin-viewer-note-open')).to_be_focused();expect(v.locator('#kin-viewer-note-open')).to_be_enabled()
-  self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('작업 제목',exact=True)).to_have_value('KEEP RETRY JOB TITLE')
+  self.assertEqual(v.url,url);self.assertEqual(self.snapshot(v),before);expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP RETRY JOB TITLE')
   self.open_note(v);expect(v.locator('#tech-note-text')).to_have_value('RECONNECTED NOTE');v.locator('#tech-note-close').click()
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
   expect(v.locator('#kin-viewer-note-open')).to_be_disabled();expect(v.locator('#kin-viewer-note-retry')).to_be_disabled()

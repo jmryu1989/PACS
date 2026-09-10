@@ -83,12 +83,12 @@ class FavoriteViewE2E(ViewerJobsE2E):
   a,b,job,s,fid=self.prepare_favorite();self.change(self.body(s,'view',fid,uid=a.uid,jobId=job['id']))
   p=self.login();self.select(p,b);p.locator('#findings').fill('KEEP DIRTY PREVIOUS REPORT');p.locator('#m-reading').click()
   expect(p.locator('#reading-frame')).to_be_visible();frame=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,1)
-  frame.get_by_role('button',name='Comparison',exact=True).click();frame.get_by_label('작업 제목',exact=True).fill('KEEP UNSAVED PREVIOUS VIEW')
+  frame.get_by_role('button',name='Comparison',exact=True).click();frame.get_by_label('Job Title',exact=True).fill('KEEP UNSAVED PREVIOUS VIEW')
   src=p.locator('#reading-frame').get_attribute('src');p.get_by_role('button',name='Worklist',exact=True).click();p.locator('#favorite-open').click()
   p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(p.locator('#reading-status')).to_contain_text('저장하지 않은 작업')
-  self.assertEqual(p.locator('#reading-frame').get_attribute('src'),src);expect(frame.get_by_label('작업 제목',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW')
+  self.assertEqual(p.locator('#reading-frame').get_attribute('src'),src);expect(frame.get_by_label('Job Title',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW')
   p.get_by_role('button',name='Return to Previous Viewer',exact=True).click();expect(p.locator('#findings')).to_have_value('KEEP DIRTY PREVIOUS REPORT')
-  expect(frame.get_by_label('작업 제목',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW');self.assertEqual(len(self.jobs(b)),0)
+  expect(frame.get_by_label('Job Title',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW');self.assertEqual(len(self.jobs(b)),0)
 
 
  def test_favorite_view_05_late_view_after_session_end_is_discarded(self):
