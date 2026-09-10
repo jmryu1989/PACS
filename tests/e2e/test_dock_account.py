@@ -10,10 +10,10 @@ from test_prior_selection import canvas_ready
 class DockAccountE2E(AppearanceAccountE2E):
  def saved(self,p):expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
  def test_dock_account_01_cross_browser_explicit_restore_and_live_work(self):
-  a,b=self.pair();p=self.login();f=self.workspace(p,a);f.get_by_role('button',name='비교 작업·배치',exact=True).click();self.ready(p)
+  a,b=self.pair();p=self.login();f=self.workspace(p,a);f.get_by_role('button',name='Comparison',exact=True).click();self.ready(p)
   p.locator('#reading-dock-placement').select_option('top');p.locator('#reading-font-current').select_option('mono');p.locator('#appearance-account-save').click();self.saved(p)
   saved=p.request.get(self.stack.api+'/reading-appearance').json()['sizes'];self.assertEqual(saved['version'],6);self.assertEqual(saved['dock'],dict(version=2,placement='top',panel=1,autoHide=False))
-  other=self.login();g=self.workspace(other,a);g.get_by_role('button',name='비교 작업·배치',exact=True).click();g.get_by_label('작업 제목',exact=True).fill('KEEP ROAM DOCK TITLE');other.locator('#findings').fill('KEEP ROAM REPORT')
+  other=self.login();g=self.workspace(other,a);g.get_by_role('button',name='Comparison',exact=True).click();g.get_by_label('작업 제목',exact=True).fill('KEEP ROAM DOCK TITLE');other.locator('#findings').fill('KEEP ROAM REPORT')
   before=ViewerTechNoteE2E.snapshot(self,g);self.assertEqual(len(before),2);self.ready(other);expect(g.locator('#kin-dock-placement')).to_have_value('bottom')
   other.locator('#appearance-account-load').click();expect(other.locator('#appearance-account-status')).to_have_text('계정의 표시 설정을 불러왔습니다.');expect(g.locator('#kin-dock-placement')).to_have_value('top');expect(other.locator('#reading-font-current')).to_have_value('mono');canvas_ready(g,2)
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,g),before);expect(g.get_by_label('작업 제목',exact=True)).to_have_value('KEEP ROAM DOCK TITLE');expect(other.locator('#findings')).to_have_value('KEEP ROAM REPORT');self.assertEqual(self.jobs(a),[]);expect(other.locator('#reading-dock-status')).not_to_contain_text('다른 창')

@@ -36,9 +36,9 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     #kin-workspace-dock label { max-width: 650px; display: block; }
   `;
   d.head.append(style);
-  const dock = d.createElement('section'); dock.id = 'kin-workspace-dock'; dock.setAttribute('aria-label', '영상 도구');
-  const nav = d.createElement('nav'); nav.setAttribute('aria-label', '영상 도구 패널'); dock.append(nav);
-  const buttons = ['측정·주석', '비교 작업·배치'].map((label, i) => {
+  const dock = d.createElement('section'); dock.id = 'kin-workspace-dock'; dock.setAttribute('aria-label', 'Viewer Tools');
+  const nav = d.createElement('nav'); nav.setAttribute('aria-label', 'Viewer Tool Panels'); dock.append(nav);
+  const buttons = ['Measurements', 'Comparison'].map((label, i) => {
     const b = d.createElement('button'); b.type = 'button'; b.textContent = label;
     b.setAttribute('aria-controls', panels[i].id); b.setAttribute('aria-expanded', 'false');
     b.onclick = () => {
@@ -48,15 +48,15 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     };
     nav.append(b); return b;
   });
-  const label=d.createElement('label');label.textContent='도구 위치 ';nav.append(label);
-  const location=d.createElement('select');location.id='kin-dock-placement';location.setAttribute('aria-label','도구 영역 위치');label.append(location);
-  for(const [value,text] of [['bottom','아래'],['top','위']]){const option=d.createElement('option');option.value=value;option.textContent=text;location.append(option);}
+  const label=d.createElement('label');label.textContent='Dock Position ';nav.append(label);
+  const location=d.createElement('select');location.id='kin-dock-placement';location.setAttribute('aria-label','Dock Position');label.append(location);
+  for(const [value,text] of [['bottom','Bottom'],['top','Top']]){const option=d.createElement('option');option.value=value;option.textContent=text;location.append(option);}
   location.onchange=()=>{if(!live()){end();return;}if(!['bottom','top'].includes(location.value))return;placement=location.value;apply();save();};
-  const autoLabel=d.createElement('label');autoLabel.textContent='자동 숨김 ';nav.append(autoLabel);
-  const auto=d.createElement('input');auto.type='checkbox';auto.id='kin-dock-autohide';auto.setAttribute('aria-label','도구 패널 자동 숨김');autoLabel.append(auto);
+  const autoLabel=d.createElement('label');autoLabel.textContent='Auto-hide ';nav.append(autoLabel);
+  const auto=d.createElement('input');auto.type='checkbox';auto.id='kin-dock-autohide';auto.setAttribute('aria-label','Auto-hide Panels');autoLabel.append(auto);
   autoLabel.title='영상 화면 안에서 도구 밖 조작을 마치면 패널을 접습니다. 버튼이나 키보드로 다시 열 수 있습니다.';
   auto.onchange=()=>{if(!live()){end();return;}autoHide=auto.checked;autoHidden=false;apply();save();};
-  const reset=d.createElement('button');reset.type='button';reset.id='kin-dock-reset';reset.textContent='도구 영역 초기화';nav.append(reset);
+  const reset=d.createElement('button');reset.type='button';reset.id='kin-dock-reset';reset.textContent='Reset Dock';nav.append(reset);
   reset.onclick=()=>{if(!live()){end();return;}placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();save();};
   const status=d.createElement('span');status.id='kin-dock-preference-status';status.setAttribute('role','status');status.textContent=initialMessage;nav.append(status);
   function resizeVisible(){

@@ -10,10 +10,10 @@ class ToolFocusE2E(ReadingWorkspaceE2E):
   from test_viewer_tech_note import ViewerTechNoteE2E
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP TOOL FOCUS REPORT')
-  f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP TOOL FOCUS VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP TOOL FOCUS VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   p.locator('#findings').focus();p.keyboard.press('Control+Alt+7')
-  measurement=f.get_by_role('button',name='측정·주석',exact=True);jobs=f.get_by_role('button',name='비교 작업·배치',exact=True)
+  measurement=f.get_by_role('button',name='Measurements',exact=True);jobs=f.get_by_role('button',name='Comparison',exact=True)
   expect(measurement).to_be_focused();expect(jobs).to_have_attribute('aria-expanded','true')
   self.assertEqual(ViewerTechNoteE2E.snapshot(self,f),before)
   p.keyboard.press('Enter');expect(measurement).to_have_attribute('aria-expanded','true')

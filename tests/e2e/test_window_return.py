@@ -54,7 +54,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
    self.assertEqual(result,expected);expect(target).to_be_focused();expect(p.locator('#reading-target')).to_contain_text(a.uid)
 
  def test_return_06_visible_feedback_and_rebind_cancels_pending(self):
-  a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);v.get_by_role('button',name='측정·주석',exact=True).click();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4')
+  a,b=self.pair();p,f,v=self.popup(a);self.active(v,a.uid);v.get_by_role('button',name='Measurements',exact=True).click();p.locator('#reading-appearance-open').click();v.keyboard.press('Control+Alt+4')
   expect(v.locator('#kin-viewer-return-status')).to_contain_text('대화상자');expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-layout')).not_to_be_visible();expect(v.locator('#kin-viewer-history')).to_be_visible();p.locator('#reading-appearance-close').click()
   p.evaluate("()=>{window.syntheticReplies=[];const send=BroadcastChannel.prototype.postMessage;window.syntheticSend=send;BroadcastChannel.prototype.postMessage=function(m){if(m.type==='result')window.syntheticReplies.push([this,m]);else send.call(this,m)}}")
   v.keyboard.press('Control+Alt+4');p.wait_for_function('()=>window.syntheticReplies.length===1');p.get_by_role('button',name='Open Viewer Window',exact=True).click();expect(v.locator('#kin-viewer-return-status')).to_contain_text('이전 복귀 요청은 취소');expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-busy','false')

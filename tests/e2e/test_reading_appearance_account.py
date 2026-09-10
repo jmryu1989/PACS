@@ -15,7 +15,7 @@ class AppearanceAccountE2E(ReadingAppearanceE2E):
   from test_viewer_tech_note import ViewerTechNoteE2E
   a,b=self.pair();p=self.login();f=self.workspace(p,a)
   p.locator('#findings').fill('KEEP ACCOUNT FONT REPORT')
-  f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP ACCOUNT FONT VIEWER')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP ACCOUNT FONT VIEWER')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);self.ready(p)
   p.locator('#reading-font-current').select_option('mono')
   p.locator('#reading-color-current').select_option('warm')

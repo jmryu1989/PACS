@@ -24,7 +24,7 @@ window.KinReadingAppearance = function (options) {
   const dockKey=initialOwner?'kin-viewer-dock:v1:'+initialOwner:null,normalizeDock=window.KinViewerWorkspaceDock.normalize;
   let dockValue={version:2,placement:'bottom',panel:-1,autoHide:false};
   const toolbarIds=['MeasurementTools','Zoom','Pan','TrackballRotate','WindowLevel','Capture','Layout','Crosshairs','MoreTools'];
-  const toolbarLabels=['측정 도구','확대·축소','이동','3D 회전','밝기·대조','영상 캡처','영상 배치','교차선','추가 도구'];
+  const toolbarLabels=['Measurements','Zoom','Pan','3D Rotate','Window / Level','Capture','Layout','Crosshairs','More Tools'];
   const toolbarKey=initialOwner?'kin-viewer-toolbar:v1:'+initialOwner:null;
   const defaultToolbar=()=>({version:1,order:toolbarIds.slice(),hidden:[]});
   const normalizeToolbar=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='hidden,order,version'&&v.version===1&&Array.isArray(v.order)&&v.order.length===toolbarIds.length&&new Set(v.order).size===toolbarIds.length&&v.order.every(id=>toolbarIds.includes(id))&&Array.isArray(v.hidden)&&new Set(v.hidden).size===v.hidden.length&&v.hidden.every(id=>toolbarIds.includes(id)&&id!=='Zoom')?{version:1,order:v.order.slice(),hidden:v.hidden.slice()}:null;
@@ -46,52 +46,52 @@ window.KinReadingAppearance = function (options) {
   `;document.head.append(style);
   const dialog=document.createElement('dialog');dialog.id='reading-appearance-dialog';dialog.setAttribute('aria-labelledby','reading-appearance-title');
   const element=(tag,text,parent)=>{const e=document.createElement(tag);e.textContent=text;if(parent)parent.append(e);return e;};
-  const title=element('h2','글자·도구 설정',dialog);title.id='reading-appearance-title';
+  const title=element('h2','Appearance & Tools',dialog);title.id='reading-appearance-title';
   element('p','글자 크기·글꼴·색과 도구 위치를 계정에 저장하고 다른 기기에서 함께 불러올 수 있습니다. 이전 설정에 없는 항목은 현재 값을 유지합니다.',dialog);
   const fields={};
-  for(const [name,label] of [['list','검사 목록'],['current','작성 중 판독문'],['prior','과거 판독문']]){
+  for(const [name,label] of [['list','Worklist'],['current','Current Report'],['prior','Prior Report']]){
     const row=element('label',label,dialog),select=element('select','',row);select.id='reading-text-'+name;
     for(const size of sizes){const option=element('option',size+' px',select);option.value=String(size);}
     fields[name]=select;select.onchange=()=>{if(!live()){end();return;}value={...value,[name]:Number(select.value)};apply();save();};
   }
-  const fontSection=element('fieldset','',dialog);element('legend','글꼴',fontSection);
+  const fontSection=element('fieldset','',dialog);element('legend','Font',fontSection);
   element('p','설치되지 않은 글꼴은 기기의 대체 글꼴로 표시합니다.',fontSection);
   const fontFields={};
-  for(const [name,label] of [['list','검사 목록 글꼴'],['current','작성 중 판독문 글꼴'],['prior','과거 판독문 글꼴']]){
+  for(const [name,label] of [['list','Worklist Font'],['current','Current Report Font'],['prior','Prior Report Font']]){
     const row=element('label',label,fontSection),select=element('select','',row);select.id='reading-font-'+name;
-    for(const [id,text] of [['default','기본'],['sans','고딕'],['serif','명조'],['mono','고정폭']]){const option=element('option',text,select);option.value=id;}
+    for(const [id,text] of [['default','Default'],['sans','Sans Serif'],['serif','Serif'],['mono','Monospace']]){const option=element('option',text,select);option.value=id;}
     fontFields[name]=select;select.onchange=()=>{if(!live()){end();return;}const clean=normalizeFonts({...fontValue,[name]:select.value});if(!clean)return;fontValue=clean;applyFonts();saveFonts();};
   }
   const fontStatus=element('p','',fontSection);fontStatus.id='reading-font-status';fontStatus.setAttribute('role','status');
-  const fontReset=element('button','기본 글꼴',fontSection);fontReset.type='button';fontReset.id='reading-font-reset';
+  const fontReset=element('button','Reset Fonts',fontSection);fontReset.type='button';fontReset.id='reading-font-reset';
   fontReset.onclick=()=>{if(!live()){end();return;}fontValue=defaultFonts();applyFonts();saveFonts();};
-  const colorSection=element('fieldset','',dialog);element('legend','글자색',colorSection);
+  const colorSection=element('fieldset','',dialog);element('legend','Text Color',colorSection);
   element('p','기본 글자색만 바꿉니다. 검사 상태색과 선택 표시는 유지합니다.',colorSection);
   const colorFields={};
-  for(const [name,label] of [['list','검사 목록 글자색'],['current','작성 중 판독문 글자색'],['prior','과거 판독문 글자색']]){
+  for(const [name,label] of [['list','Worklist Text Color'],['current','Current Report Text Color'],['prior','Prior Report Text Color']]){
     const row=element('label',label,colorSection),select=element('select','',row);select.id='reading-color-'+name;
-    for(const [id,text] of [['default','기본'],['warm','따뜻한 흰색'],['cool','차가운 흰색'],['white','흰색']]){const option=element('option',text,select);option.value=id;}
+    for(const [id,text] of [['default','Default'],['warm','Warm White'],['cool','Cool White'],['white','White']]){const option=element('option',text,select);option.value=id;}
     colorFields[name]=select;select.onchange=()=>{if(!live()){end();return;}const clean=normalizeColors({...colorValue,[name]:select.value});if(!clean)return;colorValue=clean;applyColors();saveColors();};
   }
   const colorStatus=element('p','',colorSection);colorStatus.id='reading-color-status';colorStatus.setAttribute('role','status');
-  const colorReset=element('button','기본 글자색',colorSection);colorReset.type='button';colorReset.id='reading-color-reset';
+  const colorReset=element('button','Reset Text Colors',colorSection);colorReset.type='button';colorReset.id='reading-color-reset';
   colorReset.onclick=()=>{if(!live()){end();return;}colorValue=defaultColors();applyColors();saveColors();};
-  const dockSection=element('fieldset','',dialog);element('legend','영상 도구 영역',dockSection);
+  const dockSection=element('fieldset','',dialog);element('legend','Viewer Tool Dock',dockSection);
   element('p','현재 통합 영상과 다음 영상 창에 적용합니다. 이미 열린 다른 영상 창은 유지합니다.',dockSection);
   const dockFields={};
-  for(const [name,label,choices] of [['placement','도구 위치',[['bottom','아래'],['top','위']]],['panel','열 도구',[['-1','접기'],['0','측정·주석'],['1','비교 작업·배치']]]]){
+  for(const [name,label,choices] of [['placement','Dock Position',[['bottom','Bottom'],['top','Top']]],['panel','Open Panel',[['-1','Collapsed'],['0','Measurements'],['1','Comparison']]]]){
     const row=element('label',label,dockSection),select=element('select','',row);select.id='reading-dock-'+name;dockFields[name]=select;
     for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
     select.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,[name]:name==='panel'?Number(select.value):select.value});};
   }
-  const autoLabel=element('label','도구 패널 자동 숨김 ',dockSection),autoInput=element('input','',autoLabel);autoInput.type='checkbox';autoInput.id='reading-dock-autohide';dockFields.autoHide=autoInput;
+  const autoLabel=element('label','Auto-hide Panels ',dockSection),autoInput=element('input','',autoLabel);autoInput.type='checkbox';autoInput.id='reading-dock-autohide';dockFields.autoHide=autoInput;
   autoInput.onchange=()=>{if(!live()){end();return;}setDock({...dockValue,autoHide:autoInput.checked});};
   const dockStatus=element('p','',dockSection);dockStatus.id='reading-dock-status';dockStatus.setAttribute('role','status');
-  const toolbarSection=element('fieldset','',dialog);element('legend','기본 영상 도구 모음',toolbarSection);
+  const toolbarSection=element('fieldset','',dialog);element('legend','Viewer Toolbar',toolbarSection);
   element('p','영상의 비교 작업·배치 패널에서 순서·표시를 편집합니다. 계정에서 불러오면 현재 통합 영상과 다음 영상 창에 적용하며 열린 다른 창은 유지합니다.',toolbarSection);
   const toolbarSummary=element('p','',toolbarSection);toolbarSummary.id='reading-toolbar-summary';
   const toolbarStatus=element('p','',toolbarSection);toolbarStatus.id='reading-toolbar-status';toolbarStatus.setAttribute('role','status');
-  const toolbarReset=element('button','기본 도구 순서·표시',toolbarSection);toolbarReset.type='button';toolbarReset.id='reading-toolbar-reset';toolbarReset.onclick=()=>setToolbar(defaultToolbar());
+  const toolbarReset=element('button','Reset Toolbar',toolbarSection);toolbarReset.type='button';toolbarReset.id='reading-toolbar-reset';toolbarReset.onclick=()=>setToolbar(defaultToolbar());
   function showToolbar(){toolbarSummary.textContent=toolbarValue.order.filter(id=>!toolbarValue.hidden.includes(id)).map(id=>toolbarLabels[toolbarIds.indexOf(id)]).join(' → ');}
   function setToolbar(next){
     const clean=normalizeToolbar(next);if(!live()||!clean)return false;
@@ -104,16 +104,16 @@ window.KinReadingAppearance = function (options) {
   function toolbarChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=normalizeToolbar(e.detail.value);if(!clean)return;if(e.type==='kin-toolbar-preference-changed'||JSON.stringify(clean)!==JSON.stringify(toolbarValue))generation++;toolbarValue=clean;showToolbar();}
   window.addEventListener('kin-toolbar-preference-changed',toolbarChanged);window.addEventListener('kin-toolbar-preference-mounted',toolbarChanged);
   const viewer=window.KinViewerIdentity;let viewerValue=viewer.read(initialOwner);
-  const viewerFields={},viewerSection=element('fieldset','',dialog);element('legend','영상 식별 표시',viewerSection);
+  const viewerFields={},viewerSection=element('fieldset','',dialog);element('legend','Image Identification',viewerSection);
   element('p','기준 검사와 비교 검사의 글자를 따로 설정합니다. 환자 ID와 기준/비교 표시는 항상 유지합니다. 설치되지 않은 글꼴은 기기의 대체 글꼴을 사용합니다.',viewerSection);
-  for(const [role,label] of [['current','기준 영상'],['prior','비교 영상']]){
+  for(const [role,label] of [['current','Current Image'],['prior','Prior Image']]){
     const group=element('fieldset','',viewerSection);element('legend',label,group);viewerFields[role]={};
-    for(const [field,caption,choices] of [['size','크기',[12,14,16,18,20].map(n=>[String(n),n+' px'])],['font','글꼴',[['default','기본'],['sans','고딕'],['serif','명조'],['mono','고정폭']]],['color','글자색',[['default','기본'],['warm','따뜻한 흰색'],['cool','차가운 흰색'],['white','흰색']]]]){
+    for(const [field,caption,choices] of [['size','Size',[12,14,16,18,20].map(n=>[String(n),n+' px'])],['font','Font',[['default','Default'],['sans','Sans Serif'],['serif','Serif'],['mono','Monospace']]],['color','Text Color',[['default','Default'],['warm','Warm White'],['cool','Cool White'],['white','White']]]]){
       const row=element('label',label+' '+caption,group),select=element('select','',row);select.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=select;
       for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
       select.onchange=()=>changeViewer(role,field,field==='size'?Number(select.value):select.value);
     }
-    for(const [field,caption] of [['name','환자 이름'],['date','검사일'],['description','검사 설명']]){const row=element('label',label+' '+caption,group),input=element('input','',row);input.type='checkbox';input.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=input;input.onchange=()=>changeViewer(role,field,input.checked);}
+    for(const [field,caption] of [['name','Patient Name'],['date','Study Date'],['description','Study Description']]){const row=element('label',label+' '+caption,group),input=element('input','',row);input.type='checkbox';input.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=input;input.onchange=()=>changeViewer(role,field,input.checked);}
   }
   const viewerStatus=element('p','',viewerSection);viewerStatus.id='viewer-identity-status';viewerStatus.setAttribute('role','status');
   function showViewer(){for(const role of ['current','prior'])for(const [field,e] of Object.entries(viewerFields[role])){if(e.type==='checkbox')e.checked=viewerValue[role][field];else e.value=String(viewerValue[role][field]);}}
@@ -135,7 +135,7 @@ window.KinReadingAppearance = function (options) {
   const status=element('p','',dialog);status.id='reading-appearance-status';status.setAttribute('role','status');
   const account=element('section','계정 저장 기능을 연결하지 못했습니다. 현재 브라우저 설정은 사용할 수 있습니다.',dialog);
   account.id='reading-appearance-account';account.style.cssText='border-top:1px solid #819bb7;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px';
-  const footer=element('footer','',dialog),reset=element('button','기본 크기',footer),close=element('button','닫기',footer);
+  const footer=element('footer','',dialog),reset=element('button','Reset Sizes',footer),close=element('button','Close',footer);
   reset.type=close.type='button';reset.id='reading-appearance-reset';close.id='reading-appearance-close';
   document.body.append(dialog);
   // An absent global preference must not silently replace saved column typography.

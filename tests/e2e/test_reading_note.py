@@ -15,7 +15,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   original=self.originals();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   button=p.locator('#reading-tech-note');expect(button).to_have_text('Image Tech Note · 있음')
   p.locator('#findings').fill('UNSAVED REPORT NOTE ROUNDTRIP')
-  f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('UNSAVED VIEWER NOTE ROUNDTRIP')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('UNSAVED VIEWER NOTE ROUNDTRIP')
   view="() => cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports().map(v=>({image:v.getCurrentImageId?.(),camera:v.getCamera(),voi:v.getProperties().voiRange})))"
   before=f.evaluate(view);url=f.url
   p.keyboard.press('Control+Alt+6')
@@ -75,7 +75,7 @@ class ReadingNoteE2E(ReadingWorkspaceE2E):
   f=self.workspace(p,a);expect(p.locator('#reading-tech-note')).to_be_disabled()
   p.locator('#findings').fill('KEEP REPORT WITHOUT NOTES');p.keyboard.press('Control+Alt+2')
   expect(p.locator('#reading-frame')).to_be_focused();canvas_ready(f,2)
-  f.get_by_role('button',name='비교 작업·배치',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP VIEWER THROUGH ASSET RETRY')
+  f.get_by_role('button',name='Comparison',exact=True).click();f.get_by_label('작업 제목',exact=True).fill('KEEP VIEWER THROUGH ASSET RETRY')
   before=ViewerTechNoteE2E.snapshot(self,f);self.assertEqual(len(before),2);url=f.url
   f.evaluate('() => window.noteRetryDocument = document')
   retry=p.locator('#reading-note-retry');expect(retry).to_be_enabled();retry.click()
