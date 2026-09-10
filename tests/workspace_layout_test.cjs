@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const layout = require('../worklist-v0/hpacs-lite/workspace-layout.js');
+const reading = require('../worklist-v0/hpacs-lite/reading-panel-layout.js');
 const session = { state: 'approved', sub: 'account-a', institution: 'hospital-a', user: 'old-name' };
 const record = () => ({ version: 1, mode: 'portrait', portrait: { main: 350, top: 200 }, landscape: { main: 700 } });
 function store() {
@@ -73,4 +74,27 @@ test('DATA: serialization is a detached whitelist, never the caller state', () =
   assert.equal(layout.write(s,k,{ ...source, report: 'private' }), false);
   assert.equal(s.getItem(k),before);
   assert.deepEqual(Object.keys(JSON.parse(before)).sort(),['landscape','mode','portrait','version']);
+});
+
+test('READING: v2 roundtrip isolates owners and loading legacy layouts preserves integrated choices', () => {
+  const s = store(), k = layout.key(session), base = record();
+  const panels = { ...reading.defaults(), reportWidth: 570, relatedHidden: true };
+  const v2 = layout.withReading(base, panels);
+  assert.equal(v2.version, 2);
+  assert.equal(layout.write(s, k, v2), true);
+  panels.reportWidth = 600;
+  assert.equal(layout.read(s, k).state.reading.reportWidth, 570);
+  assert.equal(layout.read(s, layout.key({ ...session, sub: 'b' })).status, 'empty');
+  const legacy = { ...record(), mode: 'landscape' };
+  const merged = layout.mergeLoaded(v2, legacy);
+  assert.equal(merged.mode, 'landscape');
+  assert.deepEqual(merged.reading, v2.reading);
+  assert.deepEqual(layout.mergeLoaded(base, legacy), legacy);
+  assert.deepEqual(layout.mergeLoaded(v2, layout.withReading(base, reading.defaults())).reading, reading.defaults());
+  for (const invalid of [{ ...v2, reading: null }, { ...v2, reading: { ...v2.reading, patient: 'not-allowed' } },
+    { ...v2, reading: { ...v2.reading, relatedHidden: 1 } }, { ...v2, version: 1 }]) {
+    assert.equal(layout.normalize(invalid), null);
+    assert.equal(layout.write(s, k, invalid), false);
+    assert.deepEqual(layout.read(s, k).state, v2);
+  }
 });

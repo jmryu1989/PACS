@@ -16,7 +16,7 @@
         <nav class="sfm-navigation" aria-label="Saved search navigation">
           <button type="button" id="sfm-prev" aria-controls="sfm-fields">Previous</button>
           <button type="button" id="sfm-next" aria-controls="sfm-fields">Next</button>
-        </nav><p id="sfm-position" role="status" aria-live="polite"></p>
+        </nav><p id="sfm-position" role="status" aria-live="polite" tabindex="-1"></p>
         <div id="sfm-list"></div><button type="button" id="sfm-reload">Reload List</button>
       </aside><form id="sfm-form"><fieldset id="sfm-fields">
         <legend id="sfm-heading">New Search</legend>
@@ -58,11 +58,11 @@
         <button type="submit" form="sfm-form" id="sfm-save">Save</button>
         <button type="submit" form="sfm-form" id="sfm-save-apply">Save &amp; Apply</button>
       </footer>
-      <p id="sfm-status" role="status" aria-live="polite"></p>`;
+      <p id="sfm-status" role="status" aria-live="polite" tabindex="-1"></p>`;
     document.body.append(dialog);
     const $ = id => dialog.querySelector('#sfm-' + id);
     let selected = null, source = {}, baseline = '', busy = false, opener = null, editable = true;
-    let copying = false, visibleNames = [], missingName = null;
+    let copying = false, visibleNames = [], missingName = null, cursor = null;
     const collapsed = new Set();
     const copy = value => JSON.parse(JSON.stringify(value));
     const compound = KinCompoundFilter;
@@ -100,6 +100,14 @@
     }
     const dirty = () => editable && JSON.stringify(value()) !== baseline;
     const mayLeave = () => !busy && (!dirty() || confirm('저장하지 않은 검색 조건 변경을 버릴까요?'));
+    function focusAvailable(...targets) {
+      if (!dialog.open) return;
+      for (const target of targets) {
+        if (!target?.isConnected || !dialog.contains(target) || target.matches(':disabled') || !target.getClientRects().length) continue;
+        target.focus();
+        if (document.activeElement === target) return;
+      }
+    }
     function lock(on) {
       busy = on;
       dialog.setAttribute('aria-busy', String(on));
@@ -215,6 +223,8 @@
     }
     function edit(filter, isNew = false) {
       copying = false; missingName = null;
+      // Invalid stored criteria still occupy a list position, but cannot be applied.
+      cursor = isNew ? null : filter?.name ?? null;
       // Reject unsupported stored modes instead of presenting an editable substitute.
       if (!filter || !Array.isArray(options.columns[filter.mode])) {
         editable = false; selected = null; $('fields').hidden = true; lock(busy); list();
@@ -265,7 +275,7 @@
       function searchButton(f) {
         const button = document.createElement('button'); button.type = 'button'; button.dataset.name = f.name;
         button.disabled = busy;
-        button.setAttribute('aria-pressed', String(f.name === selected));
+        button.setAttribute('aria-pressed', String(f.name === cursor));
         button.setAttribute('aria-label', `${f.isDefault ? 'Default Search: ' : ''}${f.name}`);
         button.textContent = `${f.isDefault ? '⚑ ' : ''}${f.name}`;
         if (typeof f.description === 'string' && f.description) {
@@ -303,30 +313,43 @@
         }
         return true;
       }).map(button => button.dataset.name);
-      const index = visibleNames.indexOf(selected);
+      const index = visibleNames.indexOf(cursor);
       $('prev').disabled = busy || index <= 0;
       $('next').disabled = busy || index + 1 >= visibleNames.length;
       $('position').textContent = index >= 0 ? `${index + 1} / ${visibleNames.length}`
-        : `${selected === null ? (editable ? 'New Search' : 'No Selection') : 'Not in Results'} · ${visibleNames.length} searches`;
+        : `${cursor === null ? (editable ? 'New Search' : 'No Selection') : 'Not in Results'} · ${visibleNames.length} searches`;
     }
-    function selectSearch(name) {
-      if (mayLeave() && edit(named(name))) { status(''); $('quick').focus(); }
+    function selectSearch(name, focusTarget = null) {
+      if (!mayLeave()) return;
+      const valid = edit(named(name));
+      if (valid) status('');
+      if (focusTarget) focusAvailable(focusTarget, $('next'), $('prev'), $('position'));
+      else if (valid) $('quick').focus();
+      else focusAvailable([...$('list').querySelectorAll('button[data-name]')].find(button => button.dataset.name === cursor), $('reload'));
     }
     function moveSelection(direction) {
       if (busy) return;
-      const index = visibleNames.indexOf(selected), target = index + direction;
-      if (target >= 0 && target < visibleNames.length) selectSearch(visibleNames[target]);
+      const index = visibleNames.indexOf(cursor), target = index + direction;
+      if (target >= 0 && target < visibleNames.length) selectSearch(visibleNames[target], direction < 0 ? $('prev') : $('next'));
     }
     async function run(action) {
       if (busy) return;
+      const requestFocus = document.activeElement, requestFocusId = requestFocus?.id;
       lock(true); status('처리 중…');
+      // Disabling the active control can blur it to the document body. Keep busy
+      // keyboard events inside the modal until the original control is available.
+      focusAvailable($('status'));
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       try { await action(controller.signal); }
       catch (error) { status(controller.signal.aborted
         ? '응답 시간이 초과되었습니다. 입력은 유지했습니다. 서버 처리 여부는 목록을 다시 불러와 확인하세요.'
         : error.message || '처리하지 못했습니다. 입력을 유지했습니다.', true); }
-      finally { clearTimeout(timeout); lock(false); }
+      finally {
+        clearTimeout(timeout); lock(false);
+        focusAvailable(requestFocus, requestFocusId ? document.getElementById(requestFocusId) : null,
+          requestFocus === $('delete') ? $('new') : $('save'), $('reload'), $('status'));
+      }
     }
     $('form').addEventListener('submit', e => {
       e.preventDefault(); if (busy || !editable || !$('form').reportValidity()) return;
@@ -353,17 +376,13 @@
           if (edit(saved)) status(`"${saved.name}" 저장 완료. 목록에 적용하려면 ‘Apply Saved’를 누르세요.`);
           return;
         }
-        // The save already succeeded. Keep the form intact if applying fails,
-        // but retry as an edit so a newly created copy cannot conflict with itself.
-        selected = saved.name; copying = false; $('name').readOnly = true;
-        $('heading').textContent = 'Edit Saved Search';
-        $('name-hint').textContent = '검색은 저장됐습니다. 조건을 바꾸고 ‘Save’를 누르세요.';
-        list();
         try {
           if (signal.aborted) throw new Error('응답 시간이 초과되었습니다.');
           if (await options.apply(saved) === false) throw new Error('저장 검색을 적용하지 못했습니다.');
         } catch (error) {
-          status(`"${saved.name}"은 저장됐지만 목록에 적용하지 못했습니다. ${error.message || ''} 입력은 유지했습니다. 조건을 확인하고 다시 적용하세요.`, true);
+          // Save can merge existing folder metadata. Retry from that acknowledged
+          // value so the previous new-search defaults cannot erase it afterward.
+          if (edit(saved)) status(`"${saved.name}"은 저장됐지만 목록에 적용하지 못했습니다. ${error.message || ''} 저장된 조건을 유지했습니다. 조건을 확인하고 다시 적용하세요.`, true);
           return;
         }
         baseline = JSON.stringify(value()); dialog.close();
@@ -425,7 +444,7 @@
     });
     $('reload').addEventListener('click', () => {
       if (!mayLeave()) return;
-      const name = selected ?? missingName;
+      const name = cursor ?? missingName;
       run(async signal => {
         await options.reload(signal);
         if (name !== null && !named(name)) {
@@ -437,6 +456,12 @@
       });
     });
     $('close').addEventListener('click', () => { if (mayLeave()) dialog.close(); });
+    dialog.addEventListener('keydown', e => {
+      if (e.key !== 'Escape') return;
+      // Handle Escape before the browser's repeated-close budget can bypass cancel.
+      e.preventDefault(); e.stopPropagation();
+      if (!e.repeat && mayLeave()) dialog.close();
+    }, true);
     dialog.addEventListener('cancel', e => { e.preventDefault(); if (mayLeave()) dialog.close(); });
     dialog.addEventListener('close', () => {
       if (typeof options.restoreFocus === 'function') options.restoreFocus(opener);

@@ -87,6 +87,30 @@ class Pure(unittest.TestCase):
             with patch.object(transfer,'observe',return_value=actual), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned','kin',expected)
 
+    def test_workspace_reading_layout_restore_preserves_all_sizes_visibility_and_owner(self):
+        body, _, _, _ = fixture();expected=body['product'];row=expected['rows']['WorkspaceLayout'][0]
+        layout=json.loads(row['value']);self.assertEqual(layout['version'],2)
+        self.assertEqual(layout['reading'],dict(version=1,reportWidth=540,imageHeight=390,
+            relatedHeight=None,relatedListHeight=180,relatedHidden=True))
+        changed_layouts=[]
+        for key in layout['reading']:
+            changed=copy.deepcopy(layout);del changed['reading'][key];changed_layouts.append(changed)
+        for key,value in [('reportWidth',541),('imageHeight',391),('relatedHeight',310),
+                ('relatedListHeight',181),('relatedHidden',False)]:
+            changed=copy.deepcopy(layout);changed['reading'][key]=value;changed_layouts.append(changed)
+        legacy=copy.deepcopy(layout);del legacy['reading'];legacy['version']=1;changed_layouts.append(legacy)
+        for changed in changed_layouts:
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['WorkspaceLayout'][0]['value']=json.dumps(changed,separators=(',',':'))
+            with self.subTest(layout=changed),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+        for index,field,value in [(0,'revision',1),(0,'subject','wrong-owner'),
+                (0,'institution','wrong-institution'),(1,'value',row['value'])]:
+            actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
+            actual['rows']['WorkspaceLayout'][index][field]=value
+            with self.subTest(index=index,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
+                transfer.verify_product('owned','kin',expected)
+
     def test_saved_filter_metadata_restore_contract(self):
         body, _, _, _ = fixture()
         expected = body['product']

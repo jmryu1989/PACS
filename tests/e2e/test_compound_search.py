@@ -263,7 +263,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         page.on('request', lambda request: default_writes.append(request.post_data_json)
                 if request.method == 'PATCH' and '/api/filters/' in request.url else None)
         page.locator('#chips button', has_text=bad_name).click(button='right')
-        page.locator('#ctx').get_by_text('기본 필터로 지정', exact=True).click()
+        page.locator('#ctx').get_by_text('Set as Default', exact=True).click()
         expect(page.locator('#toast')).to_contain_text('복합')
         self.assertEqual(default_writes, [])
         prefs = self.stack.request('GET', '/prefs', 'doctor')

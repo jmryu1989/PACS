@@ -730,10 +730,11 @@ export class PacsService implements OnModuleInit {
 
   private workspaceValue(value: any) {
     const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v);
-    if (!object(value) || Object.keys(value).sort().join(',') !== 'landscape,mode,portrait,version' ||
-        value.version !== 1 || !['auto', 'portrait', 'landscape'].includes(value.mode) || JSON.stringify(value).length > 2048)
+    const fields = value?.version === 2 ? 'landscape,mode,portrait,reading,version' : 'landscape,mode,portrait,version';
+    if (!object(value) || Object.keys(value).sort().join(',') !== fields ||
+        ![1, 2].includes(value.version) || !['auto', 'portrait', 'landscape'].includes(value.mode) || JSON.stringify(value).length > 2048)
       throw new BadRequestException('작업공간 배치 형식이 잘못되었습니다');
-    const clean: any = { version: 1, mode: value.mode, portrait: {}, landscape: {} };
+    const clean: any = { version: value.version, mode: value.mode, portrait: {}, landscape: {} };
     for (const axis of ['portrait', 'landscape']) {
       if (!object(value[axis]) || Object.keys(value[axis]).some(k => !['main', 'top', 'related', 'prior'].includes(k)))
         throw new BadRequestException('작업공간 패널 형식이 잘못되었습니다');
@@ -742,6 +743,21 @@ export class PacsService implements OnModuleInit {
           throw new BadRequestException('작업공간 패널 크기가 잘못되었습니다');
         clean[axis][key] = Math.round(size);
       }
+    }
+    if (value.version === 2) {
+      const reading = value.reading;
+      if (!object(reading) || Object.keys(reading).sort().join(',') !==
+          'imageHeight,relatedHeight,relatedHidden,relatedListHeight,reportWidth,version' ||
+          reading.version !== 1 || typeof reading.relatedHidden !== 'boolean')
+        throw new BadRequestException('판독 작업공간 배치 형식이 잘못되었습니다');
+      clean.reading = { version: 1 };
+      for (const key of ['reportWidth', 'imageHeight', 'relatedHeight', 'relatedListHeight']) {
+        const size = reading[key];
+        if (size !== null && (!Number.isInteger(size) || size < 1 || size > 16384))
+          throw new BadRequestException('판독 작업공간 패널 크기가 잘못되었습니다');
+        clean.reading[key] = size;
+      }
+      clean.reading.relatedHidden = reading.relatedHidden;
     }
     return clean;
   }
@@ -904,11 +920,18 @@ export class PacsService implements OnModuleInit {
     // A stale tab must not write its old account's preferences under a newly logged-in session.
     if (JSON.stringify(body.expectedOwner) !== JSON.stringify([owner.institution, owner.subject]))
       throw new ConflictException({ code: 'WORKSPACE_OWNER_CHANGED', message: '계정이 변경되었습니다. 다시 로그인한 뒤 여세요.' });
-    const value = clear ? null : JSON.stringify(this.workspaceValue(body.layout));
+    const layout = clear ? null : this.workspaceValue(body.layout);
+    const value = clear ? null : JSON.stringify(layout);
     const conflict = () => new ConflictException({ code: 'WORKSPACE_CONFLICT', message: '다른 창에서 서버 배치가 변경되었습니다. 서버 배치를 불러온 뒤 다시 시도하세요.' });
     try {
       const row = await this.prisma.$transaction(async tx => {
-        if (body.revision === 0) return tx.workspaceLayout.create({ data: { ...owner, revision: 1, value } });
+        const current = await tx.workspaceLayout.findUnique({ where: { institution_subject: owner } });
+        if ((current?.revision ?? 0) !== body.revision) throw conflict();
+        // A v1 client can know the latest revision but cannot retain v2 reading
+        // settings. CAS ties this version check to the row being replaced.
+        if (!clear && current?.value != null && this.workspaceValue(JSON.parse(current.value)).version > layout.version)
+          throw conflict();
+        if (!current) return tx.workspaceLayout.create({ data: { ...owner, revision: 1, value } });
         const updated = await tx.workspaceLayout.updateMany({ where: { ...owner, revision: body.revision },
           data: { value, revision: { increment: 1 } } });
         if (updated.count !== 1) throw conflict();

@@ -268,6 +268,10 @@
     body.portrait .left { width: 100%; min-width: 0; height: 32%; min-height: 180px; max-height: calc(100% - 420px); flex: none; }
     body.portrait .right { min-height: 0; overflow: auto; }
     body.portrait .rw section { min-height: 0; }
+    /* Wrapped controls can exceed a short panel; scroll the column without
+       collapsing clinical content beneath the next panel's hit target. */
+    body.portrait:not(.reading) .s-clinical { overflow: auto; }
+    body.portrait:not(.reading) .clinical { flex: none; }
     body.portrait .rtabs { flex-wrap: wrap; }
     body.portrait .workrow { flex-direction: column; flex: 1 0 480px; min-height: 480px; }
     body.portrait .related-p { width: 100%; height: 56%; min-height: 286px; flex: none; }
@@ -897,6 +901,7 @@
   </div>
 
   <script src="auth.js"></script>
+  <script src="reading-panel-layout.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
   <script src="reading-appearance.js"></script>
@@ -3938,6 +3943,11 @@
     const readingWorkspace = KinReadingWorkspace({
       current: () => selectedUid, study: uid => studies.find(s => s.uid === uid),
       prior: autoPrior, move, select, queue: orderedStudies, layout: () => applyLayout(), popup: openOhifWindow,
+      onPanelsEdit: () => { workspaceGeneration++; },
+      onPanelsChange: reading => {
+        const state = KinWorkspaceLayout.withReading(workspaceState, reading);
+        if (state) { workspaceState = state; saveWorkspace(); }
+      },
       noteLabel, openNote: uid => techNote.open(studies.find(s => s.uid === uid)),
       hasNote: uid => noteSummaries.get(uid)?.present,
       noteOwner: () => { const key = KinWorkspaceLayout.key(KinAuth.session()); return key ? key.slice(KinWorkspaceLayout.PREFIX.length) : null; },
@@ -3989,6 +3999,7 @@
     function saveWorkspace() {
       workspaceGeneration++;
       workspaceState.mode = layoutMode;
+      workspaceState = KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels());
       const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, workspaceState);
       $("#layout-status").textContent = saved ? "배치 저장됨 · 이 브라우저" : "배치 저장 안 됨 · 이 창에서만 유지";
     }
@@ -4006,6 +4017,7 @@
       const result = KinWorkspaceLayout.read(workspaceStorage, workspaceOwner);
       workspaceState = result.state;
       layoutMode = workspaceState.mode;
+      readingWorkspace.applyPanels(workspaceState.reading || KinReadingPanelLayout.defaults());
       $("#layout-status").textContent = ({ restored: "배치 복원됨 · 이 브라우저", empty: "배치 · 이 브라우저",
         disabled: "배치 · 이 창에서만 유지", invalid: "저장된 배치 오류 · 기본 배치", unavailable: "배치 저장소 사용 불가 · 기본 배치" })[result.status];
       applyLayout();
@@ -4056,6 +4068,7 @@
       workspaceGeneration++;
       const removed = KinWorkspaceLayout.remove(workspaceStorage, workspaceOwner);
       workspaceState = KinWorkspaceLayout.defaults(); layoutMode = "auto";
+      readingWorkspace.applyPanels(KinReadingPanelLayout.defaults());
       applyLayout();
       $("#layout-status").textContent = removed ? "기본 배치 · 이 브라우저" : "초기화 저장 안 됨 · 이 창에서만 유지";
     });
@@ -4169,6 +4182,7 @@
       count: f => filteredFor(f).length, apply: applyFilter,
       restoreFocus(opener) {
         if (opener?.isConnected && !opener.disabled && !opener.closest('[hidden]')) opener.focus();
+        else if (opener?.id === 'edit-active-filter') $('#clearfilter').focus();
         else if (opener?.dataset.name) focusFilterChip(opener.dataset.name);
         else $('#managefilters').focus();
       },
@@ -4840,10 +4854,16 @@
         endpoint: API + '/reading-preferences', sessionEndpoint: API + '/me' });
       KinWorkspaceRoaming.mount({
         owner: workspaceOwner ? [sess.institution, sess.sub] : null,
-        read: () => workspaceState, generation: () => workspaceGeneration,
+        // A reset or legacy local record still comes from a client that can
+        // preserve reading panels; never serialize it as an older v1 writer.
+        read: () => KinWorkspaceLayout.withReading(workspaceState, readingWorkspace.snapshotPanels()),
+        generation: () => workspaceGeneration,
         model: KinWorkspaceLayout, endpoint: API + '/workspace-layout', sessionEndpoint: API + '/me',
         apply: state => {
+          state = KinWorkspaceLayout.mergeLoaded(workspaceState, state);
+          if (!state) return false;
           workspaceGeneration++; workspaceState = state; layoutMode = state.mode; applyLayout();
+          if (state.reading) readingWorkspace.applyPanels(state.reading);
           const saved = KinWorkspaceLayout.write(workspaceStorage, workspaceOwner, state);
           $("#layout-status").textContent = saved ? "배치 복원됨 · 이 브라우저" : "배치 · 이 창에서만 유지";
           return saved;

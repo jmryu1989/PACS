@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D-WORKSPACE-READING-LAYOUT → RISK-ROAM-MIX/LOST/SIZE/STALE → TEST-READING-PANEL-LAYOUT/TEST-ROAM-API: `tests/reading_panel_layout_test.cjs`, `workspace_layout_test.cjs`, `workspace_roaming_live.py`, `e2e/test_reading_panel_layout.py`는 통합 영상·판독/관련 패널의 키보드·포인터 크기 조절과 숨김·복원, 원래 CT 화소·카메라·동일 iframe·미저장 판독/작업 보존, 작은 창 clamp·계정 분리·로컬 실패·v1 불러오기/v2 계정 복원을 확인한다. API는 구형 v1 쓰기의 v2 설정 삭제와 다른 계정·오래된 revision을 거절한다. `viewer_migration_test.py`의 실제 dump/restore는 v2 표시 설정 전체 행을 대조한다. 물리 다중 모니터/OS 사용 확인은 별도 잔여다.
+
 REQ-D01-FILTER-NAVIGATION → RISK-D01-FILTER-LOSS/WRONG/ACCESS → TEST-D01-FILTER-NAVIGATION: `python tests/e2e/test_saved_filter_navigation.py`는 Save Filter→관리, 저장 검색의 키보드 Edit·정확한 선택·초점 복귀, Saved/Modified/Deleted와 현재 조건 유지, Save & Apply의 검증/실패/중복 차단·성공·재로그인, 폴더/순서/검색 결과 내 이전·다음 이동과 미저장 취소를 검사한다. 실제 검사 목록·개인 판독 초안·확정 판독 이력을 보존하며 기존 관리/분류/건수/복합검색이 직접 회귀다. `KIN_EVIDENCE_DIR`는 해당 실행의 화면 기록 경로다.
 
 REQ-D-WORKSPACE-SHORTCUTS → RISK-D-WORKSPACE-ACCESS/UNSAVED/SHORTCUT-CONFLICT → TEST-WORKSPACE-SHORTCUTS: `workspace_shortcuts_test.cjs`와 `e2e/test_workspace_shortcuts.py`는 통합 목록·영상·판독문 이동 키 편집, 예약/중복 거절, 이전 키 비활성화, 입력/모달 보호, 미저장 내용·영상 보존, 브라우저 저장/충돌/실패/복원·세션 종료를 검사한다. 별도 영상 창 편집 연계·계정 서버 복원은 잔여다.

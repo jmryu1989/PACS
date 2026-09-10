@@ -92,6 +92,139 @@ window.KinReadingWorkspace = function (app) {
   const reportTarget = node('div'); reportTarget.id = 'reading-report-target'; reportTarget.hidden = true;
   $('.report-p').prepend(reportTarget);
   let active = false, ended = false, frame = null, shown = null, pending = null, epoch = 0, timer = null, deadline = 0, loaded = false, failed = false, lastSelection;
+  const panelModel = KinReadingPanelLayout;
+  let panelValues = panelModel.defaults(), panelDrag = null, panelStyleSignature = '';
+  const split = $('.split'), reportColumn = $('.right'), relatedRegion = $('.related-p');
+  const relatedList = $('.related-list-pane'), priorReport = $('.prior-report-pane');
+  reportColumn.id = 'reading-report-column'; relatedRegion.id = 'reading-related-region';
+  relatedList.id = 'reading-related-list'; priorReport.id = 'reading-prior-report';
+  const relatedToggle = button('Hide Related Panel', () => setRelatedHidden(!panelValues.relatedHidden));
+  relatedToggle.id = 'reading-related-toggle'; relatedToggle.setAttribute('aria-controls', relatedRegion.id);
+  relatedToggle.title = '관련 검사·이전 판독문 패널을 숨기거나 복원합니다. 작성 중인 내용은 유지됩니다.';
+  const panelsReset = button('Reset Panels', () => commitPanels(panelModel.defaults()));
+  panelsReset.id = 'reading-panels-reset';
+  panelsReset.title = '통합 작업공간의 패널 크기와 표시를 기본값으로 되돌립니다.';
+  const panelHelp = node('p', '패널 경계는 드래그하거나 Tab으로 선택한 뒤 방향키로 조절합니다. Shift는 크게 이동, Home/End는 최소/최대, Enter는 해당 경계의 기본값입니다. 좁은 창의 영상·판독은 위아래로 배치하며, 숨긴 관련 패널은 Related Report로 다시 엽니다.', shortcutHelp);
+  panelHelp.id = 'reading-panel-help';
+  const panelSeparators = [];
+  function panelGeometry() {
+    const grid = relatedList.querySelector('.grid2');
+    const listMin = [...relatedList.children].filter(child => child !== grid && child.getClientRects().length)
+      .reduce((total, child) => total + child.getBoundingClientRect().height, 40);
+    return panelModel.resolve(panelValues, { width: split.clientWidth || innerWidth, narrow: matchMedia('(max-width: 850px)').matches,
+      height: innerHeight, workHeight: $('.workrow').clientHeight, listMin });
+  }
+  function snapshotPanels() { return panelModel.normalize(panelValues); }
+  function applyPanels(value) {
+    const next = panelModel.normalize(value); if (!next || ended) return false;
+    cancelPanelDrag(); panelValues = next; renderPanels(); return true;
+  }
+  function commitPanels(value) {
+    if (!active || ended || !app.allowed()) return false;
+    const next = panelModel.normalize(value); if (!next) return false;
+    panelValues = next; renderPanels();
+    const snapshot = snapshotPanels();
+    app.onPanelsChange?.(snapshot);
+    return true;
+  }
+  function setRelatedHidden(hidden) {
+    if (!active || ended || !app.allowed()) return;
+    if (hidden && relatedRegion.contains(document.activeElement)) relatedToggle.focus();
+    commitPanels({ ...panelValues, relatedHidden: hidden });
+  }
+  function renderPanels() {
+    const geometry = panelGeometry(), values = geometry.effective;
+    const signature = JSON.stringify([active, ended, panelValues.relatedHidden, values]);
+    document.body.classList.toggle('reading-related-hidden', active && panelValues.relatedHidden);
+    relatedRegion.inert = active && panelValues.relatedHidden;
+    if (active && panelValues.relatedHidden) relatedRegion.setAttribute('aria-hidden', 'true');
+    else relatedRegion.removeAttribute('aria-hidden');
+    relatedToggle.textContent = panelValues.relatedHidden ? 'Show Related Panel' : 'Hide Related Panel';
+    relatedToggle.setAttribute('aria-expanded', String(!panelValues.relatedHidden));
+    relatedToggle.disabled = panelsReset.disabled = ended || !app.allowed();
+    priorFocus.setAttribute('aria-controls', priorReport.id);
+    for (const item of panelSeparators) {
+      const key = item.kind === 'report' ? (geometry.narrow ? 'imageHeight' : 'reportWidth') : item.kind;
+      const range = geometry.ranges[key], horizontal = key !== 'reportWidth';
+      item.el.hidden = !active || item.kind !== 'report' && panelValues.relatedHidden;
+      item.el.setAttribute('aria-orientation', horizontal ? 'horizontal' : 'vertical');
+      item.el.setAttribute('aria-valuemin', String(range.min)); item.el.setAttribute('aria-valuemax', String(range.max));
+      item.el.setAttribute('aria-valuenow', String(values[key]));
+      item.el.setAttribute('aria-valuetext', values[key] + ' 픽셀');
+      item.el.setAttribute('aria-disabled', String(ended || !app.allowed()));
+      item.el.tabIndex = ended || !app.allowed() ? -1 : 0;
+    }
+    if (signature === panelStyleSignature) return;
+    panelStyleSignature = signature;
+    split.style.setProperty('--reading-report-width', values.reportWidth + 'px');
+    split.style.setProperty('--reading-image-height', values.imageHeight + 'px');
+    split.style.setProperty('--reading-related-height', values.relatedHeight + 'px');
+    split.style.setProperty('--reading-related-list-height', values.relatedListHeight + 'px');
+    if (active) redrawRetainedViewer();
+  }
+  function cancelPanelDrag() {
+    const drag = panelDrag; if (!drag) return;
+    panelDrag = null; panelValues = drag.before;
+    if (drag.item.el.hasPointerCapture(drag.pointer)) drag.item.el.releasePointerCapture(drag.pointer);
+    document.body.classList.remove('reading-panel-resizing'); renderPanels();
+  }
+  function separator(kind, id, label, controls, after) {
+    const el = node('div'); el.id = id; el.className = 'reading-panel-separator'; el.hidden = true;
+    el.setAttribute('role', 'separator'); el.setAttribute('aria-label', label); el.setAttribute('aria-controls', controls);
+    el.setAttribute('aria-describedby', panelHelp.id); el.title = '드래그 또는 방향키로 크기 조절 · Enter: 기본값';
+    after.after(el);
+    const item = { kind, el }; panelSeparators.push(item);
+    const keyFor = geometry => kind === 'report' ? (geometry.narrow ? 'imageHeight' : 'reportWidth') : kind;
+    const allowed = () => active && !ended && app.allowed() && !modalOpen(document);
+    el.addEventListener('keydown', e => {
+      if (!allowed() || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+      const geometry = panelGeometry(), key = keyFor(geometry), range = geometry.ranges[key];
+      const axis = key === 'reportWidth' ? ['ArrowRight', 'ArrowLeft'] : ['ArrowUp', 'ArrowDown'];
+      if (![...axis, 'Home', 'End', 'Enter', 'Escape'].includes(e.key)) return;
+      if (e.key === 'Escape' && !panelDrag) return;
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === 'Escape') { cancelPanelDrag(); return; }
+      cancelPanelDrag();
+      const value = e.key === 'Enter' ? null : e.key === 'Home' ? range.min : e.key === 'End' ? range.max :
+        Math.max(range.min, Math.min(range.max, geometry.effective[key] + (e.key === axis[1] ? 1 : -1) * (e.shiftKey ? 40 : 10)));
+      commitPanels({ ...panelValues, [key]: value });
+    });
+    el.addEventListener('pointerdown', e => {
+      if (!allowed() || e.button !== 0) return;
+      cancelPanelDrag(); e.preventDefault(); el.focus();
+      const geometry = panelGeometry(), key = keyFor(geometry);
+      panelDrag = { item, key, before: snapshotPanels(), pointer: e.pointerId,
+        origin: key === 'reportWidth' ? e.clientX : e.clientY, size: geometry.effective[key], narrow: geometry.narrow };
+      app.onPanelsEdit?.();
+      el.setPointerCapture(e.pointerId); document.body.classList.add('reading-panel-resizing');
+    });
+    el.addEventListener('pointermove', e => {
+      const drag = panelDrag; if (!drag || drag.item !== item || drag.pointer !== e.pointerId) return;
+      const geometry = panelGeometry();
+      if (!allowed() || geometry.narrow !== drag.narrow) { cancelPanelDrag(); return; }
+      const range = geometry.ranges[drag.key], delta = (drag.key === 'reportWidth' ? drag.origin - e.clientX : e.clientY - drag.origin);
+      panelValues = { ...panelValues, [drag.key]: Math.round(Math.max(range.min, Math.min(range.max, drag.size + delta))) };
+      renderPanels();
+    });
+    el.addEventListener('pointerup', e => {
+      const drag = panelDrag; if (!drag || drag.item !== item || drag.pointer !== e.pointerId) return;
+      const next = snapshotPanels(); panelDrag = null;
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+      document.body.classList.remove('reading-panel-resizing');
+      if (allowed()) commitPanels(next); else { panelValues = drag.before; renderPanels(); }
+    });
+    for (const event of ['pointercancel', 'lostpointercapture']) el.addEventListener(event, () => {
+      if (panelDrag?.item === item) cancelPanelDrag();
+    });
+  }
+  separator('report', 'reading-resize-report', 'Image and Report Size', 'reading-viewer reading-report-column', host);
+  separator('relatedHeight', 'reading-resize-related', 'Related Panel Height', relatedRegion.id, relatedRegion);
+  separator('relatedListHeight', 'reading-resize-prior', 'Related List and Report Size', relatedList.id + ' ' + priorReport.id, relatedList);
+  const panelObserver = new ResizeObserver(() => { if (active && !ended) renderPanels(); });
+  panelObserver.observe(split); panelObserver.observe($('.workrow')); panelObserver.observe(relatedList);
+  [...relatedList.children].filter(child => !child.classList.contains('grid2')).forEach(child => panelObserver.observe(child));
+  const panelWindowResize = () => { if (panelDrag) cancelPanelDrag(); if (active && !ended) renderPanels(); };
+  window.addEventListener('resize', panelWindowResize);
   const boundDocuments = new WeakSet();
   let returnChannel=null;
   function returnLink(){
@@ -163,6 +296,7 @@ window.KinReadingWorkspace = function (app) {
       if (tool) { tool.focus({ preventScroll: true }); tool.scrollIntoView({ block: 'nearest' }); }
     } else {
       if (which === 'report') closeContext();
+      if (which === 'prior' && panelValues.relatedHidden) setRelatedHidden(false);
       const pane = $(which === 'prior' ? '.prior-report-pane' : '#findings');
       if (!pane || !pane.getClientRects().length) return;
       closeList();
@@ -304,6 +438,7 @@ window.KinReadingWorkspace = function (app) {
   }
   function leave() { active = false; layout(); $('#m-reading').focus(); }
   function layout() {
+    if (!active) cancelPanelDrag();
     const toggle=$('#m-reading');toggle.textContent=active?'Back to Worklist':'Reading Workspace';toggle.setAttribute('aria-pressed',String(active));toggle.title=active?'기존 목록 화면으로 돌아갑니다. 작성 중인 판독문과 영상 작업은 유지됩니다.':'영상과 판독문을 함께 보는 작업공간을 엽니다.';
     // The native viewer observes its container size even while hidden. Preserve
     // that size off screen so returning from the list cannot produce a NaN camera.
@@ -316,6 +451,7 @@ window.KinReadingWorkspace = function (app) {
       list.setAttribute('aria-expanded', 'false'); context.setAttribute('aria-expanded', 'false');
     }
     app.layout();
+    renderPanels();
     if (frame) frame.hidden = !sameTarget();
     if (frame && !frame.hidden) redrawRetainedViewer();
     separate.disabled = !frame || !sameTarget() || !loaded;
@@ -458,13 +594,13 @@ window.KinReadingWorkspace = function (app) {
   }
   // Session invalidation must hide the embedded document even if its own request
   // has not yet noticed the expired account. Never reconnect it from a late load.
-  function end() { ended = true; shortcuts.end(); epoch++; returnChannel?.close();returnChannel=null;clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard, true); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
+  function end() { ended = true; cancelPanelDrag(); panelObserver.disconnect(); window.removeEventListener('resize', panelWindowResize); shortcuts.end(); epoch++; returnChannel?.close();returnChannel=null;clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard, true); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
   let channel;
   try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
   window.addEventListener('beforeunload', e => { const s = viewerState(); if (s.busy || s.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end,
+  return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels,
     preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,
       apply: value => { syncAutoNote(); if (autoNote.disabled) return false; autoNote.checked = value; autoNote.onchange(); return true; } } };
 };

@@ -114,7 +114,9 @@ def expected_rows(uid):
         payloadBytes=sum(row['payloadBytes'] for row in rows['ViewerRevision']))]
     rows['ViewerRequest'] = [dict(authorSub='SYNTHETIC-sub', requestId='00000000-0000-4000-8000-00000000000'+str(n),
         fingerprint=str(n)*64, itemId=item_id, revision=n) for n in (1,2)]
-    layout = dict(version=1, mode='auto', portrait=dict(top=280), landscape=dict(main=720))
+    layout = dict(version=2, mode='auto', portrait=dict(top=280), landscape=dict(main=720),
+        reading=dict(version=1,reportWidth=540,imageHeight=390,relatedHeight=None,
+            relatedListHeight=180,relatedHidden=True))
     rows['WorkspaceLayout'] = [dict(institution='SYNTHETIC-'+kind, subject='SYNTHETIC-sub', revision=revision,
         value=value, updatedAt=STAMP) for kind,revision,value in
         [('hospital', 2, json.dumps(layout, separators=(',', ':'))), ('tele', 3, None)]]

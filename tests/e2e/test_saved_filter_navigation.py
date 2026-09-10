@@ -37,7 +37,10 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         self.chip(page, name).focus()
         page.keyboard.press(key)
         expect(page.locator('#ctx')).to_be_visible()
-        page.locator('#ctx').get_by_text('Edit', exact=True).click()
+        expect(page.locator('#ctx').get_by_role('menuitem', name='Apply', exact=True)).to_be_focused()
+        page.keyboard.press('ArrowDown')
+        expect(page.locator('#ctx').get_by_role('menuitem', name='Edit', exact=True)).to_be_focused()
+        page.keyboard.press('Enter')
         expect(page.locator('#saved-filter-manager')).to_be_visible()
         expect(page.locator('#sfm-name')).to_have_value(name)
 
@@ -49,6 +52,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         saved = response.value.json()
         self.assertEqual(saved['id'], filter_id)
         expect(page.locator('#sfm-status')).to_contain_text('저장 완료')
+        expect(page.locator('#sfm-save')).to_be_focused()
         return saved
 
     def expect_rows(self, page, *fixtures):
@@ -101,9 +105,18 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         self.edit_from_chip(page, name, key='ContextMenu')
         expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
         page.locator('#sfm-col-id').fill(first.patient_id)
-        page.once('dialog', lambda dialog: dialog.dismiss()); page.keyboard.press('Escape')
-        expect(page.locator('#saved-filter-manager')).to_be_visible()
-        expect(page.locator('#sfm-col-id')).to_have_value(first.patient_id)
+        confirms = []
+        def reject_unsaved(dialog):
+            confirms.append(dialog.message); dialog.dismiss()
+        page.on('dialog', reject_unsaved)
+        try:
+            for _ in range(2):
+                page.keyboard.press('Escape')
+                expect(page.locator('#saved-filter-manager')).to_be_visible()
+                expect(page.locator('#sfm-col-id')).to_have_value(first.patient_id)
+        finally:
+            page.remove_listener('dialog', reject_unsaved)
+        self.assertEqual(len(confirms), 2)
         page.once('dialog', lambda dialog: dialog.accept()); page.keyboard.press('Escape')
         expect(page.locator('#saved-filter-manager')).not_to_be_visible()
         expect(self.chip(page, name)).to_be_focused()
@@ -137,7 +150,9 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
             page.locator('#sfm-delete').click()
         self.assertEqual(deleted.value.status, 200)
         expect(page.locator('#sfm-status')).to_contain_text('삭제했습니다')
+        expect(page.locator('#sfm-new')).to_be_focused()
         page.locator('#sfm-close').click()
+        expect(page.locator('#clearfilter')).to_be_focused()
         expect(page.locator('#active-filter-name')).to_have_text(name)
         expect(page.locator('#active-filter-state')).to_have_text('Deleted')
         expect(page.locator('#quick')).to_have_value(prefix)
@@ -180,8 +195,9 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
                           body=json.dumps({'message': '저장 일시 실패'}))
 
         page.route('**/api/filters', fail)
-        page.locator('#sfm-save-apply').click()
+        page.locator('#sfm-save-apply').focus(); page.keyboard.press('Enter')
         expect(page.locator('#sfm-status')).to_contain_text('저장 일시 실패')
+        expect(page.locator('#sfm-save-apply')).to_be_focused()
         expect(page.locator('#sfm-name')).to_have_value(prefix)
         expect(page.locator('#sfm-col-id')).to_have_value(second.patient_id)
         expect(page.locator('#sfm-default')).to_be_checked()
@@ -195,8 +211,9 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         page.locator('#sfm-save-apply').click()
         for selector in ('#sfm-close', '#sfm-new', '#sfm-prev', '#sfm-next', '#sfm-save', '#sfm-save-apply'):
             expect(page.locator(selector)).to_be_disabled()
-        page.keyboard.press('Escape')
-        expect(page.locator('#saved-filter-manager')).to_be_visible()
+        for _ in range(2):
+            page.keyboard.press('Escape')
+            expect(page.locator('#saved-filter-manager')).to_be_visible()
         expect(page.locator('#sfm-status')).to_contain_text('처리 중')
         self.expect_rows(page, first, second)
         expect(page.locator('#findings')).to_have_value(draft)
@@ -212,6 +229,7 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         self.assertEqual(saved['cols']['id'], second.patient_id)
         held[0].fulfill(response=reply)
         expect(page.locator('#saved-filter-manager')).not_to_be_visible()
+        expect(page.locator('#savefilter')).to_be_focused()
         page.unroute('**/api/filters')
         self.expect_rows(page, second)
         expect(page.locator('#active-filter-name')).to_have_text(prefix)
@@ -261,21 +279,25 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         expect(page.locator('#sfm-name')).to_have_value(low['name'])
         expect(page.locator('#sfm-quick')).to_have_value('do not discard this edit')
         expect(page.locator('#sfm-position')).to_have_text('1 / 4')
-        page.once('dialog', lambda dialog: dialog.accept()); page.locator('#sfm-next').click()
+        page.once('dialog', lambda dialog: dialog.accept())
+        page.locator('#sfm-next').focus(); page.keyboard.press('Enter')
         expect(page.locator('#sfm-name')).to_have_value(high['name'])
         expect(page.locator('#sfm-position')).to_have_text('2 / 4')
-        page.locator('#sfm-next').click()
+        expect(page.locator('#sfm-next')).to_be_focused()
+        page.keyboard.press('Enter')
         expect(page.locator('#sfm-name')).to_have_value(excluded['name'])
-        page.locator('#sfm-prev').click()
+        page.locator('#sfm-prev').focus(); page.keyboard.press('Enter')
         expect(page.locator('#sfm-name')).to_have_value(high['name'])
+        expect(page.locator('#sfm-prev')).to_be_focused()
         page.locator('#sfm-search').fill(needle)
         expect(page.locator('#sfm-list button')).to_have_count(3)
         expect(page.locator('#sfm-position')).to_have_text('2 / 3')
-        page.locator('#sfm-next').click()
+        page.locator('#sfm-next').focus(); page.keyboard.press('Enter')
         expect(page.locator('#sfm-name')).to_have_value(root['name'])
         expect(page.locator('#sfm-position')).to_have_text('3 / 3')
         expect(page.locator('#sfm-next')).to_be_disabled()
-        page.locator('#sfm-prev').click()
+        expect(page.locator('#sfm-prev')).to_be_focused()
+        page.keyboard.press('Enter')
         expect(page.locator('#sfm-name')).to_have_value(high['name'])
         page.locator('#sfm-search').fill(prefix + '-missing')
         expect(page.locator('#sfm-list button')).to_have_count(0)
@@ -295,6 +317,105 @@ class SavedFilterNavigationE2E(base.WorklistE2E):
         self.expect_report_preserved(page, first, draft, versions)
         filters = self.stack.request('GET', '/prefs', 'doctor').body['filters']
         self.assertEqual(next(f for f in filters if f['id'] == low['id']), low)
+
+    def isolated_manager(self, filters, fail_apply=False):
+        context = self.browser.new_context(viewport={'width': 1000, 'height': 850})
+        self.contexts.append(context);page = context.new_page()
+        page.set_content('<button id="opener">Open Manager</button>')
+        assets = base.ROOT / 'worklist-v0' / 'hpacs-lite'
+        page.add_style_tag(path=str(assets / 'saved-filter-manager.css'))
+        for name in ('compound-filter.js', 'saved-filter-manager.js'):
+            page.add_script_tag(path=str(assets / name))
+        page.evaluate('''({filters, failApply}) => {
+          const clone = value => JSON.parse(JSON.stringify(value));
+          const snapshot = {name:'',mode:'Radiology',days:-1,quick:'',cols:{},sortKey:null,sortDir:0,isDefault:false};
+          window.sfmTest = {filters:clone(filters),saved:[],applied:[],failApply};
+          const state = window.sfmTest;
+          window.testManager = KinSavedFilterManager.mount({
+            columns:{Radiology:[{k:'id',t:'Patient ID',f:'text'}],Technician:[{k:'id',t:'Patient ID',f:'text'}]},
+            days:value => value, list:() => state.filters, snapshot:() => clone(snapshot), count:() => 0,
+            async save(value) {
+              const saved = clone(value);delete saved.createOnly;state.saved.push(clone(saved));
+              state.filters = [...state.filters.filter(item => item.name !== saved.name), saved];return saved;
+            },
+            apply(value) {
+              state.applied.push(clone(value));
+              if (state.failApply) throw new Error('합성 적용 실패');
+              return true;
+            },
+            async reload() {}, async remove(value) {state.filters=state.filters.filter(item=>item.name!==value.name);}
+          });
+          document.getElementById('opener').addEventListener('click',()=>window.testManager.open());
+        }''', {'filters': filters, 'failApply': fail_apply})
+        return page
+
+    def test_navigation_04_invalid_search_cursor_and_keyboard_request_focus(self):
+        def saved(name, **changes):
+            return dict(dict(name=name,mode='Radiology',days=-1,cols={},quick='',
+                sortKey=None,sortDir=0,folder='',description='',ordinal=0,isDefault=False), **changes)
+        filters = [saved('A valid'), saved('B invalid mode',mode='Unsupported'),
+            saved('C invalid criteria',cols={'$compound':{'version':1,'join':'and',
+                'rules':[{'field':'id','op':'unsupported','value':'x'}]}}), saved('D valid')]
+        page = self.isolated_manager(filters);page.locator('#opener').focus()
+        page.evaluate("testManager.open({name:'A valid'})")
+        expect(page.locator('#sfm-position')).to_have_text('1 / 4')
+        page.locator('#sfm-next').focus();page.keyboard.press('Enter')
+        for index, name in [(2, 'B invalid mode'), (3, 'C invalid criteria')]:
+            expect(page.locator('#sfm-position')).to_have_text(f'{index} / 4')
+            expect(page.locator('#sfm-fields')).not_to_be_visible()
+            expect(page.locator('#sfm-list button[aria-pressed="true"]')).to_have_text(name)
+            for action in ('save', 'save-apply', 'apply', 'preview'):
+                expect(page.locator('#sfm-' + action)).to_be_disabled()
+            expect(page.locator('#sfm-next')).to_be_focused()
+            page.keyboard.press('Enter')
+        expect(page.locator('#sfm-name')).to_have_value('D valid')
+        expect(page.locator('#sfm-position')).to_have_text('4 / 4')
+        expect(page.locator('#sfm-next')).to_be_disabled()
+        expect(page.locator('#sfm-prev')).to_be_focused()
+        for index in (3, 2, 1):
+            page.keyboard.press('Enter')
+            expect(page.locator('#sfm-position')).to_have_text(f'{index} / 4')
+            expect(page.locator('#sfm-prev' if index > 1 else '#sfm-next')).to_be_focused()
+        page.locator('#sfm-reload').focus();page.keyboard.press('Enter')
+        expect(page.locator('#sfm-status')).to_have_text('저장 검색 목록을 불러왔습니다.')
+        expect(page.locator('#sfm-reload')).to_be_focused()
+        expect(page.locator('#sfm-position')).to_have_text('1 / 4')
+        self.assertEqual(page.evaluate('sfmTest.saved'), [])
+        self.assertEqual(page.evaluate('sfmTest.applied'), [])
+        page.locator('#sfm-close').click();expect(page.locator('#opener')).to_be_focused()
+
+    def test_navigation_05_saved_apply_failure_keeps_acknowledged_metadata_for_retry(self):
+        original = dict(name='Existing Metadata',mode='Radiology',days=-1,cols={},quick='old',
+            sortKey=None,sortDir=0,folder='Existing/Folder',description='기존 원문 설명',ordinal=27,isDefault=False)
+        page = self.isolated_manager([original], fail_apply=True);page.locator('#opener').click()
+        page.locator('#sfm-name').fill(original['name']);page.locator('#sfm-quick').fill('changed criteria')
+        page.once('dialog',lambda dialog:dialog.accept())
+        page.locator('#sfm-save-apply').focus();page.keyboard.press('Enter')
+        expect(page.locator('#sfm-status')).to_contain_text('저장됐지만 목록에 적용하지 못했습니다')
+        expect(page.locator('#sfm-status')).to_contain_text('합성 적용 실패')
+        expect(page.locator('#sfm-save-apply')).to_be_focused()
+        expect(page.locator('#sfm-name')).to_have_value(original['name'])
+        expect(page.locator('#sfm-name')).to_have_attribute('readonly','')
+        expect(page.locator('#sfm-folder')).to_have_value(original['folder'])
+        expect(page.locator('#sfm-description')).to_have_value(original['description'])
+        expect(page.locator('#sfm-ordinal')).to_have_value(str(original['ordinal']))
+        expect(page.locator('#sfm-quick')).to_have_value('changed criteria')
+        self.assertFalse(page.evaluate('''() => {
+          const event = new Event('beforeunload', {cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;
+        }'''), 'A successful save followed by apply failure must not leave a false dirty baseline')
+        first_saved = page.evaluate('sfmTest.saved[0]')
+        self.assertEqual(page.evaluate('sfmTest.applied'), [first_saved])
+        for key in ('folder','description','ordinal'):
+            self.assertEqual(first_saved[key],original[key])
+        page.locator('#sfm-save').focus();page.keyboard.press('Enter')
+        expect(page.locator('#sfm-status')).to_contain_text('저장 완료')
+        expect(page.locator('#sfm-save')).to_be_focused()
+        self.assertEqual(page.evaluate('sfmTest.saved'), [first_saved,first_saved])
+        self.assertEqual(page.evaluate('sfmTest.filters'), [first_saved])
+        confirms=[]
+        page.on('dialog',lambda dialog:(confirms.append(dialog.message),dialog.dismiss()))
+        page.locator('#sfm-close').click();expect(page.locator('#saved-filter-manager')).not_to_be_visible()
+        self.assertEqual(confirms,[]);expect(page.locator('#opener')).to_be_focused()
 
 
 def load_tests(loader, tests, pattern):

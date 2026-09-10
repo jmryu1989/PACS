@@ -5,13 +5,20 @@
   const PREFIX = 'kin-workspace:v1:';
   const modes = ['auto', 'portrait', 'landscape'];
   const panels = ['main', 'top', 'related', 'prior'];
+  const readingPanels = typeof module === 'object' && module.exports
+    ? require('./reading-panel-layout.js') : root.KinReadingPanelLayout;
   const defaults = () => ({ version: 1, mode: 'auto', portrait: {}, landscape: {} });
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   function normalize(value) {
-    if (!object(value) || value.version !== 1 || !modes.includes(value.mode)
-        || Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape'].includes(k))) return null;
+    if (!object(value) || ![1, 2].includes(value.version) || !modes.includes(value.mode)
+        || Object.keys(value).some(k => !['version', 'mode', 'portrait', 'landscape', ...(value.version === 2 ? ['reading'] : [])].includes(k))) return null;
     const clean = defaults();
     clean.mode = value.mode;
+    if (value.version === 2) {
+      const reading = readingPanels.normalize(value.reading);
+      if (!reading) return null;
+      clean.version = 2; clean.reading = reading;
+    }
     for (const axis of ['portrait', 'landscape']) {
       const sizes = value[axis];
       if (!object(sizes) || Object.keys(sizes).some(k => !panels.includes(k))) return null;
@@ -22,6 +29,16 @@
       }
     }
     return clean;
+  }
+  function withReading(value, reading) {
+    return normalize({ ...value, version: 2, reading });
+  }
+  function mergeLoaded(current, incoming) {
+    const clean = normalize(incoming);
+    if (!clean) return null;
+    // Older account layouts contain no integrated-panel choice. Loading one
+    // must not silently erase the arrangement the user is currently working in.
+    return clean.version === 1 && current?.version === 2 ? withReading(clean, current.reading) : clean;
   }
   function key(session) {
     // Display names and email aliases can change or collide on a shared PC.
@@ -50,7 +67,7 @@
     try { storage.removeItem(owner); return true; }
     catch (_) { return false; }
   }
-  const api = { PREFIX, defaults, normalize, key, read, write, remove };
+  const api = { PREFIX, defaults, normalize, withReading, mergeLoaded, key, read, write, remove };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.KinWorkspaceLayout = api;
 })(globalThis);
