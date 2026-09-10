@@ -72,6 +72,11 @@ window.KinReadingWorkspace = function (app) {
   const target = node('div', '', bar); target.id = 'reading-target';
   const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · 7 작업 패널 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
   hints.id = 'reading-shortcuts';
+  const shortcutButtons = {list,image:imageFocus,prior:priorFocus,report:reportFocus,context,note,tools:toolsFocus,nativeTools:nativeToolsFocus,previous,next};
+  const shortcuts = KinWorkspaceShortcuts.create({host:nav,owner:app.noteOwner,allowed:app.allowed,changed:map=>{
+    for(const [id,b] of Object.entries(shortcutButtons))b.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(map[id]));
+    hints.textContent=Object.entries(shortcutButtons).map(([id,b])=>b.textContent+' '+KinWorkspaceShortcuts.display(map[id])).join(' · ')+' (입력 중 검사 이동 제외)';
+  }});
   const host = node('section'); host.id = 'reading-viewer'; host.hidden = true;
   host.setAttribute('aria-label', '영상 작업공간'); $('.split').prepend(host);
   const info = node('div', '', host); info.id = 'reading-images';
@@ -175,24 +180,35 @@ window.KinReadingWorkspace = function (app) {
     if (e.key === 'Escape' && doc === document && document.body.classList.contains('reading-context-open') && e.target.closest?.('#reading-context')) {
       e.preventDefault(); closeContext(); context.focus(); return;
     }
-    if (!e.ctrlKey || !e.altKey || e.shiftKey || e.metaKey) return;
-    const panes = { Digit2: 'image', Digit3: 'prior', Digit4: 'report', Digit5: 'context', Digit7: 'tools', Digit9: 'nativeTools' };
-    if (e.code === 'Digit1') {
+    const command = shortcuts.action(e);
+    // Capture precedes the embedded viewer's fixed legacy shortcuts. After a
+    // remap, the old chord must not trigger a second, differently named action.
+    if (!command) {
+      if(doc!==document&&KinWorkspaceShortcuts.action(KinWorkspaceShortcuts.defaults,e)){e.preventDefault();e.stopImmediatePropagation();}
+      return;
+    }
+    e.stopImmediatePropagation();
+    if (doc !== document && command === 'note') {
+      const target = doc.querySelector('#kin-viewer-note-open');
+      e.preventDefault(); if(target && !target.disabled)target.click(); return;
+    }
+    const panes = { image:'image', prior:'prior', report:'report', context:'context', tools:'tools', nativeTools:'nativeTools' };
+    if (command === 'list') {
       e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
-    } else if (panes[e.code]) {
-      e.preventDefault(); focusPane(panes[e.code]);
-    } else if (e.code === 'Digit6') {
+    } else if (panes[command]) {
+      e.preventDefault(); focusPane(panes[command]);
+    } else if (command === 'note') {
       e.preventDefault(); showNote();
-    } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    } else if (command === 'previous' || command === 'next') {
       // Do not turn editor cursor/IME gestures into a change of patient context.
       if (e.target.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
       e.preventDefault(); navigation();
-      const b = e.code === 'ArrowLeft' ? previous : next;
+      const b = command === 'previous' ? previous : next;
       if (!b.disabled) { b.focus(); b.click(); }
     }
   }
   const parentKeyboard = e => keyboard(e);
-  document.addEventListener('keydown', parentKeyboard);
+  document.addEventListener('keydown', parentKeyboard, true);
   function label(uid) {
     const s = app.study(uid);
     return s ? [s.name || s.patientName || '', s.patientId || s.id || '', s.date || '날짜 미확인', s.modality || '', s.desc || s.description || '', uid].filter(Boolean).join(' · ') : uid;
@@ -382,8 +398,12 @@ window.KinReadingWorkspace = function (app) {
           // Keyboard events do not bubble out of an iframe. Bind each real
           // viewer document once, including documents replaced by job restore.
           if (!boundDocuments.has(doc)) {
-            doc.addEventListener('keydown', e => keyboard(e, doc)); boundDocuments.add(doc);
+            doc.addEventListener('keydown', e => keyboard(e, doc), true); boundDocuments.add(doc);
           }
+          const keyMap=shortcuts.read();
+          for(const [id,selector] of Object.entries({image:'#kin-viewer-focus-2',report:'#kin-viewer-focus-4',tools:'#kin-viewer-focus-7',nativeTools:'#kin-viewer-focus-9',note:'#kin-viewer-note-open'}))doc.querySelector(selector)?.setAttribute('aria-keyshortcuts',KinWorkspaceShortcuts.display(keyMap[id]));
+          const toolHint=doc.querySelector('#kin-viewer-tool-focus > p');
+          if(toolHint){const key=id=>keyMap[id].replace(/^Digit|^Key/,'');toolHint.textContent='Ctrl+Alt+'+key('tools')+' 측정 도구 · 8 비교 작업 도구 · '+key('nativeTools')+' 기본 영상 도구 (Tab 이동·Enter 선택) · '+key('image')+' 선택 영상 · '+key('report')+' 판독문으로';}
           if (!loaded) {
             loaded = true; failed = false; frame.inert = false;
             if (sameTarget()) { pending = null; recovery.hidden = true; status.textContent = '영상 작업공간 연결됨'; identify(); }
@@ -434,7 +454,7 @@ window.KinReadingWorkspace = function (app) {
   }
   // Session invalidation must hide the embedded document even if its own request
   // has not yet noticed the expired account. Never reconnect it from a late load.
-  function end() { ended = true; epoch++; returnChannel?.close();returnChannel=null;clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
+  function end() { ended = true; shortcuts.end(); epoch++; returnChannel?.close();returnChannel=null;clearInterval(timer); timer = null; queueObserver.disconnect(); document.removeEventListener('keydown', parentKeyboard, true); frame?.remove(); frame = null; shown = pending = null; loaded = false; active = false; layout(); identify(); }
   let channel;
   try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });

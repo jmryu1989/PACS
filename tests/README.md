@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D-WORKSPACE-SHORTCUTS → RISK-D-WORKSPACE-ACCESS/UNSAVED/SHORTCUT-CONFLICT → TEST-WORKSPACE-SHORTCUTS: `workspace_shortcuts_test.cjs`와 `e2e/test_workspace_shortcuts.py`는 통합 목록·영상·판독문 이동 키 편집, 예약/중복 거절, 이전 키 비활성화, 입력/모달 보호, 미저장 내용·영상 보존, 브라우저 저장/충돌/실패/복원·세션 종료를 검사한다. 별도 영상 창 편집 연계·계정 서버 복원은 잔여다.
+
 REQ-D-WORKSPACE-DOCK-AUTOHIDE -> RISK-OCCLUSION/FOCUS/UNSAVED/PREFERENCE-LOSS -> TEST-DOCK-AUTOHIDE: `e2e/test_dock_autohide.py` verifies opt-in timed collapse, native input/pointer/request guards, preserved live panels and keyboard focus re-entry, account restore/legacy preservation and lifecycle. `reading_appearance_live.py` verifies v5/dockv2 strict boolean, atomic rejection and older-writer refusal. Scope is the existing custom tool panels; full OHIF toolbar and physical monitor validation remain pending.
 
 REQ-D-WORKSPACE-NATIVE-FOCUS -> RISK-D-WORKSPACE-ACCESS/UNSAVED -> TEST-NATIVE-TOOLBAR: `e2e/test_native_toolbar.py` checks Ctrl+Alt+9 and explicit button entry to the pinned OHIF toolbar, native Tab/Enter activation and actual image manipulation, unchanged viewport on focus, report return, modal/modifier exclusion, missing target and standalone lifecycle. Full toolbar editing and other modality/device validation remain pending.
