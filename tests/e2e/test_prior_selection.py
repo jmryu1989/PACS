@@ -146,6 +146,9 @@ class PriorSelectionE2E(base.WorklistE2E):
             row = self.select(page, selected)
             date = {past.uid: "2026-07-01", current.uid: "2026-08-01", future.uid: "2026-09-07"}[selected.uid]
             expect(row).to_contain_text(date)
+            # Selection starts its own thumbnail lookup. Observe autoPrior only
+            # after that work settles, so it cannot be counted as a new fetch.
+            page.evaluate('() => thumbDone')
             requests = []
             listener = lambda request: requests.append(request.url)
             page.on("request", listener)

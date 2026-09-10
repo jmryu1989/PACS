@@ -35,6 +35,7 @@ class ReadingWindowReuseE2E(ReadingWorkspaceE2E):
           return event.defaultPrevented;
         }""")
         self.assertFalse(clean_event)
+        popup.get_by_role('button', name='Comparison', exact=True).click()
         popup.get_by_label("Job Title", exact=True).fill("KEEP SEPARATE WINDOW")
         event = popup.evaluate("""() => {
           const event = new Event('beforeunload', { cancelable: true });

@@ -498,6 +498,12 @@
     #countlist .dot-t { background: var(--kin-st-t); }
     #filterlist { margin-left: auto; color: var(--kin-dim); font-size: 11.5px; }
 
+    #image-opening-dialog { width: 460px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; color: var(--kin-text); background: var(--kin-panel); border: 1px solid var(--kin-muted); border-radius: 8px; padding: 20px; }
+    #image-opening-dialog::backdrop { background: #0009; }
+    #image-opening-dialog h2 { margin-top: 0; }
+    #image-opening-dialog p { color: var(--kin-muted); line-height: 1.5; }
+    #image-opening-dialog select { max-width: 100%; background: var(--kin-bg); color: var(--kin-text); border: 1px solid var(--kin-muted); border-radius: 4px; padding: 6px; }
+    .image-opening-actions { display: flex; justify-content: flex-end; gap: 8px; }
     .right { background: var(--kin-bg); }
     .rw { border-bottom-color: var(--kin-line2); }
     .rw section, .related-p { border-color: var(--kin-line2); }
@@ -561,6 +567,7 @@
     <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
     <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
+    <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
     <details id="workspace-server-menu" style="position:relative">
       <summary class="chip">Account Layout</summary>
       <div id="workspace-server-panel" style="position:fixed;z-index:60;width:300px;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);overflow:auto;padding:12px;background:var(--kin-panel);border:1px solid var(--kin-muted);border-radius:6px">
@@ -902,6 +909,7 @@
 
   <script src="auth.js"></script>
   <script src="reading-panel-layout.js"></script>
+  <script src="viewer-opening.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
   <script src="reading-appearance.js"></script>
@@ -3753,7 +3761,9 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
+    let imageOpening = null;
     function autoPrior(uid) {
+      if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
       if (!s?.sourcePatientKey || !validPriorDate(s.date)) return null;
       // fmtD는 모양만 바꾼다. 달력 검증 없이 정렬하면 미래·불량 날짜가 prior가 된다.
@@ -3763,8 +3773,9 @@
         .sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid))[0]?.uid ?? null;
     }
 
-    function openFilmbox(uid, priorUid = null, initialSeriesUid = null) {
-      if (readingWorkspace.active()) return readingWorkspace.open(uid, priorUid, initialSeriesUid);
+    function openFilmbox(uid, priorUid = autoPrior(uid), initialSeriesUid = null) {
+      if (readingWorkspace.active() || imageOpening?.snapshot().listTarget === 'workspace')
+        return readingWorkspace.open(uid, priorUid, initialSeriesUid);
       return openOhifWindow(uid, priorUid, initialSeriesUid);
     }
     function ohifScope(value) {
@@ -4836,6 +4847,7 @@
       renderHeads();
       renderTemplates();
       applyRoleUi();
+      imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
       try {
