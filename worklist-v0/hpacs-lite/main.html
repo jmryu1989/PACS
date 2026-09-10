@@ -548,6 +548,10 @@
       <button data-days="-1" class="on">All</button>
     </div>
     <span id="chips" style="display:flex;gap:4px;flex-wrap:wrap"></span>
+    <span id="active-filter-info" hidden style="max-width:100%;overflow-wrap:anywhere">
+      <span id="active-filter-name"></span> · <span id="active-filter-state" role="status"></span>
+      <button class="chip" id="edit-active-filter" type="button" title="적용한 저장 검색을 편집합니다. 열기만으로 목록 조건은 바뀌지 않습니다.">Edit Search</button>
+    </span>
     <div class="spacer"></div>
     <button class="chip" id="refresh">Refresh</button>
     <button class="chip" id="layout-toggle" title="자동·세로 고정·가로 고정 순서로 전환">Layout: Auto</button>
@@ -4111,6 +4115,37 @@
       quick: $("#quick").value, days: quickDays, mode, cols: { ...fval },
       sortKey, sortDir,
     });
+    let activeFilterName = null;
+    function filterCriteriaKey(filter) {
+      const canonical = value => Array.isArray(value) ? value.map(canonical)
+        : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, canonical(value[k])])) : value;
+      const cols = Object.fromEntries(Object.entries(filter.cols || {}).filter(([, v]) => v !== '' && v != null));
+      const key = COLS[filter.mode]?.some(c => c.k === filter.sortKey) ? filter.sortKey : null;
+      return JSON.stringify(canonical({ mode: filter.mode, quick: filter.quick ?? '', days: savedFilterDays(filter.days),
+        cols, sortKey: key, sortDir: key ? filter.sortDir || 0 : 0 }));
+    }
+    function renderActiveFilter() {
+      const holder = $('#active-filter-info');
+      holder.hidden = activeFilterName === null;
+      if (holder.hidden) return;
+      const stored = userFilters.find(f => f.name === activeFilterName);
+      const modified = !!stored && (filterCriteriaKey(stored) !== filterCriteriaKey(snapshotFilter())
+        || !!favoriteList?.key() || !!studyTagList?.key());
+      $('#active-filter-name').textContent = activeFilterName;
+      $('#active-filter-state').textContent = !stored ? 'Deleted' : modified ? 'Modified' : 'Saved';
+      holder.title = !stored ? '저장 검색이 삭제됐습니다. 현재 목록 조건은 유지됩니다.' : modified
+        ? '현재 목록 조건과 저장된 조건이 다릅니다. 저장 검색을 다시 적용하거나 현재 조건을 새 검색으로 저장하세요.'
+        : '저장된 검색 조건을 적용 중입니다. 결과 건수는 현재 불러온 목록을 기준으로 합니다.';
+      $('#edit-active-filter').disabled = !stored;
+    }
+    function focusFilterChip(name) {
+      const chip = [...$('#chips').querySelectorAll('button[data-i]')].find(b => userFilters[+b.dataset.i]?.name === name);
+      (chip || $('#managefilters')).focus();
+    }
+    function editSavedFilter(name) {
+      focusFilterChip(name);
+      savedFilterManager.open({ name });
+    }
     async function filterWriteReady(signal) {
       if (sess?.demo && !offline && !serverMode) return true;
       const disconnected = () => offline || !serverMode;
@@ -4132,6 +4167,11 @@
     const savedFilterManager = KinSavedFilterManager.mount({
       columns: COLS, days: savedFilterDays, list: () => userFilters, snapshot: snapshotFilter,
       count: f => filteredFor(f).length, apply: applyFilter,
+      restoreFocus(opener) {
+        if (opener?.isConnected && !opener.disabled && !opener.closest('[hidden]')) opener.focus();
+        else if (opener?.dataset.name) focusFilterChip(opener.dataset.name);
+        else $('#managefilters').focus();
+      },
       async save(filter, signal) {
         // Capture the transport before the request: a later disconnect must never
         // turn a completed account save into browser-local preference data.
@@ -4156,10 +4196,12 @@
       },
     });
     $('#managefilters').addEventListener('click', () => savedFilterManager.open());
+    $('#edit-active-filter').addEventListener('click', () => savedFilterManager.open({ name: activeFilterName }));
     function applyFilter(f) {
       if (!f || !Array.isArray(COLS[f.mode])) { toast('저장 검색의 업무 화면을 확인할 수 없습니다.', 'err'); return false; }
       const compoundError = KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]);
       if (compoundError) { toast('복합 조건을 적용하지 못했습니다: ' + compoundError, 'err'); return false; }
+      activeFilterName = userFilters.some(saved => saved.name === f.name) ? f.name : null;
       $("#quick").value = f.quick ?? "";
       quickDays = savedFilterDays(f.days);
       document.querySelectorAll("#qf button").forEach(x => x.classList.toggle("on", +x.dataset.days === quickDays));
@@ -4184,6 +4226,7 @@
     function renderChips() {
       const holder = $("#chips");
       if (!holder) return;
+      renderActiveFilter();
       const rows = userFilters.map((uf, i) => {
         const count = filteredFor(uf).length;
         const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}`;
@@ -4192,13 +4235,18 @@
       // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
       // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
       const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count]));
-      if (holder.dataset.renderSignature === signature) return;
+      if (holder.dataset.renderSignature === signature) {
+        holder.querySelectorAll('button[data-i]').forEach(b => b.setAttribute('aria-pressed', String(userFilters[+b.dataset.i]?.name === activeFilterName)));
+        return;
+      }
+      const focused = holder.contains(document.activeElement) ? userFilters[+document.activeElement.dataset.i]?.name : null;
       holder.innerHTML = rows.map(({ i, uf, count, label }) =>
-        `<button class="chip" data-i="${i}" aria-label="${esc(label)}" ` +
-        `title="${esc(label)} · 클릭: 적용 / 우클릭: 메뉴">` +
+        `<button class="chip" data-i="${i}" data-name="${esc(uf.name)}" aria-label="${esc(label)}" aria-pressed="${uf.name === activeFilterName}" aria-haspopup="menu" ` +
+        `title="${esc(label)} · 클릭: 적용 / 우클릭 또는 Shift+F10: 메뉴">` +
         `${uf.isDefault ? "⚑ " : ""}${esc(uf.name)} <span aria-hidden="true">(${count})</span></button>`
       ).join("");
       holder.dataset.renderSignature = signature;
+      if (focused !== null) focusFilterChip(focused);
     }
 
     /**
@@ -4221,27 +4269,11 @@
       renderChips(); renderTemplates();
     }
 
-    $("#savefilter").addEventListener("click", async () => {
+    $("#savefilter").addEventListener("click", () => {
       const current = snapshotFilter();
-      const compoundError = KinCompoundFilter.validate(current.cols[KinCompoundFilter.KEY], COLS[current.mode]);
-      if (compoundError) { toast('복합 조건을 저장하지 못했습니다: ' + compoundError, 'err'); return; }
-      const name = prompt("필터 이름 (같은 이름이면 덮어씁니다):");
-      if (!name?.trim()) return;
-      // 기본 필터 = 로그인하면 자동으로 걸리는 필터. 릴리즈노트의 깃발(⚑) 기능.
-      const isDefault = confirm(
-        `"${name}" 을(를) 기본 필터로 지정할까요?\n\n` +
-        `지정하면 다음 로그인부터 이 필터가 자동으로 적용됩니다.\n(취소를 누르면 그냥 저장만 합니다)`);
-      const f = { name: name.trim(), isDefault, ...current };
-      if (serverMode) {
-        try { await api("POST", "/filters", f); await reloadPrefs(); }
-        catch (e) { toast("필터 저장 실패: " + e.message, "err"); return; }
-      } else {
-        const i = userFilters.findIndex(x => x.name === f.name);
-        if (isDefault) userFilters.forEach(x => x.isDefault = false);
-        if (i >= 0) userFilters[i] = f; else userFilters.push(f);
-        saveFiltersLocal(); renderChips();
-      }
-      toast(`필터 "${f.name}" 저장${isDefault ? " (기본 필터로 지정)" : ""}`);
+      const error = KinCompoundFilter.validate(current.cols[KinCompoundFilter.KEY], COLS[current.mode]);
+      if (error) { toast('복합 조건을 저장하지 못했습니다: ' + error, 'err'); return; }
+      savedFilterManager.open();
     });
 
     $("#chips").addEventListener("click", e => {
@@ -4251,13 +4283,16 @@
 
     // 우클릭에 바로 삭제를 걸어두면 손이 미끄러진 한 번으로 사라진다.
     // 되돌릴 수 없는 동작은 메뉴를 한 겹 두른다 (교훈 §5).
-    $("#chips").addEventListener("contextmenu", e => {
-      const b = e.target.closest("button[data-i]"); if (!b) return;
+    function showFilterMenu(e, b) {
       e.preventDefault();
       const i = +b.dataset.i, f = userFilters[i];
+      if (!f) return;
+      b.focus();
+      const rect = b.getBoundingClientRect();
       showCtx(e, [
-        { label: "적용", act: () => applyFilter(f) },
-        { label: f.isDefault ? "기본 필터 해제" : "기본 필터로 지정", act: async () => {
+        { label: "Apply", act: () => applyFilter(f) },
+        { label: "Edit", act: () => editSavedFilter(f.name) },
+        { label: f.isDefault ? "Clear Default" : "Set as Default", act: async () => {
             const on = !f.isDefault;
             if (on && (!Array.isArray(COLS[f.mode]) || KinCompoundFilter.validate(f.cols?.[KinCompoundFilter.KEY], COLS[f.mode]))) {
               toast('복합 조건 또는 업무 화면을 확인할 수 없어 기본 필터로 지정하지 못했습니다.', 'err'); return;
@@ -4272,7 +4307,7 @@
             toast(on ? `"${f.name}" 을 기본 필터로 지정했습니다` : "기본 필터에서 해제했습니다");
           } },
         { sep: 1 },
-        { label: "삭제", act: async () => {
+        { label: "Delete", act: async () => {
             if (!confirm(`필터 "${f.name}" 을(를) 삭제할까요?`)) return;
             if (serverMode) {
               try { await api("DELETE", `/filters/${f.id}`); await reloadPrefs(); }
@@ -4282,11 +4317,19 @@
             }
             toast("필터를 삭제했습니다", "info");
           } },
-      ]);
+      ], e.type === 'keydown' ? { x: rect.left, y: rect.bottom, focus: true } : null);
+    }
+    $("#chips").addEventListener("contextmenu", e => {
+      const b = e.target.closest('button[data-i]'); if (b) showFilterMenu(e, b);
+    });
+    $("#chips").addEventListener("keydown", e => {
+      if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return;
+      const b = e.target.closest('button[data-i]'); if (b) showFilterMenu(e, b);
     });
     renderChips();
 
     $("#clearfilter").addEventListener("click", () => {
+      activeFilterName = null;
       favoriteList?.clear();studyTagList?.clear();
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
@@ -4395,18 +4438,39 @@
     // ══════════ 우클릭 컨텍스트 메뉴 (모드·대상에 따라 항목이 달라짐) ══════════
     const ctx = $("#ctx");
     let ctxItems = [];
-    function showCtx(e, items) {
+    let ctxOpener = null;
+    function showCtx(e, items, keyboard = null) {
+      ctxOpener = document.activeElement;
       ctxItems = items;
+      ctx.setAttribute('role', 'menu');
       ctx.innerHTML = items.map((it, i) =>
-        it.sep ? "<hr>" : `<div data-i="${i}" class="${it.dis ? "dis" : ""}">${esc(it.label)}</div>`).join("");
-      ctx.style.left = Math.min(e.clientX, innerWidth - 200) + "px";
-      ctx.style.top = Math.min(e.clientY, innerHeight - (items.length * 28 + 20)) + "px";
+        it.sep ? '<hr role="separator">' : `<div data-i="${i}" role="menuitem" tabindex="-1" aria-disabled="${!!it.dis}" class="${it.dis ? "dis" : ""}">${esc(it.label)}</div>`).join("");
+      ctx.style.left = Math.max(0, Math.min(keyboard?.x ?? e.clientX, innerWidth - 200)) + "px";
+      ctx.style.top = Math.max(0, Math.min(keyboard?.y ?? e.clientY, innerHeight - (items.length * 28 + 20))) + "px";
       ctx.style.display = "block";
+      if (keyboard?.focus) ctx.querySelector('[data-i]:not(.dis)')?.focus();
     }
+    ctx.addEventListener('keydown', e => {
+      const items = [...ctx.querySelectorAll('[data-i]:not(.dis)')];
+      const index = items.indexOf(document.activeElement);
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+        e.preventDefault(); e.stopPropagation();
+        const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1
+          : (index + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next]?.focus();
+      } else if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault(); e.stopPropagation(); items[index]?.click();
+      } else if (e.key === 'Escape' || e.key === 'Tab') {
+        if (e.key === 'Escape') e.preventDefault();
+        e.stopPropagation(); ctx.style.display = 'none'; ctxOpener?.focus();
+      }
+    });
     ctx.addEventListener("click", async e => {
       const d = e.target.closest("div[data-i]"); if (!d) return;
       const it = ctxItems[+d.dataset.i];
       if (it.dis) return;
+      ctx.style.display = 'none';
+      ctxOpener?.focus();
       /**
        * **`act()`를 await하고 catch한다.**
        *

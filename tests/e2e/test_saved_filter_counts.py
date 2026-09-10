@@ -26,14 +26,14 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         expect(page.locator("#rows tr[data-uid]" )).to_have_count(2)
 
         name = '검사함-"<&-' + uuid.uuid4().hex[:8]
-        def answer(dialog):
-            dialog.accept(name) if dialog.type == "prompt" else dialog.dismiss()
-        page.on("dialog", answer)
+        page.locator('#savefilter').click()
+        page.locator('#sfm-name').fill(name)
         with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/api/filters")) as saved:
-            page.locator("#savefilter").click()
-        page.remove_listener("dialog", answer)
+            page.locator('#sfm-save').click()
         filter_id = saved.value.json()["id"]
         self.addCleanup(self.remove_filter, filter_id)
+        expect(page.locator('#sfm-status')).to_contain_text('저장 완료')
+        page.locator('#sfm-close').click()
 
         chip = page.locator("#chips button", has_text=name)
         expect(chip).to_have_count(1)
@@ -47,7 +47,7 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
 
         chip.locator("span").click(button="right")
         with page.expect_response(lambda r: r.request.method == "PATCH" and "/api/filters/" in r.url) as toggled:
-            page.locator("#ctx").get_by_text("기본 필터로 지정", exact=True).click()
+            page.locator("#ctx").get_by_text("Set as Default", exact=True).click()
         self.assertEqual(toggled.value.request.post_data_json, {"on": True})
         expect(page.locator("#toast")).to_have_text(f'"{name}" 을 기본 필터로 지정했습니다')
         expect(chip).to_have_attribute("aria-label", re.compile(r"기본 필터"))

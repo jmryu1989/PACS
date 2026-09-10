@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D01-FILTER-NAVIGATION → RISK-D01-FILTER-LOSS/WRONG/ACCESS → TEST-D01-FILTER-NAVIGATION: `python tests/e2e/test_saved_filter_navigation.py`는 Save Filter→관리, 저장 검색의 키보드 Edit·정확한 선택·초점 복귀, Saved/Modified/Deleted와 현재 조건 유지, Save & Apply의 검증/실패/중복 차단·성공·재로그인, 폴더/순서/검색 결과 내 이전·다음 이동과 미저장 취소를 검사한다. 실제 검사 목록·개인 판독 초안·확정 판독 이력을 보존하며 기존 관리/분류/건수/복합검색이 직접 회귀다. `KIN_EVIDENCE_DIR`는 해당 실행의 화면 기록 경로다.
+
 REQ-D-WORKSPACE-SHORTCUTS → RISK-D-WORKSPACE-ACCESS/UNSAVED/SHORTCUT-CONFLICT → TEST-WORKSPACE-SHORTCUTS: `workspace_shortcuts_test.cjs`와 `e2e/test_workspace_shortcuts.py`는 통합 목록·영상·판독문 이동 키 편집, 예약/중복 거절, 이전 키 비활성화, 입력/모달 보호, 미저장 내용·영상 보존, 브라우저 저장/충돌/실패/복원·세션 종료를 검사한다. 별도 영상 창 편집 연계·계정 서버 복원은 잔여다.
 
 REQ-D-WORKSPACE-DOCK-AUTOHIDE -> RISK-OCCLUSION/FOCUS/UNSAVED/PREFERENCE-LOSS -> TEST-DOCK-AUTOHIDE: `e2e/test_dock_autohide.py` verifies opt-in timed collapse, native input/pointer/request guards, preserved live panels and keyboard focus re-entry, account restore/legacy preservation and lifecycle. `reading_appearance_live.py` verifies v5/dockv2 strict boolean, atomic rejection and older-writer refusal. Scope is the existing custom tool panels; full OHIF toolbar and physical monitor validation remain pending.
