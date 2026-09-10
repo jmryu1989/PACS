@@ -3941,6 +3941,7 @@
       notice: message => toast(message, 'err'),
     });
     $('#m-reading').addEventListener('click', () => {
+      if (readingWorkspace.active()) { readingWorkspace.exit(); return; }
       if (!selectedUid) { toast('판독할 검사를 먼저 선택하세요.', 'info'); return; }
       readingWorkspace.resume(selectedUid, relatedUid || autoPrior(selectedUid));
     });

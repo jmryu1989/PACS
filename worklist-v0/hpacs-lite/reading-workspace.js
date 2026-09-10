@@ -68,7 +68,7 @@ window.KinReadingWorkspace = function (app) {
     maybeAutoNote();
   };
   const separate = button('Open Viewer Window', () => { if (shown && sameTarget()) app.popup(shown.uid, shown.prior, shown.series, returnLink()); });
-  button('Back to Worklist', () => { active = false; layout(); });
+  button('Exit Workspace', leave);
   const target = node('div', '', bar); target.id = 'reading-target';
   const hints = node('div', 'Ctrl+Alt+1 목록 · 2 영상 · 3 과거 판독 · 4 작성 · 5 정보 · 6 영상 Tech 메모 · 7 작업 패널 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · ←/→ 이전/다음 검사 (입력 중 이동 제외)', bar);
   hints.id = 'reading-shortcuts';
@@ -300,7 +300,9 @@ window.KinReadingWorkspace = function (app) {
       } catch (_) { /* Its loading/error state is handled by the document check. */ }
     });
   }
+  function leave() { active = false; layout(); $('#m-reading').focus(); }
   function layout() {
+    const toggle=$('#m-reading');toggle.textContent=active?'Back to Worklist':'Reading Workspace';toggle.setAttribute('aria-pressed',String(active));toggle.title=active?'기존 목록 화면으로 돌아갑니다. 작성 중인 판독문과 영상 작업은 유지됩니다.':'영상과 판독문을 함께 보는 작업공간을 엽니다.';
     // The native viewer observes its container size even while hidden. Preserve
     // that size off screen so returning from the list cannot produce a NaN camera.
     if(!active&&frame&&!host.hidden){const r=host.getBoundingClientRect();if(r.width>0&&r.height>0){host.style.setProperty('--kin-retained-width',r.width+'px');host.style.setProperty('--kin-retained-height',r.height+'px');}}
@@ -460,7 +462,7 @@ window.KinReadingWorkspace = function (app) {
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
   window.addEventListener('beforeunload', e => { const s = viewerState(); if (s.busy || s.dirty) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, openJob, resume, selectionChanged, refreshNote: updateNote, active: () => active, end,
+  return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end,
     preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,
       apply: value => { syncAutoNote(); if (autoNote.disabled) return false; autoNote.checked = value; autoNote.onchange(); return true; } } };
 };

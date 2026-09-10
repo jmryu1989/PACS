@@ -52,7 +52,7 @@ class ReadingWorkspaceE2E(ViewerJobReportE2E):
   a,b=self.pair();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   p.locator('#findings').fill('UNSAVED CURRENT WORKSPACE')
   old=p.locator('#reading-frame').get_attribute('src')
-  p.get_by_role('button',name='Back to Worklist',exact=True).click();expect(p.locator('#reading-viewer')).not_to_be_visible()
+  expect(p.locator('#m-reading')).to_have_text('Back to Worklist');p.locator('#m-reading').click();expect(p.locator('#reading-viewer')).not_to_be_visible();expect(p.locator('#m-reading')).to_have_text('Reading Workspace');expect(p.locator('#m-reading')).to_be_focused()
   p.locator('#m-reading').click();expect(p.locator('#reading-frame')).to_be_visible()
   self.assertEqual(p.locator('#reading-frame').get_attribute('src'),old)
   expect(p.locator('#findings')).to_have_value('UNSAVED CURRENT WORKSPACE')
