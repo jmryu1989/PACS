@@ -53,7 +53,7 @@ class Pure(unittest.TestCase):
         body, _, _, _ = fixture(); expected=body['product']
         for table,field,value in [('FavoriteWorkspace','value','[]'),('FavoriteWorkspace','subject','wrong-owner'),
                 ('StudyTagCatalog','ownerSub','wrong-owner'),('StudyTagCatalog','lastRequest','00000000-0000-4000-8000-000000000999'),
-                ('ReaderAssignment','readerSub',None),('ReaderAssignment','revision',1),('ReaderAssignment','lastFingerprint','0'*64)]:
+                ('ReaderAssignment','readerSub',None),('ReaderAssignment','revision',1),('ReaderAssignment','lastFingerprint','0'*64),('StudyConsultation','reply','wrong reply'),('StudyConsultation','recipientSub','wrong recipient'),('StudyConsultation','revision',1)]:
             actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
             actual['rows'][table][0][field]=value
             with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
@@ -196,7 +196,7 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 40)
+        self.assertEqual(sum(len(value) for value in rows.values()), 41)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
         self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
         job=rows['ViewerJob'][0]

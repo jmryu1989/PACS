@@ -1,0 +1,17 @@
+#consultations-dialog {width:min(1080px,94vw);max-height:90vh;overflow:auto;background:#101a2b;color:#dce7fa;border:1px solid #526b91;border-radius:10px;padding:20px;}
+#consultations-dialog::backdrop {background:#0009;}
+#consultations-dialog .consultation-grid {display:grid;grid-template-columns:minmax(220px,1fr) minmax(280px,1.3fr);gap:20px;}
+#consultations-dialog section {min-width:0;}
+#consultations-dialog label {display:block;margin:8px 0;}
+#consultations-dialog input,#consultations-dialog select,#consultations-dialog textarea {box-sizing:border-box;max-width:100%;background:#0b1322;color:inherit;border:1px solid #526b91;border-radius:4px;padding:7px;}
+#consultations-dialog textarea {display:block;width:100%;}
+#consultations-dialog button {background:#192c49;color:inherit;border:1px solid #526b91;border-radius:4px;padding:8px;margin:3px;cursor:pointer;}
+#consultations-dialog button:disabled {opacity:.5;cursor:default;}
+#consultations-dialog button:focus-visible,#consultations-dialog input:focus-visible,#consultations-dialog select:focus-visible,#consultations-dialog textarea:focus-visible {outline:2px solid #68b2ff;outline-offset:2px;}
+#consultations-dialog pre,#co-study,#co-participants {white-space:pre-wrap;overflow-wrap:anywhere;}
+#co-list {max-height:42vh;overflow:auto;}
+#co-list button {display:block;width:calc(100% - 8px);text-align:left;overflow-wrap:anywhere;}
+#co-list button[aria-pressed=true] {border-color:#84c1ff;background:#264567;}
+#consultations-dialog .consultation-actions {display:flex;flex-wrap:wrap;align-items:center;gap:6px;}
+#consultations-dialog footer {display:flex;justify-content:flex-end;gap:8px;}
+@media(max-width:650px) {#consultations-dialog .consultation-grid {grid-template-columns:minmax(0,1fr);}#co-list {max-height:25vh;}}

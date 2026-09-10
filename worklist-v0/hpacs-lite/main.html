@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <title>워크리스트 — KOREA IMAGING NETWORK</title>
   <link rel="stylesheet" href="saved-filter-manager.css">
+  <link rel="stylesheet" href="consultations.css">
   <link rel="stylesheet" href="worklist-columns.css">
   <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="/kin-brand/kin-favicon-32.png">
@@ -578,6 +579,7 @@
     <button class="chip" id="layout-reset" title="이 계정의 현재 브라우저 배치를 초기화합니다">Reset Layout</button>
     <button class="chip" id="reading-appearance-open" type="button" disabled>Appearance &amp; Tools</button>
     <button class="chip" id="image-opening-open" type="button" disabled>Image Opening</button>
+    <button class="chip" id="consultations-open" type="button" hidden disabled>Consultations</button>
     <button class="chip" id="worklist-alerts-open" type="button" disabled>Worklist Alerts</button>
     <button class="chip" id="viewer-windows-open" type="button" disabled>Viewer Windows</button>
     <details id="workspace-server-menu" style="position:relative">
@@ -949,6 +951,7 @@
   <script src="study-tags.js"></script>
   <link rel="stylesheet" href="reader-assignment.css">
   <script src="reader-assignment.js"></script>
+  <script src="consultations.js"></script>
   <script>
     // ── 로그인 가드 (4장) ──
     // init()이 쿠키 세션을 한 번 판정한 뒤 session()/has()는 동기로 읽는다. 이 변수들은
@@ -1859,10 +1862,12 @@
       });
     }
 
+    let consultationFilter = null, consultationFilterSequence = 0;
     function filtered() {
       const list = filteredFor({ mode, quick: $("#quick").value, days: quickDays, cols: fval });
       const favorites = favoriteList ? favoriteList.filter(list) : list;
-      return studyTagList ? studyTagList.filter(favorites) : favorites;
+      const tagged = studyTagList ? studyTagList.filter(favorites) : favorites;
+      return consultationFilter ? tagged.filter(s => consultationFilter.uids.has(s.uid)) : tagged;
     }
 
     // Navigation and its position indicator must use the same order the reader sees.
@@ -1877,7 +1882,7 @@
     function render(revealUid) {
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
-      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir, favoriteList?.key(), studyTagList?.key()]);
+      const query = JSON.stringify([mode, $('#quick').value, quickDays, fval, sortKey, sortDir, favoriteList?.key(), studyTagList?.key(), consultationFilter?.revision ?? 0]);
       if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
       if (typeof revealUid === 'string') {
         const index = list.findIndex(s => s.uid === revealUid);
@@ -1904,6 +1909,11 @@
       columnPrefs?.decorate(mode);
 
       const active = [];
+      if (consultationFilter) {
+        const known = new Set(studies.map(s=>s.uid));
+        const missing = [...consultationFilter.uids].filter(uid=>!known.has(uid)).length;
+        active.push(consultationFilter.label + (missing ? ` · ${missing} not in loaded worklist` : ''));
+      }
       if (favoriteList?.label()) active.push(favoriteList.label());
       if (studyTagList?.label()) active.push(studyTagList.label());
       // `.on` 버튼이 없으면 `.textContent`가 TypeError를 내고 **render() 전체가 죽는다** —
@@ -4065,6 +4075,21 @@
       apply:(data,scope,id)=>{studyTagScope=scope;studyTagList.apply(tagScopeState(data,scope),id);},
     });
     $('#study-tag-open').onclick=()=>studyTags.open();$('#study-tag-clear').onclick=()=>studyTagList.clear();
+    const consultations=KinConsultations({api,
+      allowed:()=>!!sess&&serverMode&&!demoMode&&!offline&&(KinAuth.has('radiologist')||KinAuth.has('admin')),
+      admin:()=>KinAuth.has('admin'),identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.institution,s.sub]:null;},
+      current:()=>studies.find(s=>s.uid===selectedUid),study:uid=>studies.find(s=>s.uid===uid),
+      openStudy:uid=>select(uid,{openSelected:true}),
+      filter:(uids,direction)=>{
+        $('#clearfilter').click();const wanted=new Set(uids),known=new Set(studies.map(s=>s.uid));
+        consultationFilter={uids:wanted,revision:++consultationFilterSequence,label:(direction==='received'?'Received':'Sent')+' Consultations · Loaded Requests'};render();
+        const missing=[...wanted].filter(uid=>!known.has(uid)).length;
+        if(missing)toast(`자문 검사 ${wanted.size}건 중 ${missing}건이 현재 불러온 검사 목록에 없습니다. Refresh 후 접근 가능한 검사를 확인하세요.`, 'info');
+      },
+      clearFilter:()=>{consultationFilter=null;render();},
+    });
+    $('#consultations-open').onclick=()=>consultations.open();
+
     const readerAssignment=KinReaderAssignment({api,allowed:()=>!!sess&&serverMode&&!demoMode&&!offline,
       identity:()=>{const s=KinAuth.session();return s?.state==='approved'?[s.institution,s.sub]:null;},
       changed:(uid,value)=>{updateReaderAssignment(uid,value);render();},
@@ -4522,7 +4547,7 @@
 
     $("#clearfilter").addEventListener("click", () => {
       activeFilterName = null;
-      favoriteList?.clear();studyTagList?.clear();
+      favoriteList?.clear();studyTagList?.clear();consultationFilter=null;
       $("#quick").value = "";
       Object.keys(fval).forEach(k => delete fval[k]);
       quickDays = -1;
@@ -4837,6 +4862,7 @@
     /** 서버가 살아 있을 때. 재연결에서도 다시 불리므로 누적되는 조작을 하지 않는다. */
     function goOnline(b) {
       serverMode = true; offline = false;
+      $('#consultations-open').disabled=!!demoMode;consultations.refresh();
       stopReconnect();
       appState = b.states;
       orders = b.orders;
@@ -4873,6 +4899,7 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      $('#consultations-open').disabled=true;consultations.refresh();
       clearInterval(poll); poll = null; ++pollGeneration;
       $("#dbstat").innerHTML = `<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)`;
       $("#dbstat").title = `API에 연결하지 못했습니다 (${e?.message ?? ""}).\n` +
@@ -5014,6 +5041,7 @@
       renderHeads();
       renderTemplates();
       applyRoleUi();
+      $('#consultations-open').hidden=!(KinAuth.has('radiologist')||KinAuth.has('admin'));
       imageOpening = KinViewerOpening.mount({ button: $('#image-opening-open'), session: () => KinAuth.session() });
       worklistRefresh = KinWorklistRefresh.mount({select:$('#worklist-refresh'),status:$('#worklist-refresh-status'),
         owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},

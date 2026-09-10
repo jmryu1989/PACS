@@ -94,6 +94,7 @@ model StudyState {
 
   report Report?
   techNotes TechNoteRevision[]
+  consultations StudyConsultation[]
   viewerItems ViewerItem[]
   manualSrs ManualSr[]
   viewerJobs ViewerJob[]
@@ -561,4 +562,32 @@ model WorkspaceShortcuts {
   updatedAt DateTime @updatedAt
 
   @@id([institution, subject])
+}
+
+
+/// Institution-local advisory requests; does not change report or image access.
+model StudyConsultation {
+  id String @id @db.Uuid
+  studyUid String
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  institutionId String @db.VarChar(256)
+  requesterSub String @db.VarChar(256)
+  requesterActor String @db.VarChar(256)
+  recipientSub String @db.VarChar(256)
+  recipientActor String @db.VarChar(256)
+  recipientName String @db.VarChar(256)
+  reason String @db.VarChar(2000)
+  reply String? @db.VarChar(2000)
+  cancelReason String? @db.VarChar(2000)
+  state String @db.VarChar(16)
+  revision Int
+  changedBy String @db.VarChar(256)
+  creationFingerprint String
+  lastRequest String @db.Uuid
+  lastFingerprint String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([institutionId, recipientSub, createdAt, id])
+  @@index([institutionId, requesterSub, createdAt, id])
 }

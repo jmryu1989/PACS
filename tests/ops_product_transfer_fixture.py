@@ -37,12 +37,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910023000_reading_appearance/migration.sql',
               'api/prisma/migrations/20260910044500_workspace_shortcuts/migration.sql',
               'api/prisma/migrations/20260910090000_filter_folders/migration.sql',
-              'api/prisma/migrations/20260910100000_shared_filters/migration.sql']
+              'api/prisma/migrations/20260910100000_shared_filters/migration.sql',
+              'api/prisma/migrations/20260910110000_study_consultation/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary'])
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -151,6 +152,12 @@ def expected_rows(uid):
         value=json.dumps([dict(id='00000000-0000-4000-8000-00000000060'+str(n),name='SYNTHETIC tag '+str(n),uids=[uid])]),
         lastRequest=None if n==1 else '00000000-0000-4000-8000-000000000603',
         lastFingerprint=None if n==1 else 'c'*64,updatedAt=STAMP) for n,owner in [(1,'SYNTHETIC-sub'),(2,'')]]
+    rows['StudyConsultation']=[dict(id='00000000-0000-4000-8000-000000000901',studyUid=uid,
+        institutionId='SYNTHETIC-hospital',requesterSub='SYNTHETIC-sub',requesterActor='SYNTHETIC-reader',
+        recipientSub='SYNTHETIC-consultant',recipientActor='SYNTHETIC-consultant',recipientName='SYNTHETIC consultant',
+        reason='SYNTHETIC request',reply='SYNTHETIC reply',cancelReason=None,state='Completed',revision=3,
+        changedBy='SYNTHETIC-consultant',creationFingerprint='e'*64,
+        lastRequest='00000000-0000-4000-8000-000000000902',lastFingerprint='f'*64,createdAt=STAMP,updatedAt=STAMP)]
     rows['ReaderAssignment']=[dict(studyUid=uid,institutionId='SYNTHETIC-hospital',revision=4,
         readerSub='SYNTHETIC-sub',readerActor='SYNTHETIC-reader',readerName='SYNTHETIC reader',changedBy='SYNTHETIC-admin',
         lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP)]
@@ -207,7 +214,7 @@ def create_product(name, db, uid):
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary'):
+                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -372,6 +379,18 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing transfer basis FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN UPDATE "TransferBasis" SET "revokedAt"=now(),"revokedBy"='SYNTHETIC';
         RAISE EXCEPTION 'missing revocation reason check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyConsultation" SET state='Bogus';
+        RAISE EXCEPTION 'missing consultation state'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyConsultation" SET revision=0;
+        RAISE EXCEPTION 'missing consultation revision'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyConsultation" SET "recipientSub"="requesterSub";
+        RAISE EXCEPTION 'missing consultation participants'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyConsultation" SET "studyUid"='2.25.0';
+        RAISE EXCEPTION 'missing consultation study FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN UPDATE "StudyConsultation" SET state='Requested';
+        INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
+          (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));
+        RAISE EXCEPTION 'missing active consultation unique'; EXCEPTION WHEN unique_violation THEN NULL; END;
     END $$; ROLLBACK'''.replace('UID', uid)
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)
