@@ -3,10 +3,14 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
   panel.innerHTML='<strong>MPR Batch</strong><p class="target"></p><label>Start Offset (mm) <input aria-label="Batch Start Offset" type="number" step="0.1" value="0" style="width:85px"></label> <label>Interval (mm) <input aria-label="Batch Interval" type="number" min="0.1" max="1000" step="0.1" value="1" style="width:85px"></label> <label>Number <input aria-label="Batch Number" type="number" min="2" max="128" step="1" value="8" style="width:65px"></label> <label><input aria-label="Batch Reverse" type="checkbox"> Reverse</label> <button type="button" class="make">Make Batch</button> <button type="button" class="cancel" disabled>Cancel Batch</button><p role="status"></p><div class="result" hidden><img alt="Reconstructed MPR batch plane" style="max-width:100%;max-height:260px;object-fit:contain;background:black"><p class="frame"></p><button type="button" class="previous">Previous Plane</button> <button type="button" class="next">Next Plane</button> <button type="button" class="play">Play Batch</button> <button type="button" class="clear">Clear Batch</button></div><p>선택 평면에서 법선 방향으로 평행 단면을 만듭니다. Reverse는 반대 방향입니다. 원래 영상 창과 판독문을 유지합니다. 생성 결과는 이 창의 임시 미리보기이며 아직 검사에 저장되지 않습니다.</p>';
   host.append(panel);
   const q=s=>panel.querySelector(s),inputs=[...panel.querySelectorAll('input')],make=q('.make'),cancel=q('.cancel'),status=q('[role=status]'),caption=q('.target'),result=q('.result'),image=q('img'),frame=q('.frame'),previous=q('.previous'),next=q('.next'),play=q('.play'),clear=q('.clear');
+  const scout=document.createElement('figure');scout.className='scout';scout.hidden=true;scout.style.cssText='display:none;margin:0 0 8px;flex-shrink:0;max-width:100%';
+  scout.innerHTML='<div style="position:relative;width:256px;height:256px;max-width:100%"><img alt="Batch location reference" width="256" height="256" style="display:block;width:100%;height:100%;background:black"><svg aria-label="Batch plane positions" role="img" viewBox="0 0 256 256" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></svg></div><figcaption></figcaption>';
+  const images=document.createElement('div');images.style.cssText='display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap';image.before(images);images.append(image,scout);
+  const scoutImage=scout.querySelector('img'),scoutLines=scout.querySelector('svg'),scoutCaption=scout.querySelector('figcaption');
   let ended=false,operation=null,output=null,index=0,playTimer=null;
   const live=()=>!ended&&alive();
   function stopPlay(){clearInterval(playTimer);playTimer=null;play.textContent='Play Batch';}
-  function clearOutput(){stopPlay();image.removeAttribute('src');if(output)for(const row of output.frames)URL.revokeObjectURL(row.url);output=null;result.hidden=true;frame.textContent='';}
+  function clearOutput(){stopPlay();image.removeAttribute('src');scoutImage.removeAttribute('src');scoutLines.replaceChildren();scout.hidden=true;scout.style.display='none';if(output){for(const row of output.frames)URL.revokeObjectURL(row.url);if(output.scout)URL.revokeObjectURL(output.scout.url);}output=null;result.hidden=true;frame.textContent='';}
   function current(t,requirePermission=true){const now=live()&&target();return !!now&&(!requirePermission||!document.hidden&&permitted())&&now.group===t.group&&now.selection===t.selection&&now.views.every((v,i)=>v===t.views[i]);}
   const state=t=>JSON.stringify(t.views.map(v=>({camera:v.getCamera(),properties:v.getProperties(),blend:v.getActors()[0].actor.getMapper().getBlendMode(),slab:v.getSlabThickness()})));
   function refresh(){
@@ -17,7 +21,11 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
     if(!permitted())stopPlay();
     if(t)caption.textContent=t.source.study.id+' · Selected View '+(t.views.findIndex(v=>v.id===t.source.viewportId)+1)+' / 3 · '+t.source.series;
   }
-  function show(){if(!output)return;const row=output.frames[index];image.src=row.url;frame.textContent=(index+1)+' / '+output.frames.length+' · Center L/P/H (mm): '+row.camera.focalPoint.map(n=>Number(n.toFixed(3))).join(' / ');previous.disabled=index===0;next.disabled=index===output.frames.length-1;}
+  function show(){if(!output)return;const row=output.frames[index];image.src=row.url;frame.textContent=(index+1)+' / '+output.frames.length+' · '+output.display+' · Center L/P/H (mm): '+row.camera.focalPoint.map(n=>Number(n.toFixed(3))).join(' / ');previous.disabled=index===0;next.disabled=index===output.frames.length-1;
+    scout.hidden=!output.scout;scout.style.display=output.scout?'inline-block':'none';scoutLines.replaceChildren();if(output.scout){scoutImage.src=output.scout.url;scoutCaption.textContent='MPR 0.1 mm · Plane '+(index+1)+' / '+output.frames.length;scoutCaption.title='위치 확인용 얇은 MPR 참고 영상입니다. 선은 생성 단면의 위치이며 두께를 나타내지 않습니다.';
+      output.scout.guides.forEach((points,i)=>{const line=document.createElementNS('http://www.w3.org/2000/svg','line');for(const [key,value] of Object.entries({x1:points[0][0],y1:points[0][1],x2:points[1][0],y2:points[1][1],stroke:i===index?'#ffdb55':'#58d8f2','stroke-width':i===index?2:1,'stroke-opacity':i===index?1:.5,'data-plane':i,'data-selected':i===index?'true':'false'}))line.setAttribute(key,String(value));scoutLines.append(line);});
+    }
+  }
   function pending(signal,setup,milliseconds=10000){
     return new Promise((resolve,reject)=>{let cleanup=()=>{},settled=false;const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);signal.removeEventListener('abort',aborted);cleanup();error?reject(error):resolve(value);},aborted=()=>finish(Error('단면 생성을 취소했습니다.')),timer=setTimeout(()=>finish(Error('단면 생성 시간이 초과됐습니다.')),milliseconds);signal.addEventListener('abort',aborted,{once:true});if(signal.aborted){aborted();return;}try{cleanup=setup(value=>finish(null,value),error=>finish(error))||cleanup;if(settled)cleanup();}catch(error){finish(error);}});
   }
@@ -74,7 +82,9 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
         const blob=await pending(op.controller.signal,(resolve,reject)=>{out.toBlob(b=>b?resolve(b):reject(Error('단면 영상을 만들지 못했습니다.')),'image/png');});check();bytes+=blob.size;if(bytes>32*1024*1024)throw Error('생성 결과가 32 MiB를 넘었습니다. 장수를 줄이세요.');
         frames.push({blob,camera:actual});status.textContent=(i+1)+' / '+plan.cameras.length+' 단면 생성 중';
       }
-      check();clearOutput();output={target:t,reference,recipe,saveError,frames:frames.map(row=>({...row,url:URL.createObjectURL(row.blob)}))};index=0;result.hidden=false;show();status.textContent=frames.length+'개 단면 미리보기를 생성했습니다.';
+      const referenceImage=window.KinVolumeBatchScout&&window.kinRenderVolumeScout?await window.kinRenderVolumeScout({engine,volume,base:camera,corners,frames,properties,signal:op.controller.signal,check,pending}):null;
+      check();if(referenceImage&&bytes+referenceImage.blob.size>32*1024*1024)throw Error('생성 결과가 32 MiB를 넘었습니다. 장수를 줄이세요.');
+      clearOutput();output={target:t,reference,recipe,saveError,display:['MPR','MIP','MinIP','Average'][blend]+' '+Number((view.getSlabThickness()*2).toFixed(3))+' mm',scout:referenceImage?{...referenceImage,url:URL.createObjectURL(referenceImage.blob)}:null,frames:frames.map(row=>({...row,url:URL.createObjectURL(row.blob)}))};index=0;result.hidden=false;show();status.textContent=frames.length+'개 단면 미리보기를 생성했습니다.'+(referenceImage?'':' 위치 안내선 도구를 불러오지 못했습니다.');
       if(saved){inputs[0].value=parameters.offset;inputs[1].value=parameters.interval;inputs[2].value=parameters.count;inputs[3].checked=parameters.reverse;}
     }catch(error){if(live())status.textContent=error.message||'단면을 생성하지 못했습니다.';if(saved)throw error;}
     finally{op?.controller.abort();if(viewportId)try{engine?.disableElement(viewportId);}catch(_){}element?.remove();if(operation===op)operation=null;refresh();}

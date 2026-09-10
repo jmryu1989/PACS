@@ -1912,6 +1912,8 @@ function kinCreateViewerTechNote() {
         window.KinVolumeCrosshair?Promise.resolve():load('volume-crosshair.js'),
         typeof window.kinCreateVolumeCrosshair==='function'?Promise.resolve():load('viewer-volume-crosshair.js'),
         window.KinVolumeBatch?Promise.resolve():load('volume-batch.js'),
+        window.KinVolumeBatchScout?Promise.resolve():load('volume-batch-scout.js'),
+        typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
       .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
