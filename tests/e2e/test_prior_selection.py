@@ -22,7 +22,7 @@ import test_worklist as base
 from invariants_live import Fixture
 
 
-def synthetic_ct(stack, patient, label, date, slices=16):
+def synthetic_ct(stack, patient, label, date, slices=16, body_part=None):
     """D00's asymmetric 256px phantom, with real StudyDate before C-STORE."""
     uid, series, frame = generate_uid(), generate_uid(), generate_uid()
     fixture = Fixture(uid, patient, "한림병원", "jmryu", "D03A-SYNTHETIC-" + label)
@@ -53,6 +53,7 @@ def synthetic_ct(stack, patient, label, date, slices=16):
             ds.AccessionNumber, ds.StudyID = "D03A" + label, "D03A"
             ds.StudyDescription = ds.SeriesDescription = "D03A " + label
             ds.Modality, ds.SeriesNumber, ds.InstanceNumber = "CT", 1, z + 1
+            if body_part is not None:ds.BodyPartExamined = body_part
             ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
             ds.ImageOrientationPatient, ds.ImagePositionPatient = [1, 0, 0, 0, 1, 0], [0, 0, z * 2]
             ds.SliceLocation, ds.PixelSpacing = z * 2, [1, 1]

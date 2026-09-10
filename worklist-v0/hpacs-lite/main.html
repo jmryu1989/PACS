@@ -201,7 +201,7 @@
     .reltabs label { color: #7f8899; font-size: 11px; padding: 0 6px; display: flex; align-items: center; gap: 3px; cursor: pointer; }
     #related-return { flex: none; padding: 2px 5px; font-size: 11px; }
     .related-filter { display: flex; flex: none; flex-wrap: wrap; gap: 6px; align-items: center; padding: 2px 6px; }
-    #related-modality { min-width: 0; width: 110px; max-width: 65%; font-size: 11px; }
+    #related-modality, #related-body-part { background:var(--kin-panel); color:var(--kin-text); border:1px solid var(--kin-border); min-width: 0; width: 110px; max-width: 65%; font-size: 11px; }
     #related-filter-count { white-space: nowrap; font-size: 11px; }
     #related-filter-hidden { flex: none; padding: 2px 6px; color: #ffc978; font-size: 11px; }
     #related-current { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -708,9 +708,19 @@
           <div id="related-current" tabindex="-1" role="status" aria-live="polite">판독 대상을 선택하세요</div>
           <div class="related-filter">
             <select id="related-modality" aria-label="관련 검사 Modality" disabled><option value="">All Modalities</option></select>
+            <button id="related-options-open" type="button" popovertarget="related-options">More Filters</button>
             <span id="related-filter-count" role="status" aria-live="polite">0 / 0</span>
             <span id="related-pages" hidden><button id="related-page-prev" type="button">Previous</button><span id="related-page-status" role="status"></span><button id="related-page-next" type="button">Next</button>
             <button id="related-page-current" type="button">Viewed Study Page</button></span>
+          </div>
+          <div id="related-options" popover="manual" style="inset:auto 18px 18px auto;width:min(360px,calc(100vw - 48px));max-height:calc(100vh - 48px);overflow:auto;background:var(--kin-panel);color:var(--kin-text);border:1px solid var(--kin-border);padding:12px;border-radius:8px">
+            <b>Related Exam Filters</b><button type="button" popovertarget="related-options" popovertargetaction="hide" style="float:right">Close</button>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px">            <label><input type="checkbox" id="related-include-current" disabled> Include Current</label>
+            <select id="related-body-part" aria-label="관련 검사 Body Part" disabled><option value="">All Body Parts</option></select>
+            <button id="related-load-parts" type="button" disabled title="같은 환자의 현재·관련 검사에 기록된 DICOM 부위를 조회합니다">Load Body Parts</button>
+            <button id="related-cancel-parts" type="button" hidden>Cancel</button>
+</div>
+            <div id="related-parts-status" role="status" style="font-size:11px;padding:2px 6px"></div>
           </div>
           <div id="related-filter-hidden" role="status" hidden>열람 중인 검사는 필터 밖입니다</div>
           <div class="grid2">
@@ -925,6 +935,7 @@
   <script src="reading-panel-layout.js"></script>
   <script src="viewer-opening.js"></script>
   <script src="worklist-startup.js"></script>
+  <script src="related-parts.js"></script>
   <script src="worklist-alerts.js"></script>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1607,7 +1618,14 @@
     // 워크리스트 선택은 "지금 작성할 검사", Related 선택은 썸네일과 이전 판독문에만 쓴다.
     // 둘을 한 변수로 쓰면 prior를 클릭한 순간 저장·승인 대상까지 prior로 바뀐다.
     let relatedUid = null;
-    let relatedModality = "";
+    let relatedModality = "", relatedBodyPart = "", relatedIncludeCurrent = false;
+    const relatedParts = KinRelatedParts.create({
+      owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key||null;},
+      changed:()=>renderRelated()
+    });
+    function relatedCandidates() {
+      const s=cur();return s ? studies.filter(x=>x.uid===s.uid || (s.sourcePatientKey&&x.sourcePatientKey===s.sourcePatientKey)) : [];
+    }
 
     const DEMO_IMG = "data:image/svg+xml," + encodeURIComponent(
       `<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='black'/><ellipse cx='60' cy='60' rx='42' ry='50' fill='%23555'/><ellipse cx='60' cy='60' rx='36' ry='44' fill='%23888'/><ellipse cx='60' cy='55' rx='10' ry='6' fill='%23333'/><text x='60' y='112' fill='%23666' font-size='9' text-anchor='middle'>DEMO</text></svg>`);
@@ -2218,7 +2236,8 @@
       relatedReportSeq += 1;
       clearRelatedReport();
       selectedUid = uid;
-      relatedModality = "";
+      relatedModality = ""; relatedBodyPart = ""; relatedIncludeCurrent = false;
+      relatedParts.reset(uid);
       render(uid); refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
       if (openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
@@ -2275,6 +2294,10 @@
     $('#related-page-current').addEventListener('click', () => renderRelated(true));
     function renderRelated(reveal = false) {
       const s = cur();
+      relatedParts.sync(s?.uid||'');
+      $('#related-include-current').checked=relatedIncludeCurrent;$('#related-include-current').disabled=!s;
+      $('#related-load-parts').disabled=!s||!serverMode||offline||demoMode||relatedParts.busy();
+      $('#related-cancel-parts').hidden=!relatedParts.busy();
       $("#related-return").disabled = !s || !relatedUid;
       $("#related-current").textContent = s
         ? `판독 대상 · ${s.date || "날짜 없음"} · ${s.modality} · ${s.name} (${s.id}) · ${shownStudyDesc(s)}`
@@ -2282,10 +2305,17 @@
       $("#related-current").title = $("#related-current").textContent;
       let rel = [];
       if (s) {
-        rel = studies.filter(x => s.sourcePatientKey && x.sourcePatientKey === s.sourcePatientKey && x.uid !== s.uid);
+        rel = relatedCandidates().filter(x => relatedIncludeCurrent || x.uid !== s.uid);
         rel = [...rel].sort((a, b) => b.date.localeCompare(a.date) || b.uid.localeCompare(a.uid));
       }
       const total = rel.length;
+      const known=relatedCandidates().filter(x=>relatedParts.get(x.uid)?.parts).length;
+      const partTokens=[...new Set(relatedCandidates().flatMap(x=>relatedParts.get(x.uid)?.parts||[]))].filter(Boolean).sort();
+      const body=$('#related-body-part'),bodyOptions=[new Option('All Body Parts',''),new Option('Unverified','?'),new Option('Unspecified',JSON.stringify('')),
+        ...partTokens.map(v=>new Option(v,JSON.stringify(v)))];
+      if(relatedBodyPart&&!bodyOptions.some(o=>o.value===relatedBodyPart))bodyOptions.push(new Option(JSON.parse(relatedBodyPart),relatedBodyPart));
+      body.replaceChildren(...bodyOptions);body.value=relatedBodyPart;body.disabled=!s;body.title=body.selectedOptions[0]?.textContent||'';
+      $('#related-parts-status').textContent=relatedParts.note() || (s?`${relatedParts.busy()?'조회 중 · ':''}부위 확인 ${known}/${relatedCandidates().length} · 미조회·실패는 Unverified` : '');
       const modality = $("#related-modality");
       const tokens = [...new Set(rel.flatMap(relatedModalities))].sort();
       const options = [new Option("All Modalities", ""), new Option("Unspecified", JSON.stringify("")),
@@ -2301,9 +2331,10 @@
         const token = JSON.parse(relatedModality);
         rel = rel.filter(x => token ? relatedModalities(x).includes(token) : !relatedModalities(x).length);
       }
+      if(relatedBodyPart)rel=rel.filter(x=>{const parts=relatedParts.get(x.uid)?.parts;return relatedBodyPart==='?'?!parts:!!parts&&parts.includes(JSON.parse(relatedBodyPart));});
       $("#related-filter-count").textContent = `${rel.length} / ${total}`;
-      $("#related-filter-hidden").hidden = !s || !relatedUid || !relatedModality || rel.some(x => x.uid === relatedUid);
-      const pageQuery = JSON.stringify([selectedUid, relatedModality]);
+      $("#related-filter-hidden").hidden = !s || !relatedUid || rel.some(x => x.uid === relatedUid);
+      const pageQuery = JSON.stringify([selectedUid, relatedModality, relatedBodyPart, relatedIncludeCurrent]);
       if (pageQuery !== relatedPageQuery) { relatedPage = 0; relatedPageQuery = pageQuery; }
       const viewed = rel.findIndex(x => x.uid === relatedUid), pages = Math.max(1, Math.ceil(rel.length / 50));
       if (reveal === true && viewed >= 0) relatedPage = Math.floor(viewed / 50);
@@ -2315,13 +2346,13 @@
       $("#relrows").innerHTML = s
         ? (rel.slice(relatedPage * 50, (relatedPage + 1) * 50).map(x => {
             return `
-            <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid ? "related-selected" : ""}">
-              <td>${relatedDateLabel(x)} · ${x.uid === relatedUid ? "👁 열람 중" : "비교"}</td>
+            <tr data-uid="${esc(x.uid)}" class="${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "related-selected" : ""}">
+              <td>${x.uid === s.uid ? "Reading Target" : relatedDateLabel(x)} · ${x.uid === relatedUid || (x.uid === s.uid && !relatedUid) ? "👁 열람 중" : "비교"}</td>
               <td>${esc(x.date)}</td><td>${esc(x.modality)}</td><td>${esc(shownStudyDesc(x))}</td><td class="num">${esc(x.count)}</td>
               <td><span class="rs ${esc(x.rs)}">${esc(x.rs)}</span></td>
               <td>${x.rs === "A" ? "Approved" : "No Report"}</td>
             </tr>`;
-          }).join("") || `<tr><td class="empty" colspan="7">${relatedModality ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
+          }).join("") || `<tr><td class="empty" colspan="7">${relatedModality || relatedBodyPart ? "조건에 맞는 관련 검사 없음" : "관련 검사 없음"}</td></tr>`)
         : `<tr><td class="empty" colspan="7">검사를 선택하세요</td></tr>`;
       columnPrefs?.decorateRelated(mode);
     }
@@ -4789,6 +4820,10 @@
       ]);
     });
 
+    $('#related-include-current').addEventListener('change',e=>{if(cur()){relatedIncludeCurrent=e.target.checked;renderRelated();}});
+    $('#related-body-part').addEventListener('change',e=>{if(cur()){relatedBodyPart=e.target.value;renderRelated();}});
+    $('#related-load-parts').addEventListener('click',()=>{if(cur()&&serverMode&&!offline&&!demoMode)relatedParts.load(relatedCandidates().map(x=>x.uid));});
+    $('#related-cancel-parts').addEventListener('click',()=>relatedParts.cancel());
     $("#related-return").addEventListener("click", returnToReportStudy);
     $("#related-modality").addEventListener("change", e => {
       if (!cur()) return;
@@ -4798,11 +4833,11 @@
     });
     $("#relrows").addEventListener("click", e => {
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) previewRelated(tr.dataset.uid);
+      if (tr?.dataset.uid) { if(tr.dataset.uid === selectedUid)returnToReportStudy();else previewRelated(tr.dataset.uid); }
     });
     $("#relrows").addEventListener("dblclick", e => {
       const tr = e.target.closest("tr");
-      if (tr?.dataset.uid) openFilmbox(selectedUid, tr.dataset.uid);
+      if (tr?.dataset.uid) openFilmbox(selectedUid, tr.dataset.uid === selectedUid ? null : tr.dataset.uid);
     });
 
     // ══════════ 시작 ══════════
