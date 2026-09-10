@@ -942,6 +942,7 @@
   <script src="worklist-alerts.js"></script>
   <script src="study-access-status.js"></script>
   <script src="worklist-selection.js"></script>
+  <script src="worklist-image-preview.js"></script>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
   <script src="viewer-windows.js"></script>
@@ -1597,7 +1598,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null;
+    let columnPrefs = null, multiSelection = null, imagePreview = null;
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     function renderHeads() {
@@ -2278,6 +2279,7 @@
     }
 
     function renderClinical() {
+      imagePreview?.sync();
       const s = viewed();
       renderPatientCopy();
       if (srUid && srUid !== s?.uid) closeSR();
@@ -2503,9 +2505,11 @@
             open.type = "button"; open.className = "chip thumb-open"; open.textContent = "시리즈 열기"; open.disabled = true;
             open.setAttribute("aria-label", `시리즈 열기 · ${heading} · ${description} · Series UID: ${rep.seriesUid || "없음"}`);
             open.onclick = () => { if (!stale() && !open.disabled) openFilmbox(uid, null, rep.seriesUid); };
-            cell.append(label, disclosure, preview, open);
+            const inspect=document.createElement('button');inspect.type='button';inspect.className='chip thumb-preview-open';inspect.textContent='Image Preview';inspect.disabled=true;
+            inspect.onclick=()=>{if(!stale()&&!inspect.disabled){const study=viewed();if(study?.uid===uid)imagePreview?.open({...study,series:rep.seriesUid,sop:rep.sopUid});}};
+            cell.append(label, disclosure, preview, open, inspect);
             grid.appendChild(cell);
-            return { preview, open, alt: `${heading} · ${description}` };
+            return { preview, open, inspect, alt: `${heading} · ${description}` };
           });
           let next = 0, stopped = false;
           const worker = async () => {
@@ -2523,11 +2527,12 @@
                 thumbUrls.push(url);
                 const img = document.createElement("img");
                 img.alt = cells[index].alt;
-                img.onerror = () => { if (!stale()) { cells[index].open.disabled = true; cells[index].preview.textContent = "썸네일 표시 실패"; } };
+                img.onerror = () => { if (!stale()) { cells[index].open.disabled = cells[index].inspect.disabled = true; cells[index].preview.textContent = "썸네일 표시 실패"; } };
                 img.ondblclick = () => { if (!stale()) openFilmbox(uid, null, batch[index].seriesUid); };
                 img.src = url;
                 cells[index].preview.replaceChildren(img);
                 cells[index].open.disabled = false;
+                cells[index].inspect.disabled = false;
               } catch (e) {
                 if (stale()) return;
                 cells[index].preview.textContent = `썸네일 실패: ${e.message}`;
@@ -5117,6 +5122,7 @@
       worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},refresh:()=>load(),available:()=>serverMode&&!offline});
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior)});
+      imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
