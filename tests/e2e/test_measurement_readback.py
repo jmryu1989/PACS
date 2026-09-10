@@ -91,12 +91,23 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
         self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
         self.assertFalse(p.evaluate("()=>window.dispatchEvent(new Event('beforeunload',{cancelable:true}))"))
         p.unroute('**/viewer-items/*/revisions', unverified)
-        def unverified_list(route):
-            response=route.fetch(); body=response.json()
-            for head in body['items']: head['referenceStatus']='unverified'
-            route.fulfill(response=response, json=body)
+        waiting = []
+        def unverified_list(route): waiting.append(route)
         p.route('**/viewer-items?*', unverified_list)
         p.get_by_role('button', name='Refresh', exact=True).click()
+        for _ in range(100):
+            if waiting: break
+            p.wait_for_timeout(50)
+        self.assertEqual(len(waiting), 1, 'The unverified refresh must actually be pending')
+        expect(p.locator('#kin-viewer-history > [role=status]')).to_have_text('저장 항목 확인 중…')
+        expect(row).to_contain_text('미저장 수정은 보관 중')
+        self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
+        route = waiting.pop(); response = route.fetch(); body = response.json()
+        for head in body['items']: head['referenceStatus'] = 'unverified'
+        route.fulfill(response=response, json=body)
+        # The held-draft text already existed before Refresh. Await this read's
+        # completion before removing its fault or issuing the verified refresh.
+        expect(p.locator('#kin-viewer-history > [role=status]')).to_contain_text('1개 저장 항목')
         expect(row).to_contain_text('미저장 수정은 보관 중')
         self.assertTrue(p.evaluate('()=>window.kinViewerHistoryHasUnsaved()'))
         p.unroute('**/viewer-items?*', unverified_list)
