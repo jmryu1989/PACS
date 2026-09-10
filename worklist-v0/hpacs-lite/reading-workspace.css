@@ -11,6 +11,9 @@
 #reading-note-retry { inline-size: 12em; white-space: nowrap; }
 #reading-note-retry[hidden] { display: block !important; visibility: hidden; pointer-events: none; }
 #reading-position { align-self: center; padding: 0 6px; color: #bbd4f7; font-size: 12px; }
+#reading-shortcut-help { margin-top: 5px; color: #9fb9dc; font-size: 11px; }
+#reading-shortcut-help > summary { cursor: pointer; width: fit-content; padding: 3px 0; }
+#reading-shortcut-help > summary:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
 #reading-shortcuts { color: #9fb9dc; font-size: 11px; padding-top: 5px; }
 body.reading .prior-report-pane:focus-visible, body.reading #reading-frame:focus-visible { outline: 2px solid #93c5fd; outline-offset: -2px; }
 #reading-target, #reading-report-target { padding: 7px 0 0; color: #e5efff; overflow-wrap: anywhere; line-height: 1.5; }
