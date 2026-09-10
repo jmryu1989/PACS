@@ -5108,7 +5108,7 @@
       worklistRefresh = KinWorklistRefresh.mount({select:$('#worklist-refresh'),status:$('#worklist-refresh-status'),
         owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},
         changed:()=>startPolling()});
-      worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},available:()=>serverMode&&!offline});
+      worklistAlerts = KinWorklistAlerts.mount({button:$('#worklist-alerts-open'),owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key&&key.slice(KinViewerOpening.PREFIX.length);},refresh:()=>load(),available:()=>serverMode&&!offline});
       mountViewerWindows();
       restoreWorkspace();
       // Optional display controls must not prevent loading clinical work.
