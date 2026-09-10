@@ -49,7 +49,7 @@ window.kinCreateViewerPatientCopy=function(options){
     const volumeEvents=['VOLUME_NEW_IMAGE','CAMERA_MODIFIED'].map(k=>window.cornerstone?.Enums?.Events?.[k]).filter(Boolean);
     // Camera drags can fire every frame. Invalidate the ticket immediately;
     // scan all source identities only on the regular refresh or explicit copy.
-    const volumeChanged=e=>{try{const v=services.cornerstoneViewportService.getCornerstoneViewport(e.detail?.viewportId);if(v&&['orthographic','volume3d'].includes(v.type)){copyEpoch++;copyStatus.textContent='';options.onSelection?.();}}catch(_){copyEpoch++;}};
+    const volumeChanged=e=>{try{const v=services.cornerstoneViewportService.getCornerstoneViewport(e.detail?.viewportId);if(v&&['orthographic','volume3d'].includes(v.type)){copyEpoch++;copyStatus.textContent='';options.onSelection?.({contextOnly:true});}}catch(_){copyEpoch++;}};
     try{
       const grid=services.viewportGridService,events=Object.values(grid.EVENTS);
       if(!copyStackEvent||!events.length)throw new Error('image observation unavailable');
@@ -240,8 +240,25 @@ window.kinViewerTechNote=function(services){
         return {...first,sourceSignature:JSON.stringify([volumeId,images])};
       }catch(_){return null;}
     }
-    let studyEpoch=0,studySignature='';
+    let studyEpoch=0,studySignature='',studyContext='',nextStudyVolume=0;
+    const studyVolumeIds=new WeakMap();
+    function observeStudyContext(){
+      let signature='',volume=null;
+      try{
+        if(live()){
+          const grid=services.viewportGridService.getState(),id=grid.activeViewportId,cell=grid.viewports.get(id),v=services.cornerstoneViewportService.getCornerstoneViewport(id);
+          const volumeId=['orthographic','volume3d'].includes(v?.type)?v.getVolumeId():null;
+          volume=volumeId?window.cornerstone?.cache.getVolume(volumeId):null;
+          // Observe replacement without retaining evicted volume pixel buffers.
+          if(volume&&!studyVolumeIds.has(volume))studyVolumeIds.set(volume,++nextStudyVolume);
+          signature=JSON.stringify([id,v?.type,cell?.displaySetInstanceUIDs,volumeId,volume?studyVolumeIds.get(volume):null,volumeId?v.getActors().map(a=>a.referencedId||a.uid):null,
+            volume?.imageIds?.length,volume?.framesLoaded,volume?.loadStatus?.loaded,volume?.loadStatus?.loading,volume?.loadStatus?.cancelled]);
+        }
+      }catch(_){}
+      if(signature!==studyContext){studyContext=signature;studyEpoch++;}
+    }
     function selectedStudy(){
+      observeStudyContext();
       const source=selectedCopy();let target=source;
       if(source?.sourceSignature){
         const {viewportId,uid,series,study,sourceSignature}=source;
@@ -284,7 +301,7 @@ window.kinViewerTechNote=function(services){
         let bound,identity;try{bound=options.owner();identity=JSON.parse(bound);}catch(_){return false;}
         if(!Array.isArray(identity)||identity.length!==2||identity.some(v=>typeof v!=='string'||!v))return false;
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
-        patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive,onSelection:()=>selectedStudy()});
+        patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive,onSelection:event=>event?.contextOnly?observeStudyContext():selectedStudy()});
         toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:()=>{try{return live()&&options.owner()===bound&&(options.toolbarAllowed||options.allowed)();}catch(_){return false;}}});
         return true;
       };
@@ -316,7 +333,12 @@ window.kinViewerTechNote=function(services){
     const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · 2 선택 영상 · 4 판독문으로';toolBar.append(toolHint);
     const returnStatus=document.createElement('span');returnStatus.id='kin-viewer-return-status';returnStatus.setAttribute('role','status');returnStatus.style.cssText='display:inline-block;margin-left:8px;font-size:12px';(host.querySelector(':scope > summary')||toolBar).append(returnStatus);
     let readingChannel=null,pendingReturn=null,returnTimer=null,returnEpoch=0,returnSignature='';
-    function refreshReturnSelection(){const current=selectedStudy(),signature=current?JSON.stringify([current.viewportId,current.uid,current.selectionEpoch]):'';if(signature!==returnSignature){returnSignature=signature;returnEpoch++;}}
+    function refreshReturnSelection(event){
+      // Camera events must not walk thousands of source images. Keep immediate
+      // context ABA detection; polls and explicit actions still verify every source.
+      if(event?.contextOnly){const before=studyEpoch;observeStudyContext();if(before!==studyEpoch)returnEpoch++;return;}
+      const current=selectedStudy(),signature=current?JSON.stringify([current.viewportId,current.uid,current.selectionEpoch]):'';if(signature!==returnSignature){returnSignature=signature;returnEpoch++;}
+    }
     function finishReturn(message){clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent=message;refresh();if(returnStatus.getClientRects().length)returnStatus.scrollIntoView({block:'nearest',inline:'nearest'});}
     function bindReturn(){
       const cancelled=!!pendingReturn;readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;
