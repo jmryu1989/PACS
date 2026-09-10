@@ -13,7 +13,7 @@ window.kinCreateVolumeCrosshair=function({target,permitted,alive,host}){
     const groups=t.views.map(v=>cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId));
     if(!groups[0]||groups.some(g=>g!==groups[0]))return;
     const group=groups[0],tool=group.getToolInstance('Crosshairs');if(!tool?.renderAnnotation||!tool._pointNearTool)return;
-    const originals={},wrappers={},own={};
+    const originals={},wrappers={},own={},activeElements=new Set();
     const replace=(name,wrap)=>{own[name]=Object.hasOwn(tool,name);originals[name]=tool[name];wrappers[name]=wrap(originals[name]);tool[name]=wrappers[name];};
     const enabled=element=>usable()&&!hidden.has(viewId(element));
     replace('renderAnnotation',original=>function(ee,helper){
@@ -56,8 +56,34 @@ window.kinCreateVolumeCrosshair=function({target,permitted,alive,host}){
     replace('preMouseDownCallback',original=>function(event,...args){if(managed()&&!enabled(event.detail.element)){event.preventDefault();return true;}return original?.call(this,event,...args);});
     // OHIF assigns a different actor UID per viewport even when all actors reference one volume.
     replace('_checkIfViewportsRenderingSameScene',original=>function(view,other){const t=managed();if(!t||!t.views.includes(view)||!t.views.includes(other))return original.call(this,view,other);return view.getActors().length===1&&other.getActors().length===1&&cornerstone.cache.getVolume(view.getVolumeId())===cornerstone.cache.getVolume(other.getVolumeId());});
+    replace('_activateModify',original=>function(element){activeElements.add(element);return original.call(this,element);});
+    replace('_deactivateModify',original=>function(element){activeElements.delete(element);return original.call(this,element);});
+    replace('_dragCallback',original=>function(event){
+      const t=managed(),element=event.detail.element;
+      // The pinned native ROTATE operation is 2. Other operations retain their native path.
+      // EventTarget invokes listeners with the element as `this`; native callbacks
+      // are arrow functions, so consult the captured tool instead.
+      if(!t||tool.editData?.annotation?.data?.handles.activeOperation!==2)return original.call(tool,event);
+      if(!enabled(element))return;
+      const active=t.views.find(v=>v.element===element);if(!active)return;
+      let pivot;
+      try{pivot=window.KinVolumeOrientation.intersection(t.cameras);}catch(_){return original.call(tool,event);}
+      let changed=false;
+      try{
+        const center=Array.from(active.worldToCanvas(pivot)),point=Array.from(event.detail.currentPoints.canvas),previous=point.map((n,i)=>n-event.detail.deltaPoints.canvas[i]);
+        const origin=active.canvasToWorld(center),x=active.canvasToWorld([center[0]+1,center[1]]).map((n,i)=>n-origin[i]),y=active.canvasToWorld([center[0],center[1]+1]).map((n,i)=>n-origin[i]);
+        const normal=active.getCamera().viewPlaneNormal,cross=[x[1]*y[2]-x[2]*y[1],x[2]*y[0]-x[0]*y[2],x[0]*y[1]-x[1]*y[0]];
+        // Derive canvas handedness from the actual mapping, including flipped views.
+        const handedness=Math.sign(cross.reduce((sum,n,i)=>sum+n*normal[i],0));
+        const angle=-handedness*model.rotationDegrees(center,previous,point);if(!angle)return;
+        // Per-event rounding to 0.01 radians loses slow motion and compounds
+        // angle error. Apply the actual pointer angle to both linked planes.
+        const next=window.KinVolumeOrientation.rotate(t.cameras,active.getCamera().viewPlaneNormal,angle);
+        changed=true;t.views.forEach((v,i)=>{if(v!==active){const {position,focalPoint,viewUp,viewPlaneNormal}=next[i];v.setCamera({position,focalPoint,viewUp,viewPlaneNormal});v.render();}});
+      }catch(error){const now=managed();if(changed&&now?.group===t.group&&now.selection===t.selection)for(let i=0;i<t.views.length;i++)try{const {position,focalPoint,viewUp,viewPlaneNormal}=t.cameras[i];t.views[i].setCamera({position,focalPoint,viewUp,viewPlaneNormal});t.views[i].render();}catch(_){}status.textContent=error.message||'MPR 회전 방향을 확인하지 못했습니다.';}
+    });
     bound={key:t.group,group,tool};
-    restore=()=>{for(const name of Object.keys(originals))if(tool[name]===wrappers[name]){if(own[name])tool[name]=originals[name];else delete tool[name];}for(const v of t.views)try{v.render();}catch(_){}};
+    restore=()=>{for(const element of activeElements)try{originals._deactivateModify.call(tool,element);element.style.cursor='';}catch(_){}if(activeElements.size){const data=tool.editData?.annotation?.data;if(data){data.handles.activeOperation=null;data.activeViewportIds=[];}tool.editData=null;activeElements.clear();}for(const name of Object.keys(originals))if(tool[name]===wrappers[name]){if(own[name])tool[name]=originals[name];else delete tool[name];}for(const v of t.views)try{v.render();}catch(_){}};
     t.views.forEach((v,index)=>{const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.checked=!hidden.has(v.id);input.setAttribute('aria-label','Crosshair Plane '+(index+1));label.append(input,document.createTextNode(' Plane '+(index+1)+' '));planes.append(label);input.onchange=()=>{if(!usable()){input.checked=!hidden.has(v.id);return;}if(input.checked)hidden.delete(v.id);else hidden.add(v.id);v.render();};});
   }
   function refresh(){

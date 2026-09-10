@@ -17,5 +17,12 @@
     if(!Array.isArray(point)||point.length!==2||!point.every(Number.isFinite)||!Number.isFinite(tolerance)||tolerance<0)return false;
     return lines.some(({start:a,end:b})=>{const dx=b[0]-a[0],dy=b[1]-a[1],length=dx*dx+dy*dy;if(!length)return false;const t=Math.max(0,Math.min(1,((point[0]-a[0])*dx+(point[1]-a[1])*dy)/length));return Math.hypot(point[0]-a[0]-t*dx,point[1]-a[1]-t*dy)<=tolerance;});
   }
-  const model=Object.freeze({segments,near});if(typeof module!=='undefined'&&module.exports)module.exports=model;else root.KinVolumeCrosshair=model;
+  function rotationDegrees(center,previous,current){
+    if(![center,previous,current].every(v=>Array.isArray(v)&&v.length===2&&v.every(Number.isFinite)))throw Error('회전 포인터 좌표를 확인할 수 없습니다.');
+    const a=previous.map((n,i)=>n-center[i]),b=current.map((n,i)=>n-center[i]);
+    if(Math.hypot(...a)<1||Math.hypot(...b)<1)return 0;
+    // Canvas Y points down; camera-normal rotation has the opposite sign.
+    return -Math.atan2(a[0]*b[1]-a[1]*b[0],a[0]*b[0]+a[1]*b[1])*180/Math.PI;
+  }
+  const model=Object.freeze({segments,near,rotationDegrees});if(typeof module!=='undefined'&&module.exports)module.exports=model;else root.KinVolumeCrosshair=model;
 })(typeof window!=='undefined'?window:globalThis);

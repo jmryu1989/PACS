@@ -17,3 +17,9 @@ test('invalid geometry fails closed',()=>{
  assert.throws(()=>model.segments([NaN,0],[1,0],100,100,'normal'));assert.throws(()=>model.segments([0,0],[0,0],100,100,'normal'));assert.throws(()=>model.segments([0,0],[1,0],0,100,'normal'));assert.throws(()=>model.segments([0,0],[1,0],100,100,'unknown'));
  assert.equal(model.near([NaN,0],[],6),false);
 });
+test('pointer rotation retains small increments and is independent of event count',()=>{
+ const center=[100,80],point=a=>[100+150*Math.cos(a),80+150*Math.sin(a)];
+ assert.equal(model.rotationDegrees(center,[250,80],[100,230]),-90);
+ for(const count of [1,8,100]){let total=0;for(let i=1;i<=count;i++)total+=model.rotationDegrees(center,point((i-1)*Math.PI/12/count),point(i*Math.PI/12/count));assert.ok(Math.abs(total+15)<1e-10);}
+ assert.equal(model.rotationDegrees(center,center,[120,80]),0);assert.throws(()=>model.rotationDegrees(center,[NaN,0],[1,1]));
+});
