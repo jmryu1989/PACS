@@ -187,7 +187,7 @@ window.kinCreateViewerToolbarPreferences=function(options){
   window.kinViewerToolbarPreferences=controller;notify('mounted');return controller;
 };
 
-/* Standalone viewer note bridge: active loaded stack identity, never URL-first guessing. */
+/* Viewer study bridge: verified loaded source identity, never URL-first guessing. */
 window.kinViewerTechNote=function(services){
   let stop=()=>{};
   function mount(){
@@ -198,7 +198,7 @@ window.kinViewerTechNote=function(services){
     const live=()=>!ended&&location.search===search;
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
-    function selected(viewportId){
+    function selectedStack(viewportId){
       if(!live())return null;
       try{
         const grid=services.viewportGridService.getState(),id=viewportId??grid.activeViewportId,cell=grid.viewports.get(id),ids=cell?.displaySetInstanceUIDs;
@@ -210,10 +210,10 @@ window.kinViewerTechNote=function(services){
       }catch(_){return null;}
     }
     // Reconstructed planes need not coincide with any original slice. Resolve
-    // clipboard identity from every source of one loaded volume, independently
-    // of the stack-only note/return target. Never choose the first fusion actor.
+    // source identity from every image of one loaded volume. The clipboard needs
+    // a verified source instance; study-level actions must not call it a plane.
     function selectedCopy(viewportId){
-      const stack=selected(viewportId);if(stack)return stack;
+      const stack=selectedStack(viewportId);if(stack)return stack;
       if(!live())return null;
       try{
         const core=window.cornerstone,events=core?.Enums?.Events;
@@ -240,6 +240,19 @@ window.kinViewerTechNote=function(services){
         return {...first,sourceSignature:JSON.stringify([volumeId,images])};
       }catch(_){return null;}
     }
+    let studyEpoch=0,studySignature='';
+    function selectedStudy(){
+      const source=selectedCopy();let target=source;
+      if(source?.sourceSignature){
+        const {viewportId,uid,series,study,sourceSignature}=source;
+        target={viewportId,uid,series,study,sourceSignature,kind:'volume'};
+      }
+      // Study actions survive slice scrolling and camera changes within the
+      // verified source context, while viewport/study/source replacement cancels.
+      const signature=target?JSON.stringify([target.viewportId,target.uid,target.series,target.study,target.sourceSignature]):'';
+      if(signature!==studySignature){studySignature=signature;studyEpoch++;}
+      return target?{...target,selectionEpoch:studyEpoch}:null;
+    }
     // Focus the pinned viewer's real button; entering the toolbar must not
     // select a tool, invoke a command or change the active viewport.
     const nativeFocusStyle=document.createElement('style');
@@ -263,7 +276,7 @@ window.kinViewerTechNote=function(services){
       nativeLabels.clear();
     }
     if(window.top!==window){
-      window.kinViewerSelectedNoteTarget=selected;
+      window.kinViewerSelectedNoteTarget=selectedStudy;
       let patientCopy,toolbarPreferences;
       const enable=options=>{
         if(patientCopy)return true;
@@ -271,12 +284,12 @@ window.kinViewerTechNote=function(services){
         let bound,identity;try{bound=options.owner();identity=JSON.parse(bound);}catch(_){return false;}
         if(!Array.isArray(identity)||identity.length!==2||identity.some(v=>typeof v!=='string'||!v))return false;
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
-        patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive});
+        patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive,onSelection:()=>selectedStudy()});
         toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:()=>{try{return live()&&options.owner()===bound&&(options.toolbarAllowed||options.allowed)();}catch(_){return false;}}});
         return true;
       };
       window.kinViewerEnablePatientCopy=enable;
-      stop=()=>{ended=true;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selected)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
+      stop=()=>{ended=true;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selectedStudy)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
       return true;
     }
     const host=document.querySelector('#kin-viewer-layout');if(!host){disposeNativeFocus();return;}
@@ -303,7 +316,7 @@ window.kinViewerTechNote=function(services){
     const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · 2 선택 영상 · 4 판독문으로';toolBar.append(toolHint);
     const returnStatus=document.createElement('span');returnStatus.id='kin-viewer-return-status';returnStatus.setAttribute('role','status');returnStatus.style.cssText='display:inline-block;margin-left:8px;font-size:12px';(host.querySelector(':scope > summary')||toolBar).append(returnStatus);
     let readingChannel=null,pendingReturn=null,returnTimer=null,returnEpoch=0,returnSignature='';
-    function refreshReturnSelection(){const current=selected(),signature=current?JSON.stringify([current.viewportId,current.image,current.uid]):'';if(signature!==returnSignature){returnSignature=signature;returnEpoch++;}}
+    function refreshReturnSelection(){const current=selectedStudy(),signature=current?JSON.stringify([current.viewportId,current.uid,current.selectionEpoch]):'';if(signature!==returnSignature){returnSignature=signature;returnEpoch++;}}
     function finishReturn(message){clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent=message;refresh();if(returnStatus.getClientRects().length)returnStatus.scrollIntoView({block:'nearest',inline:'nearest'});}
     function bindReturn(){
       const cancelled=!!pendingReturn;readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;
@@ -325,7 +338,7 @@ window.kinViewerTechNote=function(services){
     }
     function returnToReading(){
       if(!live()||!owner||!patientCopy.tracked()||!readingChannel||pendingReturn||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
-      const current=selected();if(!current){returnStatus.textContent='불러온 스택 영상 칸을 선택한 뒤 돌아가세요.';return;}
+      const current=selectedStudy();if(!current){returnStatus.textContent='원본 검사가 확인되는 영상 칸을 선택한 뒤 돌아가세요.';return;}
       refreshReturnSelection();const request=crypto.randomUUID();pendingReturn={request,owner:JSON.stringify(owner),epoch:returnEpoch};returnStatus.textContent='판독 화면에 복귀 요청 중…';refresh();
       try{readingChannel.postMessage({type:'request',request,owner:pendingReturn.owner,studies,activeUid:current.uid});returnTimer=setTimeout(()=>finishReturn('판독 화면의 응답이 없습니다. 목록 창에서 영상 새 창을 다시 눌러 연결하세요.'),2500);}
       catch(_){finishReturn('판독 화면 연결을 확인하지 못했습니다. 목록 창을 직접 선택하세요.');}
@@ -335,7 +348,7 @@ window.kinViewerTechNote=function(services){
       if(code==='Digit4'){returnToReading();return;}
       if(!live()||!owner||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
       if(code==='Digit9'){if(!focusNativeToolbar())status.textContent='기본 영상 도구 연결을 확인한 뒤 이동하세요.';return;}
-      const current=selected();if(!current){status.textContent='불러온 스택 영상 칸을 선택한 뒤 도구로 이동하세요.';return;}
+      const current=selectedStudy();if(!current){status.textContent='원본 검사가 확인되는 영상 칸을 선택한 뒤 도구로 이동하세요.';return;}
       let target;
       try{const id=code==='Digit7'?'kin-viewer-history':'kin-viewer-layout';target=code==='Digit2'?services.cornerstoneViewportService.getCornerstoneViewport(current.viewportId)?.element:document.querySelector('#kin-workspace-dock nav button[aria-controls="'+id+'"]')||document.querySelector('#'+id+' > summary');}catch(_){}
       if(!target||!target.isConnected||!target.getClientRects().length||target.closest('[inert]')){status.textContent='영상 도구 연결을 확인한 뒤 이동하세요.';return;}
@@ -357,9 +370,9 @@ window.kinViewerTechNote=function(services){
     const note=KinTechNote({allowed:()=>live()&&!!owner,api:async(method,path,body)=>{const before=await authenticate();const result=await raw(method,path,body);if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');return result;}});
     async function open(){
       if(!live()||busy||!owner||document.querySelector('dialog[open]'))return;
-      const focus=document.activeElement,target=selected();if(!target){status.textContent='불러온 스택 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.';return;}
+      const focus=document.activeElement,target=selectedStudy();if(!target){status.textContent='원본 검사가 확인되는 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.';return;}
       busy=true;refresh();
-      try{await authenticate();const current=selected();if(!live()||!current||target.uid!==current.uid||target.viewportId!==current.viewportId)throw new Error('선택 영상이 바뀌었습니다. 대상을 확인하고 다시 누르세요');busy=false;refresh();if(focus?.isConnected)focus.focus({preventScroll:true});note.open(target.study);status.textContent='메모 대상 검사 · '+target.uid;}
+      try{await authenticate();const current=selectedStudy();if(!live()||!current||target.uid!==current.uid||target.viewportId!==current.viewportId||target.selectionEpoch!==current.selectionEpoch)throw new Error('선택 영상이 바뀌었습니다. 대상을 확인하고 다시 누르세요');busy=false;refresh();if(focus?.isConnected)focus.focus({preventScroll:true});note.open(target.study);status.textContent=(target.kind==='volume'?'볼륨 원본 검사 메모 · ':'메모 대상 검사 · ')+target.uid;}
       catch(e){if(live())status.textContent=e.message;}finally{busy=false;refresh();}
     }
     function bindShortcuts(){

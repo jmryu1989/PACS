@@ -334,10 +334,6 @@ window.KinReadingWorkspace = function (app) {
       return;
     }
     e.stopImmediatePropagation();
-    if (doc !== document && command === 'note') {
-      const target = doc.querySelector('#kin-viewer-note-open');
-      e.preventDefault(); if(target && !target.disabled)target.click(); return;
-    }
     const panes = { image:'image', prior:'prior', report:'report', context:'context', tools:'tools', nativeTools:'nativeTools' };
     if (command === 'list') {
       e.preventDefault(); document.body.classList.add('reading-list-open'); list.setAttribute('aria-expanded', 'true'); $('#quick').focus();
@@ -388,7 +384,7 @@ window.KinReadingWorkspace = function (app) {
           (document.activeElement === noteRetry || document.activeElement === document.body)) (note.disabled ? imageFocus : note).focus({preventScroll:true});
       noteRetryFocus = null;
     }
-    const label = 'Image Tech Note' + (!note.disabled ? ' · ' + app.noteLabel(selected.uid) : '');
+    const label = (selected?.kind==='volume'?'Volume Tech Note':'Image Tech Note') + (!note.disabled ? ' · ' + app.noteLabel(selected.uid) : '');
     if (note.textContent !== label) note.textContent = label;
   }
   function reconnectNote() {
@@ -429,7 +425,7 @@ window.KinReadingWorkspace = function (app) {
   function showNote() {
     updateNote(); if (note.disabled) return false;
     const selected = noteTarget();
-    if (!selected) { app.notice('불러온 스택 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.'); return false; }
+    if (!selected) { app.notice('원본 검사가 확인되는 영상 칸을 선택하세요. 메모 대상을 확인할 수 없습니다.'); return false; }
     app.openNote(selected.uid); autoLast = JSON.stringify([epoch, shown.reportUid, shown.uid]); return true;
   }
   function redrawRetainedViewer() {
