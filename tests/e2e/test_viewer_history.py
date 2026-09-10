@@ -20,9 +20,15 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
                 a=r.fetch();r.fulfill(response=a,body=a.text()+'\n'+hook)
             p.route('**/ohif/app-config.js',config)
         p.goto(self.stack.proxy+'/ohif/viewer?StudyInstanceUIDs='+f.uid+(','+extra.uid if extra else ''));canvas_ready(p,1)
-        expect(p.locator('#kin-viewer-history')).to_be_visible()
+        self.open_measurement_tools(p)
         expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('개 저장 항목')
         return w,p
+
+    def open_measurement_tools(self,p):
+        expect(p.locator('#kin-workspace-dock')).to_have_count(1,timeout=45000)
+        tab=p.locator('#kin-workspace-dock nav button[aria-controls=kin-viewer-history]')
+        if tab.get_attribute('aria-expanded')!='true':tab.click()
+        expect(p.locator('#kin-viewer-history')).to_be_visible()
 
     def draw(self,p,label):
         p.locator('[data-cy="MeasurementTools-split-button-secondary"]').click();p.get_by_text('Annotation',exact=True).click()
@@ -65,7 +71,7 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         self.assertEqual((self.state(f),self.versions(f)),before);self.assertEqual(self.hashes(),original)
 
     def key(self,p,title='키 <script>텍스트</script>'):
-        p.get_by_role('button',name='현재 프레임 키 저장',exact=True).click()
+        p.get_by_role('button',name='Add Key Image',exact=True).click()
         row=p.locator('#kin-viewer-history section[data-kind=key]').last
         row.get_by_label('키 제목').fill(title);row.get_by_label('키 설명').fill('설명')
         row.get_by_role('button',name='저장',exact=True).click();expect(row).to_contain_text('저장 완료')
@@ -100,7 +106,7 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         def lost(route):
             seen.append(route.request.post_data);route.fetch();route.abort('failed')
         p.route('**/viewer-items',lost)
-        p.get_by_role('button',name='현재 프레임 키 저장',exact=True).click();row=p.locator('#kin-viewer-history section[data-kind=key]')
+        p.get_by_role('button',name='Add Key Image',exact=True).click();row=p.locator('#kin-viewer-history section[data-kind=key]')
         row.get_by_label('키 제목').fill('응답 유실');row.get_by_role('button',name='저장',exact=True).click()
         expect(row).to_contain_text('저장 결과를 확인하지 못했습니다');self.assertEqual(len(self.saved(f)),1)
         p.unroute('**/viewer-items',lost)
@@ -140,7 +146,8 @@ class ViewerHistoryE2E(ThumbnailRequestsE2E):
         p2.wait_for_function("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').length===1")
         self.assertTrue(p2.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').every(a=>cornerstoneTools.annotation.locking.isAnnotationLocked(a.annotationUID))"))
         base.psql('UPDATE "StudyState" SET rs=\'P\', "preDoc"='+literal(self.stack.actor('doctor'))+', "preReviewer"='+literal(self.stack.actor('jmryu'))+' WHERE uid='+literal(f.uid))
-        p2.get_by_role('button',name='새로고침',exact=True).click();expect(p2.locator('#kin-viewer-history')).to_contain_text('다시 로그인')
+        self.assertEqual(self.stack.request('GET','/studies/'+f.uid+'/viewer-items','doctor2').status,403)
+        p2.get_by_role('button',name='새로고침',exact=True).click();expect(p2.locator('#kin-viewer-history')).to_contain_text('이 검사에 접근할 수 없습니다.')
         self.assertEqual(p2.locator('#kin-viewer-history section').count(),0)
         self.assertEqual(p2.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='ArrowAnnotate').length"),0)
         p.context.clear_cookies();p.get_by_role('button',name='새로고침',exact=True).click();expect(p.locator('#kin-viewer-history')).to_contain_text('다시 로그인')

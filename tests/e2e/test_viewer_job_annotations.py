@@ -75,7 +75,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
 
  def test_annotations_03_native_manual_values_pdf_and_forged_baseline(self):
   patient='JOBANN-'+uuid.uuid4().hex[:12];f=self.ct(patient,'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
-  for index,(kind,tool,label) in enumerate([('length','Length','수동 길이'),('angle','Angle','수동 각도'),('ellipse','EllipticalROI','수동 ROI')]):
+  for index,(kind,tool,label) in enumerate([('length','Length','Length'),('angle','Angle','Angle'),('ellipse','EllipticalROI','Ellipse ROI')]):
    p.get_by_role('button',name=label,exact=True).click();box=p.locator('.cornerstone-canvas').bounding_box()
    x,y=box['x']+box['width']*.38,box['y']+box['height']*.3+index*95
    p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+65,y+32,steps=10);p.mouse.up()
@@ -179,7 +179,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
 
  def test_annotations_10_roi_budget_and_accumulator_exception_restore(self):
   f=self.ct('JOBANN-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
-  p.get_by_role('button',name='수동 ROI',exact=True).click()
+  p.get_by_role('button',name='Ellipse ROI',exact=True).click()
   coords=p.evaluate('''()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId),d=v.getImageData(),r=v.element.getBoundingClientRect();
    return [[.45,.5],[.8,.95]].map(([x,y])=>v.worldToCanvas(d.imageData.indexToWorld([x*(d.dimensions[0]-1),y*(d.dimensions[1]-1),0])).map((n,i)=>n+(i?r.y:r.x)));}''')
   p.mouse.move(*coords[0]);p.mouse.down();p.mouse.move(*coords[1],steps=15);p.mouse.up()

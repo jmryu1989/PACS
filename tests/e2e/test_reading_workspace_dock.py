@@ -45,7 +45,7 @@ class ReadingDockE2E(ReadingWorkspaceE2E):
  def test_dock_03_measurement_after_panel_and_canvas_resize(self):
   a,b=self.pair();original=self.originals();p=self.login();p.set_viewport_size(dict(width=1680,height=1100));f=self.workspace(p,a)
   history=f.get_by_role('button',name='Measurements',exact=True);history.click()
-  f.get_by_role('button',name='수동 길이',exact=True).click()
+  f.get_by_role('button',name='Length',exact=True).click()
   box=f.locator('.cornerstone-canvas').first.bounding_box()
   x,y=box['x']+box['width']*.4,box['y']+box['height']*.4
   p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+60,y+30,steps=10);p.mouse.up()

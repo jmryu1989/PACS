@@ -127,7 +127,7 @@ test('C5 (4): study 403 quarantines its pending bytes, preserves other drafts, r
 
 test('A1/C5: late committed create cannot cross A→B→A; same UUID retry coalesces loaded server row', async () => {
   const h = await harness(); h.pages.set('1', []); await h.click('새로고침');
-  await h.click('현재 프레임 키 저장'); h.input('키 제목', 'new A');
+  await h.click('Add Key Image'); h.input('키 제목', 'new A');
   let release; h.setReply(async (path, options) => options.method === 'POST' ? new Promise(resolve => { release = resolve; }) : h.defaultReply(path, options));
   const detached = h.button('저장'); detached.click(); await flush();
   const pending = h.calls.find(c => c.options.method === 'POST').options.body;
@@ -171,7 +171,7 @@ test('C5 delta: denied study loses incomplete annotations; other-study marks are
 });
 
 test('A1/C5 delta: pending create does not block another edit or overwrite its changes when replay resolves', async () => {
-  const h = await harness(); await h.click('현재 프레임 키 저장'); h.input('키 제목', 'created');
+  const h = await harness(); await h.click('Add Key Image'); h.input('키 제목', 'created');
   h.setReply(async (path, options) => options.method === 'POST' ? { status: 503, data: {} } : h.defaultReply(path, options));
   await h.click('저장'); const body = h.calls.find(c => c.options.method === 'POST').options.body;
   h.pages.set('1', [head('created', 1, 'created')]); await h.switch('2'); await h.switch('1'); await h.click('보관 작업 재개');

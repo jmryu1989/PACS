@@ -20,7 +20,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
         w, p = self.open_viewer(f)
         self.addCleanup(w.close); self.addCleanup(p.close)
         for index, (kind, tool, label) in enumerate([
-                ('length', 'Length', '수동 길이'), ('angle', 'Angle', '수동 각도')]):
+                ('length', 'Length', 'Length'), ('angle', 'Angle', 'Angle')]):
             p.get_by_role('button', name=label, exact=True).click()
             box = p.locator('.cornerstone-canvas').bounding_box()
             x, y = box['x']+box['width']*.38, box['y']+box['height']*.3+index*150
@@ -82,8 +82,8 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
         self.addCleanup(p.close)
         snapshots = {}
         for index, (kind, tool, label) in enumerate([
-                ('length', 'Length', '수동 길이'), ('angle', 'Angle', '수동 각도'),
-                ('ellipse', 'EllipticalROI', '수동 ROI')]):
+                ('length', 'Length', 'Length'), ('angle', 'Angle', 'Angle'),
+                ('ellipse', 'EllipticalROI', 'Ellipse ROI')]):
             p.get_by_role('button', name=label, exact=True).click()
             box = p.locator('.cornerstone-canvas').bounding_box()
             x, y = box['x']+box['width']*.38, box['y']+box['height']*.3+index*95
@@ -184,7 +184,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
         w, p = self.open_viewer(f)
         self.addCleanup(w.close); self.addCleanup(p.close)
         # Fault injection into the display metadata only; source DICOM stays intact.
-        for tool, field, value, message in [('수동 길이', 'PixelSpacing', None, '간격'), ('수동 ROI', 'RescaleType', 'OD', 'HU 보정')]:
+        for tool, field, value, message in [('Length', 'PixelSpacing', None, '간격'), ('Ellipse ROI', 'RescaleType', 'OD', 'HU 보정')]:
             old = p.evaluate('''([field,value])=>{const v=cornerstone.getEnabledElements()[0].viewport;
                 const m=cornerstone.metaData.get('instance',v.getCurrentImageId());const old=m[field];m[field]=value;return old;}''', [field,value])
             p.get_by_role('button', name=tool, exact=True).click()
@@ -196,7 +196,7 @@ class ManualMeasurementE2E(ViewerHistoryE2E):
             p.evaluate('''([field,value])=>{const v=cornerstone.getEnabledElements()[0].viewport;
                 cornerstone.metaData.get('instance',v.getCurrentImageId())[field]=value;}''',[field,old])
         self.assertEqual(self.saved(f),[])
-        p.get_by_role('button',name='수동 길이',exact=True).click()
+        p.get_by_role('button',name='Length',exact=True).click()
         p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
         p.mouse.move(x,y);p.mouse.down();p.mouse.move(x+50,y+25);p.mouse.up()
         expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('다시 로그인한 뒤 뷰어를 여세요')

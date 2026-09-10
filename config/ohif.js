@@ -529,7 +529,7 @@ function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
   const kinds = Object.fromEntries(Object.entries(tools).map(([kind, tool]) => [tool, kind]));
-  const names = { arrow: '화살표', key: '키 이미지', length: '수동 길이', angle: '수동 각도', ellipse: '수동 ROI' };
+  const names = { arrow: '화살표', key: '키 이미지', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
   function mount() {
     stop?.();
     const cs = window.cornerstone, ct = window.cornerstoneTools;
@@ -541,7 +541,7 @@ function kinCreateViewerHistory() {
     const panel = document.createElement('details');
     panel.id = 'kin-viewer-history'; panel.open = true;
     panel.style.cssText = 'position:fixed;right:8px;bottom:30px;z-index:40;width:300px;max-height:58vh;overflow:auto;background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:10px;font:13px sans-serif';
-    const summary = document.createElement('summary'); summary.textContent = '측정 · 저장한 주석 · 키 이미지'; panel.append(summary);
+    const summary = document.createElement('summary'); summary.textContent = 'Measurements & Key Images'; panel.append(summary);
     const status = document.createElement('p'); status.setAttribute('role', 'status'); panel.append(status);
     const actions = document.createElement('div'), list = document.createElement('div'); panel.append(actions, list);
     document.body.append(panel);
@@ -936,7 +936,7 @@ function kinCreateViewerHistory() {
         });
         return;
       }
-      for (const [label, command] of [['SR 다운로드', 'downloadReport'], ['SR 저장', 'storeMeasurements']]) {
+      for (const [label, command] of [['Download SR', 'downloadReport'], ['Store SR', 'storeMeasurements']]) {
         const control = button(actions, label, () => commands.runCommand(command, { measurementData: srSelection() }, reportContext), true);
         control.dataset.kinSr = command;
       }
@@ -950,7 +950,7 @@ function kinCreateViewerHistory() {
         if (previous) group.setToolPassive(previous);
         group.setToolActive(tools[kind], { bindings: [{ mouseButton: ct.Enums.MouseBindings.Primary }] });
       }, !writable({}));
-      button(actions, '현재 프레임 키 저장', () => {
+      button(actions, 'Add Key Image', () => {
         const r = current(); if (!r || r.study !== scope) return;
         const e = { id: crypto.randomUUID(), editing: true, draft: { schemaVersion: 1, kind: 'key', seriesUid: r.seriesUid, sopUid: r.sopUid, frame: r.frame, title: '', description: '' } };
         entries.set(e.id, e); row(e);
@@ -1389,7 +1389,7 @@ function kinCreateViewerLayout() {
     const search = location.search, studies = model.scope(search);
     const panel = document.createElement('details'); panel.id = 'kin-viewer-layout'; panel.open = true;
     panel.style.cssText = 'position:fixed;left:8px;bottom:30px;z-index:41;width:260px;max-width:calc(100vw - 16px);background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:8px;font:13px sans-serif';
-    const summary = document.createElement('summary'); summary.textContent = '최근 배치 · 이 브라우저'; panel.append(summary);
+    const summary = document.createElement('summary'); summary.textContent = 'Recent Layout'; panel.append(summary);
     const note = document.createElement('p'); note.textContent = '최근 1건만 저장합니다. 영상 위치·확대·주석은 포함하지 않습니다.'; panel.append(note);
     const status = document.createElement('p'); status.id = 'kin-viewer-layout-status'; status.setAttribute('role', 'status'); panel.append(status);
     const controls = document.createElement('div'); panel.append(controls); document.body.append(panel);
@@ -1473,7 +1473,7 @@ function kinCreateViewerLayout() {
         if (live()) status.textContent = error?.name === 'QuotaExceededError' || error?.name === 'SecurityError' ? '브라우저 저장소를 사용할 수 없습니다. 현재 화면은 유지됩니다.' : error instanceof SyntaxError ? '저장한 배치가 손상되었습니다. 현재 화면은 유지됩니다.' : error?.message || '배치 작업에 실패했습니다.';
       } finally { busy = false; refresh(); }
     }
-    for (const [label, action] of [['최근 배치 저장', 'save'], ['최근 배치 복원', 'restore'], ['최근 배치 삭제', 'remove']]) {
+    for (const [label, action] of [['Save Recent Layout', 'save'], ['Restore Recent Layout', 'restore'], ['Delete Recent Layout', 'remove']]) {
       const b = document.createElement('button'); b.textContent = label; b.type = 'button'; b.disabled = true;
       b.style.cssText = 'margin:3px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px';
       b.onclick = () => run(action); controls.append(b); buttons.push(b);

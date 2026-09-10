@@ -149,7 +149,7 @@ class MeasurementPanelE2E(MeasurementReadbackE2E):
     def test_04_mixed_tools_and_missing_display_set(self):
         f = self.specimen(); p = self.observed(f)
         _, panel = self.tracked(p)
-        for index, (tool, label) in enumerate([('Angle','수동 각도'), ('EllipticalROI','수동 ROI')]):
+        for index, (tool, label) in enumerate([('Angle','Angle'), ('EllipticalROI','Ellipse ROI')]):
             p.get_by_role('button', name=label, exact=True).click()
             box=p.locator('.cornerstone-canvas').bounding_box()
             x,y=box['x']+box['width']*.4,box['y']+box['height']*(.43+index*.15)

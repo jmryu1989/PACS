@@ -28,7 +28,7 @@ class ManualSrE2E(SRProvenanceE2E):
     def download(self, p):
         try:
             with p.expect_download() as downloaded:
-                p.get_by_role('button', name='SR 다운로드', exact=True).click()
+                p.get_by_role('button', name='Download SR', exact=True).click()
         except Exception:
             print('SR DOWNLOAD FAILURE',p.locator('#kin-viewer-history').inner_text(),flush=True)
             p.screenshot(path=str(Path(__file__).parent/'artifacts/manual-sr-download-failure.png'))
@@ -79,7 +79,7 @@ class ManualSrE2E(SRProvenanceE2E):
         self.assertEqual(self.hashes(), original, 'download must not store a DICOM instance')
         # A repeated download uses the identical durable file and request.
         raw2, _ = self.download(p); self.assertEqual(raw2, raw)
-        p.get_by_role('button', name='SR 저장', exact=True).click()
+        p.get_by_role('button', name='Store SR', exact=True).click()
         expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('SR 저장 완료', timeout=30000)
         hits = self.stack._orthanc_request('POST', '/tools/lookup', str(ds.SOPInstanceUID).encode()).body
         self.assertEqual(len(hits), 1, hits)
@@ -101,7 +101,7 @@ class ManualSrE2E(SRProvenanceE2E):
     def test_02_roi_and_angle_numbers(self):
         f = self.specimen(); original = self.hashes(); p = self.observed(f)
         self.draw_length(p);p.get_by_role('button',name='Yes',exact=True).click()
-        for index, (tool, label) in enumerate([('Angle', '수동 각도'), ('EllipticalROI', '수동 ROI')]):
+        for index, (tool, label) in enumerate([('Angle', 'Angle'), ('EllipticalROI', 'Ellipse ROI')]):
             p.get_by_role('button', name=label, exact=True).click()
             box=p.locator('.cornerstone-canvas').bounding_box()
             x,y=box['x']+box['width']*.4,box['y']+box['height']*(.50+index*.18)
@@ -229,7 +229,11 @@ class ManualSrE2E(SRProvenanceE2E):
         p.get_by_label('SR 문서 선택').select_option(stored['dataset']['SOPInstanceUID'])
         expect(p.locator('svg.svg-layer')).to_contain_text(expected)
         p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
-        expect(p.locator('#kin-sr-provenance')).to_be_empty();expect(p.locator('svg.svg-layer')).not_to_contain_text(expected)
+        expect(p.locator('#kin-sr-provenance')).to_be_empty()
+        # Session teardown can remove the entire viewport; no stale SR text
+        # or retained SR annotation may survive, with or without an SVG host.
+        expect(p.locator('svg.svg-layer').filter(has_text=expected)).to_have_count(0)
+        self.assertFalse(p.evaluate('()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>String(a.annotationUID).startsWith("kin-sr:"))'))
 
     def test_05_pending_access_recheck_and_hidden_selection(self):
         f=self.specimen();self.uid=f.uid;p=self.observed(f);self.draw_length(p);self.download(p)

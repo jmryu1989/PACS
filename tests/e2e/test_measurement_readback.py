@@ -12,7 +12,8 @@ class MeasurementReadbackE2E(ViewerHistoryE2E):
                             '20260908', [0, 0, 0], [1, 0, 0, 0, 1, 0], [.7, 1.3], slices=slices)
 
     def draw_length(self, p):
-        p.get_by_role('button', name='수동 길이', exact=True).click()
+        self.open_measurement_tools(p)
+        p.get_by_role('button', name='Length', exact=True).click()
         box = p.locator('.cornerstone-canvas').bounding_box()
         x, y = box['x']+box['width']*.4, box['y']+box['height']*.4
         p.mouse.move(x, y); p.mouse.down(); p.mouse.move(x+65, y+32, steps=10); p.mouse.up()
