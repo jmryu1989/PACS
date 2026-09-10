@@ -1850,6 +1850,9 @@ function kinCreateViewerTechNote() {
       .then(()=>standalone&&!window.KinWorkspaceShortcuts?load('workspace-shortcuts.js'):undefined)
       .then(()=>standalone&&!window.KinViewerWindows?load('viewer-windows.js').catch(()=>undefined):undefined)
       .then(()=>window.KinViewerIdentity?undefined:load('viewer-identity.js'))
+      .then(()=>Promise.allSettled([
+        window.KinVolumeOrientation?Promise.resolve():load('volume-orientation.js'),
+        typeof window.kinCreateVolumeOrientation==='function'?Promise.resolve():load('viewer-volume-orientation.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
       .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;

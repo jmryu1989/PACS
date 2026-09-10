@@ -398,7 +398,7 @@ window.kinViewerTechNote=function(services){
     }
     if(window.top!==window){
       window.kinViewerSelectedNoteTarget=selectedStudy;
-      let patientCopy,toolbarPreferences,projection;
+      let patientCopy,toolbarPreferences,projection,orientation;
       const enable=options=>{
         if(patientCopy)return true;
         const host=document.querySelector('#kin-viewer-layout');if(!host||typeof options?.owner!=='function'||typeof options?.allowed!=='function')return false;
@@ -407,15 +407,16 @@ window.kinViewerTechNote=function(services){
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
         patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive,onSelection:event=>event?.contextOnly?observeStudyContext():selectedStudy()});
         projection=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>{try{return live()&&options.owner()===bound;}catch(_){return false;}},allowed:contextLive,host});
+        orientation=window.KinVolumeOrientation&&window.kinCreateVolumeOrientation?.({services,selected:selectedStudy,live:()=>{try{return live()&&options.owner()===bound;}catch(_){return false;}},allowed:contextLive,host});
         toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:()=>{try{return live()&&options.owner()===bound&&(options.toolbarAllowed||options.allowed)();}catch(_){return false;}}});
         return true;
       };
       window.kinViewerEnablePatientCopy=enable;
-      stop=()=>{ended=true;projection?.dispose();toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selectedStudy)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
+      stop=()=>{ended=true;projection?.dispose();orientation?.dispose();toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selectedStudy)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
       return true;
     }
     const host=document.querySelector('#kin-viewer-layout');if(!host){disposeNativeFocus();return;}
-    let toolbarPreferences,projection;
+    let toolbarPreferences,projection,orientation;
     const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
     const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='Tech Note';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
     const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='Retry Connection';retry.hidden=true;
@@ -483,7 +484,7 @@ window.kinViewerTechNote=function(services){
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
     }
     function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const [code,b] of toolButtons){b.disabled=!live()||!owner||(code==='Digit4'&&(!readingChannel||!patientCopy.tracked()));if(code==='Digit4'){b.setAttribute('aria-busy',String(!!pendingReturn));b.setAttribute('aria-disabled',String(b.disabled||!!pendingReturn));}}patientCopy.refresh();}
-    function end(){if(ended)return;ended=true;projection?.dispose();windowLink?.dispose();owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    function end(){if(ended)return;ended=true;projection?.dispose();orientation?.dispose();windowLink?.dispose();owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
@@ -529,7 +530,7 @@ window.kinViewerTechNote=function(services){
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){windowLink||=window.KinViewerWindows?.connect({owner:()=>owner,live});projection||=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
+      try{await authenticate();if(live()){windowLink||=window.KinViewerWindows?.connect({owner:()=>owner,live});projection||=kinCreateVolumeProjection({services,selected:selectedStudy,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});orientation||=window.KinVolumeOrientation&&window.kinCreateVolumeOrientation?.({services,selected:selectedStudy,live:()=>live()&&!!owner,allowed:()=>live()&&!!owner&&!document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'),host});toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }
