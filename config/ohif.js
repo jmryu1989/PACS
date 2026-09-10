@@ -1848,6 +1848,7 @@ function kinCreateViewerTechNote() {
     if(standalone){const css=document.createElement('link');css.rel='stylesheet';css.href='/worklist/hpacs-lite/tech-note.css';document.head.append(css);}
     prepare=()=>ready||(ready=(standalone&&typeof window.KinTechNote!=='function'?load('tech-note.js'):Promise.resolve())
       .then(()=>standalone&&typeof window.KinViewerWorkspaceDock!=='function'?load('viewer-workspace-dock.js'):undefined)
+      .then(()=>standalone&&!window.KinWorkspaceShortcuts?load('workspace-shortcuts.js'):undefined)
       .then(()=>window.KinViewerIdentity?undefined:load('viewer-identity.js'))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
       .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));

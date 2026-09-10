@@ -14,3 +14,19 @@ test('remapped chord resolves exactly once and original chord no longer resolves
   assert.equal(s.action(map,{...event,getModifierState:()=>true}),null);
   assert.equal(s.action(map,{...event,ctrlKey:false}),null);
 });
+
+
+test('standalone reads only its owner and falls back on invalid or unavailable storage',()=>{
+  const owner=JSON.stringify(['hospital','reader']);
+  const map={...s.defaults,image:'KeyI',report:'KeyR'};
+  const data=new Map([['kin-workspace-shortcuts:v1:'+owner,JSON.stringify(map)]]);
+  const storage={getItem:key=>data.get(key)??null};
+  assert.deepEqual(s.read(storage,owner),map);
+  assert.deepEqual(s.read(storage,JSON.stringify(['other','reader'])),s.defaults);
+  assert.deepEqual(s.read(storage,null),s.defaults);
+  for(const raw of ['{',JSON.stringify({...map,image:'KeyC'}),' '.repeat(2049)]){
+    data.set('kin-workspace-shortcuts:v1:'+owner,raw);assert.deepEqual(s.read(storage,owner),s.defaults);
+  }
+  assert.deepEqual(s.read({getItem(){throw Error('denied');}},owner),s.defaults);
+  assert.deepEqual(s.read(undefined,owner),s.defaults);
+});

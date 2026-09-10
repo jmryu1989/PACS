@@ -28,7 +28,7 @@
     status.style.cssText='display:block;flex-basis:100%;min-height:1.5em';
     const dialog = el('dialog','',d.body); dialog.id='workspace-shortcuts-dialog'; dialog.style.cssText='max-height:85vh;overflow:auto;width:640px;max-width:95vw;box-sizing:border-box;padding:20px;background:#111c2f;color:#d6e6ff;border:1px solid #718eaa;border-radius:8px';
     const title = el('h2','Workspace Shortcuts',dialog); title.id='workspace-shortcuts-title'; dialog.setAttribute('aria-labelledby',title.id);
-    el('p','통합 목록·영상·판독문 공통 · 이 브라우저의 현재 계정에 저장합니다. Ctrl+Alt 조합만 사용합니다. C(환자 ID 복사), 8(영상 배치), 브라우저·입력 키는 예약되어 있습니다. 별도 영상 창은 기본 단축키를 사용합니다.',dialog);
+    el('p','통합 목록·영상·판독문 공통 · 이 브라우저의 현재 계정에 저장합니다. Ctrl+Alt 조합만 사용합니다. C(환자 ID 복사), 8(영상 배치), 브라우저·입력 키는 예약되어 있습니다. 새로 연 별도 영상 창에도 영상·메모·도구·판독문 복귀 키가 적용됩니다. 열린 창은 현재 키를 유지합니다.',dialog);
     const fields = {};
     for (const id of Object.keys(defaults)) {
       const row=el('label',labels[id],dialog); row.style.cssText='display:grid;grid-template-columns:minmax(100px,1fr) minmax(130px,1fr);align-items:center;gap:12px;margin:8px 0';
@@ -77,6 +77,10 @@
     const timer=setInterval(sync,500);sync();
     return {action:e=>{sync();return action(map,e);},end:()=>{ended=true;clearInterval(timer);map={...defaults};dialog.remove();edit.remove();status.remove();},read:()=>({...map})};
   }
-  const api={defaults,valid,display,action,create};
+  function read(storage, owner) {
+    if(owner)try{const raw=storage.getItem(prefix+owner);if(raw!==null&&raw.length<=2048){const value=JSON.parse(raw);if(valid(value))return value;}}catch(_){}
+    return {...defaults};
+  }
+  const api={defaults,valid,display,action,create,read};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinWorkspaceShortcuts=api;
 })(typeof window==='object'?window:globalThis);

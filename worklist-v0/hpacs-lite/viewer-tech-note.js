@@ -298,6 +298,8 @@ window.kinViewerTechNote=function(services){
     for(const [code,label] of [['Digit7','Focus Measurements'],['Digit8','Focus Comparison'],['Digit9','Image Tools'],['Digit2','Active Image'],['Digit4','Return to Report']]){
       const b=document.createElement('button');b.type='button';b.textContent=label;b.id='kin-viewer-focus-'+code.slice(-1);b.setAttribute('aria-keyshortcuts','Control+Alt+'+code.slice(-1));b.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px';b.onclick=()=>focusTool(code);toolBar.append(b);toolButtons.set(code,b);
     }
+    let shortcutMap=null;
+    const shortcutActions={image:'Digit2',report:'Digit4',note:'Digit6',tools:'Digit7',nativeTools:'Digit9'};
     const toolHint=document.createElement('p');toolHint.textContent='Ctrl+Alt+7 측정 도구 · 8 비교 작업 도구 · 9 기본 영상 도구 (Tab 이동·Enter 선택) · 2 선택 영상 · 4 판독문으로';toolBar.append(toolHint);
     const returnStatus=document.createElement('span');returnStatus.id='kin-viewer-return-status';returnStatus.setAttribute('role','status');returnStatus.style.cssText='display:inline-block;margin-left:8px;font-size:12px';(host.querySelector(':scope > summary')||toolBar).append(returnStatus);
     let readingChannel=null,pendingReturn=null,returnTimer=null,returnEpoch=0,returnSignature='';
@@ -317,7 +319,7 @@ window.kinViewerTechNote=function(services){
           const messages={focused:'판독문으로 돌아왔습니다.',ready:'판독문 위치를 준비했습니다. 목록 창을 선택하세요.',session:'세션이 바뀌었습니다. 판독 화면에서 다시 연결하세요.',context:'판독 대상이나 화면이 바뀌었습니다. 목록 창에서 확인하세요.',modal:'판독 화면의 대화상자를 닫은 뒤 다시 시도하세요.',unavailable:'판독문 입력란을 확인한 뒤 다시 시도하세요.'};
           if(Object.hasOwn(messages,m.result))finishReturn(messages[m.result]);
         };
-        returnStatus.textContent=cancelled?'이전 복귀 요청은 취소되었습니다. 다시 눌러 돌아가세요.':'연결된 판독문으로 · Ctrl+Alt+4';
+        returnStatus.textContent=cancelled?'이전 복귀 요청은 취소되었습니다. 다시 눌러 돌아가세요.':'연결된 판독문으로 · '+(shortcutMap?window.KinWorkspaceShortcuts.display(shortcutMap.report):'Control+Alt+4');
       }catch(_){returnStatus.textContent='이 브라우저에서 창 연결을 사용할 수 없습니다. 목록 창을 직접 선택하세요.';}
       refresh();
     }
@@ -360,8 +362,25 @@ window.kinViewerTechNote=function(services){
       try{await authenticate();const current=selected();if(!live()||!current||target.uid!==current.uid||target.viewportId!==current.viewportId)throw new Error('선택 영상이 바뀌었습니다. 대상을 확인하고 다시 누르세요');busy=false;refresh();if(focus?.isConnected)focus.focus({preventScroll:true});note.open(target.study);status.textContent='메모 대상 검사 · '+target.uid;}
       catch(e){if(live())status.textContent=e.message;}finally{busy=false;refresh();}
     }
-    const key=e=>{if(e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||!e.altKey||e.shiftKey||e.metaKey||!['Digit6',...toolButtons.keys()].includes(e.code)||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"]'))return;
-      e.preventDefault();if(e.code==='Digit6')open();else focusTool(e.code);};
+    function bindShortcuts(){
+      if(shortcutMap||!owner)return;
+      const api=window.KinWorkspaceShortcuts;
+      let storage;try{storage=window.localStorage;}catch(_){}
+      shortcutMap=api.read(storage,JSON.stringify(owner));
+      if(readingChannel&&!pendingReturn)returnStatus.textContent='연결된 판독문으로 · '+api.display(shortcutMap.report);
+      for(const [action,code] of Object.entries(shortcutActions)){
+        const target=action==='note'?button:toolButtons.get(code);
+        target.setAttribute('aria-keyshortcuts',api.display(shortcutMap[action]));
+      }
+      toolHint.textContent=Object.entries(shortcutActions).map(([action,code])=>(action==='note'?button:toolButtons.get(code)).textContent+' '+api.display(shortcutMap[action])).join(' · ')+' · Focus Comparison Control+Alt+8 (Tab 이동·Enter 선택)';
+    }
+    const key=e=>{
+      if(!live()||!owner||!shortcutMap||e.defaultPrevented||e.repeat||e.isComposing||e.getModifierState('AltGraph')||!e.ctrlKey||!e.altKey||e.shiftKey||e.metaKey||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;
+      const action=window.KinWorkspaceShortcuts.action(shortcutMap,e);
+      const code=e.code==='Digit8'?'Digit8':shortcutActions[action];
+      if(!code)return;
+      e.preventDefault();if(code==='Digit6')open();else focusTool(code);
+    };
     button.onclick=open;document.addEventListener('keydown',key);
     const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
     try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
@@ -370,7 +389,7 @@ window.kinViewerTechNote=function(services){
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
+      try{await authenticate();if(live()){toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});arrangeTools();bindShortcuts();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · '+window.KinWorkspaceShortcuts.display(shortcutMap.note);}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }

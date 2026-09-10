@@ -1,6 +1,6 @@
 # coding: utf-8
 """TEST-WORKSPACE-SHORTCUTS: real embedded navigation and preference failure guards."""
-import os, unittest
+import os, unittest, re
 from pathlib import Path
 from playwright.sync_api import expect
 from test_viewer_tech_note import ViewerTechNoteE2E
@@ -25,6 +25,28 @@ class WorkspaceShortcutsE2E(ViewerTechNoteE2E):
   f.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
   print('after canvas sizes',f.locator('.cornerstone-canvas').evaluate_all('es=>es.map(e=>[e.width,e.height])'),flush=True);self.assertEqual(self.snapshot(f),before)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);self.editor(p);p.screenshot(path=str(folder/'workspace-shortcuts.png'));p.locator('#workspace-shortcuts-cancel').click()
+
+ def test_shortcuts_05_standalone_uses_saved_navigation_keys(self):
+  a,b=self.pair();p=self.login();f=self.workspace(p,a);self.editor(p)
+  for action,key in [('image','I'),('report','R'),('note','N'),('tools','T'),('nativeTools','Z')]:self.assign(p,action,'Control+Alt+'+key)
+  self.apply(p);p.locator('#findings').fill('KEEP POPUP SHORTCUT REPORT')
+  with p.context.expect_page() as opened:p.get_by_role('button',name='Open Viewer Window',exact=True).click()
+  v=opened.value
+  from test_viewer_tech_note import canvas_ready
+  canvas_ready(v,2);self.ready(v)
+  expect(v.locator('#kin-viewer-note-open')).to_have_attribute('aria-keyshortcuts','Control+Alt+N')
+  expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-keyshortcuts','Control+Alt+R')
+  v.get_by_label('Job Title',exact=True).fill('KEEP POPUP SHORTCUT JOB');before=self.snapshot(v)
+  v.keyboard.press('Control+Alt+I');focus=v.evaluate('()=>document.activeElement') is not None
+  self.assertTrue(focus);self.assertTrue(v.evaluate("()=>document.activeElement.matches('[data-viewport-uid],.viewport-element')||!!document.activeElement.querySelector('canvas')"))
+  v.keyboard.press('Control+Alt+6');expect(v.locator('#tech-note-dialog')).not_to_be_visible()
+  v.keyboard.press('Control+Alt+N');expect(v.locator('#tech-note-meta')).not_to_be_empty();v.locator('#tech-note-close').click()
+  v.keyboard.press('Control+Alt+T');expect(v.locator('#kin-workspace-dock nav button[aria-controls=kin-viewer-history]')).to_be_focused()
+  v.keyboard.press('Control+Alt+Z');expect(v.locator('#root button[data-cy=Zoom]')).to_be_focused()
+  v.keyboard.press('Control+Alt+4');expect(v.locator('#root button[data-cy=Zoom]')).to_be_focused()
+  v.keyboard.press('Control+Alt+R');expect(v.locator('#kin-viewer-return-status')).to_have_text(re.compile(r'판독문으로 돌아왔습니다\.|판독문 위치를 준비했습니다\. 목록 창을 선택하세요\.'))
+  expect(p.locator('#findings')).to_have_value('KEEP POPUP SHORTCUT REPORT');expect(v.get_by_label('Job Title',exact=True)).to_have_value('KEEP POPUP SHORTCUT JOB');self.assertEqual(self.snapshot(v),before)
+  folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);v.screenshot(path=str(folder/'standalone-shortcuts.png'))
 
  def test_shortcuts_02_reserved_duplicate_cancel_defaults_and_input(self):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);self.editor(p)
