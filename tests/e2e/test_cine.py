@@ -57,18 +57,18 @@ class CineE2E(ViewerLayoutE2E):
 
  def test_cine_01_direction_loop_bounds_and_resume(self):
   f,a,b=self.pair();originals=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a]);self.watch(p)
-  p.get_by_role('button',name='첫 프레임',exact=True).click();self.wait_index(p,0,0)
+  p.get_by_role('button',name='First Frame',exact=True).click();self.wait_index(p,0,0)
   self.play(p);p.wait_for_timeout(2500);self.play(p);stopped=self.snapshot(p);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p),stopped)
   data=p.evaluate('cineRenders');print('CINE forward '+json.dumps(data),flush=True)
   self.assertGreater(len(data),18);self.assertTrue(all(x['marker']>200 and '/frames/'+str(x['index']+1) in x['image'] for x in data))
   self.assertTrue(all((y['index']-x['index'])%12==1 for x,y in zip(data,data[1:])))
   fps=(len(data)-1)*1000/(data[-1]['t']-data[0]['t']);self.assertGreater(fps,8);self.assertLess(fps,12);print('CINE 10fps measured '+str(fps),flush=True)
-  p.get_by_label('재생 방향').select_option('reverse');p.get_by_label('반복',exact=True).uncheck()
-  p.get_by_role('button',name='끝 프레임',exact=True).click();self.wait_index(p,0,11)
+  p.get_by_label('Playback Direction').select_option('reverse');p.get_by_label('Loop',exact=True).uncheck()
+  p.get_by_role('button',name='Last Frame',exact=True).click();self.wait_index(p,0,11)
   p.wait_for_function('()=>cineRenders.at(-1)?.index===11');p.evaluate('()=>{cineRenders=[]}');self.play(p);self.wait_index(p,0,0)
   p.wait_for_timeout(350);self.assertFalse(self.snapshot(p)[0]['playing']);self.assertEqual(self.snapshot(p)[0]['index'],0)
   reverse=p.evaluate('cineRenders');self.assertEqual([r['index'] for r in reverse],list(range(10,-1,-1)));self.assertTrue(all(r['marker']>200 for r in reverse));print('CINE reverse '+json.dumps(reverse),flush=True)
-  p.get_by_label('재생 방향').select_option('forward');self.play(p);self.wait_index(p,0,11);p.wait_for_timeout(350);self.assertFalse(self.snapshot(p)[0]['playing'])
+  p.get_by_label('Playback Direction').select_option('forward');self.play(p);self.wait_index(p,0,11);p.wait_for_timeout(350);self.assertFalse(self.snapshot(p)[0]['playing'])
   p.screenshot(path=str(Path(__file__).parent/'artifacts/CINE-controls.png'))
   self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),rows)
 

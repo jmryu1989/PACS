@@ -1633,46 +1633,75 @@ function kinCreateCine() {
     let ended = false, channel, selected, owner, sequence = 0, halting = false, wasEnabled = false;
     const panel = document.createElement('div'); panel.id = 'kin-cine'; panel.hidden = true;
     panel.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);z-index:42;max-width:65vw;display:flex;flex-wrap:wrap;gap:6px;padding:7px;background:#101e32;color:#e1ecfc;border-radius:6px;font:13px sans-serif';
-    // The native controls remain the playback/FPS entry point; these apply to the selected stack only.
-    const direction = document.createElement('select'); direction.setAttribute('aria-label', '재생 방향');
-    for (const [value, text] of [['forward', '정방향'], ['reverse', '역방향']]) {
+    // Native controls remain the playback/FPS entry point for the selected view.
+    const direction = document.createElement('select'); direction.setAttribute('aria-label', 'Playback Direction');
+    for (const [value, text] of [['forward', 'Forward'], ['reverse', 'Reverse']]) {
       const option = document.createElement('option'); option.value = value; option.textContent = text; direction.append(option);
     }
     const loop = document.createElement('input'); loop.type = 'checkbox'; loop.checked = true;
-    const label = document.createElement('label'); label.append(loop, ' 반복');
+    const label = document.createElement('label'); label.append(loop, ' Loop');
     const status = document.createElement('span'); status.setAttribute('role', 'status');
-    const first = document.createElement('button'); first.textContent = '첫 프레임';
-    const last = document.createElement('button'); last.textContent = '끝 프레임';
-    panel.append('선택 화면 ', direction, label, first, last, status); document.body.append(panel);
+    const first = document.createElement('button'); first.textContent = 'First Frame';
+    const last = document.createElement('button'); last.textContent = 'Last Frame';
+    panel.append('Selected View ', direction, label, first, last, status); document.body.append(panel);
     for (const control of [direction, first, last]) control.style.cssText = 'background:#263c57;color:white;border:1px solid #6884a6;border-radius:3px;padding:2px 5px';
     const listen = (target, type, fn, capture = false) => { target.addEventListener(type, fn, capture); listeners.push(() => target.removeEventListener(type, fn, capture)); };
     const viewport = id => services.cornerstoneViewportService.getCornerstoneViewport(id);
-    const signature = v => JSON.stringify([grid.getState().viewports.get(v.id)?.displaySetInstanceUIDs, v.getImageIds?.()]);
+    const volumeTarget = (v, verify = false) => { try { return window.kinGetVolumeCineTarget?.(v, verify) || null; } catch (e) { if (verify) throw e; return null; } };
+    const eligible = v => v?.type === 'stack' || v?.type === 'orthographic' && !!volumeTarget(v)?.allowed;
+    const signature = v => { if (v.type === 'orthographic') { const c=v.getCamera(),round=n=>Number(n.toFixed(6)); return JSON.stringify([volumeTarget(v)?.key,c.viewPlaneNormal.map(round),c.viewUp.map(round),round(c.parallelScale),c.flipHorizontal,c.flipVertical]); } return JSON.stringify([grid.getState().viewports.get(v.id)?.displaySetInstanceUIDs, v.getImageIds?.()]); };
+    const contentSignature = v => v.type==='orthographic'?volumeTarget(v)?.contentKey:signature(v);
+    function positionControls(v) {
+      const pane=[...document.querySelectorAll('[data-cy=viewport-grid] > div')].find(p=>p.contains(v?.element)),control=pane?.querySelector('[data-cy="cine-player-play-pause"]'),rect=control?.getBoundingClientRect();
+      if(!rect?.width||!panel.offsetHeight)return;
+      panel.style.bottom='auto';panel.style.top=Math.max(48,rect.top-panel.offsetHeight-8)+'px';panel.style.left=Math.min(innerWidth-panel.offsetWidth/2-8,Math.max(panel.offsetWidth/2+8,rect.x+rect.width/2))+'px';
+    }
+    function volumeFrames(v,target) {
+      const {sliceRange,spacingInNormalDirection:step,camera}=core.utilities.getVolumeViewportScrollInfo(v,target.volume.volumeId).sliceRangeInfo;
+      const {min,max,current}=sliceRange,last=Math.floor((max-min)/step+1e-6),index=Math.round((current-min)/step);
+      if(![min,max,current,step].every(Number.isFinite)||step<=0||max<=min||!Number.isSafeInteger(last)||last<1||!Number.isSafeInteger(index))throw Error('MPR 재생 범위를 확인할 수 없습니다.');
+      return {min,step,last,index,current,camera};
+    }
+    function moveVolume(v,target,frames,index) {
+      const {camera,min,step,current}=frames,delta=min+index*step-current;
+      const next={focalPoint:camera.focalPoint.map((n,i)=>n+camera.viewPlaneNormal[i]*delta),position:camera.position.map((n,i)=>n+camera.viewPlaneNormal[i]*delta)};
+      try{v.setCamera(next);v.render();const actual=v.getCamera();if(Object.keys(next).some(key=>next[key].some((n,i)=>Math.abs(n-actual[key][i])>1e-5)))throw Error('MPR 재생 위치를 확인하지 못했습니다.');}
+      catch(error){if(volumeTarget(v)?.key===target.key)try{v.setCamera({focalPoint:camera.focalPoint,position:camera.position});v.render();}catch(_){}throw error;}
+    }
     function record(v) {
       let r = records.get(v.id);
       if (!r || r.element !== v.element) {
-        r = { element: v.element, reverse: false, loop: true, ticket: 0, signature: signature(v) }; records.set(v.id, r);
-        listen(v.element, core.Enums.Events.VIEWPORT_NEW_IMAGE_SET, () => { r.signature = signature(v); halt(v.id); r.reverse = false; r.loop = true; render(); });
-        listen(v.element, 'CORNERSTONE_CINE_TOOL_STOPPED', () => halt(v.id));
+        if(r){clearInterval(r.volumeTimer);nativeStop.call(cine,r.element,{viewportId:v.id});}
+        r = { element: v.element, reverse: false, loop: true, ticket: 0, signature: signature(v), content:contentSignature(v) }; records.set(v.id, r);
+        const owns=()=>records.get(v.id)===r;
+        listen(v.element, core.Enums.Events.VIEWPORT_NEW_IMAGE_SET, () => { if(!owns())return;r.signature = signature(v); halt(v.id); r.reverse = false; r.loop = true; render(); });
+        if(v.type==='orthographic') {
+          listen(v.element, core.Enums.Events.VOLUME_VIEWPORT_NEW_VOLUME, () => { if(!owns())return;halt(v.id);r.signature=signature(v);const content=contentSignature(v);if(r.content!==content){r.content=content;r.reverse=false;r.loop=true;}render(); });
+          listen(v.element, core.Enums.Events.CAMERA_MODIFIED, () => { if(owns()&&r.signature!==signature(v)) { halt(v.id); r.signature=signature(v); render(); } });
+        }
+        listen(v.element, 'CORNERSTONE_CINE_TOOL_STOPPED', () => {if(owns())halt(v.id);});
       }
       return r;
     }
     function halt(id) {
-      const r = records.get(id); if (r) { r.ticket = ++sequence; r.loading = false; r.authorized = false; nativeStop.call(cine, r.element, { viewportId: id }); }
+      const r = records.get(id); if (r) { r.ticket = ++sequence; r.loading = false; r.authorized = false; clearInterval(r.volumeTimer); r.volumeTimer=undefined; nativeStop.call(cine, r.element, { viewportId: id }); }
       if (cine.getState().cines?.[id]?.isPlaying) cine.setCine({ id, isPlaying: false });
     }
     function haltAll() { if (halting) return; halting = true; try { records.forEach((_, id) => halt(id)); } finally { halting = false; } }
     function render() {
       if (ended) return;
-      const id = grid.getActiveViewportId(), v = viewport(id), stack = v?.type === 'stack';
-      panel.hidden = !cine.getState().isCineEnabled || !stack;
+      const id = grid.getActiveViewportId(), v = viewport(id), supported = eligible(v);
+      first.textContent=v?.type==='orthographic'?'First Plane':'First Frame';last.textContent=v?.type==='orthographic'?'Last Plane':'Last Frame';
+      panel.hidden = !cine.getState().isCineEnabled || (!supported&&v?.type!=='orthographic');
       panel.style.display = panel.hidden ? 'none' : 'flex';
-      if (!stack) return;
+      direction.disabled=loop.disabled=!supported;
+      if (!supported) { first.disabled=last.disabled=true;status.textContent='완전히 로드된 단일 정규 CT의 MPR 평면을 선택하고 다른 작업을 마친 뒤 재생하세요.';positionControls(v);return; }
       const r = record(v);
-      if (r.signature !== signature(v)) { r.signature = signature(v); halt(id); r.reverse = false; r.loop = true; }
+      if (r.signature !== signature(v)) { r.signature = signature(v);const content=contentSignature(v);if(r.content!==content){r.reverse=false;r.loop=true;r.content=content;}halt(id); }
       direction.value = r.reverse ? 'reverse' : 'forward'; loop.checked = r.loop;
-      first.disabled = last.disabled = r.loading || !v.getImageIds?.().length;
-      status.textContent = r.message || (r.loading ? '프레임 준비 중' : '');
+      first.disabled = last.disabled = r.loading || (v.type==='stack' ? !v.getImageIds?.().length : !volumeTarget(v));
+      status.textContent = r.message || (r.loading ? '프레임 준비 중' : v.type==='orthographic'?'원본 CT에서 재구성한 평면을 재생합니다.':'');
+      positionControls(v);
     }
     async function session() {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10000);
@@ -1687,19 +1716,37 @@ function kinCreateCine() {
     }
     cine.stopClip = function (element, options) {
       const v = core.getEnabledElement(element)?.viewport, r = v && records.get(v.id);
-      if (r) { r.ticket = ++sequence; r.loading = false; }
+      if (r) { r.ticket = ++sequence; r.loading = false; clearInterval(r.volumeTimer); r.volumeTimer=undefined; }
       return nativeStop.call(this, element, options);
     };
     cine.playClip = async function (element, options = {}) {
       const v = core.getEnabledElement(element)?.viewport;
-      if (ended || document.hidden || !v) return;
-      if (v.type !== 'stack') return nativePlay.call(this, element, options);
+      if (ended || document.hidden || !v) { if(v)halt(v.id); return; }
+      if (v.type !== 'stack' && v.type !== 'orthographic') return nativePlay.call(this, element, options);
       const r = record(v), id = v.id, ticket = r.ticket = ++sequence, before = signature(v);
-      const current = () => !ended && !document.hidden && r.authorized && r.ticket === ticket && viewport(id) === v && signature(v) === before && grid.getActiveViewportId() === id && cine.getState().isCineEnabled;
+      clearInterval(r.volumeTimer);r.volumeTimer=undefined;
+      const current = () => !ended && !document.hidden && r.authorized && r.ticket === ticket && records.get(id)===r && viewport(id) === v && signature(v) === before && grid.getActiveViewportId() === id && cine.getState().isCineEnabled && (v.type==='stack'||!!volumeTarget(v)?.allowed);
       if (!r.authorized || grid.getActiveViewportId() !== id) { halt(id); return; }
       records.forEach((_, other) => { if (other !== id) halt(other); });
       r.loading = true; r.message = ''; render();
       try {
+        if(v.type==='orthographic') {
+          const target=volumeTarget(v,true);if(!target)throw Error('완전히 로드된 정규 CT MPR 평면을 선택하세요.');
+          const fps=Math.abs(Number(options.framesPerSecond||24));if(!Number.isFinite(fps)||fps<1||fps>90)throw Error('MPR 재생 속도는 1~90 fps입니다.');
+          await session();if(!current())return;
+          nativeStop.call(cine,element,{viewportId:id});clearInterval(r.volumeTimer);r.loading=false;
+          // Anchor a physical grid at the first plane. Native cine excludes the
+          // final position and its oblique scroll snap accumulates spacing drift.
+          const timer=setInterval(()=>{
+            if(!current()){clearInterval(timer);if(records.get(id)===r&&r.ticket===ticket){halt(id);render();}return;}
+            try{
+              const frames=volumeFrames(v,target),{last,index}=frames;
+              let next=index+(r.reverse?-1:1);
+              if(next<0||next>last){if(!r.loop){halt(id);render();return;}next=r.reverse?last:0;}
+              moveVolume(v,target,frames,next);
+            }catch(error){clearInterval(timer);if(records.get(id)===r){r.message=error.message||'MPR 재생을 중단했습니다.';if(r.ticket===ticket)halt(id);render();}}
+          },1000/fps);r.volumeTimer=timer;render();return;
+        }
         const ids = v.getImageIds(), pixels = ids.map(imageId => core.metaData.get('imagePixelModule', imageId));
         if (!kinCineWithinBudget(ids, pixels)) throw Error('재생 준비 범위는 2~500 프레임·128 MiB 이내입니다');
         await session(); if (!current()) return;
@@ -1714,23 +1761,28 @@ function kinCreateCine() {
         // This pinned native API retains loop from its first play; update its public cine state on every explicit start.
         window.cornerstoneTools.utilities.cine.getToolState(element).loop = r.loop;
         render();
-      } catch (_) {
-        if (current()) { r.message = '재생을 준비할 수 없습니다. 로그인·영상과 500 프레임/128 MiB 제한을 확인하세요.'; halt(id); render(); }
+      } catch (error) {
+        if (current()) { r.message = v.type==='orthographic'?(error.message||'MPR 재생을 준비할 수 없습니다.'):'재생을 준비할 수 없습니다. 로그인·영상과 500 프레임/128 MiB 제한을 확인하세요.'; halt(id); render(); }
+      } finally {
+        if(v.type==='orthographic'&&r.ticket===ticket&&!current()){halt(id);render();}
       }
     };
     const change = () => {
-      const v = viewport(grid.getActiveViewportId()); if (v?.type !== 'stack') return;
+      const v = viewport(grid.getActiveViewportId()); if (!eligible(v)) return;
       const r = record(v); r.reverse = direction.value === 'reverse'; r.loop = loop.checked; halt(v.id); r.message = '설정을 바꿨습니다. 재생을 눌러 시작하세요.'; render();
     };
     listen(direction, 'change', change); listen(loop, 'change', change);
     listen(document, 'click', e => {
       if (!e.target.closest?.('[data-cy="cine-player-play-pause"]')) return;
       const v = viewport(grid.getActiveViewportId());
-      if (v?.type === 'stack') record(v).authorized = !cine.getState().cines?.[v.id]?.isPlaying;
+      if (eligible(v)) record(v).authorized = !cine.getState().cines?.[v.id]?.isPlaying;
     }, true);
     async function jump(end) {
-      const v = viewport(grid.getActiveViewportId()); if (v?.type !== 'stack') return;
+      const v = viewport(grid.getActiveViewportId()); if (!eligible(v)) return;
       halt(v.id); const r = record(v), ticket = r.ticket = ++sequence, before = signature(v);
+      if(v.type==='orthographic') {
+        try{const target=volumeTarget(v,true);if(!target)throw Error('대상 MPR 평면을 다시 확인하세요.');const frames=volumeFrames(v,target);moveVolume(v,target,frames,end?frames.last:0);r.message='MPR 끝 위치로 이동했습니다.';}catch(error){r.message=error.message;}render();return;
+      }
       const index = end ? v.getImageIds().length - 1 : 0, imageId = v.getImageIds()[index];
       r.loading = true; r.message = ''; render();
       try {
@@ -1752,6 +1804,7 @@ function kinCreateCine() {
     const end = () => { haltAll(); ended = true; panel.style.display = 'none'; };
     listen(document, 'visibilitychange', () => { if (document.hidden) haltAll(); });
     listen(window, 'pagehide', end);
+    listen(window, 'kin-volume-cine-target-ended', () => { records.forEach((_,id)=>{if(viewport(id)?.type==='orthographic')halt(id);});render(); });
     listen(window, 'storage', e => { if (e.key === 'kin-session-ended') end(); });
     try { channel = new BroadcastChannel('kin-session'); listen(channel, 'message', e => { if (e.data?.type === 'session-ended') end(); }); } catch (_) {}
     const timer = setInterval(render, 250); selected = grid.getActiveViewportId(); render();

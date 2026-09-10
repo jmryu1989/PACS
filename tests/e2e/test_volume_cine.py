@@ -1,0 +1,47 @@
+# coding: utf-8
+import unittest
+import numpy as np
+from playwright.sync_api import expect
+from test_volume_orientation import VolumeOrientationE2E
+
+class VolumeCineE2E(VolumeOrientationE2E):
+ def cine_open(self,v):
+  errors=[];v.on('pageerror',lambda e:errors.append(str(e)));self.addCleanup(lambda:self.assertEqual(errors,[]))
+  v.locator('[data-cy="MoreTools-split-button-secondary"]').click();v.locator('[data-cy="Cine"]').click();expect(v.locator('#kin-cine')).to_be_visible()
+ def cine_play(self,v):
+  v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-play-pause"]').click()
+ def watch_cine(self,v):
+  v.evaluate("""()=>{window.cineView=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');window.cinePositions=[];window.cinePixels=[];cineView.element.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,()=>{const p=cineView.getCamera().focalPoint;if(!cinePositions.length||p.some((x,i)=>Math.abs(x-cinePositions.at(-1).point[i])>1e-6))cinePositions.push({point:p,time:performance.now()})});cineView.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,()=>{const c=cineView.getCanvas(),p=cineView.getCamera().focalPoint,q=cineView.worldToCanvas(p);cinePixels.push({point:p,value:c.getContext('2d').getImageData(Math.floor(q[0]*c.width/c.clientWidth),Math.floor(q[1]*c.height/c.clientHeight),1,1).data[0]})})}""")
+ def test_volume_cine_01_both_endpoints_direction_pixels(self):
+  a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP MPR CINE REPORT');self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);self.assertAlmostEqual(before[0]['camera']['focalPoint'][2],32,delta=1e-6);self.watch_cine(v);self.cine_play(v)
+  v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);forward=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in forward],list(range(31,-1,-1)),atol=1e-6,rtol=0);fps=(len(forward)-1)*1000/(forward[-1]['time']-forward[0]['time']);self.assertGreater(fps,18);self.assertLess(fps,30);print('VOLUME_CINE_FPS',fps,flush=True)
+  pixels=v.evaluate('()=>cinePixels');self.assertTrue(pixels)
+  for row in pixels:
+   z=row['point'][2];want=25 if z<10.5 else 230 if z>=21.5 else 128;self.assertAlmostEqual(row['value'],want,delta=3)
+  self.preserved_volume(before[1:],self.volume_state(v)[1:]);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.evaluate('()=>{cinePositions=[];cinePixels=[]}');self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);reverse=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in reverse],list(range(1,33)),atol=1e-6,rtol=0);expect(p.locator('#findings')).to_have_value('KEEP MPR CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);print('CINE_BOTH_DIRECTIONS',len(forward),len(reverse),flush=True)
+ def test_volume_cine_02_selection_modal_session_stop(self):
+  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.choose_volume(v,v,1);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(250);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)
+  self.choose_volume(v,v,0);v.wait_for_timeout(600);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.get_by_label('Loop',exact=True).uncheck();self.cine_play(v);v.wait_for_function('(count)=>cinePositions.length>count',arg=count);self.open_note(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.locator('#tech-note-close').click();expect(v.get_by_label('Playback Direction',exact=True)).to_have_value('reverse');expect(v.get_by_label('Loop',exact=True)).not_to_be_checked();self.cine_play(v);v.wait_for_timeout(200)
+  v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.wait_for_timeout(200);count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(300);self.assertEqual(v.evaluate('()=>cinePositions.length'),count);self.cine_play(v);v.wait_for_timeout(100);self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(len(self.versions(a)),1)
+ def test_volume_cine_03_oblique_spacing_and_loop(self):
+  a,p,v=self.starting();self.rotate_planes(v,0,25);self.rotate_planes(v,1,-35);self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);normal=np.array(before[0]['camera']['viewPlaneNormal']);first=np.array(before[0]['camera']['focalPoint']);last=int(np.floor(float(np.dot(np.abs(normal),[63,63,32]))));self.assertAlmostEqual(float(np.dot(first,normal)),float(np.minimum(normal*[63,63,32],0).sum()),delta=2e-5);self.watch_cine(v);self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);positions=v.evaluate('()=>cinePositions');self.assertEqual(len(positions),last)
+  for i,row in enumerate(positions,1):np.testing.assert_allclose(row['point'],first+normal*i,atol=2e-5,rtol=0)
+  self.preserved_volume(before[1:],self.volume_state(v)[1:]);self.assertGreater(len(positions),40);v.get_by_label('Loop',exact=True).check();v.evaluate('()=>cinePositions=[]');self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.cine_play(v);points=v.evaluate('()=>cinePositions');np.testing.assert_allclose(points[0]['point'],first,atol=2e-5,rtol=0);self.assertEqual(len(self.versions(a)),1);print('OBLIQUE_CINE_POSITIONS',last,flush=True)
+ def test_volume_cine_04_delayed_permission_and_source_change(self):
+  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);pending=[];pattern='**/api/me';v.route(pattern,lambda r:pending.append(r));self.cine_play(v);v.wait_for_timeout(200);self.assertTrue(pending)
+  v.evaluate("()=>{window.cineVolume=cornerstone.cache.getVolume(cineView.getVolumeId());cineVolume.framesLoaded--}")
+  for request in pending:request.fulfill(response=request.fetch())
+  v.unroute(pattern);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.wait_for_timeout(200);self.assertEqual(v.evaluate('()=>cinePositions'),[]);v.evaluate('()=>cineVolume.framesLoaded++');expect(v.get_by_label('Playback Direction',exact=True)).to_be_enabled()
+  v.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}));self.cine_play(v);expect(v.locator('#kin-cine [role=status]')).to_contain_text('로그인');self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(v.evaluate('()=>cinePositions'),[]);v.unroute(pattern);self.assertEqual(len(self.versions(a)),1)
+ def test_volume_cine_05_partial_camera_failure_recovers(self):
+  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);before=self.volume_state(v)
+  v.evaluate("()=>{window.cineSetCamera=cineView.setCamera;window.cineFailures=0;cineView.setCamera=function(camera,...args){if(camera.focalPoint&&cineFailures++===0){cineSetCamera.call(this,{focalPoint:camera.focalPoint});throw Error('Synthetic partial cine camera failure')}return cineSetCamera.call(this,camera,...args)}}")
+  self.cine_play(v);expect(v.locator('#kin-cine [role=status]')).to_contain_text('Synthetic partial cine camera failure');v.wait_for_timeout(200);self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));v.evaluate('()=>cineView.setCamera=cineSetCamera');self.preserved_volume(before,self.volume_state(v));self.assertEqual(len(self.versions(a)),1)
+ def test_volume_cine_06_fps_change_waiting_for_permission(self):
+  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=4');pending=[];pattern='**/api/me';v.route(pattern,lambda r:pending.append(r))
+  v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-left-arrow"]').click();v.wait_for_timeout(180);self.assertTrue(pending);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(150);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)
+  for request in pending:request.fulfill(response=request.fetch())
+  v.unroute(pattern);v.wait_for_function('(count)=>cinePositions.length>=count+4',arg=count);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].frameRate"),23);self.cine_play(v);self.assertEqual(len(self.versions(a)),1)
+
+def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCineE2E(n) for n in loader.getTestCaseNames(VolumeCineE2E) if n.startswith('test_volume_cine_'))
+if __name__=='__main__':unittest.main(verbosity=2)
