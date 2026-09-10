@@ -2,16 +2,18 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const model = require('../worklist-v0/hpacs-lite/viewer-opening.js');
 test('opening choices contain no study or report data and are strictly normalized', () => {
-  const chosen = { version: 2, listTarget: 'workspace', includePrior: false, maxWindows: 2 };
+  const chosen = { version: 3, listTarget: 'workspace', includePrior: false, maxWindows: 2, autoLoad: true, reuseClean: true };
   assert.deepEqual(model.normalize(chosen), chosen);
   assert.notEqual(model.normalize(chosen), chosen);
-  for (const patch of [{ version: 3 }, { listTarget: 'tab' }, { includePrior: 1 }, { maxWindows: 0 }, { maxWindows: 5 }, { maxWindows: 1.5 }, { uid: '1.2.3' }])
+  for (const patch of [{ version: 4 }, { listTarget: 'tab' }, { includePrior: 1 }, { autoLoad: 1 }, { reuseClean: 1 }, { maxWindows: 0 }, { maxWindows: 5 }, { maxWindows: 1.5 }, { uid: '1.2.3' }])
     assert.equal(model.normalize({ ...chosen, ...patch }), null);
   for (const value of [null, [], {}, { version: 1, listTarget: 'window' }]) assert.equal(model.normalize(value), null);
 });
 test('legacy opening choices upgrade without enabling additional windows', () => {
   assert.deepEqual(model.normalize({ version: 1, listTarget: 'workspace', includePrior: false }),
-    { version: 2, listTarget: 'workspace', includePrior: false, maxWindows: 1 });
+    { version: 3, listTarget: 'workspace', includePrior: false, maxWindows: 1, autoLoad: false, reuseClean: false });
+  assert.deepEqual(model.normalize({ version: 2, listTarget: 'window', includePrior: true, maxWindows: 4 }),
+    { version: 3, listTarget: 'window', includePrior: true, maxWindows: 4, autoLoad: false, reuseClean: false });
 });
 test('owner uses institution and immutable subject, refuses anonymous and demo', () => {
   const a = { state: 'approved', institution: 'i', sub: 'a', name: 'same' };

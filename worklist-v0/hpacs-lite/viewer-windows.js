@@ -26,7 +26,7 @@
   function create({ storage, owner, newId, origin, describe, changed = () => {} }) {
     const bound = owner(), key = 'kin-viewer-windows:v1:' + bound;
     let state, error = null, ended = false, channel;
-    const entries = Array.from({ length: 4 }, () => ({ popup: null, href: null }));
+    const entries = Array.from({ length: 4 }, () => ({ popup: null, href: null, pending: null, document: null, committed: false }));
     try {
       if (!bound) throw Error('owner');
       const raw = storage.getItem(key);
@@ -46,7 +46,7 @@
       entries.forEach((entry, i) => {
         try { if (next.slots[i] && entry.popup?.closed) { next.slots[i] = false; any = true; } } catch (_) {}
       });
-      if (any && persist(next)) { entries.forEach((entry, i) => { if (!next.slots[i]) { entry.popup = null; entry.href = null; } }); changed(); }
+      if (any && persist(next)) { entries.forEach((entry, i) => { if (!next.slots[i]) { entry.popup = null; entry.href = null; entry.pending = null; entry.document = null; } }); changed(); }
     }
     function rows() {
       prune();
@@ -54,15 +54,26 @@
         if (!state.slots[i]) return [];
         let status;
         try { status = entry.popup ? describe(entry.popup) : null; } catch (_) {}
-        const href = status?.href || entry.href;
+        if (entry.pending && entry.document) {
+          try { if (entry.popup.document !== entry.document) { entry.committed = true; entry.document = null; } }
+          catch (_) { entry.committed = true; entry.document = null; }
+        }
+        const readyWithoutDocument = !entry.document && !entry.committed && status?.ready &&
+          JSON.stringify(scope(status.href, origin)) === JSON.stringify(scope(entry.pending, origin));
+        if (entry.pending && (entry.committed && status?.kind === 'viewer' || readyWithoutDocument)) {
+          entry.pending = null; entry.document = null;
+        }
+        const href = entry.pending || status?.href || entry.href;
+        if (entry.pending) status = { kind: 'pending', href, ready: false, busy: true, dirty: false };
         return [{ index: i, name: i === 0 ? 'kin-ohif-current' : 'kin-ohif-' + state.id + '-' + i,
-          href, scope: scope(href, origin), status, popup: entry.popup }];
+          href, scope: scope(href, origin), status, pending: !!entry.pending, popup: entry.popup }];
       });
     }
     function choose(href, limit) {
       if (!current() || error || !scope(href, origin)) return { error: error || '현재 계정과 영상 대상을 확인한 뒤 다시 여세요.' };
       if (!Number.isInteger(limit) || limit < 1 || limit > 4) return { error: '영상 창 수 설정을 확인하세요.' };
       const open = rows(), wanted = JSON.stringify(scope(href, origin));
+      if (error) return { error };
       let row = open.find(r => r.scope && JSON.stringify(r.scope) === wanted);
       if (!row && limit === 1 && open.length === 1 && open[0].index === 0) row = open[0];
       if (row) return { ...row, fresh: false };
@@ -76,6 +87,15 @@
       if (!current() || !state?.slots[choice.index] || !popup) return false;
       entries[choice.index].popup = popup; changed(); return true;
     }
+    function navigating(choice, href, previousDocument) {
+      if (!current() || !state?.slots[choice.index] || !scope(href, origin)) return;
+      entries[choice.index].pending = entries[choice.index].href = new URL(href, origin).href;
+      // Release the old document reference as soon as replacement is observed.
+      // A restored Job or unverified new owner must not remain labelled Loading.
+      entries[choice.index].committed = false;
+      try { entries[choice.index].document = previousDocument || entries[choice.index].popup.document || null; } catch (_) { entries[choice.index].document = null; }
+      changed();
+    }
     function blocked(choice) {
       if (!choice.fresh || entries[choice.index].popup || !current()) return;
       const next = normalize(state); next.slots[choice.index] = false; persist(next); changed();
@@ -86,7 +106,7 @@
       return url.pathname + url.search + url.hash;
     }
     function refresh() { prune(); try { channel?.postMessage({ type: 'discover', owner: bound }); } catch (_) {} }
-    function end() { ended = true; channel?.close(); }
+    function end() { ended = true; channel?.close(); entries.forEach(entry => { entry.popup = null; entry.href = null; entry.pending = null; entry.document = null; }); }
     if (state && !error && typeof root.BroadcastChannel === 'function') {
       channel = new root.BroadcastChannel('kin-viewer-windows:' + state.id);
       channel.onmessage = e => {
@@ -97,7 +117,7 @@
       };
       refresh();
     }
-    return { choose, attach, blocked, linked, rows, refresh, end, available: () => current() && !error, error: () => error };
+    return { choose, attach, navigating, blocked, linked, rows, refresh, end, available: () => current() && !error, error: () => error };
   }
   function connect({ owner, live }) {
     let channel, ended = false, group, index;

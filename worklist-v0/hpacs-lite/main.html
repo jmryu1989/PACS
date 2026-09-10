@@ -2172,7 +2172,7 @@
     });
     window.addEventListener('pagehide', endPatientCopy);
 
-    function select(uid, { deferViewer = false } = {}) {
+    function select(uid, { deferViewer = false, openSelected = false } = {}) {
       /**
        * **같은 검사를 다시 고르는 것은 이동이 아니다.**
        *
@@ -2199,6 +2199,7 @@
       relatedModality = "";
       render(uid); refreshRight({ forceReport: true, deferViewer });
       if (mode === "Technician") renderOrders();   // 선택 표시줄·ID sync 갱신
+      if (openSelected && !deferViewer && !readingWorkspace.active() && imageOpening?.snapshot().autoLoad) openFilmbox(uid);
     }
     function refreshRight({ forceReport = false, deferViewer = false } = {}) {
       renderClinical(); renderRelated(); renderThumbs(); renderTemplates();
@@ -3556,9 +3557,9 @@
       const list = orderedStudies();
       if (!list.length) return;
       const i = list.findIndex(s => s.uid === selectedUid);
-      if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid); return; }
+      if (i === -1) { select(step > 0 ? list[0].uid : list[list.length - 1].uid, { openSelected: true }); return; }
       const next = list[i + step];
-      if (next) select(next.uid);
+      if (next) select(next.uid, { openSelected: true });
     }
     $("#b-prev").addEventListener("click", () => move(-1));
     $("#b-next").addEventListener("click", () => move(1));
@@ -3769,7 +3770,7 @@
       return year > 0 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
     }
 
-    let imageOpening = null, viewerWindows = null;
+    let imageOpening = null, viewerWindows = null, viewerWindowCursor = null;
     function autoPrior(uid) {
       if (imageOpening && !imageOpening.snapshot().includePrior) return null;
       const s = studies.find(x => x.uid === uid);
@@ -3838,7 +3839,14 @@
         (initialSeriesUid === null ? "" : `&initialSeriesInstanceUID=${encodeURIComponent(initialSeriesUid)}`)+returnHash;
       const seq = ++ohifOpenSeq;
       if (!viewerWindows) { toast('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return; }
-      const choice = viewerWindows.choose(url, imageOpening?.snapshot().maxWindows || 1);
+      const preferences = imageOpening?.snapshot(), limit = preferences?.maxWindows || 1;
+      let choice = viewerWindows.choose(url, limit);
+      if (choice.full && viewerWindows.available() && preferences?.reuseClean && limit > 1) {
+        const rows = viewerWindows.rows();
+        const clean = row => row.status?.kind === 'viewer' && row.status.ready && !row.status.busy && !row.status.dirty;
+        const reusable = rows.length === limit && (rows.find(row => row.index !== viewerWindowCursor && clean(row)) || rows.find(clean));
+        if (reusable) choice = { ...reusable, fresh: false };
+      }
       if (choice.error) { toast(choice.error, 'err', 8000); if (choice.full) $('#viewer-windows-open').click(); return; }
       url = viewerWindows.linked(url, choice.index);
       const stored = readStoredOhifRect(choice.index);
@@ -3849,9 +3857,14 @@
         `popup=yes,width=${initial.width},height=${initial.height},left=${initial.left},top=${initial.top},resizable=yes,scrollbars=yes`,
       );
       if (popup) {
-        viewerWindows.attach(choice, popup); ohifPopupSlots.set(popup, choice.index); ohifPopupSequences.set(popup, seq);
+        viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index); ohifPopupSequences.set(popup, seq);
         // Reopening a named window can restore its opener even without navigation.
         try{popup.opener=null;}catch(_){toast('영상 창 연결을 분리하지 못했습니다. 기존 창에서 작업을 저장한 뒤 닫고 다시 여세요.','err',8000);return;}
+        if (choice.pending) {
+          popup.focus(); watchOhifRect(popup);
+          toast('기존 영상 창을 불러오는 중입니다. 계속되지 않으면 그 창을 닫은 뒤 다시 여세요.', 'info');
+          return;
+        }
         const previous = ohifPopupState(popup);
         if (previous.kind === "viewer") {
           if (sameOhifScope(previous.href, url)) {
@@ -3895,7 +3908,9 @@
             popup.moveTo(initial.left, initial.top);
           } catch (_) {}
         }
+        const previousDocument = popup.document;
         popup.location.href = url;
+        viewerWindows.navigating(choice, url, previousDocument);
         popup.focus();
         watchOhifRect(popup);
         if (!monitorHintShown && monitorPermission?.state === "prompt" && screen.isExtended === true) {
@@ -3925,13 +3940,14 @@
     function mountViewerWindows() {
       const button = $('#viewer-windows-open'), dialog = document.createElement('dialog'); dialog.id = 'viewer-windows-dialog';
       dialog.setAttribute('aria-labelledby', 'viewer-windows-title');
-      dialog.innerHTML = '<h2 id="viewer-windows-title">Viewer Windows</h2><p>이 목록에 연결된 영상 창입니다. 창 닫기는 저장 중이거나 미저장 작업이 있으면 거절합니다. 확인되지 않은 창은 Focus로 상태를 확인합니다.</p><div id="viewer-windows-list"></div><p id="viewer-windows-status" role="status"></p><button class="chip" id="viewer-windows-done" type="button">Done</button>';
+      dialog.innerHTML = '<h2 id="viewer-windows-title">Viewer Windows</h2><p>이 목록에 연결된 영상 창입니다. 창 닫기는 저장 중이거나 미저장 작업이 있으면 거절합니다. 확인되지 않은 창은 Focus로 상태를 확인합니다.</p><nav aria-label="Opened viewer navigation"><button class="chip" id="viewer-windows-prev" type="button">Previous Window</button> <button class="chip" id="viewer-windows-next" type="button">Next Window</button></nav><p>이 목록에서 마지막으로 연 창 또는 Focus한 창을 기준으로 이동합니다. 판독 대상과 영상 내용은 바꾸지 않습니다.</p><div id="viewer-windows-list"></div><p id="viewer-windows-status" role="status"></p><button class="chip" id="viewer-windows-done" type="button">Done</button>';
       document.body.append(dialog);
       const list = $('#viewer-windows-list'), status = $('#viewer-windows-status'); let signature = '';
       function render() {
         const rows = viewerWindows?.rows() || [], limit = imageOpening?.snapshot().maxWindows || 1;
         button.textContent = 'Viewer Windows · ' + rows.length + '/' + limit;
-        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
+        $('#viewer-windows-prev').disabled = $('#viewer-windows-next').disabled = !rows.length;
+        const values = rows.map(row => ({ index: row.index, scope: row.scope, state: row.pending ? 'Loading' : !row.status?.ready || row.status.kind !== 'viewer' ? 'Unverified' : row.status.busy ? 'Busy' : row.status.dirty ? 'Unsaved' : 'Open' }));
         const next = JSON.stringify(values); if (next === signature) return; signature = next;
         const focused = document.activeElement, focusIndex = focused?.dataset.windowIndex, focusAction = focused?.dataset.windowAction;
         list.replaceChildren();
@@ -3970,12 +3986,19 @@
           }
           rememberOhifRect(popup); popup.close(); render();
           status.textContent = popup.closed ? '영상 창을 닫았습니다.' : '브라우저에서 창을 닫지 못했습니다. 해당 창에서 닫으세요.';
-        } else { dialog.close(); popup.focus(); watchOhifRect(popup, index); }
+        } else { viewerWindowCursor = index; dialog.close(); popup.focus(); watchOhifRect(popup, index); }
       }
       let storage; try { storage = sessionStorage; } catch (_) {}
       viewerWindows = KinViewerWindows.create({ storage, owner: () => { const key = KinViewerOpening.key(KinAuth.session()); return key ? key.slice(KinViewerOpening.PREFIX.length) : null; },
         newId: () => crypto.randomUUID(), origin: location.origin, describe: ohifPopupState, changed: render });
       button.disabled = false;
+      function cycle(step) {
+        const rows = viewerWindows.rows(); if (!rows.length) return;
+        const current = rows.findIndex(row => row.index === viewerWindowCursor);
+        const next = current < 0 ? (step > 0 ? 0 : rows.length - 1) : (current + step + rows.length) % rows.length;
+        operate(rows[next].index, 'focus');
+      }
+      $('#viewer-windows-prev').onclick = () => cycle(-1); $('#viewer-windows-next').onclick = () => cycle(1);
       button.onclick = () => { viewerWindows.refresh(); render(); status.textContent = viewerWindows.error() || ''; dialog.showModal(); $('#viewer-windows-done').focus(); };
       $('#viewer-windows-done').onclick = () => dialog.close(); dialog.addEventListener('close', () => { if (!button.disabled) button.focus(); });
       const timer = setInterval(() => { viewerWindows.refresh(); render(); }, 2000);
@@ -4471,7 +4494,7 @@
       if (!tr?.dataset.uid) return;
       const uid = tr.dataset.uid;
       if (e.target.closest('[data-tech-note]')) { techNote.open(studies.find(s => s.uid === uid)); return; }
-      select(uid);
+      select(uid, { openSelected: true });
       // select()의 render가 클릭한 행을 새 DOM으로 바꾸므로, 새 행에 초점을 다시 남긴다.
       $("#rows").querySelector(`tr[data-uid="${CSS.escape(uid)}"]`)?.focus({ preventScroll: true });
     });

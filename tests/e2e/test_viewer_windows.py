@@ -153,7 +153,7 @@ class ViewerWindowsE2E(ViewerOpeningE2E):
         expect(p.locator('#toast')).to_contain_text('팝업이 차단되었습니다')
         self.assertEqual(p.evaluate('viewerWindows.rows().length'), 0)
         self.assertEqual(len(p.context.pages), 1)
-        p.evaluate('window.open=window.__realOpen')
+        p.evaluate('() => { window.open=window.__realOpen; }')
         first = self.separate(p, a)
         first.evaluate("window.__realOwner=kinViewerWindowOwner; window.kinViewerWindowOwner=()=> '[\"other\",\"owner\"]'; window.__windowMarker='unverified-kept'")
         self.choose(p, b)

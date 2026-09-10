@@ -63,3 +63,68 @@ test('window hash preserves the reading return token and carries no new clinical
   assert.equal(hash.get('kin-reading-return'), id); assert.equal(hash.get('kin-window-group'), id);
   assert.equal(hash.get('kin-window-slot'), '0'); assert.equal(hash.size, 3);
 });
+
+test('a failed closed-slot write cannot continue an open request and can recover on refresh', () => {
+  const { registry:r, storage } = setup();
+  const popup = { href: url(1), closed: false }; r.attach(r.choose(url(1), 1), popup);
+  const set = storage.setItem; storage.setItem = () => { throw Error('quota'); }; popup.closed = true;
+  assert.ok(r.choose(url(2), 1).error);
+  assert.equal(r.available(), false);
+  storage.setItem = set; r.refresh();
+  assert.equal(r.rows().length, 0); assert.equal(r.available(), true);
+  assert.equal(r.choose(url(2), 1).fresh, true);
+});
+
+test('pending navigation deduplicates a blank document and cannot appear ready from its old scope', () => {
+  const { registry:r, values } = setup();
+  const a = r.choose(url(1), 2), popup = { href: 'about:blank', closed: false };
+  r.attach(a, popup); r.navigating(a, url(1));
+  const duplicate = r.choose(url(1), 2);
+  assert.equal(duplicate.index, a.index); assert.equal(duplicate.fresh, false); assert.equal(duplicate.pending, true);
+  assert.equal(r.choose(url(2), 1).pending, true);
+  popup.href = url(2); assert.equal(r.rows()[0].status.ready, false);
+  assert.deepEqual(r.rows()[0].scope.studies, ['1.2.1']);
+  popup.href = url(1); assert.equal(r.rows()[0].pending, false); assert.equal(r.rows()[0].status.ready, true);
+  assert.ok(![...values.values()][0].includes('1.2.1'));
+});
+
+test('an authenticated replacement document can announce its restored Job scope', () => {
+  const { registry:r } = setup(), a = r.choose(url(1), 2);
+  const popup = { href: url(3), closed: false, document: {}, performance: { timeOrigin: 100 } };
+  r.attach(a, popup); r.navigating(a, url(1));
+  assert.equal(r.rows()[0].pending, true);
+  popup.document = {};
+  assert.equal(r.rows()[0].pending, false);
+  assert.deepEqual(r.rows()[0].scope.studies, ['1.2.3']);
+});
+
+test('a changed but unverified document is no longer pending and end drops document references', () => {
+  const { options } = setup();
+  const r = create({ ...options, describe: p => ({ kind: 'viewer', href: p.href, ready: false, busy: true }) });
+  const a = r.choose(url(1), 1), popup = { href: url(1), closed: false, document: {} };
+  r.attach(a, popup); r.navigating(a, url(1), popup.document);
+  assert.equal(r.rows()[0].pending, true);
+  popup.document = {};
+  assert.equal(r.rows()[0].pending, false); assert.equal(r.rows()[0].status.ready, false);
+  r.end(); assert.equal(r.rows()[0].popup, null); assert.equal(r.rows()[0].scope, null);
+});
+
+test('a target URL with the old ready document cannot finish navigation', () => {
+  const { registry:r } = setup(), a = r.choose(url(1), 1);
+  const popup = { href: url(1), closed: false, document: {} };
+  r.attach(a, popup); r.navigating(a, url(1), popup.document);
+  assert.equal(r.rows()[0].pending, true); assert.equal(r.rows()[0].status.ready, false);
+  popup.document = {};
+  assert.equal(r.rows()[0].pending, false); assert.equal(r.rows()[0].status.ready, true);
+});
+
+test('an inaccessible replacement followed by another verified scope releases pending', () => {
+  const { options } = setup(); let inaccessible = false, document = {};
+  const r = create({ ...options, describe: p => inaccessible ? { kind: 'unknown', ready: false } : { kind: 'viewer', href: p.href, ready: true } });
+  const a = r.choose(url(1), 1), popup = { href: url(2), closed: false };
+  Object.defineProperty(popup, 'document', { get() { if (inaccessible) throw Error('cross-origin'); return document; } });
+  r.attach(a, popup); r.navigating(a, url(1), document);
+  inaccessible = true; assert.equal(r.rows()[0].pending, true);
+  inaccessible = false; document = {}; popup.href = url(3);
+  assert.equal(r.rows()[0].pending, false); assert.deepEqual(r.rows()[0].scope.studies, ['1.2.3']);
+});
