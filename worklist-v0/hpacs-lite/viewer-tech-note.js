@@ -108,6 +108,79 @@ window.kinCreateViewerPatientCopy=function(options){
   refreshCopy();return {refresh:refreshCopy,tracked:()=>copyTracked,end,dispose(){end();toolBar.remove();}};
 };
 
+/* Change only the native primary section's IDs. Button definitions, command
+ * bindings, evaluation and active tools remain owned by the pinned viewer. */
+window.kinCreateViewerToolbarPreferences=function(options){
+  const catalog=[['MeasurementTools','측정 도구'],['Zoom','확대·축소'],['Pan','이동'],['TrackballRotate','3D 회전'],['WindowLevel','밝기·대조'],['Capture','영상 캡처'],['Layout','영상 배치'],['Crosshairs','교차선'],['MoreTools','추가 도구']];
+  const ids=catalog.map(x=>x[0]),labels=Object.fromEntries(catalog),service=options.services.toolbarService;
+  const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b),read=()=>service.getButtonSection('primary').map(b=>b?.id);
+  const defaults=()=>({version:1,order:ids.slice(),hidden:[]});
+  const normalize=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='hidden,order,version'&&v.version===1&&Array.isArray(v.order)&&v.order.length===ids.length&&new Set(v.order).size===ids.length&&v.order.every(id=>ids.includes(id))&&Array.isArray(v.hidden)&&new Set(v.hidden).size===v.hidden.length&&v.hidden.every(id=>ids.includes(id)&&id!=='Zoom')?{version:1,order:v.order.slice(),hidden:v.hidden.slice()}:null;
+  if(!service||typeof service.getButtonSection!=='function'||typeof service.clearButtonSection!=='function'||typeof service.createButtonSection!=='function')return null;
+  const baseline=read();if(!same(baseline,ids))return null;
+  const initialOwner=JSON.stringify(options.owner()),key='kin-viewer-toolbar:v1:'+initialOwner;
+  let ended=false,applying=false,suspended=false,current=defaults(),draft,applied=baseline.slice(),opener,channel;
+  const live=()=>!ended&&options.live()&&JSON.stringify(options.owner())===initialOwner;
+  const box=document.createElement('section');box.id='kin-native-toolbar-settings';options.host.append(box);
+  const button=document.createElement('button');button.type='button';button.id='kin-native-toolbar-edit';button.textContent='기본 도구 모음 편집';box.append(button);
+  const status=document.createElement('span');status.id='kin-native-toolbar-status';status.setAttribute('role','status');status.textContent='이 브라우저 · 현재 계정';box.append(status);
+  const dialog=document.createElement('dialog');dialog.id='kin-native-toolbar-dialog';dialog.setAttribute('aria-labelledby','kin-native-toolbar-title');
+  dialog.style.cssText='background:#101e32;color:#e1ecfc;border:1px solid #718eaa;border-radius:8px;max-height:85vh;max-width:90vw;overflow:auto;padding:18px';document.body.append(dialog);
+  const title=document.createElement('h2');title.id='kin-native-toolbar-title';title.textContent='기본 영상 도구 모음';dialog.append(title);
+  const hint=document.createElement('p');hint.textContent='표시할 도구와 순서를 정한 뒤 적용하세요. 숨겨도 현재 조작은 바뀌지 않습니다. 확대·축소는 키보드 진입을 위해 유지합니다.';hint.style.maxWidth='560px';dialog.append(hint);
+  const rows=document.createElement('div');rows.id='kin-native-toolbar-rows';dialog.append(rows);
+  const action=(id,text,fn)=>{const b=document.createElement('button');b.type='button';b.id=id;b.textContent=text;b.style.cssText='margin:6px;padding:6px;border:1px solid #718eaa';b.onclick=fn;dialog.append(b);return b;};
+  function close(){dialog.close();if(opener?.isConnected&&!opener.disabled&&opener.getClientRects().length)opener.focus({preventScroll:true});}
+  function render(focus){
+    rows.replaceChildren();
+    draft.order.forEach((id,index)=>{
+      const row=document.createElement('div');row.dataset.tool=id;row.style.cssText='display:flex;gap:8px;align-items:center;margin:6px 0';rows.append(row);
+      const label=document.createElement('label');label.style.cssText='flex:1;min-width:170px';const check=document.createElement('input');check.type='checkbox';check.checked=!draft.hidden.includes(id);check.disabled=id==='Zoom';check.setAttribute('aria-label',labels[id]+' 표시');label.append(check,document.createTextNode(' '+labels[id]));row.append(label);
+      check.onchange=()=>{draft.hidden=draft.hidden.filter(x=>x!==id);if(!check.checked)draft.hidden.push(id);};
+      for(const [step,text] of [[-1,'앞으로'],[1,'뒤로']]){
+        const b=document.createElement('button');b.type='button';b.textContent=text;b.dataset.move=String(step);b.setAttribute('aria-label',labels[id]+' '+text);b.disabled=index+step<0||index+step>=draft.order.length;b.style.cssText='padding:4px;border:1px solid #718eaa';row.append(b);
+        b.onclick=()=>{const next=index+step;if(next<0||next>=draft.order.length)return;[draft.order[index],draft.order[next]]=[draft.order[next],draft.order[index]];render({id,step});};
+      }
+    });
+    if(focus){const row=rows.querySelector('[data-tool="'+focus.id+'"]');(row.querySelector('[data-move="'+focus.step+'"]:not(:disabled)')||row.querySelector('[data-move]:not(:disabled)'))?.focus();}
+  }
+  function write(next){
+    // Detect another extension changing the section; never overwrite its state.
+    if(!same(read(),applied)){suspended=true;status.textContent='도구 모음이 변경되었습니다. 영상을 다시 연 뒤 편집하세요.';return false;}
+    const section=next.order.filter(id=>!next.hidden.includes(id)),before=applied.slice();
+    applying=true;
+    try{service.clearButtonSection('primary');service.createButtonSection('primary',section.slice());if(!same(read(),section))throw Error('section mismatch');applied=section;current=next;return true;}
+    catch(_){try{service.clearButtonSection('primary');service.createButtonSection('primary',before);}catch(_){}suspended=true;status.textContent='도구 모음을 적용하지 못했습니다. 영상을 다시 열어 확인하세요.';return false;}
+    finally{applying=false;}
+  }
+  action('kin-native-toolbar-default','기본 순서·표시',()=>{draft=defaults();render();});
+  action('kin-native-toolbar-apply','적용',()=>{
+    if(!live()||suspended){status.textContent='현재 영상과 계정을 확인한 뒤 다시 여세요.';close();return;}
+    const next=normalize(draft);if(!next||!write(next))return;
+    try{localStorage.setItem(key,JSON.stringify(current));status.textContent='도구 모음을 기억했습니다 · 이 브라우저';}catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}
+    close();
+  });
+  action('kin-native-toolbar-cancel','취소',close);
+  dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
+  // The viewer's document hotkeys otherwise consume Escape and may operate
+  // on the image while a native settings dialog has keyboard focus.
+  dialog.addEventListener('keydown',e=>{e.stopPropagation();if(e.key==='Escape'&&!e.isComposing){e.preventDefault();close();}},true);
+  for(const event of ['keyup','keypress'])dialog.addEventListener(event,e=>e.stopPropagation(),true);
+  button.onclick=()=>{if(!live()||suspended||document.querySelector('dialog[open],[role="dialog"][aria-modal="true"],.modal.show'))return;opener=document.activeElement;draft=normalize(current);render();dialog.showModal();};
+  let subscription;
+  function end(){
+    if(ended)return;ended=true;subscription?.unsubscribe();window.removeEventListener('storage',storage);channel?.close();
+    if(same(read(),applied)&&!same(applied,baseline)){applying=true;try{service.clearButtonSection('primary');service.createButtonSection('primary',baseline.slice());}catch(_){}finally{applying=false;}}
+    dialog.remove();box.remove();
+  }
+  function storage(e){if(e.key==='kin-session-ended')end();else if(e.key===key)status.textContent='다른 창의 도구 설정 변경 · 현재 창 유지';}
+  try{const raw=localStorage.getItem(key);if(raw!==null){const value=raw.length<=2048?normalize(JSON.parse(raw)):null;if(value){if(write(value))status.textContent='기억한 도구 모음 · 이 브라우저';}else status.textContent='저장값 오류 · 기본 도구 모음';}}catch(_){status.textContent='저장소 사용 불가 · 이 창';}
+  subscription=service.subscribe(service.EVENTS.TOOL_BAR_MODIFIED,()=>{if(!ended&&!applying&&!same(read(),applied)){suspended=true;button.disabled=true;status.textContent='도구 모음이 변경되었습니다. 영상을 다시 연 뒤 편집하세요.';}});
+  window.addEventListener('storage',storage);
+  try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+  return {dispose:end};
+};
+
 /* Standalone viewer note bridge: active loaded stack identity, never URL-first guessing. */
 window.kinViewerTechNote=function(services){
   let stop=()=>{};
@@ -185,7 +258,7 @@ window.kinViewerTechNote=function(services){
     }
     if(window.top!==window){
       window.kinViewerSelectedNoteTarget=selected;
-      let patientCopy;
+      let patientCopy,toolbarPreferences;
       const enable=options=>{
         if(patientCopy)return true;
         const host=document.querySelector('#kin-viewer-layout');if(!host||typeof options?.owner!=='function'||typeof options?.allowed!=='function')return false;
@@ -193,13 +266,15 @@ window.kinViewerTechNote=function(services){
         if(!Array.isArray(identity)||identity.length!==2||identity.some(v=>typeof v!=='string'||!v))return false;
         const contextLive=()=>{try{return live()&&options.allowed()&&options.owner()===bound;}catch(_){return false;}};
         patientCopy=window.kinCreateViewerPatientCopy({services,selected:selectedCopy,studies,host,owner:()=>identity,live:contextLive});
+        toolbarPreferences=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>identity,live:contextLive});
         return true;
       };
       window.kinViewerEnablePatientCopy=enable;
-      stop=()=>{ended=true;disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selected)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
+      stop=()=>{ended=true;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy?.dispose();if(window.kinViewerSelectedNoteTarget===selected)delete window.kinViewerSelectedNoteTarget;if(window.kinViewerEnablePatientCopy===enable)delete window.kinViewerEnablePatientCopy;};
       return true;
     }
     const host=document.querySelector('#kin-viewer-layout');if(!host){disposeNativeFocus();return;}
+    let toolbarPreferences;
     const panel=document.createElement('section');panel.id='kin-viewer-tech-note';
     const button=document.createElement('button');button.id='kin-viewer-note-open';button.type='button';button.textContent='선택 영상 Tech 메모';button.setAttribute('aria-keyshortcuts','Control+Alt+6');button.style.cssText='border:1px solid #718eaa;padding:5px;margin:4px 0';
     const retry=document.createElement('button');retry.id='kin-viewer-note-retry';retry.type='button';retry.textContent='메모 연결 다시 시도';retry.hidden=true;
@@ -260,7 +335,7 @@ window.kinViewerTechNote=function(services){
       target.focus({preventScroll:true});target.scrollIntoView({block:'nearest'});
     }
     function refresh(){button.disabled=!live()||busy||!owner;arrange.disabled=!live()||!owner;retry.disabled=!live()||busy;for(const [code,b] of toolButtons){b.disabled=!live()||!owner||(code==='Digit4'&&(!readingChannel||!patientCopy.tracked()));if(code==='Digit4'){b.setAttribute('aria-busy',String(!!pendingReturn));b.setAttribute('aria-disabled',String(b.disabled||!!pendingReturn));}}patientCopy.refresh();}
-    function end(){if(ended)return;ended=true;owner=null;disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
+    function end(){if(ended)return;ended=true;owner=null;toolbarPreferences?.dispose();disposeNativeFocus();patientCopy.end();readingChannel?.close();readingChannel=null;clearTimeout(returnTimer);returnTimer=null;pendingReturn=null;returnStatus.textContent='세션이나 영상 창이 변경되었습니다.';window.removeEventListener('hashchange',bindReturn);window.removeEventListener('kin-reading-link-changed',bindReturn);dock?.end();for(const c of requests)c.abort();note.dispose();refresh();status.textContent='세션이나 영상창이 변경되었습니다. 뷰어를 새로 여세요.';}
     async function raw(method,path,body){
       if(!live())throw new Error('영상창이 변경되었습니다');
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
@@ -289,7 +364,7 @@ window.kinViewerTechNote=function(services){
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';
-      try{await authenticate();if(live()){let remembered=false;try{const raw=localStorage.getItem('kin-viewer-dock:v1:'+JSON.stringify(owner));remembered=raw!==null&&raw.length<=128&&!!window.KinViewerWorkspaceDock?.normalize(JSON.parse(raw));}catch(_){}if(remembered)arrangeTools();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
+      try{await authenticate();if(live()){toolbarPreferences||=window.kinCreateViewerToolbarPreferences({services,host,owner:()=>owner,live:()=>live()&&!!owner});let remembered=false;try{const raw=localStorage.getItem('kin-viewer-dock:v1:'+JSON.stringify(owner));remembered=raw!==null&&raw.length<=128&&!!window.KinViewerWorkspaceDock?.normalize(JSON.parse(raw));}catch(_){}if(remembered)arrangeTools();retry.hidden=true;status.textContent='선택한 영상 칸의 검사 메모 · Ctrl+Alt+6';}}
       catch(e){if(live()){retry.hidden=false;status.textContent='메모를 연결하지 못했습니다. 다시 시도하세요.';}}
       finally{busy=false;refresh();if(restore&&live()){const target=retry.hidden?(host.hidden?dock?.querySelector('nav button[aria-controls="kin-viewer-layout"]'):button):retry;target?.focus({preventScroll:true});}}
     }
