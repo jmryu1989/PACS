@@ -328,35 +328,56 @@ class ViewerJobPrintPages(unittest.TestCase):
             self.assertNotIn(flat("Comparison Study Report"), text)
         self.no_writes(page)
 
-    def test_pages_06_named_page_support_gate_blocks_print(self):
-        # A browser that parses margin boxes but rejects named @page rules
-        # would print continuation pages with only the shared footer, which is
-        # exactly what the per-report footer exists to prevent.
-        data = self.data("20260801", "20260901")
-        page = self.context.new_page()
-        page.set_content("<!doctype html><html><body></body></html>")
-        page.evaluate(CORNERSTONE)
-        page.add_script_tag(path=str(MODULE))
-        page.evaluate("""() => {
+    # Two ways a browser can lack named @page support: an old parser throws,
+    # a lenient one silently drops the unknown rule and keeps the rest. The
+    # gate must close the print path in both, so both are simulated.
+    UNSUPPORTED_NAMED_PAGES = {
+        "throws": """() => {
           const original = CSSStyleSheet.prototype.replaceSync;
           CSSStyleSheet.prototype.replaceSync = function (text) {
             if (/@page\\s+report-\\d+/.test(String(text))) throw new SyntaxError('named pages unsupported');
             return original.call(this, text);
           };
-        }""")
-        page.evaluate(SETUP, data)
-        page.evaluate("uid => window.__printer.open(uid, 'job-1', 2)", data["job"]["snapshot"]["studies"][0])
-        page.wait_for_function("() => document.querySelector('#kin-job-print [role=status]')"
-                               ".textContent.includes('페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.')", timeout=60000)
-        self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
-        # The preview itself is still built; only the print path is closed.
-        self.assertIn("<main>", self.srcdoc(page) or "")
-        page.select_option(SELECT, "both")
-        page.wait_for_function(SRCDOC, arg='data-report-uid="' + UID_B + '"', timeout=60000)
-        page.wait_for_function("() => document.querySelector('#kin-job-print [role=status]')"
-                               ".textContent.includes('페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.')", timeout=60000)
-        self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
-        self.no_writes(page)
+        }""",
+        "drops": """() => {
+          const original = CSSStyleSheet.prototype.replaceSync;
+          CSSStyleSheet.prototype.replaceSync = function (text) {
+            return original.call(this, String(text).replace(/@page\\s+report-\\d+\\s*\\{[^]*?\\}\\s*\\}/g, ''));
+          };
+        }""",
+    }
+    GATE_STATUS = ("() => document.querySelector('#kin-job-print [role=status]')"
+                   ".textContent.includes('페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.')")
+
+    def test_pages_06_named_page_support_gate_blocks_print(self):
+        # A browser that parses margin boxes but lacks named @page rules would
+        # print continuation pages with only the shared footer, which is
+        # exactly what the per-report footer exists to prevent.
+        for variant, stub in self.UNSUPPORTED_NAMED_PAGES.items():
+            with self.subTest(variant=variant):
+                data = self.data("20260801", "20260901")
+                page = self.context.new_page()
+                page.set_content("<!doctype html><html><body></body></html>")
+                page.evaluate(CORNERSTONE)
+                page.add_script_tag(path=str(MODULE))
+                page.evaluate(stub)
+                # The stub must leave the generic @page rule intact so that only
+                # the named-page check, not the margin-box check, decides.
+                self.assertTrue(page.evaluate("() => { const s = new CSSStyleSheet();"
+                                              " s.replaceSync('@page{@bottom-left{content:\"x\"}}');"
+                                              " return s.cssRules[0]?.cssRules[0]?.name === 'bottom-left'; }"))
+                page.evaluate(SETUP, data)
+                page.evaluate("uid => window.__printer.open(uid, 'job-1', 2)", data["job"]["snapshot"]["studies"][0])
+                page.wait_for_function(self.GATE_STATUS, timeout=60000)
+                self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
+                # The preview itself is still built; only the print path is closed.
+                self.assertIn("<main>", self.srcdoc(page) or "")
+                page.select_option(SELECT, "both")
+                page.wait_for_function(SRCDOC, arg='data-report-uid="' + UID_B + '"', timeout=60000)
+                page.wait_for_function(self.GATE_STATUS, timeout=60000)
+                self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
+                self.no_writes(page)
+                page.close()
 
     def test_pages_05_preview_never_writes(self):
         data = self.data("20260801", "20260901")
