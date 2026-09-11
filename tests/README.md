@@ -120,6 +120,8 @@ REQ-D-WORKSPACE-WINDOW-RETURN → RISK-WRONG-REPORT-FOCUS/WORK-LOSS/STALE-WINDOW
 
 `python tests/e2e/test_compare_reports.py`는 TEST-D09-COMPARE-REPORTS의 명시적 현재/과거/두 검사 저장 판독문 선택을 검사한다. 저장 CT v3 비교·주석·각 검사 식별/버전의 PDF와 원본 화소, 과거 판독 변경 및 실제 P 접근 거절, 누락/잘못된 응답·늦은 선택 전환, 현재 CT 출력·단일 검사 재열기와 자료 보존을 확인한다. 미확정 편집문·전체 출력 서식·물리 매체는 별도 잔여다.
 
+REQ-D09-OUTPUT-IDENTITY → RISK-D09-REPORT-MISATTRIBUTION → TEST-D09-OUTPUT-IDENTITY: `node --test tests/viewer_job_print_identity_test.cjs`의 순수 14건은 현재/비교 검사 명칭, 실제 달력 날짜와 선후 관계, 판독문 선택 항목, 환자·검사 식별행, 보고서별 named page와 margin-box CSS를 검사한다. `python tests/viewer_job_print_pages_test.py`의 격리 Chromium 6건은 현재보다 이후·이전·같은 날짜와 미상 날짜, 긴 식별정보의 하단 여백, 단일 검사, named-page 미지원 거절 및 preview 무쓰기를 실제 PDF 페이지에서 확인한다. validate의 runtime과 measurements job은 각각 `record-run.py`로 원문과 소스 해시를 남기고 합성 artifact만 게시한다. 실제 프린터의 물리 여백·색·DPI 수용은 별도다.
+
 프론트엔드·UI/UX와 필수 API를 통합한 뒤 의사에게 평가 후보를 전달한다. 전달 전 중간 버전은 사용자가 사용하지 않는다. 전달 뒤에는 의사 피드백과 단일 병원 도입용 백엔드 준비를 병행하되, 평가 버전·데이터를 안정적으로 유지하고 백엔드는 별도 브랜치·환경에서 작업한다. 의사 재확인과 운영 검증 후 배포하며 병원 간 Connect 확장은 보류한다.
 
 | 시점 또는 변경 | 실행할 검증 |

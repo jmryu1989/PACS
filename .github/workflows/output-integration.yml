@@ -1,0 +1,47 @@
+name: Output integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: output-integration-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  output-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Output integration profile safeguards and exact selection
+        run: python3 scripts/record-run.py --run-dir tmp/output-integration-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/output-integration-python"
+          "$RUNNER_TEMP/output-integration-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/output-integration-python/bin/python" -m playwright install --with-deps chromium
+      - name: Isolated comparison report to viewer job report connection
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/output-integration-python/bin/python" tests/measurement_ci.py --profile output-integration
+      - name: Sanitized synthetic output integration evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-output-integration-results
+          path: |
+            tests/e2e/artifacts/output-integration-ci/
+            tests/e2e/artifacts/job-report.pdf
+            tests/e2e/artifacts/compare-reports*.pdf
+            tmp/output-integration-ci/
+          if-no-files-found: error
+          retention-days: 7

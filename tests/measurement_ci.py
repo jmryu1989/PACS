@@ -31,6 +31,19 @@ PROFILES = {
         'suites': (('e2e/test_volume_rendering.py', None,
                     'ci-volume-rendering'),),
     },
+    'output-integration': {
+        'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
+        'project_prefix': 'kin-output-ci-',
+        'suite_timeout': 900,
+        # Explicit local classes exclude inherited tests and preserve the
+        # requested comparison-report then viewer-job-report connection order.
+        'suites': (
+            ('e2e/test_compare_reports.py', 'CompareReportsE2E',
+             'ci-output-compare-reports'),
+            ('e2e/test_viewer_job_report.py', 'ViewerJobReportE2E',
+             'ci-output-viewer-job-report'),
+        ),
+    },
 }
 
 

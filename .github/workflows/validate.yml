@@ -39,6 +39,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/measurement-python"
           "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
+      - name: Saved comparison print page identity and pagination
+        timeout-minutes: 4
+        run: |
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/job-print-pages/evidence" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-pages --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_pages_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_pages_test.py
       - name: Workspace window transition and identity DOM regressions
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/window-manager --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/viewer-windows.js --file tests/viewer_window_manager_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_window_manager_dom_test.py
@@ -111,6 +115,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Saved comparison print identity model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_identity_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
       - name: D-MEASURE2 session recovery and SR guard regressions (no containers)
@@ -203,3 +209,11 @@ jobs:
           echo "Code SHA: $CODE_SHA" >> "$GITHUB_STEP_SUMMARY"
           docker image inspect kin-api:ci --format 'Image ID: {{.Id}}' >> "$GITHUB_STEP_SUMMARY"
           echo 'CI checks runtime packaging and disposable-DB startup. The 69 live invariants, 14 browser tests and independent review remain separate release gates. No deployment is performed.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Synthetic runtime print identity evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-runtime-print-identity
+          path: tmp/runtime-ci/job-print-identity/
+          if-no-files-found: error
+          retention-days: 7
