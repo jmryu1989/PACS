@@ -27,15 +27,21 @@
     same: '현재 검사와 같은 날짜 · 선후 미확인', unknown: '검사일 확인 불가 · 선후 미확인' };
   function relationText(relation) { return relations[relation] || relations.unknown; }
   function reportTitle(role) { return role === 'current' ? 'Current Study Report' : 'Comparison Study Report'; }
+  // An unsaved editor body carries no server version and no approval state; it
+  // must never borrow the saved report's v/RS wording on any page.
   function reportLabel(report) {
+    if (report.unsaved) return '미확정 편집문 · 저장·승인되지 않음';
     return !report.version ? '저장된 판독문 없음' :
       `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
   }
+  const comparisonLabel = comparison => `${dateText(comparison)} · ${comparison.desc || comparison.modality} · Acc ${comparison.acc || '-'}`;
   function optionLabel(value, comparison) {
     if (value === 'none') return 'Images only';
     if (value === 'saved') return 'Current study report';
     if (value === 'both') return 'Current + comparison study reports';
-    return `Comparison study report (${dateText(comparison)} · ${comparison.desc || comparison.modality} · Acc ${comparison.acc || '-'})`;
+    if (value === 'editor') return 'Current study draft (unsaved)';
+    if (value === 'editor-prior') return `Current study draft (unsaved) + comparison study report (${comparisonLabel(comparison)})`;
+    return `Comparison study report (${comparisonLabel(comparison)})`;
   }
   function reportEntry(uid, report, identities, currentUid) {
     const role = uid === currentUid ? 'current' : 'comparison';
@@ -72,9 +78,12 @@
     reportEntry, studyLine, dateLine, summaryText, pageIdentity, pageName, cssContent, pageRules };
   if (typeof module === 'object' && module.exports) module.exports = api; else root.kinViewerJobPrintIdentity = api;
 })(globalThis);
-globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
+globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const core = window.cornerstone;
   const identity = globalThis.kinViewerJobPrintIdentity;
+  // The editor adapter is injected read-only; its wording lives with it.
+  const linkText = reason => globalThis.kinViewerEditorLinkApi?.reasonText(reason) || '편집문 응답을 확인할 수 없습니다.';
+  const editorChoice = choice => ['editor', 'editor-prior'].includes(choice);
   const entries = new Map();
   const scheme = 'kinjobprint';
   // Only run-owned, freshly fetched pixels enter this loader. Never evict or
@@ -92,14 +101,26 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
   for (const value of ['none', 'saved']) {
     const option = el('option', identity.optionLabel(value), reportSource); option.value = value;
   }
+  const CHOSEN_OPTIONS = ['prior', 'both', 'editor', 'editor-prior'];
+  // The draft choice stays listed but unusable without a live reading window,
+  // so the reason for its absence is visible instead of the choice vanishing.
+  function addEditorOptions(comparison) {
+    const usable = !!editor && editor.available();
+    const draft = el('option', identity.optionLabel('editor'), reportSource); draft.value = 'editor'; draft.disabled = !usable;
+    if (comparison) {
+      const pair = el('option', identity.optionLabel('editor-prior', comparison), reportSource);
+      pair.value = 'editor-prior'; pair.disabled = !usable;
+    }
+  }
   function syncReportOptions(data) {
     const chosen = reportSource.value;
-    for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
+    for (const option of [...reportSource.options]) if (CHOSEN_OPTIONS.includes(option.value)) option.remove();
     const comparison = data.identities.find(s => s.uid !== current.uid);
     if (comparison) {
       el('option', identity.optionLabel('prior', comparison), reportSource).value = 'prior';
       el('option', identity.optionLabel('both', comparison), reportSource).value = 'both';
     }
+    addEditorOptions(comparison);
     reportSource.value = chosen;
   }
   const refresh = el('button', '다시 확인', dialog), printButton = el('button', '인쇄 / PDF', dialog), closeButton = el('button', '닫기', dialog);
@@ -191,13 +212,18 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
     const studies = job.snapshot.studies;
     if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || studies[0] !== item.uid || new Set(studies).size !== studies.length)
       throw new Error('출력 비교 검사 정보를 확인할 수 없습니다.');
-    if (!['none', 'saved', 'prior', 'both'].includes(reportChoice) || ['prior', 'both'].includes(reportChoice) && studies.length !== 2)
+    if (!['none', 'saved', 'prior', 'both', 'editor', 'editor-prior'].includes(reportChoice) ||
+        ['prior', 'both', 'editor-prior'].includes(reportChoice) && studies.length !== 2)
       throw new Error('선택한 판독문의 비교 검사를 확인할 수 없습니다.');
-    const reportUids = reportChoice === 'none' ? [] : reportChoice === 'saved' ? [item.uid] : reportChoice === 'prior' ? [studies[1]] : studies;
+    const draftWanted = editorChoice(reportChoice);
+    const reportUids = ['none', 'editor'].includes(reportChoice) ? [] : reportChoice === 'saved' ? [item.uid] :
+      ['prior', 'editor-prior'].includes(reportChoice) ? [studies[1]] : studies;
+    let currentPreview = null;
     for (const uid of job.snapshot.studies) {
       const data = await api('/studies/' + uid + '/report-preview', { signal });
       if (data.study?.uid !== uid) throw new Error('출력 검사 정보를 확인할 수 없습니다.');
       identities.push(data.study);
+      if (uid === item.uid) currentPreview = data;
       // Selection is bound to the verified comparison, never to the active
       // image cell or the worklist's independent report editor.
       if (reportUids.includes(uid)) {
@@ -208,12 +234,34 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
         reports.push({ uid, report });
       }
     }
+    // The unsaved body is asked for only after this study's own institution/P
+    // boundary answered; it is never taken from a server draft or from the DOM.
+    let draft = null;
+    if (draftWanted) {
+      if (currentPreview?.canPreviewEditor !== true) throw new Error(linkText('denied'));
+      if (!editor || !editor.available()) throw new Error(linkText('missing'));
+      const reply = await editor.read(signal);
+      if (!reply || reply.ok === false) throw new Error(linkText(reply && reply.reason));
+      const body = reply.editor;
+      if (reply.uid !== item.uid || typeof reply.owner !== 'string' || typeof reply.session !== 'string' || !reply.session ||
+          !body || ['findings', 'conclusion', 'recommendation'].some(k => typeof body[k] !== 'string'))
+        throw new Error(linkText('invalid'));
+      draft = { owner: reply.owner, uid: reply.uid, session: reply.session,
+        editor: { findings: body.findings, conclusion: body.conclusion, recommendation: body.recommendation } };
+    }
     // Roles and date relations are resolved only after every identity is read.
     const entries = reports.map(row => identity.reportEntry(row.uid, row.report, identities, item.uid));
+    if (draft) {
+      const report = { version: null, rs: null, unsaved: true, findings: draft.editor.findings,
+        conclusion: draft.editor.conclusion, recommendation: draft.editor.recommendation,
+        author: typeof currentPreview.actor === 'string' ? currentPreview.actor : null };
+      const entry = identity.reportEntry(item.uid, report, identities, item.uid);
+      entry.draft = true; entries.unshift(entry);
+    }
     await authenticate(signal);
     const latest = await readJob(); validCurrent(item);
     if (!equal(latest, job)) throw new Error('작업이 변경되었습니다. 다시 확인하세요.');
-    return { job, identities, reports: entries };
+    return { job, identities, reports: entries, editor: draft };
   }
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   function verifyAnnotationValues(viewport, engine, id, annotations, budget) {
@@ -414,8 +462,14 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
       el('p', dateLine(entry), section).className = 'report-date';
       el('p', `Study ${identity.uid}`, section).className = 'reference';
       el('p', reportLabel(report), section).className = 'report-source';
-      el('p', '출력 확인 시점의 서버 저장본입니다. 비교 작업 저장 당시 판독문이나 미저장 편집문이 아닙니다.', section);
-      el('p', `작성자: ${report.author || '-'} · 승인 판독의: ${report.repDoc || '-'} · 승인일(UTC): ${report.confirm || '-'}`, section);
+      if (entry.draft) {
+        section.dataset.reportDraft = 'true';
+        el('p', '출력 시점의 판독 화면 편집문입니다. 서버에 저장·승인되지 않았습니다.', section);
+        el('p', `작성자(편집 중): ${report.author || '-'}`, section);
+      } else {
+        el('p', '출력 확인 시점의 서버 저장본입니다. 비교 작업 저장 당시 판독문이나 미저장 편집문이 아닙니다.', section);
+        el('p', `작성자: ${report.author || '-'} · 승인 판독의: ${report.repDoc || '-'} · 승인일(UTC): ${report.confirm || '-'}`, section);
+      }
       for (const [key, label] of [['findings', '소견'], ['conclusion', '결론'], ['recommendation', '권고']]) {
         el('h3', label, section); el('p', report[key] || '(내용 없음)', section).dataset.reportField = key;
       }
@@ -538,12 +592,13 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
   function open(item) {
     close(); reportSource.value = 'none'; current = item;
     controls.hidden=[4,5,6].includes(item.version);controls.style.display=[4,5,6].includes(item.version)?'none':'flex';
-    for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
+    for (const option of [...reportSource.options]) if (CHOSEN_OPTIONS.includes(option.value)) option.remove();
+    addEditorOptions(null);
     heading.textContent = [4,5,6].includes(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();
   }
   return { open(uid, id, version) { open({ uid, id, version }); }, openCurrent(uid, snapshot, unchanged) { open({ uid, version:snapshot.version, snapshot: structuredClone(snapshot), unchanged }); }, close,
-    destroy() { close(); dialog.remove(); core.metaData.removeProvider(provider); } };
+    destroy() { close(); editor?.dispose?.(); dialog.remove(); core.metaData.removeProvider(provider); } };
 };
