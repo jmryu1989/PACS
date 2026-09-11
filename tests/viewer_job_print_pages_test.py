@@ -97,7 +97,10 @@ def lines(rows):
     grouped = {}
     for y, x, text in rows:
         grouped.setdefault(round(y, 1), []).append((x, text))
-    return ["".join(text for _, text in sorted(group)) for _, group in sorted(grouped.items(), reverse=True)]
+    # Chromium can emit Korean and Latin fragments at the same x coordinate.
+    # Keep the PDF extraction order for those ties instead of sorting by text.
+    return ["".join(text for _, text in sorted(group, key=lambda item: item[0]))
+            for _, group in sorted(grouped.items(), reverse=True)]
 
 
 class ViewerJobPrintPages(unittest.TestCase):
@@ -160,6 +163,16 @@ class ViewerJobPrintPages(unittest.TestCase):
 
     def no_writes(self, page):
         self.assertEqual(page.evaluate("() => window.__writes"), [])
+
+    def test_pages_00_equal_x_fragments_keep_pdf_extraction_order(self):
+        rows = [
+            (10.0, 33.75, "환자 "),
+            (10.0, 33.75, "NAME00"),
+            (10.0, 100.0, " · 검사"),
+            (20.0, 100.0, "right"),
+            (20.0, 20.0, "left"),
+        ]
+        self.assertEqual(lines(rows), ["leftright", "환자 NAME00 · 검사"])
 
     def test_pages_01_later_comparison_keeps_page_identity(self):
         data = self.data("20260801", "20260901")
