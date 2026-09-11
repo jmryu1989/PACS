@@ -229,3 +229,62 @@ test('pageRules binds one named page footer per report', () => {
   assert.ok(!none.includes('data-print-page') && !none.includes('.intro{'));
   assert.ok(none.startsWith('@page{size:A4;') && none.endsWith('}'));
 });
+
+/* TEST-D09-EDITOR-COMPARE-OUTPUT additions: the unsaved editor body never
+ * borrows the saved report's version, approval or page wording. */
+const draft = { version: null, rs: null, unsaved: true, author: 'doctor',
+  findings: 'DF', conclusion: 'DC', recommendation: 'DR' };
+
+test('reportLabel marks an unsaved editor body instead of a stored version', () => {
+  assert.equal(identity.reportLabel(draft), '미확정 편집문 · 저장·승인되지 않음');
+  // The wording must not be reachable from any saved report shape.
+  for (const report of [approved, unapproved, { version: 0, rs: 'W' }])
+    assert.ok(!identity.reportLabel(report).includes('미확정'), JSON.stringify(report));
+  for (const label of ['v', 'RS', '저장본'])
+    assert.ok(!identity.reportLabel(draft).includes(label), label);
+  // A stale unsaved flag next to a version still refuses the saved wording.
+  assert.equal(identity.reportLabel({ version: 3, rs: 'A', unsaved: true }), '미확정 편집문 · 저장·승인되지 않음');
+  assert.ok(!identity.reportLabel(draft).includes('과거'));
+});
+
+test('optionLabel names the unsaved draft choices without renaming the saved ones', () => {
+  const comparison = study(COMPARE, '20260901');
+  assert.equal(identity.optionLabel('editor'), 'Current study draft (unsaved)');
+  assert.equal(identity.optionLabel('editor-prior', comparison),
+    'Current study draft (unsaved) + comparison study report (20260901 · CHEST CT · Acc ACC-uid-compare)');
+  assert.equal(identity.optionLabel('editor-prior', study(COMPARE, '', { desc: '', acc: '' })),
+    'Current study draft (unsaved) + comparison study report (날짜 없음 · CT · Acc -)');
+  // The first pull request's four choices keep their exact wording.
+  assert.equal(identity.optionLabel('none'), 'Images only');
+  assert.equal(identity.optionLabel('saved'), 'Current study report');
+  assert.equal(identity.optionLabel('both', comparison), 'Current + comparison study reports');
+  assert.equal(identity.optionLabel('prior', comparison),
+    'Comparison study report (20260901 · CHEST CT · Acc ACC-uid-compare)');
+  for (const date of ['20260901', '20260801', '20260701', '', 'BADDATE1'])
+    assert.ok(!identity.optionLabel('editor-prior', study(COMPARE, date)).includes('과거'), date);
+});
+
+test('a draft entry keeps the current role and carries the unsaved footer', () => {
+  const identities = [study(CURRENT, '20260801'), study(COMPARE, '20260901')];
+  const entry = identity.reportEntry(CURRENT, draft, identities, CURRENT);
+  assert.equal(entry.role, 'current');
+  assert.equal(entry.title, 'Current Study Report');
+  assert.equal(entry.relation, null);
+  assert.equal(identity.dateLine(entry), '검사일 20260801 · 현재 검사');
+  assert.equal(identity.pageIdentity(entry), [
+    'Current Study Report · 20260801',
+    '홍 길동 (PID-uid-current) · CHEST CT · Acc ACC-uid-current',
+    'Study uid-current',
+    '미확정 편집문 · 저장·승인되지 않음',
+  ].join('\n'));
+  const compare = identity.reportEntry(COMPARE, unapproved, identities, CURRENT);
+  const summary = identity.summaryText(identities, [entry, compare]);
+  assert.ok(summary.includes('Current Study Report: 20260801 · 미확정 편집문 · 저장·승인되지 않음'), summary);
+  assert.ok(summary.includes('Comparison Study Report: 20260901 · 현재 검사보다 이후 · 미승인 저장본 · v2 · RS W'), summary);
+  assert.ok(!summary.includes('과거'));
+  // The draft page owns its own named page, exactly like a saved report page.
+  const rules = identity.pageRules([entry, compare], summary);
+  assert.ok(rules.includes(`@page report-0{@bottom-left{content:${identity.cssContent(identity.pageIdentity(entry))};`), rules.slice(0, 120));
+  assert.equal(rules.match(/@page report-\d+\{/g).length, 2);
+  assert.ok(rules.endsWith('.intro{page:report-0}'));
+});
