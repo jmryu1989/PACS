@@ -37,7 +37,11 @@ class ExecutionSelectionTests(unittest.TestCase):
                         original = [name for name in original if name in cls.__dict__]
                     self.assertEqual(original, selected)
                 else:
-                    self.assertEqual(filename, 'viewer_api_test.py')
+                    self.assertIn(filename, ['viewer_api_test.py', 'reading_appearance_live.py'])
+                    module = runner.load_module(ROOT/'tests'/filename)
+                    cls = getattr(module, class_name)
+                    self.assertEqual(selected, sorted(name for name in cls.__dict__
+                                                     if name.startswith('test_')))
                 print('SELECTION', filename, len(selected), flush=True)
 
     def test_volume_rendering_profile_selects_only_local_vr_methods(self):

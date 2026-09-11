@@ -45,6 +45,9 @@ jobs:
       - name: Worklist DICOM body-part search and saved-search DOM integration
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/body-parts --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_body_parts_dom_test.py
+      - name: Current and prior identity position and legacy display preferences
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-position --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file worklist-v0/hpacs-lite/reading-appearance-account.js --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/viewer_identity_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_position_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |

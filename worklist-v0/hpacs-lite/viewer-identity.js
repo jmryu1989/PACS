@@ -2,11 +2,12 @@
 window.KinViewerIdentity=(()=>{
   const fonts={default:'inherit',sans:'"Malgun Gothic", sans-serif',serif:'"Batang", serif',mono:'"Consolas", monospace'};
   const colors={default:'#d7f3ff',warm:'#fff1d6',cool:'#d7f3ff',white:'#ffffff'};
-  const defaults=()=>({version:1,current:{size:12,font:'default',color:'default',name:true,date:true,description:false},prior:{size:12,font:'default',color:'warm',name:true,date:true,description:false}});
+  const positions=['top-left','top-right','bottom-left','bottom-right'];
+  const defaults=()=>({version:2,current:{size:12,font:'default',color:'default',name:true,date:true,description:false,position:'top-right'},prior:{size:12,font:'default',color:'warm',name:true,date:true,description:false,position:'top-right'}});
   const normalize=v=>{
-    if(!v||typeof v!=='object'||Array.isArray(v)||v.version!==1||Object.keys(v).sort().join()!=='current,prior,version')return null;
-    const result={version:1};
-    for(const role of ['current','prior']){const p=v[role];if(!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).sort().join()!=='color,date,description,font,name,size'||![12,14,16,18,20].includes(p.size)||typeof p.font!=='string'||typeof p.color!=='string'||!Object.hasOwn(fonts,p.font)||!Object.hasOwn(colors,p.color)||['name','date','description'].some(k=>typeof p[k]!=='boolean'))return null;result[role]={size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description};}
+    if(!v||typeof v!=='object'||Array.isArray(v)||![1,2].includes(v.version)||Object.keys(v).sort().join()!=='current,prior,version')return null;
+    const result={version:2};
+    for(const role of ['current','prior']){const p=v[role],keys=v.version===1?'color,date,description,font,name,size':'color,date,description,font,name,position,size';if(!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).sort().join()!==keys||![12,14,16,18,20].includes(p.size)||typeof p.font!=='string'||typeof p.color!=='string'||!Object.hasOwn(fonts,p.font)||!Object.hasOwn(colors,p.color)||['name','date','description'].some(k=>typeof p[k]!=='boolean')||(v.version===2&&!positions.includes(p.position)))return null;result[role]={size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description,position:v.version===1?'top-right':p.position};}
     return result;
   };
   const key=owner=>'kin-viewer-identity:v1:'+owner;
@@ -47,16 +48,22 @@ window.KinViewerIdentity=(()=>{
           if(loading.has(id)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
           const current=resolve(id),m=current&&window.cornerstone.metaData.get('instance',current.image),v=services.cornerstoneViewportService.getCornerstoneViewport(id);
           if(!current||!m||!v?.element||v.viewportStatus!==window.cornerstone.Enums.ViewportStatus.RENDERED||!studies.includes(current.uid)||m.StudyInstanceUID!==current.uid||m.SeriesInstanceUID!==current.series||m.SOPInstanceUID!==current.sop||typeof m.PatientID!=='string'||!m.PatientID.trim()||m.PatientID.length>64||(current.study.id&&current.study.id!==m.PatientID)){labels.get(id)?.remove();labels.delete(id);titles.delete(id);continue;}
-          let e=labels.get(id);if(!e||e.parentNode!==v.element){e?.remove();e=document.createElement('div');e.className='kin-viewer-identity';e.style.cssText='position:absolute;right:28px;top:38px;max-width:40%;max-height:32%;overflow:hidden;overflow-wrap:anywhere;text-align:right;pointer-events:none;background:#0b182bcc;padding:3px 6px;border-radius:3px;z-index:2;line-height:1.3';v.element.append(e);labels.set(id,e);}
+          let e=labels.get(id);if(!e||e.parentNode!==v.element){e?.remove();e=document.createElement('div');e.className='kin-viewer-identity';e.style.cssText='position:absolute;box-sizing:border-box;overflow:hidden;overflow-wrap:anywhere;pointer-events:none;background:#0b182bcc;padding:3px 6px;border-radius:3px;z-index:2;line-height:1.3';v.element.append(e);labels.set(id,e);}
           const role=current.uid===studies[0]?'current':'prior',p=value[role];e.dataset.role=role;e.dataset.study=current.uid;
           const parts=[(role==='current'?'기준 검사':'비교 검사')+' · '+m.PatientID];
           if(p.name)parts.push(text(m.PatientName).slice(0,128));if(p.date)parts.push(text(m.StudyDate).slice(0,16));if(p.description)parts.push(text(m.StudyDescription||m.SeriesDescription).slice(0,128));
           titles.set(id,parts.concat(text(m.Modality).slice(0,16)).filter(Boolean).join(' · ')+' — 판독 뷰어');
           e.textContent=parts.filter(Boolean).join(' · ');e.style.fontSize=p.size+'px';e.style.fontFamily=fonts[p.font];e.style.color=colors[p.color];
-          const bounds=v.element.getBoundingClientRect(),right=bounds.right-28,left=right-bounds.width*.4;
-          const pane=v.element.closest('[data-cy="viewport-pane"]')||v.element.parentElement;let top=38;
-          for(const native of pane?.querySelectorAll('[data-cy="viewport-overlay-top-left"],[data-cy="viewport-overlay-top-right"]')||[]){const b=native.getBoundingClientRect();if(native.textContent.trim()&&b.width&&b.height&&b.right>left&&b.left<right)top=Math.max(top,b.bottom-bounds.top+6);}
-          e.style.top=top+'px';
+          const bounds=v.element.getBoundingClientRect(),small=bounds.width<140||bounds.height<100;
+          const horizontal=p.position.endsWith('left')?'left':'right',vertical=p.position.startsWith('top')?'top':'bottom';
+          const x=small?4:28,y=small?4:38,maxWidth=small?Math.max(0,bounds.width-x*2):bounds.width*.4;
+          for(const side of ['left','right','top','bottom'])e.style[side]='auto';
+          e.style[horizontal]=x+'px';e.style[vertical]=y+'px';e.style.textAlign=horizontal;e.style.maxWidth=maxWidth+'px';
+          const left=horizontal==='left'?bounds.left+x:bounds.right-x-maxWidth,right=left+maxWidth;
+          const pane=v.element.closest('[data-cy="viewport-pane"]')||v.element.parentElement,suffix=vertical==='top'?'top':'bottom';let offset=y;
+          for(const native of pane?.querySelectorAll('[data-cy="viewport-overlay-'+suffix+'-left"],[data-cy="viewport-overlay-'+suffix+'-right"]')||[]){const b=native.getBoundingClientRect();if(native.textContent.trim()&&b.width&&b.height&&b.right>left&&b.left<right)offset=Math.max(offset,vertical==='top'?b.bottom-bounds.top+6:bounds.bottom-b.top+6);}
+          const finalOffset=Math.min(Math.max(y,offset),Math.max(y,bounds.height-y));e.style[vertical]=finalOffset+'px';
+          e.style.maxHeight=Math.max(0,Math.min(small?bounds.height-y*2:bounds.height*.32,bounds.height-finalOffset-y))+'px';
         }
         syncTitle();
       }catch(_){clear();}
@@ -90,5 +97,5 @@ window.KinViewerIdentity=(()=>{
     const unsubscribe=subscribe(bound,next=>{value=next;refresh();}),timer=setInterval(refresh,500);refresh();
     return {dispose(){ended=true;clearInterval(timer);unsubscribe();subscriptions.forEach(s=>s.unsubscribe());for(const event of events.filter(Boolean))document.removeEventListener(event,imageChanged,true);loading.clear();clear();}};
   }
-  return {defaults,normalize,read,publish,subscribe,mount};
+  return {positions:[...positions],defaults,normalize,read,publish,subscribe,mount};
 })();

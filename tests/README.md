@@ -1,5 +1,7 @@
 # 살아 있는 불변조건 테스트
 
+REQ-D02-IDENTITY-POSITION → RISK-D02-WRONG-IDENTITY/OCCLUSION/PREFERENCE-LOSS/STALE → TEST-VIEWER-IDENTITY-POSITION: `viewer_identity_position_dom_test.py`는 현재/비교 정보 묶음의 네 모서리 배치·복사, 작은 viewport와 native overlay 겹침, 원본 식별/교체/소유자 경계 및 이전 설정 이행을 격리 DOM에서 검사한다. `reading_appearance_position_live.py`는 v7→v8 계정 왕복, viewer v2 위치의 엄격한 형식, 원자적 거절·구버전 작성자와 소유자 분리를 검사한다. `e2e/test_viewer_identity_position.py`는 실제 영상에서 위치 변경→복사→계정 저장/다른 브라우저 복원과 영상·편집 보존, 기존 로컬 설정·늦은 응답을 검사한다. 두 live 모듈은 각각 선언한 시험만 선택하며 fresh hosted CI가 기존 표시 설정 API 회귀와 함께 실행한다. 로컬 원본 연결 fixture는 실행하지 않는다. 필드별/modality별 배치·발표 모드·물리 모니터는 별도 잔여다.
+
 ## 실행 입구와 중단 조건 (2026-09-11)
 
 REQ-DEV-EXECUTION-GATE → RISK-DEV-ACCIDENTAL-LIVE/CONCURRENT-FIXTURES/UNBOUNDED-RETRY → TEST-DEV-EXECUTION-GATE (`execution_guard_test.py`). `LiveStack`을 쓰는 아래 과거 직접 실행 예시는 이제 공용 실행기로 감싼다. 순수 모델 시험에서 실환경 TestCase가 import로 따라온 사고를 막기 위해 일반 `unittest`에서는 LiveStack 생성 자체가 거부된다.

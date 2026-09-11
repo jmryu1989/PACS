@@ -119,16 +119,17 @@ window.KinReadingAppearance = function (options) {
   window.addEventListener('kin-toolbar-preference-changed',toolbarChanged);window.addEventListener('kin-toolbar-preference-mounted',toolbarChanged);
   const viewer=window.KinViewerIdentity;let viewerValue=viewer.read(initialOwner);
   const viewerFields={},viewerSection=element('fieldset','',dialog);element('legend','Image Identification',viewerSection);
-  element('p','기준 검사와 비교 검사의 글자를 따로 설정합니다. 환자 ID와 기준/비교 표시는 항상 유지합니다. 설치되지 않은 글꼴은 기기의 대체 글꼴을 사용합니다.',viewerSection);
+  element('p','기준 검사와 비교 검사의 글자와 위치를 따로 설정합니다. 환자 ID와 기준/비교 표시는 항상 유지합니다. 설치되지 않은 글꼴은 기기의 대체 글꼴을 사용합니다.',viewerSection);
   for(const [role,label] of [['current','Current Image'],['prior','Prior Image']]){
     const group=element('fieldset','',viewerSection);element('legend',label,group);viewerFields[role]={};
-    for(const [field,caption,choices] of [['size','Size',[12,14,16,18,20].map(n=>[String(n),n+' px'])],['font','Font',[['default','Default'],['sans','Sans Serif'],['serif','Serif'],['mono','Monospace']]],['color','Text Color',[['default','Default'],['warm','Warm White'],['cool','Cool White'],['white','White']]]]){
+    for(const [field,caption,choices] of [['position','Position',[['top-left','Top Left'],['top-right','Top Right'],['bottom-left','Bottom Left'],['bottom-right','Bottom Right']]],['size','Size',[12,14,16,18,20].map(n=>[String(n),n+' px'])],['font','Font',[['default','Default'],['sans','Sans Serif'],['serif','Serif'],['mono','Monospace']]],['color','Text Color',[['default','Default'],['warm','Warm White'],['cool','Cool White'],['white','White']]]]){
       const row=element('label',label+' '+caption,group),select=element('select','',row);select.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=select;
       for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
       select.onchange=()=>changeViewer(role,field,field==='size'?Number(select.value):select.value);
     }
     for(const [field,caption] of [['name','Patient Name'],['date','Study Date'],['description','Study Description']]){const row=element('label',label+' '+caption,group),input=element('input','',row);input.type='checkbox';input.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=input;input.onchange=()=>changeViewer(role,field,input.checked);}
   }
+  const copyViewer=element('button','Copy Current to Prior',viewerSection);copyViewer.type='button';copyViewer.id='viewer-identity-copy-current';copyViewer.onclick=()=>{if(!live()){end();return;}setViewer({...viewerValue,prior:{...viewerValue.current}});};
   const viewerStatus=element('p','',viewerSection);viewerStatus.id='viewer-identity-status';viewerStatus.setAttribute('role','status');
   function showViewer(){for(const role of ['current','prior'])for(const [field,e] of Object.entries(viewerFields[role])){if(e.type==='checkbox')e.checked=viewerValue[role][field];else e.value=String(viewerValue[role][field]);}}
   function setViewer(next){const clean=viewer.normalize(next);if(!live()||!clean)return false;viewerValue=clean;generation++;showViewer();const saved=viewer.publish(initialOwner,clean);viewerStatus.textContent=saved?'영상 표시를 기억했습니다 · 이 브라우저':'저장소를 사용할 수 없어 현재 화면에만 적용합니다.';return true;}
@@ -149,6 +150,7 @@ window.KinReadingAppearance = function (options) {
   const status=element('p','',dialog);status.id='reading-appearance-status';status.setAttribute('role','status');
   const account=element('section','계정 저장 기능을 연결하지 못했습니다. 현재 브라우저 설정은 사용할 수 있습니다.',dialog);
   account.id='reading-appearance-account';account.style.cssText='border-top:1px solid #819bb7;padding-top:12px;display:flex;flex-wrap:wrap;gap:8px';
+  if(!mprModel)element('p','MPR 설정 구성 요소를 불러오지 못해 계정 표시 설정을 저장하거나 불러올 수 없습니다. 영상 정보 위치는 이 브라우저에만 적용합니다.',dialog).id='reading-appearance-local-only';
   const footer=element('footer','',dialog),reset=element('button','Reset Sizes',footer),close=element('button','Close',footer);
   reset.type=close.type='button';reset.id='reading-appearance-reset';close.id='reading-appearance-close';
   document.body.append(dialog);
@@ -180,7 +182,7 @@ window.KinReadingAppearance = function (options) {
   dialog.addEventListener('close',()=>{if(live()&&opener.isConnected)opener.focus({preventScroll:true});});
   opener.onclick=()=>{if(!live()){end();return;}if(!dialog.open)dialog.showModal();};
   function end(){
-    stopViewer();for(const fields of Object.values(viewerFields))for(const e of Object.values(fields))e.disabled=true;
+    stopViewer();for(const fields of Object.values(viewerFields))for(const e of Object.values(fields))e.disabled=true;copyViewer.disabled=true;
     ended=true;opener.disabled=true;for(const f of Object.values(fields))f.disabled=true;reset.disabled=true;
     if(dialog.open)dialog.close();value=defaults();apply();fontValue=defaultFonts();applyFonts();
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
@@ -226,13 +228,16 @@ window.KinReadingAppearance = function (options) {
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version===7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(v.version>=4&&v.viewer?.version!==(v.version===8?2:1))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
-    const dock=v.version>=3?normalizeDock(v.dock):null,view=v.version>=4?viewer.normalize(v.viewer):null;
+    const dock=v.version>=3?normalizeDock(v.dock):null,checkedView=v.version>=4?viewer.normalize(v.viewer):null;
+    const view=checkedView&&(v.version===8?checkedView:{version:1,...Object.fromEntries(['current','prior'].map(role=>[role,{...v.viewer[role]}]))});
     const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null;
     return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<7||mpr)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{}),...(mpr?{mpr}:{})}:null;
   };
-  return {host:account,read:()=>({...value,version:mprModel?7:6,...(mprModel?{mpr:readMpr()}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
+  const legacyViewer=()=>({version:1,...Object.fromEntries(['current','prior'].map(role=>{const {position,...rest}=viewerValue[role];return [role,{...rest}];}))});
+  return {host:account,read:()=>({...value,version:mprModel?8:6,...(mprModel?{mpr:readMpr()}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
       if(clean.version>=6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
       if(clean.version>=3&&!setDock(clean.dock))return false;
