@@ -160,6 +160,13 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": "https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.6/rendered"}], last)
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
 
+    def test_failed_owner_check_remains_visible_after_grid_refresh(self):
+        self.page.evaluate("pdfController.stop();routes['/api/me']={status:503,body:{}};mountPdf()")
+        expect(self.page.locator('#kin-source-pdf-status')).to_contain_text('로그인 세션을 확인할 수 없습니다')
+        self.page.evaluate('emit()')
+        expect(self.page.locator('#kin-source-pdf-status')).to_contain_text('로그인 세션을 확인할 수 없습니다')
+        expect(self.page.locator('#kin-source-pdf-open')).to_be_disabled()
+
     def test_popup_denial_closed_window_http_failure_and_dispose_are_bounded(self):
         button = self.page.locator("#kin-source-pdf-open")
         self.page.evaluate("blockPopup=true")
@@ -182,6 +189,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});throwNavigation=true")
         button.click()
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("PDF 창을 열 수 없습니다")
+        expect(self.page.locator("#kin-source-pdf [data-patient]")).to_be_empty()
         self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
 
         self.page.evaluate("holdPath='/api/me'")

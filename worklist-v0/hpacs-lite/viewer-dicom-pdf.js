@@ -11,7 +11,7 @@
   function create(services,options={}){
     const grid=services?.viewportGridService,sets=services?.displaySetService;
     const fetcher=options.fetch||root.fetch?.bind(root),openWindow=options.open||root.open?.bind(root);
-    let ended=false,mounted=false,hostTimer=null,channel=null,boundOwner=null,source=null,generation=0,request=null,ownerRequest=null,pendingWindow=null;
+    let ended=false,mounted=false,hostTimer=null,channel=null,boundOwner=null,ownerError=null,source=null,generation=0,request=null,ownerRequest=null,pendingWindow=null;
     const subscriptions=[];
     const panel=root.document.createElement('section');panel.id='kin-source-pdf';panel.hidden=true;
     panel.innerHTML='<style>#kin-source-pdf{border-top:1px solid #355272;padding:8px 10px}#kin-source-pdf h3{margin:0 0 5px;font-size:14px}#kin-source-pdf p{margin:3px 0;overflow-wrap:anywhere}#kin-source-pdf button{margin-top:5px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px}</style><h3>Source Documents</h3><p data-title></p><p data-role></p><p data-patient></p><p id="kin-source-pdf-status" role="status"></p><button id="kin-source-pdf-open" type="button" disabled>Open Source PDF</button>';
@@ -51,15 +51,15 @@
         if(typeof raw!=='string')throw Error('원본 PDF 경로를 확인할 수 없습니다.');
         const parsed=new URL(raw,root.location.href),expected='/dicom-web/studies/'+value.study+'/series/'+value.series+'/instances/'+value.sop+'/rendered';
         if(parsed.origin!==root.location.origin||parsed.pathname!==expected||parsed.search||parsed.hash||parsed.username||parsed.password)throw Error('원본 PDF 경로를 확인할 수 없습니다.');
-        source={...value,url:parsed.href};button.disabled=!boundOwner;status.textContent=boundOwner?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':'Checking session…';
+        source={...value,url:parsed.href};button.disabled=!boundOwner;status.textContent=boundOwner?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':(ownerError||'Checking session…');
       }catch(error){if(!ended&&ticket===generation&&live(value)){source=null;button.disabled=true;status.textContent=error.message||'원본 PDF 경로를 확인할 수 없습니다.';}}
     }
     function refresh(){
       if(ended)return;const next=snapshot(candidate());
-      if(source&&sameSource(source,next)){button.disabled=!!request||!boundOwner;if(!request)status.textContent=boundOwner?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':'Checking session…';return;}
+      if(source&&sameSource(source,next)){button.disabled=!!request||!boundOwner;if(!request)status.textContent=boundOwner?'Ready · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.':(ownerError||'Checking session…');return;}
       generation++;cancelOperation();source=null;patient.textContent='';
       if(!next){const selected=selection();if(selected.kind==='invalid'){panel.hidden=false;title.textContent='';role.textContent='';status.textContent='선택한 원본 PDF를 지원하지 않거나 식별 정보가 일치하지 않습니다.';button.disabled=true;}else unavailable();return;}
-      panel.hidden=false;title.textContent=next.title;role.textContent=next.role+' source PDF';status.textContent='Checking source path…';button.disabled=true;
+      panel.hidden=false;title.textContent=next.title;role.textContent=next.role+' source PDF';status.textContent=ownerError||'Checking source path…';button.disabled=true;
       resolveSource(next,generation);
     }
     function assertLive(operation){if(request!==operation||operation.controller.signal.aborted||operation.generation!==generation||!live(operation.before)||source?.url!==operation.before.url)throw Error('선택한 원본 문서가 변경되어 열지 않았습니다.');if(operation.popup.closed)throw Error('PDF 창이 닫혀 열기를 취소했습니다.');}
@@ -69,7 +69,7 @@
     async function open(){
       if(ended||request||!source||!boundOwner)return;
       let popup;try{popup=openWindow('','_blank');if(!popup)throw Error('popup');popup.opener=null;}catch(_){try{popup?.close();}catch(__){}status.textContent='팝업이 차단되어 Source PDF를 열지 못했습니다.';return;}
-      const before=snapshot(source),owner={...boundOwner},controller=new AbortController(),operation={popup,controller,before,generation};pendingWindow=popup;request=operation;const signal=controller.signal,timer=setTimeout(()=>controller.abort(),10000);button.disabled=true;status.textContent='Verifying source PDF…';
+      const before=snapshot(source),owner={...boundOwner},controller=new AbortController(),operation={popup,controller,before,generation};pendingWindow=popup;request=operation;const signal=controller.signal,timer=setTimeout(()=>controller.abort(),10000);button.disabled=true;patient.textContent='';status.textContent='Verifying source PDF…';
       const init=(method='GET',body)=>({method,credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
       try{
         const first=ownerOf(await response('/api/me',init(),operation));if(!sameOwner(first,owner))throw Error('계정이 변경되어 PDF를 열지 않았습니다.');assertLive(operation);
@@ -79,14 +79,14 @@
         if(matches.length!==1||matches[0].id!==before.patientId)throw Error('원본 환자 식별을 확인할 수 없습니다.');assertLive(operation);
         const last=ownerOf(await response('/api/me',init(),operation));if(!sameOwner(last,owner))throw Error('계정이 변경되어 PDF를 열지 않았습니다.');assertLive(operation);
         patient.textContent='Verified Patient ID: '+matches[0].id;try{popup.location.replace(before.url);}catch(_){throw Error('PDF 창을 열 수 없습니다.');}if(pendingWindow===popup)pendingWindow=null;if(request===operation)status.textContent='Opened source PDF · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.';
-      }catch(error){closeWindow(popup);if(pendingWindow===popup)pendingWindow=null;if(!ended&&request===operation)status.textContent=error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message;}
+      }catch(error){closeWindow(popup);if(pendingWindow===popup)pendingWindow=null;if(!ended&&request===operation){patient.textContent='';status.textContent=error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message;}}
       finally{clearTimeout(timer);if(request===operation){request=null;if(!ended)button.disabled=!source||!boundOwner;}}
     }
     button.addEventListener('click',open);
     async function bindOwner(){
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);ownerRequest=controller;
       try{const reply=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1'}}),data=reply?.ok?await json(reply):null,next=ownerOf(data);if(!next)throw Error();if(!ended&&ownerRequest===controller){boundOwner=next;refresh();}}
-      catch(_){if(!ended&&ownerRequest===controller){boundOwner=null;status.textContent='로그인 세션을 확인할 수 없습니다.';button.disabled=true;}}
+      catch(_){if(!ended&&ownerRequest===controller){boundOwner=null;ownerError='로그인 세션을 확인할 수 없습니다. 뷰어를 다시 여세요.';status.textContent=ownerError;button.disabled=true;}}
       finally{clearTimeout(timer);if(ownerRequest===controller)ownerRequest=null;}
     }
     function attach(){const host=root.document.querySelector('#kin-viewer-layout');if(!host)return false;if(!panel.isConnected)host.append(panel);mounted=true;refresh();return true;}

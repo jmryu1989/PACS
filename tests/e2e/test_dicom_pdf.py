@@ -86,7 +86,7 @@ class DicomPdfE2E(ViewerLayoutE2E):
     def launch_pdf_viewer(self, worklist, fixtures):
         page = worklist.context.new_page()
         page.goto(self.stack.proxy + "/ohif/viewer?StudyInstanceUIDs=" + ",".join(f.uid for f in fixtures))
-        page.wait_for_function("typeof services==='object' && services.displaySetService.getActiveDisplaySets().length>0", timeout=60000)
+        page.wait_for_function("()=>typeof services==='object' && services.displaySetService.getActiveDisplaySets().length>0", timeout=60000)
         self.open_layout_tools(page)
         return page
 
@@ -116,11 +116,14 @@ class DicomPdfE2E(ViewerLayoutE2E):
     def test_pdf_01_native_handler_object_and_exact_three_page_source(self):
         fixture = self.ct("PDF-NATIVE-" + uuid.uuid4().hex[:12], "current", "20260801")
         source = self.pdf_source(fixture, ["KIN PDF PAGE 1", "KIN PDF PAGE 2", "KIN PDF PAGE 3"], "PDF Three Pages")
-        self.seed_report(fixture); rows = self.report_rows(fixture)
+        self.seed_report(fixture); draft = "PDF PRIVATE DRAFT"
         self.assertEqual(self.stack.request("POST", f"/studies/{fixture.uid}/hold", "doctor").status, 201)
-        work = self.login(); self.select(work, fixture); draft = "PDF PRIVATE DRAFT"
-        work.locator("#findings").fill(draft); work.locator("#quick").click()
-        self.wait_state(work, fixture, lambda state: (state.get("draft") or {}).get("findings") == draft)
+        saved = self.stack.request("PUT", f"/studies/{fixture.uid}/report", "doctor",
+                                   {"baseVersion":1,"findings":draft,"conclusion":"","recommendation":""})
+        self.assertEqual(saved.status,200,saved.text); rows = self.report_rows(fixture)
+        work = self.login(); self.select(work, fixture)
+        expect(work.locator("#findings")).to_have_value(draft)
+        self.assertEqual(self.state(fixture)['draft']['findings'],draft)
         originals = self.originals(); holder = self.state(fixture)["holder"]
         page = self.launch_pdf_viewer(work, [fixture]); display = self.place(page, source)
         self.assertEqual(display, dict(id=display["id"], handler="@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf",
@@ -156,7 +159,7 @@ class DicomPdfE2E(ViewerLayoutE2E):
     def test_pdf_03_blank_popup_access_sequence_stale_and_denied_sop_splice(self):
         fixture = self.ct("PDF-OPEN-" + uuid.uuid4().hex[:12], "current", "20260801")
         source = self.pdf_source(fixture, ["OPEN PDF PAGE 1", "OPEN PDF PAGE 2"], "PDF Explicit Open")
-        denied_fixture = self.fixture("고려병원", patient_id="PDF-DENIED-" + uuid.uuid4().hex[:12])
+        denied_fixture = self.fixture(institution="고려병원", patient_id="PDF-DENIED-" + uuid.uuid4().hex[:12])
         denied = self.pdf_source(denied_fixture, ["DENIED PDF"], "PDF Denied")
         denied_reply = self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": fixture.uid, "sopUid": denied["sop"]})
         self.assertEqual(denied_reply.status, 403)
