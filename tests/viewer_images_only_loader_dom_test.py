@@ -83,7 +83,7 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-images-only]').length===1")
             page.evaluate("imagesOnlyExtension.onModeExit()")
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
-            page.wait_for_timeout(0)
+            page.wait_for_function("()=>!!window.imagesOnlyCalls")
             self.assertEqual({"creates": 0, "mounts": 0, "stops": 0}, page.evaluate(
                 "()=>({creates:imagesOnlyCalls.creates,mounts:imagesOnlyCalls.mounts,stops:imagesOnlyCalls.stops})"))
         finally:
@@ -102,9 +102,9 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-images-only]').length===1")
             page.evaluate("dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
-            page.wait_for_timeout(0)
+            page.wait_for_function("()=>!!window.imagesOnlyCalls")
             page.evaluate("enterImagesOnly()")
-            page.wait_for_timeout(0)
+            page.wait_for_function("()=>!!window.imagesOnlyCalls")
             self.assertEqual({"creates": 0, "mounts": 0, "stops": 0}, page.evaluate(
                 "()=>({creates:imagesOnlyCalls.creates,mounts:imagesOnlyCalls.mounts,stops:imagesOnlyCalls.stops})"))
         finally:
@@ -123,7 +123,7 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-images-only]').length===1")
             self.assertEqual(1, len(held))
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
-            page.wait_for_function("()=>imagesOnlyCalls?.mounts===1")
+            page.wait_for_function("()=>window.imagesOnlyCalls?.mounts===1")
             self.assertEqual({"creates": 1, "mounts": 1, "stops": 0, "sameServices": True}, page.evaluate(
                 "()=>({creates:imagesOnlyCalls.creates,mounts:imagesOnlyCalls.mounts,stops:imagesOnlyCalls.stops,"
                 "sameServices:imagesOnlyCalls.services[0]===services})"))
