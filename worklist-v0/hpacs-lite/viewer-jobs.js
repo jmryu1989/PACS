@@ -48,24 +48,25 @@ window.kinViewerJobs = function (services, model) {
       openingPrint = true;
       try {
         const snapshot = row ? null : capture(true);
-        if([4,5].includes(snapshot?.version)||[4,5].includes(row?.snapshotVersion))throw new Error('MPR 작업은 현재 저장·복원을 지원합니다. 재구성 영상 출력은 아직 지원하지 않습니다.');
+        if([4,5].includes(snapshot?.version)||row?.snapshotVersion===4)throw new Error('MPR 출력은 저장된 단면 묶음에서 지원합니다. Make Batch 후 Save New Job으로 저장하세요.');
         const unchanged = () => live() && JSON.stringify(capture(true)) === JSON.stringify(snapshot);
-        if (typeof window.kinViewerJobPrint !== 'function') {
+        const assets=[['kinViewerJobPrint','viewer-job-print.js'],...(row?.snapshotVersion===5?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
+        if (assets.length) {
           // A print-only asset failure must leave saving/restoring available.
-          if (!printLoading) printLoading = new Promise((resolve, reject) => {
-            const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-job-print.js';
+          if (!printLoading) printLoading = Promise.all(assets.map(([name,file])=>new Promise((resolve, reject) => {
+            const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/'+file;
             const cancel = () => finish(new Error('출력 화면 확인이 취소되었습니다.'));
             const timer = setTimeout(() => finish(new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.')), 30000);
             function finish(error) { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); }
-            script.onload = () => finish(typeof window.kinViewerJobPrint === 'function' ? null : new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
+            script.onload = () => finish(typeof window[name] === 'function' ? null : new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
             script.onerror = () => finish(new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
             abort.signal.addEventListener('abort', cancel, { once: true }); document.head.append(script);
-          });
+          })));
           await printLoading;
         }
         if (!live()) return;
         printer ||= window.kinViewerJobPrint({ api, authenticate, live });
-        if (row) printer.open(studies[0], row.id);
+        if (row) printer.open(studies[0], row.id,row.snapshotVersion);
         else { if (!unchanged()) throw new Error('현재 영상이 바뀌었습니다. 다시 출력하세요.'); printer.openCurrent(studies[0], snapshot, unchanged); }
       } catch (e) { if (live()) status.textContent = e.message; }
       finally { printLoading = null; openingPrint = false; }
@@ -141,7 +142,7 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && ![4,5].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if (!row.hidden && row.snapshotVersion!==4) button(item, 'Print Saved Images', () => openPrint(row));
         if([4,5].includes(row.snapshotVersion))text('p',(row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);

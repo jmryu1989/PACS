@@ -7,7 +7,7 @@ from playwright.sync_api import expect
 import test_prior_selection as ct
 from test_volume_study_workflow import VolumeStudyWorkflowE2E
 
-def phantom(stack,intercept=0,constant=False):
+def phantom(stack,intercept=0,constant=False,signed=False):
  uid,series,frame=ct.generate_uid(),ct.generate_uid(),ct.generate_uid();patient='PROJECTION-'+uuid.uuid4().hex[:10]
  f=ct.Fixture(uid,patient,'한림병원','jmryu','PROJECTION-SYNTHETIC');stack.active[uid]=f
  ae=ct.AE(ae_title='HALLYM_CT');ae.add_requested_context(ct.CTImageStorage,ct.ExplicitVRLittleEndian);assoc=ae.associate('127.0.0.1',4242,ae_title='KINLAB')
@@ -18,7 +18,9 @@ def phantom(stack,intercept=0,constant=False):
    d=ct.FileDataset(None,{},file_meta=meta,preamble=b'\0'*128);d.SOPClassUID=ct.CTImageStorage;d.SOPInstanceUID=sop;d.SpecificCharacterSet='ISO_IR 192';d.PatientName='PROJECTION^SYNTHETIC';d.PatientID=patient;d.PatientBirthDate='';d.PatientSex='O';d.InstitutionName='한림병원'
    d.StudyInstanceUID=uid;d.SeriesInstanceUID=series;d.FrameOfReferenceUID=frame;d.StudyDate=d.SeriesDate='20260901';d.StudyTime=d.SeriesTime='120000';d.AccessionNumber='PROJECTION';d.StudyID='PROJECTION';d.StudyDescription=d.SeriesDescription='Known voxel projection';d.Modality='CT';d.SeriesNumber=1;d.InstanceNumber=z+1;d.ImageType=['ORIGINAL','PRIMARY','AXIAL'];d.ImageOrientationPatient=[1,0,0,0,1,0];d.ImagePositionPatient=[0,0,z];d.SliceLocation=z;d.PixelSpacing=[1,1];d.SliceThickness=d.SpacingBetweenSlices=1
    d.Rows=d.Columns=64;d.SamplesPerPixel=1;d.PhotometricInterpretation='MONOCHROME2';d.BitsAllocated=d.BitsStored=16;d.HighBit=15;d.PixelRepresentation=0;d.WindowCenter=500+intercept;d.WindowWidth=1000;d.RescaleIntercept=intercept;d.RescaleSlope=1;d.RescaleType='HU'
-   value=500 if constant else 100 if z<=10 else 900 if z>=22 else 500;pixels=np.full((64,64),value,dtype='<u2');pixels[:4,:4]=1000 if not constant else 500;d.PixelData=pixels.tobytes();status=assoc.send_c_store(d)
+   value=500 if constant else 100 if z<=10 else 900 if z>=22 else 500;pixels=np.full((64,64),value,dtype='<u2');pixels[:4,:4]=1000 if not constant else 500
+   if signed:d.PixelRepresentation=1;d.WindowCenter-=1024;pixels=(pixels.astype('int32')-1024).astype('<i2')
+   d.PixelData=pixels.tobytes();status=assoc.send_c_store(d)
    if status is None or status.Status!=0:raise RuntimeError('Synthetic CT C-STORE failed')
  finally:assoc.release()
  deadline=time.monotonic()+30

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from playwright.sync_api import expect
 from test_viewer_job_print import ViewerJobPrintE2E,canvas_ready
 from test_viewer_jobs import literal,psql
+from test_viewer_history import ViewerHistoryE2E
 
 
 class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
@@ -75,6 +76,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
 
  def test_annotations_03_native_manual_values_pdf_and_forged_baseline(self):
   patient='JOBANN-'+uuid.uuid4().hex[:12];f=self.ct(patient,'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
+  ViewerHistoryE2E.open_measurement_tools(self,p)
   for index,(kind,tool,label) in enumerate([('length','Length','Length'),('angle','Angle','Angle'),('ellipse','EllipticalROI','Ellipse ROI')]):
    p.get_by_role('button',name=label,exact=True).click();box=p.locator('.cornerstone-canvas').bounding_box()
    x,y=box['x']+box['width']*.38,box['y']+box['height']*.3+index*95
@@ -89,6 +91,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
    row=p.locator('#kin-viewer-history section[data-kind='+kind+']');row.get_by_label('Annotation Text').fill('한글 저장 '+kind)
    row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
   for key in ['r','h','v']:p.keyboard.press(key)
+  self.open_layout_tools(p)
   p.get_by_label('Job Title',exact=True).fill('수치가 확인되는 과거 작업');self.click_job(p,'Save Job with Annotations','고정했습니다')
   job=self.get_job(f,self.jobs(f)[0]);self.assertEqual(len(job['annotations']),3)
   before=p.evaluate('()=>services.measurementService.getMeasurements().map(m=>m.uid).sort()');paper=self.output(p)
@@ -179,6 +182,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
 
  def test_annotations_10_roi_budget_and_accumulator_exception_restore(self):
   f=self.ct('JOBANN-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);canvas_ready(p,1)
+  ViewerHistoryE2E.open_measurement_tools(self,p)
   p.get_by_role('button',name='Ellipse ROI',exact=True).click()
   coords=p.evaluate('''()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId),d=v.getImageData(),r=v.element.getBoundingClientRect();
    return [[.45,.5],[.8,.95]].map(([x,y])=>v.worldToCanvas(d.imageData.indexToWorld([x*(d.dimensions[0]-1),y*(d.dimensions[1]-1),0])).map((n,i)=>n+(i?r.y:r.x)));}''')
@@ -186,6 +190,7 @@ class ViewerJobAnnotationsE2E(ViewerJobPrintE2E):
   p.wait_for_function('''()=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId),t=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId).getToolInstance('EllipticalROI');
    const a=cornerstoneTools.annotation.state.getAllAnnotations().find(a=>a.metadata.toolName==='EllipticalROI');return !t.isDrawing&&a&&!a.invalidated&&Object.keys(a.data.cachedStats).length}''')
   row=p.locator('#kin-viewer-history section[data-kind=ellipse]');row.get_by_label('Annotation Text').fill('연산 한도 ROI');row.get_by_role('button',name='Save',exact=True).click();expect(row).to_contain_text('저장 완료')
+  self.open_layout_tools(p)
   p.get_by_label('Job Title',exact=True).fill('ROI 예외 복구');self.click_job(p,'Save Job with Annotations','고정했습니다')
   job=self.get_job(f,self.jobs(f)[0]);item=copy.deepcopy(job['annotations'][0]['item']);item.pop('hidden');item.pop('sourceDigest')
   p.evaluate('''()=>{const c=new cornerstoneTools.EllipticalROITool().configuration.statsCalculator;window.__jobStats={c,callback:c.statsCallback,prior:Object.fromEntries(['max','min','sum','count','runMean','m2','pointsInShape'].map(k=>[k,c[k]]))};c.statsCallback=()=>{throw Error('owned calculator fault')}}''')

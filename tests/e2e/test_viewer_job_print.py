@@ -179,7 +179,9 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
    expect(p.locator('#kin-job-print')).not_to_be_visible();self.assertTrue(opened.value.is_closed())
   finally:psql(f'UPDATE "StudyState" SET rs=\'W\', "preDoc"=NULL, "preReviewer"=NULL WHERE uid={literal(b.uid)}')
   p.close();p=self.launch_job([a]);self.output(p)
-  work=p.context.new_page();self.relog(work,'doctor2');expect(p.locator('#kin-job-print')).not_to_be_visible()
+  # relog silently replaces cookies; it does not emit the logout broadcast.
+  # The fallback checks after 15 s on a 1 s tick, then awaits the server.
+  work=p.context.new_page();self.relog(work,'doctor2');expect(p.locator('#kin-job-print')).not_to_be_visible(timeout=30000)
 
  def test_print_06_actual_source_replacement_blocks_cached_display(self):
   f=self.ct('JOBPRINT-'+uuid.uuid4().hex[:12],'current','20260801');p=self.launch_job([f]);j=self.saved(p,f);self.output(p)
@@ -195,7 +197,11 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
   try:
    with p.expect_popup() as opened:p.locator('#kin-job-print').get_by_role('button',name='인쇄 / PDF').click()
    expect(p.locator('#kin-job-print [role=status]')).to_contain_text('원본과 달라')
-   if not opened.value.is_closed():opened.value.wait_for_event('close',timeout=15000)
+   # Closing can arrive before a later event listener is registered. Observe
+   # retained page state while pumping the opener, with the same 15 s budget.
+   for _ in range(300):
+    if opened.value.is_closed():break
+    p.wait_for_timeout(50)
    self.assertTrue(opened.value.is_closed())
    p.locator('#kin-job-print').get_by_role('button',name='다시 확인').click();expect(p.locator('#kin-job-print [role=status]')).to_contain_text('원본과 달라')
    self.assertEqual(self.pngs(p),before)
