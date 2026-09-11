@@ -40,7 +40,7 @@ class VolumeBatchSaveE2E(VolumeBatchE2E):
   actual=fresh.evaluate(CAPTURE);self.same_recipe(actual['batch'],recipe);self.assertEqual(self.pixels(fresh),pixels);self.assertEqual(fresh.evaluate('devicePixelRatio'),1.5)
   for left,right in zip(actual['cells'],job['snapshot']['cells']):
    for key in ['position','focalPoint','viewUp','viewPlaneNormal']:np.testing.assert_allclose(left['camera'][key],right['camera'][key],atol=1e-6,rtol=0)
-  expect(fresh.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(0);expect(p.locator('#findings')).to_have_value('KEEP SAVED BATCH REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
+  expect(fresh.get_by_role('button',name='Print Saved Images',exact=True)).to_be_enabled();expect(p.locator('#findings')).to_have_value('KEEP SAVED BATCH REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
   print('BATCH_SAVED_REPLAY',json.dumps({'recipe':recipe,'pixels':pixels,'actual':actual}),flush=True)
  def test_batch_save_02_partial_failure_recovers_previous_batch(self):
   a,p,v=self.batch_start();self.make_batch(v);self.save_volume(v);self.make_batch(v,offset=-8,interval=8,count=3);before=v.evaluate(CAPTURE);pixels=self.pixels(v);p.locator('#findings').fill('KEEP BATCH ROLLBACK')

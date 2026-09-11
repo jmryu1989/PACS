@@ -1912,6 +1912,8 @@ function kinCreateViewerTechNote() {
       .then(()=>Promise.allSettled([
         window.KinVolumeOrientation?Promise.resolve():load('volume-orientation.js'),
         typeof window.kinCreateVolumeOrientation==='function'?Promise.resolve():load('viewer-volume-orientation.js'),
+        window.KinVolumeDisplay?Promise.resolve():load('volume-display.js'),
+        typeof window.kinCreateVolumeDisplay==='function'?Promise.resolve():load('viewer-volume-display.js'),
         window.KinVolumeCrosshair?Promise.resolve():load('volume-crosshair.js'),
         typeof window.kinCreateVolumeCrosshair==='function'?Promise.resolve():load('viewer-volume-crosshair.js'),
         window.KinVolumeBatch?Promise.resolve():load('volume-batch.js'),

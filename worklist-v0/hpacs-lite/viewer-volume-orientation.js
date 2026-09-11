@@ -6,6 +6,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const model=window.KinVolumeOrientation,volumeKeys=new WeakMap();let nextVolume=0,ended=false,busy=false,shown='',baseline=null;
   const alive=()=>{try{return !ended&&live();}catch(_){return false;}};
   const permitted=()=>{try{return alive()&&allowed();}catch(_){return false;}};
+  const workspaceBusy=()=>{try{return !!window.kinViewerJobWorkspaceState?.().busy;}catch(_){return true;}};
   const same=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((n,i)=>Number.isFinite(Number(n))&&Math.abs(Number(n)-Number(b[i]))<.001);
   function target(verify=false){
     if(!alive())return null;
@@ -36,24 +37,24 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
     const t=target();let eligible=false;
     try{const g=services.viewportGridService.getState();eligible=g.viewports.size===3&&services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId)?.type==='orthographic';}catch(_){}
     panel.hidden=!alive()||!eligible;
-    rotate.disabled=reset.disabled=axis.disabled=degrees.disabled=busy||!t||!permitted();
+    rotate.disabled=reset.disabled=axis.disabled=degrees.disabled=busy||workspaceBusy()||!t||!permitted();
     if(!t){shown='';caption.textContent='완전히 로드된 단일 정규 CT의 3평면을 선택하세요.';return;}
     shown=t.selection;
     try{
       const point=model.intersection(t.cameras);
-      if(!baseline||baseline.group!==t.group)baseline={group:t.group,cameras:structuredClone(t.cameras)};
+      if(!workspaceBusy()&&(!baseline||baseline.group!==t.group||baseline.viewRefs.some((ref,i)=>ref.deref()!==t.views[i])))baseline={group:t.group,cameras:structuredClone(t.cameras),viewRefs:t.views.map(v=>new WeakRef(v))};
       caption.textContent=t.source.study.id+' · Center L/P/H (mm): '+point.map(n=>Number(n.toFixed(3))).join(' / ');
-    }catch(error){rotate.disabled=true;reset.disabled=busy||!permitted()||baseline?.group!==t.group;caption.textContent=error.message;}
+    }catch(error){rotate.disabled=true;reset.disabled=busy||workspaceBusy()||!permitted()||baseline?.group!==t.group;caption.textContent=error.message;}
   }
   const setCamera=(v,camera)=>{v.setCamera({flipHorizontal:camera.flipHorizontal,flipVertical:camera.flipVertical});const next={...camera};delete next.rotation;delete next.flipHorizontal;delete next.flipVertical;v.setCamera(next);v.render();};
   async function apply(starting){
     if(busy)return;
     let t,before,changed=false;
     try{
-      t=target(true);if(!t||t.selection!==shown)throw Error('선택한 MPR 평면이 바뀌었습니다. 대상을 확인하고 다시 적용하세요.');
+      t=target(true);if(!t||workspaceBusy()||t.selection!==shown)throw Error('선택한 MPR 평면이 바뀌었습니다. 대상을 확인하고 다시 적용하세요.');
       const angle=Number(degrees.value),index=Number(axis.value);
       if(!starting&&(!degrees.value.trim()||![0,1,2].includes(index)||!Number.isFinite(angle)||Math.abs(angle)>180))throw Error('회전축과 -180~180도 범위의 각도를 입력하세요.');
-      if(starting&&baseline?.group!==t.group)throw Error('이 배치의 시작 화면을 확인할 수 없습니다.');
+      if(starting&&(baseline?.group!==t.group||baseline.viewRefs.some((ref,i)=>ref.deref()!==t.views[i])))throw Error('이 배치의 시작 화면을 확인할 수 없습니다.');
       const next=starting?structuredClone(baseline.cameras):model.rotate(t.cameras,[0,1,2].map(i=>i===index?1:0),angle);
       before=t.cameras;busy=true;status.textContent='MPR 방향을 적용 중입니다.';refresh();changed=true;
       t.views.forEach((v,i)=>setCamera(v,next[i]));
@@ -71,8 +72,9 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   for(const name of ['pointerdown','wheel','keydown'])document.addEventListener(name,guard,{capture:true,passive:false});
   const timer=setInterval(refresh,500);refresh();
   const crosshair=window.KinVolumeCrosshair&&window.kinCreateVolumeCrosshair?.({target,permitted,alive,host});
+  const display=window.KinVolumeDisplay&&window.kinCreateVolumeDisplay?.({target,starting:()=>baseline,permitted:()=>!busy&&permitted(),alive,services,host});
   const batch=window.KinVolumeBatch&&window.kinCreateVolumeBatch?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

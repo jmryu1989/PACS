@@ -94,7 +94,7 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
   play.onclick=()=>{if(playTimer){stopPlay();return;}if(!output||!current(output.target))return;play.textContent='Stop Batch';playTimer=setInterval(()=>{if(!output||!current(output.target)||document.hidden){stopPlay();return;}index=(index+1)%output.frames.length;show();},100);};
   clear.onclick=()=>{clearOutput();status.textContent='단면 미리보기를 비웠습니다.';};
   const timer=setInterval(refresh,250);refresh();
-  const capability={capture(reference){
+  const capability={busy:()=>!!operation,capture(reference){
     if(operation)throw Error('단면 생성을 마친 뒤 작업을 저장하세요.');
     if(!output)return null;
     if(!current(output.target,false)){clearOutput();return null;}
