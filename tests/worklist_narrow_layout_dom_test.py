@@ -27,11 +27,11 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
             page.set_content(html)
             page.evaluate("""()=>{
               document.querySelector('#heads').innerHTML='<th>Patient</th><th>Study</th>';
-              document.querySelector('#rows').innerHTML='<tr tabindex="0" data-uid="2.25.10"><td>Synthetic Patient</td><td>CT</td></tr>';
+              document.querySelector('#rows').innerHTML='<tr tabindex="0" data-uid="2.25.10" style="position:relative"><td>Synthetic Patient</td><td>CT <button type="button" data-tech-note="2.25.10" style="position:absolute;left:42%;top:0;height:100%;width:30%">Tech Note</button></td></tr>';
               document.querySelector('#filterrow').innerHTML='<th><input aria-label="Patient filter"></th><th><input aria-label="Study filter"></th>';
               document.querySelector('#page-status').textContent='불러온 목록 중 1–1 / 1건 · 1/1페이지';
               document.querySelector('#countlist').textContent='W:1 · A:0 · H:0 · O:0 · T:0 · P:0';
-              document.querySelector('#rows tr').onclick=()=>window.rowClicked=true;
+              document.querySelector('#rows').addEventListener('click',event=>{if(event.target.closest('[data-tech-note]')){window.techNoteOpened=true;return}window.rowClicked=true});
               document.querySelector('#findings').value='Unchanged editor text';
             }""")
             page.add_script_tag(content=(ASSETS / 'worklist-selection.js').read_text(encoding='utf-8'))
@@ -39,8 +39,13 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
               tbody:document.querySelector('#rows'),owner:()=> 'synthetic-owner',rows:()=>[{uid:'2.25.10'}],current:()=>null})""")
             row = page.locator('#rows tr')
             try:
-                row.click()
-                self.assertTrue(page.evaluate('rowClicked'))
+                expect(row.locator('[data-tech-note]')).to_be_visible()
+                row.focus()
+                row.press('Space')
+                expect(row).to_have_attribute('aria-selected', 'true')
+                expect(row).to_have_class(re.compile(r'\bmulti-selected\b'))
+                expect(page.locator('#multi-selection-count')).to_have_text('Selected: 1')
+                self.assertIsNone(page.evaluate('window.techNoteOpened'))
                 harness = re.search(r'<script>(.*)</script>', HARNESS, re.S).group(1)
                 page.add_script_tag(content=harness.replace("document.querySelector('#host')", "document.querySelector('#thumbwrap')"))
                 page.add_script_tag(content=PREVIEW)

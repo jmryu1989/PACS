@@ -15,6 +15,7 @@ on:
           - hanging-protocols
           - dicom-pdf
           - image-thumbnails
+          - display-scope
 
 permissions:
   contents: read
@@ -60,6 +61,9 @@ jobs:
             tests/e2e/artifacts/hanging-protocols-ci/
             tests/e2e/artifacts/dicom-pdf-ci/
             tests/e2e/artifacts/image-thumbnails-ci/
+            tests/e2e/artifacts/display-scope-ci/
+            tests/e2e/artifacts/LAYOUT-display-scope-*.png
+            tests/e2e/artifacts/test_scope_*.png
             tests/e2e/artifacts/IMAGE-THUMBNAILS-*.png
             tests/e2e/artifacts/test_image_thumbnails_*.png
             tests/e2e/artifacts/HP-*.png

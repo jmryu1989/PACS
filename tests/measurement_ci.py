@@ -20,6 +20,12 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'display-scope': {
+        'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
+        'project_prefix': 'kin-display-scope-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_display_scope.py', 'ViewerDisplayScopeE2E', 'ci-display-scope'),),
+    },
     'image-thumbnails': {
         'out': ROOT / 'tests/e2e/artifacts/image-thumbnails-ci',
         'project_prefix': 'kin-image-thumbs-ci-',

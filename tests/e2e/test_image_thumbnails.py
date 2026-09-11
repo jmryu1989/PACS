@@ -1,6 +1,6 @@
 # coding: utf-8
 """Native Worklist Images browsing with real stored multi-instance/multiframe pixels."""
-import base64, io, time, unittest, uuid
+import base64, io, re, time, unittest, uuid
 from pathlib import Path
 
 import numpy as np
@@ -112,7 +112,10 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         literal = 'Literal <img onerror="window.imageThumbInjected=1"> & Series'
         f = self.ct("IMAGE-THUMBS-" + uuid.uuid4().hex[:12], "current", "20260801")
         CineE2E.series(self, f, 14, literal); originals = self.originals(); page = self.login(); page.set_viewport_size({"width": 390, "height": 700})
-        self.select(page, f); self.thumbs(page); card = page.locator("#thumbwrap .thumb-card").filter(has_text=literal)
+        page.locator("#quick").fill(f.patient_id); row = page.locator(f'#rows tr[data-uid="{f.uid}"]'); expect(row).to_be_visible()
+        row.focus(); row.press("Space"); expect(row).to_have_attribute("aria-selected", "true"); expect(row).to_have_class(re.compile(r"\bmulti-selected\b"))
+        row.press("Enter"); expect(row).to_have_class(re.compile(r"\bsel\b"))
+        self.thumbs(page); card = page.locator("#thumbwrap .thumb-card").filter(has_text=literal)
         entry = card.locator(".thumb-images-open"); expect(entry).to_be_enabled(); entry.focus(); entry.press("Enter")
         view = page.locator("#thumb-images-view"); cards = self.ready(view, 12)
         expect(view.locator("#thumb-images-series")).to_contain_text(literal)
