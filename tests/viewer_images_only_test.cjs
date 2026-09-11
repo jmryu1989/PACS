@@ -77,3 +77,23 @@ test('rejected fullscreen exit keeps a visible owned retry until exit succeeds',
   h.doc.exitFullscreen=Document.prototype.exitFullscreen.bind(h.doc);h.doc.getElementById('kin-images-only-exit').click();await Promise.resolve();
   assert.equal(h.doc.fullscreenElement,null);assert.equal(h.doc.getElementById('kin-images-only-exit'),null);h.controller.stop();
 });
+
+
+test('hidden image text refuses fullscreen until explicit text restoration', async()=>{
+  const h=setup();let calls=0;
+  h.viewport.element.requestFullscreen=()=>{calls++;h.doc.fullscreenElement=h.viewport.element;h.doc.dispatchEvent(new Event('fullscreenchange'));return Promise.resolve()};
+  h.win.kinViewerImageTextHidden=()=>true;h.emit();h.enter.click();
+  assert.equal(calls,0);assert.equal(h.doc.fullscreenElement,null);
+  assert.match(h.doc.getElementById('kin-images-only-status').textContent,/Show Image Text/);
+  h.win.kinViewerImageTextHidden=()=>false;h.emit();h.enter.click();await Promise.resolve();
+  assert.equal(calls,1);assert.equal(h.doc.fullscreenElement,h.viewport.element);h.controller.stop();
+});
+
+
+test('image text hidden while native request is pending retires late fullscreen', async()=>{
+  const h=setup();let resolve;
+  h.win.kinViewerImageTextHidden=()=>false;
+  h.viewport.element.requestFullscreen=()=>new Promise(done=>resolve=()=>{h.doc.fullscreenElement=h.viewport.element;h.doc.dispatchEvent(new Event('fullscreenchange'));done()});
+  h.enter.click();h.win.kinViewerImageTextHidden=()=>true;resolve();await Promise.resolve();await Promise.resolve();
+  assert.equal(h.doc.fullscreenElement,null);assert.equal(h.doc.exits.length,1);h.controller.stop();
+});

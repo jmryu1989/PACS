@@ -18,6 +18,7 @@ on:
           - display-scope
           - study-arrivals
           - images-only
+          - image-text
 
 permissions:
   contents: read
@@ -68,6 +69,9 @@ jobs:
             tests/e2e/artifacts/images-only-ci/
             tests/e2e/artifacts/IMAGES-ONLY-*.png
             tests/e2e/artifacts/test_images_only_*.png
+            tests/e2e/artifacts/image-text-ci/
+            tests/e2e/artifacts/IMAGE-TEXT-*.png
+            tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png
             tests/e2e/artifacts/LAYOUT-display-scope-*.png

@@ -20,6 +20,12 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'image-text': {
+        'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
+        'project_prefix': 'kin-image-text-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_image_text.py', 'ViewerImageTextE2E', 'ci-image-text'),),
+    },
     'images-only': {
         'out': ROOT / 'tests/e2e/artifacts/images-only-ci',
         'project_prefix': 'kin-images-only-ci-',

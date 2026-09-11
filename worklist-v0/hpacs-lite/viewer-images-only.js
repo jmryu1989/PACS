@@ -32,6 +32,7 @@
     }
     function inspect() {
       if (!live()) throw Error('현재 영상 세션을 확인할 수 없습니다.');
+      if (win.kinViewerImageTextHidden?.()) throw Error('Show Image Text로 문자 표시를 복원한 뒤 전체 화면을 여세요.');
       if (doc.fullscreenElement) throw Error('열려 있는 전체 화면을 종료한 뒤 다시 시도하세요.');
       const boundOwner = owner(); if (!boundOwner) throw Error('현재 영상 계정을 확인할 수 없습니다.');
       if (dialogs()) throw Error('열린 대화상자를 닫은 뒤 다시 시도하세요.');
@@ -67,7 +68,7 @@
     }
     function matches(record) {
       try {
-        if (!record || !live() || owner() !== record.owner || dialogs() || busy()) return false;
+        if (!record || !live() || win.kinViewerImageTextHidden?.() || owner() !== record.owner || dialogs() || busy()) return false;
         const state = services.viewportGridService.getState(), cell = state.viewports.get(record.viewportId);
         if (cell !== record.cell || gridSignature(state) !== record.grid || services.cornerstoneViewportService.getCornerstoneViewport(record.viewportId) !== record.viewport ||
             services.displaySetService.getDisplaySetByUID(record.displaySetId) !== record.displaySet || record.viewport.element !== record.element) return false;
