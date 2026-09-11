@@ -288,6 +288,21 @@
       left: 0; right: 0; top: 2px; bottom: auto; width: auto; height: 2px;
     }
 
+    /* Very narrow windows need bounded toolbar scrolling and full-width context
+       panels; otherwise wrapped controls consume the list's entire hit area. */
+    @media (max-width: 600px) {
+      body.portrait:not(.reading) .menubar { max-height: 92px; overflow: auto; }
+      body.portrait:not(.reading) .userfilter { max-height: 150px; overflow: auto; }
+      body.portrait:not(.reading) .split { overflow: auto; }
+      body.portrait:not(.reading) .left { height: 300px !important; min-height: 300px; max-height: none; }
+      body.portrait:not(.reading) .right { flex: none; height: 650px; }
+      body.portrait:not(.reading) .rw { height: 760px !important; flex-direction: column; }
+      body.portrait:not(.reading) .rw > section { width: 100%; flex: none; }
+      body.portrait:not(.reading) .s-thumb { height: 340px; }
+      body.portrait:not(.reading) .s-clinical { height: 180px; }
+      body.portrait:not(.reading) .s-template { height: 240px; }
+    }
+
     /* ── 모달 (Modify Exam) ── */
     .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 30; align-items: center; justify-content: center; }
     .modal.show { display: flex; }

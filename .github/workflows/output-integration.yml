@@ -61,6 +61,7 @@ jobs:
             tests/e2e/artifacts/dicom-pdf-ci/
             tests/e2e/artifacts/image-thumbnails-ci/
             tests/e2e/artifacts/IMAGE-THUMBNAILS-*.png
+            tests/e2e/artifacts/test_image_thumbnails_*.png
             tests/e2e/artifacts/HP-*.png
             tests/e2e/artifacts/LAYOUT-source-pdf-*.png
             tests/tmp/workspace-ui-ci/identity-position-native/
