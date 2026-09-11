@@ -116,4 +116,26 @@ class ReadingAppearanceLive(unittest.TestCase):
   for value in invalid:
    payload=copy.deepcopy(b);payload['sizes']['toolbar']=value;self.assertEqual(self.write(payload).status,400);self.assertEqual(self.get(),saved)
   payload=copy.deepcopy(b);payload['sizes']['version']=5;self.assertEqual(self.write(payload).status,400);self.assertEqual(self.get(),saved)
+ def mpr_body(self):
+  b=self.toolbar_body();b['sizes'].update(version=7,mpr=dict(version=1,progressive=False,display={k:k not in ['demographics','autoHideCrosshair'] for k in ['windowing','zoom','thickness','scale','orientation','demographics','cube','sample','autoHideCrosshair']},mouse=dict(left='StackScroll',middle='Zoom',right='WindowLevel'),sync=dict(windowing=False,zoom=True)));return b
+ def test_15_mpr_upgrade_roundtrip_preserves_other_fields_and_old_writers(self):
+  old=self.toolbar_body();self.assertEqual(self.write(old).status,200);new=self.mpr_body();r=self.write(new);self.assertEqual(r.status,200,r.text);self.assertEqual(r.body['sizes'],new['sizes']);saved=self.get()
+  old['revision']=saved['revision'];self.assertEqual(self.write(old).status,409);self.assertEqual(self.get(),saved);self.assertEqual(self.write(new).status,409);self.assertEqual(self.write(new,'doctor2').status,409);self.assertIsNone(self.get('doctor2')['sizes'])
+ def test_17_each_legacy_version_upgrades_to_mpr(self):
+  for version in range(1,7):
+   with self.subTest(version=version):
+    cleanup_workspace(self.stack,'ReadingAppearance')
+    old={1:self.body,2:self.dock_body,3:self.dock_body,4:self.viewer_body,5:self.auto_body,6:self.toolbar_body}[version]()
+    if version==2:old['sizes'].pop('dock');old['sizes']['version']=2
+    self.assertEqual(self.write(old).status,200)
+    new=self.mpr_body();reply=self.write(new);self.assertEqual(reply.status,200,reply.text);self.assertEqual(reply.body['sizes'],new['sizes'])
+    old['revision']=reply.body['revision'];self.assertEqual(self.write(old).status,409);self.assertEqual(self.get(),reply.body)
+ def test_16_invalid_mpr_does_not_change_appearance(self):
+  import copy
+  b=self.mpr_body();self.assertEqual(self.write(b).status,200);saved=self.get();b['revision']=saved['revision'];b['sizes']['current']=12
+  for group,key,bad in [('display','windowing',1),('display','patient','forbidden'),('display','cube',None),('mouse','left','Zoom'),('mouse','right','Length'),('sync','zoom','true'),('sync','uid','forbidden')]:
+   candidate=copy.deepcopy(b);candidate['sizes']['mpr'][group][key]=bad;self.assertEqual(self.write(candidate).status,400);self.assertEqual(self.get(),saved)
+  for bad in [None,{},[],dict(b['sizes']['mpr'],version=2),dict(b['sizes']['mpr'],progressive='true')]:
+   candidate=copy.deepcopy(b);candidate['sizes']['mpr']=bad;self.assertEqual(self.write(candidate).status,400);self.assertEqual(self.get(),saved)
+
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -138,7 +138,11 @@ window.kinCreateVolumeSync=function({target,permitted,alive,services,host}){
     }catch(error){clear();status.textContent=error.message||'동기화 대상을 확인하지 못했습니다.';}
   }
   windowing.onchange=()=>change('windowing',windowing.checked);zoom.onchange=()=>change('zoom',zoom.checked);
-  const capability={selected(operation){session?.pending.clear();suppressed++;try{return operation();}finally{suppressed--;}}};
+  const capability={selected(operation){session?.pending.clear();suppressed++;try{return operation();}finally{suppressed--;}},read(){return session?{windowing:session.windowing,zoom:session.zoom}:null;},apply(value){
+    try{if(!allowed()||!same(session?.target,target(true))||typeof value?.windowing!=='boolean'||typeof value?.zoom!=='boolean')return false;
+      session.pending.clear();session.windowing=value.windowing;session.zoom=value.zoom;refresh();return true;
+    }catch(_){return false;}
+  }};
   window.kinVolumeSynchronization=capability;const timer=setInterval(refresh,250);refresh();
   return {dispose(){ended=true;clearInterval(timer);clear();if(window.kinVolumeSynchronization===capability)delete window.kinVolumeSynchronization;panel.remove();}};
 };

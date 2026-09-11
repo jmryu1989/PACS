@@ -29,6 +29,19 @@ window.KinReadingAppearance = function (options) {
   const defaultToolbar=()=>({version:1,order:toolbarIds.slice(),hidden:[]});
   const normalizeToolbar=v=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join(',')==='hidden,order,version'&&v.version===1&&Array.isArray(v.order)&&v.order.length===toolbarIds.length&&new Set(v.order).size===toolbarIds.length&&v.order.every(id=>toolbarIds.includes(id))&&Array.isArray(v.hidden)&&new Set(v.hidden).size===v.hidden.length&&v.hidden.every(id=>toolbarIds.includes(id)&&id!=='Zoom')?{version:1,order:v.order.slice(),hidden:v.hidden.slice()}:null;
   let toolbarValue=defaultToolbar();
+  const mprModel=window.KinVolumePreferences,mprKey=initialOwner?'kin-mpr-preferences:v1:'+initialOwner:null;
+  let mprValue=mprModel?.defaults();
+  function readMpr(){return mprModel?.normalize(options.getMpr?.()?.read())||mprValue;}
+  function setMpr(next){
+    const clean=mprModel?.normalize(next);if(!live()||!clean)return false;
+    const controller=options.getMpr?.();if(controller&&!controller.requestApply(clean))return false;
+    mprValue=clean;generation++;
+    try{storage.setItem(mprKey,JSON.stringify(clean));mprStatus.textContent='MPR 표시·마우스·동기화 설정을 불러왔습니다. 영상 창의 모달/작업이 끝나면 적용합니다.';}
+    catch(_){mprStatus.textContent='MPR 설정은 현재 창에만 적용하며 브라우저에 저장하지 못했습니다.';}
+    return true;
+  }
+  function mprChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=mprModel?.normalize(e.detail.value);if(clean){mprValue=clean;generation++;}}
+  window.addEventListener('kin-mpr-preference-changed',mprChanged);
   const live=()=>!ended&&!!key&&owner()===initialOwner;
   const style=document.createElement('style');style.textContent=`
     #rows td, #rows td span, #relrows td, #relrows td span { font-size:var(--kin-list-text,var(--kin-column-text,12px)); font-family:var(--kin-list-font,var(--kin-column-font,inherit)); }
@@ -48,6 +61,7 @@ window.KinReadingAppearance = function (options) {
   const element=(tag,text,parent)=>{const e=document.createElement(tag);e.textContent=text;if(parent)parent.append(e);return e;};
   const title=element('h2','Appearance & Tools',dialog);title.id='reading-appearance-title';
   element('p','글자 크기·글꼴·색과 도구 위치를 계정에 저장하고 다른 기기에서 함께 불러올 수 있습니다. 이전 설정에 없는 항목은 현재 값을 유지합니다.',dialog);
+  const mprStatus=element('p','MPR Properties의 표시·마우스·동기화 설정도 계정 표시 설정에 포함됩니다.',dialog);mprStatus.id='reading-mpr-status';mprStatus.setAttribute('role','status');
   const fields={};
   for(const [name,label] of [['list','Worklist'],['current','Current Report'],['prior','Prior Report']]){
     const row=element('label',label,dialog),select=element('select','',row);select.id='reading-text-'+name;
@@ -172,11 +186,11 @@ window.KinReadingAppearance = function (options) {
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
     colorValue=defaultColors();applyColors();for(const f of Object.values(colorFields))f.disabled=true;colorReset.disabled=true;
     for(const f of Object.values(dockFields))f.disabled=true;
-    toolbarReset.disabled=true;window.removeEventListener('kin-toolbar-preference-changed',toolbarChanged);window.removeEventListener('kin-toolbar-preference-mounted',toolbarChanged);
+    window.removeEventListener('kin-mpr-preference-changed',mprChanged);toolbarReset.disabled=true;window.removeEventListener('kin-toolbar-preference-changed',toolbarChanged);window.removeEventListener('kin-toolbar-preference-mounted',toolbarChanged);
     window.removeEventListener('kin-dock-preference-changed',dockChanged);window.removeEventListener('kin-dock-preference-mounted',dockChanged);
     window.removeEventListener('storage',onStorage);window.removeEventListener('pagehide',end);channel?.close();
   }
-  function onStorage(e){if(e.key==='kin-session-ended')end();else if(toolbarKey&&e.key===toolbarKey){
+  function onStorage(e){if(e.key==='kin-session-ended')end();else if(mprKey&&e.key===mprKey){try{const clean=e.newValue?.length<=1024&&mprModel?.normalize(JSON.parse(e.newValue));if(clean){mprValue=clean;generation++;mprStatus.textContent='다른 영상 창에서 MPR 설정을 저장했습니다.';}}catch(_){} }else if(toolbarKey&&e.key===toolbarKey){
     let matches=false;try{const clean=e.newValue?.length<=2048?normalizeToolbar(JSON.parse(e.newValue)):null;matches=clean&&JSON.stringify(clean)===JSON.stringify(toolbarValue);}catch(_){}
     if(!matches){generation++;toolbarStatus.textContent='다른 창의 도구 모음 변경 · 현재 창 유지';}
   }else if(dockKey&&e.key===dockKey){
@@ -206,23 +220,25 @@ window.KinReadingAppearance = function (options) {
   }catch(_){colorStatus.textContent='저장된 글자색을 읽지 못해 기본 글자색을 적용했습니다.';}
   try{const raw=dockKey?storage.getItem(dockKey):null;if(raw!==null){const clean=raw.length<=128?normalizeDock(JSON.parse(raw)):null;if(clean)dockValue={...clean,version:2,autoHide:clean.autoHide??false};else dockStatus.textContent='저장된 도구 설정 오류 · 기본값';}}catch(_){dockStatus.textContent='도구 설정을 읽지 못해 기본값을 표시합니다.';}
   try{const raw=toolbarKey?storage.getItem(toolbarKey):null;if(raw!==null){const clean=raw.length<=2048?normalizeToolbar(JSON.parse(raw)):null;if(clean)toolbarValue=clean;else toolbarStatus.textContent='저장된 도구 모음 오류 · 기본값';}}catch(_){toolbarStatus.textContent='도구 모음을 읽지 못해 기본값을 표시합니다.';}showToolbar();
+  try{const raw=mprKey?storage.getItem(mprKey):null;const clean=raw&&raw.length<=1024&&mprModel?.normalize(JSON.parse(raw));if(clean)mprValue=clean;}catch(_){mprStatus.textContent='MPR 설정을 읽지 못해 기본 설정을 사용합니다.';}
   apply(hasText);applyFonts(hasFont);applyColors(hasColor);showDock();opener.disabled=!live();
   window.addEventListener('storage',onStorage);window.addEventListener('pagehide',end);
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version===7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
     const dock=v.version>=3?normalizeDock(v.dock):null,view=v.version>=4?viewer.normalize(v.viewer):null;
-    const toolbar=v.version===6?normalizeToolbar(v.toolbar):null;
-    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{})}:null;
+    const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null;
+    return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<7||mpr)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{}),...(mpr?{mpr}:{})}:null;
   };
-  return {host:account,read:()=>({...value,version:6,fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
+  return {host:account,read:()=>({...value,version:mprModel?7:6,...(mprModel?{mpr:readMpr()}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:viewer.normalize(viewerValue),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:live,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
-      if(clean.version===6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
+      if(clean.version>=6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
       if(clean.version>=3&&!setDock(clean.dock))return false;
-      if(clean.version===6&&!setToolbar(clean.toolbar))return false;
+      if(clean.version>=6&&!setToolbar(clean.toolbar))return false;
       if(clean.version>=4&&!setViewer(clean.viewer))return false;
+      if(clean.version>=7&&!setMpr(clean.mpr))return false;
       value={version:1,list:clean.list,current:clean.current,prior:clean.prior};
       if(clean.version>=2){fontValue=clean.fonts;colorValue=clean.colors;applyFonts();applyColors();saveFonts();saveColors();}
       apply();save();return true;}};
