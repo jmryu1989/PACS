@@ -96,6 +96,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/vr-python"
           "$RUNNER_TEMP/vr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
+      - name: VR source binding survives transient MPR layout readiness
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
       - name: Confirm exact declared VR-only selection
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared volume rendering tests
