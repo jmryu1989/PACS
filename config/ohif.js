@@ -1307,9 +1307,10 @@ function kinCreateViewerHistory() {
     }
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
-    const beforeUnload = e => { if (recovery.size || [...entries.values()].some(hasWork)) { e.preventDefault(); e.returnValue = ''; } };
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) ||
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
+    // Native marks exist before the next history scan; warn during that gap too.
+    const beforeUnload = e => { if (jobGuard()) { e.preventDefault(); e.returnValue = ''; } };
     window.kinViewerHistoryHasUnsaved = jobGuard;
     const workspaceState = () => ({ dirty: jobGuard(), busy: [...entries.values()].some(x => x.busy || x.pending) });
     window.kinViewerHistoryWorkspaceState = workspaceState;

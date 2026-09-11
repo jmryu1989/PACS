@@ -110,6 +110,20 @@ class ViewerRecoveryE2E(HeldMeasurementE2E):
         self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"),0)
         self.guard(p,True);self.assertEqual(self.durable(a),stored)
 
+    def test_recovery_06_new_native_annotation_warns_before_history_scan(self):
+        f=self.specimen();w,p=self.open_viewer(f);self.addCleanup(w.close);self.addCleanup(p.close)
+        p.evaluate('''()=>{
+          window.recoveryAtCreate=[];cornerstone.eventTarget.addEventListener(cornerstoneTools.Enums.Events.ANNOTATION_ADDED,({detail:{annotation}})=>{
+            if(annotation.metadata.toolName==='Length'){
+              const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);
+              recoveryAtCreate.push({prevented:event.defaultPrevented,dirty:kinViewerHistoryHasUnsaved(),rows:document.querySelectorAll('#kin-viewer-history section[data-kind=length]').length});
+            }
+          });}''')
+        row=self.draw_length(p);expect(row).to_have_count(1)
+        samples=p.evaluate('()=>recoveryAtCreate');self.assertTrue(samples)
+        self.assertEqual(samples[0],{'prevented':True,'dirty':True,'rows':0})
+        self.assertEqual(self.saved(f),[])
+
 
 if __name__=='__main__':
     sys.stdout.reconfigure(encoding='utf-8',errors='replace')

@@ -111,7 +111,8 @@ REQ-D-WORKSPACE-WINDOW-RETURN → RISK-WRONG-REPORT-FOCUS/WORK-LOSS/STALE-WINDOW
 ## 기능별 시험 카탈로그
 
 D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (18개),
-`python tests/e2e/test_viewer_recovery.py` (5개).
+`python tests/e2e/test_viewer_recovery.py` (6개).
+REQ-D04-MANUAL-CONTINUE → RISK-D04-LOSS → TEST-D04-HELD-RECOVERY: 실제 주석 생성 이벤트에서 이력 scan 전에도 Job/이탈 가드가 모두 미저장 상태를 감지하는지 검사한다. 기존 삭제·저장·보관 수정 회귀의 경고 해제 조건도 유지한다.
 빠른 시험은 실제 `config/ohif.js` 확장을 VM에서 mount하고 DOM/HTTP 경계만 대체한다.
 A1(원문 §2-5)의 검사 왕복·늦은 응답·동일 UUID, A2(6)의 busy 경합,
 C1(7)의 서버판 채택/취소, C2(9)의 종료 후 두 SR command 안내,
