@@ -184,15 +184,20 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
    print('VR_SCULPT_SHAPE',mode,inside,outside,flush=True)
 
  def test_vr_20_sculpt_draft_cancel_resize_reset_and_crop_transfer(self):
-  a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);full=self.vr_pixels(v);camera=self.vr_state(v)['camera']
-  self.sculpt_region(v,dialog);expect(dialog.get_by_label('View From',exact=True)).to_be_disabled();expect(dialog.get_by_role('button',name='Apply Display',exact=True)).to_be_disabled();self.assertEqual(self.vr_state(v)['camera'],camera)
-  dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click();expect(dialog.locator('[data-kin-vr-sculpt]')).not_to_be_visible();self.assertEqual(self.vr_pixels(v),full)
-  self.sculpt_region(v,dialog);size=v.viewport_size;v.set_viewport_size({'width':size['width']-30,'height':size['height']});expect(dialog.locator('[data-kin-vr-sculpt]')).not_to_be_visible();v.set_viewport_size(size)
-  self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();cut=self.vr_pixels(v)
-  dialog.get_by_label('VR Opacity',exact=True).fill('50');dialog.get_by_role('button',name='Apply Display',exact=True).click();self.assertAlmostEqual(self.vr_pixels(v)['width'],cut['width'],delta=2)
-  dialog.get_by_label('K Max',exact=True).fill('7');dialog.get_by_role('button',name='Apply Crop',exact=True).click();cropped=self.vr_pixels(v);self.assertGreater(cropped['count'],0);self.assertLess(cropped['height'],cut['height'])
-  dialog.get_by_role('button',name='Reset VR',exact=True).click();self.assertEqual(self.vr_pixels(v),full)
-  self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();dialog.get_by_role('button',name='Close VR',exact=True).click();dialog=self.vr(v);self.assertEqual(self.vr_pixels(v),full)
+  v=None
+  try:
+   a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);full=self.vr_pixels(v);camera=self.vr_state(v)['camera']
+   self.sculpt_region(v,dialog);expect(dialog.get_by_label('View From',exact=True)).to_be_disabled();expect(dialog.get_by_role('button',name='Apply Display',exact=True)).to_be_disabled();self.assertEqual(self.vr_state(v)['camera'],camera)
+   dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click();expect(dialog.locator('[data-kin-vr-sculpt]')).not_to_be_visible();self.assertEqual(self.vr_pixels(v),full)
+   self.sculpt_region(v,dialog);size=v.viewport_size;v.set_viewport_size({'width':size['width']-30,'height':size['height']});expect(dialog.locator('[data-kin-vr-sculpt]')).not_to_be_visible();v.set_viewport_size(size)
+   self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();cut=self.vr_pixels(v)
+   dialog.get_by_label('VR Opacity',exact=True).fill('50');dialog.get_by_role('button',name='Apply Display',exact=True).click();self.assertAlmostEqual(self.vr_pixels(v)['width'],cut['width'],delta=2)
+   dialog.get_by_label('K Max',exact=True).fill('7');dialog.get_by_role('button',name='Apply Crop',exact=True).click();cropped=self.vr_pixels(v);self.assertGreater(cropped['count'],0);self.assertLess(cropped['height'],cut['height'])
+   dialog.get_by_role('button',name='Reset VR',exact=True).click();self.assertEqual(self.vr_pixels(v),full)
+   self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();dialog.get_by_role('button',name='Close VR',exact=True).click();dialog=self.vr(v);self.assertEqual(self.vr_pixels(v),full)
+  finally:
+   if v is not None and not v.is_closed():
+    print('VR20_FINAL_STATE',v.evaluate("""()=>{const d=document.querySelector('#kin-volume-rendering'),s=d?.querySelector('[aria-label="Sculpt Tool"]'),h=d?.querySelector('[data-kin-vr-render]');const box=e=>{const r=e?.getBoundingClientRect();return r?{width:r.width,height:r.height,x:r.x,y:r.y}:null;};return {open:!!d?.open,screen:[innerWidth,innerHeight],select:box(s),host:box(h),status:document.querySelector('#kin-volume-orientation [role=status]')?.textContent?.slice(0,400),dialogStatus:d?.querySelector('[role=status]')?.textContent?.slice(0,400)};}"""),flush=True)
 
  def test_vr_21_sculpt_native_failure_closes_only_vr(self):
   a,p,v=self.opened_projection(constant=True);source=self.volume_state(v);native=self.native_pixels(v);dialog=self.vr(v);self.sculpt_region(v,dialog)
