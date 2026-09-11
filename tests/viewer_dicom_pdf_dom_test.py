@@ -131,7 +131,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
 
     def test_source_timeout_exposes_retry_and_ignores_the_late_provider(self):
         self.page.evaluate("""() => {
-          pdfController.stop();held=[];holdPath='/api/dicom/lookup';ignoreAbort=true;window.nativeRetries=0;
+          pdfController.stop();held=[];requests=[];holdPath='/api/dicom/lookup';ignoreAbort=true;window.nativeRetries=0;
           mountPdf({timeoutMs:30,onRetry:()=>nativeRetries++});
         }""")
         self.page.wait_for_function("() => held.length===1")
@@ -140,7 +140,8 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(button).to_have_text("Retry Source PDF");expect(button).to_be_enabled()
         self.page.evaluate("holdPath=null");button.click()
         expect(button).to_have_text("Open Source PDF");expect(button).to_be_enabled()
-        self.assertEqual(1,self.page.evaluate("nativeRetries"))
+        self.assertEqual(0,self.page.evaluate("nativeRetries"),"source retry must not restart the native resolver")
+        self.assertEqual(2,self.page.evaluate("requests.filter(r=>r.url==='/api/dicom/lookup').length"))
         self.page.evaluate("held.shift().resolve()")
         self.page.wait_for_timeout(0)
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
@@ -152,7 +153,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         }""")
         button = self.page.locator("#kin-source-pdf-open")
         expect(button).to_be_enabled()
-        self.page.evaluate("pdfController.nativeFailure(Error('Synthetic native timeout'))")
+        self.page.evaluate("pdfController.nativeFailure(Error('Synthetic native timeout'),displaySet,displaySet.pdfUrl)")
         self.page.evaluate("emit()")
         expect(button).to_have_text("Retry Source PDF")
         expect(button).to_be_enabled()
@@ -164,7 +165,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(self.page.locator("#kin-source-pdf-status")).to_have_text("Checking native PDF…")
         self.page.evaluate("emit()")
         expect(button).to_be_disabled()
-        self.page.evaluate("pdfController.nativeReady()")
+        self.page.evaluate("pdfController.nativeReady(displaySet,displaySet.pdfUrl)")
         expect(button).to_have_text("Open Source PDF")
         expect(button).to_be_enabled()
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
@@ -176,8 +177,25 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
           displaySet=makeSet({displaySetInstanceUID:'owner-mismatch'});view.displaySetInstanceUIDs=['owner-mismatch'];emit();
         }""")
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("계정이 변경")
-        expect(self.page.locator("#kin-source-pdf-open")).to_have_text("Retry Source PDF")
+        expect(self.page.locator("#kin-source-pdf-open")).to_have_text("Open Source PDF")
+        expect(self.page.locator("#kin-source-pdf-open")).to_be_disabled()
         self.assertEqual(["/api/me"],self.page.evaluate("requests.map(r=>r.url)"))
+
+    def test_native_failure_and_pending_retry_do_not_block_a_new_source(self):
+        self.page.evaluate("""() => {
+          window.nativeRetries=[];pdfController.stop();
+          mountPdf({onRetry:(value,pdfUrl)=>nativeRetries.push([value.displaySetInstanceUID,pdfUrl])});
+        }""")
+        button=self.page.locator("#kin-source-pdf-open");expect(button).to_be_enabled()
+        self.page.evaluate("pdfController.nativeFailure(Error('A native failure'),displaySet,displaySet.pdfUrl)")
+        button.click();expect(button).to_be_disabled();self.assertEqual(1,len(self.page.evaluate("nativeRetries")))
+        self.page.evaluate("""() => {
+          displaySet=makeSet({displaySetInstanceUID:'source-b',SOPInstanceUID:'1.5',SeriesDescription:'Source B',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});
+          view.displaySetInstanceUIDs=['source-b'];emit();
+        }""")
+        expect(button).to_have_text("Open Source PDF");expect(button).to_be_enabled()
+        button.click();expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
+        self.assertEqual(PDF,self.page.evaluate("popups.at(-1).navigated"))
 
     def test_related_role_and_invalid_mime_identity_or_url_fail_closed(self):
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'ds-related',StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',SeriesDescription:'Prior PDF',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.9/series/1.8/instances/1.7/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['ds-related'];emit();}""")

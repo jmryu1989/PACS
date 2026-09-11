@@ -55,6 +55,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py --file tests/worklist_image_thumbnails_dom_test.py --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
+      - name: Existing study arrivals and preserved reading inputs
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/worklist_arrivals_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_arrivals_dom_test.py
       - name: Selected CT display controls and session loader boundaries
         timeout-minutes: 3
         run: |
@@ -143,6 +147,8 @@ jobs:
           persist-credentials: false
       - name: Saved comparison print identity model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_identity_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs
+      - name: Existing study instance and series arrival model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
       - name: CT display target selection and atomic rollback model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/display-scope --cwd . --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_display_scope_test.cjs
       - name: Native PDF source key and mode lifecycle model

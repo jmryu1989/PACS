@@ -2188,14 +2188,15 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   }
   function start(record) {
     const controller = new AbortController(); record.controller = controller; record.failed = false; pending.add(controller);
-    resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(); } }, error => {
-      if (!record.settled && error?.retryable && active && record.ticket === epoch && matches(record.source)) { record.failed = true; options.onFailure?.(error); }
+    resolve(record.source, record.ticket, controller).then(value => { if (!record.settled) { record.settled = true; records.delete(record); record.resolve(value); options.onSuccess?.(record.source.value, record.original); } }, error => {
+      if (!record.settled && error?.retryable && active && record.ticket === epoch && matches(record.source)) { record.failed = true; options.onFailure?.(error, record.source.value, record.original); }
       else if (!record.settled) { record.settled = true; records.delete(record); record.reject(error); }
     });
   }
   function resolvedSource(source) {
     let record = cache.get(source.value);
     if (record?.key === source.key && record.original === source.pdfUrl) return record;
+    if (record && !record.settled) { record.controller?.abort(); record.settled = true; records.delete(record); record.reject(new Error('선택한 원본 문서가 변경되었습니다.')); }
     let fulfill, reject; const promise = new Promise((resolve, fail) => { fulfill = resolve; reject = fail; }); promise.catch(() => {});
     record = { key: source.key, original: source.pdfUrl, source, ticket: epoch, promise, resolve: fulfill, reject, failed: false, settled: false, controller: null };
     cache.set(source.value, record); records.add(record); start(record); return record;
@@ -2221,7 +2222,7 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
   function listen() { if (listening) return; listening = true; globalThis.addEventListener?.('storage', storageEnded); try { sessionChannel = new BroadcastChannel('kin-session'); sessionChannel.onmessage = event => { if (event.data?.type === 'session-ended') sessionEnded(); }; } catch (_) {} }
   function unlisten() { if (!listening) return; listening = false; globalThis.removeEventListener?.('storage', storageEnded); sessionChannel?.close(); sessionChannel = null; }
   function activate() { active = true; listen(); for (const waiter of [...activationWaiters]) { if (waiter.ticket === epoch) waiter.resolve(); else waiter.reject(new Error('원본 PDF 준비가 중단되었습니다.')); activationWaiters.delete(waiter); } }
-  function retry() { for (const record of records) if (record.failed && !record.settled && record.ticket === epoch && matches(record.source)) start(record); }
+  function retry(value, pdfUrl) { for (const record of records) if (record.failed && !record.settled && record.ticket === epoch && matches(record.source) && (!value || record.source.value === value && record.original === pdfUrl)) start(record); }
   function deactivate() {
     active = false; epoch++; unlisten(); cache = new WeakMap(); for (const item of pending) item.abort(); pending.clear();
     for (const waiter of activationWaiters) waiter.reject(new Error('원본 PDF 준비가 중단되었습니다.')); activationWaiters.clear();
@@ -2232,8 +2233,8 @@ function kinDicomPdfViewportGuard(extensionManager, options) {
 }
 
 function kinCreateDicomPdf() {
-  let services, ready, current, viewportGuard, nativeError = null, epoch = 0;
-  function retire() { epoch++; nativeError = null; current?.stop(); current = null; }
+  let services, ready, current, viewportGuard, nativeErrors = new WeakMap(), epoch = 0;
+  function retire() { epoch++; nativeErrors = new WeakMap(); current?.stop(); current = null; }
   function prepare() {
     if (window.KinDicomPdf) return Promise.resolve(window.KinDicomPdf);
     if (!ready) ready = new Promise((resolve, reject) => {
@@ -2248,13 +2249,19 @@ function kinCreateDicomPdf() {
   }
   return { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
     services = servicesManager.services;
-    if (extensionManager) { viewportGuard = kinDicomPdfViewportGuard(extensionManager, { onSessionEnd: retire, onFailure: error => { nativeError = error; current?.nativeFailure?.(error); }, onSuccess: () => { nativeError = null; current?.nativeReady?.(); } }); if (!viewportGuard.install()) throw new Error('원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'); }
+    if (extensionManager) { viewportGuard = kinDicomPdfViewportGuard(extensionManager, { onSessionEnd: retire,
+      onFailure: (error, value, pdfUrl) => { nativeErrors.set(value, { pdfUrl, error }); current?.nativeFailure?.(error, value, pdfUrl); },
+      onSuccess: (value, pdfUrl) => { if (nativeErrors.has(value)) nativeErrors.delete(value); current?.nativeReady?.(value, pdfUrl); }
+    }); if (!viewportGuard.install()) throw new Error('원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'); }
   },
     onModeEnter() {
       if (viewportGuard && !viewportGuard.ownsWrapper() && !viewportGuard.install()) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = '원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'; return; }
       viewportGuard?.activate();
       const ticket = ++epoch; current?.stop(); current = null;
-      prepare().then(module => { if (ticket === epoch) { current = module.create(services, { onRetry: () => { nativeError = null; viewportGuard?.retry(); } }); current.mount(); if (nativeError) current.nativeFailure?.(nativeError); } }).catch(error => {
+      prepare().then(module => { if (ticket === epoch) { current = module.create(services, {
+        nativeFailureFor: (value, pdfUrl) => { const saved = nativeErrors.get(value); return saved?.pdfUrl === pdfUrl ? saved.error : null; },
+        onRetry: (value, pdfUrl) => viewportGuard?.retry(value, pdfUrl)
+      }); current.mount(); } }).catch(error => {
         if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; }
       });
     },

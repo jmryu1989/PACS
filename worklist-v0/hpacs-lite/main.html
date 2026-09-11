@@ -979,6 +979,7 @@
   <style>#rows tr[data-uid]:focus-visible,#relrows tr[data-uid]:focus-visible{outline:2px solid #b2dcff;outline-offset:-2px}#row-keyboard-help{font-size:12px;color:#c1d3e9}</style>
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
+  <script src="study-arrivals.js"></script>
   <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
@@ -3574,7 +3575,10 @@
           if (generation !== pollGeneration || commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
-          const known = new Set(studies.map(x => x.uid));
+          const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
+          const arrivalNotice = arrivals?.ok && arrivals.changes.length
+            ? `기존 검사 ${arrivals.changes.length}건에 영상 또는 시리즈가 추가됐습니다. 현재 영상 화면은 자동 교체하지 않습니다.` : '';
+          const known = new Map(studies.map(x => [x.uid, x]));
           const fresh = r.studies.filter(s => !known.has(s.uid));
 
           // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
@@ -3592,14 +3596,16 @@
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
             render();
             if (selectedUid) { loadReport(); updateReportButtons(); }
-            if (fresh.length)
-              toast(`새 검사 ${fresh.length}건이 도착했습니다` +
-                    (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : ""), "info");
+            if (fresh.length || arrivalNotice)
+              toast([fresh.length ? `새 검사 ${fresh.length}건이 도착했습니다` +
+                    (fresh.some(s => s.state.ss === "Unverified") ? " — Technician 탭에서 확인(Verify)하세요" : "") : '', arrivalNotice].filter(Boolean).join(' · '), "info");
             return;
           }
 
           for (const s of r.studies) {
-            const uid = s.uid, st = s.state;
+            const uid = s.uid, st = s.state, existing = known.get(uid);
+            if (existing) for (const field of ['count', 'series'])
+              if (Number.isSafeInteger(s[field]) && s[field] >= 0) existing[field] = s[field];
             updateNoteSummary(uid, s.techNote);
             updateReaderAssignment(uid, s.readerAssignment);
             if (uid === selectedUid) {
@@ -3628,6 +3634,7 @@
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
           }
           render();
+          if (arrivalNotice) toast(arrivalNotice, 'info');
           pollFails = 0;
         } catch (e) {
           if (generation !== pollGeneration) return;

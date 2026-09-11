@@ -6,6 +6,12 @@ import measurement_ci as ci
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_study_arrivals_profile_is_exact_and_separate(self):
+        profile=ci.PROFILES['study-arrivals']
+        self.assertEqual(profile['suites'],(('e2e/test_study_arrivals.py','StudyArrivalsE2E','ci-study-arrivals'),))
+        self.assertEqual(profile['out'].name,'study-arrivals-ci')
+        self.assertEqual(profile['suite_timeout'],900)
+
     def test_display_scope_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['display-scope']
         self.assertEqual(profile['suites'],(('e2e/test_viewer_display_scope.py','ViewerDisplayScopeE2E','ci-display-scope'),))
@@ -38,7 +44,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
-                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope'})
+                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']

@@ -20,6 +20,12 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'study-arrivals': {
+        'out': ROOT / 'tests/e2e/artifacts/study-arrivals-ci',
+        'project_prefix': 'kin-study-arrivals-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_study_arrivals.py', 'StudyArrivalsE2E', 'ci-study-arrivals'),),
+    },
     'display-scope': {
         'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
         'project_prefix': 'kin-display-scope-ci-',

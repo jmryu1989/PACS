@@ -111,6 +111,28 @@ test('a transient native HTTP failure keeps the consumed promise for explicit re
   assert.equal(await samePromise,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
 });
 
+test('native failure and success callbacks stay bound to their exact display set',async()=>{
+  let unavailable=true;const states=new Map(),reply=value=>({ok:true,status:200,json:async()=>value});
+  const fetch=async url=>{if(unavailable)return {ok:false,status:503,json:async()=>({})};if(url==='/api/dicom/lookup')return reply({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});return reply({kind:'member',institution:'hospital',sub:'reader'})};
+  const sandbox=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=sandbox.kinDicomPdfViewportGuard(fixture.manager,{
+    onFailure:(error,value,pdfUrl)=>states.set(value,{error,pdfUrl}),
+    onSuccess:(value,pdfUrl)=>{if(states.get(value)?.pdfUrl===pdfUrl)states.delete(value)}
+  });guard.install();guard.activate();
+  const url='https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered',a=display({displaySetInstanceUID:'a',pdfUrl:Promise.resolve(url)});
+  const aElement=fixture.entry.component({displaySets:[a]});await new Promise(resolve=>setImmediate(resolve));assert.equal(states.get(a).pdfUrl,a.pdfUrl);
+  unavailable=false;const b=display({displaySetInstanceUID:'b',pdfUrl:Promise.resolve(url)}),bElement=fixture.entry.component({displaySets:[b]});
+  assert.match(await bElement.props.displaySets[0].pdfUrl,/\/instances\/.+\/pdf$/);assert.ok(states.has(a),'B success must not clear A failure');assert.equal(states.has(b),false);
+  guard.retry(a,a.pdfUrl);assert.match(await aElement.props.displaySets[0].pdfUrl,/\/instances\/.+\/pdf$/);assert.equal(states.has(a),false);
+});
+
+test('replacing pdfUrl on the same display set retires its stale resolver record',async()=>{
+  const fetch=async url=>url==='/api/dicom/lookup'?{ok:true,json:async()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'})}:{ok:true,json:async()=>({kind:'member',institution:'hospital',sub:'reader'})};
+  const sandbox=load({fetch,location:{href:'https://pdf.test/ohif/viewer',origin:'https://pdf.test'}}),fixture=manager(keyed),guard=sandbox.kinDicomPdfViewportGuard(fixture.manager);guard.install();guard.activate();
+  const source=display({pdfUrl:new Promise(()=>{})}),old=fixture.entry.component({displaySets:[source]}),url='https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered';
+  source.pdfUrl=Promise.resolve(url);const current=fixture.entry.component({displaySets:[source]});await assert.rejects(old.props.displaySets[0].pdfUrl,/변경/);
+  assert.equal(await current.props.displaySets[0].pdfUrl,'https://pdf.test/instances/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee/pdf');
+});
+
 test('session-ended retires pending native work',async()=>{
   const listeners=new Map();let ended=0;class Channel{constructor(){this.onmessage=null}close(){this.closed=true}}
   const addEventListener=(name,fn)=>listeners.set(name,fn),removeEventListener=(name,fn)=>{if(listeners.get(name)===fn)listeners.delete(name)};
