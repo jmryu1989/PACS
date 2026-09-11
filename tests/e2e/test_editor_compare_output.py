@@ -15,6 +15,7 @@ from pypdf import PdfReader
 from playwright.sync_api import expect
 from test_viewer_job_report import ViewerJobReportE2E, canvas_ready
 from test_viewer_job_print import psql, literal
+from test_compare_reports import text_runs, page_lines
 
 DRAFT_MARK = 'DRAFT-BODY-LINE'
 COMPARISON_MARK = 'COMPARISON-BODY-LINE'
@@ -139,21 +140,36 @@ class EditorCompareOutputE2E(ViewerJobReportE2E):
   pdf = PdfReader(path); total = len(pdf.pages)
   self.assertGreaterEqual(total, 4)
   owned = {a.uid: 0, b.uid: 0}
+  summary_seen = 0
   for index, sheet in enumerate(pdf.pages):
    text = sheet.extract_text(); page = flat(text)
    self.assertIn(patient, text)
    draft = flat(DRAFT_MARK) in page
    comparison = COMPARISON_MARK in page
    self.assertFalse(draft and comparison, 'page %d mixes the draft and the saved report' % (index + 1))
+   # The title-block summary lists every report by name with its own label; it
+   # shares the first report's page (here the draft's), exactly as in the saved
+   # output, and the image pages repeat it as their legend. Those lines are
+   # checked by name, the rest of a draft page as the draft.
+   lines = [flat(line) for line in page_lines(text_runs(sheet))]
+   summary = [line for line in lines if line.startswith((flat('Current Study Report:'), flat('Comparison Study Report:')))]
+   rest = ''.join(line for line in lines if line not in summary)
+   if summary:
+    summary_seen += 1
+    current_line = [line for line in summary if line.startswith(flat('Current Study Report:'))]
+    self.assertEqual(len(current_line), 1, summary); self.assertIn(flat(UNSAVED), current_line[0])
+    for stamp in ('RSA', 'RSW', '·v1·', '승인된저장본'): self.assertNotIn(stamp, current_line[0], summary)
+    comparison_line = [line for line in summary if line.startswith(flat('Comparison Study Report:'))]
+    self.assertEqual(len(comparison_line), 1, summary); self.assertIn(flat('미승인 저장본 · v1'), comparison_line[0])
    if draft:
     owned[a.uid] += 1
     self.assertIn(flat('Current Study Report'), page)
     self.assertIn(flat('Study ' + a.uid), page)
     self.assertIn(flat(UNSAVED), page)
     self.assertIn('20260801', page)
-    self.assertNotIn(b.uid, page)
+    self.assertNotIn(b.uid, rest)
     for stamp in ('RSA', 'RSW', '·v1·', '승인된저장본'):
-     self.assertNotIn(stamp, page, 'page %d gave the draft a saved stamp %r' % (index + 1, stamp))
+     self.assertNotIn(stamp, rest, 'page %d gave the draft a saved stamp %r' % (index + 1, stamp))
    if comparison:
     owned[b.uid] += 1
     self.assertIn(flat('Comparison Study Report'), page)
@@ -163,7 +179,7 @@ class EditorCompareOutputE2E(ViewerJobReportE2E):
     self.assertNotIn(a.uid, page)
     self.assertNotIn(flat('미확정'), page)
    self.assertIn('%d/%d' % (index + 1, total), page)
-  self.assertGreaterEqual(owned[a.uid], 2); self.assertGreaterEqual(owned[b.uid], 2)
+  self.assertGreaterEqual(owned[a.uid], 2); self.assertGreaterEqual(owned[b.uid], 2); self.assertGreaterEqual(summary_seen, 1)
   alltext = '\n'.join(sheet.extract_text() for sheet in pdf.pages)
   self.assertIn('UNSAVED CURRENT', alltext); self.assertIn('PRIOR SAVED', alltext)
   self.assertNotIn('SAVED CURRENT MUST NOT BE SUBSTITUTED', alltext)
@@ -220,6 +236,8 @@ class EditorCompareOutputE2E(ViewerJobReportE2E):
   self.set_body(p, findings='CHANGED WHILE THE PREVIEW WAS OPEN')
   printed = self.print_popup(p)
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('변경되었습니다', timeout=45000)
+  # The dialog closes the popup before it reports; the close event may still be in flight.
+  if not printed.is_closed(): printed.wait_for_event('close', timeout=10000)
   self.assertTrue(printed.is_closed())
   expect(paper.locator('.report')).to_have_count(0)
   p.locator('#kin-job-print').get_by_role('button', name='다시 확인', exact=True).click()
@@ -230,6 +248,7 @@ class EditorCompareOutputE2E(ViewerJobReportE2E):
   p.evaluate("()=>{window.__editorSession='session-2'}")
   printed = self.print_popup(p)
   expect(p.locator('#kin-job-print [role=status]')).to_contain_text('변경되었습니다', timeout=45000)
+  if not printed.is_closed(): printed.wait_for_event('close', timeout=10000)
   self.assertTrue(printed.is_closed())
   p.evaluate("()=>{window.__editorMode='silent'}")
   p.locator('#kin-job-print').get_by_role('button', name='다시 확인', exact=True).click()
