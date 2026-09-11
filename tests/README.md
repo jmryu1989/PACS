@@ -1,5 +1,27 @@
 # 살아 있는 불변조건 테스트
 
+## 실행 입구와 중단 조건 (2026-09-11)
+
+REQ-DEV-EXECUTION-GATE → RISK-DEV-ACCIDENTAL-LIVE/CONCURRENT-FIXTURES/UNBOUNDED-RETRY → TEST-DEV-EXECUTION-GATE (`execution_guard_test.py`). `LiveStack`을 쓰는 아래 과거 직접 실행 예시는 이제 공용 실행기로 감싼다. 순수 모델 시험에서 실환경 TestCase가 import로 따라온 사고를 막기 위해 일반 `unittest`에서는 LiveStack 생성 자체가 거부된다.
+
+```sh
+python scripts/run-tests.py --module tests/volume_recipe_precision_test.py --mode pure --unit recipe-precision-fix
+python scripts/run-tests.py --module tests/e2e/test_volume_rendering.py --class VolumeRenderingE2E --mode live --unit vr-display --timeout 1800
+python scripts/run-tests.py --plan ../tmp/my-work/tests.json
+```
+
+`--module`은 해당 모듈의 `load_tests`를 존중하며 import된 TestCase가 섞인 수집을 거부한다. `--class`를 주면 그 파일에서 선언한 클래스의 직접 선언 시험만 선택한다. 상속 시험을 포함할 때는 JSON의 정확한 메서드로 선택한다. 실행 전 선택 전체를 검증하고 `EXACT_TESTS`로 출력한다. 기존 별도 main 블록의 선택을 추정하지 말고 대응하는 클래스/메서드를 대조한다. CI 측정 8개 suite는 기존 클래스의 직접 선언 시험 목록을 사용한다.
+
+```json
+{"unit":"vr-display-regression","mode":"live","tests":[{"file":"tests/e2e/test_volume_rendering.py","case":"VolumeRenderingE2E.test_vr_01_native_rotation_display_reset_and_preservation"}],"max_attempts":3,"timeout_seconds":600}
+```
+
+단위는 같은 결함 수정 동안 유지한다. 시도 수는 증거 디렉터리와 별도로 OS 계정의 영구 상태 디렉터리 `<unit>.json`에 누적되고 성공 후 반복·최대 3회 초과·한도 상향을 거부한다. Windows는 OS 계정의 Local AppData 아래 `KIN/PACS/test-gate`, Linux는 계정 홈 아래 `.local/state/kin-pacs/test-gate`이며 TMP/TEMP/TMPDIR/HOME 환경변수로 분리되지 않는다. 시간 초과는 자기 시험 프로세스 트리를 종료하고 실패로 남긴다. `record-run.py`로 이 실행기를 감싸면 기존 원문/exit/전후 해시 기록을 그대로 보존할 수 있다.
+
+실환경 실행은 사용자 계정의 호스트 공용 OS 잠금을 소유하며, 실패/중단하면 `live-needs-inspection.json`을 남긴다. 다음 실행자는 이 파일과 해당 ledger를 읽고 자기 합성 fixture 정리·현행 보존 검사를 완료해 근거를 남긴 뒤, 살아 있는 잠금 소유자가 없는 상태에서 marker만 제거한다. 원본/기존 행은 정리 대상이 아니며 실패 기록과 시도 수는 지우지 않는다. 이 확인은 개발 실행자의 일이며 사용자에게 매번 승인·정리를 맡기지 않는다.
+
+이 장치는 동일 계정의 악의적 코드에 대한 sandbox가 아니다. 직접 SQL/다른 시험 도구·Docker·원본 자격증명 접근과 Codex 앱 전체 호출/토큰 상한은 별도 경계다. 원본과 완전히 분리된 로컬 시험 환경을 구축했다고 해석하지 않는다. 모듈 import 자체도 임의 Python을 실행하므로 순수 모드는 LiveStack 입구 제한이며 OS 네트워크 차단이 아니다.
+
 REQ-D-VOLUME-SYNC → RISK-D-VOLUME-SYNC-TARGET/GEOMETRY/LOSS → TEST-VOLUME-SYNC: `python tests/e2e/test_volume_sync.py`는 현재 정규 CT 3평면의 Windowing/Zoom 동기화, 선택 초기화 제외, 개별 카메라·반전 보존, SIGMOID 픽셀/실제 입력 범위, 부분 실패 복구·재시도, 배치 교체/오래된 이벤트, 모달·소유자·세션 종료와 저장 후 새 로그인 재열람을 검사한다. 동기화 옵션은 현재 배치용이며 Job 필드가 아니다. 전체 MPR/VR·전문 modality·대용량·물리 장치 수용은 별도 잔여다.
 
 REQ-D-WORKSPACE-READING-LAYOUT → RISK-ROAM-MIX/LOST/SIZE/STALE → TEST-READING-PANEL-LAYOUT/TEST-ROAM-API: `tests/reading_panel_layout_test.cjs`, `workspace_layout_test.cjs`, `workspace_roaming_live.py`, `e2e/test_reading_panel_layout.py`는 통합 영상·판독/관련 패널의 키보드·포인터 크기 조절과 숨김·복원, 원래 CT 화소·카메라·동일 iframe·미저장 판독/작업 보존, 작은 창 clamp·계정 분리·로컬 실패·v1 불러오기/v2 계정 복원을 확인한다. API는 구형 v1 쓰기의 v2 설정 삭제와 다른 계정·오래된 revision을 거절한다. `viewer_migration_test.py`의 실제 dump/restore는 v2 표시 설정 전체 행을 대조한다. 물리 다중 모니터/OS 사용 확인은 별도 잔여다.

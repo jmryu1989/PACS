@@ -34,6 +34,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen,
 )
+from live_test_gate import require_live_run
 
 
 # 실패 메시지가 핵심 증거인데 Windows CP949가 한글을 깨뜨리면 어떤 불변조건이 무너졌는지
@@ -305,6 +306,7 @@ TEMPORARY_PASSWORD_RE = r"^[A-Za-z0-9_-]{24}aA1!$"
 
 class LiveStack:
     def __init__(self) -> None:
+        require_live_run()
         self.proxy = os.environ.get("KIN_TEST_PROXY", "https://localhost:9443").rstrip("/")
         self.api = os.environ.get("KIN_TEST_API", self.proxy + "/api").rstrip("/")
         self.keycloak = os.environ.get(

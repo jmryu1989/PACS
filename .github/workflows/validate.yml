@@ -27,6 +27,8 @@ jobs:
         run: python3 tests/measurement_ci_test.py
       - name: Execution evidence raw and LF hash preservation
         run: python3 tests/record_run_test.py
+      - name: Explicit test selection, process leases and bounded retries
+        run: python3 tests/execution_guard_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
@@ -40,6 +42,7 @@ jobs:
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
+          "$RUNNER_TEMP/measurement-python/bin/python" tests/execution_selection_test.py
           "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py
       - name: Sanitized synthetic measurement evidence
         if: always()

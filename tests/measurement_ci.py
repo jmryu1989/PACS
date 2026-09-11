@@ -10,6 +10,20 @@ SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
           'e2e/test_measurement_panel.py', 'e2e/test_held_measurements.py',
           'e2e/test_manual_sr.py', 'e2e/test_measurement_recheck.py',
           'e2e/test_viewer_recovery.py', 'e2e/test_measurement_calibration.py']
+SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
+                 'HeldMeasurementE2E', 'ManualSrE2E', 'MeasurementRecheckE2E',
+                 'ViewerRecoveryE2E', 'MeasurementCalibrationE2E']
+
+
+def guarded_suite_command(suite, class_name, remaining):
+    # The inner supervisor must terminate its descendants before the outer CI
+    # deadline kills the supervisor and starts disposable-stack cleanup.
+    seconds = min(540, int(remaining)-35)
+    if seconds < 1:
+        raise RuntimeError('Insufficient CI time for a supervised test run')
+    return [sys.executable, str(ROOT/'scripts/run-tests.py'), '--module', 'tests/'+suite,
+            '--class', class_name, '--mode', 'live',
+            '--unit', 'ci-'+Path(suite).stem.replace('_','-'), '--timeout', str(seconds)]
 
 
 def sanitize(output, secrets_to_hide):
@@ -114,8 +128,8 @@ def main():
                     if time.monotonic() >= ready_by: raise RuntimeError('Stack readiness deadline')
                     time.sleep(1)
         run('ports', compose+['ps'])
-        for suite in SUITES:
-            run(Path(suite).stem, [sys.executable, str(ROOT/'tests'/suite)])
+        for suite, class_name in zip(SUITES, SUITE_CLASSES):
+            run(Path(suite).stem, guarded_suite_command(suite, class_name, deadline-time.monotonic()))
     finally:
         # This project was generated after proving an empty runner daemon.
         # Never use this cleanup against a developer or production stack.

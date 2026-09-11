@@ -5,6 +5,13 @@ import measurement_ci as ci
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_inner_deadline_leaves_time_to_terminate_descendants(self):
+        for remaining, expected in [(1000,540), (100,65), (36,1)]:
+            command=ci.guarded_suite_command('e2e/test_manual_sr.py','ManualSrE2E',remaining)
+            self.assertEqual(command[command.index('--timeout')+1],str(expected))
+        with self.assertRaisesRegex(RuntimeError,'Insufficient CI time'):
+            ci.guarded_suite_command('e2e/test_manual_sr.py','ManualSrE2E',35)
+
     def test_local_and_self_hosted_refused_before_docker(self):
         for env in [{}, {'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'self-hosted'}]:
             with patch.dict(os.environ,env,clear=True), patch.object(ci.subprocess,'check_output') as command, patch.object(ci.subprocess,'run') as mutation:

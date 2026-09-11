@@ -67,6 +67,14 @@ Orthanc·NestJS/Prisma·PostgreSQL·Keycloak·nginx로 구성된 의료영상 �
 
 ## 2. 실행과 검증
 
+### 시험 실행 통제 (2026-09-11)
+
+사용자가 현재 실행의 모델/추론 수준을 선택한다. 이 선택을 별도 고비용 실행·보조 실행이나 모델 설정 변경의 승인으로 해석하지 않는다. 다음 개발 업무는 주실행자가 기존 요구사항·로드맵에서 선택하며 사용자에게 시험 계획 작성을 떠넘기지 않는다.
+
+`LiveStack`을 쓰는 시험은 `scripts/run-tests.py`가 만든 실행 범위 안에서만 허용한다. 일반 `unittest` 실행이나 환경 변수로 이 허가를 얻지 못한다. 실행기는 정확한 파일/클래스/메서드를 고정하고 순수 모드의 LiveStack 접근·실환경 동시 실행·성공한 단위의 반복을 거부한다. 단위당 최대 3회·회당 최대 3600초이며 수정/증거 디렉터리 변경으로 같은 단위의 예산을 다시 만들지 않는다. 단위 이름을 바꾸는 것이 같은 실패의 재시도 허가가 아니다.
+
+실환경 실패·중단에는 OS 계정의 영구 상태 디렉터리 `test-gate/live-needs-inspection.json`이 남는다. 주실행자가 해당 실행 소유의 합성 자료와 보존 상태를 확인·정리하고 근거를 남길 때까지 다른 실환경 시험도 차단한다. 시간 경과·다음 heartbeat를 이유로 marker/ledger를 지우지 않는다. 예산 소진 항목은 원인·남은 조건을 현재 상태에 기록하고 의존하지 않는 승인 업무를 계속한다. 이 도구는 OS 자격증명 격리나 Codex 전체 호출/토큰 상한을 제공하지 않으며, 같은 계정의 임의 쉘·Docker 접근까지 차단했다고 보고하지 않는다.
+
 로컬 정식 입구는 **`https://localhost:9443`**이며 `/api`·`/auth`·`/worklist`·`/ohif`·`/dicom-web`은 같은 출처다.
 8042·3000·8080은 디버깅 포트다. 계정은 관리자 발급을 사용한다.
 현재 인증은 BFF의 HttpOnly 세션과 OIDC Authorization Code + PKCE다. 시험용 password grant는
@@ -82,8 +90,8 @@ LiveStack이 생성·정리하는 임시 클라이언트에만 사용하며 기�
 추가 시험과 조건은 [tests/README.md](tests/README.md)를 확인한다.
 
 ```bash
-python tests/invariants_live.py       # 현재 69개
-python tests/e2e/test_worklist.py      # 현재 14개, 앞 시험 종료 후 실행
+python scripts/run-tests.py --module tests/invariants_live.py --mode live --unit candidate-invariants --timeout 3600
+python scripts/run-tests.py --module tests/e2e/test_worklist.py --mode live --unit candidate-worklist --timeout 1800
 ```
 
 문서만 바꾸면 문서 대조·링크·diff를 확인한다. 일상 상태/증거 요약은 별도 독립 문서 검토를 만들지 않는다. 안전·권한·제품 경계의 실질 변경과 최종 후보 계약에는 필요한 독립 검토를 유지한다. 제품 시험·재기동·새 제품 태그를 불필요하게 만들지 않는다.
