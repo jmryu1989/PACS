@@ -12,6 +12,7 @@ on:
           - output-integration
           - identity-fields
           - vr-resize-probe
+          - hanging-protocols
 
 permissions:
   contents: read
@@ -54,6 +55,8 @@ jobs:
             tests/e2e/artifacts/output-integration-ci/
             tests/e2e/artifacts/identity-fields-ci/
             tests/e2e/artifacts/vr-resize-probe-ci/
+            tests/e2e/artifacts/hanging-protocols-ci/
+            tests/e2e/artifacts/HP-*.png
             tests/tmp/workspace-ui-ci/identity-position-native/
             tests/tmp/workspace-ui-ci/identity-fields-native/
             tests/e2e/artifacts/job-report.pdf

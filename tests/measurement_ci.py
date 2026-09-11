@@ -20,6 +20,18 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'hanging-protocols': {
+        'out': ROOT / 'tests/e2e/artifacts/hanging-protocols-ci',
+        'project_prefix': 'kin-hp-ci-',
+        'suite_timeout': 900,
+        # Shared API/DB changes retain invariants then worklist before the new flow.
+        'suites': (
+            ('invariants_live.py', None, 'ci-hp-invariants'),
+            ('e2e/test_worklist.py', None, 'ci-hp-worklist'),
+            ('hanging_protocol_api_live.py', 'HangingProtocolApiLive', 'ci-hp-account'),
+            ('e2e/test_hanging_protocol.py', 'HangingProtocolE2E', 'ci-hp-native'),
+        ),
+    },
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
         'project_prefix': 'kin-measure-ci-',

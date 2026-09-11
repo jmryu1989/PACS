@@ -157,7 +157,7 @@ GitHub 호스팅의 빈 Docker runner에서만 임시 비밀·합성 CT·DB/Keyc
 측정 job의 API는 실제 `development` target/소스 mount로 컴파일한다. 기존 `runtime` job의 production image 검증과 구분한다.
 기존 readback/panel/held/manual-SR와 viewer-api, 재확인/세션회복/calibration 시험을 순서대로 실제 실행한다.
 두 fault.cjs는 해당 E2E가 소유 fixture와 실제 컴파일 서비스를 통해 실행한다. 등록과 실제 CI 성공은 구분한다.
-수동 `Focused integration` workflow는 같은 빈 GitHub-hosted runner와 실행 가드를 재사용한다. 세 선택지는 `output-integration`, `identity-fields`, `vr-resize-probe`다. 기본 `output-integration` 선택은 비교 판독문 6개 뒤 Job 판독문 4개를 실행한다. `identity-fields` 선택은 표시 설정 API 17개, 위치 API 2개, 필드 API 2개, 실제 위치 2개, 실제 필드 2개를 이 순서로 실행하며 프로필별 정화 로그를 분리한다. runner의 `--profile` 허용 목록은 이 세 선택지에 자동 `measurements`, `volume-rendering`을 더한 다섯 프로필을 검사한다. 이는 실제 실행 경로의 등록 설명이며 실행 성공 근거가 아니다. 로컬 원본 fixture에서 실행하지 않는다.
+수동 `Focused integration` workflow는 같은 빈 GitHub-hosted runner와 실행 가드를 재사용한다. 네 선택지는 `output-integration`, `identity-fields`, `vr-resize-probe`, `hanging-protocols`다. 기본 `output-integration` 선택은 비교 판독문 6개 뒤 Job 판독문 4개를 실행한다. `identity-fields` 선택은 표시 설정 API 17개, 위치 API 2개, 필드 API 2개, 실제 위치 2개, 실제 필드 2개를 이 순서로 실행하며 프로필별 정화 로그를 분리한다. runner의 `--profile` 허용 목록은 이 네 선택지에 자동 `measurements`, `volume-rendering`을 더한 여섯 프로필을 검사한다. 이는 실제 실행 경로의 등록 설명이며 실행 성공 근거가 아니다. 로컬 원본 fixture에서 실행하지 않는다.
 세션 내 보관본은 브라우저 저장소에 쓰지 않으며 명시적 재개 전에 현재 검사 접근을 조회한다.
 뷰어 모드 종료·로그아웃·로그인 주체 변경 시 폐기하며 페이지 이탈/Job 복구 경고에 포함한다.
 후속 A3/A4 빠른 시험은 같은 revision의 검증 실패와 분리된 편집문, 분리된 이전 저장 handler 거절,
@@ -1258,3 +1258,15 @@ Execution evidence retains the original `sha256` and adds `lf_sha256`: byte-leve
 `node --test tests/worklist_body_parts_test.cjs tests/compound_filter_test.cjs` checks real token semantics, unknown/error exclusion, bounded series reads, cancellation/resume and stale account/scope rejection. `python tests/worklist_body_parts_dom_test.py` uses isolated Chromium and synthetic QIDO responses with the actual worklist filter, saved-search editor and metadata loader. It verifies partial counts, explicit reads and editor/selection preservation; it does not use a PACS stack.
 
 The fresh GitHub-hosted `measurements` profile additionally selects only `WorklistBodyPartsE2E.test_worklist_body_parts_01_actual_metadata_saved_default_and_clear` from `e2e/test_worklist_body_parts.py` through the guarded runner. Three owned synthetic CT studies exercise real DICOMweb metadata, saved/default search restoration, Clear, and unchanged report target/text/history. Never run this LiveStack fixture against the original local environment while isolation remains incomplete. Both pure DOM and real-stack evidence distinguish unverified metadata from verified missing BodyPartExamined.
+
+
+## TEST-HP-LIBRARY — Personal rules, explicit Apply, and account storage
+
+REQ-D-HP-LIBRARY → RISK-D-HP-WRONG-STUDY/STALE/OWNER/LOSS → TEST-HP-MODEL/DOM/API/NATIVE.
+`hanging_protocol_model_test.cjs` and `hanging_protocol_validator_test.cjs` share strict JSON vectors. `viewer_hanging_protocol_dom_test.py` covers form edits, ordered first-match selection, explicit Vacancy and duplicates, owner CAS, empty-library save, corruption, stale requests/imports, and bounded native rollback. `viewer_hanging_protocol_mount_dom_test.py` exercises the authenticated config loader and stack-source filtering.
+
+The manual `hanging-protocols` profile runs unchanged invariants69 → worklist14 → `HangingProtocolApiLive` → four declared `HangingProtocolE2E` tests on a fresh synthetic hosted stack. The additive `HangingProtocolPreference` migration, production-image migration list and synthetic product-restore fixture travel together. Native tests verify Study/Series/SOP, rendered pixels, account reopening, stale frame/camera/layout responses and preserved report/original rows. Registration is not execution evidence.
+
+Current/Related follows the viewer URL order. Only unambiguous native stack display sets with consistent study/series image identities are eligible; composite stacks, split series and specialized objects are refused. Apply First Match follows enabled rule order. Save Draft and account Save do not apply layouts; account Load is explicit. Definitions contain no patient snapshots or monitor coordinates. Retrieve AE means DICOM (0008,0054); unknown or mixed metadata does not match a specified condition. Other-user copying, physical monitor placement, and modality-specific display transformations remain separate requirements.
+
+Yoyo direction persists through the native FPS stop/play effect and pause/resume. The deterministic stack/MPR lifecycle tests reproduce the descending-direction regression and check explicit range/mode/geometry resets. The late preload native test holds the loader promise so cached images still exercise source retirement.

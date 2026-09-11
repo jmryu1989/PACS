@@ -81,6 +81,18 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
 
+    def test_hanging_protocol_profile_runs_exact_shared_and_new_cases(self):
+        profile=ci.PROFILES['hanging-protocols']
+        for index,(filename,class_name,unit) in enumerate(profile['suites']):
+            plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+            self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
+            if index<2:self.assertEqual(len(plan['tests']),[69,14][index])
+            if class_name=='HangingProtocolE2E':
+                cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+                self.assertEqual({row['case'] for row in plan['tests']},
+                    {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_hp_')})
+                self.assertEqual(len(plan['tests']),4)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

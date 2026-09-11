@@ -1380,6 +1380,20 @@ const kinViewerLayoutModel = (() => {
   return { PREFIX, uid, scope, owner, normalize, read, write };
 })();
 
+function kinHangingProtocolDisplaySets(values) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = JSON.stringify([value.StudyInstanceUID, value.SeriesInstanceUID]);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return values.filter(value =>
+    counts.get(JSON.stringify([value.StudyInstanceUID, value.SeriesInstanceUID])) === 1 &&
+    value.SOPClassHandlerId === '@ohif/extension-default.sopClassHandlerModule.stack' &&
+    !value.isCompositeStack && Array.isArray(value.images) && value.images.length > 0 &&
+    value.images.every(image => image.StudyInstanceUID === value.StudyInstanceUID &&
+      image.SeriesInstanceUID === value.SeriesInstanceUID));
+}
+
 function kinCreateViewerLayout() {
   let services, stop;
   function mount() {
@@ -1388,20 +1402,22 @@ function kinCreateViewerLayout() {
     const cs = services.cornerstoneViewportService, ds = services.displaySetService;
     const search = location.search, studies = model.scope(search);
     const panel = document.createElement('details'); panel.id = 'kin-viewer-layout'; panel.open = true;
-    panel.style.cssText = 'position:fixed;left:8px;bottom:30px;z-index:41;width:260px;max-width:calc(100vw - 16px);background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:8px;font:13px sans-serif';
+    panel.style.cssText = 'position:fixed;left:8px;bottom:30px;z-index:41;width:360px;max-width:calc(100vw - 16px);max-height:calc(100vh - 48px);overflow:auto;box-sizing:border-box;background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:8px;font:13px sans-serif';
     const summary = document.createElement('summary'); summary.textContent = 'Recent Layout'; panel.append(summary);
     const note = document.createElement('p'); note.textContent = '최근 1건만 저장합니다. 영상 위치·확대·주석은 포함하지 않습니다.'; panel.append(note);
     const status = document.createElement('p'); status.id = 'kin-viewer-layout-status'; status.setAttribute('role', 'status'); panel.append(status);
     const controls = document.createElement('div'); panel.append(controls); document.body.append(panel);
-    let ended = false, busy = false, key = null, channel;
+    let ended = false, busy = false, key = null, channel, hpOwner = null, hp = null;
     const controller = new AbortController();
     const buttons = [];
     const live = () => !ended && location.search === search;
     const refresh = () => buttons.forEach(b => { b.disabled = ended || busy || !key || !studies; });
-    function end() { ended = true; controller.abort(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
-    async function get(path) {
+    function end() { ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    async function get(path, signal) {
       const request = new AbortController(), abort = () => request.abort();
       controller.signal.addEventListener('abort', abort, { once: true });
+      signal?.addEventListener('abort', abort, { once: true });
+      if (controller.signal.aborted || signal?.aborted) abort();
       const timer = setTimeout(abort, 10000);
       try {
         const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
@@ -1409,12 +1425,41 @@ function kinCreateViewerLayout() {
         if (response.status === 401 || response.status === 403) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
         if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
         return await response.json();
-      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); }
+      } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
     }
-    async function authenticate() {
-      const next = model.owner(await get('/api/me'));
+    async function authenticate(signal) {
+      const me = await get('/api/me', signal), next = model.owner(me);
       if (!live() || !next || (key && next !== key)) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       key = next;
+      hpOwner = { institution: me.institution, subject: me.sub };
+    }
+    async function mountProtocols() {
+      const load = (name, global) => window[global] ? Promise.resolve() : new Promise((resolve, reject) => {
+        const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+        const finish = error => { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); };
+        const abort = () => finish(new Error('Hanging Protocol 연결이 중단되었습니다.'));
+        const timer = setTimeout(abort, 10000);
+        script.onload = () => finish(window[global] ? null : new Error('Hanging Protocol 모듈을 확인할 수 없습니다.'));
+        script.onerror = () => finish(new Error('Hanging Protocol 화면을 불러오지 못했습니다.'));
+        controller.signal.addEventListener('abort', abort, { once: true }); document.head.append(script);
+      });
+      await load('hanging-protocol-model.js', 'KinHangingProtocolModel');
+      if (!live()) return;
+      await load('viewer-hanging-protocol.js', 'KinViewerHangingProtocol');
+      if (!live()) return;
+      const host = document.createElement('section'); panel.append(host);
+      hp = window.KinViewerHangingProtocol.mount({ services, host, owner: hpOwner, live,
+        access: async ({ signal }) => {
+          await authenticate(signal);
+          const data = await get('/api/studies', signal);
+          // Current/Related follows the opening order, unlike Recent Layout's canonical scope.
+          const uids = new URLSearchParams(search).get('StudyInstanceUIDs').split(',');
+          const rows = uids.map(uid => data.studies?.find(row => row.uid === uid));
+          if (rows.some(row => !row)) throw new Error('현재 검사 접근 권한을 확인할 수 없습니다.');
+          await authenticate(signal);
+          if (signal.aborted) throw new Error('Hanging Protocol 확인이 중단되었습니다.');
+          return { studies: rows, displaySets: kinHangingProtocolDisplaySets(ds.getActiveDisplaySets()) };
+        } });
     }
     const ordered = state => [...state.viewports.values()].sort((a, b) => a.y - b.y || a.x - b.x);
     const signature = () => {
@@ -1482,7 +1527,7 @@ function kinCreateViewerLayout() {
     const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
-    if (studies) authenticate().then(() => { if (live()) status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; }).catch(() => { if (live()) status.textContent = '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
+    if (studies) authenticate().then(async () => { if (live()) { status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols(); } }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
     else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
     stop = () => { end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
   }
@@ -1675,7 +1720,8 @@ function kinCreateCine() {
     const eligible = v => v?.type === 'stack' || v?.type === 'orthographic' && !!volumeTarget(v)?.allowed;
     const signature = v => { if (v.type === 'orthographic') { const c=v.getCamera(),round=n=>Number(n.toFixed(6)); return JSON.stringify([volumeTarget(v)?.key,c.viewPlaneNormal.map(round),c.viewUp.map(round),round(c.parallelScale),c.flipHorizontal,c.flipVertical]); } return JSON.stringify([grid.getState().viewports.get(v.id)?.displaySetInstanceUIDs, v.getImageIds?.()]); };
     const contentSignature = v => v.type==='orthographic'?volumeTarget(v)?.contentKey:signature(v);
-    const resetRange = r => { r.range = null; r.rangeRevision = (r.rangeRevision || 0) + 1; };
+    const resetDirection = r => { r.playDirection = r.mode === 'reverse' ? -1 : 1; };
+    const resetRange = r => { r.range = null; r.rangeRevision = (r.rangeRevision || 0) + 1; resetDirection(r); };
     const resetPlayback = r => { r.mode = 'forward'; r.loop = true; resetRange(r); };
     function positionControls(v) {
       const pane=[...document.querySelectorAll('[data-cy=viewport-grid] > div')].find(p=>p.contains(v?.element)),control=pane?.querySelector('[data-cy="cine-player-play-pause"]'),rect=control?.getBoundingClientRect();
@@ -1698,7 +1744,7 @@ function kinCreateCine() {
       let r = records.get(v.id);
       if (!r || r.element !== v.element) {
         const previous=r;
-        r = { element: v.element, mode: 'forward', loop: true, range: null, rangeRevision: 0, ticket: 0, signature: signature(v), content:contentSignature(v) }; records.set(v.id, r);
+        r = { element: v.element, mode: 'forward', loop: true, range: null, rangeRevision: 0, playDirection: 1, ticket: 0, signature: signature(v), content:contentSignature(v) }; records.set(v.id, r);
         // stopClip broadcasts synchronously. Publish the replacement first so
         // its render callback cannot retire the same old viewport recursively.
         if(previous){clearInterval(previous.volumeTimer);nativeStop.call(cine,previous.element,{viewportId:v.id});if(cine.getState().cines?.[v.id]?.isPlaying)cine.setCine({id:v.id,isPlaying:false});}
@@ -1784,7 +1830,7 @@ function kinCreateCine() {
           await session();if(!current())return;
           let frames=volumeFrames(v,target);const bounds=playbackRange(r,frames.last+1);if(!bounds)throw Error('MPR 재생 범위가 바뀌었습니다. 다시 적용하세요.');
           if(frames.index<bounds.first||frames.index>bounds.last){moveVolume(v,target,frames,bounds.first);frames=volumeFrames(v,target);}
-          nativeStop.call(cine,element,{viewportId:id});clearInterval(r.volumeTimer);r.loading=false;r.playDirection=r.mode==='reverse'?-1:1;
+          nativeStop.call(cine,element,{viewportId:id});clearInterval(r.volumeTimer);r.loading=false;
           // Anchor a physical grid at the first plane. Native cine excludes the
           // final position and its oblique scroll snap accumulates spacing drift.
           const timer=setInterval(()=>{
@@ -1814,7 +1860,7 @@ function kinCreateCine() {
           window.cornerstoneTools.utilities.cine.getToolState(element).loop = r.loop;render();return;
         }
         const fps=Math.abs(Number(options.framesPerSecond||10));if(!Number.isFinite(fps)||fps<1||fps>90)throw Error('재생 속도는 1~90 fps입니다.');
-        nativeStop.call(cine,element,{viewportId:id});r.playDirection=r.mode==='reverse'?-1:1;
+        nativeStop.call(cine,element,{viewportId:id});
         const timer=setInterval(()=>{
           if(!current()){clearInterval(timer);if(records.get(id)===r&&r.ticket===ticket){halt(id);render();}return;}
           try{
@@ -1833,7 +1879,9 @@ function kinCreateCine() {
     };
     const change = () => {
       const v = viewport(grid.getActiveViewportId()); if (!eligible(v)) return;
-      const r = record(v); r.mode = direction.value; r.loop = loop.checked; halt(v.id); r.message = '설정을 바꿨습니다. 재생을 눌러 시작하세요.'; render();
+      const r = record(v), modeChanged = r.mode !== direction.value; r.mode = direction.value; r.loop = loop.checked;
+      if (modeChanged) resetDirection(r);
+      halt(v.id); r.message = '설정을 바꿨습니다. 재생을 눌러 시작하세요.'; render();
     };
     listen(direction, 'change', change); listen(loop, 'change', change);
     listen(applyRange,'click',()=>{
@@ -1842,7 +1890,7 @@ function kinCreateCine() {
       if(!Number.isSafeInteger(firstValue)||!Number.isSafeInteger(lastValue)||firstValue<1||firstValue>=lastValue||lastValue>total){
         r.message=`재생 범위는 1~${total} 안에서 시작이 끝보다 작아야 합니다.`;render();return;
       }
-      r.range={first:firstValue-1,last:lastValue-1};r.rangeRevision++;halt(v.id);r.message='범위를 적용했습니다. 재생을 눌러 시작하세요.';render();
+      r.range={first:firstValue-1,last:lastValue-1};r.rangeRevision++;resetDirection(r);halt(v.id);r.message='범위를 적용했습니다. 재생을 눌러 시작하세요.';render();
     });
     listen(document, 'click', e => {
       if (!e.target.closest?.('[data-cy="cine-player-play-pause"]')) return;

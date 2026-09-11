@@ -196,7 +196,11 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 43)
+        self.assertEqual(sum(len(value) for value in rows.values()), 46)
+        hp = rows['HangingProtocolPreference']
+        self.assertEqual(len(hp), 3)
+        self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)
+        self.assertEqual(sum(r['value'] is None for r in hp), 1)
         self.assertEqual([(r['revision'],r['value'] is None) for r in rows['WorklistColumns']],[(2,False),(3,True)])
         self.assertEqual([(r['studyUid'],r['version'],r['text']) for r in rows['TechNoteRevision']],[(UID,1,'SYNTHETIC tech note')])
         job=rows['ViewerJob'][0]

@@ -141,11 +141,14 @@ class CineE2E(ViewerLayoutE2E):
   self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),rows)
 
  def test_cine_08_ranged_yoyo_selection_hidden_and_late_source_stop(self):
-  f,a,b=self.pair();originals=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a,b]);self.watch(p);pending=[];pattern='**/instances/'+a['sops'][0]+'/frames/8';p.route(pattern,lambda r:pending.append(r))
-  p.get_by_label('Range Start').fill('3');p.get_by_label('Range End').fill('6');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo');self.play(p);p.wait_for_timeout(350);self.assertTrue(pending)
+  f,a,b=self.pair();originals=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a,b]);self.watch(p)
+  # OHIF may have already cached every multiframe image before Cine opens. Hold
+  # the preparation promise itself so this race stays observable on a warm cache.
+  p.evaluate("""()=>{const loader=cornerstone.imageLoader,load=loader.loadAndCacheImage.bind(loader);window.cineOriginalLoad=loader.loadAndCacheImage;let release;
+   window.cineReleasePreparation=()=>release?.();loader.loadAndCacheImage=(imageId,...args)=>{const result=load(imageId,...args);if(!window.cinePreparationPending&&String(imageId).endsWith('/frames/8')){window.cinePreparationPending=true;return new Promise((resolve,reject)=>release=()=>Promise.resolve(result).then(resolve,reject))}return result}}""")
+  p.get_by_label('Range Start').fill('3');p.get_by_label('Range End').fill('6');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo');self.play(p);p.wait_for_function('()=>window.cinePreparationPending===true')
   self.drag(p,'D03A current',0);replacement=self.snapshot(p)
-  for request in pending:request.fulfill(response=request.fetch())
-  p.unroute(pattern);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),replacement);self.assertFalse(replacement[0]['playing']);expect(p.get_by_label('Range Start')).to_have_value('1');self.assertEqual(p.get_by_label('Playback Direction').input_value(),'forward');self.assertTrue(p.get_by_label('Loop',exact=True).is_checked())
+  p.evaluate('()=>{cornerstone.imageLoader.loadAndCacheImage=cineOriginalLoad;cineReleasePreparation()}');p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),replacement);self.assertFalse(replacement[0]['playing']);expect(p.get_by_label('Range Start')).to_have_value('1');self.assertEqual(p.get_by_label('Playback Direction').input_value(),'forward');self.assertTrue(p.get_by_label('Loop',exact=True).is_checked())
   self.select_cell(p,1);p.get_by_label('Range Start').fill('2');p.get_by_label('Range End').fill('5');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo');p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_function('()=>cineRenders.filter(r=>r.id===services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[1].viewportId).id).length>=3')
   self.select_cell(p,0);stopped=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),stopped);self.assertFalse(stopped[1]['playing'])
   self.select_cell(p,1);p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_function('()=>cineRenders.length>=3');p.evaluate("()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'))}");hidden=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),hidden);self.assertFalse(hidden[1]['playing'])

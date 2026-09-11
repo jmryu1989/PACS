@@ -49,6 +49,7 @@ function fixture(kind='orthographic',stackFrames=7){
  function response(){return {ok:true,json:async()=>({kind:'member',institution:'institution',sub:'same-user'})};}
  function play(){document.emit('click',{target:{closest:()=>true}});cine.setCine({id:current.id,isPlaying:true});return cine.playClip(current.element,{framesPerSecond:24});}
  return {play,old:current,range(first,last){control('Range Start').value=String(first);control('Range End').value=String(last);button('Apply Range').emit('click');},
+  restart(){cine.stopClip(current.element,{viewportId:current.id});return cine.playClip(current.element,{framesPerSecond:12});},
   mode(value){control('Playback Direction').value=value;control('Playback Direction').emit('change');},loop(value){const input=find(node=>node.type==='checkbox');input.checked=value;input.emit('change');},
   jump(end){button(end?(kind==='stack'?'Last Frame':'Last Plane'):(kind==='stack'?'First Frame':'First Plane')).emit('click');},
   changeScale(value){current.setCamera({parallelScale:value});},message:()=>find(node=>node.attributes.role==='status').textContent,replace(){current=makeView();gridEvents.emit('grid');return current;},
@@ -104,4 +105,17 @@ test('stack range clamps to its start and uses bounded Yoyo while full range sta
   const pending=normal.play();normal.release();await pending;assert.equal(normal.nativePlays(),1);
  }finally{normal.close();}
  const single=fixture('stack',1);try{single.jump(false);single.jump(true);assert.equal(single.index(),0);}finally{single.close();}
+});
+
+for(const kind of ['stack','orthographic'])test(`${kind} Yoyo keeps descending direction across native FPS restart`,async()=>{
+ const f=fixture(kind);try{
+  f.range(3,5);f.mode('yoyo');const pending=f.play();f.release();await pending;
+  for(const expected of [3,4,3]){f.tick();assert.equal(kind==='stack'?f.index():f.old.getCamera().focalPoint[2],expected);}
+  await f.restart();f.tick();assert.equal(kind==='stack'?f.index():f.old.getCamera().focalPoint[2],2);
+  f.tick();f.tick();f.tick(); // 3, 4, 3: descending again.
+  f.range(3,6);await f.play();f.tick();assert.equal(kind==='stack'?f.index():f.old.getCamera().focalPoint[2],4);
+  f.tick();f.tick(); // 5, 4: descending after the new endpoint.
+  f.mode('forward');f.mode('yoyo');await f.play();f.tick();assert.equal(kind==='stack'?f.index():f.old.getCamera().focalPoint[2],5);
+  if(kind==='orthographic'){f.tick();f.changeScale(20);await f.play();f.tick();assert.equal(f.old.getCamera().focalPoint[2],5);}
+ }finally{f.close();}
 });
