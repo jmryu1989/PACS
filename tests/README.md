@@ -60,6 +60,8 @@ REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-CO
 
 ## 공통 실행 증거 기록
 
+REQ-D-CINE-RANGE/YOYO → RISK-D-CINE-WRONG-FRAME/STALE/LOSS/UNBOUNDED → TEST-CINE-RANGE/YOYO: `cine_playback_test.cjs`와 `cine_lifecycle_test.cjs`는 선택 구간의 양 끝·왕복·중단, 범위 검증·원본/평면 기하 교체와 기존 비동기 소유권을 검사한다. `e2e/test_cine.py`와 `e2e/test_volume_cine.py`의 각 클래스에 직접 정의된 시험은 기존 `measurements` 프로필에서 함께 실행하며, 실제 multiframe/재구성 평면·화소·세션/선택/숨김/지연 중단·판독/원본 보존을 확인한다. `execution_selection_test.py`는 새 범위/중단 시험의 실제 선택과 상속 시험 제외를 대조한다. 로컬 원본 fixture는 실행하지 않으며 등록 사실은 hosted 실행 성공을 뜻하지 않는다.
+
 REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIEWER-WINDOW-MANAGER-DOM: `python tests/viewer_window_manager_dom_test.py` exercises the actual window-manager DOM handler and registry in isolated Chromium with synthetic window/session state and all network requests blocked. It checks pending navigation, changes during close confirmation, existing dirty/busy guards, normal close/focus, and neutral comparison identification. It does not start LiveStack or replace real OHIF/DICOM and physical-monitor verification. The existing measurements CI job runs this suite after installing the pinned browser dependencies and preserves its raw execution record separately.
 
 단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.

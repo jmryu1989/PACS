@@ -11,12 +11,14 @@ SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
           'e2e/test_viewer_recovery.py', 'e2e/test_measurement_calibration.py',
           'e2e/test_worklist_body_parts.py', 'reading_appearance_live.py',
           'reading_appearance_position_live.py', 'e2e/test_viewer_identity_position.py',
-          'reading_appearance_fields_live.py', 'e2e/test_viewer_identity_fields.py']
+          'reading_appearance_fields_live.py', 'e2e/test_viewer_identity_fields.py',
+          'e2e/test_cine.py', 'e2e/test_volume_cine.py']
 SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'HeldMeasurementE2E', 'ManualSrE2E', 'MeasurementRecheckE2E',
                  'ViewerRecoveryE2E', 'MeasurementCalibrationE2E', 'WorklistBodyPartsE2E',
                  'ReadingAppearanceLive', 'ReadingAppearancePositionLive', 'ViewerIdentityPositionE2E',
-                 'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E']
+                 'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
+                 'CineE2E', 'VolumeCineE2E']
 PROFILES = {
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',

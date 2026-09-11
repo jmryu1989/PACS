@@ -126,6 +126,32 @@ class CineE2E(ViewerLayoutE2E):
   p.evaluate("()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))}");p.wait_for_timeout(350);self.assertEqual(self.snapshot(p),before)
   p.reload();canvas_ready(p,1);p.wait_for_timeout(350);self.assertTrue(all(not x['playing'] for x in self.snapshot(p)))
 
+ def test_cine_07_range_yoyo_invalid_input_and_source_reset(self):
+  f,a,b=self.pair();originals=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a]);self.watch(p)
+  self.assertEqual((p.get_by_label('Range Start').input_value(),p.get_by_label('Range End').input_value()),('1','12'))
+  p.get_by_label('Range Start').fill('3');p.get_by_label('Range End').fill('6');p.get_by_role('button',name='Apply Range',exact=True).click()
+  p.get_by_label('Playback Direction').select_option('yoyo');p.get_by_label('Loop',exact=True).uncheck();p.evaluate('()=>{cineRenders=[]}');self.play(p)
+  p.wait_for_function('''()=>{const id=[...services.viewportGridService.getState().viewports.values()][0].viewportId,rows=cineRenders.filter(r=>r.id===id),unique=rows.filter((r,i)=>!i||r.index!==rows[i-1].index).map(r=>r.index);return unique.join(',').includes('2,3,4,5,4,3,2')&&!services.cineService.getState().cines[id]?.isPlaying}''',timeout=5000)
+  sequence=p.evaluate('''()=>{const id=[...services.viewportGridService.getState().viewports.values()][0].viewportId,rows=cineRenders.filter(r=>r.id===id);return rows.filter((r,i)=>!i||r.index!==rows[i-1].index)}''')
+  self.assertEqual([r['index'] for r in sequence],[2,3,4,5,4,3,2]);self.assertTrue(all(r['marker']>200 and '/frames/'+str(r['index']+1) in r['image'] for r in sequence))
+  p.get_by_label('Range Start').fill('8');p.get_by_label('Range End').fill('4');p.get_by_role('button',name='Apply Range',exact=True).click()
+  expect(p.locator('#kin-cine [role=status]')).to_contain_text('시작이 끝보다 작아야');p.get_by_role('button',name='Last Frame',exact=True).click();self.wait_index(p,0,5)
+  self.drag(p,b['label'],0);self.identity(p,[b]);expect(p.get_by_label('Range Start')).to_have_value('1');expect(p.get_by_label('Range End')).to_have_value('7')
+  self.assertEqual(p.get_by_label('Playback Direction').input_value(),'forward');self.assertTrue(p.get_by_label('Loop',exact=True).is_checked())
+  self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),rows)
+
+ def test_cine_08_ranged_yoyo_selection_hidden_and_late_source_stop(self):
+  f,a,b=self.pair();originals=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a,b]);self.watch(p);pending=[];pattern='**/instances/'+a['sops'][0]+'/frames/8';p.route(pattern,lambda r:pending.append(r))
+  p.get_by_label('Range Start').fill('3');p.get_by_label('Range End').fill('6');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo');self.play(p);p.wait_for_timeout(350);self.assertTrue(pending)
+  self.drag(p,'D03A current',0);replacement=self.snapshot(p)
+  for request in pending:request.fulfill(response=request.fetch())
+  p.unroute(pattern);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),replacement);self.assertFalse(replacement[0]['playing']);expect(p.get_by_label('Range Start')).to_have_value('1');self.assertEqual(p.get_by_label('Playback Direction').input_value(),'forward');self.assertTrue(p.get_by_label('Loop',exact=True).is_checked())
+  self.select_cell(p,1);p.get_by_label('Range Start').fill('2');p.get_by_label('Range End').fill('5');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo');p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_function('()=>cineRenders.filter(r=>r.id===services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[1].viewportId).id).length>=3')
+  self.select_cell(p,0);stopped=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),stopped);self.assertFalse(stopped[1]['playing'])
+  self.select_cell(p,1);p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_function('()=>cineRenders.length>=3');p.evaluate("()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'))}");hidden=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),hidden);self.assertFalse(hidden[1]['playing'])
+  sequence=p.evaluate('''()=>{const id=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[1].viewportId,rows=cineRenders.filter(r=>r.id===id);return rows.filter((r,i)=>!i||r.index!==rows[i-1].index)}''');self.assertTrue(sequence);self.assertTrue(all(1<=r['index']<=4 and r['marker']>200 and '/frames/'+str(r['index']+1) in r['image'] for r in sequence));self.assertTrue(all(abs(y['index']-x['index'])==1 for x,y in zip(sequence,sequence[1:])))
+  p.evaluate("()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))}");self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),rows)
+
 if __name__=='__main__':
  suite=unittest.TestSuite(CineE2E(n) for n in dir(CineE2E) if n.startswith('test_cine_'))
  import sys
