@@ -1,6 +1,80 @@
 /* Render immutable saved CT views without moving the reading workspace. */
-window.kinViewerJobPrint = function ({ api, authenticate, live }) {
+(function (root) {
+  'use strict';
+  // Output names each study by its own date relation, never by its position in
+  // the comparison: a manually compared study can be later, same-day or undated.
+  function normalizeStudyDate(value) {
+    if (typeof value !== 'string') return null;
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) || /^(\d{4})(\d{2})(\d{2})$/.exec(value);
+    if (!parts) return null;
+    const year = Number(parts[1]), month = Number(parts[2]), day = Number(parts[3]);
+    const leap = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
+    const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (month < 1 || month > 12 || day < 1 || day > lengths[month - 1]) return null;
+    return parts[1] + parts[2] + parts[3];
+  }
+  function dateText(identity) {
+    const raw = identity && identity.date;
+    const text = typeof raw === 'string' ? raw : raw === undefined || raw === null ? '' : String(raw);
+    return text.trim() ? text : '날짜 없음';
+  }
+  function dateRelation(currentDate, comparisonDate) {
+    const current = normalizeStudyDate(currentDate), comparison = normalizeStudyDate(comparisonDate);
+    if (!current || !comparison) return 'unknown';
+    return comparison < current ? 'earlier' : comparison > current ? 'later' : 'same';
+  }
+  const relations = { earlier: '현재 검사보다 이전', later: '현재 검사보다 이후',
+    same: '현재 검사와 같은 날짜 · 선후 미확인', unknown: '검사일 확인 불가 · 선후 미확인' };
+  function relationText(relation) { return relations[relation] || relations.unknown; }
+  function reportTitle(role) { return role === 'current' ? 'Current Study Report' : 'Comparison Study Report'; }
+  function reportLabel(report) {
+    return !report.version ? '저장된 판독문 없음' :
+      `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
+  }
+  function optionLabel(value, comparison) {
+    if (value === 'none') return 'Images only';
+    if (value === 'saved') return 'Current study report';
+    if (value === 'both') return 'Current + comparison study reports';
+    return `Comparison study report (${dateText(comparison)} · ${comparison.desc || comparison.modality} · Acc ${comparison.acc || '-'})`;
+  }
+  function reportEntry(uid, report, identities, currentUid) {
+    const role = uid === currentUid ? 'current' : 'comparison';
+    const identity = identities.find(s => s.uid === uid);
+    const relation = role === 'comparison' ? dateRelation(identities.find(s => s.uid === currentUid)?.date, identity?.date) : null;
+    return { uid, report, role, title: reportTitle(role), identity, relation, relationText: relation ? relationText(relation) : null };
+  }
+  function studyLine(identity) { return `${identity.name} (${identity.id}) · ${identity.desc || identity.modality} · Acc ${identity.acc || '-'}`; }
+  function dateLine(entry) {
+    return entry.role === 'current' ? `검사일 ${dateText(entry.identity)} · 현재 검사`
+      : `검사일 ${dateText(entry.identity)} · ${relationText(entry.relation)}`;
+  }
+  function summaryText(identities, entries) {
+    return identities.map(s => `환자 ${s.name} (${s.id}) · 검사 ${dateText(s)} · Acc ${s.acc || '-'}`).join('\n') +
+      entries.map(entry => '\n' + entry.title + ': ' + dateText(entry.identity) +
+        (entry.role === 'comparison' ? ' · ' + relationText(entry.relation) : '') + ' · ' + reportLabel(entry.report)).join('');
+  }
+  function pageIdentity(entry) {
+    return [`${entry.title} · ${dateText(entry.identity)}` + (entry.role === 'comparison' ? ' · ' + relationText(entry.relation) : ''),
+      studyLine(entry.identity), `Study ${entry.identity.uid}`, reportLabel(entry.report)].join('\n');
+  }
+  function pageName(index) { return `report-${index}`; }
+  function cssContent(text) { return '"' + Array.from(text, c => '\\' + c.codePointAt(0).toString(16) + ' ').join('') + '"'; }
+  // A named @page per report keeps every continuation page's footer bound to the
+  // study printed on it; one shared footer cannot say which study a later page is.
+  function pageRules(entries, generic) {
+    const box = 'font:8px "Malgun Gothic",sans-serif;white-space:pre-wrap;overflow-wrap:anywhere';
+    return `@page{size:A4;margin:12mm 12mm 24mm;@bottom-left{content:${cssContent(generic)};${box}}@bottom-right{content:counter(page) " / " counter(pages);font:9px sans-serif}}` +
+      entries.map((entry, index) => `@page ${pageName(index)}{@bottom-left{content:${cssContent(pageIdentity(entry))};${box}}}`).join('') +
+      entries.map((entry, index) => `.report[data-print-page="${pageName(index)}"]{page:${pageName(index)}}`).join('') +
+      (entries.length ? `.intro{page:${pageName(0)}}` : '');
+  }
+  const api = { normalizeStudyDate, dateText, dateRelation, relationText, reportTitle, reportLabel, optionLabel,
+    reportEntry, studyLine, dateLine, summaryText, pageIdentity, pageName, cssContent, pageRules };
+  if (typeof module === 'object' && module.exports) module.exports = api; else root.kinViewerJobPrintIdentity = api;
+})(globalThis);
+globalThis.kinViewerJobPrint = function ({ api, authenticate, live }) {
   const core = window.cornerstone;
+  const identity = globalThis.kinViewerJobPrintIdentity;
   const entries = new Map();
   const scheme = 'kinjobprint';
   // Only run-owned, freshly fetched pixels enter this loader. Never evict or
@@ -15,16 +89,16 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   const caption = el('p', '저장 당시 영상 범위와 밝기입니다. 실제 크기 아님.', dialog);
   const status = el('p', '', dialog); status.setAttribute('role', 'status');
   const reportSource = el('select', undefined, dialog); reportSource.setAttribute('aria-label', '함께 출력할 판독문');
-  for (const [value, label] of [['none', '영상만 출력'], ['saved', '현재 검사의 서버 저장 판독문 함께 출력']]) {
-    const option = el('option', label, reportSource); option.value = value;
+  for (const value of ['none', 'saved']) {
+    const option = el('option', identity.optionLabel(value), reportSource); option.value = value;
   }
   function syncReportOptions(data) {
     const chosen = reportSource.value;
     for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
-    const prior = data.identities.find(s => s.uid !== current.uid);
-    if (prior) {
-      el('option', `비교 과거 검사 (${prior.date} · ${prior.desc || prior.modality} · Acc ${prior.acc || '-'}) 저장 판독문`, reportSource).value = 'prior';
-      el('option', '현재·비교 과거 검사 저장 판독문 모두', reportSource).value = 'both';
+    const comparison = data.identities.find(s => s.uid !== current.uid);
+    if (comparison) {
+      el('option', identity.optionLabel('prior', comparison), reportSource).value = 'prior';
+      el('option', identity.optionLabel('both', comparison), reportSource).value = 'both';
     }
     reportSource.value = chosen;
   }
@@ -131,13 +205,15 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
         if (!report || !Number.isInteger(report.version) || report.version < 0 ||
             !['findings', 'conclusion', 'recommendation', 'rs'].every(k => typeof report[k] === 'string'))
           throw new Error('출력 판독문 정보를 확인할 수 없습니다.');
-        reports.push({ uid, report, label: uid === item.uid ? '현재 검사 판독문' : '비교 과거 검사 판독문' });
+        reports.push({ uid, report });
       }
     }
+    // Roles and date relations are resolved only after every identity is read.
+    const entries = reports.map(row => identity.reportEntry(row.uid, row.report, identities, item.uid));
     await authenticate(signal);
     const latest = await readJob(); validCurrent(item);
     if (!equal(latest, job)) throw new Error('작업이 변경되었습니다. 다시 확인하세요.');
-    return { job, identities, reports };
+    return { job, identities, reports: entries };
   }
   const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   function verifyAnnotationValues(viewport, engine, id, annotations, budget) {
@@ -319,22 +395,23 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   }
   function html(data, images, outputEdits, batchOutput) {
     const { job, identities } = data, main = el('main'), legends = [];
+    const { reportLabel, dateLine, pageName, pageRules, summaryText } = identity;
+    // The title block shares the first report's named page, so no forced break.
+    const intro = node => { node.className = 'intro'; return node; };
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    el('h1', batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
-    el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
-    el('p', (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main);
-    if(batchOutput&&!job.transient&&!job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main);
-    if(batchOutput&&job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main);
-    const reportLabel = report => !report.version ? '저장된 판독문 없음' :
-      `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
-    const summary = identities.map(s => `환자 ${s.name} (${s.id}) · 검사 ${s.date} · Acc ${s.acc || '-'}`).join('\n') +
-      data.reports.map(entry => '\n' + entry.label + ': ' + identities.find(s => s.uid === entry.uid).date + ' · ' + reportLabel(entry.report)).join('');
-    el('p', summary, main);
-    for (const entry of data.reports) {
+    intro(el('h1', batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
+    intro(el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main));
+    intro(el('p', (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
+    if(batchOutput&&!job.transient&&!job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main));
+    if(batchOutput&&job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main));
+    const summary = summaryText(identities, data.reports);
+    intro(el('p', summary, main));
+    for (const [reportIndex, entry] of data.reports.entries()) {
       const report = entry.report, identity = identities.find(s => s.uid === entry.uid), section = el('section', undefined, main);
-      section.className = 'report'; section.dataset.reportUid = entry.uid;
-      el('h2', entry.label, section);
+      section.className = 'report'; section.dataset.reportUid = entry.uid; section.dataset.printPage = pageName(reportIndex);
+      el('h2', entry.title, section);
       el('p', `${identity.name} (${identity.id}) · ${identity.date} · ${identity.desc || identity.modality} · Acc ${identity.acc || '-'}`, section);
+      el('p', dateLine(entry), section).className = 'report-date';
       el('p', `Study ${identity.uid}`, section).className = 'reference';
       el('p', reportLabel(report), section).className = 'report-source';
       el('p', '출력 확인 시점의 서버 저장본입니다. 비교 작업 저장 당시 판독문이나 미저장 편집문이 아닙니다.', section);
@@ -393,14 +470,22 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       }
     });
     legends.forEach(legend => main.append(legend));
-    const cssString = '"' + Array.from(summary, char => '\\' + char.codePointAt(0).toString(16) + ' ').join('') + '"';
+    const cssPages = pageRules(data.reports, summary);
     return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\';img-src blob:;style-src \'unsafe-inline\';base-uri \'none\'"><title>저장 비교 영상</title><style>' +
-      'body{margin:0;color:#18212b;background:white;font:13px/1.5 "Malgun Gothic",sans-serif}main{padding:12px}h1{font-size:21px}h2{font-size:16px}p{white-space:pre-wrap;overflow-wrap:anywhere}.grid{display:grid;gap:12px}.cell{min-width:0;break-inside:avoid;border-top:1px solid #aaa;padding-top:10px}.cell img{display:block;max-width:100%;max-height:145mm;width:auto;height:auto;margin:8px auto}.reference{font-size:9px}@page{size:A4;margin:12mm 12mm 24mm;@bottom-left{content:' + cssString + ';font:8px "Malgun Gothic",sans-serif;white-space:pre-wrap}@bottom-right{content:counter(page) " / " counter(pages);font:9px sans-serif}}@media print{main{padding:0}}' +
+      'body{margin:0;color:#18212b;background:white;font:13px/1.5 "Malgun Gothic",sans-serif}main{padding:12px}h1{font-size:21px}h2{font-size:16px}p{white-space:pre-wrap;overflow-wrap:anywhere}.grid{display:grid;gap:12px}.cell{min-width:0;break-inside:avoid;border-top:1px solid #aaa;padding-top:10px}.cell img{display:block;max-width:100%;max-height:145mm;width:auto;height:auto;margin:8px auto}.reference{font-size:9px}' + cssPages + '@media print{main{padding:0}}' +
       '.annotations{margin-top:18px}.annotations>h2,.annotations>p{break-after:avoid;break-inside:avoid}.annotations>div{break-inside:avoid;border-top:1px solid #ccc;padding:8px 0;overflow-wrap:anywhere}.annotations strong{white-space:pre-wrap;overflow-wrap:anywhere}' +
       '.report h2,.report h3{break-after:avoid}.report-source{font-weight:bold}.report+.grid,.report+.report,.report+.batch-reference{break-before:page}.report p{orphans:3;widows:3}.batch-reference{break-inside:avoid}' +
       '</style></head><body>' + main.outerHTML + '</body></html>';
   }
-  function supportsIdentity() { try { const css = new CSSStyleSheet(); css.replaceSync('@page{@bottom-left{content:"x"}}'); return css.cssRules[0]?.cssRules[0]?.name === 'bottom-left'; } catch { return false; } }
+  function supportsIdentity() {
+    try {
+      const css = new CSSStyleSheet(); css.replaceSync('@page{@bottom-left{content:"x"}}');
+      if (css.cssRules[0]?.cssRules[0]?.name !== 'bottom-left') return false;
+      // Per-report footers need named pages, not only margin boxes.
+      const named = new CSSStyleSheet(); named.replaceSync('@page report-0{@bottom-left{content:"x"}}');
+      return named.cssRules[0]?.selectorText === 'report-0' && named.cssRules[0]?.cssRules[0]?.name === 'bottom-left';
+    } catch { return false; }
+  }
   async function prepare() {
     if (!current) return; const ticket = ++serial, item = current, reportChoice = reportSource.value; clear(); status.textContent = '저장한 영상 상태를 확인하는 중…';
     try { await bounded(async signal => {
