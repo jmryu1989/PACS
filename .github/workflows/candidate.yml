@@ -44,7 +44,7 @@ jobs:
         timeout-minutes: 10
         run: |
           python3 -m venv "$RUNNER_TEMP/candidate-python"
-          "$RUNNER_TEMP/candidate-python/bin/python" -m pip install -r target/tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/candidate-python/bin/python" -m pip install -r target/tests/e2e/requirements.txt -r target/gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/candidate-python/bin/python" -m playwright install --with-deps chromium
       - name: Candidate runner guards and exact sequence
         run: |
