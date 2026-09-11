@@ -56,6 +56,29 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
         self.assertLess(result["maxLength"], 32768, "the full two-role, eleven-modality schema fits the documented local bound")
         self.assertEqual(12, result["tooLarge"]["current"]["size"], "oversized local values fail closed to defaults")
 
+    def test_malformed_local_profiles_fail_closed(self):
+        result = self.page.evaluate("""() => {
+          const valid=KinViewerIdentity.defaults(),mutations={};
+          mutations.version=structuredClone(valid);mutations.version.version=4;
+          mutations.generalKeys=structuredClone(valid);mutations.generalKeys.current.extra=true;
+          mutations.generalPlain=structuredClone(valid);mutations.generalPlain.current=[];
+          mutations.fieldKeys=structuredClone(valid);delete mutations.fieldKeys.current.fieldPositions.date;
+          mutations.fieldPlain=structuredClone(valid);mutations.fieldPlain.current.fieldPositions=[];
+          mutations.size=structuredClone(valid);mutations.size.current.size=13;
+          mutations.font=structuredClone(valid);mutations.font.current.font='script';
+          mutations.color=structuredClone(valid);mutations.color.current.color='red';
+          mutations.plain=[];
+          return Object.fromEntries(Object.entries(mutations).map(([name,value])=>{
+            localStorage.setItem('kin-viewer-identity:v1:'+name,JSON.stringify(value));
+            return [name,{normalized:KinViewerIdentity.normalize(value),read:KinViewerIdentity.read(name)}];
+          }));
+        }""")
+        for name, outcome in result.items():
+            with self.subTest(defect=name):
+                self.assertIsNone(outcome["normalized"])
+                self.assertEqual(12, outcome["read"]["current"]["size"])
+                self.assertEqual(3, outcome["read"]["version"])
+
     def test_parent_realm_preference_event_updates_embedded_viewer(self):
         self.page.set_content('<iframe id="viewer"></iframe>')
         self.page.locator('#viewer').evaluate("(frame,html)=>frame.srcdoc=html", HARNESS)
@@ -79,12 +102,16 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
           const root=document.querySelector('#vp1>.kin-viewer-identity'),viewport=document.querySelector('#vp1').getBoundingClientRect();
           const snapshot=()=>[...root.querySelectorAll('.kin-viewer-identity-group')].map(e=>({position:e.dataset.position,text:e.textContent,box:(()=>{const b=e.getBoundingClientRect();return {left:b.left,right:b.right,top:b.top,bottom:b.bottom,width:b.width,height:b.height}})()}));
           const ctResult={profile:root.dataset.profile,modality:root.dataset.modality,root:root.querySelector('.kin-viewer-identity-content').textContent,groups:snapshot(),viewport:{left:viewport.left,right:viewport.right,top:viewport.top,bottom:viewport.bottom}};
-          const pane=document.querySelector('#vp1').parentElement,native=pane.querySelector('[data-cy="viewport-overlay-top-left"]');pane.style.width='200px';pane.style.height='120px';document.querySelector('#vp1').style.width='200px';document.querySelector('#vp1').style.height='120px';native.style.display='block';native.style.height='70px';KinViewerIdentity.publish(JSON.stringify(ownerValue),value);
-          const smallRoot=document.querySelector('#vp1>.kin-viewer-identity'),smallViewport=document.querySelector('#vp1').getBoundingClientRect(),small=[smallRoot.querySelector('.kin-viewer-identity-content'),...smallRoot.querySelectorAll('.kin-viewer-identity-group')].map(node=>{const b=node.getBoundingClientRect();return {left:b.left,right:b.right,top:b.top,bottom:b.bottom,width:b.width,height:b.height}});
+          const pane=document.querySelector('#vp1').parentElement,native=pane.querySelector('[data-cy="viewport-overlay-top-left"]');native.style.display='block';
+          const narrow=[[200,120,70],[200,120,20],[130,90,20],[110,70,20]].map(([width,height,nativeHeight])=>{pane.style.width=width+'px';pane.style.height=height+'px';document.querySelector('#vp1').style.width=width+'px';document.querySelector('#vp1').style.height=height+'px';native.style.height=nativeHeight+'px';KinViewerIdentity.publish(JSON.stringify(ownerValue),value);const root=document.querySelector('#vp1>.kin-viewer-identity'),viewport=document.querySelector('#vp1').getBoundingClientRect(),boxes=[root.querySelector('.kin-viewer-identity-content'),...root.querySelectorAll('.kin-viewer-identity-group')].map(node=>{const b=node.getBoundingClientRect();return {left:b.left,right:b.right,top:b.top,bottom:b.bottom,width:b.width,height:b.height}});return {width,height,nativeHeight,text:root.textContent,boxes,viewport:{left:viewport.left,right:viewport.right,top:viewport.top,bottom:viewport.bottom}};});
+          pane.style.width='400px';pane.style.height='300px';document.querySelector('#vp1').style.width='400px';document.querySelector('#vp1').style.height='300px';native.style.display='none';KinViewerIdentity.publish(JSON.stringify(ownerValue),value);
+          const restored=document.querySelector('#vp1>.kin-viewer-identity'),restoredStyle=restored.style,restoredCt={profile:restored.dataset.profile,modality:restored.dataset.modality,root:restored.querySelector('.kin-viewer-identity-content').textContent,groups:[...restored.querySelectorAll('.kin-viewer-identity-group')].map(e=>({position:e.dataset.position,text:e.textContent})),position:[restoredStyle.left,restoredStyle.right,restoredStyle.top,restoredStyle.bottom]};
           metadata['image-current'].Modality='MR';__grid();
-          return new Promise(resolve=>queueMicrotask(()=>{const next=document.querySelector('#vp1>.kin-viewer-identity');resolve({ct:ctResult,small,smallViewport:{left:smallViewport.left,right:smallViewport.right,top:smallViewport.top,bottom:smallViewport.bottom},mr:{profile:next.dataset.profile,modality:next.dataset.modality,root:next.querySelector('.kin-viewer-identity-content').textContent,groups:[...next.querySelectorAll('.kin-viewer-identity-group')].map(e=>({position:e.dataset.position,text:e.textContent}))}})}));
+          return new Promise(resolve=>queueMicrotask(()=>{const next=document.querySelector('#vp1>.kin-viewer-identity'),style=next.style;resolve({ct:ctResult,narrow,restoredCt,mr:{profile:next.dataset.profile,modality:next.dataset.modality,root:next.querySelector('.kin-viewer-identity-content').textContent,groups:[...next.querySelectorAll('.kin-viewer-identity-group')].map(e=>({position:e.dataset.position,text:e.textContent})),position:[style.left,style.right,style.top,style.bottom]}})}));
         }""")
         self.assertEqual(("override", "CT"), (result["ct"]["profile"], result["ct"]["modality"]))
+        self.assertEqual("기준 검사 · PID-1", result["ct"]["root"])
+        self.assertEqual({"top-left", "bottom-right"}, {g["position"] for g in result["ct"]["groups"]}, "ordinary layout keeps configured corners")
         top_left = next(g for g in result["ct"]["groups"] if g["position"] == "top-left")
         self.assertLess(top_left["text"].index("CURRENT^PATIENT"), top_left["text"].index("20260911"))
         viewport = result["ct"]["viewport"]
@@ -95,15 +122,27 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
             self.assertLessEqual(group["box"]["right"], viewport["right"])
             self.assertGreaterEqual(group["box"]["top"], viewport["top"])
             self.assertLessEqual(group["box"]["bottom"], viewport["bottom"])
-        for box in result["small"]:
-            self.assertGreater(box["width"], 0)
-            self.assertGreater(box["height"], 0)
-            self.assertGreaterEqual(box["left"], result["smallViewport"]["left"])
-            self.assertLessEqual(box["right"], result["smallViewport"]["right"])
-            self.assertGreaterEqual(box["top"], result["smallViewport"]["top"])
-            self.assertLessEqual(box["bottom"], result["smallViewport"]["bottom"])
+        for layout in result["narrow"]:
+            self.assertTrue(layout["text"].startswith("기준 검사 · PID-1"), "required patient identity remains first")
+            for configured in ("CURRENT^PATIENT", "20260911", "Current CT"):
+                self.assertIn(configured, layout["text"], "collision fallback retains configured values")
+            for index, box in enumerate(layout["boxes"]):
+                self.assertGreater(box["width"], 0)
+                self.assertGreater(box["height"], 0)
+                self.assertGreaterEqual(box["left"], layout["viewport"]["left"])
+                self.assertLessEqual(box["right"], layout["viewport"]["right"])
+                self.assertGreaterEqual(box["top"], layout["viewport"]["top"])
+                self.assertLessEqual(box["bottom"], layout["viewport"]["bottom"])
+                for other in layout["boxes"][index + 1:]:
+                    self.assertFalse(box["left"] < other["right"] and box["right"] > other["left"] and box["top"] < other["bottom"] and box["bottom"] > other["top"], f"{layout['width']}x{layout['height']} native {layout['nativeHeight']}px corner groups overlap")
+        self.assertEqual(("override", "CT"), (result["restoredCt"]["profile"], result["restoredCt"]["modality"]))
+        self.assertEqual("기준 검사 · PID-1", result["restoredCt"]["root"])
+        self.assertEqual(["auto", "28px", "38px", "auto"], result["restoredCt"]["position"], "same CT positioning returns after resize")
+        self.assertEqual({"top-left", "bottom-right"}, {g["position"] for g in result["restoredCt"]["groups"]}, "same CT configured corners return after resize")
         self.assertEqual(("general", "MR"), (result["mr"]["profile"], result["mr"]["modality"]))
-        self.assertIn("PID-1", result["mr"]["root"])
+        self.assertEqual("기준 검사 · PID-1", result["mr"]["root"])
+        self.assertEqual(["auto", "28px", "auto", "38px"], result["mr"]["position"], "ordinary positioning returns after resize")
+        self.assertEqual({"top-left", "bottom-left"}, {g["position"] for g in result["mr"]["groups"]})
         self.assertTrue(any(g["position"] == "bottom-left" and "CURRENT^PATIENT" in g["text"] for g in result["mr"]["groups"]))
 
     def test_editor_copy_reset_and_appearance_v9_legacy_v8(self):
@@ -134,6 +173,24 @@ class ViewerIdentityFieldsDOMTest(unittest.TestCase):
         reset = self.page.evaluate("appearance.read().viewer.prior")
         self.assertNotIn("MR", reset["overrides"])
         self.assertIn("CT", reset["overrides"])
+
+        self.page.select_option("#viewer-identity-prior-profile", "general")
+        self.page.click("#viewer-identity-prior-reset-profile")
+        general_reset = self.page.evaluate("appearance.read().viewer.prior")
+        self.assertEqual((12, "default", "warm"), (general_reset["size"], general_reset["font"], general_reset["color"]))
+        self.assertEqual(result["priorCt"], general_reset["overrides"]["CT"], "general reset preserves the complete modality override")
+
+    def test_empty_optional_metadata_creates_no_empty_group_or_token(self):
+        result = self.page.evaluate("""() => {
+          metadata['image-current'].PatientName='';metadata['image-current'].StudyDate='';metadata['image-current'].StudyDescription='';metadata['image-current'].SeriesDescription='';
+          const value=KinViewerIdentity.defaults();value.current.description=true;value.current.fieldPositions={name:'top-left',date:'bottom-left',description:'bottom-right'};
+          window.identityMount=__mount();KinViewerIdentity.publish(JSON.stringify(ownerValue),value);
+          const root=document.querySelector('#vp1>.kin-viewer-identity');
+          return {content:root.querySelector('.kin-viewer-identity-content').textContent,groups:root.querySelectorAll('.kin-viewer-identity-group').length,tokens:root.textContent.split(' · ')};
+        }""")
+        self.assertEqual("기준 검사 · PID-1", result["content"])
+        self.assertEqual(0, result["groups"])
+        self.assertEqual(["기준 검사", "PID-1"], result["tokens"])
 
 
 if __name__ == "__main__":

@@ -155,7 +155,7 @@ GitHub 호스팅의 빈 Docker runner에서만 임시 비밀·합성 CT·DB/Keyc
 측정 job의 API는 실제 `development` target/소스 mount로 컴파일한다. 기존 `runtime` job의 production image 검증과 구분한다.
 기존 readback/panel/held/manual-SR와 viewer-api, 재확인/세션회복/calibration 시험을 순서대로 실제 실행한다.
 두 fault.cjs는 해당 E2E가 소유 fixture와 실제 컴파일 서비스를 통해 실행한다. 등록과 실제 CI 성공은 구분한다.
-수동 `Focused integration` workflow는 같은 빈 GitHub-hosted runner와 실행 가드를 재사용한다. 기본 `output-integration` 선택은 비교 판독문 6개 뒤 Job 판독문 4개를 실행한다. `identity-fields` 선택은 표시 설정 API 17개, 위치 API 2개, 필드 API 2개, 실제 위치 2개, 실제 필드 2개를 이 순서로 실행하며 프로필별 정화 로그를 분리한다. workflow 입력은 고정된 두 선택지만 허용하고 runner의 `--profile` 허용 목록에서도 다시 검사한다. 이는 실제 실행 경로의 등록 설명이며 실행 성공 근거가 아니다. 로컬 원본 fixture에서 실행하지 않는다.
+수동 `Focused integration` workflow는 같은 빈 GitHub-hosted runner와 실행 가드를 재사용한다. 세 선택지는 `output-integration`, `identity-fields`, `vr-resize-probe`다. 기본 `output-integration` 선택은 비교 판독문 6개 뒤 Job 판독문 4개를 실행한다. `identity-fields` 선택은 표시 설정 API 17개, 위치 API 2개, 필드 API 2개, 실제 위치 2개, 실제 필드 2개를 이 순서로 실행하며 프로필별 정화 로그를 분리한다. runner의 `--profile` 허용 목록은 이 세 선택지에 자동 `measurements`, `volume-rendering`을 더한 다섯 프로필을 검사한다. 이는 실제 실행 경로의 등록 설명이며 실행 성공 근거가 아니다. 로컬 원본 fixture에서 실행하지 않는다.
 세션 내 보관본은 브라우저 저장소에 쓰지 않으며 명시적 재개 전에 현재 검사 접근을 조회한다.
 뷰어 모드 종료·로그아웃·로그인 주체 변경 시 폐기하며 페이지 이탈/Job 복구 경고에 포함한다.
 후속 A3/A4 빠른 시험은 같은 revision의 검증 실패와 분리된 편집문, 분리된 이전 저장 handler 거절,

@@ -100,6 +100,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         )
         self.assertEqual(3, result["read"]["version"])
         self.assertEqual("top-right", result["read"]["current"]["position"])
+        self.assertEqual((14, "sans", "cool"), (result["read"]["current"]["size"], result["read"]["current"]["font"], result["read"]["current"]["color"]))
         self.assertEqual(1, result["raw"]["version"], "migration keeps the established storage key/value until an explicit write")
         self.assertIsNone(result["extra"])
         self.assertIsNone(result["invalid"])
@@ -133,12 +134,27 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
     def test_metadata_owner_and_loading_gates_clear_then_recover(self):
         self.page.evaluate("window.identityMount=__mount()")
         self.assertEqual(2, self.page.locator(".kin-viewer-identity").count())
-        self.page.evaluate("metadata['image-current'].SOPInstanceUID='wrong';__grid()")
-        self.page.wait_for_timeout(0)
-        self.assertEqual(0, self.page.locator("#vp1 .kin-viewer-identity").count())
-        self.page.evaluate("metadata['image-current'].SOPInstanceUID='sop-current';__grid()")
-        self.page.wait_for_timeout(0)
-        self.assertEqual(1, self.page.locator("#vp1 .kin-viewer-identity").count())
+        defects = {
+            "study UID": "metadata['image-current'].StudyInstanceUID='wrong'",
+            "series UID": "metadata['image-current'].SeriesInstanceUID='wrong'",
+            "SOP UID": "metadata['image-current'].SOPInstanceUID='wrong'",
+            "study allowlist": "imageState.vp1.uid='study-outside-open-pair';metadata['image-current'].StudyInstanceUID='study-outside-open-pair'",
+            "rendered viewport": "viewportObjects.vp1.viewportStatus='loading'",
+            "patient ID type": "imageState.vp1.study.id=null;metadata['image-current'].PatientID=new String('PID-1')",
+            "patient ID blank": "imageState.vp1.study.id=null;metadata['image-current'].PatientID='   '",
+            "patient ID length": "imageState.vp1.study.id=null;metadata['image-current'].PatientID='X'.repeat(65)",
+            "patient ID mismatch": "metadata['image-current'].PatientID='OTHER-PATIENT'",
+        }
+        for name, mutation in defects.items():
+            with self.subTest(gate=name):
+                self.page.evaluate("window.gateMetadata=structuredClone(metadata['image-current']);window.gateState=structuredClone(imageState.vp1);window.gateStatus=viewportObjects.vp1.viewportStatus")
+                self.page.evaluate(mutation + ";__grid()")
+                self.page.wait_for_timeout(0)
+                self.assertEqual(0, self.page.locator("#vp1 .kin-viewer-identity").count())
+                self.assertEqual(1, self.page.locator("#vp2 .kin-viewer-identity").count(), "one invalid viewport must not clear the valid comparison")
+                self.page.evaluate("metadata['image-current']=gateMetadata;imageState.vp1=gateState;viewportObjects.vp1.viewportStatus=gateStatus;__grid()")
+                self.page.wait_for_timeout(0)
+                self.assertEqual(1, self.page.locator("#vp1 .kin-viewer-identity").count())
         self.page.evaluate("__image('PRE_STACK_NEW_IMAGE','vp1','replacement')")
         self.assertEqual(0, self.page.locator("#vp1 .kin-viewer-identity").count())
         self.page.evaluate("__image('STACK_NEW_IMAGE','vp1','replacement');__image('IMAGE_RENDERED','vp1','replacement')")

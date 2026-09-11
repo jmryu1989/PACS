@@ -93,6 +93,12 @@ window.KinViewerIdentity=(()=>{
           }
           place(e,p.position,true);
           for(const position of positions)if(position!==p.position&&groups.has(position)){const group=document.createElement('span');group.className='kin-viewer-identity-group';group.dataset.position=position;group.textContent=groups.get(position).join(' · ');e.append(group);place(group,position,false);}
+          const boxes=[primary,...e.querySelectorAll('.kin-viewer-identity-group')].map(node=>node.getBoundingClientRect()),overlap=boxes.some((a,index)=>boxes.slice(index+1).some(b=>a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top));
+          // Four independently anchored labels cannot always fit in a narrow
+          // viewport. Keep every configured value, with the required patient
+          // identity first, in one bounded label when their measured boxes
+          // would cover each other. Ordinary layouts keep their chosen corners.
+          if(overlap){primary.textContent=[...groups.values()].flat().join(' · ');for(const group of e.querySelectorAll('.kin-viewer-identity-group'))group.remove();place(e,p.position,true);}
         }
         syncTitle();
       }catch(_){clear();}
