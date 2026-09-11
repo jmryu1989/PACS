@@ -57,5 +57,80 @@
     return result;
   }
   function hexToRgb(hex){const value=parseInt(hex.slice(1),16);return [(value>>16)/255,((value>>8)&255)/255,(value&255)/255];}
-  const api={rotate,orient,validateCropBounds,cropPlanes,createCropPlane,validateTransferKnots,hexToRgb,directions:Object.keys(directions)};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeRendering=api;
+  const presetNames=['CT-Bone','CT-Soft-Tissue','CT-Fat'],presetStorePrefix='kin-vr-display-presets:v1:';
+  const exactKeys=(value,keys)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.prototype.hasOwnProperty.call(value,key));
+  function normalizeOwner(owner){
+    if(!Array.isArray(owner)||owner.length!==2||owner.some(value=>typeof value!=='string'||value.length<1||value.length>256||/[\u0000-\u001f\u007f]/.test(value)))throw Error('VR 개인 설정의 기관과 계정을 확인할 수 없습니다.');
+    return [...owner];
+  }
+  function presetStoreKey(owner){return presetStorePrefix+JSON.stringify(normalizeOwner(owner));}
+  function normalizePresetName(name){
+    if(typeof name!=='string')throw Error('프리셋 이름을 입력하세요.');
+    const value=name.normalize('NFKC').trim().replace(/\s+/gu,' ');
+    if(Array.from(value).length<1||Array.from(value).length>64)throw Error('프리셋 이름은 1~64자로 입력하세요.');
+    return value;
+  }
+  const nameIdentity=name=>normalizePresetName(name).toLocaleLowerCase('en-US');
+  function normalizeDisplay(value){
+    const keys=['transferMode','preset','knots','opacity','shading'];
+    if(!exactKeys(value,keys)||!['Preset','Custom'].includes(value.transferMode)||value.transferMode==='Preset'&&!presetNames.includes(value.preset)||value.transferMode==='Custom'&&value.preset!==null||typeof value.opacity!=='number'||!Number.isFinite(value.opacity)||value.opacity<0||value.opacity>100||typeof value.shading!=='boolean')throw Error('저장된 VR 표시 조건 형식을 확인할 수 없습니다.');
+    let knots;
+    if(value.transferMode==='Preset'){
+      if(!Array.isArray(value.knots)||value.knots.length!==0)throw Error('저장된 VR 표시 조건 형식을 확인할 수 없습니다.');
+      knots=[];
+    }else{
+      if(!Array.isArray(value.knots)||value.knots.some(k=>!exactKeys(k,['hu','opacity','color'])||typeof k.hu!=='number'||!Number.isFinite(k.hu)||typeof k.opacity!=='number'||!Number.isFinite(k.opacity)||typeof k.color!=='string'))throw Error('저장된 VR 표시 조건 형식을 확인할 수 없습니다.');
+      knots=validateTransferKnots(value.knots);
+    }
+    return {transferMode:value.transferMode,preset:value.preset,knots,opacity:value.opacity,shading:value.shading};
+  }
+  function emptyPresetLibrary(owner){return {version:1,owner:normalizeOwner(owner),presets:[]};}
+  function normalizePresetLibrary(value,expectedOwner){
+    if(!exactKeys(value,['version','owner','presets'])||value.version!==1||!Array.isArray(value.presets)||value.presets.length>20)throw Error('저장된 VR 프리셋 목록 형식을 확인할 수 없습니다.');
+    const owner=normalizeOwner(value.owner),expected=normalizeOwner(expectedOwner);
+    if(JSON.stringify(owner)!==JSON.stringify(expected))throw Error('저장된 VR 프리셋의 계정을 확인할 수 없습니다.');
+    const seen=new Set(),presets=value.presets.map(entry=>{
+      if(!exactKeys(entry,['name','display']))throw Error('저장된 VR 프리셋 목록 형식을 확인할 수 없습니다.');
+      const name=normalizePresetName(entry.name),identity=nameIdentity(name);
+      if(name!==entry.name||seen.has(identity))throw Error('저장된 VR 프리셋 이름을 확인할 수 없습니다.');
+      seen.add(identity);return {name,display:normalizeDisplay(entry.display)};
+    });
+    return {version:1,owner,presets};
+  }
+  function readPresetLibrary(storage,owner){
+    if(!storage||typeof storage.getItem!=='function')throw Error('브라우저 VR 프리셋 저장소를 사용할 수 없습니다.');
+    const key=presetStoreKey(owner);let raw;
+    try{raw=storage.getItem(key);}catch(_){throw Error('VR 프리셋 목록을 읽지 못했습니다.');}
+    if(raw===null)return {key,raw,library:emptyPresetLibrary(owner)};
+    if(typeof raw!=='string'||raw.length>131072||new TextEncoder().encode(raw).byteLength>131072)throw Error('저장된 VR 프리셋 목록 크기를 확인할 수 없습니다. 목록을 덮어쓰지 않았습니다.');
+    let parsed;try{parsed=JSON.parse(raw);}catch(_){throw Error('저장된 VR 프리셋 목록이 손상되었습니다. 목록을 덮어쓰지 않았습니다.');}
+    try{return {key,raw,library:normalizePresetLibrary(parsed,owner)};}catch(error){throw Error(error.message+' 목록을 덮어쓰지 않았습니다.');}
+  }
+  function changePresetLibrary(library,command){
+    const current=normalizePresetLibrary(library,library?.owner);
+    if(!exactKeys(command,command?.type==='add'?['type','name','display']:command?.type==='replace'?['type','name','display']:command?.type==='delete'?['type','name']:[]))throw Error('VR 프리셋 작업을 확인할 수 없습니다.');
+    const name=normalizePresetName(command.name),identity=nameIdentity(name),index=current.presets.findIndex(item=>nameIdentity(item.name)===identity);
+    if(command.type==='add'){
+      if(index!==-1)throw Error('같은 이름의 VR 프리셋이 이미 있습니다.');
+      if(current.presets.length>=20)throw Error('VR 프리셋은 최대 20개까지 저장할 수 있습니다.');
+      current.presets.push({name,display:normalizeDisplay(command.display)});
+    }else if(command.type==='replace'){
+      if(index===-1)throw Error('바꿀 VR 프리셋을 선택하세요.');
+      current.presets[index]={name:current.presets[index].name,display:normalizeDisplay(command.display)};
+    }else if(command.type==='delete'){
+      if(index===-1)throw Error('삭제할 VR 프리셋을 선택하세요.');
+      current.presets.splice(index,1);
+    }
+    return normalizePresetLibrary(current,current.owner);
+  }
+  function writePresetLibrary(storage,snapshot,command){
+    if(!snapshot||typeof snapshot.key!=='string'||!Object.prototype.hasOwnProperty.call(snapshot,'raw'))throw Error('VR 프리셋 목록 상태를 먼저 불러오세요.');
+    const checked=normalizePresetLibrary(snapshot.library,snapshot.library?.owner);if(snapshot.key!==presetStoreKey(checked.owner))throw Error('VR 프리셋 저장소의 계정을 확인할 수 없습니다.');
+    let actual;try{actual=storage.getItem(snapshot.key);}catch(_){throw Error('VR 프리셋 저장소 상태를 확인하지 못했습니다.');}
+    if(actual!==snapshot.raw)throw Error('다른 창에서 VR 프리셋 목록이 변경되었습니다. Reload Presets를 누르세요.');
+    const library=changePresetLibrary(checked,command),raw=JSON.stringify(library);
+    try{storage.setItem(snapshot.key,raw);}catch(_){throw Error('VR 프리셋을 저장하지 못했습니다. 입력 내용은 유지됩니다.');}
+    return {key:snapshot.key,raw,library:normalizePresetLibrary(library,library.owner)};
+  }
+  const api={rotate,orient,validateCropBounds,cropPlanes,createCropPlane,validateTransferKnots,hexToRgb,directions:Object.keys(directions),presetNames:[...presetNames],presetStorePrefix,presetStoreKey,normalizeOwner,normalizePresetName,normalizeDisplay,emptyPresetLibrary,normalizePresetLibrary,readPresetLibrary,changePresetLibrary,writePresetLibrary};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeRendering=api;
 })(typeof window==='object'?window:globalThis);

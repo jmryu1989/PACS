@@ -40,6 +40,20 @@ class ExecutionSelectionTests(unittest.TestCase):
                     self.assertEqual(filename, 'viewer_api_test.py')
                 print('SELECTION', filename, len(selected), flush=True)
 
+    def test_volume_rendering_profile_selects_only_local_vr_methods(self):
+        suite, class_name, unit = ci.PROFILES['volume-rendering']['suites'][0]
+        plan = runner.module_plan('tests/'+suite, unit, 'live', 1800, class_name)
+        selected = [item['case'] for item in plan['tests']]
+        module = runner.load_module(ROOT/'tests'/suite)
+        declared = sorted('VolumeRenderingE2E.'+name for name in
+                          module.VolumeRenderingE2E.__dict__ if name.startswith('test_vr_'))
+        self.assertEqual(selected, declared)
+        self.assertGreaterEqual(len(selected), 12)
+        self.assertTrue(all(case.startswith('VolumeRenderingE2E.test_vr_') for case in selected))
+        self.assertTrue(all(item['file'] == 'tests/e2e/test_volume_rendering.py'
+                            for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), len(declared))
+
     def test_candidate_contract_remains_69_then_14(self):
         for filename, count in [('tests/invariants_live.py', 69), ('tests/e2e/test_worklist.py', 14)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)

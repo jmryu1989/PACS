@@ -43,13 +43,47 @@ jobs:
         timeout-minutes: 28
         run: |
           "$RUNNER_TEMP/measurement-python/bin/python" tests/execution_selection_test.py
-          "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py
+          "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measurements
       - name: Sanitized synthetic measurement evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: synthetic-measurement-results
           path: tests/e2e/artifacts/measurement-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-rendering:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: CI profile safeguards and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
+      - name: Volume rendering model and personal preset boundaries
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/vr-python"
+          "$RUNNER_TEMP/vr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared VR-only selection
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared volume rendering tests
+        timeout-minutes: 28
+        run: "$RUNNER_TEMP/vr-python/bin/python" tests/measurement_ci.py --profile volume-rendering
+      - name: Sanitized synthetic volume rendering evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-rendering-results
+          path: |
+            tests/e2e/artifacts/volume-rendering-ci/
+            tmp/vr-ci/
           if-no-files-found: error
           retention-days: 7
   runtime:

@@ -1,11 +1,10 @@
 # coding: utf-8
-"""D-MEASURE2 B1: fresh GitHub-hosted runner only; owned synthetic local stack."""
-import json, os, re, secrets, ssl, subprocess, sys, time
+"""Fresh GitHub-hosted runner only; owned synthetic local stack CI profiles."""
+import argparse, json, os, re, secrets, shutil, ssl, subprocess, sys, time
 from pathlib import Path
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'tests/e2e/artifacts/measurement-ci'
 SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
           'e2e/test_measurement_panel.py', 'e2e/test_held_measurements.py',
           'e2e/test_manual_sr.py', 'e2e/test_measurement_recheck.py',
@@ -13,17 +12,45 @@ SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
 SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'HeldMeasurementE2E', 'ManualSrE2E', 'MeasurementRecheckE2E',
                  'ViewerRecoveryE2E', 'MeasurementCalibrationE2E']
+PROFILES = {
+    'measurements': {
+        'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
+        'project_prefix': 'kin-measure-ci-',
+        'suite_timeout': 540,
+        'suites': tuple((suite, class_name, 'ci-'+Path(suite).stem.replace('_','-'))
+                        for suite, class_name in zip(SUITES, SUITE_CLASSES)),
+    },
+    'volume-rendering': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-rendering-ci',
+        'project_prefix': 'kin-vr-ci-',
+        'suite_timeout': 1200,
+        # This module's load_tests is the allowlist: declared test_vr_* only.
+        'suites': (('e2e/test_volume_rendering.py', None,
+                    'ci-volume-rendering'),),
+    },
+}
 
 
-def guarded_suite_command(suite, class_name, remaining):
+def guarded_suite_command(suite, class_name, remaining, unit=None, maximum=540):
     # The inner supervisor must terminate its descendants before the outer CI
     # deadline kills the supervisor and starts disposable-stack cleanup.
-    seconds = min(540, int(remaining)-35)
+    seconds = min(maximum, int(remaining)-35)
     if seconds < 1:
         raise RuntimeError('Insufficient CI time for a supervised test run')
-    return [sys.executable, str(ROOT/'scripts/run-tests.py'), '--module', 'tests/'+suite,
-            '--class', class_name, '--mode', 'live',
-            '--unit', 'ci-'+Path(suite).stem.replace('_','-'), '--timeout', str(seconds)]
+    command = [sys.executable, str(ROOT/'scripts/run-tests.py'), '--module', 'tests/'+suite]
+    if class_name:
+        command += ['--class', class_name]
+    return command + ['--mode', 'live', '--unit',
+            unit or 'ci-'+Path(suite).stem.replace('_','-'), '--timeout', str(seconds)]
+
+
+def guarded_profile_run(profile, suite, class_name, unit, remaining):
+    command = guarded_suite_command(
+        suite, class_name, remaining, unit, profile['suite_timeout'])
+    # run() also caps this request by the shared deadline. Requesting the inner
+    # maximum plus its reserved margin prevents the outer supervisor from
+    # preempting run-tests.py before it terminates descendants and records state.
+    return command, profile['suite_timeout'] + 35
 
 
 def sanitize(output, secrets_to_hide):
@@ -32,6 +59,35 @@ def sanitize(output, secrets_to_hide):
     output = re.sub(r'(?i)(bearer|basic)\s+[A-Za-z0-9._~+/=-]+', r'\1 [REDACTED]', output)
     output = re.sub(r'(?im)((?:set-cookie|cookie):)[^\r\n]*', r'\1 [REDACTED]', output)
     return re.sub(r'(?i)("(?:access_token|refresh_token|id_token|temporaryPassword|password|client_secret|cookie|authorization)"\s*:\s*)"[^"\r\n]*"', r'\1"[REDACTED]"', output)
+
+
+def profile_environment(profile_name, out, values, evidence_stage=None):
+    env = {**os.environ, **values, 'PYTHONIOENCODING':'utf-8', 'PUBLIC_PORT':'9443',
+           'PUBLIC_ORIGIN':'https://localhost:9443',
+           'KIN_TEST_PROXY':'https://localhost:9443',
+           'KIN_TEST_API':'https://localhost:9443/api',
+           'KIN_TEST_TOKEN_URL':'http://127.0.0.1:8080/auth/realms/kin/protocol/openid-connect/token',
+           'KIN_TEST_ORTHANC':'http://127.0.0.1:8042',
+           'KIN_TEST_ORTHANC_USER':'admin',
+           'KIN_TEST_ORTHANC_PASSWORD':values['ORTHANC_PASS']}
+    if profile_name == 'volume-rendering':
+        if evidence_stage is None:
+            raise RuntimeError('VR evidence requires private staging')
+        env['KIN_EVIDENCE_DIR'] = str(evidence_stage)
+    else:
+        env.pop('KIN_EVIDENCE_DIR', None)
+    env.pop('COMPOSE_FILE', None)
+    return env
+
+
+def publish_vr_evidence(stage, out):
+    expected = stage/'volume-rendering.png'
+    files = sorted(path.relative_to(stage).as_posix() for path in stage.rglob('*') if path.is_file())
+    if files != ['volume-rendering.png']:
+        raise RuntimeError('Unexpected or missing VR suite evidence: '+', '.join(files))
+    if expected.read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
+        raise RuntimeError('VR suite evidence is not a PNG')
+    shutil.copyfile(expected, out/expected.name)
 
 
 def seed_source():
@@ -73,7 +129,11 @@ def seed_source():
         ds.save_as(dest / f'{z}.dcm', write_like_original=False)
 
 
-def main():
+def main(profile_name):
+    if profile_name not in PROFILES:
+        raise RuntimeError('Unknown CI profile')
+    profile = PROFILES[profile_name]
+    out = profile['out']
     if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted':
         raise RuntimeError('Requires a disposable GitHub-hosted runner')
     if (ROOT/'.env').exists() or (ROOT/'sample-data').exists():
@@ -83,13 +143,19 @@ def main():
     endpoint = subprocess.check_output(['docker','context','inspect','--format','{{.Endpoints.docker.Host}}']).decode().strip()
     if not endpoint.startswith('unix:///') or os.environ.get('DOCKER_HOST'):
         raise RuntimeError('Requires the runner local Docker socket')
-    OUT.mkdir(parents=True, exist_ok=False)
+    out.mkdir(parents=True, exist_ok=False)
     values = {key: secrets.token_hex(32) for key in ['POSTGRES_PASSWORD','ORTHANC_PASS',
               'KC_ADMIN_PASSWORD','KC_CLIENT_SECRET','KC_WEB_SECRET','KIN_COOKIE_SECRET']}
     for value in values.values(): print('::add-mask::'+value, flush=True)
-    env = {**os.environ, **values, 'PYTHONIOENCODING':'utf-8', 'PUBLIC_PORT':'9443', 'PUBLIC_ORIGIN':'https://localhost:9443'}
-    env.pop('COMPOSE_FILE', None)
-    project = 'kin-measure-ci-'+secrets.token_hex(6)
+    evidence_stage = None
+    if profile_name == 'volume-rendering':
+        runner_temp = os.environ.get('RUNNER_TEMP')
+        if not runner_temp or not Path(runner_temp).is_absolute():
+            raise RuntimeError('VR evidence requires absolute RUNNER_TEMP')
+        evidence_stage = Path(runner_temp)/('kin-vr-suite-evidence-'+secrets.token_hex(6))
+        evidence_stage.mkdir(parents=True, exist_ok=False)
+    env = profile_environment(profile_name, out, values, evidence_stage)
+    project = profile['project_prefix']+secrets.token_hex(6)
     # Fixed container names mean isolation comes from the empty hosted daemon,
     # not this project name. Helpers must still address the same Compose project.
     env['COMPOSE_PROJECT_NAME'] = project
@@ -104,7 +170,7 @@ def main():
         except subprocess.TimeoutExpired as error:
             code, output = 124, (error.stdout or b'')+(error.stderr or b'')+b'\nCI command deadline\n'
         output = sanitize(output.decode('utf-8', errors='replace'), values.values())
-        (OUT/(name+'.log')).write_text(output, encoding='utf-8')
+        (out/(name+'.log')).write_text(output, encoding='utf-8')
         results.append(dict(name=name, exit=code, seconds=time.monotonic()-started))
         print(name+': '+str(code), flush=True)
         if code and not finalizing: raise RuntimeError(name+' failed; see sanitized artifact')
@@ -128,8 +194,12 @@ def main():
                     if time.monotonic() >= ready_by: raise RuntimeError('Stack readiness deadline')
                     time.sleep(1)
         run('ports', compose+['ps'])
-        for suite, class_name in zip(SUITES, SUITE_CLASSES):
-            run(Path(suite).stem, guarded_suite_command(suite, class_name, deadline-time.monotonic()))
+        for suite, class_name, unit in profile['suites']:
+            command, outer_timeout = guarded_profile_run(
+                profile, suite, class_name, unit, deadline-time.monotonic())
+            run(Path(suite).stem, command, timeout=outer_timeout)
+        if evidence_stage is not None:
+            publish_vr_evidence(evidence_stage, out)
     finally:
         # This project was generated after proving an empty runner daemon.
         # Never use this cleanup against a developer or production stack.
@@ -141,7 +211,12 @@ def main():
                 cleanup = run('cleanup', compose+['down','--volumes','--remove-orphans'], timeout=60, finalizing=True)
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
             finally:
-                (OUT/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
+                if evidence_stage is not None:
+                    shutil.rmtree(evidence_stage)
 
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--profile', required=True, choices=tuple(PROFILES))
+    main(parser.parse_args().profile)
