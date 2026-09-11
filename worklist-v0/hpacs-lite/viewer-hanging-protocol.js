@@ -124,6 +124,26 @@
       }
       throw Error('영상 배치 완료를 확인하지 못해 현재 적용 기준을 갱신하지 않았습니다.');
     }
+    function snapshotIsCurrent(snapshot){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===snapshot.rows&&state.layout?.numCols===snapshot.cols&&views.length===snapshot.cells.length&&views.every((view,index)=>view.viewportId===snapshot.cells[index].id&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(snapshot.cells[index].sets));}
+    async function observeLateTarget(ids,result,beforeGeneration,beforeInteraction,userChanged){
+      for(let count=0;count<80;count++){
+        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe())return null;
+        if(targetIsCurrent(ids,result))return interactionFingerprint();
+        if(interactionFingerprint()!==beforeInteraction)return null;
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      return null;
+    }
+    async function restoreOwnedTarget(snapshot,ids,result,ownedFingerprint,beforeGeneration,userChanged){
+      if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!targetIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+      try{await restore(snapshot);}catch(_){return false;}
+      for(let count=0;count<80;count++){
+        if(snapshotIsCurrent(snapshot))return true;
+        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!targetIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      return false;
+    }
     const restore=snapshot=>grid.setLayout({numRows:snapshot.rows,numCols:snapshot.cols,activeViewportId:snapshot.active,isHangingProtocolLayout:false,
       findOrCreateViewport:index=>({displaySetInstanceUIDs:snapshot.cells[index].sets,displaySetOptions:[{}],viewportOptions:{viewportId:snapshot.cells[index].id,viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
     function workspaceSafe(){
@@ -146,7 +166,8 @@
       if(busy||ended||!live())return;if(!workspaceSafe()){status.textContent='저장하지 않은 영상 작업이 있어 배치를 변경하지 않았습니다.';return;}
       let value;try{value=strict();}catch(error){status.textContent=error.message;return;}
       if(navigation&&appliedCursor&&appliedFingerprint!==navigationFingerprint())invalidateApplied();
-      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);status.textContent='검사와 규칙을 확인 중…';
+      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false;
+      const noteInteraction=()=>{if(interactionArmed)userInteracted=true;};for(const type of ['pointerdown','wheel','keydown'])document.addEventListener(type,noteInteraction,true);queueMicrotask(()=>interactionArmed=true);status.textContent='검사와 규칙을 확인 중…';
       try{
         const context=await verifiedContext(request.signal);if(ended||!live()||beforeGeneration!==generation||before!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
         const resolveContext={studies:context.studies,displaySets:context.displaySets||displaySets.getActiveDisplaySets()};
@@ -160,11 +181,18 @@
         let targetFingerprint=null;
         try{const pending=grid.setLayout({numRows:result.rule.layout.rows,numCols:result.rule.layout.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
           findOrCreateViewport:index=>({displaySetInstanceUIDs:result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
-          if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await pending;if(!targetIsCurrent(ids,result))await waitForTarget(ids,result,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();}
-        catch(error){if(beforeGeneration===generation&&live()&&targetFingerprint!==null&&targetIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint())try{await restore(snapshot);}catch(_){}throw error;}
-        if(!request.signal.aborted&&!ended&&live()&&beforeGeneration===generation&&targetIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint()){appliedCursor=result.rule.id;appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;applied.textContent=`Applied Protocol: ${appliedName}`;status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;}
-        else if(!ended)status.textContent=request.signal.aborted?'응답 시간이 지나 현재 배치를 유지합니다.':'규칙이나 영상 표시 상태가 변경되어 적용 기준을 갱신하지 않았습니다.';
-      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);request=null;busy=false;refresh();}
+          if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await pending;if(!targetIsCurrent(ids,result))await waitForTarget(ids,result,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();
+          if(request.signal.aborted)throw new DOMException('Aborted','AbortError');
+          if(ended||!live()||beforeGeneration!==generation||!targetIsCurrent(ids,result)||targetFingerprint!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용 기준을 갱신하지 않았습니다.');}
+        catch(error){
+          let owned=targetFingerprint!==null&&!userInteracted&&workspaceSafe()&&targetIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint()?targetFingerprint:null;
+          if(owned===null&&targetFingerprint===null&&beforeGeneration===generation&&live()&&!ended)owned=await observeLateTarget(ids,result,beforeGeneration,before,()=>userInteracted);
+          const restored=owned!==null&&await restoreOwnedTarget(snapshot,ids,result,owned,beforeGeneration,()=>userInteracted);
+          if(!restored){invalidateApplied();const uncertain=Error('배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인한 뒤 다시 적용하세요.');uncertain.name='KinLayoutUnconfirmed';throw uncertain;}
+          throw error;
+        }
+        appliedCursor=result.rule.id;appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;applied.textContent=`Applied Protocol: ${appliedName}`;status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;
+      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }
     async function account(action){
       if(busy||ended||!boundOwner)return;let value=null;

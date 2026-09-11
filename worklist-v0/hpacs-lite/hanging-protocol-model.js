@@ -130,7 +130,7 @@
     if(!matches.length)return {kind:'no-match',reason:'none'};
     if(cursor===null)return direction==='next'?matches[0]:matches[matches.length-1];
     const index=matches.findIndex(result=>result.rule.id===cursor.toLowerCase());
-    if(index<0)return {kind:'no-match',reason:'stale'};
+    if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
     const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
   }
   root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,resolve,navigate};
