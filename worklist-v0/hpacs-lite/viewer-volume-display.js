@@ -17,6 +17,7 @@ window.kinCreateVolumeDisplay=function({target,starting,permitted,alive,services
   // range for inverted curves. Retain the pinned setter's actual input range.
   const state=view=>({camera:structuredClone(view.getCamera()),properties:structuredClone(view.getProperties()),range:structuredClone(view.viewportProperties?.voiRange||view.getProperties().voiRange),nodes:nodes(view),opacity:opacity(view)});
   const states=t=>t.views.map(state);
+  const selected=operation=>window.kinVolumeSynchronization?window.kinVolumeSynchronization.selected(operation):operation();
   const stateEqual=(a,b)=>camerasEqual(a.camera,b.camera)&&JSON.stringify(a.properties)===JSON.stringify(b.properties)&&JSON.stringify(a.range)===JSON.stringify(b.range)&&near(a.nodes,b.nodes)&&near(a.opacity,b.opacity);
   function selectedWindowing(v,properties){
     const manager=window.cornerstoneTools?.SynchronizerManager;
@@ -26,7 +27,7 @@ window.kinCreateVolumeDisplay=function({target,starting,permitted,alive,services
       // Native VOI events also update the visible W/L labels. Pause only the
       // currently enabled synchronizers for this synchronous update, retaining
       // native notifications for the selected viewport and restoring ownership.
-      for(const group of groups){muted.push(group);group.setEnabled(false);}
+      for(const group of groups){if(group.isDisabled())continue;muted.push(group);group.setEnabled(false);}
       // The pinned native setter changes its LUT-function field after applying
       // the old range. Apply the desired range again under the new function.
       const current=v.getProperties(),oldFunction=current.VOILUTFunction||'LINEAR',nextFunction=properties.VOILUTFunction;
@@ -62,7 +63,7 @@ window.kinCreateVolumeDisplay=function({target,starting,permitted,alive,services
       before=states(t);
       const update=kind==='windowing'?model.resetWindowing(v.getDefaultProperties(v.getVolumeId())):model.resetZoomPan(before[index].camera,baseline.cameras[index]);
       busy=true;status.textContent='선택 평면 표시를 초기화 중입니다.';refresh();changed=true;
-      if(kind==='windowing')selectedWindowing(v,update);else v.setCamera(update);
+      selected(()=>{if(kind==='windowing')selectedWindowing(v,update);else v.setCamera(update);});
       v.render();applied=states(t);
       await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('화면 갱신을 확인하지 못했습니다.')),1000);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve();}));});
       const after=target(true);if(!same(t,after)||!allowed(after))throw Error('화면이 변경되어 초기화 결과를 확인하지 못했습니다.');
@@ -97,8 +98,10 @@ window.kinCreateVolumeDisplay=function({target,starting,permitted,alive,services
           // own applied state, but never overwrite a newer independent edit.
           if(applied&&!stateEqual(current,applied[i]))continue;
           const camera={...before[i].camera};delete camera.rotation;
-          if(!camerasEqual(current.camera,camera))view.setCamera(camera);
-          if(kind==='windowing'&&(JSON.stringify(current.properties)!==JSON.stringify(before[i].properties)||!near(current.nodes,before[i].nodes)))selectedWindowing(view,model.resetWindowing({...before[i].properties,voiRange:before[i].range}));
+          selected(()=>{
+            if(!camerasEqual(current.camera,camera))view.setCamera(camera);
+            if(kind==='windowing'&&(JSON.stringify(current.properties)!==JSON.stringify(before[i].properties)||!near(current.nodes,before[i].nodes)))selectedWindowing(view,model.resetWindowing({...before[i].properties,voiRange:before[i].range}));
+          });
           if(kind==='windowing'&&!near(nodes(view),before[i].nodes))window.cornerstone.utilities.transferFunctionUtils.setTransferFunctionNodes(transfer(view),before[i].nodes);
           view.render();
         }catch(_){rollbackFailed=true;}
