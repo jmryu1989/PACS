@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { canonical } from './viewer-input';
+import { verifyVolumeMarkBounds } from './viewer-volume-marks';
 import { createHash } from 'node:crypto';
 
 const invalid = (): never => { throw new BadRequestException('정규 CT 볼륨의 전체 원본과 좌표를 확인할 수 없습니다'); };
@@ -42,9 +43,11 @@ export function verifyVolumeReference(snapshot: any, tags: any[], patient: strin
       if(!near(p,origin.map((n,j)=>n+step[j]*i)))invalid();
     }
   }
+  const batch=snapshot.version===5||snapshot.version===6&&snapshot.batch!==null;
+  if(snapshot.version===6){const o=values(tags[0].ImageOrientationPatient);verifyVolumeMarkBounds(snapshot.marks,origin,o.slice(0,3).map(n=>n*spacing[1]),o.slice(3).map(n=>n*spacing[0]),step,[Number(tags[0].Columns),Number(tags[0].Rows),tags.length]);}
   const max=Math.min(1000,Math.hypot((Number(tags[0].Columns)-1)*spacing[1],(Number(tags[0].Rows)-1)*spacing[0],Math.hypot(...step)*(tags.length-1)));
-  for(const cell of [...snapshot.cells,...(snapshot.version===5?[snapshot.batch.cell]:[])])if(cell.projection.thickness>max)invalid();
-  if(snapshot.version===5){
+  for(const cell of [...snapshot.cells,...(batch?[snapshot.batch.cell]:[])])if(cell.projection.thickness>max)invalid();
+  if(batch){
     const b=snapshot.batch,o=values(tags[0].ImageOrientationPatient),n=b.cell.camera.viewPlaneNormal;
     const corners=[0,Number(tags[0].Columns)-1].flatMap(x=>[0,Number(tags[0].Rows)-1].flatMap(y=>[0,tags.length-1].map(z=>origin.map((v,i)=>v+o[i]*x*spacing[1]+o[i+3]*y*spacing[0]+step[i]*z))));
     const distances=corners.map(p=>dot(p,n)),lo=Math.min(...distances),hi=Math.max(...distances),start=dot(b.cell.camera.focalPoint,n)+b.offset,end=start+(b.reverse?-1:1)*b.interval*(b.count-1);

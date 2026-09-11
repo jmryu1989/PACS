@@ -47,7 +47,7 @@ export class ViewerJobService {
     const identity = new Map<string, string>();
     for (const uid of snapshot.studies) identity.set(uid, (await this.orthanc.connectStudyIdentity(uid)).patientId);
     if (new Set(identity.values()).size !== 1) throw new BadRequestException('같은 환자의 검사만 비교 작업으로 저장할 수 있습니다');
-    if ([4,5].includes(snapshot.version)) {
+    if ([4,5,6].includes(snapshot.version)) {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
       try {
         const before = await this.orthanc.viewerSeriesManifest(snapshot.volume.series, controller.signal);

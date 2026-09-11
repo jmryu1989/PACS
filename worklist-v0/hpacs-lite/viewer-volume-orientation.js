@@ -3,7 +3,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   panel.innerHTML='<strong>MPR Orientation</strong><p class="target"></p><label>Axis <select aria-label="MPR Rotation Axis"><option value="0">Patient L/R</option><option value="1">Patient A/P</option><option value="2">Patient H/F</option></select></label> <label>Degrees <input type="number" aria-label="MPR Rotation Degrees" min="-180" max="180" step="5" value="15" style="width:80px"></label> <button type="button">Rotate Three Planes</button> <button type="button">Reset Planes</button><p role="status"></p><p>세 평면의 교점을 유지해 회전합니다. Reset Planes는 이 배치에서 시작한 방향·위치·확대로 돌아갑니다. Save New Job으로 표시를 저장할 수 있습니다.</p>';
   host.append(panel);
   const axis=panel.querySelector('select'),degrees=panel.querySelector('input'),[rotate,reset]=panel.querySelectorAll('button'),status=panel.querySelector('[role=status]'),caption=panel.querySelector('.target');
-  const model=window.KinVolumeOrientation,volumeKeys=new WeakMap();let nextVolume=0,ended=false,busy=false,shown='',baseline=null;
+  const model=window.KinVolumeOrientation,volumeKeys=new WeakMap(),readyRepairs=new WeakMap();let nextVolume=0,ended=false,busy=false,shown='',baseline=null;
   const alive=()=>{try{return !ended&&live();}catch(_){return false;}};
   const permitted=()=>{try{return alive()&&allowed();}catch(_){return false;}};
   const workspaceBusy=()=>{try{return !!window.kinViewerJobWorkspaceState?.().busy;}catch(_){return true;}};
@@ -19,7 +19,19 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
       const volume=cornerstone.cache.getVolume(views[0].getVolumeId());
       if(!volume?.loadStatus?.loaded||volume.framesLoaded!==volume.imageIds?.length||volume.imageIds.length>256||volume.imageIds.length<2||views.some(v=>cornerstone.cache.getVolume(v.getVolumeId())!==volume))return null;
       if(cells.some(c=>c.displaySetInstanceUIDs?.length!==1||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.StudyInstanceUID!==source.uid||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.SeriesInstanceUID!==source.series||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.Modality!=='CT'))return null;
-      if(views.some((v,i)=>{const c=v.getCanvas();return !cells[i].isReady||!c?.clientWidth||!c?.clientHeight||Math.abs(c.width-Math.floor(c.clientWidth*devicePixelRatio))>1||Math.abs(c.height-Math.floor(c.clientHeight*devicePixelRatio))>1;}))return null;
+      if(views.some((v,i)=>{const c=v.getCanvas();return !c?.clientWidth||!c?.clientHeight||Math.abs(c.width-Math.floor(c.clientWidth*devicePixelRatio))>1||Math.abs(c.height-Math.floor(c.clientHeight*devicePixelRatio))>1;}))return null;
+      if(cells.some(c=>!c.isReady)){
+        if(!permitted()||workspaceBusy())return null;
+        // The pinned grid resets isReady during layout changes, but React can
+        // retain the enabled viewport without another onElementEnabled callback.
+        // Restore that element-readiness flag only for the actual current native
+        // renderer after the complete volume/source and canvas checks above.
+        for(let i=0;i<views.length;i++)if(!cells[i].isReady){
+          const v=views[i];if(!v.element.isConnected||cornerstone.getEnabledElement(v.element)?.viewport!==v)return null;
+          if(readyRepairs.get(v)!==cells[i]){services.viewportGridService.setViewportIsReady(v.id,true);readyRepairs.set(v,cells[i]);}
+        }
+        return null;
+      }
       if(verify){
         if(!permitted())throw Error('다른 작업을 마친 뒤 MPR 방향을 조절하세요.');
         if(volume.imageIds.length!==volume.dimensions?.[2])throw Error('MPR 원본 프레임 수를 확인할 수 없습니다.');
@@ -76,8 +88,9 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const synchronization=window.kinCreateVolumeSync?.({target,permitted:()=>!busy&&permitted(),alive,services,host});
   const preferences=window.KinVolumePreferences&&window.kinCreateVolumePreferences?.({target,permitted:()=>!busy&&permitted(),alive,owner,services,host});
   const progressive=window.kinCreateVolumeProgressive?.({target,enabled:()=>window.kinMprPreferences?.read()?.progressive===true,permitted:()=>!busy&&permitted(),alive,notice:text=>window.kinMprPreferences?.notice(text)});
+  const marks=window.KinVolumeMarks&&window.kinCreateVolumeMarks?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const batch=window.KinVolumeBatch&&window.kinCreateVolumeBatch?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

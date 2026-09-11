@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference } from './viewer-input';
+import { validateVolumeMarks } from './viewer-volume-marks';
 import { createHash } from 'node:crypto';
 
 const invalid = (): never => { throw new BadRequestException('비교 작업의 입력 또는 원본 참조가 올바르지 않습니다'); };
@@ -35,11 +36,13 @@ export function previewCommand(raw: Buffer): any {
   return b.snapshot;
 }
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5].includes(s?.version) ? ['volume'] : []), ...(s?.version===5?['batch']:[])]);
-  if (![1, 2, 3, 4, 5].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6].includes(s?.version) ? ['volume'] : []), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:[])]);
+  if (![1, 2, 3, 4, 5, 6].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
-  const volume = [4,5].includes(s.version);
-  if(s.version===5){
+  const volume = [4,5,6].includes(s.version);
+  if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
+  const batch=s.version===5||s.version===6&&s.batch!==null;
+  if(batch){
     keys(s.batch,['cell','offset','interval','count','reverse']);
     number(s.batch.offset,-1e7,1e7);number(s.batch.interval,.1,1000);number(s.batch.count,2,128);
     if(!Number.isInteger(s.batch.count)||typeof s.batch.reverse!=='boolean')invalid();
@@ -53,7 +56,7 @@ function validateJobSnapshot(s: any) {
   if ((volume ? !(s.rows === 1 && s.cols === 3 || s.rows === 3 && s.cols === 1) : ![1, 2].includes(s.rows) || ![1, 2].includes(s.cols)) || !Number.isInteger(s.active) || s.active < 0 || s.active >= s.rows * s.cols ||
       !Array.isArray(s.cells) || s.cells.length !== s.rows * s.cols || s.cells.every(c => !c)) invalid();
   let pixels = 0;
-  for (const c of [...s.cells,...(s.version===5?[s.batch.cell]:[])]) {
+  for (const c of [...s.cells,...(batch?[s.batch.cell]:[])]) {
     if (c === null) { if (volume) invalid(); continue; }
     keys(c, ['study', 'series', ...(volume ? ['projection'] : ['sop', 'frame']), 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
     if (s.version >= 2) {

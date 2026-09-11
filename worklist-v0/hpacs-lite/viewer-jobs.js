@@ -26,7 +26,7 @@ window.kinViewerJobs = function (services, model) {
     const controls = text('div', ''), status = text('p', '계정 확인 중…'), list = text('div', ''); status.id = 'kin-viewer-jobs-status'; status.setAttribute('role', 'status');
     parent.insertBefore(panel, parent.children[1]);
     let ended = false, busy = false, me = null, serial = 0, editSerial = 0, pending = null, editRow = null, applying = false, channel, lastAuth = 0, checking = false;
-    const workspaceState = () => ({ busy: !ended && (busy || applying), dirty: !ended && !!(pending || editRow || title.value || description.value) });
+    const workspaceState = () => ({ busy: !ended && (busy || applying), dirty: !ended && !!(pending || editRow || title.value || description.value || window.kinMprMarks?.dirty?.()) });
     window.kinViewerJobWorkspaceState = workspaceState;
     // This panel also runs in the separate named viewer window, where the
     // worklist's embedded-frame guard cannot protect an unfinished title,
@@ -48,6 +48,7 @@ window.kinViewerJobs = function (services, model) {
       openingPrint = true;
       try {
         const snapshot = row ? null : capture(true);
+        if(snapshot?.version===6||row?.snapshotVersion===6)throw new Error('3D 표식이 포함된 작업의 출력은 아직 지원하지 않습니다. 저장한 Job으로 다시 열어 확인하세요.');
         if([4,5].includes(snapshot?.version)||row?.snapshotVersion===4)throw new Error('MPR 출력은 저장된 단면 묶음에서 지원합니다. Make Batch 후 Save New Job으로 저장하세요.');
         const unchanged = () => live() && JSON.stringify(capture(true)) === JSON.stringify(snapshot);
         const assets=[['kinViewerJobPrint','viewer-job-print.js'],...(row?.snapshotVersion===5?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
@@ -142,8 +143,8 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && row.snapshotVersion!==4) button(item, 'Print Saved Images', () => openPrint(row));
-        if([4,5].includes(row.snapshotVersion))text('p',(row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
+        if (!row.hidden && ![4,6].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if([4,5,6].includes(row.snapshotVersion))text('p',(row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
           button(item, row.hidden ? 'Unhide Job' : 'Hide Job', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
@@ -152,7 +153,7 @@ window.kinViewerJobs = function (services, model) {
     }
     async function load() { const result = await api(path + '?mine=' + mine.value + '&includeHidden=' + hidden.checked); if (live()) show(result.jobs); }
     async function apply(value, ticket) {
-      if([4,5].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
+      if([4,5,6].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const current = () => live() && serial === ticket;
@@ -192,13 +193,13 @@ window.kinViewerJobs = function (services, model) {
         await authenticate();
         if (action === 'list') { await load(); status.textContent = '현재 판독 대상의 저장 작업 목록입니다.'; return; }
         if (action === 'restore') {
-          if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요.');
+          if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요.');
           const job = await api(path + '/' + row.id); await authenticate();
           // On a fresh kinJob document, native hanging-protocol initialization
           // can change the grid while the saved job is fetched. User interaction
           // still advances serial; only that initial automatic layout is allowed.
           if (!live() || ticket !== serial || !initialRestore && before !== signature()) throw new Error('영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
-          if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식이 있어 복원하지 않았습니다.');
+          if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식이 있어 복원하지 않았습니다.');
           if (JSON.stringify(job.snapshot.studies) !== JSON.stringify(studies)) {
             if (title.value || description.value) throw new Error('작성 중인 작업 제목·설명을 저장하거나 비운 뒤 비교 검사를 여세요.');
             status.textContent = '저장한 비교 검사를 함께 여는 중…';
@@ -208,19 +209,20 @@ window.kinViewerJobs = function (services, model) {
             next.searchParams.set('StudyInstanceUIDs', job.snapshot.studies.join(',')); next.searchParams.set('kinJob', job.id);
             location.assign(next.href); return;
           }
-          const previous = capture(); if([4,5].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
+          const previous = capture(); if([4,5,6].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
           try { await apply(job.snapshot, ticket); }
           catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
           finally { applying = false; }
-          status.textContent = [4,5].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
+          status.textContent = [4,5,6].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
           if (action === 'save' || action === 'saveAnnotations') {
+            // Native frame marks have separate persistence; MPR points are captured in this Job.
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true); if (action === 'saveAnnotations') {
-              if([4,5].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5,6].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
             pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot }), url: path };
@@ -231,7 +233,9 @@ window.kinViewerJobs = function (services, model) {
             pending = { body: JSON.stringify({ expectedRevision: row.revision, title: row.title, description: row.description, hidden: !row.hidden, reason }), url: path + '/' + row.id + '/revisions' };
           }
           if (!pending) throw new Error('재시도할 요청이 없습니다.');
-          await api(pending.url, { method: 'POST', body: pending.body }); pending = editRow = null;
+          const sent=JSON.parse(pending.body);await api(pending.url, { method: 'POST', body: pending.body });
+          if(sent.snapshot?.volume)window.kinMprMarks?.saved(sent.snapshot.marks||{version:1,visible:true,sync:true,marks:[]},sent.snapshot.volume);
+          pending = editRow = null;
           if (editSerial === edit && !['hide', 'retry'].includes(action)) { title.value = ''; description.value = ''; }
           await load(); status.textContent = '비교 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' + (action === 'saveAnnotations' ? ' 저장된 주석 이력도 함께 고정했습니다.' : '');
         }

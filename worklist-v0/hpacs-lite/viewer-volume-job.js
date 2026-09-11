@@ -12,6 +12,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     return {volume,reference:{study:first.StudyInstanceUID,series:first.SeriesInstanceUID,sops}};
   }
   function resolve(value) {
+    if(value.version===6&&!window.kinMprMarks)throw Error('MPR 3D 표식 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     const ref=value.volume,matches=ds.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===ref.study&&d.SeriesInstanceUID===ref.series);
     if(matches.length!==1||matches[0].images?.length!==ref.sops.length||new Set(matches[0].images.map(m=>m.SOPInstanceUID)).size!==ref.sops.length||matches[0].images.some(m=>!ref.sops.includes(m.SOPInstanceUID)||m.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'))throw Error('저장한 MPR의 전체 원본 시리즈를 찾을 수 없습니다.');
     return matches[0].displaySetInstanceUID;
@@ -44,7 +45,8 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     });
     const active=views.findIndex(v=>v.viewportId===state.activeViewportId);if(active<0)throw Error('활성 MPR 평면을 선택한 뒤 저장하세요.');
     const batch=window.kinVolumeBatchState?.capture(reference);
-    return JSON.parse(JSON.stringify({version:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(batch?{batch}:{})}));
+    const marks=window.kinMprMarks?.capture(),annotated=marks&&(marks.marks.length||!marks.visible||!marks.sync);
+    return JSON.parse(JSON.stringify({version:annotated?6:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(annotated?{marks,batch:batch||null}:batch?{batch}:{})}));
   }
   function holdCrosshairReset(){
     const group=window.cornerstoneTools?.ToolGroupManager?.getToolGroup('mpr'),tool=group?.getToolInstance('Crosshairs');
@@ -134,10 +136,11 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     }
     if(!matched)throw Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
-    if(value.version===5){
+    if(value.version===5||value.version===6&&value.batch){
       if(!window.kinVolumeBatchState)throw Error('단면 묶음 도구 로딩을 마친 뒤 다시 복원하세요.');
       await rendered();await window.kinVolumeBatchState.restore(value.batch,current);
     }
+    if(value.version===6)window.kinMprMarks.restore(value.marks);else window.kinMprMarks?.clearForJob();
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};
