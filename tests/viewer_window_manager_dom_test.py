@@ -1,6 +1,7 @@
 # coding: utf-8
 """REQ-D-WORKSPACE-WINDOWS / RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE / TEST-VIEWER-WINDOW-MANAGER-DOM."""
 from pathlib import Path
+import hashlib
 import os
 import sys
 import unittest
@@ -19,8 +20,19 @@ def extract_function(source, name):
     depth = 0
     quote = None
     escaped = False
+    line_comment = False
+    block_comment = False
     for index in range(brace, len(source)):
         char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if char in "\r\n":
+                line_comment = False
+            continue
+        if block_comment:
+            if char == "*" and following == "/":
+                block_comment = False
+            continue
         if quote:
             if escaped:
                 escaped = False
@@ -28,6 +40,12 @@ def extract_function(source, name):
                 escaped = True
             elif char == quote:
                 quote = None
+            continue
+        if char == "/" and following == "/":
+            line_comment = True
+            continue
+        if char == "/" and following == "*":
+            block_comment = True
             continue
         if char in "'\"`":
             quote = char
@@ -67,15 +85,15 @@ let monitorPermission={state:'denied'};
 const screen={isExtended:false};
 const readStoredOhifRect=()=>null,ohifPlacement=()=>({left:10,top:10,width:800,height:600});
 const toast=(message,kind,duration)=>__toasts.push({message,kind,duration});
-window.__toasts=[];window.__opened=[];window.__blockNextOpen=false;
+window.__toasts=[];window.__opened=[];window.__openCalls=[];window.__blockNextOpen=false;window.__nextOpenPopup=null;
 window.__blankPopup=()=>{
   const documentToken={querySelector:()=>null,visibilityState:'visible'};
   return {kind:'blank',location:{href:'about:blank'},document:documentToken,opener:{},closed:false,
     focusCalls:0,closeCalls:0,resizeCalls:0,moveCalls:0,focus(){this.focusCalls++},
     close(){this.closeCalls++;this.closed=true},resizeTo(){this.resizeCalls++},moveTo(){this.moveCalls++}};
 };
-window.open=(...args)=>{if(__blockNextOpen){__blockNextOpen=false;return null}const popup=__blankPopup();
-  popup.openArgs=args;__opened.push(popup);return popup};
+window.open=(...args)=>{__openCalls.push(args);if(__blockNextOpen){__blockNextOpen=false;return null}
+  const popup=__nextOpenPopup||__blankPopup();__nextOpenPopup=null;popup.openArgs=args;__opened.push(popup);return popup};
 window.getScreenDetails = undefined;
 window.BroadcastChannel = undefined;
 window.__enableDisplay=async()=>{
@@ -121,13 +139,15 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch(headless=True)
         main_fixture = os.environ.get("KIN_VIEWER_MAIN_FIXTURE")
-        cls.main_source = Path(main_fixture).read_text(encoding="utf-8") if main_fixture else MAIN.read_text(encoding="utf-8")
+        cls.main_path = Path(main_fixture).resolve() if main_fixture else MAIN.resolve()
+        main_bytes = cls.main_path.read_bytes()
+        main_lf = main_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        print(f"MAIN_SOURCE path={cls.main_path} raw_sha256={hashlib.sha256(main_bytes).hexdigest()} "
+              f"lf_sha256={hashlib.sha256(main_lf).hexdigest()}")
+        cls.main_source = main_bytes.decode("utf-8-sig")
         cls.manager_source = extract_function(cls.main_source, "mountViewerWindows")
-        open_start = cls.main_source.index("    function openOhifWindow(")
-        open_end = cls.main_source.index("\n    function mountViewerWindows", open_start)
         cls.open_source = "\n".join(extract_function(cls.main_source, name)
-                                    for name in ("ohifScope", "sameOhifScope"))
-        cls.open_source += "\n" + cls.main_source[open_start:open_end]
+                                    for name in ("ohifScope", "sameOhifScope", "openOhifWindow"))
         cls.windows_source = WINDOWS.read_text(encoding="utf-8")
 
     @classmethod
@@ -399,6 +419,69 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertEqual(current["oldClose"], 0)
         self.assertIn("StudyInstanceUIDs=1.2.2", current["href"])
         self.assertNotIn("StudyInstanceUIDs=1.2.1", current["href"])
+
+    def test_latest_named_window_collision_preserves_original_and_releases_reservation(self):
+        result = self.page.evaluate("""() => {
+          const made=__makePopup({dirty:true});
+          const original={href:made.popup.location.href,document:made.popup.document};
+          document.querySelector('#viewer-windows-open').click();
+          __nextOpenPopup=made.popup;
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          return {rows:viewerWindows.rows().map(r=>({index:r.index,pending:r.pending,popup:r.popup===made.popup})),
+            href:made.popup.location.href,sameDocument:made.popup.document===original.document,
+            dirty:made.popup.dirty,closeCalls:made.popup.closeCalls,openCalls:__openCalls.length,
+            status:document.querySelector('#viewer-windows-status').textContent};
+        }""")
+        self.assertEqual(result["rows"], [{"index": 0, "pending": False, "popup": True}])
+        self.assertEqual(result["href"], "https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.1")
+        self.assertTrue(result["sameDocument"])
+        self.assertTrue(result["dirty"])
+        self.assertEqual(result["closeCalls"], 0)
+        self.assertEqual(result["openCalls"], 1)
+        self.assertIn("새 창 이름", result["status"])
+
+    def test_latest_preserves_comparison_series_and_reading_return_scope(self):
+        reading_return = "12345678-1234-4123-8123-123456789abc"
+        href = ("https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.1,1.2.2"
+                "&hangingProtocolId=@ohif/hpCompare&initialSeriesInstanceUID=1.2.3"
+                f"#kin-reading-return={reading_return}")
+        opened = self.page.evaluate("""href => {
+          __makePopup({href});document.querySelector('#viewer-windows-open').click();
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          return __opened[0]?.location.href;
+        }""", href)
+        target = self.page.evaluate("href => {const u=new URL(href,location.origin);return {studies:u.searchParams.get('StudyInstanceUIDs'),"
+                                    "hp:u.searchParams.get('hangingProtocolId'),series:u.searchParams.get('initialSeriesInstanceUID'),"
+                                    "reading:new URLSearchParams(u.hash.slice(1)).get('kin-reading-return')}}", opened)
+        self.assertEqual(target, {"studies": "1.2.1,1.2.2", "hp": "@ohif/hpCompare",
+                                  "series": "1.2.3", "reading": reading_return})
+
+    def test_latest_failures_are_announced_inside_the_open_dialog(self):
+        scenarios = {
+            "full": """openingPreference={maxWindows:1,reuseClean:true};__makePopup();""",
+            "popup": """__makePopup();__blockNextOpen=true;""",
+            "collision": """const made=__makePopup({dirty:true});__nextOpenPopup=made.popup;""",
+        }
+        for name, setup in scenarios.items():
+            with self.subTest(name=name):
+                self.reset_harness()
+                result = self.page.evaluate(f"""() => {{
+                  {setup}
+                  document.querySelector('#viewer-windows-open').click();
+                  document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+                  const dialog=document.querySelector('#viewer-windows-dialog');
+                  return {{open:dialog.open,status:dialog.querySelector('#viewer-windows-status').textContent,
+                    rows:viewerWindows.rows().length}};
+                }}""")
+                self.assertTrue(result["open"])
+                self.assertTrue(result["status"].strip())
+                if name == "full":
+                    self.assertIn("Viewer Windows 수", result["status"])
+                elif name == "popup":
+                    self.assertIn("팝업이 차단", result["status"])
+                else:
+                    self.assertIn("새 창 이름", result["status"])
+                self.assertEqual(result["rows"], 1)
 
 
 if __name__ == "__main__":

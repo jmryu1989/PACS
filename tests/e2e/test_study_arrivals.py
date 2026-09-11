@@ -126,6 +126,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         viewer.get_by_label("Job Title", exact=True).fill("ARRIVAL ORIGINAL UNSAVED JOB")
         before_view = self.stable_view(viewer); before_stack = self.stack_identity(viewer)
         self.assertEqual(4, len(before_stack["imageIds"])); self.assertEqual([fixture.uid] * 4, before_stack["studies"])
+        self.assertTrue(all(before_stack["sops"])); self.assertEqual(4, len(set(before_stack["sops"])))
 
         added = self.add_sop(fixture)
         self.assertEqual(200, self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": fixture.uid, "sopUid": added["sop"]}).status)
@@ -155,6 +156,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         fresh_stack = self.stack_identity(fresh)
         self.assertEqual(5, len(fresh_stack["imageIds"])); self.assertEqual([fixture.uid] * 5, fresh_stack["studies"])
         self.assertEqual(1, fresh_stack["sops"].count(added["sop"])); self.assertNotIn(added["sop"], before_stack["sops"])
+        self.assertEqual(set(before_stack["sops"]) | {added["sop"]}, set(fresh_stack["sops"]))
         self.assertEqual(before_stack, self.stack_identity(viewer)); self.assertEqual(before_view, self.stable_view(viewer))
         expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("ARRIVAL ORIGINAL UNSAVED JOB")
         self.assertTrue(viewer.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
