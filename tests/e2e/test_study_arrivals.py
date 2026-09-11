@@ -90,6 +90,15 @@ class StudyArrivalsE2E(DisplayControlsE2E):
             page.wait_for_timeout(250)
         self.fail("Native viewer output did not settle before the preservation snapshot")
 
+    def stack_identity(self, page):
+        return page.evaluate("""()=>{
+          const id=services.viewportGridService.getState().activeViewportId;
+          const viewport=services.cornerstoneViewportService.getCornerstoneViewport(id);
+          const imageIds=viewport.getImageIds();
+          return {imageIds,sops:imageIds.map(imageId=>cornerstone.metaData.get('instance',imageId)?.SOPInstanceUID||null),
+            studies:imageIds.map(imageId=>cornerstone.metaData.get('instance',imageId)?.StudyInstanceUID||null)};
+        }""")
+
     def test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources(self):
         fixture = self.ct("ARRIVAL-" + uuid.uuid4().hex[:12], "current", "20260801")
         self.seed_report(fixture)
@@ -100,7 +109,23 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         holder = self.state(fixture)["holder"]; self.assertEqual(self.stack.actor("doctor"), holder)
         versions, report_rows, originals = self.versions(fixture), self.report_rows(fixture), self.originals()
         before_row = self.study_row(fixture)
-        viewer = self.launch(work.context.new_page(), [fixture]); canvas_ready(viewer, 1); before_view = self.stable_view(viewer)
+        work.locator("#image-opening-open").click()
+        work.locator("#image-opening-target").select_option("window")
+        work.locator("#image-opening-prior").set_checked(False)
+        work.locator("#image-opening-limit").select_option("2")
+        work.locator("#image-opening-done").click()
+        with work.context.expect_page() as opened:
+            work.locator("#m-filmbox").click()
+        viewer = opened.value; viewer.wait_for_url("**/ohif/viewer?**"); canvas_ready(viewer, 1)
+        viewer.wait_for_function("""()=>typeof kinViewerWindowOwner==='function'&&kinViewerWindowOwner()&&
+          typeof kinViewerJobWorkspaceState==='function'&&!kinViewerJobWorkspaceState().busy&&
+          typeof kinViewerHistoryWorkspaceState==='function'&&!kinViewerHistoryWorkspaceState().busy""")
+        self.assertEqual([fixture.uid], viewer.evaluate("()=>new URL(location.href).searchParams.get('StudyInstanceUIDs').split(',')"))
+        marker = viewer.evaluate("window.__arrivalDocument=crypto.randomUUID()")
+        viewer.get_by_role("button", name="Comparison", exact=True).click()
+        viewer.get_by_label("Job Title", exact=True).fill("ARRIVAL ORIGINAL UNSAVED JOB")
+        before_view = self.stable_view(viewer); before_stack = self.stack_identity(viewer)
+        self.assertEqual(4, len(before_stack["imageIds"])); self.assertEqual([fixture.uid] * 4, before_stack["studies"])
 
         added = self.add_sop(fixture)
         self.assertEqual(200, self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": fixture.uid, "sopUid": added["sop"]}).status)
@@ -110,6 +135,31 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         expect(work.locator("#findings")).to_have_value(draft)
         self.assertEqual(holder, self.state(fixture)["holder"]); self.assertEqual(versions, self.versions(fixture)); self.assertEqual(report_rows, self.report_rows(fixture))
         self.assertEqual(before_view, self.stable_view(viewer)); self.assertEqual(1, len(work.evaluate("arrivalNotices"))); self.assertEqual([], work.evaluate("arrivalNotices.filter(x=>x.includes('새 검사'))"))
+        self.assertEqual(before_stack, self.stack_identity(viewer))
+        expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("ARRIVAL ORIGINAL UNSAVED JOB")
+        self.assertTrue(viewer.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
+
+        work.locator("#viewer-windows-open").click()
+        expect(work.locator("#viewer-windows-dialog")).to_be_visible()
+        latest = work.locator('[data-window-index="0"][data-window-action="latest"]')
+        expect(latest).to_be_enabled()
+        with work.context.expect_page() as fresh_opened:
+            latest.click()
+        fresh = fresh_opened.value; fresh.wait_for_url("**/ohif/viewer?**"); canvas_ready(fresh, 1)
+        fresh.wait_for_function("""()=>typeof kinViewerWindowOwner==='function'&&kinViewerWindowOwner()&&
+          typeof kinViewerJobWorkspaceState==='function'&&!kinViewerJobWorkspaceState().busy&&
+          typeof kinViewerHistoryWorkspaceState==='function'&&!kinViewerHistoryWorkspaceState().busy""")
+        self.assertIsNone(fresh.evaluate("()=>window.__arrivalDocument||null"))
+        self.assertNotEqual(marker, fresh.evaluate("window.__arrivalDocument=crypto.randomUUID()"))
+        self.assertEqual([fixture.uid], fresh.evaluate("()=>new URL(location.href).searchParams.get('StudyInstanceUIDs').split(',')"))
+        fresh_stack = self.stack_identity(fresh)
+        self.assertEqual(5, len(fresh_stack["imageIds"])); self.assertEqual([fixture.uid] * 5, fresh_stack["studies"])
+        self.assertEqual(1, fresh_stack["sops"].count(added["sop"])); self.assertNotIn(added["sop"], before_stack["sops"])
+        self.assertEqual(before_stack, self.stack_identity(viewer)); self.assertEqual(before_view, self.stable_view(viewer))
+        expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("ARRIVAL ORIGINAL UNSAVED JOB")
+        self.assertTrue(viewer.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
+        expect(work.locator("#findings")).to_have_value(draft)
+        self.assertEqual(holder, self.state(fixture)["holder"]); self.assertEqual(versions, self.versions(fixture)); self.assertEqual(report_rows, self.report_rows(fixture))
         self.existing_originals_unchanged(originals); self.shot(work, "same-study")
 
     def test_arrivals_02_new_study_and_existing_growth_emit_one_combined_notice(self):

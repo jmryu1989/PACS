@@ -40,6 +40,25 @@ test('one window reuses slot zero; several windows retain distinct scopes until 
   assert.equal(r.choose(url(4), 1).index, a.index);
   const record = [...values.values()][0]; assert.ok(!record.includes('StudyInstanceUIDs')); assert.ok(!record.includes('1.2.1'));
 });
+test('fresh document allocates another same-scope slot and retains a dirty busy viewer', () => {
+  const { registry:r } = setup();
+  const old = r.choose(url(1), 2), popup = { href:url(1), closed:false, dirty:true, busy:true }; r.attach(old, popup);
+  const fresh = r.choose(url(1), 2, { freshDocument:true });
+  assert.equal(fresh.fresh, true); assert.notEqual(fresh.index, old.index); assert.equal(r.rows()[0].popup, popup);
+  assert.deepEqual(r.rows()[0].status, { kind:'viewer', href:url(1), ready:true, busy:true, dirty:true });
+});
+test('fresh document refuses a full limit even when an existing scope looks reusable', () => {
+  const { registry:r } = setup(); const old=r.choose(url(1), 1); r.attach(old, { href:url(1), closed:false });
+  const result=r.choose(url(1), 1, { freshDocument:true });
+  assert.equal(result.full, true); assert.match(result.error, /Image Opening.*Viewer Windows/); assert.match(result.error, /저장하고 닫으세요/);
+  assert.equal(r.rows().length, 1); assert.equal(r.rows()[0].index, old.index);
+});
+test('blocked fresh reservations are reclaimed and ended owners cannot allocate', () => {
+  const { registry:r } = setup(); const old=r.choose(url(1), 2); r.attach(old, { href:url(1), closed:false });
+  const blocked=r.choose(url(1), 2, { freshDocument:true }); r.blocked(blocked);
+  const retry=r.choose(url(1), 2, { freshDocument:true }); assert.equal(retry.index, blocked.index); r.blocked(retry);
+  assert.equal(r.rows().length, 1); r.end(); assert.ok(r.choose(url(1), 2, { freshDocument:true }).error);
+});
 test('reload retains unverified occupied slots; silence cannot free capacity', () => {
   const { registry:r, options } = setup(); r.attach(r.choose(url(1), 2), { href: url(1), closed: false });
   r.attach(r.choose(url(2), 2), { href: url(2), closed: false });

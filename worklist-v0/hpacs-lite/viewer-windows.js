@@ -69,15 +69,16 @@
           href, scope: scope(href, origin), status, pending: !!entry.pending, popup: entry.popup }];
       });
     }
-    function choose(href, limit) {
+    function choose(href, limit, options = {}) {
       if (!current() || error || !scope(href, origin)) return { error: error || '현재 계정과 영상 대상을 확인한 뒤 다시 여세요.' };
       if (!Number.isInteger(limit) || limit < 1 || limit > 4) return { error: '영상 창 수 설정을 확인하세요.' };
+      const freshDocument = options?.freshDocument === true;
       const open = rows(), wanted = JSON.stringify(scope(href, origin));
       if (error) return { error };
-      let row = open.find(r => r.scope && JSON.stringify(r.scope) === wanted);
-      if (!row && limit === 1 && open.length === 1 && open[0].index === 0) row = open[0];
+      let row = freshDocument ? null : open.find(r => r.scope && JSON.stringify(r.scope) === wanted);
+      if (!freshDocument && !row && limit === 1 && open.length === 1 && open[0].index === 0) row = open[0];
       if (row) return { ...row, fresh: false };
-      if (open.length >= limit) return { full: true, error: '영상 창 수 제한에 도달했습니다. Viewer Windows에서 기존 창으로 돌아가거나 저장 후 닫으세요.' };
+      if (open.length >= limit) return { full: true, error: freshDocument ? '새 영상 화면을 열 수 없습니다. Image Opening에서 Viewer Windows 수를 늘리거나 기존 영상 창의 작업을 저장하고 닫으세요.' : '영상 창 수 제한에 도달했습니다. Viewer Windows에서 기존 창으로 돌아가거나 저장 후 닫으세요.' };
       const index = state.slots.indexOf(false), next = normalize(state);
       next.slots[index] = true;
       if (!persist(next)) return { error };

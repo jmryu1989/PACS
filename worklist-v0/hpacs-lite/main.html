@@ -4041,7 +4041,8 @@
         return { kind: "unknown", busy: true, dirty: true };
       }
     }
-    function openOhifWindow(uid, priorUid = null, initialSeriesUid = null, readingReturn = null) {
+    function openOhifWindow(uid, priorUid = null, initialSeriesUid = null, readingReturn = null, openingOptions = null) {
+      const freshDocument = openingOptions?.freshDocument === true;
       if (demoMode) { alert("데모 모드에서는 뷰어를 열 수 없습니다.\n(실제 구동은 Orthanc 연결 환경에서)"); return; }
       // 썸네일에 Series 식별이 없으면 기본 시리즈를 대신 열어 선택이 맞는 것처럼 보이지 않는다.
       if (initialSeriesUid !== null && (typeof initialSeriesUid !== "string" || initialSeriesUid.length > 64 ||
@@ -4056,14 +4057,15 @@
       const seq = ++ohifOpenSeq;
       if (!viewerWindows) { toast('영상 창 연결을 확인하지 못했습니다. 통합 판독 화면을 사용하거나 목록을 새로고침하세요.', 'err'); return; }
       const preferences = imageOpening?.snapshot(), limit = preferences?.maxWindows || 1;
-      let choice = viewerWindows.choose(url, limit);
-      if (choice.full && viewerWindows.available() && preferences?.reuseClean && limit > 1) {
+      let choice = viewerWindows.choose(url, limit, { freshDocument });
+      if (!freshDocument && choice.full && viewerWindows.available() && preferences?.reuseClean && limit > 1) {
         const rows = viewerWindows.rows();
         const clean = row => row.status?.kind === 'viewer' && row.status.ready && !row.status.busy && !row.status.dirty;
         const reusable = rows.length === limit && (rows.find(row => row.index !== viewerWindowCursor && clean(row)) || rows.find(clean));
         if (reusable) choice = { ...reusable, fresh: false };
       }
       if (choice.error) { toast(choice.error, 'err', 8000); if (choice.full) $('#viewer-windows-open').click(); return; }
+      if (freshDocument && (!choice.fresh || choice.pending)) { toast('기존 영상을 유지했습니다. 새 영상 창을 확보한 뒤 다시 여세요.', 'err'); return; }
       url = viewerWindows.linked(url, choice.index);
       const stored = readStoredOhifRect(choice.index);
       const initial = ohifPlacement(stored);
@@ -4082,6 +4084,9 @@
           return;
         }
         const previous = ohifPopupState(popup);
+        if (freshDocument && previous.kind !== "blank") {
+          popup.focus(); toast("새 창 이름에 기존 화면이 연결되어 열지 않았습니다. Viewer Windows에서 확인하세요.", "err", 8000); return;
+        }
         const deferredPlacement = previous.kind === 'blank' && monitorPermissionGranted() && screen.isExtended === true;
         const placementWrite = deferredPlacement ? {pending:true,baseline:null} : null;
         if (placementWrite) ohifPlacementWrites.set(popup, placementWrite);
@@ -4279,9 +4284,11 @@
             (study ? [study.name, study.date, study.desc, study.uid].filter(Boolean).join(' · ') : row.scope?.studies.join(' / ') || 'Unverified');
           if (row.scope?.studies.length === 2) { const comparison = studies.find(s => s.uid === row.scope.studies[1]); label.textContent += ' · Comparison: ' + (comparison ? [comparison.date, comparison.uid].join(' · ') : row.scope.studies[1]); }
           section.append(label);
-          for (const action of ['focus', 'close']) {
+          for (const action of ['focus', 'latest', 'close']) {
             const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
-            control.textContent = action === 'focus' ? 'Focus' : 'Close Window'; control.dataset.windowIndex = String(row.index); control.dataset.windowAction = action;
+            control.textContent = action === 'focus' ? 'Focus' : action === 'latest' ? 'Latest Images' : 'Close Window';
+            if (action === 'latest') { control.disabled = !['Open', 'Unsaved'].includes(row.state); control.title = '추가된 영상을 같은 검사 범위의 새 창에서 조회합니다. 기존 화면과 미저장 작업은 유지하며 설정한 창 수 제한을 따릅니다.'; }
+            control.dataset.windowIndex = String(row.index); control.dataset.windowAction = action;
             control.onclick = () => operate(row.index, action); section.append(control);
           }
           displayScreens.forEach((screen,i)=>{
@@ -4305,6 +4312,12 @@
           if (!popup) { status.textContent = '팝업이 차단되어 창 상태를 확인하지 못했습니다.'; return; }
           viewerWindows.attach(row, popup); ohifPopupSlots.set(popup, index);
           try { popup.opener = null; if (popup.location.href === 'about:blank') { popup.close(); render(); status.textContent = '이미 닫힌 창의 연결을 정리했습니다.'; return; } } catch (_) {}
+        }
+        if (action === 'latest') {
+          const state = ohifPopupState(popup), target = state.kind === 'viewer' && state.ready && !state.busy && !row.pending && ohifScope(state.href);
+          if (!target) { status.textContent = '기존 영상 창의 검사와 계정을 확인한 뒤 다시 여세요.'; return; }
+          openOhifWindow(target.studies[0], target.studies[1] || null, target.series, null, { freshDocument: true });
+          render(); return;
         }
         if (action === 'close') {
           if (row.pending) {

@@ -1,6 +1,7 @@
 # coding: utf-8
 """REQ-D-WORKSPACE-WINDOWS / RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE / TEST-VIEWER-WINDOW-MANAGER-DOM."""
 from pathlib import Path
+import os
 import sys
 import unittest
 
@@ -49,6 +50,8 @@ const studies = [
   {uid:'1.2.2',name:'Compared',date:'2026-09-11',desc:'CT'}
 ];
 const imageOpening = {snapshot:()=>({maxWindows:2})};
+let openingPreference = {maxWindows:2,reuseClean:true};
+imageOpening.snapshot=()=>({...openingPreference});
 let sessionOwner = '["institution","doctor"]';
 const KinViewerOpening = {PREFIX:'kin:',key:()=>sessionOwner ? 'kin:' + sessionOwner : null};
 const KinAuth = {session:()=>({state:'approved'})};
@@ -59,6 +62,20 @@ const KinViewerDisplayLayout = {screens:details=>details.screens||[],identity:sc
 const initMonitorPermission = async()=>{}, cacheMonitorScreens=()=>{}, popupRect=()=>null;
 const monitorPermissionGranted = ()=>true, rememberOhifRect=()=>true, watchOhifRect=()=>{};
 let monitorQueryUnsupported=false, monitorSessionGranted=false;
+let demoMode=false,ohifOpenSeq=0,viewerOpenSeq=0,monitorHintShown=false;
+let monitorPermission={state:'denied'};
+const screen={isExtended:false};
+const readStoredOhifRect=()=>null,ohifPlacement=()=>({left:10,top:10,width:800,height:600});
+const toast=(message,kind,duration)=>__toasts.push({message,kind,duration});
+window.__toasts=[];window.__opened=[];window.__blockNextOpen=false;
+window.__blankPopup=()=>{
+  const documentToken={querySelector:()=>null,visibilityState:'visible'};
+  return {kind:'blank',location:{href:'about:blank'},document:documentToken,opener:{},closed:false,
+    focusCalls:0,closeCalls:0,resizeCalls:0,moveCalls:0,focus(){this.focusCalls++},
+    close(){this.closeCalls++;this.closed=true},resizeTo(){this.resizeCalls++},moveTo(){this.moveCalls++}};
+};
+window.open=(...args)=>{if(__blockNextOpen){__blockNextOpen=false;return null}const popup=__blankPopup();
+  popup.openArgs=args;__opened.push(popup);return popup};
 window.getScreenDetails = undefined;
 window.BroadcastChannel = undefined;
 window.__enableDisplay=async()=>{
@@ -73,6 +90,7 @@ window.__holdDisplayMove=()=>{
 function ohifPopupState(popup) {
   try {
     const href=popup.location.href;
+    if (href === 'about:blank') return {kind:'blank',busy:false,dirty:false};
     if (popup.kind !== 'viewer') return {kind:popup.kind||'unknown',href,ready:false,busy:true,dirty:true};
     if (!sessionOwner || popup.owner !== sessionOwner) return {kind:'viewer',href,ready:false,busy:true,dirty:false};
     return {kind:'viewer',href,ready:popup.ready,busy:popup.busy,dirty:popup.dirty};
@@ -102,8 +120,14 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
     def setUpClass(cls):
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch(headless=True)
-        cls.main_source = MAIN.read_text(encoding="utf-8")
+        main_fixture = os.environ.get("KIN_VIEWER_MAIN_FIXTURE")
+        cls.main_source = Path(main_fixture).read_text(encoding="utf-8") if main_fixture else MAIN.read_text(encoding="utf-8")
         cls.manager_source = extract_function(cls.main_source, "mountViewerWindows")
+        open_start = cls.main_source.index("    function openOhifWindow(")
+        open_end = cls.main_source.index("\n    function mountViewerWindows", open_start)
+        cls.open_source = "\n".join(extract_function(cls.main_source, name)
+                                    for name in ("ohifScope", "sameOhifScope"))
+        cls.open_source += "\n" + cls.main_source[open_start:open_end]
         cls.windows_source = WINDOWS.read_text(encoding="utf-8")
 
     @classmethod
@@ -122,7 +146,7 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
                         if route.request.url == "https://example.test/harness" else route.abort())
         self.page.goto("https://example.test/harness")
         self.page.add_script_tag(content=self.windows_source)
-        self.page.add_script_tag(content=self.manager_source + "\nmountViewerWindows();")
+        self.page.add_script_tag(content=self.open_source + "\n" + self.manager_source + "\nmountViewerWindows();")
 
     def reset_harness(self):
         self.assertEqual(self.page_errors, [])
@@ -292,6 +316,89 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         text = self.page.locator(".viewer-window-row p").inner_text()
         self.assertIn("Comparison: 2026-09-11 · 1.2.2", text)
         self.assertNotIn("Prior:", text)
+
+    def test_latest_images_opens_a_separate_blank_document_and_preserves_dirty_source(self):
+        result = self.page.evaluate("""() => {
+          const made=__makePopup({dirty:true});
+          const original={href:made.popup.location.href,document:made.popup.document,dirty:made.popup.dirty};
+          document.querySelector('#viewer-windows-open').click();
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          return {original,index:made.index,rows:viewerWindows.rows().map(r=>({index:r.index,pending:r.pending})),
+            old:{href:made.popup.location.href,sameDocument:made.popup.document===original.document,
+              dirty:made.popup.dirty,closeCalls:made.popup.closeCalls},
+            fresh:__opened.map(p=>({args:p.openArgs,href:p.location.href,opener:p.opener,focusCalls:p.focusCalls}))};
+        }""")
+        self.assertEqual(result["index"], 0)
+        self.assertEqual(result["old"], {"href": result["original"]["href"], "sameDocument": True,
+                                          "dirty": True, "closeCalls": 0})
+        self.assertEqual(result["rows"], [{"index": 0, "pending": False}, {"index": 1, "pending": True}])
+        self.assertEqual(len(result["fresh"]), 1)
+        self.assertEqual(result["fresh"][0]["args"][0], "")
+        self.assertNotEqual(result["fresh"][0]["args"][1], "kin-ohif-current")
+        self.assertIn("StudyInstanceUIDs=1.2.1", result["fresh"][0]["href"])
+        self.assertIsNone(result["fresh"][0]["opener"])
+
+    def test_latest_images_full_limit_never_reuses_a_clean_document(self):
+        result = self.page.evaluate("""() => {
+          openingPreference={maxWindows:2,reuseClean:true};
+          const dirty=__makePopup({dirty:true});
+          const clean=__makePopup({href:'https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.2'});
+          const before=[dirty.popup.location.href,clean.popup.location.href];
+          document.querySelector('#viewer-windows-open').click();
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          return {before,after:[dirty.popup.location.href,clean.popup.location.href],opened:__opened.length,
+            closes:[dirty.popup.closeCalls,clean.popup.closeCalls],toasts:__toasts.map(x=>x.message),rows:viewerWindows.rows().length};
+        }""")
+        self.assertEqual(result["after"], result["before"])
+        self.assertEqual(result["opened"], 0)
+        self.assertEqual(result["closes"], [0, 0])
+        self.assertEqual(result["rows"], 2)
+        self.assertTrue(any("Viewer Windows 수" in message for message in result["toasts"]))
+
+    def test_latest_images_popup_block_releases_slot_and_retry_uses_a_new_blank(self):
+        first = self.page.evaluate("""() => {
+          __makePopup();document.querySelector('#viewer-windows-open').click();__blockNextOpen=true;
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          return {rows:viewerWindows.rows().length,opened:__opened.length,toasts:__toasts.map(x=>x.message)};
+        }""")
+        self.assertEqual(first["rows"], 1)
+        self.assertEqual(first["opened"], 0)
+        self.assertTrue(any("팝업이 차단" in message for message in first["toasts"]))
+        retried = self.page.evaluate("""() => {
+          document.querySelector('[data-window-index="0"][data-window-action="latest"]').click();
+          return {rows:viewerWindows.rows().map(r=>({index:r.index,pending:r.pending})),opened:__opened.length,
+            href:__opened[0]?.location.href,opener:__opened[0]?.opener};
+        }""")
+        self.assertEqual(retried["rows"], [{"index": 0, "pending": False}, {"index": 1, "pending": True}])
+        self.assertEqual(retried["opened"], 1)
+        self.assertIn("StudyInstanceUIDs=1.2.1", retried["href"])
+        self.assertIsNone(retried["opener"])
+
+    def test_latest_detached_button_revalidates_owner_pending_unknown_and_current_scope(self):
+        for boundary in ("owner", "pending", "unknown"):
+            with self.subTest(boundary=boundary):
+                self.reset_harness()
+                opened = self.page.evaluate("""boundary => {
+                  const made=__makePopup();document.querySelector('#viewer-windows-open').click();
+                  const old=document.querySelector('[data-window-index="0"][data-window-action="latest"]');
+                  if(boundary==='owner')sessionOwner='["institution","other"]';
+                  if(boundary==='pending')viewerWindows.navigating(viewerWindows.rows()[0],
+                    'https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.2',made.popup.document);
+                  if(boundary==='unknown')made.popup.kind='unknown';
+                  old.onclick();return __opened.length;
+                }""", boundary)
+                self.assertEqual(opened, 0)
+
+        self.reset_harness()
+        current = self.page.evaluate("""() => {
+          const made=__makePopup();document.querySelector('#viewer-windows-open').click();
+          const old=document.querySelector('[data-window-index="0"][data-window-action="latest"]');
+          made.popup.location.href='https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.2';
+          old.onclick();return {oldClose:made.popup.closeCalls,href:__opened[0]?.location.href};
+        }""")
+        self.assertEqual(current["oldClose"], 0)
+        self.assertIn("StudyInstanceUIDs=1.2.2", current["href"])
+        self.assertNotIn("StudyInstanceUIDs=1.2.1", current["href"])
 
 
 if __name__ == "__main__":
