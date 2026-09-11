@@ -77,13 +77,16 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   cropped=self.vr_pixels(v);self.assertGreater(cropped['count'],0);self.assertAlmostEqual(cropped['width']/full['width'],.5,delta=.08);self.assertAlmostEqual(cropped['height']/full['height'],1,delta=.04)
   planes=v.evaluate("()=>cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper().getClippingPlanes().map(p=>({origin:Array.from(p.getOrigin()),normal:Array.from(p.getNormal())}))")
   self.assertEqual(len(planes),6)
+  dialog.get_by_label('View From',exact=True).select_option('Superior');expect(dialog).to_be_visible()
+  self.assertEqual(v.evaluate("()=>cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper().getClippingPlanes().map(p=>({origin:Array.from(p.getOrigin()),normal:Array.from(p.getNormal())}))"),planes)
+  dialog.get_by_label('View From',exact=True).select_option('Anterior');self.assertEqual(self.vr_pixels(v),cropped)
   for bad in ['', '-1', '64', '1.5']:
    dialog.get_by_label('I Max',exact=True).fill(bad);dialog.get_by_role('button',name='Apply Crop',exact=True).click();expect(dialog).to_be_visible();self.assertEqual(self.vr_pixels(v),cropped)
   dialog.get_by_role('button',name='Reset VR',exact=True).click();expect(dialog.get_by_label('I Max',exact=True)).to_have_value('63');self.assertEqual(self.vr_state(v),initial);self.assertEqual(self.vr_pixels(v),full);self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.native_pixels(v),native);self.assertEqual(self.originals(),original)
 
  def test_vr_12_custom_transfer_validation_opacity_and_reopen(self):
   a,p,v=self.opened_projection(constant=True);native=self.native_pixels(v);before=self.volume_state(v);dialog=self.vr(v);initial=self.vr_state(v)
-  dialog.get_by_label('Transfer Mode',exact=True).select_option('Custom')
+  expect(dialog.get_by_label('Knot 1 HU',exact=True)).not_to_be_visible();dialog.get_by_label('Transfer Mode',exact=True).select_option('Custom');expect(dialog.get_by_label('Knot 1 HU',exact=True)).to_be_visible()
   for i,hu in [(1,'-1000'),(2,'2000')]:
    dialog.get_by_label('Knot '+str(i)+' HU',exact=True).fill(hu);dialog.get_by_label('Knot '+str(i)+' Color',exact=True).fill('#ff0000');dialog.get_by_label('Knot '+str(i)+' Opacity',exact=True).fill('1')
   dialog.get_by_role('button',name='Apply Display',exact=True).click();custom=self.vr_state(v);self.assertEqual([n[:2] for n in custom['nodes']],[[-1000,1],[2000,1]])
@@ -91,8 +94,8 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   self.assertGreater(rgb[0],20);self.assertLess(rgb[1],5);self.assertLess(rgb[2],5)
   dialog.get_by_label('Knot 2 HU',exact=True).fill('-1000');dialog.get_by_role('button',name='Apply Display',exact=True).click();self.assertEqual(self.vr_state(v),custom);expect(dialog.get_by_label('Knot 2 HU',exact=True)).to_have_value('-1000')
   dialog.get_by_label('Knot 2 HU',exact=True).fill('2000');dialog.get_by_label('VR Opacity',exact=True).fill('50');dialog.get_by_role('button',name='Apply Display',exact=True).click();half=self.vr_state(v);self.assertEqual([n[1] for n in half['nodes']],[.5,.5]);dialog.get_by_role('button',name='Apply Display',exact=True).click();self.assertEqual(self.vr_state(v),half)
-  dialog.get_by_role('button',name='Reset VR',exact=True).click();expect(dialog.get_by_label('Transfer Mode',exact=True)).to_have_value('Preset');self.assertEqual(self.vr_state(v),initial);self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.native_pixels(v),native)
-  dialog.get_by_role('button',name='Close VR',exact=True).click();dialog=self.vr(v);expect(dialog.get_by_label('Transfer Mode',exact=True)).to_have_value('Preset');self.assertEqual(self.vr_state(v),initial)
+  dialog.get_by_role('button',name='Reset VR',exact=True).click();expect(dialog.get_by_label('Transfer Mode',exact=True)).to_have_value('Preset');expect(dialog.get_by_label('Knot 1 HU',exact=True)).not_to_be_visible();expect(dialog.locator('.kin-vr-knots')).not_to_be_visible();self.assertEqual(self.vr_state(v),initial);self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.native_pixels(v),native)
+  dialog.get_by_role('button',name='Close VR',exact=True).click();dialog=self.vr(v);expect(dialog.get_by_label('Transfer Mode',exact=True)).to_have_value('Preset');expect(dialog.get_by_label('Knot 1 HU',exact=True)).not_to_be_visible();expect(dialog.locator('.kin-vr-knots')).not_to_be_visible();self.assertEqual(self.vr_state(v),initial)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeRenderingE2E(n) for n in loader.getTestCaseNames(VolumeRenderingE2E) if n.startswith('test_vr_'))
 if __name__=='__main__':unittest.main(verbosity=2)

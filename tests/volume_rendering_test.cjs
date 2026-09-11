@@ -28,6 +28,13 @@ test('crop geometry rejects invalid transforms before returning partial planes',
  assert.throws(()=>model.cropPlanes({i:[0,1],j:[0,1],k:[0,1]},[2,2,2],([i,j,k])=>[i,j,i+j]));
  assert.throws(()=>model.cropPlanes({i:[0,1],j:[0,1],k:[0,1]},[2,2,2],()=>[NaN,0,0]));
 });
+test('immutable crop planes ignore inherited camera slab updates',()=>{
+ const definitions=model.cropPlanes({i:[2,8],j:[3,9],k:[1,7]},[12,12,12],([i,j,k])=>[2*i+j*.2,3*j+k*.1,4*k]),before=structuredClone(definitions),planes=definitions.map(model.createCropPlane),cameraNormal=[.2,.7,.4],cameraOrigin=[99,-50,400];
+ assert.doesNotThrow(()=>{planes[0].setNormal(cameraNormal);planes[0].setOrigin(cameraOrigin);planes[1].setNormal(cameraNormal.map(n=>-n));planes[1].setOrigin(cameraOrigin.map(n=>n+10));});
+ assert.deepEqual(planes.map(plane=>({origin:plane.getOrigin(),normal:plane.getNormal()})),before.map(({origin,normal})=>({origin,normal})));
+ const borrowed=planes[0].getOrigin();borrowed[0]=999;cameraNormal[0]=999;cameraOrigin[0]=999;
+ assert.deepEqual(planes[0].getOrigin(),before[0].origin);assert.deepEqual(planes[0].getNormal(),before[0].normal);assert.deepEqual(definitions,before);assert.equal(planes[0].isA('vtkPlane'),true);assert.equal(planes[0].setOrigin([0,0,0]),false);
+});
 test('custom transfer knots validate atomically and retain exact manual values',()=>{
  const knots=[{hu:'-1000',color:'#1020a0',opacity:'0'},{hu:40,color:'#ABCDEF',opacity:.35},{hu:'2000',color:'#ffffff',opacity:'1'}],before=structuredClone(knots),valid=model.validateTransferKnots(knots);
  assert.deepEqual(valid,[{hu:-1000,color:'#1020A0',opacity:0},{hu:40,color:'#ABCDEF',opacity:.35},{hu:2000,color:'#FFFFFF',opacity:1}]);assert.deepEqual(knots,before);assert.notEqual(valid,knots);assert.deepEqual(model.hexToRgb('#FF8000'),[1,128/255,0]);

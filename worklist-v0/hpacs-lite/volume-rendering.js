@@ -36,6 +36,14 @@
       return [{axis:axis.toUpperCase(),side:'min',origin:world(minimum),normal:inward},{axis:axis.toUpperCase(),side:'max',origin:world(maximum),normal:inward.map(n=>-n)}];
     });
   }
+  // VolumeViewport3D inherits a camera updater that rewrites the first two mapper
+  // planes as slab planes. Crop planes deliberately reject those writes so camera
+  // rotation cannot move an index-aligned crop in world space.
+  function createCropPlane(definition){
+    if(!definition||![definition.origin,definition.normal].every(value=>Array.isArray(value)&&value.length===3&&value.every(Number.isFinite)))throw Error('VR 자르기 평면을 확인할 수 없습니다.');
+    const origin=Object.freeze([...definition.origin]),normal=Object.freeze([...definition.normal]);
+    return Object.freeze({isA:name=>name==='vtkPlane',getOrigin:()=>[...origin],getNormal:()=>[...normal],setOrigin:()=>false,setNormal:()=>false});
+  }
   function validateTransferKnots(knots){
     if(!Array.isArray(knots)||knots.length<2||knots.length>16)throw Error('전달함수 점은 2~16개로 입력하세요.');
     const result=knots.map((k,index)=>{
@@ -49,5 +57,5 @@
     return result;
   }
   function hexToRgb(hex){const value=parseInt(hex.slice(1),16);return [(value>>16)/255,((value>>8)&255)/255,(value&255)/255];}
-  const api={rotate,orient,validateCropBounds,cropPlanes,validateTransferKnots,hexToRgb,directions:Object.keys(directions)};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeRendering=api;
+  const api={rotate,orient,validateCropBounds,cropPlanes,createCropPlane,validateTransferKnots,hexToRgb,directions:Object.keys(directions)};if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeRendering=api;
 })(typeof window==='object'?window:globalThis);
