@@ -91,15 +91,18 @@
       const identities = [...record.element.querySelectorAll('.kin-viewer-identity,.kin-viewer-identity-content,.kin-viewer-identity-group')]
         .filter(value => value.isConnected && value.getClientRects?.().length);
       const target = record.element.getBoundingClientRect?.();
+      record.exit.hidden = false;
+      if (!record.exit.isConnected || target && (!target.width || !target.height)) { record.exit.hidden = true; return false; }
       for (const [position, name] of candidates) {
         record.exit.style.cssText = 'position:absolute;z-index:1000;padding:8px 12px;border:1px solid #9cc3ff;border-radius:4px;background:#0b182b;color:#fff;' + position;
         const box = record.exit.getBoundingClientRect?.();
+        if (box && (!box.width || !box.height)) continue;
         const outside = box && target && target.width && target.height && (box.left < target.left || box.right > target.right || box.top < target.top || box.bottom > target.bottom);
         if (!outside && (!box || !identities.some(value => { const other = value.getBoundingClientRect(); return box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top; }))) {
           record.exit.dataset.position = name; return true;
         }
       }
-      return false;
+      record.exit.hidden = true; return false;
     }
     function removeExit(record) {
       if (!record) return;
@@ -108,11 +111,13 @@
     function release(record) {
       if (!record) return;
       if (record.requestTimer) win.clearTimeout(record.requestTimer);
-      record.requestTimer = null; record.pending = false;
+      if (record.placementTimer) win.clearTimeout(record.placementTimer);
+      record.requestTimer = record.placementTimer = null; record.pending = false;
       if (ownership.get(record.element) === record) ownership.delete(record.element);
     }
     function exitFailed(record) {
       if (ownership.get(record.element) !== record) return;
+      record.exitMessage = '';
       if (doc.fullscreenElement !== record.element) { finish(record); return; }
       if (record.exit?.dataset.kinImagesOnly === record.token) {
         record.exit.textContent = 'Exit Images Only · Retry · 종료 요청이 거절되었습니다.';
@@ -120,7 +125,7 @@
         if (!placeExit(record)) {
           record.placementBlocked = true;
           record.exit.textContent = 'Exit Images Only · Retry · 종료 거절';
-          placeExit(record);
+          if (!placeExit(record) && status && live()) status.textContent = '안전한 Exit 위치가 없습니다. Esc로 전체 화면을 종료한 뒤 영상 배치를 확인하세요.';
         }
       }
     }
@@ -131,7 +136,7 @@
     }
     function exitOwned(record, message) {
       if (!record || ownership.get(record.element) !== record) return;
-      if (message) record.exitMessage = message;
+      record.exitMessage = message || '';
       if (doc.fullscreenElement === record.element) {
         try { Promise.resolve(doc.exitFullscreen()).then(() => {
           if (ownership.get(record.element) !== record) return;
@@ -146,18 +151,41 @@
     }
     function leave(message) { const record = active; if (record) exitOwned(record, message); }
     function shieldExit(record) {
-      const block = event => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.(); };
+      const block = event => {
+        const current = ownership.get(record.element);
+        if (current && current !== record) return;
+        if (event.target === record.exit || record.exit?.contains?.(event.target)) return;
+        event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation?.();
+      };
       const events = ['pointerdown', 'mousedown', 'click', 'dblclick'];
       events.forEach(event => record.element.addEventListener(event, block, true));
       win.setTimeout(() => events.forEach(event => record.element.removeEventListener(event, block, true)), 400);
     }
+    function ensurePlacement(record, force) {
+      if (ownership.get(record.element) !== record || doc.fullscreenElement !== record.element) return;
+      const now = Date.now(), wait = 250 - (now - (record.lastPlacement || 0));
+      if (!force && wait > 0) {
+        if (!record.placementTimer) record.placementTimer = win.setTimeout(() => {
+          record.placementTimer = null;
+          if (active === record) ensurePlacement(record, true);
+        }, wait);
+        return;
+      }
+      record.lastPlacement = now;
+      if (record.placementBlocked) {
+        if (placeExit(record)) {
+          record.placementBlocked = false;
+          if (status && live()) status.textContent = 'Images Only · Esc 또는 Exit Images Only로 돌아갑니다.';
+        }
+      } else if (!placeExit(record)) {
+        record.placementBlocked = true;
+        exitOwned(record, '환자와 원본 식별 표시를 가리지 않는 위치가 없어 Images Only를 종료했습니다.');
+      }
+    }
     function observe() {
       if (!active) { refresh(); return; }
       if (!matches(active)) exitOwned(active, '영상 화면 연결이 바뀌어 Images Only를 종료했습니다.');
-      else if (doc.fullscreenElement === active.element) {
-        if (active.placementBlocked) { if (placeExit(active)) active.placementBlocked = false; }
-        else if (!placeExit(active)) { active.placementBlocked = true; exitOwned(active, '환자와 원본 식별 표시를 가리지 않는 위치가 없어 Images Only를 종료했습니다.'); }
-      }
+      else ensurePlacement(active, false);
     }
     function refresh() {
       if (!open) return;
@@ -174,7 +202,11 @@
       const exit = doc.createElement('button'); exit.type = 'button'; exit.id = 'kin-images-only-exit'; exit.textContent = 'Exit Images Only';
       exit.dataset.kinImagesOnly = record.token = String(Date.now()) + ':' + Math.random();
       for (const event of ['pointerdown', 'mousedown', 'touchstart']) exit.addEventListener(event, value => { value.preventDefault(); value.stopPropagation(); }, true);
-      exit.addEventListener('click', value => { value.preventDefault(); value.stopPropagation(); record.placementBlocked = false; shieldExit(record); if (active === record || doc.fullscreenElement === record.element) exitOwned(record); }, true);
+      exit.addEventListener('click', value => {
+        value.preventDefault(); value.stopPropagation();
+        if (ownership.get(record.element) !== record) return;
+        record.placementBlocked = false; shieldExit(record); exitOwned(record);
+      }, true);
       record.exit = exit; record.element.append(exit);
       if (!placeExit(record)) { removeExit(record); status.textContent = '환자와 원본 식별 표시를 가리지 않는 위치를 확보한 뒤 다시 시도하세요.'; refresh(); return; }
       record.pending = true; active = record; ownership.set(record.element, record); refresh();
@@ -207,7 +239,10 @@
     }
     function fullscreenChanged() {
       if (!active) return;
-      if (doc.fullscreenElement === active.element) observe();
+      if (doc.fullscreenElement === active.element) {
+        if (!matches(active)) exitOwned(active, '영상 화면 연결이 바뀌어 Images Only를 종료했습니다.');
+        else ensurePlacement(active, true);
+      }
       else finish(active, active.exitMessage || 'Images Only를 종료했습니다.');
     }
     function end() {

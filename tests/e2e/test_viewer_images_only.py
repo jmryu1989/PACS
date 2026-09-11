@@ -1,6 +1,7 @@
 # coding: utf-8
 """Native IF-V11 Images Only fullscreen boundaries on owned synthetic CT."""
 from pathlib import Path
+import json
 import time
 import unittest
 
@@ -162,18 +163,43 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         page.get_by_role("button", name="Comparison", exact=True).click()
         page.get_by_label("Job Title", exact=True).fill("KEEP FILLED INPUT")
         self.panel(page); before = self.stable_state(page); self.enter(page)
-        page.keyboard.press("2"); page.wait_for_timeout(150)
-        page.keyboard.press("h"); page.wait_for_timeout(150)
         active = next(i for i, row in enumerate(before["rows"]) if row["id"] == before["active"])
         other = 1 - active
         canvas = page.locator('[data-viewport-uid="' + before["active"] + '"] canvas')
-        box = canvas.bounding_box(); page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        box = canvas.bounding_box()
+        canvas.click(position={"x": box["width"] / 2, "y": box["height"] / 2})
+        focus = page.evaluate("""id=>{const element=services.cornerstoneViewportService.getCornerstoneViewport(id).element;
+          element.focus();const active=document.activeElement;return {tag:active?.tagName||null,id:active?.id||null,
+            classes:typeof active?.className==='string'?active.className:null,within:!!active&&element.contains(active),
+            blocked:['INPUT','SELECT','TEXTAREA'].includes(active?.tagName)||!!active?.isContentEditable,
+            viewportIsActive:services.viewportGridService.getState().activeViewportId===id}}""",
+                              before["active"])
+        print("IMAGES ONLY native focus " + json.dumps(focus), flush=True)
+        self.assertTrue(focus["within"])
+        self.assertTrue(focus["viewportIsActive"])
+        self.assertFalse(focus["blocked"])
+        page.keyboard.press("2"); page.wait_for_timeout(150)
+        page.keyboard.press("h"); page.wait_for_timeout(150)
+        flipped = self.native_state(page)
+        print("IMAGES ONLY native focus/flip command " + json.dumps({"focus": focus,
+              "before": before["rows"][active]["camera"]["flipHorizontal"],
+              "afterCommand": flipped["rows"][active]["camera"]["flipHorizontal"]}), flush=True)
+        self.assertNotEqual(flipped["rows"][active]["camera"]["flipHorizontal"],
+                            before["rows"][active]["camera"]["flipHorizontal"])
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
         page.mouse.wheel(0, 600)
         page.wait_for_function("""value=>services.cornerstoneViewportService.getCornerstoneViewport(value.id)
           ?.getCurrentImageId?.()!==value.image""", arg={"id": before["active"], "image": before["rows"][active]["current"]})
         changed = self.native_state(page)
+        print("IMAGES ONLY native flip after frame " + json.dumps({
+              "afterCommand": flipped["rows"][active]["camera"]["flipHorizontal"],
+              "afterWheel": changed["rows"][active]["camera"]["flipHorizontal"],
+              "beforeImage": before["rows"][active]["current"], "afterImage": changed["rows"][active]["current"]}),
+              flush=True)
         self.assertIsNotNone(changed["fullscreen"])
         self.assertNotEqual(changed["rows"][active]["current"], before["rows"][active]["current"])
+        self.assertEqual(changed["rows"][active]["camera"]["flipHorizontal"],
+                         flipped["rows"][active]["camera"]["flipHorizontal"])
         self.assertEqual(changed["rows"][active]["presentation"], before["rows"][active]["presentation"])
         self.assertNotEqual(changed["rows"][active]["properties"]["voiRange"],
                             before["rows"][active]["properties"]["voiRange"])
