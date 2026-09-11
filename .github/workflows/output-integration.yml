@@ -12,6 +12,9 @@ on:
           - output-integration
           - identity-fields
           - vr-resize-probe
+          - hanging-protocols
+          - dicom-pdf
+          - image-thumbnails
 
 permissions:
   contents: read
@@ -37,7 +40,7 @@ jobs:
         timeout-minutes: 10
         run: |
           python3 -m venv "$RUNNER_TEMP/output-integration-python"
-          "$RUNNER_TEMP/output-integration-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/output-integration-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/output-integration-python/bin/python" -m playwright install --with-deps chromium
       - name: Selected isolated focused integration profile
         timeout-minutes: 28
@@ -54,6 +57,12 @@ jobs:
             tests/e2e/artifacts/output-integration-ci/
             tests/e2e/artifacts/identity-fields-ci/
             tests/e2e/artifacts/vr-resize-probe-ci/
+            tests/e2e/artifacts/hanging-protocols-ci/
+            tests/e2e/artifacts/dicom-pdf-ci/
+            tests/e2e/artifacts/image-thumbnails-ci/
+            tests/e2e/artifacts/IMAGE-THUMBNAILS-*.png
+            tests/e2e/artifacts/HP-*.png
+            tests/e2e/artifacts/LAYOUT-source-pdf-*.png
             tests/tmp/workspace-ui-ci/identity-position-native/
             tests/tmp/workspace-ui-ci/identity-fields-native/
             tests/e2e/artifacts/job-report.pdf

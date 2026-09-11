@@ -9,6 +9,7 @@ import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
 import { folderAction, folderEntries, folderPath } from './filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
+import { normalizeHangingProtocol } from './hanging-protocol';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -825,6 +826,50 @@ export class PacsService implements OnModuleInit {
         return tx.readingPreferences.findUnique({ where: { institution_subject: owner } });
       });
       return this.readingPreferencesResult(owner, row);
+    } catch (e) {
+      if ((e as any)?.code === 'P2002') throw conflict();
+      throw e;
+    }
+  }
+
+  private hangingProtocolResult(owner: { institution: string; subject: string }, row: any) {
+    if (!row) return { owner, revision: 0, value: null };
+    const value = row.value === null ? null : normalizeHangingProtocol(row.value);
+    if (!Number.isInteger(row.revision) || row.revision < 1 || row.revision > 2147483647 || value === undefined)
+      throw new ServiceUnavailableException('저장된 Hanging Protocol 설정을 확인할 수 없습니다');
+    return { owner, revision: row.revision, value };
+  }
+
+  async hangingProtocols(c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const row = await this.prisma.hangingProtocolPreference.findUnique({ where: { institution_subject: owner } });
+    return this.hangingProtocolResult(owner, row);
+  }
+
+  async saveHangingProtocols(body: any, c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
+    if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,value' ||
+        !object(body.expectedOwner) || Object.keys(body.expectedOwner).sort().join(',') !== 'institution,subject' ||
+        typeof body.expectedOwner.institution !== 'string' || typeof body.expectedOwner.subject !== 'string' ||
+        !Number.isInteger(body.revision) || body.revision < 0 || body.revision >= 2147483647)
+      throw new BadRequestException('Hanging Protocol 저장 요청 형식이 잘못되었습니다');
+    if (body.expectedOwner.institution !== owner.institution || body.expectedOwner.subject !== owner.subject)
+      throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
+    const value = body.value === null ? null : normalizeHangingProtocol(body.value);
+    if (value === undefined) throw new BadRequestException('Hanging Protocol 설정 형식이 잘못되었습니다');
+    const conflict = () => new ConflictException('Hanging Protocol 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
+    const stored: any = value === null ? Prisma.DbNull : value;
+    try {
+      const row = await this.prisma.$transaction(async tx => {
+        if (body.revision === 0)
+          return tx.hangingProtocolPreference.create({ data: { ...owner, revision: 1, value: stored } });
+        const changed = await tx.hangingProtocolPreference.updateMany({ where: { ...owner, revision: body.revision },
+          data: { value: stored, revision: { increment: 1 } } });
+        if (changed.count !== 1) throw conflict();
+        return tx.hangingProtocolPreference.findUnique({ where: { institution_subject: owner } });
+      });
+      return this.hangingProtocolResult(owner, row);
     } catch (e) {
       if ((e as any)?.code === 'P2002') throw conflict();
       throw e;

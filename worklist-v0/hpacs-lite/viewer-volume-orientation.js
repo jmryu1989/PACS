@@ -8,7 +8,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const permitted=()=>{try{return alive()&&allowed();}catch(_){return false;}};
   const workspaceBusy=()=>{try{return !!window.kinViewerJobWorkspaceState?.().busy;}catch(_){return true;}};
   const same=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((n,i)=>Number.isFinite(Number(n))&&Math.abs(Number(n)-Number(b[i]))<.001);
-  function target(verify=false,readOnly=false){
+  function target(verify=false,readOnly=false,{requireRenderReady=true}={}){
     if(!alive())return null;
     try{
       const source=selected();if(source?.kind!=='volume')return null;
@@ -16,11 +16,14 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
       if(cells.length!==3||!cells.some(c=>c.viewportId===source.viewportId))return null;
       const views=cells.map(c=>services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId));
       if(views.some(v=>v?.type!=='orthographic'||v.getActors().length!==1))return null;
+      // A mounted VR tracks source identity while native rendering briefly
+      // resizes. Binding-only reads never repair readiness or accept a rebound.
+      if(!requireRenderReady&&views.some(v=>!v.element?.isConnected||cornerstone.getEnabledElement(v.element)?.viewport!==v))return null;
       const volume=cornerstone.cache.getVolume(views[0].getVolumeId());
       if(!volume?.loadStatus?.loaded||volume.framesLoaded!==volume.imageIds?.length||volume.imageIds.length>256||volume.imageIds.length<2||views.some(v=>cornerstone.cache.getVolume(v.getVolumeId())!==volume))return null;
       if(cells.some(c=>c.displaySetInstanceUIDs?.length!==1||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.StudyInstanceUID!==source.uid||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.SeriesInstanceUID!==source.series||services.displaySetService.getDisplaySetByUID(c.displaySetInstanceUIDs[0])?.Modality!=='CT'))return null;
-      if(views.some((v,i)=>{const c=v.getCanvas();return !c?.clientWidth||!c?.clientHeight||Math.abs(c.width-Math.floor(c.clientWidth*devicePixelRatio))>1||Math.abs(c.height-Math.floor(c.clientHeight*devicePixelRatio))>1;}))return null;
-      if(cells.some(c=>!c.isReady)){
+      if(requireRenderReady&&views.some((v,i)=>{const c=v.getCanvas();return !c?.clientWidth||!c?.clientHeight||Math.abs(c.width-Math.floor(c.clientWidth*devicePixelRatio))>1||Math.abs(c.height-Math.floor(c.clientHeight*devicePixelRatio))>1;}))return null;
+      if(requireRenderReady&&cells.some(c=>!c.isReady)){
         if(!permitted()||workspaceBusy())return null;
         // The pinned grid resets isReady during layout changes, but React can
         // retain the enabled viewport without another onElementEnabled callback.

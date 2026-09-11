@@ -593,6 +593,16 @@ model StudyConsultation {
   @@index([institutionId, requesterSub, createdAt, id])
 }
 
+model HangingProtocolPreference {
+  institution String   @db.VarChar(256)
+  subject     String   @db.VarChar(256)
+  revision    Int
+  value       Json?
+  updatedAt   DateTime @updatedAt
+
+  @@id([institution, subject])
+}
+
 /// Additional per-member restrictions; clearing retains revision and history.
 model StudyAccessPolicy {
   institution String @db.VarChar(256)
