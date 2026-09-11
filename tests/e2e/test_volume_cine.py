@@ -63,6 +63,15 @@ class VolumeCineE2E(VolumeOrientationE2E):
   v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-left-arrow"]').click();v.wait_for_timeout(180);self.assertTrue(pending);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(150);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)
   for request in pending:request.fulfill(response=request.fetch())
   v.unroute(pattern);v.wait_for_function('(count)=>cinePositions.length>=count+4',arg=count);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].frameRate"),23);self.cine_play(v);self.assertEqual(len(self.versions(a)),1)
+ def test_volume_cine_08_range_yoyo_pixels_invalid_and_geometry_reset(self):
+  a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP RANGED MPR CINE REPORT');self.cine_open(v);before=self.volume_state(v);self.watch_cine(v)
+  v.get_by_label('Range Start').fill('3');v.get_by_label('Range End').fill('6');v.get_by_role('button',name='Apply Range',exact=True).click();v.get_by_label('Playback Direction',exact=True).select_option('yoyo');v.get_by_label('Loop',exact=True).uncheck();self.cine_play(v)
+  v.wait_for_function("()=>cinePositions.length>=7&&!services.cineService.getState().cines['mpr-axial'].isPlaying",timeout=5000);positions=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in positions],[30,29,28,27,28,29,30],atol=1e-6,rtol=0)
+  v.wait_for_function("()=>[27,28,29,30].every(z=>cinePixels.some(r=>Math.abs(r.point[2]-z)<1e-6))");pixels=v.evaluate('()=>cinePixels.filter(r=>[27,28,29,30].some(z=>Math.abs(r.point[2]-z)<1e-6))');self.assertTrue(pixels);self.assertTrue(all(abs(row['value']-230)<=3 for row in pixels))
+  after=self.volume_state(v);self.assertEqual(before[0]['volume'],after[0]['volume']);self.assertEqual(before[0]['properties'],after[0]['properties']);self.preserved_volume(before[1:],after[1:])
+  v.get_by_label('Range Start').fill('8');v.get_by_label('Range End').fill('4');v.get_by_role('button',name='Apply Range',exact=True).click();expect(v.locator('#kin-cine [role=status]')).to_contain_text('시작이 끝보다 작아야');v.get_by_role('button',name='Last Plane',exact=True).click();v.wait_for_function("()=>Math.abs(cineView.getCamera().focalPoint[2]-27)<1e-6")
+  v.evaluate("()=>{const c=cineView.getCamera();cineView.setCamera({parallelScale:c.parallelScale+1});cineView.render()}");expect(v.get_by_label('Range Start')).to_have_value('1');expect(v.get_by_label('Range End')).to_have_value('33')
+  expect(p.locator('#findings')).to_have_value('KEEP RANGED MPR CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCineE2E(n) for n in loader.getTestCaseNames(VolumeCineE2E) if n.startswith('test_volume_cine_'))
 if __name__=='__main__':unittest.main(verbosity=2)

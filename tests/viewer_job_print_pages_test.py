@@ -93,20 +93,35 @@ def runs(pdf_page):
     return collected
 
 
-def lines(rows):
-    """Text lines from runs: grouped by baseline, kept in content-stream order.
+def line_order(group):
+    """Runs of one baseline in visual order.
 
     Chromium emits one run per font. Where a fallback font splits a Korean/Latin
-    line (Linux CI: Liberation Sans + WenQuanYi Zen Hei), pypdf reports the x of
-    the line start again for the Latin runs after a switch, so ordering by x
-    would scramble the line (validate run 34614012107, test_pages_03). The
-    baselines of those runs are identical and the stream order of a
-    left-to-right line is its visual order, so x never decides the order.
+    line (Linux CI: Liberation Sans + WenQuanYi Zen Hei), pypdf reports two
+    kinds of misleading x for the Latin runs after a switch, both seen on the
+    summary page of validate run 34614012107 (D-FOOTERPARSER: 2 exact ties and
+    7 decreases on one PDF): the same x as the preceding run, or the x of the
+    line start again although the run continues after a run placed further
+    right. A tie keeps the extraction order (never the text), and a run whose x
+    falls back to the line start keeps the position of the run before it. Any
+    other x still decides the order, so a fragment really placed to the left
+    (test_pages_00) stays first.
     """
+    start = group[0][0] if group else None
+    ordered, cursor = [], None
+    for index, (x, text) in enumerate(group):
+        if cursor is not None and x < cursor and x == start:
+            x = cursor
+        ordered.append((x, index, text))
+        cursor = x
+    return [text for _, _, text in sorted(ordered, key=lambda item: (item[0], item[1]))]
+
+
+def lines(rows):
     grouped = {}
     for y, x, text in rows:
-        grouped.setdefault(round(y, 1), []).append(text)
-    return ["".join(group) for _, group in sorted(grouped.items(), reverse=True)]
+        grouped.setdefault(round(y, 1), []).append((x, text))
+    return ["".join(line_order(group)) for _, group in sorted(grouped.items(), reverse=True)]
 
 
 class ViewerJobPrintPages(unittest.TestCase):
@@ -169,6 +184,16 @@ class ViewerJobPrintPages(unittest.TestCase):
 
     def no_writes(self, page):
         self.assertEqual(page.evaluate("() => window.__writes"), [])
+
+    def test_pages_00_equal_x_fragments_keep_pdf_extraction_order(self):
+        rows = [
+            (10.0, 33.75, "환자 "),
+            (10.0, 33.75, "NAME00"),
+            (10.0, 100.0, " · 검사"),
+            (20.0, 100.0, "right"),
+            (20.0, 20.0, "left"),
+        ]
+        self.assertEqual(lines(rows), ["leftright", "환자 NAME00 · 검사"])
 
     def test_pages_01_later_comparison_keeps_page_identity(self):
         data = self.data("20260801", "20260901")
@@ -427,10 +452,13 @@ class ViewerJobPrintPages(unittest.TestCase):
         # A single-font line (Windows: Malgun Gothic) is one run and unaffected.
         self.assertEqual(lines([(18.4, 33.75, "승인된 저장본 · v1 · RS A"), (25.9, 33.75, "Study X")]),
                          ["Study X", "승인된 저장본 · v1 · RS A"])
-        # Distinct baselines still separate lines (a lower y is a later line);
-        # within a line the stream order decides, never the reported x.
-        self.assertEqual(lines([(10.0, 33.75, "second"), (20.0, 90.0, "first-b"), (20.0, 33.75, "first-a")]),
-                         ["first-bfirst-a", "second"])
+        # Page-1 footer of the same PDF: the label after the Korean run fell back
+        # to the line start and must follow the run placed further right.
+        self.assertEqual(lines([(18.42, 33.75, "승인된"), (18.42, 53.42, "저장본"), (18.42, 33.75, "  · v1 · RS A")]),
+                         ["승인된저장본  · v1 · RS A"])
+        # A run whose x is smaller but not the line start is really to the left
+        # (the rule of test_pages_00), and a run at a larger x still moves right.
+        self.assertEqual(lines([(20.0, 90.0, "b"), (20.0, 33.75, "a"), (20.0, 120.0, "c")]), ["abc"])
 
 
 if __name__ == "__main__":

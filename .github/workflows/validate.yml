@@ -43,6 +43,18 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-fields --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file tests/viewer_identity_fields_dom_test.py --file tests/viewer_identity_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_fields_dom_test.py
+      - name: Personal Hanging Protocol form and authenticated mount boundaries
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/hanging-protocols --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-hanging-protocol.js --file tests/viewer_hanging_protocol_dom_test.py --file tests/viewer_hanging_protocol_mount_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B -m unittest discover -s tests -p 'viewer_hanging_protocol*dom_test.py'
+      - name: Individual image thumbnails identity and bounded page lifecycle
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-thumbnails --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/worklist-image-preview.js --file worklist-v0/hpacs-lite/worklist-image-thumbnails.js --file tests/worklist_image_thumbnails_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_image_thumbnails_dom_test.py
+      - name: Source PDF owner identity and popup lifecycle boundaries
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/source-pdf --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file tests/viewer_dicom_pdf_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_dicom_pdf_dom_test.py
       - name: Saved comparison print page identity and pagination
         timeout-minutes: 4
         run: |
@@ -96,6 +108,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/vr-python"
           "$RUNNER_TEMP/vr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
+      - name: VR source binding survives transient MPR layout readiness
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
       - name: Confirm exact declared VR-only selection
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared volume rendering tests
@@ -121,6 +135,10 @@ jobs:
           persist-credentials: false
       - name: Saved comparison print identity model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_identity_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs
+      - name: Native PDF source key and mode lifecycle model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/source-pdf-key --cwd . --file config/ohif.js --file tests/viewer_dicom_pdf_key_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dicom_pdf_key_test.cjs
+      - name: Personal Hanging Protocol shared schema and owner model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/hanging-protocols --cwd . --file api/src/hanging-protocol.ts --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file tests/hanging_protocol_contract_cases.json --file tests/hanging_protocol_model_test.cjs --file tests/hanging_protocol_validator_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --experimental-strip-types --test tests/hanging_protocol_model_test.cjs tests/hanging_protocol_validator_test.cjs
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
       - name: D-MEASURE2 session recovery and SR guard regressions (no containers)
@@ -137,8 +155,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_layout_test.cjs
       - name: CT position synchronization geometry boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_sync_test.cjs
-      - name: Cine preparation frame and pixel budget boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs
+      - name: Cine range, playback ownership and preparation budget boundaries
+        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
       - name: Selected classic CT preset command boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_presets_test.cjs
       - name: SR source tree identity and bounded literal values
@@ -218,6 +236,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: synthetic-runtime-print-identity
-          path: tmp/runtime-ci/job-print-identity/
+          path: |
+            tmp/runtime-ci/job-print-identity/
+            tmp/runtime-ci/hanging-protocols/
           if-no-files-found: error
           retention-days: 7

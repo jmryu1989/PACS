@@ -25,12 +25,21 @@ def text_runs(sheet):
  sheet.extract_text(visitor_text=visitor);return rows
 
 
+def line_order(group):
+ """Same rule as viewer_job_print_pages_test.line_order: after a fallback-font switch
+ (Linux Korean/Latin) pypdf reports a tie or the line-start x again for the next run;
+ ties keep extraction order, a fall-back keeps the previous run's position, other x decide."""
+ start=group[0][0] if group else None;ordered=[];cursor=None
+ for index,(x,text) in enumerate(group):
+  if cursor is not None and x<cursor and x==start:x=cursor
+  ordered.append((x,index,text));cursor=x
+ return [text for _,_,text in sorted(ordered,key=lambda item:(item[0],item[1]))]
+
+
 def page_lines(rows):
- """Lines by baseline in content-stream order: after a fallback-font switch (Linux
- Korean/Latin) pypdf repeats the line-start x, so x cannot order a line."""
  grouped={}
- for y,x,text in rows:grouped.setdefault(round(y,1),[]).append(text)
- return [''.join(group) for _,group in sorted(grouped.items(),reverse=True)]
+ for y,x,text in rows:grouped.setdefault(round(y,1),[]).append((x,text))
+ return [''.join(line_order(group)) for _,group in sorted(grouped.items(),reverse=True)]
 
 
 class CompareReportsE2E(ViewerJobReportE2E):

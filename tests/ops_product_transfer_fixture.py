@@ -43,12 +43,13 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910110000_study_consultation/migration.sql',
               'api/prisma/migrations/20260910123000_consultation_predicates/migration.sql',
               'api/prisma/migrations/20260910130000_study_access/migration.sql',
-              'api/prisma/migrations/20260910133000_study_access_subject/migration.sql']
+              'api/prisma/migrations/20260910133000_study_access_subject/migration.sql',
+              'api/prisma/migrations/20260912100000_hanging_protocol_preferences/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'])
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -84,6 +85,20 @@ def expected_rows(uid):
     rows['ReadingAppearance'] = [dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=3,sizes=dict(version=3,list=16,current=18,prior=20,
         fonts=dict(version=1,list='sans',current='mono',prior='serif'),colors=dict(version=1,list='warm',current='white',prior='cool'),dock=dict(version=1,placement='top',panel=1)),updatedAt=STAMP)]
     rows['ReadingPreferences'] = [dict(institution='SYNTHETIC-hospital',subject='SYNTHETIC-sub',revision=2,autoNote=True,updatedAt=STAMP)]
+    protocol = dict(version=1, activeRuleId='00000000-0000-4000-8000-000000000801', rules=[dict(
+        id='00000000-0000-4000-8000-000000000801', name='SYNTHETIC CT prior', enabled=True,
+        match=dict(modality='CT', retrieveAE=None, bodyPart='CHEST', description=None),
+        selectors=[dict(alias='current', role='current', historical=False, modality='CT', retrieveAE=None,
+            bodyPart='CHEST', description=None, laterality=None, order='descending', occurrence=1),
+          dict(alias='prior', role='related', historical=True, modality='CT', retrieveAE=None,
+            bodyPart='CHEST', description=dict(operator='contains', value='SYNTHETIC prior'),
+            laterality=None, order='descending', occurrence=1)],
+        layout=dict(rows=1, cols=2, cells=['current', 'prior']))])
+    rows['HangingProtocolPreference'] = [
+        dict(institution='SYNTHETIC-hospital', subject='SYNTHETIC-sub', revision=2, value=protocol, updatedAt=STAMP),
+        dict(institution='SYNTHETIC-tele', subject='SYNTHETIC-sub', revision=3, value=None, updatedAt=STAMP),
+        dict(institution='SYNTHETIC-hospital', subject='SYNTHETIC-other', revision=4,
+            value=dict(version=1, activeRuleId=None, rules=[]), updatedAt=STAMP)]
     shortcuts = dict(list='Digit1',image='Digit2',prior='Digit3',report='KeyR',context='Digit5',
         note='Digit6',tools='Digit7',nativeTools='Digit9',previous='ArrowLeft',next='ArrowRight')
     rows['WorkspaceShortcuts'] = [dict(institution=institution,subject=subject,revision=revision,
@@ -222,7 +237,7 @@ def create_product(name, db, uid):
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'):
+                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -372,6 +387,10 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing workspace revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "WorkspaceLayout" SET value=repeat('x',2049);
         RAISE EXCEPTION 'missing workspace byte constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "HangingProtocolPreference" SELECT * FROM "HangingProtocolPreference" LIMIT 1;
+        RAISE EXCEPTION 'missing hanging protocol owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "HangingProtocolPreference" SET revision=0;
+        RAISE EXCEPTION 'missing hanging protocol revision constraint'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "WorklistColumns" SELECT * FROM "WorklistColumns" LIMIT 1;
         RAISE EXCEPTION 'missing columns owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
       BEGIN UPDATE "WorklistColumns" SET revision=0;

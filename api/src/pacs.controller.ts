@@ -104,6 +104,12 @@ export class PacsController {
   @Put('reading-preferences')
   saveReadingPreferences(@Body() body: any, @Req() req: any) { return this.svc.saveReadingPreferences(body, caller(req)); }
 
+  @Get('hanging-protocols')
+  hangingProtocols(@Req() req: any) { return this.svc.hangingProtocols(caller(req)); }
+
+  @Put('hanging-protocols')
+  saveHangingProtocols(@Body() body: any, @Req() req: any) { return this.svc.saveHangingProtocols(body, caller(req)); }
+
   @Get('workspace-shortcuts')
   workspaceShortcuts(@Req() req: any) { return this.svc.workspaceShortcuts(caller(req)); }
 
