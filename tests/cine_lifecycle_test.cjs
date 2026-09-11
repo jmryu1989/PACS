@@ -119,3 +119,12 @@ for(const kind of ['stack','orthographic'])test(`${kind} Yoyo keeps descending d
   if(kind==='orthographic'){f.tick();f.changeScale(20);await f.play();f.tick();assert.equal(f.old.getCamera().focalPoint[2],5);}
  }finally{f.close();}
 });
+
+for(const kind of ['stack','orthographic'])test(`${kind} completed Yoyo cycle can be played again`,async()=>{
+ const f=fixture(kind),index=()=>kind==='stack'?f.index():f.old.getCamera().focalPoint[2];try{
+  f.range(3,5);f.mode('yoyo');f.loop(false);const pending=f.play();f.release();await pending;
+  for(const expected of [3,4,3,2]){f.tick();assert.equal(index(),expected);}
+  f.tick();assert.equal(f.playing(),false);assert.equal(index(),2);
+  await f.play();f.tick();assert.equal(index(),3);assert.equal(f.playing(),true);
+ }finally{f.close();}
+});

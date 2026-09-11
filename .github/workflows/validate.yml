@@ -47,6 +47,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/hanging-protocols --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-hanging-protocol.js --file tests/viewer_hanging_protocol_dom_test.py --file tests/viewer_hanging_protocol_mount_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B -m unittest discover -s tests -p 'viewer_hanging_protocol*dom_test.py'
+      - name: Source PDF owner identity and popup lifecycle boundaries
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/source-pdf --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file tests/viewer_dicom_pdf_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_dicom_pdf_dom_test.py
       - name: Saved comparison print page identity and pagination
         timeout-minutes: 4
         run: |

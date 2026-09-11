@@ -6,6 +6,12 @@ import measurement_ci as ci
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_source_pdf_profile_is_exact_and_has_separate_evidence(self):
+        profile=ci.PROFILES['dicom-pdf']
+        self.assertEqual(profile['suites'],(('e2e/test_dicom_pdf.py','DicomPdfE2E','ci-source-pdf'),))
+        self.assertEqual(profile['out'].name,'dicom-pdf-ci')
+        self.assertEqual(profile['suite_timeout'],900)
+
     def test_hanging_protocol_flow_preserves_shared_boundary_sequence(self):
         profile = ci.PROFILES['hanging-protocols']
         self.assertEqual(profile['suites'], (
@@ -20,7 +26,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
-                          'identity-fields', 'vr-resize-probe', 'hanging-protocols'})
+                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']

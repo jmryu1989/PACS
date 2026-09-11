@@ -1838,7 +1838,7 @@ function kinCreateCine() {
             try{
               const frames=volumeFrames(v,target);if(frames.index<bounds.first||frames.index>bounds.last){moveVolume(v,target,frames,bounds.first);return;}
               const step=kinCineNext(frames.index,bounds.first,bounds.last,r.mode,r.playDirection,r.loop);
-              if(step.stop){halt(id);render();return;}r.playDirection=step.direction;moveVolume(v,target,frames,step.next);
+              if(step.stop){resetDirection(r);halt(id);render();return;}r.playDirection=step.direction;moveVolume(v,target,frames,step.next);
             }catch(error){clearInterval(timer);if(records.get(id)===r){r.message=error.message||'MPR 재생을 중단했습니다.';if(r.ticket===ticket)halt(id);render();}}
           },1000/fps);r.volumeTimer=timer;render();return;
         }
@@ -1867,7 +1867,7 @@ function kinCreateCine() {
             if(core.Enums.ViewportStatus&&v.viewportStatus!==core.Enums.ViewportStatus.RENDERED)return;
             const index=currentIndex();if(index<bounds.first||index>bounds.last){core.utilities.scroll(v,{delta:bounds.first-index,debounceLoading:true});return;}
             const step=kinCineNext(index,bounds.first,bounds.last,r.mode,r.playDirection,r.loop);
-            if(step.stop){halt(id);render();return;}r.playDirection=step.direction;core.utilities.scroll(v,{delta:step.next-index,debounceLoading:true});
+            if(step.stop){resetDirection(r);halt(id);render();return;}r.playDirection=step.direction;core.utilities.scroll(v,{delta:step.next-index,debounceLoading:true});
           }catch(error){clearInterval(timer);if(records.get(id)===r){r.message=error.message||'재생을 중단했습니다.';if(r.ticket===ticket)halt(id);render();}}
         },1000/fps);r.volumeTimer=timer;
         render();
@@ -2067,8 +2067,33 @@ function kinCreateFrameCoverage() {
   },onModeExit(){epoch++;current?.stop();current=null;}};
 }
 
+function kinCreateDicomPdf() {
+  let services, ready, current, epoch = 0;
+  function prepare() {
+    if (window.KinDicomPdf) return Promise.resolve(window.KinDicomPdf);
+    if (!ready) ready = new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/viewer-dicom-pdf.js';
+      const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(window.KinDicomPdf); };
+      const timer = setTimeout(() => finish(new Error('원본 PDF 도구 연결 시간이 지났습니다. 뷰어를 다시 여세요.')), 10000);
+      script.onload = () => finish(window.KinDicomPdf?.create ? null : new Error('원본 PDF 도구를 확인할 수 없습니다.'));
+      script.onerror = () => finish(new Error('원본 PDF 도구를 불러오지 못했습니다. 뷰어를 다시 여세요.'));
+      document.head.append(script);
+    }).catch(error => { ready = null; throw error; });
+    return ready;
+  }
+  return { id: 'kin.source-pdf', preRegistration({ servicesManager }) { services = servicesManager.services; },
+    onModeEnter() {
+      const ticket = ++epoch; current?.stop(); current = null;
+      prepare().then(module => { if (ticket === epoch) { current = module.create(services); current.mount(); } }).catch(error => {
+        if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; }
+      });
+    },
+    onModeExit() { epoch++; current?.stop(); current = null; },
+  };
+}
+
 window.config = {
-  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
+  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
   modes: [],
   customizationService: {},
   showStudyList: true,

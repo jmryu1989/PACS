@@ -48,9 +48,12 @@ class HangingProtocolApiLive(unittest.TestCase):
    dict(b,value=dict(b['value'],rules=[dict(rule,match=dict(rule['match'],modality='ct'))])),dict(b,value=dict(b['value'],rules=[dict(rule,match=dict(rule['match'],modality=' CT'))])),dict(b,value=dict(b['value'],rules=[dict(rule,match=dict(rule['match'],modality='X'*17))])),dict(b,value=dict(b['value'],rules=[dict(rule,match=dict(rule['match'],description=dict(operator='regex',value='x')))])),
    dict(b,value=dict(b['value'],rules=[dict(rule,selectors=[dict(rule['selectors'][0],occurrence=0)])])),dict(b,value=dict(b['value'],rules=[dict(rule,selectors=[dict(rule['selectors'][0],laterality='LEFT')])])),
    dict(b,value=dict(b['value'],rules=[dict(rule,layout=dict(rows=1,cols=2,cells=['current']))])),dict(b,value=dict(version=1,activeRuleId=RID,rules=[])),dict(b,value=dict(b['value'],rules=[])),
-   dict(b,value={'version':1,'activeRuleId':None,'rules':[],'__proto__':{}}),dict(b,value=dict(version=1,activeRuleId=None,rules=[] ,pad='한'*65537))]
+   dict(b,value={'version':1,'activeRuleId':None,'rules':[],'__proto__':{}})]
   for value in invalid:
    with self.subTest(value=str(value)[:160]):self.assertEqual(self.put(value).status,400);self.assertEqual(self.get(),saved)
+  oversized=dict(b,value=dict(version=1,activeRuleId=None,rules=[],pad='한'*65537))
+  self.assertEqual(self.put(oversized).status,413)
+  self.assertEqual(self.get(),saved)
  def test_04_explicit_repeat_empty_library_and_corrupt_row_fail_closed(self):
   value=self.value();value['rules'][0]['layout']['cells']=['current','current'];b=self.body(value=value)
   self.assertEqual(self.put(b).status,200);head=self.get();self.assertEqual(head['value']['rules'][0]['layout']['cells'],['current','current'])

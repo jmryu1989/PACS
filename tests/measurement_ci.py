@@ -20,6 +20,12 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'dicom-pdf': {
+        'out': ROOT / 'tests/e2e/artifacts/dicom-pdf-ci',
+        'project_prefix': 'kin-pdf-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_dicom_pdf.py', 'DicomPdfE2E', 'ci-source-pdf'),),
+    },
     'hanging-protocols': {
         'out': ROOT / 'tests/e2e/artifacts/hanging-protocols-ci',
         'project_prefix': 'kin-hp-ci-',
