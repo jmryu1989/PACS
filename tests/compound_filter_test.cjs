@@ -28,8 +28,10 @@ test('TEST-W-COMPOUND-EXPORT: same pure API in browser and Node, fresh field/ope
   assert.deepEqual(Object.keys(sandbox.window.KinCompoundFilter), Object.keys(matcher));
   assert.equal(sandbox.window.KinCompoundFilter.matches({ id: 'ALPHA' }, expr([rule('id', 'eq', 'alpha')]), columns), true);
   assert.deepEqual(matcher.fields(columns).map(field => [field.k, field.type]),
-    [['id', 'text'], ['name', 'text'], ['modality', 'select'], ['preDoc', 'text'], ['date', 'date']]);
+    [['id', 'text'], ['name', 'text'], ['modality', 'select'], ['preDoc', 'text'], ['date', 'date'], ['bodyPart', 'tokens']]);
   assert.equal(matcher.fields([])[0].k, 'date');
+  assert.deepEqual(matcher.fields([])[1], { k: 'bodyPart', t: 'Body Part', type: 'tokens' });
+  assert.equal(matcher.fields(techColumns).at(-1).k, 'bodyPart');
   assert.deepEqual(matcher.fields(null), []);
   const fields = matcher.fields(columns);
   fields.find(field => field.k === 'modality').values.push('BAD');
@@ -41,6 +43,68 @@ test('TEST-W-COMPOUND-EXPORT: same pure API in browser and Node, fresh field/ope
   assert.deepEqual(matcher.operators({ type: 'constructor' }), []);
   assert.deepEqual(matcher.operators({ type: '__proto__' }), []);
   assert.deepEqual(matcher.operators(null), []);
+  assert.deepEqual(matcher.operators({ type: 'tokens' }), [
+    ['contains', 'Contains'], ['eq', 'Equals'], ['notContains', 'Does Not Contain'],
+    ['neq', 'Does Not Equal'], ['empty', 'Unspecified'], ['notEmpty', 'Specified'],
+  ]);
+});
+
+test('TEST-WORKLIST-BODY-PARTS: token predicates match individual verified values case-insensitively', () => {
+  for (const condition of [rule('bodyPart', 'eq', 'chest'), rule('bodyPart', 'contains', 'bdo')]) {
+    valid(expr([condition]));
+    assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([condition])), true);
+  }
+  assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([rule('bodyPart', 'eq', 'chest abdomen')])), false);
+  assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([rule('bodyPart', 'contains', 'st ab')])), false);
+  assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([rule('bodyPart', 'neq', 'pelvis')])), true);
+  assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([rule('bodyPart', 'neq', 'abdomen')])), false);
+  assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([rule('bodyPart', 'notContains', 'pel')])), true);
+  assert.equal(match({ bodyPart: ['CHEST', 'Abdomen'] }, expr([rule('bodyPart', 'notContains', 'DOM')])), false);
+});
+
+test('TEST-WORKLIST-BODY-PARTS: empty arrays are verified unspecified; unknown or malformed values fail every operator', () => {
+  assert.equal(match({ bodyPart: [] }, expr([rule('bodyPart', 'empty')])), true);
+  assert.equal(match({ bodyPart: [] }, expr([rule('bodyPart', 'notEmpty')])), false);
+  for (const value of [undefined, null, 'CHEST', {}, [null], [''], [' CHEST'], ['CHEST '], ['x'.repeat(65)]]) {
+    for (const op of ['contains', 'eq', 'notContains', 'neq']) {
+      assert.equal(match({ bodyPart: value }, expr([rule('bodyPart', op, 'chest')])), false, `${String(value)}/${op}`);
+    }
+    assert.equal(match({ bodyPart: value }, expr([rule('bodyPart', 'empty')])), false);
+    assert.equal(match({ bodyPart: value }, expr([rule('bodyPart', 'notEmpty')])), false);
+  }
+  for (const op of ['contains', 'eq', 'notContains', 'neq']) {
+    assert.equal(match({ bodyPart: [] }, expr([rule('bodyPart', op, 'chest')])), false, op);
+  }
+});
+
+test('TEST-WORKLIST-BODY-PARTS: nested logic, saved versions and field discovery stay bounded and fail closed', () => {
+  const nested = expr([{ join: 'or', rules: [
+    rule('bodyPart', 'eq', 'chest'),
+    { join: 'and', rules: [rule('modality', 'eq', 'MR'), rule('bodyPart', 'contains', 'brain')] },
+  ] }]);
+  valid(nested);
+  assert.equal(match({ modality: 'CT', bodyPart: ['CHEST'] }, nested), true);
+  assert.equal(match({ modality: 'MR', bodyPart: ['BRAIN'] }, nested), true);
+  assert.equal(match({ modality: 'MR', bodyPart: undefined }, nested), false);
+  assert.equal(match({ modality: 'CT', bodyPart: ['BRAIN'] }, nested), false);
+  const mixedOr = expr([rule('bodyPart', 'notContains', 'chest'), rule('id', 'eq', 'known')], 'or');
+  assert.equal(match({ id: 'known' }, mixedOr), true);
+  assert.equal(match({ id: 'other' }, mixedOr), false);
+  assert.equal(matcher.usesField(nested, 'bodyPart', columns), true);
+  assert.equal(matcher.usesField(nested, 'name', columns), false);
+  assert.equal(matcher.usesField(undefined, 'bodyPart', columns), false);
+  assert.equal(matcher.usesField(expr([rule('unknown', 'eq', 'x')]), 'unknown', columns), false);
+
+  for (const saved of [nested, matcher.withQuickMode(nested, 'exact', columns)]) {
+    const restored = JSON.parse(JSON.stringify(saved));
+    valid(restored);
+    assert.equal(matcher.usesField(restored, 'bodyPart', columns), true);
+    assert.equal(match({ bodyPart: ['CHEST'] }, restored), true);
+    assert.equal(matcher.compileQuick('study-1', restored, columns)({ id: 'study-1' }), true);
+  }
+  const unknown = expr([rule('futureBodyPart', 'neq', 'chest')], 'or');
+  invalid(unknown);
+  assert.equal(matcher.usesField(unknown, 'futureBodyPart', columns), false);
 });
 
 test('TEST-W-COMPOUND-LEGACY: absent condition and explicit empty rules preserve unfiltered behavior', () => {

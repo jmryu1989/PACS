@@ -68,6 +68,13 @@
         </div>
         <label class="sfm-default"><input type="checkbox" id="sfm-default"> Apply on Sign In</label>
         <p id="sfm-count" role="status"></p>
+        <section id="sfm-body-parts" hidden aria-label="Body Part Lookup">
+          <small>Body Part는 모든 시리즈의 실제 촬영 부위로 검색합니다. Unspecified는 조회를 마친 검사에만 적용되며 미조회·실패는 포함하지 않습니다. 조회 후에도 편집 중 조건은 유지됩니다.</small>
+          <p><button type="button" id="sfm-body-parts-load">Read Body Parts</button>
+          <button type="button" id="sfm-body-parts-refresh">Refresh Body Parts</button>
+          <button type="button" id="sfm-body-parts-cancel">Cancel Body Parts</button></p>
+          <small id="sfm-body-parts-status" role="status"></small>
+        </section>
       </fieldset></form></div><footer aria-label="Saved search actions">
         <button type="button" id="sfm-copy">Save As New</button>
         <button type="button" id="sfm-delete">Delete</button>
@@ -186,7 +193,7 @@
       const fieldInput = make('Field', document.createElement('select'), 'ruleField');
       choices(fieldInput, fields.map(f => [f.k, f.k === 'date' && f.t === '검사일' ? 'Study Date' : f.t]), rule.field);
       const operator = make('Operator', document.createElement('select'), 'ruleOp');
-      choices(operator, field ? compound.operators(field).map(([op]) => [op, operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
+      choices(operator, field ? compound.operators(field).map(([op, label]) => [op, field.type === 'tokens' ? label : operatorLabels[op] || op]) : [[rule.op, rule.op]], rule.op);
       const input = make('Value', document.createElement(field?.type === 'select' ? 'select' : 'input'), 'ruleValue');
       if (field?.type === 'select') choices(input, [['', 'Select Value'], ...field.values.map(v => [v, v])], rule.value ?? '');
       else { input.type = field?.type === 'date' ? 'date' : 'text'; input.maxLength = 1000; input.value = rule.value ?? ''; }
@@ -246,9 +253,20 @@
     function count() {
       const filter = value();
       const error = compound.validate(filter.cols[compound.KEY], options.columns[filter.mode]);
+      const note = error ? '' : options.countNote?.(filter) || '';
       $('count').textContent = error ? '복합 조건 오류: ' + error
-        : `편집 중 조건: 로드된 목록 기준 ${options.count(filter)}건 · 기본 조건 AND 복합 조건을 적용합니다.`;
+        : `편집 중 조건: 로드된 목록 기준 ${options.count(filter)}건 · 기본 조건 AND 복합 조건을 적용합니다.` + (note ? ' · ' + note : '');
       $('count').classList.toggle('sfm-error', !!error);
+      const parts = options.bodyParts;
+      $('body-parts').hidden = !parts || !compound.usesField(filter.cols[compound.KEY], 'bodyPart', options.columns[filter.mode]);
+      if (parts) {
+        const state = parts.snapshot();
+        $('body-parts-load').disabled = !state.allowed || state.busy || !state.total || state.total === state.verified;
+        $('body-parts-load').textContent = state.failed ? 'Retry Body Parts' : state.verified ? 'Resume Body Parts' : 'Read Body Parts';
+        $('body-parts-refresh').disabled = !state.allowed || state.busy || !state.total;
+        $('body-parts-cancel').hidden = !state.busy;
+        $('body-parts-status').textContent = state.note || `부위 ${state.verified}/${state.total}건 확인 · 실패 ${state.failed}건`;
+      }
     }
     function edit(filter, isNew = false) {
       copying = false; missingName = null;
@@ -572,6 +590,9 @@
         if (edit(name === null ? options.snapshot() : named(name), name === null)) status('저장 검색 목록을 불러왔습니다.');
       });
     });
+    $('body-parts-load').addEventListener('click', () => options.bodyParts?.load(false));
+    $('body-parts-refresh').addEventListener('click', () => options.bodyParts?.load(true));
+    $('body-parts-cancel').addEventListener('click', () => options.bodyParts?.cancel());
     $('close').addEventListener('click', () => { if (mayLeave()) dialog.close(); });
     dialog.addEventListener('keydown', e => {
       if (e.key !== 'Escape') return;
@@ -587,7 +608,7 @@
     window.addEventListener('beforeunload', e => {
       if (dialog.open && (busy || dirty() || organizerDirty())) { e.preventDefault(); e.returnValue = ''; }
     });
-    return { open({ name } = {}) {
+    return { refreshCounts() { if (dialog.open) count(); }, open({ name } = {}) {
       if (dialog.open) return;
       opener = document.activeElement; $('search').value = ''; status('');
       collection = null; checked.clear();

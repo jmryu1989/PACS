@@ -12,6 +12,8 @@
     select: [['eq', '같음'], ['neq', '같지 않음'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
     date: [['eq', '같은 날'], ['neq', '다른 날'], ['gte', '이후 (포함)'], ['lte', '이전 (포함)'],
       ['between', '기간 (양 끝 포함)'], ['empty', '비어 있음'], ['notEmpty', '값 있음']],
+    tokens: [['contains', 'Contains'], ['eq', 'Equals'], ['notContains', 'Does Not Contain'],
+      ['neq', 'Does Not Equal'], ['empty', 'Unspecified'], ['notEmpty', 'Specified']],
   };
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -22,6 +24,7 @@
     const result = [], seen = new Set();
     for (const column of columns) {
       if (!record(column) || typeof column.k !== 'string' || !column.k || seen.has(column.k)) continue;
+      if (column.k === 'bodyPart') continue;
       let field;
       if (column.k === 'date') field = { k: 'date', t: column.t || '검사일', type: 'date' };
       else if (column.f === 'text') field = { k: column.k, t: column.t || column.k, type: 'text' };
@@ -31,6 +34,7 @@
       if (field) { result.push(field); seen.add(column.k); }
     }
     if (!seen.has('date')) result.push({ k: 'date', t: '검사일', type: 'date' });
+    result.push({ k: 'bodyPart', t: 'Body Part', type: 'tokens' });
     return result;
   }
 
@@ -141,6 +145,14 @@
     return compile(expression, columns)(study);
   }
 
+  function usesField(expression, field, columns) {
+    if (typeof field !== 'string' || validate(expression, columns) !== null || expression === undefined) return false;
+    function groupUses(group) {
+      return group.rules.some(node => own(node, 'rules') ? groupUses(node) : node.field === field);
+    }
+    return groupUses(expression);
+  }
+
   function compile(expression, columns) {
     if (expression === undefined) return () => true;
     // Validate all branches once before any short circuit can broaden results.
@@ -150,6 +162,19 @@
     const available = new Map(fields(columns).map(field => [field.k, field]));
     function matchRule(study, rule) {
       const value = own(study, rule.field) ? study[rule.field] : undefined;
+      if (available.get(rule.field).type === 'tokens') {
+        const verified = Array.isArray(value) && value.every(token => typeof token === 'string'
+          && token.length > 0 && token.length <= 64 && token === token.trim());
+        if (!verified) return false;
+        if (rule.op === 'empty') return value.length === 0;
+        if (rule.op === 'notEmpty') return value.length > 0;
+        if (!value.length) return false;
+        const wanted = rule.value.toUpperCase();
+        const any = rule.op === 'eq' || rule.op === 'neq'
+          ? value.some(token => token.toUpperCase() === wanted)
+          : value.some(token => token.toUpperCase().includes(wanted));
+        return rule.op === 'eq' || rule.op === 'contains' ? any : !any;
+      }
       if (rule.op === 'empty') return blank(value);
       if (rule.op === 'notEmpty') return !blank(value);
       // Missing values are not unequal values; use the explicit empty operator.
@@ -195,5 +220,5 @@
     }
     return groupText(expression);
   }
-  return { KEY, fields, operators, validate, matches, compile, describe, quickMode, withQuickMode, compileQuick };
+  return { KEY, fields, operators, validate, matches, compile, describe, usesField, quickMode, withQuickMode, compileQuick };
 });

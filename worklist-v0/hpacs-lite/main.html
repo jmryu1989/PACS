@@ -601,6 +601,10 @@
     <button class="chip" id="study-tag-open" type="button">Study Tags</button>
     <button class="chip" id="study-tag-clear" type="button" hidden>Clear Tag Filter</button>
     <button class="chip" id="managefilters">Search &amp; Saved Filters</button>
+    <button class="chip" id="body-parts-load" type="button" aria-describedby="body-parts-status" disabled>Read Body Parts</button>
+    <button class="chip" id="body-parts-refresh" type="button" title="확인한 부위 정보도 지우고 현재 목록의 모든 시리즈를 다시 조회합니다." hidden>Refresh Body Parts</button>
+    <button class="chip" id="body-parts-cancel" type="button" hidden>Cancel Body Parts</button>
+    <small id="body-parts-status" role="status" style="max-width:100%;overflow-wrap:anywhere"></small>
     <button class="chip" id="columnsettings">Columns</button>
     <button class="chip" id="clearfilter">Clear</button>
   </div>
@@ -940,6 +944,7 @@
   <script src="viewer-opening.js"></script>
   <script src="worklist-startup.js"></script>
   <script src="related-parts.js"></script>
+  <script src="worklist-body-parts.js"></script>
   <script src="study-priority.js"></script>
   <script src="worklist-alerts.js"></script>
   <script src="study-access-status.js"></script>
@@ -1639,6 +1644,50 @@
       owner:()=>{const key=KinViewerOpening.key(KinAuth.session());return key||null;},
       changed:()=>renderRelated()
     });
+    const worklistBodyParts = mountWorklistBodyParts();
+    function mountWorklistBodyParts() {
+      let frame = null, ended = false, channel = null;
+      const model = KinWorklistBodyParts.create({
+        owner: () => !ended && serverMode && !offline && !demoMode
+          ? KinViewerOpening.key(KinAuth.session()) || null : null,
+        changed: () => {
+          if (frame !== null) return;
+          frame = requestAnimationFrame(() => {
+            frame = null;
+            render();
+            savedFilterManager.refreshCounts();
+          });
+        }
+      });
+      const read = refresh => { model.sync(studies); return model.load({refresh}); };
+      $('#body-parts-load').addEventListener('click', () => read(false));
+      $('#body-parts-refresh').addEventListener('click', () => read(true));
+      $('#body-parts-cancel').addEventListener('click', () => model.cancel());
+      const end = () => { ended = true; model.end(); channel?.close(); };
+      try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+      window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
+      window.addEventListener('pagehide', end);
+      return model;
+    }
+    function bodyPartCountNote(filter) {
+      const columns = COLS[filter?.mode] || COLS[mode];
+      if (!KinCompoundFilter.usesField(filter?.cols?.[KinCompoundFilter.KEY], 'bodyPart', columns)) return '';
+      worklistBodyParts.sync(studies);
+      const missing = studies.filter(s => worklistBodyParts.get(s.uid) === undefined).length;
+      return missing ? `Partial · 부위 미확인 ${missing}건이 있어 결과가 아직 완전하지 않습니다. Read Body Parts로 조회하세요.` : '';
+    }
+    function renderBodyParts() {
+      const state = worklistBodyParts.sync(studies);
+      $('#body-parts-load').disabled = !state.allowed || state.busy || !state.total || state.verified === state.total;
+      $('#body-parts-load').textContent = state.failed ? 'Retry Body Parts' : state.verified ? 'Resume Body Parts' : 'Read Body Parts';
+      $('#body-parts-refresh').hidden = !state.verified && !state.failed;
+      $('#body-parts-refresh').disabled = !state.allowed || state.busy;
+      $('#body-parts-cancel').hidden = !state.busy;
+      $('#body-parts-status').textContent = state.note || (state.busy
+        ? `부위 조회 중 · ${state.verified}/${state.total}건 확인`
+        : state.verified || state.failed ? `부위 ${state.verified}/${state.total}건 확인 · 실패 ${state.failed}건`
+        : 'Body Part 검색은 촬영 부위 조회 후 사용할 수 있습니다.');
+    }
     function relatedCandidates() {
       const s=cur();return s ? studies.filter(x=>x.uid===s.uid || (s.sourcePatientKey&&x.sourcePatientKey===s.sourcePatientKey)) : [];
     }
@@ -1901,17 +1950,19 @@
     /** 저장된 필터도 현재 목록과 같은 규칙으로 센다. 화면 상태를 바꾸지 않으므로
      * 다른 저장 필터의 건수를 보려고 지금 하던 검색이 흔들리지 않는다. */
     function filteredFor(filter) {
+      worklistBodyParts.sync(studies);
       const filterMode = Array.isArray(COLS[filter?.mode]) ? filter.mode : mode;
       const cols = COLS[filterMode].filter(c => c.f);
       const days = savedFilterDays(filter?.days);
       const values = filter?.cols && typeof filter.cols === "object" ? filter.cols : {};
+      const needsParts = KinCompoundFilter.usesField(values[KinCompoundFilter.KEY], 'bodyPart', COLS[filterMode]);
       const matchCompound = KinCompoundFilter.compile(values[KinCompoundFilter.KEY], COLS[filterMode]);
       const matchQuick = KinCompoundFilter.compileQuick(filter?.quick, values[KinCompoundFilter.KEY], COLS[filterMode]);
       return studies.filter(s => {
         if (!matchQuick(s)) return false;
         if (!withinDays(s.date, days)) return false;
         return cols.every(c => testCol(s, c, values))
-          && matchCompound(s);
+          && matchCompound(needsParts ? {...s, bodyPart: worklistBodyParts.get(s.uid)} : s);
       });
     }
 
@@ -1938,6 +1989,8 @@
       const cols = COLS[mode], shown = shownColumns();
       const list = orderedStudies();
       const appliedSearch = worklistSearch?.read(searchCriteria());
+      const bodyPartNote = appliedSearch?.empty ? '' : bodyPartCountNote(appliedSearch?.criteria || searchCriteria());
+      renderBodyParts();
       const query = JSON.stringify([appliedSearch?.criteria || searchCriteria(), appliedSearch?.empty, sortKey, sortDir, favoriteList?.key(), studyTagList?.key(), consultationFilter?.revision ?? 0]);
       if (query !== resultQuery) { resultPage = 0; resultQuery = query; }
       if (typeof revealUid === 'string') {
@@ -1952,7 +2005,7 @@
       $('#page-prev').disabled = resultPage === 0; $('#page-next').disabled = resultPage >= pages - 1;
       $('#page-current').disabled = !list.some(s => s.uid === selectedUid);
       $('#row-keyboard-help').textContent='↑/↓ · Home/End 이동 · Space 선택 · Enter '+(mode==='Radiology'?'판독 진입':'검사 선택');
-      $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지`;
+      $('#page-status').textContent = `불러온 목록 중 ${list.length ? offset + 1 : 0}–${Math.min(offset + resultPageSize, list.length)} / ${list.length}건 · ${resultPage + 1}/${pages}페이지` + (bodyPartNote ? ` · ${bodyPartNote}` : '');
 
       rowNavigation?.beforeRender();
       $("#rows").innerHTML = list.slice(offset, offset + resultPageSize).map((s, i) => `
@@ -1963,7 +2016,7 @@
           const classes = [c.num ? "num" : "", c.k === "acc" ? "acc" : "", ["id", "birth"].includes(c.k) ? "dim" : ""];
           return `<td class="${classes.filter(Boolean).join(" ")}">${v}</td>`;
         }).join("") + `</tr>`).join("")
-        || `<tr><td class="empty" colspan="${shown.length}">No records found</td></tr>`;
+        || `<tr><td class="empty" colspan="${shown.length}">${bodyPartNote ? '부위 확인 전인 검사가 있어 검색 결과가 아직 완전하지 않습니다.' : 'No records found'}</td></tr>`;
       columnPrefs?.decorate(mode);
       multiSelection?.sync();
       rowNavigation?.sync();
@@ -4569,7 +4622,10 @@
     }
     const savedFilterManager = KinSavedFilterManager.mount({
       columns: COLS, days: savedFilterDays, list: () => userFilters, snapshot: snapshotFilter,
-      count: f => filteredFor(f).length, apply: applyFilter,
+      count: f => filteredFor(f).length, countNote: bodyPartCountNote, apply: applyFilter,
+      bodyParts: { snapshot: () => worklistBodyParts.sync(studies),
+        load: refresh => { worklistBodyParts.sync(studies); return worklistBodyParts.load({refresh}); },
+        cancel: () => worklistBodyParts.cancel() },
       async readFolders(signal) {
         if (await filterWriteReady(signal)) throw new Error('폴더 관리는 서버 계정으로 로그인한 뒤 사용할 수 있습니다.');
         const snapshot = await api('GET', '/filter-folders', undefined, signal);
@@ -4667,21 +4723,22 @@
       renderActiveFilter();
       const rows = userFilters.map((uf, i) => {
         const count = filteredFor(uf).length;
-        const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}`;
-        return { i, uf, count, label };
+        const note = bodyPartCountNote(uf);
+        const label = `${uf.name}, 로드된 목록 기준 ${count}건${uf.isDefault ? ", 기본 필터" : ""}${note ? ' · ' + note : ''}`;
+        return { i, uf, count, label, partial: !!note };
       });
       // 검색 글자 하나마다 같은 버튼을 다시 만들면 저장 필터에 있던 키보드 포커스가
       // 사라진다. 실제 이름·기본 여부·건수가 바뀔 때만 DOM을 교체한다.
-      const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count]));
+      const signature = JSON.stringify(rows.map(x => [x.uf.id ?? null, x.uf.name, !!x.uf.isDefault, x.count, x.label]));
       if (holder.dataset.renderSignature === signature) {
         holder.querySelectorAll('button[data-i]').forEach(b => b.setAttribute('aria-pressed', String(userFilters[+b.dataset.i]?.name === activeFilterName)));
         return;
       }
       const focused = holder.contains(document.activeElement) ? userFilters[+document.activeElement.dataset.i]?.name : null;
-      holder.innerHTML = rows.map(({ i, uf, count, label }) =>
+      holder.innerHTML = rows.map(({ i, uf, count, label, partial }) =>
         `<button class="chip" data-i="${i}" data-name="${esc(uf.name)}" aria-label="${esc(label)}" aria-pressed="${uf.name === activeFilterName}" aria-haspopup="menu" ` +
         `title="${esc(label)} · 클릭: 적용 / 우클릭 또는 Shift+F10: 메뉴">` +
-        `${uf.isDefault ? "⚑ " : ""}${esc(uf.name)} <span aria-hidden="true">(${count})</span></button>`
+        `${uf.isDefault ? "⚑ " : ""}${esc(uf.name)} <span aria-hidden="true">(${count}${partial ? ' · Partial' : ''})</span></button>`
       ).join("");
       holder.dataset.renderSignature = signature;
       if (focused !== null) focusFilterChip(focused);
@@ -5128,6 +5185,7 @@
     function goOffline(e) {
       reportPreview.close();
       serverMode = false; offline = true;
+      worklistBodyParts.sync(studies);
       $('#consultations-open').disabled=true;consultations.refresh();
       clearInterval(poll); poll = null; ++pollGeneration;
       $("#dbstat").innerHTML = `<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)`;
