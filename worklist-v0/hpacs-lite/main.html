@@ -294,7 +294,8 @@
       body.portrait:not(.reading) .menubar { max-height: 92px; overflow: auto; }
       body.portrait:not(.reading) .userfilter { max-height: 150px; overflow: auto; }
       body.portrait:not(.reading) .split { overflow: auto; }
-      body.portrait:not(.reading) .left { height: 300px !important; min-height: 300px; max-height: none; }
+      body.portrait:not(.reading) .left { height: auto !important; min-height: 300px; max-height: none; }
+      body.portrait:not(.reading) .left > .grid { flex: none; height: 220px; }
       body.portrait:not(.reading) .right { flex: none; height: 650px; }
       body.portrait:not(.reading) .rw { height: 760px !important; flex-direction: column; }
       body.portrait:not(.reading) .rw > section { width: 100%; flex: none; }

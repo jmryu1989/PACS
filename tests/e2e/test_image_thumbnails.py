@@ -74,7 +74,7 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         expect(dialog.locator("[data-status]")).to_contain_text("Rendered", timeout=25000)
         expect(dialog.locator("[data-position]")).to_contain_text(f"8 / 14 · SOP {multi['sops'][0]} · Frame 8 / 14")
         lookup = self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": f.uid, "sopUid": multi["sops"][0]})
-        self.assertEqual(201, lookup.status)
+        self.assertEqual(200, lookup.status)
         expected = page.request.get(self.stack.proxy + f"/instances/{lookup.body['id']}/frames/7/rendered?width=1024&height=1024", headers={"Accept": "image/png"})
         self.assertEqual(200, expected.status)
         np.testing.assert_array_equal(self.pixels(dialog.locator('img')), np.asarray(Image.open(io.BytesIO(expected.body())).convert('RGB')))

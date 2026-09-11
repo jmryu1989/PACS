@@ -27,10 +27,16 @@ class WorklistNarrowLayoutDOMTest(unittest.TestCase):
             page.set_content(html)
             page.evaluate("""()=>{
               document.querySelector('#heads').innerHTML='<th>Patient</th><th>Study</th>';
-              document.querySelector('#rows').innerHTML='<tr tabindex="0"><td>Synthetic Patient</td><td>CT</td></tr>';
+              document.querySelector('#rows').innerHTML='<tr tabindex="0" data-uid="2.25.10"><td>Synthetic Patient</td><td>CT</td></tr>';
+              document.querySelector('#filterrow').innerHTML='<th><input aria-label="Patient filter"></th><th><input aria-label="Study filter"></th>';
+              document.querySelector('#page-status').textContent='불러온 목록 중 1–1 / 1건 · 1/1페이지';
+              document.querySelector('#countlist').textContent='W:1 · A:0 · H:0 · O:0 · T:0 · P:0';
               document.querySelector('#rows tr').onclick=()=>window.rowClicked=true;
               document.querySelector('#findings').value='Unchanged editor text';
             }""")
+            page.add_script_tag(content=(ASSETS / 'worklist-selection.js').read_text(encoding='utf-8'))
+            page.evaluate("""()=>window.selection=KinWorklistSelection.mount({host:document.querySelector('#worklist-selection'),
+              tbody:document.querySelector('#rows'),owner:()=> 'synthetic-owner',rows:()=>[{uid:'2.25.10'}],current:()=>null})""")
             row = page.locator('#rows tr')
             try:
                 row.click()

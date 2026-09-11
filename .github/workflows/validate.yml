@@ -54,7 +54,7 @@ jobs:
       - name: Narrow worklist row and image control hit targets
         timeout-minutes: 3
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py --file tests/worklist_image_thumbnails_dom_test.py --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
       - name: Source PDF owner identity and popup lifecycle boundaries
         timeout-minutes: 3
         run: |
