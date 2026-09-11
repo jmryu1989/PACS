@@ -9,6 +9,7 @@
     const objectId=value=>{if(!value||!['object','function'].includes(typeof value))return String(value);if(!objectIds.has(value))objectIds.set(value,++nextObject);return objectIds.get(value);};
     const ordered=()=>[...(grid?.getState?.().viewports?.values?.()||[])].sort((a,b)=>(a.y??0)-(b.y??0)||(a.x??0)-(b.x??0)||String(a.viewportId).localeCompare(String(b.viewportId)));
     const metadata=imageId=>options.metadata?options.metadata(imageId):root.cornerstone?.metaData?.get?.('instance',imageId);
+    const observedImageIds=viewport=>{try{const values=viewport?.getImageIds?.();return Array.isArray(values)?values:['kin-source-unavailable'];}catch(_){return ['kin-source-unavailable'];}};
     function source(view){
       const ids=view?.displaySetInstanceUIDs||[],viewport=ids.length===1&&cornerstone?.getCornerstoneViewport?.(view.viewportId),displaySet=ids.length===1&&sets?.getDisplaySetByUID?.(ids[0]);
       const imageIds=viewport?.getImageIds?.(),current=viewport?.getCurrentImageId?.();
@@ -21,7 +22,7 @@
     }
     function signature(){
       const state=grid?.getState?.(),layout=state?.layout||{},views=ordered();
-      return JSON.stringify([layout.layoutType,layout.numRows,layout.numCols,views.map(view=>{const ids=view.displaySetInstanceUIDs||[],viewport=cornerstone?.getCornerstoneViewport?.(view.viewportId),displaySet=ids.length===1&&sets?.getDisplaySetByUID?.(ids[0]);return [objectId(view),view.viewportId,view.x,view.y,view.width,view.height,ids,objectId(viewport),objectId(displaySet),displaySet?.StudyInstanceUID,displaySet?.SeriesInstanceUID,displaySet?.SOPInstanceUID,displaySet?.SOPClassUID,displaySet?.Modality,viewport?.getImageIds?.()||[]];})]);
+      return JSON.stringify([layout.layoutType,layout.numRows,layout.numCols,views.map(view=>{const ids=view.displaySetInstanceUIDs||[],viewport=cornerstone?.getCornerstoneViewport?.(view.viewportId),displaySet=ids.length===1&&sets?.getDisplaySetByUID?.(ids[0]);return [objectId(view),view.viewportId,view.x,view.y,view.width,view.height,ids,objectId(viewport),objectId(displaySet),displaySet?.StudyInstanceUID,displaySet?.SeriesInstanceUID,displaySet?.SOPInstanceUID,displaySet?.SOPClassUID,displaySet?.Modality,observedImageIds(viewport)];})]);
     }
     function note(message){if(status)status.textContent=message;return message;}
     function resetForSource(message){mode='active';chosen.clear();try{baseline=signature();}catch(_){baseline=null;}try{refreshUi();}catch(_){ }if(message)note(message);}

@@ -115,3 +115,8 @@ test('a source getter failure during failure reporting returns partial guidance 
   const x=fixture(2),b=x.viewports.get('B');x.scope.setSelection(['A','B']);const native=b.setProperties;b.setProperties=function(value){if(value.voiRange){b.getImageIds=()=>{throw Error('late source failure')};throw Error('synthetic W/L failure')}return native.call(this,value)};
   const failed=x.scope.apply('window',{width:400,center:40});assert.equal(failed.ok,false);assert.equal(failed.partial,true);assert.match(failed.message,/일부 표시/);b.setProperties=native;
 });
+
+test('transitional volume image lookup cannot escape observation and operations still fail closed',()=>{
+  const x=fixture(1),viewport=x.viewports.get('A');assert.deepEqual(x.scope.selection(),{mode:'active',ids:['A']});viewport.type='orthographic';viewport.getImageIds=()=>{throw Error('volume has no stack image ids')};
+  assert.doesNotThrow(()=>x.scope.refresh());const rejected=x.scope.apply('invert');assert.equal(rejected.ok,false);assert.match(rejected.message,/적용 전에 중단|일반 CT 스택/);assert.equal(viewport.properties.invert,false);assert.equal(viewport.renders,0);
+});

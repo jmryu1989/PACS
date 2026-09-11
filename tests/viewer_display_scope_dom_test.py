@@ -169,6 +169,20 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
         finally:
             page.close()
 
+    def test_transitional_volume_grid_event_never_escapes_and_display_action_remains_rejected(self):
+        page = self.new_page()
+        try:
+            page.evaluate("mountDirect()")
+            escaped = page.evaluate("""()=>{const viewport=nativeViewports.get('A');viewport.type='orthographic';viewport.getImageIds=()=>{throw Error('transitional volume')};
+              try{emitGrid();return null}catch(error){return error.message}}""")
+            self.assertIsNone(escaped)
+            page.locator('[data-action="invert"]').click()
+            expect(page.locator('#kin-display-scope [role=status]')).to_contain_text('transitional volume')
+            self.assertFalse(page.evaluate("nativeViewports.get('A').properties.invert"))
+            self.assertEqual(0, page.evaluate("nativeViewports.get('A').renders"))
+        finally:
+            page.close()
+
     def test_session_end_while_config_script_is_late_must_not_mount_after_logout(self):
         dispatches = [
             "dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))",

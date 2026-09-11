@@ -75,6 +75,21 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         for path, digest in before.items():
             self.assertEqual(digest, after.get(path), path)
 
+    def stable_view(self, page, timeout=15000):
+        # Pixel contrast alone can precede the late workspace dock resize.  Keep
+        # exact preservation assertions, but take them from settled native output.
+        expect(page.locator("#kin-workspace-dock")).to_be_visible(timeout=timeout)
+        deadline = time.monotonic() + timeout / 1000
+        previous, repeats = None, 0
+        while time.monotonic() < deadline:
+            current = self.display(page)
+            repeats = repeats + 1 if current == previous else 0
+            if repeats >= 3:
+                return current
+            previous = current
+            page.wait_for_timeout(250)
+        self.fail("Native viewer output did not settle before the preservation snapshot")
+
     def test_arrivals_01_same_series_sop_updates_count_and_preserves_viewer_draft_hold_report_and_sources(self):
         fixture = self.ct("ARRIVAL-" + uuid.uuid4().hex[:12], "current", "20260801")
         self.seed_report(fixture)
@@ -85,7 +100,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         holder = self.state(fixture)["holder"]; self.assertEqual(self.stack.actor("doctor"), holder)
         versions, report_rows, originals = self.versions(fixture), self.report_rows(fixture), self.originals()
         before_row = self.study_row(fixture)
-        viewer = self.launch(work.context.new_page(), [fixture]); canvas_ready(viewer, 1); before_view = self.display(viewer)
+        viewer = self.launch(work.context.new_page(), [fixture]); canvas_ready(viewer, 1); before_view = self.stable_view(viewer)
 
         added = self.add_sop(fixture)
         self.assertEqual(200, self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": fixture.uid, "sopUid": added["sop"]}).status)
@@ -94,7 +109,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         expect(work.locator("#toast")).to_contain_text("영상 또는 시리즈가 추가됐습니다")
         expect(work.locator("#findings")).to_have_value(draft)
         self.assertEqual(holder, self.state(fixture)["holder"]); self.assertEqual(versions, self.versions(fixture)); self.assertEqual(report_rows, self.report_rows(fixture))
-        self.assertEqual(before_view, self.display(viewer)); self.assertEqual(1, len(work.evaluate("arrivalNotices"))); self.assertEqual([], work.evaluate("arrivalNotices.filter(x=>x.includes('새 검사'))"))
+        self.assertEqual(before_view, self.stable_view(viewer)); self.assertEqual(1, len(work.evaluate("arrivalNotices"))); self.assertEqual([], work.evaluate("arrivalNotices.filter(x=>x.includes('새 검사'))"))
         self.existing_originals_unchanged(originals); self.shot(work, "same-study")
 
     def test_arrivals_02_new_study_and_existing_growth_emit_one_combined_notice(self):
