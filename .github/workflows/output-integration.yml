@@ -1,7 +1,17 @@
-name: Output integration
+name: Focused integration
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Exact isolated integration profile
+        required: true
+        type: choice
+        default: output-integration
+        options:
+          - output-integration
+          - identity-fields
+          - vr-resize-probe
 
 permissions:
   contents: read
@@ -29,10 +39,12 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/output-integration-python"
           "$RUNNER_TEMP/output-integration-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/output-integration-python/bin/python" -m playwright install --with-deps chromium
-      - name: Isolated comparison report to viewer job report connection
+      - name: Selected isolated focused integration profile
         timeout-minutes: 28
+        env:
+          KIN_CI_PROFILE: ${{ inputs.profile }}
         run: |
-          "$RUNNER_TEMP/output-integration-python/bin/python" tests/measurement_ci.py --profile output-integration
+          "$RUNNER_TEMP/output-integration-python/bin/python" tests/measurement_ci.py --profile "$KIN_CI_PROFILE"
       - name: Sanitized synthetic output integration evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -40,6 +52,10 @@ jobs:
           name: synthetic-output-integration-results
           path: |
             tests/e2e/artifacts/output-integration-ci/
+            tests/e2e/artifacts/identity-fields-ci/
+            tests/e2e/artifacts/vr-resize-probe-ci/
+            tests/tmp/workspace-ui-ci/identity-position-native/
+            tests/tmp/workspace-ui-ci/identity-fields-native/
             tests/e2e/artifacts/job-report.pdf
             tests/e2e/artifacts/compare-reports*.pdf
             tmp/output-integration-ci/

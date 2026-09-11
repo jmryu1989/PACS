@@ -8,10 +8,12 @@ import measurement_ci as ci
 class MeasurementCiTests(unittest.TestCase):
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
-                         {'measurements', 'volume-rendering', 'output-integration'})
+                         {'measurements', 'volume-rendering', 'output-integration',
+                          'identity-fields', 'vr-resize-probe'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
+        identity = ci.PROFILES['identity-fields']
         self.assertEqual([row[:2] for row in measurements['suites']],
                          list(zip(ci.SUITES, ci.SUITE_CLASSES)))
         self.assertEqual(volume['suites'], (('e2e/test_volume_rendering.py',
@@ -23,9 +25,24 @@ class MeasurementCiTests(unittest.TestCase):
              'ci-output-viewer-job-report'),
         ))
         self.assertEqual(output['suite_timeout'], 900)
-        self.assertEqual(len({measurements['out'], volume['out'], output['out']}), 3)
+        self.assertEqual(identity['suites'], (
+            ('reading_appearance_live.py', 'ReadingAppearanceLive',
+             'ci-identity-reading-appearance'),
+            ('reading_appearance_position_live.py', 'ReadingAppearancePositionLive',
+             'ci-identity-reading-position'),
+            ('reading_appearance_fields_live.py', 'ReadingAppearanceFieldsLive',
+             'ci-identity-reading-fields'),
+            ('e2e/test_viewer_identity_position.py', 'ViewerIdentityPositionE2E',
+             'ci-identity-viewer-position'),
+            ('e2e/test_viewer_identity_fields.py', 'ViewerIdentityFieldsE2E',
+             'ci-identity-viewer-fields'),
+        ))
+        self.assertEqual(identity['suite_timeout'], 540)
+        self.assertEqual(len({measurements['out'], volume['out'], output['out'],
+                              identity['out']}), 4)
         self.assertEqual(volume['out'].name, 'volume-rendering-ci')
         self.assertEqual(output['out'].name, 'output-integration-ci')
+        self.assertEqual(identity['out'].name, 'identity-fields-ci')
         hostile={key:'https://outside.invalid' for key in ['KIN_TEST_PROXY','KIN_TEST_API',
                  'KIN_TEST_TOKEN_URL','KIN_TEST_ORTHANC','KIN_TEST_ORTHANC_USER',
                  'KIN_TEST_ORTHANC_PASSWORD']}
@@ -39,6 +56,8 @@ class MeasurementCiTests(unittest.TestCase):
                              ['KIN_EVIDENCE_DIR'], str(stage))
             output_env=ci.profile_environment('output-integration', output['out'], values)
             self.assertNotIn('KIN_EVIDENCE_DIR', output_env)
+            identity_env=ci.profile_environment('identity-fields', identity['out'], values)
+            self.assertNotIn('KIN_EVIDENCE_DIR', identity_env)
             expected={
                 'KIN_TEST_PROXY':'https://localhost:9443',
                 'KIN_TEST_API':'https://localhost:9443/api',
@@ -49,6 +68,7 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual({key:measurement_env[key] for key in hostile}, expected)
             self.assertEqual({key:volume_env[key] for key in hostile}, expected)
             self.assertEqual({key:output_env[key] for key in hostile}, expected)
+            self.assertEqual({key:identity_env[key] for key in hostile}, expected)
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']
@@ -86,11 +106,60 @@ class MeasurementCiTests(unittest.TestCase):
         text=(ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         for required in ['workflow_dispatch:', 'runs-on: ubuntu-24.04',
                          'ref: ${{ github.sha }}', 'persist-credentials: false',
-                         'tests/measurement_ci.py --profile output-integration',
+                         'default: output-integration', '- identity-fields',
+                         'KIN_CI_PROFILE: ${{ inputs.profile }}',
+                         'tests/measurement_ci.py --profile "$KIN_CI_PROFILE"',
                          'if: always()', 'retention-days: 7']:
             self.assertIn(required,text)
+        run_blocks='\n'.join(line for line in text.splitlines() if line.lstrip().startswith('run:'))
+        self.assertNotIn('${{ inputs.profile }}',run_blocks)
         self.assertNotIn('pull_request:',text)
         self.assertNotIn('push:',text)
+
+    def test_identity_fields_commands_are_exact_ordered_local_classes(self):
+        profile=ci.PROFILES['identity-fields']
+        expected=(
+            ('reading_appearance_live.py','ReadingAppearanceLive','test_',17),
+            ('reading_appearance_position_live.py','ReadingAppearancePositionLive',
+             'test_identity_position_api_',2),
+            ('reading_appearance_fields_live.py','ReadingAppearanceFieldsLive',
+             'test_identity_fields_api_',2),
+            ('e2e/test_viewer_identity_position.py','ViewerIdentityPositionE2E',
+             'test_identity_position_',2),
+            ('e2e/test_viewer_identity_fields.py','ViewerIdentityFieldsE2E',
+             'test_identity_fields_',2),
+        )
+        self.assertEqual([row[:2] for row in profile['suites']],
+                         [row[:2] for row in expected])
+        import ast
+        for (suite,class_name,unit),(_,_,prefix,count) in zip(profile['suites'],expected):
+            command,outer=ci.guarded_profile_run(profile,suite,class_name,unit,1000)
+            self.assertEqual(command[command.index('--module')+1],'tests/'+suite)
+            self.assertEqual(command[command.index('--class')+1],class_name)
+            self.assertEqual(command[command.index('--timeout')+1],'540')
+            self.assertEqual(outer,575)
+            tree=ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            cls=next(node for node in tree.body if isinstance(node,ast.ClassDef)
+                     and node.name==class_name)
+            declared=[node.name for node in cls.body if isinstance(node,ast.FunctionDef)
+                      and node.name.startswith('test_')]
+            self.assertEqual(len(declared),count)
+            self.assertTrue(all(name.startswith(prefix) for name in declared))
+
+    def test_vr_resize_probe_executes_only_the_instrumented_original_vr20(self):
+        import ast
+        profile=ci.PROFILES['vr-resize-probe']
+        self.assertEqual(profile['suites'], (('e2e/test_vr_resize_probe.py',
+                         'VrResizeProbeE2E', 'ci-vr-resize-probe'),))
+        self.assertEqual(profile['out'].name,'vr-resize-probe-ci')
+        tree=ast.parse((ci.ROOT/'tests/e2e/test_vr_resize_probe.py').read_text(encoding='utf-8'))
+        cls=next(node for node in tree.body if isinstance(node,ast.ClassDef))
+        methods=[node.name for node in cls.body if isinstance(node,ast.FunctionDef)
+                 and node.name.startswith('test_')]
+        self.assertEqual(methods,['test_vr_resize_probe_01_original_vr20'])
+        command,_=ci.guarded_profile_run(profile,*profile['suites'][0],1000)
+        self.assertIn('VrResizeProbeE2E',command)
+        self.assertEqual(len({p['out'] for p in ci.PROFILES.values()}),len(ci.PROFILES))
 
     def test_vr_artifact_allowlist_rejects_raw_text_and_validates_png(self):
         with tempfile.TemporaryDirectory() as folder:

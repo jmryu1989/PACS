@@ -117,23 +117,40 @@ window.KinReadingAppearance = function (options) {
   }
   function toolbarChanged(e){if(!live()||e.detail?.owner!==initialOwner)return;const clean=normalizeToolbar(e.detail.value);if(!clean)return;if(e.type==='kin-toolbar-preference-changed'||JSON.stringify(clean)!==JSON.stringify(toolbarValue))generation++;toolbarValue=clean;showToolbar();}
   window.addEventListener('kin-toolbar-preference-changed',toolbarChanged);window.addEventListener('kin-toolbar-preference-mounted',toolbarChanged);
-  const viewer=window.KinViewerIdentity;let viewerValue=viewer.read(initialOwner);
-  const viewerFields={},viewerSection=element('fieldset','',dialog);element('legend','Image Identification',viewerSection);
-  element('p','기준 검사와 비교 검사의 글자와 위치를 따로 설정합니다. 환자 ID와 기준/비교 표시는 항상 유지합니다. 설치되지 않은 글꼴은 기기의 대체 글꼴을 사용합니다.',viewerSection);
+  const viewer=window.KinViewerIdentity,viewerModalities=viewer.modalities;let viewerValue=viewer.read(initialOwner);
+  const clone=v=>JSON.parse(JSON.stringify(v)),viewerFields={},viewerProfiles={current:'general',prior:'general'},viewerSection=element('fieldset','',dialog);element('legend','Image Identification',viewerSection);
+  element('p','기준 검사와 비교 검사의 환자 이름·검사 날짜·검사 설명 위치를 따로 정하고, 촬영 modality별 표시를 덮어쓸 수 있습니다. 환자 ID와 기준/비교 표시는 항상 유지합니다.',viewerSection);
+  const positionChoices=[['top-left','Top Left'],['top-right','Top Right'],['bottom-left','Bottom Left'],['bottom-right','Bottom Right']];
   for(const [role,label] of [['current','Current Image'],['prior','Prior Image']]){
     const group=element('fieldset','',viewerSection);element('legend',label,group);viewerFields[role]={};
-    for(const [field,caption,choices] of [['position','Position',[['top-left','Top Left'],['top-right','Top Right'],['bottom-left','Bottom Left'],['bottom-right','Bottom Right']]],['size','Size',[12,14,16,18,20].map(n=>[String(n),n+' px'])],['font','Font',[['default','Default'],['sans','Sans Serif'],['serif','Serif'],['mono','Monospace']]],['color','Text Color',[['default','Default'],['warm','Warm White'],['cool','Cool White'],['white','White']]]]){
+    const profileRow=element('label',label+' Profile',group),profileSelect=element('select','',profileRow);profileSelect.id='viewer-identity-'+role+'-profile';viewerFields[role].profile=profileSelect;
+    for(const id of ['general',...viewerModalities]){const option=element('option',id==='general'?'General':id,profileSelect);option.value=id;}profileSelect.onchange=()=>{viewerProfiles[role]=profileSelect.value;showViewerRole(role);};
+    for(const [field,caption,choices] of [['position','Role & Patient ID Position',positionChoices],['size','Size',[12,14,16,18,20].map(n=>[String(n),n+' px'])],['font','Font',[['default','Default'],['sans','Sans Serif'],['serif','Serif'],['mono','Monospace']]],['color','Text Color',[['default','Default'],['warm','Warm White'],['cool','Cool White'],['white','White']]]]){
       const row=element('label',label+' '+caption,group),select=element('select','',row);select.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=select;
       for(const [id,text] of choices){const option=element('option',text,select);option.value=id;}
       select.onchange=()=>changeViewer(role,field,field==='size'?Number(select.value):select.value);
     }
-    for(const [field,caption] of [['name','Patient Name'],['date','Study Date'],['description','Study Description']]){const row=element('label',label+' '+caption,group),input=element('input','',row);input.type='checkbox';input.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=input;input.onchange=()=>changeViewer(role,field,input.checked);}
+    for(const [field,caption] of [['name','Patient Name'],['date','Study Date'],['description','Study Description']]){
+      const row=element('label',label+' '+caption,group),input=element('input','',row);input.type='checkbox';input.id='viewer-identity-'+role+'-'+field;viewerFields[role][field]=input;input.onchange=()=>changeViewer(role,field,input.checked);
+      const placeRow=element('label',label+' '+caption+' Position',group),place=element('select','',placeRow);place.id='viewer-identity-'+role+'-'+field+'-position';viewerFields[role][field+'Position']=place;
+      for(const [id,text] of positionChoices){const option=element('option',text,place);option.value=id;}place.onchange=()=>changeViewer(role,'fieldPositions',{...viewerProfile(role).fieldPositions,[field]:place.value});
+    }
+    const resetProfile=element('button','Reset Selected Profile',group);resetProfile.type='button';resetProfile.id='viewer-identity-'+role+'-reset-profile';resetProfile.onclick=()=>resetViewerProfile(role);
   }
-  const copyViewer=element('button','Copy Current to Prior',viewerSection);copyViewer.type='button';copyViewer.id='viewer-identity-copy-current';copyViewer.onclick=()=>{if(!live()){end();return;}setViewer({...viewerValue,prior:{...viewerValue.current}});};
+  const copyViewer=element('button','Copy Current to Prior',viewerSection);copyViewer.type='button';copyViewer.id='viewer-identity-copy-current';copyViewer.onclick=()=>{if(!live()){end();return;}setViewer({...viewerValue,prior:clone(viewerValue.current)});};
+  const modalityCopy=element('fieldset','',viewerSection);element('legend','Copy Modality Profile',modalityCopy);
+  const copyRoleRow=element('label','Profile Owner',modalityCopy),copyRole=element('select','',copyRoleRow),copySourceRow=element('label','Copy From Modality',modalityCopy),copySource=element('select','',copySourceRow),copyTargetRow=element('label','Copy To Modality',modalityCopy),copyTarget=element('select','',copyTargetRow),copyModality=element('button','Copy Modality Profile',modalityCopy);
+  copyRole.id='viewer-identity-copy-modality-role';for(const [id,label] of [['current','Current Image'],['prior','Prior Image']]){const option=element('option',label,copyRole);option.value=id;}
+  for(const id of viewerModalities){for(const select of [copySource,copyTarget]){const option=element('option',id,select);option.value=id;}}copySource.id='viewer-identity-copy-modality-source';copyTarget.id='viewer-identity-copy-modality-target';copyTarget.value=viewerModalities[1];copyModality.type='button';copyModality.id='viewer-identity-copy-modality';
+  copyModality.onclick=()=>{if(!live()){end();return;}const role=copyRole.value,source=copySource.value,target=copyTarget.value,from=viewerValue[role].overrides[source];if(!from){viewerStatus.textContent='선택한 원본 modality에 명시적 표시 설정이 없습니다.';return;}if(source===target){viewerStatus.textContent='서로 다른 대상 modality를 선택하세요.';return;}setViewer({...viewerValue,[role]:{...viewerValue[role],overrides:{...viewerValue[role].overrides,[target]:clone(from)}}});};
   const viewerStatus=element('p','',viewerSection);viewerStatus.id='viewer-identity-status';viewerStatus.setAttribute('role','status');
-  function showViewer(){for(const role of ['current','prior'])for(const [field,e] of Object.entries(viewerFields[role])){if(e.type==='checkbox')e.checked=viewerValue[role][field];else e.value=String(viewerValue[role][field]);}}
+  function displayProfile(p){const copy=clone(p),overrides=copy.overrides;delete copy.overrides;return {copy,overrides};}
+  function viewerProfile(role){const selected=viewerProfiles[role];return selected==='general'?viewerValue[role]:viewerValue[role].overrides[selected]||viewerValue[role];}
+  function showViewerRole(role){const p=viewerProfile(role),items=viewerFields[role];items.profile.value=viewerProfiles[role];for(const field of ['position','size','font','color'])items[field].value=String(p[field]);for(const field of ['name','date','description']){items[field].checked=p[field];items[field+'Position'].value=p.fieldPositions[field];}}
+  function showViewer(){for(const role of ['current','prior'])showViewerRole(role);}
   function setViewer(next){const clean=viewer.normalize(next);if(!live()||!clean)return false;viewerValue=clean;generation++;showViewer();const saved=viewer.publish(initialOwner,clean);viewerStatus.textContent=saved?'영상 표시를 기억했습니다 · 이 브라우저':'저장소를 사용할 수 없어 현재 화면에만 적용합니다.';return true;}
-  function changeViewer(role,field,value){if(!live()){end();return;}setViewer({...viewerValue,[role]:{...viewerValue[role],[field]:value}});}
+  function changeViewer(role,field,value){if(!live()){end();return;}const selected=viewerProfiles[role],base=viewerValue[role];if(selected==='general')setViewer({...viewerValue,[role]:{...base,[field]:value}});else{const source=base.overrides[selected]||displayProfile(base).copy;setViewer({...viewerValue,[role]:{...base,overrides:{...base.overrides,[selected]:{...clone(source),[field]:value}}}});}}
+  function resetViewerProfile(role){if(!live()){end();return;}const selected=viewerProfiles[role],fresh=viewer.defaults()[role];if(selected==='general')setViewer({...viewerValue,[role]:{...fresh,overrides:viewerValue[role].overrides}});else{const overrides={...viewerValue[role].overrides};delete overrides[selected];setViewer({...viewerValue,[role]:{...viewerValue[role],overrides}});}}
   const stopViewer=viewer.subscribe(initialOwner,next=>{if(!live())return;if(JSON.stringify(viewerValue)!==JSON.stringify(next)){viewerValue=next;generation++;showViewer();viewerStatus.textContent='같은 계정의 영상 표시 변경을 적용했습니다.';}});showViewer();
   function showDock(){dockFields.placement.value=dockValue.placement;dockFields.panel.value=String(dockValue.panel);dockFields.autoHide.checked=!!dockValue.autoHide;}
   function setDock(next){
@@ -182,7 +199,7 @@ window.KinReadingAppearance = function (options) {
   dialog.addEventListener('close',()=>{if(live()&&opener.isConnected)opener.focus({preventScroll:true});});
   opener.onclick=()=>{if(!live()){end();return;}if(!dialog.open)dialog.showModal();};
   function end(){
-    stopViewer();for(const fields of Object.values(viewerFields))for(const e of Object.values(fields))e.disabled=true;copyViewer.disabled=true;
+    stopViewer();for(const control of viewerSection.querySelectorAll('button,select,input'))control.disabled=true;
     ended=true;opener.disabled=true;for(const f of Object.values(fields))f.disabled=true;reset.disabled=true;
     if(dialog.open)dialog.close();value=defaults();apply();fontValue=defaultFonts();applyFonts();
     for(const f of Object.values(fontFields))f.disabled=true;fontReset.disabled=true;
@@ -228,16 +245,16 @@ window.KinReadingAppearance = function (options) {
   try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
   const normalizeAccount=v=>{
     const legacy=normalize(v);if(legacy)return legacy;
-    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
-    if(v.version>=4&&v.viewer?.version!==(v.version===8?2:1))return null;
+    if(!v||typeof v!=='object'||Array.isArray(v)||![2,3,4,5,6,7,8,9].includes(v.version)||Object.keys(v).sort().join(',')!==(v.version>=7?'colors,current,dock,fonts,list,mpr,prior,toolbar,version,viewer':v.version===6?'colors,current,dock,fonts,list,prior,toolbar,version,viewer':v.version>=4?'colors,current,dock,fonts,list,prior,version,viewer':v.version===3?'colors,current,dock,fonts,list,prior,version':'colors,current,fonts,list,prior,version'))return null;
+    if(v.version>=4&&v.viewer?.version!==(v.version===9?3:v.version===8?2:1))return null;
     const clean=normalize({version:1,list:v.list,current:v.current,prior:v.prior}),f=normalizeFonts(v.fonts),c=normalizeColors(v.colors);
     const dock=v.version>=3?normalizeDock(v.dock):null,checkedView=v.version>=4?viewer.normalize(v.viewer):null;
-    const view=checkedView&&(v.version===8?checkedView:{version:1,...Object.fromEntries(['current','prior'].map(role=>[role,{...v.viewer[role]}]))});
+    const view=checkedView&&clone(v.viewer);
     const toolbar=v.version>=6?normalizeToolbar(v.toolbar):null,mpr=v.version>=7?mprModel?.normalize(v.mpr):null;
     return clean&&f&&c&&(v.version===2||dock)&&(v.version<4||view)&&(v.version<6||toolbar)&&(v.version<7||mpr)&&(v.version<3||dock?.version===(v.version>=5?2:1))?{...clean,version:v.version,fonts:f,colors:c,...(dock?{dock}:{}),...(view?{viewer:view}:{}),...(toolbar?{toolbar}:{}),...(mpr?{mpr}:{})}:null;
   };
-  const legacyViewer=()=>({version:1,...Object.fromEntries(['current','prior'].map(role=>{const {position,...rest}=viewerValue[role];return [role,{...rest}];}))});
-  return {host:account,read:()=>({...value,version:mprModel?8:6,...(mprModel?{mpr:readMpr()}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
+  const legacyViewer=()=>({version:1,...Object.fromEntries(['current','prior'].map(role=>{const p=viewerValue[role];return [role,{size:p.size,font:p.font,color:p.color,name:p.name,date:p.date,description:p.description}];}))});
+  return {host:account,read:()=>({...value,version:mprModel?9:6,...(mprModel?{mpr:readMpr()}:{}),fonts:{...fontValue},colors:{...colorValue},dock:{...dockValue},viewer:mprModel?viewer.normalize(viewerValue):legacyViewer(),toolbar:normalizeToolbar(toolbarValue)}),generation:()=>generation,normalize:normalizeAccount,allowed:()=>live()&&!!mprModel,
     apply:next=>{const clean=normalizeAccount(next);if(!live()||!clean)return false;
       if(clean.version>=6){const controller=options.getToolbar?.();if(controller&&!controller.canApply(clean.toolbar))return false;}
       if(clean.version>=3&&!setDock(clean.dock))return false;

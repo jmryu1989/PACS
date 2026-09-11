@@ -39,6 +39,10 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/measurement-python"
           "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
+      - name: Image field positions and modality profile DOM integration
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-fields --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file tests/viewer_identity_fields_dom_test.py --file tests/viewer_identity_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_fields_dom_test.py
       - name: Saved comparison print page identity and pagination
         timeout-minutes: 4
         run: |

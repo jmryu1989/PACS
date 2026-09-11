@@ -85,7 +85,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
     def tearDown(self):
         self.page.close()
 
-    def test_v1_migrates_on_same_local_key_and_v2_schema_is_strict(self):
+    def test_v1_migrates_on_same_local_key_and_v3_schema_is_strict(self):
         legacy = v1_viewer()
         result = self.page.evaluate(
             """legacy => {
@@ -98,7 +98,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
             }""",
             legacy,
         )
-        self.assertEqual(2, result["read"]["version"])
+        self.assertEqual(3, result["read"]["version"])
         self.assertEqual("top-right", result["read"]["current"]["position"])
         self.assertEqual(1, result["raw"]["version"], "migration keeps the established storage key/value until an explicit write")
         self.assertIsNone(result["extra"])
@@ -152,7 +152,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.assertEqual(0, self.page.locator(".kin-viewer-identity").count())
         self.assertEqual("판독 뷰어 — KOREA IMAGING NETWORK", self.page.title())
 
-    def test_settings_copy_exports_v8_and_strictly_loads_v7_viewer_v1(self):
+    def test_settings_copy_exports_v9_and_strictly_loads_v7_viewer_v1(self):
         self.page.add_script_tag(path=str(VOLUME))
         self.page.add_script_tag(path=str(APPEARANCE))
         self.page.evaluate("""()=>{window.appearance=KinReadingAppearance({owner:()=>JSON.stringify(ownerValue)});document.querySelector('#reading-appearance-open').click()}""")
@@ -163,8 +163,8 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.page.click("#viewer-identity-copy-current")
         result = self.page.evaluate("""()=>({value:appearance.read(),priorPosition:document.querySelector('#viewer-identity-prior-position').value,
           priorSize:document.querySelector('#viewer-identity-prior-size').value,report:document.querySelector('#report').value,images:structuredClone(imageState)})""")
-        self.assertEqual(8, result["value"]["version"])
-        self.assertEqual(2, result["value"]["viewer"]["version"])
+        self.assertEqual(9, result["value"]["version"])
+        self.assertEqual(3, result["value"]["viewer"]["version"])
         self.assertEqual("bottom-left", result["priorPosition"])
         self.assertEqual("18", result["priorSize"])
         self.assertEqual(before, {"report": result["report"], "images": result["images"]})
@@ -176,10 +176,10 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.assertEqual(7, compatibility["normalized"]["version"])
         self.assertEqual(1, compatibility["normalized"]["viewer"]["version"])
         self.assertTrue(compatibility["applied"])
-        self.assertEqual(8, compatibility["exported"]["version"])
+        self.assertEqual(9, compatibility["exported"]["version"])
         self.assertEqual("top-right", compatibility["exported"]["viewer"]["prior"]["position"])
         invalid = self.page.evaluate("""v=>{const wrong=structuredClone(v);wrong.version=7;return appearance.normalize(wrong)}""", compatibility["exported"])
-        self.assertIsNone(invalid, "v1-v7 envelopes must reject a v2 viewer payload")
+        self.assertIsNone(invalid, "v1-v7 envelopes must reject a v3 viewer payload")
 
     def test_missing_mpr_keeps_position_local_and_disables_account_transfer(self):
         self.page.add_script_tag(path=str(APPEARANCE))
@@ -193,7 +193,7 @@ class ViewerIdentityPositionDOMTest(unittest.TestCase):
         self.assertTrue(result["loadDisabled"])
         self.assertTrue(result["saveDisabled"])
         self.assertEqual("bottom-left", result["local"]["current"]["position"])
-        self.assertEqual(2, result["local"]["version"])
+        self.assertEqual(3, result["local"]["version"])
         self.assertIn("이 브라우저에만 적용", result["account"])
         self.assertEqual(6, result["aggregate"]["version"])
         self.assertEqual(1, result["aggregate"]["viewer"]["version"])

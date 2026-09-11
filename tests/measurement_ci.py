@@ -10,11 +10,13 @@ SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
           'e2e/test_manual_sr.py', 'e2e/test_measurement_recheck.py',
           'e2e/test_viewer_recovery.py', 'e2e/test_measurement_calibration.py',
           'e2e/test_worklist_body_parts.py', 'reading_appearance_live.py',
-          'reading_appearance_position_live.py', 'e2e/test_viewer_identity_position.py']
+          'reading_appearance_position_live.py', 'e2e/test_viewer_identity_position.py',
+          'reading_appearance_fields_live.py', 'e2e/test_viewer_identity_fields.py']
 SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'HeldMeasurementE2E', 'ManualSrE2E', 'MeasurementRecheckE2E',
                  'ViewerRecoveryE2E', 'MeasurementCalibrationE2E', 'WorklistBodyPartsE2E',
-                 'ReadingAppearanceLive', 'ReadingAppearancePositionLive', 'ViewerIdentityPositionE2E']
+                 'ReadingAppearanceLive', 'ReadingAppearancePositionLive', 'ViewerIdentityPositionE2E',
+                 'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E']
 PROFILES = {
     'measurements': {
         'out': ROOT / 'tests/e2e/artifacts/measurement-ci',
@@ -42,6 +44,30 @@ PROFILES = {
              'ci-output-compare-reports'),
             ('e2e/test_viewer_job_report.py', 'ViewerJobReportE2E',
              'ci-output-viewer-job-report'),
+        ),
+    },
+    'vr-resize-probe': {
+        'out': ROOT / 'tests/e2e/artifacts/vr-resize-probe-ci',
+        'project_prefix': 'kin-vr-probe-ci-',
+        'suite_timeout': 540,
+        'suites': (('e2e/test_vr_resize_probe.py', 'VrResizeProbeE2E',
+                    'ci-vr-resize-probe'),),
+    },
+    'identity-fields': {
+        'out': ROOT / 'tests/e2e/artifacts/identity-fields-ci',
+        'project_prefix': 'kin-identity-ci-',
+        'suite_timeout': 540,
+        'suites': (
+            ('reading_appearance_live.py', 'ReadingAppearanceLive',
+             'ci-identity-reading-appearance'),
+            ('reading_appearance_position_live.py', 'ReadingAppearancePositionLive',
+             'ci-identity-reading-position'),
+            ('reading_appearance_fields_live.py', 'ReadingAppearanceFieldsLive',
+             'ci-identity-reading-fields'),
+            ('e2e/test_viewer_identity_position.py', 'ViewerIdentityPositionE2E',
+             'ci-identity-viewer-position'),
+            ('e2e/test_viewer_identity_fields.py', 'ViewerIdentityFieldsE2E',
+             'ci-identity-viewer-fields'),
         ),
     },
 }
