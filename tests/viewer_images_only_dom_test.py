@@ -12,7 +12,7 @@ URL = "https://images-only.test/ohif/viewer?StudyInstanceUIDs=1.2"
 HARNESS = r"""<!doctype html><html><body><main id="kin-viewer-layout"></main>
 <section id="viewport" style="position:relative;width:800px;height:600px"><canvas id="pixels"></canvas><div class="native-overlay">S:1 · I:1/2</div><div class="annotation">saved mark</div><div class="kin-viewer-identity" data-study="1.2" style="position:absolute;right:8px;top:8px">Current · PID-1</div></section>
 <input id="job" value="UNSAVED JOB"><script>
-let owner='["hospital","reader"]',historyBusy=false,jobBusy=false,active='vp',full=null,exits=[],exitMode='ready',releaseExit=null,requestMode='ready',releaseRequest=null,rejectRequest=null,syncRequest=[],sourceEvents=0,subscribers=[];
+let owner='["hospital","reader"]',historyBusy=false,jobBusy=false,active='vp',full=null,exits=[],exitAttempts=0,exitMode='ready',releaseExit=null,requestMode='ready',releaseRequest=null,rejectRequest=null,syncRequest=[],sourceEvents=0,oneUp=0,subscribers=[];
 const viewportElement=document.querySelector('#viewport'),identity=viewportElement.querySelector('.kin-viewer-identity');
 let ids=['image:1.4','image:1.5'],current=ids[0];
 const metadata=new Map([[ids[0],{StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',PatientID:'PID-1'}],[ids[1],{StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-1'}]]);
@@ -24,10 +24,11 @@ window.kinViewerWindowOwner=()=>owner;window.kinViewerHistoryWorkspaceState=()=>
 window.cornerstone={Enums:{ViewportStatus:{RENDERED:'rendered'},Events:{PRE_STACK_NEW_IMAGE:'pre-image',STACK_NEW_IMAGE:'new-image',IMAGE_RENDERED:'rendered-image'}},metaData:{get:(_,id)=>metadata.get(id)}};
 window.services={viewportGridService:{EVENTS:{GRID:'grid',LAYOUT:'layout'},getState:()=>state,subscribe:(_,fn)=>{subscribers.push(fn);return{unsubscribe(){subscribers=subscribers.filter(x=>x!==fn)}}}},cornerstoneViewportService:{getCornerstoneViewport:id=>id==='vp'?viewport:null},displaySetService:{EVENTS:{ADDED:'added'},getDisplaySetByUID:id=>id==='ds'?displaySet:null,subscribe:(_,fn)=>{subscribers.push(fn);return{unsubscribe(){subscribers=subscribers.filter(x=>x!==fn)}}}}};
 Object.defineProperty(document,'fullscreenElement',{configurable:true,get:()=>full});
-document.exitFullscreen=()=>{if(exitMode==='reject')return Promise.reject(Error('blocked'));exits.push(full);full=null;document.dispatchEvent(new Event('fullscreenchange'));if(exitMode==='held')return new Promise(resolve=>releaseExit=resolve);return Promise.resolve()};
+document.exitFullscreen=()=>{exitAttempts++;if(exitMode==='reject')return Promise.reject(Error('blocked'));exits.push(full);full=null;document.dispatchEvent(new Event('fullscreenchange'));if(exitMode==='held')return new Promise(resolve=>releaseExit=resolve);return Promise.resolve()};
 let clickActive=false;document.addEventListener('click',()=>clickActive=true,true);document.addEventListener('click',()=>clickActive=false);
 viewportElement.requestFullscreen=()=>{syncRequest.push(clickActive);if(requestMode==='reject')return Promise.reject(Error('denied'));if(requestMode==='pending')return new Promise((resolve,reject)=>{releaseRequest=()=>{full=viewportElement;document.dispatchEvent(new Event('fullscreenchange'));resolve()};rejectRequest=reject});full=viewportElement;document.dispatchEvent(new Event('fullscreenchange'));if(requestMode==='held')return new Promise(resolve=>releaseRequest=resolve);return Promise.resolve()};
 for(const name of ['pointerdown','mousedown','touchstart','click'])viewportElement.addEventListener(name,event=>{if(event.target.id==='kin-images-only-exit')sourceEvents++});
+viewportElement.addEventListener('dblclick',()=>oneUp++);
 window.mountImagesOnly=()=>{window.imagesOnly=KinViewerImagesOnly.create(services,{intervalMs:0,requestTimeoutMs:40});return imagesOnly.mount()};
 window.emit=()=>subscribers.slice().forEach(fn=>fn());
 </script></body></html>"""
@@ -77,14 +78,35 @@ class ViewerImagesOnlyDOMTest(unittest.TestCase):
 
     def test_exit_rejection_keeps_visible_retry_and_owned_fullscreen(self):
         self.page.locator("#kin-images-only-enter").click()
+        self.page.evaluate("identity.style.top='270px';identity.style.right='0';identity.style.width='300px';document.dispatchEvent(new Event('rendered-image'))")
+        self.assertEqual("left-middle", self.page.locator("#kin-images-only-exit").get_attribute("data-position"))
         self.page.evaluate("exitMode='reject'")
         self.page.locator("#kin-images-only-exit").click()
         expect(self.page.locator("#kin-images-only-exit")).to_contain_text("Retry")
         expect(self.page.locator("#kin-images-only-exit")).to_contain_text("종료 요청이 거절되었습니다")
         self.assertTrue(self.page.evaluate("document.fullscreenElement===viewportElement"))
+        self.page.evaluate("identity.style.left='0';identity.style.right='0';identity.style.top='0';identity.style.width='800px';identity.style.height='600px';document.dispatchEvent(new Event('rendered-image'))")
+        expect(self.page.locator("#kin-images-only-exit")).to_contain_text("Exit Images Only · Retry")
+        self.assertEqual(2, self.page.evaluate("exitAttempts"))
+        self.page.evaluate("document.dispatchEvent(new Event('rendered-image'))")
+        self.assertEqual(2, self.page.evaluate("exitAttempts"), "an unsafe placement must not retry exit on every observer event")
+        self.page.evaluate("identity.style.left='auto';identity.style.height='auto';identity.style.top='270px';identity.style.right='0';identity.style.width='300px';document.dispatchEvent(new Event('rendered-image'))")
         self.page.evaluate("exitMode='ready'")
+        self.page.wait_for_timeout(450)
         self.page.locator("#kin-images-only-exit").click()
         self.page.wait_for_function("()=>document.fullscreenElement===null")
+
+    def test_identity_relayout_repositions_exit_and_explicit_exit_shields_double_click(self):
+        self.page.locator("#kin-images-only-enter").click()
+        self.assertEqual("right-middle", self.page.locator("#kin-images-only-exit").get_attribute("data-position"))
+        self.page.evaluate("identity.style.top='270px';identity.style.right='0';identity.style.width='300px';document.dispatchEvent(new Event('rendered-image'))")
+        self.assertEqual("left-middle", self.page.locator("#kin-images-only-exit").get_attribute("data-position"))
+        self.page.locator("#kin-images-only-exit").click()
+        self.page.evaluate("viewportElement.querySelector('#pixels').dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}))")
+        self.assertEqual(0, self.page.evaluate("oneUp"))
+        self.page.wait_for_timeout(550)
+        self.page.evaluate("viewportElement.querySelector('#pixels').dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}))")
+        self.assertEqual(1, self.page.evaluate("oneUp"), "the exit shield must be temporary")
 
     def test_never_settled_request_is_bounded_and_blocks_competing_same_element_request(self):
         self.page.evaluate("requestMode='pending'")

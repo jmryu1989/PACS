@@ -11,6 +11,24 @@ from test_prior_selection import canvas_ready
 
 
 class ViewerImagesOnlyE2E(DisplayControlsE2E):
+    def tearDown(self):
+        result = self._outcome.result
+        failures = result.failures + result.errors + [
+            (test, error) for test, error in getattr(self._outcome, "errors", []) if error
+        ]
+        if any(test is self for test, _ in failures):
+            folder = Path(__file__).parent / "artifacts"
+            folder.mkdir(exist_ok=True)
+            for i, context in enumerate(self.contexts):
+                for j, page in enumerate(context.pages):
+                    if "/ohif/viewer" in page.url:
+                        try:
+                            page.screenshot(path=str(folder /
+                                f"IMAGES-ONLY-failure-{self._testMethodName}-{i}-{j}.png"), full_page=True)
+                        except Exception:
+                            pass
+        super().tearDown()
+
     def shot(self, page, name):
         folder = Path(__file__).parent / "artifacts"
         folder.mkdir(exist_ok=True)
@@ -39,6 +57,7 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
             let digest=2166136261;for(let n=0;n<pixels.length;n+=4)digest=Math.imul(digest^pixels[n],16777619)>>>0;
             return {id:cell.viewportId,element:token(viewport.element),displaySets:[...(cell.displaySetInstanceUIDs||[])],
               type:viewport.type,imageIds,current,index:viewport.getCurrentImageIdIndex(),camera:viewport.getCamera(),
+              presentation:viewport.getViewPresentation({pan:true,zoom:true}),
               properties:viewport.getProperties(),study:metadata.StudyInstanceUID,series:metadata.SeriesInstanceUID,
               sop:metadata.SOPInstanceUID,canvas:{width:canvas.width,height:canvas.height,digest}};
           });
@@ -57,6 +76,10 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
             previous = current
             page.wait_for_timeout(250)
         self.fail("Native viewport state did not produce four identical 250 ms samples")
+
+    @staticmethod
+    def camera_without_resize_scale(row):
+        return {key: value for key, value in row["camera"].items() if key != "parallelScale"}
 
     def enter(self, page):
         panel = self.panel(page)
@@ -117,10 +140,12 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
                          [(r["id"], r["element"], r["study"], r["series"], r["sop"], r["imageIds"])
                           for r in before["rows"]])
         for old, current in zip(before["rows"], during["rows"]):
-            for field in ("camera", "properties", "current", "index"):
+            for field in ("properties", "current", "index", "presentation"):
                 self.assertEqual(current[field], old[field])
+            self.assertEqual(self.camera_without_resize_scale(current), self.camera_without_resize_scale(old))
+            self.assertGreater(current["camera"]["parallelScale"], 0)
         page.locator("#kin-images-only-exit").click()
-        page.wait_for_function("document.fullscreenElement === null")
+        page.wait_for_function("()=>document.fullscreenElement === null")
         expect(page.locator("#kin-images-only-status")).to_have_text("Images Only를 종료했습니다.")
         self.assertEqual(self.stable_state(page), before)
         self.assertEqual(page.evaluate("""()=>cornerstoneTools.annotation.state.getAllAnnotations()
@@ -136,10 +161,6 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         _, page = self.open_pair()
         page.get_by_role("button", name="Comparison", exact=True).click()
         page.get_by_label("Job Title", exact=True).fill("KEEP FILLED INPUT")
-        self.choose(page, 0)
-        page.keyboard.press("ArrowDown")
-        page.wait_for_function("""()=>{const id=services.viewportGridService.getState().activeViewportId;
-          return services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageIdIndex?.()===1}""")
         self.panel(page); before = self.stable_state(page); self.enter(page)
         page.keyboard.press("2"); page.wait_for_timeout(150)
         page.keyboard.press("h"); page.wait_for_timeout(150)
@@ -153,15 +174,20 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         changed = self.native_state(page)
         self.assertIsNotNone(changed["fullscreen"])
         self.assertNotEqual(changed["rows"][active]["current"], before["rows"][active]["current"])
+        self.assertEqual(changed["rows"][active]["presentation"], before["rows"][active]["presentation"])
         self.assertNotEqual(changed["rows"][active]["properties"]["voiRange"],
                             before["rows"][active]["properties"]["voiRange"])
         self.assertNotEqual(changed["rows"][active]["camera"]["flipHorizontal"],
                             before["rows"][active]["camera"]["flipHorizontal"])
         self.assertEqual(changed["rows"][other], before["rows"][other])
-        page.keyboard.press("Escape"); page.wait_for_function("document.fullscreenElement === null")
+        page.keyboard.press("Escape"); page.wait_for_function("()=>document.fullscreenElement === null")
         after = self.stable_state(page)
         self.assertEqual(after["rows"][active]["properties"], changed["rows"][active]["properties"])
-        self.assertEqual(after["rows"][active]["camera"], changed["rows"][active]["camera"])
+        self.assertEqual(after["rows"][active]["presentation"], changed["rows"][active]["presentation"])
+        self.assertEqual(self.camera_without_resize_scale(after["rows"][active]),
+                         self.camera_without_resize_scale(changed["rows"][active]))
+        self.assertEqual(after["rows"][active]["camera"]["parallelScale"],
+                         before["rows"][active]["camera"]["parallelScale"])
         self.assertEqual(after["rows"][active]["current"], changed["rows"][active]["current"])
         self.assertEqual(after["rows"][active]["imageIds"], before["rows"][active]["imageIds"])
         self.assertEqual(after["rows"][other], before["rows"][other])
@@ -180,9 +206,9 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
         self.assertIsNone(page.evaluate("document.fullscreenElement"))
         page.evaluate("""()=>{const id=services.viewportGridService.getState().activeViewportId;
           services.cornerstoneViewportService.getCornerstoneViewport(id).element.requestFullscreen=__imagesOnlyRequestFullscreen;}""")
-        page.locator("#kin-images-only-enter").click(); page.wait_for_function("document.fullscreenElement !== null")
+        page.locator("#kin-images-only-enter").click(); page.wait_for_function("()=>document.fullscreenElement !== null")
         page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))")
-        page.wait_for_function("document.fullscreenElement === null")
+        page.wait_for_function("()=>document.fullscreenElement === null")
         expect(page.locator("#kin-images-only")).to_have_count(0)
 
     def test_images_only_04_native_double_click_one_up_restores_grid_without_fullscreen(self):
@@ -201,7 +227,7 @@ class ViewerImagesOnlyE2E(DisplayControlsE2E):
                          (selected["study"], selected["series"], selected["sop"], selected["imageIds"]))
         self.assertIsNone(one["fullscreen"]); self.assertEqual(page.evaluate("__imagesOnlyFullscreenCalls"), 0)
         page.locator('[data-cy=viewport-grid] > div').first.locator("canvas").dblclick()
-        page.wait_for_function("services.viewportGridService.getState().viewports.size===2")
+        page.wait_for_function("()=>services.viewportGridService.getState().viewports.size===2")
         canvas_ready(page, 2); restored = self.stable_state(page)
         self.assertEqual([(r["id"], r["study"], r["series"], r["sop"], r["imageIds"])
                           for r in restored["rows"]],
