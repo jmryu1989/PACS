@@ -21,6 +21,24 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         super().setUp()
         self.addCleanup(cleanup_workspace, self.stack, "HangingProtocolPreference")
 
+    def tearDown(self):
+        result = self._outcome.result
+        failures = result.failures + result.errors + [
+            (test, error) for test, error in getattr(self._outcome, "errors", []) if error
+        ]
+        if any(test is self for test, _ in failures):
+            folder = Path(__file__).parent / "artifacts"
+            folder.mkdir(exist_ok=True)
+            for i, context in enumerate(self.contexts):
+                for j, page in enumerate(context.pages):
+                    if "/ohif/viewer" in page.url:
+                        try:
+                            page.screenshot(path=str(folder / f"HP-failure-{self._testMethodName}-{i}-{j}.png"),
+                                            full_page=True)
+                        except Exception:
+                            pass
+        super().tearDown()
+
     def hp(self, page):
         self.open_layout_tools(page)
         expect(page.get_by_role("heading", name="Hanging Protocols", exact=True)).to_be_visible(timeout=45000)
@@ -149,8 +167,11 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         following.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
         self.identity(viewer, [current_second, related_first, None, current_second])
 
-        viewer.get_by_role("button", name="Comparison", exact=True).click()
-        viewer.get_by_label("Job Title", exact=True).fill("HP NAVIGATION UNSAVED JOB")
+        job_title = viewer.get_by_label("Job Title", exact=True)
+        if not job_title.is_visible():
+            viewer.get_by_role("button", name="Comparison", exact=True).click()
+        expect(job_title).to_be_visible()
+        job_title.fill("HP NAVIGATION UNSAVED JOB")
         dirty = self.cells(viewer); previous.click()
         expect(viewer.locator("#kin-hp-status")).to_contain_text("저장하지 않은 영상 작업")
         self.assertEqual(dirty, self.cells(viewer), "navigation must preserve dirty viewer work")
