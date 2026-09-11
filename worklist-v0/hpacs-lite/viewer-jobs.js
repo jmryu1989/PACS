@@ -47,11 +47,10 @@ window.kinViewerJobs = function (services, model) {
       if (!live() || openingPrint) return;
       openingPrint = true;
       try {
-        const snapshot = row ? null : capture(true);
-        if(snapshot?.version===6)throw new Error('현재 3D 표식은 Save New Job으로 저장한 뒤 Print Saved Images로 출력하세요.');
-        if([4,5].includes(snapshot?.version))throw new Error('현재 MPR은 Save New Job으로 저장한 뒤 Print Saved Images로 출력하세요.');
-        const unchanged = () => live() && JSON.stringify(capture(true)) === JSON.stringify(snapshot);
-        const assets=[['kinViewerJobPrint','viewer-job-print.js'],...([4,5,6].includes(row?.snapshotVersion)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
+        const currentSnapshot=(readOnly=false)=>{const value=capture(true,readOnly,true);if(value.version===5){value.version=4;delete value.batch;}else if(value.version===6)value.batch=null;return value;};
+        const snapshot = row ? null : currentSnapshot();
+        const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
+        const assets=[['kinViewerJobPrint','viewer-job-print.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
           // A print-only asset failure must leave saving/restoring available.
           if (!printLoading) printLoading = Promise.all(assets.map(([name,file])=>new Promise((resolve, reject) => {
@@ -106,9 +105,9 @@ window.kinViewerJobs = function (services, model) {
           !matches[0].images.some(i => i.SOPInstanceUID === cell.sop)) throw new Error('저장한 원본 시리즈와 프레임을 찾을 수 없습니다.');
       return matches[0].displaySetInstanceUID;
     }
-    function capture(checkOutputSize = false) {
+    function capture(checkOutputSize = false, readOnly = false, currentOutput = false) {
       const state = grid.getState(), views = ordered(), { numRows: rows, numCols: cols, layoutType } = state.layout;
-      if(views.some(g=>cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic'))return volumeTools().capture();
+      if(views.some(g=>cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic'))return volumeTools().capture(readOnly,!currentOutput);
       if (layoutType !== 'grid' || ![1, 2].includes(rows) || ![1, 2].includes(cols) || views.length !== rows*cols) throw new Error('현재 일반 CT 1·2·4화면 배치에서 저장할 수 있습니다.');
       let totalPixels = 0;
       const cells = views.map((g, i) => {

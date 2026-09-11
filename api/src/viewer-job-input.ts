@@ -32,7 +32,7 @@ export function previewCommand(raw: Buffer): any {
   const b = viewerJson(raw);
   keys(b, ['snapshot']);
   validateJobSnapshot(b.snapshot);
-  if (b.snapshot.version !== 2) invalid();
+  if (![2,4,6].includes(b.snapshot.version) || b.snapshot.version===6&&b.snapshot.batch!==null) invalid();
   return b.snapshot;
 }
 function validateJobSnapshot(s: any) {

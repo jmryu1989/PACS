@@ -90,8 +90,9 @@ class VolumeJobsE2E(VolumeProjectionE2E):
   from pathlib import Path
   a,p,v=self.opened_projection();self.project(v,1,20);self.save_volume(v);original=self.originals()
   expect(v.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(1)
-  v.get_by_role('button',name='Print Current View',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('현재 MPR은 Save New Job으로 저장한 뒤 Print Saved Images로 출력하세요.')
-  expect(v.locator('#kin-job-print')).to_have_count(0);self.assertEqual(self.originals(),original)
+  v.get_by_role('button',name='Print Current View',exact=True).click();expect(v.locator('#kin-job-print [role=status]')).to_contain_text('미리보기 내용을 확인',timeout=120000)
+  paper=v.frame_locator('#kin-job-print iframe');expect(paper.locator('.cell')).to_have_count(3);expect(paper.locator('h1')).to_have_text('KIN PACS 현재 MPR 3평면');self.assertEqual(len(self.jobs(a)),1);self.assertEqual(self.originals(),original)
+  v.locator('#kin-job-print').get_by_role('button',name='닫기',exact=True).click()
   folder=Path('../tmp/volume-job/screens');folder.mkdir(parents=True,exist_ok=True);v.get_by_role('button',name='Restore Job',exact=True).scroll_into_view_if_needed();v.screenshot(path=str(folder/'mpr-saved-workspace.png'))
  def test_volume_job_07_missing_optional_asset_keeps_stack_jobs(self):
   a,b=self.pair();p=self.login();p.route('**/viewer-volume-job.js',lambda route:route.abort());v=self.launch(p,[a]);self.ready(v)

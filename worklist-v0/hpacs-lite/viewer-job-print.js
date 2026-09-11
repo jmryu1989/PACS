@@ -102,13 +102,16 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       const checked = await api('/studies/' + item.uid + '/viewer-jobs/preview', { signal, method: 'POST', body: JSON.stringify({ snapshot: item.snapshot }) });
       // This transient adapter only feeds the renderer; it has no saved id.
       const display = structuredClone(checked.snapshot);
-      if (display?.version !== 2 || !Array.isArray(display.cells)) throw new Error('현재 표시 확인 응답이 올바르지 않습니다.');
-      for (const cell of display.cells) if (cell) {
+      if (![2,4,6].includes(display?.version) || !Array.isArray(display.cells)) throw new Error('현재 표시 확인 응답이 올바르지 않습니다.');
+      if([4,6].includes(display.version)){
+        if(!/^[a-f0-9]{64}$/.test(display.volume?.sourceDigest))throw new Error('현재 볼륨 원본 확인 값이 올바르지 않습니다.');
+        delete display.volume.sourceDigest;
+      }else for (const cell of display.cells) if (cell) {
         if (!/^[a-f0-9]{32}$/.test(cell.sourceDigest)) throw new Error('현재 원본 확인 값이 올바르지 않습니다.');
         delete cell.sourceDigest;
       }
       if (!equal(display, item.snapshot)) throw new Error('현재 표시 확인 응답이 요청과 다릅니다.');
-      return { snapshot: checked.snapshot, transient: true, title: '현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
+      return { snapshot: checked.snapshot, transient: true, title: [4,6].includes(display.version)?'현재 MPR 표시':'현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
     };
     const job = await readJob(), identities = [], reports = [];
     const studies = job.snapshot.studies;
@@ -230,7 +233,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
           item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) || item.baseline.values.some(n => !Number.isFinite(n))) refuse();
     }
   }
-  const annotationMode = job => job.snapshot.version === 6 ? (job.snapshot.marks.visible?'저장 당시 수동 3D 표식 포함':'저장 당시 수동 3D 표식 숨김') : job.snapshot.version === 3 ? '저장 당시 주석 포함' : '주석 미포함';
+  const annotationMode = job => job.snapshot.version === 6 ? ((job.transient?'처음 선택한':'저장 당시')+(job.snapshot.marks.visible?' 수동 3D 표식 포함':' 수동 3D 표식 숨김')) : job.snapshot.version === 3 ? '저장 당시 주석 포함' : '주석 미포함';
   async function render(cell, ticket, signal, budget, annotations, edit) {
     const { width, height } = cell.viewport;
     const location = await api('/dicom/lookup', { signal, method: 'POST', body: JSON.stringify({ studyUid: cell.study, sopUid: cell.sop }) });
@@ -317,10 +320,10 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   function html(data, images, outputEdits, batchOutput) {
     const { job, identities } = data, main = el('main'), legends = [];
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    el('h1', batchOutput?(job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
+    el('h1', batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
     el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
-    el('p', (batchOutput?'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성':basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main);
-    if(batchOutput&&!job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main);
+    el('p', (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main);
+    if(batchOutput&&!job.transient&&!job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main);
     if(batchOutput&&job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main);
     const reportLabel = report => !report.version ? '저장된 판독문 없음' :
       `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
@@ -416,7 +419,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
         if(typeof window.kinRenderVolumeJobPrint!=='function')throw new Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
         batchOutput=await window.kinRenderVolumeJobPrint({snapshot,api,bytes,signal,check:()=>valid(ticket,signal)});valid(ticket,signal);
         for(const row of batchOutput.frames){const url=URL.createObjectURL(row.blob);urls.push(url);images.push(url);}if(batchOutput.scout){batchOutput.scout.url=URL.createObjectURL(batchOutput.scout.blob);urls.push(batchOutput.scout.url);}
-        caption.textContent='저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다. 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
+        caption.textContent=(item.snapshot?'처음 선택한 현재 평면을 재구성하며 Job·표식·판독문을 저장하지 않습니다.':'저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다.')+' 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
       }else for (const [index, cell] of snapshot.cells.entries()) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget, cellAnnotations(data.job, cell), outputEdits[index]) : null); }
       const latest = await state(item, signal, reportChoice); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
       ready = { data, reportChoice, html: html(data, images, outputEdits,batchOutput) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
@@ -451,11 +454,11 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     close(); reportSource.value = 'none'; current = item;
     controls.hidden=[4,5,6].includes(item.version);controls.style.display=[4,5,6].includes(item.version)?'none':'flex';
     for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
-    heading.textContent = [4,5,6].includes(item.version)?'Saved MPR Output':item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    heading.textContent = [4,5,6].includes(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();
   }
-  return { open(uid, id, version) { open({ uid, id, version }); }, openCurrent(uid, snapshot, unchanged) { open({ uid, snapshot: structuredClone(snapshot), unchanged }); }, close,
+  return { open(uid, id, version) { open({ uid, id, version }); }, openCurrent(uid, snapshot, unchanged) { open({ uid, version:snapshot.version, snapshot: structuredClone(snapshot), unchanged }); }, close,
     destroy() { close(); dialog.remove(); core.metaData.removeProvider(provider); } };
 };

@@ -8,7 +8,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const permitted=()=>{try{return alive()&&allowed();}catch(_){return false;}};
   const workspaceBusy=()=>{try{return !!window.kinViewerJobWorkspaceState?.().busy;}catch(_){return true;}};
   const same=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((n,i)=>Number.isFinite(Number(n))&&Math.abs(Number(n)-Number(b[i]))<.001);
-  function target(verify=false){
+  function target(verify=false,readOnly=false){
     if(!alive())return null;
     try{
       const source=selected();if(source?.kind!=='volume')return null;
@@ -33,7 +33,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
         return null;
       }
       if(verify){
-        if(!permitted())throw Error('다른 작업을 마친 뒤 MPR 방향을 조절하세요.');
+        if(readOnly!==true&&!permitted())throw Error('다른 작업을 마친 뒤 MPR 방향을 조절하세요.');
         if(volume.imageIds.length!==volume.dimensions?.[2])throw Error('MPR 원본 프레임 수를 확인할 수 없습니다.');
         for(let i=0;i<volume.imageIds.length;i++){
           const m=cornerstone.metaData.get('instance',volume.imageIds[i]);

@@ -17,7 +17,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     if(matches.length!==1||matches[0].images?.length!==ref.sops.length||new Set(matches[0].images.map(m=>m.SOPInstanceUID)).size!==ref.sops.length||matches[0].images.some(m=>!ref.sops.includes(m.SOPInstanceUID)||m.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'))throw Error('저장한 MPR의 전체 원본 시리즈를 찾을 수 없습니다.');
     return matches[0].displaySetInstanceUID;
   }
-  function capture() {
+  function capture(readOnly=false,includeBatch=true) {
     const state=grid.getState(),views=ordered(),{numRows:rows,numCols:cols,layoutType}=state.layout;
     if(layoutType!=='grid'||!(rows===1&&cols===3||rows===3&&cols===1)||views.length!==3)fail();
     let reference,loaded,pixels=0;
@@ -44,8 +44,8 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
         properties:{voiRange:properties.voiRange,VOILUTFunction:properties.VOILUTFunction||'LINEAR',invert:!!properties.invert,interpolationType:properties.interpolationType??1}};
     });
     const active=views.findIndex(v=>v.viewportId===state.activeViewportId);if(active<0)throw Error('활성 MPR 평면을 선택한 뒤 저장하세요.');
-    const batch=window.kinVolumeBatchState?.capture(reference);
-    const marks=window.kinMprMarks?.capture(),annotated=marks&&(marks.marks.length||!marks.visible||!marks.sync);
+    const batch=includeBatch?window.kinVolumeBatchState?.capture(reference):null;
+    const marks=window.kinMprMarks?.capture(readOnly),annotated=marks&&(marks.marks.length||!marks.visible||!marks.sync);
     return JSON.parse(JSON.stringify({version:annotated?6:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(annotated?{marks,batch:batch||null}:batch?{batch}:{})}));
   }
   function holdCrosshairReset(){
