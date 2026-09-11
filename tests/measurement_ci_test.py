@@ -6,6 +6,13 @@ import measurement_ci as ci
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_images_only_profile_is_exact_and_separate(self):
+        profile=ci.PROFILES['images-only']
+        self.assertEqual(profile['suites'],(('e2e/test_viewer_images_only.py','ViewerImagesOnlyE2E','ci-images-only'),))
+        self.assertEqual(profile['out'].name,'images-only-ci')
+        self.assertEqual(profile['project_prefix'],'kin-images-only-ci-')
+        self.assertEqual(profile['suite_timeout'],900)
+
     def test_study_arrivals_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['study-arrivals']
         self.assertEqual(profile['suites'],(('e2e/test_study_arrivals.py','StudyArrivalsE2E','ci-study-arrivals'),))
@@ -44,7 +51,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
-                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals'})
+                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -142,6 +149,9 @@ class MeasurementCiTests(unittest.TestCase):
         for required in ['workflow_dispatch:', 'runs-on: ubuntu-24.04',
                          'ref: ${{ github.sha }}', 'persist-credentials: false',
                          'default: output-integration', '- identity-fields',
+                         '- images-only', 'tests/e2e/artifacts/images-only-ci/',
+                         'tests/e2e/artifacts/IMAGES-ONLY-*.png',
+                         'tests/e2e/artifacts/test_images_only_*.png',
                          'KIN_CI_PROFILE: ${{ inputs.profile }}',
                          'tests/measurement_ci.py --profile "$KIN_CI_PROFILE"',
                          'if: always()', 'retention-days: 7']:

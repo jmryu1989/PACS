@@ -17,6 +17,7 @@ on:
           - image-thumbnails
           - display-scope
           - study-arrivals
+          - images-only
 
 permissions:
   contents: read
@@ -64,6 +65,9 @@ jobs:
             tests/e2e/artifacts/image-thumbnails-ci/
             tests/e2e/artifacts/display-scope-ci/
             tests/e2e/artifacts/study-arrivals-ci/
+            tests/e2e/artifacts/images-only-ci/
+            tests/e2e/artifacts/IMAGES-ONLY-*.png
+            tests/e2e/artifacts/test_images_only_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png
             tests/e2e/artifacts/LAYOUT-display-scope-*.png
