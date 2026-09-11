@@ -94,10 +94,19 @@ def runs(pdf_page):
 
 
 def lines(rows):
+    """Text lines from runs: grouped by baseline, kept in content-stream order.
+
+    Chromium emits one run per font. Where a fallback font splits a Korean/Latin
+    line (Linux CI: Liberation Sans + WenQuanYi Zen Hei), pypdf reports the x of
+    the line start again for the Latin runs after a switch, so ordering by x
+    would scramble the line (validate run 34614012107, test_pages_03). The
+    baselines of those runs are identical and the stream order of a
+    left-to-right line is its visual order, so x never decides the order.
+    """
     grouped = {}
     for y, x, text in rows:
-        grouped.setdefault(round(y, 1), []).append((x, text))
-    return ["".join(text for _, text in sorted(group)) for _, group in sorted(grouped.items(), reverse=True)]
+        grouped.setdefault(round(y, 1), []).append(text)
+    return ["".join(group) for _, group in sorted(grouped.items(), reverse=True)]
 
 
 class ViewerJobPrintPages(unittest.TestCase):
@@ -389,6 +398,39 @@ class ViewerJobPrintPages(unittest.TestCase):
                 self.assertNotIn("과거", self.srcdoc(page))
                 self.no_writes(page)
                 page.close()
+
+    def test_parser_01_keeps_font_runs_in_stream_order(self):
+        # The exact runs pypdf reported for the summary-page footer of the CI
+        # long-identity PDF (validate run 34614012107, Linux fallback fonts):
+        # Korean runs carry their real x, the Latin runs after each font switch
+        # repeat the line-start x, and the whole line shares one baseline.
+        name = " ".join("NAME%02d" % index for index in range(13))
+        latin = "  " + name + " (" + PATIENT_ID + ") · "
+        ci_runs = [
+            (35.67, 554.23, "7"), (35.67, 557.99, " /"), (28.17, 557.99, "7"),
+            (51.42, 33.75, "환자"), (51.42, 33.75, latin), (51.42, 452.54, "검사"), (51.42, 33.75, "  20260801 · Acc ACC-"),
+            (43.92, 33.75, "0123456789AB"),
+            (36.42, 33.75, "환자"), (36.42, 33.75, latin), (36.42, 452.54, "검사"), (36.42, 33.75, "  20260901 · Acc ACC-"),
+            (28.92, 33.75, "0123456789AB"),
+            (21.42, 33.75, "Current Study Report: 20260801 · "), (21.42, 125.8, "승인된"), (21.42, 145.47, "저장본"),
+            (21.42, 33.75, "  · v1 · RS A"),
+        ]
+        parsed = [flat(line) for line in lines(ci_runs) if not re.fullmatch(r"[\d/]+", flat(line))]
+        self.assertEqual(parsed, [
+            flat("환자 " + name + " (" + PATIENT_ID + ") · 검사 20260801 · Acc ACC-"),
+            "0123456789AB",
+            flat("환자 " + name + " (" + PATIENT_ID + ") · 검사 20260901 · Acc ACC-"),
+            "0123456789AB",
+            flat("Current Study Report: 20260801 · 승인된 저장본 · v1 · RS A"),
+        ])
+        self.assertIn(flat("환자 " + name + " (" + PATIENT_ID + ")"), "".join(parsed))
+        # A single-font line (Windows: Malgun Gothic) is one run and unaffected.
+        self.assertEqual(lines([(18.4, 33.75, "승인된 저장본 · v1 · RS A"), (25.9, 33.75, "Study X")]),
+                         ["Study X", "승인된 저장본 · v1 · RS A"])
+        # Distinct baselines still separate lines (a lower y is a later line);
+        # within a line the stream order decides, never the reported x.
+        self.assertEqual(lines([(10.0, 33.75, "second"), (20.0, 90.0, "first-b"), (20.0, 33.75, "first-a")]),
+                         ["first-bfirst-a", "second"])
 
 
 if __name__ == "__main__":
