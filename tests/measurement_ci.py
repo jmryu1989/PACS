@@ -20,6 +20,12 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'image-thumbnails': {
+        'out': ROOT / 'tests/e2e/artifacts/image-thumbnails-ci',
+        'project_prefix': 'kin-image-thumbs-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_image_thumbnails.py', 'ImageThumbnailsE2E', 'ci-image-thumbnails'),),
+    },
     'dicom-pdf': {
         'out': ROOT / 'tests/e2e/artifacts/dicom-pdf-ci',
         'project_prefix': 'kin-pdf-ci-',

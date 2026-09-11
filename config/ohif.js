@@ -2067,8 +2067,45 @@ function kinCreateFrameCoverage() {
   },onModeExit(){epoch++;current?.stop();current=null;}};
 }
 
+function kinDicomPdfViewportGuard(extensionManager) {
+  const entryId = '@ohif/extension-dicom-pdf.viewportModule.dicom-pdf';
+  const objectIds = new WeakMap(); let nextObjectId = 0, patch = null;
+  function sourceKey(props) {
+    const values = props?.displaySets;
+    if (!Array.isArray(values) || values.length !== 1) return null;
+    const value = values[0], validUid = item => typeof item === 'string' && item.length <= 64 && /^\d+(?:\.\d+)+$/.test(item);
+    if (!value || typeof value.displaySetInstanceUID !== 'string' || !value.displaySetInstanceUID ||
+        ![value.StudyInstanceUID, value.SeriesInstanceUID, value.SOPInstanceUID].every(validUid)) return null;
+    const pdfUrl = value.pdfUrl; let urlIdentity;
+    if ((typeof pdfUrl === 'object' && pdfUrl !== null) || typeof pdfUrl === 'function') {
+      if (!objectIds.has(pdfUrl)) objectIds.set(pdfUrl, ++nextObjectId);
+      urlIdentity = ['object', objectIds.get(pdfUrl)];
+    } else if (typeof pdfUrl === 'string' && pdfUrl) urlIdentity = ['value', pdfUrl];
+    else return null;
+    return JSON.stringify(['kin-pdf-source-v1', value.displaySetInstanceUID, value.StudyInstanceUID,
+      value.SeriesInstanceUID, value.SOPInstanceUID, urlIdentity]);
+  }
+  function install() {
+    if (patch && patch.entry.component === patch.wrapper) return true;
+    const entry = extensionManager?.getModuleEntry?.(entryId);
+    if (!entry || typeof entry.component !== 'function') return false;
+    const original = entry.component;
+    const wrapper = function(props) {
+      const key = sourceKey(props); if (!key) return null;
+      const element = original.call(this, { ...props, key });
+      return element && element.key === key ? element : null;
+    };
+    entry.component = wrapper;
+    if (entry.component !== wrapper) return false;
+    patch = { entry, original, wrapper }; return true;
+  }
+  function ownsWrapper() { return !!patch && patch.entry.component === patch.wrapper; }
+  function dispose() { if (patch && patch.entry.component === patch.wrapper) patch.entry.component = patch.original; patch = null; }
+  return { install, ownsWrapper, dispose };
+}
+
 function kinCreateDicomPdf() {
-  let services, ready, current, epoch = 0;
+  let services, ready, current, viewportGuard, epoch = 0;
   function prepare() {
     if (window.KinDicomPdf) return Promise.resolve(window.KinDicomPdf);
     if (!ready) ready = new Promise((resolve, reject) => {
@@ -2081,8 +2118,12 @@ function kinCreateDicomPdf() {
     }).catch(error => { ready = null; throw error; });
     return ready;
   }
-  return { id: 'kin.source-pdf', preRegistration({ servicesManager }) { services = servicesManager.services; },
+  return { id: 'kin.source-pdf', preRegistration({ servicesManager, extensionManager }) {
+    services = servicesManager.services;
+    if (extensionManager) { viewportGuard = kinDicomPdfViewportGuard(extensionManager); if (!viewportGuard.install()) throw new Error('원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'); }
+  },
     onModeEnter() {
+      if (viewportGuard && !viewportGuard.ownsWrapper() && !viewportGuard.install()) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = '원본 PDF 화면을 안전하게 연결하지 못했습니다. 뷰어를 다시 여세요.'; return; }
       const ticket = ++epoch; current?.stop(); current = null;
       prepare().then(module => { if (ticket === epoch) { current = module.create(services); current.mount(); } }).catch(error => {
         if (ticket === epoch) { const status = document.querySelector('#kin-viewer-layout-status'); if (status) status.textContent = error.message; }
@@ -2093,7 +2134,7 @@ function kinCreateDicomPdf() {
 }
 
 window.config = {
-  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
+  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateCTPresets()],
   modes: [],
   customizationService: {},
   showStudyList: true,

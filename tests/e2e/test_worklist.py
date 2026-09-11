@@ -83,6 +83,8 @@ class LocalTargetGuardTests(unittest.TestCase):
 
 
 class WorklistE2E(unittest.TestCase):
+    browser_channel = None
+
     @classmethod
     def setUpClass(cls):
         cls.stack = LiveStack()
@@ -94,6 +96,7 @@ class WorklistE2E(unittest.TestCase):
         cls.pw = sync_playwright().start()
         cls.addClassCleanup(cls.pw.stop)
         cls.browser = cls.pw.chromium.launch(
+            channel=cls.browser_channel,
             headless=os.environ.get("KIN_E2E_HEADED") != "1",
             args=["--enable-unsafe-swiftshader"],
         )

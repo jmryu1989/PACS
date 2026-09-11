@@ -66,6 +66,13 @@
     async function response(path,init,operation){
       const result=await fetcher(path,init);assertLive(operation);if(!result?.ok)throw Error(result?.status===401||result?.status===403?'로그인 또는 검사 접근 권한을 확인하세요.':'원본 PDF 확인 요청을 완료하지 못했습니다.');const data=await json(result);assertLive(operation);return data;
     }
+    async function preflight(operation,init){
+      assertLive(operation);const result=await fetcher(operation.before.url,init);assertLive(operation);
+      const type=result?.headers?.get?.('content-type')?.split(';',1)[0].trim().toLowerCase(),valid=result?.status===200&&result.ok&&type==='application/pdf';
+      let cancelError=null;try{await result?.body?.cancel?.();}catch(error){cancelError=error;}assertLive(operation);
+      if(!valid)throw Error('원본 PDF 응답을 확인할 수 없습니다.');
+      if(cancelError)throw cancelError;
+    }
     async function open(){
       if(ended||request||!source||!boundOwner)return;
       let popup;try{popup=openWindow('','_blank');if(!popup)throw Error('popup');popup.opener=null;}catch(_){try{popup?.close();}catch(__){}status.textContent='팝업이 차단되어 Source PDF를 열지 못했습니다.';return;}
@@ -77,6 +84,7 @@
         if(!lookup||Object.keys(lookup).length!==1||typeof lookup.id!=='string'||!/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(lookup.id))throw Error('원본 PDF 식별을 확인할 수 없습니다.');assertLive(operation);
         const listing=await response('/api/studies',init(),operation),matches=Array.isArray(listing?.studies)?listing.studies.filter(item=>item?.uid===before.study):[];
         if(matches.length!==1||matches[0].id!==before.patientId)throw Error('원본 환자 식별을 확인할 수 없습니다.');assertLive(operation);
+        await preflight(operation,init());assertLive(operation);
         const last=ownerOf(await response('/api/me',init(),operation));if(!sameOwner(last,owner))throw Error('계정이 변경되어 PDF를 열지 않았습니다.');assertLive(operation);
         patient.textContent='Verified Patient ID: '+matches[0].id;try{popup.location.replace(before.url);}catch(_){throw Error('PDF 창을 열 수 없습니다.');}if(pendingWindow===popup)pendingWindow=null;if(request===operation)status.textContent='Opened source PDF · 브라우저 PDF 도구에서 페이지 이동·검색·인쇄를 사용할 수 있습니다.';
       }catch(error){closeWindow(popup);if(pendingWindow===popup)pendingWindow=null;if(!ended&&request===operation){patient.textContent='';status.textContent=error?.name==='AbortError'||error instanceof TypeError?'원본 PDF 확인 요청을 완료하지 못했습니다.':error.message;}}

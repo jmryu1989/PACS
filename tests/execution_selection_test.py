@@ -85,6 +85,15 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
 
+    def test_image_thumbnails_profile_selects_four_declared_native_cases(self):
+        filename,class_name,unit=ci.PROFILES['image-thumbnails']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        self.assertEqual({row['case'] for row in plan['tests']},
+            {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_image_thumbnails_')})
+        self.assertEqual(len(plan['tests']),4)
+        self.assertEqual(runner.collect(plan).countTestCases(),4)
+
     def test_candidate_contract_remains_69_then_14(self):
         for filename, count in [('tests/invariants_live.py', 69), ('tests/e2e/test_worklist.py', 14)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)

@@ -15,15 +15,16 @@ RENDERED = "https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rend
 HARNESS = r"""<!doctype html><html><body><main id="kin-viewer-layout"><object id="native-pdf"></object></main><script>
 const HANDLER='@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf',SOP='1.2.840.10008.5.1.4.1.1.104.1';
 const makeSet=(over={})=>Object.assign({displaySetInstanceUID:'ds-pdf',SOPClassHandlerId:HANDLER,SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',SeriesDescription:'Source <img src=x onerror="bad=1">',pdfUrl:Promise.resolve('RENDERED'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.4',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{BulkDataURI:'/bulk'}}},over);
-let displaySet=makeSet(),view={viewportId:'vp1',displaySetInstanceUIDs:['ds-pdf']},subscribers=[],requests=[],popups=[],blockPopup=false,throwNavigation=false,holdPath=null,ignoreAbort=false,held=[];
+let displaySet=makeSet(),view={viewportId:'vp1',displaySetInstanceUIDs:['ds-pdf']},subscribers=[],requests=[],cancels=[],popups=[],blockPopup=false,throwNavigation=false,holdPath=null,ignoreAbort=false,held=[],holdCancel=false,cancelHeld=[];
 const owner={kind:'member',institution:'hospital',sub:'reader'},routes={
  '/api/me':()=>owner,
  '/api/dicom/lookup':()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'}),
- '/api/studies':()=>({studies:[{uid:'1.2',id:'PID-001'}]})
+ '/api/studies':()=>({studies:[{uid:'1.2',id:'PID-001'}]}),
+ 'RENDERED':()=>({status:200,body:null,contentType:'application/pdf'})
 };
-const response=(status,value)=>({ok:status>=200&&status<300,status,json:async()=>structuredClone(value)});
+const response=(status,value,url,contentType='application/json')=>({ok:status>=200&&status<300,status,headers:{get:name=>name.toLowerCase()==='content-type'?contentType:null},body:{cancel:()=>{cancels.push(url);return holdCancel&&url.startsWith('https://pdf.test/dicom-web/')?new Promise(resolve=>cancelHeld.push(resolve)):Promise.resolve()}},json:async()=>structuredClone(value)});
 window.fetch=(url,options={})=>{requests.push({url,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
- const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value);};
+ const done=()=>{const configured=routes[url]??(url.startsWith('https://pdf.test/dicom-web/')?{status:200,body:null,contentType:'application/pdf'}:undefined),value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType);};
  if(holdPath===url)return new Promise((resolve,reject)=>{const item={resolve:()=>resolve(done()),reject};held.push(item);if(!ignoreAbort)options.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});return Promise.resolve(done());};
 window.open=()=>{if(blockPopup)return null;const popup={closed:false,opener:{unsafe:true},navigated:null,close(){this.closed=true},location:{replace(value){if(throwNavigation)throw Error('synthetic navigation detail');popup.navigated=value;}}};popups.push(popup);return popup;};
 const state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
@@ -92,9 +93,10 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(panel.locator("[data-patient]")).to_have_text("Verified Patient ID: PID-001")
         expect(panel.locator("[role=status]")).to_contain_text("브라우저 PDF 도구")
         result = self.page.evaluate("()=>({requests,popups:popups.map(p=>({closed:p.closed,opener:p.opener,navigated:p.navigated}))})")
-        self.assertEqual(["/api/me", "/api/me", "/api/dicom/lookup", "/api/studies", "/api/me"], [r["url"] for r in result["requests"]])
+        self.assertEqual(["/api/me", "/api/me", "/api/dicom/lookup", "/api/studies", RENDERED, "/api/me"], [r["url"] for r in result["requests"]])
         self.assertEqual({"studyUid": "1.2", "sopUid": "1.4"}, result["requests"][2]["body"])
         self.assertEqual([{"closed": False, "opener": None, "navigated": RENDERED}], result["popups"])
+        self.assertEqual([RENDERED], self.page.evaluate("cancels"))
 
     def test_related_role_and_invalid_mime_identity_or_url_fail_closed(self):
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'ds-related',StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',SeriesDescription:'Prior PDF',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.9/series/1.8/instances/1.7/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['ds-related'];emit();}""")
@@ -117,6 +119,28 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         expect(self.page.locator("#kin-source-pdf-open")).to_be_disabled()
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("경로")
         self.assertEqual([], self.page.evaluate("popups"))
+
+    def test_rendered_pdf_preflight_rejects_bad_status_or_mime_and_stale_cancel(self):
+        button = self.page.locator("#kin-source-pdf-open")
+        for route in (
+            {"status": 400, "body": {"error": "malformed"}, "contentType": "application/json"},
+            {"status": 200, "body": "not pdf", "contentType": "application/json"},
+        ):
+            with self.subTest(route=route):
+                self.page.evaluate("([url,value])=>routes[url]=value", [RENDERED, route])
+                button.click()
+                expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("원본 PDF 응답을 확인할 수 없습니다")
+                self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
+                self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
+                self.assertEqual(RENDERED, self.page.evaluate("cancels.at(-1)"))
+
+        self.page.evaluate("([url])=>{routes[url]={status:200,body:null,contentType:'application/pdf'};holdCancel=true}", [RENDERED])
+        button.click(); self.page.wait_for_function("cancelHeld.length===1")
+        self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'new-after-cancel',SOPInstanceUID:'1.5',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['new-after-cancel'];emit();holdCancel=false;cancelHeld.shift()();}""")
+        expect(button).to_be_enabled()
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
+        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
+        self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
 
     def test_source_or_owner_change_during_verification_closes_only_pending_window(self):
         self.page.evaluate("holdPath='/api/dicom/lookup'")

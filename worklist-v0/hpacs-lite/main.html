@@ -165,7 +165,13 @@
     .thumb-details summary { cursor: pointer; }
     .thumb-full { white-space: pre-wrap; overflow-wrap: anywhere; color: #d3dce8; }
     .thumb-open { max-width: calc(100% - 8px); margin: 4px; white-space: normal; }
-    .thumb-details summary:focus-visible, .thumb-open:focus-visible { outline: 2px solid #8bc8ff; outline-offset: -2px; }
+    .thumb-images-open, .thumb-image-open { max-width: calc(100% - 8px); margin: 4px; white-space: normal; }
+    .thumb-details summary:focus-visible, .thumb-open:focus-visible, .thumb-images-open:focus-visible, .thumb-image-open:focus-visible { outline: 2px solid #8bc8ff; outline-offset: -2px; }
+    .thumb-images-toolbar, .thumb-images-pages { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 4px; }
+    .thumb-images-toolbar select { background: #14181f; color: #cdd3dc; border: 1px solid #3a4356; font: inherit; }
+    .thumb-images-view > p { margin: 4px; color: #c1d3e9; overflow-wrap: anywhere; }
+    .thumb-images-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(145px,1fr)); gap: 4px; }
+    .thumb-image-preview img { display: block; width: 100%; height: auto; object-fit: contain; background: #000; }
     .s-clinical { width: 30%; }
     .clinical { flex: 1; padding: 6px 10px; overflow: auto; color: #aab2c0; }
     .clinical table td { border: none; padding: 2px 6px; }
@@ -950,6 +956,7 @@
   <script src="study-access-status.js"></script>
   <script src="worklist-selection.js"></script>
   <script src="worklist-image-preview.js"></script>
+  <script src="worklist-image-thumbnails.js"></script>
   <script src="worklist-search.js"></script>
   <script src="worklist-row-navigation.js"></script>
   <script src="viewer-display-layout.js"></script>
@@ -1610,7 +1617,7 @@
 
     let mode = "Radiology";
     const fval = {};   // 컬럼필터 값 (컬럼 key → 문자열)
-    let columnPrefs = null, multiSelection = null, imagePreview = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
+    let columnPrefs = null, multiSelection = null, imagePreview = null, imageThumbnails = null, worklistSearch = null, rowNavigation = null, relatedRowNavigation = null, relatedRows = [];
     const shownColumns = () => columnPrefs ? columnPrefs.columns(mode) : COLS[mode];
 
     function renderHeads() {
@@ -2485,18 +2492,22 @@
           || (a.seriesUid < b.seriesUid ? -1 : a.seriesUid > b.seriesUid ? 1 : 0);
       });
     }
-    function cancelThumbs() {
+    function cancelThumbs(keepImageGrid = false) {
       ++thumbSeq;
       thumbController?.abort();
       thumbController = null;
       thumbUrls.forEach(url => URL.revokeObjectURL(url));
       thumbUrls = [];
+      if (keepImageGrid !== true) imageThumbnails?.close();
     }
     window.addEventListener("pagehide", cancelThumbs);
     window.addEventListener("pageshow", e => { if (e.persisted) renderThumbs(); });
     function renderThumbs(page = 0, cached = null) {
       const wrap = $("#thumbwrap");
       const uid = viewingUid();
+      // Polling may repaint the surrounding study without changing its source. Keep an explicitly
+      // opened Images page in place; owner or study changes make sync close it synchronously.
+      if (imageThumbnails?.sync()) return;
       cancelThumbs();
       if (!uid) { wrap.innerHTML = ""; return; }
       const seq = thumbSeq;
@@ -2579,9 +2590,12 @@
             open.onclick = () => { if (!stale() && !open.disabled) openFilmbox(uid, null, rep.seriesUid); };
             const inspect=document.createElement('button');inspect.type='button';inspect.className='chip thumb-preview-open';inspect.textContent='Image Preview';inspect.disabled=true;
             inspect.onclick=()=>{if(!stale()&&!inspect.disabled){const study=viewed();if(study?.uid===uid)imagePreview?.open({...study,series:rep.seriesUid,sop:rep.sopUid});}};
-            cell.append(label, disclosure, preview, open, inspect);
+            const images=document.createElement('button');images.type='button';images.className='chip thumb-images-open';images.textContent='Images';images.disabled=true;
+            if(!imageThumbnails)images.title='Images 모듈을 불러오지 못했습니다. 페이지를 다시 열어 주세요.';
+            images.onclick=()=>{if(!stale()&&!images.disabled){const study=viewed();if(study?.uid!==uid)return;cancelThumbs(true);if(!imageThumbnails?.open({...study,series:rep.seriesUid}))renderThumbs();}};
+            cell.append(label, disclosure, preview, open, inspect, images);
             grid.appendChild(cell);
-            return { preview, open, inspect, alt: `${heading} · ${description}` };
+            return { preview, open, inspect, images, alt: `${heading} · ${description}` };
           });
           let next = 0, stopped = false;
           const worker = async () => {
@@ -2599,15 +2613,17 @@
                 thumbUrls.push(url);
                 const img = document.createElement("img");
                 img.alt = cells[index].alt;
-                img.onerror = () => { if (!stale()) { cells[index].open.disabled = cells[index].inspect.disabled = true; cells[index].preview.textContent = "썸네일 표시 실패"; } };
+                img.onerror = () => { if (!stale()) { cells[index].open.disabled = cells[index].inspect.disabled = cells[index].images.disabled = true; cells[index].preview.textContent = "썸네일 표시 실패"; } };
                 img.ondblclick = () => { if (!stale()) openFilmbox(uid, null, batch[index].seriesUid); };
                 img.src = url;
                 cells[index].preview.replaceChildren(img);
                 cells[index].open.disabled = false;
                 cells[index].inspect.disabled = false;
+                cells[index].images.disabled = !imageThumbnails;
               } catch (e) {
                 if (stale()) return;
                 cells[index].preview.textContent = `썸네일 실패: ${e.message}`;
+                cells[index].images.disabled = true;
                 // 연결/세션 전체의 실패를 24개 개별 결함처럼 재요청하지 않는다. 이미 시작한 항목은 마저 종결한다.
                 if (e instanceof TypeError || e.status === 401) {
                   stopped = true;
@@ -5349,6 +5365,8 @@
       KinStudyAccessStatus.mount({button:$('#study-access-open'),session:()=>KinAuth.session(),refresh:async()=>(await load())===true});
       multiSelection = KinWorklistSelection.mount({host:$('#worklist-selection'),tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,current:()=>selectedUid,open:uid=>select(uid,{openSelected:true}),compare:(uid,prior)=>openFilmbox(uid,prior)});
       imagePreview = KinWorklistImagePreview.mount({owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api});
+      imageThumbnails = window.KinWorklistImageThumbnails?.mount?.({host:$('#thumbwrap'),owner:()=>KinViewerOpening.key(KinAuth.session()),currentUid:viewingUid,api,
+        onPreview:value=>imagePreview?.open(value),onBack:()=>renderThumbs()}) || null;
       worklistSearch = KinWorklistSearch.mount({host:document.querySelector('.userfilter'),owner:()=>KinViewerOpening.key(KinAuth.session()),snapshot:searchCriteria,render});
       rowNavigation = KinWorklistRowNavigation.mount({tbody:$('#rows'),owner:()=>KinViewerOpening.key(KinAuth.session()),rows:orderedStudies,
         current:()=>selectedUid,reveal:uid=>render(uid),activate:uid=>{select(uid);if(mode==='Radiology')$('#findings').focus();}});
