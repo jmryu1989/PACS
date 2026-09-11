@@ -39,6 +39,9 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/measurement-python"
           "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
+      - name: Workspace window transition and identity DOM regressions
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/window-manager --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/viewer-windows.js --file tests/viewer_window_manager_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_window_manager_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
@@ -50,6 +53,14 @@ jobs:
         with:
           name: synthetic-measurement-results
           path: tests/e2e/artifacts/measurement-ci/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Synthetic workspace DOM evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-workspace-dom-results
+          path: tmp/workspace-ui-ci/
           if-no-files-found: error
           retention-days: 7
   volume-rendering:

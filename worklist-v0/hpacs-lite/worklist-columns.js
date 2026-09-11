@@ -72,24 +72,24 @@
     const identity = owner ? [session.institution, session.sub] : null;
     const dialog = document.createElement('dialog'); dialog.id = 'column-manager';
     dialog.setAttribute('aria-labelledby', 'wc-title');
-    dialog.innerHTML = `<header><h2 id="wc-title">목록 열 설정</h2><button type="button" id="wc-close">닫기</button></header>
+    dialog.innerHTML = `<header><h2 id="wc-title">Worklist Columns</h2><button type="button" id="wc-close">Close</button></header>
       <p>판독/촬영 화면을 따로 저장합니다. 다른 컴퓨터에서는 계정 설정을 불러오세요. 자동 동기화하지 않습니다.</p>
       <p>ID·Name은 항상 표시합니다. 숨긴 열의 검색 조건과 정렬은 유지됩니다.</p>
-      <section id="wc-appearance" aria-label="목록 모양">
-      <label>글꼴 <select id="wc-font"><option value="default">기본</option><option value="sans">고딕</option><option value="mono">고정폭</option></select></label>
-      <label>글자 크기 <select id="wc-size">${Array.from({length:9},(_,i)=>`<option value="${i+12}">${i+12}px</option>`).join('')}</select></label>
-      <label>글자 색 <select id="wc-color"><option value="default">기본</option><option value="cool">밝은 청색</option><option value="warm">밝은 황색</option></select></label>
+      <section id="wc-appearance" aria-label="Worklist appearance">
+      <label>Font <select id="wc-font"><option value="default">Default</option><option value="sans">Sans Serif</option><option value="mono">Monospace</option></select></label>
+      <label>Text Size <select id="wc-size">${Array.from({length:9},(_,i)=>`<option value="${i+12}">${i+12}px</option>`).join('')}</select></label>
+      <label>Text Color <select id="wc-color"><option value="default">Default</option><option value="cool">Light Blue</option><option value="warm">Light Yellow</option></select></label>
       <p>열 내용 너비는 64–600px, 빈칸은 자동입니다. 상태 표식의 색은 유지됩니다.</p>
       <p>글자·도구 설정에 저장하거나 직접 적용한 목록 글자 설정이 있으면 이곳의 글자 설정보다 우선합니다.</p>
       <p>내용 맞춤은 현재 페이지의 목록·관련 검사 내용을 기준으로 합니다. 날짜·Modality·설명·Count·RS는 두 목록에 같은 너비를 적용합니다. 다른 페이지는 포함하지 않으며 긴 내용은 줄바꿈합니다.</p>
-      <button type="button" id="wc-fit-all">표시된 열 내용 맞춤</button></section>
+      <button type="button" id="wc-fit-all">Fit Visible Columns</button></section>
       <div id="wc-list"></div><p id="wc-status" role="status" aria-live="polite"></p>
-      <section aria-label="계정 서버 열 설정"><p>계정 불러오기는 편집창에만 가져옵니다. 아래 적용 버튼으로 목록에 반영하세요.</p>
-      <button type="button" id="wc-server-inspect">계정 저장 상태 확인</button><button type="button" id="wc-server-load">계정 설정 불러오기</button>
-      <button type="button" id="wc-server-save">편집값을 계정에 저장</button><button type="button" id="wc-server-clear">계정 저장값 지우기</button>
+      <section aria-label="Account worklist column settings"><p>계정 불러오기는 편집창에만 가져옵니다. 아래 적용 버튼으로 목록에 반영하세요.</p>
+      <button type="button" id="wc-server-inspect">Check Account Settings</button><button type="button" id="wc-server-load">Load Account Settings</button>
+      <button type="button" id="wc-server-save">Save Draft to Account</button><button type="button" id="wc-server-clear">Clear Account Settings</button>
       <p id="wc-server-status" role="status" aria-live="polite"></p></section>
-      <footer><button type="button" id="wc-reset">현재 화면 기본값</button><button type="button" id="wc-reload">저장값 다시 불러오기</button>
-      <button type="button" id="wc-memory">이번 창에만 적용</button><button type="button" id="wc-save">적용·이 브라우저 저장</button></footer>`;
+      <footer><button type="button" id="wc-reset">Reset Current Mode</button><button type="button" id="wc-reload">Reload Browser Settings</button>
+      <button type="button" id="wc-memory">Apply for This Window</button><button type="button" id="wc-save">Apply &amp; Save in Browser</button></footer>`;
     document.body.append(dialog);
     const $ = id => dialog.querySelector('#wc-' + id);
     const status = text => { $('status').textContent = text; };
@@ -138,24 +138,24 @@
         const row = document.createElement('div'); row.className = 'wc-row'; row.dataset.column = key;
         const label = document.createElement('label'), input = document.createElement('input');
         input.type = 'checkbox'; input.checked = !part.hidden.includes(key); input.disabled = REQUIRED.includes(key);
-        input.setAttribute('aria-label', column.t + ' 표시');
+        input.setAttribute('aria-label', 'Show ' + column.t);
         input.addEventListener('change', () => {
           generation++;
           part.hidden = input.checked ? part.hidden.filter(k => k !== key) : [...part.hidden, key];
         });
-        label.append(input, document.createTextNode(column.t + (REQUIRED.includes(key) ? ' (필수)' : ''))); row.append(label);
+        label.append(input, document.createTextNode(column.t + (REQUIRED.includes(key) ? ' (Required)' : ''))); row.append(label);
         const width = document.createElement('input'); width.type = 'number'; width.min = '64'; width.max = '600'; width.step = '1';
-        width.className = 'wc-width'; width.placeholder = '자동'; width.value = a.widths[key] ?? '';
-        width.setAttribute('aria-label', column.t + ' 내용 너비(px)');
+        width.className = 'wc-width'; width.placeholder = 'Auto'; width.value = a.widths[key] ?? '';
+        width.setAttribute('aria-label', column.t + ' content width (px)');
         width.addEventListener('input', () => {
           generation++; part.appearance ||= appearanceDefault();
           if (width.value === '' && !width.validity.badInput) delete part.appearance.widths[key];
           else part.appearance.widths[key] = width.valueAsNumber;
         }); row.append(width);
         const fitButton = document.createElement('button'); fitButton.type = 'button'; fitButton.dataset.fit = key;
-        fitButton.textContent = '내용 맞춤'; fitButton.setAttribute('aria-label', column.t + ' 내용 맞춤');
+        fitButton.textContent = 'Fit Content'; fitButton.setAttribute('aria-label', 'Fit ' + column.t + ' content');
         fitButton.addEventListener('click', () => { fit([key]); $('list').querySelector(`[data-fit="${key}"]`)?.focus(); }); row.append(fitButton);
-        for (const [action, text, delta] of [['up', '위로', -1], ['down', '아래로', 1]]) {
+        for (const [action, text, delta] of [['up', 'Up', -1], ['down', 'Down', 1]]) {
           const button = document.createElement('button'); button.type = 'button'; button.dataset.move = action;
           button.textContent = text; button.setAttribute('aria-label', column.t + ' ' + text);
           button.disabled = index + delta < 0 || index + delta >= part.order.length;
@@ -270,7 +270,7 @@
       // Merely reading another tab's settings is not applying them. Keep the
       // active-state baseline separate so cancel/reopen cannot restore stale data.
       draft = copy(saved.raw !== stateRaw ? saved.state : state); lastRaw = saved.raw;
-      baseline = JSON.stringify(draft); $('title').textContent = '목록 열 설정 · ' + (openedMode === 'Radiology' ? '판독' : '촬영');
+      baseline = JSON.stringify(draft); $('title').textContent = 'Worklist Columns · ' + openedMode;
       $('save').disabled = !owner; renderEditor(); status(saved.message); dialog.showModal(); $('close').focus(); refreshServer();
       $('server-status').textContent = '계정 저장 상태를 확인하거나 불러오세요.';
     });

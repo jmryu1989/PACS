@@ -4185,7 +4185,7 @@
           const label = document.createElement('p'), study = studies.find(s => s.uid === row.scope?.studies[0]);
           label.textContent = 'Window ' + (row.index + 1) + ' · ' + row.state + ' · ' +
             (study ? [study.name, study.date, study.desc, study.uid].filter(Boolean).join(' · ') : row.scope?.studies.join(' / ') || 'Unverified');
-          if (row.scope?.studies.length === 2) { const prior = studies.find(s => s.uid === row.scope.studies[1]); label.textContent += ' · Prior: ' + (prior ? [prior.date, prior.uid].join(' · ') : row.scope.studies[1]); }
+          if (row.scope?.studies.length === 2) { const comparison = studies.find(s => s.uid === row.scope.studies[1]); label.textContent += ' · Comparison: ' + (comparison ? [comparison.date, comparison.uid].join(' · ') : row.scope.studies[1]); }
           section.append(label);
           for (const action of ['focus', 'close']) {
             const control = document.createElement('button'); control.type = 'button'; control.className = 'chip';
@@ -4214,8 +4214,14 @@
           viewerWindows.attach(row, popup); ohifPopupSlots.set(popup, index);
           try { popup.opener = null; if (popup.location.href === 'about:blank') { popup.close(); render(); status.textContent = '이미 닫힌 창의 연결을 정리했습니다.'; return; } } catch (_) {}
         }
-        const state = ohifPopupState(popup);
         if (action === 'close') {
+          if (row.pending) {
+            status.textContent = '창을 닫지 않았습니다. 영상 창을 불러오는 중입니다. 완료 후 다시 확인하세요.';
+            popup.focus(); return;
+          }
+          const owner = KinViewerOpening.key(KinAuth.session()), sequence = ohifPopupSequences.get(popup);
+          let viewerDocument; try { viewerDocument = popup.document; } catch (_) {}
+          const state = ohifPopupState(popup);
           if (state.kind !== 'viewer' || !state.ready || state.busy || state.dirty) {
             status.textContent = '창을 닫지 않았습니다. 해당 창의 저장·복원 또는 미저장 작업을 확인하고 열린 대화상자를 닫은 뒤 다시 시도하세요.';
             popup.focus(); return;
@@ -4223,8 +4229,13 @@
           if (typeof popup.kinViewerFrameCoverageConfirm !== 'function' || !popup.kinViewerFrameCoverageConfirm(message => confirm(message))) {
             status.textContent = '창을 닫지 않았습니다. Frame Coverage와 원본 영상을 확인하세요.'; return;
           }
-          const rechecked = ohifPopupState(popup);
-          if (popup.location.href !== state.href || !rechecked.ready || rechecked.busy || rechecked.dirty) { status.textContent = '창 상태가 바뀌어 닫지 않았습니다. 다시 확인하세요.'; return; }
+          const current = viewerWindows.rows().find(r => r.index === index), rechecked = ohifPopupState(popup);
+          let sameDocument = false; try { sameDocument = popup.document === viewerDocument; } catch (_) {}
+          if (!owner || owner !== KinViewerOpening.key(KinAuth.session()) || current?.popup !== popup || current.pending ||
+              sequence !== ohifPopupSequences.get(popup) || !sameDocument || popup.closed || popup.location.href !== state.href ||
+              rechecked.kind !== 'viewer' || rechecked.href !== state.href || !rechecked.ready || rechecked.busy || rechecked.dirty) {
+            status.textContent = '창 상태가 바뀌어 닫지 않았습니다. 다시 확인하세요.'; return;
+          }
           rememberOhifRect(popup); popup.close(); render();
           status.textContent = popup.closed ? '영상 창을 닫았습니다.' : '브라우저에서 창을 닫지 못했습니다. 해당 창에서 닫으세요.';
         } else { viewerWindowCursor = index; dialog.close(); popup.focus(); watchOhifRect(popup, index); }

@@ -58,6 +58,8 @@ REQ-D01-COLUMNS → RISK-D01-HIDDEN-FILTER/OWNER/PREFERENCE-LOSS → TEST-D01-CO
 
 ## 공통 실행 증거 기록
 
+REQ-D-WORKSPACE-WINDOWS → RISK-D-WORKSPACE-IDENTITY/UNSAVED/STALE → TEST-VIEWER-WINDOW-MANAGER-DOM: `python tests/viewer_window_manager_dom_test.py` exercises the actual window-manager DOM handler and registry in isolated Chromium with synthetic window/session state and all network requests blocked. It checks pending navigation, changes during close confirmation, existing dirty/busy guards, normal close/focus, and neutral comparison identification. It does not start LiveStack or replace real OHIF/DICOM and physical-monitor verification. The existing measurements CI job runs this suite after installing the pinned browser dependencies and preserves its raw execution record separately.
+
 단위별 기록 스크립트를 새로 만들지 않고 Python 3.9+ 표준 라이브러리 기록기를 재사용한다.
 저장소 루트에서 `python scripts/record-run.py --run-dir <새-실행-폴더> --cwd . --file scripts/record-run.py --file tests/record_run_test.py -- python -B tests/record_run_test.py`로 실행한다.
 `--file`은 작업 디렉터리 기준으로 반복 지정한다. 새 폴더의 `run.json`에는 명령 인자·cwd·UTC 시작/종료·실제 자식 exit·전후 파일 SHA256·조회 가능한 Git HEAD를, `stdout.log`/`stderr.log`에는 원문 바이트를 남긴다.
