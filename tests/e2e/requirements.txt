@@ -1,3 +1,5 @@
 playwright==1.60.0
+Pillow==11.3.0
+pypdf==6.13.1
 # Python 3.9 on Windows needs the last available compatible binary wheel.
 greenlet==3.1.1; python_version < "3.10"
