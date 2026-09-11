@@ -26,9 +26,11 @@ def text_runs(sheet):
 
 
 def page_lines(rows):
+ """Lines by baseline in content-stream order: after a fallback-font switch (Linux
+ Korean/Latin) pypdf repeats the line-start x, so x cannot order a line."""
  grouped={}
- for y,x,text in rows:grouped.setdefault(round(y,1),[]).append((x,text))
- return [''.join(t for _,t in sorted(group)) for _,group in sorted(grouped.items(),reverse=True)]
+ for y,x,text in rows:grouped.setdefault(round(y,1),[]).append(text)
+ return [''.join(group) for _,group in sorted(grouped.items(),reverse=True)]
 
 
 class CompareReportsE2E(ViewerJobReportE2E):
@@ -53,7 +55,10 @@ class CompareReportsE2E(ViewerJobReportE2E):
   draft=self.stack.request('PUT',f'/studies/{b.uid}/report','doctor2',dict(baseVersion=1,findings='PRIVATE DRAFT NOT OUTPUT',conclusion='',recommendation=''))
   self.assertEqual(draft.status,200,draft.text)
   before={f.uid:self.report_rows(f) for f in [a,b]};original=self.originals();frozen=self.get_job(a,job)
-  p=self.launch_job([a,b]);canvas_ready(p,1);pixels=self.pngs(p);writes=[]
+  p=self.launch_job([a,b]);canvas_ready(p,1);self.observe(p,'canvas-ready')
+  # The baseline is taken only once the canvases have settled after the dock
+  # panel resize; the observations record what canvas_ready alone had seen.
+  pixels=self.settled_pngs(p);settled=self.observe(p,'settled');writes=[]
   p.on('request',lambda r:writes.append(r.url) if r.method in ['POST','PUT','PATCH','DELETE'] and '/api/studies/' in r.url else None)
   paper=self.output(p);images=self.output_arrays(p,paper)
   paper=self.select_reports(p,'prior');expect(paper.locator('.report')).to_have_count(1)
@@ -98,7 +103,7 @@ class CompareReportsE2E(ViewerJobReportE2E):
   embedded=[np.array(img.image.convert('RGB')) for page in pdf.pages for img in page.images]
   self.assertEqual(len(embedded),2)
   for x in images:self.assertTrue(any(x.shape==y.shape and np.array_equal(x,y) for y in embedded))
-  self.assertEqual(self.pngs(p),pixels);self.assertEqual(self.get_job(a,job),frozen);self.assertEqual(self.originals(),original)
+  self.assert_pixels_kept(p,pixels,settled,'after-print');self.assertEqual(self.get_job(a,job),frozen);self.assertEqual(self.originals(),original)
   self.assertEqual({f.uid:self.report_rows(f) for f in [a,b]},before);self.assertEqual(writes,[])
   print('COMPARE REPORTS PDF '+json.dumps(dict(pages=len(pdf.pages),images=len(embedded))),flush=True)
 
