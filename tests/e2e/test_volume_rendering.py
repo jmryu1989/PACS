@@ -196,11 +196,20 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
 
  def test_vr_21_sculpt_native_failure_closes_only_vr(self):
   a,p,v=self.opened_projection(constant=True);source=self.volume_state(v);native=self.native_pixels(v);dialog=self.vr(v);self.sculpt_region(v,dialog)
-  v.evaluate("()=>{const mapper=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper(),set=mapper.setViewSpecificProperties;mapper.setViewSpecificProperties=function(...args){set.apply(this,args);throw Error('INJECTED SCULPT FAILURE')}}")
-  dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).not_to_be_visible();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('INJECTED SCULPT FAILURE');self.preserved_volume(source,self.volume_state(v));self.assertEqual(self.native_pixels(v),native)
+  # vtk mapper APIs are frozen. Inject the post-set failure on the mutable viewport.
+  v.evaluate("()=>{const vp=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport;vp.render=()=>{throw Error('INJECTED SCULPT FAILURE')}}")
+  dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).not_to_be_visible();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('INJECTED SCULPT FAILURE');self.preserved_volume(source,self.volume_state(v));self.assertEqual(self.native_pixels(v),native);self.mpr_live_after_mask_failure(v,native)
   dialog=self.vr(v);self.sculpt_region(v,dialog)
-  v.evaluate("()=>{const m=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper(),set=m.setViewSpecificProperties;m.setViewSpecificProperties=function(props){for(const r of props.OpenGL?.ShaderReplacements||[])r.replacementValue+='\\nINVALID_SCULPT_GLSL;';return set.call(this,props)}}")
-  dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).not_to_be_visible();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('GPU');self.preserved_volume(source,self.volume_state(v));self.assertEqual(self.native_pixels(v),native);self.vr(v)
+  before=self.vr_pixels(v)
+  v.evaluate("()=>{const original=window.KinVolumeMaskRenderer;window.vrRestoreMaskRenderer=()=>window.KinVolumeMaskRenderer=original;window.KinVolumeMaskRenderer={...original,preflight:(op,props)=>{props.OpenGL.ShaderReplacements.at(-1).replacementValue+='\\nINVALID_SCULPT_GLSL;';return original.preflight(op,props)}}}")
+  dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).to_be_visible();expect(dialog.locator('[role=status]')).to_contain_text('GPU');self.assertEqual(self.vr_pixels(v),before);self.assertEqual(self.native_pixels(v),native)
+  v.evaluate('()=>vrRestoreMaskRenderer()');dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click();dialog.get_by_role('button',name='Close VR',exact=True).click();self.mpr_live_after_mask_failure(v,native);self.preserved_volume(source,self.volume_state(v));self.vr(v)
+
+ def mpr_live_after_mask_failure(self,v,native):
+  v.evaluate("()=>{window.vrSourceProperties=structuredClone(projectionVP.getProperties());window.vrSourceFrames=0;window.vrFrameListener=()=>vrSourceFrames++;projectionVP.element.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrFrameListener);projectionVP.setProperties({voiRange:{lower:65535,upper:65536}});projectionVP.render()}")
+  v.wait_for_function('()=>vrSourceFrames>0');self.assertNotEqual(self.native_pixels(v),native)
+  v.evaluate('()=>{vrSourceFrames=0;projectionVP.setProperties(vrSourceProperties);projectionVP.render()}');v.wait_for_function('()=>vrSourceFrames>0');self.assertEqual(self.native_pixels(v),native)
+  v.evaluate('()=>projectionVP.element.removeEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,vrFrameListener)')
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeRenderingE2E(n) for n in loader.getTestCaseNames(VolumeRenderingE2E) if n.startswith('test_vr_') and n in VolumeRenderingE2E.__dict__)
 if __name__=='__main__':unittest.main(verbosity=2)

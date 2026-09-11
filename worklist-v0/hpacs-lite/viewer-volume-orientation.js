@@ -94,7 +94,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   vrButton.onclick=async()=>{
     if(vrLoading||!alive()||busy||!permitted()||workspaceBusy())return;vrLoading=true;vrButton.disabled=true;
     try{
-      for(const [name,file] of [['KinVolumeRendering','volume-rendering.js'],['KinVolumeSculpt','volume-sculpt.js'],['kinCreateVolumeSculpt','viewer-volume-sculpt.js'],['kinCreateVolumeRendering','viewer-volume-rendering.js']])if(!window[name])await new Promise((resolve,reject)=>{
+      for(const [name,file] of [['KinVolumeRendering','volume-rendering.js'],['KinVolumeSculpt','volume-sculpt.js'],['KinVolumeMaskRenderer','volume-mask-renderer.js'],['kinCreateVolumeSculpt','viewer-volume-sculpt.js'],['kinCreateVolumeRendering','viewer-volume-rendering.js']])if(!window[name])await new Promise((resolve,reject)=>{
         const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
         const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);script.onload=script.onerror=null;script.remove();error?reject(error):resolve();};
         const timer=setTimeout(()=>finish(Error('VR 도구를 불러오지 못했습니다. 다시 누르세요.')),30000);
