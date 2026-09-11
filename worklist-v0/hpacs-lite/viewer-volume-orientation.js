@@ -90,7 +90,20 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const progressive=window.kinCreateVolumeProgressive?.({target,enabled:()=>window.kinMprPreferences?.read()?.progressive===true,permitted:()=>!busy&&permitted(),alive,notice:text=>window.kinMprPreferences?.notice(text)});
   const marks=window.KinVolumeMarks&&window.kinCreateVolumeMarks?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const batch=window.KinVolumeBatch&&window.kinCreateVolumeBatch?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
+  const vrButton=document.createElement('button');vrButton.textContent='Open Volume Rendering';panel.append(vrButton);let vr=null,vrLoading=false;
+  vrButton.onclick=async()=>{
+    if(vrLoading||!alive()||busy||!permitted()||workspaceBusy())return;vrLoading=true;vrButton.disabled=true;
+    try{
+      for(const [name,file] of [['KinVolumeRendering','volume-rendering.js'],['kinCreateVolumeRendering','viewer-volume-rendering.js']])if(!window[name])await new Promise((resolve,reject)=>{
+        const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
+        const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);script.onload=script.onerror=null;script.remove();error?reject(error):resolve();};
+        const timer=setTimeout(()=>finish(Error('VR 도구를 불러오지 못했습니다. 다시 누르세요.')),30000);
+        script.onload=()=>finish(window[name]?null:Error('VR 도구를 확인하지 못했습니다.'));script.onerror=()=>finish(Error('VR 도구를 불러오지 못했습니다. 다시 누르세요.'));document.head.append(script);
+      });
+      if(!alive())return;vr||=window.kinCreateVolumeRendering({target,permitted:()=>!busy&&permitted(),alive,owner,notice:message=>{if(alive())status.textContent=message;}});await vr.open();
+    }catch(error){if(alive())status.textContent=error.message;}finally{vrLoading=false;vrButton.disabled=!alive();}
+  };
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;vr?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };
