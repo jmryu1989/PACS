@@ -47,10 +47,12 @@ jobs:
           "$RUNNER_TEMP/candidate-python/bin/python" -m pip install -r target/tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/candidate-python/bin/python" -m playwright install --with-deps chromium
       - name: Candidate runner guards and exact sequence
-        run: "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
+        run: |
+          "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
       - name: Final candidate invariants, worklist and cumulative workflows
         timeout-minutes: 26
-        run: "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci.py --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA"
+        run: |
+          "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci.py --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA"
       - name: Sanitized immutable candidate evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
