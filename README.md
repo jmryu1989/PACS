@@ -47,6 +47,17 @@ docker compose ps
 - 예비 판독 P의 접근과 승인은 지정된 판독 책임에 따른다. 작성자는 자기 예비 판독을 스스로 승인할 수 없다.
 - 판독 점유와 저장 충돌을 서버에서 검사한다. 화면의 버튼 상태만으로 권한이나 저장 성공을 판단하지 않는다.
 
+### 3D Cursor(대응점 표시)
+
+같은 검사·같은 원본 환자·같은 FrameOfReferenceUID의 고전 CT/MR stack 화면에서만 동작하는 명시적 지정 모드다.
+`worklist-v0/hpacs-lite/three-d-cursor-model.js`가 좌표를, `viewer-three-d-cursor.js`가 화면 제어를 맡는다.
+
+- 유효한 IOP/IPP/PixelSpacing·직교 단위 평면·균일한 slice 간격을 모두 확인한 화면만 대상으로 삼는다. 순서가 섞인 시리즈도 전체 평면 거리를 비교해 고르며, 영상 밖·촬영 범위 밖·식별이나 형상이 섞인 경우에는 좌표를 추정하지 않고 사유와 함께 거절한다.
+- 대상 화면 이동은 하나씩 await하고, 실제로 그려진 영상(`getCornerstoneImage().imageId`)이 기대한 SOP와 같을 때만 표식을 남긴다. 화면의 stack이 교체되면 그 뒤로 이동 요청을 보내지 않고 이 실행이 옮긴 화면만 되돌린다.
+- 표식은 이 창에서만 유지되는 임시 표시다. 주석·측정·현재 도구·대상이 아닌 화면을 바꾸지 않으며 저장하지 않는다. 고정 OHIF의 `ReferenceCursors` 도구는 대상 화면을 먼저 이동시킨 뒤 걸러내므로 사용하지 않는다.
+- **아직 어디에서도 불러오지 않는다.** `config/ohif.js`에 연결하지 않았으므로 현재 제품 영상 창에서는 이 모드를 켤 수 없고 실제 화면에 나타나지 않는다. 완료된 기능이 아니며, 연결에는 별도 로더 통합과 고정 OHIF 실행에서의 확인이 선행해야 한다.
+- 검증 범위는 `tests/three_d_cursor_model_test.cjs`(`node --test`, 순수 좌표)와 `tests/viewer_three_d_cursor_dom_test.py`(Playwright 격리 DOM, 고정 번들의 동작 순서를 재현한 합성 viewport)뿐이다. 실제 OHIF·실제 DICOM·실기 확인은 하지 않았다.
+
 세부 상태 전이와 변경 규칙은 [AGENTS.md](AGENTS.md)를 따른다. 영상 표시·주석·저장 지원은 실제 검증한 객체와 동작 범위로 구분한다. 메뉴가 보이거나 영상 요청이 성공한 사실만으로 모든 영상군의 표시·측정 정확성을 선언하지 않는다.
 
 ## DB와 인증 설정 변경
