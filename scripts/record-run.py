@@ -23,15 +23,25 @@ def file_snapshot(paths, cwd):
             path = cwd / path
         item = {"requested": requested, "path": str(path.resolve())}
         try:
-            digest = hashlib.sha256()
+            digest, lf_digest = hashlib.sha256(), hashlib.sha256()
+            pending = b""
             with path.open("rb") as stream:
                 for block in iter(lambda: stream.read(1024 * 1024), b""):
                     digest.update(block)
-            item.update(status="present", sha256=digest.hexdigest())
+                    # Retain a trailing CR so a split CRLF is normalized once.
+                    data = pending + block
+                    pending = b"\r" if data.endswith(b"\r") else b""
+                    if pending:
+                        data = data[:-1]
+                    lf_digest.update(data.replace(b"\r\n", b"\n"))
+            lf_digest.update(pending)
+            # Byte-level CRLF -> LF only, including binary inputs. This is not
+            # a Git blob id and does not apply attributes or clean filters.
+            item.update(status="present", sha256=digest.hexdigest(), lf_sha256=lf_digest.hexdigest())
         except FileNotFoundError:
-            item.update(status="missing", sha256=None)
+            item.update(status="missing", sha256=None, lf_sha256=None)
         except OSError as error:
-            item.update(status="unreadable", sha256=None, error=str(error))
+            item.update(status="unreadable", sha256=None, lf_sha256=None, error=str(error))
         result.append(item)
     return result
 

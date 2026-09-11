@@ -13,6 +13,28 @@ RECORDER = Path(__file__).resolve().parents[1] / "scripts" / "record-run.py"
 
 
 class RecordRunTest(unittest.TestCase):
+    def test_unreadable_file_has_no_raw_or_normalized_success_hash(self):
+        (self.root / "directory").mkdir()
+        result = self.run_command([sys.executable, "-c", "pass"], files=["directory"])
+        self.assertEqual(result.returncode, 125)
+        for field in ["files_before", "files_after"]:
+            item = self.record()[field][0]
+            self.assertEqual(item["status"], "unreadable")
+            self.assertIsNone(item["sha256"])
+            self.assertIsNone(item["lf_sha256"])
+
+    def test_lf_hash_handles_mixed_binary_and_split_crlf_without_changing_raw(self):
+        raw = b"x" * (1024 * 1024 - 1) + b"\r\nfirst\nsecond\r\n\x00\xfflone\rend\r"
+        (self.root / "mixed.bin").write_bytes(raw)
+        result = self.run_command([sys.executable, "-c", "pass"], files=["mixed.bin", "absent"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.record()
+        for field in ["files_before", "files_after"]:
+            self.assertEqual(record[field][0]["sha256"], hashlib.sha256(raw).hexdigest())
+            self.assertEqual(record[field][0]["lf_sha256"], hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest())
+            self.assertIsNone(record[field][1]["lf_sha256"])
+        self.assertEqual((self.root / "mixed.bin").read_bytes(), raw)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="record-run-")
         self.addCleanup(self.temporary.cleanup)

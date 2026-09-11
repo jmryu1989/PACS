@@ -25,6 +25,8 @@ jobs:
           persist-credentials: false
       - name: D-MEASURE2 disposable runner refusal and artifact redaction
         run: python3 tests/measurement_ci_test.py
+      - name: Execution evidence raw and LF hash preservation
+        run: python3 tests/record_run_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
@@ -57,7 +59,7 @@ jobs:
       - name: Backup safety regressions
         run: python3 tests/ops_backup_test.py
       - name: D-MEASURE2 session recovery and SR guard regressions (no containers)
-        run: node --test tests/viewer_recovery_test.cjs
+        run: node --test tests/viewer_recovery_test.cjs tests/viewer_note_connection_test.cjs
       - name: Automatic prior calendar and identity boundaries
         run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
       - name: Compound search operators and malformed condition boundaries

@@ -14,12 +14,13 @@ class VolumeBatchSaveE2E(VolumeBatchE2E):
  def same_recipe(self,left,right):
   # JSON/Prisma round trips alter the last binary floating-point digit. Keep
   # identifiers, dimensions and controls exact; physical camera values use a
-  # 1e-12 tolerance, tighter than the native reconstruction's 1e-6 oracle.
+  # Relative tolerance follows patient-coordinate magnitude; the small absolute
+  # floor covers zero. Both stay below the native reconstruction's 1e-6 oracle.
   a,b=copy.deepcopy(left),copy.deepcopy(right)
   ac,bc=a['cell'].pop('camera'),b['cell'].pop('camera');self.assertEqual(a,b);self.assertEqual(ac.keys(),bc.keys())
   for key in ac:
    if isinstance(ac[key],bool):self.assertEqual(ac[key],bc[key])
-   else:np.testing.assert_allclose(ac[key],bc[key],atol=1e-12,rtol=0)
+   else:np.testing.assert_allclose(ac[key],bc[key],atol=1e-14,rtol=1e-13)
  def pixels(self,v):
   result=[]
   for i in range(3):
