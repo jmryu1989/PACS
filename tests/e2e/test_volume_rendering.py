@@ -146,5 +146,61 @@ class VolumeRenderingE2E(VolumeCurrentPrintE2E):
   dialog.get_by_label('Preset Name',exact=True).fill('Never Save');dialog.get_by_role('button',name='Save New Preset',exact=True).click();expect(dialog.get_by_role('button',name='Save New Preset',exact=True)).to_be_disabled();dialog.get_by_role('button',name='Close VR',exact=True).click();expect(dialog).not_to_be_visible();v.evaluate('()=>vrReleaseLock()')
   dialog=self.vr(v);expect(dialog.get_by_label('Saved Presets',exact=True)).not_to_contain_text('Never Save');dialog.get_by_label('Preset Name',exact=True).fill('After Reopen');dialog.get_by_role('button',name='Save New Preset',exact=True).click();dialog.get_by_label('Saved Presets',exact=True).select_option(label='After Reopen');expect(dialog.get_by_label('Saved Presets',exact=True)).not_to_contain_text('Never Save')
 
+ def sculpt_region(self,v,dialog,mode='Rectangle',side='Inside',points=None):
+  dialog.get_by_label('Sculpt Tool',exact=True).select_option(mode);dialog.get_by_label('Removal Side',exact=True).select_option(side)
+  dialog.get_by_role('button',name='Draw Region',exact=True).click();overlay=dialog.locator('[data-kin-vr-sculpt]');expect(overlay).to_be_visible();box=overlay.bounding_box()
+  points=points or ([(.05,.05),(.5,.95)] if mode in ['Rectangle','Ellipse'] else [(.1,.1),(.5,.1),(.5,.9),(.1,.9)])
+  coords=[(box['x']+x*box['width'],box['y']+y*box['height']) for x,y in points]
+  if mode.startswith('Curved'):
+   for x,y in coords:v.mouse.click(x,y)
+  else:
+   v.mouse.move(*coords[0]);v.mouse.down()
+   for x,y in coords[1:]:v.mouse.move(x,y,steps=8)
+   v.mouse.up()
+  finish=dialog.get_by_role('button',name='Finish Region',exact=True)
+  if finish.is_enabled():finish.click()
+  expect(dialog.get_by_role('button',name='Apply Sculpt',exact=True)).to_be_enabled()
+
+ def test_vr_18_sculpt_pixels_world_fixed_undo_and_source_preservation(self):
+  a,p,v=self.opened_projection(constant=True);native=self.native_pixels(v);source=self.volume_state(v);original=self.originals();rows=self.rows();dialog=self.vr(v);front=self.vr_pixels(v)
+  dialog.get_by_label('View From',exact=True).select_option('Superior');top=self.vr_pixels(v);dialog.get_by_label('View From',exact=True).select_option('Anterior')
+  pristine=v.evaluate("()=>{const m=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper();m.setViewSpecificProperties({...m.getViewSpecificProperties(),kinSculptSentinel:'retain'});return m.getViewSpecificProperties()}")
+  self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();cut=self.vr_pixels(v);self.assertAlmostEqual(cut['count']/front['count'],.5,delta=.06)
+  shader=v.evaluate("()=>cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper().getViewSpecificProperties().OpenGL.ShaderReplacements")
+  dialog.get_by_label('View From',exact=True).select_option('Superior');rotated=self.vr_pixels(v);self.assertAlmostEqual(rotated['count']/top['count'],.5,delta=.06)
+  self.assertEqual(v.evaluate("()=>cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper().getViewSpecificProperties().OpenGL.ShaderReplacements"),shader)
+  dialog.get_by_role('button',name='Undo Sculpt',exact=True).click();self.assertEqual(self.vr_pixels(v),top);self.preserved_volume(source,self.volume_state(v));self.assertEqual(self.native_pixels(v),native);self.assertEqual(self.originals(),original);self.unchanged_rows(rows)
+  self.assertEqual(v.evaluate("()=>cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper().getViewSpecificProperties()"),pristine)
+  print('VR_SCULPT_WORLD_FIXED',{'front':front,'cut':cut,'top':top,'rotatedCut':rotated},flush=True)
+
+ def test_vr_19_six_sculpt_shapes_inside_outside_and_clear(self):
+  a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);full=self.vr_pixels(v)
+  for mode in ['Freehand Area','Freehand Line','Curved Area','Curved Line','Ellipse','Rectangle']:
+   self.sculpt_region(v,dialog,mode);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();inside=self.vr_pixels(v);self.assertGreater(inside['count'],0,mode);self.assertLess(inside['count'],full['count'],mode)
+   dialog.get_by_role('button',name='Clear Sculpt',exact=True).click();self.assertEqual(self.vr_pixels(v),full,mode)
+   self.sculpt_region(v,dialog,mode,'Outside');dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();outside=self.vr_pixels(v);self.assertGreater(outside['count'],0,mode);self.assertLess(outside['count'],full['count'],mode)
+   self.assertAlmostEqual((inside['count']+outside['count'])/full['count'],1,delta=.035,msg=mode)
+   dialog.get_by_role('button',name='Clear Sculpt',exact=True).click();self.assertEqual(self.vr_pixels(v),full,mode)
+   print('VR_SCULPT_SHAPE',mode,inside,outside,flush=True)
+
+ def test_vr_20_sculpt_draft_cancel_resize_reset_and_crop_transfer(self):
+  a,p,v=self.opened_projection(constant=True);dialog=self.vr(v);full=self.vr_pixels(v);camera=self.vr_state(v)['camera']
+  self.sculpt_region(v,dialog);expect(dialog.get_by_label('View From',exact=True)).to_be_disabled();expect(dialog.get_by_role('button',name='Apply Display',exact=True)).to_be_disabled();self.assertEqual(self.vr_state(v)['camera'],camera)
+  dialog.get_by_role('button',name='Cancel Sculpt',exact=True).click();expect(dialog.locator('[data-kin-vr-sculpt]')).not_to_be_visible();self.assertEqual(self.vr_pixels(v),full)
+  self.sculpt_region(v,dialog);size=v.viewport_size;v.set_viewport_size({'width':size['width']-30,'height':size['height']});expect(dialog.locator('[data-kin-vr-sculpt]')).not_to_be_visible();v.set_viewport_size(size)
+  self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();cut=self.vr_pixels(v)
+  dialog.get_by_label('VR Opacity',exact=True).fill('50');dialog.get_by_role('button',name='Apply Display',exact=True).click();self.assertAlmostEqual(self.vr_pixels(v)['width'],cut['width'],delta=2)
+  dialog.get_by_label('K Max',exact=True).fill('7');dialog.get_by_role('button',name='Apply Crop',exact=True).click();cropped=self.vr_pixels(v);self.assertGreater(cropped['count'],0);self.assertLess(cropped['height'],cut['height'])
+  dialog.get_by_role('button',name='Reset VR',exact=True).click();self.assertEqual(self.vr_pixels(v),full)
+  self.sculpt_region(v,dialog);dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();dialog.get_by_role('button',name='Close VR',exact=True).click();dialog=self.vr(v);self.assertEqual(self.vr_pixels(v),full)
+
+ def test_vr_21_sculpt_native_failure_closes_only_vr(self):
+  a,p,v=self.opened_projection(constant=True);source=self.volume_state(v);native=self.native_pixels(v);dialog=self.vr(v);self.sculpt_region(v,dialog)
+  v.evaluate("()=>{const mapper=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper(),set=mapper.setViewSpecificProperties;mapper.setViewSpecificProperties=function(...args){set.apply(this,args);throw Error('INJECTED SCULPT FAILURE')}}")
+  dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).not_to_be_visible();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('INJECTED SCULPT FAILURE');self.preserved_volume(source,self.volume_state(v));self.assertEqual(self.native_pixels(v),native)
+  dialog=self.vr(v);self.sculpt_region(v,dialog)
+  v.evaluate("()=>{const m=cornerstone.getEnabledElement(document.querySelector('[data-kin-vr-render]')).viewport.getActors()[0].actor.getMapper(),set=m.setViewSpecificProperties;m.setViewSpecificProperties=function(props){for(const r of props.OpenGL?.ShaderReplacements||[])r.replacementValue+='\\nINVALID_SCULPT_GLSL;';return set.call(this,props)}}")
+  dialog.get_by_role('button',name='Apply Sculpt',exact=True).click();expect(dialog).not_to_be_visible();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('GPU');self.preserved_volume(source,self.volume_state(v));self.assertEqual(self.native_pixels(v),native);self.vr(v)
+
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeRenderingE2E(n) for n in loader.getTestCaseNames(VolumeRenderingE2E) if n.startswith('test_vr_') and n in VolumeRenderingE2E.__dict__)
 if __name__=='__main__':unittest.main(verbosity=2)
