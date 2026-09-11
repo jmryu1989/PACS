@@ -74,7 +74,7 @@ jobs:
       - name: Image text visibility and source preservation
         timeout-minutes: 3
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-text --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-image-text.js --file tests/viewer_image_text_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_image_text_dom_test.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-text --cwd . --file worklist-v0/hpacs-lite/viewer-images-only.js --file worklist-v0/hpacs-lite/viewer-image-text.js --file tests/viewer_image_text_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_image_text_dom_test.py
       - name: Image text config loader lifecycle
         timeout-minutes: 3
         run: |

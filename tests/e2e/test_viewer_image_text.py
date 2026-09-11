@@ -47,11 +47,14 @@ class ViewerImageTextE2E(DisplayControlsE2E):
           const state=services.viewportGridService.getState();return [...state.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(cell=>{
             const viewport=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId),found=[];
             const pane=viewport.element.closest('[data-cy="viewport-pane"]')||viewport.element.parentElement;
-            for(const node of pane.querySelectorAll('.viewport-overlay,[data-cy^="viewport-overlay-"],.kin-viewer-identity'))if(!found.includes(node))found.push(node);
+            for(const node of pane.querySelectorAll('.viewport-overlay,[data-cy^="viewport-overlay-"],.kin-viewer-identity,.orientation-marker'))if(!found.includes(node))found.push(node);
             return {id:cell.viewportId,wrapperOwned:pane.getAttribute('data-kin-image-text-hidden'),
               native:found.some(node=>node.matches('.viewport-overlay,[data-cy^="viewport-overlay-"]')),
-              identity:found.some(node=>node.matches('.kin-viewer-identity')),targets:found.map(node=>({token:token(node),
-                text:node.textContent,owned:node.getAttribute('data-kin-image-text-hidden'),inline:node.style.getPropertyValue('visibility'),
+              identity:found.some(node=>node.matches('.kin-viewer-identity')),
+              orientation:found.filter(node=>node.matches('.orientation-marker')).map(node=>(node.textContent||'').trim()),
+              targets:found.map(node=>({token:token(node),
+                text:node.textContent,orientation:node.matches('.orientation-marker'),
+                owned:node.getAttribute('data-kin-image-text-hidden'),inline:node.style.getPropertyValue('visibility'),
                 priority:node.style.getPropertyPriority('visibility'),computed:getComputedStyle(node).visibility,
                 rect:node.getBoundingClientRect().toJSON()}))};
           });
@@ -84,8 +87,12 @@ class ViewerImageTextE2E(DisplayControlsE2E):
         state = self.text_state(page)
         for row in state:
             self.assertTrue(row["native"]); self.assertTrue(row["identity"]); self.assertTrue(row["targets"])
+            self.assertTrue(any(row["orientation"]))
             self.assertTrue(row["wrapperOwned"])
             self.assertTrue(all(target["owned"] is None and target["computed"] == "hidden" for target in row["targets"]))
+            orientation = [target for target in row["targets"] if target["orientation"]]
+            self.assertTrue(orientation)
+            self.assertTrue(all(target["text"].strip() and target["computed"] == "hidden" for target in orientation))
         return panel
 
     def show(self, page):
@@ -97,6 +104,8 @@ class ViewerImageTextE2E(DisplayControlsE2E):
         expect(page.locator("[data-kin-image-text-hidden]")).to_have_count(0)
 
     def assert_automatic_show(self, page):
+        page.wait_for_function("""()=>!kinViewerImageTextHidden()&&
+          !document.querySelector('[data-kin-image-text-hidden]')""", timeout=15000)
         self.assertFalse(page.evaluate("()=>kinViewerImageTextHidden()"))
         expect(page.locator("[data-kin-image-text-hidden]")).to_have_count(0)
         page.wait_for_function("""()=>{const node=document.querySelector('#kin-image-text-status');
@@ -106,7 +115,7 @@ class ViewerImageTextE2E(DisplayControlsE2E):
         page.evaluate("""()=>{window.imageTextOldPanes=[...services.viewportGridService.getState().viewports.values()].map(cell=>{
           const viewport=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId),
             wrapper=viewport.element.closest('[data-cy="viewport-pane"]')||viewport.element.parentElement,targets=[];
-          for(const node of wrapper.querySelectorAll('.viewport-overlay,[data-cy^="viewport-overlay-"],.kin-viewer-identity'))
+          for(const node of wrapper.querySelectorAll('.viewport-overlay,[data-cy^="viewport-overlay-"],.kin-viewer-identity,.orientation-marker'))
             if(!targets.some(item=>item.node===node))targets.push({node,value:node.style.getPropertyValue('visibility'),
               priority:node.style.getPropertyPriority('visibility')});
           return {wrapper,attribute:wrapper.getAttribute('data-kin-image-text-hidden'),targets};})}""")
@@ -138,7 +147,7 @@ class ViewerImageTextE2E(DisplayControlsE2E):
         page.get_by_label("Job Title", exact=True).fill("IMAGE TEXT UNSAVED JOB")
         self.panel(page); before = self.stable_state(page)
         initial = self.text_state(page)
-        self.assertTrue(all(row["native"] and row["identity"] and
+        self.assertTrue(all(row["native"] and row["identity"] and any(row["orientation"]) and
                             any(target["computed"] == "visible" for target in row["targets"]) and
                             row["wrapperOwned"] is None and all(target["owned"] is None for target in row["targets"]) for row in initial))
         self.hide(page)
@@ -146,8 +155,14 @@ class ViewerImageTextE2E(DisplayControlsE2E):
             self.assertEqual([(item["token"], item["inline"], item["priority"]) for item in current["targets"]],
                              [(item["token"], item["inline"], item["priority"]) for item in old["targets"]])
         self.assertEqual(self.display(page), before["display"])
+        self.shot(page, "hidden")
         self.show(page)
         self.assertEqual(self.stable_state(page), before)
+        for old, current in zip(initial, self.text_state(page)):
+            self.assertEqual([(item["text"], item["inline"], item["priority"], item["computed"])
+                              for item in current["targets"] if item["orientation"]],
+                             [(item["text"], item["inline"], item["priority"], item["computed"])
+                              for item in old["targets"] if item["orientation"]])
         expect(page.get_by_label("Job Title", exact=True)).to_have_value("IMAGE TEXT UNSAVED JOB")
         self.assertTrue(page.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
         self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(holder, self.state(fixture)["holder"])
@@ -166,7 +181,7 @@ class ViewerImageTextE2E(DisplayControlsE2E):
         page.wait_for_function("""()=>kinViewerImageTextHidden()&&[...services.viewportGridService.getState().viewports.values()].every(cell=>{
           const viewport=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId),
             wrapper=viewport.element.closest('[data-cy="viewport-pane"]')||viewport.element.parentElement,
-            targets=[...wrapper.querySelectorAll('.viewport-overlay,[data-cy^="viewport-overlay-"],.kin-viewer-identity')];
+            targets=[...wrapper.querySelectorAll('.viewport-overlay,[data-cy^="viewport-overlay-"],.kin-viewer-identity,.orientation-marker')];
           return wrapper.hasAttribute('data-kin-image-text-hidden')&&targets.length&&targets.every(node=>getComputedStyle(node).visibility==='hidden');})""")
         self.grid(page, 1)
         self.assert_automatic_show(page)

@@ -11,7 +11,7 @@ IMAGES_ONLY_MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-images-only.j
 URL = "https://image-text.test/ohif/viewer?StudyInstanceUIDs=1.2"
 
 HARNESS = r"""<!doctype html><html><head><title>Verified Study</title></head><body><main id="kin-viewer-layout"></main>
-<section data-cy="viewport-pane" id="pane"><div class="viewport-overlay" id="native">Native text</div><div data-cy="viewport-overlay-top-left" id="prehidden" style="visibility:hidden">Existing hidden</div><div id="viewport"><canvas id="pixels"></canvas><div class="annotation">saved mark</div><div class="kin-viewer-identity" data-study="1.2" style="display:block">Current · PID-1</div></div></section>
+<section data-cy="viewport-pane" id="pane" style="position:relative;width:800px;height:600px"><div class="viewport-overlay" id="native" style="position:absolute;left:8px;top:8px">Native text</div><div data-cy="viewport-overlay-top-left" id="prehidden" style="position:absolute;left:8px;top:32px;visibility:hidden">Existing hidden</div><div class="orientation-marker" id="orientation" style="position:absolute;left:8px;top:50%;color:rgb(255, 0, 0)">A</div><div id="viewport" style="position:relative;width:800px;height:600px"><canvas id="pixels"></canvas><div class="annotation">saved mark</div><div class="kin-viewer-identity" data-study="1.2" style="display:block">Current · PID-1</div></div></section>
 <input id="job" value="UNSAVED JOB"><script>
 let owner='owner-1',historyBusy=false,jobBusy=false,active='vp',subscribers=[],ids=['image:1.4','image:1.5'],current=ids[0];
 const viewportElement=document.querySelector('#viewport'),pane=document.querySelector('#pane');
@@ -47,21 +47,28 @@ class ViewerImageTextDOMTest(unittest.TestCase):
         self.page.close()
 
     def test_scoped_hide_survives_native_sibling_and_identity_refresh_then_restores_exactly(self):
-        before = self.page.evaluate("()=>({rect:pixels.getBoundingClientRect().toJSON(),camera:viewport.camera,title:document.title,job:job.value,native:native.getAttribute('style'),pre:prehidden.getAttribute('style')})")
+        before = self.page.evaluate("()=>({rect:pixels.getBoundingClientRect().toJSON(),camera:viewport.camera,title:document.title,job:job.value,native:native.getAttribute('style'),pre:prehidden.getAttribute('style'),orientation:orientation.getAttribute('style')})")
         self.page.locator("#kin-image-text-toggle").click()
         self.assertTrue(self.page.evaluate("kinViewerImageTextHidden()"))
         expect(self.page.locator("#kin-image-text-toggle")).to_have_text("Show Image Text")
         expect(self.page.locator("#native")).to_have_css("visibility", "hidden")
         expect(self.page.locator(".kin-viewer-identity")).to_have_css("visibility", "hidden")
+        expect(self.page.locator("#orientation")).to_have_css("visibility", "hidden")
         expect(self.page.locator("#pixels")).to_have_css("visibility", "visible")
+        expect(self.page.locator(".annotation")).to_have_css("visibility", "visible")
         self.assertIsNotNone(self.page.locator("#pane").get_attribute("data-kin-image-text-hidden"))
-        self.page.evaluate("document.querySelector('.kin-viewer-identity').style.cssText='display:block;position:absolute;right:4px';const next=document.createElement('div');next.className='kin-viewer-identity';next.dataset.study='1.2';next.textContent='Replacement identity';document.querySelector('.kin-viewer-identity').replaceWith(next)")
+        self.page.evaluate("document.querySelector('.kin-viewer-identity').style.cssText='display:block;position:absolute;right:4px';const next=document.createElement('div');next.className='kin-viewer-identity';next.dataset.study='1.2';next.textContent='Replacement identity';document.querySelector('.kin-viewer-identity').replaceWith(next);const direction=document.createElement('div');direction.id='orientation-new';direction.className='orientation-marker';direction.style.color='rgb(0, 0, 255)';direction.textContent='R';pane.append(direction)")
         expect(self.page.locator(".kin-viewer-identity")).to_have_css("visibility", "hidden")
+        expect(self.page.locator("#orientation-new")).to_have_css("visibility", "hidden")
         self.page.locator("#kin-image-text-toggle").click()
         expect(self.page.locator("#native")).to_have_css("visibility", "visible")
         expect(self.page.locator("#prehidden")).to_have_css("visibility", "hidden")
+        expect(self.page.locator("#orientation")).to_have_css("visibility", "visible")
+        expect(self.page.locator("#orientation-new")).to_have_css("visibility", "visible")
+        expect(self.page.locator("#orientation-new")).to_have_css("color", "rgb(0, 0, 255)")
+        expect(self.page.locator(".annotation")).to_have_css("visibility", "visible")
         self.assertIsNone(self.page.locator("#pane").get_attribute("data-kin-image-text-hidden"))
-        after = self.page.evaluate("()=>({rect:pixels.getBoundingClientRect().toJSON(),camera:viewport.camera,title:document.title,job:job.value,native:native.getAttribute('style'),pre:prehidden.getAttribute('style')})")
+        after = self.page.evaluate("()=>({rect:pixels.getBoundingClientRect().toJSON(),camera:viewport.camera,title:document.title,job:job.value,native:native.getAttribute('style'),pre:prehidden.getAttribute('style'),orientation:orientation.getAttribute('style')})")
         self.assertEqual(before, after)
 
     def test_frame_navigation_stays_hidden_but_source_change_auto_shows(self):
@@ -101,7 +108,7 @@ class ViewerImageTextDOMTest(unittest.TestCase):
 
     def test_actual_images_only_module_is_blocked_until_image_text_is_shown(self):
         self.page.add_script_tag(path=str(IMAGES_ONLY_MODULE))
-        self.page.evaluate("window.fullscreenRequests=0;viewportElement.requestFullscreen=()=>{fullscreenRequests++;return Promise.resolve()};window.imagesOnly=KinViewerImagesOnly.create(services,{intervalMs:100});imagesOnly.mount()")
+        self.page.evaluate("window.fullscreenRequests=0;Object.defineProperty(viewportElement,'requestFullscreen',{configurable:true,value:()=>{fullscreenRequests++;return Promise.resolve()}});window.imagesOnly=KinViewerImagesOnly.create(services,{intervalMs:100});imagesOnly.mount()")
         self.page.locator("#kin-image-text-toggle").click()
         self.assertTrue(self.page.evaluate("kinViewerImageTextHidden()"))
         expect(self.page.locator("#kin-images-only-enter")).to_be_disabled()
@@ -109,8 +116,8 @@ class ViewerImageTextDOMTest(unittest.TestCase):
         self.assertEqual(0, self.page.evaluate("fullscreenRequests"))
         self.page.locator("#kin-image-text-toggle").click()
         expect(self.page.locator("#kin-images-only-enter")).to_be_enabled(timeout=1000)
-        self.page.locator("#kin-images-only-enter").evaluate("element => element.click()")
-        self.assertEqual(1, self.page.evaluate("fullscreenRequests"))
+        result = self.page.locator("#kin-images-only-enter").evaluate("element => { if (element.disabled) return {requests:-1}; element.click(); return {requests:fullscreenRequests,status:document.querySelector('#kin-images-only-status').textContent,viewport:viewportElement.getBoundingClientRect().toJSON()} }")
+        self.assertEqual(1, result["requests"], result)
         self.page.evaluate("imagesOnly.stop()")
 
 

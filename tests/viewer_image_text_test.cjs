@@ -36,8 +36,8 @@ function setup({two=false}={}) {
   let owner='owner-1',busy=false;win.kinViewerWindowOwner=()=>owner;win.kinViewerHistoryWorkspaceState=()=>({busy});win.kinViewerJobWorkspaceState=()=>({busy:false});
   const state={layout:{numRows:1,numCols:two?2:1},activeViewportId:'vp0',viewports:new Map()},viewports=new Map(),sets=new Map(),meta=new Map(),subs=[];
   for(let index=0;index<(two?2:1);index++){
-    const study=`1.2.${index+1}`,series=`1.3.${index+1}`,sop=`1.4.${index+1}`,image=`image:${sop}`,pane=new Element(),element=new Element(),overlay=new Element(),identity=new Element();
-    pane.setAttribute('data-cy','viewport-pane');overlay.className='viewport-overlay';identity.className='kin-viewer-identity';identity.dataset.study=study;pane.append(overlay);pane.append(element);element.append(identity);doc.main.append(pane);
+    const study=`1.2.${index+1}`,series=`1.3.${index+1}`,sop=`1.4.${index+1}`,image=`image:${sop}`,pane=new Element(),element=new Element(),overlay=new Element(),orientation=new Element(),identity=new Element();
+    pane.setAttribute('data-cy','viewport-pane');overlay.className='viewport-overlay';orientation.className='orientation-marker';orientation.style.setProperty('color','red');identity.className='kin-viewer-identity';identity.dataset.study=study;pane.append(overlay);pane.append(orientation);pane.append(element);element.append(identity);doc.main.append(pane);
     const value={StudyInstanceUID:study,SeriesInstanceUID:series,SOPInstanceUID:sop,PatientID:`PID-${index+1}`};meta.set(image,value);
     const displaySet={displaySetInstanceUID:`ds${index}`,StudyInstanceUID:study,SeriesInstanceUID:series,images:[value]};sets.set(displaySet.displaySetInstanceUID,displaySet);
     const viewport={type:'stack',viewportStatus:'rendered',element,camera:{scale:index+1},imageIds:[image],current:image,getImageIds(){return [...this.imageIds]},getCurrentImageId(){return this.current}};viewports.set(`vp${index}`,viewport);
@@ -52,6 +52,7 @@ test('hide and show affect verified grid text only and restore exact prior style
   const h=setup({two:true}),first=h.viewports.get('vp0'),second=h.viewports.get('vp1'),canvas=new Element('canvas');first.element.append(canvas);
   const panes=[first,second].map(v=>v.element.parentElement),overlays=panes.map(p=>p.querySelectorAll('.viewport-overlay')[0]);overlays[1].style.setProperty('visibility','hidden','important');const camera=first.camera;
   h.toggle.click();assert.equal(globalThis.kinViewerImageTextHidden(),true);assert.equal(h.toggle.textContent,'Show Image Text');
+  assert.match(h.doc.head.children[0].textContent,/\.orientation-marker/);assert.equal(panes[0].children.find(item=>item.className==='orientation-marker').style.getPropertyValue('color'),'red');
   assert.match(panes[0].getAttribute('data-kin-image-text-hidden'),/^kit-/);assert.equal(overlays[0].style.getPropertyValue('visibility'),'');assert.equal(canvas.hasAttribute('data-kin-image-text-hidden'),false);assert.equal(first.camera,camera);
   h.toggle.click();assert.equal(globalThis.kinViewerImageTextHidden(),false);assert.equal(overlays[0].style.getPropertyValue('visibility'),'');assert.equal(overlays[1].style.getPropertyValue('visibility'),'hidden');assert.equal(overlays[1].style.getPropertyPriority('visibility'),'important');h.api.stop();
 });

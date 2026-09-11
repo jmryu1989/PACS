@@ -56,7 +56,7 @@
     function conceal(record) {
       if (record.panes.some(item => item.wrapper.hasAttribute('data-kin-image-text-hidden'))) throw Error('Image Text 표시 소유권이 충돌했습니다.');
       const style = doc.createElement('style'); style.setAttribute('data-kin-image-text-style', record.token);
-      style.textContent = `[data-kin-image-text-hidden="${record.token}"] .viewport-overlay,[data-kin-image-text-hidden="${record.token}"] [data-cy^="viewport-overlay-"],[data-kin-image-text-hidden="${record.token}"] .kin-viewer-identity{visibility:hidden!important}`;
+      style.textContent = `[data-kin-image-text-hidden="${record.token}"] .viewport-overlay,[data-kin-image-text-hidden="${record.token}"] [data-cy^="viewport-overlay-"],[data-kin-image-text-hidden="${record.token}"] .kin-viewer-identity,[data-kin-image-text-hidden="${record.token}"] .orientation-marker{visibility:hidden!important}`;
       (doc.head || doc.body || doc.documentElement).append(style); record.style = style;
       for (const item of record.panes) item.wrapper.setAttribute('data-kin-image-text-hidden', record.token);
     }
