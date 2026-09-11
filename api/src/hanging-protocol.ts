@@ -102,7 +102,7 @@ export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary
       rules.push({ id, name, enabled: input.enabled, match: ruleMatch, selectors: selectors as Selector[],
         layout: { rows: layout.rows as 1 | 2, cols: layout.cols as 1 | 2, cells } });
     }
-    const activeRuleId = activeInput === null ? null : activeInput.toLowerCase();
+    const activeRuleId = typeof activeInput === 'string' ? activeInput.toLowerCase() : null;
     if (activeRuleId !== null && !rules.some(rule => rule.id === activeRuleId && rule.enabled)) return undefined;
     const clean: HangingProtocolLibrary = { version: 1, activeRuleId, rules };
     return Buffer.byteLength(JSON.stringify(clean), 'utf8') <= 65536 ? clean : undefined;
