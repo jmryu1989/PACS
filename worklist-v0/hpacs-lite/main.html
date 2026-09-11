@@ -4082,7 +4082,9 @@
         if (freshDocument && ohifPopupState(popup).kind !== "blank") {
           try { popup.opener = null; } catch (_) {}
           viewerWindows.blocked(choice);
-          popup.focus(); notify("새 창 이름에 기존 화면이 연결되어 열지 않았습니다. 기존 화면을 유지했습니다.", "err", 8000); return;
+          notify("새 창 이름에 기존 화면이 연결되어 열지 않았습니다. 기존 화면을 유지했습니다.", "err", 8000);
+          try { popup.focus(); } catch (_) {}
+          return;
         }
         viewerWindows.attach(choice, popup); viewerWindowCursor = choice.index; ohifPopupSlots.set(popup, choice.index);
         // Reopening a named window can restore its opener even without navigation.
@@ -4322,6 +4324,7 @@
         if (action === 'latest') {
           const state = ohifPopupState(popup), target = state.kind === 'viewer' && state.ready && !state.busy && !row.pending && ohifScope(state.href);
           if (!target) { status.textContent = '기존 영상 창의 검사와 계정을 확인한 뒤 다시 여세요.'; return; }
+          status.textContent = '';
           const readingReturn = new URLSearchParams(new URL(state.href, location.origin).hash.slice(1)).get('kin-reading-return');
           openOhifWindow(target.studies[0], target.studies[1] || null, target.series, readingReturn, { freshDocument: true, notice: message => { status.textContent = message; } });
           render(); return;

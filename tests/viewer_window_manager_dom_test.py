@@ -393,6 +393,7 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertEqual(retried["opened"], 1)
         self.assertIn("StudyInstanceUIDs=1.2.1", retried["href"])
         self.assertIsNone(retried["opener"])
+        self.assertEqual("", self.page.locator("#viewer-windows-status").text_content())
 
     def test_latest_detached_button_revalidates_owner_pending_unknown_and_current_scope(self):
         for boundary in ("owner", "pending", "unknown"):
@@ -440,6 +441,15 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
         self.assertEqual(result["openCalls"], 1)
         self.assertIn("새 창 이름", result["status"])
 
+    def test_latest_collision_focus_failure_keeps_visible_notice_and_no_exception(self):
+        self.page.evaluate("""()=>{const made=__makePopup({dirty:true});
+          document.querySelector('#viewer-windows-open').click();
+          made.popup.focus=()=>{throw Error('native focus failed')};__nextOpenPopup=made.popup;}""")
+        self.page.locator('[data-window-index="0"][data-window-action="latest"]').click()
+        self.assertIn('기존 화면', self.page.locator('#viewer-windows-status').text_content())
+        self.assertEqual([], self.page_errors)
+        self.assertEqual(1, self.page.evaluate('viewerWindows.rows().length'))
+
     def test_latest_preserves_comparison_series_and_reading_return_scope(self):
         reading_return = "12345678-1234-4123-8123-123456789abc"
         href = ("https://example.test/ohif/viewer?StudyInstanceUIDs=1.2.1,1.2.2"
@@ -486,4 +496,5 @@ class ViewerWindowManagerDOMTest(unittest.TestCase):
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     unittest.main(verbosity=2)
