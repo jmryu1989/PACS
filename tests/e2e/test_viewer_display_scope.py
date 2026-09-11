@@ -102,7 +102,7 @@ class ViewerDisplayScopeE2E(DisplayControlsE2E):
         self.scope(page, 'all'); before = self.display(page)
         page.evaluate("""()=>{const cells=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
           const v=services.cornerstoneViewportService.getCornerstoneViewport(cells[1].viewportId),original=v.setProperties;
-          let once=true;window.restoreScopeSetter=()=>v.setProperties=original;
+          let once=true;window.restoreScopeSetter=()=>{v.setProperties=original;};
           v.setProperties=function(...args){if(once){once=false;throw Error('Synthetic second target failure')}return original.apply(this,args)};}""")
         try:
             page.locator('#kin-display-scope [data-action=invert]').click()
@@ -116,7 +116,7 @@ class ViewerDisplayScopeE2E(DisplayControlsE2E):
         before_window = self.display(page)
         page.evaluate("""()=>{const cells=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
           const v=services.cornerstoneViewportService.getCornerstoneViewport(cells[1].viewportId),original=v.setVOI;
-          let once=true;window.restoreScopeVoi=()=>v.setVOI=original;
+          let once=true;window.restoreScopeVoi=()=>{v.setVOI=original;};
           v.setVOI=function(...args){if(once){once=false;throw Error('Synthetic W/L failure')}return original.apply(this,args)};}""")
         try:
             page.locator('#kin-display-scope [data-ww]').fill('400')
