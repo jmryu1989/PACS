@@ -48,10 +48,10 @@ window.kinViewerJobs = function (services, model) {
       openingPrint = true;
       try {
         const snapshot = row ? null : capture(true);
-        if(snapshot?.version===6||row?.snapshotVersion===6)throw new Error('3D 표식이 포함된 작업의 출력은 아직 지원하지 않습니다. 저장한 Job으로 다시 열어 확인하세요.');
-        if([4,5].includes(snapshot?.version)||row?.snapshotVersion===4)throw new Error('MPR 출력은 저장된 단면 묶음에서 지원합니다. Make Batch 후 Save New Job으로 저장하세요.');
+        if(snapshot?.version===6)throw new Error('현재 3D 표식은 Save New Job으로 저장한 뒤 Print Saved Images로 출력하세요.');
+        if([4,5].includes(snapshot?.version))throw new Error('현재 MPR은 Save New Job으로 저장한 뒤 Print Saved Images로 출력하세요.');
         const unchanged = () => live() && JSON.stringify(capture(true)) === JSON.stringify(snapshot);
-        const assets=[['kinViewerJobPrint','viewer-job-print.js'],...(row?.snapshotVersion===5?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
+        const assets=[['kinViewerJobPrint','viewer-job-print.js'],...([4,5,6].includes(row?.snapshotVersion)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
           // A print-only asset failure must leave saving/restoring available.
           if (!printLoading) printLoading = Promise.all(assets.map(([name,file])=>new Promise((resolve, reject) => {
@@ -143,7 +143,7 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && ![4,6].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if (!row.hidden) button(item, 'Print Saved Images', () => openPrint(row));
         if([4,5,6].includes(row.snapshotVersion))text('p',(row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);

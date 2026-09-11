@@ -82,7 +82,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   }
   const valid = (ticket, signal) => { if (!live() || ticket !== serial || !dialog.open || signal.aborted) throw new Error('출력 확인이 취소되었습니다.'); validCurrent(current); };
   async function bounded(work) {
-    controller?.abort(); const c = controller = new AbortController(), timer = setTimeout(() => c.abort(), current?.version===5?120000:30000);
+    controller?.abort(); const c = controller = new AbortController(), timer = setTimeout(() => c.abort(), [4,5,6].includes(current?.version)?120000:30000);
     try { return await work(c.signal); } finally { clearTimeout(timer); c.abort(); if (controller === c) controller = null; }
   }
   async function bytes(url, signal, max, budget, accept = 'application/json') {
@@ -111,7 +111,6 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       return { snapshot: checked.snapshot, transient: true, title: '현재 비교 화면', description: '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님' };
     };
     const job = await readJob(), identities = [], reports = [];
-    if(job.snapshot?.version===4)throw new Error('MPR 작업은 저장·복원을 지원합니다. 재구성 영상 출력은 아직 지원하지 않습니다.');
     const studies = job.snapshot.studies;
     if (!Array.isArray(studies) || ![1, 2].includes(studies.length) || studies[0] !== item.uid || new Set(studies).size !== studies.length)
       throw new Error('출력 비교 검사 정보를 확인할 수 없습니다.');
@@ -231,7 +230,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
           item.baseline.values.length !== (item.kind === 'ellipse' ? 5 : 1) || item.baseline.values.some(n => !Number.isFinite(n))) refuse();
     }
   }
-  const annotationMode = job => job.snapshot.version === 3 ? '저장 당시 주석 포함' : '주석 미포함';
+  const annotationMode = job => job.snapshot.version === 6 ? (job.snapshot.marks.visible?'저장 당시 수동 3D 표식 포함':'저장 당시 수동 3D 표식 숨김') : job.snapshot.version === 3 ? '저장 당시 주석 포함' : '주석 미포함';
   async function render(cell, ticket, signal, budget, annotations, edit) {
     const { width, height } = cell.viewport;
     const location = await api('/dicom/lookup', { signal, method: 'POST', body: JSON.stringify({ studyUid: cell.study, sopUid: cell.sop }) });
@@ -318,10 +317,11 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   function html(data, images, outputEdits, batchOutput) {
     const { job, identities } = data, main = el('main'), legends = [];
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    el('h1', batchOutput?'KIN PACS 저장 MPR 단면 묶음':job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
+    el('h1', batchOutput?(job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main); el('h2', job.title, main); el('p', job.description, main);
     el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main);
     el('p', (batchOutput?'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성':basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main);
-    if(batchOutput)el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main);
+    if(batchOutput&&!job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main);
+    if(batchOutput&&job.snapshot.batch)el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main);
     const reportLabel = report => !report.version ? '저장된 판독문 없음' :
       `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
     const summary = identities.map(s => `환자 ${s.name} (${s.id}) · 검사 ${s.date} · Acc ${s.acc || '-'}`).join('\n') +
@@ -340,23 +340,32 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
         el('h3', label, section); el('p', report[key] || '(내용 없음)', section).dataset.reportField = key;
       }
     }
-    if(batchOutput){
+    if(batchOutput?.scout){
       const reference=el('section',undefined,main);reference.className='batch-reference';el('h2','Batch Location Reference',reference);el('p','MPR 0.1 mm · 선은 단면 중심 위치이며 두께 경계가 아닙니다.',reference);
       const box=el('div',undefined,reference);box.style.cssText='position:relative;width:256px;height:256px';const img=el('img',undefined,box);img.src=batchOutput.scout.url;img.alt='Batch location reference';img.style.cssText='width:256px;height:256px;display:block';
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 256 256');svg.style.cssText='position:absolute;inset:0;width:256px;height:256px';
       for(const points of batchOutput.scout.guides){const line=document.createElementNS(svg.namespaceURI,'line');for(const [key,value] of Object.entries({x1:points[0][0],y1:points[0][1],x2:points[1][0],y2:points[1][1],stroke:'#ffdb55','stroke-width':1}))line.setAttribute(key,value);svg.append(line);}box.append(svg);
     }
-    const grid = el('div', undefined, main); grid.className = 'grid'; grid.style.gridTemplateColumns = `repeat(${batchOutput?2:job.snapshot.cols},minmax(0,1fr))`;
-    const cells=batchOutput?batchOutput.frames.map(row=>({...job.snapshot.batch.cell,camera:row.camera})):job.snapshot.cells;
+    const grid = el('div', undefined, main); grid.className = 'grid'; grid.style.gridTemplateColumns = `repeat(${batchOutput&&job.snapshot.batch?2:job.snapshot.cols},minmax(0,1fr))`;
+    const cells=batchOutput?batchOutput.frames.map(row=>({...row.cell,camera:row.camera})):job.snapshot.cells;
     cells.forEach((cell, index) => {
       const figure = el('section', undefined, grid); figure.className = 'cell'; el('strong', '셀 ' + (index + 1), figure);
       if (!cell) { el('p', '빈 셀', figure); return; }
       const identity = identities.find(s => s.uid === cell.study), img = el('img', undefined, figure); img.src = images[index]; img.alt = '출력 셀 ' + (index + 1);
       el('p', `${identity.name} (${identity.id}) · ${identity.date} · ${identity.desc || identity.modality}`, figure);
       if(batchOutput){
-        figure.dataset.batchPlane=String(index+1);el('p',`Plane ${index+1} / ${cells.length} · ${['MPR','MIP','MinIP','Average'][cell.projection.blend]} ${cell.projection.thickness} mm · ${batchOutput.width} × ${batchOutput.height}`,figure);
+        figure.dataset.batchPlane=String(index+1);el('p',`Plane ${index+1} / ${cells.length} · ${['MPR','MIP','MinIP','Average'][cell.projection.blend]} ${cell.projection.thickness} mm · ${batchOutput.frames[index].width} × ${batchOutput.frames[index].height}`,figure);
         el('p','Center L/P/H (mm): '+cell.camera.focalPoint.map(n=>Number(n.toFixed(3))).join(' / '),figure);
         el('p',`VOI ${cell.properties.voiRange.lower} ~ ${cell.properties.voiRange.upper} (${cell.properties.VOILUTFunction}) · ${cell.properties.invert?'Inverted':'Normal grayscale'}`,figure);
+        const annotations=batchOutput.frames[index].annotations;
+        if(annotations.length){
+          const legend=el('div');legend.className='annotations';legends.push(legend);el('h2',`Plane ${index+1} · Manual 3D Annotations`,legend);el('p','십자: 평면 위 · 점선 원/물결 번호: 평면 밖 점의 투영 위치',legend);el('p',`${identity.name} (${identity.id}) · ${identity.date} · Study ${cell.study}`,legend);
+          for(const annotation of annotations){
+            const row=el('div',undefined,legend);row.dataset.annotationId=annotation.id;row.dataset.plane=String(index+1);row.dataset.offset=String(annotation.offset);row.dataset.x=String(annotation.xy[0]);row.dataset.y=String(annotation.xy[1]);
+            el('strong',`${annotation.number}. ${annotation.label}`,row);
+            el('p',`${annotation.visible?(annotation.onCanvas?'Visible marker':'Outside image'):'Hidden marker'} · ${Math.abs(annotation.offset)<=.01?'On plane':annotation.offset.toFixed(2)+' mm off plane'} · L/P/H (mm): ${annotation.point.map(n=>Number(n.toFixed(3))).join(' / ')}`,row);
+          }
+        }
         el('p',`Study ${cell.study}\nSource series ${cell.series} · ${job.snapshot.volume.sops.length} original CT instances\nReconstructed display · no original SOP for this plane`,figure).className='reference';return;
       }
       const edit = outputEdits[index] || defaultEdit(), properties = outputProperties(cell, edit);
@@ -393,21 +402,21 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
     if (!current) return; const ticket = ++serial, item = current, reportChoice = reportSource.value; clear(); status.textContent = '저장한 영상 상태를 확인하는 중…';
     try { await bounded(async signal => {
       const data = await state(item, signal, reportChoice); valid(ticket, signal); const snapshot = data.job.snapshot;
-      if (![2, 3, 5].includes(snapshot.version)) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
+      if (![2, 3, 4, 5, 6].includes(snapshot.version)) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
       verifyAnnotationSet(data.job);
       if (controlJob && !equal(controlJob.snapshot, snapshot)) edits = [];
       controlJob = data.job; const outputEdits = snapshot.cells.map((_, index) => structuredClone(edits[index] || defaultEdit()));
-      controls.hidden=snapshot.version===5;controls.style.display=snapshot.version===5?'none':'flex';
+      controls.hidden=[4,5,6].includes(snapshot.version);controls.style.display=[4,5,6].includes(snapshot.version)?'none':'flex';
       caption.textContent = (item.snapshot ? '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님 · Job 저장 안 함' : '저장 상태를 기준으로 출력만 조절합니다') + ' · ' + annotationMode(data.job) + ' · 실제 크기 아님.';
       let total = 0;
       for (const cell of snapshot.cells) if (cell) { const { width, height } = cell.viewport || {}; total += width * height;
         if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 8192) || width * height > 16777216 || total > 33554432) throw new Error('저장 화면 크기가 출력 한도를 초과했습니다.'); }
       const images = [], budget = { bytes: 0, sourcePixels: 0 };let batchOutput;
-      if(snapshot.version===5){
+      if([4,5,6].includes(snapshot.version)){
         if(typeof window.kinRenderVolumeJobPrint!=='function')throw new Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
         batchOutput=await window.kinRenderVolumeJobPrint({snapshot,api,bytes,signal,check:()=>valid(ticket,signal)});valid(ticket,signal);
-        for(const row of batchOutput.frames){const url=URL.createObjectURL(row.blob);urls.push(url);images.push(url);}batchOutput.scout.url=URL.createObjectURL(batchOutput.scout.blob);urls.push(batchOutput.scout.url);
-        caption.textContent='저장한 생성 조건과 전체 CT 원본으로 단면 묶음을 재구성합니다. 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
+        for(const row of batchOutput.frames){const url=URL.createObjectURL(row.blob);urls.push(url);images.push(url);}if(batchOutput.scout){batchOutput.scout.url=URL.createObjectURL(batchOutput.scout.blob);urls.push(batchOutput.scout.url);}
+        caption.textContent='저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다. 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
       }else for (const [index, cell] of snapshot.cells.entries()) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget, cellAnnotations(data.job, cell), outputEdits[index]) : null); }
       const latest = await state(item, signal, reportChoice); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
       ready = { data, reportChoice, html: html(data, images, outputEdits,batchOutput) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
@@ -415,7 +424,7 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
       const selected = selection.value; selection.replaceChildren(); el('option', '전체 영상 셀', selection).value = 'all';
       snapshot.cells.forEach((cell, index) => { if (cell) el('option', '셀 ' + (index + 1), selection).value = String(index); });
       selection.value = [...selection.options].some(o => o.value === selected) ? selected : 'all';
-      dirtyControls = false; controls.disabled = snapshot.version===5;refresh.disabled = reportSource.disabled = false; syncControls();
+      dirtyControls = false; controls.disabled = [4,5,6].includes(snapshot.version);refresh.disabled = reportSource.disabled = false; syncControls();
       status.textContent = printButton.disabled ? '페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.' : '미리보기 내용을 확인하세요. ' + annotationMode(data.job) + ' · 실제 크기 아님.';
     }); } catch (error) { if (ticket === serial) { clear(); controls.disabled = !controlJob; refresh.disabled = reportSource.disabled = false; selection.disabled = false; status.textContent = error.message; } }
   }
@@ -440,9 +449,9 @@ window.kinViewerJobPrint = function ({ api, authenticate, live }) {
   dialog.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function open(item) {
     close(); reportSource.value = 'none'; current = item;
-    controls.hidden=item.version===5;controls.style.display=item.version===5?'none':'flex';
+    controls.hidden=[4,5,6].includes(item.version);controls.style.display=[4,5,6].includes(item.version)?'none':'flex';
     for (const option of [...reportSource.options]) if (['prior', 'both'].includes(option.value)) option.remove();
-    heading.textContent = item.version===5?'Saved MPR Batch Output':item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    heading.textContent = [4,5,6].includes(item.version)?'Saved MPR Output':item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();

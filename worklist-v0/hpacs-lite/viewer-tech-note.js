@@ -201,6 +201,18 @@ function kinPrepareVolumeAverage(viewport,volume){
         // Include half-float rounding at the endpoints; this is an unfiltered mean.
         const padding=Math.max(1,Math.abs(range[0]),Math.abs(range[1]))/512/info.dataComputedScale[0];
         mapper.setIpScalarRange(-padding,1+padding);
+        // The pinned shader adds whole samples but divides by fractional ray
+        // distance. Count accepted samples to preserve constant/offset CT values.
+        const patches=[
+          ['vec4 sum = vec4(0.);','vec4 sum = vec4(0.); float kinAverageSamples = 0.0;'],
+          ['sum += tValue;','sum += tValue; kinAverageSamples += 1.0;'],
+          ['sum /= vec4(stepsTraveled, stepsTraveled, stepsTraveled, 1.0);','sum /= vec4(max(kinAverageSamples, 1.0), max(kinAverageSamples, 1.0), max(kinAverageSamples, 1.0), 1.0);']
+        ];
+        const literalPattern=value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+        const properties=mapper.getViewSpecificProperties()||{},openGL=properties.OpenGL||{},existing=openGL.ShaderReplacements||[];
+        // vtk treats global anchors as RegExp; escape the literal GLSL syntax.
+        mapper.setViewSpecificProperties({...properties,OpenGL:{...openGL,ShaderReplacements:[...existing.filter(r=>!patches.some(([value])=>r.originalValue===value||r.originalValue===literalPattern(value))),...patches.map(([value,replacementValue])=>({shaderType:'Fragment',originalValue:literalPattern(value),replacementValue,replaceFirst:true,replaceAll:true}))]}});
+
 }
 
 function kinCreateVolumeProjection({services,selected,live,allowed=live,host}){

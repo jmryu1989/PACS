@@ -89,8 +89,8 @@ class VolumeJobsE2E(VolumeProjectionE2E):
  def test_volume_job_06_display_job_does_not_print_as_a_source_frame(self):
   from pathlib import Path
   a,p,v=self.opened_projection();self.project(v,1,20);self.save_volume(v);original=self.originals()
-  expect(v.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(0)
-  v.get_by_role('button',name='Print Current View',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('MPR 출력은 저장된 단면 묶음에서 지원합니다. Make Batch 후 Save New Job으로 저장하세요.')
+  expect(v.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(1)
+  v.get_by_role('button',name='Print Current View',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('현재 MPR은 Save New Job으로 저장한 뒤 Print Saved Images로 출력하세요.')
   expect(v.locator('#kin-job-print')).to_have_count(0);self.assertEqual(self.originals(),original)
   folder=Path('../tmp/volume-job/screens');folder.mkdir(parents=True,exist_ok=True);v.get_by_role('button',name='Restore Job',exact=True).scroll_into_view_if_needed();v.screenshot(path=str(folder/'mpr-saved-workspace.png'))
  def test_volume_job_07_missing_optional_asset_keeps_stack_jobs(self):

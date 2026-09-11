@@ -72,7 +72,7 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
       if(typeof mapper.setViewSpecificProperties!=='function')throw Error('단면 묶음의 고정 샘플링을 지원하지 않는 뷰어입니다.');
       mapper.setViewSpecificProperties({OpenGL:{ShaderReplacements:[{shaderType:'Fragment',originalValue:'float jitter = 0.01 + 0.99*texture2D(jtexture, gl_FragCoord.xy/32.0).r;',replacementValue:'float jitter = 0.5;',replaceFirst:true,replaceAll:false}]}});
       view.setProperties({invert:false,colormap:{name:'Grayscale',opacity:1}});view.setProperties(properties);
-      const blend=saved?saved.cell.projection.blend:source.getActors()[0].actor.getMapper().getBlendMode();if(blend===3)window.kinPrepareVolumeAverage(view,volume);view.setBlendMode(blend);view.setSlabThickness(saved?saved.cell.projection.thickness/2:source.getSlabThickness());
+      const blend=saved?saved.cell.projection.blend:source.getActors()[0].actor.getMapper().getBlendMode();if(blend===3)window.kinPrepareVolumeAverage(view,volume);view.setBlendMode(blend);const halfThickness=saved?saved.cell.projection.thickness/2:source.getSlabThickness();if(Math.abs(halfThickness-.05)<1e-8)view.resetSlabThickness();else view.setSlabThickness(halfThickness);if(Math.abs(view.getSlabThickness()-halfThickness)>1e-6)throw Error('생성 단면의 두께를 재현하지 못했습니다.');
       const frames=[];let bytes=0;
       for(let i=0;i<plan.cameras.length;i++){
         check();const c=structuredClone(plan.cameras[i]);delete c.rotation;view.setCamera(c);

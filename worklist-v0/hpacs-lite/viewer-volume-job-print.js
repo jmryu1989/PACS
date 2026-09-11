@@ -1,8 +1,8 @@
 /* Reconstruct saved batch output from private, freshly read CT pixels. */
 window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check}){
   const core=window.cornerstone,reference=snapshot.volume,batch=snapshot.batch;
-  if(snapshot.version!==5||!batch||typeof window.KinVolumeBatch?.plan!=='function'||typeof window.KinVolumeBatchScout?.camera!=='function'||typeof window.KinVolumeBatchScout?.line!=='function'||typeof window.kinRenderVolumeScout!=='function')throw Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
-  if(batch.cell.projection.blend===3&&typeof window.kinPrepareVolumeAverage!=='function')throw Error('평균 투영 출력 도구를 불러오지 못했습니다.');
+  if(![4,5,6].includes(snapshot.version)||batch&&(typeof window.KinVolumeBatch?.plan!=='function'||typeof window.KinVolumeBatchScout?.camera!=='function'||typeof window.KinVolumeBatchScout?.line!=='function'||typeof window.kinRenderVolumeScout!=='function'))throw Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
+  if((batch?[batch.cell]:snapshot.cells).some(cell=>cell.projection.blend===3)&&typeof window.kinPrepareVolumeAverage!=='function')throw Error('평균 투영 출력 도구를 불러오지 못했습니다.');
   const fail=()=>{throw Error('저장한 CT 원본의 화소·좌표를 확인할 수 없습니다.');};
   const list=value=>Array.isArray(value)?value.map(Number):String(value).split('\\').map(Number);
   const near=(a,b)=>a.length===b.length&&a.every((n,i)=>Number.isFinite(n)&&Math.abs(n-b[i])<.001);
@@ -64,29 +64,54 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
     // Local pixel insertion has no streaming loader to mark texture slices.
     // Upload every private frame before the first reconstructed plane renders.
     volume.invalidate();
-    engine=new core.RenderingEngine(id);const base={...structuredClone(batch.cell.camera),parallelProjection:true},corners=[0,dimensions[0]-1].flatMap(a=>[0,dimensions[1]-1].flatMap(b=>[0,dimensions[2]-1].map(c=>Array.from(volume.imageData.indexToWorld([a,b,c])))));
-    const plan=window.KinVolumeBatch.plan({camera:base,corners,...batch,width:batch.cell.viewport.width,height:batch.cell.viewport.height});
+    engine=new core.RenderingEngine(id);const base={...structuredClone((batch?.cell||snapshot.cells[0]).camera),parallelProjection:true},corners=[0,dimensions[0]-1].flatMap(a=>[0,dimensions[1]-1].flatMap(b=>[0,dimensions[2]-1].map(c=>Array.from(volume.imageData.indexToWorld([a,b,c])))));
+    const plan=batch?window.KinVolumeBatch.plan({camera:base,corners,...batch,width:batch.cell.viewport.width,height:batch.cell.viewport.height}):{columns:snapshot.cells[0].viewport.width,rows:snapshot.cells[0].viewport.height,cameras:snapshot.cells.map(c=>c.camera)};
+    const specs=plan.cameras.map((camera,index)=>({cell:batch?batch.cell:snapshot.cells[index],camera,width:batch?plan.columns:snapshot.cells[index].viewport.width,height:batch?plan.rows:snapshot.cells[index].viewport.height}));
+    const marks=snapshot.version===6?window.KinVolumeMarks?.normalize(snapshot.marks):null;
+    if(snapshot.version===6&&(!marks||marks.marks.some(m=>!window.KinVolumeMarks.inVolume(m.point,volume))))throw Error('저장 표식의 원본 좌표를 확인할 수 없습니다.');
     element=document.createElement('div');element.dataset.kinBatchPrintRender='1';element.style.cssText='position:fixed;left:-20000px;top:0;width:'+(plan.columns/devicePixelRatio)+'px;height:'+(plan.rows/devicePixelRatio)+'px';document.body.append(element);
-    engine.enableElement({viewportId:id,type:core.Enums.ViewportType.ORTHOGRAPHIC,element,defaultOptions:{suppressEvents:true}});const view=engine.getViewport(id);view.suppressEvents=false;
+    let view;
+    const frames=[];let encoded=0;
+    for(const spec of specs){
+      check();const {cell,camera,width,height}=spec;
+      element.style.width=(width/devicePixelRatio)+'px';element.style.height=(height/devicePixelRatio)+'px';
+      if(!view||!batch){if(view)engine.disableElement(id);
+    engine.enableElement({viewportId:id,type:core.Enums.ViewportType.ORTHOGRAPHIC,element,defaultOptions:{suppressEvents:true}});view=engine.getViewport(id);view.suppressEvents=false;
     await pending((resolve,reject)=>{view.setVolumes([{volumeId:id}]).then(resolve,reject);});check();
     view.getActors()[0].actor.getMapper().setViewSpecificProperties({OpenGL:{ShaderReplacements:[{shaderType:'Fragment',originalValue:'float jitter = 0.01 + 0.99*texture2D(jtexture, gl_FragCoord.xy/32.0).r;',replacementValue:'float jitter = 0.5;',replaceFirst:true,replaceAll:false}]}});
-    view.setProperties({invert:false,colormap:{name:'Grayscale',opacity:1}});view.setProperties(batch.cell.properties);
-    if(batch.cell.projection.blend===3){
-      // A fresh GL context has no range metadata until its texture uploads.
-      // Initialize it with a private thin render before preparing Average.
-      view.setBlendMode(0);view.setSlabThickness(.05);
+      }
+      if(!batch||frames.length===0){
+      view.setProperties({invert:false,colormap:{name:'Grayscale',opacity:1}});view.setProperties(cell.properties);
+      if(cell.projection.blend===3){
+        view.setBlendMode(0);view.setSlabThickness(.05);
+        await pending(resolve=>{const done=()=>resolve();element.addEventListener(core.Enums.Events.IMAGE_RENDERED,done,{once:true});view.render();return ()=>element.removeEventListener(core.Enums.Events.IMAGE_RENDERED,done);},5000);check();
+        window.kinPrepareVolumeAverage(view,volume);
+      }
+      view.setBlendMode(cell.projection.blend);
+      // The pinned setter clamps half-thickness to 0.1, but its native MPR
+      // default is 0.05. Reset preserves a saved 0.1 mm total slab.
+      if(Math.abs(cell.projection.thickness-.1)<1e-8)view.resetSlabThickness();else view.setSlabThickness(cell.projection.thickness/2);
+      if(Math.abs(view.getSlabThickness()*2-cell.projection.thickness)>1e-6)throw Error('저장한 단면 두께를 출력에 재현하지 못했습니다.');
+      }
+      const next={...camera};delete next.rotation;view.setCamera(next);
       await pending(resolve=>{const done=()=>resolve();element.addEventListener(core.Enums.Events.IMAGE_RENDERED,done,{once:true});view.render();return ()=>element.removeEventListener(core.Enums.Events.IMAGE_RENDERED,done);},5000);check();
-      window.kinPrepareVolumeAverage(view,volume);
+      const actual=view.getCamera(),canvas=view.getCanvas();if(canvas.width!==width||canvas.height!==height||Math.abs(actual.parallelScale-camera.parallelScale)>1e-5||actual.flipHorizontal!==camera.flipHorizontal||actual.flipVertical!==camera.flipVertical||['focalPoint','position','viewPlaneNormal','viewUp'].some(key=>actual[key].some((n,i)=>Math.abs(n-camera[key][i])>1e-5)))throw Error('출력 단면의 크기·환자 좌표를 재현하지 못했습니다.');
+      const annotations=(marks?.marks||[]).map((mark,index)=>{
+        const xy=view.worldToCanvas(mark.point).map(n=>n*devicePixelRatio),offset=window.KinVolumeMarks.signedOffset(mark.point,actual);
+        if(xy.some(n=>!Number.isFinite(n))||!Number.isFinite(offset))throw Error('출력 표식의 평면 위치를 확인할 수 없습니다.');
+        return {...mark,number:index+1,xy,offset,visible:marks.visible,onCanvas:xy[0]>=0&&xy[1]>=0&&xy[0]<width&&xy[1]<height};
+      });
+      let output=canvas;
+      if(annotations.some(a=>a.visible&&a.onCanvas)){
+        output=document.createElement('canvas');output.width=width;output.height=height;const ctx=output.getContext('2d');ctx.drawImage(canvas,0,0);ctx.font='14px sans-serif';ctx.textBaseline='top';
+        for(const a of annotations.filter(a=>a.visible&&a.onCanvas)){
+          const [x,y]=a.xy,offPlane=Math.abs(a.offset)>.01;ctx.lineWidth=3;ctx.strokeStyle='#000';ctx.beginPath();if(offPlane){ctx.setLineDash([2,2]);ctx.arc(x,y,5,0,Math.PI*2);}else{ctx.setLineDash([]);ctx.moveTo(x-5,y);ctx.lineTo(x+5,y);ctx.moveTo(x,y-5);ctx.lineTo(x,y+5);}ctx.stroke();ctx.lineWidth=1;ctx.strokeStyle='#ffdb55';ctx.stroke();ctx.setLineDash([]);
+          const label=(offPlane?'~':'')+String(a.number),tx=Math.max(0,Math.min(width-ctx.measureText(label).width-2,x+7)),ty=Math.max(0,Math.min(height-16,y+7));ctx.lineWidth=3;ctx.strokeStyle='#000';ctx.strokeText(label,tx,ty);ctx.fillStyle='#ffdb55';ctx.fillText(label,tx,ty);
+        }
+      }
+      const blob=await pending((resolve,reject)=>{output.toBlob(value=>value?resolve(value):reject(Error('출력 단면을 만들지 못했습니다.')),'image/png');});check();encoded+=blob.size;if(encoded>32*1024*1024)throw Error('출력 단면 용량 한도를 초과했습니다.');frames.push({blob,camera:actual,cell,width,height,annotations});
     }
-    view.setBlendMode(batch.cell.projection.blend);view.setSlabThickness(batch.cell.projection.thickness/2);
-    const frames=[];let encoded=0;
-    for(const camera of plan.cameras){
-      check();const next={...camera};delete next.rotation;view.setCamera(next);
-      await pending(resolve=>{const done=()=>resolve();element.addEventListener(core.Enums.Events.IMAGE_RENDERED,done,{once:true});view.render();return ()=>element.removeEventListener(core.Enums.Events.IMAGE_RENDERED,done);},5000);check();
-      const actual=view.getCamera(),canvas=view.getCanvas();if(canvas.width!==plan.columns||canvas.height!==plan.rows||['focalPoint','position','viewPlaneNormal','viewUp'].some(key=>actual[key].some((n,i)=>Math.abs(n-camera[key][i])>1e-5)))throw Error('출력 단면의 크기·환자 좌표를 재현하지 못했습니다.');
-      const blob=await pending((resolve,reject)=>{canvas.toBlob(value=>value?resolve(value):reject(Error('출력 단면을 만들지 못했습니다.')),'image/png');});check();encoded+=blob.size;if(encoded>32*1024*1024)throw Error('출력 단면 용량 한도를 초과했습니다.');frames.push({blob,camera:actual});
-    }
-    const scout=await window.kinRenderVolumeScout({engine,volume,base,corners,frames,properties:batch.cell.properties,signal,check,pending:(_signal,setup,ms)=>pending(setup,ms)});check();if(encoded+scout.blob.size>32*1024*1024)throw Error('출력 단면 용량 한도를 초과했습니다.');
+    const scout=batch?await window.kinRenderVolumeScout({engine,volume,base,corners,frames,properties:batch.cell.properties,signal,check,pending:(_signal,setup,ms)=>pending(setup,ms)}):null;check();if(encoded+(scout?.blob.size||0)>32*1024*1024)throw Error('출력 단면 용량 한도를 초과했습니다.');
     return {frames,scout,width:plan.columns,height:plan.rows};
   }finally{
     engine?.destroy();element?.remove();if(core.cache.getVolume(id))core.cache.removeVolumeLoadObject(id);
