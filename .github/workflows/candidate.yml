@@ -1,0 +1,61 @@
+name: Validate immutable deployment candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full lowercase 40-character commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - name: Checkout reviewed runner tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: tools
+          persist-credentials: false
+      - name: Validate immutable candidate input
+        run: python3 -B tools/tests/candidate_ci.py --check-sha "$CANDIDATE_SHA"
+      - name: Checkout immutable candidate separately
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          path: target
+          persist-credentials: false
+      - name: Keep browser install independent of unused Chrome APT repository
+        run: |
+          python3 -B tools/tests/ci_browser_apt_test.py
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 tools/scripts/ci_browser_apt.py
+      - name: Install candidate pinned synthetic test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/candidate-python"
+          "$RUNNER_TEMP/candidate-python/bin/python" -m pip install -r target/tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/candidate-python/bin/python" -m playwright install --with-deps chromium
+      - name: Candidate runner guards and exact sequence
+        run: "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci_test.py
+      - name: Final candidate invariants, worklist and cumulative workflows
+        timeout-minutes: 26
+        run: "$RUNNER_TEMP/candidate-python/bin/python" -B tools/tests/candidate_ci.py --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA"
+      - name: Sanitized immutable candidate evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-${{ inputs.candidate_sha }}
+          path: target/tests/e2e/artifacts/candidate-ci/
+          if-no-files-found: error
+          retention-days: 7
