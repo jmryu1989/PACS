@@ -6,7 +6,7 @@ import time
 import unittest
 
 from playwright.sync_api import sync_playwright, expect, Error as PlaywrightError
-from viewer_hanging_protocol_dom_test import library
+from viewer_hanging_protocol_dom_test import library, plane
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = (ROOT / 'config' / 'ohif.js').read_text(encoding='utf-8')
@@ -35,17 +35,28 @@ const sets=[stack('ds-current',currentUID,'9.9.2.1','Brain Axial'),stack('ds-rel
  {...stack('bad-handler',currentUID,'9.9.2.2','Brain Axial'),SOPClassHandlerId:'other'},
  {...stack('bad-composite',currentUID,'9.9.2.3','Brain Axial'),isCompositeStack:true},
  stack('split-a',currentUID,'9.9.2.4','Brain Axial'),stack('split-b',currentUID,'9.9.2.4','Brain Axial'),
- {...stack('mixed-images',currentUID,'9.9.2.5','Brain Axial'),images:[image(currentUID,'9.9.2.5'),image(relatedUID,'9.9.2.5')]}];
+ {...stack('mixed-images',currentUID,'9.9.2.5','Brain Axial'),images:[image(currentUID,'9.9.2.5'),image(relatedUID,'9.9.2.5')]},
+ {...stack('ds-volume',currentUID,'9.9.2.6','Brain Volume'),images:[0,1,2].map(n=>({...image(currentUID,'9.9.2.6'),
+   SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',SOPInstanceUID:'1.2.9.'+n}))}];
 let setCalls=[];
 const viewports=new Map([['old',{viewportId:'old',x:0,y:0,width:1,height:1,displaySetInstanceUIDs:['ds-current']}]]);
 let layout={numRows:1,numCols:1,layoutType:'grid',version:0},activeViewportId='old';
 const grid={getState:()=>({layout,activeViewportId,viewports}),
  setLayout:value=>{setCalls.push(value);const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));
    setTimeout(()=>{layout={numRows:value.numRows,numCols:value.numCols,layoutType:'grid',version:layout.version+1};activeViewportId=value.activeViewportId;
-     viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs}));},10);
+     viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs,options:v.viewportOptions}));},10);
    return Promise.resolve();}};
 const viewport={type:'stack',getCurrentImageId:()=>'/synthetic/image',getCurrentImageIdIndex:()=>0,getCamera:()=>({scale:1}),getProperties:()=>({voiRange:{lower:-100,upper:200}})};
-const services={viewportGridService:grid,displaySetService:{getActiveDisplaySets:()=>sets,getDisplaySetByUID:id=>sets.find(s=>s.displaySetInstanceUID===id)},cornerstoneViewportService:{getCornerstoneViewport:()=>viewport}};
+// Native orientation presets in patient space, so a requested plane can be checked as geometry.
+const PLANES={axial:[0,0,-1],sagittal:[1,0,0],coronal:[0,1,0]};
+const planeViewports=new Map();
+const cornerstone={getCornerstoneViewport:id=>{const options=viewports.get(id)?.options;
+  if(!options||options.viewportType!=='volume')return viewport;
+  // One stable instance per viewport, as the native service returns.
+  if(!planeViewports.has(id))planeViewports.set(id,{type:'orthographic',getCurrentImageId:()=>null,getCurrentImageIdIndex:()=>null,
+    getCamera:()=>({viewPlaneNormal:PLANES[options.orientation],focalPoint:[0,0,0],parallelScale:100}),getProperties:()=>({})});
+  return planeViewports.get(id);}};
+const services={viewportGridService:grid,displaySetService:{getActiveDisplaySets:()=>sets,getDisplaySetByUID:id=>sets.find(s=>s.displaySetInstanceUID===id)},cornerstoneViewportService:cornerstone};
 window.mountLayout=()=>{viewerLayoutExtension.preRegistration({servicesManager:{services}});viewerLayoutExtension.onModeEnter()};
 </script>
 """
@@ -154,6 +165,28 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
         self.change_owner_after = self.me_count + 1
         self.page.locator('#kin-hp-apply').click(); expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
         self.assertEqual(0, self.page.evaluate('setCalls.length'))
+
+
+    def test_actual_mount_opens_plane_cells_of_one_eligible_volume(self):
+        value = library('Volume Three Plane'); rule = value['rules'][0]
+        rule['selectors'] = [rule['selectors'][0]]
+        rule['selectors'][0]['description'] = {'operator': 'contains', 'value': 'Volume'}
+        rule['layout'] = {'rows': 2, 'cols': 2, 'cells': [plane('Current', 'axial'), plane('Current', 'sagittal'),
+                                                          plane('Current', 'coronal'), None]}
+        self.page.evaluate("value=>localStorage.setItem('kin-hanging-protocols:v1:'+JSON.stringify(['hospital','reader']),JSON.stringify(value))", value)
+        self.mount(); self.page.locator('#kin-hp-apply').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('Applied')
+        result = self.page.evaluate("""()=>({calls:setCalls.length,cells:[...viewports.values()].map(v=>v.displaySetInstanceUIDs),
+          options:[...viewports.values()].map(v=>[v.options.viewportType,v.options.toolGroupId,v.options.orientation??null]),
+          normals:[...viewports.values()].map(v=>cornerstone.getCornerstoneViewport(v.viewportId).getCamera().viewPlaneNormal??null),
+          report:document.querySelector('#report').value})""")
+        self.assertEqual(1, result['calls'])
+        self.assertEqual([['ds-volume'], ['ds-volume'], ['ds-volume'], []], result['cells'],
+                         'the mounted rule opens one eligible volume in three cells and leaves the vacancy empty')
+        self.assertEqual([['volume', 'mpr', 'axial'], ['volume', 'mpr', 'sagittal'],
+                          ['volume', 'mpr', 'coronal'], ['stack', 'default', None]], result['options'])
+        self.assertEqual([[0, 0, -1], [1, 0, 0], [0, 1, 0], None], result['normals'])
+        self.assertEqual('KEEP REPORT', result['report'])
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

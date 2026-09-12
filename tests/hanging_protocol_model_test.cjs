@@ -37,6 +37,51 @@ test('schema rejects extra keys, noncanonical tokens, names/aliases, active ids 
   const tooMany=library();while(tooMany.rules.length<21)tooMany.rules.push(rule(crypto.randomUUID(),'Rule '+tooMany.rules.length));assert.equal(model.normalize(tooMany),null);
 });
 
+const CT_IMAGE='1.2.840.10008.5.1.4.1.1.2';
+const slice=(n,patch={})=>({...image(),SOPClassUID:CT_IMAGE,SOPInstanceUID:'1.2.9.'+n,...patch});
+const volume=(uid,study,number,patch={})=>display(uid,study,number,{images:[slice(1),slice(2),slice(3)],...patch});
+const plane=(alias,orientation)=>({alias,view:'mpr',orientation});
+
+test('plane cells stay one viewport each, keep string cells byte-identical and reject unknown shapes',()=>{
+  const value=library(),r=value.rules[0];
+  r.layout={rows:2,cols:2,cells:[plane('Current','axial'),plane('Current','sagittal'),plane('Current','coronal'),null]};
+  assert.deepEqual(plain(model.normalize(value)),value,'a three-plane layout round trips without a version bump');
+  assert.equal(model.normalize(value).rules[0].layout.cells.length,4,'three planes are three cells, never one cell that expands');
+  const mixed=library();mixed.rules[0].layout={rows:1,cols:2,cells:['Current',plane('Current','coronal')]};
+  assert.deepEqual(plain(model.normalize(mixed)),mixed);
+  assert.equal(typeof model.normalize(mixed).rules[0].layout.cells[0],'string','a stack cell is still the bare alias string');
+  const mutations=[v=>v.rules[0].layout.cells[0]={...plane('Current','axial'),thickness:5},v=>v.rules[0].layout.cells[0]=plane('Current','oblique'),
+    v=>v.rules[0].layout.cells[0]={...plane('Current','axial'),view:'vr'},v=>v.rules[0].layout.cells[0]={...plane('Current','axial'),view:'stack'},
+    v=>v.rules[0].layout.cells[0]=plane('Missing','axial'),v=>v.rules[0].layout.cells[0]=plane('current','axial'),
+    v=>v.rules[0].layout.cells={0:plane('Current','axial'),length:1},v=>v.rules[0].layout.cells[1]=plane('Current','axial')];
+  for(const mutate of mutations){const broken=library();broken.rules[0].layout={rows:1,cols:2,cells:[plane('Current','axial'),null]};mutate(broken);
+    assert.equal(model.normalize(broken),null,JSON.stringify(broken.rules[0].layout));}
+  assert.deepEqual(model.cellSpec('Current'),{alias:'Current',view:'stack',orientation:null});
+  assert.deepEqual(model.cellSpec(plane('Current','axial')),{alias:'Current',view:'mpr',orientation:'axial'});
+  assert.equal(model.cellSpec({alias:'Current',view:'mpr'}),null);
+});
+
+test('a plane cell needs one eligible CT volume and fails before any layout change',()=>{
+  const value=library(),r=value.rules[0];
+  r.layout={rows:2,cols:2,cells:[plane('Current','axial'),plane('Current','sagittal'),plane('Current','coronal'),null]};
+  const context=sets=>({studies:[studies()[0]],displaySets:sets});
+  const good=volume('1.2.1.1','1.2.1',1),result=model.resolve(value,context([good]));
+  assert.equal(result.kind,'match');
+  assert.deepEqual(result.cells.map(cell=>cell&&cell.displaySetInstanceUID),['ds-1.2.1.1','ds-1.2.1.1','ds-1.2.1.1',null],
+    'every plane of the layout references the same single volume');
+  for(const patch of [{Modality:'MR'},{images:[slice(1)]},{images:[slice(1),{...slice(2),SOPClassUID:'1.2.840.10008.5.1.4.1.1.7'}]},
+    {images:[slice(1),slice(1)]},{images:[slice(1),{...slice(2),SOPInstanceUID:''}]}]){
+    const rejected=model.resolve(value,context([volume('1.2.1.1','1.2.1',1,patch)]));
+    assert.equal(rejected.kind,'no-match',JSON.stringify(patch));
+  }
+  const split=[volume('1.2.1.1','1.2.1',1),{...volume('1.2.1.1','1.2.1',1),displaySetInstanceUID:'split'}];
+  assert.equal(model.resolve(value,context(split)).kind,'no-match','a split series is refused before the screen changes');
+  // The same source stays a valid ordinary stack cell: legacy rules keep behaving identically.
+  const stack=library();assert.equal(model.resolve(stack,context([display('1.2.1.1','1.2.1',1)])).kind,'match');
+  assert.equal(model.volumeEligible(good),true);
+  assert.equal(model.volumeEligible(display('1.2.1.1','1.2.1',1)),false);
+});
+
 test('owner scoped storage is strict and separates accounts',()=>{
   const memory=new Map(),storage={getItem:k=>memory.get(k)??null,setItem:(k,v)=>memory.set(k,v)};
   const a=model.ownerKey({institution:'hospital',subject:'a'}),b=model.ownerKey({institution:'hospital',subject:'b'});assert.notEqual(a,b);

@@ -181,7 +181,8 @@ class ExecutionSelectionTests(unittest.TestCase):
                 cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
                 self.assertEqual({row['case'] for row in plan['tests']},
                     {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_hp_')})
-                self.assertEqual(len(plan['tests']),4)
+                # test_hp_05 added the reconstructed-cell flow to the same declared selection.
+                self.assertEqual(len(plan['tests']),5)
 
 
 if __name__ == '__main__':

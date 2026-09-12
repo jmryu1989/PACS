@@ -12,6 +12,22 @@
     return own(v,['operator','value'])&&['equals','contains'].includes(v.operator)&&text(v.value,128)?{operator:v.operator,value:v.value}:null;
   }
   const alias=v=>typeof v==='string'&&/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(v)?v:null;
+  // A layout cell is always one viewport. A reconstructed cell therefore names its own
+  // plane; three planes of one series are three cells, not one cell that expands.
+  const VIEWS=['mpr'],ORIENTATIONS=['axial','sagittal','coronal'],CT_IMAGE='1.2.840.10008.5.1.4.1.1.2';
+  function cellSpec(value){
+    if(typeof value==='string'){const name=alias(value);return name?{alias:name,view:'stack',orientation:null}:null;}
+    if(!own(value,['alias','view','orientation']))return null;
+    const name=alias(value.alias);
+    return name&&VIEWS.includes(value.view)&&ORIENTATIONS.includes(value.orientation)?{alias:name,view:value.view,orientation:value.orientation}:null;
+  }
+  // The same source predicate the MPR job and Recent Layout already require of a volume.
+  function volumeEligible(displaySet){
+    const images=displaySet?.images;
+    if(exactToken(displaySet?.Modality,16)!=='CT'||!Array.isArray(images)||images.length<2)return false;
+    const sops=images.map(image=>image?.SOPInstanceUID);
+    return images.every((image,index)=>image?.SOPClassUID===CT_IMAGE&&uid(sops[index]))&&new Set(sops).size===sops.length;
+  }
   function condition(v,laterality,strict=true){
     const keys=['modality','retrieveAE','bodyPart','description',...(laterality?['laterality']:[])];
     if(strict&&!own(v,keys))return null;
@@ -42,12 +58,14 @@
       const layout=rule.layout;
       if(!own(layout,['rows','cols','cells'])||![[1,1],[1,2],[2,2]].some(([r,c])=>layout.rows===r&&layout.cols===c)||
         !Array.isArray(layout.cells)||layout.cells.length!==layout.rows*layout.cols)return null;
-      const byAlias=new Map(selectors.map(s=>[s.alias.toLowerCase(),s])),cells=[];
+      const byAlias=new Map(selectors.map(s=>[s.alias.toLowerCase(),s])),cells=[],planes=new Set();
       for(const cell of layout.cells){
         if(cell===null){cells.push(null);continue;}
-        const aliasValue=alias(cell),selector=aliasValue&&byAlias.get(aliasValue.toLowerCase());if(!selector||aliasValue!==selector.alias)return null;cells.push(aliasValue);
+        const spec=cellSpec(cell),selector=spec&&byAlias.get(spec.alias.toLowerCase());if(!spec||!selector||spec.alias!==selector.alias)return null;
+        if(spec.view!=='stack'){const plane=spec.alias.toLowerCase()+'|'+spec.view+'|'+spec.orientation;if(planes.has(plane))return null;planes.add(plane);}
+        cells.push(spec.view==='stack'?spec.alias:{alias:spec.alias,view:spec.view,orientation:spec.orientation});
       }
-      if(!cells.some(cell=>cell!==null&&byAlias.get(cell.toLowerCase()).role==='current'))return null;
+      if(!cells.some(cell=>cell!==null&&byAlias.get(cellSpec(cell).alias.toLowerCase()).role==='current'))return null;
       ids.add(id);names.add(nameKey);rules.push({id,name,enabled:rule.enabled,match,selectors,layout:{rows:layout.rows,cols:layout.cols,cells}});
     }
     const activeRuleId=value.activeRuleId===null?null:value.activeRuleId.toLowerCase();
@@ -105,7 +123,9 @@
       const currentUid=current.uid??current.StudyInstanceUID,currentSets=sets.filter(ds=>ds?.StudyInstanceUID===currentUid);
       if(!fieldsMatch(studyMetadata(current,currentSets),rule.match))continue;
       const chosen=new Map(),byAlias=new Map(rule.selectors.map(s=>[s.alias,s]));let failed=false;
-      for(const alias of new Set(rule.layout.cells.filter(Boolean))){
+      const specs=rule.layout.cells.map(cell=>cell===null?null:cellSpec(cell));
+      const reconstructed=new Set(specs.filter(spec=>spec&&spec.view!=='stack').map(spec=>spec.alias));
+      for(const alias of new Set(specs.filter(Boolean).map(spec=>spec.alias))){
         const selector=byAlias.get(alias),study=selector.role==='current'?current:related;
         if(!study||selector.historical&&(!currentDate||!relatedDate||relatedDate>=currentDate)){failed=true;break;}
         const studyUid=study.uid??study.StudyInstanceUID;
@@ -115,9 +135,12 @@
         pool.sort((a,b)=>{const am=displayMetadata(a),bm=displayMetadata(b),an=am.seriesNumber,bn=bm.seriesNumber;
           if(an===null||bn===null){if(an===null&&bn===null){const tied=a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID);return selector.order==='ascending'?tied:-tied;}return an===null?1:-1;}
           const ordered=an-bn||a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID);return selector.order==='ascending'?ordered:-ordered;});
-        const selected=pool[selector.occurrence-1];if(!selected){failed=true;break;}chosen.set(alias,selected);
+        const selected=pool[selector.occurrence-1];if(!selected){failed=true;break;}
+        // A plane cell must fail here, before any layout change, not after the screen is gone.
+        if(reconstructed.has(alias)&&!volumeEligible(selected)){failed=true;break;}
+        chosen.set(alias,selected);
       }
-      if(!failed)return {kind:'match',rule,cells:rule.layout.cells.map(alias=>alias===null?null:chosen.get(alias))};
+      if(!failed)return {kind:'match',rule,cells:specs.map(spec=>spec===null?null:chosen.get(spec.alias))};
     }
     return {kind:'no-match'};
   }
@@ -133,6 +156,6 @@
     if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
     const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
   }
-  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,resolve,navigate};
+  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate};
   if(typeof module==='object'&&module.exports)module.exports=root.KinHangingProtocolModel;
 })(typeof globalThis==='object'?globalThis:this);

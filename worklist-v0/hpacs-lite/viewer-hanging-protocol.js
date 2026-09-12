@@ -7,6 +7,7 @@
     const live=options.live||(()=>true),fetcher=options.fetcher||root.fetch.bind(root),endpoint=options.endpoint||'/api/hanging-protocols';
     const grid=services.viewportGridService,displaySets=services.displaySetService,objects=new WeakMap();let objectSequence=0;
     let library=model.empty(),selected=null,revision=null,busy=false,ended=false,generation=0,request=null,channel=null,storageError='',appliedCursor=null,appliedFingerprint=null,appliedName=null,layoutQuarantined=false;
+    let ownedPlanes=new Map();
     const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
     host.textContent='';host.classList.add('kin-hanging-protocols');
@@ -62,6 +63,26 @@
       op.setAttribute('aria-label','Description Operator');op.onchange=()=>{if(target.description){target.description.operator=op.value;markChanged();}render();};row.prepend(op);
       if(includeLaterality)addInput(parent,'Laterality',target.laterality||'',i=>target.laterality=i.value||null,[['','Any'],['L','L'],['R','R'],['B','B']]);
     }
+    const PLANE_LABELS={axial:'Axial',sagittal:'Sagittal',coronal:'Coronal'};
+    const spec=cell=>cell===null?null:model.cellSpec(cell);
+    const plane=cell=>{const value=spec(cell);return value&&value.view!=='stack'?{view:value.view,orientation:value.orientation}:null;};
+    // One cell stays one viewport. A plane reuses the combination the saved MPR job already
+    // uses (viewer-volume-job.js), including viewportOptions.id: the native position cache keys
+    // on it, so a fresh id keeps a cached oblique presentation off a new axial viewport.
+    function viewportRequest(id,sets,cellPlane){
+      const viewportOptions=cellPlane?{id,viewportId:id,viewportType:'volume',toolGroupId:'mpr',orientation:cellPlane.orientation,allowUnmatchedView:true}
+        :{viewportId:id,viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true};
+      return {displaySetInstanceUIDs:sets,displaySetOptions:[{}],viewportOptions};
+    }
+    // The select carries one string per cell; the alias charset excludes '|', so it separates.
+    function cellValue(cell){const value=spec(cell);return !value?'':value.view==='stack'?value.alias:[value.alias,value.view,value.orientation].join('|');}
+    function cellFromValue(value){const [alias,view,orientation]=String(value||'').split('|');return !alias?null:view?{alias,view,orientation}:alias;}
+    function renameCell(cell,from,to){const value=spec(cell);if(!value||value.alias!==from)return cell;return value.view==='stack'?to:{...value,alias:to};}
+    function cellOptions(rule){
+      return [['','Vacancy'],...rule.selectors.flatMap(selector=>[[selector.alias,selector.alias],
+        ...model.VIEWS.flatMap(view=>model.ORIENTATIONS.map(orientation=>
+          [[selector.alias,view,orientation].join('|'),`${selector.alias} · ${view.toUpperCase()} ${PLANE_LABELS[orientation]||orientation}`]))])];
+    }
     function blankRule(){return {id:crypto.randomUUID(),name:'New Protocol',enabled:true,match:{modality:null,retrieveAE:null,bodyPart:null,description:null},
       selectors:[{alias:'Current1',role:'current',historical:false,modality:null,retrieveAE:null,bodyPart:null,description:null,laterality:null,order:'ascending',occurrence:1}],layout:{rows:1,cols:1,cells:['Current1']}};}
     function uniqueName(base){const used=new Set(library.rules.map(r=>fold(r.name))),stem=base.slice(0,56);let name=stem,n=2;while(used.has(fold(name)))name=(stem+' '+n++).slice(0,64);return name;}
@@ -73,17 +94,18 @@
       const study=make('fieldset');study.append(make('legend','Study Match · empty means Any'));conditionEditor(study,rule.match,false);editor.append(study);
       const selectors=make('fieldset');selectors.append(make('legend','Series Selectors'));editor.append(selectors);
       rule.selectors.forEach((selector,index)=>{const box=make('section');box.dataset.selector=String(index);box.append(make('h4',selector.alias));
-        addInput(box,'Alias (ASCII letter, then letters/numbers/_/-)',selector.alias,i=>{const old=selector.alias,next=cleanText(i,32);selector.alias=next;rule.layout.cells=rule.layout.cells.map(c=>c===old?next:c);});
+        addInput(box,'Alias (ASCII letter, then letters/numbers/_/-)',selector.alias,i=>{const old=selector.alias,next=cleanText(i,32);selector.alias=next;rule.layout.cells=rule.layout.cells.map(c=>renameCell(c,old,next));});
         addInput(box,'Role',selector.role,i=>{selector.role=i.value;selector.historical=selector.role==='related'&&selector.historical;},[['current','Current'],['related','Related']]);
         const historical=make('input');historical.type='checkbox';historical.checked=selector.historical;historical.disabled=selector.role!=='related';historical.onchange=()=>{selector.historical=historical.checked;markChanged();};const hlabel=make('label','Require strictly earlier study');hlabel.prepend(historical);box.append(hlabel);
         conditionEditor(box,selector,true);
         addInput(box,'Order',selector.order,i=>selector.order=i.value,[['ascending','Series Number ascending'],['descending','Series Number descending']]);
         addInput(box,'Occurrence',String(selector.occurrence),i=>selector.occurrence=Number(i.value));box.lastElementChild.querySelector('input').type='number';box.lastElementChild.querySelector('input').min='1';box.lastElementChild.querySelector('input').max='500';
-        const remove=make('button','Remove Selector');remove.type='button';remove.onclick=()=>{rule.selectors.splice(index,1);rule.layout.cells=rule.layout.cells.map(c=>c===selector.alias?null:c);markChanged();render();};box.append(remove);selectors.append(box);});
+        const remove=make('button','Remove Selector');remove.type='button';remove.onclick=()=>{rule.selectors.splice(index,1);rule.layout.cells=rule.layout.cells.map(c=>spec(c)?.alias===selector.alias?null:c);markChanged();render();};box.append(remove);selectors.append(box);});
       const add=make('button','Add Selector');add.type='button';add.dataset.requiresSelectorSlot='true';add.disabled=rule.selectors.length>=model.MAX_SELECTORS;add.onclick=()=>{const alias=uniqueAlias(rule,'Series');rule.selectors.push({alias,role:'related',historical:false,modality:null,retrieveAE:null,bodyPart:null,description:null,laterality:null,order:'ascending',occurrence:1});markChanged();render();};selectors.append(add);
       const layout=make('fieldset');layout.append(make('legend','Cell Layout · Vacancy leaves the cell empty'));editor.append(layout);
+      layout.append(make('p','MPR 평면은 재구성할 수 있는 CT 시리즈에서만 적용됩니다. 같은 시리즈의 Axial·Sagittal·Coronal 세 칸이 일반적인 3평면 배치이며, 조건에 맞지 않으면 현재 화면을 그대로 둡니다.'));
       addInput(layout,'Grid',rule.layout.rows+'x'+rule.layout.cols,i=>{const [rows,cols]=i.value.split('x').map(Number),old=rule.layout.cells;rule.layout={rows,cols,cells:Array(rows*cols).fill(null).map((_,n)=>old[n]??null)};},[['1x1','1 × 1'],['1x2','1 × 2'],['2x2','2 × 2']]);
-      rule.layout.cells.forEach((cell,index)=>addInput(layout,'Cell '+(index+1),cell||'',i=>rule.layout.cells[index]=i.value||null,[['','Vacancy'],...rule.selectors.map(s=>[s.alias,s.alias])]));
+      rule.layout.cells.forEach((cell,index)=>addInput(layout,'Cell '+(index+1),cellValue(cell),i=>rule.layout.cells[index]=cellFromValue(i.value),cellOptions(rule)));
       refresh();
     }
     function uniqueAlias(rule,base){const used=new Set(rule.selectors.map(s=>fold(s.alias)));let alias=base,n=2;while(used.has(fold(alias)))alias=base+n++;return alias;}
@@ -110,11 +132,19 @@
       const state=grid.getState(),layout=state.layout,views=ordered(state),rows=layout?.numRows,cols=layout?.numCols;
       if(layout?.layoutType!=='grid'||!Number.isInteger(rows)||!Number.isInteger(cols)||views.length!==rows*cols)return null;
       const cells=views.map((view,index)=>{const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(view.viewportId);
-        if(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6||((view.displaySetInstanceUIDs||[]).length&&viewport?.type!=='stack'))return null;
-        return {id:view.viewportId,sets:[...(view.displaySetInstanceUIDs||[])]};});
+        const sets=[...(view.displaySetInstanceUIDs||[])];
+        if(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6)return null;
+        if(!sets.length||viewport?.type==='stack')return {id:view.viewportId,sets,plane:null};
+        // Only a plane this controller itself built can be rebuilt; any other non-stack
+        // screen (a saved MPR job, VR) stays unknown and keeps refusing the whole apply.
+        const owned=ownedPlanes.get(view.viewportId);
+        return owned&&viewport?.type==='orthographic'&&sets.length===1&&sets[0]===owned.set?{id:view.viewportId,sets,plane:owned.plane}:null;});
       return cells.some(cell=>cell===null)?null:{rows,cols,active:state.activeViewportId,cells};
     }
-    function targetIsCurrent(ids,result){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===result.rule.layout.rows&&state.layout?.numCols===result.rule.layout.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(result.cells[index]?[result.cells[index].displaySetInstanceUID]:[]));}
+    // A plane that silently fell back to a stack is not the requested cell.
+    const planeIsCurrent=(plane,viewportId)=>!plane||services.cornerstoneViewportService?.getCornerstoneViewport?.(viewportId)?.type==='orthographic';
+    function targetIsCurrent(ids,result){const state=grid.getState(),views=ordered(state),planes=result.rule.layout.cells.map(plane);
+      return state.layout?.numRows===result.rule.layout.rows&&state.layout?.numCols===result.rule.layout.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(result.cells[index]?[result.cells[index].displaySetInstanceUID]:[])&&planeIsCurrent(planes[index],view.viewportId));}
     function boundedNative(promise,{signal=null,timeout=0}={}){
       const task=Promise.resolve(promise);task.catch(()=>{});
       return new Promise((resolve,reject)=>{
@@ -155,7 +185,7 @@
       return false;
     }
     const restore=snapshot=>grid.setLayout({numRows:snapshot.rows,numCols:snapshot.cols,activeViewportId:snapshot.active,isHangingProtocolLayout:false,
-      findOrCreateViewport:index=>({displaySetInstanceUIDs:snapshot.cells[index].sets,displaySetOptions:[{}],viewportOptions:{viewportId:snapshot.cells[index].id,viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
+      findOrCreateViewport:index=>viewportRequest(snapshot.cells[index].id,snapshot.cells[index].sets,snapshot.cells[index].plane)});
     function workspaceSafe(){
       for(const name of ['kinViewerJobWorkspaceState','kinViewerHistoryWorkspaceState']){const value=typeof root[name]==='function'?root[name]():null;if(value?.dirty||value?.busy)return false;}
       if(typeof root.kinViewerHistoryHasUnsaved==='function'&&root.kinViewerHistoryHasUnsaved())return false;
@@ -186,11 +216,12 @@
           status.textContent=navigation?(result.reason==='end'?`${navigation==='next'?'Next':'Previous'} Protocol: 저장 순서의 끝입니다. 현재 배치를 유지합니다.`:`${navigation==='next'?'Next':'Previous'} Protocol: 현재 검사와 일치하는 규칙이 없습니다. 현재 배치를 유지합니다.`):'일치하는 규칙이 없어 현재 배치를 유지합니다.';return;
         }
         if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
-        const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 stack grid에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
+        const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 영상 격자 또는 이 규칙으로 만든 MPR 배치에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
         const ids=result.cells.map(()=>`kin-hp-${crypto.randomUUID()}`),active=result.cells.findIndex(Boolean);
+        const planes=result.rule.layout.cells.map(plane);
         let targetFingerprint=null,nativeSettled=false;
         try{const pending=Promise.resolve(grid.setLayout({numRows:result.rule.layout.rows,numCols:result.rule.layout.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
-          findOrCreateViewport:index=>({displaySetInstanceUIDs:result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})}));
+          findOrCreateViewport:index=>viewportRequest(ids[index],result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],planes[index])}));
           pending.then(()=>nativeSettled=true,()=>nativeSettled=true);
           if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await boundedNative(pending,{signal:request.signal});if(!targetIsCurrent(ids,result))await waitForTarget(ids,result,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();
           if(request.signal.aborted)throw new DOMException('Aborted','AbortError');
@@ -202,6 +233,8 @@
           if(!restored||!nativeSettled){layoutQuarantined=true;invalidateApplied();const uncertain=Error('배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인하고 뷰어 창을 닫은 뒤 다시 열어 주세요.');uncertain.name='KinLayoutUnconfirmed';throw uncertain;}
           throw error;
         }
+        // Remember the planes this apply owns so a later apply can still roll back to them.
+        ownedPlanes=new Map(ids.map((id,index)=>[id,{plane:planes[index],set:result.cells[index]?.displaySetInstanceUID??null}]).filter(([,value])=>value.plane));
         appliedCursor=result.rule.id;appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;applied.textContent=`Applied Protocol: ${appliedName}`;status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;
       }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }
