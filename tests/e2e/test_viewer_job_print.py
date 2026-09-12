@@ -31,6 +31,45 @@ class ViewerJobPrintE2E(ViewerJobsE2E):
    const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);return g.displaySetInstanceUIDs?.length?v.getCanvas().toDataURL():null;
   })''')
 
+ # Per-viewport observation for pixel-preservation checks: backing-store and
+ # element size, dock state, image and camera, plus a size/hash of the canvas
+ # PNG. Printed per stage so a CI mismatch names what moved (integration run
+ # 34614022650: test_compare_reports_01 baseline vs after-print PNGs differed).
+ VIEWPORT_STATE='''stage=>[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(g=>{
+   const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);if(!g.displaySetInstanceUIDs?.length||!v)return null;
+   const c=v.getCanvas(),r=v.element.getBoundingClientRect(),png=c.toDataURL();let hash=0;for(let i=0;i<png.length;i+=7)hash=(hash*31+png.charCodeAt(i))>>>0;
+   return {stage,id:g.viewportId,canvas:[c.width,c.height],element:[Math.round(r.width),Math.round(r.height)],dpr:window.devicePixelRatio,
+    dockOpen:document.body.classList.contains('kin-dock-open'),image:v.getCurrentImageId?.()??null,index:v.getCurrentImageIdIndex?.()??null,
+    camera:v.getCamera?.()??null,properties:v.getProperties?.()??null,pngLength:png.length,pngHash:hash};
+  })'''
+ # canvas_ready only proves that some image is painted. The dock panel opened by
+ # launch_job shrinks #root afterwards and OHIF resizes the canvases on the
+ # following resize event, so a baseline taken before that lands differs from
+ # every later capture. Settled means: every backing store already matches its
+ # element box, an image is bound, and two animation frames paint identically.
+ SETTLED='''async()=>{
+   const frame=()=>new Promise(r=>requestAnimationFrame(()=>r()));
+   const cells=[...services.viewportGridService.getState().viewports.values()].filter(g=>g.displaySetInstanceUIDs?.length);
+   const state=()=>cells.map(g=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);if(!v)return null;
+    const c=v.getCanvas(),r=v.element.getBoundingClientRect(),dpr=window.devicePixelRatio;
+    return {fit:Math.abs(c.width-r.width*dpr)<=1.5&&Math.abs(c.height-r.height*dpr)<=1.5,image:v.getCurrentImageId?.()??null,png:c.toDataURL()};});
+   const first=state();if(!first.length||first.some(s=>!s||!s.fit||!s.image))return false;
+   await frame();await frame();
+   const second=state();return first.every((s,i)=>second[i]&&second[i].fit&&second[i].image===s.image&&second[i].png===s.png);
+  }'''
+
+ def observe(self,p,stage):
+  state=p.evaluate(self.VIEWPORT_STATE,stage);print('VIEWPORT_STATE '+json.dumps(state),flush=True);return state
+
+ def settled_pngs(self,p):
+  p.wait_for_function(self.SETTLED,timeout=60000);return self.pngs(p)
+
+ def assert_pixels_kept(self,p,pixels,before,stage):
+  after=self.observe(p,stage)
+  if self.pngs(p)!=pixels:
+   # The full data-URL diff is useless; the observations say what moved.
+   self.fail('viewer pixels changed between %s and %s: %s'%(before[0]['stage'] if before and before[0] else 'baseline',stage,json.dumps(dict(before=before,after=after))))
+
  def arrays(self,values):return [np.array(Image.open(io.BytesIO(base64.b64decode(x.split(',')[1]))).convert('RGB')) if x else None for x in values]
 
  def output_arrays(self,p,paper):

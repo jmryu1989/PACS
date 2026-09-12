@@ -93,14 +93,35 @@ def runs(pdf_page):
     return collected
 
 
+def line_order(group):
+    """Runs of one baseline in visual order.
+
+    Chromium emits one run per font. Where a fallback font splits a Korean/Latin
+    line (Linux CI: Liberation Sans + WenQuanYi Zen Hei), pypdf reports two
+    kinds of misleading x for the Latin runs after a switch, both seen on the
+    summary page of validate run 34614012107 (D-FOOTERPARSER: 2 exact ties and
+    7 decreases on one PDF): the same x as the preceding run, or the x of the
+    line start again although the run continues after a run placed further
+    right. A tie keeps the extraction order (never the text), and a run whose x
+    falls back to the line start keeps the position of the run before it. Any
+    other x still decides the order, so a fragment really placed to the left
+    (test_pages_00) stays first.
+    """
+    start = group[0][0] if group else None
+    ordered, cursor = [], None
+    for index, (x, text) in enumerate(group):
+        if cursor is not None and x < cursor and x == start:
+            x = cursor
+        ordered.append((x, index, text))
+        cursor = x
+    return [text for _, _, text in sorted(ordered, key=lambda item: (item[0], item[1]))]
+
+
 def lines(rows):
     grouped = {}
     for y, x, text in rows:
         grouped.setdefault(round(y, 1), []).append((x, text))
-    # Chromium can emit Korean and Latin fragments at the same x coordinate.
-    # Keep the PDF extraction order for those ties instead of sorting by text.
-    return ["".join(text for _, text in sorted(group, key=lambda item: item[0]))
-            for _, group in sorted(grouped.items(), reverse=True)]
+    return ["".join(line_order(group)) for _, group in sorted(grouped.items(), reverse=True)]
 
 
 class ViewerJobPrintPages(unittest.TestCase):
@@ -341,35 +362,56 @@ class ViewerJobPrintPages(unittest.TestCase):
             self.assertNotIn(flat("Comparison Study Report"), text)
         self.no_writes(page)
 
-    def test_pages_06_named_page_support_gate_blocks_print(self):
-        # A browser that parses margin boxes but rejects named @page rules
-        # would print continuation pages with only the shared footer, which is
-        # exactly what the per-report footer exists to prevent.
-        data = self.data("20260801", "20260901")
-        page = self.context.new_page()
-        page.set_content("<!doctype html><html><body></body></html>")
-        page.evaluate(CORNERSTONE)
-        page.add_script_tag(path=str(MODULE))
-        page.evaluate("""() => {
+    # Two ways a browser can lack named @page support: an old parser throws,
+    # a lenient one silently drops the unknown rule and keeps the rest. The
+    # gate must close the print path in both, so both are simulated.
+    UNSUPPORTED_NAMED_PAGES = {
+        "throws": """() => {
           const original = CSSStyleSheet.prototype.replaceSync;
           CSSStyleSheet.prototype.replaceSync = function (text) {
             if (/@page\\s+report-\\d+/.test(String(text))) throw new SyntaxError('named pages unsupported');
             return original.call(this, text);
           };
-        }""")
-        page.evaluate(SETUP, data)
-        page.evaluate("uid => window.__printer.open(uid, 'job-1', 2)", data["job"]["snapshot"]["studies"][0])
-        page.wait_for_function("() => document.querySelector('#kin-job-print [role=status]')"
-                               ".textContent.includes('페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.')", timeout=60000)
-        self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
-        # The preview itself is still built; only the print path is closed.
-        self.assertIn("<main>", self.srcdoc(page) or "")
-        page.select_option(SELECT, "both")
-        page.wait_for_function(SRCDOC, arg='data-report-uid="' + UID_B + '"', timeout=60000)
-        page.wait_for_function("() => document.querySelector('#kin-job-print [role=status]')"
-                               ".textContent.includes('페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.')", timeout=60000)
-        self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
-        self.no_writes(page)
+        }""",
+        "drops": """() => {
+          const original = CSSStyleSheet.prototype.replaceSync;
+          CSSStyleSheet.prototype.replaceSync = function (text) {
+            return original.call(this, String(text).replace(/@page\\s+report-\\d+\\s*\\{[^]*?\\}\\s*\\}/g, ''));
+          };
+        }""",
+    }
+    GATE_STATUS = ("() => document.querySelector('#kin-job-print [role=status]')"
+                   ".textContent.includes('페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.')")
+
+    def test_pages_06_named_page_support_gate_blocks_print(self):
+        # A browser that parses margin boxes but lacks named @page rules would
+        # print continuation pages with only the shared footer, which is
+        # exactly what the per-report footer exists to prevent.
+        for variant, stub in self.UNSUPPORTED_NAMED_PAGES.items():
+            with self.subTest(variant=variant):
+                data = self.data("20260801", "20260901")
+                page = self.context.new_page()
+                page.set_content("<!doctype html><html><body></body></html>")
+                page.evaluate(CORNERSTONE)
+                page.add_script_tag(path=str(MODULE))
+                page.evaluate(stub)
+                # The stub must leave the generic @page rule intact so that only
+                # the named-page check, not the margin-box check, decides.
+                self.assertTrue(page.evaluate("() => { const s = new CSSStyleSheet();"
+                                              " s.replaceSync('@page{@bottom-left{content:\"x\"}}');"
+                                              " return s.cssRules[0]?.cssRules[0]?.name === 'bottom-left'; }"))
+                page.evaluate(SETUP, data)
+                page.evaluate("uid => window.__printer.open(uid, 'job-1', 2)", data["job"]["snapshot"]["studies"][0])
+                page.wait_for_function(self.GATE_STATUS, timeout=60000)
+                self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
+                # The preview itself is still built; only the print path is closed.
+                self.assertIn("<main>", self.srcdoc(page) or "")
+                page.select_option(SELECT, "both")
+                page.wait_for_function(SRCDOC, arg='data-report-uid="' + UID_B + '"', timeout=60000)
+                page.wait_for_function(self.GATE_STATUS, timeout=60000)
+                self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
+                self.no_writes(page)
+                page.close()
 
     def test_pages_05_preview_never_writes(self):
         data = self.data("20260801", "20260901")
@@ -381,6 +423,42 @@ class ViewerJobPrintPages(unittest.TestCase):
                 self.assertNotIn("과거", self.srcdoc(page))
                 self.no_writes(page)
                 page.close()
+
+    def test_parser_01_keeps_font_runs_in_stream_order(self):
+        # The exact runs pypdf reported for the summary-page footer of the CI
+        # long-identity PDF (validate run 34614012107, Linux fallback fonts):
+        # Korean runs carry their real x, the Latin runs after each font switch
+        # repeat the line-start x, and the whole line shares one baseline.
+        name = " ".join("NAME%02d" % index for index in range(13))
+        latin = "  " + name + " (" + PATIENT_ID + ") · "
+        ci_runs = [
+            (35.67, 554.23, "7"), (35.67, 557.99, " /"), (28.17, 557.99, "7"),
+            (51.42, 33.75, "환자"), (51.42, 33.75, latin), (51.42, 452.54, "검사"), (51.42, 33.75, "  20260801 · Acc ACC-"),
+            (43.92, 33.75, "0123456789AB"),
+            (36.42, 33.75, "환자"), (36.42, 33.75, latin), (36.42, 452.54, "검사"), (36.42, 33.75, "  20260901 · Acc ACC-"),
+            (28.92, 33.75, "0123456789AB"),
+            (21.42, 33.75, "Current Study Report: 20260801 · "), (21.42, 125.8, "승인된"), (21.42, 145.47, "저장본"),
+            (21.42, 33.75, "  · v1 · RS A"),
+        ]
+        parsed = [flat(line) for line in lines(ci_runs) if not re.fullmatch(r"[\d/]+", flat(line))]
+        self.assertEqual(parsed, [
+            flat("환자 " + name + " (" + PATIENT_ID + ") · 검사 20260801 · Acc ACC-"),
+            "0123456789AB",
+            flat("환자 " + name + " (" + PATIENT_ID + ") · 검사 20260901 · Acc ACC-"),
+            "0123456789AB",
+            flat("Current Study Report: 20260801 · 승인된 저장본 · v1 · RS A"),
+        ])
+        self.assertIn(flat("환자 " + name + " (" + PATIENT_ID + ")"), "".join(parsed))
+        # A single-font line (Windows: Malgun Gothic) is one run and unaffected.
+        self.assertEqual(lines([(18.4, 33.75, "승인된 저장본 · v1 · RS A"), (25.9, 33.75, "Study X")]),
+                         ["Study X", "승인된 저장본 · v1 · RS A"])
+        # Page-1 footer of the same PDF: the label after the Korean run fell back
+        # to the line start and must follow the run placed further right.
+        self.assertEqual(lines([(18.42, 33.75, "승인된"), (18.42, 53.42, "저장본"), (18.42, 33.75, "  · v1 · RS A")]),
+                         ["승인된저장본  · v1 · RS A"])
+        # A run whose x is smaller but not the line start is really to the left
+        # (the rule of test_pages_00), and a run at a larger x still moves right.
+        self.assertEqual(lines([(20.0, 90.0, "b"), (20.0, 33.75, "a"), (20.0, 120.0, "c")]), ["abc"])
 
 
 if __name__ == "__main__":
