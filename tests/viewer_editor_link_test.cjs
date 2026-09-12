@@ -59,6 +59,10 @@ test('validReply refuses malformed shapes without throwing', () => {
     'numeric session': { session: 7 },
     'no editor': { editor: undefined },
     'array editor': { editor: [] },
+    // An array survives structuredClone with its own properties, so an
+    // array-shaped body carrying the three fields must still be refused.
+    'array editor carrying fields': { editor: Object.assign([], body({ findings: 'LEAK' })) },
+    'array editor with indexed fields': { editor: Object.assign(['x'], body()) },
     'string editor': { editor: 'F' },
     'numeric findings': { editor: body({ findings: 1 }) },
     'null conclusion': { editor: body({ conclusion: null }) },
@@ -140,4 +144,89 @@ test('reasonText names every refusal the dialog can show', () => {
     assert.equal(link.reasonText(bad), '편집문 응답을 확인할 수 없습니다.', String(bad));
   for (const reason of ['session', 'context', 'modal', 'unavailable', 'denied', 'invalid', 'timeout', 'missing'])
     assert.ok(!link.reasonText(reason).includes('과거'), reason);
+});
+
+/* The cross-window boundary of the adapter (`event.origin` and `event.source`)
+ * is the only thing standing between a foreign frame and the unsaved report
+ * body, so it is pinned here with an injected window instead of a real one:
+ * a page test cannot make a wrong-origin reply arrive from the bound window. */
+const ORIGIN = 'https://localhost:9443';
+// In the browser the pure half publishes itself on the global; under require the
+// CommonJS branch wins, so the factory's lookup is restored for these cases.
+globalThis.kinViewerEditorLinkApi = globalThis.kinViewerEditorLinkApi || link;
+
+function harness(extra) {
+  const listeners = new Set();
+  const target = { sent: [], postMessage(data, origin) { this.sent.push({ data, origin }); } };
+  const view = {
+    crypto: { randomUUID: () => REQUEST },
+    addEventListener(type, fn) { if (type === 'message') listeners.add(fn); },
+    removeEventListener(type, fn) { if (type === 'message') listeners.delete(fn); },
+  };
+  const adapter = globalThis.kinViewerEditorLink(Object.assign({
+    window: view, target, origin: ORIGIN, studies: [CURRENT, COMPARE],
+    owner: () => ['INST-1', 'subject-1'], live: () => true, timeoutMs: 30,
+  }, extra));
+  return { adapter, view, target, listeners,
+    deliver: event => { for (const fn of [...listeners]) fn(event); } };
+}
+
+test('the adapter asks the bound window with the request it will accept', async () => {
+  const kit = harness();
+  assert.equal(kit.adapter.available(), true);
+  const answer = kit.adapter.read();
+  assert.equal(kit.target.sent.length, 1);
+  assert.equal(kit.target.sent[0].origin, ORIGIN);
+  assert.deepEqual(kit.target.sent[0].data, { type: 'kin-editor-request', request: REQUEST,
+    owner: OWNER, studies: [CURRENT, COMPARE], activeUid: CURRENT });
+  kit.deliver({ origin: ORIGIN, source: kit.target, data: reply() });
+  assert.deepEqual(await answer, { owner: OWNER, uid: CURRENT, session: 'sess-1',
+    editor: { findings: 'F', conclusion: 'C', recommendation: 'R' } });
+  assert.equal(kit.listeners.size, 0);
+});
+
+test('a reply from another origin is ignored, not answered', async () => {
+  for (const origin of ['https://evil.example', 'http://localhost:9443', 'https://localhost:9444', '', null, undefined]) {
+    const kit = harness();
+    const answer = kit.adapter.read();
+    kit.deliver({ origin, source: kit.target, data: reply() });
+    assert.deepEqual(await answer, { ok: false, reason: 'timeout' }, String(origin));
+    assert.equal(kit.listeners.size, 0, String(origin));
+  }
+});
+
+test('a reply from a window other than the bound one is ignored, not answered', async () => {
+  const others = () => [{ postMessage() {} }, { }, null, undefined, globalThis];
+  for (const source of others()) {
+    const kit = harness();
+    const answer = kit.adapter.read();
+    kit.deliver({ origin: ORIGIN, source, data: reply() });
+    assert.deepEqual(await answer, { ok: false, reason: 'timeout' }, String(source));
+    assert.equal(kit.listeners.size, 0, String(source));
+  }
+  // A foreign window cannot get in by sending a refusal either.
+  const kit = harness();
+  const answer = kit.adapter.read();
+  kit.deliver({ origin: ORIGIN, source: { postMessage() {} }, data: reply({ result: 'denied' }) });
+  assert.deepEqual(await answer, { ok: false, reason: 'timeout' });
+});
+
+test('a foreign reply does not consume the answer the bound window still sends', async () => {
+  const kit = harness();
+  const answer = kit.adapter.read();
+  kit.deliver({ origin: 'https://evil.example', source: kit.target, data: reply({ editor: body({ findings: 'LEAK' }) }) });
+  kit.deliver({ origin: ORIGIN, source: { postMessage() {} }, data: reply({ editor: body({ findings: 'LEAK' }) }) });
+  kit.deliver({ origin: ORIGIN, source: kit.target, data: reply() });
+  const value = await answer;
+  assert.equal(value.editor.findings, 'F');
+  assert.deepEqual(value, { owner: OWNER, uid: CURRENT, session: 'sess-1',
+    editor: { findings: 'F', conclusion: 'C', recommendation: 'R' } });
+});
+
+test('an array-shaped body from the bound window is refused, not read as fields', async () => {
+  const kit = harness();
+  const answer = kit.adapter.read();
+  kit.deliver({ origin: ORIGIN, source: kit.target,
+    data: reply({ editor: Object.assign([], body({ findings: 'LEAK' })) }) });
+  assert.deepEqual(await answer, { ok: false, reason: 'invalid' });
 });
