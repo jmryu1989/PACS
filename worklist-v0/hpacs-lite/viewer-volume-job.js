@@ -1,7 +1,22 @@
 /* MPR Jobs keep volume references, never a fictitious reconstructed SOP/frame. */
 window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
-  const fail=()=>{throw Error('완전히 로드된 단일 일반 CT의 3평면에서 MPR 작업을 저장하세요.');};
+  const fail=()=>{throw Error('완전히 로드된 단일 일반 CT의 평면 배치(1·2·4분할 또는 3평면)에서 MPR 작업을 저장하세요.');};
   const ordered=()=>[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
+  // The Hanging Protocol whitelist (hanging-protocol-model.js:109) plus the three-plane
+  // grids this Job already saved. A vacancy stays a cell, so a cell index is a viewport index.
+  const GRIDS=[[1,1],[1,2],[2,2],[1,3],[3,1]],ORIENTATIONS=['axial','sagittal','coronal'];
+  const PLANE_AXIS={axial:2,sagittal:0,coronal:1};
+  // The plane a cell actually is. The requested orientation is authoritative because a
+  // camera the Crosshairs tool has rotated no longer names its own plane; without one,
+  // only a camera still exactly on an anatomical axis may name itself (the sign-agnostic
+  // axis test viewer-hanging-protocol.js:285-287 already uses). Anything else is refused.
+  function planeOrientation(view,viewport) {
+    const stored=view.viewportOptions?.orientation??viewport.options?.orientation;
+    if(ORIENTATIONS.includes(stored))return stored;
+    const normal=viewport.getCamera?.()?.viewPlaneNormal;
+    if(!Array.isArray(normal)||normal.length!==3)return null;
+    return ORIENTATIONS.find(name=>normal.every((value,i)=>Math.abs(Math.abs(value)-(i===PLANE_AXIS[name]?1:0))<1e-6))||null;
+  }
   function source(v) {
     if(v?.type!=='orthographic'||v.getActors().length!==1)fail();
     const volume=cornerstone.cache.getVolume(v.getVolumeId()),images=volume?.imageIds;
@@ -19,14 +34,22 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
   }
   function capture(readOnly=false,includeBatch=true) {
     const state=grid.getState(),views=ordered(),{numRows:rows,numCols:cols,layoutType}=state.layout;
-    if(layoutType!=='grid'||!(rows===1&&cols===3||rows===3&&cols===1)||views.length!==3)fail();
+    if(layoutType!=='grid'||!GRIDS.some(([r,c])=>rows===r&&cols===c)||views.length!==rows*cols)fail();
+    // The established three-plane job keeps its exact v4/v5/v6 snapshot. Every other
+    // allowed grid, and any allowed grid holding a vacancy, is the new v7 layout.
+    const legacy=(rows===1&&cols===3||rows===3&&cols===1)&&views.every(g=>g.displaySetInstanceUIDs?.length===1);
     let reference,loaded,pixels=0;
     const cells=views.map((g,i)=>{
-      if(Math.abs(g.x-(i%cols)/cols)>1e-6||Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6||Math.abs(g.width-1/cols)>1e-6||Math.abs(g.height-1/rows)>1e-6||g.displaySetInstanceUIDs?.length!==1)fail();
+      if(Math.abs(g.x-(i%cols)/cols)>1e-6||Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6||Math.abs(g.width-1/cols)>1e-6||Math.abs(g.height-1/rows)>1e-6)fail();
+      const sets=g.displaySetInstanceUIDs||[];
+      if(!sets.length){if(legacy)fail();return null;}
+      if(sets.length!==1)fail();
       const v=cs.getCornerstoneViewport(g.viewportId),current=source(v);
+      const orientation=legacy?null:planeOrientation(g,v);
+      if(!legacy&&!orientation)throw Error('평면 방향을 확인할 수 없는 화면입니다. MPR 평면 배치를 다시 적용한 뒤 저장하세요.');
       if(reference&&(JSON.stringify(reference)!==JSON.stringify(current.reference)||loaded!==current.volume))fail();
       reference=current.reference;loaded=current.volume;
-      if(resolve({volume:reference})!==g.displaySetInstanceUIDs[0])fail();
+      if(resolve({volume:reference})!==sets[0])fail();
       const camera=v.getCamera(),properties=v.getProperties(),canvas=v.getCanvas(),mapper=v.getActors()[0].actor.getMapper();
       const width=canvas.width,height=canvas.height;pixels+=width*height;
       if(![width,height].every(n=>Number.isInteger(n)&&n>=1&&n<=8192)||width*height>16777216||pixels>33554432)throw Error('저장할 화면 크기를 줄인 뒤 다시 저장하세요.');
@@ -39,13 +62,21 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
       const blend=mapper.getBlendMode(),thickness=v.getSlabThickness()*2;
       if(![0,1,2,3].includes(blend)||!Number.isFinite(thickness)||thickness<.1||thickness>1000||blend===0&&thickness>.2)fail();
       if(blend===3){const info=mapper.getScalarTexture?.()?.getVolumeInfo();if(!Number.isFinite(info?.dataComputedScale?.[0])||info.dataComputedScale[0]<=0)throw Error('평균 투영을 다시 적용한 뒤 저장하세요.');}
-      return {study:reference.study,series:reference.series,viewport:{width,height},projection:{blend,thickness},
+      return {study:reference.study,series:reference.series,...(legacy?{}:{orientation}),viewport:{width,height},projection:{blend,thickness},
         camera:{...Object.fromEntries(['focalPoint','position','viewUp','viewPlaneNormal','parallelScale','flipHorizontal','flipVertical'].map(k=>[k,camera[k]])),rotation:camera.rotation||0},
         properties:{voiRange:properties.voiRange,VOILUTFunction:properties.VOILUTFunction||'LINEAR',invert:!!properties.invert,interpolationType:properties.interpolationType??1}};
     });
+    if(cells.every(c=>!c))fail();
     const active=views.findIndex(v=>v.viewportId===state.activeViewportId);if(active<0)throw Error('활성 MPR 평면을 선택한 뒤 저장하세요.');
     const batch=includeBatch?window.kinVolumeBatchState?.capture(reference):null;
     const marks=window.kinMprMarks?.capture(readOnly),annotated=marks&&(marks.marks.length||!marks.visible||!marks.sync);
+    // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
+    // user's own state visible instead of writing a v7 snapshot that quietly lost it.
+    if(!legacy){
+      if(batch)throw Error('단면 묶음은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 묶음을 해제하거나 3평면 배치에서 저장하세요.');
+      if(annotated)throw Error('MPR 3D 표식은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 표식을 지우거나 3평면 배치에서 저장하세요.');
+      return JSON.parse(JSON.stringify({version:7,studies,rows,cols,active,volume:reference,cells}));
+    }
     return JSON.parse(JSON.stringify({version:annotated?6:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(annotated?{marks,batch:batch||null}:batch?{batch}:{})}));
   }
   function holdCrosshairReset(){
@@ -66,27 +97,32 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     // cached oblique reference recurses through setOrientation/resetCamera on
     // a fresh axial viewport. Initialize a new presentation for this Job;
     // the verified saved cameras below are the sole position source.
+    // A saved vacancy is rebuilt as the same empty stack cell a Hanging Protocol leaves
+    // (viewer-hanging-protocol.js:97-101), so the grid keeps every saved cell index.
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
-      findOrCreateViewport:index=>({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:['axial','sagittal','coronal'][index],allowUnmatchedView:true}})});
+      findOrCreateViewport:index=>value.cells[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
+        :({displaySetInstanceUIDs:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
     const loaded=[],deadline=Date.now()+60000;
     for(let i=0;i<ids.length;i++){
+      if(!value.cells[i])continue;
+      const want=loaded.length+1;
       while(Date.now()<deadline){
         if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');
         const v=cs.getCornerstoneViewport(ids[i]);let original;try{original=source(v);}catch(_){}
         const canvas=v?.getCanvas(),ready=grid.getState().viewports.get(ids[i])?.isReady;
         if(original&&ready&&canvas?.clientWidth>1&&canvas?.clientHeight>1&&Math.abs(canvas.width-Math.floor(canvas.clientWidth*devicePixelRatio))<=1&&Math.abs(canvas.height-Math.floor(canvas.clientHeight*devicePixelRatio))<=1){
           if(JSON.stringify(original.reference)!==JSON.stringify({study:value.volume.study,series:value.volume.series,sops:value.volume.sops}))throw Error('볼륨 원본의 순서나 구성이 달라 복원하지 않았습니다.');
-          loaded.push({v,original});break;
+          loaded.push({v,original,cell:value.cells[i]});break;
         }
         await new Promise(r=>setTimeout(r,100));
       }
-      if(loaded.length!==i+1)throw Error('MPR 원본 볼륨 로딩에 실패했습니다.');
+      if(loaded.length!==want)throw Error('MPR 원본 볼륨 로딩에 실패했습니다.');
     }
     const rendered=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
     await rendered();
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');
     for(let i=0;i<loaded.length;i++){
-      const {v,original}=loaded[i],cell=value.cells[i];
+      const {v,original,cell}=loaded[i];
       // Volume opacity [] is an empty transfer function (black), unlike a stack.
       v.setProperties({invert:false,colormap:{name:'Grayscale',opacity:1}});v.setProperties(cell.properties);
       if(cell.projection.blend===3){if(typeof window.kinPrepareVolumeAverage!=='function')throw Error('평균 투영 도구 로딩을 마친 뒤 다시 복원하세요.');window.kinPrepareVolumeAverage(v,original.volume);}
@@ -112,7 +148,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     let matched=false;
     for(let attempt=0;attempt<3&&!matched;attempt++){
     for(let i=0;i<loaded.length;i++){
-      const v=loaded[i].v,cell=value.cells[i];
+      const {v,cell}=loaded[i];
       v.setCamera({flipHorizontal:cell.camera.flipHorizontal,flipVertical:cell.camera.flipVertical});
       const camera={...cell.camera};delete camera.flipHorizontal;delete camera.flipVertical;delete camera.rotation;v.setCamera(camera);v.render();
     }
@@ -123,7 +159,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     if(crosshair.tool&&crosshair.group.getToolOptions('Crosshairs')?.mode!=='Disabled')crosshair.tool.computeToolCenter();
     await rendered();matched=true;
     for(let i=0;i<loaded.length;i++){
-      const actual=loaded[i].v.getCamera(),expected=value.cells[i].camera;
+      const actual=loaded[i].v.getCamera(),expected=loaded[i].cell.camera;
       for(const [key,want] of Object.entries(expected)){
         // Native oblique rotation derives a sign from a nearly-zero dot product
         // against initialViewUp (335 vs 25 for identical physical vectors).
