@@ -270,23 +270,29 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
             # The pick itself did not need a preceding activation click; one click did both.
             self.assertEqual(picked["state"]["run"], before + 1)
 
-            # 4. IMAGE_RENDERED: move the other pane through the renderer and watch the counter.
-            other = next(cell for cell in cells if cell["id"] != target["id"])
+            # 4. IMAGE_RENDERED: move the pane that carries the marker through the renderer. Its
+            # marker claims that this exact image is on screen at this exact point, so the frame
+            # change must take it away — and the receive counter says the host really heard the
+            # render rather than only the index change.
+            marked = [row["id"] for row in picked["state"]["panes"] if row["marked"]]
+            self.assertTrue(marked, "no pane carried a marker to invalidate")
+            moving = next(cell for cell in cells if cell["id"] == marked[0])
             renders = page.evaluate("() => kinViewerThreeDCursorState().renders")
             self.assertGreater(renders, 0, "no IMAGE_RENDERED was received while the study loaded")
             page.evaluate("""async ({id, index}) => {
               await services.cornerstoneViewportService.getCornerstoneViewport(id).setImageIdIndex(index);
-            }""", dict(id=other["id"], index=(other["index"] + 2) % other["count"]))
+            }""", dict(id=moving["id"], index=(moving["index"] + 2) % moving["count"]))
             page.wait_for_function("renders => kinViewerThreeDCursorState().renders > renders",
                                    arg=renders, timeout=30000)
             page.wait_for_function("""id => {
               const pane = kinViewerThreeDCursorState().cursor.panes.find(p => p.id === id);
               return pane && !pane.marked;
-            }""", arg=other["id"], timeout=30000)
+            }""", arg=moving["id"], timeout=30000)
             moved = self.record(page, "image-rendered")
             self.assertGreater(moved["probe"]["renders"], renders)
-            self.assertEqual([p["marked"] for p in moved["state"]["panes"] if p["id"] == other["id"]],
+            self.assertEqual([p["marked"] for p in moved["state"]["panes"] if p["id"] == moving["id"]],
                              [False], "the stale marker survived the render")
+            self.assertEqual(moved["marks"], 0, "the marker node outlived the frame it claimed")
         finally:
             self.report("flag-on-pick")
         page.screenshot(path=str(ARTIFACTS / "THREE-D-CURSOR-WIRING-pick.png"))
