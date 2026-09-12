@@ -132,6 +132,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
       - name: Volume rendering, sculpt, and personal preset boundaries
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs
+      - name: Volume display, batch, crosshair, marks, orientation and preference models
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -144,6 +146,9 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
       - name: Confirm exact declared VR-only selection
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/execution_selection_test.py
+      - name: Volume batch recipe rounding precision
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/recipe-precision --cwd . --file tests/volume_recipe_precision_test.py --file tests/e2e/test_volume_batch_save.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/volume_recipe_precision_test.py
       - name: Isolated declared volume rendering tests
         timeout-minutes: 28
         run: |
@@ -259,6 +264,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_source_test.cjs
       - name: Study access policy, fail-closed storage and stale response boundaries
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_access_policy_test.cjs /tests/study_access_service_test.cjs
+      - name: Compiled volume job command and volume mark boundary models
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs
       - name: Observe an isolated real restart loop
         run: python3 tests/ops_monitor_container_test.py
       - name: Production image migration, startup and refusal checks
@@ -285,5 +292,6 @@ jobs:
             tmp/runtime-ci/hanging-protocols/
             tmp/runtime-ci/three-d-cursor-model/
             tmp/runtime-ci/editor-link/
+            tmp/runtime-ci/volume-api-models/
           if-no-files-found: error
           retention-days: 7
