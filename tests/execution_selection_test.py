@@ -112,6 +112,42 @@ class ExecutionSelectionTests(unittest.TestCase):
                             for item in plan['tests']))
         self.assertEqual(runner.collect(plan).countTestCases(), len(declared))
 
+    def test_volume_mpr_profile_selects_only_the_two_declared_mpr_modules(self):
+        profile = ci.PROFILES['volume-mpr']
+        expected = [('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E',
+                     'test_crosshair_', 'ci-mpr-crosshair', 8),
+                    ('e2e/test_volume_display.py', 'VolumeDisplayE2E',
+                     'test_mpr_display_', 'ci-mpr-display', 12)]
+        self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
+        self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
+        for (suite, class_name, unit), (_, cls_name, prefix, _, count) in zip(
+                profile['suites'], expected):
+            with self.subTest(suite=suite):
+                # No class is passed: the module's own load_tests is the allowlist.
+                self.assertIsNone(class_name)
+                plan = runner.module_plan('tests/'+suite, unit, 'live',
+                                          profile['suite_timeout'], class_name)
+                selected = [item['case'] for item in plan['tests']]
+                cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
+                declared = sorted(cls_name+'.'+name for name in cls.__dict__
+                                  if name.startswith(prefix))
+                self.assertEqual(sorted(selected), declared)
+                self.assertEqual(len(selected), count)
+                # Inherited base-class cases must not widen this profile: the
+                # orientation/job suites keep their own registration elsewhere.
+                inherited = {name for base in cls.__mro__[1:]
+                             for name in vars(base) if name.startswith('test_')}
+                self.assertTrue(inherited, 'expected an inheriting MPR suite')
+                self.assertFalse(inherited & {case.split('.', 1)[1] for case in selected})
+                # And no case may come from another module or another class.
+                self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+                self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
+                self.assertEqual(runner.collect(plan).countTestCases(), count)
+                print('SELECTION', suite, len(selected), flush=True)
+        # The MPR profile stays disjoint from the VR profile it is modelled on.
+        vr_suite = ci.PROFILES['volume-rendering']['suites'][0][0]
+        self.assertNotIn(vr_suite, [row[0] for row in profile['suites']])
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
