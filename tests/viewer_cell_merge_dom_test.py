@@ -153,9 +153,11 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
             self.assertAlmostEqual(box["height"], grid["height"], delta=1)
             page.locator('[data-cell="C"]').dblclick()
             page.wait_for_function("()=>gridState.viewports.size===4")
+            # The restore is only finished when the controller says so: the recorded
+            # camera is re-applied after the rebuilt panes settle.
+            expect(page.locator("#kin-cell-merge [role=status]")).to_contain_text("되돌렸습니다")
             self.assertEqual(before, page.evaluate("geometry()"))
             self.assertEqual(42, page.evaluate("nativeViewports.get('B').camera.parallelScale"))
-            expect(page.locator("#kin-cell-merge [role=status]")).to_contain_text("되돌렸습니다")
             self.assertEqual(2, len(page.evaluate("layoutCalls")))
         finally:
             page.close()

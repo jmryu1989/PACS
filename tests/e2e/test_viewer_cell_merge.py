@@ -50,8 +50,11 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
           })''')
 
     def annotations(self, page):
-        return page.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations()"
-                             ".map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text||null}))")
+        # Only what the user drew: native reference-line style annotations are derived from
+        # the pane itself and legitimately follow its geometry.
+        return page.evaluate("""()=>{const drawn=['ArrowAnnotate','Length','Angle','Bidirectional','RectangleROI','EllipticalROI','CircleROI','Probe'];
+          return cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>drawn.includes(a.metadata.toolName))
+            .map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text||null}));}""")
 
     def merge_button(self, page, action):
         return page.locator(f'#kin-cell-merge [data-cell-merge="{action}"]')

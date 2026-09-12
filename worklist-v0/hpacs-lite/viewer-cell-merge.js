@@ -235,16 +235,16 @@
     const sameState = (a, b) => !!a && !!b && sameCamera(a.camera, b.camera) && a.imageId === b.imageId &&
       JSON.stringify(a.voiRange ?? null) === JSON.stringify(b.voiRange ?? null) && (a.invert ?? null) === (b.invert ?? null);
 
-    // The native viewport refits its camera when a pane changes shape, and that refit is
-    // not reversible by resizing back. So the state right after a verified merge is
-    // recorded, and a cell still holding exactly that state is owed its pre-merge camera
-    // back; a cell the user has since worked in keeps the newer state instead.
-    async function settledState() {
+    // The native viewport refits its camera when a pane changes shape, on its own resize
+    // observer, and that refit is not reversible by resizing back. Nothing may be recorded
+    // or re-applied before it has settled, so this waits for two identical readings and
+    // never accepts the first ones.
+    async function settledState(minimum = 4) {
       let previous = null;
-      for (let count = 0; count < 24; count++) {
+      for (let count = 0; count < 32; count++) {
         const current = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
-        if (previous && [...current].every(([id, cell]) => cell.kind !== 'stack' || sameState(cell, previous.get(id)))
-            && previous.size === current.size) return current;
+        if (count >= minimum && previous && previous.size === current.size &&
+            [...current].every(([id, cell]) => cell.kind !== 'stack' || sameState(cell, previous.get(id)))) return current;
         previous = current;
         await pause();
       }
@@ -269,17 +269,20 @@
     async function rebuild(target, owned) {
       if (!owned()) return false;
       try { await boundedNative(dispatch(target.rows, target.cols, null, target.cells, target.active), 2000); } catch (_) { }
-      const deadline = Date.now() + 3000;
-      let confirmed = false;
-      for (let count = 0; count < 160 && Date.now() < deadline; count++) {
-        // A late native refit could undo an accepted restore, so the check has to hold
-        // twice across a pause before this module says the screen is back.
-        if (restored(target)) { if (confirmed) return true; confirmed = true; }
-        else { confirmed = false; reapply(target); }
+      const deadline = Date.now() + 5000;
+      let confirmed = 0;
+      while (Date.now() < deadline) {
         if (!owned()) return false;
-        await pause();
+        if (!geometryIs(target)) { confirmed = 0; await pause(); continue; }
+        // Re-applying into an ongoing native refit only loses the value again, and a late
+        // refit could undo an accepted restore, so each decision is taken on a settled
+        // screen and the restore must hold twice.
+        await settledState();
+        if (!owned()) return false;
+        if (restored(target)) { if (++confirmed >= 2) return true; }
+        else { confirmed = 0; reapply(target); }
       }
-      return confirmed && restored(target);
+      return false;
     }
 
     function quarantine() {
