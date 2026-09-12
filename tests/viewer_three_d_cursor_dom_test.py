@@ -20,7 +20,10 @@ VIEWER = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-three-d-cursor.js"
 
 HARNESS = r"""
 <div id="panes">
- <div id="pane-ct" style="width:200px;height:200px"></div>
+ <div id="pane-ct" style="position:relative;width:200px;height:200px;border:3px solid #000;padding:7px">
+  <canvas id="canvas-ct" style="position:absolute;left:20px;top:30px;width:150px;height:150px"></canvas>
+  <div id="overlay-ct" style="position:absolute;left:0;top:0;width:40px;height:40px">L</div>
+ </div>
  <div id="pane-mr" style="width:200px;height:200px"></div>
  <div id="pane-other" style="width:200px;height:200px"></div>
  <div id="pane-volume" style="width:200px;height:200px"><span id="volume-keep">KEEP</span></div>
@@ -72,21 +75,29 @@ class Stack{
  worldToCanvas(world){const p=KinThreeDCursorModel.toPixel(this.plane(),world);return [p.x,p.y];}
 }
 const ct=new Stack('vp-ct',CT,2),mr=new Stack('vp-mr',MR,0),foreign=new Stack('vp-other',FOREIGN,0);
+ct.element=document.querySelector('#pane-ct');mr.element=document.querySelector('#pane-mr');foreign.element=document.querySelector('#pane-other');
 const volume={id:'vp-volume',type:'volume',getImageIds(){return MR;},calls:[],setImageIdIndex(i){this.calls.push(i);return Promise.resolve();}};
-const mr2=new Stack('vp-mr2',MR2,0);
+const mr2=new Stack('vp-mr2',MR2,0);mr2.element=document.querySelector('#pane-mr2');
 window.viewports={ct,mr,foreign,volume,mr2};
-window.addSecondTarget=()=>{paneList=[...paneList,{id:'mr2',element:document.querySelector('#pane-mr2'),viewport:mr2}];};
-let paneList=[{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct},
- {id:'mr',element:document.querySelector('#pane-mr'),viewport:mr},
- {id:'other',element:document.querySelector('#pane-other'),viewport:foreign},
- {id:'volume',element:document.querySelector('#pane-volume'),viewport:volume}];
-window.setPanes=list=>{paneList=list.map(id=>({ct:paneList[0],mr:paneList[1],other:paneList[2],volume:paneList[3]}[id]));};
+const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct},
+ mr:{id:'mr',element:document.querySelector('#pane-mr'),viewport:mr},
+ other:{id:'other',element:document.querySelector('#pane-other'),viewport:foreign},
+ volume:{id:'volume',element:document.querySelector('#pane-volume'),viewport:volume},
+ mr2:{id:'mr2',element:document.querySelector('#pane-mr2'),viewport:mr2}};
+let paneList=[PANES.ct,PANES.mr,PANES.other,PANES.volume];
+window.addSecondTarget=()=>{paneList=[...paneList,PANES.mr2];};
+window.setPanes=list=>{paneList=list.map(id=>PANES[id]);};
 let ctx={owner:'hospital|reader',session:'s1',tool:'WindowLevel'};
 window.setContext=next=>{ctx={...ctx,...next};};
 window.flush=name=>{const v=viewports[name],queue=v.pending.splice(0);queue.forEach(fn=>fn());return queue.length;};
-window.__mount=()=>window.cursor=KinViewerThreeDCursor.mount({
- panes:()=>paneList,meta:id=>META.get(id)||null,context:()=>ctx,
- tick:()=>Promise.resolve(),confirmAttempts:2});
+const options=extra=>({panes:()=>paneList,meta:id=>META.get(id)||null,context:()=>ctx,
+ tick:()=>new Promise(r=>setTimeout(r,0)),confirmAttempts:2,navigationAttempts:150,drainAttempts:400,...extra});
+window.__mount=extra=>window.cursor=KinViewerThreeDCursor.mount(options(extra));
+window.__mountSecond=()=>window.cursor2=KinViewerThreeDCursor.mount(options({panes:()=>[PANES.mr2]}));
+window.scrollTo_=(name,index)=>{const v=viewports[name];v.currentImageIdIndex=index;v.csImage={imageId:v.imageIds[index]};v.viewportStatus='rendered';};
+window.clickAt=(selector,x,y)=>{const box=document.querySelector(selector).getBoundingClientRect();
+ for(const type of ['pointerdown','click'])document.elementFromPoint(box.left+x,box.top+y)
+  .dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:box.left+x,clientY:box.top+y}));};
 </script>
 """
 
@@ -128,8 +139,157 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
             ".map(node=>({pane:node.closest('[id^=pane-]').id,sop:node.dataset.kinSop,left:node.style.left,top:node.style.top}))"
         )
 
+    def rounded(self, pixel):
+        # The pane rect can sit on a fractional device pixel; the mapping, not the rounding, is
+        # what this asserts.
+        return {key: round(value, 6) for key, value in pixel.items()}
+
     def calls(self):
         return self.page.evaluate("()=>({ct:viewports.ct.calls,mr:viewports.mr.calls,foreign:viewports.foreign.calls,volume:viewports.volume.calls})")
+
+    # --- review 184a433 blocking regressions -------------------------------------------------
+    def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):
+        # A click landing on an inset canvas/overlay child must map to the canvas point the
+        # renderer itself uses (client minus the enabled element rect), not the child offset.
+        self.enable()
+        self.page.evaluate("clickAt('#pane-ct',100,50)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual({"x": 100, "y": 50}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+        self.page.evaluate("clickAt('#pane-ct',12,9)")
+        self.page.wait_for_function("cursor.state().source&&cursor.state().source.pixel.x===12")
+        self.assertEqual({"x": 12, "y": 9}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+
+    def test_b1_a_click_without_a_usable_viewport_rect_is_refused(self):
+        self.enable()
+        self.page.evaluate("document.querySelector('#pane-ct').style.display='none'")
+        self.page.evaluate(
+            "()=>document.querySelector('#pane-ct').dispatchEvent("
+            "new MouseEvent('click',{bubbles:true,clientX:40,clientY:40}))")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
+
+    def test_b2_a_pane_dropped_from_the_host_loses_its_marker_and_listeners(self):
+        self.enable()
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(2, len(self.marks()))
+        self.page.evaluate("setPanes(['ct']);cursor.refresh()")
+        # The dropped pane keeps nothing; the pane still bound keeps its own marker.
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#pane-mr [data-kin-3d-cursor-layer]').length"))
+        self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
+        before = self.page.evaluate("cursor.state().run")
+        self.page.evaluate("clickAt('#pane-mr',60,60)")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(before, self.page.evaluate("cursor.state().run"))
+
+    def test_b2_cleanup_never_removes_another_controllers_nodes(self):
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("__mountSecond();cursor2.enable()")
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.page.evaluate("cursor2.pick('mr2',{x:40,y:40})")
+        self.page.wait_for_function("cursor2.state().busy===false")
+        self.assertEqual(1, self.page.evaluate("cursor2.state().panes.filter(p=>p.marked).length"))
+        self.page.evaluate("cursor.stop()")
+        self.page.wait_for_function("cursor.state().stopped===true")
+        self.assertEqual(1, self.page.evaluate("cursor2.state().panes.filter(p=>p.marked).length"))
+        self.assertEqual(1, self.page.evaluate("document.querySelectorAll('[data-kin-3d-cursor-mark]').length"))
+        self.page.evaluate("cursor2.stop()")
+        self.page.wait_for_function("cursor2.state().stopped===true")
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('[data-kin-3d-cursor-layer]').length"))
+
+    def test_b3_stop_during_an_active_pick_is_bounded_and_owns_the_rollback(self):
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.page.evaluate("window.stopping=cursor.stop();null")
+        self.page.evaluate("viewports.mr.hold=false;flush('mr')")
+        self.assertEqual("settled", self.page.evaluate("stopping"))
+        self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(0, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([], self.marks())
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('[data-kin-3d-cursor-layer]').length"))
+
+    def test_b3_stop_with_a_never_resolving_load_quarantines_instead_of_racing_it(self):
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.page.set_default_timeout(15000)
+        self.assertEqual("settled", self.page.evaluate("cursor.stop()"))
+        state = self.page.evaluate("cursor.state()")
+        self.assertEqual(["mr"], state["quarantined"])
+        self.assertEqual("restore-blocked-unsettled", state["restores"]["mr"])
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual([], self.marks())
+        # A late settle after teardown must not navigate, mark or claim a restore.
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_timeout(50)
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual([], self.marks())
+        self.assertEqual([], self.page.evaluate("unhandled"))
+
+    def test_b3_a_drain_that_cannot_finish_reports_unsettled_and_claims_nothing(self):
+        self.page.evaluate("cursor.stop();__mount({drainAttempts:0})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.stop()"))
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('[data-kin-3d-cursor-layer]').length"))
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        # Teardown already happened, so the abandoned run must not drive the viewport afterwards.
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual("restore-blocked-stopped", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([], self.marks())
+
+    def test_b3_a_never_resolving_restore_is_bounded_and_never_claimed_as_restored(self):
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.page.evaluate("viewports.mr.hold=true")
+        self.page.evaluate("cursor.cancel('user-interrupt')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
+        panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual("restore-unconfirmed", panes["mr"]["restore"])
+        self.assertEqual([], self.marks())
+
+    def test_b4_a_user_scroll_on_a_moved_pane_is_never_overwritten_by_the_rollback(self):
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.page.eval_on_selector("#pane-mr", "n=>n.dispatchEvent(new WheelEvent('wheel',{bubbles:true}))")
+        self.page.evaluate("scrollTo_('mr',6)")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(6, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual("restore-skipped-user", panes["mr"]["restore"])
+
+    def test_b4_a_user_takeover_revokes_the_pane_even_at_the_same_index(self):
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        # The reader scrolled away and back: the index equals the one the run issued, but the
+        # pane is theirs now and must not be driven back to the pre-run frame.
+        self.page.eval_on_selector("#pane-mr", "n=>n.dispatchEvent(new WheelEvent('wheel',{bubbles:true}))")
+        self.page.evaluate("scrollTo_('mr',4)")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual("restore-skipped-user", panes["mr"]["restore"])
 
     def test_mode_binds_only_valid_classic_stack_panes(self):
         self.assertTrue(self.enable())
@@ -167,16 +327,17 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
     def test_a_real_click_on_a_bound_pane_picks_that_pane_point(self):
         self.enable()
         # A real pointerdown precedes the click; it must not swallow or duplicate the pick.
-        self.page.click("#pane-ct", position={"x": 100, "y": 50})
+        self.page.evaluate("clickAt('#pane-ct',100,50)")
         self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
-        self.assertEqual({"paneId": "ct", "sop": "1.2.3.4.3", "world": [-200, -210, 10], "pixel": {"x": 100, "y": 50}},
-                         self.page.evaluate("cursor.state().source"))
+        state = self.page.evaluate("cursor.state().source")
+        self.assertEqual(("ct", "1.2.3.4.3", [-200, -210, 10]), (state["paneId"], state["sop"], state["world"]))
+        self.assertEqual({"x": 100, "y": 50}, self.rounded(state["pixel"]))
         self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
         self.assertEqual(1, self.page.evaluate("cursor.state().run"))
         self.assertEqual([], self.page.evaluate("viewports.volume.calls"))
         self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
         # Picking from a pane of another frame of reference is allowed, but it carries nothing.
-        self.page.click("#pane-other", position={"x": 100, "y": 50})
+        self.page.evaluate("clickAt('#pane-other',100,50)")
         self.page.wait_for_function("cursor.state().source&&cursor.state().source.paneId==='other'")
         self.assertEqual(["pane-other"], [m["pane"] for m in self.marks()])
         self.assertEqual({"ct": [], "mr": [], "foreign": [], "volume": []}, self.calls())
