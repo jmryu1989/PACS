@@ -25,10 +25,21 @@ def text_runs(sheet):
  sheet.extract_text(visitor_text=visitor);return rows
 
 
+def line_order(group):
+ """Same rule as viewer_job_print_pages_test.line_order: after a fallback-font switch
+ (Linux Korean/Latin) pypdf reports a tie or the line-start x again for the next run;
+ ties keep extraction order, a fall-back keeps the previous run's position, other x decide."""
+ start=group[0][0] if group else None;ordered=[];cursor=None
+ for index,(x,text) in enumerate(group):
+  if cursor is not None and x<cursor and x==start:x=cursor
+  ordered.append((x,index,text));cursor=x
+ return [text for _,_,text in sorted(ordered,key=lambda item:(item[0],item[1]))]
+
+
 def page_lines(rows):
  grouped={}
  for y,x,text in rows:grouped.setdefault(round(y,1),[]).append((x,text))
- return [''.join(t for _,t in sorted(group)) for _,group in sorted(grouped.items(),reverse=True)]
+ return [''.join(line_order(group)) for _,group in sorted(grouped.items(),reverse=True)]
 
 
 class CompareReportsE2E(ViewerJobReportE2E):
@@ -53,7 +64,10 @@ class CompareReportsE2E(ViewerJobReportE2E):
   draft=self.stack.request('PUT',f'/studies/{b.uid}/report','doctor2',dict(baseVersion=1,findings='PRIVATE DRAFT NOT OUTPUT',conclusion='',recommendation=''))
   self.assertEqual(draft.status,200,draft.text)
   before={f.uid:self.report_rows(f) for f in [a,b]};original=self.originals();frozen=self.get_job(a,job)
-  p=self.launch_job([a,b]);canvas_ready(p,1);pixels=self.pngs(p);writes=[]
+  p=self.launch_job([a,b]);canvas_ready(p,1);self.observe(p,'canvas-ready')
+  # The baseline is taken only once the canvases have settled after the dock
+  # panel resize; the observations record what canvas_ready alone had seen.
+  pixels=self.settled_pngs(p);settled=self.observe(p,'settled');writes=[]
   p.on('request',lambda r:writes.append(r.url) if r.method in ['POST','PUT','PATCH','DELETE'] and '/api/studies/' in r.url else None)
   paper=self.output(p);images=self.output_arrays(p,paper)
   paper=self.select_reports(p,'prior');expect(paper.locator('.report')).to_have_count(1)
@@ -98,7 +112,7 @@ class CompareReportsE2E(ViewerJobReportE2E):
   embedded=[np.array(img.image.convert('RGB')) for page in pdf.pages for img in page.images]
   self.assertEqual(len(embedded),2)
   for x in images:self.assertTrue(any(x.shape==y.shape and np.array_equal(x,y) for y in embedded))
-  self.assertEqual(self.pngs(p),pixels);self.assertEqual(self.get_job(a,job),frozen);self.assertEqual(self.originals(),original)
+  self.assert_pixels_kept(p,pixels,settled,'after-print');self.assertEqual(self.get_job(a,job),frozen);self.assertEqual(self.originals(),original)
   self.assertEqual({f.uid:self.report_rows(f) for f in [a,b]},before);self.assertEqual(writes,[])
   print('COMPARE REPORTS PDF '+json.dumps(dict(pages=len(pdf.pages),images=len(embedded))),flush=True)
 
