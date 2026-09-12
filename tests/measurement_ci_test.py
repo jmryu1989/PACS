@@ -83,11 +83,48 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('tests/e2e/artifacts/three-d-cursor-accuracy-ci/', dispatch)
         self.assertIn('tests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png', dispatch)
 
+    def test_three_d_cursor_wiring_profile_is_exact_and_dispatch_only(self):
+        import ast
+        profile = ci.PROFILES['three-d-cursor-wiring']
+        self.assertEqual(profile['suites'], (('e2e/test_three_d_cursor_wiring.py',
+                         'ThreeDCursorWiringE2E', 'ci-three-d-cursor-wiring'),))
+        self.assertEqual(profile['out'].name, 'three-d-cursor-wiring-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-3d-cursor-wire-ci-')
+        self.assertEqual(profile['suite_timeout'], 1200)
+        # A separate profile, a separate Compose project and a separate artifact directory: the
+        # accuracy run and the wiring run never share one.
+        accuracy = ci.PROFILES['three-d-cursor-accuracy']
+        self.assertNotEqual(profile['out'], accuracy['out'])
+        self.assertNotEqual(profile['project_prefix'], accuracy['project_prefix'])
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_three_d_cursor_wiring.py')
+        self.assertEqual(command[command.index('--class')+1], 'ThreeDCursorWiringE2E')
+        self.assertEqual(command[command.index('--timeout')+1], '1200')
+        self.assertEqual(outer, 1235)
+        source = (ci.ROOT/'tests/e2e/test_three_d_cursor_wiring.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                   and node.name == 'ThreeDCursorWiringE2E')
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                    and node.name.startswith('test_')]
+        self.assertEqual(len(declared), 3)
+        self.assertTrue(all(name.startswith('test_wiring_') for name in declared))
+        # The point of the suite: the modules must arrive through config/ohif.js, so the harness's
+        # own injection call may not appear in it.
+        self.assertNotIn('.add_script_tag(', source)
+        # No push gate: the profile reaches CI only through the manual dispatch workflow.
+        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        self.assertNotIn('three-d-cursor-wiring', validate)
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- three-d-cursor-wiring', dispatch)
+        self.assertIn('tests/e2e/artifacts/three-d-cursor-wiring-ci/', dispatch)
+        self.assertIn('tests/e2e/artifacts/THREE-D-CURSOR-WIRING-*.png', dispatch)
+
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']

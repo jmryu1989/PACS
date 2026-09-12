@@ -124,6 +124,10 @@ const options=extra=>({panes:()=>paneList,meta:id=>META.get(id)||null,context:()
 window.__mount=extra=>window.cursor=KinViewerThreeDCursor.mount(options(extra));
 window.__mountHosted=extra=>{const host=document.querySelector('#kin-viewer-layout');host.replaceChildren();
  return window.cursor=KinViewerThreeDCursor.mount(options({host,...extra}));};
+// The same host, deliberately not cleared: what a stopped controller left behind stays
+// visible to the next mount.
+window.__mountHostedKeep=extra=>window.cursor=KinViewerThreeDCursor.mount(
+ options({host:document.querySelector('#kin-viewer-layout'),...extra}));
 window.panelText=()=>{const p=document.querySelector('#kin-3d-cursor-status');return p?p.textContent:null;};
 window.toggleState=()=>{const b=document.querySelector('#kin-3d-cursor-toggle');
  return b?{label:b.textContent,pressed:b.getAttribute('aria-pressed'),disabled:b.disabled}:null;};
@@ -148,16 +152,19 @@ window.clickAt=(selector,x,y)=>{const host=document.querySelector(selector);
  return target.id||target.tagName;};
 // A gesture whose up lands somewhere else, and one that uses another button or another pointer.
 // PointerEvent carries pointerId; MouseEvent does not, which is exactly the legacy shape above.
+// PointerEventInit.isPrimary defaults to false, which a real mouse never is, so a gesture is
+// primary here unless the caller is deliberately describing a second finger.
 window.gestureAt=(selector,down,up,opts)=>{const host=document.querySelector(selector);
  const box=host.getBoundingClientRect(),o=opts||{};
+ const primary=o.isPrimary===undefined?true:o.isPrimary;
  const send=(type,point,extra)=>{
   const client={clientX:(point.absolute?0:box.left)+point.x,clientY:(point.absolute?0:box.top)+point.y};
   const at=document.elementFromPoint(client.clientX,client.clientY)||host;
   const init={bubbles:true,button:o.button||0,...client,...extra};
   at.dispatchEvent(o.pointerId===undefined?new MouseEvent(type,init):new PointerEvent(type,init));
   return at.id||at.tagName;};
- const first=send('pointerdown',down,{pointerId:o.pointerId});
- const second=send('pointerup',up,{pointerId:o.upPointerId!==undefined?o.upPointerId:o.pointerId});
+ const first=send('pointerdown',down,{pointerId:o.pointerId,isPrimary:o.downPrimary===undefined?primary:o.downPrimary});
+ const second=send('pointerup',up,{pointerId:o.upPointerId!==undefined?o.upPointerId:o.pointerId,isPrimary:primary});
  if(!o.noClick)send('click',up,{pointerId:o.pointerId});
  return {down:first,up:second};};
 window.clickOnly=(selector,x,y)=>{const host=document.querySelector(selector);
@@ -1208,7 +1215,7 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.evaluate(
             "()=>{const t=document.querySelector('#canvas-ct'),r=document.querySelector('#pane-ct')"
             ".getBoundingClientRect();t.dispatchEvent(new PointerEvent('pointerup',"
-            "{bubbles:true,pointerId:3,clientX:r.left+100,clientY:r.top+50}));}")
+            "{bubbles:true,pointerId:3,isPrimary:true,clientX:r.left+100,clientY:r.top+50}));}")
         self.page.wait_for_timeout(50)
         self.assertEqual(1, self.page.evaluate("cursor.state().run"))
         self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
@@ -1309,6 +1316,137 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.wait_for_timeout(50)
         self.assertEqual(0, self.page.evaluate("cursor.state().run"))
         self.assertIsNone(self.page.evaluate("cursor.state().source"))
+
+    # --- B9: the five follow-ups from 검토결과 D-3DCURSOR-B8b §9 ------------------------------
+
+    def test_d7_a_stale_document_gesture_no_longer_swallows_a_synthetic_click(self):
+        """비차단① (§4-1 P4). The click suppression asked only whether *any* pointerdown had ever
+        been seen. One down anywhere in the document — never a gesture on any pane — then closed
+        the legacy synthetic-click path for good. Only a sequence this click could still belong to
+        may suppress it, and the bound is the injected one."""
+        self.page.evaluate("cursor.stop();__mount({pickTimeLimitMs:50})")
+        self.enable()
+        # Outside every pane, so this down is not any pane's gesture and revokes nothing.
+        self.page.evaluate("()=>document.body.dispatchEvent(new MouseEvent('pointerdown',"
+                           "{bubbles:true,clientX:900,clientY:2}))")
+        self.page.wait_for_timeout(120)
+        self.page.evaluate("clickOnly('#pane-ct',100,50)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+        self.assertEqual({"x": 100, "y": 50}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+        # A fresh gesture is still suppressed at its own click: down, up and click pick once.
+        self.page.evaluate("clickAt('#pane-ct',120,60)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source.pixel.x===120")
+        self.page.wait_for_timeout(120)
+        self.assertEqual(2, self.page.evaluate("cursor.state().run"), "no second pick from the click")
+
+    def test_d7_the_default_pick_time_limit_is_one_second(self):
+        """관찰① (§3-2). The injection test uses 0 ms, and 0 x 10 is still 0, so the shipped
+        default was fixed by nothing. This holds it with the default mount and no injection."""
+        self.enable()
+        self.page.evaluate(
+            "()=>{const t=document.querySelector('#canvas-ct'),r=document.querySelector('#pane-ct')"
+            ".getBoundingClientRect();const at=type=>t.dispatchEvent(new MouseEvent(type,"
+            "{bubbles:true,clientX:r.left+100,clientY:r.top+50}));at('pointerdown');"
+            "window.__upAt=()=>at('pointerup');}")
+        self.page.wait_for_timeout(1200)
+        self.page.evaluate("__upAt()")
+        self.page.wait_for_timeout(80)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"),
+                         "a pointer held for 1.2 s is past the one second default")
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        # The contrast, with the same events and the same default: a prompt up is a pick.
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},{noClick:true})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+
+    def test_d7_a_second_finger_that_is_not_the_primary_pointer_is_not_a_pick(self):
+        """관찰② (§4-2 P2). button 0 is the primary button, not the primary pointer: the second
+        finger of a two-finger tap carries button 0 too and overwrites the gesture."""
+        self.enable()
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},"
+                           "{pointerId:2,isPrimary:false,noClick:true})")
+        self.page.wait_for_timeout(80)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        # A second finger is not a failed pick, so it says nothing to the reader.
+        self.assertEqual("", self.page.evaluate("cursor.state().status"))
+        # The same gesture from the primary pointer does pick, so the refusal is the isPrimary term.
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},"
+                           "{pointerId:2,isPrimary:true,noClick:true})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+
+    def test_d7_a_cancelled_pointer_sequence_is_dropped_and_does_not_pick(self):
+        """관찰③ (§4-3 P3). The browser withdrew the sequence; an up that arrives for the same
+        pointer afterwards is not the reader's aim any more."""
+        self.enable()
+        self.page.evaluate(
+            "()=>{const t=document.querySelector('#canvas-ct'),r=document.querySelector('#pane-ct')"
+            ".getBoundingClientRect();const send=(node,type)=>node.dispatchEvent(new PointerEvent("
+            "type,{bubbles:true,pointerId:5,isPrimary:true,clientX:r.left+100,clientY:r.top+50}));"
+            "send(t,'pointerdown');send(document,'pointercancel');send(t,'pointerup');}")
+        self.page.wait_for_timeout(80)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        self.assertEqual("", self.page.evaluate("cursor.state().status"))
+        # Without the cancel the identical sequence is a pick, so the refusal is the cancel alone.
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},{pointerId:5,noClick:true})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+
+    def test_d7_a_down_on_the_border_two_panes_share_belongs_to_neither_neighbour(self):
+        """관찰④ (§4-4). The rect test included both far edges, so a down on the line two panes
+        share sat inside both of them. The interval is half open on the far edges instead."""
+        # The move tolerance is taken out of the way (검토자 probes.py P1 does the same), so the
+        # rect test alone decides and the up can land on a point that is inside the image.
+        self.page.evaluate("cursor.stop();__mount({pickMoveTolerancePx:100000})")
+        self.enable()
+        shared = self.page.evaluate("""() => {
+          const ct = document.querySelector('#pane-ct').getBoundingClientRect();
+          const mr = document.querySelector('#pane-mr').getBoundingClientRect();
+          window.__edge = {x: ct.left + 100, y: ct.bottom};
+          return {ctBottom: ct.bottom, mrTop: mr.top};
+        }""")
+        self.assertEqual(shared["ctBottom"], shared["mrTop"], "the two panes must share this line")
+        self.page.evaluate("gestureAt('#pane-ct',{x:__edge.x,y:__edge.y,absolute:true},"
+                           "{x:100,y:50},{noClick:true})")
+        self.page.wait_for_timeout(80)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"),
+                         "the shared line is the next pane's first row, not this pane's last")
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        # One pixel inside is the contrast: the same up, and now the down really is this pane's.
+        self.page.evaluate("gestureAt('#pane-ct',{x:__edge.x,y:__edge.y-1,absolute:true},"
+                           "{x:100,y:50},{noClick:true})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+        self.assertEqual({"x": 100, "y": 50}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+
+    def test_d7_stop_takes_the_panel_and_its_toggle_listener_back(self):
+        """B9 3(a)-5 관측. 호스트는 모드 이탈·세션 종료에서 stop()을 부르고 다음 진입에서 새
+        컨트롤러를 마운트한다. stop()이 패널을 회수하지 않으면 재진입 때 패널이 쌓이고, 떨어져
+        나온 토글이 멈춘 컨트롤러를 계속 부른다."""
+        self.page.evaluate("cursor.stop();__mountHosted()")
+        self.enable()
+        self.assertEqual(1, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        first = self.page.evaluate(
+            "document.querySelector('[data-kin-3d-cursor-panel]').getAttribute('data-kin-3d-cursor-panel')")
+        self.page.evaluate("cursor.stop()")
+        self.page.wait_for_function("cursor.state().stopped===true")
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        self.assertIsNone(self.page.evaluate("panelText()"))
+        self.assertIsNone(self.page.evaluate("toggleState()"))
+        # A fresh controller in the very same host, which nothing cleared in between.
+        self.page.evaluate("__mountHostedKeep()")
+        self.enable()
+        self.assertEqual(1, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        second = self.page.evaluate(
+            "document.querySelector('[data-kin-3d-cursor-panel]').getAttribute('data-kin-3d-cursor-panel')")
+        self.assertNotEqual(first, second, "the new mount must own the panel that is on screen")
+        self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
 
 
 if __name__ == "__main__":

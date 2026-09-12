@@ -96,6 +96,10 @@ MOUNT = """async () => {
     };
     document.addEventListener('click', event => note('document-capture', event), true);
     document.addEventListener('click', event => note('document-bubble', event), false);
+    // Since B8b the controller measures the pointerup, not the click. PointerEvent.clientX is a
+    // double while MouseEvent.clientX is rounded to whole pixels, so only this event carries the
+    // coordinates the product was actually asked about.
+    document.addEventListener('pointerup', event => note('document-pointerup', event), true);
     for (const pane of panes()) {
       const anchor = pane.viewport.element || pane.element;
       pane.element.addEventListener('click', event => note('pane-bubble:' + pane.id, event), false);
@@ -315,25 +319,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
 
     ACTIVE = "() => services.viewportGridService.getActiveViewportId()"
 
-    def focus(self, page, cell):
-        """Make a pane the active one before it is measured.
-
-        The pinned viewer swallows the first click into a pane that is not yet active: mousedown and
-        mouseup land on different nodes because activating the pane rebuilds it, so the `click` event
-        is retargeted to the grid cell above `[data-viewport-uid]` and no listener inside the pane
-        ever sees it. Whether that focus click itself picked is recorded, not hidden.
-        """
-        if page.evaluate(self.ACTIVE) == cell["id"]:
-            return None
-        rect = page.evaluate("""id => {
-          const r = document.querySelector('[data-viewport-uid="' + id + '"]').getBoundingClientRect();
-          return {left: r.left, top: r.top, width: r.width, height: r.height};
-        }""", cell["id"])
-        before = page.evaluate("() => window.__acc.cursor.state().run")
-        page.mouse.click(rect["left"] + rect["width"] * .08, rect["top"] + rect["height"] * .08)
-        page.wait_for_function(self.ACTIVE.replace("() =>", "id =>") + " === id", arg=cell["id"], timeout=10000)
-        page.wait_for_function("() => !window.__acc.cursor.state().busy", timeout=30000)
-        return page.evaluate("() => window.__acc.cursor.state().run") > before
+    # The activation click this harness used to spend before every measurement is gone (B8b A' +
+    # 작업지시 D-3DCURSOR-B9 3(c)). The pinned viewer still swallows nothing less: mousedown and
+    # mouseup land on different nodes when an inactive pane is activated, and the `click` is
+    # retargeted out of the pane. The controller reads the pointerup instead, so the measurement
+    # click itself both activates the pane and picks. `focusClickPicked` now records that the
+    # measured click was delivered into a pane that was not active and picked anyway.
 
     def pick(self, page, cell, client):
         clicks = []
@@ -356,11 +347,17 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                   elementAtPoint: (t => t && t.tagName + ' ' + String(t.className).slice(0, 60))(
                     document.elementFromPoint(window.__acc.probeX, window.__acc.probeY))})"""))
                 continue
-            seen = page.evaluate("id => window.__acc.events.filter(e => e.phase === 'pane-bubble:' + id)",
-                                 cell["id"])
-            self.assertTrue(seen, "the controller's own pane never saw the click: %s"
+            # The pointerup is the pick, and it is the only event whose coordinates are not
+            # rounded to whole client pixels. A click into a pane that was not active is also
+            # retargeted above [data-viewport-uid], so the pane's own click listener may never see
+            # it at all; the document capture always does.
+            seen = page.evaluate("() => window.__acc.events.filter(e => e.phase === 'document-pointerup')")
+            self.assertTrue(seen, "the pointerup never reached the document: %s"
                             % json.dumps(page.evaluate("() => window.__acc.events"), ensure_ascii=False))
-            return page.evaluate("() => window.__acc.cursor.state()"), page.evaluate(MARKS), clicks, seen[-1]
+            inside = page.evaluate("id => window.__acc.events.filter(e => e.phase === 'pane-bubble:' + id).length",
+                                   cell["id"])
+            return (page.evaluate("() => window.__acc.cursor.state()"), page.evaluate(MARKS),
+                    clicks, seen[-1], inside)
         self.fail("the click at %s started no run: %s" % (client, json.dumps(clicks, ensure_ascii=False)))
 
     def compare(self, page, condition, target, source_cell, target_cell):
@@ -371,7 +368,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         point = fx.world(source_plane, target["slice"], target["column"], target["row"])
         found = fx.project(target_plane, point)
 
-        focus_picked = self.focus(page, source_cell)
+        was_active = page.evaluate(self.ACTIVE) == source_cell["id"]
         self.show(page, source_cell, target["sop"])
         source_map, source_blobs, source_reading = self.mapping(
             page, source_cell, target["series"], target["slice"])
@@ -381,12 +378,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         fiducial_residual = math.dist(client, (measured["clientX"], measured["clientY"]))
 
         self.last_click = client
-        state, marks, lost, event = self.pick(page, source_cell, client)
+        state, marks, lost, event, pane_clicks = self.pick(page, source_cell, client)
 
-        # The browser delivers the click at whole client pixels, so the point the product was asked
-        # about is not exactly the voxel centre. The expectation is therefore recomputed from the
-        # coordinates the event actually carried — still only from this test's affine and the DICOM
-        # tags — and the voxel-centre figure is kept beside it as the click quantization.
+        # The point the product was asked about is not exactly the voxel centre: the pointer lands
+        # where the browser puts it. The expectation is therefore recomputed from the coordinates
+        # the pointerup actually carried — still only from this test's affine and the DICOM tags —
+        # and the voxel-centre figure is kept beside it as the input quantization.
         landed = source_map.pixel(event["x"], event["y"])
         asked = fx.world(source_plane, target["slice"], landed[0], landed[1])
         reached = fx.project(target_plane, asked)
@@ -407,7 +404,11 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                    expectedSourcePixel=list(landed), reportedSourcePixel=[source_pixel["x"], source_pixel["y"]],
                    sourcePixelErrorPX=math.dist([source_pixel["x"], source_pixel["y"]], list(landed)),
                    fiducialSelfCheckPX=fiducial_residual,
-                   focusClickPicked=focus_picked, clicksSwallowed=len(lost),
+                   paneWasActive=was_active, paneSawClick=pane_clicks,
+                   # True means this pick was the first click into a pane the host had taken out of
+                   # the hit test — the case the removed workaround used to absorb. None means the
+                   # pane was already active, so the case does not arise for that row.
+                   focusClickPicked=None if was_active else True, clicksSwallowed=len(lost),
                    swallowed=lost or None,
                    expectedTargetSOP=target_plane["sopInstanceUIDs"][reached["index"]],
                    voxelTargetSOP=target_plane["sopInstanceUIDs"][found["index"]],
@@ -463,7 +464,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         wrong = []
         for row in rows:
             detail = {key: row[key] for key in
-                      ("condition", "target", "calculationMM", "clickQuantizationMM", "voxelCentreMM",
+                      ("condition", "target", "paneWasActive", "paneSawClick", "clicksSwallowed",
+                       "calculationMM", "clickQuantizationMM", "voxelCentreMM",
                        "sourcePixelErrorPX", "expectedTargetPixel", "separationMM", "runnerUpMM",
                        "marginMM", "voxelSeparationMM", "targetReason", "markerPX", "clickedAt",
                        "deliveredAt", "fiducialSelfCheckPX")
@@ -479,6 +481,11 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 wrong.append(("mapping over %.3f mm" % CALCULATION_MM, detail))
             if "markerPX" in row and row["markerPX"] > MARKER_PX:
                 wrong.append(("marker over %.3f px" % MARKER_PX, detail))
+            # Without the activation click, every measured click has to be answered the first time.
+            if row["clicksSwallowed"]:
+                wrong.append(("click swallowed", detail))
+            if row["focusClickPicked"] is False:
+                wrong.append(("inactive pane refused the first click", detail))
         self.assertEqual(wrong, [], "conditions that did not hold:\n"
                          + json.dumps(wrong, ensure_ascii=False, indent=1))
 
@@ -498,6 +505,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             separationMM=max(row["separationMM"] for row in self.observations),
             boundaryFrames=sum(1 for row in self.observations if row.get("frameVerdict") == "boundary"),
             clicksSwallowed=sum(row["clicksSwallowed"] for row in self.observations),
+            inactivePaneClicks=sum(1 for row in self.observations if not row["paneWasActive"]),
             focusClicksThatPicked=sum(1 for row in self.observations if row["focusClickPicked"]))
         print("3D CURSOR ACCURACY " + name + " " + json.dumps(dict(
             count=len(self.observations), worst=worst,
@@ -543,6 +551,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             if self.observations:
                 self.report("default-scale")
         self.verdict(collected)
+        self.assertTrue([row for row in collected if row["focusClickPicked"]],
+                        "no condition exercised the first click into an inactive pane")
         self.assertEqual(self.originals(), originals)
 
     def test_cursor_accuracy_02_device_pixel_ratio_and_browser_zoom(self):
@@ -572,6 +582,8 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             if self.observations:
                 self.report("screen-conditions")
         self.verdict(collected)
+        self.assertTrue([row for row in collected if row["focusClickPicked"]],
+                        "no condition exercised the first click into an inactive pane")
         self.assertEqual(self.originals(), originals)
 
     def test_cursor_accuracy_03_normal_oblique_is_carried_and_bad_geometry_is_refused(self):

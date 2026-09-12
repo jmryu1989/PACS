@@ -2178,6 +2178,176 @@ function kinCreateFrameCoverage() {
   },onModeExit(){epoch++;current?.stop();current=null;}};
 }
 
+/* REQ-D-3D-CURSOR 연결 경로. 이 확장은 3D Cursor 모듈 두 개를 불러 컨트롤러를 붙이고
+   렌더러의 사건을 컨트롤러의 refresh()로 옮기는 일만 한다. 도구를 켜거나 끄지 않고,
+   주석을 만들지 않으며, 저장소에 쓰지 않는다.
+   평가 빌드에 커밋되는 플래그는 false다. 켜는 수단은 window.config의 리터럴 하나뿐이고
+   URL 매개변수·localStorage·전역 토글 같은 런타임 우회 경로는 두지 않는다. OFF면
+   preRegistration에서 스크립트를 주입하지 않으므로 모듈 전역도 패널도 생기지 않는다. */
+function kinCreateThreeDCursor() {
+  let services, ready = null, current = null, epoch = 0, ended = false, listening = false, channel = null;
+  let rows = [], owner = null, mark = null, listeners = [], mounts = 0, renders = 0, invalidations = 0;
+  // 'true'가 아닌 모든 값(누락·문자열 'true'·1)은 OFF다.
+  const on = () => window.config?.kinThreeDCursor?.enabled === true;
+  const say = text => { const node = document.querySelector('#kin-viewer-layout-status'); if (node) node.textContent = text; };
+  // mountProtocols() :1436-1448과 같은 형태. 이미 로드된 전역이 있으면 다시 주입하지 않는다.
+  const load = (name, global) => window[global] ? Promise.resolve() : new Promise((resolve, reject) => {
+    const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+    const finish = error => { clearTimeout(timer); script.onload = script.onerror = null; error ? reject(error) : resolve(); };
+    const timer = setTimeout(() => finish(new Error('3D Cursor 연결이 지연되어 중단했습니다.')), 20000);
+    script.onload = () => finish(window[global] ? null : new Error('3D Cursor 모듈을 확인할 수 없습니다.'));
+    script.onerror = () => finish(new Error('3D Cursor 모듈을 불러오지 못했습니다.'));
+    document.head.append(script);
+  });
+  async function get(path) {
+    const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store' });
+    if (!response.ok) throw new Error('검사 접근 정보를 확인할 수 없습니다.');
+    return await response.json();
+  }
+  const ownerOf = me => me?.kind === 'member' && me.institution && me.sub ? JSON.stringify([me.institution, me.sub]) : null;
+
+  /* view(info) :1611-1614과 같은 이유의 렌더링엔진 대조: grid가 기록한 viewportId로 얻은
+     뷰포트가 이 그리드를 그리는 엔진의 것이 아니면 그 pane은 버린다. 남은 판정(type,
+     stack 내용, 앵커)은 컨트롤러가 한다. */
+  function panes() {
+    const grid = services.viewportGridService, cornerstoneViewports = services.cornerstoneViewportService;
+    let engineId = null;
+    try { engineId = cornerstoneViewports.getRenderingEngine?.()?.id || null; } catch (_) { engineId = null; }
+    const list = [];
+    for (const record of grid.getState().viewports.values()) {
+      const viewport = cornerstoneViewports.getCornerstoneViewport(record.viewportId);
+      const element = document.querySelector('[data-viewport-uid="' + record.viewportId + '"]');
+      // 컨트롤러도 stack이 아닌 것을 거절하지만, 후보 목록에 넣지 않는 편이 조용한 탈락과
+      // 거절 사유를 헷갈리게 하지 않는다.
+      if (!viewport || !element || viewport.type !== 'stack') continue;
+      let paneEngine = null;
+      try { paneEngine = viewport.getRenderingEngine()?.id || null; } catch (_) { continue; }
+      if (!paneEngine || (engineId && paneEngine !== engineId)) continue;
+      list.push({ id: record.viewportId, element, viewport });
+    }
+    return list;
+  }
+
+  const numbers = value => Array.isArray(value) ? value.map(Number) : value;
+  /* 환자 키는 인증된 /api/studies 행에서만 온다(:1617). DICOM PatientID는 제품의 식별
+     경계가 아니므로 태그에서 유도하지 않으며, 행이 없으면 null을 돌려 pane을 거절시킨다. */
+  function meta(imageId) {
+    const core = window.cornerstone;
+    const instance = core?.metaData?.get('instance', imageId);
+    if (!instance) return null;
+    const plane = core.metaData.get('imagePlaneModule', imageId) || {};
+    const patient = rows.find(row => row.uid === instance.StudyInstanceUID)?.sourcePatientKey;
+    if (!patient) return null;
+    return {
+      StudyInstanceUID: instance.StudyInstanceUID, SeriesInstanceUID: instance.SeriesInstanceUID,
+      SOPInstanceUID: instance.SOPInstanceUID, FrameOfReferenceUID: instance.FrameOfReferenceUID,
+      sourcePatientKey: patient, Modality: instance.Modality,
+      ImageOrientationPatient: numbers(instance.ImageOrientationPatient ?? plane.imageOrientationPatient),
+      ImagePositionPatient: numbers(instance.ImagePositionPatient ?? plane.imagePositionPatient),
+      PixelSpacing: numbers(instance.PixelSpacing ?? plane.pixelSpacing),
+      Rows: Number(instance.Rows ?? plane.rows), Columns: Number(instance.Columns ?? plane.columns), imageId };
+  }
+
+  /* 직렬화된 세 값 중 하나라도 바뀌면 컨트롤러가 진행 중인 run을 취소한다. owner는 :1605의
+     ownerOf, tool은 :948과 같은 getActivePrimaryMouseButtonTool이다. 제품은 뷰어 창에
+     읽을 수 있는 세션 식별자를 노출하지 않으므로 session은 이 창의 모드 진입 표식이며,
+     세션 종료·모드 이탈에서 컨트롤러 자체가 내려가므로 그 경계와 같은 값이다. */
+  function context() {
+    if (!owner || !mark) return null;
+    let tool = null;
+    try {
+      const active = services.viewportGridService.getActiveViewportId();
+      const viewport = active && services.cornerstoneViewportService.getCornerstoneViewport(active);
+      const group = viewport && window.cornerstoneTools.ToolGroupManager.getToolGroupForViewport(viewport.id, viewport.renderingEngineId);
+      tool = group?.getActivePrimaryMouseButtonTool() || null;
+    } catch (_) { tool = null; }
+    return { owner, session: mark, tool };
+  }
+
+  /* 확정은 끝까지 컨트롤러 안의 rendered() 폴링이다. IMAGE_RENDERED는 그 대기를 줄이고,
+     STACK_NEW_IMAGE·grid 변경·CAMERA_MODIFIED는 표식을 무효화한다. STACK_NEW_IMAGE는
+     render 앞에 발화하므로 확정 신호로 쓰지 않는다(B8 §2). */
+  function bind() {
+    const core = window.cornerstone;
+    const listen = (target, type, handler, capture) => {
+      target.addEventListener(type, handler, capture);
+      listeners.push(() => target.removeEventListener(type, handler, capture));
+    };
+    const rendered = () => { renders++; current?.refresh(); };
+    const invalidate = () => { invalidations++; current?.refresh(); };
+    // viewer-frame-coverage.js:141/146과 같은 document capture.
+    listen(document, core.Enums.Events.IMAGE_RENDERED, rendered, true);
+    listen(document, core.Enums.Events.STACK_NEW_IMAGE, invalidate, true);
+    listen(document, core.Enums.Events.CAMERA_MODIFIED, invalidate, true);
+    // kinCreateViewerHistory :1326-1329의 grid 구독 관례. 해제는 같은 배열이 가진다.
+    for (const event of Object.values(services.viewportGridService.EVENTS)) {
+      const subscription = services.viewportGridService.subscribe(event, invalidate);
+      listeners.push(() => subscription.unsubscribe());
+    }
+  }
+  function unbind() {
+    const pending = listeners; listeners = [];
+    for (const off of pending) { try { off(); } catch (_) {} }
+  }
+
+  function retire() {
+    epoch++; unbind();
+    const gone = current; current = null; mark = null;
+    if (!gone) return;
+    // 이탈은 disable() 뒤 stop()이다. stop()이 'unsettled'를 돌려주면 그 창에서 모드는
+    // 영구 불가이며, 호스트는 재마운트로 그것을 되돌리려 하지 않는다.
+    Promise.resolve().then(() => gone.disable('off')).then(() => gone.stop()).catch(() => {});
+  }
+  function endSession() {
+    if (ended) return; ended = true;
+    retire();
+    window.removeEventListener('storage', onStorage); window.removeEventListener('pagehide', endSession);
+    channel?.close(); channel = null;
+  }
+  function onStorage(event) { if (event.key === 'kin-session-ended') endSession(); }
+  function watchSession() {
+    if (listening) return; listening = true;
+    // kinCreateCTSync :1657-1660 + kinCreateImageText :2028-2040의 pagehide 포함 형태.
+    window.addEventListener('storage', onStorage); window.addEventListener('pagehide', endSession);
+    try { channel = new window.BroadcastChannel('kin-session'); channel.onmessage = event => { if (event.data?.type === 'session-ended') endSession(); }; } catch (_) {}
+  }
+
+  return {
+    id: 'kin.three-d-cursor',
+    preRegistration({ servicesManager }) {
+      services = servicesManager.services;
+      if (!on()) return;
+      ready = load('three-d-cursor-model.js', 'KinThreeDCursorModel')
+        .then(() => load('viewer-three-d-cursor.js', 'KinViewerThreeDCursor'));
+      ready.catch(() => {});
+      // 다른 확장과 같은 읽기 전용 관측 창구다. 여기서 기능을 켜거나 끌 수 없다.
+      window.kinViewerThreeDCursorState = () => ({
+        mounts, renders, invalidations, listeners: listeners.length, ended,
+        mounted: !!current, cursor: current ? current.state() : null });
+    },
+    onModeEnter() {
+      if (!ready || ended) return;
+      // kinCreateFrameCoverage :2171-2175의 티켓 관례. 늦게 도착한 then은 버린다.
+      const ticket = ++epoch;
+      watchSession();
+      ready.then(async () => {
+        if (ticket !== epoch || ended) return;
+        const me = await get('/api/me');
+        const next = ownerOf(me);
+        rows = (await get('/api/studies')).studies || [];
+        if (ticket !== epoch || ended || !next) return;
+        owner = next; mark = 'kin3d-mode-' + ticket;
+        if (current) return;
+        current = window.KinViewerThreeDCursor.mount(
+          { panes, meta, context, host: document.querySelector('#kin-viewer-layout') });
+        mounts++;
+        bind();
+      }).catch(() => { if (ticket === epoch) say('3D Cursor를 연결하지 못했습니다. 영상 작업을 저장한 뒤 뷰어를 다시 여세요.'); });
+    },
+    onModeExit() { retire(); },
+  };
+}
+
 function kinDicomPdfViewportGuard(extensionManager, options) {
   options = options || {};
   const entryId = '@ohif/extension-dicom-pdf.viewportModule.dicom-pdf';
@@ -2344,7 +2514,10 @@ function kinCreateDicomPdf() {
 }
 
 window.config = {
-  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets()],
+  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor()],
+  // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
+  // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
+  kinThreeDCursor: { enabled: false },
   modes: [],
   customizationService: {},
   showStudyList: true,

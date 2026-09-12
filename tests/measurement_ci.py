@@ -115,6 +115,16 @@ PROFILES = {
         'suites': (('e2e/test_three_d_cursor_accuracy.py', 'ThreeDCursorAccuracyE2E',
                     'ci-three-d-cursor-accuracy'),),
     },
+    'three-d-cursor-wiring': {
+        'out': ROOT / 'tests/e2e/artifacts/three-d-cursor-wiring-ci',
+        'project_prefix': 'kin-3d-cursor-wire-ci-',
+        'suite_timeout': 1200,
+        # Dispatch only, and separate from the accuracy profile: this one proves the loader in
+        # config/ohif.js, not the position accuracy, and its flag-ON build exists only inside the
+        # suite's own intercepted config response.
+        'suites': (('e2e/test_three_d_cursor_wiring.py', 'ThreeDCursorWiringE2E',
+                    'ci-three-d-cursor-wiring'),),
+    },
     'identity-fields': {
         'out': ROOT / 'tests/e2e/artifacts/identity-fields-ci',
         'project_prefix': 'kin-identity-ci-',

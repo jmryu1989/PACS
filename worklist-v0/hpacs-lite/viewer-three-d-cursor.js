@@ -549,18 +549,33 @@
       gesture={pointerId:event.pointerId,button:event.button,x:event.clientX,y:event.clientY,at:Date.now(),
         live:Number.isFinite(event.clientX)&&Number.isFinite(event.clientY)};
     }
+    /* The browser took the sequence back — a scroll, a native drag or a lost capture. Whatever it
+       becomes afterwards is no longer the reader's aim, so the gesture is dropped outright rather
+       than left live for an up of the same id to answer (검토결과 B8b §4-3 P3). */
+    function onDocumentCancel(event){
+      if(!event||!gesture||gesture.pointerId!==event.pointerId)return;
+      gesture=null;
+    }
     function isPickGesture(item,event){
       if(!gesture||!gesture.live)return false;
       // Same pointer, and the primary button on both ends: a right or middle click, a second
       // finger or a stray up from another sequence is not this reader's pick.
       if(gesture.pointerId!==event.pointerId||gesture.button!==0||event.button!==0)return false;
+      /* button 0 is the primary *button*, not the primary *pointer*: a second finger's up also
+         carries button 0, and gesture is overwritten by every down, so without this the second
+         finger of a two-finger tap picks (검토결과 D-3DCURSOR-B8b §4-2 P2). Only an explicit
+         false is refused — the older synthetic path dispatches MouseEvent, which has no
+         isPrimary at all, and that path is deliberately still supported. */
+      if(event.isPrimary===false)return false;
       if(Date.now()-gesture.at>pickTimeLimitMs)return false;
       if(!Number.isFinite(event.clientX)||!Number.isFinite(event.clientY))return false;
       if(Math.hypot(event.clientX-gesture.x,event.clientY-gesture.y)>pickMoveTolerancePx)return false;
       let rect=null;
       try{rect=item.element.getBoundingClientRect();}catch(_){return false;}
       if(!rect||![rect.left,rect.top,rect.right,rect.bottom].every(Number.isFinite)||!(rect.width>0)||!(rect.height>0))return false;
-      return gesture.x>=rect.left&&gesture.x<=rect.right&&gesture.y>=rect.top&&gesture.y<=rect.bottom;
+      /* Half-open on the far edges: two panes that share a border would otherwise both contain a
+         down on that line, and either one's up would then answer for it (검토결과 B8b §4-4). */
+      return gesture.x>=rect.left&&gesture.x<rect.right&&gesture.y>=rect.top&&gesture.y<rect.bottom;
     }
     /* The point is the one the up carries, not the one the down did: the pane is only laid out as
        the active viewport after the activation, and the rect the coordinates are measured against
@@ -588,7 +603,11 @@
        That is the older synthetic path (a host or a test that dispatches a bare click), which
        stays supported. */
     function onClick(element,event){
-      const sequence=gesture!==null;
+      /* Only a sequence this click could actually belong to suppresses it. Without the time bound
+         any pointerdown anywhere in the document — one that never became a gesture on any pane —
+         swallows the next synthetic click for the rest of the session (검토결과 B8b §4-1 P4,
+         측정 run=0). The bound is the injected one, so no new literal appears here. */
+      const sequence=gesture!==null&&Date.now()-gesture.at<=pickTimeLimitMs;
       gesture=null;
       if(sequence)return;
       const item=[...bound.values()].find(entry=>entry.element===element);
@@ -645,10 +664,18 @@
       stopped=true;bound=new Map();
       // The one listener this controller owns outside the panes goes with the controller itself.
       try{doc.removeEventListener('pointerdown',onDocumentDown,true);}catch(_){}
+      try{doc.removeEventListener('pointercancel',onDocumentCancel,true);}catch(_){}
       gesture=null;
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
       note(message(result==='unsettled'?'teardown-unsettled':'stopped'));refreshUi();
+      /* The panel node and its toggle listener are this controller's too. The host calls
+         stop() at mode exit and at session end and mounts a fresh controller on the next
+         entry, so a panel that is not taken back stacks up and its dead toggle keeps
+         calling a stopped controller (B9 3(a)-5에서 관측). */
+      try{toggleNode?.removeEventListener('click',onToggle);}catch(_){}
+      try{panel?.remove();}catch(_){}
+      panel=null;toggleNode=null;statusNode=null;
       return result;
     }
 
@@ -662,6 +689,7 @@
     // in the document — including on a node the host viewer puts over the pane. It writes nothing
     // and reads no other controller's state, and stop() takes it back off.
     try{doc.addEventListener('pointerdown',onDocumentDown,true);}catch(_){}
+    try{doc.addEventListener('pointercancel',onDocumentCancel,true);}catch(_){}
     buildPanel(options.host);
     return {enable,disable,refresh,pick,stop,state,cancel};
   }
