@@ -50,7 +50,7 @@ window.kinViewerJobs = function (services, model) {
         const currentSnapshot=(readOnly=false)=>{const value=capture(true,readOnly,true);if(value.version===5){value.version=4;delete value.batch;}else if(value.version===6)value.batch=null;return value;};
         const snapshot = row ? null : currentSnapshot();
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
-        const assets=[['kinViewerJobPrint','viewer-job-print.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
+        const assets=[['kinViewerJobPrint','viewer-job-print.js'],['kinViewerEditorLink','viewer-editor-link.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
           // A print-only asset failure must leave saving/restoring available.
           if (!printLoading) printLoading = Promise.all(assets.map(([name,file])=>new Promise((resolve, reject) => {
@@ -65,7 +65,8 @@ window.kinViewerJobs = function (services, model) {
           await printLoading;
         }
         if (!live()) return;
-        printer ||= window.kinViewerJobPrint({ api, authenticate, live });
+        printer ||= window.kinViewerJobPrint({ api, authenticate, live,
+          editor: window.kinViewerEditorLink({ studies, owner: () => me ? [me.institution, me.sub] : null, live }) });
         if (row) printer.open(studies[0], row.id,row.snapshotVersion);
         else { if (!unchanged()) throw new Error('현재 영상이 바뀌었습니다. 다시 출력하세요.'); printer.openCurrent(studies[0], snapshot, unchanged); }
       } catch (e) { if (live()) status.textContent = e.message; }

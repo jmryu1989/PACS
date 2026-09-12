@@ -1,11 +1,13 @@
 # coding: utf-8
 """TEST-D09-KEY-PREVIEW: bounded output crop, independent pixels and PDF."""
-import base64,io,sys,unittest
+import base64,io,re,sys,unittest
 from pathlib import Path
 import numpy as np
 from PIL import Image
 from pypdf import PdfReader
 from test_report_window import ReportWindowE2E,expect
+
+def flat(text):return re.sub(r'\s+','',text)
 
 class KeyPreviewControlsE2E(ReportWindowE2E):
     def open_keys(self,p,keys):
@@ -59,7 +61,7 @@ class KeyPreviewControlsE2E(ReportWindowE2E):
         with p.expect_popup() as opened:p.get_by_role('button',name='인쇄 / PDF',exact=True).click()
         printed=opened.value;printed.wait_for_function('()=>window.__printed===true')
         output=Path(__file__).parent/'artifacts/key-preview-controls.pdf';printed.pdf(path=str(output),prefer_css_page_size=True);pdf=PdfReader(output)
-        text='\n'.join(page.extract_text() for page in pdf.pages);self.assertIn('출력 확대 200%',text);self.assertIn('키 출력 편집문 <b>미확정</b>',text)
+        text='\n'.join(page.extract_text() for page in pdf.pages);flatall=flat(text);self.assertIn(flat('출력 확대 200%'),flatall);self.assertIn(flat('키 출력 편집문 <b>미확정</b>'),flatall)
         images=[np.asarray(i.image.convert('RGB')) for page in pdf.pages for i in page.images];self.assertEqual(len(images),1);self.assertTrue(np.array_equal(images[0],actual))
         for page in pdf.pages:self.assertIn(f.patient_id,page.extract_text())
         printed.close();self.assertEqual(p.locator('#findings').input_value(),'키 출력 편집문 <b>미확정</b>');self.assertEqual(self.saved_rows(f),before);self.assertEqual(self.hashes(),original)

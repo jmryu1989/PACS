@@ -1,12 +1,15 @@
 # coding: utf-8
 """TEST-D09-REPORT-PREVIEW: actual BFF, report snapshot, frame output and cancellation."""
-import base64, hashlib, io, sys, unittest, uuid
+import base64, hashlib, io, re, sys, unittest, uuid
 from pathlib import Path
 import numpy as np
 from pydicom import dcmread
 from pydicom.uid import generate_uid
 from pypdf import PdfReader
 from test_viewer_history import ViewerHistoryE2E, expect, base, literal
+
+
+def flat(text):return re.sub(r'\s+','',text)
 
 
 class ReportPreviewE2E(ViewerHistoryE2E):
@@ -107,7 +110,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         printed.pdf(path=str(output),prefer_css_page_size=True)
         pdf=PdfReader(output);self.assertGreaterEqual(len(pdf.pages),3)
         for sheet in pdf.pages:
-            self.assertIn(f.patient_id,sheet.extract_text());self.assertIn('승인된 저장본',sheet.extract_text())
+            self.assertIn(f.patient_id,sheet.extract_text());self.assertIn(flat('승인된 저장본'),flat(sheet.extract_text()))
         printed.close();self.assertEqual(writes,[]);self.assertEqual(self.saved_rows(f),before);self.assertEqual(self.hashes(),original)
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
         p.locator('#findings').evaluate("e=>e.value='현재 편집문 <b>그대로</b>'")
