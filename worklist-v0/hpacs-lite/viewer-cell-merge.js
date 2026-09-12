@@ -232,15 +232,35 @@
       return check();
     }
 
-    // What unmerge owes each recorded cell: a cell still on screen keeps its newest
-    // state, a cell this module removed gets the state recorded before the merge.
-    function unmergeTarget(base) {
+    const sameState = (a, b) => !!a && !!b && sameCamera(a.camera, b.camera) && a.imageId === b.imageId &&
+      JSON.stringify(a.voiRange ?? null) === JSON.stringify(b.voiRange ?? null) && (a.invert ?? null) === (b.invert ?? null);
+
+    // The native viewport refits its camera when a pane changes shape, and that refit is
+    // not reversible by resizing back. So the state right after a verified merge is
+    // recorded, and a cell still holding exactly that state is owed its pre-merge camera
+    // back; a cell the user has since worked in keeps the newer state instead.
+    async function settledState() {
+      let previous = null;
+      for (let count = 0; count < 24; count++) {
+        const current = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
+        if (previous && [...current].every(([id, cell]) => cell.kind !== 'stack' || sameState(cell, previous.get(id)))
+            && previous.size === current.size) return current;
+        previous = current;
+        await pause();
+      }
+      return previous;
+    }
+
+    // What unmerge owes each recorded cell: a cell this module removed, or one untouched
+    // since the merge, gets the state recorded before the merge; anything the user has
+    // since changed keeps its newest state.
+    function unmergeTarget(base, after) {
       const present = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
       return { rows: base.rows, cols: base.cols, active: base.active, cells: base.cells.map(cell => {
         const current = present.get(cell.viewportId);
-        return current && current.kind === 'stack' && JSON.stringify(current.sets) === JSON.stringify(cell.sets)
-          ? { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex }
-          : cell;
+        if (!current || current.kind !== 'stack' || JSON.stringify(current.sets) !== JSON.stringify(cell.sets)) return cell;
+        if (after && sameState(current, after.get(cell.viewportId))) return cell;
+        return { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex };
       }) };
     }
 
@@ -249,15 +269,17 @@
     async function rebuild(target, owned) {
       if (!owned()) return false;
       try { await boundedNative(dispatch(target.rows, target.cols, null, target.cells, target.active), 2000); } catch (_) { }
-      const deadline = Date.now() + 2000;
-      for (let count = 0; count < 120 && Date.now() < deadline; count++) {
-        if (restored(target)) return true;
-        reapply(target);
-        if (restored(target)) return true;
+      const deadline = Date.now() + 3000;
+      let confirmed = false;
+      for (let count = 0; count < 160 && Date.now() < deadline; count++) {
+        // A late native refit could undo an accepted restore, so the check has to hold
+        // twice across a pause before this module says the screen is back.
+        if (restored(target)) { if (confirmed) return true; confirmed = true; }
+        else { confirmed = false; reapply(target); }
         if (!owned()) return false;
         await pause();
       }
-      return restored(target);
+      return confirmed && restored(target);
     }
 
     function quarantine() {
@@ -293,7 +315,9 @@
         const achieved = await settle(() => geometryIs(expected), deadline);
         if (ended || !live()) return { ok: false, message: '' };
         if (achieved) {
-          record = { base, op, anchorId: anchor, signature: layoutSignature() };
+          const after = await settledState();
+          if (ended || !live()) return { ok: false, message: '' };
+          record = { base, op, anchorId: anchor, after, signature: layoutSignature() };
           return { ok: true, op, message: note(op === 'maximize'
             ? '선택한 칸을 한 화면으로 확대했습니다. 다시 더블클릭하거나 Restore Grid로 이전 배치로 돌아갑니다.'
             : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아갑니다. 병합 화면은 저장할 수 없습니다.') };
@@ -316,7 +340,7 @@
         record = null; refresh();
         return { ok: false, message: note('화면 또는 원본이 변경되어 병합 기록을 지웠습니다. 현재 화면은 유지됩니다.') };
       }
-      const target = unmergeTarget(record.base), watch = watchInteraction();
+      const target = unmergeTarget(record.base, record.after), watch = watchInteraction();
       busy = true; refresh(); note('이전 배치로 되돌리는 중…');
       try {
         const back = await rebuild(target, watch.owned);

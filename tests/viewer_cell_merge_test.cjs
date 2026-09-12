@@ -11,10 +11,18 @@ let source = fs.readFileSync(sourcePath, 'utf8');
 // Isolated copies of the module with one guard removed, used to prove the guard is the
 // thing that keeps a boundary. The shipped file is never modified.
 const mutation = process.env.KIN_CELL_MERGE_MUTATION;
-if (mutation === 'skip-kind-guard') source = source.replace("if (!['stack', 'empty'].includes(cell.kind))", 'if (false)');
-if (mutation === 'skip-uniform-guard') source = source.replace('!near(cell.width, 1 / cols) || !near(cell.height, 1 / rows))', 'false)');
-if (mutation === 'trust-dispatch') source = source.replace('const achieved = await settle(() => geometryIs(expected), deadline);', 'const achieved = true;');
-if (mutation === 'claim-restore') source = source.replace('return restored(target);\n    }', 'return true;\n    }');
+// A mutation that silently fails to apply would report a guard as proven for nothing,
+// so every replacement must actually change the source.
+function mutate(name, from, to) {
+  if (mutation !== name) return;
+  const next = source.replace(from, to);
+  if (next === source) throw new Error('mutation did not apply: ' + name);
+  source = next;
+}
+mutate('skip-kind-guard', "if (!['stack', 'empty'].includes(cell.kind))", 'if (false)');
+mutate('skip-uniform-guard', '!near(cell.width, 1 / cols) || !near(cell.height, 1 / rows))', 'false)');
+mutate('trust-dispatch', 'const achieved = await settle(() => geometryIs(expected), deadline);', 'const achieved = true;');
+mutate('claim-restore', 'if (restored(target)) { if (confirmed) return true; confirmed = true; }', 'if (true) { return true; }');
 const moduleBox = { exports: {} };
 new Function('module', 'exports', source)(moduleBox, moduleBox.exports);
 const CellMerge = moduleBox.exports;
@@ -41,7 +49,7 @@ function makeViewport(id, imageId, seed) {
 
 // A grid whose setLayout follows the pinned SET_LAYOUT reducer: per-position rectangles
 // override the uniform default and positions beyond layoutOptions.length are skipped.
-function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout = false, empty = [] } = {}) {
+function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout = false, empty = [], refitOnResize = false } = {}) {
   const names = ['A', 'B', 'C', 'D'].slice(0, rows * cols);
   const viewports = new Map(), sets = new Map(), cells = new Map();
   names.forEach((name, index) => {
@@ -77,6 +85,13 @@ function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout
         if (restoresPresentation) { const saved = state.saved?.get(id); if (saved) { viewport.camera = clone(saved.camera); viewport.properties = clone(saved.properties); viewport.current = saved.current; viewport.index = saved.index; } }
         viewports.set(id, viewport);
         void cell;
+      }
+      // The native viewport refits its camera when a pane changes shape, and resizing
+      // back does not undo that refit; this models the ratio drift seen on real panes.
+      if (refitOnResize) for (const [id, cell] of next) {
+        const previous = state.viewports.get(id), viewport = viewports.get(id);
+        if (previous && viewport && Math.abs(previous.width / previous.height - cell.width / cell.height) > 1e-6)
+          viewport.camera.parallelScale = Number((viewport.camera.parallelScale * 0.883).toFixed(6));
       }
       state.viewports = next; state.layout = { layoutType: 'grid', numRows: payload.numRows, numCols: payload.numCols };
       state.activeViewportId = payload.activeViewportId;
@@ -192,6 +207,22 @@ test('an empty cell is recorded and comes back empty, and never becomes the anch
   assert.deepEqual(layoutOf(x.state), before);
   assert.deepEqual(x.state.viewports.get('B').displaySetInstanceUIDs, []);
   assert.equal(x.viewports.get('B').getCurrentImageId(), null);
+});
+
+test('a pane refit during the merge is undone on restore, but real user work is not', async () => {
+  const x = fixture({ refitOnResize: true });
+  const zoom = x.viewports.get('A').camera.parallelScale;
+  assert.equal((await x.controller.merge('merge-column', 'A')).ok, true);
+  // The merged pane changed shape, so the native refit moved the zoom.
+  assert.notEqual(x.viewports.get('A').camera.parallelScale, zoom);
+  assert.equal((await x.controller.unmerge()).ok, true);
+  assert.equal(x.viewports.get('A').camera.parallelScale, zoom);
+
+  const y = fixture({ refitOnResize: true });
+  assert.equal((await y.controller.merge('merge-column', 'A')).ok, true);
+  y.viewports.get('A').camera.parallelScale = 3.5;
+  assert.equal((await y.controller.unmerge()).ok, true);
+  assert.equal(y.viewports.get('A').camera.parallelScale, 3.5);
 });
 
 test('a native cache that returns the presentation needs no explicit re-apply', async () => {
