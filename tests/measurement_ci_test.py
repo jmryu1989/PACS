@@ -55,10 +55,39 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(profile['out'].name, 'hanging-protocols-ci')
         self.assertEqual(profile['suite_timeout'], 900)
 
+    def test_three_d_cursor_accuracy_profile_is_exact_and_dispatch_only(self):
+        import ast
+        profile = ci.PROFILES['three-d-cursor-accuracy']
+        self.assertEqual(profile['suites'], (('e2e/test_three_d_cursor_accuracy.py',
+                         'ThreeDCursorAccuracyE2E', 'ci-three-d-cursor-accuracy'),))
+        self.assertEqual(profile['out'].name, 'three-d-cursor-accuracy-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-3d-cursor-acc-ci-')
+        self.assertEqual(profile['suite_timeout'], 1200)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_three_d_cursor_accuracy.py')
+        self.assertEqual(command[command.index('--class')+1], 'ThreeDCursorAccuracyE2E')
+        self.assertEqual(command[command.index('--timeout')+1], '1200')
+        self.assertEqual(outer, 1235)
+        tree = ast.parse((ci.ROOT/'tests/e2e/test_three_d_cursor_accuracy.py').read_text(encoding='utf-8'))
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                   and node.name == 'ThreeDCursorAccuracyE2E')
+        declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                    and node.name.startswith('test_')]
+        self.assertEqual(len(declared), 3)
+        self.assertTrue(all(name.startswith('test_cursor_accuracy_') for name in declared))
+        # No push gate: the profile reaches CI only through the manual dispatch workflow.
+        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        self.assertNotIn('three-d-cursor-accuracy', validate)
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- three-d-cursor-accuracy', dispatch)
+        self.assertIn('tests/e2e/artifacts/three-d-cursor-accuracy-ci/', dispatch)
+        self.assertIn('tests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png', dispatch)
+
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
-                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text'})
+                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
+                          'three-d-cursor-accuracy'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']

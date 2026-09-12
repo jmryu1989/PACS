@@ -2,6 +2,7 @@
 """TEST-HP-MOUNT: actual config mount, source filtering and stale async boundaries."""
 from pathlib import Path
 from urllib.parse import urlparse
+import time
 import unittest
 
 from playwright.sync_api import sync_playwright, expect, Error as PlaywrightError
@@ -48,6 +49,7 @@ const services={viewportGridService:grid,displaySetService:{getActiveDisplaySets
 window.mountLayout=()=>{viewerLayoutExtension.preRegistration({servicesManager:{services}});viewerLayoutExtension.onModeEnter()};
 </script>
 """
+CAPTURE_TIMEOUT_MS = 10_000
 
 
 class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
@@ -90,6 +92,17 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
         self.page.evaluate('mountLayout()')
         expect(self.page.get_by_role('heading', name='Hanging Protocols')).to_be_visible()
 
+    def wait_for_capture(self, held, what, count=1):
+        # The script/fetch element exists before Chromium issues the request, so waiting on the DOM
+        # tag can leave `held` empty and release a request that was never captured. Wait for the
+        # route handler itself; sync-API handlers run on this thread while wait_for_timeout blocks.
+        deadline = time.monotonic() + CAPTURE_TIMEOUT_MS / 1000
+        while len(held) < count:
+            if time.monotonic() >= deadline:
+                self.fail(f'{what} route captured {len(held)}/{count} request(s) within {CAPTURE_TIMEOUT_MS}ms')
+            self.page.wait_for_timeout(10)
+        return held
+
     def release(self, held, **kwargs):
         for route in held:
             try: route.fulfill(**kwargs)
@@ -118,12 +131,13 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
 
     def test_mode_exit_while_editor_script_is_delayed_cannot_mount_or_mutate(self):
         self.delayed_script = []; self.page.evaluate('mountLayout()'); self.page.wait_for_function('()=>document.querySelectorAll("script[src*=viewer-hanging-protocol]").length===1')
-        self.assertTrue(self.delayed_script); self.page.evaluate('viewerLayoutExtension.onModeExit()')
+        self.wait_for_capture(self.delayed_script, 'viewer-hanging-protocol.js'); self.page.evaluate('viewerLayoutExtension.onModeExit()')
         self.release(self.delayed_script, body=EDITOR, content_type='application/javascript'); self.page.wait_for_timeout(100)
         self.assertEqual(0, self.page.locator('#kin-viewer-layout').count()); self.assertEqual(0, self.page.get_by_role('heading', name='Hanging Protocols').count()); self.assertEqual(0, self.page.evaluate('setCalls.length'))
 
     def test_session_end_while_editor_script_is_delayed_cannot_mount_or_mutate(self):
         self.delayed_script = []; self.page.evaluate('mountLayout()'); self.page.wait_for_function('()=>document.querySelectorAll("script[src*=viewer-hanging-protocol]").length===1')
+        self.wait_for_capture(self.delayed_script, 'viewer-hanging-protocol.js')
         self.page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
         self.release(self.delayed_script, body=EDITOR, content_type='application/javascript'); self.page.wait_for_timeout(100)
         self.assertEqual(0, self.page.get_by_role('heading', name='Hanging Protocols').count()); self.assertEqual(0, self.page.evaluate('setCalls.length'))
@@ -131,7 +145,7 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
 
     def test_interrupted_permission_and_delayed_owner_change_fail_closed(self):
         self.mount(); self.delayed_studies = []; self.page.locator('#kin-hp-apply').click()
-        self.page.wait_for_timeout(50); self.assertTrue(self.delayed_studies)
+        self.wait_for_capture(self.delayed_studies, '/api/studies')
         self.page.evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
         self.release(self.delayed_studies, json={'studies': STUDIES}); self.page.wait_for_timeout(100); self.assertEqual(0, self.page.evaluate('setCalls.length'))
 
