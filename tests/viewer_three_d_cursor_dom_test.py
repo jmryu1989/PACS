@@ -35,6 +35,7 @@ HARNESS = r"""
  </div>
  <div id="pane-styled" class="host-positioned" style="width:200px;height:200px"></div>
  <div id="pane-shared" style="width:200px;height:200px"></div>
+ <div id="pane-mro" style="width:200px;height:200px"></div>
 </div>
 <style>.host-positioned{position:absolute;left:600px;top:600px}</style>
 <script>
@@ -59,6 +60,9 @@ const FOREIGN=series('fo',{series:'1.2.3.7',modality:'CT',count:4,gap:5,origin:[
 const MR2=series('m2',{series:'1.2.3.6',modality:'MR',count:7,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
 const INSET=series('in',{series:'1.2.3.5',modality:'CT',count:5,gap:5,origin:[-250,-250,0],spacing:[0.8,0.5],rows:256,columns:512});
 const SPARE=series('sp',{series:'1.2.3.8',modality:'MR',count:6,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
+// Offset by 1.2 mm so that no slice of it ever contains a CT slice plane: the transported point
+// is always some measurable distance away from the slice that gets shown for it.
+const MRO=series('mo',{series:'1.2.3.11',modality:'MR',count:7,gap:2.5,origin:[-64,-64,1.2],spacing:[1,1],rows:128,columns:128});
 
 class Stack{
  constructor(id,imageIds,index){this.id=id;this.type='stack';this.imageIds=imageIds;this.currentImageIdIndex=index||0;
@@ -96,7 +100,8 @@ const mr2=new Stack('vp-mr2',MR2,0);mr2.element=document.querySelector('#pane-mr
 const inset=new Stack('vp-inset',INSET,2);inset.element=document.querySelector('#enabled-inset');
 const styled=new Stack('vp-styled',MR2,0);styled.element=document.querySelector('#pane-styled');
 const shared=new Stack('vp-shared',MR2,0);shared.element=document.querySelector('#pane-shared');
-window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared};
+const mro=new Stack('vp-mro',MRO,0);mro.element=document.querySelector('#pane-mro');
+window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared,mro};
 const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct},
  mr:{id:'mr',element:document.querySelector('#pane-mr'),viewport:mr},
  other:{id:'other',element:document.querySelector('#pane-other'),viewport:foreign},
@@ -105,7 +110,8 @@ const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct}
  inset:{id:'inset',element:document.querySelector('#pane-inset'),viewport:inset},
  styled:{id:'styled',element:document.querySelector('#pane-styled'),viewport:styled},
  sharedA:{id:'sharedA',element:document.querySelector('#pane-shared'),viewport:shared},
- sharedB:{id:'sharedB',element:document.querySelector('#pane-shared'),viewport:shared}};
+ sharedB:{id:'sharedB',element:document.querySelector('#pane-shared'),viewport:shared},
+ mro:{id:'mro',element:document.querySelector('#pane-mro'),viewport:mro}};
 let paneList=[PANES.ct,PANES.mr,PANES.other,PANES.volume];
 window.addSecondTarget=()=>{paneList=[...paneList,PANES.mr2];};
 window.setPanes=list=>{paneList=list.map(id=>PANES[id]);};
@@ -179,6 +185,37 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
 
     def calls(self):
         return self.page.evaluate("()=>({ct:viewports.ct.calls,mr:viewports.mr.calls,foreign:viewports.foreign.calls,volume:viewports.volume.calls})")
+
+    # --- B8 1: slice distance ----------------------------------------------------------------
+    def test_d1_a_marked_pane_reports_the_slice_distance_in_its_result(self):
+        # The transported point is shown on the nearest slice of the target series; how far that
+        # slice is from the point is the difference between a located point and a suggested one.
+        self.page.evaluate("setPanes(['ct','mr','mro'])")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        by_pane = {entry["paneId"]: entry for entry in result["results"]}
+        self.assertEqual(0, by_pane["mr"]["distance"], "the MR slice plane contains the point")
+        self.assertAlmostEqual(1.2, by_pane["mro"]["distance"], places=9)
+        self.assertEqual(3, by_pane["mro"]["distanceLimit"])
+        self.assertEqual(3, self.page.evaluate("cursor.state().sliceDistanceLimit"))
+        self.assertEqual("3D Cursor 표시됨 · 선택점에서 단면까지 1.2 mm", result["status"])
+        panes = {pane["id"]: pane for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertAlmostEqual(1.2, panes["mro"]["distance"], places=9)
+        self.assertEqual([4], self.page.evaluate("viewports.mro.calls"))
+        # The visible sentence names the slice distance and never an accuracy or an error.
+        for banned in ("정확도", "오차", "정밀도", "±"):
+            self.assertNotIn(banned, result["status"])
+        # An injected limit below that distance refuses the pane with its own reason and payload.
+        self.page.evaluate("cursor.stop();__mount({sliceDistanceLimit:1});setPanes(['ct','mr','mro'])")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        refused = [entry for entry in result["results"] if entry["paneId"] == "mro"][0]
+        self.assertEqual("slice-distance-exceeded", refused["reason"])
+        self.assertAlmostEqual(1.2, refused["distance"], places=9)
+        self.assertEqual(1, refused["limit"])
+        self.assertEqual("1 pane(s): 선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다.", result["status"])
+        self.assertEqual([4], self.page.evaluate("viewports.mro.calls"), "a refused pane is never navigated")
+        self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
 
     # --- review 184a433 blocking regressions -------------------------------------------------
     def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):

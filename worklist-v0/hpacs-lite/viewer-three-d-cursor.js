@@ -10,6 +10,7 @@
   const TEXT={'identity-study':'같은 검사가 아닙니다.','identity-patient':'같은 원본 환자가 아닙니다.','identity-frame':'같은 기준 좌표계가 아닙니다.',
     'identity-missing':'원본 식별을 확인하지 못했습니다.','out-of-image':'해당 영상 범위 밖입니다.','out-of-coverage':'해당 시리즈 촬영 범위 밖입니다.',
     'ambiguous-slice':'가장 가까운 영상을 하나로 정할 수 없습니다.','pick-off-plane':'현재 표시된 영상 평면의 점이 아닙니다.',
+    'slice-distance-exceeded':'선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다.',
     'source-not-rendered':'현재 표시된 영상을 확인하지 못했습니다.','target-not-confirmed':'대상 영상이 표시된 것을 확인하지 못했습니다.',
     'source-replaced':'영상이 교체되어 취소했습니다.','navigation-failed':'대상 영상으로 이동하지 못했습니다.','user-interrupt':'다른 조작으로 취소했습니다.',
     'context-changed':'세션 또는 도구가 바뀌어 취소했습니다.','pick-slice-unknown':'현재 영상을 원본 목록에서 찾지 못했습니다.',
@@ -18,6 +19,10 @@
     'teardown-unsettled':'끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.',
     'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.'};
   const message=reason=>TEXT[reason]||'3D Cursor를 사용할 수 없습니다.';
+  /* The one sentence the reader may see about |n·(p−o)|. It is the distance from the picked
+     point to the plane of the slice being shown, not an accuracy, an error or a precision:
+     saying '±' or '오차' here would describe the computation instead of the geometry. */
+  const distanceText=value=>'선택점에서 단면까지 '+Number(value).toFixed(1)+' mm';
   let mounted=0;
 
   function mount(options){
@@ -27,6 +32,10 @@
     const confirmAttempts=limit(options.confirmAttempts,20),navigationAttempts=limit(options.navigationAttempts,625),
       drainAttempts=limit(options.drainAttempts,625);
     const snapTolerance=typeof options.snapTolerance==='number'?options.snapTolerance:0.5;
+    // Injected by the caller; the model's constant is the fallback so no call site carries a
+    // millimetre literal of its own.
+    const sliceDistanceLimit=typeof options.sliceDistanceLimit==='number'&&options.sliceDistanceLimit>=0
+      ?options.sliceDistanceLimit:model.SLICE_DISTANCE_LIMIT_MM;
     const owned='kin3d-'+(++mounted);
     let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
       source=null,busy=false,abort=null,active=null,teardown='idle';
@@ -329,8 +338,15 @@
         if(!item.stack){results.push({paneId:item.id,ok:false,reason:item.reason});continue;}
         const mismatch=model.comparable(origin.stack.id,item.stack.id);
         if(mismatch){results.push({paneId:item.id,ok:false,reason:mismatch});continue;}
-        const found=model.locate(item.stack,picked.world);
-        if(!found.ok){results.push({paneId:item.id,ok:false,reason:found.reason});continue;}
+        const found=model.locate(item.stack,picked.world,sliceDistanceLimit);
+        if(!found.ok){
+          // A refusal that measured a distance carries it, so the reader is told how far the
+          // point actually was instead of only that it was too far.
+          results.push(Number.isFinite(found.distance)
+            ?{paneId:item.id,ok:false,reason:found.reason,distance:found.distance,limit:found.limit}
+            :{paneId:item.id,ok:false,reason:found.reason});
+          continue;
+        }
         if(quarantine.has(item.id)){results.push({paneId:item.id,ok:false,reason:'navigation-unsettled'});continue;}
         // Every gate below is re-read in the same tick as the call: a replacement that happened
         // during an earlier await must never receive this stack's index.
@@ -360,14 +376,19 @@
         }
         // Ownership is kept until the whole run succeeds: a later cancel must be able to roll
         // back panes that had already finished, and only a complete run releases them.
-        marks.set(item.id,{world:picked.world,sop:found.sop,imageId:found.imageId,pixel:found.pixel,token:token(item.viewport),anchor:item.anchor});
-        results.push({paneId:item.id,ok:true,sop:found.sop,index:found.index,pixel:found.pixel});
+        marks.set(item.id,{world:picked.world,sop:found.sop,imageId:found.imageId,pixel:found.pixel,token:token(item.viewport),anchor:item.anchor,
+          distance:found.distance});
+        results.push({paneId:item.id,ok:true,sop:found.sop,index:found.index,pixel:found.pixel,distance:found.distance,distanceLimit:found.distanceLimit});
       }
       const ending=halt();
       if(ending)return stopRun(ending);
       moved.clear();paint();
       const missed=results.filter(result=>!result.ok);
-      status=missed.length?missed.length+' pane(s): '+message(missed[0].reason):'3D Cursor 표시됨';
+      // The worst slice distance among the panes that were actually marked: it is the one the
+      // reader is most likely to misread as a point lying in the displayed image.
+      const spread=results.filter(result=>result.ok&&Number.isFinite(result.distance)).map(result=>result.distance);
+      status=missed.length?missed.length+' pane(s): '+message(missed[0].reason)
+        :'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):'');
       return {ok:true,results,status};
     }
     /* setImageIdIndex resolves even when its load was discarded, and resolves at once when the
@@ -459,10 +480,11 @@
       return result;
     }
 
-    const state=()=>({enabled,stopped,poisoned,busy,run,session,status,teardown,source,
+    const state=()=>({enabled,stopped,poisoned,busy,run,session,status,teardown,source,sliceDistanceLimit,
       frozen:stopped||poisoned,quarantined:[...quarantine.keys()],restores:Object.fromEntries(reports),
       panes:[...bound.values()].map(item=>({id:item.id,eligible:!!item.stack,reason:item.reason||null,marked:marks.has(item.id),
         sop:marks.get(item.id)?.sop||null,canvas:marks.get(item.id)?.canvas||null,visible:marks.get(item.id)?.visible??null,
+        distance:marks.get(item.id)?.distance??null,
         restore:reports.get(item.id)||null}))});
     return {enable,disable,refresh,pick,stop,state,cancel};
   }

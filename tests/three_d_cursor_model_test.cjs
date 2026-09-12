@@ -1,6 +1,7 @@
 /* REQ-D-3D-CURSOR / RISK-D-3D-CURSOR-IDENTITY/GEOMETRY / TEST-3D-CURSOR-MODEL */
 const test=require('node:test'),assert=require('node:assert/strict');
-const {identity,plane,stack,locate,pick,comparable,toWorld,toPixel}=require('../worklist-v0/hpacs-lite/three-d-cursor-model.js');
+const {identity,plane,stack,locate,pick,comparable,toWorld,toPixel,
+  SLICE_DISTANCE_LIMIT_MM}=require('../worklist-v0/hpacs-lite/three-d-cursor-model.js');
 
 const AXIAL=[1,0,0,0,1,0];
 // PixelSpacing is [between rows, between columns]: a row/column swap changes these results.
@@ -36,6 +37,47 @@ test('an oblique plane resolves a hand-computed point without assuming an axis',
   assert.equal(found.index,1);near(found.pixel.x,10,1e-9);near(found.pixel.y,20,1e-9);
   const round=toPixel(built.slices[1].plane,toWorld(built.slices[1].plane,{x:10,y:20}));
   near(round.x,10,1e-9);near(round.y,20,1e-9);near(round.distance,0,1e-9);
+});
+
+/* B8 §1. |n·(p−o)| for the slice that is actually shown. The value already existed and was
+   thrown away; a reader who is shown a point on a slice 4 mm away from it must be told so. */
+test('locate reports the signed-free distance to the chosen slice',()=>{
+  const built=ok(stack(axial())).stack;   // planes at z = 0, 5, 10, 15, 20
+  const below=ok(locate(built,[-200,-210,8.6]));
+  assert.equal(below.index,2);near(below.distance,1.4,1e-9);
+  assert.equal(below.distanceLimit,SLICE_DISTANCE_LIMIT_MM);
+  // The same magnitude on the other side of the plane: the reported distance is unsigned, and
+  // the slice chosen is the nearest one, not the one with the smallest signed difference.
+  const above=ok(locate(built,[-200,-210,11.4]));
+  assert.equal(above.index,2);near(above.distance,1.4,1e-9);
+  near(ok(locate(built,[-200,-210,10])).distance,0,1e-12);
+  // Hand check against the definition itself: |n·(p−o)| with n = [0,0,1], o = the slice origin.
+  near(below.distance,Math.abs(8.6-built.slices[2].projection),1e-12);
+});
+
+test('locate refuses a point farther than the slice distance limit',()=>{
+  assert.equal(SLICE_DISTANCE_LIMIT_MM,3);
+  const wide=ok(stack(axial(3,10))).stack;   // planes at z = 0, 10, 20
+  // Exactly at the limit is still shown: the boundary belongs to the accepted side.
+  const edge=ok(locate(wide,[-200,-210,3]));
+  assert.equal(edge.index,0);near(edge.distance,3,1e-12);
+  const far=locate(wide,[-200,-210,3.5]);
+  assert.equal(far.ok,false);assert.equal(far.reason,'slice-distance-exceeded');
+  near(far.distance,3.5,1e-12);assert.equal(far.limit,3);
+  // Equally far from two slices is refused for the distance, not for the tie: there is nothing
+  // to choose between when neither slice may carry the point.
+  const middle=locate(wide,[-200,-210,5]);
+  assert.equal(middle.reason,'slice-distance-exceeded');near(middle.distance,5,1e-12);
+  // An injected limit replaces the default in both directions.
+  assert.equal(locate(wide,[-200,-210,3],2).reason,'slice-distance-exceeded');
+  assert.equal(locate(wide,[-200,-210,3],2).limit,2);
+  assert.equal(ok(locate(wide,[-200,-210,3.5],4)).index,0);
+  assert.equal(ok(locate(wide,[-200,-210,3.5],4)).distanceLimit,4);
+  // A 5 mm stack still passes its own worst case, which is what the 3.0 mm default is for.
+  const narrow=ok(stack(axial())).stack;
+  near(ok(locate(narrow,[-200,-210,7.4])).distance,2.4,1e-12);
+  // The limit is not a coverage check: outside the scanned range keeps its own reason.
+  assert.equal(locate(wide,[-200,-210,-6]).reason,'out-of-coverage');
 });
 
 test('an unordered series resolves the same slice as the ordered one and keeps its own index',()=>{
