@@ -65,10 +65,21 @@
     // millimetre literal of its own.
     const sliceDistanceLimit=typeof options.sliceDistanceLimit==='number'&&options.sliceDistanceLimit>=0
       ?options.sliceDistanceLimit:model.SLICE_DISTANCE_LIMIT_MM;
+    /* What separates a click from a drag, and how long a pointer may stay down and still be one.
+       Both are injected so no call site carries a pixel or millisecond literal of its own; the
+       defaults are the only place the numbers appear. */
+    const pickMoveTolerancePx=typeof options.pickMoveTolerancePx==='number'&&options.pickMoveTolerancePx>=0
+      ?options.pickMoveTolerancePx:4;
+    const pickTimeLimitMs=typeof options.pickTimeLimitMs==='number'&&options.pickTimeLimitMs>=0
+      ?options.pickTimeLimitMs:1000;
     const owned='kin3d-'+(++mounted);
     let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
       source=null,busy=false,abort=null,active=null,teardown='idle';
     const nodes=new Map(),handlers=new Map(),revoked=new Set(),quarantine=new Map(),reports=new Map();
+    /* The pointer sequence that is under way, as seen from the document rather than from a pane:
+       the pane the reader aimed at may not have received its pointerdown at all (see
+       onPointerUp). 'live' says the sequence can still become a pick. */
+    let gesture=null;
 
     /* The only thing the reader can see. hpacs-lite convention (viewer-image-text.js,
        viewer-display-scope.js): a <section id="kin-…"> with an English button label and a Korean
@@ -184,8 +195,10 @@
 
     function attach(element){
       if(handlers.has(element))return;
-      const record={click:event=>onClick(element,event),competing:event=>onCompeting(element,event)};
+      const record={click:event=>onClick(element,event),competing:event=>onCompeting(element,event),
+        up:event=>onPointerUp(element,event)};
       element.addEventListener('click',record.click);
+      element.addEventListener('pointerup',record.up,true);
       element.addEventListener('pointerdown',record.competing,true);
       element.addEventListener('wheel',record.competing,true);
       handlers.set(element,record);
@@ -194,6 +207,7 @@
       const record=handlers.get(element);
       if(!record)return;
       element.removeEventListener('click',record.click);
+      element.removeEventListener('pointerup',record.up,true);
       element.removeEventListener('pointerdown',record.competing,true);
       element.removeEventListener('wheel',record.competing,true);
       handlers.delete(element);
@@ -511,15 +525,68 @@
       if(!enabled||stopped)return;
       const item=[...bound.values()].find(entry=>entry.element===element);
       if(item)revoked.add(item.id);
+      // A wheel between the down and the up is a reader gesture of its own, so the sequence it
+      // interrupts can no longer become a pick. The sequence itself is kept, so the click that
+      // ends it is still recognised as belonging to it and does not pick either.
+      if(event&&event.type==='wheel'&&gesture)gesture.live=false;
       if(busy){abort='user-interrupt';return;}
       if(event&&event.type==='pointerdown')clearMarks();else clearMarks('user-interrupt');
     }
-    function onClick(element,event){
-      const item=[...bound.values()].find(entry=>entry.element===element);
-      if(!item||!item.stack)return;
+
+    /* A′ (작업지시 D-3DCURSOR-B8b 지휘자 결정, evidence/three-d-cursor-b8b/retarget-probe.json).
+       The pinned viewer puts pointer-events-none on the container of a pane that is not the active
+       viewport, so the first pointerdown of a click never reaches that pane and the click that
+       closes the gesture is retargeted to a common ancestor outside it. Neither event can be used
+       to recognise the reader's aim. What does survive is the pointerup: activating the pane on
+       the down removes the class, so the up lands on the pane's own canvas (8/8 observed). The
+       down is therefore read from one document-level capture listener and matched to the pane by
+       geometry, never by its target — while it happened the pane could not be a target at all. */
+    function onDocumentDown(event){
+      if(!event)return;
+      gesture={pointerId:event.pointerId,button:event.button,x:event.clientX,y:event.clientY,at:Date.now(),
+        live:Number.isFinite(event.clientX)&&Number.isFinite(event.clientY)};
+    }
+    function isPickGesture(item,event){
+      if(!gesture||!gesture.live)return false;
+      // Same pointer, and the primary button on both ends: a right or middle click, a second
+      // finger or a stray up from another sequence is not this reader's pick.
+      if(gesture.pointerId!==event.pointerId||gesture.button!==0||event.button!==0)return false;
+      if(Date.now()-gesture.at>pickTimeLimitMs)return false;
+      if(!Number.isFinite(event.clientX)||!Number.isFinite(event.clientY))return false;
+      if(Math.hypot(event.clientX-gesture.x,event.clientY-gesture.y)>pickMoveTolerancePx)return false;
+      let rect=null;
+      try{rect=item.element.getBoundingClientRect();}catch(_){return false;}
+      if(!rect||![rect.left,rect.top,rect.right,rect.bottom].every(Number.isFinite)||!(rect.width>0)||!(rect.height>0))return false;
+      return gesture.x>=rect.left&&gesture.x<=rect.right&&gesture.y>=rect.top&&gesture.y<=rect.bottom;
+    }
+    /* The point is the one the up carries, not the one the down did: the pane is only laid out as
+       the active viewport after the activation, and the rect the coordinates are measured against
+       is the one that exists now. */
+    function startPick(item,event){
       const point=canvasPoint(item,event);
+      // The reader aimed at this pane and missed the displayed image — that is worth a sentence.
+      // A drag, a right click or a foreign pointer is not a failed pick and says nothing.
       if(!point){note(message('point-outside-viewport'));return;}
       pick(item.id,point).catch(()=>{note(message('internal'));});
+    }
+    function onPointerUp(element,event){
+      if(!enabled||stopped)return;
+      const item=[...bound.values()].find(entry=>entry.element===element);
+      if(!item||!item.stack||!isPickGesture(item,event))return;
+      startPick(item,event);
+    }
+    /* One gesture is answered once. A click that closes a pointer sequence has already been
+       decided by that sequence's pointerup — picked, or refused as a drag, a right click or a
+       foreign pointer — so this listener answers only a click that has no sequence of its own.
+       That is the older synthetic path (a host or a test that dispatches a bare click), which
+       stays supported. */
+    function onClick(element,event){
+      const sequence=gesture!==null;
+      gesture=null;
+      if(sequence)return;
+      const item=[...bound.values()].find(entry=>entry.element===element);
+      if(!item||!item.stack)return;
+      startPick(item,event);
     }
 
     /* An unsettled teardown leaves a native request nobody can withdraw, so this controller stays
@@ -569,6 +636,9 @@
     async function stop(){
       const result=await disable('stopped');
       stopped=true;bound=new Map();
+      // The one listener this controller owns outside the panes goes with the controller itself.
+      try{doc.removeEventListener('pointerdown',onDocumentDown,true);}catch(_){}
+      gesture=null;
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
       note(message(result==='unsettled'?'teardown-unsettled':'stopped'));refreshUi();
@@ -581,6 +651,10 @@
         sop:marks.get(item.id)?.sop||null,canvas:marks.get(item.id)?.canvas||null,visible:marks.get(item.id)?.visible??null,
         distance:marks.get(item.id)?.distance??null,
         restore:reports.get(item.id)||null}))});
+    // Installed for the life of the controller, because the down it has to see may land anywhere
+    // in the document — including on a node the host viewer puts over the pane. It writes nothing
+    // and reads no other controller's state, and stop() takes it back off.
+    try{doc.addEventListener('pointerdown',onDocumentDown,true);}catch(_){}
     buildPanel(options.host);
     return {enable,disable,refresh,pick,stop,state,cancel};
   }
