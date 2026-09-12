@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium coverage for the actual Images Only config loader."""
 from pathlib import Path
+import time
 import unittest
 
 from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
@@ -48,6 +49,7 @@ FAKE_MODULE = """(()=>{
    return {mount(){imagesOnlyCalls.mounts++;return true},stop(){imagesOnlyCalls.stops++}};
  }};
 })()"""
+CAPTURE_TIMEOUT_MS = 10_000
 
 
 class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
@@ -75,12 +77,25 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
                    lambda route: held.append(route))
         return held
 
+    def wait_for_capture(self, page, held, count=1):
+        # The script element exists before Chromium issues the request, so waiting on the DOM tag
+        # can leave `held` empty; wait for the route handler itself. Sync-API handlers run on this
+        # thread while page.wait_for_timeout blocks, so the poll lets them fire.
+        deadline = time.monotonic() + CAPTURE_TIMEOUT_MS / 1000
+        while len(held) < count:
+            if time.monotonic() >= deadline:
+                self.fail(f"viewer-images-only.js route captured {len(held)}/{count} request(s) "
+                          f"within {CAPTURE_TIMEOUT_MS}ms")
+            page.wait_for_timeout(10)
+        return held
+
     def test_mode_exit_while_script_is_late_never_mounts_stale_controller(self):
         page = self.new_page()
         held = self.hold_module(page)
         try:
             page.evaluate("enterImagesOnly()")
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-images-only]').length===1")
+            self.wait_for_capture(page, held)
             page.evaluate("imagesOnlyExtension.onModeExit()")
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
             page.wait_for_function("()=>!!window.imagesOnlyCalls")
@@ -100,6 +115,7 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
         try:
             page.evaluate("enterImagesOnly()")
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-images-only]').length===1")
+            self.wait_for_capture(page, held)
             page.evaluate("dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended'}))")
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
             page.wait_for_function("()=>!!window.imagesOnlyCalls")
@@ -121,6 +137,7 @@ class ViewerImagesOnlyLoaderDOMTest(unittest.TestCase):
         try:
             page.evaluate("enterImagesOnly();enterImagesOnly()")
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-images-only]').length===1")
+            self.wait_for_capture(page, held)
             self.assertEqual(1, len(held))
             held.pop().fulfill(body=FAKE_MODULE, content_type="application/javascript")
             page.wait_for_function("()=>window.imagesOnlyCalls?.mounts===1")
