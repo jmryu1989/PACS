@@ -138,11 +138,31 @@ window.markRect=()=>{const dot=document.querySelector('[data-kin-3d-cursor-mark]
  if(!dot)return null;const r=dot.getBoundingClientRect();
  return {cx:r.left+r.width/2,cy:r.top+r.height/2,width:r.width,height:r.height,display:getComputedStyle(dot).display};};
 window.rectOf=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};
+// The whole gesture a real mouse produces: down, up and the click that closes them. Since B8b the
+// pointerup is the pick signal, so every existing click test exercises that path.
 window.clickAt=(selector,x,y)=>{const host=document.querySelector(selector);
  host.scrollIntoView({block:'center',inline:'center'});
  const box=host.getBoundingClientRect(),target=document.elementFromPoint(box.left+x,box.top+y)||host;
- for(const type of ['pointerdown','click'])
+ for(const type of ['pointerdown','pointerup','click'])
   target.dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:box.left+x,clientY:box.top+y}));
+ return target.id||target.tagName;};
+// A gesture whose up lands somewhere else, and one that uses another button or another pointer.
+// PointerEvent carries pointerId; MouseEvent does not, which is exactly the legacy shape above.
+window.gestureAt=(selector,down,up,opts)=>{const host=document.querySelector(selector);
+ const box=host.getBoundingClientRect(),o=opts||{};
+ const send=(type,point,extra)=>{
+  const client={clientX:(point.absolute?0:box.left)+point.x,clientY:(point.absolute?0:box.top)+point.y};
+  const at=document.elementFromPoint(client.clientX,client.clientY)||host;
+  const init={bubbles:true,button:o.button||0,...client,...extra};
+  at.dispatchEvent(o.pointerId===undefined?new MouseEvent(type,init):new PointerEvent(type,init));
+  return at.id||at.tagName;};
+ const first=send('pointerdown',down,{pointerId:o.pointerId});
+ const second=send('pointerup',up,{pointerId:o.upPointerId!==undefined?o.upPointerId:o.pointerId});
+ if(!o.noClick)send('click',up,{pointerId:o.pointerId});
+ return {down:first,up:second};};
+window.clickOnly=(selector,x,y)=>{const host=document.querySelector(selector);
+ const box=host.getBoundingClientRect(),target=document.elementFromPoint(box.left+x,box.top+y)||host;
+ target.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:box.left+x,clientY:box.top+y}));
  return target.id||target.tagName;};
 </script>
 """
@@ -1094,6 +1114,176 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual(0, self.page.evaluate("document.querySelectorAll('[data-kin-3d-cursor-layer]').length"))
         self.assertEqual([{"uid": "existing-length", "kept": True}], self.page.evaluate("annotations"))
         self.assertEqual([], self.page.evaluate("toolCalls"))
+
+    # --- B8b A′: the first click on a pane the host had taken out of the hit test ---------------
+    # 작업지시 D-3DCURSOR-B8b 「지휘자 결정 — 관측 결과 반영」. The pinned viewer puts
+    # pointer-events-none on the container of a pane that is not the active viewport, so the
+    # pointerdown of the first click never reaches that pane and the click that closes the gesture
+    # is retargeted to a common ancestor outside it (evidence/three-d-cursor-b8b/retarget-probe.json,
+    # 8/8 in the live viewer and in the hide-overlay variant of the isolated probe). The pick is
+    # therefore recognised on the pane's own capture pointerup.
+    BLOCK_FIRST_DOWN = r"""() => {
+      const pane = document.querySelector('#pane-ct'), rect = pane.getBoundingClientRect();
+      // A sibling of the pane, on top of it: while it is up nothing below it can be a pointer
+      // target, which is what pointer-events-none on the pane subtree does in the pinned viewer.
+      const cover = document.createElement('div');
+      cover.id = 'kin-test-cover';
+      cover.setAttribute('style', 'position:fixed;z-index:5;left:' + rect.left + 'px;top:' + rect.top +
+        'px;width:' + rect.width + 'px;height:' + rect.height + 'px');
+      pane.parentElement.appendChild(cover);
+      window.__seen = {down: [], up: [], click: [], paneClicks: 0};
+      pane.addEventListener('click', () => { window.__seen.paneClicks += 1; }, false);
+      const name = node => node.id || node.tagName;
+      document.addEventListener('pointerdown', event => {
+        window.__seen.down.push(name(event.target));
+        // The host activates the pane on the down; from here on the pane is hit-testable again.
+        // The node stays in the document, exactly as the pinned viewer's container does when the
+        // class comes off, so the click still retargets to the common ancestor instead of
+        // vanishing (retarget-probe.json: hide-overlay fires a click, remove-overlay does not).
+        const node = document.querySelector('#kin-test-cover');
+        if (node) node.style.display = 'none';
+      }, true);
+      document.addEventListener('pointerup', event => window.__seen.up.push(name(event.target)), true);
+      document.addEventListener('click', event => window.__seen.click.push(
+        {target: name(event.target), insidePane: pane.contains(event.target)}), true);
+      return {x: rect.left + 100, y: rect.top + 50};
+    }"""
+
+    def test_d6_a_first_click_blocked_at_pointerdown_still_picks_exactly_once(self):
+        self.enable()
+        point = self.page.evaluate(self.BLOCK_FIRST_DOWN)
+        self.page.mouse.click(point["x"], point["y"])
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        seen = self.page.evaluate("__seen")
+        # The observed shape, reproduced by a real browser click: the down is not on the pane, the
+        # up is on its canvas, and the click is retargeted out of the pane altogether.
+        self.assertEqual(["kin-test-cover"], seen["down"])
+        self.assertEqual(["canvas-ct"], seen["up"])
+        self.assertEqual([{"target": "panes", "insidePane": False}], seen["click"])
+        self.assertEqual(0, seen["paneClicks"], "the retargeted click never reaches the pane")
+        # And the pick happened anyway, once, at the point of the up.
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+        self.assertEqual({"x": 100, "y": 50}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+        self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
+        self.page.wait_for_timeout(150)
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"), "no second pick from the click")
+        # The pane is active now, so the second click is the ordinary shape: down, up and click all
+        # on the canvas. It must pick once too, not twice.
+        self.page.mouse.click(point["x"] + 8, point["y"] + 8)
+        self.page.wait_for_function(
+            "cursor.state().busy===false&&cursor.state().source&&cursor.state().source.pixel.x===108")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(2, self.page.evaluate("cursor.state().run"))
+        self.assertEqual(1, self.page.evaluate("__seen.paneClicks"))
+        self.assertEqual({"target": "canvas-ct", "insidePane": True}, self.page.evaluate("__seen.click").pop())
+
+    def test_d6_a_pointerdown_pointerup_and_click_together_produce_exactly_one_pick(self):
+        self.enable()
+        self.page.evaluate("clickAt('#pane-ct',100,50)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+        self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
+        # The pointerdown of this gesture did reach the pane and revoked it; runPick clears the
+        # revocation set on entry, so a pick never refuses its own run's rollback.
+        self.assertEqual({}, self.page.evaluate("cursor.state().restores"))
+
+    def test_d6_a_plain_synthetic_click_without_a_pointer_sequence_still_picks(self):
+        # The older host path (and eleven existing tests before B8b) dispatches a click with no
+        # pointer events of its own. It stays supported.
+        self.enable()
+        self.page.evaluate("clickOnly('#pane-ct',100,50)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+        self.assertEqual({"x": 100, "y": 50}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+
+    def test_d6_a_drag_beyond_the_tolerance_is_not_a_pick_and_revokes_the_pane(self):
+        self.enable()
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:90})")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        # A drag is not a failed pick, so it says nothing to the reader.
+        self.assertEqual("", self.page.evaluate("cursor.state().status"))
+        # The other half: a drag on a pane this run has moved is a takeover like any other.
+        self.page.evaluate("addSecondTarget();cursor.refresh()")
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.page.evaluate("gestureAt('#pane-mr',{x:60,y:60},{x:60,y:120})")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        # The frame is still the one the run issued, so only the revocation can refuse the
+        # rollback: without it the pane would have been written back to index 0.
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual("restore-skipped-user", self.page.evaluate("cursor.state().restores.mr"))
+
+    def test_d6_a_non_primary_button_gesture_is_not_a_pick(self):
+        self.enable()
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},{button:2,noClick:true})")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        self.assertEqual("", self.page.evaluate("cursor.state().status"))
+
+    def test_d6_a_pointerup_from_another_pointer_sequence_is_not_a_pick(self):
+        # A second finger, or an up left over from a sequence that started elsewhere: the up is on
+        # the pane and at the recorded point, and it is still not this reader's pick.
+        self.enable()
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},{pointerId:7,upPointerId:9,noClick:true})")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        # The same gesture with one pointer does pick, so the refusal above is the identity check.
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},{pointerId:7})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+
+    def test_d6_a_pointerup_whose_pointerdown_started_outside_the_pane_is_not_a_pick(self):
+        # The down is matched to the pane by geometry, never by its target — while it happened the
+        # pane may not have been a target at all. A down that was not over the pane is not its own.
+        self.enable()
+        # Three pixels above the top edge of the pane and one pixel below it: the same gesture as
+        # far as the pointer, the button and the tolerance are concerned, and only the geometry
+        # tells the two apart.
+        pane = self.page.evaluate("rectOf('#pane-ct')")
+        self.page.evaluate(
+            "gestureAt('#pane-ct',{x:%d,y:%d,absolute:true},{x:100,y:1},{noClick:true})"
+            % (round(pane["left"] + 100), round(pane["top"]) - 2))
+        self.page.wait_for_timeout(50)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
+        self.assertEqual([], self.marks())
+        # The contrast: the same up, with a down one pixel inside the pane, is a pick.
+        self.page.evaluate(
+            "gestureAt('#pane-ct',{x:%d,y:%d,absolute:true},{x:100,y:1},{noClick:true})"
+            % (round(pane["left"] + 100), round(pane["top"]) + 1))
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+
+    def test_d6_the_move_and_time_thresholds_are_injected_and_not_written_at_the_call_site(self):
+        self.page.evaluate("cursor.stop();__mount({pickMoveTolerancePx:60})")
+        self.enable()
+        # The same 40 px drag that is refused with the default tolerance is a pick with this one.
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:90})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual({"x": 100, "y": 90}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+        # And a limit of zero refuses a gesture that took any measurable time at all.
+        self.page.evaluate("cursor.stop();__mount({pickTimeLimitMs:0})")
+        self.enable()
+        self.page.evaluate(
+            "()=>{const t=document.querySelector('#canvas-ct'),r=document.querySelector('#pane-ct')"
+            ".getBoundingClientRect();t.dispatchEvent(new MouseEvent('pointerdown',"
+            "{bubbles:true,clientX:r.left+100,clientY:r.top+50}));window.__upAt=()=>t.dispatchEvent("
+            "new MouseEvent('pointerup',{bubbles:true,clientX:r.left+100,clientY:r.top+50}));}")
+        self.page.wait_for_timeout(50)
+        self.page.evaluate("__upAt()")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertIsNone(self.page.evaluate("cursor.state().source"))
 
 
 if __name__ == "__main__":
