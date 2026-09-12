@@ -37,6 +37,7 @@ HARNESS = r"""
  <div id="pane-shared" style="width:200px;height:200px"></div>
  <div id="pane-mro" style="width:200px;height:200px"></div>
 </div>
+<div id="kin-viewer-layout"></div>
 <style>.host-positioned{position:absolute;left:600px;top:600px}</style>
 <script>
 window.unhandled=[];window.addEventListener('unhandledrejection',e=>{unhandled.push(String(e.reason));e.preventDefault();});
@@ -121,6 +122,12 @@ window.flush=name=>{const v=viewports[name],queue=v.pending.splice(0);queue.forE
 const options=extra=>({panes:()=>paneList,meta:id=>META.get(id)||null,context:()=>ctx,
  tick:()=>new Promise(r=>setTimeout(r,0)),confirmAttempts:2,navigationAttempts:1500,drainAttempts:4000,...extra});
 window.__mount=extra=>window.cursor=KinViewerThreeDCursor.mount(options(extra));
+window.__mountHosted=extra=>{const host=document.querySelector('#kin-viewer-layout');host.replaceChildren();
+ return window.cursor=KinViewerThreeDCursor.mount(options({host,...extra}));};
+window.panelText=()=>{const p=document.querySelector('#kin-3d-cursor-status');return p?p.textContent:null;};
+window.toggleState=()=>{const b=document.querySelector('#kin-3d-cursor-toggle');
+ return b?{label:b.textContent,pressed:b.getAttribute('aria-pressed'),disabled:b.disabled}:null;};
+window.clickToggle=()=>document.querySelector('#kin-3d-cursor-toggle').click();
 window.__mountSecond=()=>window.cursor2=KinViewerThreeDCursor.mount(options({panes:()=>[PANES.mr2]}));
 window.scrollTo_=(name,index)=>{const v=viewports[name];v.currentImageIdIndex=index;v.csImage={imageId:v.imageIds[index]};v.viewportStatus='rendered';};
 window.markCenters=()=>[...document.querySelectorAll('[data-kin-3d-cursor-mark]')].map(dot=>{
@@ -292,14 +299,16 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         # '3D Cursor를 사용할 수 없습니다.', which explains nothing. Both product files are read
         # here so that a code added later without its sentence fails this test.
         import re
-        non_reason = {"data-kin-3d-cursor-layer", "data-kin-3d-cursor-mark",
+        # Literals that are DOM names, not reason codes. A new one has to be listed here on
+        # purpose, which is the point: an unlisted new literal fails this test.
+        non_reason = {"data-kin-3d-cursor-layer", "data-kin-3d-cursor-mark", "data-kin-3d-cursor-panel",
                       "kin-3d-cursor", "kin-3d-cursor-toggle", "kin-3d-cursor-status", "aria-pressed"}
         pattern = re.compile(r"'([a-z][a-z0-9]*(?:-[a-z0-9]+)+)'")
         found = set()
         for path in (MODEL, VIEWER):
             found |= set(pattern.findall(path.read_text(encoding="utf-8")))
         # Single-word codes carry no hyphen and are listed here explicitly.
-        found |= {"stopped", "internal", "abandoned", "inactive", "restored"}
+        found |= {"stopped", "internal", "abandoned", "inactive", "restored", "off"}
         found -= non_reason
         self.assertIn("slice-distance-exceeded", found)
         self.assertIn("geometry-axes-invalid", found)
@@ -468,6 +477,83 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual([4, 6], self.page.evaluate("viewports.mr.calls"))
         self.assert_no_mouse_events()
         self.assertEqual([], self.page.evaluate("unhandled"))
+
+    # --- B8 5: what the reader can see -------------------------------------------------------
+    def test_d5_the_toggle_reflects_the_active_state_and_deactivates_the_mode(self):
+        # A mount without a host stays headless: the 36 pre-existing mounts must not grow a panel.
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        self.page.evaluate("cursor.stop();__mountHosted()")
+        self.assertEqual({"label": "3D Cursor", "pressed": "false", "disabled": False},
+                         self.page.evaluate("toggleState()"))
+        self.page.evaluate("clickToggle()")
+        self.assertEqual({"label": "Exit 3D Cursor", "pressed": "true", "disabled": False},
+                         self.page.evaluate("toggleState()"))
+        self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
+        self.assertTrue(self.page.evaluate("cursor.state().enabled"))
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다.", self.page.evaluate("panelText()"))
+        # The same button is the only way out, and it really does leave the mode.
+        self.page.evaluate("clickToggle()")
+        self.page.wait_for_function("cursor.state().enabled===false")
+        self.assertEqual({"label": "3D Cursor", "pressed": "false", "disabled": False},
+                         self.page.evaluate("toggleState()"))
+        self.assertEqual("3D Cursor를 껐습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual([], self.marks())
+        self.assertEqual({"ok": False, "reason": "inactive"}, self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})"))
+
+    def test_d5_enable_without_an_eligible_pane_shows_a_visible_reason(self):
+        self.page.evaluate("cursor.stop();__mountHosted();setPanes(['volume'])")
+        self.assertFalse(self.page.evaluate("cursor.enable()"))
+        self.assertEqual("대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual("false", self.page.evaluate("toggleState().pressed"))
+        # The button path must say the same thing rather than doing nothing visible.
+        self.page.evaluate("clickToggle()")
+        self.assertEqual("대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertFalse(self.page.evaluate("cursor.state().enabled"))
+        self.page.evaluate("setPanes(['ct','mr'])")
+        self.page.evaluate("clickToggle()")
+        self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
+
+    def test_d5_a_partial_run_shows_the_count_and_the_first_reason(self):
+        self.page.evaluate("cursor.stop();__mountHosted({navigationAttempts:2});setPanes(['ct','mr','mr2','other'])")
+        self.enable()
+        self.page.evaluate("viewports.mr.throwOnSet=true")
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual(["ct", "mr2"], self.marked())
+        # An unconfirmed restoration is its own sentence and stays on screen after the run.
+        self.page.evaluate("viewports.mr.throwOnSet=false;cursor.stop();__mountHosted({navigationAttempts:2})")
+        self.page.evaluate("setPanes(['ct','mr','mr2']);scrollTo_('mr',0);scrollTo_('mr2',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{viewports.mr.currentImageIdIndex=0;cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-unconfirmed", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual("다른 조작으로 취소했습니다. · 2 pane(s): 원래 영상으로 되돌린 것을 확인하지 못했습니다.",
+                         self.page.evaluate("panelText()"))
+
+    def test_d5_an_unsettled_teardown_disables_the_toggle_and_says_why(self):
+        self.page.evaluate("cursor.stop();__mountHosted({drainAttempts:0});setPanes(['ct','mr'])")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        self.assertTrue(self.page.evaluate("cursor.state().poisoned"))
+        self.assertEqual({"label": "3D Cursor", "pressed": "false", "disabled": True},
+                         self.page.evaluate("toggleState()"))
+        self.assertEqual("끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.",
+                         self.page.evaluate("panelText()"))
+        self.page.evaluate("clickToggle()")
+        self.assertFalse(self.page.evaluate("cursor.state().enabled"))
+        self.assertEqual("끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.",
+                         self.page.evaluate("panelText()"))
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(True, self.page.evaluate("toggleState().disabled"))
 
     # --- review 184a433 blocking regressions -------------------------------------------------
     def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):

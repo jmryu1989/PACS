@@ -19,6 +19,7 @@
     'teardown-unsettled':'끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.',
     'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.',
     'inactive':'3D Cursor가 켜져 있지 않습니다.','point-nonfinite':'선택점 좌표를 확인하지 못했습니다.',
+    'off':'3D Cursor를 껐습니다.','no-eligible-pane':'대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.',
     /* One image's own attributes are out of spec. This is the only geometry statement that calls
        an image defective, and it never describes the angle between two series: a series that is
        oblique to another one is ordinary DICOM and produces no reason code at all. */
@@ -68,6 +69,51 @@
     let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
       source=null,busy=false,abort=null,active=null,teardown='idle';
     const nodes=new Map(),handlers=new Map(),revoked=new Set(),quarantine=new Map(),reports=new Map();
+
+    /* The only thing the reader can see. hpacs-lite convention (viewer-image-text.js,
+       viewer-display-scope.js): a <section id="kin-…"> with an English button label and a Korean
+       <p role="status">. Every status string goes through note(), so a path that writes a reason
+       and draws nothing cannot exist; the panel is built only when a host is given, so a mount
+       without one keeps the headless shape the controller had before. */
+    let panel=null,toggleNode=null,statusNode=null;
+    /* A pane that could not be confirmed back on its own frame, or that was left holding a
+       request nobody can withdraw, is not the same as a restored one and may not disappear from
+       the screen just because the run that caused it has ended. The internal status string stays
+       exactly what it was; the visible line carries the outstanding restorations as well. */
+    function outstanding(){
+      const left=[...reports.values()].filter(value=>value!=='restored');
+      return left.length?left.length+' pane(s): '+message(left[0]):'';
+    }
+    function note(value){
+      status=value;
+      if(statusNode)statusNode.textContent=[value,outstanding()].filter(Boolean).join(' · ');
+      return value;
+    }
+    function refreshUi(){
+      if(!toggleNode)return;
+      toggleNode.textContent=enabled?'Exit 3D Cursor':'3D Cursor';
+      toggleNode.setAttribute('aria-pressed',String(enabled));
+      // A poisoned or stopped controller can never be switched on again, so the one way out of
+      // the mode must not look available.
+      toggleNode.disabled=stopped||poisoned;
+    }
+    // The button is the whole of the release mechanism: no new keyboard shortcut is registered,
+    // because this controller must not take a key away from the host viewer.
+    function onToggle(){
+      if(stopped||poisoned)return;
+      if(enabled)disable('off').catch(()=>{});else enable();
+    }
+    function buildPanel(host){
+      if(!host||!host.append)return;
+      panel=doc.createElement('section');panel.id='kin-3d-cursor';panel.setAttribute('data-kin-3d-cursor-panel',owned);
+      toggleNode=doc.createElement('button');toggleNode.type='button';toggleNode.id='kin-3d-cursor-toggle';
+      toggleNode.setAttribute('aria-pressed','false');toggleNode.textContent='3D Cursor';
+      toggleNode.addEventListener('click',onToggle);
+      statusNode=doc.createElement('p');statusNode.id='kin-3d-cursor-status';statusNode.setAttribute('role','status');
+      statusNode.textContent=status;
+      panel.append(toggleNode,statusNode);host.append(panel);
+      refreshUi();
+    }
 
     const fingerprint=value=>{try{return JSON.stringify(value??null);}catch(_){return null;}};
     const now=()=>{try{return fingerprint(context?.())??'';}catch(_){return null;}};
@@ -260,7 +306,7 @@
       for(const id of [...nodes.keys()])if(!keep.has(id))dropNode(id);
     }
     function clearMarks(reason){
-      marks.clear();source=null;status=reason?message(reason):'';
+      marks.clear();source=null;note(reason?message(reason):'');
       dropNodes();
     }
 
@@ -354,7 +400,7 @@
       moved.clear();revoked.clear();reports.clear();abort=null;clearMarks();
       syncBinding();
       const origin=bound.get(paneId);
-      const refuse=reason=>({ok:false,reason,status:status=message(reason)});
+      const refuse=reason=>({ok:false,reason,status:note(message(reason))});
       if(!origin||!origin.stack||!origin.token)return refuse(origin?.reason||'identity-missing');
       if(now()!==base)return refuse('context-changed');
       const currentId=readId(origin.viewport),index=readIndex(origin.viewport);
@@ -429,8 +475,8 @@
       // The worst slice distance among the panes that were actually marked: it is the one the
       // reader is most likely to misread as a point lying in the displayed image.
       const spread=results.filter(result=>result.ok&&Number.isFinite(result.distance)).map(result=>result.distance);
-      status=missed.length?missed.length+' pane(s): '+message(missed[0].reason)
-        :'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):'');
+      note(missed.length?missed.length+' pane(s): '+message(missed[0].reason)
+        :'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):''));
       return {ok:true,results,status};
     }
     /* setImageIdIndex resolves even when its load was discarded, and resolves at once when the
@@ -452,9 +498,9 @@
       if(!enabled||stopped||busy)return Promise.resolve({ok:false,reason:'inactive'});
       busy=true;
       const promise=runPick(paneId,point).catch(error=>{
-        status=message('internal');
+        note(message('internal'));
         return {ok:false,reason:'internal',error:String(error&&error.message||error)};
-      }).then(result=>{busy=false;active=null;return result;});
+      }).then(result=>{busy=false;active=null;refreshUi();return result;});
       active=promise;
       return promise;
     }
@@ -472,8 +518,8 @@
       const item=[...bound.values()].find(entry=>entry.element===element);
       if(!item||!item.stack)return;
       const point=canvasPoint(item,event);
-      if(!point){status=message('point-outside-viewport');return;}
-      pick(item.id,point).catch(()=>{status=message('internal');});
+      if(!point){note(message('point-outside-viewport'));return;}
+      pick(item.id,point).catch(()=>{note(message('internal'));});
     }
 
     /* An unsettled teardown leaves a native request nobody can withdraw, so this controller stays
@@ -481,15 +527,18 @@
        controller helps with the JS state, and only reopening the viewer window is certain about
        the request itself. */
     function enable(){
-      if(stopped||enabled||poisoned)return false;
+      if(enabled)return false;
+      // Never a silent no-op: every path that answers false writes the reason where it can be read.
+      if(stopped||poisoned){note(message(poisoned?'teardown-unsettled':'stopped'));refreshUi();return false;}
       const probe=now();
-      if(probe===null)return false;
+      if(probe===null){note(message('context-changed'));refreshUi();return false;}
       base=probe;enabled=true;syncBinding();
       if(![...bound.values()].some(item=>item.stack)){
-        enabled=false;detachAll();dropNodes();bound=new Map();base=null;status='';
+        enabled=false;detachAll();dropNodes();bound=new Map();base=null;
+        note(message('no-eligible-pane'));refreshUi();
         return false;
       }
-      status='3D Cursor 대기';
+      note('3D Cursor 대기');refreshUi();
       return true;
     }
     async function disable(reason){
@@ -504,8 +553,8 @@
       session++;
       if(result==='unsettled')poisoned=true;
       detachAll();marks.clear();source=null;dropNodes();base=null;
-      status=result==='unsettled'?message('teardown-unsettled'):'';
       teardown=result;
+      note(result==='unsettled'?message('teardown-unsettled'):message(reason||'off'));refreshUi();
       return result;
     }
     /* The host adapter calls this when the renderer says something changed. Confirmation stays a
@@ -522,7 +571,7 @@
       stopped=true;bound=new Map();
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
-      status=message(result==='unsettled'?'teardown-unsettled':'stopped');
+      note(message(result==='unsettled'?'teardown-unsettled':'stopped'));refreshUi();
       return result;
     }
 
@@ -532,6 +581,7 @@
         sop:marks.get(item.id)?.sop||null,canvas:marks.get(item.id)?.canvas||null,visible:marks.get(item.id)?.visible??null,
         distance:marks.get(item.id)?.distance??null,
         restore:reports.get(item.id)||null}))});
+    buildPanel(options.host);
     return {enable,disable,refresh,pick,stop,state,cancel};
   }
 
