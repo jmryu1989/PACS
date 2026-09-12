@@ -4,9 +4,18 @@
     const model=options.model||root.KinHangingProtocolModel,services=options.services,host=options.host;
     if(!model||!services?.viewportGridService||!services?.displaySetService||!host)throw Error('Hanging Protocol 연결을 확인할 수 없습니다.');
     const boundOwner=model.owner(options.owner),key=model.ownerKey(boundOwner),storage=options.storage||root.localStorage;
+    const boundSite=model.siteOwner(boundOwner?{institution:boundOwner.institution}:null),siteStorageKey=model.siteKey(boundSite);
     const live=options.live||(()=>true),fetcher=options.fetcher||root.fetch.bind(root),endpoint=options.endpoint||'/api/hanging-protocols';
+    const SCOPE_LABELS={personal:'Personal',site:'Site'};
+    // One cache namespace per scope: the site library belongs to the institution, the personal
+    // one to this account. A session or institution change therefore cannot read a stale library
+    // out of the other scope's key, and neither scope can overwrite the other.
+    const scopeKeys={personal:key,site:siteStorageKey},scopeEndpoints={personal:endpoint,site:endpoint+'/site'};
     const grid=services.viewportGridService,displaySets=services.displaySetService,objects=new WeakMap();let objectSequence=0;
-    let library=model.empty(),selected=null,revision=null,busy=false,ended=false,generation=0,request=null,channel=null,storageError='',appliedCursor=null,appliedFingerprint=null,appliedName=null,layoutQuarantined=false;
+    let library=model.empty(),selected=null,revision=null,busy=false,ended=false,generation=0,request=null,channel=null,storageError='',appliedCursor=null,appliedFingerprint=null,appliedName=null,appliedScope=null,layoutQuarantined=false;
+    let scope='personal',canManageSite=false;
+    // The scope not being edited keeps its own draft so switching back and forth never loses one.
+    const parked={personal:null,site:null};
     let ownedPlanes=new Map();
     const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
@@ -29,6 +38,9 @@
     const title=make('h3','Hanging Protocols');host.append(title);
     const note=make('p','규칙을 편집한 뒤 Apply로 현재 영상에 적용합니다. 저장과 적용은 서로 독립적입니다.');host.append(note);
     const toolbar=make('div');toolbar.className='kin-hp-toolbar';host.append(toolbar);
+    const scopeSelect=make('select',undefined,'kin-hp-scope');scopeSelect.setAttribute('aria-label','Hanging Protocol Scope');
+    for(const value of model.SCOPES){const option=make('option',SCOPE_LABELS[value]);option.value=value;scopeSelect.append(option);}
+    scopeSelect.value='personal';toolbar.append(scopeSelect);
     const choose=make('select',undefined,'kin-hp-rule');choose.setAttribute('aria-label','Hanging Protocol Rule');toolbar.append(choose);
     const actions={new:'New',duplicate:'Duplicate',delete:'Delete',up:'Move Up',down:'Move Down'};
     for(const [action,label] of Object.entries(actions)){const button=make('button',label,'kin-hp-'+action);button.type='button';button.dataset.action=action;toolbar.append(button);}
@@ -39,11 +51,19 @@
     }
     const importLabel=make('label','Import');const importInput=make('input',undefined,'kin-hp-import');importInput.type='file';importInput.accept='application/json,.json';importLabel.append(importInput);operations.append(importLabel);
     const applied=make('p','Applied Protocol: None','kin-hp-applied');host.append(applied);
+    const scopeNote=make('p','','kin-hp-scope-note');host.append(scopeNote);
     const status=make('p',storageError, 'kin-hp-status');status.setAttribute('role','status');host.append(status);
     const buttons=()=>[...host.querySelectorAll('button,input,select')];
     const clone=v=>structuredClone(v),fold=v=>v.normalize('NFKC').toLocaleLowerCase('en-US');
     function cleanText(input,max){const value=input.value.trim();return value.slice(0,max);}
-    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=null;applied.textContent='Applied Protocol: None';}
+    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=appliedScope=null;applied.textContent='Applied Protocol: None';}
+    const readOnly=()=>scope==='site'&&!canManageSite;
+    function describeScope(){
+      if(scope==='personal'){scopeNote.textContent='Personal: 내 계정에만 저장되는 규칙입니다. 적용은 개인 규칙을 먼저 찾고, 맞는 규칙이 없을 때만 Site 규칙으로 넘어갑니다.';return;}
+      scopeNote.textContent=canManageSite
+        ?'Site: 기관 공용 규칙입니다. 관리자만 저장·초기화할 수 있으며, 저장하면 같은 기관의 모든 사용자에게 보입니다.'
+        :'Site: 기관 공용 규칙은 읽기 전용입니다. 편집과 저장은 기관 관리자만 할 수 있습니다.';
+    }
     function markChanged(){generation++;invalidateApplied();refresh();}
     function current(){return library.rules.find(rule=>rule.id===selected)||null;}
     function selectActive(){const rule=current();library.activeRuleId=rule?.enabled?rule.id:null;}
@@ -111,7 +131,35 @@
     function uniqueAlias(rule,base){const used=new Set(rule.selectors.map(s=>fold(s.alias)));let alias=base,n=2;while(used.has(fold(alias)))alias=base+n++;return alias;}
     function strict(){const value=model.normalize(library);if(!value)throw Error('규칙의 이름, 조건, selector, Current cell을 확인하세요.');return value;}
     function saveLocal(value,message='이 브라우저에 규칙 초안을 저장했습니다.'){
-      library=model.write(storage,key,value);selected=library.activeRuleId||library.rules[0]?.id||null;invalidateApplied();status.textContent=message;render();return library;
+      library=model.write(storage,scopeKeys[scope],value);selected=library.activeRuleId||library.rules[0]?.id||null;invalidateApplied();status.textContent=message;render();return library;
+    }
+    // The scope that is not being edited still takes part in precedence, so its draft is read
+    // from the parked state or its own cache. A corrupt cache there must not break the scope the
+    // user is actually working in, so it degrades to "this scope has no rules".
+    function parkedLibrary(name){
+      if(parked[name])return parked[name].library;
+      try{return model.read(storage,scopeKeys[name]);}catch(_){return null;}
+    }
+    // Apply First Match and navigation span both scopes, so an account whose own library is
+    // empty must still be able to reach the institution rules.
+    function anyEnabledRule(){
+      if(library.rules.some(rule=>rule.enabled))return true;
+      const other=parkedLibrary(scope==='personal'?'site':'personal');
+      return !!other&&other.rules.some(rule=>rule.enabled);
+    }
+    function bothLibraries(active){
+      const other=scope==='personal'?'site':'personal',value=parkedLibrary(other);
+      return scope==='personal'?{personal:active,site:value}:{personal:value,site:active};
+    }
+    function switchScope(next){
+      if(next===scope)return;
+      parked[scope]={library,selected,revision};
+      scope=next;scopeSelect.value=next;
+      const saved=parked[scope];
+      if(saved){library=saved.library;selected=saved.selected;revision=saved.revision;}
+      else{revision=null;try{library=model.read(storage,scopeKeys[scope])||model.empty();}catch(error){library=model.empty();status.textContent=error.message;}
+        selected=library.activeRuleId||library.rules[0]?.id||null;}
+      generation++;describeScope();render();
     }
     const ordered=state=>[...state.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
     function stateSignature(){const state=grid.getState(),views=ordered(state);return JSON.stringify([state.layout,state.activeViewportId,views.map(v=>[v.viewportId,v.x,v.y,v.width,v.height,v.displaySetInstanceUIDs])]);}
@@ -280,6 +328,15 @@
     async function json(response){try{return await response.json();}catch(_){throw Error('계정 응답 형식을 확인할 수 없습니다.');}}
     function sameOwner(value){return !!boundOwner&&value&&value.institution===boundOwner.institution&&value.subject===boundOwner.subject&&Object.keys(value).length===2;}
     function accountValue(data){if(!data||!sameOwner(data.owner)||!Number.isInteger(data.revision)||data.revision<0||data.revision>2147483647||data.value!==null&&!model.normalize(data.value))throw Error('계정 Hanging Protocol 응답을 확인할 수 없습니다.');return data;}
+    // The site response must name this institution and the sentinel subject, and it must say
+    // who may manage it. A response for another institution is refused, not cached.
+    function siteValue(data){
+      const owner=data&&data.owner;
+      if(!boundSite||!owner||owner.institution!==boundSite.institution||owner.subject!==''||Object.keys(owner).length!==2||
+         typeof data.canManageSite!=='boolean'||!Number.isInteger(data.revision)||data.revision<0||data.revision>2147483647||
+         data.value!==null&&!model.normalize(data.value))throw Error('기관 Hanging Protocol 응답을 확인할 수 없습니다.');
+      return data;
+    }
     async function session(signal){const response=await fetcher('/api/me',{credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1'}});if(!response.ok)throw Error('계정 세션을 확인할 수 없습니다.');const me=await json(response);if(!boundOwner||me.kind!=='member'||me.institution!==boundOwner.institution||me.sub!==boundOwner.subject)throw Error('계정이 변경되어 작업을 적용하지 않았습니다.');return me;}
     async function verifiedContext(signal){
       if(typeof options.access==='function')return options.access({signal,owner:boundOwner});
@@ -295,7 +352,11 @@
       try{
         const context=await boundedNative(verifiedContext(request.signal),{signal:request.signal});if(request.signal.aborted||ended||!live()||beforeGeneration!==generation||before!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
         const resolveContext={studies:context.studies,displaySets:context.displaySets||displaySets.getActiveDisplaySets()};
-        const result=navigation?model.navigate(value,resolveContext,appliedCursor,navigation):model.resolve(value,resolveContext,firstMatch?null:selected);
+        // Personal rules are tried before the institution library on every automatic path, so a
+        // Site rule is a fallback for an account that has no matching rule, never an override.
+        const scoped=bothLibraries(value);
+        const result=navigation?model.navigateScoped(scoped,resolveContext,appliedCursor,navigation)
+          :model.resolveScoped(scoped,resolveContext,firstMatch?null:{scope,ruleId:selected});
         if(result.kind==='no-match'){
           status.textContent=navigation?(result.reason==='end'?`${navigation==='next'?'Next':'Previous'} Protocol: 저장 순서의 끝입니다. 현재 배치를 유지합니다.`:`${navigation==='next'?'Next':'Previous'} Protocol: 현재 검사와 일치하는 규칙이 없습니다. 현재 배치를 유지합니다.`):'일치하는 규칙이 없어 현재 배치를 유지합니다.';return;
         }
@@ -321,25 +382,42 @@
         }
         // Remember the planes this apply owns so a later apply can still roll back to them.
         ownedPlanes=new Map(ids.map((id,index)=>[id,{plane:planes[index],set:result.cells[index]?.displaySetInstanceUID??null}]).filter(([,value])=>value.plane));
-        appliedCursor=result.rule.id;appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;applied.textContent=`Applied Protocol: ${appliedName}`;status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;
+        appliedCursor={scope:result.scope,ruleId:result.rule.id};appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;appliedScope=result.scope;
+        applied.textContent=`Applied Protocol: ${appliedName} · Source: ${SCOPE_LABELS[appliedScope]}`;
+        status.textContent=`Applied: ${result.rule.name} (${SCOPE_LABELS[appliedScope]}) · Current/Related 영상을 확인하세요.`;
       }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }
     async function account(action){
-      if(busy||ended||!boundOwner)return;let value=null;
+      if(busy||ended||!boundOwner)return;const site=scope==='site';let value=null;
+      if(site&&!boundSite){status.textContent='기관 정보를 확인할 수 없습니다.';return;}
+      if(site&&action!=='load'&&!canManageSite){status.textContent='기관 공용 규칙의 저장·초기화는 관리자 전용입니다.';return;}
       try{if(action==='save')value=strict();}catch(error){status.textContent=error.message;return;}
-      if(action!=='load'&&revision===null){status.textContent='먼저 Load from Account로 최신 revision을 확인하세요.';return;}
-      busy=true;refresh();const before=generation;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);status.textContent='계정 설정 확인 중…';
+      if(action!=='load'&&revision===null){status.textContent=`먼저 ${site?'Load from Site':'Load from Account'}로 최신 revision을 확인하세요.`;return;}
+      busy=true;refresh();const before=generation,beforeScope=scope;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);
+      status.textContent=site?'기관 설정 확인 중…':'계정 설정 확인 중…';
       try{
-        const method=action==='load'?'GET':'PUT',body=method==='GET'?undefined:JSON.stringify({expectedOwner:boundOwner,revision,value:action==='reset'?null:value});
-        const response=await fetcher(endpoint,{method,credentials:'same-origin',cache:'no-store',signal:request.signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},body});const raw=await json(response);
-        if(!response.ok)throw Error(response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.');
-        const data=accountValue(raw);
+        const method=action==='load'?'GET':'PUT',expectedOwner=site?boundSite:boundOwner;
+        const body=method==='GET'?undefined:JSON.stringify({expectedOwner,revision,value:action==='reset'?null:value});
+        const response=await fetcher(scopeEndpoints[beforeScope],{method,credentials:'same-origin',cache:'no-store',signal:request.signal,headers:{'X-KIN-CSRF':'1',...(body?{'Content-Type':'application/json'}:{})},body});const raw=await json(response);
+        if(!response.ok)throw Error(response.status===403?'기관 공용 규칙의 저장·초기화는 관리자 전용입니다.'
+          :response.status===409?'다른 창에서 규칙이 바뀌었습니다. 다시 불러오세요.'
+          :site?'기관 저장 여부를 확인하지 못했습니다. 다시 불러오세요.':'계정 저장 여부를 확인하지 못했습니다. 다시 불러오세요.');
+        const data=site?siteValue(raw):accountValue(raw);
         await session(request.signal);if(ended||!live())return;
-        if(action==='load'&&before!==generation)throw Error('편집 중 규칙이 바뀌어 계정 값을 불러오지 않았습니다.');
+        // A response belongs to the scope that asked for it. Coming back to a different scope
+        // must not write this revision or library into the scope now on screen.
+        if(beforeScope!==scope)throw Error('범위가 바뀌어 응답을 반영하지 않았습니다.');
+        if(action==='load'&&before!==generation)throw Error(site?'편집 중 규칙이 바뀌어 기관 값을 불러오지 않았습니다.':'편집 중 규칙이 바뀌어 계정 값을 불러오지 않았습니다.');
+        if(site)canManageSite=data.canManageSite;
         revision=data.revision;
-        if(action==='load'){invalidateApplied();if(data.value)saveLocal(data.value,'계정 규칙을 불러와 이 브라우저에 저장했습니다. Apply를 눌러 적용하세요.');else status.textContent='계정에 저장된 Hanging Protocol이 없습니다.';}
-        else if(action==='reset')status.textContent='계정 규칙을 초기화했습니다. 현재 초안과 화면은 유지됩니다.';
-        else status.textContent=before===generation?'계정에 규칙을 저장했습니다.':'요청 당시 규칙을 저장했습니다. 이후 편집은 저장되지 않았습니다.';
+        if(action==='load'){invalidateApplied();
+          if(data.value)saveLocal(data.value,site?'기관 규칙을 불러왔습니다. Apply를 눌러 적용하세요.':'계정 규칙을 불러와 이 브라우저에 저장했습니다. Apply를 눌러 적용하세요.');
+          else status.textContent=site?'기관에 저장된 Hanging Protocol이 없습니다.':'계정에 저장된 Hanging Protocol이 없습니다.';}
+        else if(action==='reset')status.textContent=site?'기관 규칙을 초기화했습니다. 현재 초안과 화면은 유지됩니다.':'계정 규칙을 초기화했습니다. 현재 초안과 화면은 유지됩니다.';
+        else status.textContent=before===generation
+          ?(site?'기관에 규칙을 저장했습니다. 같은 기관의 사용자에게 적용됩니다.':'계정에 규칙을 저장했습니다.')
+          :'요청 당시 규칙을 저장했습니다. 이후 편집은 저장되지 않았습니다.';
+        describeScope();
       }catch(error){if(!ended)status.textContent=error?.name==='AbortError'||error instanceof TypeError?'계정 응답을 확인하지 못했습니다. 다시 불러오세요.':error.message;}finally{clearTimeout(timer);request=null;busy=false;refresh();}
     }
     function refresh(){buttons().forEach(control=>{
@@ -348,10 +426,34 @@
       const needsRule=['kin-hp-duplicate','kin-hp-delete','kin-hp-up','kin-hp-down','kin-hp-apply'].includes(control.id)||control.textContent==='Remove Selector';
       const needsOwner=['kin-hp-save-local','kin-hp-load-account','kin-hp-save-account','kin-hp-reset-account'].includes(control.id);
       const needsRevision=['kin-hp-save-account','kin-hp-reset-account'].includes(control.id);
-      control.disabled=busy||ended||layoutQuarantined&&['kin-hp-apply','kin-hp-apply-first','kin-hp-previous','kin-hp-next'].includes(control.id)||needsRule&&!current()||needsOwner&&!boundOwner||needsRevision&&revision===null||control.dataset.requiresSelectorSlot==='true'&&current()?.selectors.length>=model.MAX_SELECTORS||control.id==='kin-hp-new'&&library.rules.length>=model.MAX_RULES||['kin-hp-apply-first','kin-hp-previous','kin-hp-next'].includes(control.id)&&!library.rules.some(rule=>rule.enabled);
-    });choose.disabled=busy||ended||library.rules.length===0;}
+      control.disabled=busy||ended||layoutQuarantined&&['kin-hp-apply','kin-hp-apply-first','kin-hp-previous','kin-hp-next'].includes(control.id)||needsRule&&!current()||needsOwner&&!boundOwner||needsRevision&&revision===null||control.dataset.requiresSelectorSlot==='true'&&current()?.selectors.length>=model.MAX_SELECTORS||control.id==='kin-hp-new'&&library.rules.length>=model.MAX_RULES||['kin-hp-apply-first','kin-hp-previous','kin-hp-next'].includes(control.id)&&!anyEnabledRule();
+    });
+    choose.disabled=busy||ended||library.rules.length===0;
+    // Scope stays switchable while a request is in flight; the response is refused on return
+    // if it comes back to a different scope, which is the guard that actually protects state.
+    scopeSelect.disabled=ended||!boundOwner||!boundSite;
+    // Site wording so a reader knows which library each write touches before pressing it.
+    const site=scope==='site';
+    for(const [id,label] of [['kin-hp-load-account',site?'Load from Site':'Load from Account'],
+      ['kin-hp-save-account',site?'Save to Site':'Save to Account'],['kin-hp-reset-account',site?'Reset Site':'Reset Account'],
+      ['kin-hp-save-local',site?'Save Site Draft':'Save Draft']]){
+      const control=host.querySelector('#'+id);if(control&&control.textContent!==label)control.textContent=label;
+    }
+    // The server is the boundary; this only keeps a member from typing into a library they
+    // cannot publish. A member may still read, apply and export the institution rules.
+    if(readOnly()){
+      for(const control of editor.querySelectorAll('input,select,button'))control.disabled=true;
+      for(const id of ['kin-hp-new','kin-hp-duplicate','kin-hp-delete','kin-hp-up','kin-hp-down',
+        'kin-hp-save-local','kin-hp-save-account','kin-hp-reset-account','kin-hp-import']){
+        const control=host.querySelector('#'+id);if(control)control.disabled=true;
+      }
+    }}
+    scopeSelect.onchange=()=>{const next=scopeSelect.value;
+      if(!model.SCOPES.includes(next)||ended){scopeSelect.value=scope;return;}switchScope(next);};
     choose.onchange=()=>{selected=choose.value||null;selectActive();generation++;refresh();render();};
-    toolbar.addEventListener('click',event=>{const action=event.target.dataset.action;if(!action)return;const index=library.rules.findIndex(r=>r.id===selected),rule=current();
+    toolbar.addEventListener('click',event=>{const action=event.target.dataset.action;if(!action)return;
+      if(readOnly()){status.textContent='기관 공용 규칙은 읽기 전용입니다. 편집은 기관 관리자만 할 수 있습니다.';return;}
+      const index=library.rules.findIndex(r=>r.id===selected),rule=current();
       if(action==='new'){const next=blankRule();next.name=uniqueName(next.name);library.rules.push(next);selected=next.id;}
       if(action==='duplicate'&&rule){const next=clone(rule);next.id=crypto.randomUUID();next.name=uniqueName(rule.name+' Copy');library.rules.splice(index+1,0,next);selected=next.id;}
       if(action==='delete'&&rule){library.rules.splice(index,1);selected=library.rules[Math.min(index,library.rules.length-1)]?.id||null;}
@@ -359,11 +461,12 @@
       if(action==='down'&&index>=0&&index<library.rules.length-1)[library.rules[index],library.rules[index+1]]=[library.rules[index+1],library.rules[index]];
       selectActive();markChanged();render();});
     operations.addEventListener('click',event=>{const action=event.target.dataset.operation;if(!action)return;
-      if(action==='apply'||action==='apply-first')runApply(action==='apply-first');else if(action==='previous'||action==='next')runApply(false,action);else if(action==='save-local'){try{saveLocal(strict());}catch(error){status.textContent=error.message;}}
+      if(action==='apply'||action==='apply-first')runApply(action==='apply-first');else if(action==='previous'||action==='next')runApply(false,action);else if(action==='save-local'){if(readOnly()){status.textContent='기관 공용 규칙은 읽기 전용입니다. 편집은 기관 관리자만 할 수 있습니다.';return;}try{saveLocal(strict());}catch(error){status.textContent=error.message;}}
       else if(action==='load-account')account('load');else if(action==='save-account')account('save');else if(action==='reset-account')account('reset');
       else if(action==='export'){try{const blob=new Blob([JSON.stringify(strict(),null,2)+'\n'],{type:'application/json'}),a=make('a');a.href=URL.createObjectURL(blob);a.download='hanging-protocols.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),0);status.textContent='환자 정보 없이 규칙 정의를 내보냈습니다.';}catch(error){status.textContent=error.message;}}});
     importInput.onchange=async()=>{
       const file=importInput.files?.[0],before=generation;importInput.value='';if(!file)return;
+      if(readOnly()){status.textContent='기관 공용 규칙은 읽기 전용입니다. 편집은 기관 관리자만 할 수 있습니다.';return;}
       try{
         if(file.size>65536)throw Error('가져올 파일이 너무 큽니다.');
         const value=model.normalize(JSON.parse(await file.text()));
@@ -377,7 +480,9 @@
     const storageEnd=event=>{if(event.key==='kin-session-ended')end();};root.addEventListener?.('storage',storageEnd);try{channel=new BroadcastChannel('kin-session');channel.onmessage=event=>{if(event.data?.type==='session-ended')end();};}catch(_){}
     const navigationChanged=()=>{if(!busy&&appliedCursor&&appliedFingerprint!==navigationFingerprint()){invalidateApplied();refresh();}};
     for(const service of [grid,displaySets])for(const event of new Set(Object.values(service?.EVENTS||{})))try{subscriptions.push(service.subscribe(event,navigationChanged));}catch(_){}
-    render();return {read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation};
+    describeScope();render();
+    return {read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation,
+      scope:()=>scope,setScope:switchScope,canManageSite:()=>canManageSite};
   }
   root.KinViewerHangingProtocol={mount};if(typeof module==='object'&&module.exports)module.exports=root.KinViewerHangingProtocol;
 })(typeof globalThis==='object'?globalThis:this);

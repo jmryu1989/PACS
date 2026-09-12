@@ -110,6 +110,13 @@ export class PacsController {
   @Put('hanging-protocols')
   saveHangingProtocols(@Body() body: any, @Req() req: any) { return this.svc.saveHangingProtocols(body, caller(req)); }
 
+  // 기관 공용 Hanging Protocol. 소속 회원은 읽고, 저장은 admin 전용 — 서버에서 막는다.
+  @Get('hanging-protocols/site')
+  siteHangingProtocols(@Req() req: any) { return this.svc.siteHangingProtocols(caller(req)); }
+
+  @Put('hanging-protocols/site')
+  saveSiteHangingProtocols(@Body() body: any, @Req() req: any) { return this.svc.saveSiteHangingProtocols(body, caller(req)); }
+
   @Get('workspace-shortcuts')
   workspaceShortcuts(@Req() req: any) { return this.svc.workspaceShortcuts(caller(req)); }
 

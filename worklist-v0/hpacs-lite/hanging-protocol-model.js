@@ -1,6 +1,7 @@
 (function(root){
   'use strict';
-  const VERSION=1,MAX_RULES=20,MAX_SELECTORS=4,PREFIX='kin-hanging-protocols:v1:';
+  const VERSION=1,MAX_RULES=20,MAX_SELECTORS=4,PREFIX='kin-hanging-protocols:v1:',SITE_PREFIX='kin-hanging-protocols:v1:site:';
+  const SCOPES=['personal','site'];
   const own=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.getPrototypeOf(v)===Object.prototype&&Object.keys(v).sort().join('|')===[...keys].sort().join('|');
   const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
   const uid=v=>typeof v==='string'&&v.length<=64&&/^[0-9]+(?:\.[0-9]+)*$/.test(v);
@@ -128,6 +129,17 @@
     return [institution,subject].every(v=>typeof v==='string'&&v.length>0&&v.length<=256)?{institution,subject}:null;
   }
   const ownerKey=value=>{const clean=owner(value);return clean?PREFIX+JSON.stringify([clean.institution,clean.subject]):null;};
+  // The institution row is the StudyTagCatalog sentinel: same table, subject ''. The server's
+  // personal guard keeps a real subject non-empty, so the two scopes can never name one row.
+  function siteOwner(value){
+    const institution=Array.isArray(value)?value[0]:value?.institution,subject=Array.isArray(value)?value[1]:value?.subject;
+    if(subject!==undefined&&subject!=='')return null;
+    return typeof institution==='string'&&institution.length>0&&institution.length<=256?{institution,subject:''}:null;
+  }
+  // A separate cache namespace, keyed by institution only: a different account in the same
+  // institution reads the same site library, and a different institution cannot read this one.
+  const siteKey=value=>{const clean=siteOwner(value);return clean?SITE_PREFIX+JSON.stringify([clean.institution]):null;};
+  const scopeKey=(scope,value)=>scope==='site'?siteKey(value):scope==='personal'?ownerKey(value):null;
   function read(storage,key){
     if(!key)throw Error('계정 정보를 확인할 수 없습니다.');const raw=storage.getItem(key);if(raw===null)return null;
     const clean=typeof raw==='string'&&raw.length<=65536?normalize(JSON.parse(raw)):null;if(!clean)throw Error('저장한 Hanging Protocol이 손상되었거나 지원하지 않는 형식입니다.');return clean;
@@ -205,6 +217,40 @@
     if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
     const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
   }
-  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate};
+  // Personal first, institution second. The site library is a fallback, never an override:
+  // it is only consulted when no enabled personal rule matched the current study, and a
+  // no-match across both scopes still leaves the current layout alone.
+  function libraryOf(libraries,scope,strict){
+    const value=libraries?.[scope];
+    if(value===null||value===undefined)return null;
+    const library=normalize(value);
+    if(!library&&strict)throw Error('Hanging Protocol 형식이 잘못되었습니다.');
+    return library;
+  }
+  function resolveScoped(libraries,context,selection=null){
+    if(selection!==null&&(!own(selection,['scope','ruleId'])||!SCOPES.includes(selection.scope)))throw Error('선택한 범위를 확인할 수 없습니다.');
+    for(const scope of selection===null?SCOPES:[selection.scope]){
+      const library=libraryOf(libraries,scope,selection!==null);
+      if(!library)continue;
+      const result=resolve(library,context,selection===null?null:selection.ruleId);
+      if(result.kind==='match')return {...result,scope};
+    }
+    return {kind:'no-match'};
+  }
+  function navigateScoped(libraries,context,cursor,direction){
+    if(!['previous','next'].includes(direction))throw Error('Hanging Protocol 이동 방향을 확인할 수 없습니다.');
+    if(cursor!==null&&(!own(cursor,['scope','ruleId'])||!SCOPES.includes(cursor.scope)||!uuid(cursor.ruleId)))throw Error('마지막 적용 규칙을 확인할 수 없습니다.');
+    const matches=[];
+    for(const scope of SCOPES){
+      const library=libraryOf(libraries,scope,false);if(!library)continue;
+      for(const rule of library.rules)if(rule.enabled){const result=resolve(library,context,rule.id);if(result.kind==='match')matches.push({...result,scope});}
+    }
+    if(!matches.length)return {kind:'no-match',reason:'none'};
+    if(cursor===null)return direction==='next'?matches[0]:matches[matches.length-1];
+    const index=matches.findIndex(result=>result.scope===cursor.scope&&result.rule.id===cursor.ruleId.toLowerCase());
+    if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
+    const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
+  }
+  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,SITE_PREFIX,SCOPES,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,siteOwner,siteKey,scopeKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate,resolveScoped,navigateScoped};
   if(typeof module==='object'&&module.exports)module.exports=root.KinHangingProtocolModel;
 })(typeof globalThis==='object'?globalThis:this);
