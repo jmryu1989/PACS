@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from pydicom import dcmread
 from pydicom.uid import generate_uid
-from playwright.sync_api import expect
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError,expect
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
 
@@ -55,10 +55,18 @@ class CineE2E(ViewerLayoutE2E):
 
  def wait_index(self,p,i,n):p.wait_for_function('a=>services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[a[0]].viewportId).getCurrentImageIdIndex()===a[1]',arg=[i,n])
 
+ def wait_stopped(self,p,i,timeout=5000):
+  # A stop driven by data, by the grid or by another browsing context lands
+  # after the action call returns, so a baseline snapshot taken immediately
+  # can still encode the pre-stop state and make the following negative
+  # margin compare two different transitions. Wait for the transition itself.
+  try:p.wait_for_function('a=>{const g=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[a];return !!g&&!services.cineService.getState().cines[g.viewportId]?.isPlaying}',arg=i,timeout=timeout)
+  except PlaywrightTimeoutError as error:raise AssertionError('viewport %d never reported the expected cine stop within %d ms: %s'%(i,timeout,json.dumps(self.snapshot(p)))) from error
+
  def test_cine_01_direction_loop_bounds_and_resume(self):
   f,a,b=self.pair();originals=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a]);self.watch(p)
   p.get_by_role('button',name='First Frame',exact=True).click();self.wait_index(p,0,0)
-  self.play(p);p.wait_for_timeout(2500);self.play(p);stopped=self.snapshot(p);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p),stopped)
+  self.play(p);p.wait_for_timeout(2500);self.play(p);self.wait_stopped(p,0);stopped=self.snapshot(p);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p),stopped)
   data=p.evaluate('cineRenders');print('CINE forward '+json.dumps(data),flush=True)
   self.assertGreater(len(data),18);self.assertTrue(all(x['marker']>200 and '/frames/'+str(x['index']+1) in x['image'] for x in data))
   self.assertTrue(all((y['index']-x['index'])%12==1 for x,y in zip(data,data[1:])))
@@ -79,21 +87,21 @@ class CineE2E(ViewerLayoutE2E):
   self.assertEqual(self.stack.request('POST','/studies/'+f.uid+'/hold','doctor').status,201)
   original=self.originals();rows=self.report_rows(f);p=self.open_cine(f,[a,b]);self.watch(p)
   self.play(p,0);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p)[1]['index'],0)
-  self.select_cell(p,1);before=self.snapshot(p)[0];self.play(p,1);p.wait_for_timeout(850);self.assertEqual(self.snapshot(p)[0],before)
+  self.select_cell(p,1);self.wait_stopped(p,0);before=self.snapshot(p)[0];self.play(p,1);p.wait_for_timeout(850);self.assertEqual(self.snapshot(p)[0],before)
   self.play(p,1)
   for _ in range(5):p.locator('[data-cy=viewport-grid] > div').nth(1).locator('[data-cy="cine-player-left-arrow"]').click()
   p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_timeout(2500);self.play(p,1)
   data=p.evaluate('cineRenders');seq=[r for r in data if r['id']==self.snapshot(p)[1]['id']]
   fps=(len(seq)-1)*1000/(seq[-1]['t']-seq[0]['t']);print('CINE 5fps '+json.dumps(dict(fps=fps,renders=seq)),flush=True)
   self.assertGreater(fps,4);self.assertLess(fps,6);self.assertTrue(all((y['index']-x['index'])%7==1 for x,y in zip(seq,seq[1:])))
-  self.play(p,1);self.drag(p,'D03A current',1);p.wait_for_timeout(500);before=self.snapshot(p);print('CINE replacement '+json.dumps(before),flush=True);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p),before);self.assertFalse(before[1]['playing'])
+  self.play(p,1);self.drag(p,'D03A current',1);p.wait_for_timeout(500);self.wait_stopped(p,1);before=self.snapshot(p);print('CINE replacement '+json.dumps(before),flush=True);p.wait_for_timeout(450);self.assertEqual(self.snapshot(p),before);self.assertFalse(before[1]['playing'])
   self.grid(p,1);p.wait_for_timeout(300);self.assertTrue(all(not x['playing'] for x in self.snapshot(p)))
   self.assertEqual(self.originals(),original);self.assertEqual(self.report_rows(f),rows)
 
  def test_cine_03_delayed_stop_and_access_failure(self):
   f,a,b=self.pair();p=self.open_cine(f,[a]);pending=[]
   pattern='**/api/me';p.route(pattern,lambda r:pending.append(r))
-  self.play(p);p.wait_for_timeout(250);self.assertTrue(pending);self.play(p);before=self.snapshot(p)
+  self.play(p);p.wait_for_timeout(250);self.assertTrue(pending);self.play(p);self.wait_stopped(p,0);before=self.snapshot(p)
   for r in pending:r.fulfill(response=r.fetch())
   p.unroute(pattern);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),before)
   p.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}));self.play(p)
@@ -104,7 +112,7 @@ class CineE2E(ViewerLayoutE2E):
  def test_cine_04_logout_and_spa_exit(self):
   f,a,b=self.pair();work=self.login();p=self.open_cine(f,[a],work.context.new_page());self.play(p);p.wait_for_timeout(350)
   work.once('dialog',lambda d:d.accept());work.locator('#logout').click();work.wait_for_url('**/worklist/hpacs-lite/index.html')
-  before=self.snapshot(p);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),before);self.assertFalse(before[0]['playing']);expect(p.locator('#kin-cine')).not_to_be_visible()
+  self.wait_stopped(p,0);before=self.snapshot(p);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),before);self.assertFalse(before[0]['playing']);expect(p.locator('#kin-cine')).not_to_be_visible()
   p=self.open_cine(f,[a]);self.play(p);p.wait_for_timeout(350);p.evaluate('()=>{window.cineExitMarker=true}');p.mouse.click(20,24)
   expect(p.locator('#kin-cine')).to_have_count(0);self.assertTrue(p.evaluate('window.cineExitMarker===true'));self.assertNotIn('/ohif/viewer?',p.url)
 
@@ -155,10 +163,10 @@ class CineE2E(ViewerLayoutE2E):
   p.get_by_label('Range Start').fill('3');p.get_by_label('Range End').fill('6');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo')
   with p.expect_request(pattern):self.play(p)
   p.wait_for_timeout(100);self.assertEqual(1,len(pending),'only the exact source SOP/frame preparation request is held')
-  self.drag(p,'D03A current',0);replacement=self.snapshot(p)
+  self.drag(p,'D03A current',0);self.wait_stopped(p,0);replacement=self.snapshot(p)
   pending[0].fulfill(response=pending[0].fetch());p.unroute(pattern);p.wait_for_timeout(500);self.assertEqual(self.snapshot(p),replacement);self.assertFalse(replacement[0]['playing']);expect(p.get_by_label('Range Start')).to_have_value('1');self.assertEqual(p.get_by_label('Playback Direction').input_value(),'forward');self.assertTrue(p.get_by_label('Loop',exact=True).is_checked())
   self.select_cell(p,1);p.get_by_label('Range Start').fill('2');p.get_by_label('Range End').fill('5');p.get_by_role('button',name='Apply Range',exact=True).click();p.get_by_label('Playback Direction').select_option('yoyo');p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_function('()=>cineRenders.filter(r=>r.id===services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[1].viewportId).id).length>=3')
-  self.select_cell(p,0);stopped=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),stopped);self.assertFalse(stopped[1]['playing'])
+  self.select_cell(p,0);self.wait_stopped(p,1);stopped=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),stopped);self.assertFalse(stopped[1]['playing'])
   self.select_cell(p,1);p.evaluate('()=>{cineRenders=[]}');self.play(p,1);p.wait_for_function('()=>cineRenders.length>=3');p.evaluate("()=>{Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'))}");hidden=self.snapshot(p);p.wait_for_timeout(400);self.assertEqual(self.snapshot(p),hidden);self.assertFalse(hidden[1]['playing'])
   sequence=p.evaluate('''()=>{const id=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.x-b.x)[1].viewportId,rows=cineRenders.filter(r=>r.id===id);return rows.filter((r,i)=>!i||r.index!==rows[i-1].index)}''');self.assertTrue(sequence);self.assertTrue(all(1<=r['index']<=4 and r['marker']>200 and '/frames/'+str(r['index']+1) in r['image'] for r in sequence));self.assertTrue(all(abs(y['index']-x['index'])==1 for x,y in zip(sequence,sequence[1:])))
   p.evaluate("()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))}");self.assertEqual(self.originals(),originals);self.assertEqual(self.report_rows(f),rows)
