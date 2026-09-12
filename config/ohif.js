@@ -2187,6 +2187,11 @@ function kinCreateFrameCoverage() {
 function kinCreateThreeDCursor() {
   let services, ready = null, current = null, epoch = 0, ended = false, listening = false, channel = null;
   let rows = [], owner = null, mark = null, listeners = [], mounts = 0, renders = 0, invalidations = 0;
+  /* 종료는 이 호스트가 소유한다. retiring은 아직 끝나지 않은 disable→stop이고, blocked는 그
+     종료가 미완료(unsettled)이거나 예외로 끝나 이 뷰어 창에서 모드가 영구 불가가 된 상태다.
+     컨트롤러 안의 poisoned는 인스턴스와 함께 사라지므로 창 단위 기억은 여기에만 있고, 그래서
+     retire()는 컨트롤러를 버리기 전에 그 인스턴스의 오염을 읽어 여기로 올린다(:2308-2325). */
+  let retiring = null, blocked = false;
   // 'true'가 아닌 모든 값(누락·문자열 'true'·1)은 OFF다.
   const on = () => window.config?.kinThreeDCursor?.enabled === true;
   const say = text => { const node = document.querySelector('#kin-viewer-layout-status'); if (node) node.textContent = text; };
@@ -2294,9 +2299,32 @@ function kinCreateThreeDCursor() {
     epoch++; unbind();
     const gone = current; current = null; mark = null;
     if (!gone) return;
-    // 이탈은 disable() 뒤 stop()이다. stop()이 'unsettled'를 돌려주면 그 창에서 모드는
-    // 영구 불가이며, 호스트는 재마운트로 그것을 되돌리려 하지 않는다.
-    Promise.resolve().then(() => gone.disable('off')).then(() => gone.stop()).catch(() => {});
+    /* 이탈은 disable() 뒤 stop()이다. 둘 중 하나라도 'unsettled'를 돌려주거나 동기 예외·
+       reject로 끝나면 취소할 수 없는 native 요청이 남은 것이므로 그 창에서 모드는 영구
+       불가다. 호스트는 재마운트로 그것을 되돌리지 않으며, 뒤따르는 정리가 성공해도 이미
+       세워진 차단을 지우지 않는다. 정리 자체는 오류 뒤에도 이어서 시도한다. */
+    const step = call => Promise.resolve().then(call).then(
+      result => { if (result === 'unsettled') blocked = true; }, () => { blocked = true; });
+    /* 반환값만으로는 부족하다. 패널의 토글은 호스트를 거치지 않고 스스로 disable('off')을
+       부를 수 있고, 그 종료가 미완료로 끝나면 기록은 그 인스턴스 안의 poisoned에만 남는다.
+       뒤늦게 진행 중이던 요청이 정리되고 나면 호스트의 disable·stop은 이미 끝난 종료를 보고
+       'idle'을 돌려주므로, 결과만 읽는 호스트는 그 미완료를 영원히 보지 못한 채 새 컨트롤러를
+       올린다. 그래서 교체 전후로 컨트롤러 상태를 직접 읽어 창 단위 기억으로 올린다. 상태를
+       읽지 못한 것은 안전을 확인하지 못한 것이므로 조용히 재마운트를 허용하지 않고 막는다. */
+    const inspect = () => {
+      let seen = null;
+      try { seen = gone.state(); } catch (_) { blocked = true; return; }
+      if (!seen || typeof seen !== 'object') { blocked = true; return; }
+      if (seen.poisoned || seen.teardown === 'unsettled') blocked = true;
+    };
+    // 종료끼리 겹치지 않게 이어 붙이고, 끝나기 전에는 새 mount가 생기지 않게 보관한다.
+    const run = (retiring || Promise.resolve())
+      .then(inspect)
+      .then(() => step(() => gone.disable('off')))
+      .then(() => step(() => gone.stop()))
+      .then(inspect);
+    retiring = run;
+    run.then(() => { if (retiring === run) retiring = null; });
   }
   function endSession() {
     if (ended) return; ended = true;
@@ -2322,21 +2350,24 @@ function kinCreateThreeDCursor() {
       ready.catch(() => {});
       // 다른 확장과 같은 읽기 전용 관측 창구다. 여기서 기능을 켜거나 끌 수 없다.
       window.kinViewerThreeDCursorState = () => ({
-        mounts, renders, invalidations, listeners: listeners.length, ended,
-        mounted: !!current, cursor: current ? current.state() : null });
+        mounts, renders, invalidations, listeners: listeners.length, ended, blocked,
+        retiring: !!retiring, mounted: !!current, cursor: current ? current.state() : null });
     },
     onModeEnter() {
-      if (!ready || ended) return;
+      if (!ready || ended || blocked) return;
       // kinCreateFrameCoverage :2171-2175의 티켓 관례. 늦게 도착한 then은 버린다.
       const ticket = ++epoch;
       watchSession();
-      ready.then(async () => {
-        if (ticket !== epoch || ended) return;
+      // 이전 종료가 끝난 뒤에만 mount한다. 종료를 기다리는 동안 여러 번 진입해도 표가 가장
+      // 나중인 요청 하나만 남아 재개하므로, 사용자는 모드를 다시 고르지 않아도 된다.
+      ready.then(() => retiring).then(async () => {
+        if (ticket !== epoch || ended || blocked) return;
         const me = await get('/api/me');
         const next = ownerOf(me);
-        rows = (await get('/api/studies')).studies || [];
-        if (ticket !== epoch || ended || !next) return;
-        owner = next; mark = 'kin3d-mode-' + ticket;
+        // 늦게 끝난 이전 진입이 최신 목록을 덮지 않도록 표를 확인한 뒤에만 옮긴다.
+        const studies = (await get('/api/studies')).studies || [];
+        if (ticket !== epoch || ended || blocked || !next) return;
+        rows = studies; owner = next; mark = 'kin3d-mode-' + ticket;
         if (current) return;
         current = window.KinViewerThreeDCursor.mount(
           { panes, meta, context, host: document.querySelector('#kin-viewer-layout') });
