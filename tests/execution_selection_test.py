@@ -173,15 +173,36 @@ class ExecutionSelectionTests(unittest.TestCase):
 
     def test_hanging_protocol_profile_runs_exact_shared_and_new_cases(self):
         profile=ci.PROFILES['hanging-protocols']
+        # The required sequence: the shared invariants and worklist boundaries run
+        # before the API change they protect, and the native flow runs last.
+        self.assertEqual([row[0] for row in profile['suites']],
+            ['invariants_live.py','e2e/test_worklist.py',
+             'hanging_protocol_api_live.py','e2e/test_hanging_protocol.py'])
         for index,(filename,class_name,unit) in enumerate(profile['suites']):
-            plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+            # Each suite is planned at the budget CI will actually request for it,
+            # not at a uniform profile maximum.
+            timeout=profile['suite_budgets'][unit]
+            plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
+            self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
             if index<2:self.assertEqual(len(plan['tests']),[69,14][index])
+            if class_name:
+                self.assertTrue(all(row['case'].startswith(class_name+'.')
+                                    for row in plan['tests']))
+            if class_name=='HangingProtocolApiLive':
+                cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+                self.assertEqual({row['case'] for row in plan['tests']},
+                    {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_')})
+                self.assertTrue(plan['tests'])
             if class_name=='HangingProtocolE2E':
                 cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
                 self.assertEqual({row['case'] for row in plan['tests']},
                     {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_hp_')})
-                self.assertEqual(len(plan['tests']),4)
+                # Set equality above already pins the selection exactly. This floor
+                # only guards against the module losing declared cases; a unit that
+                # adds an HP case raises it, so it must not be an equality.
+                self.assertGreaterEqual(len(plan['tests']),4)
+            print('SELECTION',filename,len(plan['tests']),flush=True)
 
 
 if __name__ == '__main__':

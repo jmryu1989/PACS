@@ -200,6 +200,47 @@ jobs:
             tmp/mpr-ci/
           if-no-files-found: error
           retention-days: 7
+  hanging-protocols:
+    # A separate job, not extra suites inside measurements: the four hanging-protocol
+    # suites must not consume that job's budget, and each profile needs its own fresh
+    # runner with an empty Docker daemon. The same 40-minute job policy and 28-minute
+    # live step as the existing e2e jobs. The profile's own per-suite budgets
+    # (420/240/120/300 plus four 35s margins = 1220s) fit measurement_ci.py's
+    # 25-minute deadline, so the trailing hanging-protocol flows keep their slice
+    # even if the shared invariants and worklist suites run to their caps.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Hanging protocol profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hp-python"
+          "$RUNNER_TEMP/hp-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared invariants, worklist and hanging protocol selection
+        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared invariants, worklist and hanging protocol tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/hp-python/bin/python" tests/measurement_ci.py --profile hanging-protocols
+      - name: Sanitized synthetic hanging protocol evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-hanging-protocols-results
+          path: |
+            tests/e2e/artifacts/hanging-protocols-ci/
+            tests/e2e/artifacts/HP-*.png
+            tmp/hp-ci/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

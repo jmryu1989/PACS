@@ -59,7 +59,18 @@ PROFILES = {
     'hanging-protocols': {
         'out': ROOT / 'tests/e2e/artifacts/hanging-protocols-ci',
         'project_prefix': 'kin-hp-ci-',
-        'suite_timeout': 900,
+        # Four suites share main()'s single 25-minute deadline, and the required
+        # order puts the hanging-protocol flows LAST, so a uniform 900 cap let the
+        # shared invariants/worklist suites legally claim the whole deadline and
+        # leave the flows this profile exists to prove with no evidence at all.
+        # 'suite_budgets' caps each suite separately instead: 400+240+120+300 plus
+        # the four 35s supervisor margins is 1200s, so the profile's entire
+        # configured worst case fits the 1500s deadline and still leaves 300s for a
+        # stack whose measured cold setup and cleanup total 73.4s. These are
+        # ceilings, not runtime estimates.
+        'suite_timeout': 400,
+        'suite_budgets': {'ci-hp-invariants': 400, 'ci-hp-worklist': 240,
+                          'ci-hp-account': 120, 'ci-hp-native': 300},
         # Shared API/DB changes retain invariants then worklist before the new flow.
         'suites': (
             ('invariants_live.py', None, 'ci-hp-invariants'),
@@ -174,12 +185,15 @@ def guarded_suite_command(suite, class_name, remaining, unit=None, maximum=540):
 
 
 def guarded_profile_run(profile, suite, class_name, unit, remaining):
-    command = guarded_suite_command(
-        suite, class_name, remaining, unit, profile['suite_timeout'])
+    # A profile may cap individual suites below its own maximum so no one suite can
+    # claim the shared deadline. Without that mapping the profile maximum applies,
+    # which is every other profile's unchanged behaviour.
+    maximum = profile.get('suite_budgets', {}).get(unit, profile['suite_timeout'])
+    command = guarded_suite_command(suite, class_name, remaining, unit, maximum)
     # run() also caps this request by the shared deadline. Requesting the inner
     # maximum plus its reserved margin prevents the outer supervisor from
     # preempting run-tests.py before it terminates descendants and records state.
-    return command, profile['suite_timeout'] + 35
+    return command, maximum + 35
 
 
 def sanitize(output, secrets_to_hide):
