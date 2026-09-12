@@ -186,7 +186,11 @@ test('the adapter asks the bound window with the request it will accept', async 
 });
 
 test('a reply from another origin is ignored, not answered', async () => {
-  for (const origin of ['https://evil.example', 'http://localhost:9443', 'https://localhost:9444', '', null, undefined]) {
+  // The prefix-sharing entries pin an exact-match check: a startsWith test would
+  // let every one of them through while the wholly foreign ones still fail.
+  for (const origin of ['https://evil.example', 'http://localhost:9443', 'https://localhost:9444',
+    'https://localhost:9443.evil.example', 'https://localhost:94430', 'https://localhost:9443@evil.example',
+    '', null, undefined]) {
     const kit = harness();
     const answer = kit.adapter.read();
     kit.deliver({ origin, source: kit.target, data: reply() });
