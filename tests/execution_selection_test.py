@@ -173,16 +173,37 @@ class ExecutionSelectionTests(unittest.TestCase):
 
     def test_hanging_protocol_profile_runs_exact_shared_and_new_cases(self):
         profile=ci.PROFILES['hanging-protocols']
+        # The required sequence: the shared invariants and worklist boundaries run
+        # before the API change they protect, and the native flow runs last.
+        self.assertEqual([row[0] for row in profile['suites']],
+            ['invariants_live.py','e2e/test_worklist.py',
+             'hanging_protocol_api_live.py','e2e/test_hanging_protocol.py'])
         for index,(filename,class_name,unit) in enumerate(profile['suites']):
-            plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+            # Each suite is planned at the budget CI will actually request for it,
+            # not at a uniform profile maximum.
+            timeout=profile['suite_budgets'][unit]
+            plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
+            self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
             if index<2:self.assertEqual(len(plan['tests']),[69,14][index])
+            if class_name:
+                self.assertTrue(all(row['case'].startswith(class_name+'.')
+                                    for row in plan['tests']))
+            if class_name=='HangingProtocolApiLive':
+                cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+                self.assertEqual({row['case'] for row in plan['tests']},
+                    {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_')})
+                self.assertTrue(plan['tests'])
             if class_name=='HangingProtocolE2E':
                 cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
                 self.assertEqual({row['case'] for row in plan['tests']},
                     {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_hp_')})
-                # test_hp_05 added the reconstructed-cell flow to the same declared selection.
+                # test_hp_05 added the reconstructed-cell flow to the same declared
+                # selection, so the exact declared count is now 5. This stays an
+                # equality: a floor would let a case silently disappear as long as
+                # four remained, which is the regression this guard exists to catch.
                 self.assertEqual(len(plan['tests']),5)
+            print('SELECTION',filename,len(plan['tests']),flush=True)
 
 
 if __name__ == '__main__':
