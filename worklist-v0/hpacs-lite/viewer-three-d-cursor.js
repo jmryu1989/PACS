@@ -10,14 +10,48 @@
   const TEXT={'identity-study':'같은 검사가 아닙니다.','identity-patient':'같은 원본 환자가 아닙니다.','identity-frame':'같은 기준 좌표계가 아닙니다.',
     'identity-missing':'원본 식별을 확인하지 못했습니다.','out-of-image':'해당 영상 범위 밖입니다.','out-of-coverage':'해당 시리즈 촬영 범위 밖입니다.',
     'ambiguous-slice':'가장 가까운 영상을 하나로 정할 수 없습니다.','pick-off-plane':'현재 표시된 영상 평면의 점이 아닙니다.',
+    'slice-distance-exceeded':'선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다.',
     'source-not-rendered':'현재 표시된 영상을 확인하지 못했습니다.','target-not-confirmed':'대상 영상이 표시된 것을 확인하지 못했습니다.',
     'source-replaced':'영상이 교체되어 취소했습니다.','navigation-failed':'대상 영상으로 이동하지 못했습니다.','user-interrupt':'다른 조작으로 취소했습니다.',
     'context-changed':'세션 또는 도구가 바뀌어 취소했습니다.','pick-slice-unknown':'현재 영상을 원본 목록에서 찾지 못했습니다.',
     'point-outside-viewport':'영상 표시 영역 안을 클릭하세요.','navigation-unsettled':'대상 영상 요청이 끝나지 않아 이 화면을 보류했습니다.',
     'stopped':'3D Cursor를 종료했습니다.','internal':'3D Cursor를 사용할 수 없습니다.','abandoned':'',
     'teardown-unsettled':'끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.',
-    'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.'};
-  const message=reason=>TEXT[reason]||'3D Cursor를 사용할 수 없습니다.';
+    'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.',
+    'inactive':'3D Cursor가 켜져 있지 않습니다.','point-nonfinite':'선택점 좌표를 확인하지 못했습니다.',
+    'off':'3D Cursor를 껐습니다.','no-eligible-pane':'대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.',
+    /* One image's own attributes are out of spec. This is the only geometry statement that calls
+       an image defective, and it never describes the angle between two series: a series that is
+       oblique to another one is ordinary DICOM and produces no reason code at all. */
+    'geometry-axes-invalid':'이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.',
+    'geometry-missing':'이 영상의 위치·방향 정보를 읽지 못했습니다.','geometry-spacing':'이 영상의 화소 간격 정보를 읽지 못했습니다.',
+    'geometry-extent':'이 영상의 행·열 크기 정보를 읽지 못했습니다.',
+    /* Unsupported series shapes are a limit of this feature, not a fault of the data: the wording
+       says what is not supported and never calls the series abnormal or the DICOM wrong. */
+    'stack-too-short':'현재 지원하지 않는 시리즈 구성입니다(단면이 2장 미만).',
+    'stack-too-long':'현재 지원하지 않는 시리즈 구성입니다(단면 수가 한도를 넘음).',
+    'stack-identity-mixed':'현재 지원하지 않는 시리즈 구성입니다(한 화면에 서로 다른 시리즈).',
+    'stack-orientation-mixed':'현재 지원하지 않는 시리즈 구성입니다(한 화면 안에서 단면 방향이 섞임).',
+    'stack-spacing-mixed':'현재 지원하지 않는 시리즈 구성입니다(화소 간격이 섞임).',
+    'stack-extent-mixed':'현재 지원하지 않는 시리즈 구성입니다(영상 크기가 섞임).',
+    'stack-duplicate-sop':'현재 지원하지 않는 시리즈 구성입니다(같은 영상이 중복).',
+    'stack-duplicate-position':'현재 지원하지 않는 시리즈 구성입니다(같은 위치의 단면이 중복).',
+    'stack-spacing-nonuniform':'현재 지원하지 않는 시리즈 구성입니다(단면 간격이 일정하지 않음).',
+    'restored':'원래 영상으로 되돌렸습니다.','restore-unconfirmed':'원래 영상으로 되돌린 것을 확인하지 못했습니다.',
+    'restore-failed':'원래 영상으로 되돌리지 못했습니다.','restore-skipped-user':'사용자가 옮긴 화면이라 되돌리지 않았습니다.',
+    'restore-skipped-replaced':'영상이 교체되어 되돌리지 않았습니다.','restore-skipped-unbound':'화면이 사라져 되돌리지 않았습니다.',
+    'restore-blocked-unsettled':'끝나지 않은 영상 요청이 있어 되돌리지 않았습니다.',
+    'restore-blocked-abandoned':'세션이 끝나 되돌리지 않았습니다.','restore-blocked-stopped':'3D Cursor를 종료해 되돌리지 않았습니다.'};
+  // Presence in the table decides, not truthiness: 'abandoned' is an entry whose text is
+  // deliberately empty, and a fallback sentence there would speak for a run that must say nothing.
+  const message=reason=>Object.prototype.hasOwnProperty.call(TEXT,reason)?TEXT[reason]:'3D Cursor를 사용할 수 없습니다.';
+  // Every reason code the controller can emit must be in the table above; a code that is not
+  // would reach the reader as the bare 'unavailable' sentence, which explains nothing.
+  const reasons=()=>Object.keys(TEXT);
+  /* The one sentence the reader may see about |n·(p−o)|. It is the distance from the picked
+     point to the plane of the slice being shown, not an accuracy, an error or a precision:
+     saying '±' or '오차' here would describe the computation instead of the geometry. */
+  const distanceText=value=>'선택점에서 단면까지 '+Number(value).toFixed(1)+' mm';
   let mounted=0;
 
   function mount(options){
@@ -27,10 +61,59 @@
     const confirmAttempts=limit(options.confirmAttempts,20),navigationAttempts=limit(options.navigationAttempts,625),
       drainAttempts=limit(options.drainAttempts,625);
     const snapTolerance=typeof options.snapTolerance==='number'?options.snapTolerance:0.5;
+    // Injected by the caller; the model's constant is the fallback so no call site carries a
+    // millimetre literal of its own.
+    const sliceDistanceLimit=typeof options.sliceDistanceLimit==='number'&&options.sliceDistanceLimit>=0
+      ?options.sliceDistanceLimit:model.SLICE_DISTANCE_LIMIT_MM;
     const owned='kin3d-'+(++mounted);
     let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
       source=null,busy=false,abort=null,active=null,teardown='idle';
     const nodes=new Map(),handlers=new Map(),revoked=new Set(),quarantine=new Map(),reports=new Map();
+
+    /* The only thing the reader can see. hpacs-lite convention (viewer-image-text.js,
+       viewer-display-scope.js): a <section id="kin-…"> with an English button label and a Korean
+       <p role="status">. Every status string goes through note(), so a path that writes a reason
+       and draws nothing cannot exist; the panel is built only when a host is given, so a mount
+       without one keeps the headless shape the controller had before. */
+    let panel=null,toggleNode=null,statusNode=null;
+    /* A pane that could not be confirmed back on its own frame, or that was left holding a
+       request nobody can withdraw, is not the same as a restored one and may not disappear from
+       the screen just because the run that caused it has ended. The internal status string stays
+       exactly what it was; the visible line carries the outstanding restorations as well. */
+    function outstanding(){
+      const left=[...reports.values()].filter(value=>value!=='restored');
+      return left.length?left.length+' pane(s): '+message(left[0]):'';
+    }
+    function note(value){
+      status=value;
+      if(statusNode)statusNode.textContent=[value,outstanding()].filter(Boolean).join(' · ');
+      return value;
+    }
+    function refreshUi(){
+      if(!toggleNode)return;
+      toggleNode.textContent=enabled?'Exit 3D Cursor':'3D Cursor';
+      toggleNode.setAttribute('aria-pressed',String(enabled));
+      // A poisoned or stopped controller can never be switched on again, so the one way out of
+      // the mode must not look available.
+      toggleNode.disabled=stopped||poisoned;
+    }
+    // The button is the whole of the release mechanism: no new keyboard shortcut is registered,
+    // because this controller must not take a key away from the host viewer.
+    function onToggle(){
+      if(stopped||poisoned)return;
+      if(enabled)disable('off').catch(()=>{});else enable();
+    }
+    function buildPanel(host){
+      if(!host||!host.append)return;
+      panel=doc.createElement('section');panel.id='kin-3d-cursor';panel.setAttribute('data-kin-3d-cursor-panel',owned);
+      toggleNode=doc.createElement('button');toggleNode.type='button';toggleNode.id='kin-3d-cursor-toggle';
+      toggleNode.setAttribute('aria-pressed','false');toggleNode.textContent='3D Cursor';
+      toggleNode.addEventListener('click',onToggle);
+      statusNode=doc.createElement('p');statusNode.id='kin-3d-cursor-status';statusNode.setAttribute('role','status');
+      statusNode.textContent=status;
+      panel.append(toggleNode,statusNode);host.append(panel);
+      refreshUi();
+    }
 
     const fingerprint=value=>{try{return JSON.stringify(value??null);}catch(_){return null;}};
     const now=()=>{try{return fingerprint(context?.())??'';}catch(_){return null;}};
@@ -149,12 +232,26 @@
         if(!item||!item.stack||nodes.get(id).anchor!==item.anchor)dropNode(id);
       }
       if(enabled)for(const element of live)attach(element);
-      for(const [id,mark] of [...marks]){
-        const item=next.get(id);
-        if(!item||!item.stack||item.anchor!==mark.anchor||!same(item.token,mark.token)||!rendered(item.viewport,mark.imageId))marks.delete(id);
-      }
+      for(const [id,mark] of [...marks])if(stale(next.get(id),mark,next.get(id)?.token))marks.delete(id);
       bound=next;
       return bound;
+    }
+    /* A marker claims that this exact image is on screen at this exact point. The claim dies with
+       the pane, with the stack it was measured against, and with the frame itself: the confirming
+       observation is rendered(), the same predicate that let the marker be committed. */
+    const stale=(item,mark,mark_token)=>!item||!item.stack||item.anchor!==mark.anchor||
+      !same(mark_token,mark.token)||!rendered(item.viewport,mark.imageId);
+    /* Invalidation alone, for a refresh that arrives while a run is awaiting. Rebinding or moving
+       a pane then would take the run's bindings away from it, but leaving a marker that no longer
+       matches the displayed frame would keep a stale claim on screen for the whole run. */
+    function invalidateMarks(){
+      let dropped=false;
+      for(const [id,mark] of [...marks]){
+        const item=bound.get(id);
+        if(stale(item,mark,item&&token(item.viewport))){marks.delete(id);dropped=true;}
+      }
+      if(dropped)paint();
+      return dropped;
     }
 
     const SIZE=13;
@@ -209,7 +306,7 @@
       for(const id of [...nodes.keys()])if(!keep.has(id))dropNode(id);
     }
     function clearMarks(reason){
-      marks.clear();source=null;status=reason?message(reason):'';
+      marks.clear();source=null;note(reason?message(reason):'');
       dropNodes();
     }
 
@@ -303,7 +400,7 @@
       moved.clear();revoked.clear();reports.clear();abort=null;clearMarks();
       syncBinding();
       const origin=bound.get(paneId);
-      const refuse=reason=>({ok:false,reason,status:status=message(reason)});
+      const refuse=reason=>({ok:false,reason,status:note(message(reason))});
       if(!origin||!origin.stack||!origin.token)return refuse(origin?.reason||'identity-missing');
       if(now()!==base)return refuse('context-changed');
       const currentId=readId(origin.viewport),index=readIndex(origin.viewport);
@@ -329,8 +426,15 @@
         if(!item.stack){results.push({paneId:item.id,ok:false,reason:item.reason});continue;}
         const mismatch=model.comparable(origin.stack.id,item.stack.id);
         if(mismatch){results.push({paneId:item.id,ok:false,reason:mismatch});continue;}
-        const found=model.locate(item.stack,picked.world);
-        if(!found.ok){results.push({paneId:item.id,ok:false,reason:found.reason});continue;}
+        const found=model.locate(item.stack,picked.world,sliceDistanceLimit);
+        if(!found.ok){
+          // A refusal that measured a distance carries it, so the reader is told how far the
+          // point actually was instead of only that it was too far.
+          results.push(Number.isFinite(found.distance)
+            ?{paneId:item.id,ok:false,reason:found.reason,distance:found.distance,limit:found.limit}
+            :{paneId:item.id,ok:false,reason:found.reason});
+          continue;
+        }
         if(quarantine.has(item.id)){results.push({paneId:item.id,ok:false,reason:'navigation-unsettled'});continue;}
         // Every gate below is re-read in the same tick as the call: a replacement that happened
         // during an earlier await must never receive this stack's index.
@@ -360,14 +464,19 @@
         }
         // Ownership is kept until the whole run succeeds: a later cancel must be able to roll
         // back panes that had already finished, and only a complete run releases them.
-        marks.set(item.id,{world:picked.world,sop:found.sop,imageId:found.imageId,pixel:found.pixel,token:token(item.viewport),anchor:item.anchor});
-        results.push({paneId:item.id,ok:true,sop:found.sop,index:found.index,pixel:found.pixel});
+        marks.set(item.id,{world:picked.world,sop:found.sop,imageId:found.imageId,pixel:found.pixel,token:token(item.viewport),anchor:item.anchor,
+          distance:found.distance});
+        results.push({paneId:item.id,ok:true,sop:found.sop,index:found.index,pixel:found.pixel,distance:found.distance,distanceLimit:found.distanceLimit});
       }
       const ending=halt();
       if(ending)return stopRun(ending);
       moved.clear();paint();
       const missed=results.filter(result=>!result.ok);
-      status=missed.length?missed.length+' pane(s): '+message(missed[0].reason):'3D Cursor 표시됨';
+      // The worst slice distance among the panes that were actually marked: it is the one the
+      // reader is most likely to misread as a point lying in the displayed image.
+      const spread=results.filter(result=>result.ok&&Number.isFinite(result.distance)).map(result=>result.distance);
+      note(missed.length?missed.length+' pane(s): '+message(missed[0].reason)
+        :'3D Cursor 표시됨'+(spread.length?' · '+distanceText(Math.max(...spread)):''));
       return {ok:true,results,status};
     }
     /* setImageIdIndex resolves even when its load was discarded, and resolves at once when the
@@ -389,9 +498,9 @@
       if(!enabled||stopped||busy)return Promise.resolve({ok:false,reason:'inactive'});
       busy=true;
       const promise=runPick(paneId,point).catch(error=>{
-        status=message('internal');
+        note(message('internal'));
         return {ok:false,reason:'internal',error:String(error&&error.message||error)};
-      }).then(result=>{busy=false;active=null;return result;});
+      }).then(result=>{busy=false;active=null;refreshUi();return result;});
       active=promise;
       return promise;
     }
@@ -409,8 +518,8 @@
       const item=[...bound.values()].find(entry=>entry.element===element);
       if(!item||!item.stack)return;
       const point=canvasPoint(item,event);
-      if(!point){status=message('point-outside-viewport');return;}
-      pick(item.id,point).catch(()=>{status=message('internal');});
+      if(!point){note(message('point-outside-viewport'));return;}
+      pick(item.id,point).catch(()=>{note(message('internal'));});
     }
 
     /* An unsettled teardown leaves a native request nobody can withdraw, so this controller stays
@@ -418,15 +527,18 @@
        controller helps with the JS state, and only reopening the viewer window is certain about
        the request itself. */
     function enable(){
-      if(stopped||enabled||poisoned)return false;
+      if(enabled)return false;
+      // Never a silent no-op: every path that answers false writes the reason where it can be read.
+      if(stopped||poisoned){note(message(poisoned?'teardown-unsettled':'stopped'));refreshUi();return false;}
       const probe=now();
-      if(probe===null)return false;
+      if(probe===null){note(message('context-changed'));refreshUi();return false;}
       base=probe;enabled=true;syncBinding();
       if(![...bound.values()].some(item=>item.stack)){
-        enabled=false;detachAll();dropNodes();bound=new Map();base=null;status='';
+        enabled=false;detachAll();dropNodes();bound=new Map();base=null;
+        note(message('no-eligible-pane'));refreshUi();
         return false;
       }
-      status='3D Cursor 대기';
+      note('3D Cursor 대기');refreshUi();
       return true;
     }
     async function disable(reason){
@@ -441,12 +553,16 @@
       session++;
       if(result==='unsettled')poisoned=true;
       detachAll();marks.clear();source=null;dropNodes();base=null;
-      status=result==='unsettled'?message('teardown-unsettled'):'';
       teardown=result;
+      note(result==='unsettled'?message('teardown-unsettled'):message(reason||'off'));refreshUi();
       return result;
     }
+    /* The host adapter calls this when the renderer says something changed. Confirmation stays a
+       poll of rendered(); the call only shortens the wait and triggers invalidation. A render
+       event is never treated as proof by itself, because STACK_NEW_IMAGE fires before render. */
     function refresh(){
-      if(!enabled||stopped||busy)return;
+      if(!enabled||stopped)return;
+      if(busy){invalidateMarks();return;}
       if(now()!==base){disable('context-changed');return;}
       syncBinding();paint();
     }
@@ -455,18 +571,20 @@
       stopped=true;bound=new Map();
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
-      status=message(result==='unsettled'?'teardown-unsettled':'stopped');
+      note(message(result==='unsettled'?'teardown-unsettled':'stopped'));refreshUi();
       return result;
     }
 
-    const state=()=>({enabled,stopped,poisoned,busy,run,session,status,teardown,source,
+    const state=()=>({enabled,stopped,poisoned,busy,run,session,status,teardown,source,sliceDistanceLimit,
       frozen:stopped||poisoned,quarantined:[...quarantine.keys()],restores:Object.fromEntries(reports),
       panes:[...bound.values()].map(item=>({id:item.id,eligible:!!item.stack,reason:item.reason||null,marked:marks.has(item.id),
         sop:marks.get(item.id)?.sop||null,canvas:marks.get(item.id)?.canvas||null,visible:marks.get(item.id)?.visible??null,
+        distance:marks.get(item.id)?.distance??null,
         restore:reports.get(item.id)||null}))});
+    buildPanel(options.host);
     return {enable,disable,refresh,pick,stop,state,cancel};
   }
 
-  const api={mount,message};
+  const api={mount,message,reasons};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinViewerThreeDCursor=api;
 })(typeof globalThis==='object'?globalThis:this);

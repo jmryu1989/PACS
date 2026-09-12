@@ -35,7 +35,9 @@ HARNESS = r"""
  </div>
  <div id="pane-styled" class="host-positioned" style="width:200px;height:200px"></div>
  <div id="pane-shared" style="width:200px;height:200px"></div>
+ <div id="pane-mro" style="width:200px;height:200px"></div>
 </div>
+<div id="kin-viewer-layout"></div>
 <style>.host-positioned{position:absolute;left:600px;top:600px}</style>
 <script>
 window.unhandled=[];window.addEventListener('unhandledrejection',e=>{unhandled.push(String(e.reason));e.preventDefault();});
@@ -59,6 +61,9 @@ const FOREIGN=series('fo',{series:'1.2.3.7',modality:'CT',count:4,gap:5,origin:[
 const MR2=series('m2',{series:'1.2.3.6',modality:'MR',count:7,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
 const INSET=series('in',{series:'1.2.3.5',modality:'CT',count:5,gap:5,origin:[-250,-250,0],spacing:[0.8,0.5],rows:256,columns:512});
 const SPARE=series('sp',{series:'1.2.3.8',modality:'MR',count:6,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
+// Offset by 1.2 mm so that no slice of it ever contains a CT slice plane: the transported point
+// is always some measurable distance away from the slice that gets shown for it.
+const MRO=series('mo',{series:'1.2.3.11',modality:'MR',count:7,gap:2.5,origin:[-64,-64,1.2],spacing:[1,1],rows:128,columns:128});
 
 class Stack{
  constructor(id,imageIds,index){this.id=id;this.type='stack';this.imageIds=imageIds;this.currentImageIdIndex=index||0;
@@ -96,7 +101,8 @@ const mr2=new Stack('vp-mr2',MR2,0);mr2.element=document.querySelector('#pane-mr
 const inset=new Stack('vp-inset',INSET,2);inset.element=document.querySelector('#enabled-inset');
 const styled=new Stack('vp-styled',MR2,0);styled.element=document.querySelector('#pane-styled');
 const shared=new Stack('vp-shared',MR2,0);shared.element=document.querySelector('#pane-shared');
-window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared};
+const mro=new Stack('vp-mro',MRO,0);mro.element=document.querySelector('#pane-mro');
+window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared,mro};
 const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct},
  mr:{id:'mr',element:document.querySelector('#pane-mr'),viewport:mr},
  other:{id:'other',element:document.querySelector('#pane-other'),viewport:foreign},
@@ -105,7 +111,8 @@ const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct}
  inset:{id:'inset',element:document.querySelector('#pane-inset'),viewport:inset},
  styled:{id:'styled',element:document.querySelector('#pane-styled'),viewport:styled},
  sharedA:{id:'sharedA',element:document.querySelector('#pane-shared'),viewport:shared},
- sharedB:{id:'sharedB',element:document.querySelector('#pane-shared'),viewport:shared}};
+ sharedB:{id:'sharedB',element:document.querySelector('#pane-shared'),viewport:shared},
+ mro:{id:'mro',element:document.querySelector('#pane-mro'),viewport:mro}};
 let paneList=[PANES.ct,PANES.mr,PANES.other,PANES.volume];
 window.addSecondTarget=()=>{paneList=[...paneList,PANES.mr2];};
 window.setPanes=list=>{paneList=list.map(id=>PANES[id]);};
@@ -115,6 +122,12 @@ window.flush=name=>{const v=viewports[name],queue=v.pending.splice(0);queue.forE
 const options=extra=>({panes:()=>paneList,meta:id=>META.get(id)||null,context:()=>ctx,
  tick:()=>new Promise(r=>setTimeout(r,0)),confirmAttempts:2,navigationAttempts:1500,drainAttempts:4000,...extra});
 window.__mount=extra=>window.cursor=KinViewerThreeDCursor.mount(options(extra));
+window.__mountHosted=extra=>{const host=document.querySelector('#kin-viewer-layout');host.replaceChildren();
+ return window.cursor=KinViewerThreeDCursor.mount(options({host,...extra}));};
+window.panelText=()=>{const p=document.querySelector('#kin-3d-cursor-status');return p?p.textContent:null;};
+window.toggleState=()=>{const b=document.querySelector('#kin-3d-cursor-toggle');
+ return b?{label:b.textContent,pressed:b.getAttribute('aria-pressed'),disabled:b.disabled}:null;};
+window.clickToggle=()=>document.querySelector('#kin-3d-cursor-toggle').click();
 window.__mountSecond=()=>window.cursor2=KinViewerThreeDCursor.mount(options({panes:()=>[PANES.mr2]}));
 window.scrollTo_=(name,index)=>{const v=viewports[name];v.currentImageIdIndex=index;v.csImage={imageId:v.imageIds[index]};v.viewportStatus='rendered';};
 window.markCenters=()=>[...document.querySelectorAll('[data-kin-3d-cursor-mark]')].map(dot=>{
@@ -179,6 +192,368 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
 
     def calls(self):
         return self.page.evaluate("()=>({ct:viewports.ct.calls,mr:viewports.mr.calls,foreign:viewports.foreign.calls,volume:viewports.volume.calls})")
+
+    # --- B8 1: slice distance ----------------------------------------------------------------
+    def test_d1_a_marked_pane_reports_the_slice_distance_in_its_result(self):
+        # The transported point is shown on the nearest slice of the target series; how far that
+        # slice is from the point is the difference between a located point and a suggested one.
+        self.page.evaluate("setPanes(['ct','mr','mro'])")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        by_pane = {entry["paneId"]: entry for entry in result["results"]}
+        self.assertEqual(0, by_pane["mr"]["distance"], "the MR slice plane contains the point")
+        self.assertAlmostEqual(1.2, by_pane["mro"]["distance"], places=9)
+        self.assertEqual(3, by_pane["mro"]["distanceLimit"])
+        self.assertEqual(3, self.page.evaluate("cursor.state().sliceDistanceLimit"))
+        self.assertEqual("3D Cursor 표시됨 · 선택점에서 단면까지 1.2 mm", result["status"])
+        panes = {pane["id"]: pane for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertAlmostEqual(1.2, panes["mro"]["distance"], places=9)
+        self.assertEqual([4], self.page.evaluate("viewports.mro.calls"))
+        # The visible sentence names the slice distance and never an accuracy or an error.
+        for banned in ("정확도", "오차", "정밀도", "±"):
+            self.assertNotIn(banned, result["status"])
+        # An injected limit below that distance refuses the pane with its own reason and payload.
+        self.page.evaluate("cursor.stop();__mount({sliceDistanceLimit:1});setPanes(['ct','mr','mro'])")
+        self.enable()
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        refused = [entry for entry in result["results"] if entry["paneId"] == "mro"][0]
+        self.assertEqual("slice-distance-exceeded", refused["reason"])
+        self.assertAlmostEqual(1.2, refused["distance"], places=9)
+        self.assertEqual(1, refused["limit"])
+        self.assertEqual("1 pane(s): 선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다.", result["status"])
+        self.assertEqual([4], self.page.evaluate("viewports.mro.calls"), "a refused pane is never navigated")
+        self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
+
+    # --- B8 2: a marker is committed only after the image is displayed -----------------------
+    def marked(self):
+        return self.page.evaluate("()=>cursor.state().panes.filter(p=>p.marked).map(p=>p.id)")
+
+    def test_d2_a_marker_is_not_committed_until_the_target_image_is_actually_rendered(self):
+        # The index moves before the pixels do, so neither the index nor a resolved request is
+        # the observation that commits a marker: only the image the renderer is holding is.
+        self.enable()
+        self.page.evaluate("viewports.mr.discard=true")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual("mr:0", self.page.evaluate("viewports.mr.csImage.imageId"))
+        self.assertEqual("target-not-confirmed", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual(["ct"], self.marked())
+        self.assertEqual(["pane-ct"], [mark["pane"] for mark in self.marks()])
+        # The load that never completes: the index already reads as the target frame.
+        self.page.evaluate("cursor.stop();__mount({confirmAttempts:400,navigationAttempts:4000})")
+        self.page.evaluate("viewports.mr.discard=false;scrollTo_('mr',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("mr:4", self.page.evaluate("viewports.mr.getCurrentImageId()"))
+        self.assertEqual("mr:0", self.page.evaluate("viewports.mr.csImage.imageId"))
+        self.assertEqual(["ct"], self.marked(), "the index alone must not commit the marker")
+        self.page.evaluate("viewports.mr.hold=false;flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr"], self.marked())
+        self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
+
+    def test_d2_a_render_event_invalidates_a_stale_marker_without_a_pick(self):
+        # What a host adapter does on a render event is call refresh(); no click, no pick.
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr", "mr2"], self.marked())
+        # The renderer began loading another image into a marked pane: the index and the held
+        # image still match, and only the status says the frame on screen is on its way out.
+        self.page.evaluate("viewports.mr.viewportStatus='loading';cursor.refresh()")
+        self.assertEqual(["ct", "mr2"], self.marked())
+        self.assertEqual(["pane-ct", "pane-mr2"], [mark["pane"] for mark in self.marks()])
+        # The same must hold while a run is awaiting: a refresh then may not rebind or move a
+        # pane, but it must still drop a marker whose frame has gone.
+        self.page.evaluate("viewports.mr.viewportStatus='rendered';cursor.stop();__mount({navigationAttempts:4000})")
+        self.page.evaluate("scrollTo_('mr',0);scrollTo_('mr2',0);addSecondTarget()")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.assertEqual(["ct", "mr"], self.marked())
+        self.page.evaluate("scrollTo_('mr',6);cursor.refresh()")
+        self.assertEqual(["ct"], self.marked())
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr2"], self.marked(), "the invalidated marker must not come back")
+        self.assertEqual(["pane-ct", "pane-mr2"], [mark["pane"] for mark in self.marks()])
+
+    def test_d2_a_failed_navigation_leaves_no_marker_and_reports_the_reason(self):
+        self.enable()
+        self.page.evaluate("viewports.mr.throwOnSet=true")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("navigation-failed", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual(["ct"], self.marked())
+        # Two panes missed (the foreign-frame one always does); the count and the FIRST reason
+        # are what the status carries, and the first miss here is the navigation that failed.
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", result["status"])
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", self.page.evaluate("cursor.state().status"))
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#pane-mr [data-kin-3d-cursor-mark]').length"))
+
+    # --- B8 3: bad IOP versus an ordinary oblique relation -----------------------------------
+    def test_d3_every_reason_code_the_controller_can_emit_has_its_own_text(self):
+        # A reason code that is not in the text table reaches the reader as the bare
+        # '3D Cursor를 사용할 수 없습니다.', which explains nothing. Both product files are read
+        # here so that a code added later without its sentence fails this test.
+        import re
+        # Literals that are DOM names, not reason codes. A new one has to be listed here on
+        # purpose, which is the point: an unlisted new literal fails this test.
+        non_reason = {"data-kin-3d-cursor-layer", "data-kin-3d-cursor-mark", "data-kin-3d-cursor-panel",
+                      "kin-3d-cursor", "kin-3d-cursor-toggle", "kin-3d-cursor-status", "aria-pressed"}
+        pattern = re.compile(r"'([a-z][a-z0-9]*(?:-[a-z0-9]+)+)'")
+        found = set()
+        for path in (MODEL, VIEWER):
+            found |= set(pattern.findall(path.read_text(encoding="utf-8")))
+        # Single-word codes carry no hyphen and are listed here explicitly.
+        found |= {"stopped", "internal", "abandoned", "inactive", "restored", "off"}
+        found -= non_reason
+        self.assertIn("slice-distance-exceeded", found)
+        self.assertIn("geometry-axes-invalid", found)
+        self.assertNotIn("geometry-axes", found, "the ambiguous code must be gone, not renamed in one place")
+        known = set(self.page.evaluate("KinViewerThreeDCursor.reasons()"))
+        self.assertEqual(set(), found - known, "these reason codes have no text of their own")
+        texts = {code: self.page.evaluate("KinViewerThreeDCursor.message(%r)" % code) for code in sorted(known)}
+        # 'abandoned' is deliberately empty: a run whose session ended writes no status at all.
+        for code, text in texts.items():
+            if code == "abandoned":
+                self.assertEqual("", text)
+                continue
+            self.assertTrue(text.strip(), code)
+            if code != "internal":
+                self.assertNotEqual("3D Cursor를 사용할 수 없습니다.", text, code)
+        # An unsupported series shape is a limit of this feature, never an accusation.
+        for code, text in texts.items():
+            for banned in ("비정상", "잘못된 DICOM", "정확도", "오차", "정밀도"):
+                self.assertNotIn(banned, text, code)
+        for code in ("stack-too-short", "stack-spacing-nonuniform", "stack-orientation-mixed", "stack-duplicate-position"):
+            self.assertIn("현재 지원하지 않는 시리즈 구성입니다", texts[code], code)
+        self.assertEqual("이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.", texts["geometry-axes-invalid"])
+
+    def test_d3_a_defective_iop_is_reported_as_its_own_geometry_reason(self):
+        # The controller surfaces the model's classification unchanged: |x| = 2 and |y| = 0.5 are
+        # orthogonal and their cross product is a unit normal, so only the axis check refuses it.
+        self.enable()
+        self.page.evaluate("META.set('mr:3',{...META.get('mr:3'),ImageOrientationPatient:[2,0,0,0,0.5,0]})")
+        self.page.evaluate("cursor.refresh()")
+        panes = {pane["id"]: pane for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual((False, "geometry-axes-invalid"), (panes["mr"]["eligible"], panes["mr"]["reason"]))
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("geometry-axes-invalid", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual("2 pane(s): 이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.", result["status"])
+        self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
+
+    # --- B8 4: frames moved without any mouse event ------------------------------------------
+    def watch_input(self):
+        # Records every pointer event that reaches the document, so each test below can show that
+        # the defence it exercises never had the revocation set to fall back on.
+        self.page.evaluate(
+            "()=>{window.mouseEvents=[];for(const type of ['pointerdown','pointerup','mousedown',"
+            "'mouseup','click','wheel'])document.addEventListener(type,e=>mouseEvents.push(type),true);}")
+
+    def assert_no_mouse_events(self):
+        self.assertEqual([], self.page.evaluate("mouseEvents"))
+
+    def test_d4_keyboard_arrow_move_during_a_run_is_not_overwritten_by_the_rollback(self):
+        # A keyboard arrow is handled by the host, not by this controller: the pane moves and no
+        # pointerdown or wheel is produced, so the revocation set stays empty and the issued-frame
+        # comparison is the only thing that can refuse the rollback.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate(
+            "viewports.mr2.hold=true;"
+            "viewports.mr2.onHold=()=>{document.querySelector('#pane-mr').dispatchEvent("
+            "new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));"
+            "scrollTo_('mr',6);cursor.cancel('context-changed');};"
+            "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-skipped-user", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(6, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("mr:6", self.page.evaluate("viewports.mr.getCurrentImageId()"))
+        self.assertEqual([], self.marks())
+        self.assert_no_mouse_events()
+        # The other half of the contract: the controller must not listen for the host's keys
+        # either. A keydown on a pane may not cancel a run that is under way.
+        # The request held above is abandoned with its controller; drop it so the wait below sees
+        # only the request this phase makes.
+        self.page.evaluate("viewports.mr2.pending.length=0;viewports.mr2.hold=false;cursor.stop()")
+        self.page.evaluate("__mount();setPanes(['ct','mr','mr2']);scrollTo_('mr',0);scrollTo_('mr2',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.page.evaluate("document.querySelector('#pane-mr2').dispatchEvent("
+                           "new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}))")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertTrue(self.page.evaluate("picking").get("ok"))
+        self.assertEqual(["ct", "mr", "mr2"], self.marked())
+        self.assert_no_mouse_events()
+
+    def test_d4_a_cine_advance_during_a_run_invalidates_that_panes_marker(self):
+        # A cine timer moves the frame of a pane this run has already marked. No event of any kind
+        # reaches the controller; the host's render adapter calls refresh(), and that must drop the
+        # marker rather than leave it claiming an image that is no longer displayed.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:4000});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate(
+            "viewports.mr2.hold=true;"
+            "viewports.mr2.onHold=()=>setTimeout(()=>{scrollTo_('mr',5);cursor.refresh();},0);"
+            "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().panes.filter(p=>p.marked).length===1")
+        self.assertEqual(["ct"], self.marked())
+        self.assertTrue(self.page.evaluate("cursor.state().busy"))
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr2"], self.marked())
+        self.assertEqual(["pane-ct", "pane-mr2"], [mark["pane"] for mark in self.marks()])
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"), "the cine pane is never navigated again")
+        self.assertEqual(5, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assert_no_mouse_events()
+
+    def test_d4_a_synchronizer_move_without_pointer_events_relies_on_the_frame_comparison(self):
+        # Another synchronisation tool moves the pane programmatically: no DOM event at all. The
+        # rollback must still refuse, and the only defence left is the issued-frame comparison.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{scrollTo_('mr',1);cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-skipped-user", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(1, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([], self.marks())
+        self.assert_no_mouse_events()
+        # Contrast, same run shape with nothing moving the pane: the rollback does happen, so the
+        # refusal above is the frame comparison and not a rollback that never runs.
+        self.page.evaluate("viewports.mr2.pending.length=0;viewports.mr2.hold=false;cursor.stop()")
+        self.page.evaluate("__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.page.evaluate("scrollTo_('mr',0);scrollTo_('mr2',0);viewports.mr.calls.length=0")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(0, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("restored", self.page.evaluate("cursor.state().restores.mr"))
+        self.assert_no_mouse_events()
+
+    def test_d4_a_late_render_from_a_previous_request_never_becomes_the_current_marker(self):
+        # Run N leaves a request the renderer never finished; run N+1 marks a different frame.
+        # When run N's load finally lands it may not mark, restore or claim anything.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.set_default_timeout(15000)
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["mr2"], self.page.evaluate("cursor.state().quarantined"))
+        self.assertEqual(["ct", "mr"], self.marked())
+        run_n = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual("1.2.3.9.5", run_n["mr"])
+        # Run N+1 on another source frame: the same panes, different slices.
+        self.page.evaluate("scrollTo_('ct',3)")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("navigation-unsettled", [r for r in result["results"] if r["paneId"] == "mr2"][0]["reason"])
+        self.assertEqual(["ct", "mr"], self.marked())
+        run_next = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual(("1.2.3.4.4", "1.2.3.9.7"), (run_next["ct"], run_next["mr"]))
+        # Run N's load lands now.
+        self.page.evaluate("flush('mr2')")
+        self.page.wait_for_timeout(50)
+        self.page.evaluate("cursor.refresh()")
+        after = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual(run_next, after, "the late render must not change what is marked")
+        self.assertEqual([4], self.page.evaluate("viewports.mr2.calls"))
+        self.assertEqual(["ct", "mr"], self.marked())
+        self.assertEqual({}, self.page.evaluate("cursor.state().restores"))
+        self.assertEqual([4, 6], self.page.evaluate("viewports.mr.calls"))
+        self.assert_no_mouse_events()
+        self.assertEqual([], self.page.evaluate("unhandled"))
+
+    # --- B8 5: what the reader can see -------------------------------------------------------
+    def test_d5_the_toggle_reflects_the_active_state_and_deactivates_the_mode(self):
+        # A mount without a host stays headless: the 36 pre-existing mounts must not grow a panel.
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        self.page.evaluate("cursor.stop();__mountHosted()")
+        self.assertEqual({"label": "3D Cursor", "pressed": "false", "disabled": False},
+                         self.page.evaluate("toggleState()"))
+        self.page.evaluate("clickToggle()")
+        self.assertEqual({"label": "Exit 3D Cursor", "pressed": "true", "disabled": False},
+                         self.page.evaluate("toggleState()"))
+        self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
+        self.assertTrue(self.page.evaluate("cursor.state().enabled"))
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("1 pane(s): 같은 기준 좌표계가 아닙니다.", self.page.evaluate("panelText()"))
+        # The same button is the only way out, and it really does leave the mode.
+        self.page.evaluate("clickToggle()")
+        self.page.wait_for_function("cursor.state().enabled===false")
+        self.assertEqual({"label": "3D Cursor", "pressed": "false", "disabled": False},
+                         self.page.evaluate("toggleState()"))
+        self.assertEqual("3D Cursor를 껐습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual([], self.marks())
+        self.assertEqual({"ok": False, "reason": "inactive"}, self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})"))
+
+    def test_d5_enable_without_an_eligible_pane_shows_a_visible_reason(self):
+        self.page.evaluate("cursor.stop();__mountHosted();setPanes(['volume'])")
+        self.assertFalse(self.page.evaluate("cursor.enable()"))
+        self.assertEqual("대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual("false", self.page.evaluate("toggleState().pressed"))
+        # The button path must say the same thing rather than doing nothing visible.
+        self.page.evaluate("clickToggle()")
+        self.assertEqual("대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertFalse(self.page.evaluate("cursor.state().enabled"))
+        self.page.evaluate("setPanes(['ct','mr'])")
+        self.page.evaluate("clickToggle()")
+        self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
+
+    def test_d5_a_partial_run_shows_the_count_and_the_first_reason(self):
+        self.page.evaluate("cursor.stop();__mountHosted({navigationAttempts:2});setPanes(['ct','mr','mr2','other'])")
+        self.enable()
+        self.page.evaluate("viewports.mr.throwOnSet=true")
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", self.page.evaluate("panelText()"))
+        self.assertEqual(["ct", "mr2"], self.marked())
+        # An unconfirmed restoration is its own sentence and stays on screen after the run.
+        self.page.evaluate("viewports.mr.throwOnSet=false;cursor.stop();__mountHosted({navigationAttempts:2})")
+        self.page.evaluate("setPanes(['ct','mr','mr2']);scrollTo_('mr',0);scrollTo_('mr2',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{viewports.mr.currentImageIdIndex=0;cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-unconfirmed", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual("다른 조작으로 취소했습니다. · 2 pane(s): 원래 영상으로 되돌린 것을 확인하지 못했습니다.",
+                         self.page.evaluate("panelText()"))
+
+    def test_d5_an_unsettled_teardown_disables_the_toggle_and_says_why(self):
+        self.page.evaluate("cursor.stop();__mountHosted({drainAttempts:0});setPanes(['ct','mr'])")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        self.assertTrue(self.page.evaluate("cursor.state().poisoned"))
+        self.assertEqual({"label": "3D Cursor", "pressed": "false", "disabled": True},
+                         self.page.evaluate("toggleState()"))
+        self.assertEqual("끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.",
+                         self.page.evaluate("panelText()"))
+        self.page.evaluate("clickToggle()")
+        self.assertFalse(self.page.evaluate("cursor.state().enabled"))
+        self.assertEqual("끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.",
+                         self.page.evaluate("panelText()"))
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(True, self.page.evaluate("toggleState().disabled"))
 
     # --- review 184a433 blocking regressions -------------------------------------------------
     def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):

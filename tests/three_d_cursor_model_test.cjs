@@ -1,6 +1,7 @@
 /* REQ-D-3D-CURSOR / RISK-D-3D-CURSOR-IDENTITY/GEOMETRY / TEST-3D-CURSOR-MODEL */
 const test=require('node:test'),assert=require('node:assert/strict');
-const {identity,plane,stack,locate,pick,comparable,toWorld,toPixel}=require('../worklist-v0/hpacs-lite/three-d-cursor-model.js');
+const {identity,plane,stack,locate,pick,comparable,toWorld,toPixel,
+  SLICE_DISTANCE_LIMIT_MM}=require('../worklist-v0/hpacs-lite/three-d-cursor-model.js');
 
 const AXIAL=[1,0,0,0,1,0];
 // PixelSpacing is [between rows, between columns]: a row/column swap changes these results.
@@ -38,6 +39,86 @@ test('an oblique plane resolves a hand-computed point without assuming an axis',
   near(round.x,10,1e-9);near(round.y,20,1e-9);near(round.distance,0,1e-9);
 });
 
+/* B8 §1. |n·(p−o)| for the slice that is actually shown. The value already existed and was
+   thrown away; a reader who is shown a point on a slice 4 mm away from it must be told so. */
+test('locate reports the signed-free distance to the chosen slice',()=>{
+  const built=ok(stack(axial())).stack;   // planes at z = 0, 5, 10, 15, 20
+  const below=ok(locate(built,[-200,-210,8.6]));
+  assert.equal(below.index,2);near(below.distance,1.4,1e-9);
+  assert.equal(below.distanceLimit,SLICE_DISTANCE_LIMIT_MM);
+  // The same magnitude on the other side of the plane: the reported distance is unsigned, and
+  // the slice chosen is the nearest one, not the one with the smallest signed difference.
+  const above=ok(locate(built,[-200,-210,11.4]));
+  assert.equal(above.index,2);near(above.distance,1.4,1e-9);
+  near(ok(locate(built,[-200,-210,10])).distance,0,1e-12);
+  // Hand check against the definition itself: |n·(p−o)| with n = [0,0,1], o = the slice origin.
+  near(below.distance,Math.abs(8.6-built.slices[2].projection),1e-12);
+});
+
+test('locate refuses a point farther than the slice distance limit',()=>{
+  assert.equal(SLICE_DISTANCE_LIMIT_MM,3);
+  const wide=ok(stack(axial(3,10))).stack;   // planes at z = 0, 10, 20
+  // Exactly at the limit is still shown: the boundary belongs to the accepted side.
+  const edge=ok(locate(wide,[-200,-210,3]));
+  assert.equal(edge.index,0);near(edge.distance,3,1e-12);
+  const far=locate(wide,[-200,-210,3.5]);
+  assert.equal(far.ok,false);assert.equal(far.reason,'slice-distance-exceeded');
+  near(far.distance,3.5,1e-12);assert.equal(far.limit,3);
+  // Equally far from two slices is refused for the distance, not for the tie: there is nothing
+  // to choose between when neither slice may carry the point.
+  const middle=locate(wide,[-200,-210,5]);
+  assert.equal(middle.reason,'slice-distance-exceeded');near(middle.distance,5,1e-12);
+  // An injected limit replaces the default in both directions.
+  assert.equal(locate(wide,[-200,-210,3],2).reason,'slice-distance-exceeded');
+  assert.equal(locate(wide,[-200,-210,3],2).limit,2);
+  assert.equal(ok(locate(wide,[-200,-210,3.5],4)).index,0);
+  assert.equal(ok(locate(wide,[-200,-210,3.5],4)).distanceLimit,4);
+  // A 5 mm stack still passes its own worst case, which is what the 3.0 mm default is for.
+  const narrow=ok(stack(axial())).stack;
+  near(ok(locate(narrow,[-200,-210,7.4])).distance,2.4,1e-12);
+  // The limit is not a coverage check: outside the scanned range keeps its own reason.
+  assert.equal(locate(wide,[-200,-210,-6]).reason,'out-of-coverage');
+});
+
+/* B8 §3. A series that sits at an angle to the one that was picked from is ordinary DICOM:
+   comparable() asks only for the same study, patient and frame of reference, and locate()
+   projects with the TARGET's own normal and pixels with the target slice's own axes. Nothing
+   here may require the two series to be parallel or perpendicular. */
+test('locate transports a point into a valid oblique target series',()=>{
+  const c=Math.SQRT1_2;                                   // cos 45°
+  const u=[c,c,0],v=[0,0,-1],n=[-c,c,0];                  // n = cross(u,v), a unit vector
+  const target=ok(stack(Array.from({length:5},(_,k)=>base({SeriesInstanceUID:'1.2.3.9',Modality:'MR',
+    SOPInstanceUID:'1.2.3.9.'+(k+1),imageId:'obl:'+k,ImageOrientationPatient:[...u,...v],
+    ImagePositionPatient:[-100+n[0]*4*k,-100+n[1]*4*k,80+n[2]*4*k],PixelSpacing:[1,1],Rows:200,Columns:200})))).stack;
+  // The axial source is at 45° to it, which is exactly the relation the feature must support.
+  const source=ok(stack(axial())).stack;
+  assert.equal(comparable(source.id,target.id),null);
+  // Slice 2's origin plus 30 columns along u and 40 rows along v, computed by hand.
+  const origin=[-100+n[0]*8,-100+n[1]*8,80+n[2]*8];
+  const world=[origin[0]+30*u[0],origin[1]+30*u[1],origin[2]+40*v[2]];
+  const found=ok(locate(target,world));
+  assert.equal(found.index,2);assert.equal(found.sop,'1.2.3.9.3');
+  near(found.pixel.x,30,1e-9);near(found.pixel.y,40,1e-9);near(found.distance,0,1e-9);
+  // Half a slice interval off the plane is still transported, and the distance says how far.
+  const off=[world[0]+n[0]*1.5,world[1]+n[1]*1.5,world[2]];
+  const shifted=ok(locate(target,off));
+  assert.equal(shifted.index,2);near(shifted.distance,1.5,1e-9);
+  near(shifted.pixel.x,30,1e-9);near(shifted.pixel.y,40,1e-9);
+});
+
+test('a non-unit but orthogonal IOP is refused as geometry-axes-invalid',()=>{
+  // Review D-3DCURSOR-801AD73 §8-3 G12: cross([2,0,0],[0,0.5,0]) is exactly [0,0,1], so only the
+  // per-axis unit/orthogonality check separates a defective image from a valid one.
+  const pair=over=>[base(),base({SOPInstanceUID:'1.2.3.4.2',ImagePositionPatient:[-250,-250,5],...over})];
+  for(const iop of [[2,0,0,0,0.5,0],[1,0,0,0.5,1,0],[1,0,0,0,1,0.4]]){
+    assert.equal(plane(base({ImageOrientationPatient:iop})).reason,'geometry-axes-invalid',String(iop));
+    assert.equal(stack(pair({ImageOrientationPatient:iop})).reason,'geometry-axes-invalid',String(iop));
+  }
+  // The refusal is about one image's own attributes: a lawful oblique IOP is accepted.
+  const c=Math.SQRT1_2;
+  assert.equal(plane(base({ImageOrientationPatient:[c,c,0,0,0,-1]})).ok,true);
+});
+
 test('an unordered series resolves the same slice as the ordered one and keeps its own index',()=>{
   const ordered=axial(5),shuffled=[ordered[3],ordered[0],ordered[4],ordered[1],ordered[2]];
   const a=ok(locate(ok(stack(ordered)).stack,[-200,-210,15])),b=ok(locate(ok(stack(shuffled)).stack,[-200,-210,15]));
@@ -72,9 +153,9 @@ test('incomplete or invalid plane geometry is rejected with its reason',()=>{
     ['geometry-missing',{ImagePositionPatient:[-250,-250,'0']}],
     ['geometry-missing',{ImagePositionPatient:[-250,-250,Number.POSITIVE_INFINITY]}],
     ['geometry-missing',{PixelSpacing:[0.8]}],
-    ['geometry-axes',{ImageOrientationPatient:[2,0,0,0,1,0]}],
-    ['geometry-axes',{ImageOrientationPatient:[1,0,0,0.5,0.8660254037844386,0]}],
-    ['geometry-axes',{ImageOrientationPatient:[1,0,0,1,0,0]}],
+    ['geometry-axes-invalid',{ImageOrientationPatient:[2,0,0,0,1,0]}],
+    ['geometry-axes-invalid',{ImageOrientationPatient:[1,0,0,0.5,0.8660254037844386,0]}],
+    ['geometry-axes-invalid',{ImageOrientationPatient:[1,0,0,1,0,0]}],
     ['geometry-spacing',{PixelSpacing:[0.8,0]}],
     ['geometry-spacing',{PixelSpacing:[-0.8,0.5]}],
     ['geometry-extent',{Rows:0}],['geometry-extent',{Columns:256.5}],
@@ -122,12 +203,12 @@ test('an orthogonal but non-unit orientation is refused although its normal is a
   const pair=over=>[base(),base({SOPInstanceUID:'1.2.3.4.2',ImagePositionPatient:[-250,-250,5],...over})];
   // |x|=2, |y|=0.5, x.y=0 -> cross(x,y) === [0,0,1].
   const scaled={ImageOrientationPatient:[2,0,0,0,0.5,0]};
-  assert.equal(plane(base(scaled)).reason,'geometry-axes');
-  assert.equal(stack(pair(scaled)).reason,'geometry-axes');
+  assert.equal(plane(base(scaled)).reason,'geometry-axes-invalid');
+  assert.equal(stack(pair(scaled)).reason,'geometry-axes-invalid');
   // Skewed as well as non-unit: x.y=0.5, and cross([1,0,0],[0.5,1,0]) === [0,0,1] all the same.
   const skewed={ImageOrientationPatient:[1,0,0,0.5,1,0]};
-  assert.equal(plane(base(skewed)).reason,'geometry-axes');
-  assert.equal(stack(pair(skewed)).reason,'geometry-axes');
+  assert.equal(plane(base(skewed)).reason,'geometry-axes-invalid');
+  assert.equal(stack(pair(skewed)).reason,'geometry-axes-invalid');
   // What the refusal prevents: PixelSpacing is divided out of a projection onto a non-unit axis,
   // so one and the same world point would land on a silently rescaled pixel.
   const good=ok(plane(base())).plane;

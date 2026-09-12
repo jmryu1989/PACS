@@ -5,6 +5,11 @@
   // Scanners store IOP to ~6 decimals, so a tight axis tolerance still accepts real data
   // while rejecting the reformatted/derived planes this feature must not transport points to.
   const AXIS_TOL=1e-3,TIE_MM=1e-6,DUP_MM=1e-4,COVER_MM=1e-6;
+  /* Provisional default for |n·(p−o)|, the distance from the picked point to the plane of the
+     slice that is shown for it. 3.0 mm passes the worst case of a 5 mm slice (2.5 mm) and
+     refuses a 10 mm interval stack, where the shown slice can be 5 mm away from the point.
+     The mount injects its own value; this constant is the fallback, not a call-site literal. */
+  const SLICE_DISTANCE_LIMIT_MM=3;
   const uid=v=>typeof v==='string'&&v.length<=64&&/^[0-9]+(?:\.[0-9]+)*$/.test(v);
   const num=v=>typeof v==='number'&&Number.isFinite(v);
   const key=v=>typeof v==='string'&&v.length>0&&v.length<=256?v:null;
@@ -35,12 +40,16 @@
     if(!Array.isArray(orientation)||orientation.length!==6||!orientation.every(num)||!position)return fail('geometry-missing');
     if(!Array.isArray(spacing)||spacing.length!==2||!spacing.every(num))return fail('geometry-missing');
     const x=orientation.slice(0,3).map(Number),y=orientation.slice(3,6).map(Number);
-    if(Math.abs(norm(x)-1)>AXIS_TOL||Math.abs(norm(y)-1)>AXIS_TOL||Math.abs(dot(x,y))>AXIS_TOL)return fail('geometry-axes');
+    /* DICOM PS3.3 C.7.6.2: the two IOP vectors are unit and mutually orthogonal. Failing that is
+       a defect of THIS image's own attributes. It says nothing about how this series is angled
+       against any other one: two valid series may sit at any oblique angle to each other and are
+       transported by their own axes below, so no relation between series is checked anywhere. */
+    if(Math.abs(norm(x)-1)>AXIS_TOL||Math.abs(norm(y)-1)>AXIS_TOL||Math.abs(dot(x,y))>AXIS_TOL)return fail('geometry-axes-invalid');
     const stepX=Number(spacing[1]),stepY=Number(spacing[0]);
     if(!(stepX>0)||!(stepY>0))return fail('geometry-spacing');
     if(!extent(meta.Rows)||!extent(meta.Columns))return fail('geometry-extent');
     const normal=cross(x,y);
-    if(Math.abs(norm(normal)-1)>AXIS_TOL)return fail('geometry-axes');
+    if(Math.abs(norm(normal)-1)>AXIS_TOL)return fail('geometry-axes-invalid');
     return {ok:true,plane:{id,imageId:typeof meta.imageId==='string'?meta.imageId:null,x,y,normal,position,stepX,stepY,rows:meta.Rows,columns:meta.Columns,
       projection:dot(position,normal)}};
   }
@@ -89,10 +98,17 @@
   const comparable=(a,b)=>!a||!b?'identity-missing':a.study!==b.study?'identity-study':a.patient!==b.patient?'identity-patient':a.frame!==b.frame?'identity-frame':null;
 
   /* Exhaustive nearest-plane choice. A tie means two candidate slices are equally
-     plausible, so no point is placed rather than one of them being guessed. */
-  function locate(target,world){
+     plausible, so no point is placed rather than one of them being guessed.
+     Four refusals are kept apart because they mean different things to a reader:
+     out-of-coverage (outside what was scanned), slice-distance-exceeded (scanned, but no slice
+     is close enough for the point to be shown as if it were on one), ambiguous-slice (two
+     slices equally close) and out-of-image (inside the slice plane, outside its pixel grid).
+     The distance limit is read before the tie: when no slice is close enough there is nothing
+     to choose between, so the distance is the honest reason rather than the tie. */
+  function locate(target,world,limit){
     const point=triple(world);
     if(!point)return fail('point-nonfinite');
+    const cap=num(limit)&&limit>=0?limit:SLICE_DISTANCE_LIMIT_MM;
     const t=dot(point,target.normal),half=target.gap/2;
     if(t<target.first-half-COVER_MM||t>target.last+half+COVER_MM)return fail('out-of-coverage');
     let best=null,tie=false;
@@ -102,11 +118,12 @@
       else if(distance<=best.distance+TIE_MM)tie=true;
     }
     if(!best)return fail('stack-too-short');
+    if(best.distance>cap)return {ok:false,reason:'slice-distance-exceeded',distance:best.distance,limit:cap};
     if(tie)return fail('ambiguous-slice');
     const pixel=toPixel(best.slice.plane,point);
     if(!inImage(best.slice.plane,pixel))return fail('out-of-image');
     return {ok:true,index:best.slice.index,imageId:best.slice.imageId,sop:best.slice.plane.id.sop,
-      pixel:{x:pixel.x,y:pixel.y},distance:best.distance,offPlane:pixel.distance};
+      pixel:{x:pixel.x,y:pixel.y},distance:best.distance,distanceLimit:cap,offPlane:pixel.distance};
   }
 
   /* The picked canvas point comes from the renderer and carries float residue off the
@@ -123,6 +140,6 @@
     return {ok:true,pixel:snapped,world:toWorld(slice.plane,snapped),sop:slice.plane.id.sop,imageId:slice.imageId};
   }
 
-  const api={AXIS_TOL,identity,plane,stack,locate,pick,comparable,toWorld,toPixel,inImage};
+  const api={AXIS_TOL,SLICE_DISTANCE_LIMIT_MM,identity,plane,stack,locate,pick,comparable,toWorld,toPixel,inImage};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinThreeDCursorModel=api;
 })(typeof globalThis==='object'?globalThis:this);
