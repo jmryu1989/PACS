@@ -48,6 +48,15 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
 
+    def test_cell_merge_profile_selects_four_declared_native_cases(self):
+        filename,class_name,unit=ci.PROFILES['cell-merge']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        self.assertEqual({row['case'] for row in plan['tests']},
+            {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_cell_merge_')})
+        self.assertEqual(len(plan['tests']),4)
+        self.assertEqual(runner.collect(plan).countTestCases(),4)
+
     def test_ci_selection_matches_existing_main_contracts(self):
         self.assertEqual(len(ci.SUITES), len(ci.SUITE_CLASSES))
         for filename, class_name in zip(ci.SUITES, ci.SUITE_CLASSES):

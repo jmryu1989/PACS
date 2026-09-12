@@ -32,6 +32,53 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(profile['out'].name,'display-scope-ci')
         self.assertEqual(profile['suite_timeout'],900)
 
+    def test_cell_merge_profile_is_exact_and_separate(self):
+        profile = ci.PROFILES['cell-merge']
+        self.assertEqual(profile['suites'], (('e2e/test_viewer_cell_merge.py', 'ViewerCellMergeE2E', 'ci-cell-merge'),))
+        self.assertEqual(profile['out'].name, 'cell-merge-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-cell-merge-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_viewer_cell_merge.py')
+        self.assertEqual(command[command.index('--class')+1], 'ViewerCellMergeE2E')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        for name, other in ci.PROFILES.items():
+            if name == 'cell-merge':
+                continue
+            with self.subTest(profile=name):
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+
+    def test_validate_workflow_runs_cell_merge_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  cell-merge:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one cell-merge job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile cell-merge',
+                         'tests/execution_selection_test.py',
+                         'tests/e2e/artifacts/cell-merge-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        # One standing gate, one live step bound like every other e2e job, and no
+        # duplicate dispatch entry for the same suite.
+        self.assertEqual(text.count('--profile cell-merge'), 1)
+        self.assertNotIn('--profile cell-merge', jobs[0])
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'hanging-protocols']:
+            self.assertEqual(text.count('--profile '+profile), 1)
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertNotIn('- cell-merge', dispatch)
+
     def test_image_thumbnails_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-thumbnails']
         self.assertEqual(profile['suites'],(('e2e/test_image_thumbnails.py','ImageThumbnailsE2E','ci-image-thumbnails'),))
@@ -236,7 +283,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
