@@ -70,11 +70,14 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
     def annotation_tools(self, page):
         return page.evaluate("()=>[...new Set(cornerstoneTools.annotation.state.getAllAnnotations().map(a=>a.metadata.toolName))].sort()")
 
-    def draw_annotation(self, page, index, label):
+    def select_annotation_tool(self, page):
+        # Selected once for the whole case: the tool stays active between drawings, and
+        # re-opening the split button would make the exact-text match ambiguous with the
+        # toolbar button that now carries the same label.
         page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
-        # Scoped to the dropdown: once Annotation is the selected tool the toolbar button
-        # carries the same label, so an unscoped exact-text match is ambiguous.
-        page.locator('#react-portal').get_by_text('Annotation', exact=True).click()
+        page.get_by_text('Annotation', exact=True).click()
+
+    def draw_annotation(self, page, index, label):
         box = page.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box()
         x, y = box['x'] + box['width'] * .5, box['y'] + box['height'] * .5
         page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 45, y + 28, steps=8); page.mouse.up()
@@ -234,6 +237,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         # One measurement in the cell that survives and one in a cell the maximize destroys
         # and rebuilds, so preservation is claimed for a displaced viewport too.
         self.choose(page, 1)
+        self.select_annotation_tool(page)
         self.draw_annotation(page, 1, 'CM67890')
         self.draw_annotation(page, 0, 'CM12345')
         drawn = self.annotations(page)
