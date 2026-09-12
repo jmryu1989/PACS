@@ -1,10 +1,16 @@
 # coding: utf-8
 """TEST-D09-JOB-REPORT: current report plus immutable comparison output."""
-import json, sys, unittest, uuid
+import json, re, sys, unittest, uuid
 from pathlib import Path
 from pypdf import PdfReader
 from playwright.sync_api import expect
 from test_viewer_job_annotations import ViewerJobAnnotationsE2E, canvas_ready
+
+
+# Same helper as test_compare_reports/test_editor_compare_output (defined here because
+# those modules import this one). pypdf reports the Linux-rendered Korean runs with
+# doubled spaces between words, so PDF text is compared whitespace-stripped.
+def flat(text):return re.sub(r'\s+','',text)
 
 
 class ViewerJobReportE2E(ViewerJobAnnotationsE2E):
@@ -47,9 +53,9 @@ class ViewerJobReportE2E(ViewerJobAnnotationsE2E):
   printed=self.print_popup(p);printed.wait_for_function('()=>window.__printed===true')
   path=Path(__file__).parent/'artifacts/job-report.pdf';printed.pdf(path=str(path),prefer_css_page_size=True)
   pdf=PdfReader(path);self.assertGreaterEqual(len(pdf.pages),3)
-  alltext='\n'.join(page.extract_text() for page in pdf.pages)
-  for page in pdf.pages:self.assertIn(patient,page.extract_text());self.assertIn('승인된 저장본',page.extract_text())
-  self.assertIn('현재 판독',alltext);self.assertIn('동결 주석',alltext);self.assertNotIn('OTHER PRIVATE DRAFT',alltext)
+  alltext='\n'.join(page.extract_text() for page in pdf.pages);flatall=flat(alltext)
+  for page in pdf.pages:self.assertIn(patient,page.extract_text());self.assertIn(flat('승인된 저장본'),flat(page.extract_text()))
+  self.assertIn(flat('현재 판독'),flatall);self.assertIn(flat('동결 주석'),flatall);self.assertNotIn(flat('OTHER PRIVATE DRAFT'),flatall)
   self.assertEqual(sum(len(page.images) for page in pdf.pages),2)
   print('JOBREPORT PDF '+json.dumps(dict(pages=len(pdf.pages),images=2)),flush=True)
   self.assertEqual(self.pngs(p),pixels);self.assertEqual(self.get_job(a,job),frozen);self.assertEqual(self.originals(),original)
