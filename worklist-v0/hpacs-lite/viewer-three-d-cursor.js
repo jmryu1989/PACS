@@ -18,7 +18,8 @@
     'stopped':'3D Cursor를 종료했습니다.','internal':'3D Cursor를 사용할 수 없습니다.','abandoned':'',
     'teardown-unsettled':'끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.',
     'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.',
-    'inactive':'3D Cursor가 켜져 있지 않습니다.','point-nonfinite':'선택점 좌표를 확인하지 못했습니다.',
+    'inactive':'3D Cursor가 켜져 있지 않습니다.','already-on':'3D Cursor가 이미 켜져 있습니다.',
+    'point-nonfinite':'선택점 좌표를 확인하지 못했습니다.',
     'off':'3D Cursor를 껐습니다.','no-eligible-pane':'대상 시리즈가 없어 3D Cursor를 켜지 못했습니다.',
     /* One image's own attributes are out of spec. This is the only geometry statement that calls
        an image defective, and it never describes the angle between two series: a series that is
@@ -445,7 +446,9 @@
           // A refusal that measured a distance carries it, so the reader is told how far the
           // point actually was instead of only that it was too far.
           results.push(Number.isFinite(found.distance)
-            ?{paneId:item.id,ok:false,reason:found.reason,distance:found.distance,limit:found.limit}
+            // One name for one value: the refusal reports the limit under the same key as the success
+            // below, whatever the model happens to call it internally.
+            ?{paneId:item.id,ok:false,reason:found.reason,distance:found.distance,distanceLimit:found.limit}
             :{paneId:item.id,ok:false,reason:found.reason});
           continue;
         }
@@ -573,6 +576,10 @@
       if(!enabled||stopped)return;
       const item=[...bound.values()].find(entry=>entry.element===element);
       if(!item||!item.stack||!isPickGesture(item,event))return;
+      // The sequence has now been answered. It is kept, so the click that closes it is still
+      // recognised as belonging to it, but it can no longer become a second pick — a stray extra
+      // pointerup for the same pointer must not run the pick twice.
+      gesture.live=false;
       startPick(item,event);
     }
     /* One gesture is answered once. A click that closes a pointer sequence has already been
@@ -594,8 +601,8 @@
        controller helps with the JS state, and only reopening the viewer window is certain about
        the request itself. */
     function enable(){
-      if(enabled)return false;
       // Never a silent no-op: every path that answers false writes the reason where it can be read.
+      if(enabled){note(message('already-on'));refreshUi();return false;}
       if(stopped||poisoned){note(message(poisoned?'teardown-unsettled':'stopped'));refreshUi();return false;}
       const probe=now();
       if(probe===null){note(message('context-changed'));refreshUi();return false;}

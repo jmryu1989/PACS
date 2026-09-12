@@ -239,7 +239,8 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         refused = [entry for entry in result["results"] if entry["paneId"] == "mro"][0]
         self.assertEqual("slice-distance-exceeded", refused["reason"])
         self.assertAlmostEqual(1.2, refused["distance"], places=9)
-        self.assertEqual(1, refused["limit"])
+        self.assertEqual(1, refused["distanceLimit"], "one value, one key, refusal and success alike")
+        self.assertNotIn("limit", refused)
         self.assertEqual("1 pane(s): 선택점이 이 시리즈의 어느 단면에서도 멀리 있습니다.", result["status"])
         self.assertEqual([4], self.page.evaluate("viewports.mro.calls"), "a refused pane is never navigated")
         self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
@@ -486,8 +487,12 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         run_next = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
         self.assertEqual(("1.2.3.4.4", "1.2.3.9.7"), (run_next["ct"], run_next["mr"]))
         # Run N's load lands now.
+        # flush() calls the resolver synchronously and the resolver sets csImage and
+        # viewportStatus synchronously with it, so the late render has already landed when this
+        # returns; the controller's own continuation is a microtask, which is finished before the
+        # next round trip starts. There is nothing left to wait for, and a fixed window in front
+        # of a negative assertion would only pass by idling if it were ever too short.
         self.page.evaluate("flush('mr2')")
-        self.page.wait_for_timeout(50)
         self.page.evaluate("cursor.refresh()")
         after = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
         self.assertEqual(run_next, after, "the late render must not change what is marked")
@@ -534,6 +539,12 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.evaluate("setPanes(['ct','mr'])")
         self.page.evaluate("clickToggle()")
         self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
+        # The last path that answered false silently: a host that calls enable() twice is told
+        # why nothing happened, like every other refusal.
+        self.assertFalse(self.page.evaluate("cursor.enable()"))
+        self.assertEqual("3D Cursor가 이미 켜져 있습니다.", self.page.evaluate("panelText()"))
+        self.assertTrue(self.page.evaluate("cursor.state().enabled"))
+        self.assertEqual("true", self.page.evaluate("toggleState().pressed"))
 
     def test_d5_a_partial_run_shows_the_count_and_the_first_reason(self):
         self.page.evaluate("cursor.stop();__mountHosted({navigationAttempts:2});setPanes(['ct','mr','mr2','other'])")
@@ -1187,6 +1198,20 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         # The pointerdown of this gesture did reach the pane and revoked it; runPick clears the
         # revocation set on entry, so a pick never refuses its own run's rollback.
         self.assertEqual({}, self.page.evaluate("cursor.state().restores"))
+
+    def test_d6_a_second_pointerup_of_the_same_sequence_does_not_pick_again(self):
+        # One gesture is answered once. The click that closes a sequence is refused because the
+        # sequence exists; a repeated up for the same pointer must be refused for the same reason.
+        self.enable()
+        self.page.evaluate("gestureAt('#pane-ct',{x:100,y:50},{x:100,y:50},{pointerId:3,noClick:true})")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.page.evaluate(
+            "()=>{const t=document.querySelector('#canvas-ct'),r=document.querySelector('#pane-ct')"
+            ".getBoundingClientRect();t.dispatchEvent(new PointerEvent('pointerup',"
+            "{bubbles:true,pointerId:3,clientX:r.left+100,clientY:r.top+50}));}")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(1, self.page.evaluate("cursor.state().run"))
+        self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
 
     def test_d6_a_plain_synthetic_click_without_a_pointer_sequence_still_picks(self):
         # The older host path (and eleven existing tests before B8b) dispatches a click with no
