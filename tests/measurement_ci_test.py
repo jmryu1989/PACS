@@ -46,6 +46,8 @@ class MeasurementCiTests(unittest.TestCase):
              'ci-output-compare-reports'),
             ('e2e/test_viewer_job_report.py', 'ViewerJobReportE2E',
              'ci-output-viewer-job-report'),
+            ('e2e/test_editor_compare_output.py', 'EditorCompareOutputE2E',
+             'ci-output-editor-compare-output'),
         ))
         self.assertEqual(output['suite_timeout'], 900)
         self.assertEqual(identity['suites'], (
@@ -103,17 +105,21 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual(outer,935)
         self.assertEqual([command[command.index('--module')+1] for command in commands],
                          ['tests/e2e/test_compare_reports.py',
-                          'tests/e2e/test_viewer_job_report.py'])
+                          'tests/e2e/test_viewer_job_report.py',
+                          'tests/e2e/test_editor_compare_output.py'])
         self.assertEqual([command[command.index('--class')+1] for command in commands],
-                         ['CompareReportsE2E','ViewerJobReportE2E'])
+                         ['CompareReportsE2E','ViewerJobReportE2E','EditorCompareOutputE2E'])
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
-                         ['ci-output-compare-reports','ci-output-viewer-job-report'])
+                         ['ci-output-compare-reports','ci-output-viewer-job-report',
+                          'ci-output-editor-compare-output'])
 
-    def test_output_integration_declares_exact_six_then_four_tests(self):
+    def test_output_integration_declares_exact_six_four_four_tests(self):
         expected=(('e2e/test_compare_reports.py','CompareReportsE2E',
                    'test_compare_reports_',6),
                   ('e2e/test_viewer_job_report.py','ViewerJobReportE2E',
-                   'test_job_report_',4))
+                   'test_job_report_',4),
+                  ('e2e/test_editor_compare_output.py','EditorCompareOutputE2E',
+                   'test_editor_output_',4))
         for suite,class_name,prefix,count in expected:
             text=(ci.ROOT/'tests'/suite).read_text(encoding='utf-8')
             import ast

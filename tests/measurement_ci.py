@@ -64,12 +64,15 @@ PROFILES = {
         'project_prefix': 'kin-output-ci-',
         'suite_timeout': 900,
         # Explicit local classes exclude inherited tests and preserve the
-        # requested comparison-report then viewer-job-report connection order.
+        # requested comparison-report then viewer-job-report then editor-output
+        # connection order.
         'suites': (
             ('e2e/test_compare_reports.py', 'CompareReportsE2E',
              'ci-output-compare-reports'),
             ('e2e/test_viewer_job_report.py', 'ViewerJobReportE2E',
              'ci-output-viewer-job-report'),
+            ('e2e/test_editor_compare_output.py', 'EditorCompareOutputE2E',
+             'ci-output-editor-compare-output'),
         ),
     },
     'vr-resize-probe': {
