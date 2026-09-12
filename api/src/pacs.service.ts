@@ -10,6 +10,7 @@ import { studyPageQuery, studyPageSlice } from './study-page';
 import { folderAction, folderEntries, folderPath } from './filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
 import { normalizeHangingProtocol } from './hanging-protocol';
+import type { HangingProtocolLibrary } from './hanging-protocol';
 
 /**
  * 호출자. 다섯 필드 모두 **서명된 토큰**과 가드 판정에서 나온다 — 클라이언트가 정할 수 없다.
@@ -832,6 +833,20 @@ export class PacsService implements OnModuleInit {
     }
   }
 
+  /**
+   * 기관 공용(SITE) 행의 주인. 개인 행과 같은 표를 쓰되 `subject=''` 센티널로 구분한다
+   * (StudyTagCatalog의 `ownerSub=''`와 같은 방식). 개인 경로의 `workspaceOwner()`는
+   * subject가 비어 있지 않음을 계속 요구하므로, 빈 subject는 오직 이 경로에서만 나온다.
+   */
+  private siteOwner(c: Caller) {
+    if (c.kind !== 'member') throw new ForbiddenException('회원 전용 배치입니다');
+    need(c.roles, c.roles.includes('technician') ? 'technician' : 'radiologist', '기관 Hanging Protocol');
+    const institution = inst(c);
+    if (typeof institution !== 'string' || institution.length === 0 || institution.length > 256)
+      throw new ForbiddenException('계정 정보를 확인할 수 없습니다');
+    return { institution, subject: '' };
+  }
+
   private hangingProtocolResult(owner: { institution: string; subject: string }, row: any) {
     if (!row) return { owner, revision: 0, value: null };
     const value = row.value === null ? null : normalizeHangingProtocol(row.value);
@@ -846,8 +861,12 @@ export class PacsService implements OnModuleInit {
     return this.hangingProtocolResult(owner, row);
   }
 
-  async saveHangingProtocols(body: any, c: Caller) {
-    const owner = this.workspaceOwner(c);
+  /**
+   * 저장 요청의 형식·소유자·값 검사. 개인과 기관(SITE)이 같은 표·같은 스키마·같은 CAS를
+   * 쓰므로 검사도 하나만 둔다. 기관은 `expectedOwner.subject`가 빈 문자열이어야 하고,
+   * 개인은 비어 있지 않아야 하므로 소유자 대조만으로 두 범위가 서로 섞이지 않는다.
+   */
+  private hangingProtocolRequest(body: any, owner: { institution: string; subject: string }) {
     const object = (v: any) => v !== null && typeof v === 'object' && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
     if (!object(body) || Object.keys(body).sort().join(',') !== 'expectedOwner,revision,value' ||
         !object(body.expectedOwner) || Object.keys(body.expectedOwner).sort().join(',') !== 'institution,subject' ||
@@ -858,22 +877,59 @@ export class PacsService implements OnModuleInit {
       throw new ConflictException('계정이 변경되었습니다. 다시 로그인하세요');
     const value = body.value === null ? null : normalizeHangingProtocol(body.value);
     if (value === undefined) throw new BadRequestException('Hanging Protocol 설정 형식이 잘못되었습니다');
+    return value;
+  }
+
+  private async writeHangingProtocol(owner: { institution: string; subject: string }, revision: number,
+      value: HangingProtocolLibrary | null, audit: ((tx: Prisma.TransactionClient, saved: any) => Promise<unknown>) | null) {
     const conflict = () => new ConflictException('Hanging Protocol 설정이 변경되었습니다. 불러온 뒤 다시 저장하세요');
     const stored: any = value === null ? Prisma.DbNull : value;
     try {
-      const row = await this.prisma.$transaction(async tx => {
-        if (body.revision === 0)
-          return tx.hangingProtocolPreference.create({ data: { ...owner, revision: 1, value: stored } });
-        const changed = await tx.hangingProtocolPreference.updateMany({ where: { ...owner, revision: body.revision },
-          data: { value: stored, revision: { increment: 1 } } });
-        if (changed.count !== 1) throw conflict();
-        return tx.hangingProtocolPreference.findUnique({ where: { institution_subject: owner } });
+      return await this.prisma.$transaction(async tx => {
+        let row: any;
+        if (revision === 0) row = await tx.hangingProtocolPreference.create({ data: { ...owner, revision: 1, value: stored } });
+        else {
+          const changed = await tx.hangingProtocolPreference.updateMany({ where: { ...owner, revision },
+            data: { value: stored, revision: { increment: 1 } } });
+          if (changed.count !== 1) throw conflict();
+          row = await tx.hangingProtocolPreference.findUnique({ where: { institution_subject: owner } });
+        }
+        if (audit) await audit(tx, row);
+        return row;
       });
-      return this.hangingProtocolResult(owner, row);
     } catch (e) {
       if ((e as any)?.code === 'P2002') throw conflict();
       throw e;
     }
+  }
+
+  async saveHangingProtocols(body: any, c: Caller) {
+    const owner = this.workspaceOwner(c);
+    const value = this.hangingProtocolRequest(body, owner);
+    return this.hangingProtocolResult(owner, await this.writeHangingProtocol(owner, body.revision, value, null));
+  }
+
+  private siteHangingProtocolResult(owner: { institution: string; subject: string }, row: any, c: Caller) {
+    // 개인 응답은 한 글자도 바꾸지 않는다. 기관 전용 필드는 이 응답에만 붙인다.
+    return { ...this.hangingProtocolResult(owner, row),
+      canManageSite: c.roles.includes('admin'), updatedAt: row?.updatedAt ?? null };
+  }
+
+  async siteHangingProtocols(c: Caller) {
+    const owner = this.siteOwner(c);
+    const row = await this.prisma.hangingProtocolPreference.findUnique({ where: { institution_subject: owner } });
+    return this.siteHangingProtocolResult(owner, row, c);
+  }
+
+  async saveSiteHangingProtocols(body: any, c: Caller) {
+    const owner = this.siteOwner(c);
+    // 형식보다 권한을 먼저 본다. 관리자가 아닌 호출자는 본문으로 저장 경로를 떠볼 수 없다.
+    need(c.roles, 'admin', '기관 Hanging Protocol 배포');
+    const value = this.hangingProtocolRequest(body, owner);
+    const row = await this.writeHangingProtocol(owner, body.revision, value, (tx, saved) =>
+      tx.auditLog.create({ data: { actor: c.actor, action: 'hanging-protocol.site.' + (value === null ? 'reset' : 'save'),
+        target: owner.institution, detail: JSON.stringify({ revision: saved?.revision ?? null }) } }));
+    return this.siteHangingProtocolResult(owner, row, c);
   }
 
   private validShortcutBindings(v: any) {

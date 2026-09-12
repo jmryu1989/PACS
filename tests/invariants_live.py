@@ -143,6 +143,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("PUT", "reading-preferences"): Route(Kind.USER),
     ("GET", "hanging-protocols"): Route(Kind.USER),
     ("PUT", "hanging-protocols"): Route(Kind.USER),
+    # 기관 공용 라이브러리라서 개인 경로와 달리 TENANT다(shared-filters와 같은 분류).
+    ("GET", "hanging-protocols/site"): Route(Kind.TENANT),
+    ("PUT", "hanging-protocols/site"): Route(Kind.TENANT),
     ("GET", "workspace-shortcuts"): Route(Kind.USER),
     ("PUT", "workspace-shortcuts"): Route(Kind.USER),
     ("GET", "reading-appearance"): Route(Kind.USER),

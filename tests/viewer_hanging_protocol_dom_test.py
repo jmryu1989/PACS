@@ -180,6 +180,86 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         self.assertEqual({'expectedOwner':{'institution':'hospital','subject':'reader'},'revision':4,'value':None},reset)
         self.assertEqual('Saved Rule',self.page.input_value('#host input'))
 
+    def seed_site(self,value):
+        self.page.evaluate("value=>localStorage.setItem(KinHangingProtocolModel.siteKey({institution:owner.institution}),JSON.stringify(value))",value)
+
+    def test_site_scope_is_read_only_for_a_member_and_publishable_only_by_an_admin(self):
+        self.seed();self.page.select_option('#kin-hp-scope','site')
+        expect(self.page.locator('#kin-hp-scope-note')).to_contain_text('읽기 전용')
+        self.page.evaluate("(value)=>responses.push(response({owner:{institution:'hospital',subject:''},revision:2,value,canManageSite:false,updatedAt:'2026-09-13T00:00:00.000Z'}))",library('Site Rule'))
+        self.page.locator('#kin-hp-load-account').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('기관 규칙을 불러왔습니다')
+        self.assertEqual(1,self.page.evaluate("requests.filter(r=>r.url==='/api/hanging-protocols/site').length"))
+        expect(self.page.get_by_label('Name')).to_have_value('Site Rule')
+        # A member reads and applies the institution rules but cannot type into or publish them.
+        for locator in ('#kin-hp-save-account','#kin-hp-reset-account','#kin-hp-save-local','#kin-hp-new','#kin-hp-delete','#kin-hp-import'):
+            expect(self.page.locator(locator)).to_be_disabled()
+        expect(self.page.get_by_label('Name')).to_be_disabled()
+        expect(self.page.locator('#kin-hp-load-account')).to_be_enabled();expect(self.page.locator('#kin-hp-apply')).to_be_enabled()
+        expect(self.page.locator('#kin-hp-save-account')).to_have_text('Save to Site')
+        # A refused edit never reaches the network and never changes the cached library.
+        self.page.locator('#kin-hp-new').dispatch_event('click')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('읽기 전용')
+        self.assertEqual(1,self.page.evaluate("requests.filter(r=>r.url==='/api/hanging-protocols/site').length"))
+        self.page.evaluate("(value)=>responses.push(response({owner:{institution:'hospital',subject:''},revision:2,value,canManageSite:true,updatedAt:'2026-09-13T00:00:00.000Z'}))",library('Site Rule'))
+        self.page.locator('#kin-hp-load-account').click();expect(self.page.locator('#kin-hp-scope-note')).to_contain_text('관리자만 저장')
+        expect(self.page.get_by_label('Name')).to_be_enabled();expect(self.page.locator('#kin-hp-save-account')).to_be_enabled()
+        self.page.get_by_label('Name').fill('Published Rule');self.page.get_by_label('Name').dispatch_event('change')
+        self.page.evaluate("(value)=>responses.push(response({owner:{institution:'hospital',subject:''},revision:3,value,canManageSite:true,updatedAt:'2026-09-13T00:00:00.000Z'}))",library('Published Rule'))
+        self.page.locator('#kin-hp-save-account').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('같은 기관의 사용자')
+        put=self.page.evaluate("requests.filter(r=>r.method==='PUT').at(-1)")
+        self.assertEqual('/api/hanging-protocols/site',put['url'])
+        self.assertEqual({'institution':'hospital','subject':''},put['body']['expectedOwner']);self.assertEqual(2,put['body']['revision'])
+        # The personal library and its own endpoint are untouched by every site operation.
+        self.assertEqual('Brain CT',self.page.evaluate("JSON.parse(localStorage.getItem(KinHangingProtocolModel.ownerKey(owner))).rules[0].name"))
+        self.assertEqual([],self.page.evaluate("requests.filter(r=>r.url==='/api/hanging-protocols')"))
+
+    def test_site_rules_apply_only_when_no_personal_rule_matches_and_name_their_source(self):
+        personal=library('My Rule');personal['rules'][0]['match']['modality']='MR'
+        site=library('Site Fallback');site['rules'][0]['id']='22222222-2222-4222-8222-222222222222'
+        site['activeRuleId']='22222222-2222-4222-8222-222222222222'
+        self.seed(personal);self.seed_site(site)
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Site Fallback · Source: Site')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('(Site)')
+        self.assertEqual(1,self.page.evaluate('setCalls.length'))
+        # As soon as a personal rule matches again it wins: Site is a fallback, not an override.
+        self.page.evaluate("()=>{const key=KinHangingProtocolModel.ownerKey(owner);const value=JSON.parse(localStorage.getItem(key));value.rules[0].match.modality='CT';localStorage.setItem(key,JSON.stringify(value));}")
+        self.page.evaluate('hp.end();document.querySelector("#host").textContent="";__mount()')
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: My Rule · Source: Personal')
+        # With no personal library at all the institution rules still open for this account.
+        self.page.evaluate("localStorage.removeItem(KinHangingProtocolModel.ownerKey(owner))")
+        self.page.evaluate('hp.end();document.querySelector("#host").textContent="";__mount()')
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Site Fallback · Source: Site')
+
+    def test_scope_caches_stay_isolated_and_a_late_response_cannot_cross_scopes(self):
+        self.seed();self.seed_site(library('Site Rule'))
+        personal_key=self.page.evaluate("KinHangingProtocolModel.ownerKey(owner)")
+        site_key=self.page.evaluate("KinHangingProtocolModel.siteKey({institution:owner.institution})")
+        self.assertNotEqual(personal_key,site_key)
+        # Another institution reads neither this cache nor this account's personal one.
+        self.assertNotEqual(site_key,self.page.evaluate("KinHangingProtocolModel.siteKey({institution:'other'})"))
+        self.page.select_option('#kin-hp-scope','site');expect(self.page.get_by_label('Name')).to_have_value('Site Rule')
+        self.page.select_option('#kin-hp-scope','personal');expect(self.page.get_by_label('Name')).to_have_value('Brain CT')
+        # A draft parked in one scope survives the round trip without touching the other cache.
+        self.page.get_by_label('Name').fill('Personal Draft');self.page.get_by_label('Name').dispatch_event('change')
+        self.page.select_option('#kin-hp-scope','site');self.page.select_option('#kin-hp-scope','personal')
+        expect(self.page.get_by_label('Name')).to_have_value('Personal Draft')
+        self.assertEqual('Site Rule',self.page.evaluate("key=>JSON.parse(localStorage.getItem(key)).rules[0].name",site_key))
+        self.assertEqual('Brain CT',self.page.evaluate("key=>JSON.parse(localStorage.getItem(key)).rules[0].name",personal_key))
+        # A site response arriving after the user switched back must not land on the personal scope.
+        self.page.select_option('#kin-hp-scope','site')
+        self.page.evaluate("holdAccess=true")
+        self.page.evaluate("(value)=>responses.push(new Promise(resolve=>{window.releaseSite=()=>resolve(response({owner:{institution:'hospital',subject:''},revision:9,value,canManageSite:true,updatedAt:null}))}))",library('Late Site'))
+        self.page.locator('#kin-hp-load-account').click()
+        self.page.wait_for_function('typeof releaseSite==="function"')
+        self.page.select_option('#kin-hp-scope','personal')
+        self.page.evaluate('releaseSite()')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('범위가 바뀌어')
+        expect(self.page.get_by_label('Name')).to_have_value('Personal Draft')
+        self.assertEqual('Site Rule',self.page.evaluate("key=>JSON.parse(localStorage.getItem(key)).rules[0].name",site_key))
+
     def test_import_is_strict_draft_only_and_contains_no_patient_snapshot(self):
         self.page.evaluate('__mount()');payload=library('Imported Rule')
         self.page.locator('#kin-hp-import').set_input_files({'name':'rules.json','mimeType':'application/json','buffer':json.dumps(payload).encode()})
@@ -224,16 +304,16 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
 
     def test_previous_next_use_success_cursor_skip_rules_and_do_not_wrap(self):
         self.seed(navigation_library())
-        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
-        self.page.select_option('#kin-hp-rule','44444444-4444-4444-8444-444444444444');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT · Source: Personal')
+        self.page.select_option('#kin-hp-rule','44444444-4444-4444-8444-444444444444');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT · Source: Personal')
         self.page.evaluate("camera={scale:9};activeViewportId=[...viewports.keys()].at(-1);layoutVersion++;emitHP()")
-        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
-        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Last CT')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT · Source: Personal')
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Last CT · Source: Personal')
         calls=self.page.evaluate('setCalls.length');self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('저장 순서의 끝')
         self.assertEqual(calls,self.page.evaluate('setCalls.length'))
-        self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT · Source: Personal')
         self.page.evaluate("hp.end();document.querySelector('#host').textContent='';__mount()")
-        self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Last CT')
+        self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Last CT · Source: Personal')
 
     def test_navigation_failure_dirty_and_manual_source_change_do_not_advance_stale_cursor(self):
         self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
@@ -276,7 +356,7 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
     def test_resolved_native_dispatch_waits_for_observable_target_before_success(self):
         self.seed(navigation_library());self.page.evaluate('delayTarget=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof targetResolve==="function"')
         expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
-        self.page.evaluate('targetResolve()');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.evaluate('targetResolve()');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT · Source: Personal')
 
     def test_native_layout_resolving_after_apply_timeout_cannot_advance_cursor_or_leave_pending_status(self):
         self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
@@ -397,7 +477,7 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         self.assertEqual('Applied Protocol: None',self.page.text_content('#kin-hp-applied'))
         self.page.evaluate("volumeLoaded=true")
         expect(self.page.locator('#kin-hp-status')).to_contain_text('Applied')
-        self.assertEqual('Applied Protocol: Three Plane CT',self.page.text_content('#kin-hp-applied'))
+        self.assertEqual('Applied Protocol: Three Plane CT · Source: Personal',self.page.text_content('#kin-hp-applied'))
 
     def test_an_orthographic_cell_on_the_wrong_volume_or_plane_keeps_the_previous_screen(self):
         self.seed(mpr_library());self.page.evaluate("sets[0].images=ctSlices(4);useNativeViewportTypes()")
