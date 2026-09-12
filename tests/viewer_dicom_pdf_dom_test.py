@@ -11,6 +11,8 @@ MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-dicom-pdf.js"
 CONFIG = ROOT / "config" / "ohif.js"
 URL = "https://pdf.test/ohif/viewer?StudyInstanceUIDs=1.2,1.9"
 RENDERED = "https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.4/rendered"
+ORTHANC_ID = "aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee"
+PDF = f"https://pdf.test/instances/{ORTHANC_ID}/pdf"
 
 HARNESS = r"""<!doctype html><html><body><main id="kin-viewer-layout"><object id="native-pdf"></object></main><script>
 const HANDLER='@ohif/extension-dicom-pdf.sopClassHandlerModule.dicom-pdf',SOP='1.2.840.10008.5.1.4.1.1.104.1';
@@ -20,18 +22,18 @@ const owner={kind:'member',institution:'hospital',sub:'reader'},routes={
  '/api/me':()=>owner,
  '/api/dicom/lookup':()=>({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'}),
  '/api/studies':()=>({studies:[{uid:'1.2',id:'PID-001'}]}),
- 'RENDERED':()=>({status:200,body:null,contentType:'application/pdf'})
+ 'PDF_ROUTE':()=>({status:200,body:null,contentType:'application/pdf'})
 };
-const response=(status,value,url,contentType='application/json')=>({ok:status>=200&&status<300,status,headers:{get:name=>name.toLowerCase()==='content-type'?contentType:null},body:{cancel:()=>{cancels.push(url);return holdCancel&&url.startsWith('https://pdf.test/dicom-web/')?new Promise(resolve=>cancelHeld.push(resolve)):Promise.resolve()}},json:async()=>structuredClone(value)});
+const response=(status,value,url,contentType='application/json')=>({ok:status>=200&&status<300,status,headers:{get:name=>name.toLowerCase()==='content-type'?contentType:null},body:{cancel:()=>{cancels.push(url);return holdCancel&&url==='PDF_ROUTE'?new Promise(resolve=>cancelHeld.push(resolve)):Promise.resolve()}},json:async()=>structuredClone(value)});
 window.fetch=(url,options={})=>{requests.push({url,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
- const done=()=>{const configured=routes[url]??(url.startsWith('https://pdf.test/dicom-web/')?{status:200,body:null,contentType:'application/pdf'}:undefined),value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType);};
+ const done=()=>{const configured=routes[url],value=typeof configured==='function'?configured():configured;return response(value?.status||200,value?.body??value,url,value?.contentType);};
  if(holdPath===url)return new Promise((resolve,reject)=>{const item={resolve:()=>resolve(done()),reject};held.push(item);if(!ignoreAbort)options.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});});return Promise.resolve(done());};
 window.open=()=>{if(blockPopup)return null;const popup={closed:false,opener:{unsafe:true},navigated:null,close(){this.closed=true},location:{replace(value){if(throwNavigation)throw Error('synthetic navigation detail');popup.navigated=value;}}};popups.push(popup);return popup;};
 const state={activeViewportId:'vp1',viewports:new Map([['vp1',view]])};
 window.services={viewportGridService:{EVENTS:{ACTIVE:'active',GRID:'grid'},getState:()=>state,getActiveViewportId:()=>state.activeViewportId,subscribe:(_,fn)=>{subscribers.push(fn);return {unsubscribe(){subscribers=subscribers.filter(x=>x!==fn)}}}},displaySetService:{getDisplaySetByUID:id=>id===displaySet.displaySetInstanceUID?displaySet:null}};
 window.emit=()=>subscribers.forEach(fn=>fn());
-window.mountPdf=()=>{window.pdfController=KinDicomPdf.create(services);pdfController.mount();};
-</script></body></html>""".replace("RENDERED", RENDERED)
+window.mountPdf=(options={})=>{window.pdfController=KinDicomPdf.create(services,options);pdfController.mount();};
+</script></body></html>""".replace("RENDERED", RENDERED).replace("PDF_ROUTE", PDF)
 
 
 def extract_function(source, name):
@@ -89,14 +91,111 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.assertEqual(0, panel.locator("img,script").count())
         self.assertIsNone(self.page.evaluate("window.bad"))
         self.assertEqual(1, self.page.locator("#native-pdf").count(), "the native embedded PDF is untouched")
+        self.page.evaluate("requests=[]")
         self.page.locator("#kin-source-pdf-open").click()
         expect(panel.locator("[data-patient]")).to_have_text("Verified Patient ID: PID-001")
         expect(panel.locator("[role=status]")).to_contain_text("브라우저 PDF 도구")
         result = self.page.evaluate("()=>({requests,popups:popups.map(p=>({closed:p.closed,opener:p.opener,navigated:p.navigated}))})")
-        self.assertEqual(["/api/me", "/api/me", "/api/dicom/lookup", "/api/studies", RENDERED, "/api/me"], [r["url"] for r in result["requests"]])
-        self.assertEqual({"studyUid": "1.2", "sopUid": "1.4"}, result["requests"][2]["body"])
-        self.assertEqual([{"closed": False, "opener": None, "navigated": RENDERED}], result["popups"])
-        self.assertEqual([RENDERED], self.page.evaluate("cancels"))
+        self.assertEqual(["/api/me", "/api/dicom/lookup", "/api/studies", PDF, "/api/me"], [r["url"] for r in result["requests"]])
+        self.assertEqual({"studyUid": "1.2", "sopUid": "1.4"}, result["requests"][1]["body"])
+        self.assertEqual([{"closed": False, "opener": None, "navigated": PDF}], result["popups"])
+        self.assertEqual([PDF], self.page.evaluate("cancels"))
+
+    def test_open_rejects_a_lookup_id_spliced_after_source_resolution(self):
+        initial = self.page.evaluate("requests.filter(r=>r.url==='/api/dicom/lookup').map(r=>r.body)")
+        self.assertEqual([{"studyUid": "1.2", "sopUid": "1.4"}], initial)
+        self.page.evaluate("routes['/api/dicom/lookup']=()=>({id:'11111111-22222222-33333333-44444444-55555555'})")
+        self.page.locator("#kin-source-pdf-open").click()
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("원본 PDF 식별을 확인할 수 없습니다")
+        self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
+        self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
+        self.assertNotIn(PDF, self.page.evaluate("requests.map(r=>r.url)"))
+
+    def test_late_source_lookup_cannot_replace_a_new_selected_pdf(self):
+        self.page.evaluate("""() => {
+          holdPath='/api/dicom/lookup';ignoreAbort=true;
+          displaySet=makeSet({displaySetInstanceUID:'held-source',SeriesDescription:'Held PDF'});
+          view.displaySetInstanceUIDs=['held-source'];emit();
+        }""")
+        self.page.wait_for_function("() => held.length===1")
+        self.page.evaluate("""() => {
+          holdPath=null;
+          displaySet=makeSet({displaySetInstanceUID:'new-source',SOPInstanceUID:'1.5',SeriesDescription:'New PDF',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});
+          view.displaySetInstanceUIDs=['new-source'];emit();
+        }""")
+        expect(self.page.locator("#kin-source-pdf-open")).to_be_enabled()
+        self.page.evaluate("held.shift().resolve()")
+        self.page.wait_for_timeout(0)
+        expect(self.page.locator("#kin-source-pdf [data-title]")).to_have_text("New PDF")
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
+
+    def test_source_timeout_exposes_retry_and_ignores_the_late_provider(self):
+        self.page.evaluate("""() => {
+          pdfController.stop();held=[];requests=[];holdPath='/api/dicom/lookup';ignoreAbort=true;window.nativeRetries=0;
+          mountPdf({timeoutMs:30,onRetry:()=>nativeRetries++});
+        }""")
+        self.page.wait_for_function("() => held.length===1")
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("시간이 지났습니다")
+        button=self.page.locator("#kin-source-pdf-open")
+        expect(button).to_have_text("Retry Source PDF");expect(button).to_be_enabled()
+        self.page.evaluate("holdPath=null");button.click()
+        expect(button).to_have_text("Open Source PDF");expect(button).to_be_enabled()
+        self.assertEqual(0,self.page.evaluate("nativeRetries"),"source retry must not restart the native resolver")
+        self.assertEqual(2,self.page.evaluate("requests.filter(r=>r.url==='/api/dicom/lookup').length"))
+        self.page.evaluate("held.shift().resolve()")
+        self.page.wait_for_timeout(0)
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
+
+    def test_native_failure_retry_survives_grid_refresh_until_native_ready(self):
+        self.page.evaluate("""() => {
+          pdfController.stop();window.nativeRetries=0;
+          mountPdf({onRetry:()=>nativeRetries++});
+        }""")
+        button = self.page.locator("#kin-source-pdf-open")
+        expect(button).to_be_enabled()
+        self.page.evaluate("pdfController.nativeFailure(Error('Synthetic native timeout'),displaySet,displaySet.pdfUrl)")
+        self.page.evaluate("emit()")
+        expect(button).to_have_text("Retry Source PDF")
+        expect(button).to_be_enabled()
+        expect(self.page.locator("#kin-source-pdf-status")).to_have_text("Synthetic native timeout")
+        button.click()
+        self.assertEqual(1, self.page.evaluate("nativeRetries"))
+        expect(button).to_have_text("Retry Source PDF")
+        expect(button).to_be_disabled()
+        expect(self.page.locator("#kin-source-pdf-status")).to_have_text("Checking native PDF…")
+        self.page.evaluate("emit()")
+        expect(button).to_be_disabled()
+        self.page.evaluate("pdfController.nativeReady(displaySet,displaySet.pdfUrl)")
+        expect(button).to_have_text("Open Source PDF")
+        expect(button).to_be_enabled()
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Ready")
+        self.assertEqual([], self.page.evaluate("popups"))
+
+    def test_source_owner_mismatch_stops_before_lookup(self):
+        self.page.evaluate("""() => {
+          requests=[];routes['/api/me']=()=>({kind:'member',institution:'other',sub:'reader'});
+          displaySet=makeSet({displaySetInstanceUID:'owner-mismatch'});view.displaySetInstanceUIDs=['owner-mismatch'];emit();
+        }""")
+        expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("계정이 변경")
+        expect(self.page.locator("#kin-source-pdf-open")).to_have_text("Open Source PDF")
+        expect(self.page.locator("#kin-source-pdf-open")).to_be_disabled()
+        self.assertEqual(["/api/me"],self.page.evaluate("requests.map(r=>r.url)"))
+
+    def test_native_failure_and_pending_retry_do_not_block_a_new_source(self):
+        self.page.evaluate("""() => {
+          window.nativeRetries=[];pdfController.stop();
+          mountPdf({onRetry:(value,pdfUrl)=>nativeRetries.push([value.displaySetInstanceUID,pdfUrl])});
+        }""")
+        button=self.page.locator("#kin-source-pdf-open");expect(button).to_be_enabled()
+        self.page.evaluate("pdfController.nativeFailure(Error('A native failure'),displaySet,displaySet.pdfUrl)")
+        button.click();expect(button).to_be_disabled();self.assertEqual(1,len(self.page.evaluate("nativeRetries")))
+        self.page.evaluate("""() => {
+          displaySet=makeSet({displaySetInstanceUID:'source-b',SOPInstanceUID:'1.5',SeriesDescription:'Source B',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});
+          view.displaySetInstanceUIDs=['source-b'];emit();
+        }""")
+        expect(button).to_have_text("Open Source PDF");expect(button).to_be_enabled()
+        button.click();expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
+        self.assertEqual(PDF,self.page.evaluate("popups.at(-1).navigated"))
 
     def test_related_role_and_invalid_mime_identity_or_url_fail_closed(self):
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'ds-related',StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',SeriesDescription:'Prior PDF',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.9/series/1.8/instances/1.7/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.9',SeriesInstanceUID:'1.8',SOPInstanceUID:'1.7',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['ds-related'];emit();}""")
@@ -127,14 +226,14 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
             {"status": 200, "body": "not pdf", "contentType": "application/json"},
         ):
             with self.subTest(route=route):
-                self.page.evaluate("([url,value])=>routes[url]=value", [RENDERED, route])
+                self.page.evaluate("([url,value])=>routes[url]=value", [PDF, route])
                 button.click()
                 expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("원본 PDF 응답을 확인할 수 없습니다")
                 self.assertTrue(self.page.evaluate("popups.at(-1).closed"))
                 self.assertIsNone(self.page.evaluate("popups.at(-1).navigated"))
-                self.assertEqual(RENDERED, self.page.evaluate("cancels.at(-1)"))
+                self.assertEqual(PDF, self.page.evaluate("cancels.at(-1)"))
 
-        self.page.evaluate("([url])=>{routes[url]={status:200,body:null,contentType:'application/pdf'};holdCancel=true}", [RENDERED])
+        self.page.evaluate("([url])=>{routes[url]={status:200,body:null,contentType:'application/pdf'};holdCancel=true}", [PDF])
         button.click(); self.page.wait_for_function("cancelHeld.length===1")
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'new-after-cancel',SOPInstanceUID:'1.5',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['new-after-cancel'];emit();holdCancel=false;cancelHeld.shift()();}""")
         expect(button).to_be_enabled()
@@ -149,7 +248,7 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.wait_for_function("held.length===1")
         button.click(force=True)
         self.assertEqual(1, self.page.evaluate("popups.length"), "a busy click cannot create a phantom second window")
-        self.page.evaluate("() => {displaySet=makeSet({displaySetInstanceUID:'replacement',SOPInstanceUID:'1.5',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['replacement'];emit();}")
+        self.page.evaluate("() => {displaySet=makeSet({displaySetInstanceUID:'replacement',SOPInstanceUID:'1.5',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.5',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['replacement'];emit();holdPath=null;}")
         self.assertTrue(self.page.evaluate("popups[0].closed"))
         self.assertIsNone(self.page.evaluate("popups[0].navigated"))
         expect(button).to_be_enabled()
@@ -171,17 +270,17 @@ class ViewerDicomPdfDOMTest(unittest.TestCase):
         self.page.evaluate("held.shift().resolve()")
         self.page.wait_for_timeout(0)
         first = self.page.evaluate("()=>popups.map(p=>({closed:p.closed,navigated:p.navigated}))")
-        self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": "https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.5/rendered"}], first)
+        self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": PDF}], first)
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
 
-        self.page.evaluate("""() => {displaySet=makeSet();view.displaySetInstanceUIDs=['ds-pdf'];emit();holdPath='/api/dicom/lookup';}""")
-        expect(button).to_be_enabled(); button.click(); self.page.wait_for_function("held.length===1")
+        self.page.evaluate("""() => {displaySet=makeSet();view.displaySetInstanceUIDs=['ds-pdf'];emit();}""")
+        expect(button).to_be_enabled(); self.page.evaluate("holdPath='/api/dicom/lookup'"); button.click(); self.page.wait_for_function("held.length===1")
         self.page.evaluate("""() => {displaySet=makeSet({displaySetInstanceUID:'last-pdf',SOPInstanceUID:'1.6',pdfUrl:Promise.resolve('https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.6/rendered'),instance:{SOPClassUID:SOP,StudyInstanceUID:'1.2',SeriesInstanceUID:'1.3',SOPInstanceUID:'1.6',PatientID:'PID-001',MIMETypeOfEncapsulatedDocument:'application/pdf',EncapsulatedDocument:{}}});view.displaySetInstanceUIDs=['last-pdf'];emit();holdPath=null;}""")
         expect(button).to_be_enabled(); button.click(); expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
         self.page.evaluate("held.shift().reject(Error('late old rejection'))")
         self.page.wait_for_timeout(0)
         last = self.page.evaluate("()=>popups.slice(-2).map(p=>({closed:p.closed,navigated:p.navigated}))")
-        self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": "https://pdf.test/dicom-web/studies/1.2/series/1.3/instances/1.6/rendered"}], last)
+        self.assertEqual([{"closed": True, "navigated": None}, {"closed": False, "navigated": PDF}], last)
         expect(self.page.locator("#kin-source-pdf-status")).to_contain_text("Opened source PDF")
 
     def test_failed_owner_check_remains_visible_after_grid_refresh(self):

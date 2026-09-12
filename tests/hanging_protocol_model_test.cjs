@@ -75,3 +75,19 @@ test('first enabled matching rule wins when no rule is selected',()=>{
   const value=library();value.activeRuleId=null;value.rules.unshift({...rule(IDS[1],'Disabled'),enabled:false});
   const result=model.resolve(value,{studies:[studies()[0]],displaySets:[display('1.2.1.1','1.2.1',1)]});assert.equal(result.rule.id,IDS[0]);
 });
+
+test('previous and next traverse only ordered enabled fully matched rules without wrapping',()=>{
+  const ids=[IDS[0],'22222222-2222-4222-8222-222222222222','33333333-3333-4333-8333-333333333333','44444444-4444-4444-8444-444444444444'];
+  const value=library(),disabled=rule(ids[1],'Disabled'),miss=rule(ids[2],'MR only'),last=rule(ids[3],'Last CT');disabled.enabled=false;value.rules[0].match.modality='CT';miss.match.modality='MR';last.match.modality='CT';value.rules=[value.rules[0],disabled,miss,last];value.activeRuleId=IDS[0];
+  const context={studies:[studies()[0]],displaySets:[display('1.2.1.1','1.2.1',1)]},before=plain(value);
+  assert.equal(model.navigate(value,context,null,'next').rule.name,'Brain CT');
+  assert.equal(model.navigate(value,context,null,'previous').rule.name,'Last CT');
+  assert.equal(model.navigate(value,context,IDS[0],'next').rule.name,'Last CT');
+  assert.equal(model.navigate(value,context,ids[3],'previous').rule.name,'Brain CT');
+  assert.deepEqual(model.navigate(value,context,ids[3],'next'),{kind:'no-match',reason:'end'});
+  assert.deepEqual(model.navigate(value,context,IDS[0],'previous'),{kind:'no-match',reason:'end'});
+  const changed={studies:[{...studies()[0],desc:'MR follow-up',modality:'MR'}],displaySets:[{...display('1.2.1.1','1.2.1',1),Modality:'MR'}]};
+  assert.equal(model.navigate(value,changed,IDS[0],'next').rule.id,ids[2],"a cursor that no longer matches restarts from the fresh matching list");
+  assert.equal(model.navigate(value,changed,IDS[0],'previous').rule.id,ids[2]);
+  assert.deepEqual(value,before);assert.throws(()=>model.navigate(value,context,null,'sideways'),/방향/);
+});

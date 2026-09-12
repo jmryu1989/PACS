@@ -21,6 +21,24 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         super().setUp()
         self.addCleanup(cleanup_workspace, self.stack, "HangingProtocolPreference")
 
+    def tearDown(self):
+        result = self._outcome.result
+        failures = result.failures + result.errors + [
+            (test, error) for test, error in getattr(self._outcome, "errors", []) if error
+        ]
+        if any(test is self for test, _ in failures):
+            folder = Path(__file__).parent / "artifacts"
+            folder.mkdir(exist_ok=True)
+            for i, context in enumerate(self.contexts):
+                for j, page in enumerate(context.pages):
+                    if "/ohif/viewer" in page.url:
+                        try:
+                            page.screenshot(path=str(folder / f"HP-failure-{self._testMethodName}-{i}-{j}.png"),
+                                            full_page=True)
+                        except Exception:
+                            pass
+        super().tearDown()
+
     def hp(self, page):
         self.open_layout_tools(page)
         expect(page.get_by_role("heading", name="Hanging Protocols", exact=True)).to_be_visible(timeout=45000)
@@ -57,6 +75,23 @@ class HangingProtocolE2E(ViewerLayoutE2E):
             }],
         }
 
+    def navigation_library(self):
+        second = self.library(occurrence=2)["rules"][0]
+        first = json.loads(json.dumps(second))
+        first["id"] = "22222222-2222-4222-8222-222222222222"
+        first["name"] = "Synthetic Current First"
+        first["selectors"] = [first["selectors"][0]]
+        first["selectors"][0]["occurrence"] = 1
+        first["layout"] = {"rows": 1, "cols": 1, "cells": ["Current"]}
+        no_match = json.loads(json.dumps(first))
+        no_match.update(id="33333333-3333-4333-8333-333333333333", name="Synthetic MR Skip")
+        no_match["match"]["modality"] = "MR"
+        disabled = json.loads(json.dumps(first))
+        disabled.update(id="44444444-4444-4444-8444-444444444444",
+                        name="Synthetic Disabled Skip", enabled=False)
+        return {"version": 1, "activeRuleId": second["id"],
+                "rules": [first, no_match, disabled, second]}
+
     def described_ref(self, page, fixture, description):
         metadata = self.metadata(page, fixture)
         series = next(item["0020000E"]["Value"][0] for item in metadata
@@ -88,16 +123,59 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         expect(viewer.locator("#kin-hp-save-local")).to_be_enabled(); viewer.locator("#kin-hp-save-local").click()
         expect(viewer.locator("#kin-hp-status")).to_contain_text("이 브라우저")
 
-        definition = self.library(occurrence=2)
+        definition = self.navigation_library()
         self.import_rules(viewer, definition)
-        before = self.cells(viewer); self.apply(viewer, "Applied")
+        before = self.cells(viewer)
+        previous = viewer.locator("#kin-hp-previous")
+        following = viewer.locator("#kin-hp-next")
+        expect(previous).to_have_text("Previous Protocol")
+        expect(following).to_have_text("Next Protocol")
         current_second = self.described_ref(viewer, current, "D02E second series")
+        current_first = self.described_ref(viewer, current, "D03A current")
         related_first = self.described_ref(viewer, related, "D03A older")
+
+        # With no successful cursor, Previous starts at the last eligible rule.
+        previous.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
         self.identity(viewer, [current_second, related_first, None, current_second])
         viewer.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-current-related-vacancy.png'))
         applied = self.cells(viewer)
         self.assertEqual([], applied[2]["sets"])
         self.assertNotEqual(before, applied)
+
+        # A manual layout change invalidates the cursor; Next therefore starts at the first rule.
+        self.grid(viewer, 1)
+        expect(viewer.locator("#kin-hp-applied")).to_have_text("Applied Protocol: None")
+        following.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
+        self.identity(viewer, [current_first])
+        following.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
+        self.identity(viewer, [current_second, related_first, None, current_second])
+        endpoint = self.cells(viewer)
+        following.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("저장 순서의 끝")
+        self.assertEqual(endpoint, self.cells(viewer), "navigation must not wrap beyond the last matching rule")
+
+        previous.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
+        self.identity(viewer, [current_first])
+        first_endpoint = self.cells(viewer)
+        previous.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("저장 순서의 끝")
+        self.assertEqual(first_endpoint, self.cells(viewer), "navigation must not wrap before the first matching rule")
+
+        # Apply follows the editor selection (the second rule) and becomes the navigation cursor.
+        self.apply(viewer, "Applied")
+        self.identity(viewer, [current_second, related_first, None, current_second])
+        previous.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
+        self.identity(viewer, [current_first])
+        following.click(); expect(viewer.locator("#kin-hp-status")).to_contain_text("Applied", timeout=45000)
+        self.identity(viewer, [current_second, related_first, None, current_second])
+
+        job_title = viewer.get_by_label("Job Title", exact=True)
+        if not job_title.is_visible():
+            viewer.get_by_role("button", name="Comparison", exact=True).click()
+        expect(job_title).to_be_visible()
+        job_title.fill("HP NAVIGATION UNSAVED JOB")
+        dirty = self.cells(viewer); previous.click()
+        expect(viewer.locator("#kin-hp-status")).to_contain_text("저장하지 않은 영상 작업")
+        self.assertEqual(dirty, self.cells(viewer), "navigation must preserve dirty viewer work")
+        expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("HP NAVIGATION UNSAVED JOB")
         expect(work.locator("#findings")).to_have_value("HP FORM UNSAVED REPORT")
         self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
 
@@ -108,6 +186,12 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         originals = self.originals(); viewer = self.launch(self.login(), [current, future])
         definition = self.library(historical=True, name="Strict Historical")
         self.import_rules(viewer, definition); before = self.cells(viewer); self.apply(viewer, "일치하는 규칙이 없어")
+        self.assertEqual(before, self.cells(viewer))
+        viewer.locator("#kin-hp-next").click()
+        expect(viewer.locator("#kin-hp-status")).to_contain_text("현재 검사와 일치하는 규칙이 없습니다")
+        self.assertEqual(before, self.cells(viewer))
+        viewer.locator("#kin-hp-previous").click()
+        expect(viewer.locator("#kin-hp-status")).to_contain_text("현재 검사와 일치하는 규칙이 없습니다")
         self.assertEqual(before, self.cells(viewer))
 
         related = viewer.locator('[data-selector="1"]')

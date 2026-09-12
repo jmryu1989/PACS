@@ -12,6 +12,42 @@ import measurement_ci as ci
 
 
 class ExecutionSelectionTests(unittest.TestCase):
+    def test_image_text_profile_selects_four_declared_native_cases(self):
+        filename,class_name,unit=ci.PROFILES['image-text']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        declared={class_name+'.'+name for name in cls.__dict__ if name.startswith('test_image_text_')}
+        self.assertEqual({row['case'] for row in plan['tests']},declared)
+        self.assertEqual(len(plan['tests']),4)
+        self.assertEqual(runner.collect(plan).countTestCases(),4)
+
+    def test_images_only_profile_selects_four_declared_native_cases(self):
+        filename,class_name,unit=ci.PROFILES['images-only']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        declared={class_name+'.'+name for name in cls.__dict__ if name.startswith('test_images_only_')}
+        self.assertEqual({row['case'] for row in plan['tests']},declared)
+        self.assertEqual(len(plan['tests']),4)
+        self.assertEqual(runner.collect(plan).countTestCases(),4)
+
+    def test_study_arrivals_profile_selects_four_declared_native_cases(self):
+        filename,class_name,unit=ci.PROFILES['study-arrivals']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        self.assertEqual({row['case'] for row in plan['tests']},
+            {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_arrivals_')})
+        self.assertEqual(len(plan['tests']),4)
+        self.assertEqual(runner.collect(plan).countTestCases(),4)
+
+    def test_display_scope_profile_selects_four_declared_native_cases(self):
+        filename,class_name,unit=ci.PROFILES['display-scope']['suites'][0]
+        plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
+        cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
+        self.assertEqual({row['case'] for row in plan['tests']},
+            {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_scope_')})
+        self.assertEqual(len(plan['tests']),4)
+        self.assertEqual(runner.collect(plan).countTestCases(),4)
+
     def test_ci_selection_matches_existing_main_contracts(self):
         self.assertEqual(len(ci.SUITES), len(ci.SUITE_CLASSES))
         for filename, class_name in zip(ci.SUITES, ci.SUITE_CLASSES):

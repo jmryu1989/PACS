@@ -15,6 +15,10 @@ on:
           - hanging-protocols
           - dicom-pdf
           - image-thumbnails
+          - display-scope
+          - study-arrivals
+          - images-only
+          - image-text
 
 permissions:
   contents: read
@@ -60,7 +64,20 @@ jobs:
             tests/e2e/artifacts/hanging-protocols-ci/
             tests/e2e/artifacts/dicom-pdf-ci/
             tests/e2e/artifacts/image-thumbnails-ci/
+            tests/e2e/artifacts/display-scope-ci/
+            tests/e2e/artifacts/study-arrivals-ci/
+            tests/e2e/artifacts/images-only-ci/
+            tests/e2e/artifacts/IMAGES-ONLY-*.png
+            tests/e2e/artifacts/test_images_only_*.png
+            tests/e2e/artifacts/image-text-ci/
+            tests/e2e/artifacts/IMAGE-TEXT-*.png
+            tests/e2e/artifacts/test_image_text_*.png
+            tests/e2e/artifacts/STUDY-ARRIVALS-*.png
+            tests/e2e/artifacts/test_arrivals_*.png
+            tests/e2e/artifacts/LAYOUT-display-scope-*.png
+            tests/e2e/artifacts/test_scope_*.png
             tests/e2e/artifacts/IMAGE-THUMBNAILS-*.png
+            tests/e2e/artifacts/test_image_thumbnails_*.png
             tests/e2e/artifacts/HP-*.png
             tests/e2e/artifacts/LAYOUT-source-pdf-*.png
             tests/tmp/workspace-ui-ci/identity-position-native/

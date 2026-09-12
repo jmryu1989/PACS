@@ -1,6 +1,6 @@
 # coding: utf-8
 """Native Worklist Images browsing with real stored multi-instance/multiframe pixels."""
-import base64, io, time, unittest, uuid
+import base64, io, re, time, unittest, uuid
 from pathlib import Path
 
 import numpy as np
@@ -73,6 +73,11 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         cards.nth(7).locator(".thumb-image-open").click(); dialog = page.locator("#worklist-image-preview")
         expect(dialog.locator("[data-status]")).to_contain_text("Rendered", timeout=25000)
         expect(dialog.locator("[data-position]")).to_contain_text(f"8 / 14 · SOP {multi['sops'][0]} · Frame 8 / 14")
+        lookup = self.stack.request("POST", "/dicom/lookup", "doctor", {"studyUid": f.uid, "sopUid": multi["sops"][0]})
+        self.assertEqual(200, lookup.status)
+        expected = page.request.get(self.stack.proxy + f"/instances/{lookup.body['id']}/frames/7/rendered?width=1024&height=1024", headers={"Accept": "image/png"})
+        self.assertEqual(200, expected.status)
+        np.testing.assert_array_equal(self.pixels(dialog.locator('img')), np.asarray(Image.open(io.BytesIO(expected.body())).convert('RGB')))
         dialog.locator("[data-close]").click(); view.locator("#thumb-images-back").click(); self.thumbs(page)
         expect(page.locator("#findings")).to_have_value(values["findings"])
         self.assertEqual(self.stack.actor("doctor"), self.state(f)["holder"])
@@ -107,7 +112,10 @@ class ImageThumbnailsE2E(WorklistImagePreviewE2E):
         literal = 'Literal <img onerror="window.imageThumbInjected=1"> & Series'
         f = self.ct("IMAGE-THUMBS-" + uuid.uuid4().hex[:12], "current", "20260801")
         CineE2E.series(self, f, 14, literal); originals = self.originals(); page = self.login(); page.set_viewport_size({"width": 390, "height": 700})
-        self.select(page, f); self.thumbs(page); card = page.locator("#thumbwrap .thumb-card").filter(has_text=literal)
+        page.locator("#quick").fill(f.patient_id); row = page.locator(f'#rows tr[data-uid="{f.uid}"]'); expect(row).to_be_visible()
+        row.focus(); row.press("Space"); expect(row).to_have_attribute("aria-selected", "true"); expect(row).to_have_class(re.compile(r"\bmulti-selected\b"))
+        row.press("Enter"); expect(row).to_have_class(re.compile(r"\bsel\b"))
+        self.thumbs(page); card = page.locator("#thumbwrap .thumb-card").filter(has_text=literal)
         entry = card.locator(".thumb-images-open"); expect(entry).to_be_enabled(); entry.focus(); entry.press("Enter")
         view = page.locator("#thumb-images-view"); cards = self.ready(view, 12)
         expect(view.locator("#thumb-images-series")).to_contain_text(literal)

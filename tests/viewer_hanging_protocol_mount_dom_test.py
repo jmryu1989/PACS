@@ -37,8 +37,12 @@ const sets=[stack('ds-current',currentUID,'9.9.2.1','Brain Axial'),stack('ds-rel
  {...stack('mixed-images',currentUID,'9.9.2.5','Brain Axial'),images:[image(currentUID,'9.9.2.5'),image(relatedUID,'9.9.2.5')]}];
 let setCalls=[];
 const viewports=new Map([['old',{viewportId:'old',x:0,y:0,width:1,height:1,displaySetInstanceUIDs:['ds-current']}]]);
-const grid={getState:()=>({layout:{numRows:1,numCols:1,layoutType:'grid',version:0},activeViewportId:[...viewports.keys()][0],viewports}),
- setLayout:async value=>{setCalls.push(value);const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs}));}};
+let layout={numRows:1,numCols:1,layoutType:'grid',version:0},activeViewportId='old';
+const grid={getState:()=>({layout,activeViewportId,viewports}),
+ setLayout:value=>{setCalls.push(value);const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));
+   setTimeout(()=>{layout={numRows:value.numRows,numCols:value.numCols,layoutType:'grid',version:layout.version+1};activeViewportId=value.activeViewportId;
+     viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs}));},10);
+   return Promise.resolve();}};
 const viewport={type:'stack',getCurrentImageId:()=>'/synthetic/image',getCurrentImageIdIndex:()=>0,getCamera:()=>({scale:1}),getProperties:()=>({voiRange:{lower:-100,upper:200}})};
 const services={viewportGridService:grid,displaySetService:{getActiveDisplaySets:()=>sets,getDisplaySetByUID:id=>sets.find(s=>s.displaySetInstanceUID===id)},cornerstoneViewportService:{getCornerstoneViewport:()=>viewport}};
 window.mountLayout=()=>{viewerLayoutExtension.preRegistration({servicesManager:{services}});viewerLayoutExtension.onModeEnter()};

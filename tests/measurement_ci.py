@@ -20,6 +20,30 @@ SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E']
 PROFILES = {
+    'image-text': {
+        'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
+        'project_prefix': 'kin-image-text-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_image_text.py', 'ViewerImageTextE2E', 'ci-image-text'),),
+    },
+    'images-only': {
+        'out': ROOT / 'tests/e2e/artifacts/images-only-ci',
+        'project_prefix': 'kin-images-only-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_images_only.py', 'ViewerImagesOnlyE2E', 'ci-images-only'),),
+    },
+    'study-arrivals': {
+        'out': ROOT / 'tests/e2e/artifacts/study-arrivals-ci',
+        'project_prefix': 'kin-study-arrivals-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_study_arrivals.py', 'StudyArrivalsE2E', 'ci-study-arrivals'),),
+    },
+    'display-scope': {
+        'out': ROOT / 'tests/e2e/artifacts/display-scope-ci',
+        'project_prefix': 'kin-display-scope-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_display_scope.py', 'ViewerDisplayScopeE2E', 'ci-display-scope'),),
+    },
     'image-thumbnails': {
         'out': ROOT / 'tests/e2e/artifacts/image-thumbnails-ci',
         'project_prefix': 'kin-image-thumbs-ci-',

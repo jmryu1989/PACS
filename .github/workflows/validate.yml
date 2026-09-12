@@ -51,6 +51,34 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-thumbnails --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/worklist-image-preview.js --file worklist-v0/hpacs-lite/worklist-image-thumbnails.js --file tests/worklist_image_thumbnails_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_image_thumbnails_dom_test.py
+      - name: Narrow worklist row and image control hit targets
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py --file tests/worklist_image_thumbnails_dom_test.py --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
+      - name: Existing study arrivals and preserved reading inputs
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/worklist_arrivals_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_arrivals_dom_test.py
+      - name: Selected CT display controls and session loader boundaries
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/display-scope --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_display_scope_dom_test.py
+      - name: Images Only fullscreen lifecycle and source preservation
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/images-only --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-images-only.js --file tests/viewer_images_only_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_images_only_dom_test.py
+      - name: Images Only config loader mode and session boundaries
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/images-only-loader --cwd . --file config/ohif.js --file tests/viewer_images_only_loader_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_images_only_loader_dom_test.py
+      - name: Image text visibility and source preservation
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-text --cwd . --file worklist-v0/hpacs-lite/viewer-images-only.js --file worklist-v0/hpacs-lite/viewer-image-text.js --file tests/viewer_image_text_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_image_text_dom_test.py
+      - name: Image text config loader lifecycle
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-text-loader --cwd . --file config/ohif.js --file tests/viewer_image_text_loader_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_image_text_loader_dom_test.py
       - name: Source PDF owner identity and popup lifecycle boundaries
         timeout-minutes: 3
         run: |
@@ -137,6 +165,14 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_identity_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs
       - name: Editor link model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/editor-link --cwd . --file worklist-v0/hpacs-lite/viewer-editor-link.js --file tests/viewer_editor_link_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_editor_link_test.cjs
+      - name: Existing study instance and series arrival model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
+      - name: CT display target selection and atomic rollback model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/display-scope --cwd . --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_display_scope_test.cjs
+      - name: Images Only fullscreen owner and source lifecycle model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/images-only --cwd . --file worklist-v0/hpacs-lite/viewer-images-only.js --file tests/viewer_images_only_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_images_only_test.cjs
+      - name: Image text visibility source lifecycle model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/image-text --cwd . --file worklist-v0/hpacs-lite/viewer-image-text.js --file tests/viewer_image_text_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_image_text_test.cjs
       - name: Native PDF source key and mode lifecycle model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/source-pdf-key --cwd . --file config/ohif.js --file tests/viewer_dicom_pdf_key_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dicom_pdf_key_test.cjs
       - name: Personal Hanging Protocol shared schema and owner model

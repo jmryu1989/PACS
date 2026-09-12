@@ -121,6 +121,18 @@
     }
     return {kind:'no-match'};
   }
-  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,resolve};
+  function navigate(value,context,cursor,direction){
+    const library=normalize(value);if(!library)throw Error('Hanging Protocol 형식이 잘못되었습니다.');
+    if(!['previous','next'].includes(direction))throw Error('Hanging Protocol 이동 방향을 확인할 수 없습니다.');
+    if(cursor!==null&&!uuid(cursor))throw Error('마지막 적용 규칙을 확인할 수 없습니다.');
+    const matches=[];
+    for(const rule of library.rules)if(rule.enabled){const result=resolve(library,context,rule.id);if(result.kind==='match')matches.push(result);}
+    if(!matches.length)return {kind:'no-match',reason:'none'};
+    if(cursor===null)return direction==='next'?matches[0]:matches[matches.length-1];
+    const index=matches.findIndex(result=>result.rule.id===cursor.toLowerCase());
+    if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
+    const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
+  }
+  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,resolve,navigate};
   if(typeof module==='object'&&module.exports)module.exports=root.KinHangingProtocolModel;
 })(typeof globalThis==='object'?globalThis:this);

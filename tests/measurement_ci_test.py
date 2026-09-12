@@ -6,6 +6,32 @@ import measurement_ci as ci
 
 
 class MeasurementCiTests(unittest.TestCase):
+    def test_image_text_profile_is_exact_and_separate(self):
+        profile=ci.PROFILES['image-text']
+        self.assertEqual(profile['suites'],(('e2e/test_viewer_image_text.py','ViewerImageTextE2E','ci-image-text'),))
+        self.assertEqual(profile['out'].name,'image-text-ci')
+        self.assertEqual(profile['project_prefix'],'kin-image-text-ci-')
+        self.assertEqual(profile['suite_timeout'],900)
+
+    def test_images_only_profile_is_exact_and_separate(self):
+        profile=ci.PROFILES['images-only']
+        self.assertEqual(profile['suites'],(('e2e/test_viewer_images_only.py','ViewerImagesOnlyE2E','ci-images-only'),))
+        self.assertEqual(profile['out'].name,'images-only-ci')
+        self.assertEqual(profile['project_prefix'],'kin-images-only-ci-')
+        self.assertEqual(profile['suite_timeout'],900)
+
+    def test_study_arrivals_profile_is_exact_and_separate(self):
+        profile=ci.PROFILES['study-arrivals']
+        self.assertEqual(profile['suites'],(('e2e/test_study_arrivals.py','StudyArrivalsE2E','ci-study-arrivals'),))
+        self.assertEqual(profile['out'].name,'study-arrivals-ci')
+        self.assertEqual(profile['suite_timeout'],900)
+
+    def test_display_scope_profile_is_exact_and_separate(self):
+        profile=ci.PROFILES['display-scope']
+        self.assertEqual(profile['suites'],(('e2e/test_viewer_display_scope.py','ViewerDisplayScopeE2E','ci-display-scope'),))
+        self.assertEqual(profile['out'].name,'display-scope-ci')
+        self.assertEqual(profile['suite_timeout'],900)
+
     def test_image_thumbnails_profile_is_exact_and_separate(self):
         profile=ci.PROFILES['image-thumbnails']
         self.assertEqual(profile['suites'],(('e2e/test_image_thumbnails.py','ImageThumbnailsE2E','ci-image-thumbnails'),))
@@ -32,7 +58,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_profiles_are_exact_and_use_separate_owned_artifacts(self):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
-                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails'})
+                          'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -136,6 +162,11 @@ class MeasurementCiTests(unittest.TestCase):
         for required in ['workflow_dispatch:', 'runs-on: ubuntu-24.04',
                          'ref: ${{ github.sha }}', 'persist-credentials: false',
                          'default: output-integration', '- identity-fields',
+                         '- images-only', 'tests/e2e/artifacts/images-only-ci/',
+                         '- image-text', 'tests/e2e/artifacts/image-text-ci/',
+                         'tests/e2e/artifacts/IMAGE-TEXT-*.png',
+                         'tests/e2e/artifacts/IMAGES-ONLY-*.png',
+                         'tests/e2e/artifacts/test_images_only_*.png',
                          'KIN_CI_PROFILE: ${{ inputs.profile }}',
                          'tests/measurement_ci.py --profile "$KIN_CI_PROFILE"',
                          'if: always()', 'retention-days: 7']:

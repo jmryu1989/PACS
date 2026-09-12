@@ -14,6 +14,7 @@ HARNESS = r"""
 <div id="host"></div><textarea id="report">KEEP REPORT</textarea>
 <script>
 window.BroadcastChannel=undefined;
+window.unhandled=[];window.addEventListener('unhandledrejection',event=>{unhandled.push(String(event.reason));event.preventDefault();});
 const owner={institution:'hospital',subject:'reader'};
 const studies=[{uid:'1.2.1',sourcePatientKey:'hospital|patient',date:'20260912',modality:'CT',desc:'Head CT'},
  {uid:'1.2.2',sourcePatientKey:'hospital|patient',date:'20250912',modality:'CT',desc:'Old Head CT'}];
@@ -22,13 +23,14 @@ const sets=[
  {displaySetInstanceUID:'ds-current',StudyInstanceUID:'1.2.1',SeriesInstanceUID:'1.2.1.1',SeriesNumber:1,SeriesDescription:'Brain Axial',Modality:'CT',images:[image(),image()]},
  {displaySetInstanceUID:'ds-related',StudyInstanceUID:'1.2.2',SeriesInstanceUID:'1.2.2.1',SeriesNumber:1,SeriesDescription:'Brain Prior',Modality:'CT',images:[image(),image()]}
 ];
-let layoutVersion=0,layoutRows=1,layoutCols=1,setCalls=[],failAfterMutation=false;
+let layoutVersion=0,layoutRows=1,layoutCols=1,setCalls=[],failAfterMutation=false,hpSubscribers=[],activeViewportId=null,holdLayout=false,holdLayoutCount=0,layoutResolve=null,heldLayouts=[],delayTarget=false,targetResolve=null,rejectBeforeTarget=false;
 const viewports=new Map([['old',{viewportId:'old',x:0,y:0,width:1,height:1,displaySetInstanceUIDs:['ds-current']}]])
-const grid={getState:()=>({layout:{numRows:layoutRows,numCols:layoutCols,layoutType:'grid',version:layoutVersion},activeViewportId:[...viewports.keys()][0],viewports}),
- setLayout:async value=>{setCalls.push(value);layoutVersion++;layoutRows=value.numRows;layoutCols=value.numCols;const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs}));if(failAfterMutation){failAfterMutation=false;throw Error('synthetic native failure');}}};
+const grid={EVENTS:{GRID:'grid'},subscribe:(_,fn)=>{hpSubscribers.push(fn);return{unsubscribe(){hpSubscribers=hpSubscribers.filter(x=>x!==fn)}}},getState:()=>({layout:{numRows:layoutRows,numCols:layoutCols,layoutType:'grid',version:layoutVersion},activeViewportId:activeViewportId||[...viewports.keys()][0],viewports}),
+ setLayout:async value=>{setCalls.push(value);const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));const install=()=>{layoutVersion++;layoutRows=value.numRows;layoutCols=value.numCols;viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs}));};if(delayTarget){delayTarget=false;targetResolve=install;if(rejectBeforeTarget){rejectBeforeTarget=false;throw Error('synthetic deferred dispatch failure');}return;}install();const shouldHold=holdLayout||holdLayoutCount>0;if(holdLayoutCount>0)holdLayoutCount--;if(shouldHold)await new Promise((resolve,reject)=>{layoutResolve=resolve;heldLayouts.push({resolve,reject});});if(failAfterMutation){failAfterMutation=false;throw Error('synthetic native failure');}}};
 let camera={scale:1},properties={voiRange:{lower:-100,upper:200}};
 const viewport={type:'stack',getCurrentImageId:()=>'/studies/1.2.1/series/1.2.1.1/instances/1',getCurrentImageIdIndex:()=>0,getCamera:()=>camera,getProperties:()=>properties};
-const services={viewportGridService:grid,displaySetService:{getActiveDisplaySets:()=>sets},cornerstoneViewportService:{getCornerstoneViewport:()=>viewport}};
+const services={viewportGridService:grid,displaySetService:{EVENTS:{CHANGED:'changed'},subscribe:(_,fn)=>{hpSubscribers.push(fn);return{unsubscribe(){hpSubscribers=hpSubscribers.filter(x=>x!==fn)}}},getActiveDisplaySets:()=>sets},cornerstoneViewportService:{getCornerstoneViewport:()=>viewport}};
+window.emitHP=()=>hpSubscribers.slice().forEach(fn=>fn());
 let accessResolve=null,holdAccess=false;
 const access=()=>holdAccess?new Promise(resolve=>accessResolve=()=>resolve({studies,displaySets:sets})):Promise.resolve({studies,displaySets:sets});
 const responses=[],requests=[];
@@ -50,6 +52,14 @@ def rule(name="Brain CT"):
 
 def library(name="Brain CT"):
     return {"version":1,"activeRuleId":"11111111-1111-4111-8111-111111111111","rules":[rule(name)]}
+
+def navigation_library():
+    value=library("First CT")
+    disabled=rule("Disabled");disabled["id"]="22222222-2222-4222-8222-222222222222";disabled["enabled"]=False
+    missed=rule("MR only");missed["id"]="33333333-3333-4333-8333-333333333333";missed["match"]["modality"]="MR"
+    last=rule("Last CT");last["id"]="44444444-4444-4444-8444-444444444444"
+    value["rules"]=[value["rules"][0],disabled,missed,last]
+    return value
 
 class ViewerHangingProtocolDOMTest(unittest.TestCase):
     @classmethod
@@ -166,6 +176,108 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         self.page.evaluate("localStorage.setItem(KinHangingProtocolModel.ownerKey(owner),'{}');__mount()")
         expect(self.page.locator('#kin-hp-status')).to_contain_text('손상')
         self.assertEqual('{}',self.page.evaluate('localStorage.getItem(KinHangingProtocolModel.ownerKey(owner))'))
+
+    def test_previous_next_use_success_cursor_skip_rules_and_do_not_wrap(self):
+        self.seed(navigation_library())
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.select_option('#kin-hp-rule','44444444-4444-4444-8444-444444444444');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.evaluate("camera={scale:9};activeViewportId=[...viewports.keys()].at(-1);layoutVersion++;emitHP()")
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Last CT')
+        calls=self.page.evaluate('setCalls.length');self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('저장 순서의 끝')
+        self.assertEqual(calls,self.page.evaluate('setCalls.length'))
+        self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+        self.page.evaluate("hp.end();document.querySelector('#host').textContent='';__mount()")
+        self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Last CT')
+
+    def test_navigation_failure_dirty_and_manual_source_change_do_not_advance_stale_cursor(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate('failAfterMutation=true');self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('synthetic native failure')
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('Last CT')
+        self.page.evaluate("[...viewports.values()][0].displaySetInstanceUIDs=['ds-related']")
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate("window.kinViewerJobWorkspaceState=()=>({dirty:true,busy:false})");calls=self.page.evaluate('setCalls.length');self.page.locator('#kin-hp-previous').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('저장하지 않은')
+        self.assertEqual(calls,self.page.evaluate('setCalls.length'))
+        self.page.evaluate("window.kinViewerJobWorkspaceState=()=>({dirty:false,busy:false});[...viewports.values()][0].displaySetInstanceUIDs=['ds-related'];emitHP()")
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate("sets[0].images.push(image());emitHP()")
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+
+    def test_import_and_empty_account_load_invalidate_applied_cursor_without_applying(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        calls=self.page.evaluate('setCalls.length');payload=navigation_library();payload['rules'][0]['name']='Imported First'
+        self.page.locator('#kin-hp-import').set_input_files({'name':'rules.json','mimeType':'application/json','buffer':json.dumps(payload).encode()})
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');self.assertEqual(calls,self.page.evaluate('setCalls.length'))
+        self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('Imported First')
+        self.page.evaluate("responses.push(response({owner,revision:9,value:null}))");self.page.locator('#kin-hp-load-account').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('저장된 Hanging Protocol이 없습니다')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');self.assertEqual(calls+1,self.page.evaluate('setCalls.length'))
+
+    def test_navigation_late_frame_change_rejects_without_setting_cursor(self):
+        self.seed(navigation_library());self.page.evaluate('holdAccess=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof accessResolve==="function"')
+        self.page.evaluate('camera={scale:7};accessResolve()');expect(self.page.locator('#kin-hp-status')).to_contain_text('변경되어 적용하지 않았습니다')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');self.assertEqual(0,self.page.evaluate('setCalls.length'))
+        self.page.evaluate('holdAccess=true');self.page.locator('#kin-hp-previous').click();self.page.wait_for_function('typeof accessResolve==="function"')
+        self.page.evaluate('hp.end();accessResolve()');expect(self.page.locator('#kin-hp-previous')).to_be_disabled()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');self.assertEqual(0,self.page.evaluate('setCalls.length'))
+
+    def test_edit_during_native_layout_completion_cannot_advance_applied_cursor(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate('holdLayout=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof layoutResolve==="function"')
+        self.page.evaluate("()=>{const input=[...document.querySelectorAll('input')].find(value=>value.labels?.[0]?.textContent==='Name');input.value='Changed During Layout';input.dispatchEvent(new Event('change'));layoutResolve();}")
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');expect(self.page.locator('#kin-hp-status')).not_to_contain_text('Applied: Last CT')
+
+    def test_resolved_native_dispatch_waits_for_observable_target_before_success(self):
+        self.seed(navigation_library());self.page.evaluate('delayTarget=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof targetResolve==="function"')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        self.page.evaluate('targetResolve()');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: First CT')
+
+    def test_native_layout_resolving_after_apply_timeout_cannot_advance_cursor_or_leave_pending_status(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate("()=>{window.realSetTimeout=window.setTimeout;window.setTimeout=(fn,ms,...args)=>realSetTimeout(fn,ms===10000?10:ms===2000?15:ms,...args);holdLayout=true;}")
+        self.page.locator('#kin-hp-next').click();self.page.wait_for_function('heldLayouts.length===2')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('뷰어 창을 닫은 뒤 다시 열어 주세요');expect(self.page.locator('#kin-hp-status')).not_to_contain_text('확인 중')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');expect(self.page.locator('#kin-hp-next')).to_be_disabled();expect(self.page.get_by_label('Name')).to_be_enabled()
+        calls=self.page.evaluate("setCalls.length");self.page.evaluate("document.querySelector('#kin-hp-next').click()");self.assertEqual(calls,self.page.evaluate('setCalls.length'))
+        self.page.evaluate("heldLayouts.forEach(item=>item.reject(Error('late native rejection')))");self.page.wait_for_timeout(30);self.assertEqual([],self.page.evaluate('unhandled'))
+
+    def test_access_provider_ignoring_abort_cannot_dispatch_layout_after_timeout(self):
+        self.seed(navigation_library());self.page.evaluate("()=>{window.realSetTimeout=window.setTimeout;window.setTimeout=(fn,ms,...args)=>realSetTimeout(fn,ms===10000?10:ms,...args);holdAccess=true;}")
+        self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof accessResolve==="function"');expect(self.page.locator('#kin-hp-status')).to_contain_text('응답 시간이 지나')
+        expect(self.page.locator('#kin-hp-next')).to_be_enabled();self.page.evaluate('accessResolve()');self.page.wait_for_timeout(30)
+        self.assertEqual(0,self.page.evaluate('setCalls.length'));expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None');self.assertEqual([],self.page.evaluate('unhandled'))
+
+    def test_confirmed_restore_still_quarantines_an_unsettled_original_native_call(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        before=self.page.evaluate("()=>[...viewports.values()].map(value=>[value.viewportId,value.displaySetInstanceUIDs])")
+        self.page.evaluate("()=>{window.realSetTimeout=window.setTimeout;window.setTimeout=(fn,ms,...args)=>realSetTimeout(fn,ms===10000?10:ms,...args);holdLayoutCount=1;}")
+        self.page.locator('#kin-hp-next').click();self.page.wait_for_function('heldLayouts.length===1');expect(self.page.locator('#kin-hp-status')).to_contain_text('뷰어 창을 닫은 뒤 다시 열어 주세요')
+        self.assertEqual(before,self.page.evaluate("()=>[...viewports.values()].map(value=>[value.viewportId,value.displaySetInstanceUIDs])"));expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        expect(self.page.locator('#kin-hp-next')).to_be_disabled();expect(self.page.get_by_label('Name')).to_be_enabled();calls=self.page.evaluate('setCalls.length')
+        self.page.evaluate("heldLayouts[0].reject(Error('late original rejection'));document.querySelector('#kin-hp-next').click()");self.page.wait_for_timeout(30)
+        self.assertEqual(calls,self.page.evaluate('setCalls.length'));expect(self.page.locator('#kin-hp-next')).to_be_disabled();self.assertEqual([],self.page.evaluate('unhandled'))
+
+    def test_rejected_dispatch_that_commits_late_is_restored_only_without_intervening_input(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        before=self.page.evaluate("()=>[...viewports.values()].map(value=>[value.viewportId,value.displaySetInstanceUIDs])")
+        self.page.evaluate('delayTarget=true;rejectBeforeTarget=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof targetResolve==="function"')
+        self.page.evaluate('lateInstall=targetResolve;delayTarget=true;lateInstall()');self.page.wait_for_function('setCalls.length===3&&targetResolve!==lateInstall');self.page.evaluate('targetResolve()')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('synthetic deferred dispatch failure');expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.assertEqual(before,self.page.evaluate("()=>[...viewports.values()].map(value=>[value.viewportId,value.displaySetInstanceUIDs])"));self.assertEqual(3,self.page.evaluate('setCalls.length'))
+
+    def test_rejected_dispatch_never_restores_over_intervening_camera_input(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate('delayTarget=true;rejectBeforeTarget=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof targetResolve==="function"');self.page.evaluate("camera={scale:77};document.dispatchEvent(new WheelEvent('wheel'));targetResolve()")
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('복원 완료를 확인하지 못했습니다');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        self.assertEqual(2,self.page.evaluate('setCalls.length'));self.assertEqual(77,self.page.evaluate('camera.scale'))
+
+    def test_rejected_dispatch_never_restores_when_input_follows_late_target_in_same_turn(self):
+        self.seed(navigation_library());self.page.locator('#kin-hp-next').click();expect(self.page.locator('#kin-hp-applied')).to_contain_text('First CT')
+        self.page.evaluate('delayTarget=true;rejectBeforeTarget=true');self.page.locator('#kin-hp-next').click();self.page.wait_for_function('typeof targetResolve==="function"')
+        self.page.evaluate("targetResolve();camera={scale:88};document.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight'}))")
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('복원 완료를 확인하지 못했습니다');expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        self.assertEqual(2,self.page.evaluate('setCalls.length'));self.assertEqual(88,self.page.evaluate('camera.scale'))
 
     def test_delayed_import_cannot_replace_newer_edits_or_retired_editor(self):
         self.seed()

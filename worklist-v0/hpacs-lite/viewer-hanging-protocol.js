@@ -6,7 +6,8 @@
     const boundOwner=model.owner(options.owner),key=model.ownerKey(boundOwner),storage=options.storage||root.localStorage;
     const live=options.live||(()=>true),fetcher=options.fetcher||root.fetch.bind(root),endpoint=options.endpoint||'/api/hanging-protocols';
     const grid=services.viewportGridService,displaySets=services.displaySetService,objects=new WeakMap();let objectSequence=0;
-    let library=model.empty(),selected=null,revision=null,busy=false,ended=false,generation=0,request=null,channel=null,storageError='';
+    let library=model.empty(),selected=null,revision=null,busy=false,ended=false,generation=0,request=null,channel=null,storageError='',appliedCursor=null,appliedFingerprint=null,appliedName=null,layoutQuarantined=false;
+    const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
     host.textContent='';host.classList.add('kin-hanging-protocols');
     function make(tag,text,id){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(id)node.id=id;return node;}
@@ -32,15 +33,17 @@
     for(const [action,label] of Object.entries(actions)){const button=make('button',label,'kin-hp-'+action);button.type='button';button.dataset.action=action;toolbar.append(button);}
     const editor=make('div');editor.id='kin-hp-editor';host.append(editor);
     const operations=make('div');operations.className='kin-hp-operations';host.append(operations);
-    for(const [action,label] of [['apply','Apply'],['apply-first','Apply First Match'],['save-local','Save Draft'],['load-account','Load from Account'],['save-account','Save to Account'],['reset-account','Reset Account'],['export','Export']]){
+    for(const [action,label] of [['previous','Previous Protocol'],['next','Next Protocol'],['apply','Apply'],['apply-first','Apply First Match'],['save-local','Save Draft'],['load-account','Load from Account'],['save-account','Save to Account'],['reset-account','Reset Account'],['export','Export']]){
       const button=make('button',label,'kin-hp-'+action);button.type='button';button.dataset.operation=action;operations.append(button);
     }
     const importLabel=make('label','Import');const importInput=make('input',undefined,'kin-hp-import');importInput.type='file';importInput.accept='application/json,.json';importLabel.append(importInput);operations.append(importLabel);
+    const applied=make('p','Applied Protocol: None','kin-hp-applied');host.append(applied);
     const status=make('p',storageError, 'kin-hp-status');status.setAttribute('role','status');host.append(status);
     const buttons=()=>[...host.querySelectorAll('button,input,select')];
     const clone=v=>structuredClone(v),fold=v=>v.normalize('NFKC').toLocaleLowerCase('en-US');
     function cleanText(input,max){const value=input.value.trim();return value.slice(0,max);}
-    function markChanged(){generation++;refresh();}
+    function invalidateApplied(){appliedCursor=appliedFingerprint=appliedName=null;applied.textContent='Applied Protocol: None';}
+    function markChanged(){generation++;invalidateApplied();refresh();}
     function current(){return library.rules.find(rule=>rule.id===selected)||null;}
     function selectActive(){const rule=current();library.activeRuleId=rule?.enabled?rule.id:null;}
     function addInput(parent,label,value,onchange,options){
@@ -86,7 +89,7 @@
     function uniqueAlias(rule,base){const used=new Set(rule.selectors.map(s=>fold(s.alias)));let alias=base,n=2;while(used.has(fold(alias)))alias=base+n++;return alias;}
     function strict(){const value=model.normalize(library);if(!value)throw Error('규칙의 이름, 조건, selector, Current cell을 확인하세요.');return value;}
     function saveLocal(value,message='이 브라우저에 규칙 초안을 저장했습니다.'){
-      library=model.write(storage,key,value);selected=library.activeRuleId||library.rules[0]?.id||null;status.textContent=message;render();return library;
+      library=model.write(storage,key,value);selected=library.activeRuleId||library.rules[0]?.id||null;invalidateApplied();status.textContent=message;render();return library;
     }
     const ordered=state=>[...state.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
     function stateSignature(){const state=grid.getState(),views=ordered(state);return JSON.stringify([state.layout,state.activeViewportId,views.map(v=>[v.viewportId,v.x,v.y,v.width,v.height,v.displaySetInstanceUIDs])]);}
@@ -98,6 +101,11 @@
       const sources=displaySets.getActiveDisplaySets().map(value=>[objectId(value),objectId(value.images),value.displaySetInstanceUID,value.StudyInstanceUID,value.SeriesInstanceUID,value.images?.length??null]);
       return JSON.stringify([stateSignature(),views,sources]);
     }
+    function navigationFingerprint(){
+      const state=grid.getState(),layout=state.layout,views=ordered(state).map(value=>[value.x,value.y,value.width,value.height,value.displaySetInstanceUIDs]);
+      const sources=displaySets.getActiveDisplaySets().map(value=>[objectId(value),objectId(value.images),value.displaySetInstanceUID,value.StudyInstanceUID,value.SeriesInstanceUID,value.images?.length??null]);
+      return JSON.stringify([[layout?.layoutType,layout?.numRows,layout?.numCols],views,sources]);
+    }
     function rollbackSnapshot(){
       const state=grid.getState(),layout=state.layout,views=ordered(state),rows=layout?.numRows,cols=layout?.numCols;
       if(layout?.layoutType!=='grid'||!Number.isInteger(rows)||!Number.isInteger(cols)||views.length!==rows*cols)return null;
@@ -107,6 +115,45 @@
       return cells.some(cell=>cell===null)?null:{rows,cols,active:state.activeViewportId,cells};
     }
     function targetIsCurrent(ids,result){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===result.rule.layout.rows&&state.layout?.numCols===result.rule.layout.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(result.cells[index]?[result.cells[index].displaySetInstanceUID]:[]));}
+    function boundedNative(promise,{signal=null,timeout=0}={}){
+      const task=Promise.resolve(promise);task.catch(()=>{});
+      return new Promise((resolve,reject)=>{
+        let settled=false,timer=null;const finish=(fn,value)=>{if(settled)return;settled=true;if(timer!==null)clearTimeout(timer);signal?.removeEventListener?.('abort',aborted);fn(value);};
+        const aborted=()=>finish(reject,new DOMException('Aborted','AbortError'));
+        task.then(value=>finish(resolve,value),error=>finish(reject,error));
+        if(signal){if(signal.aborted)aborted();else signal.addEventListener('abort',aborted,{once:true});}
+        if(timeout>0&&!settled)timer=setTimeout(()=>finish(reject,Error('Native layout timeout')),timeout);
+      });
+    }
+    async function waitForTarget(ids,result,signal,beforeGeneration){
+      for(let count=0;count<80;count++){
+        if(targetIsCurrent(ids,result))return;
+        if(signal.aborted)throw new DOMException('Aborted','AbortError');
+        if(ended||!live()||beforeGeneration!==generation)throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      throw Error('영상 배치 완료를 확인하지 못해 현재 적용 기준을 갱신하지 않았습니다.');
+    }
+    function snapshotIsCurrent(snapshot){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===snapshot.rows&&state.layout?.numCols===snapshot.cols&&views.length===snapshot.cells.length&&views.every((view,index)=>view.viewportId===snapshot.cells[index].id&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(snapshot.cells[index].sets));}
+    async function observeLateTarget(ids,result,beforeGeneration,beforeInteraction,userChanged){
+      for(let count=0;count<80;count++){
+        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe())return null;
+        if(targetIsCurrent(ids,result))return interactionFingerprint();
+        if(interactionFingerprint()!==beforeInteraction)return null;
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      return null;
+    }
+    async function restoreOwnedTarget(snapshot,ids,result,ownedFingerprint,beforeGeneration,userChanged){
+      if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!targetIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+      const deadline=Date.now()+2000;try{await boundedNative(restore(snapshot),{timeout:2000});}catch(_){return false;}
+      for(let count=0;count<80&&Date.now()<deadline;count++){
+        if(snapshotIsCurrent(snapshot))return true;
+        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!targetIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      return false;
+    }
     const restore=snapshot=>grid.setLayout({numRows:snapshot.rows,numCols:snapshot.cols,activeViewportId:snapshot.active,isHangingProtocolLayout:false,
       findOrCreateViewport:index=>({displaySetInstanceUIDs:snapshot.cells[index].sets,displaySetOptions:[{}],viewportOptions:{viewportId:snapshot.cells[index].id,viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
     function workspaceSafe(){
@@ -125,24 +172,38 @@
       await session(signal);const response=await fetcher('/api/studies',{credentials:'same-origin',cache:'no-store',signal,headers:{'X-KIN-CSRF':'1'}});if(!response.ok)throw Error('검사 접근 권한을 확인할 수 없습니다.');
       const data=await json(response),uids=urlStudies();if(!uids||!Array.isArray(data.studies))throw Error('현재 검사 범위를 확인할 수 없습니다.');const studies=uids.map(uid=>data.studies.find(s=>s.uid===uid));if(studies.some(v=>!v))throw Error('현재 검사 접근 권한을 확인할 수 없습니다.');return {studies,displaySets:displaySets.getActiveDisplaySets()};
     }
-    async function runApply(firstMatch=false){
-      if(busy||ended||!live())return;if(!workspaceSafe()){status.textContent='저장하지 않은 영상 작업이 있어 배치를 변경하지 않았습니다.';return;}
+    async function runApply(firstMatch=false,navigation=null){
+      if(busy||ended||!live())return;if(layoutQuarantined){status.textContent='이전 배치 요청의 완료를 확인하지 못했습니다. 뷰어 창을 닫고 다시 열어 주세요.';return;}if(!workspaceSafe()){status.textContent='저장하지 않은 영상 작업이 있어 배치를 변경하지 않았습니다.';return;}
       let value;try{value=strict();}catch(error){status.textContent=error.message;return;}
-      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);status.textContent='검사와 규칙을 확인 중…';
+      if(navigation&&appliedCursor&&appliedFingerprint!==navigationFingerprint())invalidateApplied();
+      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false;
+      const noteInteraction=()=>{if(interactionArmed)userInteracted=true;};for(const type of ['pointerdown','wheel','keydown'])document.addEventListener(type,noteInteraction,true);queueMicrotask(()=>interactionArmed=true);status.textContent='검사와 규칙을 확인 중…';
       try{
-        const context=await verifiedContext(request.signal);if(ended||!live()||beforeGeneration!==generation||before!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
-        const result=model.resolve(value,{studies:context.studies,displaySets:context.displaySets||displaySets.getActiveDisplaySets()},firstMatch?null:selected);
-        if(result.kind==='no-match'){status.textContent='일치하는 규칙이 없어 현재 배치를 유지합니다.';return;}
+        const context=await boundedNative(verifiedContext(request.signal),{signal:request.signal});if(request.signal.aborted||ended||!live()||beforeGeneration!==generation||before!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
+        const resolveContext={studies:context.studies,displaySets:context.displaySets||displaySets.getActiveDisplaySets()};
+        const result=navigation?model.navigate(value,resolveContext,appliedCursor,navigation):model.resolve(value,resolveContext,firstMatch?null:selected);
+        if(result.kind==='no-match'){
+          status.textContent=navigation?(result.reason==='end'?`${navigation==='next'?'Next':'Previous'} Protocol: 저장 순서의 끝입니다. 현재 배치를 유지합니다.`:`${navigation==='next'?'Next':'Previous'} Protocol: 현재 검사와 일치하는 규칙이 없습니다. 현재 배치를 유지합니다.`):'일치하는 규칙이 없어 현재 배치를 유지합니다.';return;
+        }
         if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
         const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 stack grid에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
         const ids=result.cells.map(()=>`kin-hp-${crypto.randomUUID()}`),active=result.cells.findIndex(Boolean);
-        let targetFingerprint=null;
-        try{const pending=grid.setLayout({numRows:result.rule.layout.rows,numCols:result.rule.layout.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
-          findOrCreateViewport:index=>({displaySetInstanceUIDs:result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
-          if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await pending;}
-        catch(error){if(beforeGeneration===generation&&live()&&targetFingerprint!==null&&targetIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint())try{await restore(snapshot);}catch(_){}throw error;}
-        if(live())status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;
-      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);request=null;busy=false;refresh();}
+        let targetFingerprint=null,nativeSettled=false;
+        try{const pending=Promise.resolve(grid.setLayout({numRows:result.rule.layout.rows,numCols:result.rule.layout.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
+          findOrCreateViewport:index=>({displaySetInstanceUIDs:result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})}));
+          pending.then(()=>nativeSettled=true,()=>nativeSettled=true);
+          if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await boundedNative(pending,{signal:request.signal});if(!targetIsCurrent(ids,result))await waitForTarget(ids,result,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();
+          if(request.signal.aborted)throw new DOMException('Aborted','AbortError');
+          if(ended||!live()||beforeGeneration!==generation||!targetIsCurrent(ids,result)||targetFingerprint!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용 기준을 갱신하지 않았습니다.');}
+        catch(error){
+          let owned=targetFingerprint!==null&&!userInteracted&&workspaceSafe()&&targetIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint()?targetFingerprint:null;
+          if(owned===null&&targetFingerprint===null&&beforeGeneration===generation&&live()&&!ended)owned=await observeLateTarget(ids,result,beforeGeneration,before,()=>userInteracted);
+          const restored=owned!==null&&await restoreOwnedTarget(snapshot,ids,result,owned,beforeGeneration,()=>userInteracted);
+          if(!restored||!nativeSettled){layoutQuarantined=true;invalidateApplied();const uncertain=Error('배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인하고 뷰어 창을 닫은 뒤 다시 열어 주세요.');uncertain.name='KinLayoutUnconfirmed';throw uncertain;}
+          throw error;
+        }
+        appliedCursor=result.rule.id;appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;applied.textContent=`Applied Protocol: ${appliedName}`;status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;
+      }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }
     async function account(action){
       if(busy||ended||!boundOwner)return;let value=null;
@@ -157,7 +218,7 @@
         await session(request.signal);if(ended||!live())return;
         if(action==='load'&&before!==generation)throw Error('편집 중 규칙이 바뀌어 계정 값을 불러오지 않았습니다.');
         revision=data.revision;
-        if(action==='load'){if(data.value)saveLocal(data.value,'계정 규칙을 불러와 이 브라우저에 저장했습니다. Apply를 눌러 적용하세요.');else status.textContent='계정에 저장된 Hanging Protocol이 없습니다.';}
+        if(action==='load'){invalidateApplied();if(data.value)saveLocal(data.value,'계정 규칙을 불러와 이 브라우저에 저장했습니다. Apply를 눌러 적용하세요.');else status.textContent='계정에 저장된 Hanging Protocol이 없습니다.';}
         else if(action==='reset')status.textContent='계정 규칙을 초기화했습니다. 현재 초안과 화면은 유지됩니다.';
         else status.textContent=before===generation?'계정에 규칙을 저장했습니다.':'요청 당시 규칙을 저장했습니다. 이후 편집은 저장되지 않았습니다.';
       }catch(error){if(!ended)status.textContent=error?.name==='AbortError'||error instanceof TypeError?'계정 응답을 확인하지 못했습니다. 다시 불러오세요.':error.message;}finally{clearTimeout(timer);request=null;busy=false;refresh();}
@@ -168,9 +229,9 @@
       const needsRule=['kin-hp-duplicate','kin-hp-delete','kin-hp-up','kin-hp-down','kin-hp-apply'].includes(control.id)||control.textContent==='Remove Selector';
       const needsOwner=['kin-hp-save-local','kin-hp-load-account','kin-hp-save-account','kin-hp-reset-account'].includes(control.id);
       const needsRevision=['kin-hp-save-account','kin-hp-reset-account'].includes(control.id);
-      control.disabled=busy||ended||needsRule&&!current()||needsOwner&&!boundOwner||needsRevision&&revision===null||control.dataset.requiresSelectorSlot==='true'&&current()?.selectors.length>=model.MAX_SELECTORS||control.id==='kin-hp-new'&&library.rules.length>=model.MAX_RULES||control.id==='kin-hp-apply-first'&&!library.rules.some(rule=>rule.enabled);
+      control.disabled=busy||ended||layoutQuarantined&&['kin-hp-apply','kin-hp-apply-first','kin-hp-previous','kin-hp-next'].includes(control.id)||needsRule&&!current()||needsOwner&&!boundOwner||needsRevision&&revision===null||control.dataset.requiresSelectorSlot==='true'&&current()?.selectors.length>=model.MAX_SELECTORS||control.id==='kin-hp-new'&&library.rules.length>=model.MAX_RULES||['kin-hp-apply-first','kin-hp-previous','kin-hp-next'].includes(control.id)&&!library.rules.some(rule=>rule.enabled);
     });choose.disabled=busy||ended||library.rules.length===0;}
-    choose.onchange=()=>{selected=choose.value||null;selectActive();markChanged();render();};
+    choose.onchange=()=>{selected=choose.value||null;selectActive();generation++;refresh();render();};
     toolbar.addEventListener('click',event=>{const action=event.target.dataset.action;if(!action)return;const index=library.rules.findIndex(r=>r.id===selected),rule=current();
       if(action==='new'){const next=blankRule();next.name=uniqueName(next.name);library.rules.push(next);selected=next.id;}
       if(action==='duplicate'&&rule){const next=clone(rule);next.id=crypto.randomUUID();next.name=uniqueName(rule.name+' Copy');library.rules.splice(index+1,0,next);selected=next.id;}
@@ -179,7 +240,7 @@
       if(action==='down'&&index>=0&&index<library.rules.length-1)[library.rules[index],library.rules[index+1]]=[library.rules[index+1],library.rules[index]];
       selectActive();markChanged();render();});
     operations.addEventListener('click',event=>{const action=event.target.dataset.operation;if(!action)return;
-      if(action==='apply'||action==='apply-first')runApply(action==='apply-first');else if(action==='save-local'){try{saveLocal(strict());}catch(error){status.textContent=error.message;}}
+      if(action==='apply'||action==='apply-first')runApply(action==='apply-first');else if(action==='previous'||action==='next')runApply(false,action);else if(action==='save-local'){try{saveLocal(strict());}catch(error){status.textContent=error.message;}}
       else if(action==='load-account')account('load');else if(action==='save-account')account('save');else if(action==='reset-account')account('reset');
       else if(action==='export'){try{const blob=new Blob([JSON.stringify(strict(),null,2)+'\n'],{type:'application/json'}),a=make('a');a.href=URL.createObjectURL(blob);a.download='hanging-protocols.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),0);status.textContent='환자 정보 없이 규칙 정의를 내보냈습니다.';}catch(error){status.textContent=error.message;}}});
     importInput.onchange=async()=>{
@@ -193,8 +254,10 @@
         library=value;selected=value.activeRuleId||value.rules[0]?.id||null;markChanged();render();status.textContent='규칙을 초안으로 가져왔습니다. Save Draft 또는 Save to Account를 선택하세요.';
       }catch(error){if(!ended)status.textContent=error instanceof SyntaxError?'가져올 JSON 형식이 잘못되었습니다.':error.message;}
     };
-    function end(){ended=true;request?.abort();channel?.close();root.removeEventListener?.('storage',storageEnd);refresh();}
+    function end(){ended=true;request?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});root.removeEventListener?.('storage',storageEnd);refresh();}
     const storageEnd=event=>{if(event.key==='kin-session-ended')end();};root.addEventListener?.('storage',storageEnd);try{channel=new BroadcastChannel('kin-session');channel.onmessage=event=>{if(event.data?.type==='session-ended')end();};}catch(_){}
+    const navigationChanged=()=>{if(!busy&&appliedCursor&&appliedFingerprint!==navigationFingerprint()){invalidateApplied();refresh();}};
+    for(const service of [grid,displaySets])for(const event of new Set(Object.values(service?.EVENTS||{})))try{subscriptions.push(service.subscribe(event,navigationChanged));}catch(_){}
     render();return {read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation};
   }
   root.KinViewerHangingProtocol={mount};if(typeof module==='object'&&module.exports)module.exports=root.KinViewerHangingProtocol;
