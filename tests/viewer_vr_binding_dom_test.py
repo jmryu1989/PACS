@@ -101,6 +101,31 @@ class ViewerVrBindingDOMTest(unittest.TestCase):
                 finally:
                     page.close()
 
+    def test_three_planes_beside_an_empty_cell_keep_the_mpr_tools_and_vr_bound(self):
+        """A Hanging Protocol opens the three planes in a 2x2 grid, so one cell stays empty."""
+        page = self.page_with_vr()
+        try:
+            page.evaluate("tick(500)")
+            self.assertFalse(page.evaluate("document.querySelector('#kin-volume-orientation').hidden"))
+            before = page.evaluate("document.querySelector('#kin-volume-orientation .target').textContent")
+            self.assertIn('Center', before)
+            page.evaluate("""()=>{const vacancy={viewportId:'vacancy',x:1,y:1,isReady:true,displaySetInstanceUIDs:[]};
+              cells.push(vacancy);grid.viewports.set('vacancy',vacancy);tick(500);}""")
+            self.assertFalse(page.evaluate("document.querySelector('#kin-volume-orientation').hidden"),
+                             "an empty fourth cell does not hide the three-plane tools")
+            self.assertEqual(before, page.evaluate("document.querySelector('#kin-volume-orientation .target').textContent"))
+            self.assertFalse(page.evaluate("document.querySelector('#kin-volume-orientation button').disabled"),
+                             "Rotate Three Planes stays usable beside an empty cell")
+            self.open_ready(page)
+            self.assertEqual([], page.evaluate("repairs"), "the empty cell is not a native readiness repair target")
+            # A fourth cell that actually shows something is not a three-plane screen.
+            page.evaluate("""()=>{const extra={viewportId:'extra',x:0,y:1,isReady:true,displaySetInstanceUIDs:['ds']};
+              cells.push(extra);grid.viewports.set('extra',extra);tick(500);}""")
+            self.assertTrue(page.evaluate("document.querySelector('#kin-volume-orientation').hidden"))
+            self.assertTrue(page.evaluate("document.querySelector('#kin-volume-orientation button').disabled"))
+        finally:
+            page.close()
+
     def test_stale_binding_identity_and_metadata_close_even_while_render_unready(self):
         mutations = {
             'uid': "source.uid='study-2'",

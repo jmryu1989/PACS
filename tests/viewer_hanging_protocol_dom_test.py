@@ -24,9 +24,9 @@ const sets=[
  {displaySetInstanceUID:'ds-related',StudyInstanceUID:'1.2.2',SeriesInstanceUID:'1.2.2.1',SeriesNumber:1,SeriesDescription:'Brain Prior',Modality:'CT',images:[image(),image()]}
 ];
 let layoutVersion=0,layoutRows=1,layoutCols=1,setCalls=[],failAfterMutation=false,hpSubscribers=[],activeViewportId=null,holdLayout=false,holdLayoutCount=0,layoutResolve=null,heldLayouts=[],delayTarget=false,targetResolve=null,rejectBeforeTarget=false;
-const viewports=new Map([['old',{viewportId:'old',x:0,y:0,width:1,height:1,displaySetInstanceUIDs:['ds-current']}]])
+const viewports=new Map([['old',{viewportId:'old',x:0,y:0,width:1,height:1,isReady:true,displaySetInstanceUIDs:['ds-current']}]])
 const grid={EVENTS:{GRID:'grid'},subscribe:(_,fn)=>{hpSubscribers.push(fn);return{unsubscribe(){hpSubscribers=hpSubscribers.filter(x=>x!==fn)}}},getState:()=>({layout:{numRows:layoutRows,numCols:layoutCols,layoutType:'grid',version:layoutVersion},activeViewportId:activeViewportId||[...viewports.keys()][0],viewports}),
- setLayout:async value=>{setCalls.push(value);const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));const install=()=>{layoutVersion++;layoutRows=value.numRows;layoutCols=value.numCols;viewports.clear();next.forEach((v,i)=>viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,displaySetInstanceUIDs:v.displaySetInstanceUIDs,options:v.viewportOptions}));};if(delayTarget){delayTarget=false;targetResolve=install;if(rejectBeforeTarget){rejectBeforeTarget=false;throw Error('synthetic deferred dispatch failure');}return;}install();const shouldHold=holdLayout||holdLayoutCount>0;if(holdLayoutCount>0)holdLayoutCount--;if(shouldHold)await new Promise((resolve,reject)=>{layoutResolve=resolve;heldLayouts.push({resolve,reject});});if(failAfterMutation){failAfterMutation=false;throw Error('synthetic native failure');}}};
+ setLayout:async value=>{setCalls.push(value);const next=[];for(let i=0;i<value.numRows*value.numCols;i++)next.push(value.findOrCreateViewport(i));const install=()=>{layoutVersion++;layoutRows=value.numRows;layoutCols=value.numCols;viewports.clear();next.forEach((v,i)=>{viewports.set(v.viewportOptions.viewportId,{viewportId:v.viewportOptions.viewportId,x:(i%value.numCols)/value.numCols,y:Math.floor(i/value.numCols)/value.numRows,width:1/value.numCols,height:1/value.numRows,isReady:true,displaySetInstanceUIDs:v.displaySetInstanceUIDs,options:v.viewportOptions});window.installPlane(v.viewportOptions.viewportId,v.viewportOptions);});};if(delayTarget){delayTarget=false;targetResolve=install;if(rejectBeforeTarget){rejectBeforeTarget=false;throw Error('synthetic deferred dispatch failure');}return;}install();const shouldHold=holdLayout||holdLayoutCount>0;if(holdLayoutCount>0)holdLayoutCount--;if(shouldHold)await new Promise((resolve,reject)=>{layoutResolve=resolve;heldLayouts.push({resolve,reject});});if(failAfterMutation){failAfterMutation=false;throw Error('synthetic native failure');}}};
 let camera={scale:1},properties={voiRange:{lower:-100,upper:200}};
 const viewport={type:'stack',getCurrentImageId:()=>'/studies/1.2.1/series/1.2.1.1/instances/1',getCurrentImageIdIndex:()=>0,getCamera:()=>camera,getProperties:()=>properties};
 const services={viewportGridService:grid,displaySetService:{EVENTS:{CHANGED:'changed'},subscribe:(_,fn)=>{hpSubscribers.push(fn);return{unsubscribe(){hpSubscribers=hpSubscribers.filter(x=>x!==fn)}}},getActiveDisplaySets:()=>sets},cornerstoneViewportService:{getCornerstoneViewport:()=>viewport}};
@@ -43,15 +43,32 @@ window.__mount=()=>window.hp=KinViewerHangingProtocol.mount({services,host:docum
 // way cornerstone does, so a cell that asked for a plane can be checked against real geometry.
 const PLANES={axial:{viewPlaneNormal:[0,0,-1],viewUp:[0,-1,0]},sagittal:{viewPlaneNormal:[1,0,0],viewUp:[0,0,1]},coronal:{viewPlaneNormal:[0,1,0],viewUp:[0,0,1]}};
 const planeViewports=new Map();
-window.useNativeViewportTypes=()=>{services.cornerstoneViewportService.getCornerstoneViewport=id=>{
-  const options=viewports.get(id)?.options;
-  if(!options)return viewports.has(id)?viewport:undefined;
-  if(options.viewportType!=='volume')return viewport;
-  // One stable instance per viewport, as the native service returns.
-  if(!planeViewports.has(id))planeViewports.set(id,{type:'orthographic',getCurrentImageId:()=>null,getCurrentImageIdIndex:()=>null,
-    getCamera:()=>({...PLANES[options.orientation],focalPoint:[0,0,0],parallelScale:100}),getProperties:()=>properties});
-  return planeViewports.get(id);};};
-window.ctSlices=count=>Array.from({length:count},(_,n)=>({...image(),SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',SOPInstanceUID:'1.2.9.'+(n+1)}));
+// The cache holds one loaded volume of the current series, as it does after a real load. The
+// knobs below reproduce the three ways a native plane can come up wrong.
+window.volumeLoaded=true;window.volumeSeries=null;window.planeNormalOverride=null;
+const volumeFrames=()=>(window.volumeSeries||sets[0].images.map(i=>i.SOPInstanceUID)).map(sop=>'frame-'+sop);
+const cachedVolume=()=>{const imageIds=volumeFrames();return {volumeId:'volume-1',imageIds,framesLoaded:imageIds.length,loadStatus:{loaded:window.volumeLoaded}};};
+window.cornerstone={cache:{getVolume:id=>id==='volume-1'?cachedVolume():null},
+  metaData:{get:(_,id)=>({SOPInstanceUID:String(id).slice('frame-'.length)})}};
+const actors=[{actor:{}}];
+function makePlane(options){
+  const preset=PLANES[options.orientation];
+  return {type:'orthographic',getCurrentImageId:()=>null,getCurrentImageIdIndex:()=>null,getVolumeId:()=>'volume-1',getActors:()=>actors,
+    getProperties:()=>properties,render(){},
+    camera:{viewPlaneNormal:[...(window.planeNormalOverride||preset.viewPlaneNormal)],viewUp:[...preset.viewUp],
+      focalPoint:[0,0,0],position:[0,0,100],parallelScale:100,flipHorizontal:false,flipVertical:false},
+    getCamera(){return structuredClone(this.camera);},
+    setCamera(next){this.camera={...this.camera,...structuredClone(next)};}};
+}
+// Rebuilding a viewport on an orientation preset is what native does, so a plane instance never
+// survives a layout change with the camera the user left on it.
+window.installPlane=(id,options)=>{if(options.viewportType==='volume')planeViewports.set(id,makePlane(options));else planeViewports.delete(id);};
+window.useNativeViewportTypes=()=>{services.cornerstoneViewportService.getCornerstoneViewport=id=>
+  planeViewports.get(id)||(viewports.has(id)?viewport:undefined);};
+window.planeCameras=()=>[...viewports.keys()].map(id=>planeViewports.get(id)?.getCamera()||null);
+window.ctSlices=count=>Array.from({length:count},(_,n)=>({...image(),SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',SOPInstanceUID:'1.2.9.'+(n+1),
+  Modality:'CT',SamplesPerPixel:1,PhotometricInterpretation:'MONOCHROME2',FrameOfReferenceUID:'1.2.9.0',
+  Rows:512,Columns:512,PixelSpacing:[0.7,0.7],ImageOrientationPatient:[1,0,0,0,1,0],ImagePositionPatient:[-150,-150,n*2.5]}));
 </script>
 """
 
@@ -370,6 +387,58 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         calls=self.page.evaluate('setCalls.length');self.page.locator('#kin-hp-apply').click()
         expect(self.page.locator('#kin-hp-status')).to_contain_text('현재 배치를 유지합니다')
         self.assertEqual(calls,self.page.evaluate('setCalls.length'))
+
+    def test_a_plane_cell_is_not_applied_until_its_volume_is_really_loaded(self):
+        self.seed(mpr_library());self.page.evaluate("sets[0].images=ctSlices(4);useNativeViewportTypes();volumeLoaded=false")
+        self.page.locator('#kin-hp-apply').click();self.page.wait_for_timeout(400)
+        self.assertEqual(1,self.page.evaluate('setCalls.length'),"the layout request is made once")
+        self.assertNotIn('Applied',self.page.text_content('#kin-hp-status'),
+                         "an orthographic viewport without its volume is not a successful apply")
+        self.assertEqual('Applied Protocol: None',self.page.text_content('#kin-hp-applied'))
+        self.page.evaluate("volumeLoaded=true")
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('Applied')
+        self.assertEqual('Applied Protocol: Three Plane CT',self.page.text_content('#kin-hp-applied'))
+
+    def test_an_orthographic_cell_on_the_wrong_volume_or_plane_keeps_the_previous_screen(self):
+        self.seed(mpr_library());self.page.evaluate("sets[0].images=ctSlices(4);useNativeViewportTypes()")
+        before=self.page.evaluate("()=>[...viewports.values()].map(v=>[v.viewportId,v.displaySetInstanceUIDs])")
+        for knob in ["planeNormalOverride=[0.5773,0.5773,0.5773]",
+                     "volumeSeries=['1.2.8.1','1.2.8.2','1.2.8.3','1.2.8.4']"]:
+            self.page.evaluate("planeNormalOverride=null;volumeSeries=null;"+knob)
+            self.page.locator('#kin-hp-apply').click()
+            expect(self.page.locator('#kin-hp-status')).to_contain_text('이전 화면')
+            self.assertEqual('Applied Protocol: None',self.page.text_content('#kin-hp-applied'),knob)
+            self.assertEqual(before,self.page.evaluate("()=>[...viewports.values()].map(v=>[v.viewportId,v.displaySetInstanceUIDs])"),knob)
+        self.page.evaluate("planeNormalOverride=null;volumeSeries=null")
+        self.page.locator('#kin-hp-apply').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('Applied')
+
+    def test_a_failed_apply_restores_the_plane_camera_the_user_was_working_in(self):
+        self.seed(mpr_library());self.page.evaluate("sets[0].images=ctSlices(4);useNativeViewportTypes()")
+        self.page.locator('#kin-hp-apply').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('Applied')
+        # The user rotates the three planes with the Crosshairs tool of toolGroup 'mpr'.
+        adjusted=self.page.evaluate("""()=>{const rotated={viewPlaneNormal:[0.5773,0.5773,0.5773],viewUp:[0,0,1],
+            focalPoint:[3,4,5],position:[13,14,15],parallelScale:42,flipHorizontal:true,flipVertical:false};
+          for(const id of viewports.keys()){const v=planeViewports.get(id);if(v)v.setCamera(rotated);}
+          return planeCameras();}""")
+        self.assertEqual(3,len([value for value in adjusted if value]),"three planes carry the user's own camera")
+        self.page.select_option('#kin-hp-rule','22222222-2222-4222-8222-222222222222')
+        self.page.evaluate('failAfterMutation=true')
+        self.page.locator('#kin-hp-apply').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('synthetic native failure')
+        self.assertEqual(adjusted,self.page.evaluate('planeCameras()'),
+                         "the rollback restores the user's actual camera, not the recorded orientation")
+        self.assertEqual([0.5773,0.5773,0.5773],self.page.evaluate('planeCameras()[0].viewPlaneNormal'))
+
+    def test_an_owned_plane_without_a_readable_camera_refuses_before_any_mutation(self):
+        self.seed(mpr_library());self.page.evaluate("sets[0].images=ctSlices(4);useNativeViewportTypes()")
+        self.page.locator('#kin-hp-apply').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('Applied')
+        calls=self.page.evaluate('setCalls.length')
+        self.page.evaluate("()=>{for(const v of planeViewports.values())v.getCamera=()=>({viewPlaneNormal:[0,0,-1]});}")
+        self.page.select_option('#kin-hp-rule','22222222-2222-4222-8222-222222222222')
+        self.page.locator('#kin-hp-apply').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('현재 배치를 유지합니다')
+        self.assertEqual(calls,self.page.evaluate('setCalls.length'),
+                         "a screen we could not snapshot is refused before the layout is destroyed")
 
     def test_editor_offers_plane_cells_per_selector_and_saves_them_strictly(self):
         self.seed()

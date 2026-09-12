@@ -36,8 +36,11 @@ const sets=[stack('ds-current',currentUID,'9.9.2.1','Brain Axial'),stack('ds-rel
  {...stack('bad-composite',currentUID,'9.9.2.3','Brain Axial'),isCompositeStack:true},
  stack('split-a',currentUID,'9.9.2.4','Brain Axial'),stack('split-b',currentUID,'9.9.2.4','Brain Axial'),
  {...stack('mixed-images',currentUID,'9.9.2.5','Brain Axial'),images:[image(currentUID,'9.9.2.5'),image(relatedUID,'9.9.2.5')]},
+ // A regular axial CT: one frame of reference, constant matrix and a constant 2.5 mm step.
  {...stack('ds-volume',currentUID,'9.9.2.6','Brain Volume'),images:[0,1,2].map(n=>({...image(currentUID,'9.9.2.6'),
-   SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',SOPInstanceUID:'1.2.9.'+n}))}];
+   SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',SOPInstanceUID:'1.2.9.'+n,Modality:'CT',SamplesPerPixel:1,
+   PhotometricInterpretation:'MONOCHROME2',FrameOfReferenceUID:'9.9.2.0',Rows:512,Columns:512,PixelSpacing:[0.7,0.7],
+   ImageOrientationPatient:[1,0,0,0,1,0],ImagePositionPatient:[-150,-150,n*2.5]}))}];
 let setCalls=[];
 const viewports=new Map([['old',{viewportId:'old',x:0,y:0,width:1,height:1,displaySetInstanceUIDs:['ds-current']}]]);
 let layout={numRows:1,numCols:1,layoutType:'grid',version:0},activeViewportId='old';
@@ -50,11 +53,18 @@ const viewport={type:'stack',getCurrentImageId:()=>'/synthetic/image',getCurrent
 // Native orientation presets in patient space, so a requested plane can be checked as geometry.
 const PLANES={axial:[0,0,-1],sagittal:[1,0,0],coronal:[0,1,0]};
 const planeViewports=new Map();
+// The cache holds one fully loaded volume of that series, as it does after a real load.
+const volumeFrames=()=>sets.find(s=>s.displaySetInstanceUID==='ds-volume').images.map(i=>'frame-'+i.SOPInstanceUID);
+window.cornerstone={cache:{getVolume:id=>{if(id!=='volume-1')return null;const imageIds=volumeFrames();
+    return {volumeId:id,imageIds,framesLoaded:imageIds.length,loadStatus:{loaded:true}};}},
+  metaData:{get:(_,id)=>({SOPInstanceUID:String(id).slice('frame-'.length)})}};
 const cornerstone={getCornerstoneViewport:id=>{const options=viewports.get(id)?.options;
   if(!options||options.viewportType!=='volume')return viewport;
   // One stable instance per viewport, as the native service returns.
   if(!planeViewports.has(id))planeViewports.set(id,{type:'orthographic',getCurrentImageId:()=>null,getCurrentImageIdIndex:()=>null,
-    getCamera:()=>({viewPlaneNormal:PLANES[options.orientation],focalPoint:[0,0,0],parallelScale:100}),getProperties:()=>({})});
+    getVolumeId:()=>'volume-1',getActors:()=>[{actor:{}}],render(){},setCamera(){},
+    getCamera:()=>({viewPlaneNormal:PLANES[options.orientation],viewUp:[0,0,1],position:[0,0,100],focalPoint:[0,0,0],
+      parallelScale:100,flipHorizontal:false,flipVertical:false}),getProperties:()=>({})});
   return planeViewports.get(id);}};
 const services={viewportGridService:grid,displaySetService:{getActiveDisplaySets:()=>sets,getDisplaySetByUID:id=>sets.find(s=>s.displaySetInstanceUID===id)},cornerstoneViewportService:cornerstone};
 window.mountLayout=()=>{viewerLayoutExtension.preRegistration({servicesManager:{services}});viewerLayoutExtension.onModeEnter()};

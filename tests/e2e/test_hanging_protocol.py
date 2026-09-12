@@ -99,8 +99,14 @@ class HangingProtocolE2E(ViewerLayoutE2E):
             const volume=cornerstone.cache.getVolume(v.getVolumeId()),camera=v.getCamera();
             const first=cornerstone.metaData.get('instance',volume.imageIds[0]);
             const group=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);
+            // The whole requested series, completely loaded: a plane that reported the right
+            // type over a partial or foreign volume is not the cell the rule asked for.
+            const sops=volume.imageIds.map(id=>cornerstone.metaData.get('instance',id).SOPInstanceUID);
+            const source=services.displaySetService.getDisplaySetByUID(sets[0]);
             return {type:v.type,sets,volumeId:v.getVolumeId(),slices:volume.imageIds.length,
               study:first.StudyInstanceUID,series:first.SeriesInstanceUID,group:group?.id??null,
+              loaded:!!volume.loadStatus?.loaded,framesLoaded:volume.framesLoaded,
+              sops:[...sops].sort(),sourceSops:(source?.images||[]).map(i=>i.SOPInstanceUID).sort(),
               viewPlaneNormal:camera.viewPlaneNormal,focalPoint:camera.focalPoint};})""")
 
     def rendered_planes(self, page, count):
@@ -320,6 +326,9 @@ class HangingProtocolE2E(ViewerLayoutE2E):
             self.assertEqual(cells[0]["volumeId"], cell["volumeId"], "every plane shows one and the same volume")
             self.assertEqual(series, cell["series"]); self.assertEqual(current.uid, cell["study"])
             self.assertEqual("mpr", cell["group"], "planes join the established MPR tool group")
+            self.assertTrue(cell["loaded"], "a cell is only applied over a fully loaded volume")
+            self.assertEqual(cell["slices"], cell["framesLoaded"])
+            self.assertEqual(cell["sourceSops"], cell["sops"], "the plane stands on exactly the requested series")
         self.assertEqual({tuple(cell["sets"]) for cell in cells[:3]}, {tuple(cells[0]["sets"])})
         normals = np.array([cell["viewPlaneNormal"] for cell in cells[:3]])
         np.testing.assert_allclose(np.abs(normals), [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)

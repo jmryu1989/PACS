@@ -8,12 +8,16 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const permitted=()=>{try{return alive()&&allowed();}catch(_){return false;}};
   const workspaceBusy=()=>{try{return !!window.kinViewerJobWorkspaceState?.().busy;}catch(_){return true;}};
   const same=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&a.every((n,i)=>Number.isFinite(Number(n))&&Math.abs(Number(n)-Number(b[i]))<.001);
+  // The three planes are the cells that actually show something. A Hanging Protocol opens them
+  // in a 2x2 grid with one empty cell, so the group is three shown cells, not three grid cells;
+  // an ordinary 1x3/3x1 MPR grid has no empty cell and reaches exactly the same three.
+  const shown3=grid=>{const cells=[...grid.viewports.values()].filter(c=>c.displaySetInstanceUIDs?.length).sort((a,b)=>a.y-b.y||a.x-b.x);return cells.length===3?cells:null;};
   function target(verify=false,readOnly=false,{requireRenderReady=true}={}){
     if(!alive())return null;
     try{
       const source=selected();if(source?.kind!=='volume')return null;
-      const grid=services.viewportGridService.getState(),cells=[...grid.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
-      if(cells.length!==3||!cells.some(c=>c.viewportId===source.viewportId))return null;
+      const grid=services.viewportGridService.getState(),cells=shown3(grid);
+      if(!cells||!cells.some(c=>c.viewportId===source.viewportId))return null;
       const views=cells.map(c=>services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId));
       if(views.some(v=>v?.type!=='orthographic'||v.getActors().length!==1))return null;
       // A mounted VR tracks source identity while native rendering briefly
@@ -50,7 +54,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   function refresh(){
     if(ended)return;
     const t=target();let eligible=false;
-    try{const g=services.viewportGridService.getState();eligible=g.viewports.size===3&&services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId)?.type==='orthographic';}catch(_){}
+    try{const g=services.viewportGridService.getState();eligible=!!shown3(g)&&services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId)?.type==='orthographic';}catch(_){}
     panel.hidden=!alive()||!eligible;
     rotate.disabled=reset.disabled=axis.disabled=degrees.disabled=busy||workspaceBusy()||!t||!permitted();
     if(!t){shown='';caption.textContent='완전히 로드된 단일 정규 CT의 3평면을 선택하세요.';return;}
