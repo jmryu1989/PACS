@@ -124,6 +124,10 @@ const options=extra=>({panes:()=>paneList,meta:id=>META.get(id)||null,context:()
 window.__mount=extra=>window.cursor=KinViewerThreeDCursor.mount(options(extra));
 window.__mountHosted=extra=>{const host=document.querySelector('#kin-viewer-layout');host.replaceChildren();
  return window.cursor=KinViewerThreeDCursor.mount(options({host,...extra}));};
+// The same host, deliberately not cleared: what a stopped controller left behind stays
+// visible to the next mount.
+window.__mountHostedKeep=extra=>window.cursor=KinViewerThreeDCursor.mount(
+ options({host:document.querySelector('#kin-viewer-layout'),...extra}));
 window.panelText=()=>{const p=document.querySelector('#kin-3d-cursor-status');return p?p.textContent:null;};
 window.toggleState=()=>{const b=document.querySelector('#kin-3d-cursor-toggle');
  return b?{label:b.textContent,pressed:b.getAttribute('aria-pressed'),disabled:b.disabled}:null;};
@@ -1420,6 +1424,29 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
         self.assertEqual(1, self.page.evaluate("cursor.state().run"))
         self.assertEqual({"x": 100, "y": 50}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+
+    def test_d7_stop_takes_the_panel_and_its_toggle_listener_back(self):
+        """B9 3(a)-5 관측. 호스트는 모드 이탈·세션 종료에서 stop()을 부르고 다음 진입에서 새
+        컨트롤러를 마운트한다. stop()이 패널을 회수하지 않으면 재진입 때 패널이 쌓이고, 떨어져
+        나온 토글이 멈춘 컨트롤러를 계속 부른다."""
+        self.page.evaluate("cursor.stop();__mountHosted()")
+        self.enable()
+        self.assertEqual(1, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        first = self.page.evaluate(
+            "document.querySelector('[data-kin-3d-cursor-panel]').getAttribute('data-kin-3d-cursor-panel')")
+        self.page.evaluate("cursor.stop()")
+        self.page.wait_for_function("cursor.state().stopped===true")
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        self.assertIsNone(self.page.evaluate("panelText()"))
+        self.assertIsNone(self.page.evaluate("toggleState()"))
+        # A fresh controller in the very same host, which nothing cleared in between.
+        self.page.evaluate("__mountHostedKeep()")
+        self.enable()
+        self.assertEqual(1, self.page.evaluate("document.querySelectorAll('#kin-3d-cursor').length"))
+        second = self.page.evaluate(
+            "document.querySelector('[data-kin-3d-cursor-panel]').getAttribute('data-kin-3d-cursor-panel')")
+        self.assertNotEqual(first, second, "the new mount must own the panel that is on screen")
+        self.assertEqual("3D Cursor 대기", self.page.evaluate("panelText()"))
 
 
 if __name__ == "__main__":

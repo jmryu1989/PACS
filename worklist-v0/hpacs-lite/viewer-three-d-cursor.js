@@ -669,6 +669,13 @@
       // The per-run maps are deliberately kept and labelled final instead of being cleared: they
       // are the only record of what was left quarantined or unconfirmed.
       note(message(result==='unsettled'?'teardown-unsettled':'stopped'));refreshUi();
+      /* The panel node and its toggle listener are this controller's too. The host calls
+         stop() at mode exit and at session end and mounts a fresh controller on the next
+         entry, so a panel that is not taken back stacks up and its dead toggle keeps
+         calling a stopped controller (B9 3(a)-5에서 관측). */
+      try{toggleNode?.removeEventListener('click',onToggle);}catch(_){}
+      try{panel?.remove();}catch(_){}
+      panel=null;toggleNode=null;statusNode=null;
       return result;
     }
 
