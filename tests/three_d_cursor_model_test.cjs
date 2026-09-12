@@ -85,22 +85,26 @@ test('locate refuses a point farther than the slice distance limit',()=>{
    projects with the TARGET's own normal and pixels with the target slice's own axes. Nothing
    here may require the two series to be parallel or perpendicular. */
 test('locate transports a point into a valid oblique target series',()=>{
-  const c=Math.SQRT1_2;                                   // cos 45°
-  const u=[c,c,0],v=[0,0,-1],n=[-c,c,0];                  // n = cross(u,v), a unit vector
+  // A true oblique relation, not a right angle: the target's normal is 0.8 against the axial
+  // [0,0,1], which is 36.87° between the two planes — the same relation the B7 render harness
+  // exercised. A 90° fixture would only have said that orthogonal series work.
+  const u=[1,0,0],v=[0,0.8,-0.6],n=[0,0.6,0.8];           // n = cross(u,v), a unit vector
   const target=ok(stack(Array.from({length:5},(_,k)=>base({SeriesInstanceUID:'1.2.3.9',Modality:'MR',
     SOPInstanceUID:'1.2.3.9.'+(k+1),imageId:'obl:'+k,ImageOrientationPatient:[...u,...v],
     ImagePositionPatient:[-100+n[0]*4*k,-100+n[1]*4*k,80+n[2]*4*k],PixelSpacing:[1,1],Rows:200,Columns:200})))).stack;
-  // The axial source is at 45° to it, which is exactly the relation the feature must support.
+  // Neither parallel nor perpendicular to the axial source, which is the relation the feature
+  // must support and the one a 90° fixture cannot show.
+  const dot=Math.abs(n[2]);near(dot,0.8,1e-12);near(Math.acos(dot)*180/Math.PI,36.8698976458,1e-9);
   const source=ok(stack(axial())).stack;
   assert.equal(comparable(source.id,target.id),null);
   // Slice 2's origin plus 30 columns along u and 40 rows along v, computed by hand.
   const origin=[-100+n[0]*8,-100+n[1]*8,80+n[2]*8];
-  const world=[origin[0]+30*u[0],origin[1]+30*u[1],origin[2]+40*v[2]];
+  const world=[0,1,2].map(i=>origin[i]+30*u[i]+40*v[i]);
   const found=ok(locate(target,world));
   assert.equal(found.index,2);assert.equal(found.sop,'1.2.3.9.3');
   near(found.pixel.x,30,1e-9);near(found.pixel.y,40,1e-9);near(found.distance,0,1e-9);
   // Half a slice interval off the plane is still transported, and the distance says how far.
-  const off=[world[0]+n[0]*1.5,world[1]+n[1]*1.5,world[2]];
+  const off=[0,1,2].map(i=>world[i]+n[i]*1.5);
   const shifted=ok(locate(target,off));
   assert.equal(shifted.index,2);near(shifted.distance,1.5,1e-9);
   near(shifted.pixel.x,30,1e-9);near(shifted.pixel.y,40,1e-9);
