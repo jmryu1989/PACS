@@ -1,10 +1,22 @@
 # coding: utf-8
+import time
 import unittest
 import numpy as np
 from playwright.sync_api import expect
 from test_volume_orientation import VolumeOrientationE2E
 
 class VolumeCineE2E(VolumeOrientationE2E):
+ CAPTURE_TIMEOUT_MS=10000
+ def wait_for_capture(self,v,size,what,count=1):
+  # Route handlers and page listeners append after the action returns, so a fixed window can expire
+  # before the append lands (D-CINETIMING 추가 1). Poll the capture itself; sync-API route handlers
+  # run on this thread while wait_for_timeout blocks.
+  deadline=time.monotonic()+self.CAPTURE_TIMEOUT_MS/1000
+  while True:
+   got=size()
+   if got>=count:return got
+   if time.monotonic()>=deadline:self.fail('%s captured %d/%d within %dms'%(what,got,count,self.CAPTURE_TIMEOUT_MS))
+   v.wait_for_timeout(10)
  def cine_open(self,v):
   errors=[];v.on('pageerror',lambda e:errors.append(str(e)));self.addCleanup(lambda:self.assertEqual(errors,[]))
   v.locator('[data-cy="MoreTools-split-button-secondary"]').click();v.locator('[data-cy="Cine"]').click();expect(v.locator('#kin-cine')).to_be_visible()
@@ -20,17 +32,19 @@ class VolumeCineE2E(VolumeOrientationE2E):
    z=row['point'][2];want=25 if z<10.5 else 230 if z>=21.5 else 128;self.assertAlmostEqual(row['value'],want,delta=3)
   self.preserved_volume(before[1:],self.volume_state(v)[1:]);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.evaluate('()=>{cinePositions=[];cinePixels=[]}');self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);reverse=v.evaluate('()=>cinePositions');np.testing.assert_allclose([r['point'][2] for r in reverse],list(range(1,33)),atol=1e-6,rtol=0);expect(p.locator('#findings')).to_have_value('KEEP MPR CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);print('CINE_BOTH_DIRECTIONS',len(forward),len(reverse),flush=True)
  def test_volume_cine_02_selection_modal_session_stop(self):
-  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.choose_volume(v,v,1);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(250);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)
+  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.choose_volume(v,v,1);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(250);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)  # negative assertion: fixed window is the delivery margin for frames that must not arrive after the modal stop
   self.choose_volume(v,v,0);v.wait_for_timeout(600);v.get_by_label('Playback Direction',exact=True).select_option('reverse');v.get_by_label('Loop',exact=True).uncheck();self.cine_play(v);v.wait_for_function('(count)=>cinePositions.length>count',arg=count);self.open_note(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.locator('#tech-note-close').click();expect(v.get_by_label('Playback Direction',exact=True)).to_have_value('reverse');expect(v.get_by_label('Loop',exact=True)).not_to_be_checked();self.cine_play(v);v.wait_for_timeout(200)
+  # The 300ms and 100ms windows below are negative-assertion delivery margins: no frame may arrive after session end, and play must never start.
   v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.wait_for_timeout(200);count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(300);self.assertEqual(v.evaluate('()=>cinePositions.length'),count);self.cine_play(v);v.wait_for_timeout(100);self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_03_oblique_spacing_and_loop(self):
   a,p,v=self.starting();self.rotate_planes(v,0,25);self.rotate_planes(v,1,-35);self.cine_open(v);v.get_by_label('Loop',exact=True).uncheck();v.get_by_role('button',name='First Plane',exact=True).click();v.wait_for_timeout(200);before=self.volume_state(v);normal=np.array(before[0]['camera']['viewPlaneNormal']);first=np.array(before[0]['camera']['focalPoint']);last=int(np.floor(float(np.dot(np.abs(normal),[63,63,32]))));self.assertAlmostEqual(float(np.dot(first,normal)),float(np.minimum(normal*[63,63,32],0).sum()),delta=2e-5);self.watch_cine(v);self.cine_play(v);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false",timeout=10000);positions=v.evaluate('()=>cinePositions');self.assertEqual(len(positions),last)
   for i,row in enumerate(positions,1):np.testing.assert_allclose(row['point'],first+normal*i,atol=2e-5,rtol=0)
   self.preserved_volume(before[1:],self.volume_state(v)[1:]);self.assertGreater(len(positions),40);v.get_by_label('Loop',exact=True).check();v.evaluate('()=>cinePositions=[]');self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');self.cine_play(v);points=v.evaluate('()=>cinePositions');np.testing.assert_allclose(points[0]['point'],first,atol=2e-5,rtol=0);self.assertEqual(len(self.versions(a)),1);print('OBLIQUE_CINE_POSITIONS',last,flush=True)
  def test_volume_cine_04_delayed_permission_and_source_change(self):
-  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);pending=[];pattern='**/api/me';v.route(pattern,lambda r:pending.append(r));self.cine_play(v);v.wait_for_timeout(200);self.assertTrue(pending)
+  a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);pending=[];pattern='**/api/me';v.route(pattern,lambda r:pending.append(r));self.cine_play(v);self.wait_for_capture(v,lambda:len(pending),'/api/me');self.assertTrue(pending)
   v.evaluate("()=>{window.cineVolume=cornerstone.cache.getVolume(cineView.getVolumeId());cineVolume.framesLoaded--}")
   for request in pending:request.fulfill(response=request.fetch())
+  # The 200ms window below is a negative-assertion delivery margin: no camera move may ever arrive.
   v.unroute(pattern);v.wait_for_function("()=>services.cineService.getState().cines['mpr-axial'].isPlaying===false");v.wait_for_timeout(200);self.assertEqual(v.evaluate('()=>cinePositions'),[]);v.evaluate('()=>cineVolume.framesLoaded++');expect(v.get_by_label('Playback Direction',exact=True)).to_be_enabled()
   v.route(pattern,lambda r:r.fulfill(status=403,json={'message':'Synthetic denied'}));self.cine_play(v);expect(v.locator('#kin-cine [role=status]')).to_contain_text('로그인');self.assertFalse(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(v.evaluate('()=>cinePositions'),[]);v.unroute(pattern);self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_05_partial_camera_failure_recovers(self):
@@ -55,12 +69,12 @@ class VolumeCineE2E(VolumeOrientationE2E):
   self.choose_volume(v,v,0);v.wait_for_function("()=>kinGetVolumeCineTarget(services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial'))?.allowed")
   self.assertTrue(v.evaluate("()=>{const now=services.cornerstoneViewportService.getCornerstoneViewport('mpr-axial');return now!==retiredCineView&&now.element!==retiredCineView.element&&now.id===retiredCineView.id}"))
   self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=3');count=v.evaluate('()=>cinePositions.length')
-  v.evaluate('async()=>{releaseOldCine();await oldCinePlay}');v.wait_for_timeout(250)
+  v.evaluate('async()=>{releaseOldCine();await oldCinePlay}');self.wait_for_capture(v,lambda:v.evaluate('()=>cinePositions.length'),'cine positions after the retired play resolved',count+1)
   self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertGreater(v.evaluate('()=>cinePositions.length'),count);self.cine_play(v)
   expect(p.locator('#findings')).to_have_value('KEEP REPLACED CINE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_06_fps_change_waiting_for_permission(self):
   a,p,v=self.starting();self.cine_open(v);self.watch_cine(v);self.cine_play(v);v.wait_for_function('()=>cinePositions.length>=4');pending=[];pattern='**/api/me';v.route(pattern,lambda r:pending.append(r))
-  v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-left-arrow"]').click();v.wait_for_timeout(180);self.assertTrue(pending);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(150);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)
+  v.locator('[data-cy=viewport-grid] > div').nth(0).locator('[data-cy="cine-player-left-arrow"]').click();self.wait_for_capture(v,lambda:len(pending),'/api/me');self.assertTrue(pending);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));count=v.evaluate('()=>cinePositions.length');v.wait_for_timeout(150);self.assertEqual(v.evaluate('()=>cinePositions.length'),count)  # negative assertion: fixed window is the delivery margin for frames that must not advance while permission is held
   for request in pending:request.fulfill(response=request.fetch())
   v.unroute(pattern);v.wait_for_function('(count)=>cinePositions.length>=count+4',arg=count);self.assertTrue(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].isPlaying"));self.assertEqual(v.evaluate("()=>services.cineService.getState().cines['mpr-axial'].frameRate"),23);self.cine_play(v);self.assertEqual(len(self.versions(a)),1)
  def test_volume_cine_08_range_yoyo_pixels_invalid_and_geometry_reset(self):
