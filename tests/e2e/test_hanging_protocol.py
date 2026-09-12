@@ -173,6 +173,31 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         self.assertTrue(saved.body["canManageSite"])
         return saved.body
 
+    def job_rows(self, uid):
+        return [row for row in psql('SELECT to_jsonb(j)::text FROM "ViewerJob" j '
+                                    "WHERE \"studyUid\"='" + uid.replace("'", "''") + "';") if row]
+
+    def cleanup_jobs(self, uid):
+        """Delete exactly the Job rows this run saved, by full-row equality.
+
+        A saved Job holds a foreign key on StudyState, so the shared fixture cleanup cannot
+        remove the study while it exists. This runs before that cleanup and never widens
+        beyond this run's own study and author.
+        """
+        for raw in self.job_rows(uid):
+            job = json.loads(raw)
+            self.assertRegex(job["id"], r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+            self.assertTrue(set(job["studies"]) <= set(self.stack.active))
+            print("JOB synthetic row " + job["id"], flush=True)
+            for rev in [row for row in psql('SELECT to_jsonb(r)::text FROM "ViewerJobRevision" r '
+                                            "WHERE \"jobId\"='" + job["id"] + "'::uuid;") if row]:
+                if psql('DELETE FROM "ViewerJobRevision" r WHERE to_jsonb(r)=\''
+                        + rev.replace("'", "''") + "'::jsonb RETURNING 1;") != ["1"]:
+                    raise RuntimeError("Synthetic Job revision changed before exact-row cleanup")
+            if psql('DELETE FROM "ViewerJob" j WHERE to_jsonb(j)=\''
+                    + raw.replace("'", "''") + "'::jsonb RETURNING 1;") != ["1"]:
+                raise RuntimeError("Synthetic Job row changed before exact-row cleanup")
+
     def described_ref(self, page, fixture, description):
         metadata = self.metadata(page, fixture)
         series = next(item["0020000E"]["Value"][0] for item in metadata
@@ -384,6 +409,7 @@ class HangingProtocolE2E(ViewerLayoutE2E):
           v.setCamera({parallelScale:c.parallelScale*1.2,
             focalPoint:c.focalPoint.map((n,i)=>n+(i===1?2:0)),position:c.position.map((n,i)=>n+(i===1?2:0))});
           v.setProperties({voiRange:{lower:-420,upper:820}});v.render();grid.setActiveViewportId(id);}""")
+        self.addCleanup(self.cleanup_jobs, current.uid)
         viewer.get_by_label("Job Title", exact=True).fill("HP plane layout job")
         viewer.get_by_role("button", name="Save New Job", exact=True).click()
         expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장했습니다", timeout=45000)
