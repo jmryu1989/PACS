@@ -292,6 +292,12 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         # panes genuinely resize, so the native refit happens exactly as it would on a
         # successful merge, while the achieved geometry is not the one that was asked for.
         # The rollback therefore owes the recorded state, never the refit it just caused.
+        # The shape is the mirrored column merge, which hands the second pane the
+        # half-width/full-height rectangle the anchor gets in case 02 - the one change this
+        # native really does refit for. A row shape was used here before and asserted
+        # nothing: it only ever made a pane wider at the same height, which leaves
+        # parallelScale untouched, so this case never exercised a refit at all
+        # (run 34725673641, samples all 140.25000000000003).
         # While that deviating layout is on screen the zoom of the reshaped panes is sampled,
         # so the rollback below is not proven against a screen that never refitted at all.
         page.evaluate('''()=>{const grid=services.viewportGridService,original=grid.setLayout;
@@ -303,7 +309,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
             catch(error){window.kinCellMergeRefit.push([['error',String(error)]]);}};
           let once=true;grid.setLayout=function(payload){
             if(once&&payload.layoutOptions&&payload.layoutOptions.length===3){once=false;
-              return Promise.resolve(original.call(this,{...payload,layoutOptions:[{x:0,y:0,width:1,height:.5},{x:0,y:.5,width:.5,height:.5},{x:.5,y:.5,width:.5,height:.5}]}))
+              return Promise.resolve(original.call(this,{...payload,layoutOptions:[{x:0,y:0,width:.5,height:.5},{x:.5,y:0,width:.5,height:1},{x:0,y:.5,width:.5,height:.5}]}))
                 .then(value=>{for(const delay of [150,400,800,1500])setTimeout(sample,delay);return value;});}
             return original.call(this,payload);};}''')
         try:
