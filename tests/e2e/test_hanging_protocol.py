@@ -12,11 +12,13 @@ from playwright.sync_api import expect
 
 from test_viewer_layout import ViewerLayoutE2E
 from test_prior_selection import canvas_ready
+from test_worklist import psql
 from workspace_roaming_support import cleanup_workspace
 
 
 class HangingProtocolE2E(ViewerLayoutE2E):
     RULE_ID = "11111111-1111-4111-8111-111111111111"
+    SITE_RULE_ID = "66666666-6666-4666-8666-666666666666"
 
     def setUp(self):
         super().setUp()
@@ -136,6 +138,40 @@ class HangingProtocolE2E(ViewerLayoutE2E):
                         name="Synthetic Disabled Skip", enabled=False)
         return {"version": 1, "activeRuleId": second["id"],
                 "rules": [first, no_match, disabled, second]}
+
+    def site_library(self, name="Site Three Plane"):
+        """What an administrator publishes: the same three-plane definition, institution wide."""
+        value = self.mpr_library(name=name)
+        value["rules"] = [value["rules"][0]]
+        value["rules"][0]["id"] = self.SITE_RULE_ID
+        value["activeRuleId"] = self.SITE_RULE_ID
+        return value
+
+    def site_rows(self, institution):
+        return [row for row in psql('SELECT to_jsonb(t)::text FROM "HangingProtocolPreference" t '
+                                    "WHERE subject='' AND institution='" + institution.replace("'", "''") + "';") if row]
+
+    def cleanup_site(self, institution):
+        """Delete exactly the institution rows this run created, by full-row equality."""
+        for raw in self.site_rows(institution):
+            print("SITE synthetic row " + raw, flush=True)
+            if psql('DELETE FROM "HangingProtocolPreference" t WHERE to_jsonb(t)=\''
+                    + raw.replace("'", "''") + "'::jsonb RETURNING 1;") != ["1"]:
+                raise RuntimeError("Synthetic site row changed before exact-row cleanup")
+
+    def publish_site(self, value, actor="jmryu"):
+        """An administrator publishes through the isolated fixture API, never through seeded storage."""
+        head = self.stack.request("GET", "/hanging-protocols/site", actor)
+        self.assertEqual(200, head.status, head.text)
+        institution = head.body["owner"]["institution"]
+        if self.site_rows(institution):
+            self.skipTest("SITE NATIVE SKIPPED: 기존 기관 행이 있어 합성 쓰기를 하지 않습니다")
+        saved = self.stack.request("PUT", "/hanging-protocols/site", actor,
+                                   dict(expectedOwner=head.body["owner"], revision=head.body["revision"], value=value))
+        self.addCleanup(self.cleanup_site, institution)
+        self.assertEqual(200, saved.status, saved.text)
+        self.assertTrue(saved.body["canManageSite"])
+        return saved.body
 
     def described_ref(self, page, fixture, description):
         metadata = self.metadata(page, fixture)
@@ -361,6 +397,75 @@ class HangingProtocolE2E(ViewerLayoutE2E):
                                    [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)
         self.assertEqual([cell["series"] for cell in reloaded[:3]], [series] * 3)
         expect(work.locator("#findings")).to_have_value("HP MPR UNSAVED REPORT")
+        self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
+
+
+    def test_hp_06_published_site_rule_reaches_a_fresh_member_and_opens_its_planes(self):
+        patient = "HP-SITE-" + uuid.uuid4().hex[:12]
+        current = self.ct(patient, "current", "20260801")
+        self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
+        published = self.publish_site(self.site_library())
+        site_key = "kin-hanging-protocols:v1:site:" + json.dumps([published["owner"]["institution"]], separators=(",", ":"))
+
+        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP SITE UNSAVED REPORT")
+        viewer = work.context.new_page(); site_reads = []
+        viewer.on("request", lambda request: site_reads.append(request.method)
+                  if request.url.split("?")[0].endswith("/api/hanging-protocols/site") else None)
+        viewer = self.launch(viewer, [current])
+        # This member never opens the Site scope and has no matching rule of their own.
+        personal = self.library(name="Personal MR Only"); personal["rules"][0]["match"]["modality"] = "MR"
+        self.import_rules(viewer, personal)
+        initial = self.cells(viewer)
+        self.assertEqual(1, len(initial), "opening the viewer applies nothing by itself")
+
+        # The published library reaches this browser from the server, not from a seeded cache.
+        viewer.wait_for_function("key=>localStorage.getItem(key)!==null", arg=site_key, timeout=45000)
+        self.assertEqual(["GET"], site_reads, "one read-only institution read, before any explicit press")
+        self.assertEqual(initial, self.cells(viewer), "reading the institution library applies no layout")
+        stored = viewer.evaluate("key=>JSON.parse(localStorage.getItem(key))", site_key)
+        self.assertEqual("Site Three Plane", stored["rules"][0]["name"])
+
+        viewer.locator("#kin-hp-apply-first").click()
+        expect(viewer.locator("#kin-hp-applied")).to_have_text(
+            "Applied Protocol: Site Three Plane · Source: Site", timeout=45000)
+        self.rendered_planes(viewer, 3)
+        cells = self.planes(viewer)
+        self.assertEqual(4, len(cells), "three planes are three cells of the published 2x2 grid")
+        self.assertEqual([], cells[3]["sets"]); self.assertIsNone(cells[3].get("volumeId"))
+        series = self.described_ref(viewer, current, "D03A current")["series"]
+        for cell in cells[:3]:
+            self.assertEqual("orthographic", cell["type"]); self.assertEqual(1, len(cell["sets"]))
+            self.assertEqual(cells[0]["volumeId"], cell["volumeId"], "every plane shows one and the same volume")
+            self.assertEqual(series, cell["series"]); self.assertEqual(current.uid, cell["study"])
+            self.assertEqual("mpr", cell["group"]); self.assertTrue(cell["loaded"])
+            self.assertEqual(cell["slices"], cell["framesLoaded"])
+            self.assertEqual(cell["sourceSops"], cell["sops"], "the plane stands on exactly the published series")
+        normals = np.array([cell["viewPlaneNormal"] for cell in cells[:3]])
+        np.testing.assert_allclose(np.abs(normals), [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)
+        viewer.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-site-three-plane-cells.png'))
+        self.assertEqual(["GET"], site_reads, "the applied institution library is read once, not per press")
+
+        # A member may read the institution library and may not publish it. The screen says so,
+        # and the server refuses regardless of the screen.
+        viewer.select_option("#kin-hp-scope", "site")
+        expect(viewer.locator("#kin-hp-scope-note")).to_contain_text("읽기 전용")
+        for control in ("#kin-hp-save-account", "#kin-hp-reset-account", "#kin-hp-save-local", "#kin-hp-new"):
+            expect(viewer.locator(control)).to_be_disabled()
+        expect(viewer.get_by_label("Name")).to_be_disabled()
+        viewer.locator("#kin-hp-load-account").click()
+        expect(viewer.locator("#kin-hp-status")).to_contain_text("기관 규칙을 불러왔습니다")
+        expect(viewer.get_by_label("Name")).to_have_value("Site Three Plane")
+        self.assertEqual(["GET", "GET"], site_reads, "the explicit Load from Site is the only refresh")
+        refused = self.stack.request("PUT", "/hanging-protocols/site", "doctor",
+                                     dict(expectedOwner=published["owner"], revision=published["revision"],
+                                          value=self.site_library("Member Attempt")))
+        self.assertEqual(403, refused.status, refused.text)
+        after = self.stack.request("GET", "/hanging-protocols/site", "doctor")
+        self.assertEqual((published["revision"], "Site Three Plane", False),
+                         (after.body["revision"], after.body["value"]["rules"][0]["name"], after.body["canManageSite"]))
+        self.assertEqual(0, self.stack.request("GET", "/hanging-protocols", "doctor").body["revision"],
+                         "applying a site rule writes nothing into the member's own account")
+        expect(work.locator("#findings")).to_have_value("HP SITE UNSAVED REPORT")
         self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
 
 

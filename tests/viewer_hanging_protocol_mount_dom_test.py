@@ -85,6 +85,9 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
     def setUp(self):
         self.page = self.browser.new_page(viewport={'width': 1280, 'height': 900}); self.delayed_script = None; self.delayed_studies = None
         self.me_count = 0; self.change_owner_after = None
+        # The institution library is unreachable unless a case publishes one, which is what the
+        # other cases already assumed; every attempt is recorded either way.
+        self.site_value = None; self.site_requests = []
         self.page.route('https://mount.test/**', self.route)
         self.page.goto(f'https://mount.test/ohif/viewer?StudyInstanceUIDs={CURRENT},{RELATED}')
         self.page.add_script_tag(content=INTEGRATION)
@@ -104,6 +107,11 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
             self.me_count += 1; owner = dict(OWNER)
             if self.change_owner_after is not None and self.me_count >= self.change_owner_after: owner['subject'] = 'changed-reader'
             route.fulfill(json={'kind': 'member', 'institution': owner['institution'], 'sub': owner['subject']}); return
+        if path == '/api/hanging-protocols/site':
+            self.site_requests.append(route.request.method)
+            if self.site_value is None: route.abort(); return
+            route.fulfill(json={'owner': {'institution': OWNER['institution'], 'subject': ''}, 'revision': 2,
+                                'value': self.site_value, 'canManageSite': False, 'updatedAt': None}); return
         if path == '/api/studies':
             if self.delayed_studies is not None: self.delayed_studies.append(route); return
             route.fulfill(json={'studies': STUDIES}); return
@@ -176,6 +184,29 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
         self.page.locator('#kin-hp-apply').click(); expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
         self.assertEqual(0, self.page.evaluate('setCalls.length'))
 
+
+    def test_actual_mount_reads_the_published_institution_library_once_and_applies_it_only_on_demand(self):
+        personal = library('Personal MR Only'); personal['rules'][0]['match']['modality'] = 'MR'
+        site = library('Site Head CT'); site['rules'][0]['id'] = '22222222-2222-4222-8222-222222222222'
+        site['activeRuleId'] = site['rules'][0]['id']; self.site_value = site
+        self.page.evaluate("value=>localStorage.setItem('kin-hanging-protocols:v1:'+JSON.stringify(['hospital','reader']),JSON.stringify(value))", personal)
+        self.mount()
+        # The actual config mount reaches the published library by itself, exactly once, and
+        # reaching it changes no layout and no scope: only the explicit press applies it.
+        self.page.wait_for_function("()=>localStorage.getItem('kin-hanging-protocols:v1:site:'+JSON.stringify(['hospital']))!==null")
+        self.assertEqual(['GET'], self.site_requests)
+        self.assertEqual(0, self.page.evaluate('setCalls.length'))
+        expect(self.page.locator('#kin-hp-scope')).to_have_value('personal')
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Site Head CT · Source: Site')
+        self.assertEqual(['GET'], self.site_requests, 'the applied institution library is read once, not per press')
+        result = self.page.evaluate("""()=>({calls:setCalls.length,cells:[...viewports.values()].map(v=>v.displaySetInstanceUIDs),
+          personal:JSON.parse(localStorage.getItem('kin-hanging-protocols:v1:'+JSON.stringify(['hospital','reader']))).rules[0].name,
+          report:document.querySelector('#report').value})""")
+        self.assertEqual(1, result['calls'])
+        self.assertEqual([['ds-current'], ['ds-related'], [], ['ds-current']], result['cells'])
+        self.assertEqual('Personal MR Only', result['personal'], 'the account keeps its own library untouched')
+        self.assertEqual('KEEP REPORT', result['report'])
 
     def test_actual_mount_opens_plane_cells_of_one_eligible_volume(self):
         value = library('Volume Three Plane'); rule = value['rules'][0]

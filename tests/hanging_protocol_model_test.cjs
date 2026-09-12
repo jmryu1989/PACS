@@ -130,6 +130,83 @@ test('owner scoped storage is strict and separates accounts',()=>{
   memory.set(b,'{"version":1}');assert.throws(()=>model.read(storage,b),/손상/);assert.throws(()=>model.write(storage,a,{version:1}),/저장/);
 });
 
+test('site scoped storage is keyed by institution only and never collides with a personal key',()=>{
+  const site=model.siteKey({institution:'hospital'}),other=model.siteKey({institution:'other'});
+  assert.notEqual(site,other);
+  assert.notEqual(site,model.ownerKey({institution:'hospital',subject:'a'}));
+  // Two accounts of one institution read the same site library; a personal subject never can.
+  assert.equal(model.siteKey({institution:'hospital',subject:''}),site);
+  assert.equal(model.siteKey({institution:'hospital',subject:'a'}),null,'a real subject is not a site owner');
+  assert.equal(model.siteKey({institution:''}),null);
+  assert.deepEqual(model.siteOwner({institution:'hospital'}),{institution:'hospital',subject:''});
+  assert.equal(model.scopeKey('site',{institution:'hospital'}),site);
+  assert.equal(model.scopeKey('personal',{institution:'hospital',subject:'a'}),model.ownerKey({institution:'hospital',subject:'a'}));
+  assert.equal(model.scopeKey('other',{institution:'hospital',subject:'a'}),null);
+});
+
+test('personal rules win and the site library is only a fallback, never an override',()=>{
+  const context={studies:[studies()[0]],displaySets:[display('1.2.1.1','1.2.1',1)]};
+  const personal=library();personal.rules[0].name='My CT';
+  const site=library();site.rules[0].id=IDS[1];site.rules[0].name='Site CT';site.activeRuleId=IDS[1];
+  const both=model.resolveScoped({personal,site},context,null);
+  assert.equal(both.scope,'personal');assert.equal(both.rule.name,'My CT');
+  // Only when no enabled personal rule matches does the institution library get a turn.
+  const noMatch=library();noMatch.rules[0].match.modality='MR';noMatch.activeRuleId=null;
+  const fell=model.resolveScoped({personal:noMatch,site},context,null);
+  assert.equal(fell.scope,'site');assert.equal(fell.rule.name,'Site CT');
+  // An account with no personal library at all still gets the institution rules.
+  assert.equal(model.resolveScoped({personal:null,site},context,null).scope,'site');
+  // Neither scope matching keeps the current layout: no-match, not a site override.
+  const neither=model.resolveScoped({personal:noMatch,site:noMatch},context,null);
+  assert.deepEqual(neither,{kind:'no-match'});
+  assert.deepEqual(model.resolveScoped({personal:null,site:null},context,null),{kind:'no-match'});
+  // A corrupt site cache must not break the personal scope it is only a fallback for.
+  assert.equal(model.resolveScoped({personal,site:{version:1}},context,null).scope,'personal');
+  // An explicitly selected rule applies from exactly the scope that was asked for.
+  assert.equal(model.resolveScoped({personal,site},context,{scope:'site',ruleId:IDS[1]}).scope,'site');
+  assert.equal(model.resolveScoped({personal,site},context,{scope:'personal',ruleId:IDS[0]}).scope,'personal');
+  assert.equal(model.resolveScoped({personal,site},context,{scope:'site',ruleId:IDS[0]}).kind,'no-match');
+  assert.throws(()=>model.resolveScoped({personal,site},context,{scope:'account',ruleId:IDS[0]}),/범위/);
+  assert.throws(()=>model.resolveScoped({personal,site},context,{scope:'personal'}),/범위/);
+  assert.throws(()=>model.resolveScoped({personal,site:{version:1}},context,{scope:'site',ruleId:IDS[1]}),/형식/);
+});
+
+test('a site fallback opens the same MPR planes a personal rule would have opened',()=>{
+  const planes=value=>{value.rules[0].layout={rows:2,cols:2,
+    cells:[plane('Current','axial'),plane('Current','sagittal'),plane('Current','coronal'),null]};return value;};
+  const context={studies:[studies()[0]],displaySets:[volume('1.2.1.1','1.2.1',1)]};
+  const personal=planes(library()),direct=model.resolve(personal,context);
+  const empty=library();empty.rules=[];empty.activeRuleId=null;
+  const site=planes(library());site.rules[0].id=IDS[1];site.activeRuleId=IDS[1];
+  const fell=model.resolveScoped({personal:empty,site},context,null);
+  assert.equal(fell.scope,'site');
+  assert.deepEqual(fell.rule.layout.cells,direct.rule.layout.cells,'the site rule carries the identical plane cells');
+  assert.deepEqual(fell.cells.map(cell=>cell&&cell.displaySetInstanceUID),
+    direct.cells.map(cell=>cell&&cell.displaySetInstanceUID),'and resolves them onto the same single volume');
+  // The same pre-check protects a site rule: an unreconstructable source fails before any
+  // layout change, so a site fallback can never destroy the screen a personal rule kept.
+  const weak={studies:[studies()[0]],displaySets:[display('1.2.1.1','1.2.1',1)]};
+  assert.deepEqual(model.resolveScoped({personal:empty,site},weak,null),{kind:'no-match'});
+});
+
+test('scoped navigation walks personal rules before site rules and keys the cursor by scope',()=>{
+  const context={studies:[studies()[0]],displaySets:[display('1.2.1.1','1.2.1',1)]};
+  const personal=library();personal.rules[0].name='Mine';
+  // The same rule id in both scopes must not be confused for one position in the walk.
+  const site=library();site.rules[0].name='Theirs';
+  assert.equal(model.navigateScoped({personal,site},context,null,'next').scope,'personal');
+  assert.equal(model.navigateScoped({personal,site},context,null,'previous').scope,'site');
+  const second=model.navigateScoped({personal,site},context,{scope:'personal',ruleId:IDS[0]},'next');
+  assert.equal(second.scope,'site');assert.equal(second.rule.name,'Theirs');
+  assert.deepEqual(model.navigateScoped({personal,site},context,{scope:'site',ruleId:IDS[0]},'next'),{kind:'no-match',reason:'end'});
+  assert.equal(model.navigateScoped({personal,site},context,{scope:'site',ruleId:IDS[0]},'previous').scope,'personal');
+  assert.deepEqual(model.navigateScoped({personal,site},context,{scope:'personal',ruleId:IDS[0]},'previous'),{kind:'no-match',reason:'end'});
+  assert.deepEqual(model.navigateScoped({personal:null,site:null},context,null,'next'),{kind:'no-match',reason:'none'});
+  assert.throws(()=>model.navigateScoped({personal,site},context,null,'first'),/방향/);
+  assert.throws(()=>model.navigateScoped({personal,site},context,{scope:'personal',ruleId:'bad'},'next'),/마지막 적용/);
+  assert.throws(()=>model.navigateScoped({personal,site},context,{scope:'account',ruleId:IDS[0]},'next'),/마지막 적용/);
+});
+
 test('specified metadata is exact and missing or mixed image metadata is unknown',()=>{
   assert.deepEqual(plain(model.displayMetadata(display('1.3','1.2.1',1))),{modality:'CT',retrieveAE:'ARCHIVE',bodyPart:'HEAD',description:'Brain Axial',laterality:'L',seriesNumber:1});
   for(const patch of [{images:[image(),image({RetrieveAETitle:'OTHER'})]},{images:[image(),image({BodyPartExamined:''})]},
