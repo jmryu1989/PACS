@@ -33,11 +33,18 @@ const services={viewportGridService:grid,displaySetService:{EVENTS:{CHANGED:'cha
 window.emitHP=()=>hpSubscribers.slice().forEach(fn=>fn());
 let accessResolve=null,holdAccess=false;
 const access=()=>holdAccess?new Promise(resolve=>accessResolve=()=>resolve({studies,displaySets:sets})):Promise.resolve({studies,displaySets:sets});
-const responses=[],requests=[];
+const responses=[],requests=[],siteResponses=[];
 const response=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json'}});
+// The institution GET has its own queue. The editor reads that library by itself for a browser
+// that has no copy of it, so a personal response queued for a later click must never be able to
+// answer it, and an institution queue left empty is an institution read that genuinely failed.
 async function fetcher(url,options={}){requests.push({url,method:options.method||'GET',body:options.body?JSON.parse(options.body):null});
  if(url==='/api/me')return response({kind:'member',institution:'hospital',sub:'reader'});
+ if(url==='/api/hanging-protocols/site'&&(options.method||'GET')==='GET'){
+  if(siteResponses.length)return siteResponses.shift();throw Error('BLOCKED NETWORK '+url);}
  if(responses.length)return responses.shift();throw Error('BLOCKED NETWORK '+url);}
+window.siteBody=(value,canManageSite=false,revision=2)=>({owner:{institution:'hospital',subject:''},revision,value,canManageSite,updatedAt:'2026-09-13T00:00:00.000Z'});
+window.siteRequests=()=>requests.filter(r=>r.url==='/api/hanging-protocols/site'&&r.method==='GET').length;
 window.__mount=()=>window.hp=KinViewerHangingProtocol.mount({services,host:document.querySelector('#host'),owner,access,fetcher});
 // Native orientation presets in patient space. The stub honours the requested orientation the
 // way cornerstone does, so a cell that asked for a plane can be checked against real geometry.
@@ -186,9 +193,12 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
     def test_site_scope_is_read_only_for_a_member_and_publishable_only_by_an_admin(self):
         self.seed();self.page.select_option('#kin-hp-scope','site')
         expect(self.page.locator('#kin-hp-scope-note')).to_contain_text('읽기 전용')
-        self.page.evaluate("(value)=>responses.push(response({owner:{institution:'hospital',subject:''},revision:2,value,canManageSite:false,updatedAt:'2026-09-13T00:00:00.000Z'}))",library('Site Rule'))
+        # The mount already spent this browser's one read-only institution read, which failed
+        # here; the explicit Load is counted against that baseline, not against zero.
+        mounted=self.page.evaluate('siteRequests()');self.assertEqual(1,mounted)
+        self.page.evaluate("(value)=>siteResponses.push(response(siteBody(value)))",library('Site Rule'))
         self.page.locator('#kin-hp-load-account').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('기관 규칙을 불러왔습니다')
-        self.assertEqual(1,self.page.evaluate("requests.filter(r=>r.url==='/api/hanging-protocols/site').length"))
+        self.assertEqual(mounted+1,self.page.evaluate('siteRequests()'))
         expect(self.page.get_by_label('Name')).to_have_value('Site Rule')
         # A member reads and applies the institution rules but cannot type into or publish them.
         for locator in ('#kin-hp-save-account','#kin-hp-reset-account','#kin-hp-save-local','#kin-hp-new','#kin-hp-delete','#kin-hp-import'):
@@ -199,12 +209,12 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         # A refused edit never reaches the network and never changes the cached library.
         self.page.locator('#kin-hp-new').dispatch_event('click')
         expect(self.page.locator('#kin-hp-status')).to_contain_text('읽기 전용')
-        self.assertEqual(1,self.page.evaluate("requests.filter(r=>r.url==='/api/hanging-protocols/site').length"))
-        self.page.evaluate("(value)=>responses.push(response({owner:{institution:'hospital',subject:''},revision:2,value,canManageSite:true,updatedAt:'2026-09-13T00:00:00.000Z'}))",library('Site Rule'))
+        self.assertEqual(mounted+1,self.page.evaluate('siteRequests()'))
+        self.page.evaluate("(value)=>siteResponses.push(response(siteBody(value,true)))",library('Site Rule'))
         self.page.locator('#kin-hp-load-account').click();expect(self.page.locator('#kin-hp-scope-note')).to_contain_text('관리자만 저장')
         expect(self.page.get_by_label('Name')).to_be_enabled();expect(self.page.locator('#kin-hp-save-account')).to_be_enabled()
         self.page.get_by_label('Name').fill('Published Rule');self.page.get_by_label('Name').dispatch_event('change')
-        self.page.evaluate("(value)=>responses.push(response({owner:{institution:'hospital',subject:''},revision:3,value,canManageSite:true,updatedAt:'2026-09-13T00:00:00.000Z'}))",library('Published Rule'))
+        self.page.evaluate("(value)=>responses.push(response(siteBody(value,true,3)))",library('Published Rule'))
         self.page.locator('#kin-hp-save-account').click();expect(self.page.locator('#kin-hp-status')).to_contain_text('같은 기관의 사용자')
         put=self.page.evaluate("requests.filter(r=>r.method==='PUT').at(-1)")
         self.assertEqual('/api/hanging-protocols/site',put['url'])
@@ -251,7 +261,7 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         # A site response arriving after the user switched back must not land on the personal scope.
         self.page.select_option('#kin-hp-scope','site')
         self.page.evaluate("holdAccess=true")
-        self.page.evaluate("(value)=>responses.push(new Promise(resolve=>{window.releaseSite=()=>resolve(response({owner:{institution:'hospital',subject:''},revision:9,value,canManageSite:true,updatedAt:null}))}))",library('Late Site'))
+        self.page.evaluate("(value)=>siteResponses.push(new Promise(resolve=>{window.releaseSite=()=>resolve(response({...siteBody(value,true,9),updatedAt:null}))}))",library('Late Site'))
         self.page.locator('#kin-hp-load-account').click()
         self.page.wait_for_function('typeof releaseSite==="function"')
         self.page.select_option('#kin-hp-scope','personal')
@@ -259,6 +269,85 @@ class ViewerHangingProtocolDOMTest(unittest.TestCase):
         expect(self.page.locator('#kin-hp-status')).to_contain_text('범위가 바뀌어')
         expect(self.page.get_by_label('Name')).to_have_value('Personal Draft')
         self.assertEqual('Site Rule',self.page.evaluate("key=>JSON.parse(localStorage.getItem(key)).rules[0].name",site_key))
+
+    def cold_member(self):
+        """A freshly joined member: one personal rule that does not match, and no site cache."""
+        personal=library('My Rule');personal['rules'][0]['match']['modality']='MR'
+        site=library('Site Fallback');site['rules'][0]['id']='22222222-2222-4222-8222-222222222222'
+        site['activeRuleId']=site['rules'][0]['id']
+        return personal,site
+
+    def test_a_cold_browser_reads_the_published_site_library_from_the_server_before_the_first_apply(self):
+        personal,site=self.cold_member()
+        self.page.evaluate("value=>siteResponses.push(response(siteBody(value)))",site)
+        self.seed(personal)
+        site_key=self.page.evaluate("KinHangingProtocolModel.siteKey({institution:owner.institution})")
+        # The published library reaches this browser without the member ever opening the Site
+        # scope, and arriving is not applying: the mount changes no layout and no scope.
+        self.page.wait_for_function("key=>localStorage.getItem(key)!==null",arg=site_key)
+        self.assertEqual(1,self.page.evaluate('siteRequests()'))
+        self.assertEqual([],self.page.evaluate('setCalls'),"a read-only institution read never applies a layout")
+        self.assertEqual('personal',self.page.evaluate('hp.scope()'))
+        expect(self.page.get_by_label('Hanging Protocol Scope')).to_have_value('personal')
+        expect(self.page.get_by_label('Name')).to_have_value('My Rule')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Site Fallback · Source: Site')
+        self.assertEqual(1,self.page.evaluate('siteRequests()'),"the institution library is not read twice")
+        self.assertEqual(1,self.page.evaluate('setCalls.length'))
+        self.assertEqual('My Rule',self.page.evaluate("JSON.parse(localStorage.getItem(KinHangingProtocolModel.ownerKey(owner))).rules[0].name"))
+        self.assertEqual('Site Fallback',self.page.evaluate("key=>JSON.parse(localStorage.getItem(key)).rules[0].name",site_key))
+        self.assertEqual('personal',self.page.evaluate('hp.scope()'),"the editor never switched scope to reach the fallback")
+
+    def test_an_apply_during_the_initial_site_read_waits_instead_of_reporting_no_match(self):
+        personal,site=self.cold_member()
+        self.page.evaluate("value=>siteResponses.push(new Promise(resolve=>{window.releaseSite=()=>resolve(response(siteBody(value)))}))",site)
+        self.seed(personal);self.page.wait_for_function('siteRequests()===1')
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('기관 공용 규칙을 확인 중')
+        expect(self.page.locator('#kin-hp-apply-first')).to_be_disabled()
+        self.assertEqual([],self.page.evaluate('setCalls'))
+        self.page.evaluate('releaseSite()')
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Site Fallback · Source: Site')
+        self.assertEqual(1,self.page.evaluate('siteRequests()'),"the pending read is awaited, never duplicated")
+        self.assertNotIn('일치하는 규칙이 없어',self.page.text_content('#kin-hp-status'))
+
+    def test_a_failed_site_read_stays_visible_and_only_an_explicit_apply_tries_again(self):
+        personal,site=self.cold_member();self.seed(personal)  # nothing queued: the read fails
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('기관 공용 규칙을 불러오지 못했습니다')
+        before=self.page.evaluate("()=>[...viewports.values()].map(v=>[v.viewportId,v.displaySetInstanceUIDs])")
+        self.assertEqual([],self.page.evaluate('setCalls'))
+        self.assertIsNone(self.page.evaluate("localStorage.getItem(KinHangingProtocolModel.siteKey({institution:owner.institution}))"))
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('일치하는 규칙이 없어')
+        expect(self.page.locator('#kin-hp-status')).to_contain_text('기관 공용 규칙은 불러오지 못했습니다')
+        self.assertEqual([],self.page.evaluate('setCalls'))
+        self.assertEqual(before,self.page.evaluate("()=>[...viewports.values()].map(v=>[v.viewportId,v.displaySetInstanceUIDs])"))
+        self.assertEqual(2,self.page.evaluate('siteRequests()'),"only the explicit press tries again")
+        self.page.wait_for_timeout(150)
+        self.assertEqual(2,self.page.evaluate('siteRequests()'),"a failed institution read never polls")
+        self.page.evaluate("value=>siteResponses.push(response(siteBody(value)))",site)
+        self.page.locator('#kin-hp-apply-first').click()
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: Site Fallback · Source: Site')
+        self.assertEqual(3,self.page.evaluate('siteRequests()'))
+
+    def test_a_late_site_answer_never_lands_on_the_scope_the_user_moved_into(self):
+        personal,site=self.cold_member()
+        self.page.evaluate("value=>siteResponses.push(new Promise(resolve=>{window.releaseSite=()=>resolve(response(siteBody(value)))}))",site)
+        self.seed(personal);self.page.wait_for_function('siteRequests()===1')
+        site_key=self.page.evaluate("KinHangingProtocolModel.siteKey({institution:owner.institution})")
+        self.page.select_option('#kin-hp-scope','site')
+        expect(self.page.locator('#kin-hp-scope-note')).to_contain_text('읽기 전용')
+        self.page.evaluate('releaseSite()');self.page.wait_for_timeout(80)
+        # The member is standing in the Site scope. A read they never asked for may not write
+        # underneath them, replace what the editor is showing, or apply anything.
+        self.assertIsNone(self.page.evaluate("key=>localStorage.getItem(key)",site_key))
+        self.assertEqual([],self.page.evaluate('hp.read().rules'))
+        self.assertEqual([],self.page.evaluate('setCalls'))
+        expect(self.page.locator('#kin-hp-applied')).to_have_text('Applied Protocol: None')
+        self.page.select_option('#kin-hp-scope','personal')
+        expect(self.page.get_by_label('Name')).to_have_value('My Rule')
+        self.assertEqual('My Rule',self.page.evaluate("JSON.parse(localStorage.getItem(KinHangingProtocolModel.ownerKey(owner))).rules[0].name"))
 
     def test_import_is_strict_draft_only_and_contains_no_patient_snapshot(self):
         self.page.evaluate('__mount()');payload=library('Imported Rule')

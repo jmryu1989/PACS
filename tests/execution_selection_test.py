@@ -198,11 +198,12 @@ class ExecutionSelectionTests(unittest.TestCase):
                 cls=getattr(runner.load_module(ROOT/'tests'/filename),class_name)
                 self.assertEqual({row['case'] for row in plan['tests']},
                     {class_name+'.'+name for name in cls.__dict__ if name.startswith('test_hp_')})
-                # test_hp_05 added the reconstructed-cell flow to the same declared
-                # selection, so the exact declared count is now 5. This stays an
-                # equality: a floor would let a case silently disappear as long as
-                # four remained, which is the regression this guard exists to catch.
-                self.assertEqual(len(plan['tests']),5)
+                # test_hp_05 added the reconstructed-cell flow and test_hp_06 the
+                # published institution flow to the same declared selection, so the
+                # exact declared count is now 6. This stays an equality: a floor would
+                # let a case silently disappear as long as five remained, which is the
+                # regression this guard exists to catch.
+                self.assertEqual(len(plan['tests']),6)
             print('SELECTION',filename,len(plan['tests']),flush=True)
 
 

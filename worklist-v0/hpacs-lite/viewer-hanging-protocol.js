@@ -16,6 +16,11 @@
     let scope='personal',canManageSite=false;
     // The scope not being edited keeps its own draft so switching back and forth never loses one.
     const parked={personal:null,site:null};
+    // The institution library takes part in precedence even for an account that never opens the
+    // Site scope, so a browser without a copy of it reads one, read-only. It fills the same cache
+    // precedence already reads and nothing else: no scope switch, no layout, no revision to save
+    // against, and no write over a site draft this browser is holding.
+    let sitePending=null,siteRequest=null,siteLoaded=false,siteUnavailable=false;
     let ownedPlanes=new Map();
     const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
@@ -140,10 +145,50 @@
       if(parked[name])return parked[name].library;
       try{return model.read(storage,scopeKeys[name]);}catch(_){return null;}
     }
+    // A corrupt or missing site cache both mean "this browser has no institution copy yet"; the
+    // corrupt one is the server's own copy, never a draft, so replacing it loses no user work.
+    function siteCacheEmpty(){try{return !model.read(storage,scopeKeys.site);}catch(_){return true;}}
+    // True while this account still owes itself one institution read. A scope the user is editing
+    // or has parked answers for itself, so no read is owed and none is started there.
+    function siteReadOwed(){return !!boundSite&&scope!=='site'&&!parked.site&&!siteLoaded&&siteCacheEmpty();}
+    function cacheSite(value){
+      // A draft the user is holding in the site scope is newer than a copy this account never
+      // asked for, so a response that comes back into one is dropped instead of written.
+      if(ended||!live()||scope==='site'||parked.site)return;
+      try{model.write(storage,scopeKeys.site,value);}catch(_){}
+    }
+    function loadSiteLibrary(){
+      if(sitePending)return sitePending;
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000),quiet=status.textContent;
+      siteRequest=controller;
+      sitePending=(async()=>{
+        try{
+          const response=await fetcher(scopeEndpoints.site,{credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1'}});
+          const raw=await json(response);
+          if(!response.ok)throw Error('기관 공용 Hanging Protocol을 불러오지 못했습니다.');
+          const data=siteValue(raw);
+          if(ended||!live())return;
+          // An institution with nothing published is an answer, not a failure: it is remembered
+          // so neither this mount nor a later Apply asks the same question twice.
+          siteLoaded=true;siteUnavailable=false;
+          if(data.value)cacheSite(data.value);
+        }catch(_){
+          siteUnavailable=true;
+          // Visible where nothing else has been reported yet. A failed institution read changes
+          // no layout and must not overwrite what the user is actually being told.
+          if(!ended&&!busy&&quiet===''&&status.textContent==='')
+            status.textContent='기관 공용 규칙을 불러오지 못했습니다. 개인 규칙은 그대로 사용할 수 있습니다.';
+        }finally{clearTimeout(timer);siteRequest=null;}
+      })().finally(()=>{sitePending=null;if(!ended)refresh();});
+      return sitePending;
+    }
     // Apply First Match and navigation span both scopes, so an account whose own library is
     // empty must still be able to reach the institution rules.
     function anyEnabledRule(){
       if(library.rules.some(rule=>rule.enabled))return true;
+      // Until the institution answers, "there is nothing to apply" is not yet known. Apply stays
+      // pressable and waits for that answer rather than being reported as a no-match in advance.
+      if(siteReadOwed())return true;
       const other=parkedLibrary(scope==='personal'?'site':'personal');
       return !!other&&other.rules.some(rule=>rule.enabled);
     }
@@ -347,6 +392,18 @@
       if(busy||ended||!live())return;if(layoutQuarantined){status.textContent='이전 배치 요청의 완료를 확인하지 못했습니다. 뷰어 창을 닫고 다시 열어 주세요.';return;}if(!workspaceSafe()){status.textContent='저장하지 않은 영상 작업이 있어 배치를 변경하지 않았습니다.';return;}
       let value;try{value=strict();}catch(error){status.textContent=error.message;return;}
       if(navigation&&appliedCursor&&appliedFingerprint!==navigationFingerprint())invalidateApplied();
+      // An institution rule can be the one that matches, so an explicit Apply waits for the
+      // read-only institution read instead of answering "no match" over a library still on its
+      // way. The wait is that request's own 10s bound, the controls are disabled meanwhile, and
+      // only this explicit press starts a retry after a failed read: nothing here polls.
+      if(siteReadOwed()){
+        busy=true;refresh();status.textContent='기관 공용 규칙을 확인 중…';
+        const beforeSite=generation;
+        try{await (sitePending||loadSiteLibrary());}catch(_){}
+        busy=false;
+        if(ended||!live()){refresh();return;}
+        if(beforeSite!==generation){status.textContent='편집 중 규칙이 바뀌어 적용하지 않았습니다.';refresh();return;}
+      }
       busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();let timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false;
       const noteInteraction=()=>{if(interactionArmed)userInteracted=true;};for(const type of ['pointerdown','wheel','keydown'])document.addEventListener(type,noteInteraction,true);queueMicrotask(()=>interactionArmed=true);status.textContent='검사와 규칙을 확인 중…';
       try{
@@ -358,7 +415,10 @@
         const result=navigation?model.navigateScoped(scoped,resolveContext,appliedCursor,navigation)
           :model.resolveScoped(scoped,resolveContext,firstMatch?null:{scope,ruleId:selected});
         if(result.kind==='no-match'){
-          status.textContent=navigation?(result.reason==='end'?`${navigation==='next'?'Next':'Previous'} Protocol: 저장 순서의 끝입니다. 현재 배치를 유지합니다.`:`${navigation==='next'?'Next':'Previous'} Protocol: 현재 검사와 일치하는 규칙이 없습니다. 현재 배치를 유지합니다.`):'일치하는 규칙이 없어 현재 배치를 유지합니다.';return;
+          // A no-match reached without the institution library is reported as what it is, so it
+          // is never read as "the institution published nothing".
+          status.textContent=(navigation?(result.reason==='end'?`${navigation==='next'?'Next':'Previous'} Protocol: 저장 순서의 끝입니다. 현재 배치를 유지합니다.`:`${navigation==='next'?'Next':'Previous'} Protocol: 현재 검사와 일치하는 규칙이 없습니다. 현재 배치를 유지합니다.`):'일치하는 규칙이 없어 현재 배치를 유지합니다.')
+            +(siteUnavailable?' 기관 공용 규칙은 불러오지 못했습니다.':'');return;
         }
         if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
         const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 영상 격자 또는 이 규칙으로 만든 MPR 배치에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
@@ -408,7 +468,7 @@
         // must not write this revision or library into the scope now on screen.
         if(beforeScope!==scope)throw Error('범위가 바뀌어 응답을 반영하지 않았습니다.');
         if(action==='load'&&before!==generation)throw Error(site?'편집 중 규칙이 바뀌어 기관 값을 불러오지 않았습니다.':'편집 중 규칙이 바뀌어 계정 값을 불러오지 않았습니다.');
-        if(site)canManageSite=data.canManageSite;
+        if(site){canManageSite=data.canManageSite;siteLoaded=true;siteUnavailable=false;}
         revision=data.revision;
         if(action==='load'){invalidateApplied();
           if(data.value)saveLocal(data.value,site?'기관 규칙을 불러왔습니다. Apply를 눌러 적용하세요.':'계정 규칙을 불러와 이 브라우저에 저장했습니다. Apply를 눌러 적용하세요.');
@@ -476,11 +536,15 @@
         library=value;selected=value.activeRuleId||value.rules[0]?.id||null;markChanged();render();status.textContent='규칙을 초안으로 가져왔습니다. Save Draft 또는 Save to Account를 선택하세요.';
       }catch(error){if(!ended)status.textContent=error instanceof SyntaxError?'가져올 JSON 형식이 잘못되었습니다.':error.message;}
     };
-    function end(){ended=true;request?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});root.removeEventListener?.('storage',storageEnd);refresh();}
+    function end(){ended=true;request?.abort();siteRequest?.abort();channel?.close();subscriptions.splice(0).forEach(value=>{try{value?.unsubscribe?.();}catch(_){}});root.removeEventListener?.('storage',storageEnd);refresh();}
     const storageEnd=event=>{if(event.key==='kin-session-ended')end();};root.addEventListener?.('storage',storageEnd);try{channel=new BroadcastChannel('kin-session');channel.onmessage=event=>{if(event.data?.type==='session-ended')end();};}catch(_){}
     const navigationChanged=()=>{if(!busy&&appliedCursor&&appliedFingerprint!==navigationFingerprint()){invalidateApplied();refresh();}};
     for(const service of [grid,displaySets])for(const event of new Set(Object.values(service?.EVENTS||{})))try{subscriptions.push(service.subscribe(event,navigationChanged));}catch(_){}
     describeScope();render();
+    // One read-only institution read per mount, and only for a browser that has no copy yet.
+    // A copy already here is refreshed by the explicit Load from Site, which is also the only
+    // thing that may overwrite a site draft.
+    if(siteReadOwed())loadSiteLibrary();
     return {read:()=>clone(library),apply:runApply,end,account,save:()=>saveLocal(strict()),generation:()=>generation,
       scope:()=>scope,setScope:switchScope,canManageSite:()=>canManageSite};
   }
