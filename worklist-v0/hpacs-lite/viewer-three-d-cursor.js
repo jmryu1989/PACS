@@ -158,12 +158,26 @@
         if(!item||!item.stack||nodes.get(id).anchor!==item.anchor)dropNode(id);
       }
       if(enabled)for(const element of live)attach(element);
-      for(const [id,mark] of [...marks]){
-        const item=next.get(id);
-        if(!item||!item.stack||item.anchor!==mark.anchor||!same(item.token,mark.token)||!rendered(item.viewport,mark.imageId))marks.delete(id);
-      }
+      for(const [id,mark] of [...marks])if(stale(next.get(id),mark,next.get(id)?.token))marks.delete(id);
       bound=next;
       return bound;
+    }
+    /* A marker claims that this exact image is on screen at this exact point. The claim dies with
+       the pane, with the stack it was measured against, and with the frame itself: the confirming
+       observation is rendered(), the same predicate that let the marker be committed. */
+    const stale=(item,mark,mark_token)=>!item||!item.stack||item.anchor!==mark.anchor||
+      !same(mark_token,mark.token)||!rendered(item.viewport,mark.imageId);
+    /* Invalidation alone, for a refresh that arrives while a run is awaiting. Rebinding or moving
+       a pane then would take the run's bindings away from it, but leaving a marker that no longer
+       matches the displayed frame would keep a stale claim on screen for the whole run. */
+    function invalidateMarks(){
+      let dropped=false;
+      for(const [id,mark] of [...marks]){
+        const item=bound.get(id);
+        if(stale(item,mark,item&&token(item.viewport))){marks.delete(id);dropped=true;}
+      }
+      if(dropped)paint();
+      return dropped;
     }
 
     const SIZE=13;
@@ -466,8 +480,12 @@
       teardown=result;
       return result;
     }
+    /* The host adapter calls this when the renderer says something changed. Confirmation stays a
+       poll of rendered(); the call only shortens the wait and triggers invalidation. A render
+       event is never treated as proof by itself, because STACK_NEW_IMAGE fires before render. */
     function refresh(){
-      if(!enabled||stopped||busy)return;
+      if(!enabled||stopped)return;
+      if(busy){invalidateMarks();return;}
       if(now()!==base){disable('context-changed');return;}
       syncBinding();paint();
     }

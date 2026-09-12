@@ -217,6 +217,75 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual([4], self.page.evaluate("viewports.mro.calls"), "a refused pane is never navigated")
         self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
 
+    # --- B8 2: a marker is committed only after the image is displayed -----------------------
+    def marked(self):
+        return self.page.evaluate("()=>cursor.state().panes.filter(p=>p.marked).map(p=>p.id)")
+
+    def test_d2_a_marker_is_not_committed_until_the_target_image_is_actually_rendered(self):
+        # The index moves before the pixels do, so neither the index nor a resolved request is
+        # the observation that commits a marker: only the image the renderer is holding is.
+        self.enable()
+        self.page.evaluate("viewports.mr.discard=true")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual("mr:0", self.page.evaluate("viewports.mr.csImage.imageId"))
+        self.assertEqual("target-not-confirmed", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual(["ct"], self.marked())
+        self.assertEqual(["pane-ct"], [mark["pane"] for mark in self.marks()])
+        # The load that never completes: the index already reads as the target frame.
+        self.page.evaluate("cursor.stop();__mount({confirmAttempts:400,navigationAttempts:4000})")
+        self.page.evaluate("viewports.mr.discard=false;scrollTo_('mr',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("mr:4", self.page.evaluate("viewports.mr.getCurrentImageId()"))
+        self.assertEqual("mr:0", self.page.evaluate("viewports.mr.csImage.imageId"))
+        self.assertEqual(["ct"], self.marked(), "the index alone must not commit the marker")
+        self.page.evaluate("viewports.mr.hold=false;flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr"], self.marked())
+        self.assertEqual(["pane-ct", "pane-mr"], [mark["pane"] for mark in self.marks()])
+
+    def test_d2_a_render_event_invalidates_a_stale_marker_without_a_pick(self):
+        # What a host adapter does on a render event is call refresh(); no click, no pick.
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr", "mr2"], self.marked())
+        # The renderer began loading another image into a marked pane: the index and the held
+        # image still match, and only the status says the frame on screen is on its way out.
+        self.page.evaluate("viewports.mr.viewportStatus='loading';cursor.refresh()")
+        self.assertEqual(["ct", "mr2"], self.marked())
+        self.assertEqual(["pane-ct", "pane-mr2"], [mark["pane"] for mark in self.marks()])
+        # The same must hold while a run is awaiting: a refresh then may not rebind or move a
+        # pane, but it must still drop a marker whose frame has gone.
+        self.page.evaluate("viewports.mr.viewportStatus='rendered';cursor.stop();__mount({navigationAttempts:4000})")
+        self.page.evaluate("scrollTo_('mr',0);scrollTo_('mr2',0);addSecondTarget()")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.assertEqual(["ct", "mr"], self.marked())
+        self.page.evaluate("scrollTo_('mr',6);cursor.refresh()")
+        self.assertEqual(["ct"], self.marked())
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr2"], self.marked(), "the invalidated marker must not come back")
+        self.assertEqual(["pane-ct", "pane-mr2"], [mark["pane"] for mark in self.marks()])
+
+    def test_d2_a_failed_navigation_leaves_no_marker_and_reports_the_reason(self):
+        self.enable()
+        self.page.evaluate("viewports.mr.throwOnSet=true")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("navigation-failed", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual(["ct"], self.marked())
+        # Two panes missed (the foreign-frame one always does); the count and the FIRST reason
+        # are what the status carries, and the first miss here is the navigation that failed.
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", result["status"])
+        self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", self.page.evaluate("cursor.state().status"))
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#pane-mr [data-kin-3d-cursor-mark]').length"))
+
     # --- review 184a433 blocking regressions -------------------------------------------------
     def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):
         # A click landing on an inset canvas/overlay child must map to the canvas point the
