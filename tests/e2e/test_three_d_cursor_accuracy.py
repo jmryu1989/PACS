@@ -96,6 +96,10 @@ MOUNT = """async () => {
     };
     document.addEventListener('click', event => note('document-capture', event), true);
     document.addEventListener('click', event => note('document-bubble', event), false);
+    // Since B8b the controller measures the pointerup, not the click. PointerEvent.clientX is a
+    // double while MouseEvent.clientX is rounded to whole pixels, so only this event carries the
+    // coordinates the product was actually asked about.
+    document.addEventListener('pointerup', event => note('document-pointerup', event), true);
     for (const pane of panes()) {
       const anchor = pane.viewport.element || pane.element;
       pane.element.addEventListener('click', event => note('pane-bubble:' + pane.id, event), false);
@@ -343,11 +347,12 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                   elementAtPoint: (t => t && t.tagName + ' ' + String(t.className).slice(0, 60))(
                     document.elementFromPoint(window.__acc.probeX, window.__acc.probeY))})"""))
                 continue
-            # A click into a pane that was not active is retargeted above [data-viewport-uid], so
-            # the pane's own listener may never see it. The document capture always does, and it
-            # carries the same clientX/clientY the controller measured the pointerup at.
-            seen = page.evaluate("() => window.__acc.events.filter(e => e.phase === 'document-capture')")
-            self.assertTrue(seen, "the click never reached the document: %s"
+            # The pointerup is the pick, and it is the only event whose coordinates are not
+            # rounded to whole client pixels. A click into a pane that was not active is also
+            # retargeted above [data-viewport-uid], so the pane's own click listener may never see
+            # it at all; the document capture always does.
+            seen = page.evaluate("() => window.__acc.events.filter(e => e.phase === 'document-pointerup')")
+            self.assertTrue(seen, "the pointerup never reached the document: %s"
                             % json.dumps(page.evaluate("() => window.__acc.events"), ensure_ascii=False))
             inside = page.evaluate("id => window.__acc.events.filter(e => e.phase === 'pane-bubble:' + id).length",
                                    cell["id"])
@@ -375,10 +380,10 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
         self.last_click = client
         state, marks, lost, event, pane_clicks = self.pick(page, source_cell, client)
 
-        # The browser delivers the click at whole client pixels, so the point the product was asked
-        # about is not exactly the voxel centre. The expectation is therefore recomputed from the
-        # coordinates the event actually carried — still only from this test's affine and the DICOM
-        # tags — and the voxel-centre figure is kept beside it as the click quantization.
+        # The point the product was asked about is not exactly the voxel centre: the pointer lands
+        # where the browser puts it. The expectation is therefore recomputed from the coordinates
+        # the pointerup actually carried — still only from this test's affine and the DICOM tags —
+        # and the voxel-centre figure is kept beside it as the input quantization.
         landed = source_map.pixel(event["x"], event["y"])
         asked = fx.world(source_plane, target["slice"], landed[0], landed[1])
         reached = fx.project(target_plane, asked)
