@@ -11,6 +11,17 @@ test('server validator rejects every shared invalid case',()=>{
   for(const item of cases.invalid)assert.equal(normalizeHangingProtocol(item.value),undefined,item.name);
 });
 
+test('server validator detaches plane cells and keeps stack cells as plain strings',()=>{
+  const value=cases.valid.find(item=>item.name==='three explicit planes of one current volume').value;
+  const clean=normalizeHangingProtocol(value),cells=clean.rules[0].layout.cells;
+  assert.equal(cells.length,4,'a plane layout keeps one cell per viewport');
+  assert.notEqual(cells[0],value.rules[0].layout.cells[0]);
+  assert.deepEqual(cells[0],{alias:'Current',view:'mpr',orientation:'axial'});
+  assert.equal(Object.getPrototypeOf(cells[0]),Object.prototype);
+  const mixed=cases.valid.find(item=>item.name==='one plane beside a stack cell of the same series').value;
+  assert.equal(typeof normalizeHangingProtocol(mixed).rules[0].layout.cells[0],'string');
+});
+
 test('server validator rejects non-JSON graphs and the byte limit before traversal',()=>{
   const cyclic={version:1,activeRuleId:null,rules:[]};cyclic.self=cyclic;
   assert.equal(normalizeHangingProtocol(cyclic),undefined);

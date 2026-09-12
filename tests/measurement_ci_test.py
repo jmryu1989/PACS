@@ -53,7 +53,119 @@ class MeasurementCiTests(unittest.TestCase):
             ('e2e/test_hanging_protocol.py', 'HangingProtocolE2E', 'ci-hp-native'),
         ))
         self.assertEqual(profile['out'].name, 'hanging-protocols-ci')
-        self.assertEqual(profile['suite_timeout'], 900)
+        self.assertEqual(profile['suite_timeout'], 400)
+
+    def test_hanging_protocol_budget_cannot_starve_the_trailing_flows(self):
+        profile = ci.PROFILES['hanging-protocols']
+        budgets = profile['suite_budgets']
+        units = [unit for _, _, unit in profile['suites']]
+        # Every suite is budgeted, and nothing is budgeted that is not a suite.
+        self.assertEqual(sorted(budgets), sorted(units))
+        self.assertEqual(budgets, {'ci-hp-invariants': 400, 'ci-hp-worklist': 240,
+                                   'ci-hp-account': 120, 'ci-hp-native': 300})
+        # No budget may exceed the profile's own declared maximum, and none of them
+        # may raise the 900 this profile used to request.
+        self.assertLessEqual(max(budgets.values()), profile['suite_timeout'])
+        self.assertTrue(all(value < 900 for value in budgets.values()))
+        # Unlike every other profile, this one's ENTIRE configured worst case fits
+        # main()'s single deadline, with room left for the stack it shares.
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        worst_case = sum(budgets.values()) + 35*len(units)
+        self.assertEqual(worst_case, 1200)
+        # Measured on run 34703534031: 60.6s setup and 12.8s cleanup through this
+        # same main() path. The reserve left over is 3.8x that.
+        self.assertGreaterEqual(25*60 - worst_case, 4*74)
+        # The required order is 69 -> 14 -> API -> e2e, so the new flow runs last;
+        # even if everything ahead of it burns its whole budget and the stack takes
+        # four times its measured time, the trailing suite keeps its full slice.
+        ahead = sum(budgets[unit] + 35 for unit in units[:-1])
+        self.assertEqual(units[-1], 'ci-hp-native')
+        self.assertGreaterEqual(25*60 - ahead - 4*74, budgets['ci-hp-native'])
+
+    def test_hanging_protocol_commands_are_exact_ordered_and_separately_capped(self):
+        profile = ci.PROFILES['hanging-protocols']
+        commands = []
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+            commands.append(command)
+            self.assertEqual(command[command.index('--timeout')+1],
+                             str(profile['suite_budgets'][unit]))
+            self.assertEqual(outer, profile['suite_budgets'][unit] + 35)
+        self.assertEqual([command[command.index('--module')+1] for command in commands],
+                         ['tests/invariants_live.py', 'tests/e2e/test_worklist.py',
+                          'tests/hanging_protocol_api_live.py',
+                          'tests/e2e/test_hanging_protocol.py'])
+        self.assertEqual([command[command.index('--unit')+1] for command in commands],
+                         ['ci-hp-invariants', 'ci-hp-worklist',
+                          'ci-hp-account', 'ci-hp-native'])
+        # The two shared boundary suites keep their own load_tests as the allowlist;
+        # the two hanging-protocol suites stay pinned to their declared classes.
+        self.assertNotIn('--class', commands[0])
+        self.assertNotIn('--class', commands[1])
+        self.assertEqual(commands[2][commands[2].index('--class')+1], 'HangingProtocolApiLive')
+        self.assertEqual(commands[3][commands[3].index('--class')+1], 'HangingProtocolE2E')
+        # A shrinking deadline shortens the request instead of overrunning it.
+        near, _ = ci.guarded_profile_run(profile, *profile['suites'][3], 200)
+        self.assertEqual(near[near.index('--timeout')+1], '165')
+        # A separate Compose project and artifact directory from every other profile.
+        for name, other in ci.PROFILES.items():
+            if name == 'hanging-protocols':
+                continue
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('hanging-protocols', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_per_suite_budgets_leave_every_other_profile_unchanged(self):
+        # The mapping is opt-in: a profile without it keeps requesting its own
+        # maximum for every suite, exactly as before.
+        for name, profile in ci.PROFILES.items():
+            if name == 'hanging-protocols':
+                self.assertIn('suite_budgets', profile)
+                continue
+            with self.subTest(profile=name):
+                self.assertNotIn('suite_budgets', profile)
+                for suite, class_name, unit in profile['suites']:
+                    command, outer = ci.guarded_profile_run(
+                        profile, suite, class_name, unit, 4000)
+                    self.assertEqual(command[command.index('--timeout')+1],
+                                     str(profile['suite_timeout']))
+                    self.assertEqual(outer, profile['suite_timeout'] + 35)
+
+    def test_validate_workflow_runs_hanging_protocols_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  hanging-protocols:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one hanging-protocols job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile hanging-protocols',
+                         'tests/execution_selection_test.py',
+                         'tests/e2e/artifacts/hanging-protocols-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        # The HP suites must not be appended to another job's budget, and the live
+        # step keeps the same 28-minute bound as the existing e2e jobs.
+        self.assertEqual(text.count('--profile hanging-protocols'), 1)
+        self.assertNotIn('--profile hanging-protocols', jobs[0])
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        # Registering this standing gate must not disturb the gates already green.
+        for profile in ['measurements', 'volume-rendering', 'volume-mpr']:
+            self.assertEqual(text.count('--profile '+profile), 1)
+        # The manual dispatch path for this profile stays available as well.
+        dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
+        self.assertIn('- hanging-protocols', dispatch)
+        self.assertIn('tests/e2e/artifacts/hanging-protocols-ci/', dispatch)
 
     def test_three_d_cursor_accuracy_profile_is_exact_and_dispatch_only(self):
         import ast

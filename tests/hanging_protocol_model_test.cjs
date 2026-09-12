@@ -37,6 +37,92 @@ test('schema rejects extra keys, noncanonical tokens, names/aliases, active ids 
   const tooMany=library();while(tooMany.rules.length<21)tooMany.rules.push(rule(crypto.randomUUID(),'Rule '+tooMany.rules.length));assert.equal(model.normalize(tooMany),null);
 });
 
+const CT_IMAGE='1.2.840.10008.5.1.4.1.1.2';
+// A regular axial CT: one frame of reference, constant in-plane geometry and a constant
+// 2.5 mm step along the slice normal, which is what the volume loader reconstructs.
+const GEOMETRY={Modality:'CT',SamplesPerPixel:1,PhotometricInterpretation:'MONOCHROME2',FrameOfReferenceUID:'1.2.9.0',
+  Rows:512,Columns:512,PixelSpacing:[0.7,0.7],ImageOrientationPatient:[1,0,0,0,1,0]};
+const slice=(n,patch={})=>({...image(),SOPClassUID:CT_IMAGE,SOPInstanceUID:'1.2.9.'+n,...GEOMETRY,ImagePositionPatient:[-150,-150,(n-1)*2.5],...patch});
+const slices=count=>Array.from({length:count},(_,n)=>slice(n+1));
+const volume=(uid,study,number,patch={})=>display(uid,study,number,{images:[slice(1),slice(2),slice(3)],...patch});
+const plane=(alias,orientation)=>({alias,view:'mpr',orientation});
+
+test('plane cells stay one viewport each, keep string cells byte-identical and reject unknown shapes',()=>{
+  const value=library(),r=value.rules[0];
+  r.layout={rows:2,cols:2,cells:[plane('Current','axial'),plane('Current','sagittal'),plane('Current','coronal'),null]};
+  assert.deepEqual(plain(model.normalize(value)),value,'a three-plane layout round trips without a version bump');
+  assert.equal(model.normalize(value).rules[0].layout.cells.length,4,'three planes are three cells, never one cell that expands');
+  const mixed=library();mixed.rules[0].layout={rows:1,cols:2,cells:['Current',plane('Current','coronal')]};
+  assert.deepEqual(plain(model.normalize(mixed)),mixed);
+  assert.equal(typeof model.normalize(mixed).rules[0].layout.cells[0],'string','a stack cell is still the bare alias string');
+  const mutations=[v=>v.rules[0].layout.cells[0]={...plane('Current','axial'),thickness:5},v=>v.rules[0].layout.cells[0]=plane('Current','oblique'),
+    v=>v.rules[0].layout.cells[0]={...plane('Current','axial'),view:'vr'},v=>v.rules[0].layout.cells[0]={...plane('Current','axial'),view:'stack'},
+    v=>v.rules[0].layout.cells[0]=plane('Missing','axial'),v=>v.rules[0].layout.cells[0]=plane('current','axial'),
+    v=>v.rules[0].layout.cells={0:plane('Current','axial'),length:1},v=>v.rules[0].layout.cells[1]=plane('Current','axial')];
+  for(const mutate of mutations){const broken=library();broken.rules[0].layout={rows:1,cols:2,cells:[plane('Current','axial'),null]};mutate(broken);
+    assert.equal(model.normalize(broken),null,JSON.stringify(broken.rules[0].layout));}
+  assert.deepEqual(model.cellSpec('Current'),{alias:'Current',view:'stack',orientation:null});
+  assert.deepEqual(model.cellSpec(plane('Current','axial')),{alias:'Current',view:'mpr',orientation:'axial'});
+  assert.equal(model.cellSpec({alias:'Current',view:'mpr'}),null);
+});
+
+test('a plane cell needs one eligible CT volume and fails before any layout change',()=>{
+  const value=library(),r=value.rules[0];
+  r.layout={rows:2,cols:2,cells:[plane('Current','axial'),plane('Current','sagittal'),plane('Current','coronal'),null]};
+  const context=sets=>({studies:[studies()[0]],displaySets:sets});
+  const good=volume('1.2.1.1','1.2.1',1),result=model.resolve(value,context([good]));
+  assert.equal(result.kind,'match');
+  assert.deepEqual(result.cells.map(cell=>cell&&cell.displaySetInstanceUID),['ds-1.2.1.1','ds-1.2.1.1','ds-1.2.1.1',null],
+    'every plane of the layout references the same single volume');
+  for(const patch of [{Modality:'MR'},{images:[slice(1)]},{images:[slice(1),{...slice(2),SOPClassUID:'1.2.840.10008.5.1.4.1.1.7'}]},
+    {images:[slice(1),slice(1)]},{images:[slice(1),{...slice(2),SOPInstanceUID:''}]}]){
+    const rejected=model.resolve(value,context([volume('1.2.1.1','1.2.1',1,patch)]));
+    assert.equal(rejected.kind,'no-match',JSON.stringify(patch));
+  }
+  const split=[volume('1.2.1.1','1.2.1',1),{...volume('1.2.1.1','1.2.1',1),displaySetInstanceUID:'split'}];
+  assert.equal(model.resolve(value,context(split)).kind,'no-match','a split series is refused before the screen changes');
+  // The same source stays a valid ordinary stack cell: legacy rules keep behaving identically.
+  const stack=library();assert.equal(model.resolve(stack,context([display('1.2.1.1','1.2.1',1)])).kind,'match');
+  assert.equal(model.volumeEligible(good),true);
+  assert.equal(model.volumeEligible(display('1.2.1.1','1.2.1',1)),false);
+});
+
+test('an unreconstructable CT is refused before the layout changes, not after the screen is gone',()=>{
+  const value=library(),r=value.rules[0];
+  r.layout={rows:2,cols:2,cells:[plane('Current','axial'),plane('Current','sagittal'),plane('Current','coronal'),null]};
+  const context=sets=>({studies:[studies()[0]],displaySets:sets});
+  // Every source below satisfies Modality CT + CT Image Storage + unique SOPInstanceUID and is
+  // still not a volume. The same predicates the MPR job and the MPR Orientation panel enforce
+  // (viewer-volume-job.js:8-11, viewer-volume-orientation.js:23,43) decide it here instead.
+  const unreconstructable={
+    'two slice topogram, frontal and lateral':[slice(1),{...slice(2),ImageOrientationPatient:[1,0,0,0,0,-1],ImagePositionPatient:[-150,0,-150]}],
+    'uneven 5 / 5 / 37 mm spacing':[0,5,10,47].map((z,n)=>slice(n+1,{ImagePositionPatient:[-150,-150,z]})),
+    'palette colour CT':slices(3).map(frame=>({...frame,SamplesPerPixel:3,PhotometricInterpretation:'PALETTE COLOR'})),
+    'mixed frame of reference':slices(3).map((frame,n)=>n===2?{...frame,FrameOfReferenceUID:'1.2.9.9'}:frame),
+    'more frames than the loader accepts':Array.from({length:257},(_,n)=>slice(n+1)),
+    'mixed matrix size':slices(3).map((frame,n)=>n===2?{...frame,Rows:256}:frame),
+    'mixed pixel spacing':slices(3).map((frame,n)=>n===2?{...frame,PixelSpacing:[0.5,0.5]}:frame),
+    'gantry tilted positions off the slice normal':slices(3).map((frame,n)=>({...frame,ImagePositionPatient:[-150,-150+n*1.5,n*2.5]})),
+    'two frames at the same position':[slice(1),slice(2,{ImagePositionPatient:[-150,-150,0]})],
+    'missing ImagePositionPatient':slices(3).map((frame,n)=>n===1?{...frame,ImagePositionPatient:undefined}:frame),
+    'missing ImageOrientationPatient':slices(3).map(frame=>({...frame,ImageOrientationPatient:undefined}))};
+  for(const [name,images] of Object.entries(unreconstructable)){
+    const source=volume('1.2.1.1','1.2.1',1,{images});
+    assert.equal(model.volumeEligible(source),false,name);
+    assert.equal(model.resolve(value,context([source])).kind,'no-match',name);
+    // The very same series is still an ordinary stack cell: legacy rules are untouched.
+    assert.equal(model.resolve(library(),context([source])).kind,'match',name);
+  }
+  // DICOM string multi-values and the loader limits themselves stay accepted.
+  const strings=volume('1.2.1.1','1.2.1',1,{images:slices(3).map(frame=>({...frame,PixelSpacing:'0.7\\0.7',
+    ImageOrientationPatient:'1\\0\\0\\0\\1\\0',ImagePositionPatient:frame.ImagePositionPatient.join('\\')}))});
+  assert.equal(model.volumeEligible(strings),true,'naturalized and raw DICOM multi-values agree');
+  assert.equal(model.volumeEligible(volume('1.2.1.1','1.2.1',1,{images:Array.from({length:256},(_,n)=>slice(n+1))})),true,'256 frames is the accepted limit');
+  const oblique=volume('1.2.1.1','1.2.1',1,{images:[0,2.5,5].map((along,n)=>slice(n+1,{ImageOrientationPatient:[1,0,0,0,0,-1],
+    ImagePositionPatient:[-150,along,-150]}))});
+  assert.equal(model.volumeEligible(oblique),true,'a consistently oriented coronal acquisition is still a volume');
+});
+
 test('owner scoped storage is strict and separates accounts',()=>{
   const memory=new Map(),storage={getItem:k=>memory.get(k)??null,setItem:(k,v)=>memory.set(k,v)};
   const a=model.ownerKey({institution:'hospital',subject:'a'}),b=model.ownerKey({institution:'hospital',subject:'b'});assert.notEqual(a,b);

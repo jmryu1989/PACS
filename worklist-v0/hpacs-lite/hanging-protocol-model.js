@@ -12,6 +12,71 @@
     return own(v,['operator','value'])&&['equals','contains'].includes(v.operator)&&text(v.value,128)?{operator:v.operator,value:v.value}:null;
   }
   const alias=v=>typeof v==='string'&&/^[A-Za-z][A-Za-z0-9_-]{0,31}$/.test(v)?v:null;
+  // A layout cell is always one viewport. A reconstructed cell therefore names its own
+  // plane; three planes of one series are three cells, not one cell that expands.
+  const VIEWS=['mpr'],ORIENTATIONS=['axial','sagittal','coronal'],CT_IMAGE='1.2.840.10008.5.1.4.1.1.2';
+  function cellSpec(value){
+    if(typeof value==='string'){const name=alias(value);return name?{alias:name,view:'stack',orientation:null}:null;}
+    if(!own(value,['alias','view','orientation']))return null;
+    const name=alias(value.alias);
+    return name&&VIEWS.includes(value.view)&&ORIENTATIONS.includes(value.orientation)?{alias:name,view:value.view,orientation:value.orientation}:null;
+  }
+  // The same source predicate the MPR job (viewer-volume-job.js:6-12) and the MPR Orientation
+  // panel (viewer-volume-orientation.js:23,40-45) already require of a volume, evaluated on the
+  // metadata the display set is already holding so an unreconstructable series fails here,
+  // before the layout is destroyed, instead of leaving an empty MPR screen behind.
+  const MAX_FRAMES=256,SPACING_EPSILON=1e-3;
+  function numbers(value,count){
+    const list=Array.isArray(value)?value:typeof value==='string'?value.split('\\'):null;
+    if(!list||list.length!==count)return null;
+    const clean=list.map(Number);
+    return clean.every(Number.isFinite)?clean:null;
+  }
+  const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+  function sameSeriesGeometry(images){
+    const first=images[0],cosines=numbers(first?.ImageOrientationPatient,6);
+    if(!cosines)return null;
+    const normal=cross(cosines.slice(0,3),cosines.slice(3,6));
+    // Non-orthonormal direction cosines describe no reconstructable grid.
+    if(Math.abs(dot(normal,normal)-1)>SPACING_EPSILON||Math.abs(dot(cosines.slice(0,3),cosines.slice(3,6)))>SPACING_EPSILON)return null;
+    const spacing=numbers(first?.PixelSpacing,2),rows=Number(first?.Rows),columns=Number(first?.Columns);
+    if(!spacing||spacing.some(value=>!(value>0))||!Number.isInteger(rows)||rows<1||!Number.isInteger(columns)||columns<1)return null;
+    if(!uid(first?.FrameOfReferenceUID))return null;
+    const positions=[];
+    for(const image of images){
+      if(exactToken(image?.Modality,16)!=='CT'||Number(image?.SamplesPerPixel)!==1||image?.PhotometricInterpretation!=='MONOCHROME2')return null;
+      if(image?.FrameOfReferenceUID!==first.FrameOfReferenceUID||Number(image?.Rows)!==rows||Number(image?.Columns)!==columns)return null;
+      const pixelSpacing=numbers(image?.PixelSpacing,2),orientation=numbers(image?.ImageOrientationPatient,6),position=numbers(image?.ImagePositionPatient,3);
+      if(!pixelSpacing||pixelSpacing.some((value,index)=>Math.abs(value-spacing[index])>SPACING_EPSILON))return null;
+      if(!orientation||orientation.some((value,index)=>Math.abs(value-cosines[index])>SPACING_EPSILON))return null;
+      if(!position)return null;
+      positions.push(position);
+    }
+    return {normal,positions,origin:positions[0]};
+  }
+  function reconstructable(images){
+    const geometry=sameSeriesGeometry(images);if(!geometry)return false;
+    const {normal,positions,origin}=geometry;
+    // Every frame must sit on the same line along the slice normal at a constant step: the
+    // volume loader maps frame i to origin + i*step*normal and the orientation panel compares
+    // each ImagePositionPatient against that mapping (viewer-volume-orientation.js:43).
+    const offsets=positions.map(position=>dot([position[0]-origin[0],position[1]-origin[1],position[2]-origin[2]],normal));
+    for(let index=0;index<positions.length;index++){
+      const along=offsets[index],position=positions[index];
+      for(let axis=0;axis<3;axis++)if(Math.abs(position[axis]-origin[axis]-along*normal[axis])>Math.max(.01,Math.abs(along)*.001))return false;
+    }
+    const sorted=[...offsets].sort((a,b)=>a-b),step=sorted[1]-sorted[0],tolerance=Math.max(.01,Math.abs(step)*.01);
+    if(!(Math.abs(step)>tolerance))return false;
+    return sorted.every((value,index)=>index===0||Math.abs(value-sorted[index-1]-step)<=tolerance);
+  }
+  function volumeEligible(displaySet){
+    const images=displaySet?.images;
+    if(exactToken(displaySet?.Modality,16)!=='CT'||!Array.isArray(images)||images.length<2||images.length>MAX_FRAMES)return false;
+    const sops=images.map(image=>image?.SOPInstanceUID);
+    if(!images.every((image,index)=>image?.SOPClassUID===CT_IMAGE&&uid(sops[index]))||new Set(sops).size!==sops.length)return false;
+    return reconstructable(images);
+  }
   function condition(v,laterality,strict=true){
     const keys=['modality','retrieveAE','bodyPart','description',...(laterality?['laterality']:[])];
     if(strict&&!own(v,keys))return null;
@@ -42,12 +107,14 @@
       const layout=rule.layout;
       if(!own(layout,['rows','cols','cells'])||![[1,1],[1,2],[2,2]].some(([r,c])=>layout.rows===r&&layout.cols===c)||
         !Array.isArray(layout.cells)||layout.cells.length!==layout.rows*layout.cols)return null;
-      const byAlias=new Map(selectors.map(s=>[s.alias.toLowerCase(),s])),cells=[];
+      const byAlias=new Map(selectors.map(s=>[s.alias.toLowerCase(),s])),cells=[],planes=new Set();
       for(const cell of layout.cells){
         if(cell===null){cells.push(null);continue;}
-        const aliasValue=alias(cell),selector=aliasValue&&byAlias.get(aliasValue.toLowerCase());if(!selector||aliasValue!==selector.alias)return null;cells.push(aliasValue);
+        const spec=cellSpec(cell),selector=spec&&byAlias.get(spec.alias.toLowerCase());if(!spec||!selector||spec.alias!==selector.alias)return null;
+        if(spec.view!=='stack'){const plane=spec.alias.toLowerCase()+'|'+spec.view+'|'+spec.orientation;if(planes.has(plane))return null;planes.add(plane);}
+        cells.push(spec.view==='stack'?spec.alias:{alias:spec.alias,view:spec.view,orientation:spec.orientation});
       }
-      if(!cells.some(cell=>cell!==null&&byAlias.get(cell.toLowerCase()).role==='current'))return null;
+      if(!cells.some(cell=>cell!==null&&byAlias.get(cellSpec(cell).alias.toLowerCase()).role==='current'))return null;
       ids.add(id);names.add(nameKey);rules.push({id,name,enabled:rule.enabled,match,selectors,layout:{rows:layout.rows,cols:layout.cols,cells}});
     }
     const activeRuleId=value.activeRuleId===null?null:value.activeRuleId.toLowerCase();
@@ -105,7 +172,9 @@
       const currentUid=current.uid??current.StudyInstanceUID,currentSets=sets.filter(ds=>ds?.StudyInstanceUID===currentUid);
       if(!fieldsMatch(studyMetadata(current,currentSets),rule.match))continue;
       const chosen=new Map(),byAlias=new Map(rule.selectors.map(s=>[s.alias,s]));let failed=false;
-      for(const alias of new Set(rule.layout.cells.filter(Boolean))){
+      const specs=rule.layout.cells.map(cell=>cell===null?null:cellSpec(cell));
+      const reconstructed=new Set(specs.filter(spec=>spec&&spec.view!=='stack').map(spec=>spec.alias));
+      for(const alias of new Set(specs.filter(Boolean).map(spec=>spec.alias))){
         const selector=byAlias.get(alias),study=selector.role==='current'?current:related;
         if(!study||selector.historical&&(!currentDate||!relatedDate||relatedDate>=currentDate)){failed=true;break;}
         const studyUid=study.uid??study.StudyInstanceUID;
@@ -115,9 +184,12 @@
         pool.sort((a,b)=>{const am=displayMetadata(a),bm=displayMetadata(b),an=am.seriesNumber,bn=bm.seriesNumber;
           if(an===null||bn===null){if(an===null&&bn===null){const tied=a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID);return selector.order==='ascending'?tied:-tied;}return an===null?1:-1;}
           const ordered=an-bn||a.SeriesInstanceUID.localeCompare(b.SeriesInstanceUID);return selector.order==='ascending'?ordered:-ordered;});
-        const selected=pool[selector.occurrence-1];if(!selected){failed=true;break;}chosen.set(alias,selected);
+        const selected=pool[selector.occurrence-1];if(!selected){failed=true;break;}
+        // A plane cell must fail here, before any layout change, not after the screen is gone.
+        if(reconstructed.has(alias)&&!volumeEligible(selected)){failed=true;break;}
+        chosen.set(alias,selected);
       }
-      if(!failed)return {kind:'match',rule,cells:rule.layout.cells.map(alias=>alias===null?null:chosen.get(alias))};
+      if(!failed)return {kind:'match',rule,cells:specs.map(spec=>spec===null?null:chosen.get(spec.alias))};
     }
     return {kind:'no-match'};
   }
@@ -133,6 +205,6 @@
     if(index<0)return direction==='next'?matches[0]:matches[matches.length-1];
     const target=matches[index+(direction==='next'?1:-1)];return target||{kind:'no-match',reason:'end'};
   }
-  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,resolve,navigate};
+  root.KinHangingProtocolModel={VERSION,MAX_RULES,MAX_SELECTORS,PREFIX,VIEWS,ORIENTATIONS,empty,normalize,owner,ownerKey,read,write,date,displayMetadata,cellSpec,volumeEligible,resolve,navigate};
   if(typeof module==='object'&&module.exports)module.exports=root.KinHangingProtocolModel;
 })(typeof globalThis==='object'?globalThis:this);

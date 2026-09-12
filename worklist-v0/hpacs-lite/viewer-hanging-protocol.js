@@ -7,6 +7,7 @@
     const live=options.live||(()=>true),fetcher=options.fetcher||root.fetch.bind(root),endpoint=options.endpoint||'/api/hanging-protocols';
     const grid=services.viewportGridService,displaySets=services.displaySetService,objects=new WeakMap();let objectSequence=0;
     let library=model.empty(),selected=null,revision=null,busy=false,ended=false,generation=0,request=null,channel=null,storageError='',appliedCursor=null,appliedFingerprint=null,appliedName=null,layoutQuarantined=false;
+    let ownedPlanes=new Map();
     const subscriptions=[];
     try{library=model.read(storage,key)||model.empty();selected=library.activeRuleId||library.rules[0]?.id||null;}catch(error){library=model.empty();storageError=error.message;}
     host.textContent='';host.classList.add('kin-hanging-protocols');
@@ -62,6 +63,26 @@
       op.setAttribute('aria-label','Description Operator');op.onchange=()=>{if(target.description){target.description.operator=op.value;markChanged();}render();};row.prepend(op);
       if(includeLaterality)addInput(parent,'Laterality',target.laterality||'',i=>target.laterality=i.value||null,[['','Any'],['L','L'],['R','R'],['B','B']]);
     }
+    const PLANE_LABELS={axial:'Axial',sagittal:'Sagittal',coronal:'Coronal'};
+    const spec=cell=>cell===null?null:model.cellSpec(cell);
+    const plane=cell=>{const value=spec(cell);return value&&value.view!=='stack'?{view:value.view,orientation:value.orientation}:null;};
+    // One cell stays one viewport. A plane reuses the combination the saved MPR job already
+    // uses (viewer-volume-job.js), including viewportOptions.id: the native position cache keys
+    // on it, so a fresh id keeps a cached oblique presentation off a new axial viewport.
+    function viewportRequest(id,sets,cellPlane){
+      const viewportOptions=cellPlane?{id,viewportId:id,viewportType:'volume',toolGroupId:'mpr',orientation:cellPlane.orientation,allowUnmatchedView:true}
+        :{viewportId:id,viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true};
+      return {displaySetInstanceUIDs:sets,displaySetOptions:[{}],viewportOptions};
+    }
+    // The select carries one string per cell; the alias charset excludes '|', so it separates.
+    function cellValue(cell){const value=spec(cell);return !value?'':value.view==='stack'?value.alias:[value.alias,value.view,value.orientation].join('|');}
+    function cellFromValue(value){const [alias,view,orientation]=String(value||'').split('|');return !alias?null:view?{alias,view,orientation}:alias;}
+    function renameCell(cell,from,to){const value=spec(cell);if(!value||value.alias!==from)return cell;return value.view==='stack'?to:{...value,alias:to};}
+    function cellOptions(rule){
+      return [['','Vacancy'],...rule.selectors.flatMap(selector=>[[selector.alias,selector.alias],
+        ...model.VIEWS.flatMap(view=>model.ORIENTATIONS.map(orientation=>
+          [[selector.alias,view,orientation].join('|'),`${selector.alias} · ${view.toUpperCase()} ${PLANE_LABELS[orientation]||orientation}`]))])];
+    }
     function blankRule(){return {id:crypto.randomUUID(),name:'New Protocol',enabled:true,match:{modality:null,retrieveAE:null,bodyPart:null,description:null},
       selectors:[{alias:'Current1',role:'current',historical:false,modality:null,retrieveAE:null,bodyPart:null,description:null,laterality:null,order:'ascending',occurrence:1}],layout:{rows:1,cols:1,cells:['Current1']}};}
     function uniqueName(base){const used=new Set(library.rules.map(r=>fold(r.name))),stem=base.slice(0,56);let name=stem,n=2;while(used.has(fold(name)))name=(stem+' '+n++).slice(0,64);return name;}
@@ -73,17 +94,18 @@
       const study=make('fieldset');study.append(make('legend','Study Match · empty means Any'));conditionEditor(study,rule.match,false);editor.append(study);
       const selectors=make('fieldset');selectors.append(make('legend','Series Selectors'));editor.append(selectors);
       rule.selectors.forEach((selector,index)=>{const box=make('section');box.dataset.selector=String(index);box.append(make('h4',selector.alias));
-        addInput(box,'Alias (ASCII letter, then letters/numbers/_/-)',selector.alias,i=>{const old=selector.alias,next=cleanText(i,32);selector.alias=next;rule.layout.cells=rule.layout.cells.map(c=>c===old?next:c);});
+        addInput(box,'Alias (ASCII letter, then letters/numbers/_/-)',selector.alias,i=>{const old=selector.alias,next=cleanText(i,32);selector.alias=next;rule.layout.cells=rule.layout.cells.map(c=>renameCell(c,old,next));});
         addInput(box,'Role',selector.role,i=>{selector.role=i.value;selector.historical=selector.role==='related'&&selector.historical;},[['current','Current'],['related','Related']]);
         const historical=make('input');historical.type='checkbox';historical.checked=selector.historical;historical.disabled=selector.role!=='related';historical.onchange=()=>{selector.historical=historical.checked;markChanged();};const hlabel=make('label','Require strictly earlier study');hlabel.prepend(historical);box.append(hlabel);
         conditionEditor(box,selector,true);
         addInput(box,'Order',selector.order,i=>selector.order=i.value,[['ascending','Series Number ascending'],['descending','Series Number descending']]);
         addInput(box,'Occurrence',String(selector.occurrence),i=>selector.occurrence=Number(i.value));box.lastElementChild.querySelector('input').type='number';box.lastElementChild.querySelector('input').min='1';box.lastElementChild.querySelector('input').max='500';
-        const remove=make('button','Remove Selector');remove.type='button';remove.onclick=()=>{rule.selectors.splice(index,1);rule.layout.cells=rule.layout.cells.map(c=>c===selector.alias?null:c);markChanged();render();};box.append(remove);selectors.append(box);});
+        const remove=make('button','Remove Selector');remove.type='button';remove.onclick=()=>{rule.selectors.splice(index,1);rule.layout.cells=rule.layout.cells.map(c=>spec(c)?.alias===selector.alias?null:c);markChanged();render();};box.append(remove);selectors.append(box);});
       const add=make('button','Add Selector');add.type='button';add.dataset.requiresSelectorSlot='true';add.disabled=rule.selectors.length>=model.MAX_SELECTORS;add.onclick=()=>{const alias=uniqueAlias(rule,'Series');rule.selectors.push({alias,role:'related',historical:false,modality:null,retrieveAE:null,bodyPart:null,description:null,laterality:null,order:'ascending',occurrence:1});markChanged();render();};selectors.append(add);
       const layout=make('fieldset');layout.append(make('legend','Cell Layout · Vacancy leaves the cell empty'));editor.append(layout);
+      layout.append(make('p','MPR 평면은 재구성할 수 있는 CT 시리즈에서만 적용됩니다. 같은 시리즈의 Axial·Sagittal·Coronal 세 칸이 일반적인 3평면 배치이며, 조건에 맞지 않으면 현재 화면을 그대로 둡니다.'));
       addInput(layout,'Grid',rule.layout.rows+'x'+rule.layout.cols,i=>{const [rows,cols]=i.value.split('x').map(Number),old=rule.layout.cells;rule.layout={rows,cols,cells:Array(rows*cols).fill(null).map((_,n)=>old[n]??null)};},[['1x1','1 × 1'],['1x2','1 × 2'],['2x2','2 × 2']]);
-      rule.layout.cells.forEach((cell,index)=>addInput(layout,'Cell '+(index+1),cell||'',i=>rule.layout.cells[index]=i.value||null,[['','Vacancy'],...rule.selectors.map(s=>[s.alias,s.alias])]));
+      rule.layout.cells.forEach((cell,index)=>addInput(layout,'Cell '+(index+1),cellValue(cell),i=>rule.layout.cells[index]=cellFromValue(i.value),cellOptions(rule)));
       refresh();
     }
     function uniqueAlias(rule,base){const used=new Set(rule.selectors.map(s=>fold(s.alias)));let alias=base,n=2;while(used.has(fold(alias)))alias=base+n++;return alias;}
@@ -106,15 +128,81 @@
       const sources=displaySets.getActiveDisplaySets().map(value=>[objectId(value),objectId(value.images),value.displaySetInstanceUID,value.StudyInstanceUID,value.SeriesInstanceUID,value.images?.length??null]);
       return JSON.stringify([[layout?.layoutType,layout?.numRows,layout?.numCols],views,sources]);
     }
+    // The camera keys the saved MPR job already treats as the physical position of a plane
+    // (viewer-volume-job.js:43), so a rollback can put the user's own work back.
+    const CAMERA_KEYS=['focalPoint','position','viewUp','viewPlaneNormal','parallelScale','flipHorizontal','flipVertical'];
+    function cameraOf(viewportId){
+      try{
+        const camera=services.cornerstoneViewportService?.getCornerstoneViewport?.(viewportId)?.getCamera?.();if(!camera)return null;
+        const value={};
+        for(const key of CAMERA_KEYS){
+          const part=camera[key];
+          if(key==='parallelScale'){if(!Number.isFinite(part))return null;value[key]=part;continue;}
+          if(key==='flipHorizontal'||key==='flipVertical'){value[key]=!!part;continue;}
+          if(!Array.isArray(part)||part.length!==3||!part.every(Number.isFinite))return null;
+          value[key]=[...part];
+        }
+        return value;
+      }catch(_){return null;}
+    }
+    const sameCamera=(a,b)=>!!a&&!!b&&CAMERA_KEYS.every(key=>Array.isArray(a[key])?Array.isArray(b[key])&&a[key].every((n,i)=>Math.abs(n-b[key][i])<1e-6):typeof a[key]==='number'?Math.abs(a[key]-b[key])<1e-6:a[key]===b[key]);
+    // Flips first, then the physical camera, exactly as viewer-volume-job.js:116 restores one.
+    function setCamera(viewportId,camera){
+      try{const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);if(viewport?.type!=='orthographic')return;
+        viewport.setCamera?.({flipHorizontal:camera.flipHorizontal,flipVertical:camera.flipVertical});
+        const next={...camera};delete next.flipHorizontal;delete next.flipVertical;viewport.setCamera?.(next);viewport.render?.();}catch(_){}
+    }
     function rollbackSnapshot(){
       const state=grid.getState(),layout=state.layout,views=ordered(state),rows=layout?.numRows,cols=layout?.numCols;
       if(layout?.layoutType!=='grid'||!Number.isInteger(rows)||!Number.isInteger(cols)||views.length!==rows*cols)return null;
       const cells=views.map((view,index)=>{const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(view.viewportId);
-        if(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6||((view.displaySetInstanceUIDs||[]).length&&viewport?.type!=='stack'))return null;
-        return {id:view.viewportId,sets:[...(view.displaySetInstanceUIDs||[])]};});
+        const sets=[...(view.displaySetInstanceUIDs||[])];
+        if(Math.abs(view.x-(index%cols)/cols)>1e-6||Math.abs(view.y-Math.floor(index/cols)/rows)>1e-6)return null;
+        if(!sets.length||viewport?.type==='stack')return {id:view.viewportId,sets,plane:null};
+        // Only a plane this controller itself built can be rebuilt; any other non-stack
+        // screen (a saved MPR job, VR) stays unknown and keeps refusing the whole apply.
+        const owned=ownedPlanes.get(view.viewportId);
+        if(!owned||viewport?.type!=='orthographic'||sets.length!==1||sets[0]!==owned.set)return null;
+        // The rollback owes the user the screen actually in front of them, including a plane
+        // the Crosshairs tool has since rotated. Without a readable camera we cannot promise
+        // that, so the whole apply is refused here, before anything is destroyed.
+        const camera=cameraOf(view.viewportId);
+        return camera?{id:view.viewportId,sets,plane:owned.plane,camera}:null;});
       return cells.some(cell=>cell===null)?null:{rows,cols,active:state.activeViewportId,cells};
     }
-    function targetIsCurrent(ids,result){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===result.rule.layout.rows&&state.layout?.numCols===result.rule.layout.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(result.cells[index]?[result.cells[index].displaySetInstanceUID]:[]));}
+    const PLANE_AXIS={axial:2,sagittal:0,coronal:1};
+    // A fully loaded single volume of exactly the requested series, the same thing the MPR job
+    // (viewer-volume-job.js:7-12) and the MPR Orientation panel (viewer-volume-orientation.js:23)
+    // require before they trust a plane.
+    function planeVolumeSops(viewport){
+      const native=root.cornerstone,volume=native?.cache?.getVolume?.(viewport.getVolumeId?.()),ids=volume?.imageIds;
+      if(!volume?.loadStatus?.loaded||!Array.isArray(ids)||ids.length<2||ids.length>256||volume.framesLoaded!==ids.length)return null;
+      const sops=ids.map(id=>native?.metaData?.get?.('instance',id)?.SOPInstanceUID);
+      return sops.every(value=>typeof value==='string'&&value)&&new Set(sops).size===sops.length?sops:null;
+    }
+    // A plane that silently fell back to a stack, never loaded its volume, or stood on another
+    // plane than the cell asked for is not the requested cell.
+    function planeIsCurrent(plane,viewportId,displaySet){
+      if(!plane)return true;
+      try{
+        const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(viewportId);
+        if(viewport?.type!=='orthographic'||viewport.getActors?.().length!==1)return false;
+        const sops=planeVolumeSops(viewport),expected=displaySet?.images?.map(image=>image?.SOPInstanceUID);
+        if(!sops||!Array.isArray(expected)||expected.length!==sops.length||expected.some(value=>!sops.includes(value)))return false;
+        // Only the axis is asserted, not its sign: native orientation presets differ in sign
+        // between versions, while an oblique or reset camera misses the axis entirely.
+        const axis=PLANE_AXIS[plane.orientation],normal=viewport.getCamera?.()?.viewPlaneNormal;
+        return Number.isInteger(axis)&&Array.isArray(normal)&&normal.length===3&&normal.every(value=>Number.isFinite(value))&&
+          normal.every((value,index)=>Math.abs(index===axis?Math.abs(value)-1:value)<=1e-3);
+      }catch(_){return false;}
+    }
+    // Layout identity is what this controller owns and can roll back; the plane reality below
+    // is what makes an apply acceptable. Keeping them apart means a volume that failed or is
+    // still loading is rolled back to the previous screen instead of quarantining the panel.
+    function layoutIsCurrent(ids,result){const state=grid.getState(),views=ordered(state);
+      return state.layout?.numRows===result.rule.layout.rows&&state.layout?.numCols===result.rule.layout.cols&&views.length===ids.length&&views.every((view,index)=>view.viewportId===ids[index]&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(result.cells[index]?[result.cells[index].displaySetInstanceUID]:[]));}
+    function targetIsCurrent(ids,result){const planes=result.rule.layout.cells.map(plane);
+      return layoutIsCurrent(ids,result)&&planes.every((value,index)=>planeIsCurrent(value,ids[index],result.cells[index]));}
     function boundedNative(promise,{signal=null,timeout=0}={}){
       const task=Promise.resolve(promise);task.catch(()=>{});
       return new Promise((resolve,reject)=>{
@@ -125,37 +213,63 @@
         if(timeout>0&&!settled)timer=setTimeout(()=>finish(reject,Error('Native layout timeout')),timeout);
       });
     }
+    // A plane has to load its volume before it can be judged, so a rule with plane cells waits
+    // the volume budget the saved MPR job also allows itself (viewer-volume-job.js:71).
+    const planeBudget=result=>result.rule.layout.cells.some(plane)?{limit:1200,timeout:30000}:{limit:80,timeout:10000};
+    // A plane whose volume is already loaded on a ready cell will not start standing on the
+    // requested series or plane by waiting longer; that is a failure now, not in 30 seconds.
+    function planeSettledWrong(ids,result){
+      const state=grid.getState();
+      return result.rule.layout.cells.map(plane).some((value,index)=>{
+        if(!value||!state.viewports.get(ids[index])?.isReady)return false;
+        try{
+          const viewport=services.cornerstoneViewportService?.getCornerstoneViewport?.(ids[index]);
+          if(viewport?.type!=='orthographic'||viewport.getActors?.().length!==1||!planeVolumeSops(viewport))return false;
+        }catch(_){return false;}
+        return !planeIsCurrent(value,ids[index],result.cells[index]);
+      });
+    }
     async function waitForTarget(ids,result,signal,beforeGeneration){
-      for(let count=0;count<80;count++){
+      const {limit}=planeBudget(result);
+      for(let count=0;count<limit;count++){
         if(targetIsCurrent(ids,result))return;
+        if(layoutIsCurrent(ids,result)&&planeSettledWrong(ids,result))break;
         if(signal.aborted)throw new DOMException('Aborted','AbortError');
         if(ended||!live()||beforeGeneration!==generation)throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
         await new Promise(resolve=>setTimeout(resolve,25));
       }
-      throw Error('영상 배치 완료를 확인하지 못해 현재 적용 기준을 갱신하지 않았습니다.');
+      throw Error(layoutIsCurrent(ids,result)&&result.rule.layout.cells.some(plane)
+        ?'요청한 MPR 볼륨이나 평면 방향을 확인하지 못해 이전 화면으로 되돌립니다.'
+        :'영상 배치 완료를 확인하지 못해 현재 적용 기준을 갱신하지 않았습니다.');
     }
-    function snapshotIsCurrent(snapshot){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===snapshot.rows&&state.layout?.numCols===snapshot.cols&&views.length===snapshot.cells.length&&views.every((view,index)=>view.viewportId===snapshot.cells[index].id&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(snapshot.cells[index].sets));}
+    function snapshotIsCurrent(snapshot){const state=grid.getState(),views=ordered(state);return state.layout?.numRows===snapshot.rows&&state.layout?.numCols===snapshot.cols&&views.length===snapshot.cells.length&&views.every((view,index)=>view.viewportId===snapshot.cells[index].id&&JSON.stringify(view.displaySetInstanceUIDs||[])===JSON.stringify(snapshot.cells[index].sets))&&
+      // A plane rebuilt on its recorded orientation is not the screen the user was working in.
+      snapshot.cells.every(cell=>!cell.plane||sameCamera(cameraOf(cell.id),cell.camera));}
     async function observeLateTarget(ids,result,beforeGeneration,beforeInteraction,userChanged){
       for(let count=0;count<80;count++){
         if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe())return null;
-        if(targetIsCurrent(ids,result))return interactionFingerprint();
+        if(layoutIsCurrent(ids,result))return interactionFingerprint();
         if(interactionFingerprint()!==beforeInteraction)return null;
         await new Promise(resolve=>setTimeout(resolve,25));
       }
       return null;
     }
     async function restoreOwnedTarget(snapshot,ids,result,ownedFingerprint,beforeGeneration,userChanged){
-      if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!targetIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+      if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!layoutIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
       const deadline=Date.now()+2000;try{await boundedNative(restore(snapshot),{timeout:2000});}catch(_){return false;}
       for(let count=0;count<80&&Date.now()<deadline;count++){
+        restorePlaneCameras(snapshot);
         if(snapshotIsCurrent(snapshot))return true;
-        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!targetIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
+        if(ended||!live()||beforeGeneration!==generation||userChanged()||!workspaceSafe()||!layoutIsCurrent(ids,result)||interactionFingerprint()!==ownedFingerprint)return false;
         await new Promise(resolve=>setTimeout(resolve,25));
       }
       return false;
     }
     const restore=snapshot=>grid.setLayout({numRows:snapshot.rows,numCols:snapshot.cols,activeViewportId:snapshot.active,isHangingProtocolLayout:false,
-      findOrCreateViewport:index=>({displaySetInstanceUIDs:snapshot.cells[index].sets,displaySetOptions:[{}],viewportOptions:{viewportId:snapshot.cells[index].id,viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
+      findOrCreateViewport:index=>viewportRequest(snapshot.cells[index].id,snapshot.cells[index].sets,snapshot.cells[index].plane)});
+    // Rebuilding the plane restores the requested orientation, not the camera the user left
+    // behind; the recorded one is put back as soon as the rebuilt plane can take it.
+    function restorePlaneCameras(snapshot){for(const cell of snapshot.cells)if(cell.plane&&!sameCamera(cameraOf(cell.id),cell.camera))setCamera(cell.id,cell.camera);}
     function workspaceSafe(){
       for(const name of ['kinViewerJobWorkspaceState','kinViewerHistoryWorkspaceState']){const value=typeof root[name]==='function'?root[name]():null;if(value?.dirty||value?.busy)return false;}
       if(typeof root.kinViewerHistoryHasUnsaved==='function'&&root.kinViewerHistoryHasUnsaved())return false;
@@ -176,7 +290,7 @@
       if(busy||ended||!live())return;if(layoutQuarantined){status.textContent='이전 배치 요청의 완료를 확인하지 못했습니다. 뷰어 창을 닫고 다시 열어 주세요.';return;}if(!workspaceSafe()){status.textContent='저장하지 않은 영상 작업이 있어 배치를 변경하지 않았습니다.';return;}
       let value;try{value=strict();}catch(error){status.textContent=error.message;return;}
       if(navigation&&appliedCursor&&appliedFingerprint!==navigationFingerprint())invalidateApplied();
-      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();const timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false;
+      busy=true;refresh();const before=interactionFingerprint(),beforeGeneration=generation;request=new AbortController();let timer=setTimeout(()=>request.abort(),10000);let interactionArmed=false,userInteracted=false;
       const noteInteraction=()=>{if(interactionArmed)userInteracted=true;};for(const type of ['pointerdown','wheel','keydown'])document.addEventListener(type,noteInteraction,true);queueMicrotask(()=>interactionArmed=true);status.textContent='검사와 규칙을 확인 중…';
       try{
         const context=await boundedNative(verifiedContext(request.signal),{signal:request.signal});if(request.signal.aborted||ended||!live()||beforeGeneration!==generation||before!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용하지 않았습니다.');
@@ -186,22 +300,27 @@
           status.textContent=navigation?(result.reason==='end'?`${navigation==='next'?'Next':'Previous'} Protocol: 저장 순서의 끝입니다. 현재 배치를 유지합니다.`:`${navigation==='next'?'Next':'Previous'} Protocol: 현재 검사와 일치하는 규칙이 없습니다. 현재 배치를 유지합니다.`):'일치하는 규칙이 없어 현재 배치를 유지합니다.';return;
         }
         if(!workspaceSafe())throw Error('영상 작업 상태가 바뀌어 배치를 변경하지 않았습니다.');
-        const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 stack grid에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
+        const snapshot=rollbackSnapshot();if(!snapshot)throw Error('일반 영상 격자 또는 이 규칙으로 만든 MPR 배치에서만 Hanging Protocol을 적용할 수 있습니다. 현재 배치를 유지합니다.');
         const ids=result.cells.map(()=>`kin-hp-${crypto.randomUUID()}`),active=result.cells.findIndex(Boolean);
+        const planes=result.rule.layout.cells.map(plane);
+        // The network phase keeps its 10s bound; only a plane apply gets the volume budget.
+        const budget=planeBudget(result);if(budget.timeout!==10000){clearTimeout(timer);timer=setTimeout(()=>request.abort(),budget.timeout);}
         let targetFingerprint=null,nativeSettled=false;
         try{const pending=Promise.resolve(grid.setLayout({numRows:result.rule.layout.rows,numCols:result.rule.layout.cols,activeViewportId:ids[Math.max(0,active)],isHangingProtocolLayout:false,
-          findOrCreateViewport:index=>({displaySetInstanceUIDs:result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})}));
+          findOrCreateViewport:index=>viewportRequest(ids[index],result.cells[index]?[result.cells[index].displaySetInstanceUID]:[],planes[index])}));
           pending.then(()=>nativeSettled=true,()=>nativeSettled=true);
           if(targetIsCurrent(ids,result))targetFingerprint=interactionFingerprint();await boundedNative(pending,{signal:request.signal});if(!targetIsCurrent(ids,result))await waitForTarget(ids,result,request.signal,beforeGeneration);if(targetFingerprint===null)targetFingerprint=interactionFingerprint();
           if(request.signal.aborted)throw new DOMException('Aborted','AbortError');
           if(ended||!live()||beforeGeneration!==generation||!targetIsCurrent(ids,result)||targetFingerprint!==interactionFingerprint())throw Error('규칙이나 영상 표시 상태가 변경되어 적용 기준을 갱신하지 않았습니다.');}
         catch(error){
-          let owned=targetFingerprint!==null&&!userInteracted&&workspaceSafe()&&targetIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint()?targetFingerprint:null;
+          let owned=targetFingerprint!==null&&!userInteracted&&workspaceSafe()&&layoutIsCurrent(ids,result)&&targetFingerprint===interactionFingerprint()?targetFingerprint:null;
           if(owned===null&&targetFingerprint===null&&beforeGeneration===generation&&live()&&!ended)owned=await observeLateTarget(ids,result,beforeGeneration,before,()=>userInteracted);
           const restored=owned!==null&&await restoreOwnedTarget(snapshot,ids,result,owned,beforeGeneration,()=>userInteracted);
           if(!restored||!nativeSettled){layoutQuarantined=true;invalidateApplied();const uncertain=Error('배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인하고 뷰어 창을 닫은 뒤 다시 열어 주세요.');uncertain.name='KinLayoutUnconfirmed';throw uncertain;}
           throw error;
         }
+        // Remember the planes this apply owns so a later apply can still roll back to them.
+        ownedPlanes=new Map(ids.map((id,index)=>[id,{plane:planes[index],set:result.cells[index]?.displaySetInstanceUID??null}]).filter(([,value])=>value.plane));
         appliedCursor=result.rule.id;appliedFingerprint=navigationFingerprint();appliedName=result.rule.name;applied.textContent=`Applied Protocol: ${appliedName}`;status.textContent=`Applied: ${result.rule.name} · Current/Related 영상을 확인하세요.`;
       }catch(error){if(!ended)status.textContent=error?.name==='AbortError'?'응답 시간이 지나 현재 배치를 유지합니다.':error.message;}finally{clearTimeout(timer);for(const type of ['pointerdown','wheel','keydown'])document.removeEventListener(type,noteInteraction,true);request=null;busy=false;refresh();}
     }

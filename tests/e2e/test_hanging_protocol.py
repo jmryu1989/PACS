@@ -7,6 +7,7 @@ import unittest
 import uuid
 from pathlib import Path
 
+import numpy as np
 from playwright.sync_api import expect
 
 from test_viewer_layout import ViewerLayoutE2E
@@ -74,6 +75,50 @@ class HangingProtocolE2E(ViewerLayoutE2E):
                 "layout": {"rows": 2, "cols": 2, "cells": ["Current", "Related", None, "Current"]},
             }],
         }
+
+    def mpr_library(self, name="Synthetic Three Plane"):
+        """One eligible CT volume in three explicitly oriented cells plus a vacancy."""
+        value = self.library(name=name)
+        rule = value["rules"][0]
+        rule["selectors"] = [rule["selectors"][0]]
+        rule["layout"] = {"rows": 2, "cols": 2, "cells": [
+            {"alias": "Current", "view": "mpr", "orientation": orientation}
+            for orientation in ("axial", "sagittal", "coronal")] + [None]}
+        stack = json.loads(json.dumps(rule))
+        stack.update(id="55555555-5555-4555-8555-555555555555", name="Synthetic Stack Again")
+        stack["layout"] = {"rows": 1, "cols": 1, "cells": ["Current"]}
+        value["rules"].append(stack)
+        return value
+
+    def planes(self, page):
+        return page.evaluate("""()=>[...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x).map(cell=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId);
+            const sets=cell.displaySetInstanceUIDs||[];
+            if(v?.type!=='orthographic')return {type:v?.type??null,sets};
+            const volume=cornerstone.cache.getVolume(v.getVolumeId()),camera=v.getCamera();
+            const first=cornerstone.metaData.get('instance',volume.imageIds[0]);
+            const group=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId);
+            // The whole requested series, completely loaded: a plane that reported the right
+            // type over a partial or foreign volume is not the cell the rule asked for.
+            const sops=volume.imageIds.map(id=>cornerstone.metaData.get('instance',id).SOPInstanceUID);
+            const source=services.displaySetService.getDisplaySetByUID(sets[0]);
+            return {type:v.type,sets,volumeId:v.getVolumeId(),slices:volume.imageIds.length,
+              study:first.StudyInstanceUID,series:first.SeriesInstanceUID,group:group?.id??null,
+              loaded:!!volume.loadStatus?.loaded,framesLoaded:volume.framesLoaded,
+              sops:[...sops].sort(),sourceSops:(source?.images||[]).map(i=>i.SOPInstanceUID).sort(),
+              viewPlaneNormal:camera.viewPlaneNormal,focalPoint:camera.focalPoint};})""")
+
+    def rendered_planes(self, page, count):
+        page.wait_for_function("""count=>{
+          const cells=[...services.viewportGridService.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).slice(0,count);
+          return cells.length===count&&cells.every(cell=>{
+            const c=document.querySelector('[data-viewport-uid="'+cell.viewportId+'"] .cornerstone-canvas');
+            if(!c?.width||!c.height)return false;
+            const ctx=c.getContext('2d');if(!ctx)return false;
+            const pixels=ctx.getImageData(0,0,c.width,c.height).data;let lo=255,hi=0;
+            for(let n=0;n<pixels.length;n+=16){lo=Math.min(lo,pixels[n]);hi=Math.max(hi,pixels[n]);}
+            return hi-lo>100;});}""", arg=count, timeout=60000)
 
     def navigation_library(self):
         second = self.library(occurrence=2)["rules"][0]
@@ -258,6 +303,64 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         delayed_change(lambda: self.grid(viewer, 2))
         self.assertEqual(2, len(self.cells(viewer)))
         expect(work.locator("#findings")).to_have_value("HP STALE UNSAVED REPORT")
+        self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
+
+
+    def test_hp_05_plane_cells_open_one_ct_volume_and_round_trip_through_the_account(self):
+        patient = "HP-MPR-" + uuid.uuid4().hex[:12]
+        current = self.ct(patient, "current", "20260801")
+        self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
+        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP MPR UNSAVED REPORT")
+        viewer = self.launch(work.context.new_page(), [current])
+        self.import_rules(viewer, self.mpr_library())
+        before = self.cells(viewer)
+        self.apply(viewer, "Applied")
+        self.rendered_planes(viewer, 3)
+        cells = self.planes(viewer)
+        self.assertEqual(4, len(cells), "three planes are three cells of the saved 2x2 grid")
+        self.assertEqual([], cells[3]["sets"]); self.assertIsNone(cells[3].get("volumeId"))
+        series = self.described_ref(viewer, current, "D03A current")["series"]
+        for index, cell in enumerate(cells[:3]):
+            self.assertEqual("orthographic", cell["type"])
+            self.assertEqual(1, len(cell["sets"]))
+            self.assertEqual(cells[0]["volumeId"], cell["volumeId"], "every plane shows one and the same volume")
+            self.assertEqual(series, cell["series"]); self.assertEqual(current.uid, cell["study"])
+            self.assertEqual("mpr", cell["group"], "planes join the established MPR tool group")
+            self.assertTrue(cell["loaded"], "a cell is only applied over a fully loaded volume")
+            self.assertEqual(cell["slices"], cell["framesLoaded"])
+            self.assertEqual(cell["sourceSops"], cell["sops"], "the plane stands on exactly the requested series")
+        self.assertEqual({tuple(cell["sets"]) for cell in cells[:3]}, {tuple(cells[0]["sets"])})
+        normals = np.array([cell["viewPlaneNormal"] for cell in cells[:3]])
+        np.testing.assert_allclose(np.abs(normals), [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)
+        for a, b in [(0, 1), (0, 2), (1, 2)]:
+            self.assertAlmostEqual(float(np.dot(normals[a], normals[b])), 0, delta=1e-6)
+        viewer.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-three-plane-cells.png'))
+        self.assertNotEqual(before, self.cells(viewer))
+
+        # The same rule library round trips through the account, and an ordinary stack rule
+        # still replaces the plane screen this rule built.
+        viewer.locator("#kin-hp-load-account").click()
+        expect(viewer.locator("#kin-hp-status")).to_contain_text("저장된 Hanging Protocol이 없습니다")
+        viewer.locator("#kin-hp-save-account").click()
+        expect(viewer.locator("#kin-hp-status")).to_contain_text("계정에 규칙을 저장")
+        viewer.select_option("#kin-hp-rule", "55555555-5555-4555-8555-555555555555")
+        self.apply(viewer, "Applied")
+        stack = self.cells(viewer)
+        self.assertEqual(1, len(stack)); self.assertEqual("stack", stack[0]["type"])
+        self.identity(viewer, [self.described_ref(viewer, current, "D03A current")])
+
+        target = self.launch(self.login(), [current]); self.hp(target)
+        target.locator("#kin-hp-load-account").click()
+        expect(target.locator("#kin-hp-status")).to_contain_text("Apply를 눌러")
+        self.assertEqual(1, len(self.cells(target)), "an account load stores a draft and does not apply it")
+        self.apply(target, "Applied")
+        self.rendered_planes(target, 3)
+        reloaded = self.planes(target)
+        self.assertEqual([cell["type"] for cell in reloaded], ["orthographic"] * 3 + [None])
+        np.testing.assert_allclose(np.abs([cell["viewPlaneNormal"] for cell in reloaded[:3]]),
+                                   [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)
+        self.assertEqual([cell["series"] for cell in reloaded[:3]], [series] * 3)
+        expect(work.locator("#findings")).to_have_value("HP MPR UNSAVED REPORT")
         self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
 
 

@@ -7,9 +7,12 @@ export type HangingProtocolLibrary = {
     enabled: boolean;
     match: Match;
     selectors: Selector[];
-    layout: { rows: 1 | 2; cols: 1 | 2; cells: Array<string | null> };
+    layout: { rows: 1 | 2; cols: 1 | 2; cells: Cell[] };
   }>;
 };
+
+/** One cell is one viewport: a plane cell names its own orientation, it never expands. */
+export type Cell = string | null | { alias: string; view: 'mpr'; orientation: 'axial' | 'sagittal' | 'coronal' };
 
 type Description = { operator: 'equals' | 'contains'; value: string };
 type Match = { modality: string | null; retrieveAE: string | null; bodyPart: string | null; description: Description | null };
@@ -18,6 +21,8 @@ type Selector = Match & { alias: string; role: 'current' | 'related'; historical
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALIAS = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+const VIEWS = ['mpr'];
+const ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 const own = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' &&
   !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;
 const exact = (v: Record<string, unknown>, keys: string[]) => {
@@ -31,6 +36,19 @@ const dense = (v: unknown): v is unknown[] => {
   return keys.length === v.length + 1 && keys[keys.length - 1] === 'length' &&
     keys.slice(0, -1).every((key, index) => typeof key === 'string' && key === String(index) && descriptors[key].enumerable && 'value' in descriptors[key]);
 };
+
+const fold = (v: string) => v.normalize('NFKC').toLocaleLowerCase('en-US');
+
+/** Returns a detached cell, undefined for a malformed one. Null stays an explicit vacancy. */
+function cell(v: unknown, aliases: Map<string, string>): Cell | undefined {
+  if (v === null) return null;
+  if (typeof v === 'string') return aliases.get(fold(v)) === v ? v : undefined;
+  if (!own(v) || !exact(v, ['alias', 'view', 'orientation'])) return undefined;
+  const alias = v.alias, view = v.view, orientation = v.orientation;
+  if (typeof alias !== 'string' || aliases.get(fold(alias)) !== alias ||
+      !VIEWS.includes(view as string) || !ORIENTATIONS.includes(orientation as string)) return undefined;
+  return { alias, view: view as 'mpr', orientation: orientation as 'axial' | 'sagittal' | 'coronal' };
+}
 
 function text(v: unknown, max: number) {
   if (typeof v !== 'string') return undefined;
@@ -94,10 +112,21 @@ export function normalizeHangingProtocol(value: unknown): HangingProtocolLibrary
       const layout = input.layout;
       if (!own(layout) || !exact(layout, ['rows', 'cols', 'cells']) ||
           !([[1, 1], [1, 2], [2, 2]] as number[][]).some(([r, c]) => layout.rows === r && layout.cols === c) ||
-          !dense(layout.cells) || layout.cells.length !== (layout.rows as number) * (layout.cols as number) ||
-          layout.cells.some(cell => cell !== null && (typeof cell !== 'string' || aliases.get(cell.normalize('NFKC').toLocaleLowerCase('en-US')) !== cell))) return undefined;
-      const cells = layout.cells.slice() as Array<string | null>;
-      if (!(selectors as Selector[]).some(item => item.role === 'current' && cells.includes(item.alias))) return undefined;
+          !dense(layout.cells) || layout.cells.length !== (layout.rows as number) * (layout.cols as number)) return undefined;
+      const cells: Cell[] = [], planes = new Set<string>();
+      for (const raw of layout.cells) {
+        const item = cell(raw, aliases);
+        if (item === undefined) return undefined;
+        if (item !== null && typeof item !== 'string') {
+          // Two identical planes of one series are a configuration error, not a layout.
+          const plane = fold(item.alias) + '|' + item.view + '|' + item.orientation;
+          if (planes.has(plane)) return undefined;
+          planes.add(plane);
+        }
+        cells.push(item);
+      }
+      const named = (value: Cell) => value === null ? null : typeof value === 'string' ? value : value.alias;
+      if (!(selectors as Selector[]).some(item => item.role === 'current' && cells.some(value => named(value) === item.alias))) return undefined;
       ids.add(id); names.add(nameKey!);
       rules.push({ id, name, enabled: input.enabled, match: ruleMatch, selectors: selectors as Selector[],
         layout: { rows: layout.rows as 1 | 2, cols: layout.cols as 1 | 2, cells } });
