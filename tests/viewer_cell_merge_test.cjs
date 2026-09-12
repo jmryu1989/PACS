@@ -11,12 +11,22 @@ let source = fs.readFileSync(sourcePath, 'utf8');
 // Isolated copies of the module with one guard removed, used to prove the guard is the
 // thing that keeps a boundary. The shipped file is never modified.
 const mutation = process.env.KIN_CELL_MERGE_MUTATION;
-// A mutation that silently fails to apply would report a guard as proven for nothing,
-// so every replacement must actually change the source.
-function mutate(name, from, to) {
+// A mutation that silently fails to apply would report a guard as proven for nothing - and
+// an anchor that quietly stops matching the shipped module reports it for nothing while
+// still exiting non-zero, which is worse, because the run that dies at load looks exactly
+// like the run whose assertion caught the defect. So every anchor, selected or not, is
+// declared with the number of sites it must match, and the first test in this file audits
+// the whole declaration against the file on disk: drift fails by name in a plain run,
+// before anyone cites a mutation as evidence.
+const declared = [];
+const occurrences = (text, from) => typeof from === 'string' ? text.split(from).length - 1 : (text.match(from) || []).length;
+function mutate(name, from, to, expected = 1) {
+  declared.push({ name, from, expected });
   if (mutation !== name) return;
+  const found = occurrences(source, from);
+  if (found !== expected) throw new Error('mutation anchor does not match the module: ' + name + ' expected ' + expected + ' found ' + found);
   const next = source.replace(from, to);
-  if (next === source) throw new Error('mutation did not apply: ' + name);
+  if (next === source || occurrences(next, from) !== 0) throw new Error('mutation did not apply: ' + name);
   source = next;
 }
 mutate('skip-kind-guard', "if (!['stack', 'empty'].includes(cell.kind))", 'if (false)');
@@ -28,14 +38,18 @@ mutate('claim-restore', 'if (restored(target)) { if (++confirmed >= 2) return tr
 // the geometry it describes, and a camera handed back whole with an unrelated field.
 // Both halves of the rollback defect, because the fix closed it in two places: the failed
 // path read the screen back, and that reading had no settled baseline to be judged against.
-mutate('rollback-adopts-screen', 'return await rebuild(base, watch.owned)', 'return await rebuild(unmergeTarget(base), watch.owned)');
-mutate('rollback-adopts-screen', "if (!merged || merged.kind !== 'stack') return cell;",
-  "if (!merged || merged.kind !== 'stack') return { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex };");
+mutate('rollback-adopts-screen', 'return await rebuild(base, owned)', 'return await rebuild(unmergeTarget(base), owned)');
+mutate('rollback-adopts-screen', "if (!merged || merged.kind !== 'stack' || cell.kind !== 'stack') return cell;",
+  "if (!merged || merged.kind !== 'stack' || cell.kind !== 'stack') return { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex };");
 mutate('record-without-recheck', 'if (geometryIs(expected)) {', 'if (true) {');
+// Ownership, in both directions: rebuilding over a screen this module cannot account for,
+// and folding the user's own input into the baseline the restore is judged against.
+mutate('trust-foreign-screen', 'if (!ours(base)) return { ok: false, message: quarantine(FOREIGN) };', ';');
+mutate('adopt-input-baseline', 'if (!untouched || steady === false) return actual;', 'if (!untouched) return actual;');
 // The camera judged as one decision again, which is what let a slice change carry the
 // merge's refit zoom back with it.
-mutate('adopt-merged-camera', 'const owed = sameCameraKeys(current.camera, merged.camera, keys) ? cell.camera : current.camera;',
-  'const owed = sameCamera(current.camera, merged.camera) ? cell.camera : current.camera;');
+mutate('adopt-merged-camera', 'const owed = decide(sameCameraKeys(current.camera, merged.camera, keys),',
+  'const owed = decide(sameCamera(current.camera, merged.camera),');
 const moduleBox = { exports: {} };
 new Function('module', 'exports', source)(moduleBox, moduleBox.exports);
 const CellMerge = moduleBox.exports;
@@ -152,6 +166,21 @@ const layoutOf = state => [...state.viewports.values()].sort((a, b) => a.y - b.y
 
 const planCells = (rows, cols, kinds) => kinds.map((kind, index) => ({ viewportId: String.fromCharCode(65 + index), kind,
   x: (index % cols) / cols, y: Math.floor(index / cols) / rows, width: 1 / cols, height: 1 / rows, sets: ['ds-' + index] }));
+
+// A guard is only proven by a mutation that really reintroduces the defect. An anchor that
+// no longer matches the shipped module produces a run that still exits non-zero, which a
+// checker reading exit codes would count as a proof, so the whole declaration is audited
+// here by name against the file on disk - in every plain run, before any mutation is used.
+test('every declared mutation anchor still matches the shipped module exactly once', () => {
+  const shipped = fs.readFileSync(sourcePath, 'utf8');
+  // Ten anchors for nine mutations: the rollback defect takes two edits to reintroduce.
+  assert.equal(declared.length, 10);
+  for (const item of declared)
+    assert.equal(occurrences(shipped, item.from), item.expected, 'anchor drifted: ' + item.name + ' ' + item.from);
+  assert.deepEqual([...new Set(declared.map(item => item.name))].sort(),
+    ['adopt-input-baseline', 'adopt-merged-camera', 'claim-restore', 'record-without-recheck',
+      'rollback-adopts-screen', 'skip-kind-guard', 'skip-uniform-guard', 'trust-dispatch', 'trust-foreign-screen']);
+});
 
 test('each supported operation asks for exactly one documented rectangle set', () => {
   const cells = planCells(2, 2, ['stack', 'stack', 'stack', 'stack']);
@@ -324,13 +353,19 @@ test('a native layout that lands a different shape rolls back the pre-merge stat
   assert.deepEqual(x.viewports.get('A').properties.voiRange, voi);
   assert.equal(x.controller.state().merged, false);
   assert.equal(x.controller.state().quarantined, false);
+  // Ownership is proven here - every viewport and every source on screen is one this
+  // module recorded - so the rollback really is dispatched, unlike the foreign case below.
+  assert.equal(x.calls.length, 2);
+  assert.equal(x.calls[1].layoutOptions, null);
 });
 
 test('a foreign layout landing while the merge settles is never recorded as this merge', async () => {
-  // Another panel replaces a source inside the settling wait, with no user input of its
-  // own: the screen is still this module's to put back.
+  // Another panel - an async Hanging Protocol Apply or Load Job whose own click predates
+  // this merge, so no input of its own lands inside the interaction window - replaces a
+  // source inside the settling wait. The merge failed, but the newest thing on screen is
+  // that panel's work, not this module's, and rebuilding the pre-merge grid over it would
+  // be a clobber dressed up as a recovery. Nothing is dispatched: no second setLayout call.
   const x = fixture();
-  const before = layoutOf(x.state);
   const interfere = grid => {
     const original = grid.setLayout;
     grid.setLayout = function (payload) {
@@ -343,9 +378,32 @@ test('a foreign layout landing while the merge settles is never recorded as this
   interfere(x.services.viewportGridService);
   const result = await x.controller.merge('merge-column', 'A');
   assert.equal(result.ok, false);
-  assert.match(result.message, /이전 배치로 복구했습니다/);
+  assert.match(result.message, /다른 기능이 화면을 바꾸어/);
   assert.equal(x.controller.state().merged, false);
-  assert.deepEqual(layoutOf(x.state), before);
+  assert.equal(x.controller.state().quarantined, true);
+  assert.deepEqual(x.state.viewports.get('B').displaySetInstanceUIDs, ['ds-other']);
+  assert.equal(x.calls.length, 1);
+  assert.equal((await x.controller.unmerge()).ok, false);
+
+  // The same holds when the foreign work is a whole new grid rather than one source: the
+  // viewports on screen are not the ones this module recorded, so it cannot account for
+  // them and does not rebuild over them.
+  const z = fixture();
+  const originalZ = z.services.viewportGridService.setLayout;
+  z.services.viewportGridService.setLayout = function (payload) {
+    return originalZ.call(this, payload).then(value => {
+      if (payload.layoutOptions) setTimeout(() => {
+        z.state.viewports = new Map([['HP1', { viewportId: 'HP1', x: 0, y: 0, width: 1, height: .5, displaySetInstanceUIDs: ['ds-hp1'] }],
+          ['HP2', { viewportId: 'HP2', x: 0, y: .5, width: 1, height: .5, displaySetInstanceUIDs: ['ds-hp2'] }]]);
+      }, 30);
+      return value;
+    });
+  };
+  const landed = await z.controller.merge('merge-column', 'A');
+  assert.equal(landed.ok, false);
+  assert.match(landed.message, /다른 기능이 화면을 바꾸어/);
+  assert.deepEqual([...z.state.viewports.keys()], ['HP1', 'HP2']);
+  assert.equal(z.calls.length, 1);
 
   // The same change driven by the user's own click on that other panel: ownership is gone,
   // so the screen is left alone and the panel says so instead of recording a merge.
@@ -367,6 +425,80 @@ test('a foreign layout landing while the merge settles is never recorded as this
   assert.equal(y.controller.state().quarantined, true);
   // A record that survived here would rebuild the pre-merge grid over the other panel's work.
   assert.equal((await y.controller.unmerge()).ok, false);
+});
+
+// The reading the restore is judged against is taken once the merge has settled, and the
+// user can work inside that wait. Their edit must not be folded into that baseline and
+// handed back as the merge's own doing - and a bare click, which changes nothing, must not
+// cost them the refit undo either. What the screen held at the instant their input arrived
+// separates the two.
+test('a user edit made while the merge settles is kept, and a bare click costs nothing', async () => {
+  const x = fixture({ refitOnResize: true });
+  const zoom = x.viewports.get('A').camera.parallelScale;
+  const duringSettle = (env, act) => {
+    const original = env.services.viewportGridService.setLayout;
+    env.services.viewportGridService.setLayout = function (payload) {
+      return original.call(this, payload).then(value => {
+        if (payload.layoutOptions) setTimeout(act, 30);
+        return value;
+      });
+    };
+  };
+  duringSettle(x, () => {
+    x.doc.fire('pointerdown');
+    x.viewports.get('A').properties.voiRange = { lower: 12, upper: 90 };
+    x.viewports.get('A').setImageIdIndex(2);
+  });
+  assert.equal((await x.controller.merge('merge-column', 'A')).ok, true);
+  assert.notEqual(x.viewports.get('A').camera.parallelScale, zoom);
+  const back = await x.controller.unmerge();
+  assert.equal(back.ok, true);
+  // Their window and their slice survive the restore, and are not reported as restored work.
+  assert.deepEqual(x.viewports.get('A').properties.voiRange, { lower: 12, upper: 90 });
+  assert.equal(x.viewports.get('A').current, 'wadors:A:2');
+  // The zoom nobody touched still gives the refit back: the input is placed, not assumed.
+  assert.equal(x.viewports.get('A').camera.parallelScale, zoom);
+  assert.match(back.message, /이전 칸 배치와 영상 상태로 되돌렸습니다/);
+
+  const y = fixture({ refitOnResize: true });
+  const yzoom = y.viewports.get('A').camera.parallelScale, yvoi = clone(y.viewports.get('A').properties.voiRange);
+  duringSettle(y, () => { y.doc.fire('pointerdown'); });
+  assert.equal((await y.controller.merge('merge-column', 'A')).ok, true);
+  const restored = await y.controller.unmerge();
+  assert.equal(restored.ok, true);
+  assert.equal(y.viewports.get('A').camera.parallelScale, yzoom);
+  assert.deepEqual(y.viewports.get('A').properties.voiRange, yvoi);
+  assert.match(restored.message, /이전 칸 배치와 영상 상태로 되돌렸습니다/);
+});
+
+test('an input this module could not place on the screen is never silently reverted', async () => {
+  const x = fixture({ refitOnResize: true });
+  const zoom = x.viewports.get('A').camera.parallelScale;
+  const original = x.services.viewportGridService.setLayout;
+  x.services.viewportGridService.setLayout = function (payload) {
+    return original.call(this, payload).then(value => {
+      if (payload.layoutOptions) setTimeout(() => {
+        // The input arrives while that cell cannot be read, so nothing about the state
+        // that follows can be attributed either to the user or to the merge.
+        const viewport = x.viewports.get('A'); x.viewports.delete('A');
+        x.doc.fire('pointerdown');
+        x.viewports.set('A', viewport);
+        viewport.properties.voiRange = { lower: 7, upper: 77 };
+      }, 30);
+      return value;
+    });
+  };
+  assert.equal((await x.controller.merge('merge-column', 'A')).ok, true);
+  const refit = x.viewports.get('A').camera.parallelScale;
+  assert.notEqual(refit, zoom);
+  const back = await x.controller.unmerge();
+  assert.equal(back.ok, true);
+  assert.deepEqual(layoutOf(x.state).map(row => row[0]), ['A', 'B', 'C', 'D']);
+  // Nothing is reverted on a guess, and the restore says exactly that instead of claiming
+  // the image state came back.
+  assert.deepEqual(x.viewports.get('A').properties.voiRange, { lower: 7, upper: 77 });
+  assert.equal(x.viewports.get('A').camera.parallelScale, refit);
+  assert.match(back.message, /되돌리지 않고 그대로 두었습니다/);
 });
 
 test('a native cache that returns the presentation needs no explicit re-apply', async () => {

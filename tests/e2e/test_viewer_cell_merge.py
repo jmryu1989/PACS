@@ -292,11 +292,19 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         # panes genuinely resize, so the native refit happens exactly as it would on a
         # successful merge, while the achieved geometry is not the one that was asked for.
         # The rollback therefore owes the recorded state, never the refit it just caused.
+        # While that deviating layout is on screen the zoom of the reshaped panes is sampled,
+        # so the rollback below is not proven against a screen that never refitted at all.
         page.evaluate('''()=>{const grid=services.viewportGridService,original=grid.setLayout;
           window.restoreCellMergeLayout=()=>{grid.setLayout=original;};
+          window.kinCellMergeRefit=[];
+          const sample=()=>{try{window.kinCellMergeRefit.push([...grid.getState().viewports.values()].map(v=>{
+            const c=services.cornerstoneViewportService.getCornerstoneViewport(v.viewportId);
+            return [v.viewportId,c&&c.getCamera?c.getCamera().parallelScale:null];}));}
+            catch(error){window.kinCellMergeRefit.push([['error',String(error)]]);}};
           let once=true;grid.setLayout=function(payload){
             if(once&&payload.layoutOptions&&payload.layoutOptions.length===3){once=false;
-              return original.call(this,{...payload,layoutOptions:[{x:0,y:0,width:1,height:.5},{x:0,y:.5,width:.5,height:.5},{x:.5,y:.5,width:.5,height:.5}]});}
+              return Promise.resolve(original.call(this,{...payload,layoutOptions:[{x:0,y:0,width:1,height:.5},{x:0,y:.5,width:.5,height:.5},{x:.5,y:.5,width:.5,height:.5}]}))
+                .then(value=>{for(const delay of [150,400,800,1500])setTimeout(sample,delay);return value;});}
             return original.call(this,payload);};}''')
         try:
             self.merge_button(page, 'merge-column').click()
@@ -304,6 +312,13 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         finally:
             page.evaluate('restoreCellMergeLayout()')
         self.assertEqual(before_geometry, self.geometry(page))
+        # The panes really did resize and refit, so restoring the recorded zoom below is a
+        # real undo and not a comparison of two identical screens.
+        samples = page.evaluate('()=>window.kinCellMergeRefit||[]')
+        scales = {item['id']: item['camera']['parallelScale'] for item in before}
+        moved = [(viewport, scale) for sample in samples for viewport, scale in sample
+                 if viewport in scales and scale is not None and scale != scales[viewport]]
+        self.assertTrue(moved, 'no pane refitted while the deviating layout was on screen: %r vs %r' % (samples, scales))
         for old, item in zip(before, self.snap(page)):
             self.assertEqual(old['image'], item['image']); self.assertEqual(old['camera'], item['camera'])
             self.assertEqual(old['properties'], item['properties'])
