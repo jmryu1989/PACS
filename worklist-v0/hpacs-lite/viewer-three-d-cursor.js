@@ -14,7 +14,9 @@
     'source-replaced':'영상이 교체되어 취소했습니다.','navigation-failed':'대상 영상으로 이동하지 못했습니다.','user-interrupt':'다른 조작으로 취소했습니다.',
     'context-changed':'세션 또는 도구가 바뀌어 취소했습니다.','pick-slice-unknown':'현재 영상을 원본 목록에서 찾지 못했습니다.',
     'point-outside-viewport':'영상 표시 영역 안을 클릭하세요.','navigation-unsettled':'대상 영상 요청이 끝나지 않아 이 화면을 보류했습니다.',
-    'stopped':'3D Cursor를 종료했습니다.','internal':'3D Cursor를 사용할 수 없습니다.'};
+    'stopped':'3D Cursor를 종료했습니다.','internal':'3D Cursor를 사용할 수 없습니다.','abandoned':'',
+    'teardown-unsettled':'끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.',
+    'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.'};
   const message=reason=>TEXT[reason]||'3D Cursor를 사용할 수 없습니다.';
   let mounted=0;
 
@@ -26,8 +28,8 @@
       drainAttempts=limit(options.drainAttempts,625);
     const snapTolerance=typeof options.snapTolerance==='number'?options.snapTolerance:0.5;
     const owned='kin3d-'+(++mounted);
-    let enabled=false,stopped=false,run=0,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',source=null,
-      busy=false,abort=null,active=null,teardown='idle';
+    let enabled=false,stopped=false,run=0,session=0,poisoned=false,bound=new Map(),marks=new Map(),moved=new Map(),base=null,status='',
+      source=null,busy=false,abort=null,active=null,teardown='idle';
     const nodes=new Map(),handlers=new Map(),revoked=new Set(),quarantine=new Map(),reports=new Map();
 
     const fingerprint=value=>{try{return JSON.stringify(value??null);}catch(_){return null;}};
@@ -84,10 +86,17 @@
         if(!meta||typeof meta!=='object')return {id:pane.id,element:pane.element,viewport,reason:'identity-missing'};
         metas.push({...meta,imageId});
       }
+      /* The anchor is the cornerstone enabled element: the one canvasToWorld/worldToCanvas and
+         the native mouse mapping are defined against. Clicks are measured on it and the marker
+         layer hangs off it, so an enabled element inset inside a larger pane container cannot
+         put the drawn point and the picked point in two different origins. */
+      const anchor=viewport.element||pane.element;
       const built=model.stack(metas),mark=token(viewport);
-      if(!built.ok)return {id:pane.id,element:pane.element,viewport,reason:built.reason};
-      if(!mark)return {id:pane.id,element:pane.element,viewport,reason:'identity-missing'};
-      return {id:pane.id,element:pane.element,viewport,stack:built.stack,token:mark};
+      const base={id:pane.id,element:pane.element,anchor,viewport};
+      if(anchor!==pane.element&&!(pane.element.contains&&pane.element.contains(anchor)))return {...base,reason:'pane-anchor'};
+      if(!built.ok)return {...base,reason:built.reason};
+      if(!mark)return {...base,reason:'identity-missing'};
+      return {...base,stack:built.stack,token:mark};
     }
 
     function attach(element){
@@ -107,12 +116,18 @@
       handlers.delete(element);
     }
     const detachAll=()=>{for(const element of [...handlers.keys()])detach(element);};
-    function dropNode(element){
-      const host=nodes.get(element);
-      nodes.delete(element);
-      try{host?.remove();}catch(_){}
+    /* Only this controller's own inline mutation is undone. A pane positioned by the host
+       stylesheet is never written to, so teardown cannot change the viewer layout. */
+    function dropNode(id){
+      const record=nodes.get(id);
+      nodes.delete(id);
+      if(!record)return;
+      try{record.host.remove();}catch(_){}
+      try{
+        if(record.priorPosition!==null&&record.anchor.style.position==='relative')record.anchor.style.position=record.priorPosition;
+      }catch(_){}
     }
-    const dropNodes=()=>{for(const element of [...nodes.keys()])dropNode(element);};
+    const dropNodes=()=>{for(const id of [...nodes.keys()])dropNode(id);};
 
     /* Binding, listeners and owned nodes move together. A pane the host stopped returning keeps
        neither a listener nor a marker, even though it is still in the document. */
@@ -122,50 +137,76 @@
         const item=describe(pane);
         if(item&&typeof item.id==='string'&&!next.has(item.id))next.set(item.id,item);
       }
-      const live=new Set([...next.values()].map(item=>item.element));
+      // Two panes on one element cannot be told apart by a click or by a marker, so both are
+      // refused instead of one silently answering for the other.
+      const seen=new Map();
+      for(const item of next.values())seen.set(item.element,(seen.get(item.element)||0)+1);
+      for(const [id,item] of next)if(seen.get(item.element)>1)next.set(id,{id,element:item.element,anchor:item.anchor,viewport:item.viewport,reason:'pane-ambiguous'});
+      const live=new Set([...next.values()].filter(item=>item.stack).map(item=>item.element));
       for(const element of [...handlers.keys()])if(!live.has(element))detach(element);
-      for(const element of [...nodes.keys()])if(!live.has(element))dropNode(element);
+      for(const id of [...nodes.keys()]){
+        const item=next.get(id);
+        if(!item||!item.stack||nodes.get(id).anchor!==item.anchor)dropNode(id);
+      }
       if(enabled)for(const element of live)attach(element);
       for(const [id,mark] of [...marks]){
         const item=next.get(id);
-        if(!item||!item.stack||item.element!==mark.element||!same(item.token,mark.token)||!rendered(item.viewport,mark.imageId))marks.delete(id);
+        if(!item||!item.stack||item.anchor!==mark.anchor||!same(item.token,mark.token)||!rendered(item.viewport,mark.imageId))marks.delete(id);
       }
       bound=next;
       return bound;
     }
 
+    const SIZE=13;
     function layerFor(item){
-      let host=nodes.get(item.element);
-      if(host&&host.isConnected&&host.parentElement===item.element)return host;
-      dropNode(item.element);
-      host=doc.createElement('div');
+      const existing=nodes.get(item.id);
+      if(existing&&existing.anchor===item.anchor&&existing.host.isConnected&&existing.host.parentElement===item.anchor)return existing.host;
+      dropNode(item.id);
+      const host=doc.createElement('div');
       host.setAttribute('data-kin-3d-cursor-layer',owned);
-      host.style.cssText='position:absolute;inset:0;pointer-events:none;z-index:20';
-      if(!item.element.style.position)item.element.style.position='relative';
-      item.element.append(host);
-      nodes.set(item.element,host);
+      host.style.cssText='position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:20';
+      let priorPosition=null;
+      try{
+        const computed=root.getComputedStyle?root.getComputedStyle(item.anchor):null;
+        if(!computed||computed.position==='static'){priorPosition=item.anchor.style.position;item.anchor.style.position='relative';}
+      }catch(_){}
+      item.anchor.append(host);
+      nodes.set(item.id,{anchor:item.anchor,host,priorPosition});
       return host;
     }
+    /* worldToCanvas is in the anchor's coordinates, but an absolutely positioned layer starts at
+       the anchor's padding box, so the two origins differ by any border. The offset is measured
+       rather than assumed, and a point outside the visible box is hidden instead of being drawn
+       over a neighbouring pane. */
     function paint(){
       const keep=new Set();
       for(const [id,mark] of [...marks]){
         const item=bound.get(id);
-        if(!item){marks.delete(id);continue;}
+        if(!item||!item.stack){marks.delete(id);continue;}
         let canvas=null;
         try{canvas=item.viewport.worldToCanvas(mark.world);}catch(_){canvas=null;}
         if(!Array.isArray(canvas)||!canvas.slice(0,2).every(Number.isFinite)){marks.delete(id);continue;}
         mark.canvas={x:canvas[0],y:canvas[1]};
         const host=layerFor(item);
-        keep.add(item.element);
+        keep.add(id);
         let dot=host.firstElementChild;
         if(!dot){
           dot=doc.createElement('div');dot.setAttribute('data-kin-3d-cursor-mark',owned);dot.setAttribute('role','presentation');
-          dot.style.cssText='position:absolute;width:13px;height:13px;margin:-7px 0 0 -7px;border:1px solid #ffd400;border-radius:50%;box-shadow:0 0 0 1px #000';
+          dot.style.cssText='position:absolute;box-sizing:border-box;width:'+SIZE+'px;height:'+SIZE+'px;margin:'+(-SIZE/2)+'px 0 0 '+
+            (-SIZE/2)+'px;border:1px solid #ffd400;border-radius:50%;box-shadow:0 0 0 1px #000';
           host.append(dot);
         }
-        dot.style.left=canvas[0]+'px';dot.style.top=canvas[1]+'px';dot.dataset.kinSop=mark.sop;
+        let shift={x:0,y:0},box=null;
+        try{
+          const hostRect=host.getBoundingClientRect(),anchorRect=item.anchor.getBoundingClientRect();
+          shift={x:hostRect.left-anchorRect.left,y:hostRect.top-anchorRect.top};
+          box={width:anchorRect.width,height:anchorRect.height};
+        }catch(_){box=null;}
+        mark.visible=!box||(canvas[0]>=0&&canvas[1]>=0&&canvas[0]<=box.width&&canvas[1]<=box.height);
+        dot.style.display=mark.visible?'block':'none';
+        dot.style.left=(canvas[0]-shift.x)+'px';dot.style.top=(canvas[1]-shift.y)+'px';dot.dataset.kinSop=mark.sop;
       }
-      for(const element of [...nodes.keys()])if(!keep.has(element))dropNode(element);
+      for(const id of [...nodes.keys()])if(!keep.has(id))dropNode(id);
     }
     function clearMarks(reason){
       marks.clear();source=null;status=reason?message(reason):'';
@@ -177,9 +218,8 @@
        and the same rect. offsetX/offsetY are relative to the child that was hit and would shift
        the physical point silently. */
     function canvasPoint(item,event){
-      const element=item.viewport.element||item.element;
+      const element=item.anchor;
       if(!element||!element.isConnected)return null;
-      if(element!==item.element&&!item.element.contains(element))return null;
       let rect=null;
       try{rect=element.getBoundingClientRect();}catch(_){return null;}
       if(!rect||![rect.left,rect.top,rect.width,rect.height].every(Number.isFinite)||!(rect.width>0)||!(rect.height>0))return null;
@@ -215,13 +255,18 @@
       moved.delete(id);
       if(!record)return null;
       const report=value=>{reports.set(id,value);return value;};
+      // A run whose session ended owns nothing any more: it may not write to a viewport, and it
+      // may not claim anything about one either.
+      if(record.generation!==session)return report('restore-blocked-abandoned');
       const item=bound.get(id)||record.item;
       if(!item)return report('restore-skipped-unbound');
       if(quarantine.has(id))return report('restore-blocked-unsettled');
-      if(revoked.has(id))return report('restore-skipped-user');
       if(!same(token(item.viewport),record.token))return report('restore-skipped-replaced');
+      if(revoked.has(id))return report('restore-skipped-user');
       const index=readIndex(item.viewport),current=readId(item.viewport);
-      if(index===record.startIndex&&current===record.startImageId)return report('restored');
+      // Nothing to write, but the pixels still decide whether this pane really is back.
+      if(index===record.startIndex&&current===record.startImageId)
+        return report(rendered(item.viewport,record.startImageId)?'restored':'restore-unconfirmed');
       if(index!==record.issuedIndex||current!==record.issuedImageId)return report('restore-skipped-user');
       if(stopped)return report('restore-blocked-stopped');
       const failure=await navigate(item,record.startIndex);
@@ -232,7 +277,12 @@
     async function restore(){
       for(const id of [...moved.keys()])await restoreOne(id);
     }
-    async function finish(reason){
+    async function finish(reason,generation){
+      if(generation!==undefined&&generation!==session){
+        // Fence: no run counter, no marks, no status and no navigation from a dead session.
+        await restore();
+        return;
+      }
       run++;
       await restore();
       clearMarks(reason);
@@ -249,7 +299,7 @@
     }
 
     async function runPick(paneId,point){
-      const ticket=++run;
+      const ticket=++run,generation=session;
       moved.clear();revoked.clear();reports.clear();abort=null;clearMarks();
       syncBinding();
       const origin=bound.get(paneId);
@@ -263,13 +313,17 @@
       const picked=model.pick(origin.stack,index,world,snapTolerance);
       if(!picked.ok)return refuse(picked.reason);
       source={paneId,sop:picked.sop,world:picked.world,pixel:picked.pixel};
-      marks.set(paneId,{world:picked.world,sop:picked.sop,imageId:currentId,pixel:picked.pixel,token:origin.token,element:origin.element,origin:true});
+      marks.set(paneId,{world:picked.world,sop:picked.sop,imageId:currentId,pixel:picked.pixel,token:origin.token,anchor:origin.anchor,origin:true});
       const results=[{paneId,ok:true,sop:picked.sop,origin:true}];
       /* One reason to stop the whole run. Replacing the pane that was picked invalidates the
-         point itself, so it stops the run instead of being reported per target pane. */
-      const halt=()=>run!==ticket?'context-changed':abort||(now()!==base||!enabled||stopped?'context-changed':
-        !same(token(origin.viewport),origin.token)?'source-replaced':null);
-      const stopRun=async why=>{await finish(why);return {ok:false,reason:why,results,status};};
+         point itself, so it stops the run instead of being reported per target pane. A session
+         that ended while this run was awaiting is 'abandoned': it stops and writes nothing. */
+      const halt=()=>generation!==session?'abandoned':run!==ticket?'context-changed':abort||
+        (now()!==base||!enabled||stopped?'context-changed':!same(token(origin.viewport),origin.token)?'source-replaced':null);
+      const stopRun=async why=>{
+        await finish(why,generation);
+        return {ok:false,reason:why,results,status:why==='abandoned'?'':status};
+      };
       for(const item of bound.values()){
         if(item.id===paneId)continue;
         if(!item.stack){results.push({paneId:item.id,ok:false,reason:item.reason});continue;}
@@ -288,7 +342,7 @@
         let failure=null;
         if(startIndex!==found.index){
           // Ownership is the exact frame this run issued, so a newer reader frame stays.
-          moved.set(item.id,{startIndex,startImageId,issuedIndex:found.index,issuedImageId:found.imageId,token:item.token,item});
+          moved.set(item.id,{startIndex,startImageId,issuedIndex:found.index,issuedImageId:found.imageId,token:item.token,item,generation});
           failure=await navigate(item,found.index);
           why=halt();
           if(why)return stopRun(why);
@@ -297,7 +351,7 @@
         if(!failure)failure=await confirm(item,found.imageId,halt);
         // Read the stop reason once: two reads of halt() could report a different cause than the
         // one that actually ended the run.
-        const ended=failure?halt():null;
+        const ended=halt();
         if(failure==='context-changed'||ended)return stopRun(ended||'context-changed');
         if(failure){
           results.push({paneId:item.id,ok:false,reason:failure});
@@ -306,7 +360,7 @@
         }
         // Ownership is kept until the whole run succeeds: a later cancel must be able to roll
         // back panes that had already finished, and only a complete run releases them.
-        marks.set(item.id,{world:picked.world,sop:found.sop,imageId:found.imageId,pixel:found.pixel,token:token(item.viewport),element:item.element});
+        marks.set(item.id,{world:picked.world,sop:found.sop,imageId:found.imageId,pixel:found.pixel,token:token(item.viewport),anchor:item.anchor});
         results.push({paneId:item.id,ok:true,sop:found.sop,index:found.index,pixel:found.pixel});
       }
       const ending=halt();
@@ -359,12 +413,21 @@
       pick(item.id,point).catch(()=>{status=message('internal');});
     }
 
+    /* An unsettled teardown leaves a native request nobody can withdraw, so this controller stays
+       closed for good rather than letting a later session share a viewport with it. Only a new
+       controller helps with the JS state, and only reopening the viewer window is certain about
+       the request itself. */
     function enable(){
-      if(stopped||enabled)return false;
-      base=now();
-      if(base===null)return false;
-      enabled=true;syncBinding();status='3D Cursor 대기';
-      return [...bound.values()].some(item=>item.stack);
+      if(stopped||enabled||poisoned)return false;
+      const probe=now();
+      if(probe===null)return false;
+      base=probe;enabled=true;syncBinding();
+      if(![...bound.values()].some(item=>item.stack)){
+        enabled=false;detachAll();dropNodes();bound=new Map();base=null;status='';
+        return false;
+      }
+      status='3D Cursor 대기';
+      return true;
     }
     async function disable(reason){
       if(stopped)return teardown;
@@ -373,7 +436,13 @@
       let result='idle';
       if(busy){abort=reason||'context-changed';result=await drain();}
       else if(was||moved.size){await finish(reason||null);result='settled';}
-      detachAll();marks.clear();source=null;dropNodes();status='';teardown=result;
+      // Fence after the drain, never before it: the run being drained must still be able to roll
+      // back what it owns. Anything that outlives the drain is abandoned from here on.
+      session++;
+      if(result==='unsettled')poisoned=true;
+      detachAll();marks.clear();source=null;dropNodes();base=null;
+      status=result==='unsettled'?message('teardown-unsettled'):'';
+      teardown=result;
       return result;
     }
     function refresh(){
@@ -384,13 +453,17 @@
     async function stop(){
       const result=await disable('stopped');
       stopped=true;bound=new Map();
+      // The per-run maps are deliberately kept and labelled final instead of being cleared: they
+      // are the only record of what was left quarantined or unconfirmed.
+      status=message(result==='unsettled'?'teardown-unsettled':'stopped');
       return result;
     }
 
-    const state=()=>({enabled,stopped,busy,run,status,teardown,source,
-      quarantined:[...quarantine.keys()],restores:Object.fromEntries(reports),
+    const state=()=>({enabled,stopped,poisoned,busy,run,session,status,teardown,source,
+      frozen:stopped||poisoned,quarantined:[...quarantine.keys()],restores:Object.fromEntries(reports),
       panes:[...bound.values()].map(item=>({id:item.id,eligible:!!item.stack,reason:item.reason||null,marked:marks.has(item.id),
-        sop:marks.get(item.id)?.sop||null,canvas:marks.get(item.id)?.canvas||null,restore:reports.get(item.id)||null}))});
+        sop:marks.get(item.id)?.sop||null,canvas:marks.get(item.id)?.canvas||null,visible:marks.get(item.id)?.visible??null,
+        restore:reports.get(item.id)||null}))});
     return {enable,disable,refresh,pick,stop,state,cancel};
   }
 

@@ -20,7 +20,7 @@ VIEWER = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-three-d-cursor.js"
 
 HARNESS = r"""
 <div id="panes">
- <div id="pane-ct" style="position:relative;width:200px;height:200px;border:3px solid #000;padding:7px">
+ <div id="pane-ct" style="position:relative;width:600px;height:400px;border:3px solid #000;padding:7px">
   <canvas id="canvas-ct" style="position:absolute;left:20px;top:30px;width:150px;height:150px"></canvas>
   <div id="overlay-ct" style="position:absolute;left:0;top:0;width:40px;height:40px">L</div>
  </div>
@@ -28,7 +28,15 @@ HARNESS = r"""
  <div id="pane-other" style="width:200px;height:200px"></div>
  <div id="pane-volume" style="width:200px;height:200px"><span id="volume-keep">KEEP</span></div>
  <div id="pane-mr2" style="width:200px;height:200px"></div>
+ <div id="pane-inset" style="position:relative;width:300px;height:300px;padding:11px">
+  <div id="enabled-inset" style="position:absolute;left:31px;top:43px;width:200px;height:200px;border:5px solid #333">
+   <canvas id="canvas-inset" style="position:absolute;left:9px;top:13px;width:150px;height:150px"></canvas>
+  </div>
+ </div>
+ <div id="pane-styled" class="host-positioned" style="width:200px;height:200px"></div>
+ <div id="pane-shared" style="width:200px;height:200px"></div>
 </div>
+<style>.host-positioned{position:absolute;left:600px;top:600px}</style>
 <script>
 window.unhandled=[];window.addEventListener('unhandledrejection',e=>{unhandled.push(String(e.reason));e.preventDefault();});
 const META=new Map();
@@ -49,6 +57,7 @@ const CT=series('ct',{series:'1.2.3.4',modality:'CT',count:5,gap:5,origin:[-250,
 const MR=series('mr',{series:'1.2.3.9',modality:'MR',count:7,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
 const FOREIGN=series('fo',{series:'1.2.3.7',modality:'CT',count:4,gap:5,origin:[-250,-250,0],spacing:[0.8,0.5],rows:256,columns:512,frame:'1.2.99'});
 const MR2=series('m2',{series:'1.2.3.6',modality:'MR',count:7,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
+const INSET=series('in',{series:'1.2.3.5',modality:'CT',count:5,gap:5,origin:[-250,-250,0],spacing:[0.8,0.5],rows:256,columns:512});
 const SPARE=series('sp',{series:'1.2.3.8',modality:'MR',count:6,gap:2.5,origin:[-64,-64,0],spacing:[1,1],rows:128,columns:128});
 
 class Stack{
@@ -66,24 +75,37 @@ class Stack{
   const imageId=this.imageIds[i],self=this;
   const complete=()=>{if(self.discard)return;const idx=self.imageIds.indexOf(imageId);if(idx!==self.currentImageIdIndex)return;
    self.csImage={imageId};self.viewportStatus='rendered';};
-  if(this.hold)return new Promise(resolve=>this.pending.push(()=>{complete();resolve(imageId);}));
+  if(this.hold){
+   const promise=new Promise((resolve,reject)=>this.pending.push(error=>{
+    if(error)return reject(error);complete();resolve(imageId);}));
+   if(this.onHold){const hook=this.onHold;this.onHold=null;hook();}
+   return promise;
+  }
   complete();return Promise.resolve(imageId);
  }
  replaceStack(ids,index){this.imageIds=ids;this.currentImageIdIndex=index||0;this.viewportStatus='loading';}
  plane(){return KinThreeDCursorModel.plane(META.get(this.getCurrentImageId())).plane;}
- canvasToWorld(point){return KinThreeDCursorModel.toWorld(this.plane(),{x:point[0],y:point[1]});}
- worldToCanvas(world){const p=KinThreeDCursorModel.toPixel(this.plane(),world);return [p.x,p.y];}
+ canvasToWorld(point){const s=this.shift||[0,0];return KinThreeDCursorModel.toWorld(this.plane(),{x:point[0]-s[0],y:point[1]-s[1]});}
+ worldToCanvas(world){const p=KinThreeDCursorModel.toPixel(this.plane(),world),s=this.shift||[0,0];return [p.x+s[0],p.y+s[1]];}
+ rejectPending(){const queue=this.pending.splice(0);queue.forEach(fn=>fn(new Error('synthetic late rejection')));}
 }
 const ct=new Stack('vp-ct',CT,2),mr=new Stack('vp-mr',MR,0),foreign=new Stack('vp-other',FOREIGN,0);
 ct.element=document.querySelector('#pane-ct');mr.element=document.querySelector('#pane-mr');foreign.element=document.querySelector('#pane-other');
 const volume={id:'vp-volume',type:'volume',getImageIds(){return MR;},calls:[],setImageIdIndex(i){this.calls.push(i);return Promise.resolve();}};
 const mr2=new Stack('vp-mr2',MR2,0);mr2.element=document.querySelector('#pane-mr2');
-window.viewports={ct,mr,foreign,volume,mr2};
+const inset=new Stack('vp-inset',INSET,2);inset.element=document.querySelector('#enabled-inset');
+const styled=new Stack('vp-styled',MR2,0);styled.element=document.querySelector('#pane-styled');
+const shared=new Stack('vp-shared',MR2,0);shared.element=document.querySelector('#pane-shared');
+window.viewports={ct,mr,foreign,volume,mr2,inset,styled,shared};
 const PANES={ct:{id:'ct',element:document.querySelector('#pane-ct'),viewport:ct},
  mr:{id:'mr',element:document.querySelector('#pane-mr'),viewport:mr},
  other:{id:'other',element:document.querySelector('#pane-other'),viewport:foreign},
  volume:{id:'volume',element:document.querySelector('#pane-volume'),viewport:volume},
- mr2:{id:'mr2',element:document.querySelector('#pane-mr2'),viewport:mr2}};
+ mr2:{id:'mr2',element:document.querySelector('#pane-mr2'),viewport:mr2},
+ inset:{id:'inset',element:document.querySelector('#pane-inset'),viewport:inset},
+ styled:{id:'styled',element:document.querySelector('#pane-styled'),viewport:styled},
+ sharedA:{id:'sharedA',element:document.querySelector('#pane-shared'),viewport:shared},
+ sharedB:{id:'sharedB',element:document.querySelector('#pane-shared'),viewport:shared}};
 let paneList=[PANES.ct,PANES.mr,PANES.other,PANES.volume];
 window.addSecondTarget=()=>{paneList=[...paneList,PANES.mr2];};
 window.setPanes=list=>{paneList=list.map(id=>PANES[id]);};
@@ -91,13 +113,24 @@ let ctx={owner:'hospital|reader',session:'s1',tool:'WindowLevel'};
 window.setContext=next=>{ctx={...ctx,...next};};
 window.flush=name=>{const v=viewports[name],queue=v.pending.splice(0);queue.forEach(fn=>fn());return queue.length;};
 const options=extra=>({panes:()=>paneList,meta:id=>META.get(id)||null,context:()=>ctx,
- tick:()=>new Promise(r=>setTimeout(r,0)),confirmAttempts:2,navigationAttempts:150,drainAttempts:400,...extra});
+ tick:()=>new Promise(r=>setTimeout(r,0)),confirmAttempts:2,navigationAttempts:1500,drainAttempts:4000,...extra});
 window.__mount=extra=>window.cursor=KinViewerThreeDCursor.mount(options(extra));
 window.__mountSecond=()=>window.cursor2=KinViewerThreeDCursor.mount(options({panes:()=>[PANES.mr2]}));
 window.scrollTo_=(name,index)=>{const v=viewports[name];v.currentImageIdIndex=index;v.csImage={imageId:v.imageIds[index]};v.viewportStatus='rendered';};
-window.clickAt=(selector,x,y)=>{const box=document.querySelector(selector).getBoundingClientRect();
- for(const type of ['pointerdown','click'])document.elementFromPoint(box.left+x,box.top+y)
-  .dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:box.left+x,clientY:box.top+y}));};
+window.markCenters=()=>[...document.querySelectorAll('[data-kin-3d-cursor-mark]')].map(dot=>{
+ const anchor=dot.parentElement.parentElement,r=dot.getBoundingClientRect(),a=anchor.getBoundingClientRect();
+ return {pane:anchor.id,sop:dot.dataset.kinSop,x:r.left+r.width/2-a.left,y:r.top+r.height/2-a.top,
+  display:getComputedStyle(dot).display};});
+window.markRect=()=>{const dot=document.querySelector('[data-kin-3d-cursor-mark]');
+ if(!dot)return null;const r=dot.getBoundingClientRect();
+ return {cx:r.left+r.width/2,cy:r.top+r.height/2,width:r.width,height:r.height,display:getComputedStyle(dot).display};};
+window.rectOf=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height};};
+window.clickAt=(selector,x,y)=>{const host=document.querySelector(selector);
+ host.scrollIntoView({block:'center',inline:'center'});
+ const box=host.getBoundingClientRect(),target=document.elementFromPoint(box.left+x,box.top+y)||host;
+ for(const type of ['pointerdown','click'])
+  target.dispatchEvent(new MouseEvent(type,{bubbles:true,clientX:box.left+x,clientY:box.top+y}));
+ return target.id||target.tagName;};
 </script>
 """
 
@@ -214,6 +247,7 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual(0, self.page.evaluate("document.querySelectorAll('[data-kin-3d-cursor-layer]').length"))
 
     def test_b3_stop_with_a_never_resolving_load_quarantines_instead_of_racing_it(self):
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2})")
         self.enable()
         self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
         self.page.wait_for_function("viewports.mr.pending.length===1")
@@ -243,18 +277,20 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.page.wait_for_function("cursor.state().busy===false")
         # Teardown already happened, so the abandoned run must not drive the viewport afterwards.
         self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
-        self.assertEqual("restore-blocked-stopped", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual("restore-blocked-abandoned", self.page.evaluate("cursor.state().restores.mr"))
         self.assertEqual([], self.marks())
 
     def test_b3_a_never_resolving_restore_is_bounded_and_never_claimed_as_restored(self):
-        self.page.evaluate("addSecondTarget()")
+        self.page.evaluate("addSecondTarget();cursor.stop();__mount({navigationAttempts:2})")
         self.enable()
-        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
-        self.page.wait_for_function("viewports.mr2.pending.length===1")
-        self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
-        self.page.evaluate("viewports.mr.hold=true")
-        self.page.evaluate("cursor.cancel('user-interrupt')")
+        # The cancel is raised from inside the page at the moment the second pane's load is held,
+        # so the ordering does not depend on a round trip.
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{viewports.mr.hold=true;cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
         self.page.wait_for_function("cursor.state().busy===false")
+        # The pinned viewport writes the index before the load, so the rollback index is already
+        # there while its pixels are not: that is exactly why it may not be called restored.
         self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
         panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
         self.assertEqual("restore-unconfirmed", panes["mr"]["restore"])
@@ -291,6 +327,137 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
         self.assertEqual("restore-skipped-user", panes["mr"]["restore"])
 
+    # --- review-after-fix-1 blocking regressions ---------------------------------------------
+    def test_c1_an_inset_enabled_element_maps_clicks_and_draws_the_marker_on_the_same_origin(self):
+        # The product shape: the cornerstone enabled element is a bordered, inset descendant of
+        # the pane container, and carries its own children.
+        self.page.evaluate("setPanes(['inset','mr'])")
+        self.assertTrue(self.enable())
+        self.page.evaluate("clickAt('#enabled-inset',120,70)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual({"x": 120, "y": 70}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+        enabled_rect = self.page.evaluate("rectOf('#enabled-inset')")
+        pane_rect = self.page.evaluate("rectOf('#pane-inset')")
+        dot = self.page.evaluate("markRect()")
+        self.assertIsNotNone(dot)
+        # The drawn centre must sit on the enabled element's origin, not the pane's.
+        self.assertAlmostEqual(enabled_rect["left"] + 120, dot["cx"], delta=0.51)
+        self.assertAlmostEqual(enabled_rect["top"] + 70, dot["cy"], delta=0.51)
+        self.assertGreater(abs(pane_rect["left"] + 120 - dot["cx"]), 5)
+        self.assertGreater(abs(pane_rect["top"] + 70 - dot["cy"]), 5)
+
+    def test_c1_a_marker_outside_the_visible_viewport_is_clipped_and_reported(self):
+        self.page.evaluate("setPanes(['inset','mr'])")
+        self.enable()
+        self.page.evaluate("clickAt('#enabled-inset',150,150)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual(True, self.page.evaluate("cursor.state().panes.find(p=>p.id==='inset').visible"))
+        # Pan the pinned viewport so the marked world point leaves the visible canvas.
+        self.page.evaluate("viewports.inset.shift=[-400,-400];cursor.refresh()")
+        pane = self.page.evaluate("cursor.state().panes.find(p=>p.id==='inset')")
+        self.assertEqual(False, pane["visible"])
+        self.assertEqual("none", self.page.evaluate("markRect()&&markRect().display"))
+        self.assertEqual("hidden", self.page.evaluate(
+            "getComputedStyle(document.querySelector('[data-kin-3d-cursor-layer]')).overflow"))
+
+    def test_c1_a_host_positioned_pane_keeps_its_stylesheet_position_and_is_restored(self):
+        self.page.evaluate("setPanes(['styled','mr2'])")
+        self.enable()
+        self.assertEqual("static", self.page.evaluate("getComputedStyle(document.querySelector('#pane-mr2')).position"))
+        self.page.evaluate("cursor.pick('styled',{x:40,y:40})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        # The host stylesheet keeps the styled pane; only the static pane is written to.
+        self.assertEqual("", self.page.evaluate("document.querySelector('#pane-styled').style.position"))
+        self.assertEqual("absolute", self.page.evaluate("getComputedStyle(document.querySelector('#pane-styled')).position"))
+        self.assertEqual("relative", self.page.evaluate("document.querySelector('#pane-mr2').style.position"))
+        self.page.evaluate("cursor.stop()")
+        self.page.wait_for_function("cursor.state().stopped===true")
+        self.assertEqual("", self.page.evaluate("document.querySelector('#pane-mr2').style.position"))
+        self.assertEqual("", self.page.evaluate("document.querySelector('#pane-styled').style.position"))
+
+    def test_c2_an_unsettled_teardown_permanently_refuses_re_enable(self):
+        self.enable()
+        self.page.evaluate("cursor.stop();__mount({drainAttempts:0})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        self.assertEqual(True, self.page.evaluate("cursor.state().poisoned"))
+        self.assertFalse(self.page.evaluate("cursor.enable()"))
+        self.assertFalse(self.page.evaluate("cursor.state().enabled"))
+        self.assertEqual({"ok": False, "reason": "inactive"}, self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})"))
+
+    def test_c2_an_abandoned_run_cannot_write_after_an_unsettled_teardown(self):
+        self.page.evaluate("cursor.stop();__mount({drainAttempts:0})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        before = self.page.evaluate("()=>({run:cursor.state().run,status:cursor.state().status})")
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("flush('mr')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        after = self.page.evaluate("()=>({run:cursor.state().run,status:cursor.state().status})")
+        self.assertEqual(before, after, "an abandoned run must not touch the run counter or status")
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual([], self.marks())
+        self.assertEqual("restore-blocked-abandoned", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([], self.page.evaluate("unhandled"))
+
+    def test_c2_an_abandoned_run_that_rejects_late_is_fenced_the_same_way(self):
+        self.page.evaluate("cursor.stop();__mount({drainAttempts:0})")
+        self.enable()
+        self.page.evaluate("viewports.mr.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr.pending.length===1")
+        self.assertEqual("unsettled", self.page.evaluate("cursor.disable('context-changed')"))
+        self.page.set_default_timeout(15000)
+        self.page.evaluate("viewports.mr.pending.splice(0).forEach(()=>{});viewports.mr.rejectPending()")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual([], self.marks())
+        self.assertEqual([], self.page.evaluate("unhandled"))
+
+    def test_c3_enable_without_an_eligible_pane_stays_off_and_attaches_nothing(self):
+        self.page.evaluate("setPanes(['volume'])")
+        self.assertFalse(self.page.evaluate("cursor.enable()"))
+        self.assertFalse(self.page.evaluate("cursor.state().enabled"))
+        self.page.evaluate("clickAt('#pane-volume',20,20)")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+        self.assertEqual({"ok": False, "reason": "inactive"}, self.page.evaluate("cursor.pick('volume',{x:1,y:1})"))
+
+    def test_c3_two_panes_sharing_one_element_are_refused_as_ambiguous(self):
+        self.page.evaluate("setPanes(['ct','sharedA','sharedB'])")
+        self.enable()
+        panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
+        for name in ("sharedA", "sharedB"):
+            self.assertEqual((False, "pane-ambiguous"), (panes[name]["eligible"], panes[name]["reason"]))
+        self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([], self.page.evaluate("viewports.shared.calls"))
+
+    def test_c3_a_no_write_rollback_is_only_called_restored_when_the_pixels_confirm_it(self):
+        self.page.evaluate("addSecondTarget();cursor.stop();__mount({navigationAttempts:2})")
+        self.enable()
+        # The index is back on the pre-run frame through a path this controller never saw, but the
+        # pinned viewport still holds the frame this run issued: nothing to write, nothing to claim.
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{viewports.mr.currentImageIdIndex=0;cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual("restore-unconfirmed", self.page.evaluate("cursor.state().restores.mr"))
+        # Contrast: the same no-write shortcut with the pixels actually showing the start frame.
+        # A fresh controller is the documented way to clear a quarantine.
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});scrollTo_('mr',0);scrollTo_('mr2',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{scrollTo_('mr',0);cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4, 4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual("restored", self.page.evaluate("cursor.state().restores.mr"))
+
     def test_mode_binds_only_valid_classic_stack_panes(self):
         self.assertTrue(self.enable())
         state = self.page.evaluate("cursor.state()")
@@ -312,11 +479,14 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
         self.assertTrue(result["ok"])
         self.assertEqual({"ct": [], "mr": [4], "foreign": [], "volume": []}, self.calls())
+        self.assertEqual([("pane-ct", "1.2.3.4.3"), ("pane-mr", "1.2.3.9.5")],
+                         [(m["pane"], m["sop"]) for m in self.marks()])
+        centres = [{key: (round(value, 3) if isinstance(value, float) else value) for key, value in mark.items()}
+                   for mark in self.page.evaluate("markCenters()")]
         self.assertEqual(
-            [{"pane": "pane-ct", "sop": "1.2.3.4.3", "left": "460px", "top": "237.5px"},
-             {"pane": "pane-mr", "sop": "1.2.3.9.5", "left": "44px", "top": "4px"}],
-            self.marks(),
-        )
+            [{"pane": "pane-ct", "sop": "1.2.3.4.3", "x": 460, "y": 237.5, "display": "block"},
+             {"pane": "pane-mr", "sop": "1.2.3.9.5", "x": 44, "y": 4, "display": "block"}],
+            centres, "the drawn centre must sit on the canvas point of its own anchor")
         self.assertEqual("identity-frame", [r for r in result["results"] if r["paneId"] == "other"][0]["reason"])
         self.assertEqual(4, self.page.evaluate("viewports.mr.currentImageIdIndex"))
         self.assertEqual(2, self.page.evaluate("viewports.ct.currentImageIdIndex"))
