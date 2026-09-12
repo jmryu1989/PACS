@@ -114,6 +114,28 @@ test('a stack with mixed identity, mixed geometry or an unusable slice interval 
   assert.equal(stack(flipped).reason,'stack-orientation-mixed');
 });
 
+/* Independent review D-3DCURSOR-801AD73 §8-3. The unit/orthogonality check on the two image
+   axes is the only defence against these two orientations: their cross product is exactly a
+   unit vector, so the later normal-norm check accepts them. Without the axis check the same
+   physical point is reported at twice the column index and half the row index. */
+test('an orthogonal but non-unit orientation is refused although its normal is a unit vector',()=>{
+  const pair=over=>[base(),base({SOPInstanceUID:'1.2.3.4.2',ImagePositionPatient:[-250,-250,5],...over})];
+  // |x|=2, |y|=0.5, x.y=0 -> cross(x,y) === [0,0,1].
+  const scaled={ImageOrientationPatient:[2,0,0,0,0.5,0]};
+  assert.equal(plane(base(scaled)).reason,'geometry-axes');
+  assert.equal(stack(pair(scaled)).reason,'geometry-axes');
+  // Skewed as well as non-unit: x.y=0.5, and cross([1,0,0],[0.5,1,0]) === [0,0,1] all the same.
+  const skewed={ImageOrientationPatient:[1,0,0,0.5,1,0]};
+  assert.equal(plane(base(skewed)).reason,'geometry-axes');
+  assert.equal(stack(pair(skewed)).reason,'geometry-axes');
+  // What the refusal prevents: PixelSpacing is divided out of a projection onto a non-unit axis,
+  // so one and the same world point would land on a silently rescaled pixel.
+  const good=ok(plane(base())).plane;
+  near(toPixel(good,[-200,-210,0]).x,100);near(toPixel(good,[-200,-210,0]).y,50);
+  const rescaled=toPixel({...good,x:[2,0,0],y:[0,0.5,0]},[-200,-210,0]);
+  near(rescaled.x,200);near(rescaled.y,25);
+});
+
 test('only same study, same patient and same frame of reference panes are comparable',()=>{
   const a=identity(base()),b=identity(base({SeriesInstanceUID:'1.2.3.5',SOPInstanceUID:'1.2.3.5.1',Modality:'MR'}));
   assert.equal(comparable(a,b),null);

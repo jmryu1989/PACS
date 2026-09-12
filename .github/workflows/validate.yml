@@ -83,6 +83,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/source-pdf --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file tests/viewer_dicom_pdf_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_dicom_pdf_dom_test.py
+      - name: Three-D cursor pick, marker origin and rollback ownership DOM integration
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/three-d-cursor-dom --cwd . --file worklist-v0/hpacs-lite/three-d-cursor-model.js --file worklist-v0/hpacs-lite/viewer-three-d-cursor.js --file tests/viewer_three_d_cursor_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_three_d_cursor_dom_test.py
       - name: Saved comparison print page identity and pagination
         timeout-minutes: 4
         run: |
@@ -165,6 +169,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_identity_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs
       - name: Editor link model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/editor-link --cwd . --file worklist-v0/hpacs-lite/viewer-editor-link.js --file tests/viewer_editor_link_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_editor_link_test.cjs
+      - name: Three-D cursor geometry model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/three-d-cursor-model --cwd . --file worklist-v0/hpacs-lite/three-d-cursor-model.js --file tests/three_d_cursor_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/three_d_cursor_model_test.cjs
       - name: Existing study instance and series arrival model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
       - name: CT display target selection and atomic rollback model
@@ -277,5 +283,7 @@ jobs:
           path: |
             tmp/runtime-ci/job-print-identity/
             tmp/runtime-ci/hanging-protocols/
+            tmp/runtime-ci/three-d-cursor-model/
+            tmp/runtime-ci/editor-link/
           if-no-files-found: error
           retention-days: 7
