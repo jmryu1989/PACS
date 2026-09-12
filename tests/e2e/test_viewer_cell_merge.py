@@ -72,7 +72,9 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
 
     def draw_annotation(self, page, index, label):
         page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
-        page.get_by_text('Annotation', exact=True).click()
+        # Scoped to the dropdown: once Annotation is the selected tool the toolbar button
+        # carries the same label, so an unscoped exact-text match is ambiguous.
+        page.locator('#react-portal').get_by_text('Annotation', exact=True).click()
         box = page.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box()
         x, y = box['x'] + box['width'] * .5, box['y'] + box['height'] * .5
         page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 45, y + 28, steps=8); page.mouse.up()
@@ -192,7 +194,15 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertEqual(worked[0]['image'], restored[0]['image'])
         self.assertEqual(worked[0]['index'], restored[0]['index'])
         self.assertEqual(worked[0]['properties'], restored[0]['properties'])
-        self.assertEqual(before[0]['camera'], restored[0]['camera'])
+        # The zoom nobody touched is owed the pre-merge value, while where the camera sits
+        # follows the slice the user scrolled to: a stack scroll moves focalPoint and
+        # position along the normal, so those are not evidence of a zoom.
+        self.assertEqual(before[0]['camera']['parallelScale'], restored[0]['camera']['parallelScale'])
+        self.assertNotEqual(before[0]['camera']['parallelScale'], kept[0]['camera']['parallelScale'])
+        self.assertEqual(worked[0]['camera']['focalPoint'], restored[0]['camera']['focalPoint'])
+        self.assertEqual(worked[0]['camera']['position'], restored[0]['camera']['position'])
+        for field in ('viewUp', 'viewPlaneNormal', 'flipHorizontal', 'flipVertical', 'rotation'):
+            self.assertEqual(before[0]['camera'][field], restored[0]['camera'][field])
         # The surviving cell kept its own quadrant and is untouched throughout.
         self.assertEqual(before[1]['camera'], restored[1]['camera'])
         self.assertEqual(before[1]['properties'], restored[1]['properties'])

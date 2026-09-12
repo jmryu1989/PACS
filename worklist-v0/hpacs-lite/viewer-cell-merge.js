@@ -64,9 +64,18 @@
       displaced: block.filter(cell => cell.viewportId !== anchorId).map(cell => cell.viewportId) };
   }
 
-  const sameCamera = (a, b) => !!a && !!b && CAMERA_KEYS.every(key => Array.isArray(a[key])
+  const sameCameraKeys = (a, b, keys) => !!a && !!b && keys.every(key => Array.isArray(a[key])
     ? Array.isArray(b[key]) && a[key].length === b[key].length && a[key].every((value, index) => Math.abs(value - b[key][index]) < 1e-6)
     : typeof a[key] === 'number' ? Math.abs(a[key] - b[key]) < 1e-6 : a[key] === b[key]);
+  const sameCamera = (a, b) => sameCameraKeys(a, b, CAMERA_KEYS);
+  // A camera is not one decision. Scrolling a stack moves focalPoint and position along
+  // the normal, so comparing the camera whole would read every slice change as a zoom the
+  // user made and hand back the merge's own refit with it. Zoom, where the camera sits and
+  // how it is oriented are judged separately; the last group is the remainder by
+  // construction, so every key stays covered exactly once.
+  const CAMERA_ZOOM = ['parallelScale'], CAMERA_PLACE = ['focalPoint', 'position'];
+  const CAMERA_GROUPS = [CAMERA_ZOOM, CAMERA_PLACE,
+    CAMERA_KEYS.filter(key => !CAMERA_ZOOM.includes(key) && !CAMERA_PLACE.includes(key))];
 
   function create(services, options = {}) {
     const doc = options.doc || root.document, win = options.root || doc?.defaultView || root;
@@ -265,12 +274,16 @@
       return { rows: base.rows, cols: base.cols, active: base.active, cells: base.cells.map(cell => {
         const current = present.get(cell.viewportId), merged = after?.get(cell.viewportId);
         if (!current || current.kind !== 'stack' || JSON.stringify(current.sets) !== JSON.stringify(cell.sets)) return cell;
-        if (!merged || merged.kind !== 'stack') return cell;
+        if (!merged || merged.kind !== 'stack' || cell.kind !== 'stack') return cell;
         // imageId and imageIndex are one decision: an index without the image it belongs
         // to would scroll the cell to a slice the user never asked for.
         const scrolled = current.imageId !== merged.imageId;
-        return { ...cell,
-          camera: sameCamera(current.camera, merged.camera) ? cell.camera : current.camera,
+        const camera = {};
+        for (const keys of CAMERA_GROUPS) {
+          const owed = sameCameraKeys(current.camera, merged.camera, keys) ? cell.camera : current.camera;
+          for (const key of keys) camera[key] = owed[key];
+        }
+        return { ...cell, camera,
           voiRange: sameVoi(current.voiRange, merged.voiRange) ? cell.voiRange : current.voiRange,
           invert: (current.invert ?? null) === (merged.invert ?? null) ? cell.invert : current.invert,
           imageId: scrolled ? current.imageId : cell.imageId,

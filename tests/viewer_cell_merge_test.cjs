@@ -32,7 +32,10 @@ mutate('rollback-adopts-screen', 'return await rebuild(base, watch.owned)', 'ret
 mutate('rollback-adopts-screen', "if (!merged || merged.kind !== 'stack') return cell;",
   "if (!merged || merged.kind !== 'stack') return { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex };");
 mutate('record-without-recheck', 'if (geometryIs(expected)) {', 'if (true) {');
-mutate('adopt-merged-camera', 'camera: sameCamera(current.camera, merged.camera) ? cell.camera : current.camera,', 'camera: current.camera,');
+// The camera judged as one decision again, which is what let a slice change carry the
+// merge's refit zoom back with it.
+mutate('adopt-merged-camera', 'const owed = sameCameraKeys(current.camera, merged.camera, keys) ? cell.camera : current.camera;',
+  'const owed = sameCamera(current.camera, merged.camera) ? cell.camera : current.camera;');
 const moduleBox = { exports: {} };
 new Function('module', 'exports', source)(moduleBox, moduleBox.exports);
 const CellMerge = moduleBox.exports;
@@ -52,7 +55,15 @@ function makeViewport(id, imageId, seed) {
     getProperties() { return clone(this.properties); },
     setProperties(value) { Object.assign(this.properties, clone(value)); },
     setVOI(value) { this.properties.voiRange = clone(value); },
-    setImageIdIndex(value) { this.index = value; this.current = 'wadors:' + id + ':' + value; return Promise.resolve(); },
+    // Scrolling a real stack moves the camera along the view normal with the slice, so the
+    // camera cannot be read as one decision: a pure scroll must not look like a zoom.
+    setImageIdIndex(value) {
+      const shift = value - this.index;
+      this.index = value; this.current = 'wadors:' + id + ':' + value;
+      this.camera.focalPoint = [this.camera.focalPoint[0], this.camera.focalPoint[1], this.camera.focalPoint[2] + shift * 2];
+      this.camera.position = [this.camera.position[0], this.camera.position[1], this.camera.position[2] + shift * 2];
+      return Promise.resolve();
+    },
     render() { this.renders++; },
   };
 }
@@ -264,10 +275,14 @@ test('work the user did in a reshaped merged cell is kept without surrendering t
   const refit = x.viewports.get('A').camera.parallelScale;
   assert.notEqual(refit, zoom);
   // The user scrolls the merged cell. Only the slice is theirs; the refit above is not.
+  // Scrolling drags focalPoint and position with it, which must not read as a zoom.
   await x.viewports.get('A').setImageIdIndex(3);
   assert.equal((await x.controller.unmerge()).ok, true);
   assert.equal(x.viewports.get('A').current, 'wadors:A:3');
   assert.equal(x.viewports.get('A').camera.parallelScale, zoom);
+  // Where the camera sits follows the slice the user chose, not the slice it was recorded on.
+  assert.deepEqual(x.viewports.get('A').camera.focalPoint, [0, 0, 6]);
+  assert.deepEqual(x.viewports.get('A').camera.position, [0, 0, 16]);
   assert.deepEqual(x.viewports.get('A').properties.voiRange, voi);
 
   // The same holds for window/level and invert: they come back, the untouched zoom does not
