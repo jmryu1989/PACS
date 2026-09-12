@@ -283,5 +283,7 @@ jobs:
           path: |
             tmp/runtime-ci/job-print-identity/
             tmp/runtime-ci/hanging-protocols/
+            tmp/runtime-ci/three-d-cursor-model/
+            tmp/runtime-ci/editor-link/
           if-no-files-found: error
           retention-days: 7
