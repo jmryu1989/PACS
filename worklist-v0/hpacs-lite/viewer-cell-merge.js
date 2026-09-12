@@ -268,31 +268,74 @@
     // camera back as if the user had zoomed. A cell this module removed, one whose source
     // changed, or one with no trustworthy post-merge reading is owed the record whole,
     // because nothing about it can be attributed to the user.
-    function unmergeTarget(base, after) {
+    function unmergeTarget(base, after, input) {
       const present = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
       const sameVoi = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-      return { rows: base.rows, cols: base.cols, active: base.active, cells: base.cells.map(cell => {
+      const touched = input?.touched || null, interacted = !!input?.interacted;
+      let ambiguous = false;
+      const cells = base.cells.map(cell => {
         const current = present.get(cell.viewportId), merged = after?.get(cell.viewportId);
         if (!current || current.kind !== 'stack' || JSON.stringify(current.sets) !== JSON.stringify(cell.sets)) return cell;
         if (!merged || merged.kind !== 'stack' || cell.kind !== 'stack') return cell;
+        const atInput = touched?.get(cell.viewportId);
+        const placed = !interacted || (!!atInput && atInput.kind === 'stack');
+        // One field, decided on evidence. A value the user moved after the merge settled is
+        // theirs. A value that is identical in the settled reading but was different at the
+        // instant their input arrived was changed by that input and is theirs as well, so
+        // `after` never folds their edit into this module's own baseline. Only a value with
+        // no user input behind it is owed the pre-merge record. Where an input happened but
+        // could not be placed on the screen, the newer value is kept and the restore says so:
+        // an unattributable value is never silently reverted.
+        const decide = (untouched, steady, recorded, actual, unchanged) => {
+          if (!untouched || steady === false) return actual;
+          if (placed || unchanged) return recorded;
+          ambiguous = true; return actual;
+        };
         // imageId and imageIndex are one decision: an index without the image it belongs
         // to would scroll the cell to a slice the user never asked for.
         const scrolled = current.imageId !== merged.imageId;
+        const image = decide(!scrolled, atInput ? atInput.imageId === merged.imageId : null,
+          cell, current, current.imageId === cell.imageId);
         const camera = {};
         for (const keys of CAMERA_GROUPS) {
-          const owed = sameCameraKeys(current.camera, merged.camera, keys) ? cell.camera : current.camera;
+          const owed = decide(sameCameraKeys(current.camera, merged.camera, keys),
+            atInput?.camera ? sameCameraKeys(atInput.camera, merged.camera, keys) : null,
+            cell.camera, current.camera, sameCameraKeys(current.camera, cell.camera, keys));
           for (const key of keys) camera[key] = owed[key];
         }
         return { ...cell, camera,
-          voiRange: sameVoi(current.voiRange, merged.voiRange) ? cell.voiRange : current.voiRange,
-          invert: (current.invert ?? null) === (merged.invert ?? null) ? cell.invert : current.invert,
-          imageId: scrolled ? current.imageId : cell.imageId,
-          imageIndex: scrolled ? current.imageIndex : cell.imageIndex };
-      }) };
+          voiRange: decide(sameVoi(current.voiRange, merged.voiRange), atInput ? sameVoi(atInput.voiRange, merged.voiRange) : null,
+            cell.voiRange, current.voiRange, sameVoi(current.voiRange, cell.voiRange)),
+          invert: decide((current.invert ?? null) === (merged.invert ?? null), atInput ? (atInput.invert ?? null) === (merged.invert ?? null) : null,
+            cell.invert, current.invert, (current.invert ?? null) === (cell.invert ?? null)),
+          imageId: image.imageId, imageIndex: image.imageIndex };
+      });
+      return { rows: base.rows, cols: base.cols, active: base.active, cells, ambiguous };
+    }
+
+    // A screen this module is still allowed to rebuild. Its own dispatch can only ever
+    // leave the viewports and the sources it started from, inside the grid it started from;
+    // which rectangles native chose, and how many of the cells it kept, is native's answer
+    // and may deviate - that deviation is this module's own doing and is rolled back.
+    // A viewport or a source that was never in the record belongs to another operation -
+    // a Hanging Protocol Apply or a Load Job that landed while this merge was settling -
+    // whose provenance cannot be established from here, so it is never rebuilt over.
+    function ours(base) {
+      const layout = grid?.getState?.()?.layout || {}, views = ordered();
+      if (layout.numRows !== base.rows || layout.numCols !== base.cols) return false;
+      if (!views.length || views.length > base.cells.length) return false;
+      const known = new Map(base.cells.map(cell => [cell.viewportId, JSON.stringify(cell.sets)]));
+      return views.every(view => {
+        const sets = [...(view.displaySetInstanceUIDs || [])], recorded = known.get(view.viewportId);
+        // A cell that is momentarily carrying nothing is native still building this module's
+        // own request; an unknown viewport, or a source that was never in the record, is not.
+        return recorded !== undefined && (!sets.length || recorded === JSON.stringify(sets));
+      });
     }
 
     // Rollback runs only while this module still owns the screen: a user who already
-    // moved on must never have their newer work overwritten by our restore.
+    // moved on, or another panel that has put its own work there, must never have it
+    // overwritten by our restore.
     async function rebuild(target, owned) {
       if (!owned()) return false;
       try { await boundedNative(dispatch(target.rows, target.cols, null, target.cells, target.active), 2000); } catch (_) { }
@@ -312,17 +355,26 @@
       return false;
     }
 
-    function quarantine() {
+    function quarantine(message) {
       quarantined = true; record = null; refresh();
-      return note('배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인하고 뷰어 창을 닫은 뒤 다시 열어 주세요.');
+      return note(message || '배치 요청 또는 복원 완료를 확인하지 못했습니다. 현재 영상을 확인하고 뷰어 창을 닫은 뒤 다시 열어 주세요.');
     }
+    const FOREIGN = '병합을 확인하는 동안 다른 기능이 화면을 바꾸어, 이전 배치로 되돌리지 않고 지금 화면을 그대로 두었습니다. 화면을 확인한 뒤 뷰어 창을 닫고 다시 열어 주세요.';
 
-    function watchInteraction() {
-      let interacted = false, armed = false;
-      const handler = () => { if (armed) interacted = true; };
+    // `capture` reads the screen at the instant the first input arrives, in the capture
+    // phase, before any tool has acted on it. A value that is identical in that reading and
+    // in the settled one cannot be that input's work, which is how a user edit made inside
+    // the settling wait is told apart from the merge's own refit later on.
+    function watchInteraction(capture) {
+      let interacted = false, armed = false, touched = null;
+      const handler = () => {
+        if (!armed || interacted) return;
+        interacted = true;
+        if (capture) try { touched = new Map(ordered().map(view => [view.viewportId, cellOf(view)])); } catch (_) { touched = null; }
+      };
       for (const type of ['pointerdown', 'wheel', 'keydown']) doc.addEventListener(type, handler, true);
       queueMicrotask(() => { armed = true; });
-      return { owned: () => !interacted && !ended && live(),
+      return { owned: () => !interacted && !ended && live(), input: () => ({ interacted, touched }),
         release: () => { for (const type of ['pointerdown', 'wheel', 'keydown']) doc.removeEventListener(type, handler, true); } };
     }
 
@@ -337,7 +389,20 @@
       if (!result.ok) return { ok: false, message: note(result.reason) };
       const expected = { rows: base.rows, cols: base.cols,
         cells: result.slots.map((cell, index) => ({ viewportId: cell.viewportId, sets: cell.sets, ...result.layoutOptions[index] })) };
-      const watch = watchInteraction();
+      const watch = watchInteraction(true);
+      const owned = () => watch.owned() && ours(base);
+      // The rollback is owed `base` itself, not a fresh reading of the screen: it runs only
+      // while nothing else has touched the screen, so every difference on it - the refit
+      // this failed merge caused above all - is self-inflicted and must not be adopted as
+      // the state the user is owed. When the screen is no longer this module's, nothing is
+      // dispatched at all: another panel's newer work is left exactly where it is.
+      const rollback = async message => {
+        if (!watch.owned()) return { ok: false, message: quarantine() };
+        if (!ours(base)) return { ok: false, message: quarantine(FOREIGN) };
+        return await rebuild(base, owned)
+          ? { ok: false, message: note(message) }
+          : { ok: false, message: quarantine() };
+      };
       busy = true; refresh(); note('칸 배치를 적용하는 중…');
       try {
         const deadline = Date.now() + 4000;
@@ -354,24 +419,15 @@
           // requested geometry is confirmed once more, on the same synchronous reading
           // the signature is taken from, so a record only ever describes this merge.
           if (geometryIs(expected)) {
-            record = { base, op, anchorId: anchor, after, signature: layoutSignature() };
+            record = { base, op, anchorId: anchor, after, input: watch.input(), signature: layoutSignature() };
             return { ok: true, op, message: note(op === 'maximize'
               ? '선택한 칸을 한 화면으로 확대했습니다. 다시 더블클릭하거나 Restore Grid로 이전 배치로 돌아갑니다.'
               : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아갑니다. 병합 화면은 저장할 수 없습니다.') };
           }
         }
-        if (!watch.owned()) return { ok: false, message: quarantine() };
-        // The rollback is owed `base` itself, not a fresh reading of the screen: this path
-        // runs only while no interaction has happened, so every difference on screen -
-        // the refit this failed merge caused above all - is self-inflicted and must not
-        // be adopted as the state the user is owed.
-        return await rebuild(base, watch.owned)
-          ? { ok: false, message: note('요청한 칸 배치를 확인하지 못해 이전 배치로 복구했습니다.') }
-          : { ok: false, message: quarantine() };
+        return await rollback('요청한 칸 배치를 확인하지 못해 이전 배치로 복구했습니다.');
       } catch (_) {
-        return await rebuild(base, watch.owned)
-          ? { ok: false, message: note('칸 배치에 실패해 이전 배치로 복구했습니다.') }
-          : { ok: false, message: quarantine() };
+        return await rollback('칸 배치에 실패해 이전 배치로 복구했습니다.');
       } finally { watch.release(); busy = false; refresh(); }
     }
 
@@ -382,12 +438,17 @@
         record = null; refresh();
         return { ok: false, message: note('화면 또는 원본이 변경되어 병합 기록을 지웠습니다. 현재 화면은 유지됩니다.') };
       }
-      const target = unmergeTarget(record.base, record.after), watch = watchInteraction();
+      const target = unmergeTarget(record.base, record.after, record.input), watch = watchInteraction();
       busy = true; refresh(); note('이전 배치로 되돌리는 중…');
       try {
-        const back = await rebuild(target, watch.owned);
+        const back = await rebuild(target, () => watch.owned() && ours(target));
         if (ended || !live()) return { ok: false, message: '' };
-        if (back) { record = null; return { ok: true, message: note('이전 칸 배치와 영상 상태로 되돌렸습니다.') }; }
+        if (back) {
+          record = null;
+          return { ok: true, message: note(target.ambiguous
+            ? '이전 칸 배치로 되돌렸습니다. 병합 중 조작한 영상 상태는 확인되지 않아 되돌리지 않고 그대로 두었습니다.'
+            : '이전 칸 배치와 영상 상태로 되돌렸습니다.') };
+        }
         return { ok: false, message: quarantine() };
       } finally { watch.release(); busy = false; refresh(); }
     }
