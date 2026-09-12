@@ -17,8 +17,36 @@
     'point-outside-viewport':'영상 표시 영역 안을 클릭하세요.','navigation-unsettled':'대상 영상 요청이 끝나지 않아 이 화면을 보류했습니다.',
     'stopped':'3D Cursor를 종료했습니다.','internal':'3D Cursor를 사용할 수 없습니다.','abandoned':'',
     'teardown-unsettled':'끝나지 않은 영상 요청이 있어 3D Cursor를 닫았습니다. 이 창에서는 다시 켤 수 없습니다.',
-    'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.'};
-  const message=reason=>TEXT[reason]||'3D Cursor를 사용할 수 없습니다.';
+    'pane-ambiguous':'같은 화면에 두 개가 연결되어 있어 사용할 수 없습니다.','pane-anchor':'영상 표시 요소를 확인하지 못했습니다.',
+    'inactive':'3D Cursor가 켜져 있지 않습니다.','point-nonfinite':'선택점 좌표를 확인하지 못했습니다.',
+    /* One image's own attributes are out of spec. This is the only geometry statement that calls
+       an image defective, and it never describes the angle between two series: a series that is
+       oblique to another one is ordinary DICOM and produces no reason code at all. */
+    'geometry-axes-invalid':'이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.',
+    'geometry-missing':'이 영상의 위치·방향 정보를 읽지 못했습니다.','geometry-spacing':'이 영상의 화소 간격 정보를 읽지 못했습니다.',
+    'geometry-extent':'이 영상의 행·열 크기 정보를 읽지 못했습니다.',
+    /* Unsupported series shapes are a limit of this feature, not a fault of the data: the wording
+       says what is not supported and never calls the series abnormal or the DICOM wrong. */
+    'stack-too-short':'현재 지원하지 않는 시리즈 구성입니다(단면이 2장 미만).',
+    'stack-too-long':'현재 지원하지 않는 시리즈 구성입니다(단면 수가 한도를 넘음).',
+    'stack-identity-mixed':'현재 지원하지 않는 시리즈 구성입니다(한 화면에 서로 다른 시리즈).',
+    'stack-orientation-mixed':'현재 지원하지 않는 시리즈 구성입니다(한 화면 안에서 단면 방향이 섞임).',
+    'stack-spacing-mixed':'현재 지원하지 않는 시리즈 구성입니다(화소 간격이 섞임).',
+    'stack-extent-mixed':'현재 지원하지 않는 시리즈 구성입니다(영상 크기가 섞임).',
+    'stack-duplicate-sop':'현재 지원하지 않는 시리즈 구성입니다(같은 영상이 중복).',
+    'stack-duplicate-position':'현재 지원하지 않는 시리즈 구성입니다(같은 위치의 단면이 중복).',
+    'stack-spacing-nonuniform':'현재 지원하지 않는 시리즈 구성입니다(단면 간격이 일정하지 않음).',
+    'restored':'원래 영상으로 되돌렸습니다.','restore-unconfirmed':'원래 영상으로 되돌린 것을 확인하지 못했습니다.',
+    'restore-failed':'원래 영상으로 되돌리지 못했습니다.','restore-skipped-user':'사용자가 옮긴 화면이라 되돌리지 않았습니다.',
+    'restore-skipped-replaced':'영상이 교체되어 되돌리지 않았습니다.','restore-skipped-unbound':'화면이 사라져 되돌리지 않았습니다.',
+    'restore-blocked-unsettled':'끝나지 않은 영상 요청이 있어 되돌리지 않았습니다.',
+    'restore-blocked-abandoned':'세션이 끝나 되돌리지 않았습니다.','restore-blocked-stopped':'3D Cursor를 종료해 되돌리지 않았습니다.'};
+  // Presence in the table decides, not truthiness: 'abandoned' is an entry whose text is
+  // deliberately empty, and a fallback sentence there would speak for a run that must say nothing.
+  const message=reason=>Object.prototype.hasOwnProperty.call(TEXT,reason)?TEXT[reason]:'3D Cursor를 사용할 수 없습니다.';
+  // Every reason code the controller can emit must be in the table above; a code that is not
+  // would reach the reader as the bare 'unavailable' sentence, which explains nothing.
+  const reasons=()=>Object.keys(TEXT);
   /* The one sentence the reader may see about |n·(p−o)|. It is the distance from the picked
      point to the plane of the slice being shown, not an accuracy, an error or a precision:
      saying '±' or '오차' here would describe the computation instead of the geometry. */
@@ -507,6 +535,6 @@
     return {enable,disable,refresh,pick,stop,state,cancel};
   }
 
-  const api={mount,message};
+  const api={mount,message,reasons};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinViewerThreeDCursor=api;
 })(typeof globalThis==='object'?globalThis:this);

@@ -286,6 +286,56 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual("2 pane(s): 대상 영상으로 이동하지 못했습니다.", self.page.evaluate("cursor.state().status"))
         self.assertEqual(0, self.page.evaluate("document.querySelectorAll('#pane-mr [data-kin-3d-cursor-mark]').length"))
 
+    # --- B8 3: bad IOP versus an ordinary oblique relation -----------------------------------
+    def test_d3_every_reason_code_the_controller_can_emit_has_its_own_text(self):
+        # A reason code that is not in the text table reaches the reader as the bare
+        # '3D Cursor를 사용할 수 없습니다.', which explains nothing. Both product files are read
+        # here so that a code added later without its sentence fails this test.
+        import re
+        non_reason = {"data-kin-3d-cursor-layer", "data-kin-3d-cursor-mark",
+                      "kin-3d-cursor", "kin-3d-cursor-toggle", "kin-3d-cursor-status", "aria-pressed"}
+        pattern = re.compile(r"'([a-z][a-z0-9]*(?:-[a-z0-9]+)+)'")
+        found = set()
+        for path in (MODEL, VIEWER):
+            found |= set(pattern.findall(path.read_text(encoding="utf-8")))
+        # Single-word codes carry no hyphen and are listed here explicitly.
+        found |= {"stopped", "internal", "abandoned", "inactive", "restored"}
+        found -= non_reason
+        self.assertIn("slice-distance-exceeded", found)
+        self.assertIn("geometry-axes-invalid", found)
+        self.assertNotIn("geometry-axes", found, "the ambiguous code must be gone, not renamed in one place")
+        known = set(self.page.evaluate("KinViewerThreeDCursor.reasons()"))
+        self.assertEqual(set(), found - known, "these reason codes have no text of their own")
+        texts = {code: self.page.evaluate("KinViewerThreeDCursor.message(%r)" % code) for code in sorted(known)}
+        # 'abandoned' is deliberately empty: a run whose session ended writes no status at all.
+        for code, text in texts.items():
+            if code == "abandoned":
+                self.assertEqual("", text)
+                continue
+            self.assertTrue(text.strip(), code)
+            if code != "internal":
+                self.assertNotEqual("3D Cursor를 사용할 수 없습니다.", text, code)
+        # An unsupported series shape is a limit of this feature, never an accusation.
+        for code, text in texts.items():
+            for banned in ("비정상", "잘못된 DICOM", "정확도", "오차", "정밀도"):
+                self.assertNotIn(banned, text, code)
+        for code in ("stack-too-short", "stack-spacing-nonuniform", "stack-orientation-mixed", "stack-duplicate-position"):
+            self.assertIn("현재 지원하지 않는 시리즈 구성입니다", texts[code], code)
+        self.assertEqual("이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.", texts["geometry-axes-invalid"])
+
+    def test_d3_a_defective_iop_is_reported_as_its_own_geometry_reason(self):
+        # The controller surfaces the model's classification unchanged: |x| = 2 and |y| = 0.5 are
+        # orthogonal and their cross product is a unit normal, so only the axis check refuses it.
+        self.enable()
+        self.page.evaluate("META.set('mr:3',{...META.get('mr:3'),ImageOrientationPatient:[2,0,0,0,0.5,0]})")
+        self.page.evaluate("cursor.refresh()")
+        panes = {pane["id"]: pane for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual((False, "geometry-axes-invalid"), (panes["mr"]["eligible"], panes["mr"]["reason"]))
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("geometry-axes-invalid", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual("2 pane(s): 이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.", result["status"])
+        self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
+
     # --- review 184a433 blocking regressions -------------------------------------------------
     def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):
         # A click landing on an inset canvas/overlay child must map to the canvas point the

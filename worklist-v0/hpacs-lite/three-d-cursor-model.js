@@ -40,12 +40,16 @@
     if(!Array.isArray(orientation)||orientation.length!==6||!orientation.every(num)||!position)return fail('geometry-missing');
     if(!Array.isArray(spacing)||spacing.length!==2||!spacing.every(num))return fail('geometry-missing');
     const x=orientation.slice(0,3).map(Number),y=orientation.slice(3,6).map(Number);
-    if(Math.abs(norm(x)-1)>AXIS_TOL||Math.abs(norm(y)-1)>AXIS_TOL||Math.abs(dot(x,y))>AXIS_TOL)return fail('geometry-axes');
+    /* DICOM PS3.3 C.7.6.2: the two IOP vectors are unit and mutually orthogonal. Failing that is
+       a defect of THIS image's own attributes. It says nothing about how this series is angled
+       against any other one: two valid series may sit at any oblique angle to each other and are
+       transported by their own axes below, so no relation between series is checked anywhere. */
+    if(Math.abs(norm(x)-1)>AXIS_TOL||Math.abs(norm(y)-1)>AXIS_TOL||Math.abs(dot(x,y))>AXIS_TOL)return fail('geometry-axes-invalid');
     const stepX=Number(spacing[1]),stepY=Number(spacing[0]);
     if(!(stepX>0)||!(stepY>0))return fail('geometry-spacing');
     if(!extent(meta.Rows)||!extent(meta.Columns))return fail('geometry-extent');
     const normal=cross(x,y);
-    if(Math.abs(norm(normal)-1)>AXIS_TOL)return fail('geometry-axes');
+    if(Math.abs(norm(normal)-1)>AXIS_TOL)return fail('geometry-axes-invalid');
     return {ok:true,plane:{id,imageId:typeof meta.imageId==='string'?meta.imageId:null,x,y,normal,position,stepX,stepY,rows:meta.Rows,columns:meta.Columns,
       projection:dot(position,normal)}};
   }
