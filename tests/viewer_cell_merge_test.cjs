@@ -245,15 +245,23 @@ test('busy image work, cine playback and a foreign layout change refuse before d
   assert.equal(result.ok, false); assert.match(result.message, /Cine/);
   assert.equal(x.calls.length, 0);
   x.services.cineService.getState = () => ({ cines: {} });
-  x.win.kinViewerJobWorkspaceState = () => ({ dirty: true });
+  x.win.kinViewerJobWorkspaceState = () => ({ busy: true });
   result = await x.controller.merge('maximize', 'A');
-  assert.equal(result.ok, false); assert.match(result.message, /저장하지 않은/);
+  assert.equal(result.ok, false); assert.match(result.message, /끝난 뒤/);
   assert.equal(x.calls.length, 0);
-  delete x.win.kinViewerJobWorkspaceState;
+  // An unsaved measurement is not in-flight work: merge never removes an annotation,
+  // so it must stay available while the user is measuring.
+  x.win.kinViewerJobWorkspaceState = () => ({ dirty: true, busy: false });
+  x.win.kinViewerHistoryHasUnsaved = () => true;
+  result = await x.controller.merge('maximize', 'A');
+  assert.equal(result.ok, true);
+  assert.equal((await x.controller.unmerge()).ok, true);
+  delete x.win.kinViewerJobWorkspaceState; delete x.win.kinViewerHistoryHasUnsaved;
+  const dispatched = x.calls.length;
   x.doc.fullscreenElement = {};
   result = await x.controller.merge('maximize', 'A');
   assert.equal(result.ok, false); assert.match(result.message, /전체 화면/);
-  assert.equal(x.calls.length, 0);
+  assert.equal(x.calls.length, dispatched);
   x.doc.fullscreenElement = null;
   assert.equal((await x.controller.merge('maximize', 'A')).ok, true);
   // A layout change this module did not make drops the record instead of rebuilding.
@@ -262,7 +270,7 @@ test('busy image work, cine playback and a foreign layout change refuse before d
   assert.equal(rejected.ok, false);
   assert.match(rejected.message, /병합 기록을 지웠습니다/);
   assert.equal(x.controller.state().merged, false);
-  assert.equal(x.calls.length, 1);
+  assert.equal(x.calls.length, dispatched + 1);
 });
 
 test('merging refuses while already merged and unmerge refuses without a record', async () => {

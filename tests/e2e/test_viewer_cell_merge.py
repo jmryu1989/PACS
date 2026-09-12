@@ -59,6 +59,15 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
     def pane_box(self, page, index=0):
         return page.locator('[data-cy=viewport-grid] > div').nth(index).bounding_box()
 
+    def pane_of(self, page, viewport_id):
+        # Pane order in the DOM is not part of the contract; the viewport id is.
+        return page.locator(f'[data-cy=viewport-grid] > div:has([data-viewport-uid="{viewport_id}"])').bounding_box()
+
+    def click_pane(self, page, index):
+        # An empty cell has no canvas, so the pane element itself is the target.
+        box = page.locator('[data-cy=viewport-grid] > div').nth(index).bounding_box()
+        page.mouse.click(box['x'] + box['width'] * .5, box['y'] + box['height'] * .5)
+
     def dblclick_pane(self, page, index):
         box = page.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box()
         page.mouse.dblclick(box['x'] + box['width'] * .5, box['y'] + box['height'] * .35)
@@ -68,14 +77,19 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         originals = self.originals(); rows = self.report_rows(fixture)
         before_geometry = self.geometry(page); before = self.snap(page)
         grid_box = page.locator('[data-cy=viewport-grid]').bounding_box()
+        quarter = self.pane_of(page, before[0]['id'])
         self.dblclick_pane(page, 0)
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
-        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다')
         merged = self.geometry(page)
         self.assertEqual([[before[0]['id'], 0, 0, 1, 1, before[0]['sets']]], merged)
-        box = self.pane_box(page, 0)
-        self.assertAlmostEqual(box['width'], grid_box['width'], delta=2)
-        self.assertAlmostEqual(box['height'], grid_box['height'], delta=2)
+        # The pane really spans the whole grid; native pane padding keeps it a few
+        # pixels inside the container, so the claim is proportional, not pixel-exact.
+        box = self.pane_of(page, before[0]['id'])
+        self.assertGreater(box['width'], grid_box['width'] * .99)
+        self.assertGreater(box['height'], grid_box['height'] * .99)
+        self.assertGreater(box['width'], quarter['width'] * 1.9)
+        self.assertGreater(box['height'], quarter['height'] * 1.9)
         maximized = self.snap(page)
         self.assertEqual(before[0]['image'], maximized[0]['image'])
         self.assertEqual(before[0]['properties']['voiRange'], maximized[0]['properties']['voiRange'])
@@ -100,6 +114,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         originals = self.originals()
         before_geometry = self.geometry(page); before = self.snap(page)
         self.merge_button(page, 'merge-column').click()
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('병합했습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===3', timeout=30000)
         merged = self.geometry(page)
         self.assertEqual([before[0]['id'], 0, 0, .5, 1], merged[0][:5])
@@ -107,9 +122,10 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertEqual([0.5, .5, .5, .5], merged[2][1:5])
         # The anchor pane really is a full-height half, not just a state entry.
         grid_box = page.locator('[data-cy=viewport-grid]').bounding_box()
-        anchor = self.pane_box(page, 0)
-        self.assertAlmostEqual(anchor['height'], grid_box['height'], delta=2)
-        self.assertAlmostEqual(anchor['width'], grid_box['width'] / 2, delta=2)
+        anchor, neighbour = self.pane_of(page, merged[0][0]), self.pane_of(page, merged[1][0])
+        self.assertGreater(anchor['height'], grid_box['height'] * .99)
+        self.assertGreater(anchor['height'], neighbour['height'] * 1.9)
+        self.assertAlmostEqual(anchor['width'] / grid_box['width'], .5, delta=.02)
         kept = self.snap(page)
         self.assertEqual([item['id'] for item in before], [item['id'] for item in kept])
         for old, item in zip(before, kept):
@@ -142,13 +158,16 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         page.get_by_role('button', name='Save', exact=True).click()
         drawn = self.annotations(page)
         self.assertTrue(drawn)
+        # A drawn measurement must not block the enlargement the clinician asked for.
         self.merge_button(page, 'maximize').click()
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
         self.assertEqual(drawn, self.annotations(page))
         # The merged screen keeps the existing persistence refusal, unchanged.
         save = page.get_by_role('button', name='Save Recent Layout', exact=True)
         expect(save).to_be_enabled(); save.click()
-        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('저장할 수 없습니다')
+        # config/ohif.js:1479 already refuses a grid whose cell count is not rows*cols.
+        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다')
         self.assertEqual(1, page.evaluate('services.viewportGridService.getState().viewports.size'))
         self.merge_button(page, 'restore').click()
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
@@ -164,7 +183,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         originals = self.originals(); rows = self.report_rows(fixture)
         before_geometry = self.geometry(page); before = self.snap(page)
         # An empty cell cannot become the surviving cell of a merge.
-        self.choose(page, 2)
+        self.click_pane(page, 2)
         self.merge_button(page, 'maximize').click()
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('영상이 표시된')
         self.assertEqual(before_geometry, self.geometry(page))
@@ -183,8 +202,10 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
             self.assertEqual(old['properties'], item['properties'])
         # The panel still works afterwards: recovery is not a permanent lock.
         self.merge_button(page, 'maximize').click()
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
         self.merge_button(page, 'restore').click()
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('되돌렸습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
         self.assertEqual(before_geometry, self.geometry(page))
         self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(originals, self.originals())

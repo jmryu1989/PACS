@@ -134,16 +134,17 @@
         const cines = services?.cineService?.getState?.()?.cines || {};
         if (Object.values(cines).some(value => value?.isPlaying)) return 'Cine 재생을 멈춘 뒤 칸 배치를 바꾸세요.';
       } catch (_) { return '영상 재생 상태를 확인할 수 없습니다.'; }
+      // Only work that is in flight blocks a merge. An unsaved measurement does NOT:
+      // merge changes geometry, never removes an annotation and never replaces a source,
+      // and reading with a drawn measurement on screen is exactly when a clinician
+      // enlarges a cell. Hanging Protocol Apply keeps its stricter guard because it
+      // replaces the sources themselves.
       for (const name of ['kinViewerJobWorkspaceState', 'kinViewerHistoryWorkspaceState']) {
         try {
           const value = typeof win[name] === 'function' ? win[name]() : null;
-          if (value?.dirty || value?.busy) return '저장하지 않은 영상 작업이 있어 칸 배치를 바꾸지 않았습니다.';
+          if (value?.busy) return '저장 또는 영상 작업이 끝난 뒤 다시 시도하세요.';
         } catch (_) { return '영상 작업 상태를 확인할 수 없습니다.'; }
       }
-      try { if (typeof win.kinViewerHistoryHasUnsaved === 'function' && win.kinViewerHistoryHasUnsaved()) return '저장하지 않은 영상 작업이 있어 칸 배치를 바꾸지 않았습니다.'; }
-      catch (_) { return '영상 작업 상태를 확인할 수 없습니다.'; }
-      try { if (win.kinMprMarks?.dirty?.()) return '저장하지 않은 MPR 표식이 있어 칸 배치를 바꾸지 않았습니다.'; }
-      catch (_) { return '영상 작업 상태를 확인할 수 없습니다.'; }
       return null;
     }
 
