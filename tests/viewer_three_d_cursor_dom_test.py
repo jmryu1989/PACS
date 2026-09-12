@@ -327,6 +327,42 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
         self.assertEqual("restore-skipped-user", panes["mr"]["restore"])
 
+    def test_b4_a_frame_moved_without_a_pointer_event_is_never_overwritten(self):
+        # Independent review D-3DCURSOR-801AD73 4-2. The two B4 tests above are both satisfied by
+        # the revocation set, which only a pointerdown or a wheel on the pane can fill. A keyboard
+        # arrow, another tool or a synchronizer moves the frame without either event, and then the
+        # issued-frame comparison in restoreOne is the only thing that refuses the rollback.
+        self.page.evaluate("addSecondTarget();cursor.stop();__mount({navigationAttempts:2})")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{scrollTo_('mr',6);cursor.cancel('context-changed');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([], self.page.evaluate("cursor.state().panes.filter(p=>p.marked)"))
+        # No pointerdown and no wheel reached the pane, so nothing was revoked.
+        self.assertEqual("restore-skipped-user", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(6, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("mr:6", self.page.evaluate("viewports.mr.getCurrentImageId()"))
+        self.assertEqual([], self.marks())
+
+    def test_b4_a_replaced_pane_reports_the_replacement_before_the_user_takeover(self):
+        # Independent review D-3DCURSOR-801AD73 4-5: both conditions hold at once and the order of
+        # the two checks decides the reported reason. Replacement is the cause that invalidates the
+        # frame the run owned, so it must win over the takeover.
+        self.page.evaluate("addSecondTarget()")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.page.eval_on_selector("#pane-mr", "n=>n.dispatchEvent(new WheelEvent('wheel',{bubbles:true}))")
+        self.page.evaluate("viewports.mr.replaceStack(SPARE,1)")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-skipped-replaced", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(1, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([], self.marks())
+
     # --- review-after-fix-1 blocking regressions ---------------------------------------------
     def test_c1_an_inset_enabled_element_maps_clicks_and_draws_the_marker_on_the_same_origin(self):
         # The product shape: the cornerstone enabled element is a bordered, inset descendant of
@@ -359,6 +395,49 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual("none", self.page.evaluate("markRect()&&markRect().display"))
         self.assertEqual("hidden", self.page.evaluate(
             "getComputedStyle(document.querySelector('[data-kin-3d-cursor-layer]')).overflow"))
+
+    def test_c1_a_click_in_the_pane_margin_outside_the_anchor_rect_is_refused(self):
+        # Independent review D-3DCURSOR-801AD73 4-3. The listener sits on the pane container while
+        # the point is measured against the inset enabled element, so the padding around that
+        # element is clickable and produces negative or over-width coordinates. Zoomed in, such a
+        # point still falls inside the image, so without the rect check a marker would appear for
+        # a click that landed outside the displayed area.
+        self.page.evaluate("setPanes(['inset','mr'])")
+        self.assertTrue(self.enable())
+        anchor = self.page.evaluate("rectOf('#enabled-inset')")
+        pane = self.page.evaluate("rectOf('#pane-inset')")
+        self.assertGreater(anchor["left"] - pane["left"], 5)
+        for x, y in ((5, 5), (round(anchor["left"] - pane["left"] + anchor["width"] + 5), 60)):
+            self.page.evaluate("clickAt('#pane-inset',%d,%d)" % (x, y))
+            self.page.wait_for_timeout(50)
+            self.assertEqual("영상 표시 영역 안을 클릭하세요.", self.page.evaluate("cursor.state().status"))
+            self.assertIsNone(self.page.evaluate("cursor.state().source"))
+            self.assertEqual(0, self.page.evaluate("cursor.state().run"))
+            self.assertEqual([], self.marks())
+            self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
+        # Contrast: the same listener answers a click that does land on the anchor.
+        self.page.evaluate("clickAt('#enabled-inset',120,70)")
+        self.page.wait_for_function("cursor.state().busy===false&&cursor.state().source!==null")
+        self.assertEqual({"x": 120, "y": 70}, self.rounded(self.page.evaluate("cursor.state().source.pixel")))
+        self.assertEqual(1, len(self.marks()))
+
+    def test_c1_a_viewport_element_outside_its_pane_is_refused_as_pane_anchor(self):
+        # Independent review D-3DCURSOR-801AD73 4-4. A host that answers with a viewport element
+        # that is not the pane and not inside it would have clicks measured against an unrelated
+        # rect, which is the silent-wrong-point failure again. Such a pane is refused instead.
+        self.enable()
+        self.page.evaluate("viewports.mr.element=document.querySelector('#pane-other');cursor.refresh()")
+        panes = {p["id"]: p for p in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual((False, "pane-anchor"), (panes["mr"]["eligible"], panes["mr"]["reason"]))
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("pane-anchor", [r for r in result["results"] if r["paneId"] == "mr"][0]["reason"])
+        self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(["pane-ct"], [m["pane"] for m in self.marks()])
+        # The refused pane keeps no listener either: a click on it starts no run.
+        before = self.page.evaluate("cursor.state().run")
+        self.page.evaluate("clickAt('#pane-mr',60,60)")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(before, self.page.evaluate("cursor.state().run"))
 
     def test_c1_a_host_positioned_pane_keeps_its_stylesheet_position_and_is_restored(self):
         self.page.evaluate("setPanes(['styled','mr2'])")
