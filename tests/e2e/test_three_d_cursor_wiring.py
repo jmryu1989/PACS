@@ -298,7 +298,9 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
         fixture = self.study()
         originals = self.originals()
         page = self.open(fixture, ["ACC axial", "ACC oblique"], flag_on=True)
-        extension = "() => window.config.extensions.find(e => e.id === 'kin.three-d-cursor')"
+        # The host's own lifecycle hook, addressed the way the other viewer suites address theirs.
+        def call(hook):
+            return "() => window.config.extensions.find(e => e.id === 'kin.three-d-cursor')." + hook + "()"
         try:
             page.wait_for_function("() => !!document.querySelector('#kin-viewer-layout #kin-3d-cursor')")
             self.enable_mode(page)
@@ -307,14 +309,14 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
             baseline = page.evaluate("() => __kinListenerNet()")
 
             # 5. The host's own lifecycle, called the way the other viewer suites call it.
-            page.evaluate(extension + "().onModeExit()")
+            page.evaluate(call("onModeExit"))
             page.wait_for_function("() => !document.querySelector('#kin-3d-cursor')")
             exited = self.record(page, "mode-exit")
             self.assertEqual(exited["panels"], 0)
             self.assertEqual(exited["layers"], 0)
             self.assertEqual(exited["probe"]["mounted"], False)
 
-            page.evaluate(extension + "().onModeEnter()")
+            page.evaluate(call("onModeEnter"))
             page.wait_for_function("() => !!document.querySelector('#kin-viewer-layout #kin-3d-cursor')")
             page.wait_for_function("() => kinViewerThreeDCursorState().mounts === 2")
             self.enable_mode(page)
@@ -345,7 +347,7 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
             self.assertEqual(ended["probe"]["mounted"], False)
             self.assertEqual(ended["probe"]["listeners"], 0, "the event bindings outlived the session")
             # A re-entry after the session ended must not bring the mode back.
-            page.evaluate(extension + "().onModeEnter()")
+            page.evaluate(call("onModeEnter"))
             page.wait_for_timeout(500)
             self.assertEqual(page.evaluate("() => document.querySelectorAll('#kin-3d-cursor').length"), 0)
             self.assertEqual(page.evaluate("() => kinViewerThreeDCursorState().mounts"), 2)
