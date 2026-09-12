@@ -336,6 +336,139 @@ class ViewerThreeDCursorDOMTest(unittest.TestCase):
         self.assertEqual("2 pane(s): 이 영상의 방향 정보가 DICOM 규정을 벗어났습니다.", result["status"])
         self.assertEqual([], self.page.evaluate("viewports.mr.calls"))
 
+    # --- B8 4: frames moved without any mouse event ------------------------------------------
+    def watch_input(self):
+        # Records every pointer event that reaches the document, so each test below can show that
+        # the defence it exercises never had the revocation set to fall back on.
+        self.page.evaluate(
+            "()=>{window.mouseEvents=[];for(const type of ['pointerdown','pointerup','mousedown',"
+            "'mouseup','click','wheel'])document.addEventListener(type,e=>mouseEvents.push(type),true);}")
+
+    def assert_no_mouse_events(self):
+        self.assertEqual([], self.page.evaluate("mouseEvents"))
+
+    def test_d4_keyboard_arrow_move_during_a_run_is_not_overwritten_by_the_rollback(self):
+        # A keyboard arrow is handled by the host, not by this controller: the pane moves and no
+        # pointerdown or wheel is produced, so the revocation set stays empty and the issued-frame
+        # comparison is the only thing that can refuse the rollback.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate(
+            "viewports.mr2.hold=true;"
+            "viewports.mr2.onHold=()=>{document.querySelector('#pane-mr').dispatchEvent("
+            "new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true}));"
+            "scrollTo_('mr',6);cursor.cancel('context-changed');};"
+            "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-skipped-user", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(6, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("mr:6", self.page.evaluate("viewports.mr.getCurrentImageId()"))
+        self.assertEqual([], self.marks())
+        self.assert_no_mouse_events()
+        # The other half of the contract: the controller must not listen for the host's keys
+        # either. A keydown on a pane may not cancel a run that is under way.
+        # The request held above is abandoned with its controller; drop it so the wait below sees
+        # only the request this phase makes.
+        self.page.evaluate("viewports.mr2.pending.length=0;viewports.mr2.hold=false;cursor.stop()")
+        self.page.evaluate("__mount();setPanes(['ct','mr','mr2']);scrollTo_('mr',0);scrollTo_('mr2',0)")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("viewports.mr2.pending.length===1")
+        self.page.evaluate("document.querySelector('#pane-mr2').dispatchEvent("
+                           "new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}))")
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertTrue(self.page.evaluate("picking").get("ok"))
+        self.assertEqual(["ct", "mr", "mr2"], self.marked())
+        self.assert_no_mouse_events()
+
+    def test_d4_a_cine_advance_during_a_run_invalidates_that_panes_marker(self):
+        # A cine timer moves the frame of a pane this run has already marked. No event of any kind
+        # reaches the controller; the host's render adapter calls refresh(), and that must drop the
+        # marker rather than leave it claiming an image that is no longer displayed.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:4000});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate(
+            "viewports.mr2.hold=true;"
+            "viewports.mr2.onHold=()=>setTimeout(()=>{scrollTo_('mr',5);cursor.refresh();},0);"
+            "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().panes.filter(p=>p.marked).length===1")
+        self.assertEqual(["ct"], self.marked())
+        self.assertTrue(self.page.evaluate("cursor.state().busy"))
+        self.page.evaluate("viewports.mr2.hold=false;flush('mr2')")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["ct", "mr2"], self.marked())
+        self.assertEqual(["pane-ct", "pane-mr2"], [mark["pane"] for mark in self.marks()])
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"), "the cine pane is never navigated again")
+        self.assertEqual(5, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assert_no_mouse_events()
+
+    def test_d4_a_synchronizer_move_without_pointer_events_relies_on_the_frame_comparison(self):
+        # Another synchronisation tool moves the pane programmatically: no DOM event at all. The
+        # rollback must still refuse, and the only defence left is the issued-frame comparison.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{scrollTo_('mr',1);cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual("restore-skipped-user", self.page.evaluate("cursor.state().restores.mr"))
+        self.assertEqual([4], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(1, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual([], self.marks())
+        self.assert_no_mouse_events()
+        # Contrast, same run shape with nothing moving the pane: the rollback does happen, so the
+        # refusal above is the frame comparison and not a rollback that never runs.
+        self.page.evaluate("viewports.mr2.pending.length=0;viewports.mr2.hold=false;cursor.stop()")
+        self.page.evaluate("__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.page.evaluate("scrollTo_('mr',0);scrollTo_('mr2',0);viewports.mr.calls.length=0")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;"
+                           "viewports.mr2.onHold=()=>{cursor.cancel('user-interrupt');};"
+                           "window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual([4, 0], self.page.evaluate("viewports.mr.calls"))
+        self.assertEqual(0, self.page.evaluate("viewports.mr.currentImageIdIndex"))
+        self.assertEqual("restored", self.page.evaluate("cursor.state().restores.mr"))
+        self.assert_no_mouse_events()
+
+    def test_d4_a_late_render_from_a_previous_request_never_becomes_the_current_marker(self):
+        # Run N leaves a request the renderer never finished; run N+1 marks a different frame.
+        # When run N's load finally lands it may not mark, restore or claim anything.
+        self.watch_input()
+        self.page.evaluate("cursor.stop();__mount({navigationAttempts:2});setPanes(['ct','mr','mr2'])")
+        self.enable()
+        self.page.evaluate("viewports.mr2.hold=true;window.picking=cursor.pick('ct',{x:460,y:237.5});null")
+        self.page.set_default_timeout(15000)
+        self.page.wait_for_function("cursor.state().busy===false")
+        self.assertEqual(["mr2"], self.page.evaluate("cursor.state().quarantined"))
+        self.assertEqual(["ct", "mr"], self.marked())
+        run_n = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual("1.2.3.9.5", run_n["mr"])
+        # Run N+1 on another source frame: the same panes, different slices.
+        self.page.evaluate("scrollTo_('ct',3)")
+        result = self.page.evaluate("cursor.pick('ct',{x:460,y:237.5})")
+        self.assertEqual("navigation-unsettled", [r for r in result["results"] if r["paneId"] == "mr2"][0]["reason"])
+        self.assertEqual(["ct", "mr"], self.marked())
+        run_next = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual(("1.2.3.4.4", "1.2.3.9.7"), (run_next["ct"], run_next["mr"]))
+        # Run N's load lands now.
+        self.page.evaluate("flush('mr2')")
+        self.page.wait_for_timeout(50)
+        self.page.evaluate("cursor.refresh()")
+        after = {pane["id"]: pane["sop"] for pane in self.page.evaluate("cursor.state().panes")}
+        self.assertEqual(run_next, after, "the late render must not change what is marked")
+        self.assertEqual([4], self.page.evaluate("viewports.mr2.calls"))
+        self.assertEqual(["ct", "mr"], self.marked())
+        self.assertEqual({}, self.page.evaluate("cursor.state().restores"))
+        self.assertEqual([4, 6], self.page.evaluate("viewports.mr.calls"))
+        self.assert_no_mouse_events()
+        self.assertEqual([], self.page.evaluate("unhandled"))
+
     # --- review 184a433 blocking regressions -------------------------------------------------
     def test_b1_click_through_a_nested_inset_child_uses_the_viewport_rect(self):
         # A click landing on an inset canvas/overlay child must map to the canvas point the
