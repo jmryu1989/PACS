@@ -83,6 +83,21 @@ PROFILES = {
         'suites': (('e2e/test_volume_rendering.py', None,
                     'ci-volume-rendering'),),
     },
+    'volume-mpr': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-mpr-ci',
+        'project_prefix': 'kin-mpr-ci-',
+        # Two suites share main()'s single 25-minute deadline, so this cannot reuse
+        # the single-suite volume-rendering cap of 1200: at that cap one stalled suite
+        # could consume the whole deadline and leave the other flow with no evidence.
+        # 540 is the cap the other multi-suite profiles already use, and two of them
+        # plus their reserved margins still fit the deadline with room for the stack.
+        'suite_timeout': 540,
+        # Each module's load_tests is the allowlist: declared test_crosshair_* and
+        # test_mpr_display_* only. Passing no class keeps that selection authoritative
+        # and keeps the shared VolumeOrientationE2E/VolumeJobsE2E base cases out.
+        'suites': (('e2e/test_volume_crosshair.py', None, 'ci-mpr-crosshair'),
+                   ('e2e/test_volume_display.py', None, 'ci-mpr-display')),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

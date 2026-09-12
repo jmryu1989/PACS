@@ -124,7 +124,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -186,6 +186,95 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual({key:volume_env[key] for key in hostile}, expected)
             self.assertEqual({key:output_env[key] for key in hostile}, expected)
             self.assertEqual({key:identity_env[key] for key in hostile}, expected)
+
+    def test_volume_mpr_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-mpr']
+        self.assertEqual(profile['suites'], (
+            ('e2e/test_volume_crosshair.py', None, 'ci-mpr-crosshair'),
+            ('e2e/test_volume_display.py', None, 'ci-mpr-display'),
+        ))
+        self.assertEqual(profile['out'].name, 'volume-mpr-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-mpr-ci-')
+        self.assertEqual(profile['suite_timeout'], 540)
+        # A separate Compose project and a separate artifact directory from every
+        # other profile, so a lost isolation edit fails here rather than in CI.
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-mpr':
+                continue
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        commands = []
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+            commands.append(command)
+            # No --class: each module's own load_tests stays the allowlist.
+            self.assertNotIn('--class', command)
+            self.assertEqual(command[command.index('--timeout')+1], '540')
+            self.assertEqual(outer, 575)
+        self.assertEqual([command[command.index('--module')+1] for command in commands],
+                         ['tests/e2e/test_volume_crosshair.py',
+                          'tests/e2e/test_volume_display.py'])
+        self.assertEqual([command[command.index('--unit')+1] for command in commands],
+                         ['ci-mpr-crosshair', 'ci-mpr-display'])
+        # Both suites share main()'s single deadline, so no one suite may be able to
+        # claim it: even at full cap the pair plus their reserved margins must fit,
+        # and the cap must stay under the single-suite volume-rendering cap.
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertLessEqual(2*(profile['suite_timeout']+35), 25*60)
+        self.assertLess(profile['suite_timeout'],
+                        ci.PROFILES['volume-rendering']['suite_timeout'])
+        # A shrinking deadline shortens the request instead of overrunning it.
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-mpr', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_mpr_modules_declare_exact_eight_and_twelve_local_cases(self):
+        import ast
+        for suite, class_name, prefix, count in (
+                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 8),
+                ('e2e/test_volume_display.py', 'VolumeDisplayE2E', 'test_mpr_display_', 12)):
+            tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == class_name)
+            declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                        and node.name.startswith('test_')]
+            self.assertEqual(len(declared), count)
+            self.assertTrue(all(name.startswith(prefix) for name in declared))
+            # The module-level load_tests filters on exactly this prefix, so a
+            # renamed or re-parented case would silently drop out of CI.
+            load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                              and node.name == 'load_tests')
+            literals = [node.value for node in ast.walk(load_tests)
+                        if isinstance(node, ast.Constant) and node.value == prefix]
+            self.assertTrue(literals)
+
+    def test_validate_workflow_runs_volume_mpr_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-mpr:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mpr job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        mpr = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile volume-mpr',
+                         'tests/e2e/artifacts/volume-mpr-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, mpr)
+        # The MPR suites must not be appended to the volume-rendering job's budget.
+        self.assertNotIn('--profile volume-mpr', jobs[0])
+        self.assertEqual(text.count('--profile volume-mpr'), 1)
+        self.assertEqual(text.count('--profile volume-rendering'), 1)
+        # The existing pure volume model gate stays registered exactly once.
+        self.assertEqual(text.count('tmp/vr-ci/pure-volume-models'), 1)
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']

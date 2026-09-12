@@ -163,6 +163,43 @@ jobs:
             tmp/vr-ci/
           if-no-files-found: error
           retention-days: 7
+  volume-mpr:
+    # A separate job, not extra suites inside volume-rendering: the two MPR e2e
+    # modules must not consume that job's budget. The same 40-minute job policy and
+    # 28-minute live step as the existing e2e jobs; measurement_ci.py's own
+    # 25-minute deadline and the profile's 600s per-suite cap bound the run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: MPR profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mpr-python"
+          "$RUNNER_TEMP/mpr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/mpr-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared crosshair and display selection
+        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_crosshair.py --file tests/e2e/test_volume_display.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared MPR crosshair and display tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-mpr
+      - name: Sanitized synthetic MPR crosshair and display evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-mpr-results
+          path: |
+            tests/e2e/artifacts/volume-mpr-ci/
+            tmp/mpr-ci/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
