@@ -43,8 +43,12 @@ MODEL = ROOT / "worklist-v0/hpacs-lite/three-d-cursor-model.js"
 CONTROLLER = ROOT / "worklist-v0/hpacs-lite/viewer-three-d-cursor.js"
 ARTIFACTS = Path(__file__).parent / "artifacts"
 
-# Starting points, not yet a specification: the observed distribution is what the report carries.
-CALCULATION_MM = 0.01
+# The accepted tolerances, now asserted rather than only printed. The mapping figure is measured
+# against the coordinates the click was actually delivered at and carries this harness's own affine
+# residual inside it, so 0.3 mm bounds that sum and not the product's share alone. Click
+# quantization stays reported-only: a real mouse cannot land between whole client pixels, so its
+# distance to the voxel centre is a property of the input device, not of the product.
+CALCULATION_MM = 0.3
 MARKER_PX = 0.5
 
 # Mount the injected controller over the real grid. `panes`, `meta` and `context` are the whole
@@ -467,10 +471,14 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             detail["frameVerdict"] = row["frameVerdict"]
             if row["targetReason"] is not None:
                 wrong.append(("refused", detail))
-            elif row["frameVerdict"] == "wrong":
+            elif row["frameVerdict"] not in ("exact", "boundary"):
                 wrong.append(("wrong frame", detail))
             elif row["frameVerdict"] == "exact" and not row.get("markerVisible"):
                 wrong.append(("marker hidden", detail))
+            if row["calculationMM"] > CALCULATION_MM:
+                wrong.append(("mapping over %.3f mm" % CALCULATION_MM, detail))
+            if "markerPX" in row and row["markerPX"] > MARKER_PX:
+                wrong.append(("marker over %.3f px" % MARKER_PX, detail))
         self.assertEqual(wrong, [], "conditions that did not hold:\n"
                          + json.dumps(wrong, ensure_ascii=False, indent=1))
 
@@ -493,7 +501,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             focusClicksThatPicked=sum(1 for row in self.observations if row["focusClickPicked"]))
         print("3D CURSOR ACCURACY " + name + " " + json.dumps(dict(
             count=len(self.observations), worst=worst,
-            toleranceProposal=dict(calculationMM=CALCULATION_MM, markerPX=MARKER_PX)), ensure_ascii=False), flush=True)
+            tolerance=dict(calculationMM=CALCULATION_MM, markerPX=MARKER_PX)), ensure_ascii=False), flush=True)
         return worst
 
     def setUp(self):
@@ -584,7 +592,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
                 oblique=[eligible[oblique["id"]], reasons[oblique["id"]]],
                 foreign=[eligible[foreign["id"]], reasons[foreign["id"]]],
                 skewed=[eligible[skewed["id"]], reasons[skewed["id"]]]), ensure_ascii=False), flush=True)
-            self.assertEqual(reasons[skewed["id"]], "geometry-axes")
+            self.assertEqual(reasons[skewed["id"]], "geometry-axes-invalid")
             self.assertFalse(eligible[skewed["id"]])
             self.assertTrue(eligible[axial["id"]] and eligible[oblique["id"]])
             self.assertIsNone(reasons[oblique["id"]], "a normal oblique must not be refused as a pane")
@@ -601,7 +609,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             self.assertFalse(outcome[skewed["id"]]["marked"])
             self.assertIn("2 pane(s)", state["status"])
             self.assertIn("같은 기준 좌표계가 아닙니다", state["status"])
-            self.assertEqual(outcome[skewed["id"]]["reason"], "geometry-axes")
+            self.assertEqual(outcome[skewed["id"]]["reason"], "geometry-axes-invalid")
             self.assertIsNone(outcome[foreign["id"]]["reason"],
                               "a foreign frame is a per-run refusal, not an ineligible pane")
             expect(page.locator("[data-kin-3d-cursor-mark]")).to_have_count(2)
@@ -615,7 +623,7 @@ class ThreeDCursorAccuracyE2E(ViewerLayoutE2E):
             }""", dict(id=axial["id"], client=list(self.last_click)))
             by_pane = {item["paneId"]: item for item in results["results"]}
             self.assertEqual(by_pane[foreign["id"]]["reason"], "identity-frame")
-            self.assertEqual(by_pane[skewed["id"]]["reason"], "geometry-axes")
+            self.assertEqual(by_pane[skewed["id"]]["reason"], "geometry-axes-invalid")
             self.assertTrue(by_pane[oblique["id"]]["ok"])
             print("3D CURSOR ACCURACY refusals " + json.dumps(dict(
                 status=state["status"], panes=state["panes"], results=results["results"]),

@@ -7,7 +7,8 @@ one FrameOfReferenceUID:
   AXIAL    IOP [1,0,0, 0,1,0]      PixelSpacing [0.7, 0.9] (row, column), 3.0 mm slice gap
   OBLIQUE  IOP [1,0,0, 0,0.8,0.6]  PixelSpacing [1.0, 1.0], 1.0 mm slice gap
   FOREIGN  a different FrameOfReferenceUID, otherwise valid
-  SKEWED   ImageOrientationPatient whose column cosines are neither unit nor orthogonal
+  SKEWED   ImageOrientationPatient whose column cosine is not a unit vector (it stays orthogonal
+           to the row cosine; the refusal is raised by the length, not by the angle)
 
 AXIAL carries an anisotropic voxel (0.9 x 0.7 x 3.0 mm) with row and column spacing deliberately
 different, so a row/column swap cannot cancel out; OBLIQUE carries an isotropic 1.0 mm voxel.
