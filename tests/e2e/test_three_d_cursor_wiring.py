@@ -20,6 +20,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from playwright.sync_api import expect
+
 import three_d_cursor_accuracy_fixture as fx
 from test_prior_selection import canvas_ready
 from test_viewer_layout import ViewerLayoutE2E
@@ -133,15 +135,19 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
         self.assertEqual(body.count(FLAG_OFF), 1, "the served config must carry exactly one flag")
         self.assertNotIn(FLAG_ON, body, "the evaluation build must not ship the flag on")
         patched = body.replace(FLAG_OFF, FLAG_ON)
-        # The only change is the token: turning it back reproduces the served bytes exactly.
+        # The only change is the token: everything before and after it is byte for byte the served
+        # response, and turning the token back reproduces that response exactly.
+        at = body.index(FLAG_OFF)
+        self.assertEqual(patched[:at], body[:at])
+        self.assertEqual(patched[at + len(FLAG_ON):], body[at + len(FLAG_OFF):])
         self.assertEqual(patched.replace(FLAG_ON, FLAG_OFF), body)
         self.assertEqual(len(patched), len(body) - 1)
         self.config_patch = dict(
             servedSHA256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             patchedSHA256=hashlib.sha256(patched.encode("utf-8")).hexdigest(),
-            servedBytes=len(body), patchedBytes=len(patched),
+            servedBytes=len(body), patchedBytes=len(patched), flagOffset=at,
             committedFlag=FLAG_OFF, interceptedFlag=FLAG_ON,
-            differingCharacters=sum(1 for a, b in zip(body, patched) if a != b) + 1)
+            unchangedPrefixBytes=at, unchangedSuffixBytes=len(body) - at - len(FLAG_OFF))
         route.fulfill(response=response, body=patched)
 
     # ---- observations -------------------------------------------------------------------
@@ -175,7 +181,24 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
                     count: v && v.getImageIds().length};
           })""")
 
+    def reveal(self, page):
+        """Open the dock panel the controller's section lives in.
+
+        `#kin-viewer-layout` is the workspace dock's collapsible panel, so a freshly opened viewer
+        has the 3D Cursor button in the document but not on screen. This uses the dock's own tab and
+        the panel's own summary — nothing about the host layout is written by the test.
+        """
+        toggle = page.locator("#kin-3d-cursor-toggle")
+        tab = page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
+        if tab.count() and not toggle.is_visible():
+            tab.click()
+        summary = page.locator("#kin-viewer-layout > summary")
+        if summary.count() and not toggle.is_visible():
+            summary.click()
+        expect(toggle).to_be_visible()
+
     def enable_mode(self, page):
+        self.reveal(page)
         page.locator("#kin-3d-cursor-toggle").click()
         page.wait_for_function("() => kinViewerThreeDCursorState().cursor.enabled === true")
 
@@ -341,6 +364,11 @@ class ThreeDCursorWiringE2E(ViewerLayoutE2E):
         try:
             self.assertIsNone(self.config_patch, "the OFF case must not intercept the config")
             page.wait_for_timeout(2000)
+            # Open the very panel the ON build puts the section in, so 'not there' is not 'not shown'.
+            tab = page.locator('#kin-workspace-dock nav button[aria-controls="kin-viewer-layout"]')
+            if tab.count():
+                tab.click()
+            expect(page.locator("#kin-viewer-layout")).to_be_visible()
             off = self.record(page, "flag-off")
             print("3D CURSOR WIRING flag-off requests " + json.dumps(
                 dict(modules=self.module_requests(), total=len(self.requests)), ensure_ascii=False), flush=True)
