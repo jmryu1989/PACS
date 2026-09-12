@@ -234,27 +234,33 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertEqual(200, self.stack.request('PUT', f'/studies/{fixture.uid}/report', 'doctor', dict(values, baseVersion=1)).status)
         self.assertEqual(201, self.stack.request('POST', f'/studies/{fixture.uid}/hold', 'doctor').status)
         originals = self.originals(); rows = self.report_rows(fixture)
-        # One measurement in the cell that survives and one in a cell the maximize destroys
-        # and rebuilds, so preservation is claimed for a displaced viewport too.
+        # The measurement goes in the cell the maximize destroys and rebuilds, which is the
+        # case the shipped evidence did not cover. The surviving cell is never torn down, so
+        # a displaced viewport is the harder of the two claims.
+        annotated = self.snap(page)[1]['id']
         self.choose(page, 1)
         self.select_annotation_tool(page)
-        self.draw_annotation(page, 1, 'CM67890')
-        self.draw_annotation(page, 0, 'CM12345')
+        self.draw_annotation(page, 1, 'CM12345')
         drawn = self.annotations(page)
-        self.assertEqual(2, len(drawn))
+        self.assertEqual(1, len(drawn))
         # Classification is enumerated rather than assumed: every tool actually present is
         # either one a user draws with or one pinned as pane-derived. An unknown tool fails
         # here instead of being silently dropped from the comparison above.
         tools = self.annotation_tools(page)
         self.assertEqual([], [name for name in tools if name not in self.DRAWN_TOOLS + self.DERIVED_TOOLS])
         self.assertIn('ArrowAnnotate', tools)
+        # Leave the annotation tool before selecting the other cell, so activating it cannot
+        # begin a drawing, and maximize the cell that carries no measurement.
+        page.locator('[data-cy="Pan"]').click()
+        self.choose(page, 0)
         # A drawn measurement must not block the enlargement the clinician asked for.
         self.merge_button(page, 'maximize').click()
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
-        # Only one of the two annotated viewports is left, so the other one was destroyed
-        # and rebuilt with its measurement intact.
+        # The annotated viewport is not the one left on screen, so its measurement survived
+        # a real destroy and rebuild rather than merely surviving a resize.
         self.assertEqual(1, len(self.geometry(page)))
+        self.assertNotEqual(annotated, self.geometry(page)[0][0])
         self.assertEqual(drawn, self.annotations(page))
         # The merged screen keeps the existing persistence refusal, unchanged.
         save = page.get_by_role('button', name='Save Recent Layout', exact=True)
