@@ -19,6 +19,7 @@ on:
           - study-arrivals
           - images-only
           - image-text
+          - three-d-cursor-accuracy
 
 permissions:
   contents: read
@@ -71,6 +72,9 @@ jobs:
             tests/e2e/artifacts/test_images_only_*.png
             tests/e2e/artifacts/image-text-ci/
             tests/e2e/artifacts/IMAGE-TEXT-*.png
+            tests/e2e/artifacts/three-d-cursor-accuracy-ci/
+            tests/e2e/artifacts/THREE-D-CURSOR-ACCURACY-*.png
+            tests/e2e/artifacts/three-d-cursor-accuracy-*.json
             tests/e2e/artifacts/test_image_text_*.png
             tests/e2e/artifacts/STUDY-ARRIVALS-*.png
             tests/e2e/artifacts/test_arrivals_*.png

@@ -61,7 +61,7 @@ docker compose ps
 - 되돌리기는 **이 실행이 남긴 그 화면 그대로일 때만** 한다. 판독자가 그 화면을 직접 조작했거나 다른 프레임으로 옮겼으면 판독자의 현재 프레임을 그대로 두고 사유만 남긴다(우연히 번호가 같아도 같다). 즉 판독자의 최신 작업이 이전 프레임 복구보다 우선한다.
 - 표식은 이 창에서만 유지되는 임시 표시다. 주석·측정·현재 도구·대상이 아닌 화면을 바꾸지 않으며 저장하지 않는다. 고정 OHIF의 `ReferenceCursors` 도구는 대상 화면을 먼저 이동시킨 뒤 걸러내므로 사용하지 않는다.
 - **아직 어디에서도 불러오지 않는다.** `config/ohif.js`에 연결하지 않았으므로 현재 제품 영상 창에서는 이 모드를 켤 수 없고 실제 화면에 나타나지 않는다. 완료된 기능이 아니며, 연결에는 별도 로더 통합과 고정 OHIF 실행에서의 확인이 선행해야 한다.
-- 검증 범위는 `tests/three_d_cursor_model_test.cjs`(`node --test`, 순수 좌표)와 `tests/viewer_three_d_cursor_dom_test.py`(Playwright 격리 DOM, 고정 번들의 동작 순서를 재현한 합성 viewport)뿐이다. 실제 OHIF·실제 DICOM·실기 확인은 하지 않았다.
+- 검증 범위는 `tests/three_d_cursor_model_test.cjs`(`node --test`, 순수 좌표), `tests/viewer_three_d_cursor_dom_test.py`(Playwright 격리 DOM, 고정 번들의 동작 순서를 재현한 합성 viewport), 그리고 `tests/e2e/test_three_d_cursor_accuracy.py`(dispatch 전용 CI 프로파일 `three-d-cursor-accuracy`)다. 마지막 것은 좌표를 아는 합성 CT 두 시리즈(axial·정상 oblique)를 실제 고정 렌더러에 적재해 실제 마우스로 클릭하고, 제품 모듈을 쓰지 않는 독립 계산과 대조한다. 화면 안의 기준 표식만으로 영상 픽셀↔화면 매핑을 측정하므로 DPR·브라우저 확대·resize·zoom/pan·회전/반전에서도 제품 변환을 신뢰하지 않는다. **실기(실제 CT·판독의 사용) 확인은 여전히 하지 않았다.**
 
 세부 상태 전이와 변경 규칙은 [AGENTS.md](AGENTS.md)를 따른다. 영상 표시·주석·저장 지원은 실제 검증한 객체와 동작 범위로 구분한다. 메뉴가 보이거나 영상 요청이 성공한 사실만으로 모든 영상군의 표시·측정 정확성을 선언하지 않는다.
 

@@ -106,6 +106,15 @@ PROFILES = {
         'suites': (('e2e/test_vr_resize_probe.py', 'VrResizeProbeE2E',
                     'ci-vr-resize-probe'),),
     },
+    'three-d-cursor-accuracy': {
+        'out': ROOT / 'tests/e2e/artifacts/three-d-cursor-accuracy-ci',
+        'project_prefix': 'kin-3d-cursor-acc-ci-',
+        'suite_timeout': 1200,
+        # Dispatch only. This profile measures 3D cursor position accuracy against synthetic
+        # DICOM with known patient coordinates; it is deliberately not wired to a push gate.
+        'suites': (('e2e/test_three_d_cursor_accuracy.py', 'ThreeDCursorAccuracyE2E',
+                    'ci-three-d-cursor-accuracy'),),
+    },
     'identity-fields': {
         'out': ROOT / 'tests/e2e/artifacts/identity-fields-ci',
         'project_prefix': 'kin-identity-ci-',
