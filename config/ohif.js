@@ -2189,7 +2189,8 @@ function kinCreateThreeDCursor() {
   let rows = [], owner = null, mark = null, listeners = [], mounts = 0, renders = 0, invalidations = 0;
   /* 종료는 이 호스트가 소유한다. retiring은 아직 끝나지 않은 disable→stop이고, blocked는 그
      종료가 미완료(unsettled)이거나 예외로 끝나 이 뷰어 창에서 모드가 영구 불가가 된 상태다.
-     컨트롤러 안의 poisoned는 인스턴스와 함께 사라지므로 창 단위 기억은 여기에만 있다. */
+     컨트롤러 안의 poisoned는 인스턴스와 함께 사라지므로 창 단위 기억은 여기에만 있고, 그래서
+     retire()는 컨트롤러를 버리기 전에 그 인스턴스의 오염을 읽어 여기로 올린다(:2308-2325). */
   let retiring = null, blocked = false;
   // 'true'가 아닌 모든 값(누락·문자열 'true'·1)은 OFF다.
   const on = () => window.config?.kinThreeDCursor?.enabled === true;
@@ -2304,10 +2305,24 @@ function kinCreateThreeDCursor() {
        세워진 차단을 지우지 않는다. 정리 자체는 오류 뒤에도 이어서 시도한다. */
     const step = call => Promise.resolve().then(call).then(
       result => { if (result === 'unsettled') blocked = true; }, () => { blocked = true; });
+    /* 반환값만으로는 부족하다. 패널의 토글은 호스트를 거치지 않고 스스로 disable('off')을
+       부를 수 있고, 그 종료가 미완료로 끝나면 기록은 그 인스턴스 안의 poisoned에만 남는다.
+       뒤늦게 진행 중이던 요청이 정리되고 나면 호스트의 disable·stop은 이미 끝난 종료를 보고
+       'idle'을 돌려주므로, 결과만 읽는 호스트는 그 미완료를 영원히 보지 못한 채 새 컨트롤러를
+       올린다. 그래서 교체 전후로 컨트롤러 상태를 직접 읽어 창 단위 기억으로 올린다. 상태를
+       읽지 못한 것은 안전을 확인하지 못한 것이므로 조용히 재마운트를 허용하지 않고 막는다. */
+    const inspect = () => {
+      let seen = null;
+      try { seen = gone.state(); } catch (_) { blocked = true; return; }
+      if (!seen || typeof seen !== 'object') { blocked = true; return; }
+      if (seen.poisoned || seen.teardown === 'unsettled') blocked = true;
+    };
     // 종료끼리 겹치지 않게 이어 붙이고, 끝나기 전에는 새 mount가 생기지 않게 보관한다.
     const run = (retiring || Promise.resolve())
+      .then(inspect)
       .then(() => step(() => gone.disable('off')))
-      .then(() => step(() => gone.stop()));
+      .then(() => step(() => gone.stop()))
+      .then(inspect);
     retiring = run;
     run.then(() => { if (retiring === run) retiring = null; });
   }
