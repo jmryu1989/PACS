@@ -9,6 +9,16 @@ from test_display_controls import DisplayControlsE2E
 
 
 class ViewerCellMergeE2E(DisplayControlsE2E):
+    # The app's own measurement map is config/ohif.js:529 {ArrowAnnotate, Length, Angle,
+    # EllipticalROI}; this superset also covers the remaining annotation tools the pinned
+    # OHIF toolbar can place. It is only used to say what a user is *expected* to draw.
+    DRAWN_TOOLS = ('ArrowAnnotate', 'Length', 'Angle', 'Bidirectional', 'RectangleROI',
+                   'EllipticalROI', 'CircleROI', 'Probe')
+    # Overlays the pane derives from its own geometry, which legitimately follow a resize.
+    # This is the only list that removes anything from the comparison, so a tool neither
+    # list knows about is held to the user-work contract instead of being filtered away.
+    DERIVED_TOOLS = ('ReferenceLines', 'Crosshairs', 'ScaleOverlay', 'ReferenceCursors', 'AdvancedMagnify')
+
     def loaded(self, page, count):
         # A 2x2 grid with two filled cells keeps empty panes without a canvas, so the
         # exact-count helper of the other suites does not apply here.
@@ -50,11 +60,39 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
           })''')
 
     def annotations(self, page):
-        # Only what the user drew: native reference-line style annotations are derived from
-        # the pane itself and legitimately follow its geometry.
-        return page.evaluate("""()=>{const drawn=['ArrowAnnotate','Length','Angle','Bidirectional','RectangleROI','EllipticalROI','CircleROI','Probe'];
-          return cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>drawn.includes(a.metadata.toolName))
-            .map(a=>({metadata:a.metadata,points:a.data.handles.points,text:a.data.text||null}));}""")
+        # Everything that is not an explicitly pane-derived overlay, sorted so a rebuilt
+        # viewport cannot change the comparison by reordering the store.
+        return page.evaluate("""derived=>cornerstoneTools.annotation.state.getAllAnnotations()
+            .filter(a=>!derived.includes(a.metadata.toolName))
+            .map(a=>({toolName:a.metadata.toolName,metadata:a.metadata,points:a.data?.handles?.points??null,text:a.data?.text??null}))
+            .sort((a,b)=>JSON.stringify(a)<JSON.stringify(b)?-1:1)""", list(self.DERIVED_TOOLS))
+
+    def annotation_tools(self, page):
+        return page.evaluate("()=>[...new Set(cornerstoneTools.annotation.state.getAllAnnotations().map(a=>a.metadata.toolName))].sort()")
+
+    def draw_annotation(self, page, index, label):
+        page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
+        page.get_by_text('Annotation', exact=True).click()
+        box = page.locator('[data-cy=viewport-grid] > div').nth(index).locator('canvas').bounding_box()
+        x, y = box['x'] + box['width'] * .5, box['y'] + box['height'] * .5
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 45, y + 28, steps=8); page.mouse.up()
+        entry = page.get_by_placeholder('Enter label'); expect(entry).to_be_visible()
+        entry.press_sequentially(label)
+        page.get_by_role('button', name='Save', exact=True).click()
+        page.wait_for_timeout(200)
+
+    def gesture_on(self, page, tool, viewport_id, dx, dy):
+        # The parent helper always drags the first pane; a merged cell is addressed by id.
+        page.locator(f'[data-cy="{tool}"]').click()
+        box = self.pane_of(page, viewport_id)
+        x, y = box['x'] + box['width'] * .5, box['y'] + box['height'] * .5
+        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + dx, y + dy, steps=12); page.mouse.up()
+        page.wait_for_timeout(200)
+
+    def focus_pane(self, page, viewport_id):
+        box = self.pane_of(page, viewport_id)
+        page.mouse.click(box['x'] + box['width'] * .5, box['y'] + box['height'] * .3)
+        page.wait_for_timeout(120)
 
     def merge_button(self, page, action):
         return page.locator(f'#kin-cell-merge [data-cell-merge="{action}"]')
@@ -134,14 +172,46 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         for old, item in zip(before, kept):
             self.assertEqual(old['image'], item['image']); self.assertEqual(old['sets'], item['sets'])
         expect(self.merge_button(page, 'maximize')).to_be_disabled()
+        # The anchor pane changed shape, so whatever sits in its camera now is the merge's
+        # own refit. The user scrolls and windows that merged cell but never touches zoom.
+        anchor = before[0]['id']
+        self.focus_pane(page, anchor)
+        page.keyboard.press('ArrowDown'); page.wait_for_timeout(250)
+        self.gesture_on(page, 'WindowLevel', anchor, 60, 30)
+        worked = self.snap(page)
+        self.assertNotEqual(before[0]['index'], worked[0]['index'])
+        self.assertNotEqual(before[0]['properties']['voiRange'], worked[0]['properties']['voiRange'])
         self.merge_button(page, 'restore').click()
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('되돌렸습니다')
         self.assertEqual(before_geometry, self.geometry(page))
-        for old, item in zip(before, self.snap(page)):
-            self.assertEqual(old['camera'], item['camera']); self.assertEqual(old['properties'], item['properties'])
-            self.assertEqual(old['image'], item['image'])
-        print('CELL-MERGE column ' + json.dumps({'before': before_geometry, 'merged': merged}), flush=True)
+        restored = self.snap(page)
+        # Each field on its own: the slice and window the user moved come back as they left
+        # them, and the zoom they never touched is owed the pre-merge value rather than the
+        # refit that was sitting in it.
+        self.assertEqual(worked[0]['image'], restored[0]['image'])
+        self.assertEqual(worked[0]['index'], restored[0]['index'])
+        self.assertEqual(worked[0]['properties'], restored[0]['properties'])
+        self.assertEqual(before[0]['camera'], restored[0]['camera'])
+        # The surviving cell kept its own quadrant and is untouched throughout.
+        self.assertEqual(before[1]['camera'], restored[1]['camera'])
+        self.assertEqual(before[1]['properties'], restored[1]['properties'])
+        self.assertEqual(before[1]['image'], restored[1]['image'])
+        # A zoom the user really did make in the merged cell is theirs and must survive.
+        self.merge_button(page, 'merge-column').click()
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('병합했습니다', timeout=30000)
+        page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===3', timeout=30000)
+        self.gesture_on(page, 'Zoom', anchor, 0, 60)
+        zoomed = self.snap(page)
+        self.assertNotEqual(restored[0]['camera']['parallelScale'], zoomed[0]['camera']['parallelScale'])
+        self.merge_button(page, 'restore').click()
+        page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('되돌렸습니다')
+        self.assertEqual(before_geometry, self.geometry(page))
+        self.assertEqual(zoomed[0]['camera']['parallelScale'], self.snap(page)[0]['camera']['parallelScale'])
+        print('CELL-MERGE column ' + json.dumps({'before': before_geometry, 'merged': merged,
+            'anchor_camera': {'pre_merge': before[0]['camera'], 'while_merged': kept[0]['camera'],
+                              'after_restore': restored[0]['camera'], 'user_zoom': zoomed[0]['camera']}}), flush=True)
         self.assertEqual(originals, self.originals())
 
     def test_cell_merge_03_measurements_reports_and_save_refusal_survive_a_merge(self):
@@ -151,20 +221,26 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertEqual(200, self.stack.request('PUT', f'/studies/{fixture.uid}/report', 'doctor', dict(values, baseVersion=1)).status)
         self.assertEqual(201, self.stack.request('POST', f'/studies/{fixture.uid}/hold', 'doctor').status)
         originals = self.originals(); rows = self.report_rows(fixture)
-        page.locator('[data-cy="MeasurementTools-split-button-secondary"]').click()
-        page.get_by_text('Annotation', exact=True).click()
-        box = page.locator('[data-cy=viewport-grid] > div').first.locator('canvas').bounding_box()
-        x, y = box['x'] + box['width'] * .5, box['y'] + box['height'] * .5
-        page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x + 45, y + 28, steps=8); page.mouse.up()
-        entry = page.get_by_placeholder('Enter label'); expect(entry).to_be_visible()
-        entry.press_sequentially('CM12345')
-        page.get_by_role('button', name='Save', exact=True).click()
+        # One measurement in the cell that survives and one in a cell the maximize destroys
+        # and rebuilds, so preservation is claimed for a displaced viewport too.
+        self.choose(page, 1)
+        self.draw_annotation(page, 1, 'CM67890')
+        self.draw_annotation(page, 0, 'CM12345')
         drawn = self.annotations(page)
-        self.assertTrue(drawn)
+        self.assertEqual(2, len(drawn))
+        # Classification is enumerated rather than assumed: every tool actually present is
+        # either one a user draws with or one pinned as pane-derived. An unknown tool fails
+        # here instead of being silently dropped from the comparison above.
+        tools = self.annotation_tools(page)
+        self.assertEqual([], [name for name in tools if name not in self.DRAWN_TOOLS + self.DERIVED_TOOLS])
+        self.assertIn('ArrowAnnotate', tools)
         # A drawn measurement must not block the enlargement the clinician asked for.
         self.merge_button(page, 'maximize').click()
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=30000)
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
+        # Only one of the two annotated viewports is left, so the other one was destroyed
+        # and rebuilt with its measurement intact.
+        self.assertEqual(1, len(self.geometry(page)))
         self.assertEqual(drawn, self.annotations(page))
         # The merged screen keeps the existing persistence refusal, unchanged.
         save = page.get_by_role('button', name='Save Recent Layout', exact=True)
@@ -175,6 +251,7 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.merge_button(page, 'restore').click()
         page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===4', timeout=30000)
         self.assertEqual(drawn, self.annotations(page))
+        self.assertEqual(tools, self.annotation_tools(page))
         work = self.login(); self.select(work, fixture)
         expect(work.locator('#findings')).to_have_value(values['findings'])
         self.assertEqual(self.stack.actor('doctor'), self.state(fixture)['holder'])
@@ -191,18 +268,28 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('영상이 표시된')
         self.assertEqual(before_geometry, self.geometry(page))
         self.choose(page, 0)
+        # Land a real but different rectangle set instead of swallowing the request: the
+        # panes genuinely resize, so the native refit happens exactly as it would on a
+        # successful merge, while the achieved geometry is not the one that was asked for.
+        # The rollback therefore owes the recorded state, never the refit it just caused.
         page.evaluate('''()=>{const grid=services.viewportGridService,original=grid.setLayout;
           window.restoreCellMergeLayout=()=>{grid.setLayout=original;};
-          let once=true;grid.setLayout=function(...args){if(once){once=false;return Promise.resolve();}return original.apply(this,args);};}''')
+          let once=true;grid.setLayout=function(payload){
+            if(once&&payload.layoutOptions&&payload.layoutOptions.length===3){once=false;
+              return original.call(this,{...payload,layoutOptions:[{x:0,y:0,width:1,height:.5},{x:0,y:.5,width:.5,height:.5},{x:.5,y:.5,width:.5,height:.5}]});}
+            return original.call(this,payload);};}''')
         try:
-            self.merge_button(page, 'maximize').click()
-            expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('복구했습니다', timeout=30000)
+            self.merge_button(page, 'merge-column').click()
+            expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('복구했습니다', timeout=60000)
         finally:
             page.evaluate('restoreCellMergeLayout()')
         self.assertEqual(before_geometry, self.geometry(page))
         for old, item in zip(before, self.snap(page)):
             self.assertEqual(old['image'], item['image']); self.assertEqual(old['camera'], item['camera'])
             self.assertEqual(old['properties'], item['properties'])
+        # No merge record survived the rollback, and the panel is usable rather than locked.
+        expect(self.merge_button(page, 'restore')).to_be_disabled()
+        expect(self.merge_button(page, 'maximize')).to_be_enabled()
         # The panel still works afterwards: recovery is not a permanent lock.
         self.merge_button(page, 'maximize').click()
         expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=30000)

@@ -251,16 +251,30 @@
       return previous;
     }
 
-    // What unmerge owes each recorded cell: a cell this module removed, or one untouched
-    // since the merge, gets the state recorded before the merge; anything the user has
-    // since changed keeps its newest state.
+    // What unmerge owes each recorded cell, decided one field at a time against `after`,
+    // the reading taken once the merge had settled. A field that still holds what the
+    // merge itself produced - including the native refit - is owed the pre-merge value;
+    // only a field the user has actually moved since then keeps its newest value. Judging
+    // the four fields as one unit would let a single scroll hand the whole cell its refit
+    // camera back as if the user had zoomed. A cell this module removed, one whose source
+    // changed, or one with no trustworthy post-merge reading is owed the record whole,
+    // because nothing about it can be attributed to the user.
     function unmergeTarget(base, after) {
       const present = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
+      const sameVoi = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
       return { rows: base.rows, cols: base.cols, active: base.active, cells: base.cells.map(cell => {
-        const current = present.get(cell.viewportId);
+        const current = present.get(cell.viewportId), merged = after?.get(cell.viewportId);
         if (!current || current.kind !== 'stack' || JSON.stringify(current.sets) !== JSON.stringify(cell.sets)) return cell;
-        if (after && sameState(current, after.get(cell.viewportId))) return cell;
-        return { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex };
+        if (!merged || merged.kind !== 'stack') return cell;
+        // imageId and imageIndex are one decision: an index without the image it belongs
+        // to would scroll the cell to a slice the user never asked for.
+        const scrolled = current.imageId !== merged.imageId;
+        return { ...cell,
+          camera: sameCamera(current.camera, merged.camera) ? cell.camera : current.camera,
+          voiRange: sameVoi(current.voiRange, merged.voiRange) ? cell.voiRange : current.voiRange,
+          invert: (current.invert ?? null) === (merged.invert ?? null) ? cell.invert : current.invert,
+          imageId: scrolled ? current.imageId : cell.imageId,
+          imageIndex: scrolled ? current.imageIndex : cell.imageIndex };
       }) };
     }
 
@@ -320,17 +334,29 @@
         if (achieved) {
           const after = await settledState();
           if (ended || !live()) return { ok: false, message: '' };
-          record = { base, op, anchorId: anchor, after, signature: layoutSignature() };
-          return { ok: true, op, message: note(op === 'maximize'
-            ? '선택한 칸을 한 화면으로 확대했습니다. 다시 더블클릭하거나 Restore Grid로 이전 배치로 돌아갑니다.'
-            : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아갑니다. 병합 화면은 저장할 수 없습니다.') };
+          // Waiting for the screen to settle is time in which another panel - Hanging
+          // Protocol Apply, Load Job - can land a layout of its own. The signature read
+          // after that wait would then describe their screen, and Restore Grid would
+          // later rebuild the pre-merge grid over their work and call it a restore. The
+          // requested geometry is confirmed once more, on the same synchronous reading
+          // the signature is taken from, so a record only ever describes this merge.
+          if (geometryIs(expected)) {
+            record = { base, op, anchorId: anchor, after, signature: layoutSignature() };
+            return { ok: true, op, message: note(op === 'maximize'
+              ? '선택한 칸을 한 화면으로 확대했습니다. 다시 더블클릭하거나 Restore Grid로 이전 배치로 돌아갑니다.'
+              : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아갑니다. 병합 화면은 저장할 수 없습니다.') };
+          }
         }
         if (!watch.owned()) return { ok: false, message: quarantine() };
-        return await rebuild(unmergeTarget(base), watch.owned)
+        // The rollback is owed `base` itself, not a fresh reading of the screen: this path
+        // runs only while no interaction has happened, so every difference on screen -
+        // the refit this failed merge caused above all - is self-inflicted and must not
+        // be adopted as the state the user is owed.
+        return await rebuild(base, watch.owned)
           ? { ok: false, message: note('요청한 칸 배치를 확인하지 못해 이전 배치로 복구했습니다.') }
           : { ok: false, message: quarantine() };
       } catch (_) {
-        return await rebuild(unmergeTarget(base), watch.owned)
+        return await rebuild(base, watch.owned)
           ? { ok: false, message: note('칸 배치에 실패해 이전 배치로 복구했습니다.') }
           : { ok: false, message: quarantine() };
       } finally { watch.release(); busy = false; refresh(); }

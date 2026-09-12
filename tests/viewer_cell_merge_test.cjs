@@ -22,7 +22,17 @@ function mutate(name, from, to) {
 mutate('skip-kind-guard', "if (!['stack', 'empty'].includes(cell.kind))", 'if (false)');
 mutate('skip-uniform-guard', '!near(cell.width, 1 / cols) || !near(cell.height, 1 / rows))', 'false)');
 mutate('trust-dispatch', 'const achieved = await settle(() => geometryIs(expected), deadline);', 'const achieved = true;');
-mutate('claim-restore', 'if (restored(target)) { if (confirmed) return true; confirmed = true; }', 'if (true) { return true; }');
+mutate('claim-restore', 'if (restored(target)) { if (++confirmed >= 2) return true; }', 'if (true) { return true; }');
+// The three defects this module was rejected for, each reintroduced by one edit: a
+// rollback that reads the screen it just disturbed, a record taken without re-confirming
+// the geometry it describes, and a camera handed back whole with an unrelated field.
+// Both halves of the rollback defect, because the fix closed it in two places: the failed
+// path read the screen back, and that reading had no settled baseline to be judged against.
+mutate('rollback-adopts-screen', 'return await rebuild(base, watch.owned)', 'return await rebuild(unmergeTarget(base), watch.owned)');
+mutate('rollback-adopts-screen', "if (!merged || merged.kind !== 'stack') return cell;",
+  "if (!merged || merged.kind !== 'stack') return { ...cell, camera: current.camera, voiRange: current.voiRange, invert: current.invert, imageId: current.imageId, imageIndex: current.imageIndex };");
+mutate('record-without-recheck', 'if (geometryIs(expected)) {', 'if (true) {');
+mutate('adopt-merged-camera', 'camera: sameCamera(current.camera, merged.camera) ? cell.camera : current.camera,', 'camera: current.camera,');
 const moduleBox = { exports: {} };
 new Function('module', 'exports', source)(moduleBox, moduleBox.exports);
 const CellMerge = moduleBox.exports;
@@ -49,7 +59,8 @@ function makeViewport(id, imageId, seed) {
 
 // A grid whose setLayout follows the pinned SET_LAYOUT reducer: per-position rectangles
 // override the uniform default and positions beyond layoutOptions.length are skipped.
-function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout = false, empty = [], refitOnResize = false } = {}) {
+function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout = false, empty = [], refitOnResize = false, deviate = null, slow = 0 } = {}) {
+  let deviated = false;
   const names = ['A', 'B', 'C', 'D'].slice(0, rows * cols);
   const viewports = new Map(), sets = new Map(), cells = new Map();
   names.forEach((name, index) => {
@@ -66,6 +77,20 @@ function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout
     setLayout(payload) {
       calls.push(clone({ numRows: payload.numRows, numCols: payload.numCols, layoutOptions: payload.layoutOptions || null, activeViewportId: payload.activeViewportId }));
       if (breakLayout) return Promise.resolve();
+      // A native layout that lands a valid rectangle set other than the one asked for.
+      // The panes really do change shape, so the refit happens exactly as it would on a
+      // successful merge, but the achieved geometry is not the requested one.
+      if (deviate && !deviated && payload.layoutOptions?.length === deviate.length) {
+        deviated = true; payload = { ...payload, layoutOptions: clone(deviate) };
+      }
+      // A native layout whose promise resolves before the grid has actually been rebuilt,
+      // which is the reason the achieved geometry and not the promise decides success.
+      if (slow) { setTimeout(() => apply(payload), slow); return Promise.resolve(); }
+      apply(payload);
+      return Promise.resolve();
+    },
+  };
+  function apply(payload) {
       const next = new Map(), options = payload.layoutOptions;
       for (let row = 0; row < payload.numRows; row++) for (let col = 0; col < payload.numCols; col++) {
         const position = col + row * payload.numCols;
@@ -95,13 +120,17 @@ function fixture({ rows = 2, cols = 2, restoresPresentation = false, breakLayout
       }
       state.viewports = next; state.layout = { layoutType: 'grid', numRows: payload.numRows, numCols: payload.numCols };
       state.activeViewportId = payload.activeViewportId;
-      return Promise.resolve();
-    },
-  };
+  }
   state.saved = new Map([...viewports].map(([id, viewport]) => [id, { camera: clone(viewport.camera), properties: clone(viewport.properties), current: viewport.current, index: viewport.index }]));
   const services = { viewportGridService: grid, cornerstoneViewportService: { getCornerstoneViewport: id => viewports.get(id) || null },
     displaySetService: { getDisplaySetByUID: id => sets.get(id) }, cineService: { getState: () => ({ cines: {} }) } };
-  const doc = { fullscreenElement: null, querySelector: () => null, addEventListener() { }, removeEventListener() { } };
+  // Real listener bookkeeping, so a test can model the user input that accompanies a
+  // foreign panel's layout change and check that ownership is given up because of it.
+  const listeners = new Map();
+  const doc = { fullscreenElement: null, querySelector: () => null,
+    addEventListener(type, handler) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(handler); },
+    removeEventListener(type, handler) { listeners.get(type)?.delete(handler); },
+    fire(type) { for (const handler of [...(listeners.get(type) || [])]) handler({ type }); } };
   const win = { setTimeout, clearTimeout, addEventListener() { }, removeEventListener() { } };
   const controller = CellMerge.create(services, { doc, root: win });
   return { controller, state, cells, viewports, calls, services, win, doc };
@@ -223,6 +252,106 @@ test('a pane refit during the merge is undone on restore, but real user work is 
   y.viewports.get('A').camera.parallelScale = 3.5;
   assert.equal((await y.controller.unmerge()).ok, true);
   assert.equal(y.viewports.get('A').camera.parallelScale, 3.5);
+});
+
+// Each field the merge record carries is decided on its own. Scrolling or windowing the
+// merged cell is the user's work and is kept; the zoom nobody touched is still owed the
+// pre-merge value even though the merge's own refit is sitting in it.
+test('work the user did in a reshaped merged cell is kept without surrendering the zoom they never touched', async () => {
+  const x = fixture({ refitOnResize: true });
+  const zoom = x.viewports.get('A').camera.parallelScale, voi = clone(x.viewports.get('A').properties.voiRange);
+  assert.equal((await x.controller.merge('merge-column', 'A')).ok, true);
+  const refit = x.viewports.get('A').camera.parallelScale;
+  assert.notEqual(refit, zoom);
+  // The user scrolls the merged cell. Only the slice is theirs; the refit above is not.
+  await x.viewports.get('A').setImageIdIndex(3);
+  assert.equal((await x.controller.unmerge()).ok, true);
+  assert.equal(x.viewports.get('A').current, 'wadors:A:3');
+  assert.equal(x.viewports.get('A').camera.parallelScale, zoom);
+  assert.deepEqual(x.viewports.get('A').properties.voiRange, voi);
+
+  // The same holds for window/level and invert: they come back, the untouched zoom does not
+  // follow them, and the slice nobody scrolled stays where the record put it.
+  const y = fixture({ refitOnResize: true });
+  const yzoom = y.viewports.get('A').camera.parallelScale;
+  assert.equal((await y.controller.merge('merge-column', 'A')).ok, true);
+  y.viewports.get('A').properties.voiRange = { lower: 5, upper: 55 };
+  y.viewports.get('A').properties.invert = true;
+  assert.equal((await y.controller.unmerge()).ok, true);
+  assert.deepEqual(y.viewports.get('A').properties.voiRange, { lower: 5, upper: 55 });
+  assert.equal(y.viewports.get('A').properties.invert, true);
+  assert.equal(y.viewports.get('A').camera.parallelScale, yzoom);
+  assert.equal(y.viewports.get('A').current, 'wadors:A:0');
+});
+
+test('a native layout that lands after its own promise resolved is waited for, not rolled back', async () => {
+  const x = fixture({ slow: 300 });
+  const result = await x.controller.merge('merge-column', 'A');
+  assert.equal(result.ok, true);
+  assert.deepEqual(layoutOf(x.state), [['A', 0, 0, .5, 1], ['B', .5, 0, .5, .5], ['D', .5, .5, .5, .5]]);
+  assert.equal(x.controller.state().merged, true);
+  assert.equal((await x.controller.unmerge()).ok, true);
+  assert.deepEqual(layoutOf(x.state).map(row => row[0]), ['A', 'B', 'C', 'D']);
+});
+
+test('a native layout that lands a different shape rolls back the pre-merge state, not the refit it caused', async () => {
+  // Three rectangles, so the merge dispatch is the one that deviates, but a row merge
+  // where a column merge was asked for: the panes resize and refit, the geometry is wrong.
+  const x = fixture({ refitOnResize: true, deviate: [{ x: 0, y: 0, width: 1, height: .5 }, { x: 0, y: .5, width: .5, height: .5 }, { x: .5, y: .5, width: .5, height: .5 }] });
+  const before = layoutOf(x.state), zoom = x.viewports.get('A').camera.parallelScale, voi = clone(x.viewports.get('A').properties.voiRange);
+  const result = await x.controller.merge('merge-column', 'A');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /이전 배치로 복구했습니다/);
+  assert.deepEqual(layoutOf(x.state), before);
+  // Nothing on that screen was the user's: this path runs only while no interaction has
+  // happened, so the refit the failed merge caused must not be handed back as their state.
+  assert.equal(x.viewports.get('A').camera.parallelScale, zoom);
+  assert.deepEqual(x.viewports.get('A').properties.voiRange, voi);
+  assert.equal(x.controller.state().merged, false);
+  assert.equal(x.controller.state().quarantined, false);
+});
+
+test('a foreign layout landing while the merge settles is never recorded as this merge', async () => {
+  // Another panel replaces a source inside the settling wait, with no user input of its
+  // own: the screen is still this module's to put back.
+  const x = fixture();
+  const before = layoutOf(x.state);
+  const interfere = grid => {
+    const original = grid.setLayout;
+    grid.setLayout = function (payload) {
+      return original.call(this, payload).then(value => {
+        if (payload.layoutOptions) setTimeout(() => { x.state.viewports.get('B').displaySetInstanceUIDs = ['ds-other']; }, 30);
+        return value;
+      });
+    };
+  };
+  interfere(x.services.viewportGridService);
+  const result = await x.controller.merge('merge-column', 'A');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /이전 배치로 복구했습니다/);
+  assert.equal(x.controller.state().merged, false);
+  assert.deepEqual(layoutOf(x.state), before);
+
+  // The same change driven by the user's own click on that other panel: ownership is gone,
+  // so the screen is left alone and the panel says so instead of recording a merge.
+  const y = fixture();
+  const original = y.services.viewportGridService.setLayout;
+  y.services.viewportGridService.setLayout = function (payload) {
+    return original.call(this, payload).then(value => {
+      if (payload.layoutOptions) setTimeout(() => {
+        y.doc.fire('pointerdown');
+        y.state.viewports.get('B').displaySetInstanceUIDs = ['ds-other'];
+      }, 30);
+      return value;
+    });
+  };
+  const taken = await y.controller.merge('merge-column', 'A');
+  assert.equal(taken.ok, false);
+  assert.match(taken.message, /확인하지 못했습니다/);
+  assert.equal(y.controller.state().merged, false);
+  assert.equal(y.controller.state().quarantined, true);
+  // A record that survived here would rebuild the pre-merge grid over the other panel's work.
+  assert.equal((await y.controller.unmerge()).ok, false);
 });
 
 test('a native cache that returns the presentation needs no explicit re-apply', async () => {
