@@ -2,6 +2,7 @@
 """Isolated Chromium coverage for the CT display-scope panel and its config loader."""
 from pathlib import Path
 from urllib.parse import urlparse
+import time
 import unittest
 
 from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
@@ -58,6 +59,7 @@ window.emitGrid=()=>subscribers.slice().forEach(fn=>fn());
 window.mountDirect=()=>{window.scopeController=KinViewerDisplayScope.create(services);return scopeController.mount()};
 window.enterScope=()=>scopeExtension.onModeEnter({servicesManager:{services}});
 </script></body></html>"""
+CAPTURE_TIMEOUT_MS = 10_000
 
 
 class ViewerDisplayScopeDOMTest(unittest.TestCase):
@@ -80,6 +82,18 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
         if factory:
             page.add_script_tag(content=FACTORY)
         return page
+
+    def wait_for_capture(self, page, held, count=1):
+        # The script element exists before Chromium issues the request, so waiting on the DOM tag
+        # can leave `held` empty; wait for the route handler itself. Sync-API handlers run on this
+        # thread while page.wait_for_timeout blocks, so the poll lets them fire.
+        deadline = time.monotonic() + CAPTURE_TIMEOUT_MS / 1000
+        while len(held) < count:
+            if time.monotonic() >= deadline:
+                self.fail(f"viewer-display-scope.js route captured {len(held)}/{count} request(s) "
+                          f"within {CAPTURE_TIMEOUT_MS}ms")
+            page.wait_for_timeout(10)
+        return held
 
     def test_real_controls_extend_active_set_and_keep_selection_invert_separate_from_image_invert(self):
         page = self.new_page(width=320, height=560)
@@ -138,6 +152,7 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
         try:
             page.evaluate("enterScope()")
             page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-display-scope]').length===1")
+            self.wait_for_capture(page, held)
             page.evaluate("scopeExtension.onModeExit()")
             held.pop().fulfill(body=MODULE, content_type="application/javascript")
             page.wait_for_timeout(0)
@@ -197,7 +212,10 @@ class ViewerDisplayScopeDOMTest(unittest.TestCase):
                 try:
                     page.evaluate("enterScope()")
                     page.wait_for_function("()=>document.querySelectorAll('script[src*=viewer-display-scope]').length===1")
+                    self.wait_for_capture(page, held)
                     page.evaluate(dispatch)
+                    # Not a capture wait: BroadcastChannel messages are delivered on a queued task,
+                    # so this margin lets the session-end handler run before the script is released.
                     page.wait_for_timeout(25)
                     held.pop().fulfill(body=MODULE, content_type="application/javascript")
                     page.wait_for_timeout(0)
