@@ -2183,6 +2183,8 @@ function kinCreateViewerTechNote() {
         typeof window.kinCreateVolumeProgressive==='function'?Promise.resolve():load('viewer-volume-progressive.js'),
         window.KinVolumeMarks?Promise.resolve():load('volume-marks.js'),
         typeof window.kinCreateVolumeMarks==='function'?Promise.resolve():load('viewer-volume-marks.js'),
+        window.KinVolumeCurved?Promise.resolve():load('volume-curved.js'),
+        typeof window.kinCreateVolumeCurved==='function'?Promise.resolve():load('viewer-volume-curved.js'),
         window.KinVolumePreferences?Promise.resolve():load('volume-preferences.js'),
         typeof window.kinCreateVolumePreferences==='function'?Promise.resolve():load('viewer-volume-preferences.js'),
         window.KinVolumeCrosshair?Promise.resolve():load('volume-crosshair.js'),

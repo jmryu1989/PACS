@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference } from './viewer-input';
 import { validateVolumeMarks } from './viewer-volume-marks';
+import { validateVolumeCurved } from './viewer-volume-curved';
 import { createHash } from 'node:crypto';
 
 const invalid = (): never => { throw new BadRequestException('비교 작업의 입력 또는 원본 참조가 올바르지 않습니다'); };
@@ -62,14 +63,17 @@ const MERGE_SHAPES: number[][][] = [
 const PLANE_ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 const CELL_KINDS = ['plane', 'stack'];
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:[])]);
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:[])]);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
   const planes = s.version === 7, mixed = s.version === 8, merged = s.version === 9;
   // A merged layout of ordinary frame cells alone has no volume to reference, so its
   // `volume` is null and it is not a volume snapshot; one holding a plane cell is.
-  const volume = [4,5,6,7,8].includes(s.version) || merged && s.volume !== null;
+  // Version 10 is the exact version 4 three-plane snapshot plus one manual curved MPR; it
+  // carries neither a batch nor 3D marks, so neither can be dropped beside a curve.
+  const volume = [4,5,6,7,8,10].includes(s.version) || merged && s.volume !== null;
   if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
+  if(s.version===10)validateVolumeCurved(s.curved);
   const batch=s.version===5||s.version===6&&s.batch!==null;
   if(batch){
     keys(s.batch,['cell','offset','interval','count','reverse']);

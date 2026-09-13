@@ -124,12 +124,14 @@ class ExecutionSelectionTests(unittest.TestCase):
                             for item in plan['tests']))
         self.assertEqual(runner.collect(plan).countTestCases(), len(declared))
 
-    def test_volume_mpr_profile_selects_only_the_two_declared_mpr_modules(self):
+    def test_volume_mpr_profile_selects_only_the_declared_mpr_modules(self):
         profile = ci.PROFILES['volume-mpr']
         expected = [('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E',
                      'test_crosshair_', 'ci-mpr-crosshair', 11),
                     ('e2e/test_volume_display.py', 'VolumeDisplayE2E',
-                     'test_mpr_display_', 'ci-mpr-display', 12)]
+                     'test_mpr_display_', 'ci-mpr-display', 12),
+                    ('e2e/test_volume_curved.py', 'VolumeCurvedE2E',
+                     'test_curved_', 'ci-mpr-curved', 4)]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         for (suite, class_name, unit), (_, cls_name, prefix, _, count) in zip(

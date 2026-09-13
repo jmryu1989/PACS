@@ -103,17 +103,22 @@ PROFILES = {
     'volume-mpr': {
         'out': ROOT / 'tests/e2e/artifacts/volume-mpr-ci',
         'project_prefix': 'kin-mpr-ci-',
-        # Two suites share main()'s single 25-minute deadline, so this cannot reuse
+        # Three suites share main()'s single 25-minute deadline, so this cannot reuse
         # the single-suite volume-rendering cap of 1200: at that cap one stalled suite
         # could consume the whole deadline and leave the other flow with no evidence.
         # 540 is the cap the other multi-suite profiles already use, and two of them
         # plus their reserved margins still fit the deadline with room for the stack.
         'suite_timeout': 540,
-        # Each module's load_tests is the allowlist: declared test_crosshair_* and
-        # test_mpr_display_* only. Passing no class keeps that selection authoritative
+        # The manual curved MPR suite joins the same runner, so each suite gets its own cap:
+        # (400+35)+(400+35)+(420+35) = 1325s fits the 1500s deadline with 175s for the stack.
+        # Main run 34739959112 finished the whole crosshair+display live step in 282s.
+        'suite_budgets': {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420},
+        # Each module's load_tests is the allowlist: declared test_crosshair_*,
+        # test_mpr_display_* and test_curved_* only. Passing no class keeps that selection authoritative
         # and keeps the shared VolumeOrientationE2E/VolumeJobsE2E base cases out.
         'suites': (('e2e/test_volume_crosshair.py', None, 'ci-mpr-crosshair'),
-                   ('e2e/test_volume_display.py', None, 'ci-mpr-display')),
+                   ('e2e/test_volume_display.py', None, 'ci-mpr-display'),
+                   ('e2e/test_volume_curved.py', None, 'ci-mpr-curved')),
     },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',

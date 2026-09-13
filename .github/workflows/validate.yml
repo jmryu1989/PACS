@@ -136,8 +136,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
       - name: Volume rendering, sculpt, and personal preset boundaries
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs
-      - name: Volume display, batch, crosshair, marks, orientation, job capture and preference models
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/viewer_volume_job_capture_test.cjs
+      - name: Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/viewer_volume_job_capture_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -170,7 +170,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   volume-mpr:
-    # A separate job, not extra suites inside volume-rendering: the two MPR e2e
+    # A separate job, not extra suites inside volume-rendering: the MPR e2e
     # modules must not consume that job's budget. The same 40-minute job policy and
     # 28-minute live step as the existing e2e jobs; measurement_ci.py's own
     # 25-minute deadline and the profile's 540s per-suite cap bound the run.
@@ -190,13 +190,16 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/mpr-python"
           "$RUNNER_TEMP/mpr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/mpr-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared crosshair and display selection
-        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_crosshair.py --file tests/e2e/test_volume_display.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MPR crosshair and display tests
+      - name: Curved MPR editing, stale results and restore rollback on the real panel
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/curved-dom --cwd . --file worklist-v0/hpacs-lite/volume-curved.js --file worklist-v0/hpacs-lite/viewer-volume-curved.js --file tests/viewer_volume_curved_dom_test.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/viewer_volume_curved_dom_test.py
+      - name: Confirm exact declared crosshair, display and curved selection
+        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_crosshair.py --file tests/e2e/test_volume_display.py --file tests/e2e/test_volume_curved.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared MPR crosshair, display and curved tests
         timeout-minutes: 28
         run: |
           "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-mpr
-      - name: Sanitized synthetic MPR crosshair and display evidence
+      - name: Sanitized synthetic MPR crosshair, display and curved evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

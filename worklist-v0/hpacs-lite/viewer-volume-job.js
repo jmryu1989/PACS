@@ -53,6 +53,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   }
   function resolve(value) {
     if(value.version===6&&!window.kinMprMarks)throw Error('MPR 3D 표식 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
+    if(value.version===10&&!window.kinMprCurved)throw Error('곡면 MPR 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
     if([8,9].includes(value.version))for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
@@ -133,17 +134,28 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // a target; a mixed screen can never be the layout those marks belong to anyway.
     const marks=named?null:window.kinMprMarks?.capture(readOnly);
     const annotated=named?!!window.kinMprMarks?.dirty?.():marks&&(marks.marks.length||!marks.visible||!marks.sync);
+    // A manual curved MPR is drawn on this same three-plane target and is asked the same two
+    // questions: its final state where it can see one, whether work would be lost where not.
+    const curved=named?null:window.kinMprCurved?.capture(readOnly)||null;
+    const curving=named?!!window.kinMprCurved?.dirty?.():!!curved;
     // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
     // user's own state visible instead of writing a v7 snapshot that quietly lost it.
     if(!legacy){
       if(batch)throw Error('단면 묶음은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 묶음을 해제하거나 3평면 배치에서 저장하세요.');
       if(annotated)throw Error('MPR 3D 표식은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 표식을 지우거나 3평면 배치에서 저장하세요.');
+      if(curving)throw Error('곡면 MPR은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. Clear Curve로 곡선을 지우거나 3평면 배치에서 저장하세요.');
       // A merged screen saves the rectangles it stands in, beside the cells that stand in
       // them. A vacancy keeps its rectangle, which is why geometry is not a cell field. The
       // cells the merge absorbed are not on screen and are not saved as anything.
       if(merged)return JSON.parse(JSON.stringify({version:9,studies,rows,cols,
         rects:merged.map(([x,y,width,height])=>({x,y,width,height})),active,volume:reference||null,cells}));
       return JSON.parse(JSON.stringify({version:mixed?8:7,studies,rows,cols,active,volume:reference,cells}));
+    }
+    // Version 10 is the version 4 snapshot plus the curve. It holds no batch and no marks, so
+    // either one beside a curve is refused rather than silently left out of the Job.
+    if(curved){
+      if(batch||annotated)throw Error('곡면 MPR은 단면 묶음·3D 표식과 함께 저장할 수 없습니다. 하나를 해제하거나 지운 뒤 저장하세요.');
+      return JSON.parse(JSON.stringify({version:10,studies,rows,cols,active,volume:reference,cells,curved}));
     }
     return JSON.parse(JSON.stringify({version:annotated?6:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(annotated?{marks,batch:batch||null}:batch?{batch}:{})}));
   }
@@ -271,6 +283,9 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       await rendered();await window.kinVolumeBatchState.restore(value.batch,current);
     }
     if(value.version===6)window.kinMprMarks.restore(value.marks);else window.kinMprMarks?.clearForJob();
+    // The saved curve is recomputed from the restored original inside the same deadline; a
+    // failure throws into the caller's rollback instead of reporting a restore without it.
+    if(value.version===10)await window.kinMprCurved.restore(value.curved,current,deadline);else window.kinMprCurved?.clearForJob();
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};
