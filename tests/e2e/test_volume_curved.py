@@ -171,7 +171,10 @@ class VolumeCurvedE2E(VolumeMarksE2E):
   v.get_by_label('Job Title',exact=True).fill('Armed curved save');v.get_by_role('button',name='Save New Job',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('Finish Drawing');self.assertEqual(self.jobs(a),[])
   panel.get_by_role('button',name='Finish Drawing',exact=True).click();panel.get_by_role('button',name='Go to Curve Plane',exact=True).click()
   expect(v.locator('[data-kin-curved-plane]')).to_have_text('Curve plane · Curved MPR path');self.assertEqual(self.inspect(v)['value'],value)
-  axial=self.view(v,2);v.evaluate('id=>{window.projectionVP=services.cornerstoneViewportService.getCornerstoneViewport(id)}',axial)
+  axial=self.view(v,2);v.evaluate('id=>{window.projectionVP=services.cornerstoneViewportService.getCornerstoneViewport(id);services.viewportGridService.setActiveViewportId(id)}',axial)
+  # Pick Point listens on the cornerstone element; a press on an inactive pane only activates it.
+  v.wait_for_function('([id,p])=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id),xy=view.worldToCanvas(p),r=view.element.getBoundingClientRect();return services.viewportGridService.getState().activeViewportId===id&&view.element.contains(document.elementFromPoint(xy[0]+r.left,xy[1]+r.top))}',arg=[axial,[10,10,40]],timeout=5000)
+  self.assertEqual(v.evaluate('()=>services.viewportGridService.getState().activeViewportId'),axial)
   self.add_mark(v,'Curved conflict',(10,10,40));v.get_by_label('Job Title',exact=True).fill('Marks with curve');v.get_by_role('button',name='Save New Job',exact=True).click()
   expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('단면 묶음·3D 표식과 함께');self.assertEqual(self.jobs(a),[])
   v.locator('#kin-mpr-marks').get_by_role('button',name='Remove Annotation',exact=True).click()
