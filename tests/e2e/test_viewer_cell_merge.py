@@ -342,6 +342,185 @@ class ViewerCellMergeE2E(DisplayControlsE2E):
         self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(originals, self.originals())
 
 
+    # --- MPR plane cells -----------------------------------------------------------------
+    # The same double click, on the orthographic planes the viewer's own MPR button builds
+    # over the approved synthetic CT volume. Nothing here is a second renderer: the planes
+    # are opened through the app, and every claim is read back off the native volume
+    # viewport (type, volume id, SOP list, camera, window, slab, blend mode).
+
+    def mpr_screen(self):
+        from test_volume_projection import phantom
+        fixture = phantom(self.stack)
+        self.seed_report(fixture)
+        page = self.launch(self.login(), [fixture])
+        page.locator('[data-cy=Layout]').click()
+        page.locator('#react-portal').get_by_text('MPR', exact=True).click()
+        page.wait_for_function("""()=>{const g=services.viewportGridService.getState();
+          return g.viewports.size===3&&[...g.viewports.keys()].every(id=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(id);
+            return v?.type==='orthographic'&&cornerstone.cache.getVolume(v.getVolumeId())?.loadStatus.loaded})}""",
+                               timeout=90000)
+        # The initial MPR canvas is rounded up and a queued native resize follows it; every
+        # camera below is compared only after that resize has actually landed.
+        page.wait_for_function("""()=>[...services.viewportGridService.getState().viewports.keys()].every(id=>{
+          const c=services.cornerstoneViewportService.getCornerstoneViewport(id).element.querySelector('canvas');
+          return c.width===Math.floor(c.clientWidth*devicePixelRatio)&&c.height===Math.floor(c.clientHeight*devicePixelRatio)})""",
+                               timeout=60000)
+        self.open_layout_tools(page)
+        expect(page.locator('#kin-cell-merge')).to_be_visible(timeout=45000)
+        page.wait_for_timeout(300)
+        return fixture, page
+
+    def plane_state(self, page):
+        return page.evaluate('''()=>[...services.viewportGridService.getState().viewports.values()]
+          .sort((a,b)=>a.y-b.y||a.x-b.x).map(g=>{
+            const v=services.cornerstoneViewportService.getCornerstoneViewport(g.viewportId);
+            const plane=v?.type==='orthographic';
+            const volume=plane?cornerstone.cache.getVolume(v.getVolumeId()):null;
+            const properties=v?.getProperties?.()||null;
+            return {id:g.viewportId,sets:g.displaySetInstanceUIDs||[],type:v?.type||null,
+              rect:[g.x,g.y,g.width,g.height],orientation:g.viewportOptions?.orientation??null,
+              volumeId:plane?v.getVolumeId():null,loaded:!!volume?.loadStatus?.loaded,
+              framesLoaded:volume?.framesLoaded??null,
+              sops:volume?volume.imageIds.map(id=>cornerstone.metaData.get('instance',id).SOPInstanceUID):null,
+              camera:v?.getCamera?.()||null,voiRange:properties?.voiRange??null,
+              lut:properties?.VOILUTFunction??null,invert:properties?.invert??null,
+              interpolation:properties?.interpolationType??null,
+              blend:plane?v.getActors()[0].actor.getMapper().getBlendMode():null,
+              thickness:v?.getSlabThickness?.()??null};
+          })''')
+
+    @staticmethod
+    def dominant_axis(normal):
+        return max(range(3), key=lambda index: abs(normal[index]))
+
+    def pane_index(self, page, viewport_id):
+        # Pane order in the DOM is not part of the contract, so the index the gesture helpers
+        # need is derived from the viewport id rather than assumed to match the sorted order.
+        panes = page.locator('[data-cy=viewport-grid] > div')
+        for index in range(panes.count()):
+            if panes.nth(index).locator(f'[data-viewport-uid="{viewport_id}"]').count():
+                return index
+        raise AssertionError('no pane carries viewport ' + viewport_id)
+
+    def test_cell_merge_05_double_click_maximizes_an_mpr_plane_and_returns_every_plane(self):
+        fixture, page = self.mpr_screen()
+        originals = self.originals(); rows = self.report_rows(fixture)
+        before_geometry = self.geometry(page); before = self.plane_state(page)
+        self.assertEqual(3, len(before))
+        # Three orthographic planes over one and the same fully loaded volume.
+        for cell in before:
+            self.assertEqual('orthographic', cell['type'])
+            self.assertTrue(cell['loaded'])
+            self.assertEqual(33, len(cell['sops']))
+            self.assertEqual(len(cell['sops']), cell['framesLoaded'])
+            self.assertEqual(before[0]['volumeId'], cell['volumeId'], 'three planes, one volume')
+            self.assertEqual(sorted(before[0]['sops']), sorted(cell['sops']))
+        # Each plane really stands on its own anatomical axis, and the three are distinct.
+        # Only the axis is asserted, not its sign: native orientation presets differ in sign
+        # between versions while an oblique camera misses the axis entirely.
+        axes = []
+        for cell in before:
+            normal = cell['camera']['viewPlaneNormal']
+            axis = self.dominant_axis(normal); axes.append(axis)
+            for index, value in enumerate(normal):
+                self.assertAlmostEqual(abs(value), 1.0 if index == axis else 0.0, delta=1e-6)
+        self.assertEqual({0, 1, 2}, set(axes), 'axial, sagittal and coronal, one each')
+
+        # Give the plane that will be enlarged a window and a slab of its own, and the plane
+        # that will be destroyed a measurement, so both claims below are about real state.
+        anchor_index, displaced_index = 1, 2
+        anchor = before[anchor_index]['id']; displaced = before[displaced_index]['id']
+        self.focus_pane(page, anchor)
+        self.gesture_on(page, 'WindowLevel', anchor, 70, 35)
+        self.focus_pane(page, displaced)
+        self.select_annotation_tool(page)
+        self.draw_annotation(page, self.pane_index(page, displaced), 'MPR12345')
+        drawn = self.annotations(page)
+        self.assertEqual(1, len(drawn))
+        tools = self.annotation_tools(page)
+        self.assertEqual([], [name for name in tools if name not in self.DRAWN_TOOLS + self.DERIVED_TOOLS])
+        self.assertIn('ArrowAnnotate', tools)
+        page.locator('[data-cy="Pan"]').click()
+        windowed = self.plane_state(page)
+        self.assertNotEqual(before[anchor_index]['voiRange'], windowed[anchor_index]['voiRange'])
+
+        grid_box = page.locator('[data-cy=viewport-grid]').bounding_box()
+        third = self.pane_of(page, anchor)
+        self.dblclick_pane(page, self.pane_index(page, anchor))
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('확대했습니다', timeout=60000)
+        page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===1', timeout=30000)
+        merged = self.plane_state(page)
+        self.assertEqual([[anchor, 0, 0, 1, 1, before[anchor_index]['sets']]], self.geometry(page))
+        # The pane really spans the whole grid; native pane padding keeps it a few pixels
+        # inside the container, so the claim is proportional, not pixel-exact.
+        box = self.pane_of(page, anchor)
+        self.assertGreater(box['width'], grid_box['width'] * .99)
+        self.assertGreater(box['width'], third['width'] * 2.9)
+        # Enlarged, it is still the same plane of the same volume, with the window, the slab
+        # and the projection mode it had - not a rebuilt default.
+        self.assertEqual('orthographic', merged[0]['type'])
+        self.assertEqual(before[anchor_index]['volumeId'], merged[0]['volumeId'])
+        self.assertEqual(before[anchor_index]['sops'], merged[0]['sops'])
+        self.assertEqual(axes[anchor_index], self.dominant_axis(merged[0]['camera']['viewPlaneNormal']))
+        self.assertEqual(windowed[anchor_index]['voiRange'], merged[0]['voiRange'])
+        self.assertEqual(windowed[anchor_index]['blend'], merged[0]['blend'])
+        self.assertAlmostEqual(windowed[anchor_index]['thickness'], merged[0]['thickness'], delta=1e-6)
+        self.assertEqual(windowed[anchor_index]['interpolation'], merged[0]['interpolation'])
+        # The measurement drawn on the plane this maximize destroyed is not on screen at all.
+        self.assertNotIn(displaced, [row[0] for row in self.geometry(page)])
+        self.assertEqual(drawn, self.annotations(page))
+        # The merged plane screen keeps the existing persistence refusal, unchanged: a grid
+        # whose cell count is not rows*cols is still refused by config/ohif.js:1479, which
+        # this unit never touches. Merged plane geometry is not saved by anything.
+        save = page.get_by_role('button', name='Save Recent Layout', exact=True)
+        expect(save).to_be_enabled(); save.click()
+        expect(page.locator('#kin-viewer-layout-status')).to_contain_text('1·2·4화면의 일반 CT 배치만 저장할 수 있습니다')
+        self.assertEqual(1, page.evaluate('services.viewportGridService.getState().viewports.size'))
+        # The clinician moves the enlarged plane while they read it.
+        self.gesture_on(page, 'Pan', anchor, 55, 30)
+        worked = self.plane_state(page)
+        self.assertNotEqual(merged[0]['camera']['focalPoint'], worked[0]['camera']['focalPoint'])
+        self.shot(page, 'cell-merge-mpr-plane')
+        print('CELL-MERGE mpr-plane ' + json.dumps({'before': before_geometry, 'merged': self.geometry(page),
+            'anchor': {'pre': windowed[anchor_index], 'while_maximized': merged[0], 'user_pan': worked[0]}}), flush=True)
+
+        self.dblclick_pane(page, 0)
+        expect(page.locator('#kin-cell-merge [role=status]')).to_contain_text('되돌렸습니다', timeout=60000)
+        page.wait_for_function('()=>services.viewportGridService.getState().viewports.size===3', timeout=30000)
+        self.assertEqual(before_geometry, self.geometry(page))
+        after = self.plane_state(page)
+        for index, (old, cell) in enumerate(zip(windowed, after)):
+            self.assertEqual(old['id'], cell['id'])
+            self.assertEqual('orthographic', cell['type'], 'a plane comes back a plane, never a stack')
+            self.assertEqual(old['sets'], cell['sets'])
+            self.assertEqual(old['volumeId'], cell['volumeId'], 'the original volume, not a new one')
+            self.assertEqual(old['sops'], cell['sops'], 'the same originals in the same order')
+            self.assertTrue(cell['loaded'])
+            self.assertEqual(axes[index], self.dominant_axis(cell['camera']['viewPlaneNormal']))
+            self.assertEqual(old['voiRange'], cell['voiRange'])
+            self.assertEqual(old['lut'], cell['lut']); self.assertEqual(old['invert'], cell['invert'])
+            self.assertEqual(old['interpolation'], cell['interpolation'])
+            self.assertEqual(old['blend'], cell['blend'])
+            self.assertAlmostEqual(old['thickness'], cell['thickness'], delta=1e-6)
+        # The two planes the maximize destroyed come back on the camera they were left with:
+        # rebuilding one plane makes the MPR tool group reset every linked plane, and the
+        # held callback is what keeps that reset off the screen the user is owed.
+        for index in (0, 2):
+            self.assertEqual(windowed[index]['camera'], after[index]['camera'])
+        # The pan the user made while it was enlarged is theirs and survives; the zoom they
+        # never touched is owed the value from before the merge.
+        self.assertEqual(worked[0]['camera']['focalPoint'], after[anchor_index]['camera']['focalPoint'])
+        self.assertEqual(worked[0]['camera']['position'], after[anchor_index]['camera']['position'])
+        self.assertEqual(windowed[anchor_index]['camera']['parallelScale'], after[anchor_index]['camera']['parallelScale'])
+        for field in ('viewUp', 'viewPlaneNormal', 'flipHorizontal', 'flipVertical'):
+            self.assertEqual(windowed[anchor_index]['camera'][field], after[anchor_index]['camera'][field])
+        # The measurement on the displaced plane survived a real destroy and rebuild.
+        self.assertEqual(drawn, self.annotations(page))
+        self.assertEqual(tools, self.annotation_tools(page))
+        self.assertEqual(rows, self.report_rows(fixture)); self.assertEqual(originals, self.originals())
+
+
 def load_tests(loader, tests, pattern):
     return unittest.TestSuite(ViewerCellMergeE2E(name) for name in ViewerCellMergeE2E.__dict__ if name.startswith('test_cell_merge_'))
 

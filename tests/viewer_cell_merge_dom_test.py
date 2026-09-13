@@ -180,16 +180,20 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
                 finally:
                     page.close()
 
-    def test_panel_buttons_merge_a_column_and_refuse_a_non_stack_or_busy_screen(self):
+    def test_panel_buttons_merge_a_column_and_refuse_a_3d_plane_or_busy_screen(self):
         page = self.new_page()
         try:
             page.evaluate("mountDirect()")
             panel = page.locator("#kin-cell-merge")
             expect(panel.locator('[data-cell-merge="restore"]')).to_be_disabled()
-            page.evaluate("nativeViewports.get('B').type='orthographic'")
-            panel.locator('[data-cell-merge="maximize"]').click()
-            expect(panel.locator("[role=status]")).to_contain_text("MPR")
-            self.assertEqual([], page.evaluate("layoutCalls"))
+            # A VR 3D volume viewport is neither a stack nor an orthographic plane and stays
+            # refused whole. An orthographic cell whose loaded volume, SOP list and plane
+            # cannot be read here is refused by the same guard, before any dispatch.
+            for kind in ("volume3d", "orthographic"):
+                page.evaluate(f"nativeViewports.get('B').type='{kind}'")
+                panel.locator('[data-cell-merge="maximize"]').click()
+                expect(panel.locator("[role=status]")).to_contain_text("3D·SR·PDF")
+                self.assertEqual([], page.evaluate("layoutCalls"))
             page.evaluate("nativeViewports.get('B').type='stack'")
             page.evaluate("cines={A:{isPlaying:true}}")
             panel.locator('[data-cell-merge="merge-column"]').click()
