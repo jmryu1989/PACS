@@ -148,6 +148,8 @@ jobs:
           "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
       - name: VR source binding survives transient MPR layout readiness
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
+      - name: MPR Basic Orthogonal stays distinct from Reset Planes
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/orientation-basic-dom --cwd . --file worklist-v0/hpacs-lite/volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_orientation_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_volume_orientation_dom_test.py
       - name: Confirm exact declared VR-only selection
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/execution_selection_test.py
       - name: Volume batch recipe rounding precision
