@@ -8,7 +8,7 @@ import test_volume_projection as projection
 class VolumeAverageAffineE2E(VolumeMprPrintE2E):
  def constant_average(self,signed):
   make=projection.phantom
-  with patch.object(projection,'phantom',side_effect=lambda stack,intercept,constant:make(stack,intercept,True,signed=signed)):
+  with patch.object(projection,'phantom',side_effect=lambda stack,intercept,constant,**sample:make(stack,intercept,True,signed=signed,**sample)):
    a,p,v=self.opened_projection(intercept=-100 if signed else 0,constant=True)
   if signed:v.evaluate('()=>{projectionVP.setProperties({voiRange:{lower:-1124,upper:-124}});projectionVP.render()}')
   v.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');expected=v.evaluate('()=>projectionPixel()');self.assertIn(expected,[127,128])

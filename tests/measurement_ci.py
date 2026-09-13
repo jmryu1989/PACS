@@ -120,6 +120,24 @@ PROFILES = {
                    ('e2e/test_volume_display.py', None, 'ci-mpr-display'),
                    ('e2e/test_volume_curved.py', None, 'ci-mpr-curved')),
     },
+    'volume-slab': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-slab-ci',
+        'project_prefix': 'kin-slab-ci-',
+        # A second MPR suite group, not more suites inside volume-mpr: that profile already
+        # commits (400+35)+(400+35)+(420+35) = 1325s of the shared 1500s deadline, and its
+        # caps stay as they are. Caps here are about twice the local native history
+        # (projection ~26s and wheel ~31s per case): (420+35)+(300+35)+(240+35) = 1065s
+        # leaves 435s for a stack whose measured setup and cleanup total about 76s.
+        'suite_timeout': 540,
+        'suite_budgets': {'ci-slab-projection': 420, 'ci-slab-wheel': 300,
+                          'ci-slab-average-affine': 240},
+        # Each module's load_tests is the allowlist: declared test_projection_*,
+        # test_wheel_* and test_average_affine_* only. Passing no class keeps inherited
+        # base-class cases out.
+        'suites': (('e2e/test_volume_projection.py', None, 'ci-slab-projection'),
+                   ('e2e/test_volume_wheel.py', None, 'ci-slab-wheel'),
+                   ('e2e/test_volume_average_affine.py', None, 'ci-slab-average-affine')),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

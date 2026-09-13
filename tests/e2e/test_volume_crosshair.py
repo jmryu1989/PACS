@@ -1,7 +1,7 @@
 # coding: utf-8
 import json,unittest
 from pathlib import Path
-from playwright.sync_api import expect
+from playwright.sync_api import expect, TimeoutError as PlaywrightTimeout
 from test_volume_orientation import VolumeOrientationE2E
 
 class VolumeCrosshairE2E(VolumeOrientationE2E):
@@ -141,16 +141,67 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
      if index in skip or not(6<=i<=58 and 6<=j<=58 and 1<=k<=31) or abs(k-10.5)<1.5 or abs(k-21.5)<1.5:continue
      chosen.append([q.tolist(),100 if k<10.5 else 900 if k>21.5 else 500])
    points.append(chosen)
-  values=page.evaluate('''points=>[...services.viewportGridService.getState().viewports.keys()].map((id,i)=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return points[i].map(([p])=>{const xy=v.worldToCanvas(p);if(!(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2))return null;return c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]})})''',points)
+  self.band_reads=getattr(self,'band_reads',0)+1
+  # One read returns the samples plus each plane's canvas size and whole-canvas red-channel statistics.
+  read=page.evaluate('''points=>[...services.viewportGridService.getState().viewports.keys()].map((id,i)=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {values:points[i].map(([p])=>{const xy=v.worldToCanvas(p);if(!(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2))return null;return c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]}),canvas:('''+self.CANVAS_STATS+''')(id,c)}})''',points)
+  values=[plane['values'] for plane in read];canvases=[plane['canvas'] for plane in read]
   counts=[]
   for index,(row,got) in enumerate(zip(points,values)):
    if index in skip:counts.append(None);continue
    lower,upper=(voi or {}).get(index,(0,1000));bands=set();count=0
    for (point,value),pixel in zip(row,got):
     if pixel is None:continue
-    self.assertAlmostEqual(pixel,(value-lower)/(upper-lower)*255,delta=3,msg=f'plane {index} at {point} expects source value {value}');bands.add(value);count+=1
+    expected=(value-lower)/(upper-lower)*255
+    try:self.assertAlmostEqual(pixel,expected,delta=3,msg=f'plane {index} at {point} expects source value {value}; canvas {canvases[index]}')
+    except AssertionError:
+     # The first mismatch ends this read; diagnosis never replaces or softens this same assertion.
+     self.band_failure(page,index,point,value,pixel,expected,canvases,cameras);raise
+    bands.add(value);count+=1
    self.assertGreaterEqual(len(bands),2,f'plane {index} should cross source bands');self.assertGreaterEqual(count,6);counts.append(count)
   return counts
+ CANVAS_STATS="(id,c)=>{const s={id,width:c.width,height:c.height,clientWidth:c.clientWidth,clientHeight:c.clientHeight,dpr:devicePixelRatio,min:null,max:null,nonzero:0};if(!c.width||!c.height)return s;const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;for(let k=0;k<d.length;k+=4){const x=d[k];if(s.min===null||x<s.min)s.min=x;if(s.max===null||x>s.max)s.max=x;if(x)s.nonzero++}return s}"
+ # Linked MPR planes share one revision counter over native CAMERA_MODIFIED and IMAGE_RENDERED, so a plane
+ # is ready only when a rendered frame came after its latest camera change, never after a fixed time.
+ RENDER_PROOF='''ids=>{const E=window.cornerstone?.Enums?.Events;if(!E?.CAMERA_MODIFIED||!E?.IMAGE_RENDERED)throw Error('native CAMERA_MODIFIED/IMAGE_RENDERED events unavailable');
+  const proof=window.kinRenderProof={revision:0,installedAt:performance.now(),events:[E.CAMERA_MODIFIED,E.IMAGE_RENDERED],views:{}};
+  for(const id of ids){const element=services.cornerstoneViewportService.getCornerstoneViewport(id)?.element;if(!element)throw Error('linked viewport '+id+' has no element');
+   const s=proof.views[id]={camera:0,cameraAt:null,cameras:0,render:0,renderAt:null,renders:0};
+   element.addEventListener(E.CAMERA_MODIFIED,()=>{s.camera=++proof.revision;s.cameraAt=performance.now();s.cameras++});
+   element.addEventListener(E.IMAGE_RENDERED,()=>{s.render=++proof.revision;s.renderAt=performance.now();s.renders++})}
+  return proof}'''
+ RENDER_READY="ids=>ids.every(id=>{const s=window.kinRenderProof?.views?.[id];return !!s&&s.cameras>0&&s.render>s.camera})"
+ def await_final_render(self,page,ids,timeout=10000):
+  try:page.wait_for_function(self.RENDER_READY,arg=ids,timeout=timeout)
+  except PlaywrightTimeout:self.fail(f'linked planes {ids} drew no IMAGE_RENDERED after their last CAMERA_MODIFIED within {timeout}ms: '+json.dumps(page.evaluate('()=>window.kinRenderProof??null')))
+  return page.evaluate('()=>JSON.parse(JSON.stringify({...kinRenderProof,readyAt:performance.now()}))')
+ def band_failure(self,page,index,point,value,pixel,expected,canvases,cameras):
+  # Diagnosis only, saved in the uploaded volume-mpr artifact folder. Every step records its own failure and
+  # the caller re-raises its original assertion, even when the single re-rendered read below matches.
+  record={'test':self._testMethodName,'read':self.band_reads,'plane':index,'original':{'point':point,'source':value,'pixel':pixel,'expected':expected,'delta':3,'canvases':canvases},'cameras':cameras,'errors':{}}
+  def attempt(name,action):
+   try:return action()
+   except Exception as error:record['errors'][name]=f'{type(error).__name__}: {error}'
+  def save(path,data):
+   with path.open('x',encoding='utf-8') as stream:json.dump(data,stream,indent=1,default=str)
+   return str(path)
+  folder=Path(__file__).resolve().parent/'artifacts'/'volume-mpr-ci';stem=f'band-pixels-{self._testMethodName}-read{self.band_reads}-plane{index}'
+  record['render_proof']=attempt('render_proof',lambda:page.evaluate('()=>window.kinRenderProof?JSON.parse(JSON.stringify({...kinRenderProof,readAt:performance.now()})):null'))
+  attempt('folder',lambda:folder.mkdir(parents=True,exist_ok=True))
+  attempt('original_record',lambda:save(folder/(stem+'-original.json'),record))
+  def screenshot():
+   path=folder/(stem+'.png')
+   if path.exists():raise FileExistsError(str(path))
+   page.screenshot(path=str(path));return str(path)
+  record['screenshot']=attempt('screenshot',screenshot)
+  record['diagnostic']=attempt('diagnostic_render',lambda:page.evaluate('''async ([index,p])=>{const id=[...services.viewportGridService.getState().viewports.keys()][index],v=services.cornerstoneViewportService.getCornerstoneViewport(id),E=cornerstone.Enums.Events,requested=performance.now();
+   const rendered=await new Promise((resolve,reject)=>{const done=e=>{clearTimeout(timer);resolve({at:performance.now(),viewportId:e.detail?.viewportId??null})};const timer=setTimeout(()=>{v.element.removeEventListener(E.IMAGE_RENDERED,done);reject(Error('IMAGE_RENDERED not received within 5000ms of render()'))},5000);
+    v.element.addEventListener(E.IMAGE_RENDERED,done,{once:true});try{v.render()}catch(error){clearTimeout(timer);v.element.removeEventListener(E.IMAGE_RENDERED,done);reject(error)}});
+   const c=v.getCanvas(),xy=v.worldToCanvas(p),pixel=(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2)?c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]:null;
+   return {id,requested,rendered,xy:Array.from(xy),pixel,canvas:('''+self.CANVAS_STATS+''')(id,c),render_proof:window.kinRenderProof?JSON.parse(JSON.stringify(kinRenderProof)):null}}''',[index,point]))
+  if isinstance((record['diagnostic'] or {}).get('pixel'),(int,float)):record['diagnostic_within_original_tolerance']=abs(record['diagnostic']['pixel']-expected)<=3
+  record['outcome']='diagnosis only; the original assertion is re-raised unchanged'
+  attempt('diagnosis_record',lambda:save(folder/(stem+'-diagnosis.json'),record))
+  print('BAND_PIXELS_DIAGNOSIS',json.dumps(record,default=str),flush=True)
  def test_crosshair_09_basic_orthogonal_tilted_source_keeps_pivot_pan_zoom_display_and_crosshair(self):
   import numpy as np
   a,p,v=self.starting_tilted();initial=self.cameras(v);native=self.native_planes(v);self.assert_native_axes(initial,native)
@@ -252,10 +303,12 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   owner=min(others,key=lambda i:residual(S,cameras[i]));self.assertLessEqual(residual(S,cameras[owner]),3*mm);self.assertGreater(min(residual(S,cameras[i]) for i in others if i!=owner),10*mm)
   x,y=S-pivot,E-pivot;x-=n*(x@n);y-=n*(y@n);angle=math.atan2(float(np.cross(x,y)@n),float(x@y));self.assertGreater(abs(math.degrees(angle)),25)
   k=np.array([[0,-n[2],n[1]],[n[2],0,-n[0]],[-n[1],n[0],0]]);rotation=np.eye(3)*math.cos(angle)+(1-math.cos(angle))*np.outer(n,n)+math.sin(angle)*k
+  # Native render evidence starts before the real press, so every linked camera change of this drag is counted.
+  linked=[ids[i] for i in others];v.evaluate(self.RENDER_PROOF,linked)
   v.mouse.move(*start.tolist());v.mouse.down();v.wait_for_function('()=>nativeRotate.down!==undefined');self.assertEqual(v.evaluate('()=>nativeRotate.down'),2)
   # A slow multi-event leg then one large event: the result must depend on pointer positions only.
   v.mouse.move(*middle.tolist(),steps=12);v.mouse.move(*end.tolist(),steps=1);v.mouse.up();v.wait_for_function('()=>nativeRotate.up')
-  v.wait_for_function("id=>(("+find+")(id)?.data.handles.activeOperation??null)===null",arg=active);self.settled(v)
+  v.wait_for_function("id=>(("+find+")(id)?.data.handles.activeOperation??null)===null",arg=active);render_proof=self.await_final_render(v,linked);self.settled(v)
   drags=v.evaluate('()=>nativeRotate.drags');self.assertGreaterEqual(len(drags),2);self.assertTrue(all(op==2 for op in drags),drags)
   after=self.volume_state(v);moved=[s['camera'] for s in after];self.assertEqual([s['id'] for s in after],ids)
   for i,(old,new) in enumerate(zip(cameras,moved)):
@@ -278,7 +331,7 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   fresh=self.login();self.launch(fresh,[a]);self.ready(fresh);fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=45000)
   self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertAlmostEqual(residual(E,self.cameras(fresh)[owner]),expected_residual,delta=.05);reopened=self.band_pixels(fresh,identity,skip={index})
   expect(p.locator('#findings')).to_have_value('KEEP NATIVE ROTATE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(errors,[])
-  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened}),flush=True)
+  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened,'render_proof':render_proof}),flush=True)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCrosshairE2E(n) for n in loader.getTestCaseNames(VolumeCrosshairE2E) if n.startswith('test_crosshair_'))
 if __name__=='__main__':unittest.main(verbosity=2)
