@@ -47,7 +47,11 @@ export class ViewerJobService {
     const identity = new Map<string, string>();
     for (const uid of snapshot.studies) identity.set(uid, (await this.orthanc.connectStudyIdentity(uid)).patientId);
     if (new Set(identity.values()).size !== 1) throw new BadRequestException('같은 환자의 검사만 비교 작업으로 저장할 수 있습니다');
-    if ([4,5,6,7].includes(snapshot.version)) {
+    // A version 8 layout carries BOTH shapes, so it is verified against both originals:
+    // the whole ordered CT volume its plane cells reconstruct, and every stack cell's own
+    // instance. Neither check is skipped because the other one passed.
+    let verified = snapshot;
+    if ([4,5,6,7,8].includes(snapshot.version)) {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
       try {
         const before = await this.orthanc.viewerSeriesManifest(snapshot.volume.series, controller.signal);
@@ -60,22 +64,24 @@ export class ViewerJobService {
         const after = await this.orthanc.viewerSeriesManifest(snapshot.volume.series, controller.signal);
         if (canonical(before) !== canonical(after)) throw new ConflictException('원본 시리즈가 변경되어 저장 또는 복원을 중단했습니다');
         if (old && snapshot.volume.sourceDigest !== digest) throw new ConflictException('저장 당시 볼륨 원본과 달라 복원하지 않았습니다');
-        return { ...snapshot, volume: { ...snapshot.volume, sourceDigest: digest } };
+        verified = { ...snapshot, volume: { ...snapshot.volume, sourceDigest: digest } };
       } catch(error) {
         if(old && error instanceof BadRequestException)throw new ConflictException('저장 당시 볼륨 원본과 달라 복원하지 않았습니다');
         throw error;
       } finally { clearTimeout(timer); controller.abort(); }
+      if (snapshot.version !== 8) return verified;
     }
     const cells = [];
-    for (const cell of snapshot.cells) {
-      if (!cell) { cells.push(null); continue; }
+    for (const cell of verified.cells) {
+      // A version 8 plane cell was already covered by the whole-volume verification above.
+      if (!cell || cell.kind === 'plane') { cells.push(cell ?? null); continue; }
       if (!sources.has(cell.sop)) sources.set(cell.sop, await this.orthanc.viewerReference(cell.sop, true));
       const tags = sources.get(cell.sop); verifyJobCell(cell, tags);
       if (tags.PatientID !== identity.get(cell.study)) throw new BadRequestException('원본 환자 참조가 일치하지 않습니다');
       if (old && cell.sourceDigest !== tags._kinSourceDigest) throw new ConflictException('저장 당시 원본과 달라 복원하지 않았습니다');
       cells.push({ ...cell, sourceDigest: tags._kinSourceDigest });
     }
-    return { ...snapshot, cells };
+    return { ...verified, cells };
   }
   private async annotations(tx: any, snapshot: any, sources: Map<string, any>) {
     const refs = snapshot.annotations;
