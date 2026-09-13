@@ -95,7 +95,7 @@
     const grid = services?.viewportGridService, cornerstone = services?.cornerstoneViewportService, sets = services?.displaySetService;
     const live = () => !ended && options.live?.() !== false;
     let ended = false, busy = false, quarantined = false, record = null, panel = null, status = null, hint = null;
-    const subscriptions = []; let listening = false, channel = null;
+    const subscriptions = []; let listening = false, channel = null, workspace = null;
 
     const ordered = () => [...(grid?.getState?.().viewports?.values?.() || [])]
       .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0) || String(a.viewportId).localeCompare(String(b.viewportId)));
@@ -744,6 +744,8 @@
       doc.removeEventListener('dblclick', onDoubleClick);
       channel?.close(); channel = null;
       if (listening) { win.removeEventListener?.('storage', sessionEnd); win.removeEventListener?.('pagehide', stop); listening = false; }
+      if (workspace && win.kinCellMergeWorkspaceState === workspace) delete win.kinCellMergeWorkspaceState;
+      workspace = null;
       panel?.remove(); panel = status = hint = null;
     }
 
@@ -767,6 +769,11 @@
       for (const event of new Set(Object.values(grid?.EVENTS || {})))
         try { subscriptions.push(grid.subscribe(event, observe)); } catch (_) { }
       doc.addEventListener('dblclick', onDoubleClick);
+      // The record is the only way back to the pre-merge grid and it lives nowhere but here.
+      // A saved Job restore rebuilds the screen on viewports this record never saw, so the
+      // Jobs panel reads this before it touches the screen; it is read-only by construction.
+      workspace = () => ({ merged: !!record, busy });
+      win.kinCellMergeWorkspaceState = workspace;
       if (!listening) {
         listening = true;
         win.addEventListener?.('storage', sessionEnd); win.addEventListener?.('pagehide', stop);

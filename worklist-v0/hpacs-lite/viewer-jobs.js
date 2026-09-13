@@ -232,6 +232,18 @@ window.kinViewerJobs = function (services, model) {
           // still advances serial; only that initial automatic layout is allowed.
           if (!live() || ticket !== serial || !initialRestore && before !== signature()) throw new Error('영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
           if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식이 있어 복원하지 않았습니다.');
+          // Restore Grid exists only in the cell merge module's memory, keyed by viewports a
+          // restored Job never reuses. A restore that failed after its layout landed would roll
+          // back onto fresh viewports and silently discard that record with the cells it hid, so
+          // a held or in-flight merge is refused here, before any dispatch or navigation. With no
+          // module loaded there is no record to lose; a reader that will not answer is refused.
+          const mergeState = window.kinCellMergeWorkspaceState;
+          if (typeof mergeState === 'function') {
+            let held = null; try { held = mergeState(); } catch (_) { held = null; }
+            if (!held || typeof held !== 'object') throw new Error('칸 병합 상태를 확인할 수 없어 복원하지 않았습니다. 뷰어를 다시 연 뒤 복원하세요.');
+            if (held.busy) throw new Error('칸 배치 요청이 끝난 뒤 다시 복원하세요.');
+            if (held.merged) throw new Error('병합한 칸이 있어 복원하지 않았습니다. 복원에 실패하면 병합 전 격자로 돌아갈 수 없게 되므로 Restore Grid로 격자를 되돌린 뒤 복원하세요.');
+          }
           if (JSON.stringify(job.snapshot.studies) !== JSON.stringify(studies)) {
             if (title.value || description.value) throw new Error('작성 중인 작업 제목·설명을 저장하거나 비운 뒤 비교 검사를 여세요.');
             status.textContent = '저장한 비교 검사를 함께 여는 중…';
