@@ -53,12 +53,14 @@ window.kinViewerJobs = function (services, model) {
         const currentSnapshot=(readOnly=false)=>{const value=capture(true,readOnly,true);if(value.version===5){value.version=4;delete value.batch;}else if(value.version===6)value.batch=null;return value;};
         const snapshot = row ? null : currentSnapshot();
         // The MPR output renderer reconstructs a fixed, vacancy-free cell list
-        // (viewer-volume-job-print.js:68-69). A version 7 plane layout and a version 8 mixed
-        // layout are refused here, before any export, rather than falling through to the
-        // ordinary frame renderer, which would print the wrong page for a reconstructed cell.
+        // (viewer-volume-job-print.js:68-69) and the ordinary frame renderer lays its pages
+        // out on a uniform grid. A version 7 plane layout, a version 8 mixed layout and a
+        // version 9 merged layout are refused here, before any export, rather than falling
+        // through to a renderer that would print a page the saved screen never was.
         const shape = row?.snapshotVersion ?? snapshot?.version;
         if (shape === 7) throw new Error('MPR 평면 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         if (shape === 8) throw new Error('MPR 평면과 일반 영상이 섞인 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        if (shape === 9) throw new Error('칸을 병합한 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
         const assets=[['kinViewerJobPrint','viewer-job-print.js'],['kinViewerEditorLink','viewer-editor-link.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
@@ -136,11 +138,16 @@ window.kinViewerJobs = function (services, model) {
     }
     function capture(checkOutputSize = false, readOnly = false, currentOutput = false) {
       const state = grid.getState(), views = ordered(), { numRows: rows, numCols: cols, layoutType } = state.layout;
-      if(views.some(g=>cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic'))return volumeTools().capture(readOnly,!currentOutput);
-      if (layoutType !== 'grid' || ![1, 2].includes(rows) || ![1, 2].includes(cols) || views.length !== rows*cols) throw new Error('현재 일반 CT 1·2·4화면 배치에서 저장할 수 있습니다.');
+      // A merged screen is one whose cells no longer fill the grid uniformly. The MPR Job
+      // owns every rectangle-bearing layout, frame cells included, so a merged grid of
+      // ordinary CT cells is captured there rather than growing a second geometry rule here.
+      const uniform = views.length === rows*cols && views.every((g, i) =>
+        Math.abs(g.x-(i%cols)/cols)<=1e-6 && Math.abs(g.y-Math.floor(i/cols)/rows)<=1e-6 &&
+        Math.abs(g.width-1/cols)<=1e-6 && Math.abs(g.height-1/rows)<=1e-6);
+      if(layoutType==='grid'&&(!uniform||views.some(g=>cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic')))return volumeTools().capture(readOnly,!currentOutput);
+      if (layoutType !== 'grid' || ![1, 2].includes(rows) || ![1, 2].includes(cols)) throw new Error('현재 일반 CT 1·2·4화면 배치에서 저장할 수 있습니다.');
       let totalPixels = 0;
-      const cells = views.map((g, i) => {
-        if (Math.abs(g.x-(i%cols)/cols)>1e-6 || Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6 || Math.abs(g.width-1/cols)>1e-6 || Math.abs(g.height-1/rows)>1e-6) throw new Error('병합 또는 특수 배치는 아직 저장할 수 없습니다.');
+      const cells = views.map(g => {
         const sets = g.displaySetInstanceUIDs || []; if (!sets.length) return null;
         return stackCell(g, canvas => {
           if (!checkOutputSize) return;
@@ -162,8 +169,10 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && ![7,8].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
-        if([4,5,6,7,8].includes(row.snapshotVersion))text('p',(row.snapshotVersion===8?'MPR Mixed Layout · 출력 미지원':row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
+        if (!row.hidden && ![7,8,9].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        // A merged layout may hold no reconstructed cell at all, so it is not labelled as one.
+        if(row.snapshotVersion===9)text('p','Merged Cell Layout · 출력 미지원',item);
+        else if([4,5,6,7,8].includes(row.snapshotVersion))text('p',(row.snapshotVersion===8?'MPR Mixed Layout · 출력 미지원':row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
           button(item, row.hidden ? 'Unhide Job' : 'Hide Job', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
@@ -196,7 +205,7 @@ window.kinViewerJobs = function (services, model) {
       throw new Error('원본 프레임 로딩에 실패했습니다.');
     }
     async function apply(value, ticket) {
-      if([4,5,6,7,8].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
+      if([4,5,6,7,8,9].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const current = () => live() && serial === ticket;
@@ -238,11 +247,16 @@ window.kinViewerJobs = function (services, model) {
           // A missing MPR asset is not a shape problem, so that reason is kept as it is.
           let previous; try { previous = capture(); }
           catch (e) { throw new Error(volumeJobs ? '현재 화면을 저장 형식으로 읽을 수 없어 복원하지 않았습니다. 복원할 수 있는 배치를 먼저 여세요.' : e.message); }
-          if([4,5,6,7,8].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
+          if([4,5,6,7,8,9].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
           try { await apply(job.snapshot, ticket); }
           catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
           finally { applying = false; }
-          status.textContent = [4,5,6,7,8].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
+          // A merged layout is restored as the screen it was saved as. The grid it was merged
+          // from was never part of that snapshot, so the message says so instead of implying
+          // that Restore Grid - which has no record of this screen - could undo it.
+          status.textContent = job.snapshot.version === 9
+            ? '병합한 칸 배치를 복원했습니다. 병합 전 격자는 저장된 적이 없어 되돌릴 수 없으며, 다른 배치를 적용하거나 다른 저장 작업을 복원하세요.'
+            : [4,5,6,7,8].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
@@ -251,7 +265,7 @@ window.kinViewerJobs = function (services, model) {
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true); if (action === 'saveAnnotations') {
-              if([4,5,6,7,8].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5,6,7,8,9].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
             pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot }), url: path };

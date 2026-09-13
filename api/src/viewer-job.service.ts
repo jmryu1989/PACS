@@ -50,8 +50,11 @@ export class ViewerJobService {
     // A version 8 layout carries BOTH shapes, so it is verified against both originals:
     // the whole ordered CT volume its plane cells reconstruct, and every stack cell's own
     // instance. Neither check is skipped because the other one passed.
+    // A version 9 merged layout carries both shapes too, and a merged layout of ordinary
+    // frame cells alone carries no volume at all, so the whole-volume verification runs on
+    // the reference it actually has and the per-cell verification below always follows.
     let verified = snapshot;
-    if ([4,5,6,7,8].includes(snapshot.version)) {
+    if ([4,5,6,7,8].includes(snapshot.version) || snapshot.version === 9 && snapshot.volume) {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
       try {
         const before = await this.orthanc.viewerSeriesManifest(snapshot.volume.series, controller.signal);
@@ -69,11 +72,11 @@ export class ViewerJobService {
         if(old && error instanceof BadRequestException)throw new ConflictException('저장 당시 볼륨 원본과 달라 복원하지 않았습니다');
         throw error;
       } finally { clearTimeout(timer); controller.abort(); }
-      if (snapshot.version !== 8) return verified;
+      if (![8, 9].includes(snapshot.version)) return verified;
     }
     const cells = [];
     for (const cell of verified.cells) {
-      // A version 8 plane cell was already covered by the whole-volume verification above.
+      // A version 8 or 9 plane cell was already covered by the whole-volume verification above.
       if (!cell || cell.kind === 'plane') { cells.push(cell ?? null); continue; }
       if (!sources.has(cell.sop)) sources.set(cell.sop, await this.orthanc.viewerReference(cell.sop, true));
       const tags = sources.get(cell.sop); verifyJobCell(cell, tags);

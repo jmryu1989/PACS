@@ -205,7 +205,8 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
             self.assertEqual([["A", 0, 0, .5, 1], ["B", .5, 0, .5, .5], ["D", .5, .5, .5, .5]], page.evaluate("geometry()"))
             expect(panel.locator('[data-cell-merge="maximize"]')).to_be_disabled()
             expect(panel.locator('[data-cell-merge="restore"]')).to_be_enabled()
-            expect(panel.locator("[data-cell-merge-hint]")).to_contain_text("저장할 수 없으며")
+            # A merged screen is now a saveable Job shape, so the hint states that instead.
+            expect(panel.locator("[data-cell-merge-hint]")).to_contain_text("Save New Job")
             panel.locator('[data-cell-merge="restore"]').click()
             page.wait_for_function("()=>gridState.viewports.size===4")
             expect(panel.locator('[data-cell-merge="restore"]')).to_be_disabled()

@@ -41,15 +41,34 @@ export function previewCommand(raw: Buffer): any {
 // Version 8 is the mixed Hanging Protocol layout: plane cells of that one volume beside
 // ordinary stack frame cells on the HP grids only. A v8 cell never has its shape inferred
 // from the snapshot version; every non-null cell names its own kind.
+// Version 9 is the merged cell layout: the base grid stays, but the cells sit in the
+// fractional rectangles the viewer's own cell merge module dispatches. Geometry lives in
+// `rects`, not on the cell, because a row or column merge can leave an empty survivor and a
+// vacancy still occupies a rectangle. A v9 cell names its own kind, as a v8 cell does.
 const VOLUME_LAYOUTS: [number, number][] = [[1,1],[1,2],[2,2],[1,3],[3,1]];
 const MIXED_LAYOUTS: [number, number][] = [[1,1],[1,2],[2,2]];
+// The base grids and the rectangle sets viewer-cell-merge.js:10,19-32 actually produces:
+// one maximize, reachable from every base, and four 2x2 row/column shapes. Nothing outside
+// this table is a shape the viewer can create, so nothing outside it is accepted — that is
+// what refuses overlapping, gapped, out-of-bounds, nested and freeform geometry at once.
+const MERGE_BASES: [number, number][] = [[1,2],[2,1],[2,2],[1,3],[3,1]];
+const MERGE_SHAPES: number[][][] = [
+  [[0,0,1,1]],
+  [[0,0,.5,1],[.5,0,.5,.5],[.5,.5,.5,.5]],
+  [[0,0,.5,.5],[.5,0,.5,1],[0,.5,.5,.5]],
+  [[0,0,1,.5],[0,.5,.5,.5],[.5,.5,.5,.5]],
+  [[0,0,.5,.5],[.5,0,.5,.5],[0,.5,1,.5]],
+];
 const PLANE_ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 const CELL_KINDS = ['plane', 'stack'];
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8].includes(s?.version) ? ['volume'] : []), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:[])]);
-  if (![1, 2, 3, 4, 5, 6, 7, 8].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:[])]);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
-  const volume = [4,5,6,7,8].includes(s.version), planes = s.version === 7, mixed = s.version === 8;
+  const planes = s.version === 7, mixed = s.version === 8, merged = s.version === 9;
+  // A merged layout of ordinary frame cells alone has no volume to reference, so its
+  // `volume` is null and it is not a volume snapshot; one holding a plane cell is.
+  const volume = [4,5,6,7,8].includes(s.version) || merged && s.volume !== null;
   if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
   const batch=s.version===5||s.version===6&&s.batch!==null;
   if(batch){
@@ -64,7 +83,24 @@ function validateJobSnapshot(s: any) {
     s.volume.sops.forEach(viewerUid);
   }
   const grid = mixed ? MIXED_LAYOUTS : VOLUME_LAYOUTS;
-  if ((volume ? !(planes || mixed ? grid.some(([r, c]) => s.rows === r && s.cols === c) : s.rows === 1 && s.cols === 3 || s.rows === 3 && s.cols === 1)
+  if (merged) {
+    // Geometry is decided before a single cell is read, so an unsupported shape can never
+    // reach the source checks or the database.
+    if (!MERGE_BASES.some(([r, c]) => s.rows === r && s.cols === c) || !Array.isArray(s.rects)) invalid();
+    for (const r of s.rects) { keys(r, ['x', 'y', 'width', 'height']); for (const v of Object.values(r)) number(v, 0, 1); }
+    // Only the maximize shape is reachable from every base; the row and column shapes exist
+    // on 2x2 alone, exactly as the viewer builds them.
+    if (!MERGE_SHAPES.some((shape, i) => (i === 0 || s.rows === 2 && s.cols === 2) && shape.length === s.rects.length &&
+        shape.every(([x, y, w, h], n) => Math.abs(s.rects[n].x - x) < 1e-9 && Math.abs(s.rects[n].y - y) < 1e-9 &&
+          Math.abs(s.rects[n].width - w) < 1e-9 && Math.abs(s.rects[n].height - h) < 1e-9))) invalid();
+    // A merged cell list covers the rectangles, not the base grid: the cells the merge
+    // absorbed are gone from the screen and are not saved as anything.
+    if (!Array.isArray(s.cells) || s.cells.length !== s.rects.length || s.cells.every(c => !c) ||
+        !Number.isInteger(s.active) || s.active < 0 || s.active >= s.cells.length) invalid();
+    // The volume reference and the presence of a plane cell are one fact, asserted in both
+    // directions: no volume may be carried without a plane, and no plane without its volume.
+    if ((s.volume !== null) !== s.cells.some(c => c?.kind === 'plane')) invalid();
+  } else if ((volume ? !(planes || mixed ? grid.some(([r, c]) => s.rows === r && s.cols === c) : s.rows === 1 && s.cols === 3 || s.rows === 3 && s.cols === 1)
               : ![1, 2].includes(s.rows) || ![1, 2].includes(s.cols)) || !Number.isInteger(s.active) || s.active < 0 || s.active >= s.rows * s.cols ||
       !Array.isArray(s.cells) || s.cells.length !== s.rows * s.cols || s.cells.every(c => !c)) invalid();
   // A mixed layout is only a mixed layout: an all-plane grid stays version 7 and an
@@ -72,12 +108,13 @@ function validateJobSnapshot(s: any) {
   if (mixed && !(s.cells.some(c => c?.kind === 'plane') && s.cells.some(c => c?.kind === 'stack'))) invalid();
   let pixels = 0;
   for (const c of [...s.cells,...(batch?[s.batch.cell]:[])]) {
-    if (c === null) { if (volume && !planes && !mixed) invalid(); continue; }
-    // Outside a mixed layout the snapshot version names the one cell shape; inside one,
-    // every non-null cell carries its own discriminator and is validated by that alone.
-    if (mixed && !CELL_KINDS.includes(c.kind)) invalid();
-    const oriented = planes || mixed && c.kind === 'plane', plane = mixed ? c.kind === 'plane' : volume;
-    keys(c, [...(mixed ? ['kind'] : []), 'study', 'series', ...(oriented ? ['orientation'] : []), ...(plane ? ['projection'] : ['sop', 'frame']), 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
+    if (c === null) { if (volume && !planes && !mixed && !merged) invalid(); continue; }
+    // Outside a mixed or merged layout the snapshot version names the one cell shape; inside
+    // one, every non-null cell carries its own discriminator and is validated by that alone.
+    const named = mixed || merged;
+    if (named && !CELL_KINDS.includes(c.kind)) invalid();
+    const oriented = planes || named && c.kind === 'plane', plane = named ? c.kind === 'plane' : volume;
+    keys(c, [...(named ? ['kind'] : []), 'study', 'series', ...(oriented ? ['orientation'] : []), ...(plane ? ['projection'] : ['sop', 'frame']), 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
     if (oriented && !PLANE_ORIENTATIONS.includes(c.orientation)) invalid();
     if (s.version >= 2) {
       keys(c.viewport, ['width', 'height']);
@@ -115,7 +152,7 @@ function validateJobSnapshot(s: any) {
     number(c.properties.voiRange.lower, -1e9, 1e9); number(c.properties.voiRange.upper, -1e9, 1e9);
     if (c.properties.voiRange.upper <= c.properties.voiRange.lower || !['LINEAR', 'LINEAR_EXACT', 'SIGMOID'].includes(c.properties.VOILUTFunction) || typeof c.properties.invert !== 'boolean') invalid();
   }
-  if (Buffer.byteLength(canonical(s)) > (volume ? 28000 : 16000)) invalid();
+  if (Buffer.byteLength(canonical(s)) > (volume || merged ? 28000 : 16000)) invalid();
 }
 export function verifyJobCell(c: any, tags: any) {
   verifyViewerReference(c.study, { schemaVersion: 1, kind: 'key', seriesUid: c.series, sopUid: c.sop, frame: c.frame }, tags);

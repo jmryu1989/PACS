@@ -780,6 +780,151 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         expect(work.locator("#findings")).to_have_value("HP MIXED UNSAVED REPORT")
         self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
 
+    def rectangles(self, page):
+        """The rectangles the native grid is actually standing in, with its base grid."""
+        return page.evaluate("""()=>{
+          const state=services.viewportGridService.getState();
+          return {rows:state.layout.numRows,cols:state.layout.numCols,
+            rects:[...state.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x)
+              .map(v=>[v.x,v.y,v.width,v.height])};}""")
+
+    def test_hp_08_merged_cell_layout_round_trips_through_the_account(self):
+        patient = "HP-MERGE-" + uuid.uuid4().hex[:12]
+        current = self.ct(patient, "current", "20260801")
+        self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
+        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP MERGE UNSAVED REPORT")
+        viewer = self.launch(work.context.new_page(), [current])
+        self.import_rules(viewer, self.mpr_library())
+        self.apply(viewer, "Applied")
+        self.rendered_planes(viewer, 3)
+        series = self.described_ref(viewer, current, "D03A current")["series"]
+        before = self.planes(viewer)
+        self.assertEqual(4, len(before), "three planes and a vacancy fill the 2x2 grid")
+
+        # Manipulate the axial plane and make it the active cell, so the screen that is merged
+        # and then saved can only be reproduced by restoring a camera and a window, not by
+        # rebuilding the rule. Then enlarge exactly that cell through the product's own panel.
+        viewer.evaluate("""()=>{
+          const grid=services.viewportGridService,cs=services.cornerstoneViewportService;
+          const id=[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x)[0].viewportId;
+          const v=cs.getCornerstoneViewport(id),c=v.getCamera();
+          v.setCamera({parallelScale:c.parallelScale*1.2,
+            focalPoint:c.focalPoint.map((n,i)=>n+(i===1?2:0)),position:c.position.map((n,i)=>n+(i===1?2:0))});
+          v.setProperties({voiRange:{lower:-420,upper:820}});v.render();grid.setActiveViewportId(id);}""")
+        self.open_layout_tools(viewer)
+        expect(viewer.locator("#kin-cell-merge")).to_be_visible(timeout=45000)
+        viewer.locator('#kin-cell-merge [data-cell-merge="maximize"]').click()
+        expect(viewer.locator("#kin-cell-merge [role=status]")).to_contain_text("확대했습니다", timeout=30000)
+        viewer.wait_for_function("()=>services.viewportGridService.getState().viewports.size===1", timeout=30000)
+        merged = self.rectangles(viewer)
+        self.assertEqual({"rows": 2, "cols": 2, "rects": [[0, 0, 1, 1]]}, merged,
+                         "the merged screen keeps its base grid and holds one full rectangle")
+        # The panel now offers the save it used to refuse, and Restore Grid is still this
+        # session's way back, so saving never consumes the merge record.
+        expect(viewer.locator("#kin-cell-merge [data-cell-merge-hint]")).to_contain_text("Save New Job")
+        expect(viewer.locator('#kin-cell-merge [data-cell-merge="restore"]')).to_be_enabled()
+
+        # IF-A01 "셀 병합 ... 저장 후 같은 계정·기기 재현": version 9 is the merged layout
+        # snapshot — the base grid, the exact rectangles, and the cells standing in them.
+        self.addCleanup(self.cleanup_jobs, current.uid)
+        expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
+        viewer.get_by_label("Job Title", exact=True).fill("HP merged cell job")
+        viewer.get_by_role("button", name="Save New Job", exact=True).click()
+        expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장했습니다", timeout=45000)
+        listed = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor")
+        self.assertEqual(200, listed.status, listed.text); self.assertEqual(1, len(listed.body["jobs"]))
+        job = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs/{listed.body['jobs'][0]['id']}", "doctor")
+        self.assertEqual(200, job.status, job.text); stored = job.body["snapshot"]
+        self.assertEqual(9, stored["version"]); self.assertEqual([2, 2], [stored["rows"], stored["cols"]])
+        self.assertEqual([{"x": 0, "y": 0, "width": 1, "height": 1}], stored["rects"])
+        self.assertEqual(1, len(stored["cells"]), "the cells the merge absorbed are not saved as anything")
+        self.assertEqual("plane", stored["cells"][0]["kind"])
+        self.assertEqual("axial", stored["cells"][0]["orientation"])
+        self.assertEqual(0, stored["active"])
+        self.assertEqual(series, stored["volume"]["series"]); self.assertEqual(current.uid, stored["volume"]["study"])
+        self.assertEqual(sorted(before[0]["sops"]), sorted(stored["volume"]["sops"]))
+        self.assertEqual(64, len(stored["volume"]["sourceDigest"]))
+        self.assertNotIn("sop", stored["cells"][0]); self.assertNotIn("frame", stored["cells"][0])
+
+        # Geometry is decided before any source is read, and the source is verified in full:
+        # an unsupported rectangle set and an incomplete volume are each refused, Job untouched.
+        def plain(snapshot):
+            value = json.loads(json.dumps(snapshot)); del value["volume"]["sourceDigest"]
+            return value
+        for label, forge in [
+                ("incomplete volume", lambda v: v["volume"].__setitem__("sops", v["volume"]["sops"][::2])),
+                ("freeform rectangle", lambda v: v.__setitem__("rects", [{"x": 0, "y": 0, "width": .75, "height": .75}])),
+                ("rectangle outside the grid", lambda v: v.__setitem__("rects", [{"x": 0, "y": 0, "width": 1.5, "height": 1}])),
+                ("a shape on a base grid the viewer never merges", lambda v: (v.__setitem__("rows", 3), v.__setitem__("cols", 3)))]:
+            forged = plain(stored); forge(forged)
+            denied = self.stack.request("POST", f"/studies/{current.uid}/viewer-jobs", "doctor",
+                                        dict(id=str(uuid.uuid4()), title="Rejected merged layout",
+                                             description="", snapshot=forged))
+            self.assertEqual(400, denied.status, label + ": " + denied.text)
+        self.assertEqual(1, len(self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor").body["jobs"]))
+
+        # Reopened on the same account and device over the viewer's own default screen.
+        target = self.launch(self.login(), [current])
+        self.open_layout_tools(target)
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
+        expect(target.get_by_text("Merged Cell Layout · 출력 미지원")).to_be_visible()
+        self.assertEqual(0, target.get_by_role("button", name="Print Saved Images", exact=True).count(),
+                         "a merged-layout Job offers no output path it cannot render")
+        opening = self.cells(target)
+        self.assertEqual(1, len(opening)); self.assertNotIn("orthographic", [c["type"] for c in opening])
+        print("HP_MERGE_OPENING " + json.dumps(self.rectangles(target)), flush=True)
+        target.get_by_role("button", name="Restore Job", exact=True).click()
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("복원했습니다", timeout=45000)
+        self.assertEqual(merged, self.rectangles(target),
+                         "the restored screen stands in the saved rectangles, on the saved base grid")
+        restored = self.planes(target)
+        self.assertEqual(1, len(restored)); self.assertEqual("orthographic", restored[0]["type"])
+        self.assertTrue(restored[0]["loaded"]); self.assertEqual(restored[0]["slices"], restored[0]["framesLoaded"])
+        self.assertEqual(sorted(stored["volume"]["sops"]), restored[0]["sops"], "the whole original volume, in order")
+        self.assertEqual(restored[0]["sourceSops"], restored[0]["sops"]); self.assertEqual(series, restored[0]["series"])
+        np.testing.assert_allclose(np.abs(restored[0]["viewPlaneNormal"]), [0, 0, 1], atol=1e-6)
+
+        # The product's own capture reads the restored screen back; it is compared to the
+        # stored snapshot rather than to a label.
+        actual = target.evaluate("""()=>window.kinCreateVolumeJob({grid:services.viewportGridService,
+          cs:services.cornerstoneViewportService,ds:services.displaySetService,
+          studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture()""")
+        self.assertEqual(9, actual["version"]); self.assertEqual(stored["active"], actual["active"])
+        self.assertEqual([stored["rows"], stored["cols"]], [actual["rows"], actual["cols"]])
+        self.assertEqual(stored["rects"], actual["rects"])
+        self.assertEqual(stored["volume"]["sops"], actual["volume"]["sops"])
+        self.assertEqual(target.evaluate("()=>services.viewportGridService.getActiveViewportId()"),
+                         self.cells(target)[stored["active"]]["id"])
+        left, right = actual["cells"][0], stored["cells"][0]
+        self.assertEqual(right["kind"], left["kind"]); self.assertEqual(right["orientation"], left["orientation"])
+        self.assertEqual(right["projection"], left["projection"])
+        for key in ("VOILUTFunction", "invert", "interpolationType"):
+            self.assertEqual(right["properties"][key], left["properties"][key])
+        for bound in ("lower", "upper"):
+            self.assertAlmostEqual(left["properties"]["voiRange"][bound],
+                                   right["properties"]["voiRange"][bound], delta=1e-6)
+        for key, want in right["camera"].items():
+            got = left["camera"][key]
+            if isinstance(want, list):
+                for x, y in zip(got, want):
+                    self.assertAlmostEqual(x, y, delta=1e-6)
+            elif isinstance(want, bool):
+                self.assertEqual(got, want)
+            else:
+                self.assertAlmostEqual(got, want, delta=1e-6)
+
+        # The pre-merge grid was never saved, so this screen has no way back and does not
+        # pretend to: Restore Grid stays disabled and an enlargement says why instead of
+        # sending the user to a button they cannot press.
+        expect(target.locator('#kin-cell-merge [data-cell-merge="restore"]')).to_be_disabled()
+        target.locator('#kin-cell-merge [data-cell-merge="maximize"]').click()
+        expect(target.locator("#kin-cell-merge [role=status]")).to_contain_text("병합 전 격자는 저장되지 않아")
+        self.assertEqual(merged, self.rectangles(target), "a refusal never changes what is on screen")
+        print("HP_MERGED_JOB " + json.dumps(dict(saved=stored, reopened=actual)), flush=True)
+        target.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-merged-cell-job-restored.png'))
+        expect(work.locator("#findings")).to_have_value("HP MERGE UNSAVED REPORT")
+        self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
+
 
 def load_tests(loader, tests, pattern):
     names = [name for name in HangingProtocolE2E.__dict__ if name.startswith("test_hp_")]
