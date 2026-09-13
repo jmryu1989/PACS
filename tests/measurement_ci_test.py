@@ -74,7 +74,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(text.count('--profile cell-merge'), 1)
         self.assertNotIn('--profile cell-merge', jobs[0])
         self.assertEqual(job.count('timeout-minutes: 28'), 1)
-        for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'hanging-protocols']:
+        for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'volume-slab', 'hanging-protocols']:
             self.assertEqual(text.count('--profile '+profile), 1)
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
         self.assertNotIn('- cell-merge', dispatch)
@@ -171,8 +171,9 @@ class MeasurementCiTests(unittest.TestCase):
         # maximum for every suite, exactly as before.
         # volume-mpr opted in when the curved MPR suite joined its runner; its exact
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
+        # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -209,7 +210,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertNotIn('--profile hanging-protocols', jobs[0])
         self.assertEqual(job.count('timeout-minutes: 28'), 1)
         # Registering this standing gate must not disturb the gates already green.
-        for profile in ['measurements', 'volume-rendering', 'volume-mpr']:
+        for profile in ['measurements', 'volume-rendering', 'volume-mpr', 'volume-slab']:
             self.assertEqual(text.count('--profile '+profile), 1)
         # The manual dispatch path for this profile stays available as well.
         dispatch = (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8')
@@ -285,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -442,6 +443,101 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(text.count('--profile volume-rendering'), 1)
         # The existing pure volume model gate stays registered exactly once.
         self.assertEqual(text.count('tmp/vr-ci/pure-volume-models'), 1)
+
+    def test_volume_slab_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-slab']
+        self.assertEqual(profile['suites'], (
+            ('e2e/test_volume_projection.py', None, 'ci-slab-projection'),
+            ('e2e/test_volume_wheel.py', None, 'ci-slab-wheel'),
+            ('e2e/test_volume_average_affine.py', None, 'ci-slab-average-affine'),
+        ))
+        self.assertEqual(profile['out'].name, 'volume-slab-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-slab-ci-')
+        self.assertEqual(profile['suite_timeout'], 540)
+        budgets = {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Registering the slab suites must not widen or cut the first MPR group.
+        self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
+                         {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420})
+        mpr_modules = {row[0] for row in ci.PROFILES['volume-mpr']['suites']}
+        self.assertFalse(mpr_modules & {row[0] for row in profile['suites']})
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-slab':
+                continue
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        commands = []
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+            commands.append(command)
+            # No --class: each module's own load_tests stays the allowlist.
+            self.assertNotIn('--class', command)
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[unit]))
+            self.assertEqual(outer, budgets[unit]+35)
+        self.assertEqual([command[command.index('--module')+1] for command in commands],
+                         ['tests/e2e/test_volume_projection.py',
+                          'tests/e2e/test_volume_wheel.py',
+                          'tests/e2e/test_volume_average_affine.py'])
+        self.assertEqual([command[command.index('--unit')+1] for command in commands],
+                         ['ci-slab-projection', 'ci-slab-wheel', 'ci-slab-average-affine'])
+        # Every suite at full cap plus its reserved margin fits the shared deadline with
+        # stack time left, and no cap may exceed the profile maximum.
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][0], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-slab', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_slab_modules_declare_exact_local_cases(self):
+        import ast
+        for suite, class_name, prefix, count in (
+                ('e2e/test_volume_projection.py', 'VolumeProjectionE2E', 'test_projection_', 8),
+                ('e2e/test_volume_wheel.py', 'VolumeWheelE2E', 'test_wheel_', 4),
+                ('e2e/test_volume_average_affine.py', 'VolumeAverageAffineE2E', 'test_average_affine_', 2)):
+            tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == class_name)
+            declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                        and node.name.startswith('test_')]
+            self.assertEqual(len(declared), count)
+            self.assertTrue(all(name.startswith(prefix) for name in declared))
+            load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                              and node.name == 'load_tests')
+            self.assertTrue([node.value for node in ast.walk(load_tests)
+                             if isinstance(node, ast.Constant) and node.value == prefix])
+
+    def test_validate_workflow_runs_volume_slab_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-slab:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-slab job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile volume-slab',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_projection.py',
+                         '--file tests/e2e/test_volume_wheel.py',
+                         '--file tests/e2e/test_volume_average_affine.py',
+                         'tests/e2e/artifacts/volume-slab-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-slab'), 1)
+        self.assertNotIn('--profile volume-slab', jobs[0])
+        # The slab suites stay out of the first MPR job's shared deadline.
+        mpr = text.split('\n  volume-mpr:\n')[1].split('\n  volume-slab:\n')[0]
+        self.assertNotIn('--profile volume-slab', mpr)
+        self.assertEqual(text.count('--profile volume-mpr'), 1)
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']

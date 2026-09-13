@@ -166,6 +166,52 @@ class ExecutionSelectionTests(unittest.TestCase):
         vr_suite = ci.PROFILES['volume-rendering']['suites'][0][0]
         self.assertNotIn(vr_suite, [row[0] for row in profile['suites']])
 
+    def test_volume_slab_profile_selects_only_the_declared_slab_modules(self):
+        profile = ci.PROFILES['volume-slab']
+        expected = [('e2e/test_volume_projection.py', 'VolumeProjectionE2E',
+                     'test_projection_', 'ci-slab-projection', 8,
+                     {'test_projection_01_known_voxels_modes_thickness_and_other_planes',
+                      'test_projection_05_embedded_plane_change_and_source_guards',
+                      'test_projection_07_anisotropic_oblique_small_structure_final_pixels',
+                      'test_projection_08_progressive_slab_preview_final_and_capture_gate'}),
+                    ('e2e/test_volume_wheel.py', 'VolumeWheelE2E',
+                     'test_wheel_', 'ci-slab-wheel', 4,
+                     {'test_wheel_01_target_mode_and_restore',
+                      'test_wheel_03_mip_pixels_minimum_and_partial_failure'}),
+                    ('e2e/test_volume_average_affine.py', 'VolumeAverageAffineE2E',
+                     'test_average_affine_', 'ci-slab-average-affine', 2,
+                     {'test_average_affine_01_negative_constant',
+                      'test_average_affine_02_positive_constant'})]
+        self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
+        self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
+        for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
+                profile['suites'], expected):
+            with self.subTest(suite=suite):
+                self.assertIsNone(class_name)
+                # Planned at the budget CI will actually request for this suite.
+                plan = runner.module_plan('tests/'+suite, unit, 'live',
+                                          profile['suite_budgets'][unit], class_name)
+                selected = [item['case'] for item in plan['tests']]
+                cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
+                declared = sorted(cls_name+'.'+name for name in cls.__dict__
+                                  if name.startswith(prefix))
+                self.assertEqual(sorted(selected), declared)
+                self.assertEqual(len(selected), count)
+                self.assertTrue({cls_name+'.'+name for name in required}.issubset(selected))
+                # Inherited base-class cases (orientation, jobs, marks, print...) must not
+                # widen this profile.
+                inherited = {name for base in cls.__mro__[1:]
+                             for name in vars(base) if name.startswith('test_')}
+                self.assertFalse(inherited & {case.split('.', 1)[1] for case in selected})
+                self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+                self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
+                self.assertEqual(runner.collect(plan).countTestCases(), count)
+                print('SELECTION', suite, len(selected), flush=True)
+        # The slab group stays disjoint from the first MPR group and the VR profile.
+        others = {row[0] for name in ('volume-mpr', 'volume-rendering')
+                  for row in ci.PROFILES[name]['suites']}
+        self.assertFalse(others & {row[0] for row in profile['suites']})
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
