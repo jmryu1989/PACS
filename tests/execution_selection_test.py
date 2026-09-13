@@ -127,7 +127,7 @@ class ExecutionSelectionTests(unittest.TestCase):
     def test_volume_mpr_profile_selects_only_the_declared_mpr_modules(self):
         profile = ci.PROFILES['volume-mpr']
         expected = [('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E',
-                     'test_crosshair_', 'ci-mpr-crosshair', 11),
+                     'test_crosshair_', 'ci-mpr-crosshair', 12),
                     ('e2e/test_volume_display.py', 'VolumeDisplayE2E',
                      'test_mpr_display_', 'ci-mpr-display', 12),
                     ('e2e/test_volume_curved.py', 'VolumeCurvedE2E',
@@ -147,6 +147,10 @@ class ExecutionSelectionTests(unittest.TestCase):
                                   if name.startswith(prefix))
                 self.assertEqual(sorted(selected), declared)
                 self.assertEqual(len(selected), count)
+                if cls_name == 'VolumeCrosshairE2E':
+                    # The real pointer drag on the native rotation handle is the A02 line-rotation proof.
+                    self.assertIn(cls_name+'.test_crosshair_12_native_rotate_handle_drag_follows_pointer_about_pivot',
+                                  selected)
                 # Inherited base-class cases must not widen this profile: the
                 # orientation/job suites keep their own registration elsewhere.
                 inherited = {name for base in cls.__mro__[1:]

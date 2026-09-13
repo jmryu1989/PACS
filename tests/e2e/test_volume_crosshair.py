@@ -215,6 +215,70 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   self.basic(v);self.assert_native_axes(self.cameras(v),native)
   self.open_note(v);expect(button).to_be_disabled();v.locator('#tech-note-close').click();expect(button).to_be_enabled()
   expect(p.locator('#findings')).to_have_value('KEEP FAILED BASIC');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1)
+ def test_crosshair_12_native_rotate_handle_drag_follows_pointer_about_pivot(self):
+  # Numeric Rotate Three Planes cannot prove line rotation: this drives the real pointer on the
+  # native rotation handle and derives the expected planes from the sent pointer positions only.
+  import math
+  import numpy as np
+  a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP NATIVE ROTATE REPORT');errors=[];v.on('pageerror',lambda e:errors.append(str(e)))
+  v.locator('button[data-cy="Crosshairs"]').click();v.wait_for_function("()=>cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolOptions('Crosshairs')?.mode==='Active'")
+  active=v.evaluate('()=>services.viewportGridService.getState().activeViewportId')
+  # Readiness is the product wrapper bound to this tool plus native rotation handles on the active plane;
+  # otherwise the unwrapped native drag could stand in for the product path.
+  find="(id)=>cornerstoneTools.annotation.state.getAllAnnotations().find(x=>x.metadata.toolName==='Crosshairs'&&x.data.viewportId===id)"
+  v.wait_for_function("id=>{const t=cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs'),a=("+find+")(id);return Object.hasOwn(t,'_dragCallback')&&a?.data.handles.rotationPoints?.length>=2}",arg=active)
+  # Listeners registered after the native dispatchers observe the operation the tool itself selected.
+  v.evaluate("id=>{const e=services.cornerstoneViewportService.getCornerstoneViewport(id).element,t=cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs'),E=cornerstoneTools.Enums.Events,op=()=>t.editData?.annotation?.data?.handles?.activeOperation??null;window.nativeRotate={down:undefined,drags:[],up:false};e.addEventListener(E.MOUSE_DOWN,()=>{if(nativeRotate.down===undefined)nativeRotate.down=op()});e.addEventListener(E.MOUSE_DRAG,()=>nativeRotate.drags.push(op()));e.addEventListener(E.MOUSE_UP,()=>{nativeRotate.up=true})}",active)
+  self.settled(v);before=self.volume_state(v);ids=[s['id'] for s in before];index=ids.index(active);cameras=[s['camera'] for s in before];pivot=self.pivot(cameras);others=[i for i in range(3) if i!=index]
+  info=v.evaluate("id=>{const vp=services.cornerstoneViewportService.getCornerstoneViewport(id),c=vp.getCanvas(),r=vp.element.getBoundingClientRect(),a=("+find+")(id);return {left:r.left+vp.element.clientLeft,top:r.top+vp.element.clientTop,width:c.width/devicePixelRatio,height:c.height/devicePixelRatio,handles:a.data.handles.rotationPoints.map(h=>Array.from(vp.worldToCanvas(h[0])))}}",active)
+  camera=cameras[index];n=np.array(camera['viewPlaneNormal']);up=np.array(camera['viewUp']);right=np.cross(up,n);mm=2*camera['parallelScale']/info['height']
+  # Own orthographic camera mapping must agree with the renderer before its canvas points are trusted.
+  center=np.array([info['width']/2,info['height']/2])+np.array([(pivot-camera['focalPoint'])@right,-(pivot-camera['focalPoint'])@up])/mm
+  np.testing.assert_allclose(center,self.screen_point(v,pivot)[index],atol=.5,rtol=0)
+  origin=np.array([info['left'],info['top']]);turn=lambda d:np.array([[math.cos(math.radians(d)),-math.sin(math.radians(d))],[math.sin(math.radians(d)),math.cos(math.radians(d))]])
+  inside=lambda q:12<=q[0]<=info['width']-12 and 12<=q[1]<=info['height']-12
+  choice=None
+  for handle in info['handles']:
+   h=np.array(handle)
+   for degrees in (32,-32):
+    # Integer page coordinates are delivered unquantized, so the oracle sees exactly the sent input.
+    start,middle,end=[np.round(origin+center+turn(d)@(h-center)) for d in (0,degrees/2,degrees)]
+    if choice is None and np.linalg.norm(h-center)>=40 and np.linalg.norm(start-origin-h)<=2 and inside(end-origin) and inside(middle-origin):choice=(start,middle,end)
+  self.assertIsNotNone(choice,f'no visible rotation handle with room to turn: {info}');start,middle,end=choice
+  world=v.evaluate("([id,points])=>{const vp=services.cornerstoneViewportService.getCornerstoneViewport(id);return points.map(p=>Array.from(vp.canvasToWorld(p)))}",[active,[(start-origin).tolist(),(end-origin).tolist()]]);S,E=np.array(world[0]),np.array(world[1])
+  for point,page in [(S,start),(E,end)]:
+   d=point-camera['focalPoint'];self.assertAlmostEqual(float(d@n),0,delta=1e-6);np.testing.assert_allclose([info['width']/2+d@right/mm,info['height']/2-d@up/mm],page-origin,atol=.5,rtol=0)
+  residual=lambda point,c:abs(float((point-np.array(c['focalPoint']))@np.array(c['viewPlaneNormal'])))
+  owner=min(others,key=lambda i:residual(S,cameras[i]));self.assertLessEqual(residual(S,cameras[owner]),3*mm);self.assertGreater(min(residual(S,cameras[i]) for i in others if i!=owner),10*mm)
+  x,y=S-pivot,E-pivot;x-=n*(x@n);y-=n*(y@n);angle=math.atan2(float(np.cross(x,y)@n),float(x@y));self.assertGreater(abs(math.degrees(angle)),25)
+  k=np.array([[0,-n[2],n[1]],[n[2],0,-n[0]],[-n[1],n[0],0]]);rotation=np.eye(3)*math.cos(angle)+(1-math.cos(angle))*np.outer(n,n)+math.sin(angle)*k
+  v.mouse.move(*start.tolist());v.mouse.down();v.wait_for_function('()=>nativeRotate.down!==undefined');self.assertEqual(v.evaluate('()=>nativeRotate.down'),2)
+  # A slow multi-event leg then one large event: the result must depend on pointer positions only.
+  v.mouse.move(*middle.tolist(),steps=12);v.mouse.move(*end.tolist(),steps=1);v.mouse.up();v.wait_for_function('()=>nativeRotate.up')
+  v.wait_for_function("id=>(("+find+")(id)?.data.handles.activeOperation??null)===null",arg=active);self.settled(v)
+  drags=v.evaluate('()=>nativeRotate.drags');self.assertGreaterEqual(len(drags),2);self.assertTrue(all(op==2 for op in drags),drags)
+  after=self.volume_state(v);moved=[s['camera'] for s in after];self.assertEqual([s['id'] for s in after],ids)
+  for i,(old,new) in enumerate(zip(cameras,moved)):
+   self.assertAlmostEqual(new['parallelScale'],old['parallelScale'],delta=1e-9)
+   for key in ['viewUp','viewPlaneNormal','focalPoint','position']:
+    if i==index:np.testing.assert_allclose(new[key],old[key],atol=1e-9,rtol=0);continue
+    direction=key in ('viewUp','viewPlaneNormal');expected=rotation@old[key] if direction else pivot+rotation@(np.array(old[key])-pivot)
+    np.testing.assert_allclose(new[key],expected,atol=2e-5 if direction else 2e-3,rtol=0)
+  self.assertEqual(after[index]['hash'],before[index]['hash'])
+  # Rounding the handle to integer page pixels puts the mouse-down point S slightly off the drawn line. Rotating
+  # about the pivot by angle(S->E) carries that offset to E scaled by |E-P|/|S-P|, so E is expected there, not on the line.
+  expected_residual=residual(S,cameras[owner])*float(np.linalg.norm(E-pivot))/float(np.linalg.norm(S-pivot))
+  self.assertAlmostEqual(residual(E,moved[owner]),expected_residual,delta=.05);self.assertGreater(residual(E,cameras[owner]),10*mm)
+  np.testing.assert_allclose(self.pivot(moved),pivot,atol=1e-3,rtol=0);np.testing.assert_allclose(v.evaluate("()=>Array.from(cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs').toolCenter)"),pivot,atol=1e-3,rtol=0)
+  for item in self.lines(v)[index]:
+   for point in item['world']:self.assertLess(min(residual(np.array(point),moved[i]) for i in others),.001)
+  expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('시작 MPR 화면')
+  identity=[1,0,0,0,1,0];counts=self.band_pixels(v,identity,skip={index})
+  self.save_volume(v);saved=[cell['camera'] for cell in self.get_volume_job(a)['snapshot']['cells']];self.cameras_close(saved,moved,1e-6)
+  fresh=self.login();self.launch(fresh,[a]);self.ready(fresh);fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=45000)
+  self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertAlmostEqual(residual(E,self.cameras(fresh)[owner]),expected_residual,delta=.05);reopened=self.band_pixels(fresh,identity,skip={index})
+  expect(p.locator('#findings')).to_have_value('KEEP NATIVE ROTATE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(errors,[])
+  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened}),flush=True)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCrosshairE2E(n) for n in loader.getTestCaseNames(VolumeCrosshairE2E) if n.startswith('test_crosshair_'))
 if __name__=='__main__':unittest.main(verbosity=2)
