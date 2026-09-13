@@ -715,6 +715,7 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         self.assertEqual(0, target.get_by_role("button", name="Print Saved Images", exact=True).count(),
                          "a mixed-layout Job offers no output path it cannot render")
         opening = self.cells(target)
+        self.assertEqual(1, len(opening), "the reopened viewer starts on its own default layout")
         self.assertNotIn("orthographic", [cell["type"] for cell in opening],
                          "the reopened viewer starts on an ordinary screen, so Restore must rebuild the planes")
         print("HP_MIXED_OPENING " + json.dumps([cell["type"] for cell in opening]), flush=True)
@@ -758,15 +759,9 @@ class HangingProtocolE2E(ViewerLayoutE2E):
             if right is None:
                 self.assertIsNone(left); continue
             self.assertEqual(right["kind"], left["kind"])
-            for key in ("study", "series", "orientation", "sop", "frame", "sourceDigest"):
+            for key in ("study", "series", "orientation", "sop", "frame", "sourceDigest", "projection"):
                 if key in right:
                     self.assertEqual(right[key], left[key], key)
-            if "projection" in right:
-                self.assertEqual(right["projection"]["blend"], left["projection"]["blend"])
-                # The restore oracle accepts the saved slab within 1e-6, so the re-capture is
-                # compared on the same tolerance rather than on exact float equality.
-                self.assertAlmostEqual(right["projection"]["thickness"],
-                                       left["projection"]["thickness"], delta=1e-6)
             for key in ("VOILUTFunction", "invert", "interpolationType"):
                 self.assertEqual(right["properties"][key], left["properties"][key])
             for bound in ("lower", "upper"):
