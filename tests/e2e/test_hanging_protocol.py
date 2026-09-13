@@ -173,6 +173,31 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         self.assertTrue(saved.body["canManageSite"])
         return saved.body
 
+    def job_rows(self, uid):
+        return [row for row in psql('SELECT to_jsonb(j)::text FROM "ViewerJob" j '
+                                    "WHERE \"studyUid\"='" + uid.replace("'", "''") + "';") if row]
+
+    def cleanup_jobs(self, uid):
+        """Delete exactly the Job rows this run saved, by full-row equality.
+
+        A saved Job holds a foreign key on StudyState, so the shared fixture cleanup cannot
+        remove the study while it exists. This runs before that cleanup and never widens
+        beyond this run's own study and author.
+        """
+        for raw in self.job_rows(uid):
+            job = json.loads(raw)
+            self.assertRegex(job["id"], r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+            self.assertTrue(set(job["studies"]) <= set(self.stack.active))
+            print("JOB synthetic row " + job["id"], flush=True)
+            for rev in [row for row in psql('SELECT to_jsonb(r)::text FROM "ViewerJobRevision" r '
+                                            "WHERE \"jobId\"='" + job["id"] + "'::uuid;") if row]:
+                if psql('DELETE FROM "ViewerJobRevision" r WHERE to_jsonb(r)=\''
+                        + rev.replace("'", "''") + "'::jsonb RETURNING 1;") != ["1"]:
+                    raise RuntimeError("Synthetic Job revision changed before exact-row cleanup")
+            if psql('DELETE FROM "ViewerJob" j WHERE to_jsonb(j)=\''
+                    + raw.replace("'", "''") + "'::jsonb RETURNING 1;") != ["1"]:
+                raise RuntimeError("Synthetic Job row changed before exact-row cleanup")
+
     def described_ref(self, page, fixture, description):
         metadata = self.metadata(page, fixture)
         series = next(item["0020000E"]["Value"][0] for item in metadata
@@ -373,6 +398,43 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         viewer.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-three-plane-cells.png'))
         self.assertNotEqual(before, self.cells(viewer))
 
+        # IF-A01 "저장 후 재현": the plane screen this rule just built is manipulated and then
+        # saved as an MPR Job. Version 7 is the layout snapshot: three planes, one vacancy,
+        # an explicit orientation per cell and one volume reference, never a synthesized SOP.
+        expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
+        viewer.evaluate("""()=>{
+          const grid=services.viewportGridService,cs=services.cornerstoneViewportService;
+          const id=[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x)[1].viewportId;
+          const v=cs.getCornerstoneViewport(id),c=v.getCamera();
+          v.setCamera({parallelScale:c.parallelScale*1.2,
+            focalPoint:c.focalPoint.map((n,i)=>n+(i===1?2:0)),position:c.position.map((n,i)=>n+(i===1?2:0))});
+          v.setProperties({voiRange:{lower:-420,upper:820}});v.render();grid.setActiveViewportId(id);}""")
+        self.addCleanup(self.cleanup_jobs, current.uid)
+        viewer.get_by_label("Job Title", exact=True).fill("HP plane layout job")
+        viewer.get_by_role("button", name="Save New Job", exact=True).click()
+        expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장했습니다", timeout=45000)
+        listed = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor")
+        self.assertEqual(200, listed.status, listed.text); self.assertEqual(1, len(listed.body["jobs"]))
+        job = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs/{listed.body['jobs'][0]['id']}", "doctor")
+        self.assertEqual(200, job.status, job.text); stored = job.body["snapshot"]
+        self.assertEqual(7, stored["version"]); self.assertEqual([2, 2], [stored["rows"], stored["cols"]])
+        self.assertEqual(4, len(stored["cells"])); self.assertIsNone(stored["cells"][3])
+        self.assertEqual(["axial", "sagittal", "coronal"], [c["orientation"] for c in stored["cells"][:3]])
+        self.assertEqual(1, stored["active"], "the manipulated plane stays the active cell index")
+        self.assertEqual(series, stored["volume"]["series"]); self.assertEqual(current.uid, stored["volume"]["study"])
+        self.assertEqual(sorted(cells[0]["sops"]), sorted(stored["volume"]["sops"]))
+        self.assertEqual(64, len(stored["volume"]["sourceDigest"]))
+        for cell in stored["cells"][:3]:
+            self.assertNotIn("sop", cell); self.assertNotIn("frame", cell)
+        # An incomplete original for the same layout is refused and leaves the saved Job alone.
+        forged = json.loads(json.dumps(stored)); del forged["volume"]["sourceDigest"]
+        forged["volume"]["sops"] = forged["volume"]["sops"][::2]
+        denied = self.stack.request("POST", f"/studies/{current.uid}/viewer-jobs", "doctor",
+                                    dict(id=str(uuid.uuid4()), title="Rejected plane layout",
+                                         description="", snapshot=forged))
+        self.assertEqual(400, denied.status, denied.text)
+        self.assertEqual(1, len(self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor").body["jobs"]))
+
         # The same rule library round trips through the account, and an ordinary stack rule
         # still replaces the plane screen this rule built.
         viewer.locator("#kin-hp-load-account").click()
@@ -396,6 +458,55 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         np.testing.assert_allclose(np.abs([cell["viewPlaneNormal"] for cell in reloaded[:3]]),
                                    [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)
         self.assertEqual([cell["series"] for cell in reloaded[:3]], [series] * 3)
+
+        # Reopened on the same account and device, the saved layout is restored over a screen
+        # the rule alone had rebuilt: the planes, the vacancy, the manipulated camera and VOI.
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
+        expect(target.get_by_text("MPR Plane Layout · 출력 미지원")).to_be_visible()
+        self.assertEqual(0, target.get_by_role("button", name="Print Saved Images", exact=True).count(),
+                         "a plane-layout Job offers no output path it cannot render")
+        target.get_by_role("button", name="Restore Job", exact=True).click()
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("복원했습니다", timeout=45000)
+        restored = self.planes(target)
+        self.assertEqual(4, len(restored)); self.assertEqual([], restored[3]["sets"])
+        self.assertIsNone(restored[3].get("volumeId"))
+        for cell in restored[:3]:
+            self.assertEqual("orthographic", cell["type"]); self.assertTrue(cell["loaded"])
+            self.assertEqual(cell["slices"], cell["framesLoaded"])
+            self.assertEqual(sorted(stored["volume"]["sops"]), cell["sops"], "the whole original volume, in order")
+            self.assertEqual(cell["sourceSops"], cell["sops"]); self.assertEqual(series, cell["series"])
+        np.testing.assert_allclose(np.abs([cell["viewPlaneNormal"] for cell in restored[:3]]),
+                                   [[0, 0, 1], [1, 0, 0], [0, 1, 0]], atol=1e-6)
+        actual = target.evaluate("""()=>window.kinCreateVolumeJob({grid:services.viewportGridService,
+          cs:services.cornerstoneViewportService,ds:services.displaySetService,
+          studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture()""")
+        self.assertEqual(7, actual["version"]); self.assertEqual(stored["active"], actual["active"])
+        self.assertEqual([stored["rows"], stored["cols"]], [actual["rows"], actual["cols"]])
+        self.assertEqual(stored["volume"]["sops"], actual["volume"]["sops"])
+        self.assertEqual(target.evaluate("()=>services.viewportGridService.getActiveViewportId()"),
+                         self.cells(target)[stored["active"]]["id"])
+        for left, right in zip(actual["cells"], stored["cells"]):
+            if right is None:
+                self.assertIsNone(left); continue
+            self.assertEqual(right["orientation"], left["orientation"])
+            self.assertEqual(right["projection"], left["projection"])
+            self.assertEqual(right["properties"]["VOILUTFunction"], left["properties"]["VOILUTFunction"])
+            self.assertEqual(right["properties"]["invert"], left["properties"]["invert"])
+            self.assertEqual(right["properties"]["interpolationType"], left["properties"]["interpolationType"])
+            for bound in ("lower", "upper"):
+                self.assertAlmostEqual(left["properties"]["voiRange"][bound],
+                                       right["properties"]["voiRange"][bound], delta=1e-6)
+            for key, want in right["camera"].items():
+                got = left["camera"][key]
+                if isinstance(want, list):
+                    for x, y in zip(got, want):
+                        self.assertAlmostEqual(x, y, delta=1e-6)
+                elif isinstance(want, bool):
+                    self.assertEqual(got, want)
+                else:
+                    self.assertAlmostEqual(got, want, delta=1e-6)
+        print("HP_PLANE_JOB " + json.dumps(dict(saved=stored, reopened=actual)), flush=True)
+        target.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-plane-layout-job-restored.png'))
         expect(work.locator("#findings")).to_have_value("HP MPR UNSAVED REPORT")
         self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
 

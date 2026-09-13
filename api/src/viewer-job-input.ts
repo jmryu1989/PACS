@@ -35,11 +35,16 @@ export function previewCommand(raw: Buffer): any {
   if (![2,4,6].includes(b.snapshot.version) || b.snapshot.version===6&&b.snapshot.batch!==null) invalid();
   return b.snapshot;
 }
+// Version 7 is the Hanging Protocol plane layout: the same single fully loaded CT volume,
+// but on 1x1/1x2/2x2 as well as 1x3/3x1, with null vacancies and an explicit per-cell
+// orientation. Versions 4-6 keep their exact three-plane shape and their batch/marks rules.
+const VOLUME_LAYOUTS: [number, number][] = [[1,1],[1,2],[2,2],[1,3],[3,1]];
+const PLANE_ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6].includes(s?.version) ? ['volume'] : []), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:[])]);
-  if (![1, 2, 3, 4, 5, 6].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7].includes(s?.version) ? ['volume'] : []), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:[])]);
+  if (![1, 2, 3, 4, 5, 6, 7].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
-  const volume = [4,5,6].includes(s.version);
+  const volume = [4,5,6,7].includes(s.version), planes = s.version === 7;
   if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
   const batch=s.version===5||s.version===6&&s.batch!==null;
   if(batch){
@@ -53,12 +58,14 @@ function validateJobSnapshot(s: any) {
     if (!Array.isArray(s.volume.sops) || s.volume.sops.length < 2 || s.volume.sops.length > 256 || new Set(s.volume.sops).size !== s.volume.sops.length) invalid();
     s.volume.sops.forEach(viewerUid);
   }
-  if ((volume ? !(s.rows === 1 && s.cols === 3 || s.rows === 3 && s.cols === 1) : ![1, 2].includes(s.rows) || ![1, 2].includes(s.cols)) || !Number.isInteger(s.active) || s.active < 0 || s.active >= s.rows * s.cols ||
+  if ((volume ? !(planes ? VOLUME_LAYOUTS.some(([r, c]) => s.rows === r && s.cols === c) : s.rows === 1 && s.cols === 3 || s.rows === 3 && s.cols === 1)
+              : ![1, 2].includes(s.rows) || ![1, 2].includes(s.cols)) || !Number.isInteger(s.active) || s.active < 0 || s.active >= s.rows * s.cols ||
       !Array.isArray(s.cells) || s.cells.length !== s.rows * s.cols || s.cells.every(c => !c)) invalid();
   let pixels = 0;
   for (const c of [...s.cells,...(batch?[s.batch.cell]:[])]) {
-    if (c === null) { if (volume) invalid(); continue; }
-    keys(c, ['study', 'series', ...(volume ? ['projection'] : ['sop', 'frame']), 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
+    if (c === null) { if (volume && !planes) invalid(); continue; }
+    keys(c, ['study', 'series', ...(planes ? ['orientation'] : []), ...(volume ? ['projection'] : ['sop', 'frame']), 'camera', 'properties', ...(s.version >= 2 ? ['viewport'] : [])]);
+    if (planes && !PLANE_ORIENTATIONS.includes(c.orientation)) invalid();
     if (s.version >= 2) {
       keys(c.viewport, ['width', 'height']);
       for (const x of Object.values(c.viewport)) { number(x, 1, 8192); if (!Number.isInteger(x)) invalid(); }

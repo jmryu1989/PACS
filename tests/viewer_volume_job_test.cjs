@@ -37,6 +37,48 @@ test('physical slab bound and ordered volume identity are checked',()=>{
  const reversed=structuredClone(snapshot);reversed.volume.sops.reverse();assert.match(verifyVolumeReference(reversed,[...tags].reverse(),'SYNTHETIC'),/^[a-f0-9]{64}$/);
  const wrong=[tags[1],tags[0],tags[2]];rejected(()=>verifyVolumeReference(snapshot,wrong,'SYNTHETIC'));
 });
+// Version 7 is the Hanging Protocol plane layout: the same one CT volume on 1x1/1x2/2x2 as
+// well as 1x3/3x1, null vacancies, and an explicit orientation on every real cell.
+const plane=o=>({...structuredClone(cell),orientation:o});
+const layout={version:7,studies:[volume.study],volume,rows:2,cols:2,active:3,
+ cells:[plane('axial'),plane('sagittal'),plane('coronal'),null]};
+test('the plane layout saves vacancies and an explicit orientation on the accepted grids',()=>{
+ assert.equal(command(layout).snapshot.version,7);
+ for(const [rows,cols,cells] of [[1,1,[plane('axial')]],[1,2,[plane('coronal'),null]],
+   [1,3,[plane('axial'),null,plane('coronal')]],[3,1,[null,plane('axial'),plane('sagittal')]],
+   [2,2,[null,null,null,plane('axial')]]]){
+  const s={...structuredClone(layout),rows,cols,active:cells.length-1,cells};
+  assert.equal(command(s).snapshot.cells.length,rows*cols);
+ }
+ // A vacancy may hold the active index; the cell list still covers the whole grid.
+ const vacant=structuredClone(layout);assert.equal(command(vacant).snapshot.cells[3],null);
+ assert.match(verifyVolumeReference(layout,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const thick=structuredClone(layout);thick.cells[0].projection.thickness=100;
+ rejected(()=>verifyVolumeReference(thick,tags,'SYNTHETIC'));
+});
+test('the plane layout refuses an unlisted grid, a nameless plane and an emptied screen',()=>{
+ for(const change of [s=>{s.rows=2;s.cols=1;s.cells=[plane('axial'),null];s.active=0;},
+   s=>{s.rows=3;s.cols=3;s.cells=[plane('axial'),...Array(8).fill(null)];s.active=0;},
+   s=>delete s.cells[0].orientation,s=>s.cells[0].orientation='oblique',s=>s.cells[0].orientation=null,
+   s=>s.cells=[null,null,null,null],s=>s.active=4,s=>s.cells[0].sop=volume.sops[0],
+   s=>s.cells.pop(),s=>s.batch={cell:plane('axial'),offset:0,interval:1,count:2,reverse:false},
+   s=>s.marks={version:1,visible:true,sync:true,marks:[]},s=>delete s.volume]){
+  const s=structuredClone(layout);change(s);rejected(()=>command(s));
+ }
+});
+test('the three-plane versions keep their exact shape beside the new layout',()=>{
+ for(const version of [4,5,6]){
+  const s=structuredClone(snapshot);s.version=version;
+  if(version>=5)s.batch={cell:structuredClone(cell),offset:-1,interval:1,count:3,reverse:false};
+  if(version===6)s.marks={version:1,visible:true,sync:true,marks:[]};
+  assert.equal(command(s).snapshot.version,version);
+  // No orientation key, no vacancy and no other grid enters versions 4-6.
+  for(const change of [x=>x.cells[0].orientation='axial',x=>x.cells[2]=null,
+    x=>{x.rows=2;x.cols=2;x.cells.push(structuredClone(cell));}]){
+   const bad=structuredClone(s);change(bad);rejected(()=>command(bad));
+  }
+ }
+});
 test('batch recipe is independent of current planes and bounds count, raster and source range',()=>{
  const s=structuredClone(snapshot);s.version=5;s.batch={cell:structuredClone(cell),offset:-1,interval:1,count:3,reverse:false};
  assert.equal(command(s).snapshot.version,5);assert.match(verifyVolumeReference(s,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
