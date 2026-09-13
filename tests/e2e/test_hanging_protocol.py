@@ -92,6 +92,32 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         value["rules"].append(stack)
         return value
 
+    def mixed_library(self, name="Synthetic Mixed Layout"):
+        """What an HP rule may already place: two plane cells of one eligible CT volume
+        beside an ordinary frame cell of another series, plus a vacancy."""
+        value = self.library(name=name)
+        rule = value["rules"][0]
+        first = rule["selectors"][0]
+        second = json.loads(json.dumps(first))
+        second.update(alias="Second", occurrence=2)
+        rule["selectors"] = [first, second]
+        rule["layout"] = {"rows": 2, "cols": 2, "cells": [
+            {"alias": "Current", "view": "mpr", "orientation": "axial"},
+            "Second",
+            {"alias": "Current", "view": "mpr", "orientation": "coronal"},
+            None]}
+        return value
+
+    def frame_cell(self, page, index):
+        """The original instance an ordinary stack cell is actually standing on."""
+        return page.evaluate("""index=>{
+          const cell=[...services.viewportGridService.getState().viewports.values()]
+            .sort((a,b)=>a.y-b.y||a.x-b.x)[index];
+          const v=services.cornerstoneViewportService.getCornerstoneViewport(cell.viewportId);
+          const m=cornerstone.metaData.get('instance',v.getCurrentImageId());
+          return {type:v.type,study:m.StudyInstanceUID,series:m.SeriesInstanceUID,sop:m.SOPInstanceUID,
+                  frames:v.getImageIds().length,voi:v.getProperties().voiRange};}""", arg=index)
+
     def planes(self, page):
         return page.evaluate("""()=>[...services.viewportGridService.getState().viewports.values()]
           .sort((a,b)=>a.y-b.y||a.x-b.x).map(cell=>{
@@ -577,6 +603,168 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         self.assertEqual(0, self.stack.request("GET", "/hanging-protocols", "doctor").body["revision"],
                          "applying a site rule writes nothing into the member's own account")
         expect(work.locator("#findings")).to_have_value("HP SITE UNSAVED REPORT")
+        self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
+
+
+    def test_hp_07_mixed_plane_and_frame_cells_round_trip_through_the_account(self):
+        patient = "HP-MIXED-" + uuid.uuid4().hex[:12]
+        current = self.multiple(patient, "current", "20260801")
+        self.seed_report(current); originals = self.originals(); rows = self.report_rows(current)
+        work = self.login(); self.select(work, current); work.locator("#findings").fill("HP MIXED UNSAVED REPORT")
+        viewer = self.launch(work.context.new_page(), [current])
+        self.import_rules(viewer, self.mixed_library())
+        self.apply(viewer, "Applied")
+        self.rendered_planes(viewer, 3)
+        cells = self.planes(viewer)
+        self.assertEqual(["orthographic", "stack", "orthographic", None], [cell["type"] for cell in cells],
+                         "the rule places both kinds in one grid and leaves the fourth cell empty")
+        self.assertEqual([], cells[3]["sets"]); self.assertIsNone(cells[3].get("volumeId"))
+        plane_series = self.described_ref(viewer, current, "D03A current")["series"]
+        frame_series = self.described_ref(viewer, current, "D02E second series")["series"]
+        self.assertNotEqual(plane_series, frame_series)
+        for cell in (cells[0], cells[2]):
+            self.assertEqual(cells[0]["volumeId"], cell["volumeId"], "both planes show one and the same volume")
+            self.assertEqual(plane_series, cell["series"]); self.assertEqual(current.uid, cell["study"])
+            self.assertTrue(cell["loaded"]); self.assertEqual(cell["slices"], cell["framesLoaded"])
+            self.assertEqual(cell["sourceSops"], cell["sops"])
+        np.testing.assert_allclose(np.abs([cells[0]["viewPlaneNormal"], cells[2]["viewPlaneNormal"]]),
+                                   [[0, 0, 1], [0, 1, 0]], atol=1e-6)
+        before_frame = self.frame_cell(viewer, 1)
+        self.assertEqual(frame_series, before_frame["series"])
+
+        # Manipulate BOTH kinds, then make the frame cell the active one, so the saved snapshot
+        # can only be reproduced by restoring a camera, a window and a chosen original frame.
+        viewer.evaluate("""()=>{
+          const grid=services.viewportGridService,cs=services.cornerstoneViewportService;
+          const views=[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
+          const plane=cs.getCornerstoneViewport(views[0].viewportId),c=plane.getCamera();
+          plane.setCamera({parallelScale:c.parallelScale*1.2,
+            focalPoint:c.focalPoint.map((n,i)=>n+(i===1?2:0)),position:c.position.map((n,i)=>n+(i===1?2:0))});
+          plane.setProperties({voiRange:{lower:-420,upper:820}});plane.render();}""")
+        viewer.evaluate("""async()=>{
+          const grid=services.viewportGridService,cs=services.cornerstoneViewportService;
+          const views=[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
+          const v=cs.getCornerstoneViewport(views[1].viewportId);
+          const target=Math.min(1,v.getImageIds().length-1);
+          await v.setImageIdIndex(target);v.scroll(target-v.getTargetImageIdIndex(),false);
+          v.setProperties({voiRange:{lower:-300,upper:700}});v.render();
+          grid.setActiveViewportId(views[1].viewportId);}""")
+        chosen = self.frame_cell(viewer, 1)
+        self.assertNotEqual(before_frame["sop"], chosen["sop"],
+                            "the saved frame must not be the one the rule opened by itself")
+
+        self.addCleanup(self.cleanup_jobs, current.uid)
+        expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
+        viewer.get_by_label("Job Title", exact=True).fill("HP mixed layout job")
+        viewer.get_by_role("button", name="Save New Job", exact=True).click()
+        expect(viewer.locator("#kin-viewer-jobs-status")).to_contain_text("저장했습니다", timeout=45000)
+        listed = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor")
+        self.assertEqual(200, listed.status, listed.text); self.assertEqual(1, len(listed.body["jobs"]))
+        job = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs/{listed.body['jobs'][0]['id']}", "doctor")
+        self.assertEqual(200, job.status, job.text); stored = job.body["snapshot"]
+        self.assertEqual(8, stored["version"]); self.assertEqual([2, 2], [stored["rows"], stored["cols"]])
+        self.assertEqual(4, len(stored["cells"])); self.assertIsNone(stored["cells"][3])
+        self.assertEqual(["plane", "stack", "plane"], [c["kind"] for c in stored["cells"][:3]])
+        self.assertEqual(1, stored["active"], "the manipulated frame cell stays the active cell index")
+        self.assertEqual(["axial", "coronal"], [stored["cells"][i]["orientation"] for i in (0, 2)])
+        self.assertEqual(plane_series, stored["volume"]["series"])
+        self.assertEqual(current.uid, stored["volume"]["study"])
+        self.assertEqual(sorted(cells[0]["sops"]), sorted(stored["volume"]["sops"]))
+        self.assertEqual(64, len(stored["volume"]["sourceDigest"]))
+        for index in (0, 2):
+            self.assertNotIn("sop", stored["cells"][index]); self.assertNotIn("frame", stored["cells"][index])
+            self.assertEqual(plane_series, stored["cells"][index]["series"])
+        # The frame cell keeps a real original instance, and the server bound its own digest.
+        self.assertEqual(chosen["sop"], stored["cells"][1]["sop"])
+        self.assertEqual(frame_series, stored["cells"][1]["series"])
+        self.assertEqual(1, stored["cells"][1]["frame"])
+        self.assertNotIn("orientation", stored["cells"][1])
+        self.assertRegex(stored["cells"][1]["sourceDigest"], r"^[0-9a-f]{32}$")
+
+        # Both originals are verified for this one snapshot: an incomplete volume and a frame
+        # cell pointed at an instance of another series are each refused, Job untouched.
+        def plain(snapshot):
+            value = json.loads(json.dumps(snapshot)); del value["volume"]["sourceDigest"]
+            for cell in value["cells"]:
+                if cell is not None:
+                    cell.pop("sourceDigest", None)
+            return value
+        for label, forge in [("incomplete volume", lambda v: v["volume"].__setitem__("sops", v["volume"]["sops"][::2])),
+                             ("foreign frame", lambda v: v["cells"][1].__setitem__("sop", v["volume"]["sops"][0]))]:
+            forged = plain(stored); forge(forged)
+            denied = self.stack.request("POST", f"/studies/{current.uid}/viewer-jobs", "doctor",
+                                        dict(id=str(uuid.uuid4()), title="Rejected mixed layout",
+                                             description="", snapshot=forged))
+            self.assertEqual(400, denied.status, label + ": " + denied.text)
+        self.assertEqual(1, len(self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor").body["jobs"]))
+
+        # Reopened on the same account and device over an ordinary single-cell screen — the
+        # rollback snapshot of that screen is taken first and the mixed layout is rebuilt onto it.
+        target = self.launch(self.login(), [current])
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
+        expect(target.get_by_text("MPR Mixed Layout · 출력 미지원")).to_be_visible()
+        self.assertEqual(0, target.get_by_role("button", name="Print Saved Images", exact=True).count(),
+                         "a mixed-layout Job offers no output path it cannot render")
+        self.assertEqual(1, len(self.cells(target)), "the reopened viewer starts on its own default layout")
+        target.get_by_role("button", name="Restore Job", exact=True).click()
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("복원했습니다", timeout=45000)
+        restored = self.planes(target)
+        self.assertEqual(["orthographic", "stack", "orthographic", None], [cell["type"] for cell in restored])
+        self.assertEqual([], restored[3]["sets"]); self.assertIsNone(restored[3].get("volumeId"))
+        for index in (0, 2):
+            cell = restored[index]
+            self.assertTrue(cell["loaded"]); self.assertEqual(cell["slices"], cell["framesLoaded"])
+            self.assertEqual(sorted(stored["volume"]["sops"]), cell["sops"], "the whole original volume, in order")
+            self.assertEqual(cell["sourceSops"], cell["sops"]); self.assertEqual(plane_series, cell["series"])
+        np.testing.assert_allclose(np.abs([restored[0]["viewPlaneNormal"], restored[2]["viewPlaneNormal"]]),
+                                   [[0, 0, 1], [0, 1, 0]], atol=1e-6)
+        shown = self.frame_cell(target, 1)
+        self.assertEqual([stored["cells"][1][key] for key in ("study", "series", "sop")],
+                         [shown["study"], shown["series"], shown["sop"]],
+                         "the frame cell stands on exactly the saved original instance")
+        for bound in ("lower", "upper"):
+            self.assertAlmostEqual(stored["cells"][1]["properties"]["voiRange"][bound], shown["voi"][bound], delta=1e-6)
+        self.assertEqual(target.evaluate("()=>services.viewportGridService.getActiveViewportId()"),
+                         self.cells(target)[stored["active"]]["id"])
+        target.screenshot(path=str(Path(__file__).parent / 'artifacts' / 'HP-mixed-layout-job-restored.png'))
+
+        # Saving again from the restored screen re-captures it through the product's own path;
+        # the second stored snapshot is compared to the first rather than to a label.
+        target.get_by_label("Job Title", exact=True).fill("HP mixed layout recapture")
+        target.get_by_role("button", name="Save New Job", exact=True).click()
+        expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("저장했습니다", timeout=45000)
+        rows_now = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs", "doctor").body["jobs"]
+        self.assertEqual(2, len(rows_now))
+        again_id = next(r["id"] for r in rows_now if r["title"] == "HP mixed layout recapture")
+        again = self.stack.request("GET", f"/studies/{current.uid}/viewer-jobs/{again_id}", "doctor").body["snapshot"]
+        self.assertEqual(8, again["version"])
+        self.assertEqual([stored["rows"], stored["cols"], stored["active"]],
+                         [again["rows"], again["cols"], again["active"]])
+        self.assertEqual(stored["volume"]["sops"], again["volume"]["sops"])
+        self.assertEqual(stored["volume"]["sourceDigest"], again["volume"]["sourceDigest"])
+        for left, right in zip(again["cells"], stored["cells"]):
+            if right is None:
+                self.assertIsNone(left); continue
+            self.assertEqual(right["kind"], left["kind"])
+            for key in ("study", "series", "orientation", "sop", "frame", "sourceDigest", "projection"):
+                if key in right:
+                    self.assertEqual(right[key], left[key], key)
+            for key in ("VOILUTFunction", "invert", "interpolationType"):
+                self.assertEqual(right["properties"][key], left["properties"][key])
+            for bound in ("lower", "upper"):
+                self.assertAlmostEqual(left["properties"]["voiRange"][bound],
+                                       right["properties"]["voiRange"][bound], delta=1e-6)
+            for key, want in right["camera"].items():
+                got = left["camera"][key]
+                if isinstance(want, list):
+                    for x, y in zip(got, want):
+                        self.assertAlmostEqual(x, y, delta=1e-6)
+                elif isinstance(want, bool):
+                    self.assertEqual(got, want)
+                else:
+                    self.assertAlmostEqual(got, want, delta=1e-6)
+        print("HP_MIXED_JOB " + json.dumps(dict(saved=stored, reopened=again)), flush=True)
+        expect(work.locator("#findings")).to_have_value("HP MIXED UNSAVED REPORT")
         self.assertEqual(rows, self.report_rows(current)); self.assertEqual(originals, self.originals())
 
 

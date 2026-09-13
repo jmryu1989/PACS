@@ -1,10 +1,16 @@
 /* MPR Jobs keep volume references, never a fictitious reconstructed SOP/frame. */
-window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
+window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   const fail=()=>{throw Error('완전히 로드된 단일 일반 CT의 평면 배치(1·2·4분할 또는 3평면)에서 MPR 작업을 저장하세요.');};
+  // The ordinary stack cell of a mixed layout is captured, resolved and restored by the very
+  // helpers viewer-jobs.js already uses for a version 2 Job; this module never grows a second
+  // copy of that shape. Without them a mixed screen refuses instead of dropping a cell.
+  const stackTools=()=>{if(!stack?.cell||!stack.resolve||!stack.apply)throw Error('일반 영상 칸이 있는 배치의 저장 도구를 불러오지 못했습니다. 미저장 입력을 보존한 뒤 뷰어를 다시 여세요.');return stack;};
   const ordered=()=>[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
   // The Hanging Protocol whitelist (hanging-protocol-model.js:109) plus the three-plane
   // grids this Job already saved. A vacancy stays a cell, so a cell index is a viewport index.
-  const GRIDS=[[1,1],[1,2],[2,2],[1,3],[3,1]],ORIENTATIONS=['axial','sagittal','coronal'];
+  // A mixed plane+stack layout is admitted on the Hanging Protocol whitelist only, because
+  // no other grid can be produced by a rule that places both kinds.
+  const GRIDS=[[1,1],[1,2],[2,2],[1,3],[3,1]],MIXED_GRIDS=[[1,1],[1,2],[2,2]],ORIENTATIONS=['axial','sagittal','coronal'];
   const PLANE_AXIS={axial:2,sagittal:0,coronal:1};
   // The plane a cell actually is. The requested orientation is authoritative because a
   // camera the Crosshairs tool has rotated no longer names its own plane; without one,
@@ -28,6 +34,9 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
   }
   function resolve(value) {
     if(value.version===6&&!window.kinMprMarks)throw Error('MPR 3D 표식 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
+    // Every stack cell of a mixed layout must find its own original series and frame before
+    // the layout is touched, on exactly the rule the version 2 Job already applies.
+    if(value.version===8)for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
     const ref=value.volume,matches=ds.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===ref.study&&d.SeriesInstanceUID===ref.series);
     if(matches.length!==1||matches[0].images?.length!==ref.sops.length||new Set(matches[0].images.map(m=>m.SOPInstanceUID)).size!==ref.sops.length||matches[0].images.some(m=>!ref.sops.includes(m.SOPInstanceUID)||m.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'))throw Error('저장한 MPR의 전체 원본 시리즈를 찾을 수 없습니다.');
     return matches[0].displaySetInstanceUID;
@@ -35,15 +44,32 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
   function capture(readOnly=false,includeBatch=true) {
     const state=grid.getState(),views=ordered(),{numRows:rows,numCols:cols,layoutType}=state.layout;
     if(layoutType!=='grid'||!GRIDS.some(([r,c])=>rows===r&&cols===c)||views.length!==rows*cols)fail();
+    // What each cell actually is, decided once, before any shape is chosen: an empty cell is
+    // a vacancy, a reconstructed viewport is a plane and anything else is an ordinary frame.
+    const kinds=views.map(g=>{
+      const sets=g.displaySetInstanceUIDs||[];
+      return sets.length?(cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic'?'plane':'stack'):null;
+    });
+    // A mixed layout is only a mixed layout: it needs both kinds, so a 1x1 can never be one.
+    const mixed=kinds.includes('stack');
+    if(mixed&&(!kinds.includes('plane')||!MIXED_GRIDS.some(([r,c])=>rows===r&&cols===c)))fail();
+    if(mixed)stackTools();
     // The established three-plane job keeps its exact v4/v5/v6 snapshot. Every other
     // allowed grid, and any allowed grid holding a vacancy, is the new v7 layout.
-    const legacy=(rows===1&&cols===3||rows===3&&cols===1)&&views.every(g=>g.displaySetInstanceUIDs?.length===1);
+    const legacy=!mixed&&(rows===1&&cols===3||rows===3&&cols===1)&&views.every(g=>g.displaySetInstanceUIDs?.length===1);
     let reference,loaded,pixels=0;
+    // One screen, one pixel budget: a mixed layout's frame cells spend from the same
+    // allowance the plane cells do, so the cap cannot be widened by mixing kinds.
+    const measure=(width,height)=>{
+      pixels+=width*height;
+      if(![width,height].every(n=>Number.isInteger(n)&&n>=1&&n<=8192)||width*height>16777216||pixels>33554432)throw Error('저장할 화면 크기를 줄인 뒤 다시 저장하세요.');
+    };
     const cells=views.map((g,i)=>{
       if(Math.abs(g.x-(i%cols)/cols)>1e-6||Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6||Math.abs(g.width-1/cols)>1e-6||Math.abs(g.height-1/rows)>1e-6)fail();
       const sets=g.displaySetInstanceUIDs||[];
       if(!sets.length){if(legacy)fail();return null;}
       if(sets.length!==1)fail();
+      if(kinds[i]==='stack')return {kind:'stack',...stackTools().cell(g,canvas=>measure(canvas?.width,canvas?.height))};
       const v=cs.getCornerstoneViewport(g.viewportId),current=source(v);
       const orientation=legacy?null:planeOrientation(g,v);
       if(!legacy&&!orientation)throw Error('평면 방향을 확인할 수 없는 화면입니다. MPR 평면 배치를 다시 적용한 뒤 저장하세요.');
@@ -51,8 +77,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
       reference=current.reference;loaded=current.volume;
       if(resolve({volume:reference})!==sets[0])fail();
       const camera=v.getCamera(),properties=v.getProperties(),canvas=v.getCanvas(),mapper=v.getActors()[0].actor.getMapper();
-      const width=canvas.width,height=canvas.height;pixels+=width*height;
-      if(![width,height].every(n=>Number.isInteger(n)&&n>=1&&n<=8192)||width*height>16777216||pixels>33554432)throw Error('저장할 화면 크기를 줄인 뒤 다시 저장하세요.');
+      const width=canvas.width,height=canvas.height;measure(width,height);
       // Native inversion labels its grayscale transfer function "X Ray".
       const color=properties.colormap?.name;
       if(color&&color!=='Grayscale'&&!(color==='X Ray'&&properties.invert))throw Error('MPR 작업은 회색조 표시에서 저장할 수 있습니다.');
@@ -62,7 +87,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
       const blend=mapper.getBlendMode(),thickness=v.getSlabThickness()*2;
       if(![0,1,2,3].includes(blend)||!Number.isFinite(thickness)||thickness<.1||thickness>1000||blend===0&&thickness>.2)fail();
       if(blend===3){const info=mapper.getScalarTexture?.()?.getVolumeInfo();if(!Number.isFinite(info?.dataComputedScale?.[0])||info.dataComputedScale[0]<=0)throw Error('평균 투영을 다시 적용한 뒤 저장하세요.');}
-      return {study:reference.study,series:reference.series,...(legacy?{}:{orientation}),viewport:{width,height},projection:{blend,thickness},
+      return {...(mixed?{kind:'plane'}:{}),study:reference.study,series:reference.series,...(legacy?{}:{orientation}),viewport:{width,height},projection:{blend,thickness},
         camera:{...Object.fromEntries(['focalPoint','position','viewUp','viewPlaneNormal','parallelScale','flipHorizontal','flipVertical'].map(k=>[k,camera[k]])),rotation:camera.rotation||0},
         properties:{voiRange:properties.voiRange,VOILUTFunction:properties.VOILUTFunction||'LINEAR',invert:!!properties.invert,interpolationType:properties.interpolationType??1}};
     });
@@ -75,7 +100,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     if(!legacy){
       if(batch)throw Error('단면 묶음은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 묶음을 해제하거나 3평면 배치에서 저장하세요.');
       if(annotated)throw Error('MPR 3D 표식은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 표식을 지우거나 3평면 배치에서 저장하세요.');
-      return JSON.parse(JSON.stringify({version:7,studies,rows,cols,active,volume:reference,cells}));
+      return JSON.parse(JSON.stringify({version:mixed?8:7,studies,rows,cols,active,volume:reference,cells}));
     }
     return JSON.parse(JSON.stringify({version:annotated?6:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(annotated?{marks,batch:batch||null}:batch?{batch}:{})}));
   }
@@ -89,6 +114,9 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
   async function apply(value,current) {
     if(JSON.stringify(value.studies)!==JSON.stringify(studies))throw Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
     const set=resolve(value),ids=value.cells.map(()=> 'kin-volume-job-'+crypto.randomUUID());
+    // Every stack cell of a mixed layout names its own display set; a plane cell shares the
+    // single volume display set. Both are resolved before the current screen is replaced.
+    const frames=value.cells.map(cell=>cell&&cell.kind==='stack'?stackTools().resolve(cell):null);
     window.kinVolumeBatchState?.clear();
     // Native reset callbacks reset every linked plane while OHIF replaces one
     // viewport. Hold that propagation through both initialization and failure.
@@ -100,11 +128,13 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
     // A saved vacancy is rebuilt as the same empty stack cell a Hanging Protocol leaves
     // (viewer-hanging-protocol.js:97-101), so the grid keeps every saved cell index.
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
-      findOrCreateViewport:index=>value.cells[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
-        :({displaySetInstanceUIDs:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
+      findOrCreateViewport:index=>value.cells[index]&&!frames[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
+        // A saved frame cell is rebuilt as the ordinary stack viewport a Hanging Protocol
+        // leaves, holding its own display set; a vacancy is the same request holding none.
+        :({displaySetInstanceUIDs:frames[index]?[frames[index]]:[],displaySetOptions:[{}],viewportOptions:{viewportId:ids[index],viewportType:'stack',toolGroupId:'default',allowUnmatchedView:true}})});
     const loaded=[],deadline=Date.now()+60000;
     for(let i=0;i<ids.length;i++){
-      if(!value.cells[i])continue;
+      if(!value.cells[i]||frames[i])continue;
       const want=loaded.length+1;
       while(Date.now()<deadline){
         if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');
@@ -117,6 +147,15 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies}) {
         await new Promise(r=>setTimeout(r,100));
       }
       if(loaded.length!==want)throw Error('MPR 원본 볼륨 로딩에 실패했습니다.');
+    }
+    // The frame cells are restored by the same routine a version 2 Job uses, and then each
+    // one is read back: a cell showing any other instance is a failed restore, not a restore.
+    for(let i=0;i<value.cells.length;i++){
+      if(!frames[i])continue;
+      const cell=value.cells[i];await stackTools().apply(ids[i],cell,current);
+      const v=cs.getCornerstoneViewport(ids[i]),shown=v?.type==='stack'&&cornerstone.metaData.get('instance',v.getCurrentImageId?.());
+      if(!shown||shown.StudyInstanceUID!==cell.study||shown.SeriesInstanceUID!==cell.series||shown.SOPInstanceUID!==cell.sop)
+        throw Error('저장한 원본 프레임을 복원하지 못했습니다.');
     }
     const rendered=()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
     await rendered();

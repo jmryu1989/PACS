@@ -66,6 +66,55 @@ test('the plane layout refuses an unlisted grid, a nameless plane and an emptied
   const s=structuredClone(layout);change(s);rejected(()=>command(s));
  }
 });
+// Version 8 is the mixed Hanging Protocol layout: plane cells of that same one volume beside
+// ordinary frame cells, on the Hanging Protocol grids only. Every non-null cell names its own
+// kind, so the server never infers a cell shape from the snapshot version alone.
+const frame={study:volume.study,series:'2.25.7',sop:'2.25.8',frame:1,viewport:{width:256,height:256},camera:{focalPoint:[0,0,1],position:[0,0,101],viewUp:[0,1,0],viewPlaneNormal:[0,0,1],parallelScale:128,rotation:0,flipHorizontal:false,flipVertical:false},properties:{voiRange:{lower:-1000,upper:1000},VOILUTFunction:'LINEAR',invert:false,interpolationType:0}};
+const planeOf=o=>({kind:'plane',...structuredClone(cell),orientation:o});
+const frameOf=()=>({kind:'stack',...structuredClone(frame)});
+const mixed={version:8,studies:[volume.study],volume,rows:2,cols:2,active:1,
+ cells:[planeOf('axial'),frameOf(),planeOf('coronal'),null]};
+const stackOnly={version:2,studies:[volume.study],rows:1,cols:2,active:0,cells:[structuredClone(frame),null]};
+test('the mixed layout keeps both cell shapes with an explicit kind and one volume',()=>{
+ assert.equal(command(mixed).snapshot.version,8);
+ for(const [rows,cols,active,cells] of [[1,2,0,[frameOf(),planeOf('axial')]],
+   [2,2,3,[planeOf('sagittal'),null,frameOf(),null]],[2,2,0,[frameOf(),frameOf(),planeOf('axial'),null]]]){
+  const s={...structuredClone(mixed),rows,cols,active,cells};
+  assert.equal(command(s).snapshot.cells.length,rows*cols);
+ }
+ // The frame cell carries no slab, so the physical bound only judges the real planes and
+ // cannot dereference a projection that a frame cell never had.
+ assert.match(verifyVolumeReference(mixed,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const thick=structuredClone(mixed);thick.cells[0].projection.thickness=100;
+ rejected(()=>verifyVolumeReference(thick,tags,'SYNTHETIC'));
+});
+test('the mixed layout refuses an unnamed kind, a layout that is not mixed and a foreign grid',()=>{
+ // An unnamed kind on a layout that is otherwise properly mixed must be refused on its own
+ // merit: the mixture rule is already satisfied by the other cells and cannot catch it.
+ for(const change of [s=>delete s.cells[0].kind,s=>s.cells[1].kind='frame',s=>s.cells[0].kind='stack',
+   s=>{s.cells[3]={kind:'frame',...structuredClone(frame)};},s=>{s.cells[3]={...structuredClone(frame)};},
+   s=>s.cells[1]=planeOf('sagittal'),s=>{s.cells=[frameOf(),frameOf(),frameOf(),null];},
+   s=>{s.rows=1;s.cols=3;s.cells=[planeOf('axial'),frameOf(),planeOf('coronal')];},
+   s=>{s.rows=2;s.cols=1;s.cells=[planeOf('axial'),frameOf()];s.active=0;},
+   s=>{s.rows=3;s.cols=3;s.cells=[planeOf('axial'),frameOf(),...Array(7).fill(null)];},
+   s=>s.cells[0].sop=volume.sops[0],s=>delete s.cells[0].orientation,s=>s.cells[1].orientation='axial',
+   s=>s.cells[1].frame=2,s=>delete s.cells[1].sop,s=>s.cells[0].series='2.25.99',
+   s=>s.cells[1].study='2.25.99',s=>delete s.volume,s=>s.active=4,s=>s.cells.pop(),
+   s=>s.batch={cell:planeOf('axial'),offset:0,interval:1,count:2,reverse:false},
+   s=>s.marks={version:1,visible:true,sync:true,marks:[]}]){
+  const s=structuredClone(mixed);change(s);rejected(()=>command(s));
+ }
+});
+test('the established shapes refuse a cell kind and the mixed shape stays out of them',()=>{
+ assert.equal(command(stackOnly).snapshot.version,2);
+ // No version but 8 admits a kind key, in either direction.
+ for(const [base,change] of [[stackOnly,s=>s.cells[0].kind='stack'],[stackOnly,s=>s.cells[0].kind='plane'],
+   [layout,s=>s.cells[0].kind='plane'],[snapshot,s=>s.cells[0].kind='plane']]){
+  const s=structuredClone(base);change(s);rejected(()=>command(s));
+ }
+ // A version 2 layout carries no volume, so its cells can never claim the mixed shape.
+ const forged=structuredClone(stackOnly);forged.version=8;rejected(()=>command(forged));
+});
 test('the three-plane versions keep their exact shape beside the new layout',()=>{
  for(const version of [4,5,6]){
   const s=structuredClone(snapshot);s.version=version;
