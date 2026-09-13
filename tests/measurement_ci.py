@@ -44,6 +44,12 @@ PROFILES = {
         'suite_timeout': 900,
         'suites': (('e2e/test_viewer_display_scope.py', 'ViewerDisplayScopeE2E', 'ci-display-scope'),),
     },
+    'cell-merge': {
+        'out': ROOT / 'tests/e2e/artifacts/cell-merge-ci',
+        'project_prefix': 'kin-cell-merge-ci-',
+        'suite_timeout': 900,
+        'suites': (('e2e/test_viewer_cell_merge.py', 'ViewerCellMergeE2E', 'ci-cell-merge'),),
+    },
     'image-thumbnails': {
         'out': ROOT / 'tests/e2e/artifacts/image-thumbnails-ci',
         'project_prefix': 'kin-image-thumbs-ci-',
