@@ -1233,6 +1233,13 @@ REQ-D-MPR-MARKS → RISK-D-MPR-MARK-SOURCE/PLANE/LOSS/OWNER → TEST-MPR-MARKS.
 
 Job v6 binds marks to every ordered original CT SOP; it does not invent a reconstructed SOP. An optional batch recipe remains independently validated. The pinned grid's retained-element readiness repair requires the actual connected native renderer plus complete source, volume and canvas checks; a mismatched renderer cannot be promoted. Existing Job, batch, orientation, sync and preferences suites provide direct regression coverage. Fixtures must run sequentially. Saved MPR output is covered by TEST-MPR-PRINT below; clinical acceptance remains separate.
 
+## TEST-MPR-CURVED — Manual curved/freehand MPR and Job v10
+
+REQ-D-MPR-OBLIQUE-CURVED → RISK-D-MPR-GEOMETRY/INTERPOLATION/SOURCE-MUTATION/PREVIEW-FINAL → TEST-MPR-CURVED-MODEL/DOM.
+`tests/volume_curved_test.cjs` checks the pure `kin-cpr-1` model against multilinear-field oracles: anisotropic/oblique/descending bases, trilinear midpoints, half-voxel edge clamp and NaN outside, arc-length columns, row 0 on +plane normal, Catmull-Rom/freehand rules, limits and refusals. `tests/viewer_volume_curved_dom_test.py` runs the real panel in Chromium with held timers for superseded finals, target/owner loss, off-plane edits, scalar absence, the capture gate and restore rollback. `tests/viewer_volume_job_capture_test.cjs` covers v10 selection/refusals; `tests/viewer_volume_job_test.cjs` covers the compiled server schema, frame of reference, finest spacing, voxel bounds and plan parity. `tests/e2e/test_volume_curved.py` (volume-mpr profile, `ci-mpr-curved`) proves native pointer editing, cached scalars as HU (slope 2/intercept −1024 and signed +1024), every sample against a numpy oracle, Job v10 save, new-browser restore, failed-restore rollback and unchanged originals.
+
+A curve is drawn by a person on one fixed MPR plane (LPS mm, 1 µm storage). Output spacing is the finest voxel spacing; Half Height is the only parameter. Preview and final are labelled and only a final for the current curve is shown as Final or saved. The result is a derived display on an arc-length axis: no straight-line distance, measurement, mark projection, print or DICOM export. Batch or 3D marks beside a curve, and non-1×3/3×1 layouts holding one, are refused. Fixtures run sequentially; clinical acceptance remains separate.
+
 ## TEST-MPR-PRINT — Saved planes, manual points and printed identity
 
 REQ-D-MPR-PRINT → RISK-D-MPR-PRINT-SOURCE/GEOMETRY/IDENTITY/LOSS → TEST-MPR-PRINT.

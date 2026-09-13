@@ -225,3 +225,48 @@ test('batch recipe is independent of current planes and bounds count, raster and
  const reverse=structuredClone(s);reverse.batch.reverse=true;reverse.batch.offset=1;reverse.volume.sops.reverse();assert.match(verifyVolumeReference(reverse,[...tags].reverse(),'SYNTHETIC'),/^[a-f0-9]{64}$/);
  const changed=structuredClone(tags);changed[1]._kinSourceDigest='f'.repeat(32);assert.notEqual(verifyVolumeReference(s,tags,'SYNTHETIC'),verifyVolumeReference(s,changed,'SYNTHETIC'));
 });
+// Version 10 is the exact version 4 three-plane snapshot plus one manual curved MPR (kin-cpr-1).
+const curvedModel=require('/app/dist/viewer-volume-curved.js');
+const curve={schema:1,algorithm:'kin-cpr-1',kind:'curved',frameOfReference:'2.25.6',coordinates:'LPS_mm',cell:0,
+ plane:{origin:[16,16,1],normal:[0,0,1],viewUp:[0,1,0]},points:[[2,16,1],[16,20,1],[30,16,1]],interpolation:'catmull-rom-uniform-16',
+ output:{spacing:1,halfHeight:1,sampling:'trilinear',edge:'half-voxel-clamp',outside:'nan',axis:'arc-length'},
+ display:{voiRange:{lower:-1000,upper:1000},VOILUTFunction:'LINEAR',invert:false}};
+const curvedJob={...structuredClone(snapshot),version:10,curved:curve};
+test('a curved MPR job is accepted only with a valid kin-cpr-1 curve on the three-plane snapshot',()=>{
+ assert.equal(command(curvedJob).snapshot.version,10);assert.match(verifyVolumeReference(curvedJob,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const freehand=structuredClone(curvedJob);freehand.curved.kind='freehand';freehand.curved.interpolation='linear';assert.equal(command(freehand).snapshot.version,10);
+ for(const [label,change] of [
+   ['unknown algorithm',s=>s.curved.algorithm='kin-cpr-2'],['unknown schema',s=>s.curved.schema=2],['kind/interpolation mismatch',s=>s.curved.interpolation='linear'],
+   ['off-plane point',s=>s.curved.points[1][2]=1.02],['duplicate point',s=>s.curved.points[1]=s.curved.points[0].slice()],['one point',s=>s.curved.points=[s.curved.points[0]]],
+   ['65 control points',s=>s.curved.points=Array.from({length:65},(_,i)=>[i*.4,16,1])],['non-unit normal',s=>s.curved.plane.normal=[0,0,2]],
+   ['SIGMOID display',s=>s.curved.display.VOILUTFunction='SIGMOID'],['nearest edge',s=>s.curved.output.edge='nearest'],['extra key',s=>s.curved.slab={mode:'MPR'}],
+   ['half height 151',s=>s.curved.output.halfHeight=151],['arc over 1000 mm',s=>s.curved.points=[[0,16,1],[1001,16,1]]],['arc shorter than spacing',s=>s.curved.points=[[2,16,1],[2.5,16,1]]],
+   ['sample limit',s=>{s.curved.output.spacing=.05;s.curved.output.halfHeight=150;s.curved.points=[[0,16,1],[200,16,1]];}],
+   ['missing curve',s=>delete s.curved],['curve with marks',s=>s.marks={version:1,visible:true,sync:true,marks:[]}],['curve with batch',s=>s.batch=null],
+   ['vacancy',s=>s.cells[1]=null],['2x2 layout',s=>{s.rows=2;s.cols=2;s.cells.push(structuredClone(cell));}],['forged digest',s=>s.volume.sourceDigest='f'.repeat(64)]]){
+  const s=structuredClone(curvedJob);change(s);assert.throws(()=>command(s),e=>e.getStatus?.()===400,label);
+ }
+ // A curve key is never admitted by another version, and a version 10 job never parses without it.
+ for(const version of [4,5,6,7]){const s=structuredClone(curvedJob);s.version=version;rejected(()=>command(s));}
+ // The printed preview command refuses a curved job outright.
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:curvedJob}))));
+});
+test('a curved MPR job must match the original frame of reference, finest spacing and voxel bounds',()=>{
+ for(const [label,change] of [
+   ['foreign frame of reference',s=>s.curved.frameOfReference='2.25.7'],['coarser spacing',s=>s.curved.output.spacing=1.5],['finer spacing than voxels',s=>s.curved.output.spacing=.5],
+   ['point outside volume',s=>s.curved.points[2]=[32,16,1]],['origin outside volume',s=>{s.curved.plane.origin=[16,16,2.6];s.curved.points=s.curved.points.map(p=>[p[0],p[1],2.6]);}]]){
+  const s=structuredClone(curvedJob);change(s);
+  assert.equal(command(s).snapshot.version,10,label+' is syntactically valid');
+  assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label);
+ }
+ // Half a voxel beyond the edge centre is still inside, exactly as the viewer samples it.
+ const edge=structuredClone(curvedJob);edge.curved.points[2]=[31.5,16,1];assert.match(verifyVolumeReference(edge,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ // Descending originals keep the same patient-coordinate curve valid.
+ const reversed=structuredClone(curvedJob);reversed.volume.sops.reverse();assert.match(verifyVolumeReference(reversed,[...tags].reverse(),'SYNTHETIC'),/^[a-f0-9]{64}$/);
+});
+test('server arc length and output grid equal the viewer model parity constants',()=>{
+ const spec={...structuredClone(curve),plane:{origin:[16,15.75,40],normal:[0,1,0],viewUp:[0,0,1]},points:[[5,15.75,12.5],[20,15.75,40],[30,15.75,67.5]],output:{...curve.output,spacing:.5,halfHeight:3}};
+ const curved=curvedModel.curvedPlan(spec),free=curvedModel.curvedPlan({...spec,kind:'freehand',interpolation:'linear'});
+ assert.ok(Math.abs(curved.length-60.60865760815429)<=1e-9);assert.equal(curved.columns,122);assert.equal(curved.rows,13);
+ assert.ok(Math.abs(free.length-60.58665999215323)<=1e-9);assert.equal(free.columns,122);assert.equal(free.rows,13);
+});

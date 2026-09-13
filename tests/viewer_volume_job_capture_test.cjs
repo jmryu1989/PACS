@@ -41,7 +41,10 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
 // which is what a merged screen is; without it every cell fills its own grid position.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved}={}){
+  // The curved tool's own capture rules are proved in viewer_volume_curved_dom_test.py; here it
+  // is the capability shape this module consumes: capture() on a target, dirty() without one.
+  context.window.kinMprCurved=curved;
   const viewports=new Map(),lookup=new Map();
   cells.forEach((spec,index)=>{
     const id='vp-'+index,frame=spec==='frame',named=typeof spec==='string'&&!frame?spec:null;
@@ -121,6 +124,36 @@ test('marks and batch are refused on the new layout instead of being dropped',()
  const quiet={version:1,visible:true,sync:true,marks:[]};
  assert.equal(world(1,3,PLANES,{marks:quiet}).capture().version,4);
  assert.equal(world(2,2,['axial','sagittal','coronal',null],{marks:quiet}).capture().version,7);
+});
+
+test('a finished curve on the three-plane layout saves as version 10 beside the exact version 4 cells',()=>{
+ const curve={schema:1,algorithm:'kin-cpr-1',kind:'curved',points:[[0,0,0],[1,0,0]]};
+ const tool=(value,dirty=false,calls=[])=>({capture:readOnly=>{calls.push(readOnly);return value;},dirty:()=>dirty});
+ for(const [rows,cols] of [[1,3],[3,1]]){
+  const calls=[],value=world(rows,cols,PLANES,{curved:tool(curve,false,calls)}).capture(true);
+  assert.equal(value.version,10);assert.deepEqual(value.curved,curve);assert.deepEqual(calls,[true]);
+  assert.deepEqual(Object.keys(value).sort(),['active','cells','cols','curved','rows','studies','version','volume']);
+  const plain=world(rows,cols,PLANES).capture();delete value.curved;value.version=4;assert.deepEqual(value,plain);
+ }
+ // No curve, or no tool at all, leaves the established version untouched.
+ assert.equal(world(1,3,PLANES,{curved:tool(null)}).capture().version,4);
+ assert.equal(world(1,3,PLANES,{curved:undefined}).capture().version,4);
+ // A capture refusal (drawing, preview, failed) is the save refusal; nothing is written.
+ assert.throws(()=>world(1,3,PLANES,{curved:{capture:()=>{throw Error('곡면 MPR 최종 결과 계산이 끝난 뒤 저장하세요.');},dirty:()=>true}}).capture(),/최종 결과/);
+});
+
+test('a curve is refused beside a batch or marks and outside the three-plane layout',()=>{
+ const curve={schema:1,kind:'freehand'},tool={capture:()=>curve,dirty:()=>false},dirty={capture:()=>{throw Error('no target');},dirty:()=>true};
+ const batch={cell:{},offset:0,interval:1,count:2,reverse:false};
+ const marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
+ assert.throws(()=>world(1,3,PLANES,{curved:tool,batch}).capture(),/단면 묶음·3D 표식과 함께/);
+ assert.throws(()=>world(3,1,PLANES,{curved:tool,marks}).capture(),/단면 묶음·3D 표식과 함께/);
+ // A v7 plane layout can see a target, so its curve is refused by name.
+ assert.throws(()=>world(2,2,['axial','sagittal','coronal',null],{curved:tool}).capture(),/곡면 MPR은 3평면/);
+ // Mixed and merged screens have no target: only unsaved curve work blocks them.
+ assert.throws(()=>world(2,2,['axial','frame','coronal',null],{curved:dirty}).capture(),/곡면 MPR은 3평면/);
+ assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,curved:dirty}).capture(),/곡면 MPR은 3평면/);
+ assert.equal(world(2,2,['axial','frame','coronal',null],{curved:{capture:()=>{throw Error('must not be asked');},dirty:()=>false}}).capture().version,8);
 });
 
 test('a mixed plane and frame layout saves as version 8 and names every cell kind',()=>{

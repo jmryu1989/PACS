@@ -105,6 +105,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const progressive=window.kinCreateVolumeProgressive?.({target,enabled:()=>window.kinMprPreferences?.read()?.progressive===true,permitted:()=>!busy&&permitted(),alive,notice:text=>window.kinMprPreferences?.notice(text)});
   const marks=window.KinVolumeMarks&&window.kinCreateVolumeMarks?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const batch=window.KinVolumeBatch&&window.kinCreateVolumeBatch?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
+  const curved=window.KinVolumeCurved&&window.kinCreateVolumeCurved?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const vrButton=document.createElement('button');vrButton.textContent='Open Volume Rendering';panel.append(vrButton);let vr=null,vrLoading=false;
   vrButton.onclick=async()=>{
     if(vrLoading||!alive()||busy||!permitted()||workspaceBusy())return;vrLoading=true;vrButton.disabled=true;
@@ -120,5 +121,5 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   };
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;vr?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;curved?.dispose();vr?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

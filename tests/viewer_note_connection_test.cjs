@@ -11,8 +11,8 @@ function fixture(standalone=false,identityReady=true,optionalReady=true){
   // optional MPR modules. New unseeded dependencies still fail this harness.
   window.KinWorkspaceShortcuts={};window.KinViewerWindows={};
   if(optionalReady){
-    for(const name of ['KinVolumeOrientation','KinVolumeDisplay','KinVolumeMarks','KinVolumePreferences','KinVolumeCrosshair','KinVolumeBatch','KinVolumeBatchScout'])window[name]={};
-    for(const name of ['kinCreateVolumeOrientation','kinCreateVolumeDisplay','kinCreateVolumeSync','kinCreateVolumeProgressive','kinCreateVolumeMarks','kinCreateVolumePreferences','kinCreateVolumeCrosshair','kinRenderVolumeScout','kinCreateVolumeBatch'])window[name]=()=>{};
+    for(const name of ['KinVolumeOrientation','KinVolumeDisplay','KinVolumeMarks','KinVolumePreferences','KinVolumeCrosshair','KinVolumeBatch','KinVolumeBatchScout','KinVolumeCurved'])window[name]={};
+    for(const name of ['kinCreateVolumeOrientation','kinCreateVolumeDisplay','kinCreateVolumeSync','kinCreateVolumeProgressive','kinCreateVolumeMarks','kinCreateVolumePreferences','kinCreateVolumeCrosshair','kinRenderVolumeScout','kinCreateVolumeBatch','kinCreateVolumeCurved'])window[name]=()=>{};
   }
   // Note/dock cases isolate their asset; the identity dependency has its own
   // failure/retry case below instead of being mistaken for the note script.

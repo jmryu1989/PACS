@@ -169,8 +169,10 @@ class MeasurementCiTests(unittest.TestCase):
     def test_per_suite_budgets_leave_every_other_profile_unchanged(self):
         # The mapping is opt-in: a profile without it keeps requesting its own
         # maximum for every suite, exactly as before.
+        # volume-mpr opted in when the curved MPR suite joined its runner; its exact
+        # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         for name, profile in ci.PROFILES.items():
-            if name == 'hanging-protocols':
+            if name in ('hanging-protocols', 'volume-mpr'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -351,10 +353,13 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(profile['suites'], (
             ('e2e/test_volume_crosshair.py', None, 'ci-mpr-crosshair'),
             ('e2e/test_volume_display.py', None, 'ci-mpr-display'),
+            ('e2e/test_volume_curved.py', None, 'ci-mpr-curved'),
         ))
         self.assertEqual(profile['out'].name, 'volume-mpr-ci')
         self.assertEqual(profile['project_prefix'], 'kin-mpr-ci-')
         self.assertEqual(profile['suite_timeout'], 540)
+        budgets = {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420}
+        self.assertEqual(profile['suite_budgets'], budgets)
         # A separate Compose project and a separate artifact directory from every
         # other profile, so a lost isolation edit fails here rather than in CI.
         for name, other in ci.PROFILES.items():
@@ -368,19 +373,21 @@ class MeasurementCiTests(unittest.TestCase):
             commands.append(command)
             # No --class: each module's own load_tests stays the allowlist.
             self.assertNotIn('--class', command)
-            self.assertEqual(command[command.index('--timeout')+1], '540')
-            self.assertEqual(outer, 575)
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[unit]))
+            self.assertEqual(outer, budgets[unit]+35)
         self.assertEqual([command[command.index('--module')+1] for command in commands],
                          ['tests/e2e/test_volume_crosshair.py',
-                          'tests/e2e/test_volume_display.py'])
+                          'tests/e2e/test_volume_display.py',
+                          'tests/e2e/test_volume_curved.py'])
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
-                         ['ci-mpr-crosshair', 'ci-mpr-display'])
-        # Both suites share main()'s single deadline, so no one suite may be able to
-        # claim it: even at full cap the pair plus their reserved margins must fit,
-        # and the cap must stay under the single-suite volume-rendering cap.
+                         ['ci-mpr-crosshair', 'ci-mpr-display', 'ci-mpr-curved'])
+        # All suites share main()'s single deadline, so no one suite may be able to
+        # claim it: even at full cap every suite plus its reserved margin must fit
+        # with stack time left, and the cap must stay under the volume-rendering cap.
         self.assertIn('deadline = time.monotonic()+25*60',
                       (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
-        self.assertLessEqual(2*(profile['suite_timeout']+35), 25*60)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
         self.assertLess(profile['suite_timeout'],
                         ci.PROFILES['volume-rendering']['suite_timeout'])
         # A shrinking deadline shortens the request instead of overrunning it.
@@ -395,7 +402,8 @@ class MeasurementCiTests(unittest.TestCase):
         import ast
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 11),
-                ('e2e/test_volume_display.py', 'VolumeDisplayE2E', 'test_mpr_display_', 12)):
+                ('e2e/test_volume_display.py', 'VolumeDisplayE2E', 'test_mpr_display_', 12),
+                ('e2e/test_volume_curved.py', 'VolumeCurvedE2E', 'test_curved_', 4)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)
