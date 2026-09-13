@@ -10,7 +10,7 @@ import copy,json,math,os,unittest,uuid
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
-from playwright.sync_api import expect
+from playwright.sync_api import expect, TimeoutError as PlaywrightTimeout
 from pynetdicom.association import Association
 from test_volume_projection import phantom
 from test_volume_marks import VolumeMarksE2E
@@ -22,6 +22,9 @@ SIGNED=dict(slope=1,intercept=1024,signed=True)
 VIEWS='''()=>[...services.viewportGridService.getState().viewports.values()].filter(c=>c.displaySetInstanceUIDs?.length).sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(c.viewportId),m=v.getCamera();return {id:c.viewportId,normal:m.viewPlaneNormal}})'''
 PLACE='''([id,focal])=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCamera(),d=focal.map((n,i)=>n-c.focalPoint[i]);v.setCamera({focalPoint:focal,position:c.position.map((n,i)=>n+d[i])});v.setProperties({voiRange:{lower:-1000,upper:1000},VOILUTFunction:'LINEAR',invert:false});v.render()}'''
 SCREEN='''([id,p])=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),xy=v.worldToCanvas(p),r=v.element.getBoundingClientRect();return [xy[0]+r.left,xy[1]+r.top]}'''
+PROBE='''([id,p])=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),xy=v.worldToCanvas(p),r=v.element.getBoundingClientRect(),x=xy[0]+r.left,y=xy[1]+r.top,hit=document.elementFromPoint(x,y),s=kinMprCurved.inspect();
+ return {view:id,active:services.viewportGridService.getState().activeViewportId,screen:[x,y],rect:[r.left,r.top,r.width,r.height],hit:hit?[hit.tagName,hit.id,String(hit.className?.baseVal??hit.className??'')].join('|'):null,hitInView:!!hit&&v.element.contains(hit),
+  armed:s?.armed??null,state:s?.state??null,points:s?.value?.points??[],status:document.querySelector('#kin-mpr-curved [role=status]')?.textContent??null}}'''
 ACCESSOR='''()=>{const id=[...services.viewportGridService.getState().viewports.values()].find(c=>c.displaySetInstanceUIDs?.length).viewportId,vol=cornerstone.cache.getVolume(services.cornerstoneViewportService.getCornerstoneViewport(id).getVolumeId()),m=vol.voxelManager,a=m.getCompleteScalarDataArray(),at=(i,j,k)=>a[i+j*vol.dimensions[0]+k*vol.dimensions[0]*vol.dimensions[1]];
  return {complete:typeof m.getCompleteScalarDataArray,atIJK:typeof m.getAtIJK,type:a.constructor.name,length:a.length,dimensions:Array.from(vol.dimensions),spacing:Array.from(vol.spacing),origin:Array.from(vol.origin),direction:Array.from(vol.direction),corner:at(1,2,5),low:at(40,40,5),mid:at(40,40,16),high:at(40,40,30)}}'''
 
@@ -85,9 +88,18 @@ class VolumeCurvedE2E(VolumeMarksE2E):
  def final(self,v,timeout=30000):
   expect(self.panel(v).locator('p[data-kin-curved-state]')).to_have_text('Final',timeout=timeout);report=self.inspect(v,True);self.assertEqual(report['final']['signature'],report['current']);return report
  def click(self,v,view,point):v.mouse.click(*v.evaluate(SCREEN,[view,list(point)]))
+ def add_point(self,v,view,point):
+  # Every drawing click must add exactly this point at the end; the native facts around the click
+  # (hit element, active pane, panel state/status, stored order) are printed either way.
+  before=v.evaluate(PROBE,[view,list(point)]);n=len(before['points']);v.mouse.click(*before['screen']);failure=None
+  try:v.wait_for_function('n=>(kinMprCurved.inspect()?.value?.points?.length??0)>n',arg=n,timeout=5000)
+  except PlaywrightTimeout as error:failure=error
+  after=v.evaluate(PROBE,[view,list(point)]);print('CURVED_CLICK',json.dumps({'index':n,'requested':list(point),'before':before,'after':after}),flush=True)
+  if failure:self.fail(f'curved point {n} {list(point)} was not accepted; status {after["status"]!r}; hit {before["hit"]!r}')
+  self.assertEqual(len(after['points']),n+1,after['points']);self.assertTrue(all(abs(x-y)<=.5 for x,y in zip(after['points'][n],point)),after['points'])
  def draw(self,v,view,points):
   self.panel(v).get_by_role('button',name='Draw Curve',exact=True).click()
-  for point in points:self.click(v,view,point)
+  for point in points:self.add_point(v,view,point)
   self.panel(v).get_by_role('button',name='Finish Drawing',exact=True).click()
  def assert_oracle(self,report,hu):
   columns,rows,values,outside=oracle(report['value'],hu);final=report['final']
@@ -110,6 +122,7 @@ class VolumeCurvedE2E(VolumeMarksE2E):
   self.panel(v).get_by_label('Curved MPR Half Height',exact=True).fill('3')
   self.draw(v,coronal,[[1,1,15],[20,1,40],[36,1,70]]);report=self.final(v)
   value=report['value'];self.assertEqual((value['kind'],value['output']['spacing'],value['plane']['origin'][1]),('curved',0.5,1))
+  self.assertEqual(len(value['points']),3,value['points'])
   for got,want in zip(value['points'],[[1,1,15],[20,1,40],[36,1,70]]):self.assertTrue(all(abs(x-y)<=.5 for x,y in zip(got,want)),got)
   values=self.assert_oracle(report,hu);self.assertGreater(report['final']['outside'],0)
   self.assertTrue(any(abs(x-hu[5,2,1])<1e-9 for x in values if x is not None),'the 1000 raw corner voxel is reconstructed exactly')

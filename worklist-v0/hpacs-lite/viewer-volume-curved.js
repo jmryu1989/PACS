@@ -116,7 +116,17 @@ window.kinCreateVolumeCurved=function({target,permitted,alive,owner,host}){
     }
   }
 
-  const itemOf=e=>bound?.items.find(item=>item.view.element===e.currentTarget);
+  // Gestures are resolved at window capture: a host node laid over a pane, or a host capture
+  // listener that consumes the first press on a not-yet-active pane, must not lose a point.
+  // A press is the pane's when it lands inside the pane element, or over the pane on a host node
+  // that is not a control.
+  const control=e=>e.target instanceof Element&&(host.contains(e.target)||!!e.target.closest('button,input,select,textarea,a[href],[role=button],[role=menu],[role=menuitem],[role=dialog]'));
+  const itemOf=e=>{
+    if(!bound)return null;
+    const inside=bound.items.find(item=>e.target instanceof Node&&item.view.element.contains(e.target));
+    if(inside||control(e))return inside||null;
+    return bound.items.find(item=>{const r=item.view.element.getBoundingClientRect();return e.clientX>=r.left&&e.clientX<r.right&&e.clientY>=r.top&&e.clientY<r.bottom;})||null;
+  };
   const at=(item,e)=>{const rect=item.view.element.getBoundingClientRect();return model.round(Array.from(item.view.canvasToWorld([e.clientX-rect.left,e.clientY-rect.top])));};
   const stop=e=>{e.preventDefault();e.stopImmediatePropagation();};
   function editable(item,value){
@@ -206,19 +216,19 @@ window.kinCreateVolumeCurved=function({target,permitted,alive,owner,host}){
   }
   // Pointer handling above cancels the compatibility mouse events; these guards keep native
   // tools from also acting on a gesture this panel owns.
-  const mouse=e=>{if(swallow||drag||stroke)stop(e);};
+  const mouse=e=>{if(drag||stroke||swallow&&itemOf(e))stop(e);};
   const listeners=[['pointerdown',down],['pointermove',move],['pointerup',e=>up(e)],['pointercancel',e=>up(e,true)],['mousedown',mouse],['mousemove',mouse],['mouseup',mouse]];
   function bind(t){
     bound={...t,items:t.views.map((view,index)=>{
       const overlay=document.createElement('div');overlay.className='kin-mpr-curved-overlay';overlay.style.cssText='position:absolute;inset:0;pointer-events:none;overflow:hidden';view.element.append(overlay);
-      for(const [name,fn] of listeners)view.element.addEventListener(name,fn,true);
       view.element.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,paint);
       return {view,overlay,index,signature:''};
     })};
+    for(const [name,fn] of listeners)window.addEventListener(name,fn,true);
     if(record(bound).value)request();
   }
   function unbind(){
-    if(bound)for(const {view,overlay} of bound.items){for(const [name,fn] of listeners)view.element.removeEventListener(name,fn,true);view.element.removeEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,paint);overlay.remove();}
+    if(bound){for(const [name,fn] of listeners)window.removeEventListener(name,fn,true);for(const {view,overlay} of bound.items){view.element.removeEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,paint);overlay.remove();}}
     bound=null;drawn=null;
   }
   // The result follows a LINEAR window change on the drawing plane; any other function keeps the

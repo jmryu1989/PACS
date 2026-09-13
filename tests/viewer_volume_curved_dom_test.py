@@ -353,6 +353,33 @@ class VolumeCurvedDomTest(unittest.TestCase):
         self.assertIsNone(page.evaluate("window.kinMprCurved??null"))
         self.assertTrue(page.evaluate("()=>{try{retired.capture();return false}catch(_){return true}}"))
 
+    def test_curved_dom_08_first_press_consumed_by_host_capture_or_under_a_host_node_adds_the_point(self):
+        page = self.page
+        # A host capture listener consumes the first press on a pane (as a viewer activating a pane
+        # does), a host node lies over part of the pane, and a host control lies over the pane.
+        page.evaluate("""()=>{const box=document.querySelector('#views'),cover=document.createElement('div'),control=document.createElement('button');
+          cover.style.cssText='position:absolute;left:0;top:0;width:80px;height:80px;z-index:5';control.id='host-control';control.textContent='Host';control.style.cssText='position:absolute;left:120px;top:170px;width:40px;height:25px;z-index:5';
+          Object.assign(window,{consumed:0,coverEvents:0,controlEvents:0});cover.addEventListener('pointerdown',()=>coverEvents++);control.addEventListener('pointerdown',()=>controlEvents++);box.append(cover,control);
+          box.addEventListener('pointerdown',e=>{if(!consumed&&views.some(v=>v.element.contains(e.target))){consumed=1;e.stopPropagation();}},true);}""")
+        points = lambda: (self.inspect()["value"] or {"points": []})["points"]
+        self.button("Draw Curve").click()
+        page.mouse.click(*self.screen(0, [4, 20, 16]))
+        self.assertEqual(len(points()), 1, self.status().text_content())
+        page.mouse.click(140, 182)
+        self.assertEqual((len(points()), page.evaluate("controlEvents")), (1, 1))
+        page.mouse.click(*self.screen(0, [30, 2, 16]))
+        self.button("Finish Drawing").click()
+        value = self.final()["value"]
+        self.assertEqual(len(value["points"]), 2)
+        for got, want in zip(value["points"], [[4, 20, 16], [30, 2, 16]]):
+            self.assertTrue(all(abs(a - b) <= .2 for a, b in zip(got, want)), got)
+        # The panel owned both presses: no host or native listener saw them.
+        self.assertEqual(page.evaluate("[consumed,coverEvents,nativeEvents]"), [0, 0, 0])
+        # Outside an edit the host node keeps its presses and the curve is unchanged.
+        page.mouse.click(20, 20)
+        self.assertEqual(page.evaluate("coverEvents"), 1)
+        self.assertEqual(self.inspect()["value"], value)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
