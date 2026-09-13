@@ -401,7 +401,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_volume_mpr_modules_declare_exact_eleven_and_twelve_local_cases(self):
         import ast
         for suite, class_name, prefix, count in (
-                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 11),
+                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 12),
                 ('e2e/test_volume_display.py', 'VolumeDisplayE2E', 'test_mpr_display_', 12),
                 ('e2e/test_volume_curved.py', 'VolumeCurvedE2E', 'test_curved_', 4)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
