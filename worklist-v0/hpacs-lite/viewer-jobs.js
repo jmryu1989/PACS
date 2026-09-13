@@ -7,7 +7,10 @@ window.kinViewerJobs = function (services, model) {
     if (!scope) return;
     const studies = new URLSearchParams(search).get('StudyInstanceUIDs').split(',');
     const grid = services.viewportGridService, cs = services.cornerstoneViewportService, ds = services.displaySetService;
-    const volumeJobs = window.kinCreateVolumeJob?.({grid,cs,ds,studies});
+    // The MPR Job owns the volume layout; the ordinary frame cell of a mixed layout stays
+    // this panel's own shape and is lent to it rather than reimplemented there.
+    const volumeJobs = window.kinCreateVolumeJob?.({grid,cs,ds,studies,
+      stack:{cell:(g,measure)=>stackCell(g,measure),resolve:cell=>resolve(cell),apply:(id,cell,current)=>applyStackCell(id,cell,current)}});
     const volumeTools = () => { if(!volumeJobs)throw new Error('MPR 저장 도구를 불러오지 못했습니다. 미저장 입력을 보존한 뒤 뷰어를 다시 여세요.');return volumeJobs; };
     const parent = document.querySelector('#kin-viewer-layout'); if (!parent) return;
     parent.style.maxHeight = '40vh'; parent.style.overflow = 'auto';
@@ -50,9 +53,12 @@ window.kinViewerJobs = function (services, model) {
         const currentSnapshot=(readOnly=false)=>{const value=capture(true,readOnly,true);if(value.version===5){value.version=4;delete value.batch;}else if(value.version===6)value.batch=null;return value;};
         const snapshot = row ? null : currentSnapshot();
         // The MPR output renderer reconstructs a fixed, vacancy-free cell list
-        // (viewer-volume-job-print.js:68-69). A version 7 plane layout is refused here,
-        // before any export, rather than falling through to the ordinary frame renderer.
-        if ((row?.snapshotVersion ?? snapshot?.version) === 7) throw new Error('MPR 평면 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        // (viewer-volume-job-print.js:68-69). A version 7 plane layout and a version 8 mixed
+        // layout are refused here, before any export, rather than falling through to the
+        // ordinary frame renderer, which would print the wrong page for a reconstructed cell.
+        const shape = row?.snapshotVersion ?? snapshot?.version;
+        if (shape === 7) throw new Error('MPR 평면 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        if (shape === 8) throw new Error('MPR 평면과 일반 영상이 섞인 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
         const assets=[['kinViewerJobPrint','viewer-job-print.js'],['kinViewerEditorLink','viewer-editor-link.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
@@ -110,6 +116,24 @@ window.kinViewerJobs = function (services, model) {
           !matches[0].images.some(i => i.SOPInstanceUID === cell.sop)) throw new Error('저장한 원본 시리즈와 프레임을 찾을 수 없습니다.');
       return matches[0].displaySetInstanceUID;
     }
+    // One ordinary frame cell, captured from the live viewport. This is the only definition
+    // of that shape: the version 2 layout below and the mixed MPR layout in
+    // viewer-volume-job.js both go through it, so neither can drift from the other.
+    // `measure` receives the canvas so each caller applies its own size budget.
+    function stackCell(g, measure) {
+      const sets = g.displaySetInstanceUIDs || [];
+      const v = cs.getCornerstoneViewport(g.viewportId), id = v?.getCurrentImageId?.(), image = id && window.cornerstone.metaData.get('instance', id);
+      if (sets.length !== 1 || v?.type !== 'stack' || !v.getDefaultActor?.()?.actor || !image || !studies.includes(image.StudyInstanceUID)) throw new Error('원본 영상 로딩을 마친 뒤 저장하세요.');
+      const camera = v.getCamera(), properties = v.getProperties(), canvas = v.getCanvas();
+      measure(canvas);
+      if (properties.colormap?.name && properties.colormap.name !== 'Grayscale') throw new Error('현재는 회색조 표시 상태를 저장합니다.');
+      const cell = { study: image.StudyInstanceUID, series: image.SeriesInstanceUID, sop: image.SOPInstanceUID, frame: 1,
+        viewport: { width: canvas.width, height: canvas.height },
+        camera: Object.fromEntries(['focalPoint', 'position', 'viewUp', 'viewPlaneNormal', 'parallelScale', 'rotation', 'flipHorizontal', 'flipVertical'].map(k => [k, camera[k]])),
+        properties: { voiRange: properties.voiRange, VOILUTFunction: properties.VOILUTFunction || 'LINEAR', invert: !!properties.invert, interpolationType: properties.interpolationType ?? 1 } };
+      if (resolve(cell) !== sets[0]) throw new Error('선택한 영상과 시리즈가 일치하지 않습니다.');
+      return cell;
+    }
     function capture(checkOutputSize = false, readOnly = false, currentOutput = false) {
       const state = grid.getState(), views = ordered(), { numRows: rows, numCols: cols, layoutType } = state.layout;
       if(views.some(g=>cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic'))return volumeTools().capture(readOnly,!currentOutput);
@@ -118,22 +142,13 @@ window.kinViewerJobs = function (services, model) {
       const cells = views.map((g, i) => {
         if (Math.abs(g.x-(i%cols)/cols)>1e-6 || Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6 || Math.abs(g.width-1/cols)>1e-6 || Math.abs(g.height-1/rows)>1e-6) throw new Error('병합 또는 특수 배치는 아직 저장할 수 없습니다.');
         const sets = g.displaySetInstanceUIDs || []; if (!sets.length) return null;
-        const v = cs.getCornerstoneViewport(g.viewportId), id = v?.getCurrentImageId?.(), image = id && window.cornerstone.metaData.get('instance', id);
-        if (sets.length !== 1 || v?.type !== 'stack' || !v.getDefaultActor?.()?.actor || !image || !studies.includes(image.StudyInstanceUID)) throw new Error('원본 영상 로딩을 마친 뒤 저장하세요.');
-        const camera = v.getCamera(), properties = v.getProperties(), canvas = v.getCanvas();
-        if (checkOutputSize) {
+        return stackCell(g, canvas => {
+          if (!checkOutputSize) return;
           const width = canvas?.width, height = canvas?.height; totalPixels += width * height;
           if (![width, height].every(n => Number.isInteger(n) && n >= 1)) throw new Error('영상 화면 크기가 준비되지 않았습니다. 로딩을 마친 뒤 저장하세요.');
           if (width > 8192 || height > 8192 || width * height > 16777216 || totalPixels > 33554432)
             throw new Error('저장할 화면이 너무 큽니다. 브라우저 창 크기나 배율을 줄인 뒤 다시 저장하세요.');
-        }
-        if (properties.colormap?.name && properties.colormap.name !== 'Grayscale') throw new Error('현재는 회색조 표시 상태를 저장합니다.');
-        const cell = { study: image.StudyInstanceUID, series: image.SeriesInstanceUID, sop: image.SOPInstanceUID, frame: 1,
-          viewport: { width: canvas.width, height: canvas.height },
-          camera: Object.fromEntries(['focalPoint', 'position', 'viewUp', 'viewPlaneNormal', 'parallelScale', 'rotation', 'flipHorizontal', 'flipVertical'].map(k => [k, camera[k]])),
-          properties: { voiRange: properties.voiRange, VOILUTFunction: properties.VOILUTFunction || 'LINEAR', invert: !!properties.invert, interpolationType: properties.interpolationType ?? 1 } };
-        if (resolve(cell) !== sets[0]) throw new Error('선택한 영상과 시리즈가 일치하지 않습니다.');
-        return cell;
+        });
       });
       if (cells.every(c => !c)) throw new Error('저장할 영상이 없습니다.');
       return JSON.parse(JSON.stringify({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells }));
@@ -147,8 +162,8 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && row.snapshotVersion !== 7) button(item, 'Print Saved Images', () => openPrint(row));
-        if([4,5,6,7].includes(row.snapshotVersion))text('p',(row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
+        if (!row.hidden && ![7,8].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if([4,5,6,7,8].includes(row.snapshotVersion))text('p',(row.snapshotVersion===8?'MPR Mixed Layout · 출력 미지원':row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
           button(item, row.hidden ? 'Unhide Job' : 'Hide Job', () => { const reason = window.prompt('숨김 또는 해제 사유'); if (reason?.trim()) run('hide', row, reason); }, true);
@@ -156,8 +171,32 @@ window.kinViewerJobs = function (services, model) {
       }
     }
     async function load() { const result = await api(path + '?mine=' + mine.value + '&includeHidden=' + hidden.checked); if (live()) show(result.jobs); }
+    // Restore one ordinary frame cell into an existing viewport. Shared with the mixed MPR
+    // layout, which calls it for its frame cells and then reads the shown instance back.
+    async function applyStackCell(viewportId, cell, current) {
+      for (let n = 0; n < 150; n++) {
+        if (!current()) throw new Error('화면이 변경되어 복원을 중단했습니다.');
+        const v = cs.getCornerstoneViewport(viewportId), index = (v?.getImageIds?.() || []).findIndex(id => {
+          const m = window.cornerstone.metaData.get('instance', id); return m?.StudyInstanceUID === cell.study && m?.SeriesInstanceUID === cell.series && m?.SOPInstanceUID === cell.sop;
+        });
+        if (index >= 0 && v.getCurrentImageId?.() && v.getDefaultActor?.()?.actor) {
+          await v.setImageIdIndex(index); if (!current()) throw new Error('화면이 변경되었습니다.');
+          // setImageIdIndex loads pixels but leaves the native scroll target
+          // and OHIF scrollbar/instance overlay at the old frame.
+          v.scroll(index - v.getTargetImageIdIndex(), false);
+          v.setProperties({ ...cell.properties, colormap: { name: 'Grayscale', opacity: [] } });
+          // Native flips adjust the camera too; perform them before assigning
+          // physical coordinates so saved pan is not applied twice.
+          v.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
+          const camera = { ...cell.camera }; delete camera.flipHorizontal; delete camera.flipVertical;
+          v.setCamera(camera); v.render(); return;
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      throw new Error('원본 프레임 로딩에 실패했습니다.');
+    }
     async function apply(value, ticket) {
-      if([4,5,6,7].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
+      if([4,5,6,7,8].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const current = () => live() && serial === ticket;
@@ -166,27 +205,7 @@ window.kinViewerJobs = function (services, model) {
           viewportOptions: { viewportId: ids[index], viewportType: 'stack', toolGroupId: 'default', allowUnmatchedView: true } }) });
       for (let i = 0; i < value.cells.length; i++) {
         const cell = value.cells[i]; if (!cell) continue;
-        let ready = false;
-        for (let n = 0; n < 150; n++) {
-          if (!current()) throw new Error('화면이 변경되어 복원을 중단했습니다.');
-          const v = cs.getCornerstoneViewport(ids[i]), index = (v?.getImageIds?.() || []).findIndex(id => {
-            const m = window.cornerstone.metaData.get('instance', id); return m?.StudyInstanceUID === cell.study && m?.SeriesInstanceUID === cell.series && m?.SOPInstanceUID === cell.sop;
-          });
-          if (index >= 0 && v.getCurrentImageId?.() && v.getDefaultActor?.()?.actor) {
-            await v.setImageIdIndex(index); if (!current()) throw new Error('화면이 변경되었습니다.');
-            // setImageIdIndex loads pixels but leaves the native scroll target
-            // and OHIF scrollbar/instance overlay at the old frame.
-            v.scroll(index - v.getTargetImageIdIndex(), false);
-            v.setProperties({ ...cell.properties, colormap: { name: 'Grayscale', opacity: [] } });
-            // Native flips adjust the camera too; perform them before assigning
-            // physical coordinates so saved pan is not applied twice.
-            v.setCamera({ flipHorizontal: cell.camera.flipHorizontal, flipVertical: cell.camera.flipVertical });
-            const camera = { ...cell.camera }; delete camera.flipHorizontal; delete camera.flipVertical;
-            v.setCamera(camera); v.render(); ready = true; break;
-          }
-          await new Promise(r => setTimeout(r, 100));
-        }
-        if (!ready) throw new Error('원본 프레임 로딩에 실패했습니다.');
+        await applyStackCell(ids[i], cell, current);
       }
       if (!current()) throw new Error('화면이 변경되었습니다.'); grid.setActiveViewportId(ids[value.active]);
     }
@@ -213,11 +232,17 @@ window.kinViewerJobs = function (services, model) {
             next.searchParams.set('StudyInstanceUIDs', job.snapshot.studies.join(',')); next.searchParams.set('kinJob', job.id);
             location.assign(next.href); return;
           }
-          const previous = capture(); if([4,5,6,7].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
+          // No restore without a rollback snapshot of the current screen. When this screen is
+          // one no saved shape can hold, that is a reason not to restore — but it is not the
+          // saved Job's problem, so it must not be reported with the Save guidance.
+          // A missing MPR asset is not a shape problem, so that reason is kept as it is.
+          let previous; try { previous = capture(); }
+          catch (e) { throw new Error(volumeJobs ? '현재 화면을 저장 형식으로 읽을 수 없어 복원하지 않았습니다. 복원할 수 있는 배치를 먼저 여세요.' : e.message); }
+          if([4,5,6,7,8].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
           try { await apply(job.snapshot, ticket); }
           catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
           finally { applying = false; }
-          status.textContent = [4,5,6,7].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
+          status.textContent = [4,5,6,7,8].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
@@ -226,7 +251,7 @@ window.kinViewerJobs = function (services, model) {
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true); if (action === 'saveAnnotations') {
-              if([4,5,6,7].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5,6,7,8].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
             pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot }), url: path };
