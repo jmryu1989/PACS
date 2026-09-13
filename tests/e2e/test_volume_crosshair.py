@@ -265,8 +265,10 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
     direction=key in ('viewUp','viewPlaneNormal');expected=rotation@old[key] if direction else pivot+rotation@(np.array(old[key])-pivot)
     np.testing.assert_allclose(new[key],expected,atol=2e-5 if direction else 2e-3,rtol=0)
   self.assertEqual(after[index]['hash'],before[index]['hash'])
-  # The grabbed line must pass through the released pointer, independent of any sign convention.
-  self.assertLess(residual(E,moved[owner]),.05);self.assertGreater(residual(E,cameras[owner]),10*mm)
+  # Rounding the handle to integer page pixels puts the mouse-down point S slightly off the drawn line. Rotating
+  # about the pivot by angle(S->E) carries that offset to E scaled by |E-P|/|S-P|, so E is expected there, not on the line.
+  expected_residual=residual(S,cameras[owner])*float(np.linalg.norm(E-pivot))/float(np.linalg.norm(S-pivot))
+  self.assertAlmostEqual(residual(E,moved[owner]),expected_residual,delta=.05);self.assertGreater(residual(E,cameras[owner]),10*mm)
   np.testing.assert_allclose(self.pivot(moved),pivot,atol=1e-3,rtol=0);np.testing.assert_allclose(v.evaluate("()=>Array.from(cornerstoneTools.ToolGroupManager.getToolGroup('mpr').getToolInstance('Crosshairs').toolCenter)"),pivot,atol=1e-3,rtol=0)
   for item in self.lines(v)[index]:
    for point in item['world']:self.assertLess(min(residual(np.array(point),moved[i]) for i in others),.001)
@@ -274,9 +276,9 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   identity=[1,0,0,0,1,0];counts=self.band_pixels(v,identity,skip={index})
   self.save_volume(v);saved=[cell['camera'] for cell in self.get_volume_job(a)['snapshot']['cells']];self.cameras_close(saved,moved,1e-6)
   fresh=self.login();self.launch(fresh,[a]);self.ready(fresh);fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=45000)
-  self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertLess(residual(E,self.cameras(fresh)[owner]),.05);reopened=self.band_pixels(fresh,identity,skip={index})
+  self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertAlmostEqual(residual(E,self.cameras(fresh)[owner]),expected_residual,delta=.05);reopened=self.band_pixels(fresh,identity,skip={index})
   expect(p.locator('#findings')).to_have_value('KEEP NATIVE ROTATE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(errors,[])
-  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened}),flush=True)
+  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened}),flush=True)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCrosshairE2E(n) for n in loader.getTestCaseNames(VolumeCrosshairE2E) if n.startswith('test_crosshair_'))
 if __name__=='__main__':unittest.main(verbosity=2)
