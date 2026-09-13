@@ -64,6 +64,19 @@ mutate('release-crosshair-reset', 'if (!needed) return idle;', 'if (true) return
 mutate('merge-mixed-kinds',
   "if (op !== 'maximize' && new Set(cells.filter(cell => cell.kind !== 'empty').map(cell => cell.kind)).size > 1)",
   'if (false)');
+// Average projection, in both directions: a merge started on an Average plane the native
+// preparation cannot rebuild, and a restore that sets the mode without that preparation -
+// which puts a black CT on the screen and lets the oracle call it a restored plane.
+mutate('skip-average-precheck',
+  "if (base.cells.some(cell => cell.kind === 'plane' && cell.blend === 3) && !averageReady())",
+  'if (false)');
+mutate('set-average-blind', '        if (ready) viewport.setBlendMode?.(cell.blend);', '        viewport.setBlendMode?.(cell.blend);');
+// The hold and the interaction listeners taken before the try, which is what let a failure
+// during setup leave the MPR tool group's camera reset replaced for the rest of the session.
+// The line ending is not part of the guard, so the anchor accepts either one.
+mutate('setup-outside-try',
+  /try \{\r?\n\s*crosshair = holdCrosshairReset\(planes\);\r?\n\s*watch = watchInteraction\(true\);\r?\n/,
+  'crosshair = holdCrosshairReset(planes);\n      watch = watchInteraction(true);\n      try {\n');
 const moduleBox = { exports: {} };
 new Function('module', 'exports', source)(moduleBox, moduleBox.exports);
 const CellMerge = moduleBox.exports;
@@ -254,15 +267,17 @@ const planCells = (rows, cols, kinds) => kinds.map((kind, index) => ({ viewportI
 // here by name against the file on disk - in every plain run, before any mutation is used.
 test('every declared mutation anchor still matches the shipped module exactly once', () => {
   const shipped = fs.readFileSync(sourcePath, 'utf8');
-  // Fourteen anchors for thirteen mutations: the rollback defect takes two edits to
-  // reintroduce, and the three plane guards take one each.
-  assert.equal(declared.length, 14);
+  // Seventeen anchors for sixteen mutations: the rollback defect takes two edits to
+  // reintroduce, and the three plane guards, the two Average-projection guards and the
+  // setup boundary take one each.
+  assert.equal(declared.length, 17);
   for (const item of declared)
     assert.equal(occurrences(shipped, item.from), item.expected, 'anchor drifted: ' + item.name + ' ' + item.from);
   assert.deepEqual([...new Set(declared.map(item => item.name))].sort(),
     ['adopt-input-baseline', 'adopt-merged-camera', 'claim-foreign-volume', 'claim-refit-as-user', 'claim-restore',
       'merge-mixed-kinds', 'record-without-recheck', 'release-crosshair-reset', 'rollback-adopts-screen',
-      'skip-kind-guard', 'skip-uniform-guard', 'trust-dispatch', 'trust-foreign-screen']);
+      'set-average-blind', 'setup-outside-try', 'skip-average-precheck', 'skip-kind-guard', 'skip-uniform-guard',
+      'trust-dispatch', 'trust-foreign-screen']);
 });
 
 test('each supported operation asks for exactly one documented rectangle set', () => {
@@ -440,6 +455,104 @@ test('a 3D volume cell and a plane whose volume is not loaded refuse before any 
   // No hold was ever taken for an operation that never started.
   x.crosshairs.onResetCamera();
   assert.equal(x.crosshairs.calls, 1);
+});
+
+// Average projection (blend 3) is the one mode a rebuilt plane cannot be given by the
+// setter alone: the pinned streaming texture omits vtk's range metadata, so without the
+// native preparation viewer-tech-note.js:190 owns, the shader leaves its scalar range at
+// zero and the plane comes back black (viewer-tech-note.js:192-194). The saved MPR Job
+// refuses outright for the same reason (viewer-volume-job.js:128).
+test('an average-projection plane is prepared by the native tool before its mode is put back', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'], refitOnResize: true, resetsLinkedPlanes: true });
+  const prepared = [];
+  x.win.kinPrepareVolumeAverage = (viewport, volume) => { prepared.push([viewport.id, volume, viewport.blend]); };
+  for (const id of ['A', 'B', 'C']) { x.viewports.get(id).blend = 3; x.viewports.get(id).thickness = 6; }
+  const merged = await x.controller.merge('maximize', 'B');
+  assert.equal(merged.ok, true, merged.message);
+  assert.equal(x.viewports.get('B').blend, 3, 'the plane left on screen keeps its projection');
+  const back = await x.controller.unmerge();
+  assert.equal(back.ok, true, back.message);
+  assert.match(back.message, /이전 칸 배치와 영상 상태로 되돌렸습니다/);
+  for (const id of ['A', 'C']) {
+    assert.equal(x.viewports.get(id).blend, 3, id + ' is back on average projection');
+    assert.equal(x.viewports.get(id).thickness, 6);
+  }
+  // The preparation ran on the very viewport whose mode was then set, with the native
+  // volume that plane stands on - the contract viewer-volume-job.js:128 uses - and it ran
+  // before the mode was set, never after.
+  assert.deepEqual([...new Set(prepared.map(([id]) => id))].sort(), ['A', 'C']);
+  assert.ok(prepared.length > 0 && prepared.every(([, volume]) => volume === VOLUMES['vol-1']),
+    'the preparation is given the loaded native volume, not the viewport');
+  assert.ok(prepared.every(([, , blend]) => blend !== 3), 'the preparation runs before the blend mode is set');
+});
+
+test('an average-projection plane refuses the merge before any dispatch when the preparation tool is missing', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'] });
+  const before = layoutOf(x.state);
+  // No kinPrepareVolumeAverage in this window: the plane could be destroyed but not rebuilt.
+  x.viewports.get('A').blend = 3;
+  const result = await x.controller.merge('maximize', 'B');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /평균 투영 도구/);
+  assert.equal(x.calls.length, 0, 'a refusal never changes what the user is looking at');
+  assert.deepEqual(layoutOf(x.state), before);
+  assert.equal(x.viewports.get('A').blend, 3, 'the plane the user is reading is left exactly as it was');
+  assert.equal(x.controller.state().merged, false);
+  // No hold was taken for an operation that never started.
+  x.crosshairs.onResetCamera();
+  assert.equal(x.crosshairs.calls, 1);
+  // With the tool present the same screen is allowed through, so the refusal is the missing
+  // preparation and nothing else about this grid.
+  x.win.kinPrepareVolumeAverage = () => { };
+  assert.equal((await x.controller.merge('maximize', 'B')).ok, true);
+});
+
+test('a plane whose average preparation fails is reported as not restored, never set to a black mode', async () => {
+  for (const failure of ['missing', 'throws']) {
+    const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'] });
+    x.win.kinPrepareVolumeAverage = () => { };
+    for (const id of ['A', 'C']) x.viewports.get(id).blend = 3;
+    assert.equal((await x.controller.merge('maximize', 'B')).ok, true, failure);
+    // The tool goes away while the plane is maximized - a failed script load, or a volume
+    // whose pixel range the preparation refuses by name (viewer-tech-note.js:195,200).
+    if (failure === 'missing') delete x.win.kinPrepareVolumeAverage;
+    else x.win.kinPrepareVolumeAverage = () => { throw new Error('평균 투영의 픽셀 범위를 확인하지 못했습니다.'); };
+    const back = await x.controller.unmerge();
+    assert.equal(back.ok, false, failure);
+    assert.match(back.message, /확인하지 못했습니다/);
+    assert.equal(x.controller.state().quarantined, true, failure);
+    for (const id of ['A', 'C'])
+      assert.notEqual(x.viewports.get(id).blend, 3,
+        'the mode is left unrestored instead of being set without its preparation: ' + failure);
+    // The hold is given back even when the restore could never be confirmed.
+    x.crosshairs.onResetCamera();
+    assert.equal(x.crosshairs.calls, 1, failure);
+  }
+});
+
+test('a failure while the operation is being set up gives back the hold and refuses, it does not throw', async () => {
+  const x = fixture({ rows: 1, cols: 3, planes: ['axial', 'sagittal', 'coronal'] });
+  const before = layoutOf(x.state);
+  const real = x.doc.addEventListener;
+  // A document that refuses the first capture-phase listener: the failure lands after the
+  // hold on the MPR tool group's camera reset has already been taken.
+  x.doc.addEventListener = function (type) { if (type === 'pointerdown') throw new Error('listener refused'); return real.apply(this, arguments); };
+  let result = null, thrown = null;
+  try { result = await x.controller.merge('maximize', 'B'); } catch (error) { thrown = error; }
+  x.doc.addEventListener = real;
+  assert.equal(thrown, null, 'a setup failure is answered, not thrown out of the operation');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /시작하지 못했습니다/);
+  assert.equal(x.calls.length, 0, 'nothing was dispatched, so the screen is untouched');
+  assert.deepEqual(layoutOf(x.state), before);
+  assert.equal(x.controller.state().busy, false, 'the panel is not left disabled');
+  assert.equal(x.controller.state().quarantined, false, 'a screen nobody changed is not quarantined');
+  // The hold is released by the finally, so Crosshairs camera resets are not disabled for
+  // the rest of the session - and the next operation still works.
+  x.crosshairs.onResetCamera();
+  assert.equal(x.crosshairs.calls, 1);
+  const merged = await x.controller.merge('maximize', 'B');
+  assert.equal(merged.ok, true, merged.message);
 });
 
 test('maximize keeps the anchor source and restores every displaced cell exactly', async () => {

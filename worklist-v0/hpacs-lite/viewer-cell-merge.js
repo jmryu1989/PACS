@@ -282,12 +282,18 @@
       viewport.setCamera?.(camera);
     }
 
+    // Average projection is the one mode that cannot be put back by the setter alone: the
+    // pinned streaming texture omits vtk's range metadata, so the shader leaves its scalar
+    // range at zero and paints a black CT unless the native preparation that
+    // viewer-tech-note.js:190 owns runs first. The saved MPR Job refuses outright for the
+    // same reason (viewer-volume-job.js:128). This module never reimplements the
+    // preparation: it calls it, and where it cannot, the mode is left alone.
+    const averageReady = () => typeof win.kinPrepareVolumeAverage === 'function';
+    const AVERAGE_MISSING = '평균 투영 도구 로딩을 마친 뒤 다시 시도하세요.';
+
     // A plane takes its window, its projection mode and its slab back through the native
     // volume setters the saved MPR Job also uses (viewer-volume-job.js:127-131), in that
     // order: the mode and the thickness must be in place before the camera is assigned.
-    // Average projection needs the native preparation that module owns; this one calls it and
-    // never reimplements it, so a build without that tool leaves the mode unrestored and the
-    // oracle above reports that rather than claiming the screen came back.
     function reapplyPlane(cell, viewport) {
       const properties = viewport.getProperties?.() || {}, wanted = {};
       if (cell.voiRange && JSON.stringify(properties.voiRange ?? null) !== JSON.stringify(cell.voiRange)) wanted.voiRange = copy(cell.voiRange);
@@ -298,8 +304,17 @@
       let blend = null; try { blend = viewport.getActors?.()[0]?.actor?.getMapper?.()?.getBlendMode?.(); } catch (_) { }
       if (blend !== cell.blend) {
         const volume = volumeOf(viewport);
-        if (cell.blend === 3 && typeof win.kinPrepareVolumeAverage === 'function' && volume) win.kinPrepareVolumeAverage(viewport, volume);
-        viewport.setBlendMode?.(cell.blend);
+        // Average is set only once its preparation has actually run. A missing tool, a
+        // volume that cannot be read, or a preparation that refuses the pixel range
+        // (viewer-tech-note.js:195,200 throw by name) leaves the mode exactly as native
+        // rebuilt it: `restored()` compares blend, so the plane is reported as not back
+        // instead of a black CT being claimed as the screen the user left. The catch is
+        // this one call and this one consequence, not a blanket swallow.
+        let ready = cell.blend !== 3;
+        if (!ready && averageReady() && volume) {
+          try { win.kinPrepareVolumeAverage(viewport, volume); ready = true; } catch (_) { ready = false; }
+        }
+        if (ready) viewport.setBlendMode?.(cell.blend);
       }
       if (!near(viewport.getSlabThickness?.(), cell.thickness)) viewport.setSlabThickness?.(cell.thickness);
       putCamera(viewport, cell.camera);
@@ -558,26 +573,39 @@
       const anchor = anchorId || base.active;
       const result = plan({ rows: base.rows, cols: base.cols, cells: base.cells, anchorId: anchor, op });
       if (!result.ok) return { ok: false, message: note(result.reason) };
+      // A merge destroys and rebuilds planes, and an Average plane can only be rebuilt with
+      // the preparation above. Without that tool the operation is refused here - before a
+      // single rectangle is dispatched - so the user keeps the screen they have instead of
+      // being handed a restore that could not put the projection back.
+      if (base.cells.some(cell => cell.kind === 'plane' && cell.blend === 3) && !averageReady())
+        return { ok: false, message: note(AVERAGE_MISSING) };
       const expected = { rows: base.rows, cols: base.cols,
         cells: result.slots.map((cell, index) => ({ viewportId: cell.viewportId, sets: cell.sets, ...result.layoutOptions[index] })) };
-      const watch = watchInteraction(true);
-      const owned = () => watch.owned() && ours(base);
+      let crosshair = null, watch = null, dispatched = false;
+      const owned = () => !!watch && watch.owned() && ours(base);
       // The rollback is owed `base` itself, not a fresh reading of the screen: it runs only
       // while nothing else has touched the screen, so every difference on it - the refit
       // this failed merge caused above all - is self-inflicted and must not be adopted as
       // the state the user is owed. When the screen is no longer this module's, nothing is
       // dispatched at all: another panel's newer work is left exactly where it is.
       const rollback = async message => {
-        if (!watch.owned()) return { ok: false, message: quarantine() };
+        if (!watch || !watch.owned()) return { ok: false, message: quarantine() };
         if (!ours(base)) return { ok: false, message: quarantine(FOREIGN) };
         return await rebuild(base, owned)
           ? { ok: false, message: note(message) }
           : { ok: false, message: quarantine() };
       };
-      const planes = hasPlane(base.cells), marks = marksFingerprint(planes), crosshair = holdCrosshairReset(planes);
-      busy = true; refresh(); note('칸 배치를 적용하는 중…');
+      const planes = hasPlane(base.cells), marks = marksFingerprint(planes);
+      // The hold on the native callback and the interaction listeners are acquired inside
+      // the try, so the finally below is guaranteed to give both of them back: a failure
+      // while the operation is being set up can no longer leave the MPR tool group's
+      // camera reset replaced, or a capture-phase listener attached, for the session.
       try {
+        crosshair = holdCrosshairReset(planes);
+        watch = watchInteraction(true);
+        busy = true; refresh(); note('칸 배치를 적용하는 중…');
         const deadline = Date.now() + 4000;
+        dispatched = true;
         try { await boundedNative(dispatch(base.rows, base.cols, result.layoutOptions, result.slots, anchor), 2000); } catch (_) { }
         const achieved = await settle(() => geometryIs(expected), deadline);
         if (ended || !live()) return { ok: false, message: '' };
@@ -600,8 +628,12 @@
         }
         return await rollback('요청한 칸 배치를 확인하지 못해 이전 배치로 복구했습니다.');
       } catch (_) {
+        // A failure before the dispatch left the screen untouched, so it is answered as a
+        // refusal rather than rolled back over a screen nobody changed - and never thrown
+        // out of the operation, which would leave the caller with no answer at all.
+        if (!dispatched) return { ok: false, message: note('칸 배치를 시작하지 못했습니다. 잠시 후 다시 시도하세요.') };
         return await rollback('칸 배치에 실패해 이전 배치로 복구했습니다.');
-      } finally { crosshair.release(); watch.release(); busy = false; refresh(); }
+      } finally { crosshair?.release(); watch?.release(); busy = false; refresh(); }
     }
 
     async function unmerge() {
@@ -611,10 +643,16 @@
         record = null; refresh();
         return { ok: false, message: note('화면 또는 원본이 변경되어 병합 기록을 지웠습니다. 현재 화면은 유지됩니다.') };
       }
-      const target = unmergeTarget(record.base, record.after, record.input), watch = watchInteraction();
-      const before = record.marks, planes = !!record.planes, crosshair = holdCrosshairReset(planes);
-      busy = true; refresh(); note('이전 배치로 되돌리는 중…');
+      const target = unmergeTarget(record.base, record.after, record.input);
+      const before = record.marks, planes = !!record.planes;
+      let crosshair = null, watch = null, started = false;
+      // Same boundary as `run`: nothing is acquired outside the try, so the finally gives
+      // the hold and the listeners back however this ends.
       try {
+        crosshair = holdCrosshairReset(planes);
+        watch = watchInteraction();
+        busy = true; refresh(); note('이전 배치로 되돌리는 중…');
+        started = true;
         const back = await rebuild(target, () => watch.owned() && ours(target));
         if (ended || !live()) return { ok: false, message: '' };
         if (back) {
@@ -633,7 +671,13 @@
             : '이전 칸 배치와 영상 상태로 되돌렸습니다.') };
         }
         return { ok: false, message: quarantine() };
-      } finally { crosshair.release(); watch.release(); busy = false; refresh(); }
+      } catch (_) {
+        // Nothing was rebuilt yet: the merged screen is still exactly what it was, so the
+        // record is kept and the user is told to try again instead of a restore being
+        // claimed or the merge record being dropped.
+        if (!started) return { ok: false, message: note('되돌리기를 시작하지 못했습니다. 잠시 후 다시 시도하세요.') };
+        return { ok: false, message: quarantine() };
+      } finally { crosshair?.release(); watch?.release(); busy = false; refresh(); }
     }
 
     // A double click a native tool consumed never reaches document: the pinned
