@@ -599,7 +599,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     controls.hidden=[4,5,6].includes(item.version);controls.style.display=[4,5,6].includes(item.version)?'none':'flex';
     for (const option of [...reportSource.options]) if (CHOSEN_OPTIONS.includes(option.value)) option.remove();
     addEditorOptions(null);
-    heading.textContent = item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':[4,5,6].includes(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    heading.textContent = item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':[4,5,6].includes(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();

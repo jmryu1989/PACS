@@ -12,6 +12,25 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   // no other grid can be produced by a rule that places both kinds.
   const GRIDS=[[1,1],[1,2],[2,2],[1,3],[3,1]],MIXED_GRIDS=[[1,1],[1,2],[2,2]],ORIENTATIONS=['axial','sagittal','coronal'];
   const PLANE_AXIS={axial:2,sagittal:0,coronal:1};
+  // The base grids and the rectangle sets the cell merge module actually dispatches
+  // (viewer-cell-merge.js:10,19-32), in native position order. No shape is invented here and
+  // none is widened: a merged screen this table cannot name is a screen this Job cannot put
+  // back, so it is refused rather than saved as something else.
+  const MERGE_BASES=[[1,2],[2,1],[2,2],[1,3],[3,1]];
+  const MERGE_SHAPES=[
+    [[0,0,1,1]],
+    [[0,0,.5,1],[.5,0,.5,.5],[.5,.5,.5,.5]],
+    [[0,0,.5,.5],[.5,0,.5,1],[0,.5,.5,.5]],
+    [[0,0,1,.5],[0,.5,.5,.5],[.5,.5,.5,.5]],
+    [[0,0,.5,.5],[.5,0,.5,.5],[0,.5,1,.5]]];
+  const near=(a,b)=>Math.abs(a-b)<=1e-6;
+  // Only the maximize shape is reachable from every base; row and column merges exist on 2x2.
+  const mergedShape=(rows,cols,views)=>MERGE_BASES.some(([r,c])=>r===rows&&c===cols)
+    ?MERGE_SHAPES.find((shape,i)=>(i===0||rows===2&&cols===2)&&shape.length===views.length&&
+      shape.every(([x,y,w,h],n)=>near(views[n].x,x)&&near(views[n].y,y)&&near(views[n].width,w)&&near(views[n].height,h)))||null
+    :null;
+  const uniformGrid=(rows,cols,views)=>views.length===rows*cols&&
+    views.every((g,i)=>near(g.x,(i%cols)/cols)&&near(g.y,Math.floor(i/cols)/rows)&&near(g.width,1/cols)&&near(g.height,1/rows));
   // The plane a cell actually is. The requested orientation is authoritative because a
   // camera the Crosshairs tool has rotated no longer names its own plane; without one,
   // only a camera still exactly on an anatomical axis may name itself (the sign-agnostic
@@ -36,14 +55,23 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(value.version===6&&!window.kinMprMarks)throw Error('MPR 3D 표식 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
-    if(value.version===8)for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
-    const ref=value.volume,matches=ds.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===ref.study&&d.SeriesInstanceUID===ref.series);
+    if([8,9].includes(value.version))for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
+    // A merged layout of ordinary frame cells alone references no volume; its cells were
+    // just resolved above and there is nothing further to find.
+    const ref=value.volume;if(!ref&&value.version===9)return null;
+    const matches=ds.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===ref.study&&d.SeriesInstanceUID===ref.series);
     if(matches.length!==1||matches[0].images?.length!==ref.sops.length||new Set(matches[0].images.map(m=>m.SOPInstanceUID)).size!==ref.sops.length||matches[0].images.some(m=>!ref.sops.includes(m.SOPInstanceUID)||m.SOPClassUID!=='1.2.840.10008.5.1.4.1.1.2'))throw Error('저장한 MPR의 전체 원본 시리즈를 찾을 수 없습니다.');
     return matches[0].displaySetInstanceUID;
   }
   function capture(readOnly=false,includeBatch=true) {
     const state=grid.getState(),views=ordered(),{numRows:rows,numCols:cols,layoutType}=state.layout;
-    if(layoutType!=='grid'||!GRIDS.some(([r,c])=>rows===r&&cols===c)||views.length!==rows*cols)fail();
+    if(layoutType!=='grid')fail();
+    // A merged screen is saved as the rectangles it actually stands in. A screen that is
+    // neither a uniform grid nor one of those shapes is said so plainly: telling the user to
+    // open an MPR plane layout would be advice that does not describe what is on screen.
+    const merged=mergedShape(rows,cols,views);
+    if(!merged&&!uniformGrid(rows,cols,views))throw Error('지원하지 않는 칸 배치입니다. Restore Grid로 격자를 되돌린 뒤 저장하세요.');
+    if(!merged&&!GRIDS.some(([r,c])=>rows===r&&cols===c))fail();
     // What each cell actually is, decided once, before any shape is chosen: an empty cell is
     // a vacancy, a reconstructed viewport is a plane and anything else is an ordinary frame.
     const kinds=views.map(g=>{
@@ -51,12 +79,17 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       return sets.length?(cs.getCornerstoneViewport(g.viewportId)?.type==='orthographic'?'plane':'stack'):null;
     });
     // A mixed layout is only a mixed layout: it needs both kinds, so a 1x1 can never be one.
-    const mixed=kinds.includes('stack');
+    // A merged screen is not judged by that rule at all - its cells name their own kinds, so
+    // it may hold planes alone, frames alone or both on any base the merge module allows.
+    const mixed=!merged&&kinds.includes('stack');
     if(mixed&&(!kinds.includes('plane')||!MIXED_GRIDS.some(([r,c])=>rows===r&&cols===c)))fail();
-    if(mixed)stackTools();
+    // Every non-null cell of a mixed or merged layout carries its own kind; no other
+    // snapshot admits that key, so neither shape can shadow an established one.
+    const named=mixed||merged;
+    if(kinds.includes('stack'))stackTools();
     // The established three-plane job keeps its exact v4/v5/v6 snapshot. Every other
     // allowed grid, and any allowed grid holding a vacancy, is the new v7 layout.
-    const legacy=!mixed&&(rows===1&&cols===3||rows===3&&cols===1)&&views.every(g=>g.displaySetInstanceUIDs?.length===1);
+    const legacy=!named&&(rows===1&&cols===3||rows===3&&cols===1)&&views.every(g=>g.displaySetInstanceUIDs?.length===1);
     let reference,loaded,pixels=0;
     // One screen, one pixel budget: a mixed layout's frame cells spend from the same
     // allowance the plane cells do, so the cap cannot be widened by mixing kinds.
@@ -65,7 +98,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       if(![width,height].every(n=>Number.isInteger(n)&&n>=1&&n<=8192)||width*height>16777216||pixels>33554432)throw Error('저장할 화면 크기를 줄인 뒤 다시 저장하세요.');
     };
     const cells=views.map((g,i)=>{
-      if(Math.abs(g.x-(i%cols)/cols)>1e-6||Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6||Math.abs(g.width-1/cols)>1e-6||Math.abs(g.height-1/rows)>1e-6)fail();
+      if(!merged&&(Math.abs(g.x-(i%cols)/cols)>1e-6||Math.abs(g.y-Math.floor(i/cols)/rows)>1e-6||Math.abs(g.width-1/cols)>1e-6||Math.abs(g.height-1/rows)>1e-6))fail();
       const sets=g.displaySetInstanceUIDs||[];
       if(!sets.length){if(legacy)fail();return null;}
       if(sets.length!==1)fail();
@@ -87,7 +120,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       const blend=mapper.getBlendMode(),thickness=v.getSlabThickness()*2;
       if(![0,1,2,3].includes(blend)||!Number.isFinite(thickness)||thickness<.1||thickness>1000||blend===0&&thickness>.2)fail();
       if(blend===3){const info=mapper.getScalarTexture?.()?.getVolumeInfo();if(!Number.isFinite(info?.dataComputedScale?.[0])||info.dataComputedScale[0]<=0)throw Error('평균 투영을 다시 적용한 뒤 저장하세요.');}
-      return {...(mixed?{kind:'plane'}:{}),study:reference.study,series:reference.series,...(legacy?{}:{orientation}),viewport:{width,height},projection:{blend,thickness},
+      return {...(named?{kind:'plane'}:{}),study:reference.study,series:reference.series,...(legacy?{}:{orientation}),viewport:{width,height},projection:{blend,thickness},
         camera:{...Object.fromEntries(['focalPoint','position','viewUp','viewPlaneNormal','parallelScale','flipHorizontal','flipVertical'].map(k=>[k,camera[k]])),rotation:camera.rotation||0},
         properties:{voiRange:properties.voiRange,VOILUTFunction:properties.VOILUTFunction||'LINEAR',invert:!!properties.invert,interpolationType:properties.interpolationType??1}};
     });
@@ -98,13 +131,18 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // asking it to capture would fail on the missing target rather than report a state.
     // What matters there is only whether mark work would be lost, which it answers without
     // a target; a mixed screen can never be the layout those marks belong to anyway.
-    const marks=mixed?null:window.kinMprMarks?.capture(readOnly);
-    const annotated=mixed?!!window.kinMprMarks?.dirty?.():marks&&(marks.marks.length||!marks.visible||!marks.sync);
+    const marks=named?null:window.kinMprMarks?.capture(readOnly);
+    const annotated=named?!!window.kinMprMarks?.dirty?.():marks&&(marks.marks.length||!marks.visible||!marks.sync);
     // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
     // user's own state visible instead of writing a v7 snapshot that quietly lost it.
     if(!legacy){
       if(batch)throw Error('단면 묶음은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 묶음을 해제하거나 3평면 배치에서 저장하세요.');
       if(annotated)throw Error('MPR 3D 표식은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 표식을 지우거나 3평면 배치에서 저장하세요.');
+      // A merged screen saves the rectangles it stands in, beside the cells that stand in
+      // them. A vacancy keeps its rectangle, which is why geometry is not a cell field. The
+      // cells the merge absorbed are not on screen and are not saved as anything.
+      if(merged)return JSON.parse(JSON.stringify({version:9,studies,rows,cols,
+        rects:merged.map(([x,y,width,height])=>({x,y,width,height})),active,volume:reference||null,cells}));
       return JSON.parse(JSON.stringify({version:mixed?8:7,studies,rows,cols,active,volume:reference,cells}));
     }
     return JSON.parse(JSON.stringify({version:annotated?6:batch?5:4,studies,rows,cols,active,volume:reference,cells,...(annotated?{marks,batch:batch||null}:batch?{batch}:{})}));
@@ -132,7 +170,11 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // the verified saved cameras below are the sole position source.
     // A saved vacancy is rebuilt as the same empty stack cell a Hanging Protocol leaves
     // (viewer-hanging-protocol.js:97-101), so the grid keeps every saved cell index.
+    // A merged layout asks native for the saved rectangles through the same layoutOptions
+    // the cell merge module dispatches, so this Job drives the one native grid rather than
+    // a second renderer of its own. Its cell list covers those rectangles, not the base grid.
     await grid.setLayout({numRows:value.rows,numCols:value.cols,activeViewportId:ids[value.active],isHangingProtocolLayout:false,
+      ...(value.version===9?{layoutOptions:value.rects.map(r=>({x:r.x,y:r.y,width:r.width,height:r.height}))}:{}),
       findOrCreateViewport:index=>value.cells[index]&&!frames[index]?({displaySetInstanceUIDs:[set],displaySetOptions:[{}],viewportOptions:{id:ids[index],viewportId:ids[index],viewportType:'volume',toolGroupId:'mpr',orientation:value.cells[index].orientation||['axial','sagittal','coronal'][index],allowUnmatchedView:true}})
         // A saved frame cell is rebuilt as the ordinary stack viewport a Hanging Protocol
         // leaves, holding its own display set; a vacancy is the same request holding none.
@@ -215,6 +257,14 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     }
     }
     if(!matched)throw Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+    // The achieved rectangles decide a merged restore, not the resolved setLayout promise: a
+    // native grid that ignored layoutOptions would otherwise be reported as the saved screen.
+    if(value.version===9){
+      const now=ordered();
+      if(now.length!==value.rects.length||now.some((g,i)=>!near(g.x,value.rects[i].x)||!near(g.y,value.rects[i].y)||
+          !near(g.width,value.rects[i].width)||!near(g.height,value.rects[i].height)))
+        throw Error('저장한 병합 칸 배치를 복원하지 못했습니다. 이전 화면을 확인하세요.');
+    }
     if(!current())throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');grid.setActiveViewportId(ids[value.active]);
     if(value.version===5||value.version===6&&value.batch){
       if(!window.kinVolumeBatchState)throw Error('단면 묶음 도구 로딩을 마친 뒤 다시 복원하세요.');

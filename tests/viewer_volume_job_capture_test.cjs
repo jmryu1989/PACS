@@ -39,12 +39,16 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
   resolve:()=>STACK_SET,apply:async()=>{}});
 // cells: 'axial'|'sagittal'|'coronal' is a plane the layout named, 'frame' an ordinary stack
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper()}={}){
+// `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
+// which is what a merged screen is; without it every cell fills its own grid position.
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null}={}){
   const viewports=new Map(),lookup=new Map();
   cells.forEach((spec,index)=>{
     const id='vp-'+index,frame=spec==='frame',named=typeof spec==='string'&&!frame?spec:null;
     const normal=named?AXIS_NORMAL[named]||[0,0,1]:spec&&spec.normal;
-    viewports.set(id,{viewportId:id,x:(index%cols)/cols,y:Math.floor(index/cols)/rows,width:1/cols,height:1/rows,
+    const box=rects?{x:rects[index][0],y:rects[index][1],width:rects[index][2],height:rects[index][3]}
+      :{x:(index%cols)/cols,y:Math.floor(index/cols)/rows,width:1/cols,height:1/rows};
+    viewports.set(id,{viewportId:id,...box,
       displaySetInstanceUIDs:spec?[frame?STACK_SET:SET]:[],
       viewportOptions:named?{id,viewportId:id,orientation:named}:{id,viewportId:id}});
     lookup.set(id,spec&&!frame?viewport(index,normal):{type:'stack'});
@@ -167,6 +171,98 @@ test('a mixed layout shares one pixel budget and refuses marks and batch by name
  assert.throws(()=>world(2,2,['axial','frame','coronal',null],{marks,dirtyMarks:true}).capture(),/3D 표식/);
  assert.equal(world(2,2,['axial','frame','coronal',null],{marks}).capture().version,8,
    'marks already saved on their own three-plane Job are not lost by a mixed save');
+});
+
+// The rectangles viewer-cell-merge.js dispatches. A merged screen is saved as version 9:
+// the base grid it was merged on, those exact rectangles, and the cells standing in them.
+const MAXIMIZE=[[0,0,1,1]];
+const COLUMN_LEFT=[[0,0,.5,1],[.5,0,.5,.5],[.5,.5,.5,.5]];
+const COLUMN_RIGHT=[[0,0,.5,.5],[.5,0,.5,1],[0,.5,.5,.5]];
+const ROW_TOP=[[0,0,1,.5],[0,.5,.5,.5],[.5,.5,.5,.5]];
+const ROW_BOTTOM=[[0,0,.5,.5],[.5,0,.5,.5],[0,.5,1,.5]];
+
+test('a merged screen saves as version 9 with its rectangles and its base grid',()=>{
+ const value=world(2,2,['axial'],{rects:MAXIMIZE}).capture();
+ assert.equal(value.version,9);assert.equal(value.rows,2);assert.equal(value.cols,2);
+ assert.deepEqual(value.rects,[{x:0,y:0,width:1,height:1}]);
+ assert.equal(value.cells.length,1,'the cells the merge absorbed are not saved as anything');
+ assert.deepEqual(Object.keys(value.cells[0]).sort(),
+   ['camera','kind','orientation','projection','properties','series','study','viewport']);
+ assert.equal(value.cells[0].kind,'plane');
+ assert.deepEqual(value.volume,{study:STUDY,series:SERIES,sops:SOPS});
+ assert.equal(JSON.stringify(value).includes('sop"'),false,'no reconstructed SOP is written into a cell');
+ // Maximize is reachable from every base grid the merge module allows.
+ for(const [rows,cols] of [[1,2],[2,1],[2,2],[1,3],[3,1]]){
+  const other=world(rows,cols,['sagittal'],{rects:MAXIMIZE}).capture();
+  assert.equal(other.version,9);assert.deepEqual([other.rows,other.cols],[rows,cols]);
+ }
+});
+
+test('each 2x2 row and column shape is saved, with a vacancy and with either cell kind',()=>{
+ for(const shape of [COLUMN_LEFT,COLUMN_RIGHT,ROW_TOP,ROW_BOTTOM]){
+  const planes=world(2,2,['axial','coronal',null],{rects:shape,active:1}).capture();
+  assert.equal(planes.version,9);assert.equal(planes.active,1);
+  assert.deepEqual(planes.rects,shape.map(([x,y,width,height])=>({x,y,width,height})));
+  assert.equal(planes.cells.length,3);assert.equal(planes.cells[2],null,'an empty survivor keeps its rectangle');
+  // A merged screen of ordinary frame cells alone references no volume at all.
+  const frames=world(2,2,['frame','frame',null],{rects:shape}).capture();
+  assert.equal(frames.version,9);assert.equal(frames.volume,null);
+  assert.deepEqual(frames.cells.map(c=>c&&c.kind),['stack','stack',null]);
+  // Both kinds side by side need no Hanging Protocol grid rule: every cell names its kind.
+  const both=world(2,2,['axial','frame',null],{rects:shape}).capture();
+  assert.equal(both.version,9);assert.deepEqual(both.cells.map(c=>c&&c.kind),['plane','stack',null]);
+ }
+});
+
+test('a rectangle set the merge module cannot produce is refused, not saved as something else',()=>{
+ for(const [label,rows,cols,cells,rects] of [
+   ['a freeform rectangle',2,2,['axial'],[[0,0,.75,.75]]],
+   ['an overlapping pair',2,2,['axial','coronal'],[[0,0,1,1],[0,0,.5,.5]]],
+   ['a gap left by a shrunken cell',2,2,['axial','coronal',null],[[0,0,.4,1],[.5,0,.5,.5],[.5,.5,.5,.5]]],
+   ['a rectangle outside the grid',2,2,['axial'],[[0,0,1.5,1]]],
+   ['a column shape on a base that is not 2x2',1,3,['axial','coronal',null],COLUMN_LEFT],
+   ['a base grid the merge module never uses',3,3,['axial'],MAXIMIZE]])
+  assert.throws(()=>world(rows,cols,cells,{rects}).capture(),/지원하지 않는 칸 배치/,label);
+ // Position order is derived here by sorting the live viewports, never taken on trust, so a
+ // screen handed over out of order still captures in native order. A snapshot arriving at the
+ // server out of order is a different thing and is refused there (viewer_volume_job_test.cjs).
+ assert.deepEqual(world(2,2,['axial','coronal',null],
+   {rects:[COLUMN_LEFT[1],COLUMN_LEFT[0],COLUMN_LEFT[2]]}).capture().rects,
+   COLUMN_LEFT.map(([x,y,width,height])=>({x,y,width,height})));
+ // One cell filling a 1x1 grid is that established layout, not a merged screen, and stays
+ // version 7. The server refuses 1x1 as a merge base for exactly the same reason.
+ assert.equal(world(1,1,['axial'],{rects:MAXIMIZE}).capture().version,7);
+ // A merged screen with nothing on it is refused on its own merit.
+ assert.throws(()=>world(2,2,[null,null,null],{rects:ROW_TOP}).capture(),/MPR 작업을 저장하세요/);
+});
+
+test('a merged screen shares one pixel budget and refuses marks and batch by name',()=>{
+ const batch={cell:{},offset:0,interval:1,count:2,reverse:false};
+ const marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
+ assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,batch}).capture(),/단면 묶음/);
+ // A merged screen is not a three-plane target either, so the tool is asked whether mark
+ // work would be lost rather than to capture a state it cannot see from here.
+ assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,marks,dirtyMarks:true}).capture(),/3D 표식/);
+ assert.equal(world(2,2,['axial','coronal',null],{rects:ROW_TOP,marks}).capture().version,9,
+   'marks already saved on their own three-plane Job are not lost by a merged save');
+ const big={width:8192,height:2048};
+ assert.throws(()=>world(2,2,['frame','frame',null],{rects:ROW_TOP,stack:frameHelper({width:8193,height:1})}).capture(),
+   /화면 크기를 줄인/);
+ assert.equal(world(2,2,['frame','frame',null],{rects:ROW_TOP,stack:frameHelper(big)}).capture().version,9);
+ // Without the frame-cell helper a merged screen holding one refuses instead of dropping it.
+ for(const stack of [null,{resolve:()=>STACK_SET,apply:async()=>{}}])
+  assert.throws(()=>world(2,2,['axial','frame',null],{rects:ROW_TOP,stack}).capture(),/저장 도구를 불러오지 못했습니다/);
+});
+
+test('the established uniform shapes are untouched by the merged shape',()=>{
+ assert.equal(world(1,3,PLANES).capture().version,4);
+ assert.equal(world(2,2,['axial','sagittal','coronal',null]).capture().version,7);
+ assert.equal(world(2,2,['axial','frame','coronal',null]).capture().version,8);
+ // No uniform snapshot gains a rects key, and no merged snapshot loses one.
+ for(const value of [world(1,3,PLANES).capture(),world(2,2,['axial','sagittal','coronal',null]).capture(),
+   world(2,2,['axial','frame','coronal',null]).capture()])
+  assert.equal('rects' in value,false);
+ assert.equal('rects' in world(2,2,['axial'],{rects:MAXIMIZE}).capture(),true);
 });
 
 test('without the frame-cell helper a mixed screen refuses instead of dropping the cell',()=>{

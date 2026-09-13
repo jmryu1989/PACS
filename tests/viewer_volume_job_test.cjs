@@ -128,6 +128,93 @@ test('the three-plane versions keep their exact shape beside the new layout',()=
   }
  }
 });
+// Version 9 is the merged cell layout: the base grid stays, the cells sit in the fractional
+// rectangles viewer-cell-merge.js dispatches, and geometry is carried by `rects` so that an
+// empty survivor of a row or column merge still occupies one. A merged layout of ordinary
+// frame cells alone carries no volume at all.
+const rect=(x,y,width,height)=>({x,y,width,height});
+const MAXIMIZE=[rect(0,0,1,1)];
+const COLUMN_LEFT=[rect(0,0,.5,1),rect(.5,0,.5,.5),rect(.5,.5,.5,.5)];
+const COLUMN_RIGHT=[rect(0,0,.5,.5),rect(.5,0,.5,1),rect(0,.5,.5,.5)];
+const ROW_TOP=[rect(0,0,1,.5),rect(0,.5,.5,.5),rect(.5,.5,.5,.5)];
+const ROW_BOTTOM=[rect(0,0,.5,.5),rect(.5,0,.5,.5),rect(0,.5,1,.5)];
+const mergedJob=(rows,cols,rects,cells,hasVolume=true)=>({version:9,studies:[volume.study],
+ volume:hasVolume?structuredClone(volume):null,rows,cols,rects:structuredClone(rects),active:0,cells});
+const maximized=mergedJob(2,2,MAXIMIZE,[planeOf('axial')]);
+// The label names which geometry was refused, so a case that starts passing says which one.
+const refused=(label,fn)=>assert.throws(fn,e=>e.getStatus?.()===400,label);
+test('the merged layout saves the rectangles the viewer actually dispatches',()=>{
+ assert.equal(command(maximized).snapshot.version,9);
+ // The parser builds null-prototype objects, so the rectangles are compared by value.
+ assert.equal(JSON.stringify(command(maximized).snapshot.rects),JSON.stringify(MAXIMIZE));
+ // Maximize is reachable from every base grid the merge module allows.
+ for(const [rows,cols] of [[1,2],[2,1],[2,2],[1,3],[3,1]])
+  assert.equal(command(mergedJob(rows,cols,MAXIMIZE,[planeOf('sagittal')])).snapshot.rows,rows);
+ // The four 2x2 row and column shapes, with a vacancy where the merge left an empty cell.
+ for(const shape of [COLUMN_LEFT,COLUMN_RIGHT,ROW_TOP,ROW_BOTTOM]){
+  assert.equal(command(mergedJob(2,2,shape,[planeOf('axial'),planeOf('coronal'),null])).snapshot.cells.length,3);
+  assert.equal(command(mergedJob(2,2,shape,[frameOf(),frameOf(),null],false)).snapshot.volume,null);
+  assert.equal(command(mergedJob(2,2,shape,[planeOf('axial'),frameOf(),null])).snapshot.cells[1].kind,'stack');
+ }
+ // A merged layout carrying a plane is bound to the same one volume and the same slab rule.
+ assert.match(verifyVolumeReference(maximized,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const thick=structuredClone(maximized);thick.cells[0].projection.thickness=100;
+ rejected(()=>verifyVolumeReference(thick,tags,'SYNTHETIC'));
+ // A frame cell has no slab, so the physical bound never dereferences a projection it lacks.
+ assert.match(verifyVolumeReference(mergedJob(2,2,ROW_TOP,[planeOf('axial'),frameOf(),null]),
+  tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+});
+test('the merged layout refuses every geometry the viewer cannot produce',()=>{
+ for(const [label,rows,cols,rects,cells] of [
+   ['overlapping rectangles',2,2,[rect(0,0,1,1),rect(0,0,.5,.5),rect(.5,.5,.5,.5)],[planeOf('axial'),planeOf('coronal'),null]],
+   ['a gap left by a shrunken cell',2,2,[rect(0,0,.4,1),rect(.5,0,.5,.5),rect(.5,.5,.5,.5)],[planeOf('axial'),planeOf('coronal'),null]],
+   ['a rectangle outside the grid',2,2,[rect(0,0,1.5,1)],[planeOf('axial')]],
+   ['a negative origin',2,2,[rect(-0.5,0,1,1)],[planeOf('axial')]],
+   ['a freeform rectangle',2,2,[rect(0,0,.75,.75)],[planeOf('axial')]],
+   ['a nested rectangle',2,2,[rect(0,0,1,1),rect(.25,.25,.5,.5)],[planeOf('axial'),planeOf('coronal')]],
+   ['a row shape on a base that is not 2x2',1,3,COLUMN_LEFT,[planeOf('axial'),planeOf('coronal'),null]],
+   ['a base grid the merge module never uses',3,3,MAXIMIZE,[planeOf('axial')]],
+   ['a 1x1 base the merge module never uses',1,1,MAXIMIZE,[planeOf('axial')]],
+   ['a shape in the wrong position order',2,2,[COLUMN_LEFT[1],COLUMN_LEFT[0],COLUMN_LEFT[2]],[planeOf('axial'),planeOf('coronal'),null]],
+   ['more cells than rectangles',2,2,MAXIMIZE,[planeOf('axial'),planeOf('coronal')]],
+   ['fewer cells than rectangles',2,2,COLUMN_LEFT,[planeOf('axial'),planeOf('coronal')]],
+   ['an entirely empty merged screen',2,2,COLUMN_LEFT,[null,null,null]]]){
+  refused(label,()=>command(mergedJob(rows,cols,rects,cells)));
+ }
+ for(const [label,change] of [['no rects at all',s=>delete s.rects],['rects that are not a list',s=>s.rects={}],
+   ['a rectangle with a foreign key',s=>s.rects[0]={...s.rects[0],z:0}],
+   ['a rectangle missing a side',s=>delete s.rects[0].width],
+   ['geometry moved onto the cell',s=>s.cells[0].rect=rect(0,0,1,1)],
+   ['an active index past the cell list',s=>s.active=1],
+   ['a negative active index',s=>s.active=-1],
+   ['a cell with no kind',s=>delete s.cells[0].kind],
+   ['a cell kind the server does not know',s=>s.cells[0].kind='volume'],
+   ['a plane cell with no volume to stand on',s=>s.volume=null],
+   ['a frame cell claiming the plane shape',s=>s.cells[0]=frameOf()],
+   ['a plane cell of another series',s=>s.cells[0].series='2.25.99'],
+   ['a batch recipe',s=>s.batch={cell:planeOf('axial'),offset:0,interval:1,count:2,reverse:false}],
+   ['3D marks',s=>s.marks={version:1,visible:true,sync:true,marks:[]}]]){
+  const s=structuredClone(maximized);change(s);refused(label,()=>command(s));
+ }
+ // A volume carried by a merged layout that holds no plane at all is refused in the other
+ // direction too, so the reference and the cell shapes can never disagree.
+ rejected(()=>command(mergedJob(2,2,MAXIMIZE,[frameOf()],true)));
+});
+test('the merged layout stays out of the established versions and they stay out of it',()=>{
+ // No version but 9 admits rects, in either direction.
+ for(const base of [stackOnly,layout,mixed,snapshot]){
+  const s=structuredClone(base);s.rects=structuredClone(MAXIMIZE);rejected(()=>command(s));
+ }
+ // A version 9 shape cannot be relabelled as an established one, and an established
+ // snapshot cannot be relabelled as version 9.
+ for(const version of [2,4,7,8]){const s=structuredClone(maximized);s.version=version;rejected(()=>command(s));}
+ for(const base of [stackOnly,layout,mixed]){const s=structuredClone(base);s.version=9;rejected(()=>command(s));}
+ // The established shapes still parse exactly as before beside it.
+ assert.equal(command(stackOnly).snapshot.version,2);
+ assert.equal(command(layout).snapshot.version,7);
+ assert.equal(command(mixed).snapshot.version,8);
+ assert.equal(command(snapshot).snapshot.version,4);
+});
 test('batch recipe is independent of current planes and bounds count, raster and source range',()=>{
  const s=structuredClone(snapshot);s.version=5;s.batch={cell:structuredClone(cell),offset:-1,interval:1,count:3,reverse:false};
  assert.equal(command(s).snapshot.version,5);assert.match(verifyVolumeReference(s,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);

@@ -95,7 +95,7 @@
     const grid = services?.viewportGridService, cornerstone = services?.cornerstoneViewportService, sets = services?.displaySetService;
     const live = () => !ended && options.live?.() !== false;
     let ended = false, busy = false, quarantined = false, record = null, panel = null, status = null, hint = null;
-    const subscriptions = []; let listening = false, channel = null;
+    const subscriptions = []; let listening = false, channel = null, workspace = null;
 
     const ordered = () => [...(grid?.getState?.().viewports?.values?.() || [])]
       .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0) || String(a.viewportId).localeCompare(String(b.viewportId)));
@@ -176,6 +176,22 @@
       return { ...base, kind: 'stack', camera, voiRange: properties?.voiRange ? copy(properties.voiRange) : null,
         invert: properties?.invert ?? null, imageId, imageIndex };
     }
+
+    // A screen whose cells no longer fill their grid uniformly. Read-only: it is asked only
+    // to tell the user why an operation was refused, never to decide one. With no `record`
+    // this is a merged layout a saved Job restored, whose pre-merge grid was never saved.
+    function mergedLayout() {
+      const layout = grid?.getState?.()?.layout || {}, views = ordered();
+      const rows = layout.numRows, cols = layout.numCols;
+      if (!Number.isInteger(rows) || !Number.isInteger(cols) || !views.length) return false;
+      return views.length !== rows * cols || views.some((view, index) =>
+        !near(view.x, (index % cols) / cols) || !near(view.y, Math.floor(index / cols) / rows) ||
+        !near(view.width, 1 / cols) || !near(view.height, 1 / rows));
+    }
+    // Restore Grid is disabled whenever there is no record, so pointing a user at it then
+    // would be advice they cannot follow. The actual limit is stated instead.
+    const NO_RECORD = '저장된 병합 배치이거나 이 창에서 병합하지 않은 배치입니다. 병합 전 격자는 저장되지 않아 되돌릴 수 없으니 다른 배치를 적용하거나 저장된 배치 작업을 복원하세요.';
+    const refusal = reason => !record && mergedLayout() ? NO_RECORD : reason;
 
     // Layout identity only: which sources sit in which rectangles. Scrolling, W/L and
     // the active cell are the user's own work and must not invalidate a merge record.
@@ -569,10 +585,10 @@
       const base = snapshot();
       if (!base) return { ok: false, message: note(record
         ? '이미 병합된 화면입니다. 먼저 Restore Grid로 격자를 되돌리세요.'
-        : '1·2·4화면의 일반 CT 격자 또는 3평면 MPR 배치에서만 칸을 확대·병합할 수 있습니다.') };
+        : refusal('1·2·4화면의 일반 CT 격자 또는 3평면 MPR 배치에서만 칸을 확대·병합할 수 있습니다.')) };
       const anchor = anchorId || base.active;
       const result = plan({ rows: base.rows, cols: base.cols, cells: base.cells, anchorId: anchor, op });
-      if (!result.ok) return { ok: false, message: note(result.reason) };
+      if (!result.ok) return { ok: false, message: note(refusal(result.reason)) };
       // A merge destroys and rebuilds planes, and an Average plane can only be rebuilt with
       // the preparation above. Without that tool the operation is refused here - before a
       // single rectangle is dispatched - so the user keeps the screen they have instead of
@@ -623,7 +639,7 @@
             crosshair.center();
             return { ok: true, op, message: note(op === 'maximize'
               ? '선택한 칸을 한 화면으로 확대했습니다. 다시 더블클릭하거나 Restore Grid로 이전 배치로 돌아갑니다.'
-              : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아갑니다. 병합 화면은 저장할 수 없습니다.') };
+              : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아가며, 이 병합 배치는 Save New Job으로 저장할 수 있습니다.') };
           }
         }
         return await rollback('요청한 칸 배치를 확인하지 못해 이전 배치로 복구했습니다.');
@@ -707,7 +723,7 @@
         button.title = reason || (restore ? '병합 전 격자와 영상 상태로 되돌립니다.' : '선택한 칸을 확대하거나 인접한 칸과 병합합니다.');
       });
       if (hint) hint.textContent = record
-        ? '현재 병합 상태입니다. 병합 화면은 저장할 수 없으며 Restore Grid 후 저장할 수 있습니다.'
+        ? '현재 병합 상태입니다. Save New Job으로 이 배치를 저장할 수 있고, Restore Grid로 병합 전 배치와 영상 상태로 돌아갑니다.'
         : '영상 칸을 더블클릭하면 그 칸이 한 화면이 되고, 다시 더블클릭하면 이전 배치로 돌아갑니다.';
     }
 
@@ -728,6 +744,8 @@
       doc.removeEventListener('dblclick', onDoubleClick);
       channel?.close(); channel = null;
       if (listening) { win.removeEventListener?.('storage', sessionEnd); win.removeEventListener?.('pagehide', stop); listening = false; }
+      if (workspace && win.kinCellMergeWorkspaceState === workspace) delete win.kinCellMergeWorkspaceState;
+      workspace = null;
       panel?.remove(); panel = status = hint = null;
     }
 
@@ -751,6 +769,11 @@
       for (const event of new Set(Object.values(grid?.EVENTS || {})))
         try { subscriptions.push(grid.subscribe(event, observe)); } catch (_) { }
       doc.addEventListener('dblclick', onDoubleClick);
+      // The record is the only way back to the pre-merge grid and it lives nowhere but here.
+      // A saved Job restore rebuilds the screen on viewports this record never saw, so the
+      // Jobs panel reads this before it touches the screen; it is read-only by construction.
+      workspace = () => ({ merged: !!record, busy });
+      win.kinCellMergeWorkspaceState = workspace;
       if (!listening) {
         listening = true;
         win.addEventListener?.('storage', sessionEnd); win.addEventListener?.('pagehide', stop);

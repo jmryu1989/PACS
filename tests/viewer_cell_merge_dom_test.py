@@ -1,6 +1,7 @@
 # coding: utf-8
 """Isolated Chromium coverage for cell merge: double-click ownership, panel and loader."""
 from pathlib import Path
+import json
 import time
 import unittest
 
@@ -8,6 +9,8 @@ from playwright.sync_api import Error as PlaywrightError, expect, sync_playwrigh
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-cell-merge.js").read_text(encoding="utf-8")
+VOLUME_JOB = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-volume-job.js").read_text(encoding="utf-8")
+JOBS = (ROOT / "worklist-v0" / "hpacs-lite" / "viewer-jobs.js").read_text(encoding="utf-8")
 CONFIG = (ROOT / "config" / "ohif.js").read_text(encoding="utf-8")
 URL = "https://cellmerge.test/ohif/viewer?StudyInstanceUIDs=1.2.1"
 
@@ -105,6 +108,52 @@ window.enterMerge=()=>mergeExtension.onModeEnter({servicesManager:{services}});
 </script></body></html>"""
 CAPTURE_TIMEOUT_MS = 10_000
 
+# The saved Jobs panel over the same fake grid. Each stack cell gets the frame, actor and
+# canvas reads viewer-jobs.js needs to capture and restore it, so a restore really dispatches
+# a layout and really rolls back; nothing in the product path is stubbed out.
+JOB_FIXTURE = r"""(()=>{
+const frames=5,setOf=id=>gridState.viewports.get(id)?.displaySetInstanceUIDs?.[0]||null;
+window.cornerstone={metaData:{get:(type,id)=>{const m=type==='instance'&&/^img:ds-([A-D]):(\d+)$/.exec(id||'');
+  return m?{StudyInstanceUID:'1.2.1',SeriesInstanceUID:'series-'+m[1],SOPInstanceUID:'sop-'+m[1]+'-'+m[2],SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}:undefined;}}};
+for(const set of displaySets.values()){const letter=set.displaySetInstanceUID.slice(3);Object.assign(set,{StudyInstanceUID:'1.2.1',SeriesInstanceUID:'series-'+letter,
+  images:Array.from({length:frames},(_,n)=>({SOPInstanceUID:'sop-'+letter+'-'+n,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}))});}
+services.displaySetService.getActiveDisplaySets=()=>[...displaySets.values()];
+grid.setActiveViewportId=id=>{gridState.activeViewportId=id;};
+window.failNextImageLoad=false;
+const frameable=viewport=>Object.assign(viewport,{
+  getImageIds(){const set=setOf(this.id);return set?Array.from({length:frames},(_,n)=>'img:'+set+':'+n):[];},
+  getCurrentImageId(){const set=setOf(this.id);return set?'img:'+set+':'+this.index:null;},
+  getTargetImageIdIndex(){return this.index;},scroll(delta){this.index+=delta;},
+  getDefaultActor(){return setOf(this.id)?{actor:{}}:null;},getCanvas(){return {width:300,height:200};},
+  setImageIdIndex(value){if(window.failNextImageLoad){window.failNextImageLoad=false;return Promise.reject(Error('native frame load failed'));}
+    this.index=value;return Promise.resolve();}});
+nativeViewports.forEach(frameable);
+const make=makeViewport;window.makeViewport=(id,seed)=>frameable(make(id,seed));
+window.mountJobs=()=>{document.querySelector('#kin-viewer-layout').prepend(document.createElement('summary'));
+  window.kinViewerJobs(services,{scope:()=>'study'}).mount();};
+window.frameOf=id=>nativeViewports.get(id)?.getCurrentImageId?.()||null;
+window.shownFrames=()=>[...gridState.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(v=>frameOf(v.viewportId));
+// A click with no pointer event, so an in-flight merge cannot read it as user input.
+window.pressRestoreJob=title=>{const item=[...document.querySelectorAll('#kin-viewer-jobs strong')].find(s=>s.textContent===title).parentElement;
+  const button=[...item.querySelectorAll('button')].find(b=>b.textContent==='Restore Job'),enabled=!button.disabled;button.click();return enabled;};
+})();"""
+
+
+def stack_cell(letter, frame, scale):
+    return dict(study="1.2.1", series=f"series-{letter}", sop=f"sop-{letter}-{frame}", frame=1,
+                viewport=dict(width=300, height=200),
+                camera=dict(focalPoint=[0, 0, 0], position=[0, 0, 10], viewUp=[0, 1, 0], viewPlaneNormal=[0, 0, 1],
+                            parallelScale=scale, flipHorizontal=False, flipVertical=False),
+                properties=dict(voiRange=dict(lower=0, upper=100), VOILUTFunction="LINEAR", invert=False, interpolationType=1))
+
+
+SNAPSHOTS = {
+    "job-ordinary": ("Ordinary Job", dict(version=2, studies=["1.2.1"], rows=1, cols=2, active=0,
+                                          cells=[stack_cell("A", 3, 21), stack_cell("B", 1, 22)])),
+    "job-merged": ("Merged Job", dict(version=9, studies=["1.2.1"], rows=2, cols=2, rects=[dict(x=0, y=0, width=1, height=1)],
+                                      active=0, volume=None, cells=[dict(kind="stack", **stack_cell("B", 4, 33))])),
+}
+
 
 class ViewerCellMergeDOMTest(unittest.TestCase):
     @classmethod
@@ -126,6 +175,153 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
         if factory:
             page.add_script_tag(content=FACTORY)
         return page
+
+    def jobs_page(self):
+        """Cell merge and the saved Jobs panel mounted together over the same grid."""
+        page = self.new_page()
+        held, gate = [], {"hold": False}
+
+        def api(route):
+            path = route.request.url.split("https://cellmerge.test/api", 1)[1]
+            if path == "/me":
+                body = dict(kind="member", sub="doctor", institution="inst", roles=["radiologist"])
+            elif path.startswith("/studies/1.2.1/viewer-jobs?"):
+                body = dict(jobs=[dict(id=key, title=title, description="", authorActor="doctor", authorSub="other",
+                                       createdAt="2026-09-13T00:00:00Z", revision=1, hidden=False,
+                                       snapshotVersion=snapshot["version"]) for key, (title, snapshot) in SNAPSHOTS.items()])
+            elif path.startswith("/studies/1.2.1/viewer-jobs/") and path.rsplit("/", 1)[1] in SNAPSHOTS:
+                if gate["hold"]:
+                    held.append(route)
+                    return
+                body = dict(id=path.rsplit("/", 1)[1], snapshot=SNAPSHOTS[path.rsplit("/", 1)[1]][1])
+            else:
+                route.fulfill(status=404, body='{"message":"missing"}', content_type="application/json")
+                return
+            route.fulfill(body=json.dumps(body), content_type="application/json")
+
+        page.route("https://cellmerge.test/api/**", api)
+        page.add_script_tag(content=JOB_FIXTURE)
+        page.add_script_tag(content=VOLUME_JOB)
+        page.add_script_tag(content=JOBS)
+        self.assertTrue(page.evaluate("mountDirect()"))
+        page.evaluate("mountJobs()")
+        expect(page.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록")
+        return page, held, gate
+
+    def jobs_status(self, page, text, timeout=25000):
+        expect(page.locator("#kin-viewer-jobs-status")).to_contain_text(text, timeout=timeout)
+        return page.locator("#kin-viewer-jobs-status").text_content()
+
+    def test_a_held_merge_refuses_restore_job_before_any_dispatch_and_keeps_its_way_back(self):
+        page, _, _ = self.jobs_page()
+        try:
+            panel = page.locator("#kin-cell-merge")
+            # D is the cell the maximize removes; its frame and zoom exist only in the record.
+            page.evaluate("nativeViewports.get('D').index=2;nativeViewports.get('D').camera.parallelScale=55")
+            before = page.evaluate("geometry()")
+            page.locator('[data-cell="C"]').dblclick()
+            expect(panel.locator("[role=status]")).to_contain_text("확대했습니다")
+            # The user's own work on the merged cell never invalidates the record.
+            page.evaluate("nativeViewports.get('C').camera.parallelScale=64")
+            # Were the restore to run, the Job's first frame load fails after its layout landed.
+            page.evaluate("failNextImageLoad=true")
+            page.locator("#kin-viewer-jobs strong", has_text="Ordinary Job").locator("xpath=..") \
+                .get_by_role("button", name="Restore Job").click()
+            status = self.jobs_status(page, "입력은 유지됩니다")
+            observed = dict(refused="Restore Grid로 격자를 되돌린 뒤 복원하세요" in status,
+                            layout_calls=len(page.evaluate("layoutCalls")), merged=page.evaluate("mergeController.state().merged"),
+                            restore_grid_enabled=panel.locator('[data-cell-merge="restore"]').is_enabled(),
+                            geometry=page.evaluate("geometry()"))
+            self.assertEqual(dict(refused=True, layout_calls=1, merged=True, restore_grid_enabled=True,
+                                  geometry=[["C", 0, 0, 1, 1]]), observed, status)
+            page.evaluate("failNextImageLoad=false")
+
+            # A merge state that cannot be read is not taken as "no merge".
+            page.evaluate("window.heldReader=kinCellMergeWorkspaceState;kinCellMergeWorkspaceState=()=>{throw Error('unreadable')};0")
+            page.locator("#kin-viewer-jobs strong", has_text="Merged Job").locator("xpath=..") \
+                .get_by_role("button", name="Restore Job").click()
+            self.jobs_status(page, "칸 병합 상태를 확인할 수 없어")
+            self.assertEqual(1, len(page.evaluate("layoutCalls")))
+            page.evaluate("kinCellMergeWorkspaceState=heldReader")
+
+            # The way back still works and still owes the removed cell its frame and zoom.
+            panel.locator('[data-cell-merge="restore"]').click()
+            expect(panel.locator("[role=status]")).to_contain_text("되돌렸습니다", timeout=15000)
+            self.assertEqual(before, page.evaluate("geometry()"))
+            self.assertEqual(55, page.evaluate("nativeViewports.get('D').camera.parallelScale"))
+            self.assertEqual("img:ds-D:2", page.evaluate("frameOf('D')"))
+            self.assertEqual(64, page.evaluate("nativeViewports.get('C').camera.parallelScale"))
+
+            # With no record held, the explicit replacement goes ahead and succeeds.
+            page.locator("#kin-viewer-jobs strong", has_text="Ordinary Job").locator("xpath=..") \
+                .get_by_role("button", name="Restore Job").click()
+            self.jobs_status(page, "비교 작업을 복원했습니다")
+            self.assertEqual(3, len(page.evaluate("layoutCalls")))
+            self.assertEqual(["img:ds-A:3", "img:ds-B:1"], page.evaluate("shownFrames()"))
+        finally:
+            page.close()
+
+    def test_restore_job_waits_out_an_in_flight_merge_and_continues_once_no_record_is_held(self):
+        page, held, gate = self.jobs_page()
+        try:
+            panel = page.locator("#kin-cell-merge")
+            # A merge still waiting for its layout is about to become a held record.
+            page.evaluate("failSetLayout=true")
+            panel.locator('[data-cell-merge="maximize"]').click()
+            page.wait_for_function("()=>mergeController.state().busy")
+            self.assertTrue(page.evaluate("pressRestoreJob('Ordinary Job')"))
+            self.jobs_status(page, "칸 배치 요청이 끝난 뒤")
+            self.assertEqual([], page.evaluate("layoutCalls.filter(call=>String(call.activeViewportId).startsWith('kin-'))"))
+            # The merge finishes on its own terms, untouched by the refused restore.
+            expect(panel.locator("[role=status]")).to_contain_text("이전 배치로 복구했습니다", timeout=15000)
+            self.assertFalse(page.evaluate("mergeController.state().quarantined"))
+            page.evaluate("failSetLayout=false")
+
+            # Input order the other way round: a restore in flight refuses a new merge, and the
+            # user's click is itself an interaction the restore's own serial refuses on - neither
+            # side dispatches anything.
+            gate["hold"] = True
+            self.assertTrue(page.evaluate("pressRestoreJob('Merged Job')"))
+            self.wait_for_capture(page, held)
+            panel.locator('[data-cell-merge="maximize"]').click()
+            expect(panel.locator("[role=status]")).to_contain_text("저장 또는 영상 작업이 끝난 뒤")
+            gate["hold"] = False
+            held.pop().fulfill(body=json.dumps(dict(id="job-merged", snapshot=SNAPSHOTS["job-merged"][1])),
+                               content_type="application/json")
+            self.jobs_status(page, "영상 조작이 변경되어 복원하지 않았습니다")
+            self.assertEqual([], page.evaluate("layoutCalls.filter(call=>String(call.activeViewportId).startsWith('kin-'))"))
+            self.assertFalse(page.evaluate("mergeController.state().merged"))
+            # Asked again on a screen that holds no record, the saved merged layout is restored.
+            self.assertTrue(page.evaluate("pressRestoreJob('Merged Job')"))
+            self.jobs_status(page, "병합한 칸 배치를 복원했습니다")
+            self.assertEqual(["img:ds-B:4"], page.evaluate("shownFrames()"))
+            self.assertFalse(page.evaluate("mergeController.state().merged"))
+            expect(panel.locator('[data-cell-merge="restore"]')).to_be_disabled()
+
+            # A foreign source change drops a held record through the module's own observer;
+            # the screen is then an ordinary record-less one and a restore is allowed again.
+            page.locator("#kin-viewer-jobs strong", has_text="Ordinary Job").locator("xpath=..") \
+                .get_by_role("button", name="Restore Job").click()
+            self.jobs_status(page, "비교 작업을 복원했습니다")
+            panel.locator('[data-cell-merge="maximize"]').click()
+            expect(panel.locator("[role=status]")).to_contain_text("확대했습니다")
+            page.evaluate("""grid.setLayout({numRows:1,numCols:2,activeViewportId:'F0',
+              findOrCreateViewport:i=>({displaySetInstanceUIDs:['ds-'+'CD'[i]],viewportOptions:{viewportId:'F'+i}})})""")
+            expect(panel.locator("[role=status]")).to_contain_text("병합 기록을 지웠습니다")
+            self.assertTrue(page.evaluate("pressRestoreJob('Merged Job')"))
+            self.jobs_status(page, "병합한 칸 배치를 복원했습니다")
+            self.assertEqual(["img:ds-B:4"], page.evaluate("shownFrames()"))
+
+            # A stopped module leaves no reader behind, so nothing stale can answer for it.
+            page.evaluate("mergeController.stop()")
+            self.assertEqual("undefined", page.evaluate("typeof window.kinCellMergeWorkspaceState"))
+        finally:
+            for route in held:
+                try:
+                    route.abort()
+                except PlaywrightError:
+                    pass
+            page.close()
 
     def wait_for_capture(self, page, held, count=1):
         deadline = time.monotonic() + CAPTURE_TIMEOUT_MS / 1000
@@ -205,7 +401,8 @@ class ViewerCellMergeDOMTest(unittest.TestCase):
             self.assertEqual([["A", 0, 0, .5, 1], ["B", .5, 0, .5, .5], ["D", .5, .5, .5, .5]], page.evaluate("geometry()"))
             expect(panel.locator('[data-cell-merge="maximize"]')).to_be_disabled()
             expect(panel.locator('[data-cell-merge="restore"]')).to_be_enabled()
-            expect(panel.locator("[data-cell-merge-hint]")).to_contain_text("저장할 수 없으며")
+            # A merged screen is now a saveable Job shape, so the hint states that instead.
+            expect(panel.locator("[data-cell-merge-hint]")).to_contain_text("Save New Job")
             panel.locator('[data-cell-merge="restore"]').click()
             page.wait_for_function("()=>gridState.viewports.size===4")
             expect(panel.locator('[data-cell-merge="restore"]')).to_be_disabled()
