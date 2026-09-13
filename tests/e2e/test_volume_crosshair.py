@@ -158,11 +158,14 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   v.get_by_role('button',name='Show Crosshairs',exact=True).click();v.wait_for_function("()=>document.querySelectorAll('[data-kin-crosshair]').length===12")
   self.rotate_planes(v,0,25);self.rotate_planes(v,1,-35);self.rotate_planes(v,2,135)
   ax,sg,co=[native['names'].index(name) for name in ['axial','sagittal','coronal']]
+  # MPR windowing sync is on by default and would copy the sagittal window to every plane.
+  box=v.get_by_role('checkbox',name='Sync MPR Windowing',exact=True);expect(box).to_be_enabled();box.set_checked(False);expect(box).not_to_be_checked()
   v.evaluate("""([ax,sg,co])=>{const ids=[...services.viewportGridService.getState().viewports.keys()],get=i=>services.cornerstoneViewportService.getCornerstoneViewport(ids[i]);
    const axial=get(ax),c=axial.getCamera(),u=c.viewUp,n=c.viewPlaneNormal,right=[u[1]*n[2]-u[2]*n[1],u[2]*n[0]-u[0]*n[2],u[0]*n[1]-u[1]*n[0]],d=u.map((x,i)=>x*3-right[i]*4);
    axial.setCamera({focalPoint:c.focalPoint.map((x,i)=>x+d[i]),position:c.position.map((x,i)=>x+d[i]),parallelScale:c.parallelScale*.7});axial.render();
    const sagittal=get(sg);sagittal.setProperties({voiRange:{lower:0,upper:2000}});sagittal.render();
    const coronal=get(co);coronal.setBlendMode(1);coronal.setSlabThickness(5);coronal.render()}""",[ax,sg,co]);self.settled(v)
+  v.wait_for_function("voi=>[...services.viewportGridService.getState().viewports.keys()].every((id,i)=>{const r=services.cornerstoneViewportService.getCornerstoneViewport(id).getProperties().voiRange;return Math.abs(r.lower-voi[i][0])<1e-6&&Math.abs(r.upper-voi[i][1])<1e-6})",arg=[[0,2000] if i==sg else [0,1000] for i in range(3)]);self.settled(v)
   before=self.cameras(v);pivot=self.pivot(before);offsets=self.plane_offsets(before,pivot);screen=self.screen_point(v,pivot);display=self.display(v)
   self.basic(v);self.settled(v);after=self.cameras(v)
   self.assert_native_axes(after,native);np.testing.assert_allclose(self.pivot(after),pivot,atol=1e-6,rtol=0)
