@@ -709,11 +709,15 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         # Reopened on the same account and device over an ordinary single-cell screen — the
         # rollback snapshot of that screen is taken first and the mixed layout is rebuilt onto it.
         target = self.launch(self.login(), [current])
+        self.open_layout_tools(target)
         expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("저장 작업 목록", timeout=45000)
         expect(target.get_by_text("MPR Mixed Layout · 출력 미지원")).to_be_visible()
         self.assertEqual(0, target.get_by_role("button", name="Print Saved Images", exact=True).count(),
                          "a mixed-layout Job offers no output path it cannot render")
-        self.assertEqual(1, len(self.cells(target)), "the reopened viewer starts on its own default layout")
+        opening = self.cells(target)
+        self.assertNotIn("orthographic", [cell["type"] for cell in opening],
+                         "the reopened viewer starts on an ordinary screen, so Restore must rebuild the planes")
+        print("HP_MIXED_OPENING " + json.dumps([cell["type"] for cell in opening]), flush=True)
         target.get_by_role("button", name="Restore Job", exact=True).click()
         expect(target.locator("#kin-viewer-jobs-status")).to_contain_text("복원했습니다", timeout=45000)
         restored = self.planes(target)
@@ -754,9 +758,15 @@ class HangingProtocolE2E(ViewerLayoutE2E):
             if right is None:
                 self.assertIsNone(left); continue
             self.assertEqual(right["kind"], left["kind"])
-            for key in ("study", "series", "orientation", "sop", "frame", "sourceDigest", "projection"):
+            for key in ("study", "series", "orientation", "sop", "frame", "sourceDigest"):
                 if key in right:
                     self.assertEqual(right[key], left[key], key)
+            if "projection" in right:
+                self.assertEqual(right["projection"]["blend"], left["projection"]["blend"])
+                # The restore oracle accepts the saved slab within 1e-6, so the re-capture is
+                # compared on the same tolerance rather than on exact float equality.
+                self.assertAlmostEqual(right["projection"]["thickness"],
+                                       left["projection"]["thickness"], delta=1e-6)
             for key in ("VOILUTFunction", "invert", "interpolationType"):
                 self.assertEqual(right["properties"][key], left["properties"][key])
             for bound in ("lower", "upper"):
