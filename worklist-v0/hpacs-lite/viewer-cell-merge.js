@@ -279,6 +279,14 @@
         if (!merged || merged.kind !== 'stack' || cell.kind !== 'stack') return cell;
         const atInput = touched?.get(cell.viewportId);
         const placed = !interacted || (!!atInput && atInput.kind === 'stack');
+        // The only change this module makes to a cell of its own accord after the dispatch
+        // is the native refit, and native refits a pane only where its rectangle changed
+        // shape. Both rectangles are known here - the pre-merge one from the record, the
+        // merged one from the settled reading - so a cell that kept its shape cannot have
+        // been refitted at all and every change on it is somebody else's doing.
+        const aspect = box => (box && box.width > 0 && box.height > 0 ? box.width / box.height : null);
+        const shapeBefore = aspect(cell), shapeMerged = aspect(merged);
+        const refitable = shapeBefore === null || shapeMerged === null || !near(shapeBefore, shapeMerged);
         // One field, decided on evidence. A value the user moved after the merge settled is
         // theirs. A value that is identical in the settled reading but was different at the
         // instant their input arrived was changed by that input and is theirs as well, so
@@ -286,8 +294,15 @@
         // no user input behind it is owed the pre-merge record. Where an input happened but
         // could not be placed on the screen, the newer value is kept and the restore says so:
         // an unattributable value is never silently reverted.
-        const decide = (untouched, steady, recorded, actual, unchanged) => {
-          if (!untouched || steady === false) return actual;
+        // `held` is the one case where that second reading proves nothing: the field still
+        // held the recorded value when the input arrived, and this module's own refit was
+        // still to come, so the move to the settled value could be the user's gesture or
+        // that refit and nothing here separates them. The newer value is still kept - their
+        // work is never reverted on a guess - but the restore no longer claims the image
+        // state came back.
+        const decide = (untouched, steady, recorded, actual, unchanged, held) => {
+          if (!untouched) return actual;
+          if (steady === false) { if (held) ambiguous = true; return actual; }
           if (placed || unchanged) return recorded;
           ambiguous = true; return actual;
         };
@@ -298,9 +313,14 @@
           cell, current, current.imageId === cell.imageId);
         const camera = {};
         for (const keys of CAMERA_GROUPS) {
+          // Only the zoom group is refittable: the native refit of a reshaped pane changes
+          // parallelScale and leaves where the camera sits and how it is oriented alone, so
+          // a scroll, a pan or a flip that followed the input is the user's beyond doubt.
+          // The image, the window and invert are no part of a refit either and pass nothing.
           const owed = decide(sameCameraKeys(current.camera, merged.camera, keys),
             atInput?.camera ? sameCameraKeys(atInput.camera, merged.camera, keys) : null,
-            cell.camera, current.camera, sameCameraKeys(current.camera, cell.camera, keys));
+            cell.camera, current.camera, sameCameraKeys(current.camera, cell.camera, keys),
+            keys === CAMERA_ZOOM && refitable && !!atInput?.camera && sameCameraKeys(atInput.camera, cell.camera, keys));
           for (const key of keys) camera[key] = owed[key];
         }
         return { ...cell, camera,

@@ -45,7 +45,10 @@ mutate('record-without-recheck', 'if (geometryIs(expected)) {', 'if (true) {');
 // Ownership, in both directions: rebuilding over a screen this module cannot account for,
 // and folding the user's own input into the baseline the restore is judged against.
 mutate('trust-foreign-screen', 'if (!ours(base)) return { ok: false, message: quarantine(FOREIGN) };', ';');
-mutate('adopt-input-baseline', 'if (!untouched || steady === false) return actual;', 'if (!untouched) return actual;');
+mutate('adopt-input-baseline', 'if (steady === false) { if (held) ambiguous = true; return actual; }', ';');
+// The input that arrives before the refit lands: keeping the newer value is right, calling
+// it a restored image state is not. This drops the honesty and keeps the value.
+mutate('claim-refit-as-user', '{ if (held) ambiguous = true; return actual; }', '{ return actual; }');
 // The camera judged as one decision again, which is what let a slice change carry the
 // merge's refit zoom back with it.
 mutate('adopt-merged-camera', 'const owed = decide(sameCameraKeys(current.camera, merged.camera, keys),',
@@ -173,12 +176,12 @@ const planCells = (rows, cols, kinds) => kinds.map((kind, index) => ({ viewportI
 // here by name against the file on disk - in every plain run, before any mutation is used.
 test('every declared mutation anchor still matches the shipped module exactly once', () => {
   const shipped = fs.readFileSync(sourcePath, 'utf8');
-  // Ten anchors for nine mutations: the rollback defect takes two edits to reintroduce.
-  assert.equal(declared.length, 10);
+  // Eleven anchors for ten mutations: the rollback defect takes two edits to reintroduce.
+  assert.equal(declared.length, 11);
   for (const item of declared)
     assert.equal(occurrences(shipped, item.from), item.expected, 'anchor drifted: ' + item.name + ' ' + item.from);
   assert.deepEqual([...new Set(declared.map(item => item.name))].sort(),
-    ['adopt-input-baseline', 'adopt-merged-camera', 'claim-restore', 'record-without-recheck',
+    ['adopt-input-baseline', 'adopt-merged-camera', 'claim-refit-as-user', 'claim-restore', 'record-without-recheck',
       'rollback-adopts-screen', 'skip-kind-guard', 'skip-uniform-guard', 'trust-dispatch', 'trust-foreign-screen']);
 });
 
@@ -468,6 +471,58 @@ test('a user edit made while the merge settles is kept, and a bare click costs n
   assert.equal(restored.ok, true);
   assert.equal(y.viewports.get('A').camera.parallelScale, yzoom);
   assert.deepEqual(y.viewports.get('A').properties.voiRange, yvoi);
+  assert.match(restored.message, /이전 칸 배치와 영상 상태로 되돌렸습니다/);
+});
+
+// The same input, on either side of the native refit. What the screen held at the instant
+// the input arrived tells the two orderings apart: after the refit, a value that moved since
+// is the user's; before it, the same evidence fits their gesture and this merge's own refit
+// equally well. Their work is kept either way - it is the claim about it that has to differ.
+test('an input that lands before the native refit keeps the user work without claiming the image state came back', async () => {
+  const atSettle = (env, delay, act) => {
+    const original = env.services.viewportGridService.setLayout;
+    env.services.viewportGridService.setLayout = function (payload) {
+      return original.call(this, payload).then(value => {
+        if (payload.layoutOptions) setTimeout(act, delay);
+        return value;
+      });
+    };
+  };
+  // The merged layout lands at 60ms, so an input at 10ms reaches a screen that still holds
+  // the pre-merge zoom: the refit is still to come.
+  const x = fixture({ refitOnResize: true, slow: 60 });
+  const zoom = x.viewports.get('A').camera.parallelScale, bcamera = clone(x.viewports.get('B').camera);
+  atSettle(x, 10, () => { x.doc.fire('wheel'); x.viewports.get('A').setImageIdIndex(2); });
+  assert.equal((await x.controller.merge('merge-column', 'A')).ok, true);
+  const refit = x.viewports.get('A').camera.parallelScale;
+  assert.notEqual(refit, zoom);
+  const back = await x.controller.unmerge();
+  assert.equal(back.ok, true);
+  assert.deepEqual(layoutOf(x.state).map(row => row[0]), ['A', 'B', 'C', 'D']);
+  // The slice they scrolled to is theirs and is kept. The zoom moved between their input
+  // and the settled reading, which their wheel and the refit explain equally well, so the
+  // newer value stays too - and the panel does not report the image state as restored.
+  assert.equal(x.viewports.get('A').current, 'wadors:A:2');
+  assert.equal(x.viewports.get('A').camera.parallelScale, refit);
+  assert.match(back.message, /되돌리지 않고 그대로 두었습니다/);
+  assert.doesNotMatch(back.message, /영상 상태로 되돌렸습니다/);
+  // A surviving cell kept its shape, so no refit could have reached it: it is owed its
+  // recorded state whole, and the ambiguity above is confined to the cell that was reshaped.
+  assert.deepEqual(x.viewports.get('B').camera, bcamera);
+  assert.equal(x.viewports.get('B').current, 'wadors:B:0');
+
+  // The control: the same user work, the same fixture, the input placed after the refit has
+  // landed. Now the zoom at the input instant is the refit's own, so the value the settled
+  // reading holds is attributable and the untouched zoom really is restored.
+  const y = fixture({ refitOnResize: true, slow: 60 });
+  const yzoom = y.viewports.get('A').camera.parallelScale;
+  atSettle(y, 100, () => { y.doc.fire('wheel'); y.viewports.get('A').setImageIdIndex(2); });
+  assert.equal((await y.controller.merge('merge-column', 'A')).ok, true);
+  assert.notEqual(y.viewports.get('A').camera.parallelScale, yzoom);
+  const restored = await y.controller.unmerge();
+  assert.equal(restored.ok, true);
+  assert.equal(y.viewports.get('A').current, 'wadors:A:2');
+  assert.equal(y.viewports.get('A').camera.parallelScale, yzoom);
   assert.match(restored.message, /이전 칸 배치와 영상 상태로 되돌렸습니다/);
 });
 
