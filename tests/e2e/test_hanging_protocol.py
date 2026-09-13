@@ -619,9 +619,16 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         self.assertEqual(["orthographic", "stack", "orthographic", None], [cell["type"] for cell in cells],
                          "the rule places both kinds in one grid and leaves the fourth cell empty")
         self.assertEqual([], cells[3]["sets"]); self.assertIsNone(cells[3].get("volumeId"))
-        plane_series = self.described_ref(viewer, current, "D03A current")["series"]
-        frame_series = self.described_ref(viewer, current, "D02E second series")["series"]
-        self.assertNotEqual(plane_series, frame_series)
+        # Which of the study's two series the rule picked for which alias follows the product's
+        # own Series Number ordering, so it is read off the screen rather than assumed here.
+        before_frame = self.frame_cell(viewer, 1)
+        plane_series, frame_series = cells[0]["series"], before_frame["series"]
+        self.assertNotEqual(plane_series, frame_series, "the plane cells and the frame cell are different series")
+        self.assertEqual({plane_series, frame_series},
+                         {ref["series"] for ref in self.fixture_refs(viewer, current)})
+        self.assertEqual({"D03A current", "D02E second series"},
+                         {item.get("0008103E", {}).get("Value", [None])[0]
+                          for item in self.metadata(viewer, current)})
         for cell in (cells[0], cells[2]):
             self.assertEqual(cells[0]["volumeId"], cell["volumeId"], "both planes show one and the same volume")
             self.assertEqual(plane_series, cell["series"]); self.assertEqual(current.uid, cell["study"])
@@ -629,8 +636,7 @@ class HangingProtocolE2E(ViewerLayoutE2E):
             self.assertEqual(cell["sourceSops"], cell["sops"])
         np.testing.assert_allclose(np.abs([cells[0]["viewPlaneNormal"], cells[2]["viewPlaneNormal"]]),
                                    [[0, 0, 1], [0, 1, 0]], atol=1e-6)
-        before_frame = self.frame_cell(viewer, 1)
-        self.assertEqual(frame_series, before_frame["series"])
+        self.assertGreaterEqual(before_frame["frames"], 2, "the frame cell must have another frame to choose")
 
         # Manipulate BOTH kinds, then make the frame cell the active one, so the saved snapshot
         # can only be reproduced by restoring a camera, a window and a chosen original frame.
@@ -644,8 +650,10 @@ class HangingProtocolE2E(ViewerLayoutE2E):
         viewer.evaluate("""async()=>{
           const grid=services.viewportGridService,cs=services.cornerstoneViewportService;
           const views=[...grid.getState().viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x);
-          const v=cs.getCornerstoneViewport(views[1].viewportId);
-          const target=Math.min(1,v.getImageIds().length-1);
+          const v=cs.getCornerstoneViewport(views[1].viewportId),ids=v.getImageIds();
+          // Whatever frame the rule opened, move to the next one, so the saved frame is
+          // never the default no matter where the viewer started.
+          const target=(Math.max(0,ids.indexOf(v.getCurrentImageId()))+1)%ids.length;
           await v.setImageIdIndex(target);v.scroll(target-v.getTargetImageIdIndex(),false);
           v.setProperties({voiRange:{lower:-300,upper:700}});v.render();
           grid.setActiveViewportId(views[1].viewportId);}""")

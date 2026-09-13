@@ -94,7 +94,12 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(cells.every(c=>!c))fail();
     const active=views.findIndex(v=>v.viewportId===state.activeViewportId);if(active<0)throw Error('활성 MPR 평면을 선택한 뒤 저장하세요.');
     const batch=includeBatch?window.kinVolumeBatchState?.capture(reference):null;
-    const marks=window.kinMprMarks?.capture(readOnly),annotated=marks&&(marks.marks.length||!marks.visible||!marks.sync);
+    // The marks tool binds to a three-plane target, so on a mixed layout it has none and
+    // asking it to capture would fail on the missing target rather than report a state.
+    // What matters there is only whether mark work would be lost, which it answers without
+    // a target; a mixed screen can never be the layout those marks belong to anyway.
+    const marks=mixed?null:window.kinMprMarks?.capture(readOnly);
+    const annotated=mixed?!!window.kinMprMarks?.dirty?.():marks&&(marks.marks.length||!marks.visible||!marks.sync);
     // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
     // user's own state visible instead of writing a v7 snapshot that quietly lost it.
     if(!legacy){

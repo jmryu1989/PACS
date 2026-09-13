@@ -39,7 +39,7 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
   resolve:()=>STACK_SET,apply:async()=>{}});
 // cells: 'axial'|'sagittal'|'coronal' is a plane the layout named, 'frame' an ordinary stack
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,stack=frameHelper()}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper()}={}){
   const viewports=new Map(),lookup=new Map();
   cells.forEach((spec,index)=>{
     const id='vp-'+index,frame=spec==='frame',named=typeof spec==='string'&&!frame?spec:null;
@@ -50,7 +50,11 @@ function world(rows,cols,cells,{active=0,batch=null,marks=null,stack=frameHelper
     lookup.set(id,spec&&!frame?viewport(index,normal):{type:'stack'});
   });
   context.window.kinVolumeBatchState=batch?{capture:()=>batch}:undefined;
-  context.window.kinMprMarks=marks?{capture:()=>marks}:undefined;
+  // The real tool binds to a three-plane target: capture() throws without one, while
+  // dirty() answers from its own records and is the only signal a mixed layout can use.
+  context.window.kinMprMarks=marks||dirtyMarks
+    ?{capture:()=>{if(cells.some(c=>c==='frame'))throw Error('표식 입력을 마친 뒤 저장하세요.');return marks;},dirty:()=>dirtyMarks}
+    :undefined;
   return context.window.kinCreateVolumeJob({
     grid:{getState:()=>({layout:{numRows:rows,numCols:cols,layoutType:'grid'},viewports,activeViewportId:'vp-'+active})},
     cs:{getCornerstoneViewport:id=>lookup.get(id)},
@@ -158,7 +162,11 @@ test('a mixed layout shares one pixel budget and refuses marks and batch by name
  const batch={cell:{},offset:0,interval:1,count:2,reverse:false};
  const marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
  assert.throws(()=>world(2,2,['axial','frame','coronal',null],{batch}).capture(),/단면 묶음/);
- assert.throws(()=>world(2,2,['axial','frame','coronal',null],{marks}).capture(),/3D 표식/);
+ // A mixed screen is not a three-plane target, so the tool is asked whether mark work
+ // would be lost — not to capture a state it cannot see from here.
+ assert.throws(()=>world(2,2,['axial','frame','coronal',null],{marks,dirtyMarks:true}).capture(),/3D 표식/);
+ assert.equal(world(2,2,['axial','frame','coronal',null],{marks}).capture().version,8,
+   'marks already saved on their own three-plane Job are not lost by a mixed save');
 });
 
 test('without the frame-cell helper a mixed screen refuses instead of dropping the cell',()=>{
