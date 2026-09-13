@@ -1,8 +1,8 @@
 window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,owner=()=>null,host}){
   const panel=document.createElement('section');panel.id='kin-volume-orientation';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';
-  panel.innerHTML='<strong>MPR Orientation</strong><p class="target"></p><label>Axis <select aria-label="MPR Rotation Axis"><option value="0">Patient L/R</option><option value="1">Patient A/P</option><option value="2">Patient H/F</option></select></label> <label>Degrees <input type="number" aria-label="MPR Rotation Degrees" min="-180" max="180" step="5" value="15" style="width:80px"></label> <button type="button">Rotate Three Planes</button> <button type="button">Reset Planes</button><p role="status"></p><p>세 평면의 교점을 유지해 회전합니다. Reset Planes는 이 배치에서 시작한 방향·위치·확대로 돌아갑니다. Save New Job으로 표시를 저장할 수 있습니다.</p>';
+  panel.innerHTML='<strong>MPR Orientation</strong><p class="target"></p><label>Axis <select aria-label="MPR Rotation Axis"><option value="0">Patient L/R</option><option value="1">Patient A/P</option><option value="2">Patient H/F</option></select></label> <label>Degrees <input type="number" aria-label="MPR Rotation Degrees" min="-180" max="180" step="5" value="15" style="width:80px"></label> <button type="button">Rotate Three Planes</button> <button type="button">Reset Planes</button> <button type="button">Basic Orthogonal</button><p role="status"></p><p>세 평면의 교점을 유지해 회전합니다. Basic Orthogonal은 교점과 평면별 확대·화면 이동·표시 설정을 유지한 채 세 평면을 환자 기준 기본 Axial·Sagittal·Coronal 방향으로 맞춥니다. Reset Planes는 이 화면을 열거나 작업을 복원한 시점의 방향·위치·확대로 돌아가므로, 기울어진 작업을 복원한 뒤에는 그 기울기로 돌아갑니다. Save New Job으로 표시를 저장할 수 있습니다.</p>';
   host.append(panel);
-  const axis=panel.querySelector('select'),degrees=panel.querySelector('input'),[rotate,reset]=panel.querySelectorAll('button'),status=panel.querySelector('[role=status]'),caption=panel.querySelector('.target');
+  const axis=panel.querySelector('select'),degrees=panel.querySelector('input'),[rotate,reset,basic]=panel.querySelectorAll('button'),status=panel.querySelector('[role=status]'),caption=panel.querySelector('.target');
   const model=window.KinVolumeOrientation,volumeKeys=new WeakMap(),readyRepairs=new WeakMap();let nextVolume=0,ended=false,busy=false,shown='',baseline=null;
   const alive=()=>{try{return !ended&&live();}catch(_){return false;}};
   const permitted=()=>{try{return alive()&&allowed();}catch(_){return false;}};
@@ -48,7 +48,9 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
         }
       }
       if(!volumeKeys.has(volume))volumeKeys.set(volume,++nextVolume);
-      return {source,views,cameras:views.map(v=>v.getCamera()),group:JSON.stringify([cells.map(c=>c.viewportId),volumeKeys.get(volume),source.sourceSignature]),selection:JSON.stringify([source.viewportId,source.selectionEpoch])};
+      // Plane identity is the orientation the cell was opened as, on the same precedence the
+      // MPR Job uses; a rotated camera no longer names its own plane.
+      return {source,views,cameras:views.map(v=>v.getCamera()),planes:cells.map((c,i)=>{const name=c.viewportOptions?.orientation??views[i].options?.orientation;return typeof name==='string'?name:null;}),group:JSON.stringify([cells.map(c=>c.viewportId),volumeKeys.get(volume),source.sourceSignature]),selection:JSON.stringify([source.viewportId,source.selectionEpoch])};
     }catch(error){if(verify)throw error;return null;}
   }
   function refresh(){
@@ -56,37 +58,43 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
     const t=target();let eligible=false;
     try{const g=services.viewportGridService.getState();eligible=!!shown3(g)&&services.cornerstoneViewportService.getCornerstoneViewport(g.activeViewportId)?.type==='orthographic';}catch(_){}
     panel.hidden=!alive()||!eligible;
-    rotate.disabled=reset.disabled=axis.disabled=degrees.disabled=busy||workspaceBusy()||!t||!permitted();
+    rotate.disabled=reset.disabled=basic.disabled=axis.disabled=degrees.disabled=busy||workspaceBusy()||!t||!permitted();
     if(!t){shown='';caption.textContent='완전히 로드된 단일 정규 CT의 3평면을 선택하세요.';return;}
     shown=t.selection;
     try{
       const point=model.intersection(t.cameras);
       if(!workspaceBusy()&&(!baseline||baseline.group!==t.group||baseline.viewRefs.some((ref,i)=>ref.deref()!==t.views[i])))baseline={group:t.group,cameras:structuredClone(t.cameras),viewRefs:t.views.map(v=>new WeakRef(v))};
       caption.textContent=t.source.study.id+' · Center L/P/H (mm): '+point.map(n=>Number(n.toFixed(3))).join(' / ');
-    }catch(error){rotate.disabled=true;reset.disabled=busy||workspaceBusy()||!permitted()||baseline?.group!==t.group;caption.textContent=error.message;}
+    }catch(error){rotate.disabled=basic.disabled=true;reset.disabled=busy||workspaceBusy()||!permitted()||baseline?.group!==t.group;caption.textContent=error.message;}
   }
   const setCamera=(v,camera)=>{v.setCamera({flipHorizontal:camera.flipHorizontal,flipVertical:camera.flipVertical});const next={...camera};delete next.rotation;delete next.flipHorizontal;delete next.flipVertical;v.setCamera(next);v.render();};
-  async function apply(starting){
+  // Native Crosshairs keep their own center. Basic moves each plane differently, so derive it
+  // again from the applied planes rather than leaving the center of the oblique screen.
+  const center=t=>{const v=t.views[0],group=window.cornerstoneTools?.ToolGroupManager?.getToolGroupForViewport(v.id,v.renderingEngineId),tool=group?.getToolInstance?.('Crosshairs');if(tool?.computeToolCenter&&group.getToolOptions?.('Crosshairs')?.mode!=='Disabled')tool.computeToolCenter();};
+  const nativePlanes=()=>{try{return cornerstone.CONSTANTS?.MPR_CAMERA_VALUES;}catch(_){return null;}};
+  async function apply(mode){
     if(busy)return;
-    let t,before,changed=false;
+    let t,before,changed=false;const starting=mode==='reset',basicMode=mode==='basic';
     try{
       t=target(true);if(!t||workspaceBusy()||t.selection!==shown)throw Error('선택한 MPR 평면이 바뀌었습니다. 대상을 확인하고 다시 적용하세요.');
       const angle=Number(degrees.value),index=Number(axis.value);
-      if(!starting&&(!degrees.value.trim()||![0,1,2].includes(index)||!Number.isFinite(angle)||Math.abs(angle)>180))throw Error('회전축과 -180~180도 범위의 각도를 입력하세요.');
+      if(mode==='rotate'&&(!degrees.value.trim()||![0,1,2].includes(index)||!Number.isFinite(angle)||Math.abs(angle)>180))throw Error('회전축과 -180~180도 범위의 각도를 입력하세요.');
       if(starting&&(baseline?.group!==t.group||baseline.viewRefs.some((ref,i)=>ref.deref()!==t.views[i])))throw Error('이 배치의 시작 화면을 확인할 수 없습니다.');
-      const next=starting?structuredClone(baseline.cameras):model.rotate(t.cameras,[0,1,2].map(i=>i===index?1:0),angle);
+      // Basic never reads the baseline: after an oblique Job restore that baseline is oblique.
+      const next=starting?structuredClone(baseline.cameras):basicMode?model.orthogonal(t.cameras,t.planes,nativePlanes()):model.rotate(t.cameras,[0,1,2].map(i=>i===index?1:0),angle);
       before=t.cameras;busy=true;status.textContent='MPR 방향을 적용 중입니다.';refresh();changed=true;
       t.views.forEach((v,i)=>setCamera(v,next[i]));
+      if(basicMode)center(t);
       await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
       const after=target(true);if(!after||after.group!==t.group||after.selection!==t.selection)throw Error('화면이 변경되어 회전 결과를 확인하지 못했습니다.');
       for(let i=0;i<3;i++)for(const key of ['position','focalPoint','viewUp','viewPlaneNormal'])if(!same(after.cameras[i][key],next[i][key]))throw Error('MPR 방향을 확인하지 못했습니다.');
-      model.intersection(after.cameras);status.textContent=starting?'시작 MPR 화면으로 돌아왔습니다.':'세 평면을 '+angle+'도 회전했습니다. 원본과 판독문은 그대로입니다.';
+      model.intersection(after.cameras);status.textContent=starting?'시작 MPR 화면으로 돌아왔습니다.':basicMode?'세 평면을 기본 Axial·Sagittal·Coronal 방향으로 맞췄습니다. 교점·확대·화면 이동과 원본·판독문은 그대로입니다.':'세 평면을 '+angle+'도 회전했습니다. 원본과 판독문은 그대로입니다.';
     }catch(error){
-      if(changed&&alive())try{const current=target();if(current?.group===t.group&&current.selection===t.selection)t.views.forEach((v,i)=>setCamera(v,before[i]));}catch(_){}
+      if(changed&&alive())try{const current=target();if(current?.group===t.group&&current.selection===t.selection){t.views.forEach((v,i)=>setCamera(v,before[i]));if(basicMode)center(t);}}catch(_){}
       if(alive())status.textContent=error.message||'MPR 방향을 적용하지 못했습니다.';
     }finally{busy=false;refresh();}
   }
-  rotate.onclick=()=>apply(false);reset.onclick=()=>apply(true);
+  rotate.onclick=()=>apply('rotate');reset.onclick=()=>apply('reset');basic.onclick=()=>apply('basic');
   const guard=e=>{if(busy&&!panel.contains(e.target)){e.preventDefault();e.stopImmediatePropagation();}};
   for(const name of ['pointerdown','wheel','keydown'])document.addEventListener(name,guard,{capture:true,passive:false});
   const timer=setInterval(refresh,500);refresh();

@@ -391,10 +391,10 @@ class MeasurementCiTests(unittest.TestCase):
                                          {'ORTHANC_PASS': 'generated-orthanc-password'})
         self.assertNotIn('KIN_EVIDENCE_DIR', env)
 
-    def test_volume_mpr_modules_declare_exact_eight_and_twelve_local_cases(self):
+    def test_volume_mpr_modules_declare_exact_eleven_and_twelve_local_cases(self):
         import ast
         for suite, class_name, prefix, count in (
-                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 8),
+                ('e2e/test_volume_crosshair.py', 'VolumeCrosshairE2E', 'test_crosshair_', 11),
                 ('e2e/test_volume_display.py', 'VolumeDisplayE2E', 'test_mpr_display_', 12)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)

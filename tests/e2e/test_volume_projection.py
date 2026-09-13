@@ -7,7 +7,7 @@ from playwright.sync_api import expect
 import test_prior_selection as ct
 from test_volume_study_workflow import VolumeStudyWorkflowE2E
 
-def phantom(stack,intercept=0,constant=False,signed=False):
+def phantom(stack,intercept=0,constant=False,signed=False,orientation=None):
  uid,series,frame=ct.generate_uid(),ct.generate_uid(),ct.generate_uid();patient='PROJECTION-'+uuid.uuid4().hex[:10]
  f=ct.Fixture(uid,patient,'한림병원','jmryu','PROJECTION-SYNTHETIC');stack.active[uid]=f
  ae=ct.AE(ae_title='HALLYM_CT');ae.add_requested_context(ct.CTImageStorage,ct.ExplicitVRLittleEndian);assoc=ae.associate('127.0.0.1',4242,ae_title='KINLAB')
@@ -16,7 +16,7 @@ def phantom(stack,intercept=0,constant=False,signed=False):
   for z in range(33):
    sop=ct.generate_uid();meta=ct.FileMetaDataset();meta.TransferSyntaxUID=ct.ExplicitVRLittleEndian;meta.MediaStorageSOPClassUID=ct.CTImageStorage;meta.MediaStorageSOPInstanceUID=sop;meta.ImplementationClassUID=ct.generate_uid()
    d=ct.FileDataset(None,{},file_meta=meta,preamble=b'\0'*128);d.SOPClassUID=ct.CTImageStorage;d.SOPInstanceUID=sop;d.SpecificCharacterSet='ISO_IR 192';d.PatientName='PROJECTION^SYNTHETIC';d.PatientID=patient;d.PatientBirthDate='';d.PatientSex='O';d.InstitutionName='한림병원'
-   d.StudyInstanceUID=uid;d.SeriesInstanceUID=series;d.FrameOfReferenceUID=frame;d.StudyDate=d.SeriesDate='20260901';d.StudyTime=d.SeriesTime='120000';d.AccessionNumber='PROJECTION';d.StudyID='PROJECTION';d.StudyDescription=d.SeriesDescription='Known voxel projection';d.Modality='CT';d.SeriesNumber=1;d.InstanceNumber=z+1;d.ImageType=['ORIGINAL','PRIMARY','AXIAL'];d.ImageOrientationPatient=[1,0,0,0,1,0];d.ImagePositionPatient=[0,0,z];d.SliceLocation=z;d.PixelSpacing=[1,1];d.SliceThickness=d.SpacingBetweenSlices=1
+   d.StudyInstanceUID=uid;d.SeriesInstanceUID=series;d.FrameOfReferenceUID=frame;d.StudyDate=d.SeriesDate='20260901';d.StudyTime=d.SeriesTime='120000';d.AccessionNumber='PROJECTION';d.StudyID='PROJECTION';d.StudyDescription=d.SeriesDescription='Known voxel projection';d.Modality='CT';d.SeriesNumber=1;d.InstanceNumber=z+1;d.ImageType=['ORIGINAL','PRIMARY','AXIAL'];d.ImageOrientationPatient=[1,0,0,0,1,0] if orientation is None else [format(x,'.10g') for x in orientation];d.ImagePositionPatient=[0,0,z] if orientation is None else [format(x*z,'.10g') for x in np.cross(orientation[:3],orientation[3:])];d.SliceLocation=z;d.PixelSpacing=[1,1];d.SliceThickness=d.SpacingBetweenSlices=1
    d.Rows=d.Columns=64;d.SamplesPerPixel=1;d.PhotometricInterpretation='MONOCHROME2';d.BitsAllocated=d.BitsStored=16;d.HighBit=15;d.PixelRepresentation=0;d.WindowCenter=500+intercept;d.WindowWidth=1000;d.RescaleIntercept=intercept;d.RescaleSlope=1;d.RescaleType='HU'
    value=500 if constant else 100 if z<=10 else 900 if z>=22 else 500;pixels=np.full((64,64),value,dtype='<u2');pixels[:4,:4]=1000 if not constant else 500
    if signed:d.PixelRepresentation=1;d.WindowCenter-=1024;pixels=(pixels.astype('int32')-1024).astype('<i2')
@@ -33,8 +33,8 @@ def phantom(stack,intercept=0,constant=False,signed=False):
  raise RuntimeError('Projection CT did not reach local API')
 
 class VolumeProjectionE2E(VolumeStudyWorkflowE2E):
- def opened_projection(self,intercept=0,constant=False):
-  a=phantom(self.stack,intercept,constant);self.seed_report(a);p=self.login();self.choose(p,a)
+ def opened_projection(self,intercept=0,constant=False,orientation=None):
+  a=phantom(self.stack,intercept,constant,orientation=orientation);self.seed_report(a);p=self.login();self.choose(p,a)
   with p.context.expect_page() as opened:p.locator('#m-filmbox').click()
   v=opened.value;ct.canvas_ready(v,1);self.ready(v);self.mpr(v);self.choose_volume(v,v,0)
   v.evaluate("""()=>{window.projectionVP=services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getState().activeViewportId);projectionVP.setCamera({focalPoint:[32,32,16],position:[32,32,-500]});projectionVP.setProperties({voiRange:{lower:0,upper:1000},VOILUTFunction:'LINEAR',interpolationType:0,invert:false});projectionVP.render();window.projectionPixel=()=>{const v=projectionVP,c=v.getCanvas(),xy=v.worldToCanvas([32,32,16]);return c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]}}""")
