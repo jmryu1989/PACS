@@ -4,8 +4,12 @@
    records what was on screen first, and refuses whatever it cannot put back. */
 (function (root) {
   'use strict';
-  const BASES = [[1, 2], [2, 1], [2, 2]];
+  // 1x3 and 3x1 are the grids the app's own MPR button builds; 2x2 is the Hanging Protocol
+  // plane grid, with or without a vacancy. No grid is invented here: every base is one the
+  // viewer already produces (viewer-volume-job.js:7, viewer-hanging-protocol.js:132).
+  const BASES = [[1, 2], [2, 1], [2, 2], [1, 3], [3, 1]];
   const CAMERA_KEYS = ['focalPoint', 'position', 'viewUp', 'viewPlaneNormal', 'parallelScale', 'flipHorizontal', 'flipVertical'];
+  const ORIENTATIONS = ['axial', 'sagittal', 'coronal'], PLANE_AXIS = { axial: 2, sagittal: 0, coronal: 1 };
   const near = (a, b) => Math.abs(a - b) <= 1e-6;
   const copy = value => (typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value)));
   const rect = (x, y, width, height) => ({ x, y, width, height });
@@ -27,33 +31,42 @@
     return null;
   }
 
-  // A cell is {viewportId,x,y,width,height,sets,kind}; kind is 'stack' for a loaded
-  // classic stack and 'empty' for a cell with no source. Anything else refuses whole.
+  // A cell is {viewportId,x,y,width,height,sets,kind}; kind is 'stack' for a loaded classic
+  // stack, 'plane' for a loaded MPR orthographic plane and 'empty' for a cell with no
+  // source. Anything else - a VR 3D volume, an SR, a PDF, a cell still loading, a plane
+  // whose volume or orientation cannot be established - refuses the whole operation.
+  const SHOWS_IMAGE = ['stack', 'plane'];
   function plan(request) {
     const { rows, cols, cells, anchorId, op } = request || {};
     if (!BASES.some(([r, c]) => r === rows && c === cols) || !Array.isArray(cells) || cells.length !== rows * cols)
-      return { ok: false, reason: '1·2·4화면의 일반 CT 격자에서만 셀을 병합할 수 있습니다.' };
+      return { ok: false, reason: '1·2·4화면의 일반 CT 격자 또는 3평면 MPR 배치에서만 칸을 확대·병합할 수 있습니다.' };
     for (let index = 0; index < cells.length; index++) {
       const cell = cells[index];
       if (!cell || typeof cell.viewportId !== 'string' || !cell.viewportId) return { ok: false, reason: '화면 구성을 확인할 수 없습니다.' };
       if (!near(cell.x, (index % cols) / cols) || !near(cell.y, Math.floor(index / cols) / rows) ||
           !near(cell.width, 1 / cols) || !near(cell.height, 1 / rows))
         return { ok: false, reason: '이미 병합되었거나 특수한 배치입니다. 먼저 Restore Grid로 격자를 되돌리세요.' };
-      if (!['stack', 'empty'].includes(cell.kind))
-        return { ok: false, reason: 'MPR·3D·SR·PDF 화면이나 아직 불러오지 못한 칸이 있어 병합하지 않았습니다. 일반 CT 격자에서 사용하세요.' };
+      if (!['stack', 'empty', 'plane'].includes(cell.kind))
+        return { ok: false, reason: '3D·SR·PDF 화면이나 아직 불러오지 못한 칸이 있어 병합하지 않았습니다. 일반 CT 격자나 MPR 평면 배치에서 사용하세요.' };
     }
     if (new Set(cells.map(cell => cell.viewportId)).size !== cells.length) return { ok: false, reason: '화면 구성을 확인할 수 없습니다.' };
     const anchorIndex = cells.findIndex(cell => cell.viewportId === anchorId);
     if (anchorIndex < 0) return { ok: false, reason: '확대할 칸을 먼저 선택하세요.' };
     if (!['maximize', 'merge-column', 'merge-row'].includes(op)) return { ok: false, reason: '지원하지 않는 병합입니다.' };
     if (op !== 'maximize' && (rows !== 2 || cols !== 2)) return { ok: false, reason: '열·행 병합은 2×2 배치에서만 사용할 수 있습니다.' };
+    // Maximize rebuilds each cell from its own recorded kind, so a grid holding both stacks
+    // and planes is no harder than either alone. A row or column merge leaves several cells
+    // of possibly different kinds side by side in new rectangles, which is a second shape of
+    // the feature rather than the same one, so it keeps the narrower boundary.
+    if (op !== 'maximize' && new Set(cells.filter(cell => cell.kind !== 'empty').map(cell => cell.kind)).size > 1)
+      return { ok: false, reason: 'MPR 평면과 일반 CT가 섞인 배치에서는 칸 확대만 사용할 수 있습니다.' };
     const column = anchorIndex % cols, row = Math.floor(anchorIndex / cols);
     const block = op === 'maximize' ? cells.slice()
       : cells.filter((_, index) => (op === 'merge-column' ? index % cols === column : Math.floor(index / cols) === row));
     // Only the cell that survives the merge has to carry an image; an empty cell in the
     // block is recorded as empty and comes back empty, which loses nothing.
-    if (cells[anchorIndex].kind !== 'stack')
-      return { ok: false, reason: '영상이 표시된 일반 CT 칸을 선택한 뒤 병합하세요.' };
+    if (!SHOWS_IMAGE.includes(cells[anchorIndex].kind))
+      return { ok: false, reason: '영상이 표시된 칸을 선택한 뒤 확대·병합하세요.' };
     const { options, merged } = shape(op, op === 'maximize' ? 0 : op === 'merge-column' ? column : row);
     const survivors = cells.filter(cell => !block.includes(cell));
     if (survivors.length !== options.length - 1) return { ok: false, reason: '화면 구성을 확인할 수 없습니다.' };
@@ -103,22 +116,63 @@
       } catch (_) { return null; }
     }
 
+    // The native namespace, which carries the volume cache and the instance metadata. The
+    // service is bound to `cornerstone` above, so the global is reached deliberately.
+    const nativeCornerstone = () => win?.cornerstone || root.cornerstone || null;
+    const volumeOf = viewport => { try { return nativeCornerstone()?.cache?.getVolume?.(viewport?.getVolumeId?.()) || null; } catch (_) { return null; } };
+
+    // Everything a plane cell is, read through the same native volume APIs the saved MPR Job
+    // and the Hanging Protocol already read (viewer-volume-job.js:13-19,53-63 and
+    // viewer-hanging-protocol.js:270-291). Identity is the loaded volume and its full SOP
+    // list, never the viewport, so a rebuilt plane can be proven to stand on the same
+    // originals. Anything that cannot be established returns null, which becomes an unknown
+    // kind and refuses the whole operation before a single rectangle is dispatched.
+    function planeOf(base, view, viewport, properties) {
+      const native = nativeCornerstone(), camera = cameraOf(viewport);
+      let actors = null; try { actors = viewport.getActors?.(); } catch (_) { return null; }
+      if (!camera || !Array.isArray(actors) || actors.length !== 1) return null;
+      const volumeId = viewport.getVolumeId?.(), volume = volumeOf(viewport), imageIds = volume?.imageIds;
+      if (typeof volumeId !== 'string' || !volumeId || !volume?.loadStatus?.loaded || !Array.isArray(imageIds) ||
+          imageIds.length < 2 || imageIds.length > 256 || volume.framesLoaded !== imageIds.length) return null;
+      const sops = imageIds.map(id => { try { return native?.metaData?.get?.('instance', id)?.SOPInstanceUID; } catch (_) { return null; } });
+      if (!sops.every(value => typeof value === 'string' && value) || new Set(sops).size !== sops.length) return null;
+      // The requested orientation is authoritative; a camera the Crosshairs tool has rotated
+      // no longer names its own plane, so without a stored orientation only a camera still
+      // exactly on an anatomical axis may name itself. Anything else is refused.
+      const stored = view.viewportOptions?.orientation ?? viewport.options?.orientation;
+      const orientation = ORIENTATIONS.includes(stored) ? stored
+        : ORIENTATIONS.find(name => camera.viewPlaneNormal.every((value, index) =>
+            Math.abs(Math.abs(value) - (index === PLANE_AXIS[name] ? 1 : 0)) < 1e-6)) || null;
+      let blend = null, thickness = null;
+      try { blend = actors[0]?.actor?.getMapper?.()?.getBlendMode?.(); thickness = viewport.getSlabThickness?.(); } catch (_) { return null; }
+      if (!orientation || ![0, 1, 2, 3].includes(blend) || !Number.isFinite(thickness)) return null;
+      return { ...base, kind: 'plane', camera, volumeId, sops, orientation, blend, thickness,
+        voiRange: properties?.voiRange ? copy(properties.voiRange) : null, invert: properties?.invert ?? null,
+        lutFunction: properties?.VOILUTFunction ?? null, interpolation: properties?.interpolationType ?? null };
+    }
+
     // One cell as this module needs it. Anything it cannot read becomes an unknown
     // kind, which refuses the whole operation before anything is dispatched.
     function cellOf(view) {
       const ids = [...(view.displaySetInstanceUIDs || [])], viewport = viewportOf(view.viewportId);
       const base = { viewportId: view.viewportId, x: view.x, y: view.y, width: view.width, height: view.height, sets: ids,
         optionsId: view.viewportOptions?.id ?? null, toolGroupId: view.viewportOptions?.toolGroupId ?? null,
-        camera: null, voiRange: null, invert: null, imageId: null, imageIndex: null };
+        camera: null, voiRange: null, invert: null, imageId: null, imageIndex: null,
+        volumeId: null, sops: null, orientation: null, blend: null, thickness: null, lutFunction: null, interpolation: null };
       let imageId = null, imageIndex = null, properties = null;
       try {
         imageId = viewport?.getCurrentImageId?.() || null;
         imageIndex = viewport?.getCurrentImageIdIndex?.() ?? null;
         properties = viewport?.getProperties?.() || null;
       } catch (_) { return { ...base, kind: 'unreadable' }; }
+      const known = ids.length === 1 && !!sets?.getDisplaySetByUID?.(ids[0]);
+      // A plane is judged before the empty test: an orthographic viewport standing on nothing
+      // is a plane this module could not read, not a vacancy it may rebuild as a stack cell.
+      if (viewport?.type === 'orthographic')
+        return (known && properties && planeOf(base, view, viewport, properties)) || { ...base, kind: 'unreadable' };
       if (!ids.length && !imageId) return { ...base, kind: 'empty' };
       const camera = cameraOf(viewport);
-      if (ids.length !== 1 || viewport?.type !== 'stack' || !imageId || !camera || !sets?.getDisplaySetByUID?.(ids[0])) return { ...base, kind: 'unreadable' };
+      if (!known || viewport?.type !== 'stack' || !imageId || !camera) return { ...base, kind: 'unreadable' };
       return { ...base, kind: 'stack', camera, voiRange: properties?.voiRange ? copy(properties.voiRange) : null,
         invert: properties?.invert ?? null, imageId, imageIndex };
     }
@@ -164,10 +218,18 @@
       return { rows, cols, active: state.activeViewportId, cells: views.map(cellOf), signature: layoutSignature() };
     }
 
-    const requestFor = cell => ({
-      displaySetInstanceUIDs: [...cell.sets], displaySetOptions: [{}],
-      viewportOptions: { viewportId: cell.viewportId, ...(cell.optionsId ? { id: cell.optionsId } : {}),
-        viewportType: 'stack', toolGroupId: cell.toolGroupId || 'default', allowUnmatchedView: true } });
+    // One cell stays one viewport, rebuilt as the kind it was. The plane branch is the
+    // combination the Hanging Protocol and the saved MPR Job already use
+    // (viewer-hanging-protocol.js:97-101): the native position cache keys on
+    // viewportOptions.id, so the recorded id is kept rather than a fresh one - here the
+    // cached presentation is the screen the user is owed, not a stale oblique to avoid.
+    const requestFor = cell => cell.kind === 'plane'
+      ? { displaySetInstanceUIDs: [...cell.sets], displaySetOptions: [{}],
+          viewportOptions: { id: cell.optionsId || cell.viewportId, viewportId: cell.viewportId, viewportType: 'volume',
+            toolGroupId: cell.toolGroupId || 'mpr', orientation: cell.orientation, allowUnmatchedView: true } }
+      : { displaySetInstanceUIDs: [...cell.sets], displaySetOptions: [{}],
+          viewportOptions: { viewportId: cell.viewportId, ...(cell.optionsId ? { id: cell.optionsId } : {}),
+            viewportType: 'stack', toolGroupId: cell.toolGroupId || 'default', allowUnmatchedView: true } };
 
     function boundedNative(promise, timeout) {
       const task = Promise.resolve(promise); task.catch(() => { });
@@ -194,37 +256,72 @@
     // A rebuilt grid is only a restoration when every expected source is back with the
     // image, window and camera it is owed. Cells that stayed on screen are owed their
     // newest state, cells this module removed are owed the recorded one.
+    // A plane also owes its originals: the same loaded volume, the same full SOP list and the
+    // same anatomical plane. A rebuilt plane that quietly fell back to another series or to
+    // another orientation is not the cell that was taken away, whatever its camera says. A
+    // stack cell has its source asserted by the geometry, which carries the display set.
+    const sameSource = (now, cell) => cell.kind !== 'plane' || (now.volumeId === cell.volumeId && now.orientation === cell.orientation && JSON.stringify(now.sops) === JSON.stringify(cell.sops));
+
     function restored(target) {
       if (!geometryIs(target)) return false;
+      const present = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
       return target.cells.every(cell => {
-        if (cell.kind !== 'stack') return true;
-        const viewport = viewportOf(cell.viewportId); if (viewport?.type !== 'stack') return false;
-        let properties = null, imageId = null;
-        try { properties = viewport.getProperties?.() || null; imageId = viewport.getCurrentImageId?.() || null; } catch (_) { return false; }
-        return imageId === cell.imageId && sameCamera(cameraOf(viewport), cell.camera) &&
-          JSON.stringify(properties?.voiRange ?? null) === JSON.stringify(cell.voiRange) &&
-          (properties?.invert ?? null) === cell.invert;
+        if (cell.kind === 'empty') return true;
+        const now = present.get(cell.viewportId);
+        return !!now && now.kind === cell.kind && sameSource(now, cell) && sameState(now, cell);
       });
     }
 
     // Native restores camera and W/L from its own presentation cache; where it did not,
     // the owed values are put back explicitly instead of being reported as restored.
+    function putCamera(viewport, wanted) {
+      if (!wanted || sameCamera(cameraOf(viewport), wanted)) return;
+      const camera = copy(wanted);
+      viewport.setCamera?.({ flipHorizontal: camera.flipHorizontal, flipVertical: camera.flipVertical });
+      delete camera.flipHorizontal; delete camera.flipVertical;
+      viewport.setCamera?.(camera);
+    }
+
+    // A plane takes its window, its projection mode and its slab back through the native
+    // volume setters the saved MPR Job also uses (viewer-volume-job.js:127-131), in that
+    // order: the mode and the thickness must be in place before the camera is assigned.
+    // Average projection needs the native preparation that module owns; this one calls it and
+    // never reimplements it, so a build without that tool leaves the mode unrestored and the
+    // oracle above reports that rather than claiming the screen came back.
+    function reapplyPlane(cell, viewport) {
+      const properties = viewport.getProperties?.() || {}, wanted = {};
+      if (cell.voiRange && JSON.stringify(properties.voiRange ?? null) !== JSON.stringify(cell.voiRange)) wanted.voiRange = copy(cell.voiRange);
+      if (cell.lutFunction !== null && (properties.VOILUTFunction ?? null) !== cell.lutFunction) wanted.VOILUTFunction = cell.lutFunction;
+      if (cell.invert !== null && (properties.invert ?? null) !== cell.invert) wanted.invert = cell.invert;
+      if (cell.interpolation !== null && (properties.interpolationType ?? null) !== cell.interpolation) wanted.interpolationType = cell.interpolation;
+      if (Object.keys(wanted).length) viewport.setProperties?.(wanted);
+      let blend = null; try { blend = viewport.getActors?.()[0]?.actor?.getMapper?.()?.getBlendMode?.(); } catch (_) { }
+      if (blend !== cell.blend) {
+        const volume = volumeOf(viewport);
+        if (cell.blend === 3 && typeof win.kinPrepareVolumeAverage === 'function' && volume) win.kinPrepareVolumeAverage(viewport, volume);
+        viewport.setBlendMode?.(cell.blend);
+      }
+      if (!near(viewport.getSlabThickness?.(), cell.thickness)) viewport.setSlabThickness?.(cell.thickness);
+      putCamera(viewport, cell.camera);
+    }
+
     function reapply(target) {
       for (const cell of target.cells) {
-        if (cell.kind !== 'stack') continue;
-        const viewport = viewportOf(cell.viewportId); if (viewport?.type !== 'stack') continue;
+        const viewport = viewportOf(cell.viewportId);
+        if (cell.kind === 'empty' || !viewport) continue;
         try {
-          if (Number.isInteger(cell.imageIndex) && viewport.getCurrentImageId?.() !== cell.imageId && typeof viewport.setImageIdIndex === 'function')
-            Promise.resolve(viewport.setImageIdIndex(cell.imageIndex)).catch(() => { });
-          const properties = viewport.getProperties?.() || {};
-          if (cell.voiRange && JSON.stringify(properties.voiRange ?? null) !== JSON.stringify(cell.voiRange))
-            viewport.setVOI?.(copy(cell.voiRange), { forceRecreateLUTFunction: true, voiUpdatedWithSetProperties: true });
-          if (cell.invert !== null && (properties.invert ?? null) !== cell.invert) viewport.setProperties?.({ invert: cell.invert });
-          if (cell.camera && !sameCamera(cameraOf(viewport), cell.camera)) {
-            const camera = copy(cell.camera);
-            viewport.setCamera?.({ flipHorizontal: camera.flipHorizontal, flipVertical: camera.flipVertical });
-            delete camera.flipHorizontal; delete camera.flipVertical;
-            viewport.setCamera?.(camera);
+          if (cell.kind === 'plane') {
+            if (viewport.type !== 'orthographic') continue;
+            reapplyPlane(cell, viewport);
+          } else {
+            if (viewport.type !== 'stack') continue;
+            if (Number.isInteger(cell.imageIndex) && viewport.getCurrentImageId?.() !== cell.imageId && typeof viewport.setImageIdIndex === 'function')
+              Promise.resolve(viewport.setImageIdIndex(cell.imageIndex)).catch(() => { });
+            const properties = viewport.getProperties?.() || {};
+            if (cell.voiRange && JSON.stringify(properties.voiRange ?? null) !== JSON.stringify(cell.voiRange))
+              viewport.setVOI?.(copy(cell.voiRange), { forceRecreateLUTFunction: true, voiUpdatedWithSetProperties: true });
+            if (cell.invert !== null && (properties.invert ?? null) !== cell.invert) viewport.setProperties?.({ invert: cell.invert });
+            putCamera(viewport, cell.camera);
           }
           viewport.render?.();
         } catch (_) { }
@@ -241,8 +338,15 @@
       return check();
     }
 
+    // Every field this module records and can put back, compared the way it is stored. The
+    // plane-only fields are null on a stack cell, so one comparison covers both kinds and no
+    // field is silently left out of the settling test or the restore oracle.
+    const samePlain = (a, b) => (a ?? null) === (b ?? null);
+    const sameNumber = (a, b) => typeof a === 'number' && typeof b === 'number' ? near(a, b) : samePlain(a, b);
     const sameState = (a, b) => !!a && !!b && sameCamera(a.camera, b.camera) && a.imageId === b.imageId &&
-      JSON.stringify(a.voiRange ?? null) === JSON.stringify(b.voiRange ?? null) && (a.invert ?? null) === (b.invert ?? null);
+      JSON.stringify(a.voiRange ?? null) === JSON.stringify(b.voiRange ?? null) && samePlain(a.invert, b.invert) &&
+      samePlain(a.lutFunction, b.lutFunction) && samePlain(a.interpolation, b.interpolation) &&
+      samePlain(a.blend, b.blend) && sameNumber(a.thickness, b.thickness);
 
     // The native viewport refits its camera when a pane changes shape, on its own resize
     // observer, and that refit is not reversible by resizing back. Nothing may be recorded
@@ -253,7 +357,7 @@
       for (let count = 0; count < 32; count++) {
         const current = new Map(ordered().map(view => [view.viewportId, cellOf(view)]));
         if (count >= minimum && previous && previous.size === current.size &&
-            [...current].every(([id, cell]) => cell.kind !== 'stack' || sameState(cell, previous.get(id)))) return current;
+            [...current].every(([id, cell]) => !SHOWS_IMAGE.includes(cell.kind) || sameState(cell, previous.get(id)))) return current;
         previous = current;
         await pause();
       }
@@ -275,10 +379,13 @@
       let ambiguous = false;
       const cells = base.cells.map(cell => {
         const current = present.get(cell.viewportId), merged = after?.get(cell.viewportId);
-        if (!current || current.kind !== 'stack' || JSON.stringify(current.sets) !== JSON.stringify(cell.sets)) return cell;
-        if (!merged || merged.kind !== 'stack' || cell.kind !== 'stack') return cell;
+        if (!current || !SHOWS_IMAGE.includes(cell.kind) || current.kind !== cell.kind || JSON.stringify(current.sets) !== JSON.stringify(cell.sets)) return cell;
+        // A plane whose volume or anatomical plane is no longer the recorded one is not the
+        // cell these per-field decisions describe; it is owed the record whole.
+        if (!sameSource(current, cell)) return cell;
+        if (!merged || merged.kind !== cell.kind) return cell;
         const atInput = touched?.get(cell.viewportId);
-        const placed = !interacted || (!!atInput && atInput.kind === 'stack');
+        const placed = !interacted || (!!atInput && atInput.kind === cell.kind);
         // The only change this module makes to a cell of its own accord after the dispatch
         // is the native refit, and native refits a pane only where its rectangle changed
         // shape. Both rectangles are known here - the pre-merge one from the record, the
@@ -306,8 +413,14 @@
           if (placed || unchanged) return recorded;
           ambiguous = true; return actual;
         };
+        // One recorded field, run through the same evidence. A native refit touches none of
+        // these - it changes the zoom of a reshaped pane and nothing else - so `held` is
+        // false for all of them and only the camera group below can be ambiguous this way.
+        const field = (key, equal = samePlain) => decide(equal(current[key], merged[key]),
+          atInput ? equal(atInput[key], merged[key]) : null, cell[key], current[key], equal(current[key], cell[key]));
         // imageId and imageIndex are one decision: an index without the image it belongs
-        // to would scroll the cell to a slice the user never asked for.
+        // to would scroll the cell to a slice the user never asked for. A plane carries
+        // neither - where its slice sits is its camera - so this decides nothing there.
         const scrolled = current.imageId !== merged.imageId;
         const image = decide(!scrolled, atInput ? atInput.imageId === merged.imageId : null,
           cell, current, current.imageId === cell.imageId);
@@ -323,11 +436,9 @@
             keys === CAMERA_ZOOM && refitable && !!atInput?.camera && sameCameraKeys(atInput.camera, cell.camera, keys));
           for (const key of keys) camera[key] = owed[key];
         }
-        return { ...cell, camera,
-          voiRange: decide(sameVoi(current.voiRange, merged.voiRange), atInput ? sameVoi(atInput.voiRange, merged.voiRange) : null,
-            cell.voiRange, current.voiRange, sameVoi(current.voiRange, cell.voiRange)),
-          invert: decide((current.invert ?? null) === (merged.invert ?? null), atInput ? (atInput.invert ?? null) === (merged.invert ?? null) : null,
-            cell.invert, current.invert, (current.invert ?? null) === (cell.invert ?? null)),
+        return { ...cell, camera, voiRange: field('voiRange', sameVoi), invert: field('invert'),
+          lutFunction: field('lutFunction'), interpolation: field('interpolation'),
+          blend: field('blend'), thickness: field('thickness', sameNumber),
           imageId: image.imageId, imageIndex: image.imageIndex };
       });
       return { rows: base.rows, cols: base.cols, active: base.active, cells, ambiguous };
@@ -398,12 +509,52 @@
         release: () => { for (const type of ['pointerdown', 'wheel', 'keydown']) doc.removeEventListener(type, handler, true); } };
     }
 
+    const hasPlane = cells => cells.some(cell => cell.kind === 'plane');
+
+    // The MPR tool group's Crosshairs resets the camera of every linked plane whenever native
+    // recreates one of them, which would hand back three refitted planes instead of the screen
+    // the user left. The saved MPR Job holds the same callback for the same reason
+    // (viewer-volume-job.js:82-88); it is not exported, so the hold is taken here. It is taken
+    // for one operation, only when a plane is involved, and released in that operation's
+    // `finally`, so no failure can leave the native callback replaced.
+    function holdCrosshairReset(needed) {
+      const idle = { center() { }, release() { } };
+      if (!needed) return idle;
+      let group = null, tool = null;
+      try {
+        group = (win?.cornerstoneTools || root.cornerstoneTools)?.ToolGroupManager?.getToolGroup?.('mpr');
+        tool = group?.getToolInstance?.('Crosshairs');
+      } catch (_) { return idle; }
+      if (!tool || typeof tool.onResetCamera !== 'function') return idle;
+      const original = tool.onResetCamera; let held = true;
+      const guarded = function (...args) { if (!held) return original.apply(this, args); };
+      tool.onResetCamera = guarded;
+      return {
+        // Once the cameras are confirmed, the crosshair widget is placed on them. Its centre
+        // is derived from those cameras, so it lands on the position the user last set rather
+        // than on a reset one; this is the only crosshair write this module makes.
+        center() { try { if (group.getToolOptions?.('Crosshairs')?.mode !== 'Disabled') tool.computeToolCenter?.(); } catch (_) { } },
+        release() { held = false; if (tool.onResetCamera === guarded) tool.onResetCamera = original; },
+      };
+    }
+
+    // MPR 3D marks are keyed by their volume reference, not by a viewport
+    // (viewer-volume-marks.js:9,12,35), so a rebuilt plane keeps them and this module never
+    // writes them. It takes the panel's own read-only capture on both sides of the operation
+    // - the same read that panel performs on its refresh timer - and compares the two:
+    // `undefined` means the panel would not answer, and a fingerprint that moved is reported
+    // as unconfirmed instead of being passed off as a fully restored screen.
+    function marksFingerprint(needed) {
+      if (!needed) return null;
+      try { const value = win.kinMprMarks?.capture?.(true); return value ? JSON.stringify(value) : null; } catch (_) { return undefined; }
+    }
+
     async function run(op, anchorId) {
       const reason = blocked(); if (reason) return { ok: false, message: note(reason) };
       const base = snapshot();
       if (!base) return { ok: false, message: note(record
         ? '이미 병합된 화면입니다. 먼저 Restore Grid로 격자를 되돌리세요.'
-        : '1·2·4화면의 일반 CT 격자에서만 셀을 병합할 수 있습니다.') };
+        : '1·2·4화면의 일반 CT 격자 또는 3평면 MPR 배치에서만 칸을 확대·병합할 수 있습니다.') };
       const anchor = anchorId || base.active;
       const result = plan({ rows: base.rows, cols: base.cols, cells: base.cells, anchorId: anchor, op });
       if (!result.ok) return { ok: false, message: note(result.reason) };
@@ -423,6 +574,7 @@
           ? { ok: false, message: note(message) }
           : { ok: false, message: quarantine() };
       };
+      const planes = hasPlane(base.cells), marks = marksFingerprint(planes), crosshair = holdCrosshairReset(planes);
       busy = true; refresh(); note('칸 배치를 적용하는 중…');
       try {
         const deadline = Date.now() + 4000;
@@ -439,7 +591,8 @@
           // requested geometry is confirmed once more, on the same synchronous reading
           // the signature is taken from, so a record only ever describes this merge.
           if (geometryIs(expected)) {
-            record = { base, op, anchorId: anchor, after, input: watch.input(), signature: layoutSignature() };
+            record = { base, op, anchorId: anchor, after, input: watch.input(), marks, planes, signature: layoutSignature() };
+            crosshair.center();
             return { ok: true, op, message: note(op === 'maximize'
               ? '선택한 칸을 한 화면으로 확대했습니다. 다시 더블클릭하거나 Restore Grid로 이전 배치로 돌아갑니다.'
               : '선택한 칸을 병합했습니다. Restore Grid로 이전 배치로 돌아갑니다. 병합 화면은 저장할 수 없습니다.') };
@@ -448,7 +601,7 @@
         return await rollback('요청한 칸 배치를 확인하지 못해 이전 배치로 복구했습니다.');
       } catch (_) {
         return await rollback('칸 배치에 실패해 이전 배치로 복구했습니다.');
-      } finally { watch.release(); busy = false; refresh(); }
+      } finally { crosshair.release(); watch.release(); busy = false; refresh(); }
     }
 
     async function unmerge() {
@@ -459,18 +612,28 @@
         return { ok: false, message: note('화면 또는 원본이 변경되어 병합 기록을 지웠습니다. 현재 화면은 유지됩니다.') };
       }
       const target = unmergeTarget(record.base, record.after, record.input), watch = watchInteraction();
+      const before = record.marks, planes = !!record.planes, crosshair = holdCrosshairReset(planes);
       busy = true; refresh(); note('이전 배치로 되돌리는 중…');
       try {
         const back = await rebuild(target, () => watch.owned() && ours(target));
         if (ended || !live()) return { ok: false, message: '' };
         if (back) {
           record = null;
-          return { ok: true, message: note(target.ambiguous
-            ? '이전 칸 배치로 되돌렸습니다. 병합 중 조작한 영상 상태는 확인되지 않아 되돌리지 않고 그대로 두었습니다.'
+          crosshair.center();
+          const after = marksFingerprint(planes);
+          // What is actually known, said separately. An unattributable image state and an
+          // unreadable mark state are two different gaps, and a restore that has neither
+          // is the only one that claims the whole screen came back.
+          const notes = [];
+          if (target.ambiguous) notes.push('병합 중 조작한 영상 상태는 확인되지 않아 되돌리지 않고 그대로 두었습니다.');
+          if (planes && (before === undefined || after === undefined || before !== after))
+            notes.push('MPR 3D 표식 상태는 확인하지 못했습니다.');
+          return { ok: true, message: note(notes.length
+            ? '이전 칸 배치로 되돌렸습니다. ' + notes.join(' ')
             : '이전 칸 배치와 영상 상태로 되돌렸습니다.') };
         }
         return { ok: false, message: quarantine() };
-      } finally { watch.release(); busy = false; refresh(); }
+      } finally { crosshair.release(); watch.release(); busy = false; refresh(); }
     }
 
     // A double click a native tool consumed never reaches document: the pinned
@@ -529,7 +692,7 @@
       panel = doc.createElement('section'); panel.id = 'kin-cell-merge';
       panel.style.cssText = 'border-top:1px solid #657c9f;margin-top:8px;padding-top:8px';
       panel.innerHTML = '<strong>Cell Merge</strong>' +
-        '<p>칸을 확대하거나 인접한 칸을 하나로 묶습니다. 이 뷰어 격자만 바뀌며 브라우저 전체 화면(Images Only)과는 다릅니다.</p>' +
+        '<p>칸을 확대하거나 인접한 칸을 하나로 묶습니다. 일반 CT 칸과 MPR 평면 칸에서 쓸 수 있으며, 이 뷰어 격자만 바뀌고 브라우저 전체 화면(Images Only)과는 다릅니다.</p>' +
         '<div><button type="button" data-cell-merge="maximize">Maximize Cell</button> ' +
         '<button type="button" data-cell-merge="merge-column">Merge Column</button> ' +
         '<button type="button" data-cell-merge="merge-row">Merge Row</button> ' +
