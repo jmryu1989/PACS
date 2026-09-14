@@ -351,6 +351,9 @@ jobs:
       - name: Applied MPR mouse setting stays bound on a new layout on the real panel
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/preferences-layout-dom --cwd . --file worklist-v0/hpacs-lite/volume-preferences.js --file worklist-v0/hpacs-lite/viewer-volume-preferences.js --file tests/viewer_volume_preferences_layout_dom_test.py -- "$RUNNER_TEMP/syncpref-python/bin/python" -B tests/viewer_volume_preferences_layout_dom_test.py
+      - name: MPR synchronization choices stay on a Hanging Protocol three-plane layout on the real panel
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/sync-layout-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-sync.js --file tests/viewer_volume_sync_layout_dom_test.py -- "$RUNNER_TEMP/syncpref-python/bin/python" -B tests/viewer_volume_sync_layout_dom_test.py
       - name: Confirm exact declared MPR synchronization and preferences selection
         run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_sync.py --file tests/e2e/test_volume_preferences.py --file worklist-v0/hpacs-lite/viewer-volume-sync.js --file worklist-v0/hpacs-lite/viewer-volume-preferences.js --file worklist-v0/hpacs-lite/volume-preferences.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-display.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/reading-appearance.js --file config/ohif.js --file api/src/pacs.service.ts -- "$RUNNER_TEMP/syncpref-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared MPR synchronization and preferences tests

@@ -311,12 +311,13 @@ class ExecutionSelectionTests(unittest.TestCase):
     def test_volume_sync_preferences_profile_selects_only_the_declared_modules(self):
         profile = ci.PROFILES['volume-sync-preferences']
         expected = [('e2e/test_volume_sync.py', 'VolumeSyncE2E',
-                     'test_sync_', 'ci-mpr-sync', 15,
+                     'test_sync_', 'ci-mpr-sync', 16,
                      {'test_sync_01_windowing_zoom_and_selected_reset',
                       'test_sync_03_partial_peer_failure_and_retry',
                       'test_sync_05_sigmoid_inversion_pixels_and_exact_failure_restore',
                       'test_sync_12_native_mouse_windowing_and_zoom',
-                      'test_sync_15_inversion_does_not_resynchronize_selected_reset'}),
+                      'test_sync_15_inversion_does_not_resynchronize_selected_reset',
+                      'test_sync_16_hanging_protocol_vacancy_keeps_choices_and_applied_profile'}),
                     ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E',
                      'test_properties_', 'ci-mpr-preferences', 17,
                      {'test_properties_02_native_mouse_and_duplicate_rejection',
@@ -354,7 +355,7 @@ class ExecutionSelectionTests(unittest.TestCase):
                 self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
                 self.assertEqual(runner.collect(plan).countTestCases(), count)
                 print('SELECTION', suite, len(selected), flush=True)
-        self.assertEqual(len(methods), 32)
+        self.assertEqual(len(methods), 33)
         # The group stays disjoint from the other MPR groups and the VR profile; the marks suite that
         # inherits sync keeps its own registration outside this group.
         others = {row[0] for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-rendering')
@@ -370,7 +371,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             for item in suite:
                 yield from flatten(item) if isinstance(item, unittest.TestSuite) else (item,)
         for suite, class_name, prefix, count in (
-                ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 15),
+                ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 16),
                 ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 17)):
             module = runner.load_module(ROOT/'tests'/suite)
             cls = getattr(module, class_name)

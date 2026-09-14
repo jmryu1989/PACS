@@ -824,7 +824,7 @@ class MeasurementCiTests(unittest.TestCase):
     def test_volume_sync_preferences_modules_declare_exact_local_cases(self):
         import ast
         for suite, class_name, prefix, count in (
-                ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 15),
+                ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 16),
                 ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 17)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
@@ -854,6 +854,7 @@ class MeasurementCiTests(unittest.TestCase):
                          'tests/measurement_ci.py --profile volume-sync-preferences',
                          'tests/measurement_ci_test.py',
                          'tests/viewer_volume_preferences_layout_dom_test.py',
+                         'tests/viewer_volume_sync_layout_dom_test.py',
                          'tests/execution_selection_test.py',
                          '--file tests/e2e/test_volume_sync.py',
                          '--file tests/e2e/test_volume_preferences.py',

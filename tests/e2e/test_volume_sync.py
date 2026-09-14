@@ -1,6 +1,6 @@
 # coding: utf-8
 """TEST-VOLUME-SYNC: explicit three-plane scope, lifecycle and partial failure."""
-import copy,os,re,unittest
+import copy,os,re,unittest,uuid
 from pathlib import Path
 import numpy as np
 from playwright.sync_api import expect
@@ -167,6 +167,53 @@ class VolumeSyncE2E(VolumeDisplayE2E):
   v.wait_for_function('()=>[...services.viewportGridService.getState().viewports.keys()].every(id=>services.cornerstoneViewportService.getCornerstoneViewport(id).getProperties().voiRange.upper===1700)');self.assertFalse(v.evaluate('()=>projectionVP.getProperties().invert'))
   self.gesture(v,'WindowLevel',25,10);after=self.volume_state(v);self.assertNotEqual(after[0]['properties']['voiRange']['upper'],1700)
   for peer in after[1:]:self.assertEqual(peer['properties']['voiRange'],after[0]['properties']['voiRange'])
+ def test_sync_16_hanging_protocol_vacancy_keeps_choices_and_applied_profile(self):
+  # hp_08's 2x2 rule and fixture: three planes of one CT and an empty fourth cell. Its page helpers run on this case's
+  # pages through an unstarted Hanging Protocol case; the stack, browser and cleanup stay this suite's own.
+  from test_hanging_protocol import HangingProtocolE2E
+  from workspace_roaming_support import cleanup_workspace
+  hp=HangingProtocolE2E('test_hp_08_merged_cell_layout_round_trips_through_the_account');self.addCleanup(cleanup_workspace,self.stack,'HangingProtocolPreference')
+  current=HangingProtocolE2E.ct(self,'SYNC-HP-'+uuid.uuid4().hex[:12],'current','20260801');self.seed_report(current);original=self.originals()
+  work=self.login();self.select(work,current);work.locator('#findings').fill('KEEP HP SYNC REPORT')
+  v=self.launch(work.context.new_page(),[current]);self.ready(v);hp.import_rules(v,hp.mpr_library())
+  box=lambda kind:v.get_by_role('checkbox',name='Sync MPR '+kind,exact=True)
+  chosen=lambda:[box('Windowing').is_checked(),box('Zoom').is_checked()]
+  def opened():
+   hp.apply(v,'Applied');hp.rendered_planes(v,3);grid=hp.planes(v)
+   self.assertEqual(4,len(grid),'three planes and a vacancy fill the 2x2 grid');self.assertEqual([None,[]],[grid[3]['type'],grid[3]['sets']])
+   self.assertEqual([['orthographic',1,grid[0]['volumeId'],True]]*3,[[c['type'],len(c['sets']),c['volumeId'],c['loaded']] for c in grid[:3]])
+   self.choose_volume(v,v,0);expect(v.locator('#kin-volume-sync')).to_be_visible();expect(box('Zoom')).to_be_enabled()
+   return [c['id'] for c in self.cells(v)[:3]]
+  read='ids=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(ids.map(id=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id);return [view.getZoom(),view.getProperties().voiRange.upper]})))))'
+  def follows(ids,source,upper,windowing,zoom):
+   # One native zoom and window change on a shown plane reaches the other two exactly when that option is on,
+   # and neither the values nor the options are reset by the panel refreshes that follow.
+   before=v.evaluate(read,ids)
+   v.evaluate('([id,upper])=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id);view.setZoom(view.getZoom()*1.25);view.setProperties({voiRange:{lower:0,upper}});view.render()}',[ids[source],upper])
+   expected=[[before[source][0]*1.25 if zoom or i==source else before[i][0],upper if windowing or i==source else before[i][1]] for i in range(3)]
+   v.wait_for_function('([ids,expected])=>ids.every((id,i)=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id);return Math.abs(view.getZoom()-expected[i][0])<1e-6&&view.getProperties().voiRange.upper===expected[i][1]})',arg=[ids,expected])
+   v.wait_for_timeout(1100)
+   for got,want in zip(v.evaluate(read,ids),expected):self.assertAlmostEqual(got[0],want[0],delta=1e-6);self.assertEqual(got[1],want[1])
+   self.assertEqual(chosen(),[windowing,zoom])
+  ids=opened();initial=box('Windowing').is_checked();self.assertFalse(box('Zoom').is_checked())
+  # Counting the vacancy re-attached the session on every refresh and flipped the latest choice straight back.
+  self.sync(v,'Windowing',not initial);self.sync(v,'Zoom',True);v.wait_for_timeout(1100);self.assertEqual(chosen(),[not initial,True])
+  expect(v.locator('#kin-volume-sync [role=status]')).to_contain_text('동기화 설정을 적용했습니다');follows(ids,0,1500,not initial,True)
+  # Another rule retires the planes and releases the session. The options belong to the layout they were chosen on,
+  # and the re-entered Hanging Protocol layout attaches its own new planes.
+  v.select_option('#kin-hp-rule','55555555-5555-4555-8555-555555555555');hp.apply(v,'Applied')
+  v.wait_for_function("()=>{const cells=[...services.viewportGridService.getState().viewports.values()];return cells.length===1&&services.cornerstoneViewportService.getCornerstoneViewport(cells[0].viewportId)?.type==='stack'}",timeout=45000)
+  expect(v.locator('#kin-volume-sync')).to_be_hidden()
+  v.select_option('#kin-hp-rule',hp.RULE_ID);ids=opened();self.assertFalse(box('Zoom').is_checked());initial=box('Windowing').is_checked()
+  # MPR Properties applies a saved profile through the same session; it stays applied and is what a later Save stores.
+  panel=v.locator('#kin-mpr-preferences');expect(panel).to_be_visible()
+  self.sync(v,'Windowing',not initial);self.sync(v,'Zoom',True);panel.get_by_role('button',name='Save MPR Preferences',exact=True).click();expect(panel.locator('[role=status]')).to_contain_text('저장했습니다')
+  self.sync(v,'Windowing',initial);self.sync(v,'Zoom',False);follows(ids,1,1700,initial,False)
+  panel.get_by_role('button',name='Load MPR Preferences',exact=True).click();expect(panel.locator('[role=status]')).to_contain_text('불러왔습니다');self.assertEqual(chosen(),[not initial,True])
+  follows(ids,2,1900,not initial,True)
+  panel.get_by_role('button',name='Save MPR Preferences',exact=True).click();expect(panel.locator('[role=status]')).to_contain_text('저장했습니다')
+  self.assertEqual(v.evaluate("()=>Object.entries(localStorage).filter(([k])=>k.startsWith('kin-mpr-preferences:')).map(([,value])=>JSON.parse(value).sync)"),[{'windowing':not initial,'zoom':True}])
+  expect(work.locator('#findings')).to_have_value('KEEP HP SYNC REPORT');self.assertEqual(self.originals(),original)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeSyncE2E(n) for n in loader.getTestCaseNames(VolumeSyncE2E) if n.startswith('test_sync_'))
 if __name__=='__main__':unittest.main(verbosity=2)
