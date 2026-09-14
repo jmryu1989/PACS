@@ -100,16 +100,6 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
  def basic(self,page):
   page.get_by_role('button',name='Basic Orthogonal',exact=True).click();expect(page.locator('#kin-volume-orientation [role=status]')).to_contain_text('기본 Axial·Sagittal·Coronal 방향으로 맞췄습니다')
  def settled(self,page):page.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
- def pivot(self,cameras):
-  import numpy as np
-  normals=np.array([c['viewPlaneNormal'] for c in cameras]);return np.linalg.solve(normals,np.sum(normals*np.array([c['focalPoint'] for c in cameras]),axis=1))
- def cameras(self,page):return [s['camera'] for s in self.volume_state(page)]
- def cameras_close(self,actual,expected,atol):
-  import numpy as np
-  self.assertEqual(len(actual),len(expected))
-  for x,y in zip(actual,expected):
-   for key in ['focalPoint','position','viewUp','viewPlaneNormal']:np.testing.assert_allclose(x[key],y[key],atol=atol,rtol=0)
-   self.assertAlmostEqual(x['parallelScale'],y['parallelScale'],delta=atol)
  def native_planes(self,page):
   return page.evaluate("()=>({names:[...services.viewportGridService.getState().viewports.values()].map(c=>c.viewportOptions?.orientation),table:JSON.parse(JSON.stringify(cornerstone.CONSTANTS.MPR_CAMERA_VALUES))})")
  def assert_native_axes(self,cameras,native):
@@ -128,49 +118,6 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   return page.evaluate("p=>[...services.viewportGridService.getState().viewports.keys()].map(id=>Array.from(services.cornerstoneViewportService.getCornerstoneViewport(id).worldToCanvas(p)))",list(map(float,point)))
  def display(self,page):
   return page.evaluate("()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),p=v.getProperties();return {blend:v.getActors()[0].actor.getMapper().getBlendMode(),thickness:v.getSlabThickness(),voi:[p.voiRange.lower,p.voiRange.upper],invert:!!p.invert}})")
- def band_pixels(self,page,orientation,skip=(),voi=None):
-  # Expected values come from each point's own source index in the known phantom
-  # (slices 0-10:100, 11-21:500, 22-32:900), away from band, corner and volume edges.
-  import numpy as np
-  r=np.array(orientation[:3],float);c=np.array(orientation[3:],float);n=np.cross(r,c);cameras=self.cameras(page);pivot=self.pivot(cameras);points=[]
-  for index,camera in enumerate(cameras):
-   up=np.array(camera['viewUp']);right=np.cross(up,camera['viewPlaneNormal']);chosen=[]
-   for x in range(-40,41,4):
-    for y in range(-40,41,4):
-     q=pivot+right*x+up*y;i,j,k=float(q@r),float(q@c),float(q@n)
-     if index in skip or not(6<=i<=58 and 6<=j<=58 and 1<=k<=31) or abs(k-10.5)<1.5 or abs(k-21.5)<1.5:continue
-     chosen.append([q.tolist(),100 if k<10.5 else 900 if k>21.5 else 500])
-   points.append(chosen)
-  self.band_reads=getattr(self,'band_reads',0)+1
-  # One read returns the samples plus each plane's canvas size and whole-canvas red-channel statistics.
-  read=page.evaluate('''points=>[...services.viewportGridService.getState().viewports.keys()].map((id,i)=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {values:points[i].map(([p])=>{const xy=v.worldToCanvas(p);if(!(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2))return null;return c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]}),canvas:('''+self.CANVAS_STATS+''')(id,c)}})''',points)
-  values=[plane['values'] for plane in read];canvases=[plane['canvas'] for plane in read]
-  counts=[]
-  for index,(row,got) in enumerate(zip(points,values)):
-   if index in skip:counts.append(None);continue
-   lower,upper=(voi or {}).get(index,(0,1000));bands=set();count=0
-   for (point,value),pixel in zip(row,got):
-    if pixel is None:continue
-    expected=(value-lower)/(upper-lower)*255
-    try:self.assertAlmostEqual(pixel,expected,delta=3,msg=f'plane {index} at {point} expects source value {value}; canvas {canvases[index]}')
-    except AssertionError:
-     # The first mismatch ends this read; diagnosis never replaces or softens this same assertion.
-     self.band_failure(page,index,point,value,pixel,expected,canvases,cameras);raise
-    bands.add(value);count+=1
-   self.assertGreaterEqual(len(bands),2,f'plane {index} should cross source bands');self.assertGreaterEqual(count,6);counts.append(count)
-  return counts
- # The pinned Viewport.setCamera re-derives slab clipping planes only when the focal point leaves the plane or viewUp
- # changes. Every plane must still clip +/- its live normal about its focal point at its own half thickness.
- CLIP_PLANES="()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),m=v.getActors()[0].actor.getMapper(),c=v.getCamera();return {id,half:v.getSlabThickness(),blend:m.getBlendMode(),normal:Array.from(c.viewPlaneNormal),focalPoint:Array.from(c.focalPoint),planes:m.getClippingPlanes().map(p=>({normal:Array.from(p.getNormal()),origin:Array.from(p.getOrigin())}))}})"
- def assert_clip_planes(self,page,label):
-  import numpy as np
-  state=page.evaluate(self.CLIP_PLANES);message=f'{label} clipping planes: '+json.dumps(state)
-  for s in state:
-   n,f=np.array(s['normal']),np.array(s['focalPoint']);self.assertEqual(len(s['planes']),2,message)
-   np.testing.assert_allclose(s['planes'][0]['normal'],n,atol=1e-6,rtol=0,err_msg=message);np.testing.assert_allclose(s['planes'][1]['normal'],-n,atol=1e-6,rtol=0,err_msg=message)
-   np.testing.assert_allclose(s['planes'][0]['origin'],f-s['half']*n,atol=1e-5,rtol=0,err_msg=message);np.testing.assert_allclose(s['planes'][1]['origin'],f+s['half']*n,atol=1e-5,rtol=0,err_msg=message)
-  return state
- CANVAS_STATS="(id,c)=>{const s={id,width:c.width,height:c.height,clientWidth:c.clientWidth,clientHeight:c.clientHeight,dpr:devicePixelRatio,min:null,max:null,nonzero:0};if(!c.width||!c.height)return s;const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;for(let k=0;k<d.length;k+=4){const x=d[k];if(s.min===null||x<s.min)s.min=x;if(s.max===null||x>s.max)s.max=x;if(x)s.nonzero++}return s}"
  # Linked MPR planes share one revision counter over native CAMERA_MODIFIED and IMAGE_RENDERED, so a plane
  # is ready only when a rendered frame came after its latest camera change, never after a fixed time.
  RENDER_PROOF='''ids=>{const E=window.cornerstone?.Enums?.Events;if(!E?.CAMERA_MODIFIED||!E?.IMAGE_RENDERED)throw Error('native CAMERA_MODIFIED/IMAGE_RENDERED events unavailable');
@@ -185,35 +132,6 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   try:page.wait_for_function(self.RENDER_READY,arg=ids,timeout=timeout)
   except PlaywrightTimeout:self.fail(f'linked planes {ids} drew no IMAGE_RENDERED after their last CAMERA_MODIFIED within {timeout}ms: '+json.dumps(page.evaluate('()=>window.kinRenderProof??null')))
   return page.evaluate('()=>JSON.parse(JSON.stringify({...kinRenderProof,readyAt:performance.now()}))')
- def band_failure(self,page,index,point,value,pixel,expected,canvases,cameras):
-  # Diagnosis only, saved in the uploaded volume-mpr artifact folder. Every step records its own failure and
-  # the caller re-raises its original assertion, even when the single re-rendered read below matches.
-  record={'test':self._testMethodName,'read':self.band_reads,'plane':index,'original':{'point':point,'source':value,'pixel':pixel,'expected':expected,'delta':3,'canvases':canvases},'cameras':cameras,'errors':{}}
-  def attempt(name,action):
-   try:return action()
-   except Exception as error:record['errors'][name]=f'{type(error).__name__}: {error}'
-  def save(path,data):
-   with path.open('x',encoding='utf-8') as stream:json.dump(data,stream,indent=1,default=str)
-   return str(path)
-  folder=Path(__file__).resolve().parent/'artifacts'/'volume-mpr-ci';stem=f'band-pixels-{self._testMethodName}-read{self.band_reads}-plane{index}'
-  record['clip_planes']=attempt('clip_planes',lambda:page.evaluate(self.CLIP_PLANES))
-  record['render_proof']=attempt('render_proof',lambda:page.evaluate('()=>window.kinRenderProof?JSON.parse(JSON.stringify({...kinRenderProof,readAt:performance.now()})):null'))
-  attempt('folder',lambda:folder.mkdir(parents=True,exist_ok=True))
-  attempt('original_record',lambda:save(folder/(stem+'-original.json'),record))
-  def screenshot():
-   path=folder/(stem+'.png')
-   if path.exists():raise FileExistsError(str(path))
-   page.screenshot(path=str(path));return str(path)
-  record['screenshot']=attempt('screenshot',screenshot)
-  record['diagnostic']=attempt('diagnostic_render',lambda:page.evaluate('''async ([index,p])=>{const id=[...services.viewportGridService.getState().viewports.keys()][index],v=services.cornerstoneViewportService.getCornerstoneViewport(id),E=cornerstone.Enums.Events,requested=performance.now();
-   const rendered=await new Promise((resolve,reject)=>{const done=e=>{clearTimeout(timer);resolve({at:performance.now(),viewportId:e.detail?.viewportId??null})};const timer=setTimeout(()=>{v.element.removeEventListener(E.IMAGE_RENDERED,done);reject(Error('IMAGE_RENDERED not received within 5000ms of render()'))},5000);
-    v.element.addEventListener(E.IMAGE_RENDERED,done,{once:true});try{v.render()}catch(error){clearTimeout(timer);v.element.removeEventListener(E.IMAGE_RENDERED,done);reject(error)}});
-   const c=v.getCanvas(),xy=v.worldToCanvas(p),pixel=(xy[0]>=2&&xy[1]>=2&&xy[0]<=c.clientWidth-2&&xy[1]<=c.clientHeight-2)?c.getContext('2d').getImageData(Math.floor(xy[0]*c.width/c.clientWidth),Math.floor(xy[1]*c.height/c.clientHeight),1,1).data[0]:null;
-   return {id,requested,rendered,xy:Array.from(xy),pixel,canvas:('''+self.CANVAS_STATS+''')(id,c),render_proof:window.kinRenderProof?JSON.parse(JSON.stringify(kinRenderProof)):null}}''',[index,point]))
-  if isinstance((record['diagnostic'] or {}).get('pixel'),(int,float)):record['diagnostic_within_original_tolerance']=abs(record['diagnostic']['pixel']-expected)<=3
-  record['outcome']='diagnosis only; the original assertion is re-raised unchanged'
-  attempt('diagnosis_record',lambda:save(folder/(stem+'-diagnosis.json'),record))
-  print('BAND_PIXELS_DIAGNOSIS',json.dumps(record,default=str),flush=True)
  def test_crosshair_09_basic_orthogonal_tilted_source_keeps_pivot_pan_zoom_display_and_crosshair(self):
   import numpy as np
   a,p,v=self.starting_tilted();initial=self.cameras(v);native=self.native_planes(v);self.assert_native_axes(initial,native)

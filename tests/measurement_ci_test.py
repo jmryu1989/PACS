@@ -592,7 +592,7 @@ class MeasurementCiTests(unittest.TestCase):
         import ast
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_path.py', 'VolumePathE2E', 'test_path_', 4),
-                ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E', 'test_orientation_', 5)):
+                ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E', 'test_orientation_', 6)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)

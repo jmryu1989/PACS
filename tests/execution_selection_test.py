@@ -219,7 +219,7 @@ class ExecutionSelectionTests(unittest.TestCase):
                      {'test_path_01_noncoplanar_points_unfolded_oracle_save_and_new_browser_restore',
                       'test_path_02_go_to_path_point_native_planes_pixels_and_rotation_semantics'}),
                     ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E',
-                     'test_orientation_', 'ci-mpr-orientation', 5,
+                     'test_orientation_', 'ci-mpr-orientation', 6,
                      {'test_orientation_01_double_oblique_pixels_reset_and_saved_reopen'})]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])

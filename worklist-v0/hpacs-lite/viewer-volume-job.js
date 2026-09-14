@@ -260,7 +260,14 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     for(let i=0;i<loaded.length;i++){
       const {v,cell}=loaded[i];
       v.setCamera({flipHorizontal:cell.camera.flipHorizontal,flipVertical:cell.camera.flipVertical});
-      const camera={...cell.camera};delete camera.flipHorizontal;delete camera.flipVertical;delete camera.rotation;v.setCamera(camera);v.render();
+      const camera={...cell.camera};delete camera.flipHorizontal;delete camera.flipVertical;delete camera.rotation;v.setCamera(camera);
+      // Native setCamera re-derives the slab clipping planes only when the focal point leaves the plane or viewUp
+      // changes, so a fresh plane turned in place about its initial focal point would keep its initial slab. The
+      // exact current half thickness is re-applied from this camera: the 0.05 default is reset, because setting
+      // it would clamp to 0.1 (the same idiom as viewer-volume-job-print.js:93).
+      const half=v.getSlabThickness();if(Math.abs(half-.05)<1e-8)v.resetSlabThickness();else v.setSlabThickness(half);
+      if(v.getActors()[0].actor.getMapper().getBlendMode()!==cell.projection.blend||Math.abs(v.getSlabThickness()-half)>1e-9||Math.abs(v.getSlabThickness()*2-cell.projection.thickness)>1e-6)throw Error('저장한 MPR 모드나 두께를 복원하지 못했습니다.');
+      v.render();
     }
     await rendered();
     // A cached volume can become ready before delayed resize/presentation work.
