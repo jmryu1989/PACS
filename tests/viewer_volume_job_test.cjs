@@ -336,3 +336,77 @@ test('server arc length and output grid equal the viewer model parity constants'
  assert.ok(Math.abs(curved.length-60.60865760815429)<=1e-9);assert.equal(curved.columns,122);assert.equal(curved.rows,13);
  assert.ok(Math.abs(free.length-60.58665999215323)<=1e-9);assert.equal(free.columns,122);assert.equal(free.rows,13);
 });
+// TEST-VOLUME-JOB-PERSISTENCE: the compiled ViewerJobService stores and restores every validated snapshot number exactly.
+const {ViewerJobService}=require('/app/dist/viewer-job.service.js');
+const {snapshotText,writeSnapshot,readSnapshot}=require('/app/dist/viewer-job-snapshot.js');
+// Synthetic CI run 34804675037, Prisma Json write: browser request value -> PostgreSQL jsonb and GET value.
+const observed=[[-0.33113281957650276,-0.3311328195765028],[-0.39587936876278024,-0.3958793687627802]];
+// This fake's model of the engine Json conversion: 16 significant digits reproduces both observed
+// alterations. It is a test double only, not a claim about the engine's general rule.
+const engineJson=v=>Array.isArray(v)?v.map(engineJson):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,x])=>[k,engineJson(x)])):typeof v==='number'?Number(v.toPrecision(16)):v;
+const numbers=v=>Array.isArray(v)?v.flatMap(numbers):v&&typeof v==='object'?Object.values(v).flatMap(numbers):typeof v==='number'?[v]:[];
+const jobId='00000000-0000-4000-8000-000000000001',caller={kind:'member',sub:'sub-1',actor:'dr.synthetic',institution:'I1',roles:['radiologist']};
+const parentStudy={uid:volume.study,institutionId:'I1',teleInstitutionId:null,rs:'F',preDoc:null,preReviewer:null};
+// PostgreSQL is modelled by committed rows holding the jsonb text; a failed transaction commits nothing.
+function fakeDatabase(options={}){
+ const store={jobs:new Map(),revisions:[],audit:[]},log=[];
+ const pick=(row,select)=>Object.fromEntries(Object.keys(row).filter(k=>!select||select[k]).map(k=>[k,k==='snapshot'?engineJson(JSON.parse(row.snapshot)):row[k]]));
+ const client=s=>({
+  studyState:{findMany:async()=>[parentStudy]},
+  viewerJob:{findUnique:async({where,select})=>s.jobs.has(where.id)?pick(s.jobs.get(where.id),select):null,count:async()=>options.count??s.jobs.size,
+   create:async({data,select})=>{if(s.jobs.has(data.id))throw new Error('duplicate id');const row={hidden:false,createdAt:new Date(0),...data,snapshot:JSON.stringify(engineJson(data.snapshot))};s.jobs.set(data.id,row);return pick(row,select);}},
+  viewerJobRevision:{create:async({data})=>{s.revisions.push(data);}},
+  auditLog:{create:async({data})=>{if(options.failAudit)throw new Error('audit unavailable');s.audit.push(data);}},
+  $executeRaw:async(strings,...values)=>{const sql=strings.join('?');log.push({sql,values});if(!values.length)return 0;
+   assert.equal(sql,'UPDATE "ViewerJob" SET "snapshot" = ?::jsonb WHERE "id" = ?::uuid');assert.equal(typeof values[0],'string');
+   const row=s.jobs.get(values[1]);if(!row||options.updateRows===0)return 0;JSON.parse(values[0]);row.snapshot=values[0];return 1;},
+  $queryRaw:async(strings,...values)=>{const sql=strings.join('?');log.push({sql,values});if(sql.includes('FROM "StudyState"'))return [parentStudy];
+   assert.equal(sql,'SELECT "snapshot"::text AS "snapshot" FROM "ViewerJob" WHERE "id" = ?::uuid');return s.jobs.has(values[0])?[{snapshot:s.jobs.get(values[0]).snapshot}]:[];}});
+ return {store,log,...client(store),$transaction:async work=>{const staged=structuredClone(store),out=await work(client(staged));Object.assign(store,staged);return out;}};
+}
+const orthancFake={connectStudyIdentity:async()=>({patientId:'SYNTHETIC'}),viewerSeriesManifest:async()=>volume.sops.map(sop=>({sop})),viewerReference:async sop=>tags[volume.sops.indexOf(sop)]};
+const accessFake={prepare:async()=>{},snapshot:async()=>{},require:async()=>{},allowed:async(c,refs)=>new Set(refs)};
+const jobService=options=>{const db=fakeDatabase(options);return {db,jobs:new ViewerJobService(db,orthancFake,accessFake)};};
+const jobBody=(s,title='MPR')=>Buffer.from(JSON.stringify({id:jobId,title,description:'',snapshot:s}));
+function exactJob(version){
+ const s=structuredClone(version===11?pathJob:snapshot);
+ for(const c of s.cells){c.camera.focalPoint=[0.30000000000000004,0,1];c.camera.position=[0.30000000000000004,0,101];}
+ return s;
+}
+test('snapshot text keeps the observed 17-digit doubles that the Json write altered',async()=>{
+ for(const [sent,persisted] of observed){
+  assert.equal(engineJson(sent),persisted,'the fake reproduces the CI alteration');assert.notEqual(persisted,sent);
+  const s={version:11,path:{frame:{initialNormal:[sent,-sent,0.8565223763494435]}},cells:[{camera:{focalPoint:[sent,0.30000000000000004,1e-7],parallelScale:5e-324}}]};
+  const text=snapshotText(s);assert.ok(text.includes('"initialNormal":['+sent+','+(-sent)+',0.8565223763494435]'));assert.deepStrictEqual(JSON.parse(text),s);
+ }
+ for(const bad of [null,[1],'x',undefined,1])assert.throws(()=>snapshotText(bad));
+ await assert.rejects(writeSnapshot({$executeRaw:async()=>0},jobId,{version:4}));await assert.rejects(writeSnapshot({$executeRaw:async()=>2},jobId,{version:4}));
+ await assert.rejects(readSnapshot({$queryRaw:async()=>[]},jobId));await assert.rejects(readSnapshot({$queryRaw:async()=>[{snapshot:{version:4}}]},jobId));
+});
+test('a created version 4 or 11 Job stores and restores every snapshot number exactly, with replay and conflict unchanged',async()=>{
+ for(const version of [4,11]){
+  const {db,jobs}=jobService(),s=exactJob(version);
+  assert.ok(numbers(s).filter(x=>engineJson(x)!==x).length>=2,'the fixture carries doubles a 16-digit conversion alters');
+  if(version===11)assert.ok(s.path.frame.initialNormal.some(x=>engineJson(x)!==x),'the path normal itself needs 17 digits');
+  const created=await jobs.create(volume.study,jobBody(s),caller);
+  assert.deepEqual([created.id,created.revision,created.snapshotVersion,created.hidden],[jobId,1,version,false]);
+  const text=db.store.jobs.get(jobId).snapshot,stored=JSON.parse(text);
+  assert.match(stored.volume.sourceDigest,/^[a-f0-9]{64}$/);
+  assert.deepStrictEqual(stored,{...s,volume:{...s.volume,sourceDigest:stored.volume.sourceDigest}});
+  assert.deepStrictEqual(db.store.revisions.map(r=>[r.jobId,r.revision,r.reason,r.actor]),[[jobId,1,'','dr.synthetic']]);assert.equal(db.store.audit.length,1);
+  const writes=db.log.filter(q=>q.sql.startsWith('UPDATE'));assert.equal(writes.length,1);assert.deepEqual(writes[0].values,[text,jobId]);
+  // The Json column value of this row is the altered one; an exact restore therefore proves the text read.
+  const restored=await jobs.get(volume.study,jobId,caller);assert.deepStrictEqual(restored.snapshot,stored);assert.notDeepStrictEqual(engineJson(stored),stored);
+  assert.deepEqual(await jobs.create(volume.study,jobBody(s),caller),created);
+  await assert.rejects(jobs.create(volume.study,jobBody(s,'MPR changed'),caller),e=>e.getStatus?.()===409);
+  assert.equal(db.store.jobs.get(jobId).snapshot,text);assert.equal(db.store.revisions.length,1);assert.equal(db.store.audit.length,1);
+  assert.equal(db.log.filter(q=>q.sql.startsWith('UPDATE')).length,1);
+ }
+});
+test('a Job whose snapshot write, history or limit fails leaves no Job, history or audit',async()=>{
+ for(const options of [{updateRows:0},{failAudit:true},{count:200}]){
+  const {db,jobs}=jobService(options);
+  await assert.rejects(jobs.create(volume.study,jobBody(exactJob(11)),caller));
+  assert.deepEqual([db.store.jobs.size,db.store.revisions.length,db.store.audit.length],[0,0,0],JSON.stringify(options));
+ }
+});

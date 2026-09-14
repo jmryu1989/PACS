@@ -151,6 +151,14 @@ class VolumePathE2E(VolumeCurvedE2E):
    'display_before_save':display,'display_after_save':v.evaluate(CELL_DISPLAY),'job_owned':owned,**transport}),flush=True)
   self.assertTrue(owned,'the saved Job is not the one this browser posted')
   self.assertTrue(all(transport.values()) and len(stored)==1,'persistence boundary tokens were not captured')
+  # Exact round trip of the corrected boundary: one initialNormal array per body, the POST and GET tokens are
+  # the same text, and every token at all three boundaries parses to the very double the browser held.
+  tokens=lambda vector:[x.strip() for x in vector.split('[',1)[1].rstrip(']').split(',')]
+  self.assertEqual((len(transport['transport_request']),len(transport['transport_response'])),(1,1))
+  sent,db,got=tokens(transport['transport_request'][0]),tokens(stored[0]),tokens(transport['transport_response'][0])
+  self.assertEqual(got,sent,'GET initialNormal tokens differ from the POST body')
+  want=before['frame']['initialNormal']
+  for boundary,values in (('request',sent),('database',db),('response',got)):self.assertEqual([float(x) for x in values],want,boundary)
   return s,report['value']
  def assert_cameras(self,cameras,g,column,perpendicular=0,delta=1e-6):
   planes=iter([(g['N'][column],g['T'][column]),(g['B'][column],g['T'][column])])
