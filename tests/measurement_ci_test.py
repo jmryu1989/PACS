@@ -173,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -286,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -876,6 +876,122 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('--file worklist-v0/hpacs-lite/volume-preferences.js', pure)
         self.assertEqual(pure.count('tests/volume_preferences_test.cjs'), 2)
         self.assertIn('tests/volume_preferences_test.cjs', pure.rsplit(' --test ', 1)[1])
+
+    def test_volume_marks_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-marks']
+        self.assertEqual(profile['suites'], (
+            ('e2e/test_volume_marks.py', None, 'ci-mpr-marks'),
+            ('e2e/test_volume_mpr_print.py', None, 'ci-mpr-marks-print'),
+        ))
+        self.assertEqual(profile['out'].name, 'volume-marks-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-marks-ci-')
+        self.assertEqual(profile['suite_timeout'], 660)
+        budgets = {'ci-mpr-marks': 660, 'ci-mpr-marks-print': 420}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Registering this group must not widen or cut the other MPR groups.
+        self.assertEqual(ci.PROFILES['volume-batch']['suite_budgets'],
+                         {'ci-batch-preview': 240, 'ci-batch-context': 240, 'ci-batch-save': 360, 'ci-batch-scout': 240})
+        self.assertEqual(ci.PROFILES['volume-sync-preferences']['suite_budgets'],
+                         {'ci-mpr-sync': 420, 'ci-mpr-preferences': 480})
+        modules = {row[0] for row in profile['suites']}
+        # Current unsaved output inherits the saved output suite but is a separate requirement, not this group.
+        self.assertNotIn('e2e/test_volume_current_print.py', modules)
+        for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-rendering'):
+            self.assertFalse(modules & {row[0] for row in ci.PROFILES[name]['suites']}, name)
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-marks':
+                continue
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+            # Stable attempt units that no other profile shares.
+            self.assertFalse(set(budgets) & {row[2] for row in other['suites']}, name)
+        # Band diagnostics would go to another profile's folder; neither module reads bands.
+        for suite in modules:
+            self.assertNotIn('band_pixels(', (ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+        commands = []
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+            commands.append(command)
+            # No --class: each module's own load_tests stays the allowlist.
+            self.assertNotIn('--class', command)
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[unit]))
+            self.assertEqual(outer, budgets[unit]+35)
+        self.assertEqual([command[command.index('--module')+1] for command in commands],
+                         ['tests/e2e/test_volume_marks.py', 'tests/e2e/test_volume_mpr_print.py'])
+        self.assertEqual([command[command.index('--unit')+1] for command in commands],
+                         ['ci-mpr-marks', 'ci-mpr-marks-print'])
+        # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 1150)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-marks', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_marks_modules_declare_exact_local_cases(self):
+        import ast
+        for suite, class_name, prefix, count in (
+                ('e2e/test_volume_marks.py', 'VolumeMarksE2E', 'test_marks_', 20),
+                ('e2e/test_volume_mpr_print.py', 'VolumeMprPrintE2E', 'test_mpr_print_', 9)):
+            tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == class_name)
+            # The output suite declares four of its cases by assigning batch print cases to local names.
+            declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                        and node.name.startswith('test_')]
+            declared += [target.id for node in cls.body if isinstance(node, ast.Assign)
+                         for target in node.targets if isinstance(target, ast.Name) and target.id.startswith('test_')]
+            self.assertEqual(len(declared), count)
+            self.assertEqual(len(set(declared)), count)
+            self.assertTrue(all(name.startswith(prefix) for name in declared))
+            load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                              and node.name == 'load_tests')
+            self.assertTrue([node.value for node in ast.walk(load_tests)
+                             if isinstance(node, ast.Constant) and node.value == prefix])
+
+    def test_validate_workflow_runs_volume_marks_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-marks:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-marks job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile volume-marks',
+                         'tests/measurement_ci_test.py',
+                         'tests/viewer_volume_marks_progressive_dom_test.py',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_marks.py',
+                         '--file tests/e2e/test_volume_mpr_print.py',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-marks.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-progressive.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-job-print.js',
+                         'tests/e2e/artifacts/volume-marks-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-marks'), 1)
+        self.assertNotIn('--profile volume-marks', jobs[0])
+        # These suites stay out of the other MPR jobs' shared deadlines.
+        for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences'):
+            self.assertEqual(text.count('--profile '+other), 1)
+            self.assertNotIn('--profile volume-marks', text.split('\n  '+other+':\n')[1].split('\n  volume-marks:\n')[0])
+        # The pure annotation model stays listed and executed in the existing pure model gate.
+        pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
+        self.assertIn('--file worklist-v0/hpacs-lite/volume-marks.js', pure)
+        self.assertEqual(pure.count('tests/volume_marks_test.cjs'), 2)
+        self.assertIn('tests/volume_marks_test.cjs', pure.rsplit(' --test ', 1)[1])
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']

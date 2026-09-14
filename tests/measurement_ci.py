@@ -186,6 +186,21 @@ PROFILES = {
         'suites': (('e2e/test_volume_sync.py', None, 'ci-mpr-sync'),
                    ('e2e/test_volume_preferences.py', None, 'ci-mpr-preferences')),
     },
+    'volume-marks': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-marks-ci',
+        'project_prefix': 'kin-marks-ci-',
+        # A sixth MPR suite group for the manual 3D annotation suite and its saved annotated three-plane/batch
+        # output suite; the other MPR groups keep their suites and caps. Last local full-module passes took 192s
+        # (19 cases) and 122-124s (9 cases); the progressive pick/batch/restore case adds about 90s and hosted MPR
+        # suites ran at 0.9-1.5x local history, so about 380s and 190s are expected. Caps are about 1.7-2.2x that
+        # expectation: (660+35)+(420+35) = 1150s of the shared 1500s deadline.
+        'suite_timeout': 660,
+        'suite_budgets': {'ci-mpr-marks': 660, 'ci-mpr-marks-print': 420},
+        # Each module's load_tests is the allowlist: declared test_marks_* and test_mpr_print_* only. Passing no
+        # class keeps the inherited sync, display, orientation and job cases out.
+        'suites': (('e2e/test_volume_marks.py', None, 'ci-mpr-marks'),
+                   ('e2e/test_volume_mpr_print.py', None, 'ci-mpr-marks-print')),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',
