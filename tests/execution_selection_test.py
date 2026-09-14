@@ -251,6 +251,63 @@ class ExecutionSelectionTests(unittest.TestCase):
                   for row in ci.PROFILES[name]['suites']}
         self.assertFalse(others & {row[0] for row in profile['suites']})
 
+    def test_volume_batch_profile_selects_only_the_declared_batch_modules(self):
+        profile = ci.PROFILES['volume-batch']
+        expected = [('e2e/test_volume_batch.py', 'VolumeBatchE2E',
+                     'test_batch_', 'ci-batch-preview', 6,
+                     {'test_batch_01_pixels_navigation_cine_and_preservation',
+                      'test_batch_02_oblique_real_camera_spacing',
+                      'test_batch_06_cancel_late_volume_attachment_and_denied_account'}),
+                    ('e2e/test_volume_batch_context.py', 'VolumeBatchContextE2E',
+                     'test_batch_context_', 'ci-batch-context', 5,
+                     {'test_batch_context_01_embedded_owner_and_report',
+                      'test_batch_context_05_dpr150'}),
+                    ('e2e/test_volume_batch_save.py', 'VolumeBatchSaveE2E',
+                     'test_batch_save_', 'ci-batch-save', 8,
+                     {'test_batch_save_01_frozen_recipe_new_login_size_and_dpr',
+                      'test_batch_save_02_partial_failure_recovers_previous_batch',
+                      'test_batch_save_03_rejects_forged_recipe_sources_and_roles'}),
+                    ('e2e/test_volume_batch_scout.py', 'VolumeBatchScoutE2E',
+                     'test_scout_', 'ci-batch-scout', 5,
+                     {'test_scout_01_positions_pixels_navigation_and_preservation',
+                      'test_scout_02_oblique_reverse_saved_replay_dpr',
+                      'test_scout_05_missing_optional_asset_keeps_batch'})]
+        self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
+        self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
+        methods = set()
+        for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
+                profile['suites'], expected):
+            with self.subTest(suite=suite):
+                self.assertIsNone(class_name)
+                # Planned at the budget CI will actually request for this suite.
+                plan = runner.module_plan('tests/'+suite, unit, 'live',
+                                          profile['suite_budgets'][unit], class_name)
+                selected = [item['case'] for item in plan['tests']]
+                cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
+                declared = sorted(cls_name+'.'+name for name in cls.__dict__
+                                  if name.startswith(prefix))
+                self.assertEqual(sorted(selected), declared)
+                self.assertEqual(len(selected), count)
+                self.assertTrue({cls_name+'.'+name for name in required}.issubset(selected))
+                # The batch suites inherit one another and orientation, jobs, projection and copy
+                # cases; none of those may widen this profile or run twice.
+                inherited = {name for base in cls.__mro__[1:]
+                             for name in vars(base) if name.startswith('test_')}
+                self.assertTrue(inherited, 'expected an inheriting suite')
+                names = {case.split('.', 1)[1] for case in selected}
+                self.assertFalse(inherited & names)
+                self.assertFalse(methods & names)
+                methods |= names
+                self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+                self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
+                self.assertEqual(runner.collect(plan).countTestCases(), count)
+                print('SELECTION', suite, len(selected), flush=True)
+        self.assertEqual(len(methods), 24)
+        # The batch group stays disjoint from the other MPR groups and the VR profile.
+        others = {row[0] for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-rendering')
+                  for row in ci.PROFILES[name]['suites']}
+        self.assertFalse(others & {row[0] for row in profile['suites']})
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)

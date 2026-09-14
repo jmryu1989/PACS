@@ -173,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -286,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -643,6 +643,122 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('tests/viewer_volume_job_capture_test.cjs', pure.rsplit(' --test ', 1)[1])
         runtime = next(line for line in text.splitlines() if 'tmp/runtime-ci/volume-api-models' in line)
         self.assertIn('/tests/viewer_volume_job_test.cjs', runtime.rsplit(' --test ', 1)[1])
+
+    def test_volume_batch_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-batch']
+        self.assertEqual(profile['suites'], (
+            ('e2e/test_volume_batch.py', None, 'ci-batch-preview'),
+            ('e2e/test_volume_batch_context.py', None, 'ci-batch-context'),
+            ('e2e/test_volume_batch_save.py', None, 'ci-batch-save'),
+            ('e2e/test_volume_batch_scout.py', None, 'ci-batch-scout'),
+        ))
+        self.assertEqual(profile['out'].name, 'volume-batch-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-batch-ci-')
+        self.assertEqual(profile['suite_timeout'], 540)
+        budgets = {'ci-batch-preview': 240, 'ci-batch-context': 240, 'ci-batch-save': 360, 'ci-batch-scout': 240}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Registering the batch group must not widen or cut the other MPR groups.
+        self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
+                         {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420})
+        self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240})
+        self.assertEqual(ci.PROFILES['volume-path']['suite_budgets'],
+                         {'ci-path-native': 420, 'ci-mpr-orientation': 300})
+        modules = {row[0] for row in profile['suites']}
+        # Saved batch print is its own requirement and suite; it is not part of this group.
+        self.assertNotIn('e2e/test_volume_batch_print.py', modules)
+        for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-rendering'):
+            self.assertFalse(modules & {row[0] for row in ci.PROFILES[name]['suites']}, name)
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-batch':
+                continue
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        commands = []
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+            commands.append(command)
+            # No --class: each module's own load_tests stays the allowlist.
+            self.assertNotIn('--class', command)
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[unit]))
+            self.assertEqual(outer, budgets[unit]+35)
+        self.assertEqual([command[command.index('--module')+1] for command in commands],
+                         ['tests/e2e/test_volume_batch.py', 'tests/e2e/test_volume_batch_context.py',
+                          'tests/e2e/test_volume_batch_save.py', 'tests/e2e/test_volume_batch_scout.py'])
+        self.assertEqual([command[command.index('--unit')+1] for command in commands],
+                         ['ci-batch-preview', 'ci-batch-context', 'ci-batch-save', 'ci-batch-scout'])
+        # All four suites at full cap plus their reserved margins fit the shared deadline with stack time left.
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 1220)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][2], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-batch', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_batch_modules_declare_exact_local_cases(self):
+        import ast
+        for suite, class_name, prefix, count in (
+                ('e2e/test_volume_batch.py', 'VolumeBatchE2E', 'test_batch_', 6),
+                ('e2e/test_volume_batch_context.py', 'VolumeBatchContextE2E', 'test_batch_context_', 5),
+                ('e2e/test_volume_batch_save.py', 'VolumeBatchSaveE2E', 'test_batch_save_', 8),
+                ('e2e/test_volume_batch_scout.py', 'VolumeBatchScoutE2E', 'test_scout_', 5)):
+            tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == class_name)
+            declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                        and node.name.startswith('test_')]
+            self.assertEqual(len(declared), count)
+            self.assertTrue(all(name.startswith(prefix) for name in declared))
+            load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                              and node.name == 'load_tests')
+            self.assertTrue([node.value for node in ast.walk(load_tests)
+                             if isinstance(node, ast.Constant) and node.value == prefix])
+
+    def test_validate_workflow_runs_volume_batch_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-batch:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-batch job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile volume-batch',
+                         'tests/measurement_ci_test.py',
+                         'tests/viewer_volume_batch_binding_dom_test.py',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_batch.py',
+                         '--file tests/e2e/test_volume_batch_context.py',
+                         '--file tests/e2e/test_volume_batch_save.py',
+                         '--file tests/e2e/test_volume_batch_scout.py',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-batch.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-scout.js',
+                         'tests/e2e/artifacts/volume-batch-ci/',
+                         'tests/e2e/artifacts/MPR-batch-*.png',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-batch'), 1)
+        self.assertNotIn('--profile volume-batch', jobs[0])
+        # The batch suites stay out of the other MPR jobs' shared deadlines.
+        for other in ('volume-mpr', 'volume-slab', 'volume-path'):
+            self.assertEqual(text.count('--profile '+other), 1)
+            self.assertNotIn('--profile volume-batch', text.split('\n  '+other+':\n')[1].split('\n  volume-batch:\n')[0])
+        # The pure batch and scout models stay listed and executed in the existing pure model gate.
+        pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
+        for model in ('tests/volume_batch_test.cjs', 'tests/volume_batch_scout_test.cjs'):
+            self.assertEqual(pure.count(model), 2)
+            self.assertIn(model, pure.rsplit(' --test ', 1)[1])
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']

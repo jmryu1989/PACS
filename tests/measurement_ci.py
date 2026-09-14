@@ -152,6 +152,24 @@ PROFILES = {
         'suites': (('e2e/test_volume_path.py', None, 'ci-path-native'),
                    ('e2e/test_volume_orientation.py', None, 'ci-mpr-orientation')),
     },
+    'volume-batch': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-batch-ci',
+        'project_prefix': 'kin-batch-ci-',
+        # A fourth MPR suite group for the existing batch preview, owner/DPR context, saved recipe
+        # replay and scout suites; volume-mpr, volume-slab and volume-path keep their suites and caps.
+        # Last local full-module passes took 61-63s, 63-65s, 91-105s and 64s, and hosted MPR suites
+        # ran at about 1.0-1.5x their local history (orientation 70s, display 112s, wheel 75s). Caps
+        # are about 3.5x local: (240+35)+(240+35)+(360+35)+(240+35) = 1220s of the shared 1500s deadline.
+        'suite_timeout': 540,
+        'suite_budgets': {'ci-batch-preview': 240, 'ci-batch-context': 240,
+                          'ci-batch-save': 360, 'ci-batch-scout': 240},
+        # Each module's load_tests is the allowlist: declared test_batch_*, test_batch_context_*,
+        # test_batch_save_* and test_scout_* only. Passing no class keeps inherited cases out.
+        'suites': (('e2e/test_volume_batch.py', None, 'ci-batch-preview'),
+                   ('e2e/test_volume_batch_context.py', None, 'ci-batch-context'),
+                   ('e2e/test_volume_batch_save.py', None, 'ci-batch-save'),
+                   ('e2e/test_volume_batch_scout.py', None, 'ci-batch-scout')),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',
