@@ -5,6 +5,7 @@ from playwright.sync_api import expect, TimeoutError as PlaywrightTimeout
 from test_volume_orientation import VolumeOrientationE2E
 
 class VolumeCrosshairE2E(VolumeOrientationE2E):
+ ARTIFACT_PROFILE='volume-mpr-ci' # measurement_ci.py volume-mpr runs this module and uploads this folder
  def lines(self,v):
   return v.evaluate('''()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id);return [...v.element.querySelectorAll('[data-kin-crosshair]')].map(n=>({tag:n.tagName,index:n.getAttribute('data-kin-crosshair'),attributes:Object.fromEntries([...n.attributes].map(a=>[a.name,a.value])),world:n.tagName==='line'?[[+n.getAttribute('x1'),+n.getAttribute('y1')],[+n.getAttribute('x2'),+n.getAttribute('y2')]].map(p=>v.canvasToWorld(p)):[]}))})''')
  def test_crosshair_01_styles_hide_and_preserve_oblique(self):
