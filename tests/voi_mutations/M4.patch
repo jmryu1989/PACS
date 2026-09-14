@@ -1,0 +1,11 @@
+--- a/worklist-v0/hpacs-lite/volume-mip.js
++++ b/worklist-v0/hpacs-lite/volume-mip.js
+@@ -177,6 +177,8 @@
+       const ticket=++generation;
+       try{apply(next);}catch(error){return Promise.resolve(restore(error,false));}
+       applied=next;state='pending';show({status:'pending',request:next,message:label(next)+' 최종 렌더를 확인하는 중입니다.'});
++      // MUTATION M4: a VOI change is announced Final before its render is confirmed.
++      if(final&&!sameVoi(normalizeRequest(next).voiSlab,normalizeRequest(final).voiSlab)){state='final';show({status:'final',request:next,message:label(next)+' 최종 표시를 확인했습니다.'});}
+       return settle(next,ticket);
+     }
+     return {

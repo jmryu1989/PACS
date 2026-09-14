@@ -1,0 +1,16 @@
+--- a/worklist-v0/hpacs-lite/volume-mip.js
++++ b/worklist-v0/hpacs-lite/volume-mip.js
+@@ -42,8 +42,11 @@
+   // excluded samples are never traversed by MIP, MinIP or the counted-sample mean.
+   function voiPlanes(value){
+     const record=normalizeVoi(value);if(!record)throw Error('VOI Slab 값을 확인할 수 없습니다.');
+-    const half=record.thickness/2,n=record.normal;
+-    return [{origin:record.center.map((x,i)=>x-n[i]*half),normal:[...n]},{origin:record.center.map((x,i)=>x+n[i]*half),normal:n.map(x=>-x)}];
++    // MUTATION M3: planes are built from index coordinates; the affine is ignored.
++    const a=record.affine,m=[[a[3],a[6],a[9]],[a[4],a[7],a[10]],[a[5],a[8],a[11]]],det=M=>M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])-M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])+M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
++    const solve=v=>[0,1,2].map(c=>det(m.map((row,r)=>row.map((x,k)=>k===c?v[r]:x)))/det(m)),index=solve(record.center.map((x,i)=>x-a[i])),direction=solve(record.normal);
++    const half=record.thickness/2,n=direction.map(x=>x/Math.hypot(...direction));
++    return [{origin:index.map((x,i)=>x-n[i]*half),normal:[...n]},{origin:index.map((x,i)=>x+n[i]*half),normal:n.map(x=>-x)}];
+   }
+   // The viewport rewrites the first two (slab) planes on camera and thickness changes. VOI planes refuse those writes,
+   // so no camera change can move the slab in world space.

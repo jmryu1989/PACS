@@ -1,0 +1,47 @@
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -60,7 +60,7 @@
+     const actors=op.view.getActors(),actor=actors[0]?.actor,mapper=actor?.getMapper(),camera=op.view.getCamera();
+     return {actors:actors.length,volumeId:op.view.getVolumeId(),blend:mapper?.getBlendMode(),viewPlaneNormal:camera.viewPlaneNormal,viewUp:camera.viewUp,planes:(mapper?.getClippingPlanes()||[]).map(p=>({origin:p.getOrigin(),normal:p.getNormal()})),sampleDistance:mapper?.getSampleDistance(),interpolationType:actor?.getProperty().getInterpolationType(),voiRange:op.view.getProperties()?.voiRange};
+   }
+-  function expected(op,request){const p=model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);return {volumeId:op.volume.volumeId,blend:model.blendMode(request.mode),viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp,thickness:op.thickness,corners:op.corners,sampleDistance:op.sampleDistance,interpolationType:op.display.interpolationType,voiRange:op.display.voiRange,voiSlab:request.original?null:request.voiSlab??null,affine:op.binding.affine};}
++  function expected(op,request){const p=model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);return {volumeId:op.volume.volumeId,blend:model.blendMode(request.mode),viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp,thickness:op.thickness,corners:op.corners,sampleDistance:op.sampleDistance,interpolationType:op.display.interpolationType,voiRange:op.display.voiRange,voiSlab:null,mutantSlab:request.original?null:request.voiSlab??null,affine:op.binding.affine};}
+   // The affine captured at open is the VOI Slab's coordinate basis; a changed source geometry is not re-interpreted.
+   function binding(op){
+     const affine=model.affine(index=>op.volume.imageData.indexToWorld(index));
+@@ -72,6 +72,19 @@
+     if(!slab&&!extra.length)return;
+     for(const plane of extra)if(mapper.removeClippingPlane(plane)!==true)throw Error('이전 VOI Slab 평면을 지우지 못했습니다.');
+     if(slab)for(const definition of model.voiPlanes(slab))if(mapper.addClippingPlane(model.voiPlane(definition))!==true)throw Error('VOI Slab 평면을 적용하지 못했습니다.');
++  }
++  function mutantGuard(op,slab,kind){
++    const literal=value=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),f=n=>Number(n).toFixed(9),marker='kinMutantVoi';
++    const properties=op.mapper.getViewSpecificProperties()||{},openGL=properties.OpenGL||{};
++    const kept=(openGL.ShaderReplacements||[]).filter(r=>!String(r.replacementValue).includes(marker)),added=[];
++    if(slab){
++      const plane=window.KinVolumeVoi.samplePlane(slab,op.volume.imageData),info=op.mapper.getScalarTexture().getVolumeInfo(),zero=(0-info.offset[0])/info.scale[0];
++      const inside='abs('+f(plane.base)+' + dot(vec3('+plane.axes.map(f).join(', ')+'), p)) <= '+f(plane.halfThickness);
++      added.push({shaderType:'Fragment',originalValue:literal('void applyBlend('),replacementValue:'bool kinMutantVoiInside(vec3 p) { return '+inside+'; }\nvec4 kinMutantVoiSample(vec3 p) { vec4 v = getTextureValue(p); return kinMutantVoiInside(p) ? v : vec4('+f(zero)+'); }\nvoid applyBlend(',replaceFirst:true,replaceAll:false});
++      if(kind==='zero')added.push({shaderType:'Fragment',originalValue:literal('tValue = getTextureValue(posIS);'),replacementValue:'tValue = kinMutantVoiSample(posIS);',replaceFirst:true,replaceAll:true});
++      else added.push({shaderType:'Fragment',originalValue:literal('sum += tValue; kinAverageSamples += 1.0;'),replacementValue:'if (kinMutantVoiInside(posIS)) { sum += tValue; } kinAverageSamples += 1.0;',replaceFirst:true,replaceAll:true});
++    }
++    op.mapper.setViewSpecificProperties({...properties,OpenGL:{...openGL,ShaderReplacements:[...kept,...added]}});
+   }
+   // Every request writes the whole display (orientation, blend, slab and VOI Slab), so a rollback never inherits a partial write.
+   function apply(op,request){
+@@ -84,12 +97,14 @@
+     op.view.setOrientation(model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,next.orientation).key,false);op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
+     // VOI planes are written after the camera and slab setters, which rewrite the first two planes; readback proves both.
+     writeVoi(op,want.voiSlab);
++    // MUTATION M1: every excluded sample becomes a 0 HU sample.
++    mutantGuard(op,want.mutantSlab,'zero');
+     const problem=model.verifyState(readState(op),want);if(problem)throw Error(problem);
+   }
+   function gpuProblem(op,request){
+     const node=op.engine.offscreenMultiRenderWindow?.getOpenGLRenderWindow?.()?.getViewNodeFor?.(op.mapper),program=node?.get?.('tris')?.tris?.getProgram?.();
+     if(!program?.getCompiled?.()||!program.getLinked?.())return '투영 셰이더를 GPU에서 확인하지 못했습니다.';
+-    const source=program.getFragmentShader().getSource(),clipped=!!request.voiSlab&&request.original!==true;
++    const source=program.getFragmentShader().getSource(),clipped=!!expected(op,request).voiSlab;
+     if(!model.clipShader(source,clipped?4:2))return clipped?'VOI Slab 자르기 셰이더를 GPU에서 확인하지 못했습니다.':'MIP 투영 범위 셰이더를 GPU에서 확인하지 못했습니다.';
+     if(model.blendMode(request.mode)===3&&!model.averageShader(source))return 'Raysum 평균 셰이더를 확인하지 못했습니다.';
+     return '';

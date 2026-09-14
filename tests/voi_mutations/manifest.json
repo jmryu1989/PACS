@@ -1,0 +1,175 @@
+{
+ "purpose": "A11-VOI-1 intentional negative mutation experiments on frozen candidate d6271d2; not a candidate gate and not a retry of any baseline run",
+ "baseline": {
+  "commit": "d6271d2389b729533360d239ee06a22edd651649",
+  "tree": "22401ab22418f9c500afa78c67f7ce08b3c6fb96"
+ },
+ "harness_ref": "refs/heads/opus/a11-voi-mutations-20260915",
+ "harness_paths": [
+  ".github/workflows/voi-mutations.yml",
+  "tests/e2e/test_volume_mip_voi_mutation.py",
+  "tests/voi_mutations"
+ ],
+ "workflow": ".github/workflows/voi-mutations.yml",
+ "profile": "volume-mip-voi",
+ "candidate_suite": "e2e/test_volume_mip_voi.py",
+ "suite": "e2e/test_volume_mip_voi_mutation.py",
+ "unit": "ci-mip-voi",
+ "project_prefix": "kin-mipvoi-ci-",
+ "budget": {
+  "suite_cap_seconds": 1200,
+  "outer_margin_seconds": 35,
+  "profile_deadline_seconds": 1500,
+  "dependency_step_minutes": 10,
+  "live_step_minutes": 28,
+  "job_minutes": 40
+ },
+ "cases": {
+  "N1": "test_mip_04_voi_slab_known_voxels_modes_orientations",
+  "N2": "test_mip_05_voi_order_delay_failure_missing_tool_cancel"
+ },
+ "hashed_files": [
+  "worklist-v0/hpacs-lite/volume-mip.js",
+  "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+  "worklist-v0/hpacs-lite/volume-voi.js",
+  "tests/e2e/test_volume_mip.py",
+  "tests/e2e/test_volume_mip_voi.py",
+  "tests/e2e/test_volume_mip_voi_mutation.py",
+  "tests/e2e/test_volume_projection.py",
+  "tests/measurement_ci.py",
+  "tests/live_test_gate.py",
+  "scripts/run-tests.py",
+  "tests/voi_mutations/harness.py",
+  "tests/voi_mutations/manifest.json"
+ ],
+ "source": {
+  "author_mutations": "tmp/o-a11-voi-slab/tmp/mpr-a11-voi-slab-01/mutations",
+  "author_manifest_sha256": "fae30240f7bc46dcc6bb9d7d72fb03ca1614f551a30a9db0e96b0547fd53393f",
+  "author_generator": "tmp/o-a11-voi-slab/tmp/mpr-a11-voi-slab-01/scripts/make_mutations.py",
+  "patches": "byte-identical copies of the author patches; the author's full-file copies for M1/M2/M5 predate 00e9b8e and are not used"
+ },
+ "variants": {
+  "M1": {
+   "meaning": "replace exclusion with a 0 HU sample",
+   "file": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "patch": "tests/voi_mutations/M1.patch",
+   "patch_sha256": "d42038d3cb5c00821dc28b29be435b51c2965c3fe1c0a316eb57dc69a60c26a0",
+   "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
+   "after_sha256": "357a86a30c724ef5f06da21a22ee9571d39087fa2543de311cb5c397614dc611",
+   "case": "N1",
+   "expected_first_detector": "n1-readback-plane-count",
+   "detectors": [
+    {
+     "id": "n1-readback-plane-count",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 395, "self.voi_native(self.settled(v,self.apply_voi_case(v,dialog,case)),*current,record,voi)"],
+      ["voi_native", 373, "self.assertEqual(len(state['planes']),4 if shown else 2,state['planes'])"]
+     ],
+     "message": "^2 != 4 : ",
+     "proves": "M1 is caught by the N1 native VOI plane readback (2 mapper planes, not 4) after the first VOI apply, before any pixel probe; the dual-intercept zero-fill pixel oracle is not exercised"
+    },
+    {
+     "id": "n1-pixel-oracle",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 403, "self.voi_pixels(state,probes,(study,case['name'],orientation,mode,state['label']));self.voi_native(state,mode,orientation,record,voi)"],
+      ["voi_pixels", 386, "self.assertLessEqual(min(abs(actual-w) for w in wanted),VOI_DELTA,(label,expected,probe,actual))"]
+     ],
+     "message": null,
+     "proves": "zero-filled samples are caught by the N1 known-voxel pixel oracle (RISK-D-MIP-VOI-ZERO-FILL); not expected first, because line 395 reads the planes back before any pixel"
+    }
+   ]
+  },
+  "M2": {
+   "meaning": "skip VOI planes after setOrientation/setBlendMode/setSlabThickness",
+   "file": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "patch": "tests/voi_mutations/M2.patch",
+   "patch_sha256": "432aa41c5963e468f4bf8c66ed2992277247f8b35a1c06b5d45bcb48e7c8e6a8",
+   "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
+   "after_sha256": "c50511727d8fa9a96e1f9850c702a468b94d0da48a847c9ec6f3e559f279e468",
+   "case": "N1",
+   "expected_first_detector": "n1-readback-plane-count",
+   "detectors": [
+    {
+     "id": "n1-readback-plane-count",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 395, "self.voi_native(self.settled(v,self.apply_voi_case(v,dialog,case)),*current,record,voi)"],
+      ["voi_native", 373, "self.assertEqual(len(state['planes']),4 if shown else 2,state['planes'])"]
+     ],
+     "message": "^2 != 4 : ",
+     "proves": "VOI planes dropped by the camera, blend and slab setters are caught by the N1 plane readback of the settled display after the product's own readback rolls back to the last Final (RISK-D-MIP-VOI-PLANES-DROPPED)"
+    }
+   ]
+  },
+  "M3": {
+   "meaning": "build planes in index space (ignore affine)",
+   "file": "worklist-v0/hpacs-lite/volume-mip.js",
+   "patch": "tests/voi_mutations/M3.patch",
+   "patch_sha256": "fefc621a2eb2cee5536ea0424327fc02ade4f3a72cdfe8d38876ba16e5a4f450",
+   "before_sha256": "9d35a401fed62f3ffe7364d38fa06b47c0089236aa3836566d48f73e9161ef56",
+   "after_sha256": "35acd1c696839df369756177209d4a07a30c4dbb29d6fc9d2556cc274d6f2a9a",
+   "case": "N1",
+   "expected_first_detector": "n1-world-plane-origin",
+   "detectors": [
+    {
+     "id": "n1-world-plane-origin",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 395, "self.voi_native(self.settled(v,self.apply_voi_case(v,dialog,case)),*current,record,voi)"],
+      ["voi_native", 377, "np.testing.assert_allclose(origin,want_origin,atol=1e-6,rtol=0)"]
+     ],
+     "message": "Not equal to tolerance rtol=0, atol=1e-06",
+     "proves": "index-space VOI planes are caught by the N1 world LPS plane origin readback (RISK-D-MIP-VOI-COORDINATES)"
+    }
+   ]
+  },
+  "M4": {
+   "meaning": "announce Final before render confirm for a VOI change",
+   "file": "worklist-v0/hpacs-lite/volume-mip.js",
+   "patch": "tests/voi_mutations/M4.patch",
+   "patch_sha256": "7c436e3ae13bed8939439dca6b3ce15a5a51fe4a525cdb54addab62ce08f6b5c",
+   "before_sha256": "9d35a401fed62f3ffe7364d38fa06b47c0089236aa3836566d48f73e9161ef56",
+   "after_sha256": "cbb9301df35018c54569d57fcad560fc71d2cea27b7ef5b91384a5b667afa0cb",
+   "case": "N2",
+   "expected_first_detector": "n2-held-render-pending",
+   "detectors": [
+    {
+     "id": "n2-held-render-pending",
+     "frames": [
+      ["test_mip_05_voi_order_delay_failure_missing_tool_cancel", 430, "expect(dialog).to_have_attribute('data-kin-mip-state','pending')"]
+     ],
+     "message": null,
+     "proves": "a VOI change announced Final while its render is held is caught by N2's pending state, Rendering label and VOI state checks (RISK-D-MIP-VOI-STALE-FINAL)"
+    }
+   ]
+  },
+  "M5": {
+   "meaning": "average denominator counts unclipped samples",
+   "file": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "patch": "tests/voi_mutations/M5.patch",
+   "patch_sha256": "4c7e52fe93df607269b90d3f5d92f56e4544b5709f8df87c9da0487f5a355096",
+   "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
+   "after_sha256": "e85274f1e5cfe7b9dadb0dcd941a59c117e9777d5f724ebe79c5c09c5e6c0ce1",
+   "case": "N1",
+   "expected_first_detector": "n1-raysum-pixel-oracle",
+   "detectors": [
+    {
+     "id": "n1-raysum-pixel-oracle",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 403, "self.voi_pixels(state,probes,(study,case['name'],orientation,mode,state['label']));self.voi_native(state,mode,orientation,record,voi)"],
+      ["voi_pixels", 386, "self.assertLessEqual(min(abs(actual-w) for w in wanted),VOI_DELTA,(label,expected,probe,actual))"]
+     ],
+     "message": "\\(\\('(positive|negative)', '[a-z-]+', '(Axial|Coronal|Sagittal)', 'Raysum', ",
+     "proves": "a Raysum mean over in-VOI samples divided by every ray sample is caught by the N1 Raysum known-voxel pixel oracle (RISK-D-MIP-VOI-MEAN-DENOMINATOR)"
+    },
+    {
+     "id": "n1-raysum-readback-plane-count",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 403, "self.voi_pixels(state,probes,(study,case['name'],orientation,mode,state['label']));self.voi_native(state,mode,orientation,record,voi)"],
+      ["voi_native", 373, "self.assertEqual(len(state['planes']),4 if shown else 2,state['planes'])"]
+     ],
+     "message": "^2 != 4 : ",
+     "proves": "the Raysum display without VOI planes is caught by the N1 plane readback only after its pixels matched; the mean-denominator oracle is not shown"
+    }
+   ]
+  }
+ }
+}

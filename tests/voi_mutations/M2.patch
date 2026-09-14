@@ -1,0 +1,11 @@
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -83,7 +83,7 @@
+     // re-derived explicitly afterwards because a camera change alone keeps the previous planes.
+     op.view.setOrientation(model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,next.orientation).key,false);op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
+     // VOI planes are written after the camera and slab setters, which rewrite the first two planes; readback proves both.
+-    writeVoi(op,want.voiSlab);
++    // MUTATION M2: VOI planes are not re-written after the camera and slab setters.
+     const problem=model.verifyState(readState(op),want);if(problem)throw Error(problem);
+   }
+   function gpuProblem(op,request){
