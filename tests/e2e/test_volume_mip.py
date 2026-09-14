@@ -105,8 +105,9 @@ VOI_HELPERS="""()=>{if(window.mipVoiReady)return;window.mipVoiReady=true;const d
 window.mipVoiState=probes=>{const vp=mipView(),m=vp.getActors()[0].actor.getMapper(),cam=vp.getCamera();
  return {blend:m.getBlendMode(),normal:Array.from(cam.viewPlaneNormal),up:Array.from(cam.viewUp),planes:m.getClippingPlanes().map(p=>[Array.from(p.getOrigin()),Array.from(p.getNormal())]),voiRange:{...vp.getProperties().voiRange},camera:cornerstone.CONSTANTS.MPR_CAMERA_VALUES,
   state:d.dataset.kinMipState,label:d.querySelector('.kin-mip-label').textContent,voi:d.querySelector('.kin-mip-voi-state').textContent,status:s.textContent,mode:d.querySelector('[aria-label="MIP Projection"]').value,orientation:d.querySelector('[aria-label="MIP Orientation"]').value,pixels:probes.map(w=>canvasPixel(vp,w))}};
-window.mipTransitions=[];new MutationObserver(()=>mipTransitions.push(d.dataset.kinMipState||'')).observe(d,{attributes:true,attributeFilter:['data-kin-mip-state']});
+window.mipTransitions=[];let shown=d.dataset.kinMipState||'';new MutationObserver(()=>{const now=d.dataset.kinMipState||'';if(now!==shown)mipTransitions.push(shown=now)}).observe(d,{attributes:true,attributeFilter:['data-kin-mip-state']});
 window.mipStatuses=[];new MutationObserver(()=>mipStatuses.push(s.textContent)).observe(s,{childList:true,characterData:true,subtree:true});
+window.mipTrace=()=>{const limit=Error.stackTraceLimit;Error.stackTraceLimit=20;const stack=new Error().stack;Error.stackTraceLimit=limit;return stack};
 window.mipHold=false;window.mipHeldFrames=0;d.querySelector('.kin-mip-canvas-pane').addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,e=>{if(mipHold){e.stopImmediatePropagation();mipHeldFrames++}},true)}"""
 SOURCE_PLANES="()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>services.cornerstoneViewportService.getCornerstoneViewport(id).getActors().map(a=>(a.actor.getMapper().getClippingPlanes?.()||[]).map(p=>[...p.getOrigin(),...p.getNormal()])))"
 VOI_GATES=(("()=>{const e=document.createElement('div');e.id='mip-voi-modal-probe';e.setAttribute('role','dialog');e.setAttribute('aria-modal','true');document.body.append(e)}","()=>document.querySelector('#mip-voi-modal-probe').remove()",'다른 창을 닫은 뒤'),
@@ -333,7 +334,9 @@ class VolumeMipE2E(VolumeProjectionE2E):
   expect(v.locator('#kin-volume-mip[open]')).to_have_count(0);self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertEqual(self.originals(),original)
 
  # A11-VOI-1 display-only VOI Slab. Helpers wait for the first Final after an action's pending render (the requested display
- # or, after a failure, the kept one) so a wrong display fails an assertion rather than a timeout.
+ # or, after a failure, the kept one) so a wrong display fails an assertion rather than a timeout. A refused request re-shows
+ # the confirmed state by rewriting the same data-kin-mip-state value, which a MutationObserver still reports, so
+ # mipTransitions records changes of that state only.
  def opened_voi_study(self,intercept,voi):
   with patch.object(projection,'phantom',side_effect=lambda stack,value,constant,**sample:mip_phantom(stack,value)):
    a,p,v=self.opened_projection(intercept=intercept)
@@ -439,13 +442,28 @@ class VolumeMipE2E(VolumeProjectionE2E):
   def kept(mark,message):
    state=self.settled(v,mark,worlds);expect(status).to_contain_text(message);expect(status).to_contain_text(kept_label)
    self.voi_native(state,'MinIP','Coronal',rA,voi);self.assertEqual(state['pixels'],second['pixels'],message)
-  def attempt(injection,message,action=None):
-   v.evaluate(injection);self.enter_voi(dialog,perpendicular);mark=self.mark(v);(action or self.voi_button(dialog,'Apply VOI Slab').click)();kept(mark,message)
+  # vtk.js freezes its objects, so a method assigned onto the mapper or a render window is silently ignored and the change
+  # simply succeeds. Faults go where the viewer reads through a changeable object (the VOI plane factory, the viewport actor
+  # lookup, the rendering engine's window slot); each proves it is installed and that it fired exactly once, inside the
+  # product step it targets, with the VOI planes then on the mapper.
+  def attempt(injection,message,frame=None,planes=None,action=None):
+   self.assertTrue(v.evaluate(injection),'fault not installed: '+message);self.enter_voi(dialog,perpendicular);mark=self.mark(v);(action or self.voi_button(dialog,'Apply VOI Slab').click)();kept(mark,message)
+   if frame:self.assertEqual(v.evaluate('f=>mipFault.map(t=>[t.stack.includes(f),t.planes])',frame),[[True,planes]],message)
   # Plane write, VOI readback, GPU program and Raysum capability failures keep the last Final including its VOI Slab.
-  attempt("()=>{const m=mipView().getActors()[0].actor.getMapper(),add=m.addClippingPlane;m.addClippingPlane=function(){m.addClippingPlane=add;throw Error('INJECTED VOI PLANE WRITE')}}",'INJECTED VOI PLANE WRITE')
-  attempt("()=>{const m=mipView().getActors()[0].actor.getMapper(),get=m.getClippingPlanes;m.getClippingPlanes=function(){const planes=get();if(!new Error().stack.includes('readState'))return planes;m.getClippingPlanes=get;return planes.map((p,i)=>i<2?p:{getOrigin:()=>{const o=Array.from(p.getOrigin());o[0]+=.01;return o},getNormal:()=>p.getNormal()})}}",'VOI Slab 평면을 확인하지 못했습니다')
-  attempt("""()=>{const rw=mipView().getRenderingEngine().offscreenMultiRenderWindow,get=rw.getOpenGLRenderWindow;rw.getOpenGLRenderWindow=function(...args){const real=get.apply(this,args);if(!new Error().stack.includes('gpuProblem'))return real;rw.getOpenGLRenderWindow=get;return new Proxy(real,{get:(t,k)=>k==='getViewNodeFor'?()=>({get:()=>({tris:{getProgram:()=>({getCompiled:()=>true,getLinked:()=>false})}})}):(typeof t[k]==='function'?t[k].bind(t):t[k])})}}""",'투영 셰이더를 GPU에서 확인하지 못했습니다')
-  attempt('()=>{window.heldAverage=window.kinPrepareVolumeAverage;window.kinPrepareVolumeAverage=undefined}','Raysum 평균 계산 모듈',lambda:self.choose_mip(dialog,'Raysum'))
+  # The plane write fails on the second new plane: the old VOI planes are removed and one new plane is already on the mapper.
+  attempt("""()=>{"use strict";const model=window.KinVolumeMip,real=model.voiPlane,count=()=>mipView().getActors()[0].actor.getMapper().getClippingPlanes().length;let made=0;window.mipFault=[];
+ model.voiPlane=function(definition){const stack=mipTrace();if(!stack.includes('writeVoi')||++made<2)return real(definition);model.voiPlane=real;mipFault.push({stack,planes:count()});throw Error('INJECTED VOI PLANE WRITE')};return model.voiPlane!==real}""",'INJECTED VOI PLANE WRITE','writeVoi',3)
+  attempt("""()=>{"use strict";const vp=mipView(),own=Object.getOwnPropertyDescriptor(vp,'getActors'),real=vp.getActors;window.mipFault=[];
+ vp.getActors=function(...args){const actors=real.apply(this,args),stack=mipTrace();if(!stack.includes('readState'))return actors;if(own)Object.defineProperty(vp,'getActors',own);else delete vp.getActors;
+  const mapper=actors[0].actor.getMapper(),planes=mapper.getClippingPlanes(),shifted=planes.map((p,i)=>i<2?p:{getOrigin:()=>{const o=Array.from(p.getOrigin());o[0]+=.01;return o},getNormal:()=>p.getNormal()});
+  mipFault.push({stack,planes:planes.length});return [{...actors[0],actor:{...actors[0].actor,getMapper:()=>({...mapper,getClippingPlanes:()=>shifted})}},...actors.slice(1)]};return vp.getActors!==real}""",'VOI Slab 평면을 확인하지 못했습니다','readState',4)
+  # Only the link status is false; the real program's compile status and fragment source are read through.
+  attempt("""()=>{"use strict";const engine=mipView().getRenderingEngine(),key='offscreenMultiRenderWindow',own=Object.getOwnPropertyDescriptor(engine,key);let real=engine[key];window.mipFault=[];
+ const restore=()=>{if(!own)delete engine[key];else Object.defineProperty(engine,key,'value' in own?{...own,value:real}:own)};
+ const unlinked={getOpenGLRenderWindow:(...a)=>{const gl=real.getOpenGLRenderWindow(...a);return {getViewNodeFor:(...b)=>{const node=gl.getViewNodeFor(...b);return {get:(...c)=>{const program=node.get(...c).tris.getProgram();return {tris:{getProgram:()=>({getCompiled:()=>program.getCompiled(),getLinked:()=>false,getFragmentShader:()=>program.getFragmentShader()})}}}}}}}};
+ Object.defineProperty(engine,key,{configurable:true,enumerable:own?own.enumerable:false,get(){const stack=mipTrace();if(!stack.includes('gpuProblem'))return real;restore();mipFault.push({stack,planes:mipView().getActors()[0].actor.getMapper().getClippingPlanes().length});return unlinked},set(value){real=value}});
+ return !!real&&typeof Object.getOwnPropertyDescriptor(engine,key).get==='function'}""",'투영 셰이더를 GPU에서 확인하지 못했습니다','gpuProblem',4)
+  attempt('()=>{window.heldAverage=window.kinPrepareVolumeAverage;window.kinPrepareVolumeAverage=undefined;return typeof heldAverage==="function"&&window.kinPrepareVolumeAverage===undefined}','Raysum 평균 계산 모듈',action=lambda:self.choose_mip(dialog,'Raysum'))
   v.evaluate('()=>{window.kinPrepareVolumeAverage=heldAverage}')
   # Modal, job and preview gates refuse a VOI change without touching the display.
   for block,release,message in VOI_GATES:
