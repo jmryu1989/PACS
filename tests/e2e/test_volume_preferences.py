@@ -58,7 +58,8 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   from test_embedded_patient_copy import EmbeddedPatientCopyE2E
   a,p,v=self.starting();panel=self.properties(v);self.mouse(v);panel.get_by_label('Show MPR Windowing',exact=True).uncheck();panel.get_by_label('MPR Progressive Rendering',exact=True).check();self.sync(v,'Windowing',False);self.sync(v,'Zoom',True)
   panel.get_by_role('button',name='Save MPR Preferences',exact=True).click();p.bring_to_front();p.locator('#reading-appearance-open').click();expect(p.locator('#appearance-account-save')).to_be_enabled();p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_contain_text('계정에 저장했습니다')
-  stored=p.request.get(self.stack.api+'/reading-appearance').json();self.assertEqual(stored['sizes']['version'],7);self.assertFalse(stored['sizes']['mpr']['display']['windowing']);self.assertEqual(stored['sizes']['mpr']['mouse']['left'],'StackScroll')
+  # Account schema is v9 since viewer identity fields (viewer v3); mpr has been carried since v7.
+  stored=p.request.get(self.stack.api+'/reading-appearance').json();self.assertEqual(stored['sizes']['version'],9);self.assertFalse(stored['sizes']['mpr']['display']['windowing']);self.assertEqual(stored['sizes']['mpr']['mouse']['left'],'StackScroll')
   other=self.login();f=self.workspace(other,a,count=1);self.tools(f);self.mpr(f);self.choose_volume(other,f,0);other.locator('#findings').fill('KEEP MPR ACCOUNT REPORT');before=self.volume_state(f)
   other.locator('#reading-appearance-open').click();expect(other.locator('#appearance-account-save')).to_be_enabled();other.locator('#appearance-account-load').click();expect(other.locator('#appearance-account-status')).to_contain_text('계정의 표시 설정을 불러왔습니다')
   self.assertTrue(f.get_by_label('Show MPR Windowing',exact=True).is_checked());other.locator('#reading-appearance-close').click();self.tools(f);expect(f.get_by_label('Show MPR Windowing',exact=True)).not_to_be_checked();expect(f.get_by_label('MPR left mouse button',exact=True)).to_have_value('StackScroll');expect(f.get_by_role('checkbox',name='Sync MPR Zoom',exact=True)).to_be_checked()
@@ -141,5 +142,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   v.evaluate('()=>window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))');expect(v.locator('.kin-mpr-configured')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),original)
 
 
-def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumePreferencesE2E(n) for n in VolumePreferencesE2E.__dict__ if n.startswith('test_properties_') and (not loader.testNamePatterns or any(__import__('fnmatch').fnmatch(n,p) for p in loader.testNamePatterns)))
+# Declared order without inherited sync/display cases; the loader applies unittest's own -k matching,
+# which a bare method-name fnmatch missed for class-qualified names.
+def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumePreferencesE2E(n) for n in VolumePreferencesE2E.__dict__ if n.startswith('test_properties_') and n in loader.getTestCaseNames(VolumePreferencesE2E))
 if __name__=='__main__':unittest.main(verbosity=2)

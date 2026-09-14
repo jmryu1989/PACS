@@ -170,6 +170,22 @@ PROFILES = {
                    ('e2e/test_volume_batch_save.py', None, 'ci-batch-save'),
                    ('e2e/test_volume_batch_scout.py', None, 'ci-batch-scout')),
     },
+    'volume-sync-preferences': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-sync-preferences-ci',
+        'project_prefix': 'kin-syncpref-ci-',
+        # A fifth MPR suite group for the existing three-plane Windowing/Zoom synchronization suite and
+        # the MPR display, mouse, account profile and progressive refinement suite; volume-mpr, volume-slab,
+        # volume-path and volume-batch keep their suites and caps. Last local full-module passes took
+        # 150-160s (15 cases) and 167s (17 cases); the batch group's hosted suites ran at 0.9-1.21x their
+        # local history, so about 195s and 205s are expected. Caps are about 2.2-2.4x that expectation:
+        # (420+35)+(480+35) = 970s of the shared 1500s deadline.
+        'suite_timeout': 540,
+        'suite_budgets': {'ci-mpr-sync': 420, 'ci-mpr-preferences': 480},
+        # Each module's load_tests is the allowlist: declared test_sync_* and test_properties_* only.
+        # Passing no class keeps the inherited display, orientation, job and sync cases out.
+        'suites': (('e2e/test_volume_sync.py', None, 'ci-mpr-sync'),
+                   ('e2e/test_volume_preferences.py', None, 'ci-mpr-preferences')),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',
