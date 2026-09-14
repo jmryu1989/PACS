@@ -8,10 +8,11 @@ contract (Catmull-Rom centre line, arc-length columns, double-reflection transpo
 initial normal, half-voxel clamped trilinear HU); nothing expected is read back from viewer output.
 The analytic straight/planar/helix/linear-field proofs of that contract are tests/volume_path_test.cjs.
 """
-import copy,json,math,unittest,uuid
+import copy,json,math,re,unittest,uuid
 import numpy as np
 from playwright.sync_api import expect, TimeoutError as PlaywrightTimeout
 from test_volume_curved import VolumeCurvedE2E,SLOPE,SPACING,PLACE,SCREEN,hu_volume,polyline
+from test_worklist import psql
 
 CELLS='''()=>[...services.viewportGridService.getState().viewports.values()].filter(c=>c.displaySetInstanceUIDs?.length).sort((a,b)=>a.y-b.y||a.x-b.x).map(c=>c.viewportId)'''
 # Fresh native render evidence: listen on every plane, request a render, wait for all three events,
@@ -38,9 +39,9 @@ def trilinear(p,hu):
     if w:value+=w*hu[base[2]+dk,base[1]+dj,base[0]+di]
  return value
 
-def path_oracle(path):
- """kin-path-1 geometry from its written contract: arc-length centres, central-difference tangents, double reflection."""
- s=path['output']['spacing'];line=polyline(path['points'],'curved');cumulative=[0.0]
+def centre_line(points,s):
+ """Arc-length centres of the Catmull-Rom centre line and their central-difference tangents."""
+ line=polyline(points,'curved');cumulative=[0.0]
  for i in range(1,len(line)):cumulative.append(cumulative[-1]+math.dist(line[i],line[i-1]))
  columns=math.floor(cumulative[-1]/s+1e-9)+1;centres=[];segment=0
  for c in range(columns):
@@ -48,12 +49,16 @@ def path_oracle(path):
   while segment<len(line)-2 and cumulative[segment+1]<d:segment+=1
   span=cumulative[segment+1]-cumulative[segment];f=min(1,max(0,(d-cumulative[segment])/span)) if span>0 else 0
   centres.append([line[segment][k]+(line[segment+1][k]-line[segment][k])*f for k in range(3)])
- C=np.array(centres,dtype=np.float64);T=[unit(C[min(columns-1,c+1)]-C[max(0,c-1)]) for c in range(columns)]
+ C=np.array(centres,dtype=np.float64);return cumulative[-1],columns,C,[unit(C[min(columns-1,c+1)]-C[max(0,c-1)]) for c in range(columns)]
+
+def path_oracle(path):
+ """kin-path-1 geometry from its written contract: arc-length centres, central-difference tangents, double reflection."""
+ length,columns,C,T=centre_line(path['points'],path['output']['spacing'])
  n=np.array(path['frame']['initialNormal'],dtype=np.float64);r=unit(n-np.dot(n,T[0])*T[0]);N=[r]
  for c in range(columns-1):
   v1=C[c+1]-C[c];c1=np.dot(v1,v1);rL=r-2*np.dot(v1,r)/c1*v1;tL=T[c]-2*np.dot(v1,T[c])/c1*v1;v2=T[c+1]-tL;c2=np.dot(v2,v2)
   r=rL-2*np.dot(v2,rL)/c2*v2;r=unit(r-np.dot(r,T[c+1])*T[c+1]);N.append(r)
- return dict(length=cumulative[-1],columns=columns,centres=C,T=T,N=N,B=[np.cross(t,x) for t,x in zip(T,N)])
+ return dict(length=length,columns=columns,centres=C,T=T,N=N,B=[np.cross(t,x) for t,x in zip(T,N)])
 
 def unfolded(path,hu):
  g=path_oracle(path);s=path['output']['spacing'];half=math.floor(path['output']['halfHeight']/s+1e-9);rows=2*half+1;a=math.radians(path['unfold']['angle']);values=[];outside=0
@@ -64,6 +69,27 @@ def unfolded(path,hu):
 
 def default_normal(t):
  axis=int(np.argmin(np.abs(t)));e=np.zeros(3);e[axis]=1;return unit(e-t[axis]*t)
+
+def history_normal(history,s):
+ """Initial normal over the accepted control-point lists of every edit, oldest first: the default rule at the first
+ viable (two-point) path, then the kept vector projected perpendicular to each new start tangent; only a projection
+ shorter than 1e-3 falls back to the default rule. Nothing is read from viewer output."""
+ n=None
+ for points in history:
+  if len(points)<2:continue
+  t=centre_line(points,s)[3][0]
+  if n is not None:
+   p=n-np.dot(n,t)*t
+   if np.linalg.norm(p)>=1e-3:n=unit(p);continue
+  n=default_normal(t)
+ return n
+
+def raw_vectors(text,key='initialNormal'):
+ """The literal JSON tokens of every `key` array in a raw body; nothing is parsed, so no digit is rounded."""
+ return re.findall(r'"%s"\s*:\s*\[[^\[\]]{0,200}\]'%key,text)
+
+def job_post(uid):
+ return lambda r:r.method=='POST' and r.url.split('?')[0].endswith(f'/studies/{uid}/viewer-jobs')
 
 def field_differences(a,b,at=''):
  """Exact leaf differences between two JSON values as (path, a, b); key order is ignored, nothing is rounded."""
@@ -90,13 +116,14 @@ class VolumePathE2E(VolumeCurvedE2E):
   n=self.path_count(v);v.mouse.click(*v.evaluate(SCREEN,[view,list(point)]))
   try:v.wait_for_function('n=>(kinMprPath.inspect()?.value?.points?.length??0)>n',arg=n,timeout=5000)
   except PlaywrightTimeout:self.fail(f'path point {n} {list(point)} was not accepted; status {self.path_status(v).text_content()!r}')
-  got=self.path_inspect(v)['value']['points'][n];self.assertTrue(all(abs(x-y)<=.5 for x,y in zip(got,point)),got)
+  points=self.path_inspect(v)['value']['points'];got=points[n];self.assertTrue(all(abs(x-y)<=.5 for x,y in zip(got,point)),got);return points
  def add_path(self,v,picks):
-  # Each pick is (plane axis, plane focal point, world point on that plane).
-  self.path_button(v,'Add Points').click()
+  # Each pick is (plane axis, plane focal point, world point on that plane). Returns the accepted
+  # control-point list after every pick, the edit history of the initial normal.
+  self.path_button(v,'Add Points').click();history=[]
   for axis,focal,point in picks:
-   view=self.view(v,axis);v.evaluate(PLACE,[view,list(focal)]);self.path_point(v,view,point)
-  self.path_button(v,'Finish Points').click()
+   view=self.view(v,axis);v.evaluate(PLACE,[view,list(focal)]);history.append(self.path_point(v,view,point))
+  self.path_button(v,'Finish Points').click();return history
  def assert_unfolded(self,report,hu):
   g,rows,values,outside=unfolded(report['value'],hu);final=report['final']
   self.assertEqual((final['columns'],final['rows'],final['outside']),(g['columns'],rows,outside));self.assertAlmostEqual(final['length'],g['length'],delta=1e-9)
@@ -105,13 +132,25 @@ class VolumePathE2E(VolumeCurvedE2E):
    else:self.assertAlmostEqual(got,want,delta=1e-6,msg=n)
   return g
  def save_path_diagnosed(self,v,a,label):
-  # Diagnostic record only: exact before-save/saved/live field differences for the native log.
-  # It asserts nothing; the callers keep their exact saved-path equality assertions.
+  # Diagnostic record: exact before-save/saved/live field differences for the native log, plus the literal
+  # initialNormal tokens of this synthetic Job at each persistence boundary (browser POST body, PostgreSQL
+  # jsonb text, API GET response text), all read-only and unparsed. The callers keep their exact saved-path
+  # equality assertions; this refuses only when the saved Job or a boundary token could not be identified.
   before=self.path_inspect(v)['value'];display=v.evaluate(CELL_DISPLAY)
-  self.save_volume(v);s=self.get_volume_job(a)['snapshot'];report=self.path_inspect(v)
+  with v.expect_request(job_post(a.uid)) as sent:self.save_volume(v)
+  rows=self.jobs(a);self.assertEqual(len(rows),1);job=rows[0]['id']
+  r=self.stack.request('GET',f'/studies/{a.uid}/viewer-jobs/{job}','doctor');self.assertEqual(r.status,200,r.text);s=r.body['snapshot'];report=self.path_inspect(v)
+  body=sent.value.post_data or ''
+  try:owned=str(uuid.UUID(job))==job and json.loads(body)['id']==job
+  except (ValueError,KeyError,TypeError):owned=False
+  try:stored=psql("SELECT snapshot#>>'{path,frame,initialNormal}' FROM \"ViewerJob\" WHERE id='%s'::uuid"%job) if owned else None
+  except RuntimeError:stored=None
+  transport={'transport_request':raw_vectors(body),'transport_db':stored,'transport_response':raw_vectors(r.text)}
   print('PATH_SAVE',json.dumps({'test':label,'dirty':v.evaluate('()=>kinMprPath.dirty()'),'state':report['state'],'busy':report['busy'],'generation':report['generation'],
    'before_vs_saved':field_differences(before,s.get('path')),'saved_vs_live':field_differences(s.get('path'),report['value']),'before_vs_live':field_differences(before,report['value']),
-   'display_before_save':display,'display_after_save':v.evaluate(CELL_DISPLAY)}),flush=True)
+   'display_before_save':display,'display_after_save':v.evaluate(CELL_DISPLAY),'job_owned':owned,**transport}),flush=True)
+  self.assertTrue(owned,'the saved Job is not the one this browser posted')
+  self.assertTrue(all(transport.values()) and len(stored)==1,'persistence boundary tokens were not captured')
   return s,report['value']
  def assert_cameras(self,cameras,g,column,perpendicular=0,delta=1e-6):
   planes=iter([(g['N'][column],g['T'][column]),(g['B'][column],g['T'][column])])
@@ -127,13 +166,17 @@ class VolumePathE2E(VolumeCurvedE2E):
   self.path_input(v,'3D Path Half Height',20);self.path_input(v,'3D Path Unfold Angle',30)
   picks=[(2,[20,15,30],[6,8,30]),(1,[20,20,40],[16,20,40]),(0,[26,15,50],[26,12,52]),(2,[20,15,62],[34,22,62])]
   # Placing each plane moves it; the planes are compared from the last placement on.
-  self.add_path(v,picks);before=self.volume_state(v);report=self.path_final(v);value=report['value']
+  history=self.add_path(v,picks);before=self.volume_state(v);report=self.path_final(v);value=report['value']
   self.assertEqual((value['cell'],value['output']['spacing'],value['unfold']['angle'],len(value['points'])),(0,0.5,30,4))
   points=np.array(value['points']);self.assertEqual((points[0][2],points[1][1],points[2][0],points[3][2]),(30,20,26,62))
   self.assertGreater(abs(np.dot(points[1]-points[0],np.cross(points[2]-points[0],points[3]-points[0]))),100,'non-coplanar')
   g=self.assert_unfolded(report,hu);self.assertGreater(report['final']['outside'],0)
-  # The persisted initial normal is the default rule for this start direction, stored as a unit vector.
-  np.testing.assert_allclose(value['frame']['initialNormal'],default_normal(g['T'][0]),atol=1e-9)
+  # The initial normal is chosen once, by the default rule at the first two-point path, and the kept vector is
+  # re-projected on every later pick; the expectation comes from the accepted point lists alone. A fresh default at
+  # the final start tangent differs from it by more than 1e-3 for these picks, so that regression is detected.
+  self.assertEqual(history[-1],value['points']);want=history_normal(history,value['output']['spacing'])
+  np.testing.assert_allclose(value['frame']['initialNormal'],want,atol=1e-9)
+  self.assertGreater(np.max(np.abs(default_normal(g['T'][0])-want)),1e-3,'fixture must tell the edit history from a fresh default')
   self.preserved_volume(before,self.volume_state(v))
   expect(self.path(v).locator('.badge')).to_have_text('UNFOLDED 3D PATH · Derived display · Not a source image')
   self.maxDiff=None;s,_=self.save_path_diagnosed(v,a,'path_01')
@@ -188,18 +231,25 @@ class VolumePathE2E(VolumeCurvedE2E):
 
  def test_path_03_edit_delete_reset_and_unfolded_distance(self):
   a,p,v=self.opened_path();original=self.originals();p.locator('#findings').fill('KEEP PATH EDIT REPORT');hu=hu_volume(SLOPE)
-  self.path_input(v,'3D Path Half Height',2);self.add_path(v,[(2,[20,15,40],[5,5,40]),(2,[20,15,40],[35,25,40])]);report=self.path_final(v);value=report['value']
+  self.path_input(v,'3D Path Half Height',2);history=self.add_path(v,[(2,[20,15,40],[5,5,40]),(2,[20,15,40],[35,25,40])]);report=self.path_final(v);value=report['value']
   length=math.dist(*value['points']);self.assertAlmostEqual(report['final']['length'],length,delta=1e-9);self.assertEqual(report['final']['columns'],math.floor(length/0.5+1e-9)+1)
   self.assert_unfolded(report,hu)
+  # First viable path: the default rule for an in-plane axial start direction is the axial normal.
+  np.testing.assert_allclose(history_normal(history,0.5),[0,0,1],atol=1e-12);np.testing.assert_allclose(value['frame']['initialNormal'],history_normal(history,0.5),atol=1e-9)
   expect(self.path(v).locator('.caption')).to_contain_text('Arc length %.2f mm'%length);expect(self.path(v).locator('.note')).to_contain_text('직선 거리·측정 의미가 없고')
   self.save_volume(v);saved=self.get_volume_job(a)['snapshot']['path'];self.assertEqual(saved,value);self.assertFalse(v.evaluate('()=>kinMprPath.dirty()'))
   axial=self.view(v,2);start=v.evaluate(SCREEN,[axial,value['points'][1]]);end=v.evaluate(SCREEN,[axial,[35,20,40]])
   v.mouse.move(*start);v.mouse.down();v.mouse.move(*end,steps=8)
   expect(self.path(v).locator('p[data-kin-path-state]')).to_contain_text('Preview',timeout=10000);v.mouse.up()
   moved=self.path_final(v);self.assertTrue(abs(moved['value']['points'][1][1]-20)<=.5);self.assertEqual(moved['value']['points'][1][2],40);self.assert_unfolded(moved,hu);self.assertTrue(v.evaluate('()=>kinMprPath.dirty()'))
-  self.add_path(v,[(1,[20,12,40],[40,12,50])]);three=self.path_final(v);self.assertEqual(len(three['value']['points']),3);self.assert_unfolded(three,hu)
+  # Every drag position stays in the z=40 plane, so each intermediate projection keeps the axial normal exactly;
+  # the appended off-plane point then tilts the start tangent and the kept normal is projected onto it.
+  history.append(moved['value']['points']);np.testing.assert_allclose(moved['value']['frame']['initialNormal'],history_normal(history,0.5),atol=1e-9)
+  history+=self.add_path(v,[(1,[20,12,40],[40,12,50])]);three=self.path_final(v);self.assertEqual(len(three['value']['points']),3);self.assert_unfolded(three,hu)
+  self.assertEqual(history[-1],three['value']['points']);np.testing.assert_allclose(three['value']['frame']['initialNormal'],history_normal(history,0.5),atol=1e-9)
   coronal=self.view(v,1);v.mouse.click(*v.evaluate(SCREEN,[coronal,three['value']['points'][2]]));self.assertEqual(self.path_inspect(v)['selected'],2)
-  self.path_button(v,'Delete Point').click();self.assertEqual(len(self.path_final(v)['value']['points']),2)
+  self.path_button(v,'Delete Point').click();deleted=self.path_final(v)['value'];self.assertEqual(len(deleted['points']),2)
+  history.append(deleted['points']);np.testing.assert_allclose(deleted['frame']['initialNormal'],history_normal(history,0.5),atol=1e-9)
   self.path_button(v,'Reset Path').click();self.assertEqual(self.path_final(v)['value'],saved);self.assertFalse(v.evaluate('()=>kinMprPath.dirty()'))
   self.path_button(v,'Clear Path').click();expect(self.path(v).locator('p[data-kin-path-state]')).to_have_text('No Path');self.assertTrue(v.evaluate('()=>kinMprPath.dirty()'))
   v.get_by_role('button',name='Restore Job',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('미저장 3D Path')
