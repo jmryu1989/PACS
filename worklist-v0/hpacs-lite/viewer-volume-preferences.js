@@ -1,6 +1,6 @@
 window.kinCreateVolumePreferences=function({target,permitted,alive,owner,services,host}){
   const model=window.KinVolumePreferences,identity=JSON.stringify(owner()),key='kin-mpr-preferences:v1:'+identity;
-  let ended=false,current=model.defaults(),bound=null,saved=false,pending=null,failed=null;
+  let ended=false,current=model.defaults(),bound=null,saved=false,pending=null,failed=null,mouseApplied=false;
   const live=()=>{try{return !ended&&alive()&&JSON.stringify(owner())===identity;}catch(_){return false;}};
   const allowed=()=>{try{return live()&&permitted()&&!window.kinViewerJobWorkspaceState?.().busy&&!window.kinVolumeBatchState?.busy?.()&&!document.hidden;}catch(_){return false;}};
   const panel=document.createElement('section');panel.id='kin-mpr-preferences';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';host.append(panel);
@@ -61,19 +61,21 @@ window.kinCreateVolumePreferences=function({target,permitted,alive,owner,service
   function attach(t){
     clear();const groups=t.views.map(v=>cornerstoneTools.ToolGroupManager.getToolGroupForViewport(v.id,v.renderingEngineId));
     if(!groups[0]||groups.some(g=>g!==groups[0])||model.tools.some(n=>!groups[0].getToolInstance(n)))throw Error('현재 MPR 도구 연결을 확인하지 못했습니다.');
-    bound={key:t.group,views:t.views,group:groups[0],items:[],initialApplied:!saved};
+    // clear() returned the reused native tool group to its original bindings. A mouse setting applied in
+    // this window is bound again on the new layout like a saved profile, not left shown but unbound.
+    bound={key:t.group,views:t.views,group:groups[0],items:[],initialApplied:!saved&&!mouseApplied};
     for(const view of t.views){const root=view.element.parentElement;if(!root?.classList.contains('viewport-wrapper'))throw Error('현재 영상 표시 구조를 확인하지 못했습니다.');const zoom=document.createElement('span'),scale=document.createElement('span');zoom.className='kin-mpr-zoom';scale.className='kin-mpr-scale';zoom.style.cssText='position:absolute;left:10px;bottom:53px;pointer-events:none;background:#00131dcc;padding:2px 4px;color:#6de6ff;font-size:12px';scale.style.cssText='position:absolute;left:12px;top:80px;border-bottom:2px solid #6de6ff;color:#6de6ff;text-align:center;pointer-events:none;font-size:12px';const cube=document.createElementNS('http://www.w3.org/2000/svg','svg'),sample=document.createElement('span');cube.classList.add('kin-mpr-cube');cube.setAttribute('viewBox','0 0 120 120');cube.style.cssText='position:absolute;bottom:70px;right:15px;width:100px;height:100px;pointer-events:none;background:#00131dcc;border-radius:5px';sample.className='kin-mpr-sample';sample.style.cssText='position:absolute;top:110px;left:10px;color:#6de6ff;font-size:11px;pointer-events:none';view.element.append(zoom,scale,cube,sample);root.classList.add('kin-mpr-configured');view.element.addEventListener(cornerstone.Enums.Events.CAMERA_MODIFIED,paint);bound.items.push({root,view,zoom,scale,cube,sample});}
     paint();
   }
   function refresh(){
     if(ended)return;const t=live()&&target();panel.hidden=!t;
     if(!t){if(!live()||bound?.views.some(v=>!v.element.isConnected||services.cornerstoneViewportService.getCornerstoneViewport(v.id)!==v))clear();return;}
-    try{if(failed?.key===t.group&&failed.views.every((v,i)=>v===t.views[i]))return;if(!bound||bound.key!==t.group||bound.views.some((v,i)=>v!==t.views[i]))attach(t);if(pending&&allowed()){const next=pending;pending=null;apply(next);}if(saved&&!bound.initialApplied&&allowed()){bound.initialApplied=true;apply(current);}paint();}catch(error){clear();failed={key:t.group,views:t.views};status.textContent=error.message+' 영상 창을 새로고침한 뒤 재시도하세요.';}
+    try{if(failed?.key===t.group&&failed.views.every((v,i)=>v===t.views[i]))return;if(!bound||bound.key!==t.group||bound.views.some((v,i)=>v!==t.views[i]))attach(t);if(pending&&allowed()){const next=pending;pending=null;apply(next);}if(!bound.initialApplied&&allowed()){bound.initialApplied=true;if(saved)apply(current);else try{applyMouse(current.mouse);}catch(error){status.textContent=error.message;}}paint();}catch(error){clear();failed={key:t.group,views:t.views};status.textContent=error.message+' 영상 창을 새로고침한 뒤 재시도하세요.';}
     for(const control of panel.querySelectorAll('input,select,button'))control.disabled=!bound||!allowed();
     for(const name of model.fields)checks[name].checked=current.display[name];panel.querySelector('[data-action=save]').disabled=!bound||!allowed()||!!pending;progressive.checked=current.progressive;progressive.disabled=!bound||!allowed()||!window.kinMprRenderingState;
   }
   function showMouse(){for(const name of ['left','middle','right'])selects[name].value=current.mouse[name];}
-  panel.querySelector('[data-action=apply]').onclick=()=>{pending=null;try{const candidate=model.normalize({...current,mouse:Object.fromEntries(Object.entries(selects).map(([k,v])=>[k,v.value]))});if(!candidate)throw Error('각 버튼에는 서로 다른 도구를 지정하세요.');applyMouse(candidate.mouse);status.textContent='마우스 버튼을 적용했습니다. 이후 도구 모음 선택은 해당 조작을 바꿀 수 있습니다.';}catch(error){status.textContent=error.message;}refresh();};
+  panel.querySelector('[data-action=apply]').onclick=()=>{pending=null;try{const candidate=model.normalize({...current,mouse:Object.fromEntries(Object.entries(selects).map(([k,v])=>[k,v.value]))});if(!candidate)throw Error('각 버튼에는 서로 다른 도구를 지정하세요.');applyMouse(candidate.mouse);mouseApplied=true;status.textContent='마우스 버튼을 적용했습니다. 이후 도구 모음 선택은 해당 조작을 바꿀 수 있습니다.';}catch(error){status.textContent=error.message;}refresh();};
   panel.querySelector('[data-action=save]').onclick=()=>{if(!allowed()||pending)return;if(Object.entries(selects).some(([k,v])=>v.value!==current.mouse[k])){status.textContent='마우스 변경을 먼저 적용하세요.';return;}try{current=read();localStorage.setItem(key,JSON.stringify(current));saved=true;notify();status.textContent='MPR 설정을 저장했습니다 · 현재 계정·이 브라우저';}catch(_){status.textContent='MPR 설정을 저장하지 못했습니다. 현재 창은 유지합니다.';}};
   function load(explicit){try{const raw=localStorage.getItem(key);if(raw===null){status.textContent='저장된 MPR 설정이 없습니다.';return;}const value=raw.length<=1024&&model.normalize(JSON.parse(raw));if(!value)throw Error('저장된 MPR 설정 형식을 확인할 수 없습니다.');if(explicit&&!apply(value))throw Error('현재 MPR 설정을 적용하지 못했습니다.');current=value;saved=true;showMouse();paint();status.textContent='저장된 MPR 설정을 불러왔습니다 · 이 브라우저';}catch(error){status.textContent=error.message||'MPR 설정을 읽지 못했습니다.';}}
   panel.querySelector('[data-action=load]').onclick=()=>{if(allowed())load(true);refresh();};
