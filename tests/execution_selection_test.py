@@ -389,6 +389,60 @@ class ExecutionSelectionTests(unittest.TestCase):
                     self.assertEqual(sorted(selected), sorted(reference))
                     self.assertEqual(len(selected), expected)
 
+    def test_volume_marks_profile_selects_only_the_declared_marks_and_annotated_output_modules(self):
+        profile = ci.PROFILES['volume-marks']
+        expected = [('e2e/test_volume_marks.py', 'VolumeMarksE2E',
+                     'test_marks_', 'ci-mpr-marks', 20,
+                     {'test_marks_02_job_and_new_browser_restore_full_volume',
+                      'test_marks_12_legacy_jobs_clear_marks_without_target_dependency',
+                      'test_marks_19_receipt_after_layout_change_acknowledges_saved_source',
+                      'test_marks_20_progressive_slab_pick_final_batch_save_and_restore'}),
+                    ('e2e/test_volume_mpr_print.py', 'VolumeMprPrintE2E',
+                     'test_mpr_print_', 'ci-mpr-marks-print', 9,
+                     {'test_mpr_print_02_marks_number_position_and_immutable_source',
+                      'test_mpr_print_08_annotated_batch_offsets',
+                      'test_mpr_print_09_oblique_average_readonly_dpr'})]
+        self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
+        self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
+        methods = set()
+        for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
+                profile['suites'], expected):
+            with self.subTest(suite=suite):
+                self.assertIsNone(class_name)
+                # Planned at the budget CI will actually request for this suite.
+                plan = runner.module_plan('tests/'+suite, unit, 'live',
+                                          profile['suite_budgets'][unit], class_name)
+                selected = [item['case'] for item in plan['tests']]
+                cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
+                # The output suite declares four of its cases by assigning batch print cases to local names.
+                declared = sorted(cls_name+'.'+name for name in cls.__dict__
+                                  if name.startswith(prefix))
+                self.assertEqual(sorted(selected), declared)
+                self.assertEqual(len(selected), count)
+                self.assertTrue({cls_name+'.'+name for name in required}.issubset(selected))
+                # The output suite inherits every marks case and marks inherits sync, display, orientation
+                # and jobs; none of those may widen this profile or run twice.
+                inherited = {name for base in cls.__mro__[1:]
+                             for name in vars(base) if name.startswith('test_')}
+                self.assertTrue(inherited, 'expected an inheriting suite')
+                names = {case.split('.', 1)[1] for case in selected}
+                self.assertFalse(inherited & names)
+                self.assertFalse(methods & names)
+                methods |= names
+                self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+                self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
+                self.assertEqual(runner.collect(plan).countTestCases(), count)
+                print('SELECTION', suite, len(selected), flush=True)
+        self.assertEqual(len(methods), 29)
+        # The group stays disjoint from the other MPR groups and the VR profile; current unsaved output
+        # inherits the saved output suite and keeps its own registration outside this group.
+        others = {row[0] for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch',
+                                      'volume-sync-preferences', 'volume-rendering')
+                  for row in ci.PROFILES[name]['suites']}
+        modules = {row[0] for row in profile['suites']}
+        self.assertFalse(others & modules)
+        self.assertNotIn('e2e/test_volume_current_print.py', modules)
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)

@@ -367,6 +367,46 @@ jobs:
             tmp/syncpref-ci/
           if-no-files-found: error
           retention-days: 7
+  volume-marks:
+    # A sixth MPR suite group, not extra suites inside volume-mpr, volume-slab, volume-path, volume-batch or
+    # volume-sync-preferences, whose caps stay as they are. The manual 3D annotation suite and its saved annotated
+    # three-plane/batch output suite share this runner; the profile's per-suite caps (660+35)+(420+35) = 1150s
+    # bound the live step. The pure annotation model stays registered in the volume-rendering job.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Marks profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/marks-python"
+          "$RUNNER_TEMP/marks-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/marks-python/bin/python" -m playwright install --with-deps chromium
+      - name: Armed 3D annotation pick is not previewed by progressive refinement on the real panel
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/progressive-dom --cwd . --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_marks_progressive_dom_test.py -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/viewer_volume_marks_progressive_dom_test.py
+      - name: Confirm exact declared manual 3D annotation and annotated output selection
+        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_marks.py --file tests/e2e/test_volume_mpr_print.py --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-batch.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-volume-job-print.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file config/ohif.js --file api/src/viewer-volume-marks.ts -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared manual 3D annotation and annotated output tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/marks-python/bin/python" tests/measurement_ci.py --profile volume-marks
+      - name: Sanitized synthetic manual 3D annotation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-marks-results
+          path: |
+            tests/e2e/artifacts/volume-marks-ci/
+            tmp/marks-ci/
+          if-no-files-found: error
+          retention-days: 7
   hanging-protocols:
     # A separate job, not extra suites inside measurements: the four hanging-protocol
     # suites must not consume that job's budget, and each profile needs its own fresh

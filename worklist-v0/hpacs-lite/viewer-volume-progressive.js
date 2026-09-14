@@ -38,14 +38,17 @@ window.kinCreateVolumeProgressive=function({target,enabled,permitted,alive,notic
     }catch(_){active=states;settle();if(!active)notice('점진 렌더링을 적용하지 못해 원래 품질로 복귀합니다.');}
   }
   const wheel=()=>{begin();clearTimeout(settleTimer);settleTimer=setTimeout(settle,150);};
-  function clear(){settle();if(!bound)return;for(const view of bound.views){view.element.removeEventListener('pointerdown',begin,true);view.element.removeEventListener('wheel',wheel,true);}bound=null;}
+  // An armed manual 3D point pick consumes its own press without moving the image. Previewing that press
+  // left rendering unresolved when the pick checked it, so no point could be picked on a thick slab.
+  const press=e=>{try{if(window.kinMprMarks?.claims?.(e))return;}catch(_){}begin();};
+  function clear(){settle();if(!bound)return;for(const view of bound.views){view.element.removeEventListener('pointerdown',press,true);view.element.removeEventListener('wheel',wheel,true);}bound=null;}
   function refresh(){
     if(ended)return;const t=live()&&target();
     if(!allowed()||active?.some(x=>x.label.textContent==='Refinement failed'))settle();
     if(!t){clear();return;}
     if(bound?.key===t.group&&bound.views.every((v,i)=>v===t.views[i]))return;
     clear();bound={key:t.group,views:t.views};
-    for(const view of t.views){view.element.addEventListener('pointerdown',begin,{capture:true,passive:true});view.element.addEventListener('wheel',wheel,{capture:true,passive:true});}
+    for(const view of t.views){view.element.addEventListener('pointerdown',press,{capture:true,passive:true});view.element.addEventListener('wheel',wheel,{capture:true,passive:true});}
   }
   for(const event of ['pointerup','pointercancel','keydown'])document.addEventListener(event,settle,true);
   window.addEventListener('blur',settle);document.addEventListener('visibilitychange',settle);
