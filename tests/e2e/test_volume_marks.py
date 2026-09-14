@@ -128,6 +128,31 @@ class VolumeMarksE2E(VolumeSyncE2E):
   self.assertEqual(len(waiting),1);self.assertEqual(len(self.jobs(a)),1);v.locator('[data-cy=Layout]').click();v.locator('[data-cy=Layout-0-0]').click();expect(v.locator('.kin-mpr-marks-overlay')).to_have_count(0)
   route,response=waiting.pop();route.fulfill(response=response);v.unroute(pattern,hold);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다',timeout=45000);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));self.assertEqual(len(self.jobs(a)),1)
   self.mpr(v);self.choose_volume(v,v,0);self.same_marks(v.evaluate('()=>kinMprMarks.capture()'),marks);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'))
+ def test_marks_20_progressive_slab_pick_final_batch_save_and_restore(self):
+  from test_volume_batch import VolumeBatchE2E
+  from test_volume_batch_save import VolumeBatchSaveE2E,CAPTURE
+  a,p,v=self.starting();original=self.originals();p.locator('#findings').fill('KEEP PROGRESSIVE MARKS REPORT');self.project(v,3,20)
+  panel=v.locator('#kin-mpr-preferences');expect(panel).to_be_visible();panel.get_by_label('MPR Progressive Rendering',exact=True).check();v.wait_for_function('()=>kinMprPreferences.read().progressive===true')
+  # Each release on the thick plane records what the source renderer drew with before refinement settles it.
+  x,y=v.evaluate('''()=>{window.pickMapper=projectionVP.getActors()[0].actor.getMapper();window.pickBase=pickMapper.getSampleDistance();window.pressProbe=[];window.addEventListener('pointerup',e=>{if(!projectionVP.element.contains(e.target))return;const d=pickMapper.getSampleDistance();pressProbe.push([d===pickBase?'final':d===pickBase*3?'preview':'other',projectionVP.element.querySelectorAll('.kin-mpr-refining').length])},true);const r=projectionVP.element.getBoundingClientRect(),xy=projectionVP.worldToCanvas([32,32,16]);return [r.left+xy[0],r.top+xy[1]]}''')
+  v.mouse.move(x,y);v.mouse.down();v.wait_for_function('()=>pickMapper.getSampleDistance()===pickBase*3');v.mouse.up();v.wait_for_function('()=>pickMapper.getSampleDistance()===pickBase&&!kinMprRenderingState.busy()')
+  self.assertEqual(v.evaluate('()=>pressProbe.splice(0)'),[['preview',1]])
+  marks=self.add_mark(v,'Progressive slab point');self.assertEqual(v.evaluate('()=>pressProbe.splice(0)'),[['final',0]],'an armed pick press is not previewed');self.assertFalse(v.evaluate('()=>kinMprRenderingState.busy()'))
+  for got,want in zip(marks['marks'][0]['point'],[32,32,16]):self.assertAlmostEqual(got,want,delta=.2)
+  # A persistent refinement failure keeps the source coarse while a batch is generated beside it.
+  v.evaluate('()=>{const set=pickMapper.setSampleDistance;window.failRefine=true;pickMapper.setSampleDistance=value=>set(failRefine&&value===pickBase?pickBase*2:value)}')
+  v.mouse.move(x,y);v.mouse.down();v.mouse.up();expect(v.locator('.kin-mpr-refining').first).to_have_text('Refinement failed')
+  unresolved='()=>kinMprRenderingState.busy()&&pickMapper.getSampleDistance()===pickBase*2'
+  self.assertTrue(v.evaluate(unresolved));VolumeBatchE2E.make_batch(self,v);coarse=VolumeBatchSaveE2E.pixels(self,v);self.assertTrue(v.evaluate(unresolved))
+  v.evaluate('()=>{failRefine=false}');v.wait_for_function('()=>pickMapper.getSampleDistance()===pickBase&&!kinMprRenderingState.busy()');expect(v.locator('.kin-mpr-refining')).to_have_count(0)
+  v.get_by_role('button',name='Clear Batch',exact=True).click();VolumeBatchE2E.make_batch(self,v);final=VolumeBatchSaveE2E.pixels(self,v)
+  self.assertEqual(coarse,final,'batch output uses its own final renderer, never the source preview')
+  saved=v.evaluate(CAPTURE);self.assertEqual(saved['version'],6);self.save_volume(v);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'))
+  job=self.get_volume_job(a)['snapshot'];self.assertEqual(job['version'],6);self.same_marks(job['marks'],marks);VolumeBatchSaveE2E.same_recipe(self,job['batch'],saved['batch'])
+  fresh=self.login();self.launch(fresh,[a]);self.ready(fresh);fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=60000)
+  self.same_marks(fresh.evaluate('()=>kinMprMarks.capture()'),marks);self.assertFalse(fresh.evaluate('()=>kinMprMarks.dirty()'));expect(fresh.locator('.kin-mpr-marks-overlay [data-mark-id]')).to_have_count(3)
+  restored=fresh.evaluate(CAPTURE);self.assertEqual(restored['version'],6);VolumeBatchSaveE2E.same_recipe(self,restored['batch'],job['batch']);self.assertEqual(VolumeBatchSaveE2E.pixels(self,fresh),final)
+  expect(p.locator('#findings')).to_have_value('KEEP PROGRESSIVE MARKS REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.jobs(a)),1)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(loader.loadTestsFromName(name,VolumeMarksE2E) for name in loader.getTestCaseNames(VolumeMarksE2E) if name.startswith('test_marks_'))
 if __name__=='__main__':unittest.main(verbosity=2)
