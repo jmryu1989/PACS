@@ -71,7 +71,7 @@ class VolumeMipE2E(VolumeProjectionE2E):
  def open_mip(self,v):
   v.get_by_role('button',name='Open MIP Viewer',exact=True).click();dialog=v.locator('#kin-volume-mip')
   expect(dialog).to_have_attribute('data-kin-mip-state','final',timeout=45000);expect(dialog.locator('[role=status]')).to_contain_text('MIP · Axial');return dialog
- def choose(self,dialog,mode=None,orientation=None):
+ def choose_mip(self,dialog,mode=None,orientation=None):
   if orientation:dialog.get_by_label('MIP Orientation',exact=True).select_option(orientation)
   if mode:dialog.get_by_label('MIP Projection',exact=True).select_option(mode)
  def final(self,v,mode,orientation,probes=(CENTER,)):
@@ -93,7 +93,7 @@ class VolumeMipE2E(VolumeProjectionE2E):
   dialog=self.open_mip(v);expect(dialog.locator('details')).to_contain_text(a.uid);values={}
   for orientation in ORIENTATIONS:
    for mode in MODES:
-    self.choose(dialog,mode,orientation);probes=(CENTER,CORNER) if orientation=='Axial' else (CENTER,)
+    self.choose_mip(dialog,mode,orientation);probes=(CENTER,CORNER) if orientation=='Axial' else (CENTER,)
     state=self.final(v,mode,orientation,probes);self.near(state['pixels'][0],expected_hu(mode,orientation),voi,mode+' '+orientation)
     if orientation=='Axial':self.near(state['pixels'][1],COLUMN,voi,'constant column '+mode)
     values[mode+'/'+orientation]=state['pixels']
@@ -126,33 +126,33 @@ class VolumeMipE2E(VolumeProjectionE2E):
   v.evaluate("""()=>{const s=document.querySelector('#kin-volume-mip [role=status]');window.mipStatuses=[];new MutationObserver(()=>mipStatuses.push(s.textContent)).observe(s,{childList:true,characterData:true,subtree:true});
    const pane=document.querySelector('#kin-volume-mip .kin-mip-canvas-pane');window.mipHold=true;window.mipHeldFrames=0;pane.addEventListener(cornerstone.Enums.Events.IMAGE_RENDERED,e=>{if(mipHold){e.stopImmediatePropagation();mipHeldFrames++}},true)}""")
   # Delayed final render: rendered frames are withheld, so nothing is final until the latest selection renders.
-  self.choose(dialog,'MinIP');v.wait_for_function('()=>mipHeldFrames>0');expect(dialog).to_have_attribute('data-kin-mip-state','pending');expect(dialog.locator('.kin-mip-label')).to_have_text('Rendering · 최종 표시 전')
-  self.choose(dialog,orientation='Coronal');self.choose(dialog,'Raysum');v.wait_for_timeout(300);expect(dialog).to_have_attribute('data-kin-mip-state','pending')
+  self.choose_mip(dialog,'MinIP');v.wait_for_function('()=>mipHeldFrames>0');expect(dialog).to_have_attribute('data-kin-mip-state','pending');expect(dialog.locator('.kin-mip-label')).to_have_text('Rendering · 최종 표시 전')
+  self.choose_mip(dialog,orientation='Coronal');self.choose_mip(dialog,'Raysum');v.wait_for_timeout(300);expect(dialog).to_have_attribute('data-kin-mip-state','pending')
   v.evaluate('()=>{mipHold=false;mipView().render()}');state=self.final(v,'Raysum','Coronal');self.near(state['pixels'][0],expected_hu('Raysum','Coronal',intercept),voi,'low HU Raysum Coronal')
   announced=[s for s in v.evaluate('()=>mipStatuses') if '최종 표시를 확인했습니다' in s];self.assertTrue(announced);self.assertTrue(all(s.startswith('Raysum · Coronal') for s in announced),announced)
   # Input order: plane-then-mode and mode-then-plane reach the same display and pixels.
-  self.choose(dialog,orientation='Sagittal');self.choose(dialog,'MinIP');first=self.final(v,'MinIP','Sagittal')
-  self.choose(dialog,'MIP','Axial');self.final(v,'MIP','Axial');self.choose(dialog,'MinIP');self.choose(dialog,orientation='Sagittal');second=self.final(v,'MinIP','Sagittal')
+  self.choose_mip(dialog,orientation='Sagittal');self.choose_mip(dialog,'MinIP');first=self.final(v,'MinIP','Sagittal')
+  self.choose_mip(dialog,'MIP','Axial');self.final(v,'MIP','Axial');self.choose_mip(dialog,'MinIP');self.choose_mip(dialog,orientation='Sagittal');second=self.final(v,'MinIP','Sagittal')
   self.assertEqual({k:first[k] for k in ('blend','normal','up','thickness','pixels')},{k:second[k] for k in ('blend','normal','up','thickness','pixels')});self.near(second['pixels'][0],expected_hu('MinIP','Sagittal',intercept),voi,'low HU MinIP Sagittal')
   def kept(message):
    expect(status).to_contain_text(message);expect(status).to_contain_text('이전 표시(MinIP · Sagittal');state=self.final(v,'MinIP','Sagittal');self.assertEqual(state['pixels'],second['pixels'])
   # Setter and render failures keep the last confirmed display with a visible notice.
   v.evaluate("()=>{const vp=mipView(),set=vp.setBlendMode;vp.setBlendMode=function(mode,...rest){vp.setBlendMode=set;if(mode===1)throw Error('INJECTED MIP SETTER FAILURE');return set.call(this,mode,...rest)}}")
-  self.choose(dialog,'MIP');kept('INJECTED MIP SETTER FAILURE')
+  self.choose_mip(dialog,'MIP');kept('INJECTED MIP SETTER FAILURE')
   v.evaluate("()=>{const vp=mipView(),render=vp.render;vp.render=function(){vp.render=render;throw Error('INJECTED MIP RENDER FAILURE')}}")
-  self.choose(dialog,orientation='Axial');kept('INJECTED MIP RENDER FAILURE')
+  self.choose_mip(dialog,orientation='Axial');kept('INJECTED MIP RENDER FAILURE')
   # A missing Raysum capability refuses Raysum instead of showing a non-average projection.
-  v.evaluate('()=>{window.heldAverage=window.kinPrepareVolumeAverage;window.kinPrepareVolumeAverage=undefined}');self.choose(dialog,'Raysum');kept('Raysum 평균 계산 모듈')
-  v.evaluate('()=>{window.kinPrepareVolumeAverage=heldAverage}');self.choose(dialog,'Raysum');state=self.final(v,'Raysum','Sagittal');self.near(state['pixels'][0],expected_hu('Raysum','Sagittal',intercept),voi,'low HU Raysum Sagittal')
+  v.evaluate('()=>{window.heldAverage=window.kinPrepareVolumeAverage;window.kinPrepareVolumeAverage=undefined}');self.choose_mip(dialog,'Raysum');kept('Raysum 평균 계산 모듈')
+  v.evaluate('()=>{window.kinPrepareVolumeAverage=heldAverage}');self.choose_mip(dialog,'Raysum');state=self.final(v,'Raysum','Sagittal');self.near(state['pixels'][0],expected_hu('Raysum','Sagittal',intercept),voi,'low HU Raysum Sagittal')
   # Modal, job and preview gates refuse the change and keep the confirmed display.
   gates=[("()=>{const e=document.createElement('div');e.id='mip-modal-probe';e.setAttribute('role','dialog');e.setAttribute('aria-modal','true');document.body.append(e)}","()=>document.querySelector('#mip-modal-probe').remove()",'다른 창을 닫은 뒤'),
          ("()=>{window.heldJobs=window.kinViewerJobWorkspaceState;window.kinViewerJobWorkspaceState=()=>({...(heldJobs?.()||{}),busy:true})}","()=>{if(heldJobs)window.kinViewerJobWorkspaceState=heldJobs;else delete window.kinViewerJobWorkspaceState}",'영상 작업 처리가 끝난 뒤'),
          # The same capability object is restored so the progressive module still owns it at teardown.
          ("()=>{window.heldPreview=window.kinMprRenderingState;window.kinMprRenderingState={...(heldPreview||{}),busy:()=>true}}","()=>{if(heldPreview)window.kinMprRenderingState=heldPreview;else delete window.kinMprRenderingState}",'MPR preview 정리가 끝난 뒤')]
   for block,release,message in gates:
-   v.evaluate(block);self.choose(dialog,'MIP');expect(status).to_contain_text(message);expect(dialog.get_by_label('MIP Projection',exact=True)).to_have_value('Raysum')
+   v.evaluate(block);self.choose_mip(dialog,'MIP');expect(status).to_contain_text(message);expect(dialog.get_by_label('MIP Projection',exact=True)).to_have_value('Raysum')
    state=self.final(v,'Raysum','Sagittal');self.assertEqual(state['blend'],3);v.evaluate(release)
-  self.choose(dialog,'MIP');state=self.final(v,'MIP','Sagittal');self.near(state['pixels'][0],expected_hu('MIP','Sagittal',intercept),voi,'low HU MIP Sagittal')
+  self.choose_mip(dialog,'MIP');state=self.final(v,'MIP','Sagittal');self.near(state['pixels'][0],expected_hu('MIP','Sagittal',intercept),voi,'low HU MIP Sagittal')
   dialog.get_by_role('button',name='Close MIP Viewer',exact=True).click();expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate('()=>mipCount()'),0)
   self.preserved_volume(before,self.volume_state(v));self.assertEqual(self.originals(),original);self.assertEqual(self.jobs(a),[])
 
@@ -167,7 +167,7 @@ class VolumeMipE2E(VolumeProjectionE2E):
   self.assertEqual(v.evaluate('()=>mipCount()'),0);expect(dialog).not_to_have_attribute('data-kin-mip-state','final');expect(v.get_by_role('button',name='Open MIP Viewer',exact=True)).to_be_enabled()
   # Reentry while open keeps exactly one viewer; high HU values keep the known Raysum mean.
   dialog=self.open_mip(v);v.evaluate(entry);v.wait_for_timeout(300);self.assertEqual(v.evaluate('()=>mipCount()'),1)
-  self.choose(dialog,'Raysum');state=self.final(v,'Raysum','Axial',(CENTER,CORNER));self.near(state['pixels'][0],expected_hu('Raysum','Axial',intercept),voi,'high HU Raysum Axial');self.near(state['pixels'][1],COLUMN+intercept,voi,'high HU constant column')
+  self.choose_mip(dialog,'Raysum');state=self.final(v,'Raysum','Axial',(CENTER,CORNER));self.near(state['pixels'][0],expected_hu('Raysum','Axial',intercept),voi,'high HU Raysum Axial');self.near(state['pixels'][1],COLUMN+intercept,voi,'high HU constant column')
   # Escape cancels; a reopened viewer starts from its first display.
   dialog.get_by_label('MIP Projection',exact=True).focus();v.keyboard.press('Escape');expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate('()=>mipCount()'),0)
   dialog=self.open_mip(v);state=self.final(v,'MIP','Axial');self.near(state['pixels'][0],expected_hu('MIP','Axial',intercept),voi,'high HU MIP Axial')
