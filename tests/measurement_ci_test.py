@@ -499,7 +499,7 @@ class MeasurementCiTests(unittest.TestCase):
                 ('e2e/test_volume_projection.py', 'VolumeProjectionE2E', 'test_projection_', 8),
                 ('e2e/test_volume_wheel.py', 'VolumeWheelE2E', 'test_wheel_', 4),
                 ('e2e/test_volume_average_affine.py', 'VolumeAverageAffineE2E', 'test_average_affine_', 2),
-                ('e2e/test_volume_mip.py', 'VolumeMipE2E', 'test_mip_', 3)):
+                ('e2e/test_volume_mip.py', 'VolumeMipE2E', 'test_mip_', 6)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)
@@ -547,6 +547,10 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('--file worklist-v0/hpacs-lite/volume-mip.js', pure)
         self.assertEqual(pure.count('tests/volume_mip_test.cjs'), 2)
         self.assertIn('tests/volume_mip_test.cjs', pure.rsplit(' --test ', 1)[1])
+        # The protected VOI Slab geometry model and its unchanged tests run in the same pure gate.
+        self.assertIn('--file worklist-v0/hpacs-lite/volume-voi.js', pure)
+        self.assertEqual(pure.count('tests/volume_voi_test.cjs'), 2)
+        self.assertIn('tests/volume_voi_test.cjs', pure.rsplit(' --test ', 1)[1])
 
     def test_volume_path_profile_is_exact_bounded_and_isolated(self):
         profile = ci.PROFILES['volume-path']

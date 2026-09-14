@@ -130,7 +130,9 @@ PROFILES = {
         # leaves 435s for a stack whose measured setup and cleanup total about 76s.
         # The independent MIP Viewer reuses this slab projection path, so its three known-voxel
         # cases join here at the average-affine cap: (240+35) more is 1340s, still leaving 160s
-        # for that stack and within the 150s reserve the profile test requires.
+        # for that stack and within the 150s reserve the profile test requires. The display-only VOI Slab
+        # cases test_mip_04..06 are selected by the same module allowlist; this cap is unchanged and has
+        # not been re-measured for six cases.
         'suite_timeout': 540,
         'suite_budgets': {'ci-slab-projection': 420, 'ci-slab-wheel': 300,
                           'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240},
