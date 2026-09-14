@@ -128,8 +128,8 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
       if(!cornerstone.Enums?.Events?.IMAGE_RENDERED||!cornerstone.Enums?.ViewportType?.ORTHOGRAPHIC)throw Error('MIP Viewer의 최종 렌더 확인 기능을 찾지 못했습니다.');
       for(const name of model.orientations)model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,name);
       op.volume=volume;op.source=source;op.thickness=model.projectionThickness(volume.dimensions,volume.spacing);op.sampleDistance=model.sampleDistance(volume.spacing);op.corners=model.corners(volume.dimensions,index=>volume.imageData.indexToWorld(index));
-      const properties=source.getProperties()||{},voi=properties.voiRange;
-      op.display={interpolationType:source.getActors()[0].actor.getProperty().getInterpolationType(),voiRange:{lower:Number(voi?.lower),upper:Number(voi?.upper)}};
+      const properties=source.getProperties()||{},range=properties.voiRange;
+      op.display={interpolationType:source.getActors()[0].actor.getProperty().getInterpolationType(),voiRange:{lower:Number(range?.lower),upper:Number(range?.upper)}};
       if(![op.display.voiRange.lower,op.display.voiRange.upper].every(Number.isFinite)||op.display.voiRange.upper<=op.display.voiRange.lower)throw Error('MPR 밝기 범위를 확인할 수 없습니다.');
       identity.textContent='CT · Patient '+t.source.study.id;sourceText.textContent='Study '+t.source.uid+' · Series '+t.source.series;
       // An orthographic volume viewport, not the VR type: the pinned VolumeViewport3D ignores blend mode and slab thickness.
