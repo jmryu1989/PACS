@@ -319,12 +319,13 @@ class ExecutionSelectionTests(unittest.TestCase):
                       'test_sync_15_inversion_does_not_resynchronize_selected_reset',
                       'test_sync_16_hanging_protocol_vacancy_keeps_choices_and_applied_profile'}),
                     ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E',
-                     'test_properties_', 'ci-mpr-preferences', 17,
+                     'test_properties_', 'ci-mpr-preferences', 18,
                      {'test_properties_02_native_mouse_and_duplicate_rejection',
                       'test_properties_06_account_new_browser_restores_after_modal_preserving_work',
                       'test_properties_07_progressive_refines_to_identical_pixels',
                       'test_properties_10_saved_profile_applies_after_job_restore',
-                      'test_properties_14_modifier_touch_bindings_survive_and_restore'})]
+                      'test_properties_14_modifier_touch_bindings_survive_and_restore',
+                      'test_properties_18_passive_tool_bound_by_apply_mouse_restores_after_hanging_protocol_retirement'})]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         methods = set()
@@ -355,7 +356,7 @@ class ExecutionSelectionTests(unittest.TestCase):
                 self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
                 self.assertEqual(runner.collect(plan).countTestCases(), count)
                 print('SELECTION', suite, len(selected), flush=True)
-        self.assertEqual(len(methods), 33)
+        self.assertEqual(len(methods), 34)
         # The group stays disjoint from the other MPR groups and the VR profile; the marks suite that
         # inherits sync keeps its own registration outside this group.
         others = {row[0] for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-rendering')
@@ -372,7 +373,7 @@ class ExecutionSelectionTests(unittest.TestCase):
                 yield from flatten(item) if isinstance(item, unittest.TestSuite) else (item,)
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 16),
-                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 17)):
+                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 18)):
             module = runner.load_module(ROOT/'tests'/suite)
             cls = getattr(module, class_name)
             first = sorted(name for name in cls.__dict__ if name.startswith(prefix))[0]
