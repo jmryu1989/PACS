@@ -284,6 +284,48 @@ jobs:
             tmp/path-ci/
           if-no-files-found: error
           retention-days: 7
+  volume-batch:
+    # A fourth MPR suite group, not extra suites inside volume-mpr, volume-slab or volume-path, whose
+    # caps stay as they are. The existing batch preview, owner/DPR context, saved recipe replay and
+    # scout suites share this runner; the profile's per-suite caps
+    # (240+35)+(240+35)+(360+35)+(240+35) = 1220s bound the live step. The pure batch and scout
+    # models and the recipe precision check stay registered in the volume-rendering job.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Batch profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/batch-python"
+          "$RUNNER_TEMP/batch-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/batch-python/bin/python" -m playwright install --with-deps chromium
+      - name: Batch preview keeps its recipe through render readiness transients on the real panel
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/volume-batch.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-batch.js --file tests/viewer_volume_batch_binding_dom_test.py -- "$RUNNER_TEMP/batch-python/bin/python" -B tests/viewer_volume_batch_binding_dom_test.py
+      - name: Confirm exact declared batch preview, context, save and scout selection
+        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_batch.py --file tests/e2e/test_volume_batch_context.py --file tests/e2e/test_volume_batch_save.py --file tests/e2e/test_volume_batch_scout.py --file worklist-v0/hpacs-lite/viewer-volume-batch.js --file worklist-v0/hpacs-lite/viewer-volume-scout.js --file worklist-v0/hpacs-lite/volume-batch.js --file worklist-v0/hpacs-lite/volume-batch-scout.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file config/ohif.js -- "$RUNNER_TEMP/batch-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared MPR batch preview, context, save and scout tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/batch-python/bin/python" tests/measurement_ci.py --profile volume-batch
+      - name: Sanitized synthetic MPR batch evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-batch-results
+          path: |
+            tests/e2e/artifacts/volume-batch-ci/
+            tests/e2e/artifacts/MPR-batch-*.png
+            tmp/batch-ci/
+          if-no-files-found: error
+          retention-days: 7
   hanging-protocols:
     # A separate job, not extra suites inside measurements: the four hanging-protocol
     # suites must not consume that job's budget, and each profile needs its own fresh

@@ -11,7 +11,10 @@ window.kinCreateVolumeBatch=function({target,permitted,alive,owner,host}){
   const live=()=>!ended&&alive();
   function stopPlay(){clearInterval(playTimer);playTimer=null;play.textContent='Play Batch';}
   function clearOutput(){stopPlay();image.removeAttribute('src');scoutImage.removeAttribute('src');scoutLines.replaceChildren();scout.hidden=true;scout.style.display='none';if(output){for(const row of output.frames)URL.revokeObjectURL(row.url);if(output.scout)URL.revokeObjectURL(output.scout.url);}output=null;result.hidden=true;frame.textContent='';}
-  function current(t,requirePermission=true){const now=live()&&target();return !!now&&(!requirePermission||!document.hidden&&permitted())&&now.group===t.group&&now.selection===t.selection&&now.views.every((v,i)=>v===t.views[i]);}
+  // Generation and playback need a render-ready target. A generated preview binds to its source
+  // identity only: canvas size and grid readiness flicker while native rendering resizes, and
+  // clearing then would discard the generation recipe and let Save New Job capture no batch.
+  function current(t,requirePermission=true){const now=live()&&(requirePermission?target():target(false,false,{requireRenderReady:false}));return !!now&&(!requirePermission||!document.hidden&&permitted())&&now.group===t.group&&now.selection===t.selection&&now.views.every((v,i)=>v===t.views[i]);}
   const state=t=>JSON.stringify(t.views.map(v=>({camera:v.getCamera(),properties:v.getProperties(),blend:v.getActors()[0].actor.getMapper().getBlendMode(),slab:v.getSlabThickness()})));
   function refresh(){
     if(ended)return;const t=live()&&target();panel.hidden=!t;
