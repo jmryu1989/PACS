@@ -65,6 +65,15 @@ def unfolded(path,hu):
 def default_normal(t):
  axis=int(np.argmin(np.abs(t)));e=np.zeros(3);e[axis]=1;return unit(e-t[axis]*t)
 
+def field_differences(a,b,at=''):
+ """Exact leaf differences between two JSON values as (path, a, b); key order is ignored, nothing is rounded."""
+ if isinstance(a,dict) and isinstance(b,dict):
+  return [d for k in sorted(set(a)|set(b)) for d in (field_differences(a[k],b[k],f'{at}.{k}') if k in a and k in b else [(f'{at}.{k}',a.get(k,'<missing>'),b.get(k,'<missing>'))])]
+ if isinstance(a,list) and isinstance(b,list) and len(a)==len(b):
+  return [d for i,(x,y) in enumerate(zip(a,b)) for d in field_differences(x,y,f'{at}[{i}]')]
+ return [] if a==b and type(a)==type(b) or a==b and {type(a),type(b)}<={int,float} else [(at,a,b)]
+CELL_DISPLAY='''()=>(%s)().map(id=>{const p=services.cornerstoneViewportService.getCornerstoneViewport(id).getProperties();return {voiRange:p.voiRange,VOILUTFunction:p.VOILUTFunction,invert:p.invert};})'''%CELLS
+
 class VolumePathE2E(VolumeCurvedE2E):
  def opened_path(self):
   a,p,v=self.opened_curved(SLOPE);expect(v.locator('#kin-mpr-path')).to_be_visible(timeout=30000);return a,p,v
@@ -95,6 +104,15 @@ class VolumePathE2E(VolumeCurvedE2E):
    if want is None:self.assertIsNone(got,n)
    else:self.assertAlmostEqual(got,want,delta=1e-6,msg=n)
   return g
+ def save_path_diagnosed(self,v,a,label):
+  # Diagnostic record only: exact before-save/saved/live field differences for the native log.
+  # It asserts nothing; the callers keep their exact saved-path equality assertions.
+  before=self.path_inspect(v)['value'];display=v.evaluate(CELL_DISPLAY)
+  self.save_volume(v);s=self.get_volume_job(a)['snapshot'];report=self.path_inspect(v)
+  print('PATH_SAVE',json.dumps({'test':label,'dirty':v.evaluate('()=>kinMprPath.dirty()'),'state':report['state'],'busy':report['busy'],'generation':report['generation'],
+   'before_vs_saved':field_differences(before,s.get('path')),'saved_vs_live':field_differences(s.get('path'),report['value']),'before_vs_live':field_differences(before,report['value']),
+   'display_before_save':display,'display_after_save':v.evaluate(CELL_DISPLAY)}),flush=True)
+  return s,report['value']
  def assert_cameras(self,cameras,g,column,perpendicular=0,delta=1e-6):
   planes=iter([(g['N'][column],g['T'][column]),(g['B'][column],g['T'][column])])
   for i,camera in enumerate(cameras):
@@ -103,7 +121,10 @@ class VolumePathE2E(VolumeCurvedE2E):
 
  def test_path_01_noncoplanar_points_unfolded_oracle_save_and_new_browser_restore(self):
   a,p,v=self.opened_path();original=self.originals();p.locator('#findings').fill('KEEP PATH REPORT');hu=hu_volume(SLOPE);self.assert_accessor(v,SLOPE)
-  self.path_input(v,'3D Path Half Height',3);self.path_input(v,'3D Path Unfold Angle',30)
+  # Half height 20 mm carries the 30 degree unfold direction past the volume edge along part of the
+  # path: the numpy oracle below gives 515 outside samples for these picks and 447..655 when
+  # each clicked coordinate moves by up to 0.5 mm, so outside>0 is a property of this fixture.
+  self.path_input(v,'3D Path Half Height',20);self.path_input(v,'3D Path Unfold Angle',30)
   picks=[(2,[20,15,30],[6,8,30]),(1,[20,20,40],[16,20,40]),(0,[26,15,50],[26,12,52]),(2,[20,15,62],[34,22,62])]
   # Placing each plane moves it; the planes are compared from the last placement on.
   self.add_path(v,picks);before=self.volume_state(v);report=self.path_final(v);value=report['value']
@@ -115,7 +136,7 @@ class VolumePathE2E(VolumeCurvedE2E):
   np.testing.assert_allclose(value['frame']['initialNormal'],default_normal(g['T'][0]),atol=1e-9)
   self.preserved_volume(before,self.volume_state(v))
   expect(self.path(v).locator('.badge')).to_have_text('UNFOLDED 3D PATH · Derived display · Not a source image')
-  self.save_volume(v);job=self.get_volume_job(a);s=job['snapshot']
+  self.maxDiff=None;s,_=self.save_path_diagnosed(v,a,'path_01')
   self.assertEqual(s['version'],11);self.assertEqual(s['path'],value);self.assertEqual(len(s['volume']['sourceDigest']),64);self.assertEqual(len(s['cells']),3);self.assertFalse(v.evaluate('()=>kinMprPath.dirty()'))
   v.get_by_role('button',name='Print Current View',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('3D Path 작업은 아직 출력할 수 없습니다')
   forged_base=copy.deepcopy(s);del forged_base['volume']['sourceDigest']
@@ -158,7 +179,7 @@ class VolumePathE2E(VolumeCurvedE2E):
   for camera,old in zip(v.evaluate(CAMERAS),start):
    for key in ['focalPoint','position','viewPlaneNormal','viewUp']:np.testing.assert_allclose(camera[key],old[key],atol=1e-6)
   self.path_button(v,'Go to Path Point').click();expect(self.path_status(v)).to_contain_text('경로 수직 평면',timeout=20000)
-  self.save_volume(v);s=self.get_volume_job(a)['snapshot'];self.assertEqual(s['version'],11);self.assertEqual(s['path'],self.path_inspect(v)['value'])
+  self.maxDiff=None;s,live=self.save_path_diagnosed(v,a,'path_02');self.assertEqual(s['version'],11);self.assertEqual(s['path'],live)
   self.assert_cameras([cell['camera'] for cell in s['cells']],g,column)
   fresh=self.login();self.launch(fresh,[a]);self.ready(fresh)
   fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('3D Path 작업을 복원했습니다',timeout=60000)
