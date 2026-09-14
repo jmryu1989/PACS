@@ -508,5 +508,9 @@ class VolumeMipE2E(VolumeProjectionE2E):
   v.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:String(Date.now())}))")
   expect(v.locator('#kin-volume-mip[open]')).to_have_count(0);self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertEqual(self.originals(),original);self.assertEqual(writes,[])
 
-def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeMipE2E(n) for n in loader.getTestCaseNames(VolumeMipE2E) if n.startswith('test_mip_'))
+# The VOI Slab cases run once, in their own volume-mip-voi profile through test_volume_mip_voi.py, so the ci-slab-mip-viewer
+# cap keeps bounding only the three MIP Viewer cases it was sized for.
+VOI_SLAB_CASES=('test_mip_04_voi_slab_known_voxels_modes_orientations','test_mip_05_voi_order_delay_failure_missing_tool_cancel',
+                'test_mip_06_voi_original_undo_reset_scope_lifecycle')
+def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeMipE2E(n) for n in loader.getTestCaseNames(VolumeMipE2E) if n.startswith('test_mip_') and n not in VOI_SLAB_CASES)
 if __name__=='__main__':unittest.main(verbosity=2)

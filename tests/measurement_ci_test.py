@@ -173,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -286,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -1006,6 +1006,124 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('--file worklist-v0/hpacs-lite/volume-marks.js', pure)
         self.assertEqual(pure.count('tests/volume_marks_test.cjs'), 2)
         self.assertIn('tests/volume_marks_test.cjs', pure.rsplit(' --test ', 1)[1])
+
+    def test_volume_mip_voi_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-mip-voi']
+        self.assertEqual(profile['suites'], (('e2e/test_volume_mip_voi.py', None, 'ci-mip-voi'),))
+        self.assertEqual(profile['out'].name, 'volume-mip-voi-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-mipvoi-ci-')
+        self.assertEqual(profile['suite_timeout'], 1200)
+        budgets = {'ci-mip-voi': 1200}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Splitting the VOI Slab cases out must not widen or cut the slab group they came from.
+        slab = ci.PROFILES['volume-slab']
+        self.assertEqual(slab['suite_budgets'],
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
+        self.assertEqual(len(slab['suites']), 4)
+        self.assertIn(('e2e/test_volume_mip.py', None, 'ci-slab-mip-viewer'), slab['suites'])
+        modules = {row[0] for row in profile['suites']}
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-mip-voi':
+                continue
+            self.assertFalse(modules & {row[0] for row in other['suites']}, name)
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+            # A new stable attempt unit: it neither shares nor resets ci-slab-mip-viewer's ledger.
+            self.assertFalse(set(budgets) & {row[2] for row in other['suites']}, name)
+        suite, class_name, unit = profile['suites'][0]
+        command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 1500)
+        # No --class: the module's own load_tests stays the allowlist.
+        self.assertNotIn('--class', command)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_volume_mip_voi.py')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-mip-voi')
+        self.assertEqual(command[command.index('--timeout')+1], '1200')
+        self.assertEqual(outer, 1235)
+        # The one suite at full cap plus its reserved margin fits the shared deadline with stack time left.
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
+        self.assertEqual(25*60-sum(budget+35 for budget in budgets.values()), 265)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][0], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-mip-voi', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_mip_voi_module_selects_the_authored_cases_without_declaring_any(self):
+        import ast
+        voi = ('test_mip_04_voi_slab_known_voxels_modes_orientations',
+               'test_mip_05_voi_order_delay_failure_missing_tool_cancel',
+               'test_mip_06_voi_original_undo_reset_scope_lifecycle')
+        source = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip.py').read_text(encoding='utf-8'))
+        mip = next(node for node in source.body if isinstance(node, ast.ClassDef) and node.name == 'VolumeMipE2E')
+        declared = [node.name for node in mip.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        # The six authored cases stay declared once on the MIP Viewer class: three MIP Viewer and three VOI Slab.
+        self.assertEqual(len(declared), 6)
+        self.assertEqual(len(set(declared)), 6)
+        self.assertTrue(set(voi) <= set(declared))
+        self.assertEqual(sorted(set(declared) - set(voi)),
+                         ['test_mip_01_known_voxels_modes_orientations_and_mpr_slab_parity',
+                          'test_mip_02_order_delay_failure_capability_and_busy_gates',
+                          'test_mip_03_lifecycle_identity_teardown_reentry_and_high_values'])
+        constant = next(node for node in source.body if isinstance(node, ast.Assign)
+                        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ['VOI_SLAB_CASES'])
+        self.assertEqual(ast.literal_eval(constant.value), voi)
+        # The slab allowlist excludes exactly that tuple.
+        slab_loader = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == 'load_tests')
+        self.assertIn('VOI_SLAB_CASES', {node.id for node in ast.walk(slab_loader) if isinstance(node, ast.Name)})
+        self.assertTrue([node for node in ast.walk(slab_loader)
+                         if isinstance(node, ast.Compare) and any(isinstance(op, ast.NotIn) for op in node.ops)])
+        # The VOI module selects exactly that tuple on a local subclass that declares nothing.
+        wrapper = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_voi.py').read_text(encoding='utf-8'))
+        classes = [node for node in wrapper.body if isinstance(node, ast.ClassDef)]
+        self.assertEqual([(node.name, [base.id for base in node.bases]) for node in classes],
+                         [('VolumeMipVoiE2E', ['VolumeMipE2E'])])
+        self.assertFalse([node for node in ast.walk(classes[0]) if isinstance(node, (ast.FunctionDef, ast.Assign))])
+        loader = next(node for node in wrapper.body if isinstance(node, ast.FunctionDef) and node.name == 'load_tests')
+        self.assertIn('VOI_SLAB_CASES', {node.id for node in ast.walk(loader) if isinstance(node, ast.Name)})
+        self.assertNotIn('getTestCaseNames', ast.dump(loader))
+
+    def test_validate_workflow_runs_volume_mip_voi_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-mip-voi:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-voi job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'python3 -B tests/measurement_ci_test.py',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_mip.py',
+                         '--file tests/e2e/test_volume_mip_voi.py',
+                         '--file worklist-v0/hpacs-lite/volume-voi.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-mip.js',
+                         'tests/measurement_ci.py --profile volume-mip-voi',
+                         'name: synthetic-volume-mip-voi-results',
+                         'tests/e2e/artifacts/volume-mip-voi-ci/',
+                         'tmp/mipvoi-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-mip-voi'), 1)
+        self.assertNotIn('--profile volume-mip-voi', jobs[0])
+        self.assertEqual(text.count('name: synthetic-volume-mip-voi-results'), 1)
+        # A job of Validate itself, on the same triggers as every other synthetic group.
+        header = text.split('\njobs:\n')[0]
+        self.assertTrue(header.startswith('name: Validate production image\n'))
+        self.assertIn('\n  pull_request:\n', header)
+        # The other MPR jobs, including the slab job these cases came from, keep their own profile and do not run this one.
+        for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks'):
+            self.assertEqual(text.count('--profile '+other), 1)
+            self.assertNotIn('--profile volume-mip-voi', text.split('\n  '+other+':\n')[1].split('\n  volume-mip-voi:\n')[0])
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']

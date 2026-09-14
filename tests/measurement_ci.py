@@ -131,8 +131,7 @@ PROFILES = {
         # The independent MIP Viewer reuses this slab projection path, so its three known-voxel
         # cases join here at the average-affine cap: (240+35) more is 1340s, still leaving 160s
         # for that stack and within the 150s reserve the profile test requires. The display-only VOI Slab
-        # cases test_mip_04..06 are selected by the same module allowlist; this cap is unchanged and has
-        # not been re-measured for six cases.
+        # cases test_mip_04..06 are excluded from that module allowlist and run in volume-mip-voi instead.
         'suite_timeout': 540,
         'suite_budgets': {'ci-slab-projection': 420, 'ci-slab-wheel': 300,
                           'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240},
@@ -206,6 +205,20 @@ PROFILES = {
         # class keeps the inherited sync, display, orientation and job cases out.
         'suites': (('e2e/test_volume_marks.py', None, 'ci-mpr-marks'),
                    ('e2e/test_volume_mpr_print.py', None, 'ci-mpr-marks-print')),
+    },
+    'volume-mip-voi': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-mip-voi-ci',
+        'project_prefix': 'kin-mipvoi-ci-',
+        # The MIP Viewer VOI Slab cases test_mip_04..06 in their own group, not inside volume-slab: that group already
+        # commits (420+35)+(300+35)+(240+35)+(240+35) = 1340s of the shared 1500s deadline, so its caps stay as they are.
+        # Hosted main ran the three MIP Viewer cases with three study opens in 52s. These cases open four studies, read
+        # back 54 VOI cells and wait out a 15s render timeout, and have no hosted history yet, so their one suite gets a
+        # 1200s cap: (1200+35) = 1235s leaves 265s for a stack whose recorded hosted setup and cleanup took about 80s.
+        'suite_timeout': 1200,
+        'suite_budgets': {'ci-mip-voi': 1200},
+        # The module's load_tests is the allowlist: exactly the three authored VOI Slab cases on a local subclass, so the
+        # inherited MIP Viewer, projection, job and orientation cases stay out.
+        'suites': (('e2e/test_volume_mip_voi.py', None, 'ci-mip-voi'),),
     },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
