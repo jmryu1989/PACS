@@ -550,6 +550,7 @@ class MeasurementCiTests(unittest.TestCase):
         # The protected VOI Slab geometry model and its unchanged tests run in the same pure gate.
         self.assertIn('--file worklist-v0/hpacs-lite/volume-voi.js', pure)
         self.assertEqual(pure.count('tests/volume_voi_test.cjs'), 2)
+        self.assertIn(' --file tests/volume_voi_test.cjs --file ', pure)
         self.assertIn('tests/volume_voi_test.cjs', pure.rsplit(' --test ', 1)[1])
 
     def test_volume_path_profile_is_exact_bounded_and_isolated(self):
