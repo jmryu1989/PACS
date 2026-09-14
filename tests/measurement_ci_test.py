@@ -854,6 +854,7 @@ class MeasurementCiTests(unittest.TestCase):
                          'tests/measurement_ci.py --profile volume-sync-preferences',
                          'tests/measurement_ci_test.py',
                          'tests/viewer_volume_preferences_layout_dom_test.py',
+                         'tests/viewer_volume_sync_layout_dom_test.py',
                          'tests/execution_selection_test.py',
                          '--file tests/e2e/test_volume_sync.py',
                          '--file tests/e2e/test_volume_preferences.py',

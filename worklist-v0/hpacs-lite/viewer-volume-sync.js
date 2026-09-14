@@ -22,8 +22,10 @@ window.kinCreateVolumeSync=function({target,permitted,alive,services,host}){
     }finally{expected.delete();}
     utility.triggerEvent(view.element,events().VOI_MODIFIED,{...view.getVOIModifiedEventDetail(view.getVolumeId()),range:{...range}});view.render();
   }
+  // A Hanging Protocol opens the shared target's three planes in a 2x2 grid with an empty cell.
+  // Counting that vacancy re-attached every refresh and reset the options the user had just chosen.
   const mounted=s=>{try{
-    const cells=[...services.viewportGridService.getState().viewports.keys()];
+    const cells=[...services.viewportGridService.getState().viewports.values()].filter(c=>c.displaySetInstanceUIDs?.length).map(c=>c.viewportId);
     return !!s&&cells.length===3&&s.mounts.every(({view,element,volume})=>cells.includes(view.id)&&services.cornerstoneViewportService.getCornerstoneViewport(view.id)===view&&view.element===element&&window.cornerstone.cache.getVolume(view.getVolumeId())===volume);
   }catch(_){return false;}};
   function groups(t){
