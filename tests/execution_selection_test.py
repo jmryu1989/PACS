@@ -212,6 +212,45 @@ class ExecutionSelectionTests(unittest.TestCase):
                   for row in ci.PROFILES[name]['suites']}
         self.assertFalse(others & {row[0] for row in profile['suites']})
 
+    def test_volume_path_profile_selects_only_the_declared_path_and_orientation_modules(self):
+        profile = ci.PROFILES['volume-path']
+        expected = [('e2e/test_volume_path.py', 'VolumePathE2E',
+                     'test_path_', 'ci-path-native', 4,
+                     {'test_path_01_noncoplanar_points_unfolded_oracle_save_and_new_browser_restore',
+                      'test_path_02_go_to_path_point_native_planes_pixels_and_rotation_semantics'}),
+                    ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E',
+                     'test_orientation_', 'ci-mpr-orientation', 6,
+                     {'test_orientation_01_double_oblique_pixels_reset_and_saved_reopen'})]
+        self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
+        self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
+        for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
+                profile['suites'], expected):
+            with self.subTest(suite=suite):
+                self.assertIsNone(class_name)
+                # Planned at the budget CI will actually request for this suite.
+                plan = runner.module_plan('tests/'+suite, unit, 'live',
+                                          profile['suite_budgets'][unit], class_name)
+                selected = [item['case'] for item in plan['tests']]
+                cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
+                declared = sorted(cls_name+'.'+name for name in cls.__dict__
+                                  if name.startswith(prefix))
+                self.assertEqual(sorted(selected), declared)
+                self.assertEqual(len(selected), count)
+                self.assertTrue({cls_name+'.'+name for name in required}.issubset(selected))
+                # Inherited base-class cases (curved, marks, jobs, sync...) must not widen this profile.
+                inherited = {name for base in cls.__mro__[1:]
+                             for name in vars(base) if name.startswith('test_')}
+                self.assertTrue(inherited, 'expected an inheriting suite')
+                self.assertFalse(inherited & {case.split('.', 1)[1] for case in selected})
+                self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+                self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
+                self.assertEqual(runner.collect(plan).countTestCases(), count)
+                print('SELECTION', suite, len(selected), flush=True)
+        # The path group stays disjoint from the other MPR groups and the VR profile.
+        others = {row[0] for name in ('volume-mpr', 'volume-slab', 'volume-rendering')
+                  for row in ci.PROFILES[name]['suites']}
+        self.assertFalse(others & {row[0] for row in profile['suites']})
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)

@@ -1,3 +1,7 @@
+// The pinned Viewport.setCamera re-derives slab clipping planes only when the focal point moves along the new
+// normal or viewUp changes, so a plane turned in place about its own focal point keeps its previous planes.
+// Re-apply the unchanged slab through the public API; setSlabThickness clamps below 0.1, so the default uses reset.
+window.kinReapplyVolumeSlab=v=>{const half=v.getSlabThickness();if(Math.abs(half-.05)<1e-8)v.resetSlabThickness();else v.setSlabThickness(half);if(Math.abs(v.getSlabThickness()-half)>1e-9)throw Error('MPR 단면 두께를 유지하지 못했습니다.');};
 window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,owner=()=>null,host}){
   const panel=document.createElement('section');panel.id='kin-volume-orientation';panel.style.cssText='border-top:1px solid #657c9f;padding:8px 0';
   panel.innerHTML='<strong>MPR Orientation</strong><p class="target"></p><label>Axis <select aria-label="MPR Rotation Axis"><option value="0">Patient L/R</option><option value="1">Patient A/P</option><option value="2">Patient H/F</option></select></label> <label>Degrees <input type="number" aria-label="MPR Rotation Degrees" min="-180" max="180" step="5" value="15" style="width:80px"></label> <button type="button">Rotate Three Planes</button> <button type="button">Reset Planes</button> <button type="button">Basic Orthogonal</button><p role="status"></p><p>세 평면의 교점을 유지해 회전합니다. Basic Orthogonal은 교점과 평면별 확대·화면 이동·표시 설정을 유지한 채 세 평면을 환자 기준 기본 Axial·Sagittal·Coronal 방향으로 맞춥니다. Reset Planes는 이 화면을 열거나 작업을 복원한 시점의 방향·위치·확대로 돌아가므로, 기울어진 작업을 복원한 뒤에는 그 기울기로 돌아갑니다. Save New Job으로 표시를 저장할 수 있습니다.</p>';
@@ -67,7 +71,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
       caption.textContent=t.source.study.id+' · Center L/P/H (mm): '+point.map(n=>Number(n.toFixed(3))).join(' / ');
     }catch(error){rotate.disabled=basic.disabled=true;reset.disabled=busy||workspaceBusy()||!permitted()||baseline?.group!==t.group;caption.textContent=error.message;}
   }
-  const setCamera=(v,camera)=>{v.setCamera({flipHorizontal:camera.flipHorizontal,flipVertical:camera.flipVertical});const next={...camera};delete next.rotation;delete next.flipHorizontal;delete next.flipVertical;v.setCamera(next);v.render();};
+  const setCamera=(v,camera)=>{v.setCamera({flipHorizontal:camera.flipHorizontal,flipVertical:camera.flipVertical});const next={...camera};delete next.rotation;delete next.flipHorizontal;delete next.flipVertical;v.setCamera(next);window.kinReapplyVolumeSlab(v);v.render();};
   // Native Crosshairs keep their own center. Basic moves each plane differently, so derive it
   // again from the applied planes rather than leaving the center of the oblique screen.
   const center=t=>{const v=t.views[0],group=window.cornerstoneTools?.ToolGroupManager?.getToolGroupForViewport(v.id,v.renderingEngineId),tool=group?.getToolInstance?.('Crosshairs');if(tool?.computeToolCenter&&group.getToolOptions?.('Crosshairs')?.mode!=='Disabled')tool.computeToolCenter();};
@@ -106,6 +110,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   const marks=window.KinVolumeMarks&&window.kinCreateVolumeMarks?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const batch=window.KinVolumeBatch&&window.kinCreateVolumeBatch?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const curved=window.KinVolumeCurved&&window.kinCreateVolumeCurved?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
+  const path=window.KinVolumeCurved&&window.KinVolumePath&&window.kinCreateVolumePath?.({target,permitted:()=>!busy&&permitted(),alive,owner,host});
   const vrButton=document.createElement('button');vrButton.textContent='Open Volume Rendering';panel.append(vrButton);let vr=null,vrLoading=false;
   vrButton.onclick=async()=>{
     if(vrLoading||!alive()||busy||!permitted()||workspaceBusy())return;vrLoading=true;vrButton.disabled=true;
@@ -121,5 +126,5 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   };
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;curved?.dispose();vr?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;path?.dispose();curved?.dispose();vr?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

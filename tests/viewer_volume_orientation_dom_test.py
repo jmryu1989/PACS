@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # Mutation runs substitute a changed copy; the default is always the product file.
 PANEL = Path(os.environ.get("KIN_ORIENTATION_PANEL_SOURCE", ROOT / "worklist-v0" / "hpacs-lite" / "viewer-volume-orientation.js"))
 MODEL = Path(os.environ.get("KIN_ORIENTATION_MODEL_SOURCE", ROOT / "worklist-v0" / "hpacs-lite" / "volume-orientation.js"))
+CROSSHAIR_MODEL = Path(os.environ.get("KIN_CROSSHAIR_MODEL_SOURCE", ROOT / "worklist-v0" / "hpacs-lite" / "volume-crosshair.js"))
+CROSSHAIR_PANEL = Path(os.environ.get("KIN_CROSSHAIR_PANEL_SOURCE", ROOT / "worklist-v0" / "hpacs-lite" / "viewer-volume-crosshair.js"))
 BASIC = "Basic Orthogonal"
 
 HARNESS = r"""
@@ -22,18 +24,33 @@ const NAMES=['axial','sagittal','coronal'];
 const source={kind:'volume',viewportId:'mpr-axial',uid:'study-1',series:'series-1',sourceSignature:'source-1',selectionEpoch:1,study:{id:'SYNTHETIC-PID'}};
 const cells=NAMES.map((name,i)=>({viewportId:'mpr-'+name,x:i,y:0,isReady:true,displaySetInstanceUIDs:['ds'],viewportOptions:{orientation:name}}));
 const grid={viewports:new Map(cells.map(c=>[c.viewportId,c])),activeViewportId:'mpr-axial'};
-const enabled=new Map(),views=new Map(),writes=[];let centers=0,failNext=null,workspaceBusy=false;
+const enabled=new Map(),views=new Map(),writes=[],slabWrites=[];let centers=0,nativeDrags=0,failNext=null,failSlab=null,workspaceBusy=false;
 function makeCanvas(){const canvas=document.createElement('canvas');canvas.width=200;canvas.height=160;Object.defineProperty(canvas,'clientWidth',{get:()=>200});Object.defineProperty(canvas,'clientHeight',{get:()=>160});return canvas;}
 function makeView(name,camera){
   const element=document.createElement('div');document.querySelector('#sources').append(element);
   const canvas=makeCanvas();element.append(canvas);const state=structuredClone(camera);
-  const view={id:'mpr-'+name,type:'orthographic',element,renderingEngineId:'engine',options:{orientation:name},volumeId:'volume-1',
-    getActors:()=>[{actor:{}}],getCanvas:()=>canvas,getVolumeId(){return this.volumeId},getCamera:()=>structuredClone(state),render(){},
-    setCamera(next){if(next.position){writes.push(this.id);if(failNext===this.id){failNext=null;throw Error('INJECTED CAMERA FAILURE');}}for(const [key,value] of Object.entries(next))if(value!==undefined)state[key]=structuredClone(value);}};
-  views.set(view.id,view);enabled.set(element,{viewport:view});return view;
+  // Slab clipping as in the pinned cornerstone source (orthancteam/orthanc:24.12.0 libOrthancOHIF.so): planes are
+  // +/- normal about the focal point at the half thickness (0.05 default); setCamera re-derives them only for an
+  // out-of-plane focal move or a viewUp change beyond 1e-5; setSlabThickness clamps below 0.1 and re-derives.
+  const clip=()=>{const half=view.getSlabThickness(),n=state.viewPlaneNormal,f=state.focalPoint;view.planes=[{normal:n.slice(),origin:f.map((x,k)=>x-n[k]*half)},{normal:n.map(x=>-x),origin:f.map((x,k)=>x+n[k]*half)}];};
+  const slab=(id,half)=>{if(failSlab===id){failSlab=null;throw Error('INJECTED SLAB FAILURE');}view.slab=half;slabWrites.push(id);clip();};
+  const axes=()=>{const u=state.viewUp,r=cross(u,state.viewPlaneNormal),mm=2*state.parallelScale/160;return {u,r,mm};};
+  const view={id:'mpr-'+name,type:'orthographic',element,renderingEngineId:'engine',options:{orientation:name},volumeId:'volume-1',slab:undefined,blend:0,planes:null,
+    getActors:()=>[{actor:{getMapper:()=>({getBlendMode:()=>view.blend})}}],getCanvas:()=>canvas,getVolumeId(){return this.volumeId},getCamera:()=>structuredClone(state),render(){},
+    setCamera(next){if(next.position){writes.push(this.id);if(failNext===this.id){failNext=null;throw Error('INJECTED CAMERA FAILURE');}}const previous=structuredClone(state);for(const [key,value] of Object.entries(next))if(value!==undefined)state[key]=structuredClone(value);
+      if((next.focalPoint&&previous.focalPoint)||(next.viewUp&&previous.viewUp)){const moved=!!next.focalPoint&&Math.abs(dot(next.focalPoint.map((x,k)=>x-previous.focalPoint[k]),state.viewPlaneNormal))>0,turned=!!next.viewUp&&!state.viewUp.every((x,k)=>Math.abs(x-previous.viewUp[k])<=1e-5);if(moved||turned)clip();}},
+    getSlabThickness(){return Math.max(.05,this.slab??0)},setSlabThickness(half){slab(this.id,Math.max(.1,half))},resetSlabThickness(){slab(this.id,.05)},
+    worldToCanvas(p){const {u,r,mm}=axes(),d=p.map((x,k)=>x-state.focalPoint[k]);return [100+dot(d,r)/mm,80-dot(d,u)/mm];},
+    canvasToWorld([x,y]){const {u,r,mm}=axes();return state.focalPoint.map((f,k)=>f+r[k]*(x-100)*mm-u[k]*(y-80)*mm);}};
+  clip();views.set(view.id,view);enabled.set(element,{viewport:view});return view;
 }
-const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 window.start=()=>NAMES.map((name,i)=>{const {viewPlaneNormal:n,viewUp:u}=TABLE[name],r=cross(u,n),pan=[[3,-2],[-5,1],[4,6]][i],focal=[10,20,30].map((x,k)=>x+r[k]*pan[0]+u[k]*pan[1]);return {focalPoint:focal,position:focal.map((x,k)=>x+n[k]*(100+i)),viewUp:u.slice(),viewPlaneNormal:n.slice(),parallelScale:40+i,flipHorizontal:false,flipVertical:false};});
+// Every focal point at the pivot: an H/F turn then keeps sagittal and coronal focal point and viewUp.
+window.centered=()=>start().map(c=>({...c,focalPoint:[10,20,30],position:[10,20,30].map((x,k)=>x+c.viewPlaneNormal[k]*100)}));
+window.planeError=()=>Math.max(...[...views.values()].flatMap(v=>{const c=v.getCamera(),h=v.getSlabThickness(),n=c.viewPlaneNormal,f=c.focalPoint,[a,b]=v.planes;return [0,1,2].flatMap(k=>[a.normal[k]-n[k],b.normal[k]+n[k],a.origin[k]-(f[k]-h*n[k]),b.origin[k]-(f[k]+h*n[k])].map(Math.abs));}));
+window.display=()=>[...views.values()].map(v=>[v.getSlabThickness(),v.blend]);
+window.drag=(id,degrees)=>{const v=views.get(id),c=v.worldToCanvas(KinVolumeOrientation.intersection(cameras())),a=degrees*Math.PI/180,from=[c[0]+40,c[1]],to=[c[0]+40*Math.cos(a),c[1]+40*Math.sin(a)];crosshairs.editData={annotation:{data:{handles:{activeOperation:2}}}};crosshairs._dragCallback({detail:{element:v.element,currentPoints:{canvas:to},deltaPoints:{canvas:[to[0]-from[0],to[1]-from[1]]}}});};
 window.turned=turns=>turns.reduce((c,[axis,degrees])=>KinVolumeOrientation.rotate(c,axis,degrees),start());
 window.cameras=()=>[...views.values()].map(v=>v.getCamera());
 window.largest=(a,b)=>Math.max(...a.flatMap((c,i)=>['focalPoint','position','viewUp','viewPlaneNormal'].flatMap(k=>c[k].map((n,j)=>Math.abs(n-b[i][k][j]))).concat(Math.abs(c.parallelScale-b[i].parallelScale))));
@@ -42,7 +59,7 @@ window.basicButton=()=>[...document.querySelectorAll('#kin-volume-orientation bu
 const volume={volumeId:'volume-1',loadStatus:{loaded:true},framesLoaded:2,imageIds:['frame-0','frame-1'],dimensions:[2,2,2],spacing:[1,1,1],direction:[1,0,0,0,1,0,0,0,1],imageData:{indexToWorld:([i,j,k])=>[i,j,k]}};
 window.cornerstone={cache:{getVolume:id=>id==='volume-1'?volume:null},getEnabledElement:element=>enabled.get(element),CONSTANTS:{MPR_CAMERA_VALUES:TABLE},
   metaData:{get:(_,id)=>({SOPClassUID:'1.2.840.10008.5.1.4.1.1.2',Modality:'CT',SamplesPerPixel:1,PhotometricInterpretation:'MONOCHROME2',Rows:2,Columns:2,PixelSpacing:[1,1],ImagePositionPatient:[0,0,id==='frame-0'?0:1],ImageOrientationPatient:[1,0,0,0,1,0]})}};
-const crosshairs={computeToolCenter(){centers++;}},toolGroup={getToolOptions:()=>({mode:'Active'}),getToolInstance:name=>name==='Crosshairs'?crosshairs:null};
+const crosshairs={computeToolCenter(){centers++;},configuration:{},renderAnnotation(){},_pointNearTool(){return false},getHandleNearImagePoint(){},preMouseDownCallback(){},_checkIfViewportsRenderingSameScene(){return false},_activateModify(){},_deactivateModify(){},_dragCallback(){nativeDrags++;}},toolGroup={getToolOptions:()=>({mode:'Active'}),getToolInstance:name=>name==='Crosshairs'?crosshairs:null};
 window.cornerstoneTools={ToolGroupManager:{getToolGroupForViewport:()=>toolGroup}};
 const services={viewportGridService:{getState:()=>grid,setViewportIsReady(){}},cornerstoneViewportService:{getCornerstoneViewport:id=>views.get(id)},displaySetService:{getDisplaySetByUID:()=>({StudyInstanceUID:'study-1',SeriesInstanceUID:'series-1',Modality:'CT'})}};
 window.kinViewerJobWorkspaceState=()=>({busy:workspaceBusy});
@@ -65,11 +82,12 @@ class ViewerVolumeOrientationDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close();cls.pw.stop()
 
-    def mounted(self, cameras=OBLIQUE, before=""):
+    def mounted(self, cameras=OBLIQUE, before="", crosshair=False):
         page = self.browser.new_page()
         page.route("https://orientation.test/", lambda route: route.fulfill(body=HARNESS, content_type="text/html"))
         page.goto("https://orientation.test/")
         page.add_script_tag(path=str(MODEL));page.add_script_tag(path=str(PANEL))
+        if crosshair:page.add_script_tag(path=str(CROSSHAIR_MODEL));page.add_script_tag(path=str(CROSSHAIR_PANEL))
         if before:page.evaluate("code=>eval(code)", before)
         page.evaluate(f"window.panel=mount({cameras})")
         expect(page.get_by_role('button', name=BASIC, exact=True)).to_be_enabled()
@@ -144,6 +162,59 @@ class ViewerVolumeOrientationDOMTest(unittest.TestCase):
             self.assertLess(page.evaluate("b=>largest(cameras(),b)", before), 1e-12)
             self.assertEqual(1, page.evaluate("centers"), "the crosshair center is derived again from the restored planes")
             self.assertIn('기본 Axial', self.apply(page, BASIC));self.assertLess(page.evaluate("nativeError()"), 1e-12)
+        finally:
+            page.close()
+
+    def slabbed(self, page):
+        # One plane already carries a thicker MIP slab; the default planes must stay at 0.05, not the 0.1 clamp.
+        page.evaluate("const c=views.get('mpr-coronal');c.blend=1;c.setSlabThickness(2.5);slabWrites.length=0")
+        self.assertLess(page.evaluate("planeError()"), 1e-12)
+        return page.evaluate("display()")
+
+    def test_rotation_and_reset_rederive_slab_planes_and_keep_thickness(self):
+        for name, cameras in [('focal points at the pivot turn in place', "centered()"), ('focal points move', "start()")]:
+            with self.subTest(name=name):
+                page = self.mounted(cameras)
+                try:
+                    display = self.slabbed(page)
+                    page.get_by_label('MPR Rotation Axis', exact=True).select_option('2');page.get_by_label('MPR Rotation Degrees', exact=True).fill('40')
+                    self.assertIn('40도 회전했습니다', self.apply(page, 'Rotate Three Planes'))
+                    self.assertLess(page.evaluate("planeError()"), 1e-9);self.assertEqual(display, page.evaluate("display()"))
+                    self.assertIn('시작 MPR 화면', self.apply(page, 'Reset Planes'))
+                    self.assertLess(page.evaluate("planeError()"), 1e-9);self.assertEqual(display, page.evaluate("display()"))
+                finally:
+                    page.close()
+
+    def test_failed_slab_reapply_rolls_back_cameras_with_matching_planes(self):
+        page = self.mounted("centered()")
+        try:
+            display = self.slabbed(page);before = page.evaluate("cameras()");page.evaluate("failSlab='mpr-coronal'")
+            page.get_by_label('MPR Rotation Axis', exact=True).select_option('2')
+            self.assertIn('INJECTED SLAB FAILURE', self.apply(page, 'Rotate Three Planes'))
+            self.assertLess(page.evaluate("b=>largest(cameras(),b)", before), 1e-12)
+            self.assertLess(page.evaluate("planeError()"), 1e-9);self.assertEqual(display, page.evaluate("display()"))
+        finally:
+            page.close()
+
+    def test_crosshair_rotate_drag_rederives_linked_slab_planes_and_rolls_back(self):
+        for name, cameras in [('focal points at the pivot turn in place', "centered()"), ('focal points move', "start()")]:
+            with self.subTest(name=name):
+                page = self.mounted(cameras, crosshair=True)
+                try:
+                    display = self.slabbed(page);before = page.evaluate("cameras()")
+                    page.evaluate("drag('mpr-axial',30)")
+                    self.assertEqual(0, page.evaluate("nativeDrags"), "the product wrapper handles rotation")
+                    self.assertGreater(page.evaluate("b=>largest(cameras(),b)", before), .1, "the linked planes turned")
+                    self.assertLess(page.evaluate("planeError()"), 1e-9);self.assertEqual(display, page.evaluate("display()"))
+                    self.assertEqual(['mpr-sagittal', 'mpr-coronal'], page.evaluate("slabWrites"))
+                finally:
+                    page.close()
+        page = self.mounted("centered()", crosshair=True)
+        try:
+            display = self.slabbed(page);before = page.evaluate("cameras()");page.evaluate("failSlab='mpr-coronal';drag('mpr-axial',30)")
+            expect(page.locator('#kin-volume-crosshair [role=status]')).to_have_text('INJECTED SLAB FAILURE')
+            self.assertLess(page.evaluate("b=>largest(cameras(),b)", before), 1e-12)
+            self.assertLess(page.evaluate("planeError()"), 1e-9);self.assertEqual(display, page.evaluate("display()"))
         finally:
             page.close()
 

@@ -173,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -286,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -538,6 +538,111 @@ class MeasurementCiTests(unittest.TestCase):
         mpr = text.split('\n  volume-mpr:\n')[1].split('\n  volume-slab:\n')[0]
         self.assertNotIn('--profile volume-slab', mpr)
         self.assertEqual(text.count('--profile volume-mpr'), 1)
+
+    def test_volume_path_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-path']
+        self.assertEqual(profile['suites'], (
+            ('e2e/test_volume_path.py', None, 'ci-path-native'),
+            ('e2e/test_volume_orientation.py', None, 'ci-mpr-orientation'),
+        ))
+        self.assertEqual(profile['out'].name, 'volume-path-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-path-ci-')
+        self.assertEqual(profile['suite_timeout'], 540)
+        budgets = {'ci-path-native': 420, 'ci-mpr-orientation': 300}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Registering the path group must not widen or cut the first two MPR groups.
+        self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
+                         {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420})
+        self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240})
+        modules = {row[0] for row in profile['suites']}
+        for name in ('volume-mpr', 'volume-slab', 'volume-rendering'):
+            self.assertFalse(modules & {row[0] for row in ci.PROFILES[name]['suites']}, name)
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-path':
+                continue
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        commands = []
+        for suite, class_name, unit in profile['suites']:
+            command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 2000)
+            commands.append(command)
+            # No --class: each module's own load_tests stays the allowlist.
+            self.assertNotIn('--class', command)
+            self.assertEqual(command[command.index('--timeout')+1], str(budgets[unit]))
+            self.assertEqual(outer, budgets[unit]+35)
+        self.assertEqual([command[command.index('--module')+1] for command in commands],
+                         ['tests/e2e/test_volume_path.py', 'tests/e2e/test_volume_orientation.py'])
+        self.assertEqual([command[command.index('--unit')+1] for command in commands],
+                         ['ci-path-native', 'ci-mpr-orientation'])
+        # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 790)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-path', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_path_modules_declare_exact_local_cases(self):
+        import ast
+        for suite, class_name, prefix, count in (
+                ('e2e/test_volume_path.py', 'VolumePathE2E', 'test_path_', 4),
+                ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E', 'test_orientation_', 6)):
+            tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
+            cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == class_name)
+            declared = [node.name for node in cls.body if isinstance(node, ast.FunctionDef)
+                        and node.name.startswith('test_')]
+            self.assertEqual(len(declared), count)
+            self.assertTrue(all(name.startswith(prefix) for name in declared))
+            load_tests = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                              and node.name == 'load_tests')
+            self.assertTrue([node.value for node in ast.walk(load_tests)
+                             if isinstance(node, ast.Constant) and node.value == prefix])
+
+    def test_validate_workflow_runs_volume_path_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-path:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-path job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'tests/measurement_ci.py --profile volume-path',
+                         'tests/measurement_ci_test.py',
+                         'tests/viewer_volume_path_dom_test.py',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_path.py',
+                         '--file tests/e2e/test_volume_orientation.py',
+                         'tests/e2e/artifacts/volume-path-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-path'), 1)
+        self.assertNotIn('--profile volume-path', jobs[0])
+        # The path suites stay out of the first two MPR jobs' shared deadlines.
+        for other in ('volume-mpr', 'volume-slab'):
+            self.assertEqual(text.count('--profile '+other), 1)
+            self.assertNotIn('--profile volume-path', text.split('\n  '+other+':\n')[1].split('\n  volume-path:\n')[0])
+        # The pure path model runs in the existing pure model gate (listed and executed), and the
+        # compiled server Job checks keep running in the runtime gate.
+        pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
+        self.assertIn('--file worklist-v0/hpacs-lite/volume-path.js', pure)
+        self.assertEqual(pure.count('tests/volume_path_test.cjs'), 2)
+        self.assertIn('tests/viewer_volume_job_capture_test.cjs', pure.rsplit(' --test ', 1)[1])
+        runtime = next(line for line in text.splitlines() if 'tmp/runtime-ci/volume-api-models' in line)
+        self.assertIn('/tests/viewer_volume_job_test.cjs', runtime.rsplit(' --test ', 1)[1])
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']

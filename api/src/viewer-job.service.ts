@@ -7,6 +7,7 @@ import { Caller } from './pacs.service';
 import { canonical, viewerUid, viewerUuid, verifyViewerReference, isManualMeasurement } from './viewer-input';
 import { jobCommand, jobFingerprint, verifyJobCell, previewCommand } from './viewer-job-input';
 import { verifyVolumeReference, compactVolumeTags } from './viewer-volume-reference';
+import { readSnapshot, writeSnapshot } from './viewer-job-snapshot';
 const deny = (): never => { throw new ForbiddenException('비교 작업에 접근할 수 없습니다'); };
 const conflict = (): never => { throw new ConflictException('비교 작업이 변경되었습니다. 목록을 새로 확인하세요'); };
 const annotationKinds = ['arrow', 'length', 'angle', 'ellipse'];
@@ -54,7 +55,7 @@ export class ViewerJobService {
     // frame cells alone carries no volume at all, so the whole-volume verification runs on
     // the reference it actually has and the per-cell verification below always follows.
     let verified = snapshot;
-    if ([4,5,6,7,8,10].includes(snapshot.version) || snapshot.version === 9 && snapshot.volume) {
+    if ([4,5,6,7,8,10,11].includes(snapshot.version) || snapshot.version === 9 && snapshot.volume) {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
       try {
         const before = await this.orthanc.viewerSeriesManifest(snapshot.volume.series, controller.signal);
@@ -146,10 +147,12 @@ export class ViewerJobService {
   private async head(uid: string, id: string, c: Caller) {
     return this.transaction(async tx => {
       await this.parents(tx, [uid], c);
-      const j = await tx.viewerJob.findUnique({ where: { id } });
+      const j = await tx.viewerJob.findUnique({ where: { id }, select: { id: true, studyUid: true, authorSub: true, authorActor: true, studies: true,
+        title: true, description: true, hidden: true, revision: true, createdAt: true, updatedAt: true } });
       if (!j || j.studyUid !== uid) throw new NotFoundException('저장한 비교 작업이 없습니다');
       this.sameInstitution(await this.parents(tx, j.studies, c));
-      return j;
+      // Same repeatable-read transaction; the text avoids the engine's Json number conversion on read too.
+      return { ...j, snapshot: await readSnapshot(tx, id) };
     }, true);
   }
   async get(uid: string, id: string, c: Caller) { await this.studyAccess.prepare(c);
@@ -194,8 +197,12 @@ export class ViewerJobService {
       const frozen = snapshot.version === 3 ? await this.freezeAnnotations(tx, snapshot, sources) : snapshot;
       const now = new Date();
       const j = await tx.viewerJob.create({ data: { id: b.id, studyUid: uid, authorSub: c.sub, authorActor: c.actor, studies: b.snapshot.studies,
-        fingerprint, snapshot: frozen, title: b.title, description: b.description, revision: 1, updatedAt: now } });
-      await this.history(tx, j, '', c); return summary(j);
+        fingerprint, snapshot: {}, title: b.title, description: b.description, revision: 1, updatedAt: now },
+        select: { id: true, studyUid: true, authorSub: true, authorActor: true, title: true, description: true, hidden: true, revision: true, createdAt: true, updatedAt: true } });
+      // The query engine re-parses Json values and can move a 17-digit double by one ULP. The
+      // snapshot is therefore written as JSON text, which jsonb keeps as exact decimal numbers.
+      await writeSnapshot(tx, j.id, frozen);
+      await this.history(tx, j, '', c); return summary({ ...j, snapshot: frozen });
     });
   }
   private async history(tx: Prisma.TransactionClient, j: any, reason: string, c: Caller) {
