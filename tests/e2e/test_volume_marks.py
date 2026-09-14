@@ -140,11 +140,13 @@ class VolumeMarksE2E(VolumeSyncE2E):
   marks=self.add_mark(v,'Progressive slab point');self.assertEqual(v.evaluate('()=>pressProbe.splice(0)'),[['final',0]],'an armed pick press is not previewed');self.assertFalse(v.evaluate('()=>kinMprRenderingState.busy()'))
   for got,want in zip(marks['marks'][0]['point'],[32,32,16]):self.assertAlmostEqual(got,want,delta=.2)
   # A persistent refinement failure keeps the source coarse while a batch is generated beside it.
-  v.evaluate('()=>{const set=pickMapper.setSampleDistance;window.failRefine=true;pickMapper.setSampleDistance=value=>set(failRefine&&value===pickBase?pickBase*2:value)}')
-  v.mouse.move(x,y);v.mouse.down();v.mouse.up();expect(v.locator('.kin-mpr-refining').first).to_have_text('Refinement failed')
+  # vtk.js freezes the mapper, so a setter assigned onto it is silently ignored; fail through the viewport actor lookup refinement reads, as the preferences cases do.
+  v.evaluate('()=>{"use strict";const actors=projectionVP.getActors(),real=actors[0].actor.getMapper(),adapter={...real,setSampleDistance:value=>real.setSampleDistance(failRefine&&value===pickBase?pickBase*2:value)},wrapped=[{...actors[0],actor:{...actors[0].actor,getMapper:()=>adapter}},...actors.slice(1)];window.failRefine=true;window.pickLookup=Object.getOwnPropertyDescriptor(projectionVP,"getActors")||null;projectionVP.getActors=()=>wrapped;if(real!==pickMapper||projectionVP.getActors()[0].actor.getMapper()!==adapter)throw Error("Refinement failure was not installed")}')
+  v.mouse.move(x,y);v.mouse.down();v.mouse.up();expect(v.locator('.kin-mpr-refining').first).to_have_text('Refinement failed');self.assertEqual(v.evaluate('()=>pressProbe.splice(0)'),[['preview',1]],'the unarmed press previewed the thick plane before refinement failed')
   unresolved='()=>kinMprRenderingState.busy()&&pickMapper.getSampleDistance()===pickBase*2'
   self.assertTrue(v.evaluate(unresolved));VolumeBatchE2E.make_batch(self,v);coarse=VolumeBatchSaveE2E.pixels(self,v);self.assertTrue(v.evaluate(unresolved))
   v.evaluate('()=>{failRefine=false}');v.wait_for_function('()=>pickMapper.getSampleDistance()===pickBase&&!kinMprRenderingState.busy()');expect(v.locator('.kin-mpr-refining')).to_have_count(0)
+  v.evaluate('()=>{"use strict";if(pickLookup)Object.defineProperty(projectionVP,"getActors",pickLookup);else delete projectionVP.getActors;if(projectionVP.getActors()[0].actor.getMapper()!==pickMapper)throw Error("Native actor lookup was not restored")}')
   v.get_by_role('button',name='Clear Batch',exact=True).click();VolumeBatchE2E.make_batch(self,v);final=VolumeBatchSaveE2E.pixels(self,v)
   self.assertEqual(coarse,final,'batch output uses its own final renderer, never the source preview')
   saved=v.evaluate(CAPTURE);self.assertEqual(saved['version'],6);self.save_volume(v);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'))
