@@ -308,6 +308,87 @@ class ExecutionSelectionTests(unittest.TestCase):
                   for row in ci.PROFILES[name]['suites']}
         self.assertFalse(others & {row[0] for row in profile['suites']})
 
+    def test_volume_sync_preferences_profile_selects_only_the_declared_modules(self):
+        profile = ci.PROFILES['volume-sync-preferences']
+        expected = [('e2e/test_volume_sync.py', 'VolumeSyncE2E',
+                     'test_sync_', 'ci-mpr-sync', 15,
+                     {'test_sync_01_windowing_zoom_and_selected_reset',
+                      'test_sync_03_partial_peer_failure_and_retry',
+                      'test_sync_05_sigmoid_inversion_pixels_and_exact_failure_restore',
+                      'test_sync_12_native_mouse_windowing_and_zoom',
+                      'test_sync_15_inversion_does_not_resynchronize_selected_reset'}),
+                    ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E',
+                     'test_properties_', 'ci-mpr-preferences', 17,
+                     {'test_properties_02_native_mouse_and_duplicate_rejection',
+                      'test_properties_06_account_new_browser_restores_after_modal_preserving_work',
+                      'test_properties_07_progressive_refines_to_identical_pixels',
+                      'test_properties_10_saved_profile_applies_after_job_restore',
+                      'test_properties_14_modifier_touch_bindings_survive_and_restore'})]
+        self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
+        self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
+        methods = set()
+        for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
+                profile['suites'], expected):
+            with self.subTest(suite=suite):
+                self.assertIsNone(class_name)
+                # Planned at the budget CI will actually request for this suite.
+                plan = runner.module_plan('tests/'+suite, unit, 'live',
+                                          profile['suite_budgets'][unit], class_name)
+                selected = [item['case'] for item in plan['tests']]
+                cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
+                # Exactly the declared cases, in the declared order the local history ran them.
+                self.assertEqual(selected, [cls_name+'.'+name for name in cls.__dict__
+                                            if name.startswith(prefix)])
+                self.assertEqual(len(selected), count)
+                self.assertTrue({cls_name+'.'+name for name in required}.issubset(selected))
+                # Preferences inherits every sync case and sync inherits display, orientation and jobs;
+                # none of those may widen this profile or run twice.
+                inherited = {name for base in cls.__mro__[1:]
+                             for name in vars(base) if name.startswith('test_')}
+                self.assertTrue(inherited, 'expected an inheriting suite')
+                names = {case.split('.', 1)[1] for case in selected}
+                self.assertFalse(inherited & names)
+                self.assertFalse(methods & names)
+                methods |= names
+                self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+                self.assertTrue(all(case.startswith(cls_name+'.'+prefix) for case in selected))
+                self.assertEqual(runner.collect(plan).countTestCases(), count)
+                print('SELECTION', suite, len(selected), flush=True)
+        self.assertEqual(len(methods), 32)
+        # The group stays disjoint from the other MPR groups and the VR profile; the marks suite that
+        # inherits sync keeps its own registration outside this group.
+        others = {row[0] for name in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-rendering')
+                  for row in ci.PROFILES[name]['suites']}
+        modules = {row[0] for row in profile['suites']}
+        self.assertFalse(others & modules)
+        self.assertNotIn('e2e/test_volume_marks.py', modules)
+
+    def test_sync_and_preferences_load_tests_follow_unittest_name_patterns(self):
+        # A local exact rerun (-k) must select what unittest itself selects among the module's own
+        # declared cases. A module-specific matcher silently selected none for class-qualified names.
+        def flatten(suite):
+            for item in suite:
+                yield from flatten(item) if isinstance(item, unittest.TestSuite) else (item,)
+        for suite, class_name, prefix, count in (
+                ('e2e/test_volume_sync.py', 'VolumeSyncE2E', 'test_sync_', 15),
+                ('e2e/test_volume_preferences.py', 'VolumePreferencesE2E', 'test_properties_', 17)):
+            module = runner.load_module(ROOT/'tests'/suite)
+            cls = getattr(module, class_name)
+            first = sorted(name for name in cls.__dict__ if name.startswith(prefix))[0]
+            for patterns, expected in ((None, count), (['*'+first+'*'], 1),
+                                       (['*'+class_name+'.'+first+'*'], 1),
+                                       (['*'+module.__name__+'.'+class_name+'.*'], count),
+                                       (['*'+class_name+'*'], count), (['*'+first.upper()+'*'], 0),
+                                       (['*test_mpr_display_01*'], 0)):
+                with self.subTest(suite=suite, patterns=patterns):
+                    loader = unittest.TestLoader()
+                    loader.testNamePatterns = patterns
+                    selected = [test._testMethodName for test in flatten(loader.loadTestsFromModule(module))]
+                    reference = [name for name in loader.getTestCaseNames(cls)
+                                 if name.startswith(prefix) and name in cls.__dict__]
+                    self.assertEqual(sorted(selected), sorted(reference))
+                    self.assertEqual(len(selected), expected)
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)

@@ -141,5 +141,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   v.evaluate('()=>window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))');expect(v.locator('.kin-mpr-configured')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),original)
 
 
-def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumePreferencesE2E(n) for n in VolumePreferencesE2E.__dict__ if n.startswith('test_properties_') and (not loader.testNamePatterns or any(__import__('fnmatch').fnmatch(n,p) for p in loader.testNamePatterns)))
+# Declared order without inherited sync/display cases; the loader applies unittest's own -k matching,
+# which a bare method-name fnmatch missed for class-qualified names.
+def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumePreferencesE2E(n) for n in VolumePreferencesE2E.__dict__ if n.startswith('test_properties_') and n in loader.getTestCaseNames(VolumePreferencesE2E))
 if __name__=='__main__':unittest.main(verbosity=2)
