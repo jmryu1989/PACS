@@ -2,15 +2,35 @@
  "purpose": "A11-VOI-1 intentional negative mutation experiments on frozen candidate d6271d2; not a candidate gate and not a retry of any baseline run",
  "baseline": {
   "commit": "d6271d2389b729533360d239ee06a22edd651649",
-  "tree": "22401ab22418f9c500afa78c67f7ce08b3c6fb96"
+  "tree": "22401ab22418f9c500afa78c67f7ce08b3c6fb96",
+  "replaced": {
+   "path": ".github/workflows/validate.yml",
+   "mode": "100644",
+   "blob": "2060bf5253e45a2a54f3d1bcfb55e81df93f5252",
+   "sha256": "881e565b0a33daaa32b198e49cd13ebf4738ab400316ddaf42bac4642d24342e",
+   "copy": "tests/voi_mutations/baseline/validate.yml",
+   "why": "GitHub dispatches only a workflow registered on the default branch; on this isolated branch only, validate.yml carries the manual mutation workflow and the candidate Validate bytes are kept as a pinned byte copy restored by blob in the baseline proof"
+  }
  },
  "harness_ref": "refs/heads/opus/a11-voi-mutations-20260915",
  "harness_paths": [
-  ".github/workflows/voi-mutations.yml",
   "tests/e2e/test_volume_mip_voi_mutation.py",
   "tests/voi_mutations"
  ],
- "workflow": ".github/workflows/voi-mutations.yml",
+ "workflow": ".github/workflows/validate.yml",
+ "dispatch_sets": {
+  "required-M1P-M2-M5P": ["M1P", "M2", "M5P"],
+  "supplement-M3-M4": ["M3", "M4"]
+ },
+ "history": {
+  "prior_harness_commit": "d6dfe46ca1b775d94782a317c3ee68c57d415804",
+  "prior_workflow": {"path": ".github/workflows/voi-mutations.yml", "blob": "5b7286451aa64cfec3cf3cf852b7935b1a17c37a"},
+  "prior_manifest_blob": "545937470d82c05206a942f9fedb298cd5d1446c",
+  "prior_harness_blob": "f50cf67828c4714c58adbde3daa125184ee45586",
+  "dispatch_lookup": "gh workflow view voi-mutations.yml --ref opus/a11-voi-mutations-20260915 returned 404 because that file is not on the default branch; no run exists and no variant attempt was consumed",
+  "attempts_used": {"M1": 0, "M2": 0, "M3": 0, "M4": 0, "M5": 0, "M1P": 0, "M5P": 0},
+  "budget": "A preparation correction, not a retry-budget reset: every variant has exactly one attempt. M1 and M5 are retired unrun (attempt never used, never retried) and M1P and M5P are new preregistered variants with one attempt each."
+ },
  "profile": "volume-mip-voi",
  "candidate_suite": "e2e/test_volume_mip_voi.py",
  "suite": "e2e/test_volume_mip_voi_mutation.py",
@@ -46,7 +66,33 @@
   "author_mutations": "tmp/o-a11-voi-slab/tmp/mpr-a11-voi-slab-01/mutations",
   "author_manifest_sha256": "fae30240f7bc46dcc6bb9d7d72fb03ca1614f551a30a9db0e96b0547fd53393f",
   "author_generator": "tmp/o-a11-voi-slab/tmp/mpr-a11-voi-slab-01/scripts/make_mutations.py",
-  "patches": "byte-identical copies of the author patches; the author's full-file copies for M1/M2/M5 predate 00e9b8e and are not used"
+  "patches": "M1..M5 are byte-identical copies of the author patches; the author's full-file copies for M1/M2/M5 predate 00e9b8e and are not used",
+  "pixel_generator": "tmp/mpr-a11-voi-mutation-ready-fix-01/scripts/make_pixel_mutations.py (raw worktree) writes M1P/M5P from the candidate blob"
+ },
+ "pinned_shader": {
+  "served_bundle": "tmp/image-context/ohif-bundle.js, outside the repository: the served OHIF/cornerstone/vtk bundle hashed in tmp/image-context/manifest.json and cited by the candidate's tests/volume_mip_test.cjs (:4 at bundle :20497, :199 at bundle :69021)",
+  "bundle_sha256": "75b9282717a0d22d0adeab65c393bcb5e02b63290e41ac758c28b8f5998c1f86",
+  "template_line": 68713,
+  "template_sha256": "0072aa4f7f09c869505c5044f0627bf74b9c37d841a7787803b5eae9d4130fff",
+  "substitute_line": 65857,
+  "apply_replacements_line": 65663,
+  "build_shaders_lines": [65672, 65688],
+  "clip_dec_line": 69020,
+  "clip_impl_line": 69021,
+  "mapper_end_line": 70059,
+  "facts": [
+   "substitute(source, search, replace, all) takes search as a plain string when all === false and as new RegExp(search, 'g') otherwise",
+   "buildShaders applies replaceFirst replacements, then replaceShaderValues (clip-plane Dec/Impl), then the other replacements",
+   "the clip-plane Impl is a 'for(int i = 0; i < N; i++)' loop over vClipPlaneNormals/vClipPlaneDistances inside computeRayDistances; its Dec defines vtkClippingPlanesOn, which compiles IStoVC",
+   "applyBlend has 11 'tValue = getTextureValue(posIS);' samples; Average sums only valueWithinScalarRange samples at its 3 'sum += tValue;'",
+   "texture to data value is tValue*scale+offset (cscale/cshift at bundle :69444-69447; IP range uniforms at :69148)"
+  ]
+ },
+ "pixel_tolerance": {
+  "MIP": 1.0,
+  "MinIP": 1.0,
+  "Raysum": 2.5,
+  "basis": "8-bit canvas gray and rendering rounding (1.0); Raysum adds the candidate's VOI_MEAN_BOUND 1.5 sampling bound. A prediction must clear VOI_DELTA by more than this tolerance, and an accepted canvas value lies within VOI_DELTA plus this tolerance of the predicted band and nearer it than the expected value."
  },
  "variants": {
   "M1": {
@@ -57,6 +103,10 @@
    "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
    "after_sha256": "357a86a30c724ef5f06da21a22ee9571d39087fa2543de311cb5c397614dc611",
    "case": "N1",
+   "dispatchable": false,
+   "status": "retired-unrun",
+   "superseded_by": "M1P",
+   "superseded_reason": "Never dispatched (0 attempts). Its display removes the VOI planes, so N1 stops at the plane readback (voi_native :373, 2 != 4) after the first apply, before any pixel. In the pinned substitute its escaped 'void applyBlend\\(' declaration with replaceAll false is a plain string that never matches, while its samples call kinMutantVoiSample: the program would not compile, the product would roll back to the kept display, and that rollback also shows 2 planes, so the preregistered plane-count detector could fire without the mutation ever rendering. M1P keeps the planes, links (proven on the pinned template) and reaches the zero-fill pixel oracle.",
    "expected_first_detector": "n1-readback-plane-count",
    "detectors": [
     {
@@ -87,6 +137,7 @@
    "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
    "after_sha256": "c50511727d8fa9a96e1f9850c702a468b94d0da48a847c9ec6f3e559f279e468",
    "case": "N1",
+   "dispatchable": true,
    "expected_first_detector": "n1-readback-plane-count",
    "detectors": [
     {
@@ -108,6 +159,7 @@
    "before_sha256": "9d35a401fed62f3ffe7364d38fa06b47c0089236aa3836566d48f73e9161ef56",
    "after_sha256": "35acd1c696839df369756177209d4a07a30c4dbb29d6fc9d2556cc274d6f2a9a",
    "case": "N1",
+   "dispatchable": true,
    "expected_first_detector": "n1-world-plane-origin",
    "detectors": [
     {
@@ -129,6 +181,7 @@
    "before_sha256": "9d35a401fed62f3ffe7364d38fa06b47c0089236aa3836566d48f73e9161ef56",
    "after_sha256": "cbb9301df35018c54569d57fcad560fc71d2cea27b7ef5b91384a5b667afa0cb",
    "case": "N2",
+   "dispatchable": true,
    "expected_first_detector": "n2-held-render-pending",
    "detectors": [
     {
@@ -149,6 +202,10 @@
    "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
    "after_sha256": "e85274f1e5cfe7b9dadb0dcd941a59c117e9777d5f724ebe79c5c09c5e6c0ce1",
    "case": "N1",
+   "dispatchable": false,
+   "status": "retired-unrun",
+   "superseded_by": "M5P",
+   "superseded_reason": "Never dispatched (0 attempts). Its Raysum display removes the VOI planes (degenerate unclipped display) and the same escaped plain-string declaration never lands, so the Raysum program would not compile; the product would roll back to the kept MinIP display, whose pixels then fail voi_pixels under a label tuple still naming 'Raysum', which its preregistered message pattern accepts: a false pixel detection. Even if it linked, its texture-space sum over all samples gives f*mean + (1-f)*offset in HU, which depends on the runtime texture offset and is degenerate when that offset is near the kept mean. M5P keeps the planes, links (proven on the pinned template), adds the 0 HU texture value per counted excluded sample so the HU mean is the in-VOI sum over all slab samples, and pins the detector to the requested Final display, the same probe and a predicted canvas band.",
    "expected_first_detector": "n1-raysum-pixel-oracle",
    "detectors": [
     {
@@ -168,6 +225,82 @@
      ],
      "message": "^2 != 4 : ",
      "proves": "the Raysum display without VOI planes is caught by the N1 plane readback only after its pixels matched; the mean-denominator oracle is not shown"
+    }
+   ]
+  },
+  "M1P": {
+   "meaning": "zero fill with the VOI planes kept: the linked ray loop skips the two VOI planes and every sample outside them becomes a 0 HU sample",
+   "file": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "patch": "tests/voi_mutations/M1P.patch",
+   "patch_sha256": "ae1e94f6dc9e34621ab874b2f30ad16b40cbe228c0f982f4204ec1abb213737a",
+   "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
+   "after_sha256": "5c4abb3b84e266feac41e105649fa4532756d16ab0a727bc6ceafa05302c152d",
+   "case": "N1",
+   "dispatchable": true,
+   "derived_from": {"variant": "M1", "patch_sha256": "d42038d3cb5c00821dc28b29be435b51c2965c3fe1c0a316eb57dc69a60c26a0", "patch_blob": "b16d3e45f279a002131ca0b635238a943e51cd0b"},
+   "self_check": "Final requires the linked fragment source to hold the candidate's 4-plane loop (clipShader), exactly one loop skip, one inside declaration and this display's 0 HU constant, and the zero fill on every 'tValue = getTextureValue(posIS);' sample; otherwise gpuProblem returns 'MUTANT M1P: ...' and the product keeps its last Final display",
+   "pixel": {
+    "behaviours": {"MIP": ["zero_fill"], "MinIP": ["zero_fill"], "Raysum": ["expected", "zero_fill"]},
+    "basis": "MIP and MinIP take a 0 HU sample for every excluded sample: the candidate's zero_fill expectation. The pinned Average sums only valueWithinScalarRange samples and the product sets the IP range to the data range, which excludes 0 HU in both studies, so the fill should leave Raysum unchanged; both Raysum behaviours are declared and must fail first at the same probe."
+   },
+   "expected_first_detector": "n1-zero-fill-pixel-oracle",
+   "detectors": [
+    {
+     "id": "n1-zero-fill-pixel-oracle",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 403, "self.voi_pixels(state,probes,(study,case['name'],orientation,mode,state['label']));self.voi_native(state,mode,orientation,record,voi)"],
+      ["voi_pixels", 386, "self.assertLessEqual(min(abs(actual-w) for w in wanted),VOI_DELTA,(label,expected,probe,actual))"]
+     ],
+     "message": "^\\d+(\\.\\d+)? not less than or equal to 3 : \\(\\('positive', 'along-ray', 'Axial', 'MinIP', 'MinIP · Axial · 91\\.6 mm · VOI Slab 41 mm · Final'\\), 'expected', ",
+     "semantic": {
+      "cell": ["positive", "along-ray", "Axial", "MinIP"],
+      "label": "MinIP · Axial · 91.6 mm · VOI Slab 41 mm · Final",
+      "probe_index": 0,
+      "probe": {"world": [3.0, 3.0, 40.0], "kind": "kept", "expected": 150.682, "unclipped": [139.091, 139.091], "zero_fill": 127.5, "separation": 11.591, "mean_bound": 0.0},
+      "delta": 3,
+      "tolerance": 1.0,
+      "band": [127.5, 127.5],
+      "accept": [123.5, 131.5]
+     },
+     "proves": "With the VOI planes written, read back (line 395 and every earlier cell's voi_native) and linked as the 4-plane loop, the first N1 probe that separates zero fill from its expected value (positive along-ray Axial MinIP, kept probe [3,3,40], expected 150.682 gray) shows the 0 HU fill (127.5 gray, accepted 123.5-131.5) on the requested Final display: RISK-D-MIP-VOI-ZERO-FILL caught by the known-voxel pixel oracle itself, not by a plane count"
+    }
+   ]
+  },
+  "M5P": {
+   "meaning": "mean denominator with the VOI planes kept: for Raysum the linked ray loop skips the two VOI planes, in-VOI samples are summed and every slab sample is counted",
+   "file": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "patch": "tests/voi_mutations/M5P.patch",
+   "patch_sha256": "6573705f93f2b5e3fb2f7a64b171a75feb297f3faeb2172c44a9dc19a4ec8c9d",
+   "before_sha256": "2f17a48a6410b1bc55ea45562b507ae1bda9b303a947832eb9b3b382908ee538",
+   "after_sha256": "520bf65a4f2cf1a67dc2db0c6e7cb13c9800b8c5af5f5160651ee8e0c1960fdc",
+   "case": "N1",
+   "dispatchable": true,
+   "derived_from": {"variant": "M5", "patch_sha256": "4c7e52fe93df607269b90d3f5d92f56e4544b5709f8df87c9da0487f5a355096", "patch_blob": "c49f88eeda5768443556768463aa1718a466a2cd"},
+   "self_check": "For a Raysum VOI display, Final requires the linked fragment source to hold the candidate's 4-plane loop and average patch (clipShader, averageShader), exactly one loop skip, one inside declaration and this display's 0 HU constant, and the denominator form on every counted sample with no unmutated one left; MIP and MinIP displays must carry no mutation; otherwise gpuProblem returns 'MUTANT M5P: ...' and the product keeps its last Final display",
+   "pixel": {
+    "behaviours": {"MIP": ["expected"], "MinIP": ["expected"], "Raysum": ["zero_fill"]},
+    "basis": "Only the Raysum mean changes: the in-VOI HU sum divided by every in-range slab sample, which is the candidate's Raysum zero_fill expectation inside*kept/full (zero_fill_hu), over voxel-centre or voxel-edge ray extents."
+   },
+   "expected_first_detector": "n1-mean-denominator-pixel-oracle",
+   "detectors": [
+    {
+     "id": "n1-mean-denominator-pixel-oracle",
+     "frames": [
+      ["test_mip_04_voi_slab_known_voxels_modes_orientations", 403, "self.voi_pixels(state,probes,(study,case['name'],orientation,mode,state['label']));self.voi_native(state,mode,orientation,record,voi)"],
+      ["voi_pixels", 386, "self.assertLessEqual(min(abs(actual-w) for w in wanted),VOI_DELTA,(label,expected,probe,actual))"]
+     ],
+     "message": "^\\d+(\\.\\d+)? not less than or equal to 3 : \\(\\('positive', 'along-ray', 'Axial', 'Raysum', 'Raysum · Axial · 91\\.6 mm · VOI Slab 41 mm · Final'\\), 'expected', ",
+     "semantic": {
+      "cell": ["positive", "along-ray", "Axial", "Raysum"],
+      "label": "Raysum · Axial · 91.6 mm · VOI Slab 41 mm · Final",
+      "probe_index": 0,
+      "probe": {"world": [3.0, 3.0, 40.0], "kind": "kept", "expected": 175.843, "unclipped": [162.092, 162.273], "zero_fill": 152.276, "separation": 13.57, "mean_bound": 1.319},
+      "delta": 3,
+      "tolerance": 2.5,
+      "band": [151.525, 152.276],
+      "accept": [146.025, 157.776]
+     },
+     "proves": "The same case and orientation's MIP and MinIP pixels and readback passed first (no zero fill of extremes, VOI planes kept); then the first Raysum probe (positive along-ray Axial, kept probe [3,3,40], expected 175.843 gray) shows the in-VOI HU sum over every slab sample (151.5-152.3 gray, accepted 146.0-157.8) on the requested Final display: RISK-D-MIP-VOI-MEAN-DENOMINATOR caught by the known-voxel Raysum pixel oracle itself, not by a plane count"
     }
    ]
   }

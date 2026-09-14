@@ -1,0 +1,57 @@
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -73,6 +73,37 @@
+     for(const plane of extra)if(mapper.removeClippingPlane(plane)!==true)throw Error('이전 VOI Slab 평면을 지우지 못했습니다.');
+     if(slab)for(const definition of model.voiPlanes(slab))if(mapper.addClippingPlane(model.voiPlane(definition))!==true)throw Error('VOI Slab 평면을 적용하지 못했습니다.');
+   }
++  // MUTATION-BEGIN M5P
++  // MUTATION M5P (mean denominator, pixel oracle): for Raysum only, the VOI Slab planes are still written, read back and
++  // linked as the 4-plane ray loop, but the linked loop skips planes 2 and 3; samples inside those same two planes are
++  // summed and every in-range sample on the slab ray is counted, so the mean is the in-VOI HU sum over all slab samples.
++  // An excluded sample adds the texture value of 0 HU, the affine offset that keeps that HU mean independent of the texture
++  // offset. The pinned vtk substitute (ohif-bundle.js :65857) matches a plain string when replaceAll is false and a global
++  // RegExp when it is true; IStoVC and the plane uniforms are the pinned shader's own (vtkVolumeFS :380, :162 with :69020).
++  const mutantSample='sum += tValue; kinAverageSamples += 1.0;',mutantSampled='if (kinMutantVoiInside(posIS)) { sum += tValue; } else { sum += kinMutantVoiZero; } kinAverageSamples += 1.0; /*kinMutantVoiDenominator*/';
++  const mutantLoop='for(int i = 0; i < 4; i++) {\n  float rayDirRatio = dot(rayDir, vClipPlaneNormals[i]);',mutantSkip='\n  if (i >= 2) { continue; } /*kinMutantVoiUnclipped*/';
++  const mutantInside='bool kinMutantVoiInside(vec3 p) { vec3 v = IStoVC(p); return dot(v, vClipPlaneNormals[2]) + vClipPlaneDistances[2] >= 0.0 && dot(v, vClipPlaneNormals[3]) + vClipPlaneDistances[3] >= 0.0; }';
++  function mutantShader(op,active){
++    const properties=op.mapper.getViewSpecificProperties()||{},openGL=properties.OpenGL||{},added=[];
++    const kept=(openGL.ShaderReplacements||[]).filter(r=>!String(r.replacementValue).includes('kinMutantVoi'));
++    op.mutantZero=null;
++    if(active){
++      const info=op.mapper.getScalarTexture().getVolumeInfo(),zero=(0-info.offset[0])/info.scale[0];
++      if(!Number.isFinite(zero))throw Error('MUTANT M5P: the 0 HU texture value is not finite.');
++      op.mutantZero='const vec4 kinMutantVoiZero = vec4('+zero.toFixed(9)+');';
++      added.push({shaderType:'Fragment',originalValue:'void applyBlend(',replacementValue:op.mutantZero+'\n'+mutantInside+'\nvoid applyBlend(',replaceFirst:true,replaceAll:false});
++      added.push({shaderType:'Fragment',originalValue:mutantSample.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),replacementValue:mutantSampled,replaceFirst:true,replaceAll:true});
++      added.push({shaderType:'Fragment',originalValue:mutantLoop,replacementValue:mutantLoop+mutantSkip,replaceFirst:false,replaceAll:false});
++    }
++    op.mapper.setViewSpecificProperties({...properties,OpenGL:{...openGL,ShaderReplacements:[...kept,...added]}});
++  }
++  function mutantProblem(op,request,source){
++    const active=!!request.voiSlab&&request.original!==true&&model.blendMode(request.mode)===3,count=text=>source.split(text).length-1;
++    if(!active)return source.includes('kinMutantVoi')?'MUTANT M5P: the mutated shader remained on an unmutated display.':'';
++    const sums=count(mutantSampled);
++    return op.mutantZero&&count(op.mutantZero)===1&&count(mutantInside)===1&&count(mutantLoop+mutantSkip)===1&&sums>0&&count(mutantSample)===0&&count('kinAverageSamples += 1.0;')===sums?'':'MUTANT M5P: the shader replacement is not linked.';
++  }
++  // MUTATION-END M5P
+   // Every request writes the whole display (orientation, blend, slab and VOI Slab), so a rollback never inherits a partial write.
+   function apply(op,request){
+     check(op);const next=model.normalizeRequest(request),want=expected(op,next);
+@@ -84,6 +115,8 @@
+     op.view.setOrientation(model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,next.orientation).key,false);op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
+     // VOI planes are written after the camera and slab setters, which rewrite the first two planes; readback proves both.
+     writeVoi(op,want.voiSlab);
++    // MUTATION M5P: the Raysum mean divides the in-VOI HU sum by every sample on the slab ray.
++    mutantShader(op,!!want.voiSlab&&want.blend===3);
+     const problem=model.verifyState(readState(op),want);if(problem)throw Error(problem);
+   }
+   function gpuProblem(op,request){
+@@ -92,6 +125,7 @@
+     const source=program.getFragmentShader().getSource(),clipped=!!request.voiSlab&&request.original!==true;
+     if(!model.clipShader(source,clipped?4:2))return clipped?'VOI Slab 자르기 셰이더를 GPU에서 확인하지 못했습니다.':'MIP 투영 범위 셰이더를 GPU에서 확인하지 못했습니다.';
+     if(model.blendMode(request.mode)===3&&!model.averageShader(source))return 'Raysum 평균 셰이더를 확인하지 못했습니다.';
++    const mutant=mutantProblem(op,request,source);if(mutant)return mutant;
+     return '';
+   }
+   // Final means a native frame rendered after this request and the state read in that same event still matches it.

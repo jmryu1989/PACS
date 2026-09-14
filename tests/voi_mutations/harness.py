@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """A11-VOI-1 mutation experiments on frozen candidate d6271d2: one purpose, one attempt per variant.
 
-check     pure: baseline identity, patch hashes, detector anchors, derived profile, selection wrapper and workflow text
+check     pure: baseline identity, patch hashes, detector anchors and pixel predictions, derived profile, wrapper and workflow text
+predict   pure: the candidate oracle's first failing probe under each pixel-oracle variant's preregistered sampling behaviour
 guard     hosted: refuse reruns, prove the checkout is the candidate plus harness paths only, apply exactly one patch
 select    hosted venv: freeze the exact single-case plan with scripts/run-tests.py's own module_plan
 native    hosted: measurement_ci.py's unchanged volume-mip-voi stack, cap and shared deadline, on that one case
 classify  hosted, always: recorded facts plus a conservative observation; never a verdict on the experiment
 """
-import argparse, ast, hashlib, importlib.util, json, os, re, shutil, subprocess, sys, tempfile
+import argparse, ast, hashlib, importlib.util, itertools, json, math, os, re, shutil, subprocess, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,8 @@ OUT = ROOT / 'tests/e2e/artifacts/volume-mip-voi-ci'
 WRAPPER = 'tests/' + MANIFEST['suite']
 WRAPPER_CLASS = 'VolumeMipVoiMutationE2E'
 SUITE = Path(MANIFEST['suite']).stem
+ORACLE = 'tests/e2e/test_volume_mip.py'
+RETIRED_WORKFLOW = '.github/workflows/voi-mutations.yml'
 SETUP_STAGES = ('database', 'database-tcp', 'keycloak-database', 'stack', 'ports')
 PINS = ('actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4',
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1')
@@ -25,6 +28,14 @@ FRAME = re.compile(r'^  File "(?P<file>[^"]+)", line (?P<line>\d+), in (?P<funct
 BLOCK = re.compile(r'^(?P<kind>FAIL|ERROR): (?P<method>\w+) \((?P<test>[^)]+)\)$')
 SEPARATOR = re.compile(r'^(-{70}|={70})$')
 SUMMARY = re.compile(r'^(OK|FAILED)( \([a-z_]+=\d+(, [a-z_]+=\d+)*\))?$')
+# unittest's assertLessEqual(first, second, msg) text for voi_pixels: 'first not less than or equal to second : msg'.
+PIXEL_MESSAGE = re.compile(r'^(?P<gap>\d+(?:\.\d+)?(?:e[+-]?\d+)?) not less than or equal to (?P<delta>\d+) : (?P<detail>\(.*\))$', re.S)
+# The candidate oracle's pure geometry (no browser, numpy or stack): exactly these top-level names of tests/e2e/test_volume_mip.py.
+ORACLE_FUNCTIONS = ('band', 'level', 'rodrigues', 'voi_record', 'mm_text', 'voi_label', 'nearest', 'value_edges', 'voxel_hu',
+                    'ray_segments', 'kept_segment', 'clipped_parts', 'project_hu', 'zero_fill_hu', 'gray', 'voi_margins', 'voi_probe',
+                    'voi_probes', 'voi_plan')
+ORACLE_CONSTANTS = ('BASE', 'X', 'Y', 'Z', 'COLUMN', 'EDGES', 'MODES', 'ORIENTATIONS', 'BLENDS', 'TOTAL', 'SPACING', 'COUNTS', 'RAY',
+                    'STEP', 'VOI_DISCRIMINATION', 'VOI_DELTA', 'VOI_MEAN_BOUND', 'VOI_STUDIES', 'VOI_CASES', 'PRESET_NORMALS', 'WORLD_AXES')
 # scripts/run-tests.py prints this for every failed or skipped live plan; it is not a selection refusal.
 UNFINISHED_PLAN = 'Tests failed or skipped; this is not a completed plan'
 RULE = ('An observation is not a verdict. Only assertion-failure-at-preregistered-detector is a detection candidate; Astra '
@@ -49,6 +60,10 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def blob_id(data):
+    return hashlib.sha1(b'blob %d\0' % len(data) + data).hexdigest()
+
+
 def snapshot(paths):
     rows = []
     for path in paths:
@@ -64,8 +79,8 @@ def digest(rows, path):
     return next((row['sha256'] for row in rows if row['path'] == path), None)
 
 
-def git(*args, env=None):
-    result = subprocess.run(['git', *args], cwd=ROOT, env=env, capture_output=True)
+def git(*args, env=None, data=None):
+    result = subprocess.run(['git', *args], cwd=ROOT, env=env, input=data, capture_output=True)
     require(result.returncode == 0, 'git %s failed: %s' % (' '.join(args), result.stderr.decode('utf-8', 'replace').strip()[:300]))
     return result.stdout
 
@@ -92,16 +107,38 @@ def read_text(path):
 
 
 def baseline_identity():
-    # The harness paths are pure additions. Removing them from HEAD's tree in a private index must give the candidate tree
-    # exactly, which proves every product, test and CI file is the frozen candidate's without fetching its history.
+    # The harness paths are pure additions and the candidate Validate is the one replaced path: on this isolated branch
+    # validate.yml carries the manual mutation workflow. In a private index, removing the harness paths and restoring the
+    # pinned candidate Validate blob from its committed byte copy must give the candidate tree exactly, which proves every
+    # other product, test and CI file is the frozen candidate's without fetching its history.
+    replaced = MANIFEST['baseline']['replaced']
+    copy = git('cat-file', 'blob', 'HEAD:' + replaced['copy'])
+    require(blob_id(copy) == replaced['blob'] and sha256(copy) == replaced['sha256'], 'The committed candidate Validate copy is not the pinned blob')
+    head_entry = git('ls-tree', 'HEAD', '--', replaced['path']).decode('utf-8').split()
     with tempfile.TemporaryDirectory() as temporary:
         env = {**os.environ, 'GIT_INDEX_FILE': str(Path(temporary) / 'index')}
         git('read-tree', 'HEAD', env=env)
         harness = git('ls-files', '--', *MANIFEST['harness_paths'], env=env).decode('utf-8').split()
         git('rm', '-r', '--cached', '--quiet', '--', *MANIFEST['harness_paths'], env=env)
+        # A shallow checkout lacks the candidate blob; writing it from the verified copy yields the same object ID.
+        written = git('hash-object', '-w', '--no-filters', '--stdin', data=copy).decode('ascii').strip()
+        require(written == replaced['blob'], 'git wrote a different candidate Validate blob')
+        git('update-index', '--cacheinfo', '%s,%s,%s' % (replaced['mode'], written, replaced['path']), env=env)
         tree = git('write-tree', env=env).decode('ascii').strip()
     return {'head': git('rev-parse', 'HEAD').decode('ascii').strip(), 'head_tree': git('rev-parse', 'HEAD^{tree}').decode('ascii').strip(),
-            'tree_without_harness': tree, 'harness_files': harness}
+            'tree_without_harness': tree, 'harness_files': harness,
+            'replaced': {'path': replaced['path'], 'head_entry': head_entry[:3], 'candidate_blob': written, 'candidate_copy': replaced['copy']}}
+
+
+def baseline_problems(baseline):
+    replaced, problems = MANIFEST['baseline']['replaced'], []
+    if baseline['tree_without_harness'] != MANIFEST['baseline']['tree']:
+        problems.append('HEAD without the harness paths and with the pinned candidate Validate is not the frozen candidate tree')
+    if baseline['replaced']['head_entry'][:2] != [replaced['mode'], 'blob'] or baseline['replaced']['head_entry'][2:] == [replaced['blob']]:
+        problems.append('HEAD validate.yml must be the mutation workflow with the candidate mode, not the candidate blob')
+    if not all(path.startswith(tuple(p.rstrip('/') for p in MANIFEST['harness_paths'])) for path in baseline['harness_files']):
+        problems.append('a harness file lies outside the harness paths')
+    return problems
 
 
 def patched(variant, before):
@@ -136,6 +173,108 @@ def derived_profile(ci):
     return {**base, 'suites': ((MANIFEST['suite'], None, MANIFEST['unit']),)}
 
 
+def load_oracle(source):
+    # Only the named pure definitions run; imports, fixtures and the browser test class are never executed.
+    tree, body, seen = ast.parse(source), [], []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in ORACLE_FUNCTIONS:
+            body.append(node)
+            seen.append(node.name)
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            names = [target.id] if isinstance(target, ast.Name) else [e.id for e in target.elts if isinstance(e, ast.Name)] if isinstance(target, ast.Tuple) else []
+            if names and all(name in ORACLE_CONSTANTS for name in names):
+                body.append(node)
+                seen += names
+    require(sorted(seen) == sorted(ORACLE_FUNCTIONS + ORACLE_CONSTANTS), 'The candidate VOI oracle definitions changed: ' + ','.join(sorted(seen)))
+    namespace = {'math': math}
+    exec(compile(ast.Module(body=body, type_ignores=[]), ORACLE, 'exec'), namespace)
+    return namespace
+
+
+def zero_fill_band(oracle, probe, intercept, voi, record, orientation, mode):
+    # The candidate's own zero_fill expectation. A Raysum mean's full ray may end at voxel centres or voxel edges (the oracle's
+    # unclipped expectation takes both), so its band spans both extents; MIP and MinIP do not depend on the extent.
+    if mode != 'Raysum':
+        return [probe['zero_fill'], probe['zero_fill']]
+    axis = oracle['RAY'][orientation]
+    interval, _ = oracle['kept_segment'](probe['world'], axis, record)
+    values = [oracle['gray'](oracle['zero_fill_hu'](oracle['ray_segments'](probe['world'], axis, intercept, extend), interval, mode), voi)
+              for extend in (0, oracle['SPACING'][axis] / 2)]
+    require(round(values[0], 3) == probe['zero_fill'], 'The Raysum zero-fill band does not reproduce the probe expectation')
+    return [min(values), max(values)]
+
+
+def first_pixel_failure(oracle, behaviour, tolerance):
+    # N1's own order (test_mip_04): studies, cases, orientations, modes, then each probe in voi_pixels. The planes, camera and
+    # label checks of line 395 and of every earlier cell hold for these mutations, which keep the VOI planes.
+    plan, delta = oracle['voi_plan'](), oracle['VOI_DELTA']
+    for study, intercept, voi in oracle['VOI_STUDIES']:
+        for case in oracle['VOI_CASES']:
+            record = oracle['voi_record'](case)
+            for orientation in oracle['ORIENTATIONS']:
+                for mode in oracle['MODES']:
+                    for index, probe in enumerate(plan[(study, case['name'], orientation, mode)]):
+                        if behaviour[mode] == 'expected':
+                            continue
+                        band, wanted = zero_fill_band(oracle, probe, intercept, voi, record, orientation, mode), probe['expected']
+                        near = 0 if band[0] <= wanted <= band[1] else min(abs(wanted - value) for value in band)
+                        far = max(abs(wanted - value) for value in band)
+                        if far + tolerance[mode] <= delta:
+                            continue
+                        require(near - tolerance[mode] > delta, 'Ambiguous pixel prediction at %s %s %s %s probe %d' % (study, case['name'], orientation, mode, index))
+                        width = delta + tolerance[mode]
+                        return {'cell': [study, case['name'], orientation, mode],
+                                'label': '%s · %s · %s mm · %s · Final' % (mode, orientation, oracle['mm_text'](oracle['TOTAL']), oracle['voi_label'](record)),
+                                'probe_index': index, 'probe': probe, 'delta': delta, 'tolerance': tolerance[mode],
+                                'band': [round(band[0], 3), round(band[1], 3)], 'accept': [round(band[0] - width, 3), round(band[1] + width, 3)]}
+    return None
+
+
+def pixel_prediction(oracle, pixel):
+    # Every combination of the declared alternative behaviours must fail first at the same probe.
+    modes = oracle['MODES']
+    found = [first_pixel_failure(oracle, dict(zip(modes, choice)), MANIFEST['pixel_tolerance'])
+             for choice in itertools.product(*[pixel['behaviours'][mode] for mode in modes])]
+    require(found[0] is not None and all(item == found[0] for item in found), 'The declared pixel behaviours do not share one first failing probe')
+    return found[0]
+
+
+def semantic_problems(test_source):
+    oracle, problems = load_oracle(test_source), []
+    for name, variant in sorted(MANIFEST['variants'].items()):
+        if 'pixel' not in variant:
+            continue
+        predicted = pixel_prediction(oracle, variant['pixel'])
+        semantic = [detector.get('semantic') for detector in variant['detectors']]
+        if semantic != [predicted]:
+            problems.append(name + ' semantic detector differs from the candidate oracle prediction: ' + json.dumps(predicted, ensure_ascii=False))
+    return problems
+
+
+def semantic_facts(semantic, message):
+    match = PIXEL_MESSAGE.match(message or '')
+    if not match:
+        return False, {'failed': ['the voi_pixels assertion text']}
+    try:
+        label, kind, probe, actual = ast.literal_eval(match.group('detail'))
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return False, {'failed': ['a parsable voi_pixels detail']}
+    facts = {'label': list(label) if isinstance(label, tuple) else label, 'expected_kind': kind, 'probe': probe, 'actual': actual}
+    numeric = isinstance(actual, (int, float)) and not isinstance(actual, bool)
+    checks = {'cell and displayed Final label': isinstance(label, tuple) and list(label) == semantic['cell'] + [semantic['label']],
+              'expected oracle': kind == 'expected', 'same preregistered probe': probe == semantic['probe'],
+              'same delta': int(match.group('delta')) == semantic['delta'], 'numeric canvas gray': numeric}
+    if numeric and isinstance(probe, dict) and isinstance(probe.get('expected'), (int, float)):
+        low, high = semantic['band']
+        distance = 0 if low <= actual <= high else min(abs(actual - low), abs(actual - high))
+        facts['band_distance'] = round(distance, 3)
+        checks['within the preregistered mutant band'] = distance <= semantic['delta'] + semantic['tolerance']
+        checks['nearer the mutant band than the expected value'] = distance < abs(actual - probe['expected'])
+    facts['failed'] = [name for name, passed in checks.items() if not passed] + ([] if len(checks) == 7 else ['band comparison'])
+    return not facts['failed'], facts
+
+
 def detector_problems(test_source):
     lines, problems = test_source.splitlines(), []
     for name, variant in sorted(MANIFEST['variants'].items()):
@@ -151,6 +290,9 @@ def detector_problems(test_source):
                     problems.append('%s %s: line %d is not %s in %s' % (name, detector['id'], number, anchor[:40], function))
             if detector['frames'][0][0] != MANIFEST['cases'][variant['case']]:
                 problems.append('%s %s does not start in its case' % (name, detector['id']))
+    ids = [(name, detector['id']) for name, variant in MANIFEST['variants'].items() if variant.get('dispatchable') for detector in variant['detectors']]
+    if len({detector for _, detector in ids}) != len(ids):
+        problems.append('dispatchable variants share a detector id')
     return problems
 
 
@@ -191,25 +333,50 @@ def workflow_problems(text, validate):
     return ['workflow: ' + name for name, passed in checks.items() if not passed]
 
 
+def dispatch_problems(text):
+    sets, problems = MANIFEST['dispatch_sets'], []
+    matrix = {name: json.loads(values) for name, values in re.findall(r"inputs\.variants == '([A-Za-z0-9-]+)' && '(\[[^']*\])'", text)}
+    options = re.findall(r'^          - ([A-Za-z0-9-]+)$', text, re.M)
+    if matrix != sets or options != list(sets) or ('default: ' + next(iter(sets))) not in [line.strip() for line in text.splitlines()]:
+        problems.append('dispatch: workflow choices, default or matrix differ from the manifest dispatch sets')
+    listed = [variant for values in sets.values() for variant in values]
+    dispatchable = sorted(name for name, variant in MANIFEST['variants'].items() if variant.get('dispatchable') is True)
+    if sorted(listed) != dispatchable or len(set(listed)) != len(listed):
+        problems.append('dispatch: every dispatchable variant must be in exactly one set and no other variant in any')
+    return problems
+
+
 def check():
     baseline = baseline_identity()
-    require(baseline['tree_without_harness'] == MANIFEST['baseline']['tree'], 'HEAD without the harness paths is not the frozen candidate tree')
     blob = lambda path: git('cat-file', 'blob', 'HEAD:' + path)
+    require(not git('ls-tree', 'HEAD', '--', RETIRED_WORKFLOW), RETIRED_WORKFLOW + ' must not remain as a second entry')
     report = {'baseline': baseline, 'variants': {}}
     for name, variant in sorted(MANIFEST['variants'].items()):
         before = blob(variant['file'])
-        row = {'case': variant['case'], 'patch_sha256': sha256(blob(variant['patch'])), 'before_sha256': sha256(before),
-               'after_sha256': sha256(patched(variant, before))}
+        row = {'case': variant['case'], 'dispatchable': variant.get('dispatchable'), 'patch_sha256': sha256(blob(variant['patch'])),
+               'before_sha256': sha256(before), 'after_sha256': sha256(patched(variant, before))}
         require(all(row[key] == variant[key] for key in ('patch_sha256', 'before_sha256', 'after_sha256')), name + ' differs: ' + json.dumps(row))
         report['variants'][name] = row
-    problems = (detector_problems(blob('tests/e2e/test_volume_mip.py').decode('utf-8')) + wrapper_problems(blob(WRAPPER).decode('utf-8'))
-                + workflow_problems(blob(MANIFEST['workflow']).decode('utf-8'), blob('.github/workflows/validate.yml').decode('utf-8')))
+    workflow, test_source = blob(MANIFEST['workflow']).decode('utf-8'), blob(ORACLE).decode('utf-8')
+    problems = (baseline_problems(baseline) + detector_problems(test_source) + wrapper_problems(blob(WRAPPER).decode('utf-8'))
+                + workflow_problems(workflow, blob(MANIFEST['baseline']['replaced']['copy']).decode('utf-8')) + dispatch_problems(workflow)
+                + semantic_problems(test_source))
     require(not problems, '; '.join(problems))
     profile = derived_profile(measurement_ci())
     report['profile'] = {'name': MANIFEST['profile'], 'suites': profile['suites'], 'suite_timeout': profile['suite_timeout'],
                          'suite_budgets': profile['suite_budgets'], 'out': OUT.relative_to(ROOT).as_posix(), 'project_prefix': profile['project_prefix']}
+    report['pixel_predictions'] = {name: pixel_prediction(load_oracle(test_source), variant['pixel'])
+                                   for name, variant in sorted(MANIFEST['variants'].items()) if 'pixel' in variant}
     report['hashed_files_at_head'] = [{'path': path, 'sha256': sha256(blob(path))} for path in MANIFEST['hashed_files']]
-    print(json.dumps(report, indent=1))
+    print(json.dumps(report, indent=1, ensure_ascii=False))
+    return 0
+
+
+def predict():
+    source = (ROOT / ORACLE).read_bytes().replace(b'\r\n', b'\n').decode('utf-8')
+    oracle = load_oracle(source)
+    print(json.dumps({name: pixel_prediction(oracle, variant['pixel']) for name, variant in sorted(MANIFEST['variants'].items()) if 'pixel' in variant},
+                     indent=1, ensure_ascii=False))
     return 0
 
 
@@ -221,14 +388,19 @@ def guard(name):
     record = {'variant': name, 'case': variant['case'], 'meaning': variant['meaning'], 'status': 'refused', 'started_utc': utc_now(),
               'environment': environment}
     try:
+        require(variant.get('dispatchable') is True, '%s is not dispatchable (%s)' % (name, variant.get('status')))
         require(environment['GITHUB_ACTIONS'] == 'true' and environment['RUNNER_ENVIRONMENT'] == 'github-hosted', 'Requires a disposable GitHub-hosted runner')
         require(environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch', 'Manual dispatch only')
         require(environment['GITHUB_REF'] == MANIFEST['harness_ref'], 'Dispatch the prepared harness ref only')
+        require((environment['GITHUB_WORKFLOW_REF'] or '').endswith('/%s@%s' % (MANIFEST['workflow'], MANIFEST['harness_ref'])), 'Dispatch the prepared workflow entry only')
         # A rerun would be a second attempt of an experiment that already has a result: refuse before anything changes.
         require(environment['GITHUB_RUN_ATTEMPT'] == '1', 'Run attempt %s refused: each variant has exactly one attempt' % environment['GITHUB_RUN_ATTEMPT'])
         record['baseline'] = baseline = baseline_identity()
         require(baseline['head'] == environment['GITHUB_SHA'], 'The checkout is not the dispatched commit')
-        require(baseline['tree_without_harness'] == MANIFEST['baseline']['tree'], 'The checkout without harness paths is not the frozen candidate tree')
+        workflow = git('cat-file', 'blob', 'HEAD:' + MANIFEST['workflow']).decode('utf-8')
+        problems = (baseline_problems(baseline) + workflow_problems(workflow, git('cat-file', 'blob', 'HEAD:' + MANIFEST['baseline']['replaced']['copy']).decode('utf-8'))
+                    + dispatch_problems(workflow))
+        require(not problems, '; '.join(problems))
         require(not git('status', '--porcelain', '--untracked-files=no'), 'Tracked files differ from the checkout before the mutation')
         patch = ROOT / variant['patch']
         record['patch'] = {'path': variant['patch'], 'sha256': sha256(patch.read_bytes())}
@@ -408,8 +580,27 @@ def observe(name, inputs):
     for detector in variant['detectors']:
         if failures[0]['frames'] == [[function, number] for function, number, _ in detector['frames']] and (
                 detector['message'] is None or re.search(detector['message'], failures[0]['message'], re.M)):
+            if detector.get('semantic'):
+                # A pixel detector also needs the requested Final display, the same preregistered probe and a canvas value in
+                # the mutant's predicted band; a rollback to a kept display or any other deviation is not this detection.
+                matched, semantic = semantic_facts(detector['semantic'], failures[0]['message'])
+                facts.setdefault('semantic', {})[detector['id']] = semantic
+                if not matched:
+                    continue
             return result('assertion-failure-at-preregistered-detector', {'id': detector['id'], 'proves': detector['proves']})
     return result('assertion-failure-outside-preregistered-detectors')
+
+
+def detector_source(name):
+    # The exact candidate test lines at every preregistered frame, from the checkout the native run used.
+    path = ROOT / ORACLE
+    try:
+        data = path.read_bytes()
+    except OSError as error:
+        return {'error': type(error).__name__}
+    lines = data.decode('utf-8', 'replace').splitlines()
+    numbers = sorted({number for detector in MANIFEST['variants'][name]['detectors'] for _, number, _ in detector['frames']})
+    return {'path': ORACLE, 'sha256': sha256(data), 'lines': {str(number): lines[number - 1] if number <= len(lines) else None for number in numbers}}
 
 
 def copy_gate_state(target):
@@ -439,7 +630,9 @@ def classify(name):
               'stages': read_json(OUT / 'results.json'), 'suite_log': suite_log}
     outcome = observe(name, inputs)
     outcome.update(variant=name, case=variant['case'], meaning=variant['meaning'], recorded_utc=utc_now(),
-                   run={key: os.environ.get(key) for key in ('GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB')},
+                   run={key: os.environ.get(key) for key in ('GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB', 'GITHUB_WORKFLOW_REF')},
+                   patch={'path': variant['patch'], 'sha256': variant['patch_sha256'], 'after_sha256': variant['after_sha256']},
+                   detector_source=detector_source(name), pinned_shader=MANIFEST['pinned_shader'] if 'pixel' in variant else None,
                    raw={'suite_log': (OUT / (SUITE + '.log')).relative_to(ROOT).as_posix(),
                         'suite_log_sha256': sha256((OUT / (SUITE + '.log')).read_bytes()) if suite_log is not None else None,
                         'results_sha256': sha256((OUT / 'results.json').read_bytes()) if (OUT / 'results.json').is_file() else None},
@@ -456,11 +649,13 @@ def classify(name):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('command', choices=('check', 'guard', 'select', 'native', 'classify'))
+    parser.add_argument('command', choices=('check', 'predict', 'guard', 'select', 'native', 'classify'))
     parser.add_argument('--variant', choices=sorted(MANIFEST['variants']))
     args = parser.parse_args(argv)
     if args.command == 'check':
         return check()
+    if args.command == 'predict':
+        return predict()
     if not args.variant:
         parser.error('--variant is required')
     return {'guard': guard, 'select': select, 'native': native, 'classify': classify}[args.command](args.variant)
