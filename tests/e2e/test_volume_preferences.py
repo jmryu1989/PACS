@@ -1,6 +1,6 @@
 # coding: utf-8
 """TEST-MPR-PREFERENCES: visible settings, native input and retained work."""
-import json,os,sys,unittest
+import json,os,sys,unittest,uuid
 from pathlib import Path
 from playwright.sync_api import expect
 from test_volume_sync import VolumeSyncE2E
@@ -140,6 +140,45 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   original=v.evaluate('()=>{window.prefTools=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(projectionVP.id,projectionVP.renderingEngineId);prefTools.setToolActive("Zoom",{bindings:[{mouseButton:2,modifierKey:16},{numTouchPoints:2}]});return prefTools.toolOptions}')
   self.mouse(v);bindings=v.evaluate('()=>prefTools.getToolOptions("Zoom").bindings');self.assertIn({'mouseButton':2,'modifierKey':16},bindings);self.assertIn({'numTouchPoints':2},bindings)
   v.evaluate('()=>window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))');expect(v.locator('.kin-mpr-configured')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),original)
+ def test_properties_18_passive_tool_bound_by_apply_mouse_restores_after_hanging_protocol_retirement(self):
+  # IF-A06. Choosing Zoom on the native toolbar leaves WindowLevel Passive; Apply Mouse then binds it to the middle button.
+  # Retiring the Hanging Protocol planes must hand the reused native tool group back exactly as the toolbar left it, and the
+  # rebind on the next MPR layout must not take a partly restored group as its original. The raw states, the setter calls
+  # between them and any element-disabled listener error print before the checks, so one hosted run keeps every observation.
+  from test_hanging_protocol import HangingProtocolE2E
+  from workspace_roaming_support import cleanup_workspace
+  hp=HangingProtocolE2E('test_hp_08_merged_cell_layout_round_trips_through_the_account');self.addCleanup(cleanup_workspace,self.stack,'HangingProtocolPreference')
+  current=HangingProtocolE2E.ct(self,'PREF-HP-'+uuid.uuid4().hex[:12],'current','20260801');self.seed_report(current);sources=self.originals()
+  work=self.login();self.select(work,current);work.locator('#findings').fill('KEEP HP BINDING REPORT')
+  v=self.launch(work.context.new_page(),[current]);self.ready(v);hp.import_rules(v,hp.mpr_library())
+  disabled=[];v.on('console',lambda m:disabled.append(m.text) if m.type=='error' and 'ELEMENT_DISABLED' in m.text else None)
+  def opened():
+   hp.apply(v,'Applied');hp.rendered_planes(v,3);grid=hp.planes(v)
+   self.assertEqual(4,len(grid));self.assertEqual([None,[]],[grid[3]['type'],grid[3]['sets']]);self.assertEqual(['orthographic']*3,[c['type'] for c in grid[:3]])
+   self.choose_volume(v,v,0);self.properties(v);return [c['id'] for c in self.cells(v)[:3]],grid[0]['group']
+  state=lambda:v.evaluate('()=>({registered:cornerstoneTools.ToolGroupManager.getToolGroup(bindingGroup.id)===bindingGroup,tools:structuredClone(bindingGroup.toolOptions),calls:bindingCalls.splice(0)})')
+  def retire():
+   v.select_option('#kin-hp-rule','55555555-5555-4555-8555-555555555555');hp.apply(v,'Applied')
+   v.wait_for_function("()=>{const cells=[...services.viewportGridService.getState().viewports.values()];return cells.length===1&&services.cornerstoneViewportService.getCornerstoneViewport(cells[0].viewportId)?.type==='stack'}",timeout=45000)
+   # The panel releases the retired planes on one of its 250 ms refreshes; several pass before the group is read.
+   expect(v.locator('#kin-mpr-preferences')).to_be_hidden();v.wait_for_timeout(1100);return state()
+  ids,group=opened()
+  # A pass-through record of every mode change on the native group; each call still reaches the pinned setter unchanged.
+  v.evaluate("""id=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id),g=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(view.id,view.renderingEngineId);window.bindingGroup=g;window.bindingCalls=[];
+   for(const name of ['setToolActive','setToolPassive','setToolEnabled','setToolDisabled']){const setter=g[name];g[name]=function(...args){bindingCalls.push([name,...structuredClone(args)]);return setter.apply(this,args)}}}""",ids[0])
+  v.locator('#root button[data-cy="Zoom"]').click();v.wait_for_function('()=>bindingGroup.getActivePrimaryMouseButtonTool()==="Zoom"')
+  original=state();self.mouse(v,left='Pan',middle='WindowLevel',right='Zoom');applied=state()
+  first=retire()
+  v.select_option('#kin-hp-rule',hp.RULE_ID);ids,_=opened()
+  # The new layout's own rebind of the applied left button, not a left binding the retirement already left behind.
+  v.wait_for_function('()=>bindingCalls.some(c=>c[0]==="setToolActive"&&c[1]==="Pan"&&c[2]?.bindings?.[0]?.mouseButton===1)',timeout=45000)
+  rebound=state();rebound['sameGroup']=v.evaluate('id=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id);return cornerstoneTools.ToolGroupManager.getToolGroupForViewport(view.id,view.renderingEngineId)===bindingGroup}',ids[0])
+  second=retire()
+  print('IF_A06_BINDING_PROOF '+json.dumps({'group':group,'original':original,'applied':applied,'first_retirement':first,'rebound':rebound,'second_retirement':second,'element_disabled_errors':disabled},sort_keys=True),flush=True)
+  with self.subTest('Hanging Protocol retirement restores the toolbar choice'):self.assertEqual(original['tools'],first['tools'])
+  with self.subTest('a rebind and a second retirement still restore the toolbar choice'):self.assertEqual(original['tools'],second['tools'])
+  with self.subTest('retirement raises no CORNERSTONE_ELEMENT_DISABLED listener error'):self.assertEqual([],disabled)
+  expect(work.locator('#findings')).to_have_value('KEEP HP BINDING REPORT');self.assertEqual(self.originals(),sources)
 
 
 # Declared order without inherited sync/display cases; the loader applies unittest's own -k matching,

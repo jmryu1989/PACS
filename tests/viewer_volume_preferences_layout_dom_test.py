@@ -28,17 +28,21 @@ let alive=true,allowedFlag=true,layout=0,currentViews=[];const calls={active:0},
 const native=()=>({WindowLevel:{mode:'Active',bindings:[{mouseButton:1}]},Pan:{mode:'Active',bindings:[{mouseButton:4}]},
   Zoom:{mode:'Active',bindings:[{mouseButton:2},{mouseButton:2,modifierKey:16},{numTouchPoints:2}]},StackScroll:{mode:'Active',bindings:[{mouseButton:524288}]},Length:{mode:'Passive',bindings:[]}});
 const sameBinding=(a,b)=>a.mouseButton===b.mouseButton&&a.modifierKey===b.modifierKey&&a.numTouchPoints===b.numTouchPoints;
-// Active adds bindings to the tool's existing ones; Passive removes all or only the listed ones.
+// The pinned @cornerstonejs/tools ToolGroup setters (orthancteam/orthanc:24.12.0): Active appends new bindings to the tool's
+// existing ones. Passive removes all, the listed or by default only the primary binding, and a tool that keeps any binding
+// stays Active. Enabled and Disabled drop every binding.
 // failBinding fails one activation of that tool on that button after it was applied, as a partial native failure.
 const group={toolOptions:native(),failBinding:null,
   getToolInstance:name=>name in group.toolOptions?{}:undefined,getToolOptions:name=>group.toolOptions[name],
-  setToolActive(name,{bindings=[]}={}){calls.active++;const previous=group.toolOptions[name]?.bindings||[];
-    group.toolOptions[name]={mode:'Active',bindings:[...previous.filter(b=>!bindings.some(x=>sameBinding(b,x))),...bindings.map(b=>({...b}))]};
+  setToolActive(name,{bindings=[]}={}){calls.active++;const merged=[];
+    for(const b of [...(group.toolOptions[name]?.bindings||[]),...bindings])if((b.mouseButton!==undefined||b.numTouchPoints!==undefined)&&!merged.some(x=>sameBinding(x,b)))merged.push(b);
+    group.toolOptions[name]={bindings:merged,mode:'Active'};
     const fail=group.failBinding;if(fail&&fail.name===name&&bindings.some(b=>b.mouseButton===fail.mouseButton&&b.modifierKey===undefined)){group.failBinding=null;throw Error('REBIND FAILURE');}},
-  setToolPassive(name,{removeAllBindings}={}){const previous=group.toolOptions[name]?.bindings||[];
-    group.toolOptions[name]={mode:'Passive',bindings:removeAllBindings===true?[]:Array.isArray(removeAllBindings)?previous.filter(b=>!removeAllBindings.some(x=>sameBinding(b,x))):previous};},
-  setToolEnabled(name){group.toolOptions[name]={...group.toolOptions[name],mode:'Enabled'};},
-  setToolDisabled(name){group.toolOptions[name]={...group.toolOptions[name],mode:'Disabled'};}};
+  setToolPassive(name,options){const remove=options?.removeAllBindings,match=Array.isArray(remove)?remove:[{mouseButton:1}];
+    const bindings=(group.toolOptions[name]?.bindings||[]).filter(b=>remove!==true&&!match.some(x=>sameBinding(b,x)));
+    group.toolOptions[name]={bindings,mode:bindings.length?'Active':'Passive'};},
+  setToolEnabled(name){group.toolOptions[name]={bindings:[],mode:'Enabled'};},
+  setToolDisabled(name){group.toolOptions[name]={bindings:[],mode:'Disabled'};}};
 function makeViews(tag){
   return ['axial','sagittal','coronal'].map(name=>{const wrapper=document.createElement('div'),element=document.createElement('div');wrapper.className='viewport-wrapper';wrapper.append(element);document.querySelector('#grid').append(wrapper);
     return {id:name+'-'+tag,renderingEngineId:'engine',element,getZoom:()=>1,getCanvas:()=>({clientWidth:300,clientHeight:200}),canvasToWorld:([x,y])=>[x,y,0],worldToCanvas:([x,y])=>[x,y],getCamera:()=>({focalPoint:[0,0,0],viewPlaneNormal:[0,0,1]})};});
@@ -160,6 +164,29 @@ class ViewerVolumePreferencesLayoutDOMTest(unittest.TestCase):
             # The panel stays attached and usable for an explicit retry.
             expect(page.get_by_role('button', name='Apply Mouse', exact=True)).to_be_enabled()
             self.assertEqual(3, page.locator('.kin-mpr-zoom').count())
+            self.assertEqual([], errors)
+        finally:
+            page.close()
+
+    def test_toolbar_passive_tool_bound_to_the_middle_button_restores_after_retirement_and_rebind(self):
+        # IF-A06. The native toolbar leaves WindowLevel Passive without a binding and Apply Mouse binds it to the middle
+        # button. Retiring the layout, the next layout's rebind and teardown must each return the reused group to the
+        # toolbar's state instead of leaving WindowLevel on the middle button beside Pan.
+        page, errors = self.open_page()
+        try:
+            page.evaluate("()=>{group.setToolPassive('WindowLevel');group.setToolActive('Zoom',{bindings:[{mouseButton:1}]})}")
+            original = page.evaluate("structuredClone(group.toolOptions)")
+            self.assertEqual({'bindings': [], 'mode': 'Passive'}, original['WindowLevel'])
+            mouse = {'left': 'Pan', 'middle': 'WindowLevel', 'right': 'Zoom'}
+            self.apply_mouse(page, mouse)
+            page.evaluate("()=>{for(const v of currentViews)v.element.parentElement.remove();currentViews=[];tick(2)}")
+            with self.subTest('retirement restores the toolbar choice'):
+                self.assertEqual(original, page.evaluate("group.toolOptions"))
+            page.evaluate("()=>{layout++;currentViews=makeViews('layout-'+layout);tick()}")
+            self.assertEqual(bound(mouse), page.evaluate("mouseState().bound"))
+            page.evaluate("preferences.dispose()")
+            with self.subTest('the rebind does not adopt a partly restored original'):
+                self.assertEqual(original, page.evaluate("group.toolOptions"))
             self.assertEqual([], errors)
         finally:
             page.close()

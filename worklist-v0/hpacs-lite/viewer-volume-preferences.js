@@ -25,6 +25,8 @@ window.kinCreateVolumePreferences=function({target,permitted,alive,owner,service
     if(!s?.applied||!s.original||!equal(s.group.toolOptions,s.applied))return;
     for(const [name,before] of Object.entries(s.original))try{
       if(before.mode==='Active'){s.group.setToolPassive(name,{removeAllBindings:true});s.group.setToolActive(name,{bindings:before.bindings});}
+      // Native setToolPassive(name) removes only the primary binding and keeps a tool with any other binding Active.
+      else if(before.mode==='Passive')s.group.setToolPassive(name,{removeAllBindings:true});
       else s.group['setTool'+before.mode](name);
     }catch(_){}
   }
