@@ -159,6 +159,17 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
     bands.add(value);count+=1
    self.assertGreaterEqual(len(bands),2,f'plane {index} should cross source bands');self.assertGreaterEqual(count,6);counts.append(count)
   return counts
+ # The pinned Viewport.setCamera re-derives slab clipping planes only when the focal point leaves the plane or viewUp
+ # changes. Every plane must still clip +/- its live normal about its focal point at its own half thickness.
+ CLIP_PLANES="()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),m=v.getActors()[0].actor.getMapper(),c=v.getCamera();return {id,half:v.getSlabThickness(),blend:m.getBlendMode(),normal:Array.from(c.viewPlaneNormal),focalPoint:Array.from(c.focalPoint),planes:m.getClippingPlanes().map(p=>({normal:Array.from(p.getNormal()),origin:Array.from(p.getOrigin())}))}})"
+ def assert_clip_planes(self,page,label):
+  import numpy as np
+  state=page.evaluate(self.CLIP_PLANES);message=f'{label} clipping planes: '+json.dumps(state)
+  for s in state:
+   n,f=np.array(s['normal']),np.array(s['focalPoint']);self.assertEqual(len(s['planes']),2,message)
+   np.testing.assert_allclose(s['planes'][0]['normal'],n,atol=1e-6,rtol=0,err_msg=message);np.testing.assert_allclose(s['planes'][1]['normal'],-n,atol=1e-6,rtol=0,err_msg=message)
+   np.testing.assert_allclose(s['planes'][0]['origin'],f-s['half']*n,atol=1e-5,rtol=0,err_msg=message);np.testing.assert_allclose(s['planes'][1]['origin'],f+s['half']*n,atol=1e-5,rtol=0,err_msg=message)
+  return state
  CANVAS_STATS="(id,c)=>{const s={id,width:c.width,height:c.height,clientWidth:c.clientWidth,clientHeight:c.clientHeight,dpr:devicePixelRatio,min:null,max:null,nonzero:0};if(!c.width||!c.height)return s;const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data;for(let k=0;k<d.length;k+=4){const x=d[k];if(s.min===null||x<s.min)s.min=x;if(s.max===null||x>s.max)s.max=x;if(x)s.nonzero++}return s}"
  # Linked MPR planes share one revision counter over native CAMERA_MODIFIED and IMAGE_RENDERED, so a plane
  # is ready only when a rendered frame came after its latest camera change, never after a fixed time.
@@ -185,6 +196,7 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
    with path.open('x',encoding='utf-8') as stream:json.dump(data,stream,indent=1,default=str)
    return str(path)
   folder=Path(__file__).resolve().parent/'artifacts'/'volume-mpr-ci';stem=f'band-pixels-{self._testMethodName}-read{self.band_reads}-plane{index}'
+  record['clip_planes']=attempt('clip_planes',lambda:page.evaluate(self.CLIP_PLANES))
   record['render_proof']=attempt('render_proof',lambda:page.evaluate('()=>window.kinRenderProof?JSON.parse(JSON.stringify({...kinRenderProof,readAt:performance.now()})):null'))
   attempt('folder',lambda:folder.mkdir(parents=True,exist_ok=True))
   attempt('original_record',lambda:save(folder/(stem+'-original.json'),record))
@@ -304,7 +316,7 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   x,y=S-pivot,E-pivot;x-=n*(x@n);y-=n*(y@n);angle=math.atan2(float(np.cross(x,y)@n),float(x@y));self.assertGreater(abs(math.degrees(angle)),25)
   k=np.array([[0,-n[2],n[1]],[n[2],0,-n[0]],[-n[1],n[0],0]]);rotation=np.eye(3)*math.cos(angle)+(1-math.cos(angle))*np.outer(n,n)+math.sin(angle)*k
   # Native render evidence starts before the real press, so every linked camera change of this drag is counted.
-  linked=[ids[i] for i in others];v.evaluate(self.RENDER_PROOF,linked)
+  linked=[ids[i] for i in others];v.evaluate(self.RENDER_PROOF,linked);clip_before=self.assert_clip_planes(v,'before press')
   v.mouse.move(*start.tolist());v.mouse.down();v.wait_for_function('()=>nativeRotate.down!==undefined');self.assertEqual(v.evaluate('()=>nativeRotate.down'),2)
   # A slow multi-event leg then one large event: the result must depend on pointer positions only.
   v.mouse.move(*middle.tolist(),steps=12);v.mouse.move(*end.tolist(),steps=1);v.mouse.up();v.wait_for_function('()=>nativeRotate.up')
@@ -326,12 +338,14 @@ class VolumeCrosshairE2E(VolumeOrientationE2E):
   for item in self.lines(v)[index]:
    for point in item['world']:self.assertLess(min(residual(np.array(point),moved[i]) for i in others),.001)
   expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('시작 MPR 화면')
+  # The planes are read after the real drag; the pixel oracle below still guards the displayed image itself.
+  clip_after=self.assert_clip_planes(v,'after drag');self.assertEqual([(s['half'],s['blend']) for s in clip_after],[(s['half'],s['blend']) for s in clip_before])
   identity=[1,0,0,0,1,0];counts=self.band_pixels(v,identity,skip={index})
   self.save_volume(v);saved=[cell['camera'] for cell in self.get_volume_job(a)['snapshot']['cells']];self.cameras_close(saved,moved,1e-6)
   fresh=self.login();self.launch(fresh,[a]);self.ready(fresh);fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=45000)
-  self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertAlmostEqual(residual(E,self.cameras(fresh)[owner]),expected_residual,delta=.05);reopened=self.band_pixels(fresh,identity,skip={index})
+  self.cameras_close(self.cameras(fresh),saved,1e-6);self.assertAlmostEqual(residual(E,self.cameras(fresh)[owner]),expected_residual,delta=.05);clip_restored=self.assert_clip_planes(fresh,'restored job');reopened=self.band_pixels(fresh,identity,skip={index})
   expect(p.locator('#findings')).to_have_value('KEEP NATIVE ROTATE REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(errors,[])
-  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened,'render_proof':render_proof}),flush=True)
+  print('NATIVE_ROTATE_HANDLE',json.dumps({'active':active,'owner':ids[owner],'degrees':math.degrees(angle),'drag_events':len(drags),'pointer_residual_mm':residual(E,moved[owner]),'expected_residual_mm':expected_residual,'pivot':pivot.tolist(),'samples':counts,'reopened_samples':reopened,'render_proof':render_proof,'clip_planes':{'before':clip_before,'after':clip_after,'restored':clip_restored}}),flush=True)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeCrosshairE2E(n) for n in loader.getTestCaseNames(VolumeCrosshairE2E) if n.startswith('test_crosshair_'))
 if __name__=='__main__':unittest.main(verbosity=2)

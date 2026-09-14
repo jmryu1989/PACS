@@ -81,9 +81,10 @@ window.kinCreateVolumeCrosshair=function({target,permitted,alive,host}){
         const angle=-handedness*model.rotationDegrees(center,previous,point);if(!angle)return;
         // Per-event rounding to 0.01 radians loses slow motion and compounds
         // angle error. Apply the actual pointer angle to both linked planes.
+        // A plane whose focal point is the pivot turns in place, so its slab planes are re-derived explicitly.
         const next=window.KinVolumeOrientation.rotate(t.cameras,active.getCamera().viewPlaneNormal,angle);
-        changed=true;t.views.forEach((v,i)=>{if(v!==active){const {position,focalPoint,viewUp,viewPlaneNormal}=next[i];v.setCamera({position,focalPoint,viewUp,viewPlaneNormal});v.render();}});
-      }catch(error){const now=managed();if(changed&&now?.group===t.group&&now.selection===t.selection)for(let i=0;i<t.views.length;i++)try{const {position,focalPoint,viewUp,viewPlaneNormal}=t.cameras[i];t.views[i].setCamera({position,focalPoint,viewUp,viewPlaneNormal});t.views[i].render();}catch(_){}announce(error.message||'MPR 회전 방향을 확인하지 못했습니다.');}
+        changed=true;t.views.forEach((v,i)=>{if(v!==active){const {position,focalPoint,viewUp,viewPlaneNormal}=next[i];v.setCamera({position,focalPoint,viewUp,viewPlaneNormal});window.kinReapplyVolumeSlab(v);v.render();}});
+      }catch(error){const now=managed();if(changed&&now?.group===t.group&&now.selection===t.selection)for(let i=0;i<t.views.length;i++)try{const {position,focalPoint,viewUp,viewPlaneNormal}=t.cameras[i];t.views[i].setCamera({position,focalPoint,viewUp,viewPlaneNormal});window.kinReapplyVolumeSlab(t.views[i]);t.views[i].render();}catch(_){}announce(error.message||'MPR 회전 방향을 확인하지 못했습니다.');}
     });
     let wheelRemainder=0,wheelTarget='';
     wheel.onchange=()=>{wheelRemainder=0;wheelTarget='';};
