@@ -54,7 +54,7 @@ export class ViewerJobService {
     // frame cells alone carries no volume at all, so the whole-volume verification runs on
     // the reference it actually has and the per-cell verification below always follows.
     let verified = snapshot;
-    if ([4,5,6,7,8,10].includes(snapshot.version) || snapshot.version === 9 && snapshot.volume) {
+    if ([4,5,6,7,8,10,11].includes(snapshot.version) || snapshot.version === 9 && snapshot.volume) {
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
       try {
         const before = await this.orthanc.viewerSeriesManifest(snapshot.volume.series, controller.signal);

@@ -41,10 +41,11 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
 // which is what a merged screen is; without it every cell fills its own grid position.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path}={}){
   // The curved tool's own capture rules are proved in viewer_volume_curved_dom_test.py; here it
   // is the capability shape this module consumes: capture() on a target, dirty() without one.
-  context.window.kinMprCurved=curved;
+  // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape.
+  context.window.kinMprCurved=curved;context.window.kinMprPath=path;
   const viewports=new Map(),lookup=new Map();
   cells.forEach((spec,index)=>{
     const id='vp-'+index,frame=spec==='frame',named=typeof spec==='string'&&!frame?spec:null;
@@ -154,6 +155,39 @@ test('a curve is refused beside a batch or marks and outside the three-plane lay
  assert.throws(()=>world(2,2,['axial','frame','coronal',null],{curved:dirty}).capture(),/곡면 MPR은 3평면/);
  assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,curved:dirty}).capture(),/곡면 MPR은 3평면/);
  assert.equal(world(2,2,['axial','frame','coronal',null],{curved:{capture:()=>{throw Error('must not be asked');},dirty:()=>false}}).capture().version,8);
+});
+
+test('a final 3D path on the three-plane layout saves as version 11 beside the exact version 4 cells',()=>{
+ const route={schema:1,algorithm:'kin-path-1',points:[[0,0,0],[1,0,1]],position:{column:0}};
+ const tool=(value,dirty=false,calls=[])=>({capture:readOnly=>{calls.push(readOnly);return value;},dirty:()=>dirty});
+ for(const [rows,cols] of [[1,3],[3,1]]){
+  const calls=[],value=world(rows,cols,PLANES,{path:tool(route,false,calls)}).capture(true);
+  assert.equal(value.version,11);assert.deepEqual(value.path,route);assert.deepEqual(calls,[true]);
+  assert.deepEqual(Object.keys(value).sort(),['active','cells','cols','path','rows','studies','version','volume']);
+  const plain=world(rows,cols,PLANES).capture();delete value.path;value.version=4;assert.deepEqual(value,plain);
+ }
+ // No path, or no tool at all, leaves every established version untouched.
+ assert.equal(world(1,3,PLANES,{path:tool(null)}).capture().version,4);
+ assert.equal(world(1,3,PLANES,{path:undefined}).capture().version,4);
+ const curve={schema:1,kind:'curved'};
+ assert.equal(world(1,3,PLANES,{path:tool(null),curved:tool(curve)}).capture().version,10);
+ // A capture refusal (adding points, preview, failed, navigating) is the save refusal.
+ assert.throws(()=>world(1,3,PLANES,{path:{capture:()=>{throw Error('3D Path 펼친 표시의 최종 결과 계산이 끝난 뒤 저장하세요.');},dirty:()=>true}}).capture(),/최종 결과/);
+});
+
+test('a 3D path is refused beside a curve, a batch or marks and outside the three-plane layout',()=>{
+ const route={schema:1,algorithm:'kin-path-1'},tool={capture:()=>route,dirty:()=>false},dirty={capture:()=>{throw Error('no target');},dirty:()=>true};
+ const batch={cell:{},offset:0,interval:1,count:2,reverse:false};
+ const marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
+ assert.throws(()=>world(1,3,PLANES,{path:tool,curved:{capture:()=>({schema:1,kind:'curved'}),dirty:()=>false}}).capture(),/곡면 MPR과 3D Path는 한 작업에 하나만/);
+ assert.throws(()=>world(1,3,PLANES,{path:tool,batch}).capture(),/3D Path는 단면 묶음·3D 표식과 함께/);
+ assert.throws(()=>world(3,1,PLANES,{path:tool,marks}).capture(),/3D Path는 단면 묶음·3D 표식과 함께/);
+ // A quiet marks tool (no marks, default settings) is not a conflict.
+ assert.equal(world(1,3,PLANES,{path:tool,marks:{version:1,visible:true,sync:true,marks:[]}}).capture().version,11);
+ assert.throws(()=>world(2,2,['axial','sagittal','coronal',null],{path:tool}).capture(),/3D Path는 3평면/);
+ assert.throws(()=>world(2,2,['axial','frame','coronal',null],{path:dirty}).capture(),/3D Path는 3평면/);
+ assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,path:dirty}).capture(),/3D Path는 3평면/);
+ assert.equal(world(2,2,['axial','frame','coronal',null],{path:{capture:()=>{throw Error('must not be asked');},dirty:()=>false}}).capture().version,8);
 });
 
 test('a mixed plane and frame layout saves as version 8 and names every cell kind',()=>{

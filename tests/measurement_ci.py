@@ -138,6 +138,20 @@ PROFILES = {
                    ('e2e/test_volume_wheel.py', None, 'ci-slab-wheel'),
                    ('e2e/test_volume_average_affine.py', None, 'ci-slab-average-affine')),
     },
+    'volume-path': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-path-ci',
+        'project_prefix': 'kin-path-ci-',
+        # A third MPR suite group: the manual 3D path suite and the double-oblique orientation
+        # suite no profile ran before. volume-mpr and volume-slab keep their suites and caps.
+        # Caps are about twice the native history (curved four cases 46s on CI main, orientation
+        # about 30s per case): (420+35)+(300+35) = 790s of the shared 1500s deadline.
+        'suite_timeout': 540,
+        'suite_budgets': {'ci-path-native': 420, 'ci-mpr-orientation': 300},
+        # Each module's load_tests is the allowlist: declared test_path_* and test_orientation_*
+        # only. Passing no class keeps inherited base-class cases out.
+        'suites': (('e2e/test_volume_path.py', None, 'ci-path-native'),
+                   ('e2e/test_volume_orientation.py', None, 'ci-mpr-orientation')),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

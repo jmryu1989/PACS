@@ -2185,6 +2185,8 @@ function kinCreateViewerTechNote() {
         typeof window.kinCreateVolumeMarks==='function'?Promise.resolve():load('viewer-volume-marks.js'),
         window.KinVolumeCurved?Promise.resolve():load('volume-curved.js'),
         typeof window.kinCreateVolumeCurved==='function'?Promise.resolve():load('viewer-volume-curved.js'),
+        window.KinVolumePath?Promise.resolve():load('volume-path.js'),
+        typeof window.kinCreateVolumePath==='function'?Promise.resolve():load('viewer-volume-path.js'),
         window.KinVolumePreferences?Promise.resolve():load('volume-preferences.js'),
         typeof window.kinCreateVolumePreferences==='function'?Promise.resolve():load('viewer-volume-preferences.js'),
         window.KinVolumeCrosshair?Promise.resolve():load('volume-crosshair.js'),

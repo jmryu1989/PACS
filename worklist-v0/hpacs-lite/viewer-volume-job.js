@@ -54,6 +54,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
   function resolve(value) {
     if(value.version===6&&!window.kinMprMarks)throw Error('MPR 3D 표식 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     if(value.version===10&&!window.kinMprCurved)throw Error('곡면 MPR 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
+    if(value.version===11&&!window.kinMprPath)throw Error('3D Path 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
     if([8,9].includes(value.version))for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
@@ -138,18 +139,29 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // questions: its final state where it can see one, whether work would be lost where not.
     const curved=named?null:window.kinMprCurved?.capture(readOnly)||null;
     const curving=named?!!window.kinMprCurved?.dirty?.():!!curved;
+    // A manual 3D path binds to the same three-plane target and is asked the same two questions.
+    const path=named?null:window.kinMprPath?.capture(readOnly)||null;
+    const pathing=named?!!window.kinMprPath?.dirty?.():!!path;
     // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
     // user's own state visible instead of writing a v7 snapshot that quietly lost it.
     if(!legacy){
       if(batch)throw Error('단면 묶음은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 묶음을 해제하거나 3평면 배치에서 저장하세요.');
       if(annotated)throw Error('MPR 3D 표식은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 표식을 지우거나 3평면 배치에서 저장하세요.');
       if(curving)throw Error('곡면 MPR은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. Clear Curve로 곡선을 지우거나 3평면 배치에서 저장하세요.');
+      if(pathing)throw Error('3D Path는 3평면 1×3·3×1 배치에서 저장할 수 있습니다. Clear Path로 경로를 지우거나 3평면 배치에서 저장하세요.');
       // A merged screen saves the rectangles it stands in, beside the cells that stand in
       // them. A vacancy keeps its rectangle, which is why geometry is not a cell field. The
       // cells the merge absorbed are not on screen and are not saved as anything.
       if(merged)return JSON.parse(JSON.stringify({version:9,studies,rows,cols,
         rects:merged.map(([x,y,width,height])=>({x,y,width,height})),active,volume:reference||null,cells}));
       return JSON.parse(JSON.stringify({version:mixed?8:7,studies,rows,cols,active,volume:reference,cells}));
+    }
+    // Version 11 is the version 4 snapshot plus one 3D path, under the same rule as a curve; a
+    // curve and a path are two reconstructions and one Job holds only one of them.
+    if(path){
+      if(curved)throw Error('곡면 MPR과 3D Path는 한 작업에 하나만 저장할 수 있습니다. 하나를 지운 뒤 저장하세요.');
+      if(batch||annotated)throw Error('3D Path는 단면 묶음·3D 표식과 함께 저장할 수 없습니다. 하나를 해제하거나 지운 뒤 저장하세요.');
+      return JSON.parse(JSON.stringify({version:11,studies,rows,cols,active,volume:reference,cells,path}));
     }
     // Version 10 is the version 4 snapshot plus the curve. It holds no batch and no marks, so
     // either one beside a curve is refused rather than silently left out of the Job.
@@ -286,6 +298,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // The saved curve is recomputed from the restored original inside the same deadline; a
     // failure throws into the caller's rollback instead of reporting a restore without it.
     if(value.version===10)await window.kinMprCurved.restore(value.curved,current,deadline);else window.kinMprCurved?.clearForJob();
+    if(value.version===11)await window.kinMprPath.restore(value.path,current,deadline);else window.kinMprPath?.clearForJob();
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};

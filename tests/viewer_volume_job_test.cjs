@@ -264,6 +264,72 @@ test('a curved MPR job must match the original frame of reference, finest spacin
  // Descending originals keep the same patient-coordinate curve valid.
  const reversed=structuredClone(curvedJob);reversed.volume.sops.reverse();assert.match(verifyVolumeReference(reversed,[...tags].reverse(),'SYNTHETIC'),/^[a-f0-9]{64}$/);
 });
+// Version 11 is the exact version 4 three-plane snapshot plus one manual 3D path (kin-path-1).
+const pathModel=require('/app/dist/viewer-volume-path.js');
+const unitVector=v=>{const n=Math.hypot(...v);return v.map(x=>x/n);};
+// A saved normal is only valid perpendicular to the start tangent, which this test derives itself
+// from the written Catmull-Rom and arc-length rule (not from the server plan under test).
+function pathOf(points,{column=3,spacing=1}={}){
+ const p={schema:1,algorithm:'kin-path-1',frameOfReference:'2.25.6',coordinates:'LPS_mm',cell:1,points,interpolation:'catmull-rom-uniform-16',
+  frame:{method:'double-reflection-rmf',initialNormal:[0,0,1]},unfold:{angle:37.5},position:{column},
+  output:{spacing,halfHeight:2,sampling:'trilinear',edge:'half-voxel-clamp',outside:'nan',axis:'arc-length'},
+  display:{voiRange:{lower:-1000,upper:1000},VOILUTFunction:'LINEAR',invert:false}};
+ // The tangent is read without the frame check (column 0 of the resampled centres).
+ const line=[];const n=points.length,at=i=>points[Math.max(0,Math.min(n-1,i))];
+ for(let i=0;i<n-1;i++){const p0=at(i-1),p1=at(i),p2=at(i+1),p3=at(i+2);for(let j=0;j<16;j++){const t=j/16;line.push([0,1,2].map(k=>.5*(2*p1[k]+(-p0[k]+p2[k])*t+(2*p0[k]-5*p1[k]+4*p2[k]-p3[k])*t*t+(-p0[k]+3*p1[k]-3*p2[k]+p3[k])*t*t*t)));}}
+ let s=0,i=1;while(i<line.length-1&&s+Math.hypot(...line[i].map((x,k)=>x-line[i-1][k]))<spacing){s+=Math.hypot(...line[i].map((x,k)=>x-line[i-1][k]));i++;}
+ const a=line[i-1],b=line[i],f=(spacing-s)/Math.hypot(...b.map((x,k)=>x-a[k])),c1=a.map((x,k)=>x+(b[k]-x)*f),t0=unitVector(c1.map((x,k)=>x-points[0][k]));
+ p.frame.initialNormal=unitVector([0,0,1].map((x,k)=>x-t0[2]*t0[k]));return p;
+}
+const route=pathOf([[2,4,0],[16,20,1],[30,16,2],[20,6,1.5]]);
+const pathJob={...structuredClone(snapshot),version:11,path:route};
+test('a 3D path job is accepted only with a valid kin-path-1 path on the exact three-plane snapshot',()=>{
+ assert.equal(command(pathJob).snapshot.version,11);assert.match(verifyVolumeReference(pathJob,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const plan=pathModel.pathPlan(route);assert.ok(plan.columns>10);
+ for(const [label,change] of [
+   ['unknown algorithm',s=>s.path.algorithm='kin-path-2'],['unknown schema',s=>s.path.schema=2],['interpolation',s=>s.path.interpolation='linear'],['frame method',s=>s.path.frame.method='frenet'],
+   ['extra key',s=>s.path.kind='curved'],['missing frame',s=>delete s.path.frame],['extra frame key',s=>s.path.frame.twist=0],
+   ['non-unit normal',s=>s.path.frame.initialNormal=s.path.frame.initialNormal.map(x=>x*1.01)],['normal along the start tangent',s=>s.path.frame.initialNormal=plan.tangents[0]],
+   ['normal 1e-3 off perpendicular',s=>s.path.frame.initialNormal=unitVector(s.path.frame.initialNormal.map((x,k)=>x+2e-3*plan.tangents[0][k]))],
+   ['angle 360',s=>s.path.unfold.angle=360],['angle below 0',s=>s.path.unfold.angle=-.5],['angle finer than 0.01',s=>s.path.unfold.angle=12.345],
+   ['column past the path',s=>s.path.position.column=plan.columns],['fractional column',s=>s.path.position.column=1.5],['negative column',s=>s.path.position.column=-1],
+   ['duplicate point',s=>s.path.points[1]=s.path.points[0].slice()],['one point',s=>s.path.points=[s.path.points[0]]],['65 points',s=>s.path.points=Array.from({length:65},(_,i)=>[i*.4,i%2,1])],
+   ['arc over 1000 mm',s=>s.path.points=[[0,0,1],[1001,0,1]]],['arc shorter than spacing',s=>s.path.points=[[2,4,1],[2.5,4,1]]],
+   ['reversal',s=>{s.path.points=[[2,4,1],[28,4,1],[3,4,1]];s.path.frame.initialNormal=[0,0,1];}],
+   ['SIGMOID display',s=>s.path.display.VOILUTFunction='SIGMOID'],['half height 151',s=>s.path.output.halfHeight=151],['nearest edge',s=>s.path.output.edge='nearest'],
+   ['sample limit',s=>{s.path.output.spacing=.05;s.path.output.halfHeight=150;s.path.points=[[0,0,1],[200,0,1]];s.path.frame.initialNormal=[0,0,1];s.path.position.column=0;}],
+   ['bad frame of reference',s=>s.path.frameOfReference='x'],['cell 3',s=>s.path.cell=3],
+   ['missing path',s=>delete s.path],['path with marks',s=>s.marks={version:1,visible:true,sync:true,marks:[]}],['path with batch',s=>s.batch=null],['path with a curve',s=>s.curved=structuredClone(curve)],
+   ['vacancy',s=>s.cells[1]=null],['2x2 layout',s=>{s.rows=2;s.cols=2;s.cells.push(structuredClone(cell));}],['orientation key',s=>s.cells[0].orientation='axial'],['forged digest',s=>s.volume.sourceDigest='f'.repeat(64)]]){
+  const s=structuredClone(pathJob);change(s);assert.throws(()=>command(s),e=>e.getStatus?.()===400,label);
+ }
+ // No other version admits a path key, and a curved job with a path beside its curve is refused.
+ for(const version of [4,5,6,7,8,9,10]){const s=structuredClone(pathJob);s.version=version;rejected(()=>command(s));}
+ const both=structuredClone(curvedJob);both.path=structuredClone(route);rejected(()=>command(both));
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:pathJob}))));
+ // The established shapes still parse exactly as before beside it.
+ assert.equal(command(snapshot).snapshot.version,4);assert.equal(command(curvedJob).snapshot.version,10);
+});
+test('a 3D path job must match the original frame of reference, finest spacing and voxel bounds',()=>{
+ for(const [label,change] of [
+   // Each forged path keeps a normal perpendicular to its own start tangent, so only the binding fails.
+   ['foreign frame of reference',s=>s.path.frameOfReference='2.25.7'],['coarser spacing',s=>s.path=pathOf(s.path.points,{spacing:1.5,column:0})],['finer spacing than voxels',s=>s.path=pathOf(s.path.points,{spacing:.5})],
+   ['point outside volume',s=>s.path=pathOf([...s.path.points.slice(0,3),[20,6,2.6]])],['point outside in x',s=>s.path=pathOf([s.path.points[0],s.path.points[1],[31.6,16,2],s.path.points[3]])]]){
+  const s=structuredClone(pathJob);change(s);
+  assert.equal(command(s).snapshot.version,11,label+' is syntactically valid');
+  assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label);
+ }
+ const edge=structuredClone(pathJob);edge.path.points[2]=[31.5,16,2.5];edge.path=pathOf(edge.path.points);assert.match(verifyVolumeReference(edge,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const reversed=structuredClone(pathJob);reversed.volume.sops.reverse();assert.match(verifyVolumeReference(reversed,[...tags].reverse(),'SYNTHETIC'),/^[a-f0-9]{64}$/);
+});
+test('server 3D path plan and transported frame equal the viewer model parity constants',()=>{
+ const spec={...structuredClone(route),points:[[5,6,12.5],[20,15.75,40],[30,8,67.5],[12,25,70]],frame:{method:'double-reflection-rmf',initialNormal:[-0.15582558294899496,0.94703549761046,-0.28078845055364055]},
+  position:{column:0},output:{...route.output,spacing:.5,halfHeight:3}};
+ const plan=pathModel.pathPlan(spec);
+ assert.ok(Math.abs(plan.length-89.41385010736313)<=1e-9);assert.equal(plan.columns,179);assert.equal(plan.rows,13);
+ for(const [column,want] of [[100,[0.1401263211339599,0.9324108380483229,0.33312856859700046]],[178,[0.5081280875808327,0.5820371816388471,-0.6348531844460997]]])
+  want.forEach((x,k)=>assert.ok(Math.abs(plan.normals[column][k]-x)<=1e-9,'N'+column));
+});
 test('server arc length and output grid equal the viewer model parity constants',()=>{
  const spec={...structuredClone(curve),plane:{origin:[16,15.75,40],normal:[0,1,0],viewUp:[0,0,1]},points:[[5,15.75,12.5],[20,15.75,40],[30,15.75,67.5]],output:{...curve.output,spacing:.5,halfHeight:3}};
  const curved=curvedModel.curvedPlan(spec),free=curvedModel.curvedPlan({...spec,kind:'freehand',interpolation:'linear'});

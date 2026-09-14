@@ -29,7 +29,7 @@ window.kinViewerJobs = function (services, model) {
     const controls = text('div', ''), status = text('p', '계정 확인 중…'), list = text('div', ''); status.id = 'kin-viewer-jobs-status'; status.setAttribute('role', 'status');
     parent.insertBefore(panel, parent.children[1]);
     let ended = false, busy = false, me = null, serial = 0, editSerial = 0, pending = null, editRow = null, applying = false, channel, lastAuth = 0, checking = false;
-    const workspaceState = () => ({ busy: !ended && (busy || applying), dirty: !ended && !!(pending || editRow || title.value || description.value || window.kinMprMarks?.dirty?.() || window.kinMprCurved?.dirty?.()) });
+    const workspaceState = () => ({ busy: !ended && (busy || applying), dirty: !ended && !!(pending || editRow || title.value || description.value || window.kinMprMarks?.dirty?.() || window.kinMprCurved?.dirty?.() || window.kinMprPath?.dirty?.()) });
     window.kinViewerJobWorkspaceState = workspaceState;
     // This panel also runs in the separate named viewer window, where the
     // worklist's embedded-frame guard cannot protect an unfinished title,
@@ -63,6 +63,8 @@ window.kinViewerJobs = function (services, model) {
         if (shape === 9) throw new Error('칸을 병합한 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         // A curved MPR is a derived display on an arc-length axis; it has no print page yet.
         if (shape === 10) throw new Error('Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        // A 3D path and its unfolded display are derived displays too; saving and restoring only.
+        if (shape === 11) throw new Error('3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
         const assets=[['kinViewerJobPrint','viewer-job-print.js'],['kinViewerEditorLink','viewer-editor-link.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
@@ -171,10 +173,11 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && ![7,8,9,10].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if (!row.hidden && ![7,8,9,10,11].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
         // A merged layout may hold no reconstructed cell at all, so it is not labelled as one.
         if(row.snapshotVersion===9)text('p','Merged Cell Layout · 출력 미지원',item);
         else if(row.snapshotVersion===10)text('p','Curved MPR · 출력 미지원 · 곡선을 따라 펼친 재구성 표시 작업',item);
+        else if(row.snapshotVersion===11)text('p','3D Path · 출력 미지원 · 경로 평면과 경로를 따라 펼친 재구성 표시 작업',item);
         else if([4,5,6,7,8].includes(row.snapshotVersion))text('p',(row.snapshotVersion===8?'MPR Mixed Layout · 출력 미지원':row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
         if (row.authorSub === me?.sub) {
           button(item, 'Edit Details', () => { title.value = row.title; description.value = row.description; editSerial++; editRow = row; pending = null; status.textContent = '편집 후 변경 저장을 누르세요.'; }, true);
@@ -208,7 +211,7 @@ window.kinViewerJobs = function (services, model) {
       throw new Error('원본 프레임 로딩에 실패했습니다.');
     }
     async function apply(value, ticket) {
-      if([4,5,6,7,8,9,10].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
+      if([4,5,6,7,8,9,10,11].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const current = () => live() && serial === ticket;
@@ -230,6 +233,7 @@ window.kinViewerJobs = function (services, model) {
         if (action === 'restore') {
           if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요.');
           if (window.kinMprCurved?.dirty?.()) throw new Error('미저장 곡면 MPR 곡선이 있어 복원하지 않았습니다. 곡선을 저장하거나 Clear Curve로 지운 뒤 복원하세요.');
+          if (window.kinMprPath?.dirty?.()) throw new Error('미저장 3D Path가 있어 복원하지 않았습니다. 경로를 저장하거나 Clear Path로 지운 뒤 복원하세요.');
           const job = await api(path + '/' + row.id); await authenticate();
           // On a fresh kinJob document, native hanging-protocol initialization
           // can change the grid while the saved job is fetched. User interaction
@@ -237,6 +241,7 @@ window.kinViewerJobs = function (services, model) {
           if (!live() || ticket !== serial || !initialRestore && before !== signature()) throw new Error('영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
           if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식이 있어 복원하지 않았습니다.');
           if (window.kinMprCurved?.dirty?.()) throw new Error('미저장 곡면 MPR 곡선이 있어 복원하지 않았습니다. 곡선을 저장하거나 Clear Curve로 지운 뒤 복원하세요.');
+          if (window.kinMprPath?.dirty?.()) throw new Error('미저장 3D Path가 있어 복원하지 않았습니다. 경로를 저장하거나 Clear Path로 지운 뒤 복원하세요.');
           // Restore Grid exists only in the cell merge module's memory, keyed by viewports a
           // restored Job never reuses. A restore that failed after its layout landed would roll
           // back onto fresh viewports and silently discard that record with the cells it hid, so
@@ -264,7 +269,7 @@ window.kinViewerJobs = function (services, model) {
           // A missing MPR asset is not a shape problem, so that reason is kept as it is.
           let previous; try { previous = capture(); }
           catch (e) { throw new Error(volumeJobs ? '현재 화면을 저장 형식으로 읽을 수 없어 복원하지 않았습니다. 복원할 수 있는 배치를 먼저 여세요.' : e.message); }
-          if([4,5,6,7,8,9,10].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
+          if([4,5,6,7,8,9,10,11].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
           try { await apply(job.snapshot, ticket); }
           catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
           finally { applying = false; }
@@ -274,6 +279,7 @@ window.kinViewerJobs = function (services, model) {
           status.textContent = job.snapshot.version === 9
             ? '병합한 칸 배치를 복원했습니다. 병합 전 격자는 저장된 적이 없어 되돌릴 수 없으며, 다른 배치를 적용하거나 다른 저장 작업을 복원하세요.'
             : job.snapshot.version === 10 ? 'Curved MPR 작업을 복원했습니다. 곡선을 따라 펼친 재구성 표시이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
+            : job.snapshot.version === 11 ? '3D Path 작업을 복원했습니다. 경로 수직·평행 평면과 펼친 표시는 재구성이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
             : [4,5,6,7,8].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
@@ -283,7 +289,7 @@ window.kinViewerJobs = function (services, model) {
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
             if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true); if (action === 'saveAnnotations') {
-              if([4,5,6,7,8,9,10].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5,6,7,8,9,10,11].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
             pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: title.value, description: description.value, snapshot }), url: path };
@@ -297,6 +303,7 @@ window.kinViewerJobs = function (services, model) {
           const sent=JSON.parse(pending.body);await api(pending.url, { method: 'POST', body: pending.body });
           if(sent.snapshot?.volume)window.kinMprMarks?.saved(sent.snapshot.marks||{version:1,visible:true,sync:true,marks:[]},sent.snapshot.volume);
           if(sent.snapshot?.volume)window.kinMprCurved?.saved(sent.snapshot.curved||null,sent.snapshot.volume);
+          if(sent.snapshot?.volume)window.kinMprPath?.saved(sent.snapshot.path||null,sent.snapshot.volume);
           pending = editRow = null;
           if (editSerial === edit && !['hide', 'retry'].includes(action)) { title.value = ''; description.value = ''; }
           await load(); status.textContent = '비교 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' + (action === 'saveAnnotations' ? ' 저장된 주석 이력도 함께 고정했습니다.' : '');
