@@ -450,11 +450,12 @@ class MeasurementCiTests(unittest.TestCase):
             ('e2e/test_volume_projection.py', None, 'ci-slab-projection'),
             ('e2e/test_volume_wheel.py', None, 'ci-slab-wheel'),
             ('e2e/test_volume_average_affine.py', None, 'ci-slab-average-affine'),
+            ('e2e/test_volume_mip.py', None, 'ci-slab-mip-viewer'),
         ))
         self.assertEqual(profile['out'].name, 'volume-slab-ci')
         self.assertEqual(profile['project_prefix'], 'kin-slab-ci-')
         self.assertEqual(profile['suite_timeout'], 540)
-        budgets = {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240}
+        budgets = {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240}
         self.assertEqual(profile['suite_budgets'], budgets)
         # Registering the slab suites must not widen or cut the first MPR group.
         self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
@@ -477,9 +478,10 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual([command[command.index('--module')+1] for command in commands],
                          ['tests/e2e/test_volume_projection.py',
                           'tests/e2e/test_volume_wheel.py',
-                          'tests/e2e/test_volume_average_affine.py'])
+                          'tests/e2e/test_volume_average_affine.py',
+                          'tests/e2e/test_volume_mip.py'])
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
-                         ['ci-slab-projection', 'ci-slab-wheel', 'ci-slab-average-affine'])
+                         ['ci-slab-projection', 'ci-slab-wheel', 'ci-slab-average-affine', 'ci-slab-mip-viewer'])
         # Every suite at full cap plus its reserved margin fits the shared deadline with
         # stack time left, and no cap may exceed the profile maximum.
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
@@ -496,7 +498,8 @@ class MeasurementCiTests(unittest.TestCase):
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_projection.py', 'VolumeProjectionE2E', 'test_projection_', 8),
                 ('e2e/test_volume_wheel.py', 'VolumeWheelE2E', 'test_wheel_', 4),
-                ('e2e/test_volume_average_affine.py', 'VolumeAverageAffineE2E', 'test_average_affine_', 2)):
+                ('e2e/test_volume_average_affine.py', 'VolumeAverageAffineE2E', 'test_average_affine_', 2),
+                ('e2e/test_volume_mip.py', 'VolumeMipE2E', 'test_mip_', 3)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)
@@ -527,6 +530,7 @@ class MeasurementCiTests(unittest.TestCase):
                          '--file tests/e2e/test_volume_projection.py',
                          '--file tests/e2e/test_volume_wheel.py',
                          '--file tests/e2e/test_volume_average_affine.py',
+                         '--file tests/e2e/test_volume_mip.py',
                          'tests/e2e/artifacts/volume-slab-ci/',
                          'if: always()', 'if-no-files-found: error',
                          'retention-days: 7']:
@@ -538,6 +542,11 @@ class MeasurementCiTests(unittest.TestCase):
         mpr = text.split('\n  volume-mpr:\n')[1].split('\n  volume-slab:\n')[0]
         self.assertNotIn('--profile volume-slab', mpr)
         self.assertEqual(text.count('--profile volume-mpr'), 1)
+        # The MIP Viewer model is listed and executed in the existing pure model gate.
+        pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
+        self.assertIn('--file worklist-v0/hpacs-lite/volume-mip.js', pure)
+        self.assertEqual(pure.count('tests/volume_mip_test.cjs'), 2)
+        self.assertIn('tests/volume_mip_test.cjs', pure.rsplit(' --test ', 1)[1])
 
     def test_volume_path_profile_is_exact_bounded_and_isolated(self):
         profile = ci.PROFILES['volume-path']
@@ -554,7 +563,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
                          {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420})
         self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
-                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240})
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
         modules = {row[0] for row in profile['suites']}
         for name in ('volume-mpr', 'volume-slab', 'volume-rendering'):
             self.assertFalse(modules & {row[0] for row in ci.PROFILES[name]['suites']}, name)
@@ -661,7 +670,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
                          {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420})
         self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
-                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240})
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
         self.assertEqual(ci.PROFILES['volume-path']['suite_budgets'],
                          {'ci-path-native': 420, 'ci-mpr-orientation': 300})
         modules = {row[0] for row in profile['suites']}
@@ -775,7 +784,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
                          {'ci-mpr-crosshair': 400, 'ci-mpr-display': 400, 'ci-mpr-curved': 420})
         self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
-                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240})
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
         self.assertEqual(ci.PROFILES['volume-path']['suite_budgets'],
                          {'ci-path-native': 420, 'ci-mpr-orientation': 300})
         self.assertEqual(ci.PROFILES['volume-batch']['suite_budgets'],

@@ -128,15 +128,19 @@ PROFILES = {
         # caps stay as they are. Caps here are about twice the local native history
         # (projection ~26s and wheel ~31s per case): (420+35)+(300+35)+(240+35) = 1065s
         # leaves 435s for a stack whose measured setup and cleanup total about 76s.
+        # The independent MIP Viewer reuses this slab projection path, so its three known-voxel
+        # cases join here at the average-affine cap: (240+35) more is 1340s, still leaving 160s
+        # for that stack and within the 150s reserve the profile test requires.
         'suite_timeout': 540,
         'suite_budgets': {'ci-slab-projection': 420, 'ci-slab-wheel': 300,
-                          'ci-slab-average-affine': 240},
+                          'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240},
         # Each module's load_tests is the allowlist: declared test_projection_*,
-        # test_wheel_* and test_average_affine_* only. Passing no class keeps inherited
-        # base-class cases out.
+        # test_wheel_*, test_average_affine_* and test_mip_* only. Passing no class keeps
+        # inherited base-class cases out.
         'suites': (('e2e/test_volume_projection.py', None, 'ci-slab-projection'),
                    ('e2e/test_volume_wheel.py', None, 'ci-slab-wheel'),
-                   ('e2e/test_volume_average_affine.py', None, 'ci-slab-average-affine')),
+                   ('e2e/test_volume_average_affine.py', None, 'ci-slab-average-affine'),
+                   ('e2e/test_volume_mip.py', None, 'ci-slab-mip-viewer')),
     },
     'volume-path': {
         'out': ROOT / 'tests/e2e/artifacts/volume-path-ci',

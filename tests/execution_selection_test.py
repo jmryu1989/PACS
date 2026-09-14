@@ -181,7 +181,12 @@ class ExecutionSelectionTests(unittest.TestCase):
                     ('e2e/test_volume_average_affine.py', 'VolumeAverageAffineE2E',
                      'test_average_affine_', 'ci-slab-average-affine', 2,
                      {'test_average_affine_01_negative_constant',
-                      'test_average_affine_02_positive_constant'})]
+                      'test_average_affine_02_positive_constant'}),
+                    ('e2e/test_volume_mip.py', 'VolumeMipE2E',
+                     'test_mip_', 'ci-slab-mip-viewer', 3,
+                     {'test_mip_01_known_voxels_modes_orientations_and_mpr_slab_parity',
+                      'test_mip_02_order_delay_failure_capability_and_busy_gates',
+                      'test_mip_03_lifecycle_identity_teardown_reentry_and_high_values'})]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
