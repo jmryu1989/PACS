@@ -126,19 +126,48 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   };
   // Placed before the VR button so existing callers that open VR as the panel's last button keep that target.
   const mipButton=document.createElement('button');mipButton.textContent='Open MIP Viewer';vrButton.before(mipButton);let mip=null,mipLoading=false;
+  // Open MIP Viewer and a MIP Job restore load the same scripts; a restore bounds every load by its Job deadline.
+  const loadMip=async(deadline,failure)=>{
+    for(const [name,file] of [['KinVolumeMip','volume-mip.js'],['KinVolumeMipJob','volume-mip-job.js'],['kinCreateVolumeMip','viewer-volume-mip.js']])if(!window[name])await new Promise((resolve,reject)=>{
+      const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
+      const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);script.onload=script.onerror=null;script.remove();error?reject(error):resolve();};
+      const timer=setTimeout(()=>finish(Error(failure)),Math.max(0,Math.min(30000,deadline-Date.now())));
+      script.onload=()=>finish(window[name]?null:Error('MIP Viewer 도구를 확인하지 못했습니다.'));script.onerror=()=>finish(Error(failure));document.head.append(script);
+    });
+  };
+  const createMip=()=>mip||=window.kinCreateVolumeMip({target,permitted:()=>!busy&&permitted(),alive,owner,notice:message=>{if(alive())status.textContent=message;}});
   mipButton.onclick=async()=>{
     if(mipLoading||!alive()||busy||!permitted()||workspaceBusy())return;mipLoading=true;mipButton.disabled=true;
     try{
-      for(const [name,file] of [['KinVolumeMip','volume-mip.js'],['kinCreateVolumeMip','viewer-volume-mip.js']])if(!window[name])await new Promise((resolve,reject)=>{
-        const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
-        const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);script.onload=script.onerror=null;script.remove();error?reject(error):resolve();};
-        const timer=setTimeout(()=>finish(Error('MIP Viewer 도구를 불러오지 못했습니다. 다시 누르세요.')),30000);
-        script.onload=()=>finish(window[name]?null:Error('MIP Viewer 도구를 확인하지 못했습니다.'));script.onerror=()=>finish(Error('MIP Viewer 도구를 불러오지 못했습니다. 다시 누르세요.'));document.head.append(script);
-      });
-      if(!alive())return;mip||=window.kinCreateVolumeMip({target,permitted:()=>!busy&&permitted(),alive,owner,notice:message=>{if(alive())status.textContent=message;}});await mip.open();
+      await loadMip(Infinity,'MIP Viewer 도구를 불러오지 못했습니다. 다시 누르세요.');
+      if(!alive())return;await createMip().open();
     }catch(error){if(alive())status.textContent=error.message;}finally{mipLoading=false;mipButton.disabled=!alive();}
   };
+  // The MIP Viewer Job capability viewer-volume-job.js consumes, in the kinMprPath shape: the confirmed block or null, whether
+  // closing would lose work, the plane it opened on, the committed receipt, a restore inside the Job deadline, and the close
+  // every other Job restore performs. A MIP Viewer that was never opened has nothing to capture, lose or close.
+  const mipJob={
+    capture:readOnly=>mip?mip.job.capture(readOnly):null,
+    viewport:()=>mip?mip.job.viewport():null,
+    dirty:()=>{try{return !!mip&&mip.job.dirty();}catch(_){return true;}},
+    saved:(value,volume)=>{try{mip?.job.saved(value,volume);}catch(_){}},
+    cancels:event=>{try{return !!mip&&mip.job.cancels(event);}catch(_){return false;}},
+    async restore(value,current=()=>true,deadline=Date.now()+60000,viewportId){
+      try{
+        if(!alive())throw Error('MIP Viewer 계정이 변경되어 MIP 작업을 복원하지 않았습니다.');
+        await loadMip(deadline,'MIP Viewer 도구를 불러오지 못해 MIP 작업을 복원하지 않았습니다.');
+        if(!alive()||!current())throw Error('화면이 변경되어 MIP 작업 복원을 중단했습니다.');
+        await createMip().job.restore(value,{current,deadline,viewportId});
+      }catch(error){
+        // The Job rollback follows every MIP restore failure, so the reason says so even when it names no screen itself.
+        const message=error?.message||'MIP 작업을 복원하지 못했습니다.';
+        throw Error(/이전 화면/.test(message)?message:message+' 이전 화면으로 되돌립니다.');
+      }
+    },
+    clearForJob(){mip?.job.clearForJob();},
+  };
+  window.kinVolumeMipJob=mipJob;
   const cineTarget=(v,verify=false)=>{if(verify&&(busy||!permitted()))throw Error('다른 작업을 마친 뒤 MPR을 재생하세요.');const t=target(verify);if(!t||t.source.viewportId!==v?.id||!t.views.includes(v))return null;return {key:JSON.stringify([t.group,t.selection]),contentKey:JSON.stringify([t.group,v.id]),allowed:!busy&&permitted(),volume:cornerstone.cache.getVolume(v.getVolumeId())};};
   window.kinGetVolumeCineTarget=cineTarget;
-  return {dispose(){ended=true;path?.dispose();curved?.dispose();vr?.dispose();mip?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
+  return {dispose(){ended=true;path?.dispose();curved?.dispose();vr?.dispose();if(window.kinVolumeMipJob===mipJob)delete window.kinVolumeMipJob;mip?.dispose();if(window.kinGetVolumeCineTarget===cineTarget){delete window.kinGetVolumeCineTarget;window.dispatchEvent(new Event('kin-volume-cine-target-ended'));}batch?.dispose();marks?.dispose();progressive?.dispose();preferences?.dispose();synchronization?.dispose();display?.dispose();crosshair?.dispose();clearInterval(timer);panel.remove();for(const name of ['pointerdown','wheel','keydown'])document.removeEventListener(name,guard,true);}};
 };

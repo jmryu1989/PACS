@@ -41,11 +41,12 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
 // which is what a merged screen is; without it every cell fills its own grid position.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path,mip}={}){
   // The curved tool's own capture rules are proved in viewer_volume_curved_dom_test.py; here it
   // is the capability shape this module consumes: capture() on a target, dirty() without one.
-  // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape.
-  context.window.kinMprCurved=curved;context.window.kinMprPath=path;
+  // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape, and so is
+  // the MIP Viewer Job capability (its block rules are proved in volume_mip_job_test.cjs).
+  context.window.kinMprCurved=curved;context.window.kinMprPath=path;context.window.kinVolumeMipJob=mip;
   const viewports=new Map(),lookup=new Map();
   cells.forEach((spec,index)=>{
     const id='vp-'+index,frame=spec==='frame',named=typeof spec==='string'&&!frame?spec:null;
@@ -337,4 +338,115 @@ test('without the frame-cell helper a mixed screen refuses instead of dropping t
   assert.throws(()=>world(2,2,['axial','frame','coronal',null],{stack}).capture(),/저장 도구를 불러오지 못했습니다/);
  // A plane-only layout on the same grid is unaffected by the missing helper.
  assert.equal(world(2,2,['axial','sagittal','coronal',null],{stack:null}).capture().version,7);
+});
+
+// Version 12 (A11-VOI-2 P2): the MIP Viewer Job capability supplies its confirmed block, a dirty answer and the viewport it
+// was opened on; apply() awaits its restore last, on the restored active plane, inside the same deadline.
+const mipBlock=(over={})=>({schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'1.2.9',mode:'Raysum',orientation:'Coronal',
+  display:{voiRange:{lower:-1000,upper:1000},interpolationType:1},voiSlab:{center:[1,2,3],normal:[0,0,1],pivot:[1,2,3],thickness:4},...over});
+const mipTool=(value,{dirty=false,viewport='vp-0',calls=[]}={})=>({capture:readOnly=>{calls.push(readOnly);return value;},dirty:()=>dirty,viewport:()=>viewport});
+
+test('a confirmed MIP Viewer display on the three-plane layout saves as version 12 beside the exact version 4 cells',()=>{
+ for(const [rows,cols] of [[1,3],[3,1]]){
+  const calls=[],block=mipBlock(),value=world(rows,cols,PLANES,{mip:mipTool(block,{calls})}).capture(true);
+  assert.equal(value.version,12);assert.deepEqual(value.mip,block);assert.deepEqual(calls,[true]);
+  assert.deepEqual(Object.keys(value).sort(),['active','cells','cols','mip','rows','studies','version','volume']);
+  const plain=world(rows,cols,PLANES).capture();delete value.mip;value.version=4;assert.deepEqual(value,plain);
+ }
+ // A closed viewer or no capability at all leaves every established version untouched; a VOI-off display is still version 12.
+ assert.equal(world(1,3,PLANES,{mip:mipTool(null)}).capture().version,4);
+ assert.equal(world(1,3,PLANES,{mip:undefined}).capture().version,4);
+ assert.equal(world(1,3,PLANES,{mip:mipTool(mipBlock({voiSlab:null}))}).capture().version,12);
+ // The capability's own refusal (Rendering, Original, geometry) is the save refusal.
+ assert.throws(()=>world(1,3,PLANES,{mip:{capture:()=>{throw Error('최종 표시를 확인한 뒤 MIP 작업을 저장하세요.');},dirty:()=>true,viewport:()=>'vp-0'}}).capture(),/최종 표시를 확인한 뒤/);
+});
+
+test('a MIP display is refused beside a curve, path, batch or marks, off the active plane, with another W/L and off the three-plane layout',()=>{
+ const tool=over=>mipTool(mipBlock(),over),dirty={capture:()=>{throw Error('no target');},dirty:()=>true,viewport:()=>null};
+ const batch={cell:{},offset:0,interval:1,count:2,reverse:false},marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),curved:{capture:()=>({schema:1,kind:'curved'}),dirty:()=>false}}).capture(),/MIP 작업은 곡면 MPR·3D Path와 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),path:{capture:()=>({schema:1,algorithm:'kin-path-1'}),dirty:()=>false}}).capture(),/MIP 작업은 곡면 MPR·3D Path와 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),batch}).capture(),/MIP 작업은 단면 묶음·3D 표식과 함께/);
+ assert.throws(()=>world(3,1,PLANES,{mip:tool(),marks}).capture(),/MIP 작업은 단면 묶음·3D 표식과 함께/);
+ assert.equal(world(1,3,PLANES,{mip:tool(),marks:{version:1,visible:true,sync:true,marks:[]}}).capture().version,12,'a quiet marks tool is not a conflict');
+ assert.throws(()=>world(1,3,PLANES,{mip:tool({viewport:'vp-1'})}).capture(),/활성 평면이 아니어서/);
+ assert.equal(world(1,3,PLANES,{active:1,mip:tool({viewport:'vp-1'})}).capture().active,1);
+ for(const display of [{voiRange:{lower:-1000+1e-9,upper:1000},interpolationType:1},{voiRange:{lower:-1000,upper:999},interpolationType:1},{voiRange:{lower:-1000,upper:1000},interpolationType:0}])
+  assert.throws(()=>world(1,3,PLANES,{mip:mipTool(mipBlock({display}))}).capture(),/밝기 범위·보간이 활성 MPR 평면과 달라/,JSON.stringify(display));
+ assert.throws(()=>world(2,2,['axial','sagittal','coronal',null],{mip:tool()}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+ assert.throws(()=>world(2,2,['axial','frame','coronal',null],{mip:dirty}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+ assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,mip:dirty}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+ assert.equal(world(2,2,['axial','frame','coronal',null],{mip:{capture:()=>{throw Error('must not be asked');},dirty:()=>false}}).capture().version,8);
+});
+
+// apply() over a fake native grid: setLayout builds the requested viewports, each plane echoes the camera, properties,
+// blend and slab it is given, and the order of layout, active plane and tool calls is logged.
+function restoreWorld(tools={}){
+ const log=[],viewports=new Map(),lookup=new Map();let active=null;
+ context.requestAnimationFrame=callback=>setTimeout(callback,0);context.devicePixelRatio=1;
+ Object.assign(context.window,{kinVolumeBatchState:undefined,cornerstoneTools:undefined,kinMprMarks:tools.marks,kinMprCurved:tools.curved,kinMprPath:tools.path,kinVolumeMipJob:tools.mip});
+ const plane=id=>{let camera={},blend=0,half=.05,properties={};
+  return {id,type:'orthographic',getVolumeId:()=>'volume-1',getCanvas:()=>({width:256,height:256,clientWidth:256,clientHeight:256}),
+   getCamera:()=>structuredClone(camera),setCamera:next=>{camera={...camera,...structuredClone(next)};},getProperties:()=>properties,setProperties:next=>{properties={...properties,...next};},
+   setBlendMode:mode=>{blend=mode;},getSlabThickness:()=>half,setSlabThickness:value=>{half=value;},resetSlabThickness:()=>{half=.05;},render:()=>{},
+   getActors:()=>[{actor:{getMapper:()=>({getBlendMode:()=>blend}),getProperty:()=>({getScalarOpacity:()=>opacity})}}]};};
+ const grid={getState:()=>({layout:{numRows:1,numCols:3,layoutType:'grid'},viewports,activeViewportId:active}),
+  setLayout:async({numRows,numCols,activeViewportId,findOrCreateViewport})=>{
+   log.push('setLayout');viewports.clear();lookup.clear();active=activeViewportId;
+   for(let i=0;i<numRows*numCols;i++){const spec=findOrCreateViewport(i),id=spec.viewportOptions.viewportId;
+    viewports.set(id,{viewportId:id,x:(i%numCols)/numCols,y:Math.floor(i/numCols)/numRows,width:1/numCols,height:1/numRows,displaySetInstanceUIDs:spec.displaySetInstanceUIDs,viewportOptions:spec.viewportOptions,isReady:true});
+    lookup.set(id,plane(id));}},
+  setActiveViewportId:id=>{log.push('active:'+[...viewports.keys()].indexOf(id));active=id;}};
+ const jobs=context.window.kinCreateVolumeJob({grid,cs:{getCornerstoneViewport:id=>lookup.get(id)},
+  ds:{getActiveDisplaySets:()=>[{StudyInstanceUID:STUDY,SeriesInstanceUID:SERIES,displaySetInstanceUID:SET,images:SOPS.map(sop=>({SOPInstanceUID:sop,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}))}]},
+  studies:[STUDY],stack:frameHelper()});
+ return {jobs,log,grid,cameras:()=>[...viewports.keys()].map(id=>lookup.get(id).getCamera())};
+}
+const mipRestorer=(outcome,world)=>({calls:[],cleared:0,
+ restore(value,current,deadline,viewportId){world().log.push('mip');this.calls.push({value,current,deadline,viewportId,active:world().grid.getState().activeViewportId,cameras:world().cameras()});return outcome();},
+ clearForJob(){this.cleared++;world().log.push('clear');}});
+
+test('closing the MIP Viewer a restore opened passes without advancing serial; other outside input is swallowed or advances it',()=>{
+ // CA1: the Jobs panel's input decision over the real viewer-jobs.js. The rollback runs only while serial === ticket, so the
+ // cancel must reach the dialog (not swallowed) and must leave the restore ticket current (not advance serial).
+ const jobsContext=vm.createContext({window:{}});
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),jobsContext);
+ const decide=jobsContext.window.kinViewerJobs.interaction;
+ assert.equal(decide({inPanel:false,applying:true,cancelsRestore:true}),'pass','a restore cancel is neither swallowed nor a serial change');
+ assert.equal(decide({inPanel:false,applying:true,cancelsRestore:false}),'swallow','any other input during a restore');
+ assert.equal(decide({inPanel:false,applying:false,cancelsRestore:false}),'advance');
+ assert.equal(decide({inPanel:false,applying:false,cancelsRestore:true}),'advance','no exemption outside a restore');
+ assert.equal(decide({inPanel:true,applying:true,cancelsRestore:false}),'pass');assert.equal(decide({inPanel:true,applying:false,cancelsRestore:false}),'pass');
+});
+
+test('resolve(v12) refuses a missing MIP tool or an algorithm it cannot reproduce before any layout change',async()=>{
+ const saved=world(1,3,PLANES,{mip:mipTool(mipBlock())}).capture();assert.equal(saved.version,12);
+ let order=restoreWorld({});
+ assert.throws(()=>order.jobs.resolve(saved),/MIP Viewer 도구를 불러오지 못했습니다/);
+ await assert.rejects(order.jobs.apply(structuredClone(saved),()=>true),/MIP Viewer 도구를 불러오지 못했습니다/);assert.deepEqual(order.log,[]);
+ const tool={restore:async()=>{throw Error('must not restore');},clearForJob(){}};
+ for(const [label,change] of [['schema 2',s=>{s.mip.schema=2;}],['algorithm kin-mip-2',s=>{s.mip.algorithm='kin-mip-2';}],['coordinates RAS_mm',s=>{s.mip.coordinates='RAS_mm';}],['missing mip',s=>{delete s.mip;}]]){
+  const s=structuredClone(saved);change(s);order=restoreWorld({mip:tool});
+  assert.throws(()=>order.jobs.resolve(s),/계산 방식을 이 뷰어가 재현할 수 없어/,label);
+  await assert.rejects(order.jobs.apply(s,()=>true),/계산 방식을 이 뷰어가 재현할 수 없어/,label);assert.deepEqual(order.log,[],label);
+ }
+ order=restoreWorld({mip:tool});assert.equal(order.jobs.resolve(saved),SET);
+});
+
+test('apply(v12) awaits the MIP restore after cells and cameras and propagates its failure; every other version closes the MIP',async()=>{
+ const block=mipBlock(),saved=world(1,3,PLANES,{active:2,mip:mipTool(block,{viewport:'vp-2'})}).capture();assert.equal(saved.version,12);
+ let order;const ok=mipRestorer(()=>Promise.resolve(),()=>order);order=restoreWorld({mip:ok});
+ const started=Date.now();await order.jobs.apply(structuredClone(saved),()=>true);
+ assert.deepEqual(order.log,['setLayout','active:2','mip']);assert.equal(ok.calls.length,1);assert.equal(ok.cleared,0);
+ const call=ok.calls[0];assert.deepEqual(call.value,block);assert.equal(call.viewportId,call.active,'the MIP reopens on the restored active plane');
+ assert.equal(typeof call.current,'function');assert.ok(call.deadline>=started+60000&&call.deadline<=Date.now()+60000,'the Job restore deadline');
+ call.cameras.forEach((camera,i)=>{for(const key of ['focalPoint','position','viewUp','viewPlaneNormal','parallelScale'])assert.deepEqual(camera[key],saved.cells[i].camera[key],key);});
+ const failing=mipRestorer(()=>Promise.reject(Error('INJECTED MIP RESTORE FAILURE')),()=>order);order=restoreWorld({mip:failing});
+ await assert.rejects(order.jobs.apply(structuredClone(saved),()=>true),/INJECTED MIP RESTORE FAILURE/);assert.equal(failing.calls.length,1);
+ const v4=world(1,3,PLANES).capture(),closing=mipRestorer(()=>Promise.reject(Error('must not restore')),()=>order);order=restoreWorld({mip:closing});
+ await order.jobs.apply(structuredClone(v4),()=>true);assert.equal(closing.calls.length,0);assert.equal(closing.cleared,1);
+ const route={schema:1,algorithm:'kin-path-1'},v11=world(1,3,PLANES,{path:{capture:()=>route,dirty:()=>false}}).capture(),paths=[];
+ const closing11=mipRestorer(()=>Promise.reject(Error('must not restore')),()=>order);
+ order=restoreWorld({mip:closing11,path:{restore:async value=>{paths.push(value);order.log.push('path');},clearForJob(){}}});
+ await order.jobs.apply(structuredClone(v11),()=>true);assert.deepEqual(paths,[route]);assert.equal(closing11.cleared,1);assert.deepEqual(order.log.slice(-2),['path','clear']);
 });

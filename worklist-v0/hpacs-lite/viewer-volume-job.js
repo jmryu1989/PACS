@@ -55,6 +55,13 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(value.version===6&&!window.kinMprMarks)throw Error('MPR 3D 표식 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     if(value.version===10&&!window.kinMprCurved)throw Error('곡면 MPR 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     if(value.version===11&&!window.kinMprPath)throw Error('3D Path 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
+    // A MIP Viewer Job is reopened by the MIP Viewer, so its tool and its computation are checked before any layout
+    // change: an algorithm this viewer does not implement is refused (재현 불가), never reinterpreted.
+    if(value.version===12){
+      if(!window.kinVolumeMipJob)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
+      const m=value.mip;
+      if(!m||m.schema!==1||m.algorithm!=='kin-mip-1'||m.coordinates!=='LPS_mm')throw Error('이 MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
+    }
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
     if([8,9].includes(value.version))for(const cell of value.cells)if(cell&&cell.kind==='stack')stackTools().resolve(cell);
@@ -142,6 +149,10 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // A manual 3D path binds to the same three-plane target and is asked the same two questions.
     const path=named?null:window.kinMprPath?.capture(readOnly)||null;
     const pathing=named?!!window.kinMprPath?.dirty?.():!!path;
+    // An open MIP Viewer is asked the same two questions: its confirmed Job block where the three-plane target exists
+    // (it throws its own refusal for Rendering, Original or geometry), whether closing would lose work where not.
+    const mip=named?null:window.kinVolumeMipJob?.capture(readOnly)||null;
+    const projecting=named?!!window.kinVolumeMipJob?.dirty?.():!!mip;
     // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
     // user's own state visible instead of writing a v7 snapshot that quietly lost it.
     if(!legacy){
@@ -149,12 +160,25 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       if(annotated)throw Error('MPR 3D 표식은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. 표식을 지우거나 3평면 배치에서 저장하세요.');
       if(curving)throw Error('곡면 MPR은 3평면 1×3·3×1 배치에서 저장할 수 있습니다. Clear Curve로 곡선을 지우거나 3평면 배치에서 저장하세요.');
       if(pathing)throw Error('3D Path는 3평면 1×3·3×1 배치에서 저장할 수 있습니다. Clear Path로 경로를 지우거나 3평면 배치에서 저장하세요.');
+      if(projecting)throw Error('MIP 작업은 3평면 1×3·3×1 MPR 배치에서 저장할 수 있습니다.');
       // A merged screen saves the rectangles it stands in, beside the cells that stand in
       // them. A vacancy keeps its rectangle, which is why geometry is not a cell field. The
       // cells the merge absorbed are not on screen and are not saved as anything.
       if(merged)return JSON.parse(JSON.stringify({version:9,studies,rows,cols,
         rects:merged.map(([x,y,width,height])=>({x,y,width,height})),active,volume:reference||null,cells}));
       return JSON.parse(JSON.stringify({version:mixed?8:7,studies,rows,cols,active,volume:reference,cells}));
+    }
+    // Version 12 is the version 4 snapshot plus the confirmed MIP Viewer display. The viewer opens on the active plane and
+    // takes its W/L and interpolation from it, so a display from another plane or with another W/L is refused rather than
+    // saved as that plane's. It is one derived display beside no curve, path, batch or marks.
+    if(mip){
+      if(curved||path)throw Error('MIP 작업은 곡면 MPR·3D Path와 함께 저장할 수 없습니다. Clear Curve·Clear Path로 지운 뒤 저장하세요.');
+      if(batch||annotated)throw Error('MIP 작업은 단면 묶음·3D 표식과 함께 저장할 수 없습니다. 하나를 해제하거나 지운 뒤 저장하세요.');
+      if(window.kinVolumeMipJob.viewport?.()!==views[active].viewportId)throw Error('MIP Viewer를 연 MPR 평면이 활성 평면이 아니어서 저장하지 않았습니다. MIP Viewer를 다시 연 뒤 저장하세요.');
+      const shown=cells[active].properties,d=mip.display;
+      if(d?.voiRange?.lower!==shown.voiRange?.lower||d.voiRange.upper!==shown.voiRange.upper||d.interpolationType!==shown.interpolationType)
+        throw Error('MIP Viewer의 밝기 범위·보간이 활성 MPR 평면과 달라 저장하지 않았습니다. MIP Viewer를 닫고 다시 연 뒤 저장하세요.');
+      return JSON.parse(JSON.stringify({version:12,studies,rows,cols,active,volume:reference,cells,mip}));
     }
     // Version 11 is the version 4 snapshot plus one 3D path, under the same rule as a curve; a
     // curve and a path are two reconstructions and one Job holds only one of them.
@@ -306,6 +330,9 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // failure throws into the caller's rollback instead of reporting a restore without it.
     if(value.version===10)await window.kinMprCurved.restore(value.curved,current,deadline);else window.kinMprCurved?.clearForJob();
     if(value.version===11)await window.kinMprPath.restore(value.path,current,deadline);else window.kinMprPath?.clearForJob();
+    // The MIP Viewer display is reopened last, on the restored active plane and inside the same deadline; a failure or a
+    // user cancel throws into the caller's rollback, and every other Job closes an open MIP Viewer.
+    if(value.version===12)await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active]);else window.kinVolumeMipJob?.clearForJob();
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};
