@@ -1,8 +1,11 @@
 /* Reconstruct saved batch output from private, freshly read CT pixels. */
 window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check}){
   const core=window.cornerstone,reference=snapshot.volume,batch=snapshot.batch;
-  if(![4,5,6].includes(snapshot.version)||batch&&(typeof window.KinVolumeBatch?.plan!=='function'||typeof window.KinVolumeBatchScout?.camera!=='function'||typeof window.KinVolumeBatchScout?.line!=='function'||typeof window.kinRenderVolumeScout!=='function'))throw Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
-  if((batch?[batch.cell]:snapshot.cells).some(cell=>cell.projection.blend===3)&&typeof window.kinPrepareVolumeAverage!=='function')throw Error('평균 투영 출력 도구를 불러오지 못했습니다.');
+  // A saved MIP Viewer (12) or MIP Batch (13) Job shares this fresh-pixel loader and hands its frames to viewer-volume-mip-print.js.
+  const mip=[12,13].includes(snapshot.version);
+  if(![4,5,6].includes(snapshot.version)&&!mip||batch&&(typeof window.KinVolumeBatch?.plan!=='function'||typeof window.KinVolumeBatchScout?.camera!=='function'||typeof window.KinVolumeBatchScout?.line!=='function'||typeof window.kinRenderVolumeScout!=='function'))throw Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
+  if(mip&&typeof window.kinRenderVolumeMipPrint!=='function')throw Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.');
+  if(!mip&&(batch?[batch.cell]:snapshot.cells).some(cell=>cell.projection.blend===3)&&typeof window.kinPrepareVolumeAverage!=='function')throw Error('평균 투영 출력 도구를 불러오지 못했습니다.');
   const fail=()=>{throw Error('저장한 CT 원본의 화소·좌표를 확인할 수 없습니다.');};
   const list=value=>Array.isArray(value)?value.map(Number):String(value).split('\\').map(Number);
   const near=(a,b)=>a.length===b.length&&a.every((n,i)=>Number.isFinite(n)&&Math.abs(n-b[i])<.001);
@@ -47,8 +50,8 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
   const id='kin-batch-print-'+crypto.randomUUID(),imageIds=slices.map((_,i)=>id+'-slice-'+i),entries=new Map(),provider=(type,imageId)=>entries.get(imageId)?.[type];
   const dimensions=[first.columns,first.rows,slices.length],spacing=[pixelSpacing[1],pixelSpacing[0],distance],direction=[...orientation,...step.map(n=>n/distance)];
   let engine,volume,element;core.metaData.addProvider(provider,10000);
-  function pending(setup,ms=10000){return new Promise((resolve,reject)=>{
-    let clean=()=>{},done=false;const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);signal.removeEventListener('abort',abort);clean();error?reject(error):resolve(value);},abort=()=>finish(Error('출력 준비를 취소했습니다.')),timer=setTimeout(()=>finish(Error('출력 영상 준비 시간이 초과됐습니다.')),ms);
+  function pending(setup,ms=10000,expired='출력 영상 준비 시간이 초과됐습니다.'){return new Promise((resolve,reject)=>{
+    let clean=()=>{},done=false;const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);signal.removeEventListener('abort',abort);clean();error?reject(error):resolve(value);},abort=()=>finish(Error('출력 준비를 취소했습니다.')),timer=setTimeout(()=>finish(Error(expired)),ms);
     signal.addEventListener('abort',abort,{once:true});if(signal.aborted){abort();return;}try{clean=setup(value=>finish(null,value),error=>finish(error))||clean;if(done)clean();}catch(error){finish(error);}
   });}
   try{
@@ -64,6 +67,12 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
     // Local pixel insertion has no streaming loader to mark texture slices.
     // Upload every private frame before the first reconstructed plane renders.
     volume.invalidate();
+    if(mip){
+      // One private square viewport, sized by the MIP renderer. It returns inside this try, so the finally below cleans everything.
+      engine=new core.RenderingEngine(id);element=document.createElement('div');element.dataset.kinBatchPrintRender='1';element.style.cssText='position:fixed;left:-20000px;top:0';document.body.append(element);
+      const corners=[0,dimensions[0]-1].flatMap(a=>[0,dimensions[1]-1].flatMap(b=>[0,dimensions[2]-1].map(c=>Array.from(volume.imageData.indexToWorld([a,b,c])))));
+      return await window.kinRenderVolumeMipPrint({core,engine,volume,element,pending,check,snapshot,corners,dimensions,spacing,direction,frameOfReference:tags.FrameOfReferenceUID});
+    }
     engine=new core.RenderingEngine(id);const base={...structuredClone((batch?.cell||snapshot.cells[0]).camera),parallelProjection:true},corners=[0,dimensions[0]-1].flatMap(a=>[0,dimensions[1]-1].flatMap(b=>[0,dimensions[2]-1].map(c=>Array.from(volume.imageData.indexToWorld([a,b,c])))));
     const plan=batch?window.KinVolumeBatch.plan({camera:base,corners,...batch,width:batch.cell.viewport.width,height:batch.cell.viewport.height}):{columns:snapshot.cells[0].viewport.width,rows:snapshot.cells[0].viewport.height,cameras:snapshot.cells.map(c=>c.camera)};
     const specs=plan.cameras.map((camera,index)=>({cell:batch?batch.cell:snapshot.cells[index],camera,width:batch?plan.columns:snapshot.cells[index].viewport.width,height:batch?plan.rows:snapshot.cells[index].viewport.height}));

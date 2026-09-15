@@ -892,15 +892,16 @@ async function batchSaveWorld(){
   button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label)};
 }
 
-test('Save MIP Job beside a MIP Batch preview sends one version 13 body; Saved and Retry keep the pair, and the Job is never printable',async()=>{
+test('Save MIP Job beside a MIP Batch preview sends one version 13 body; Saved and Retry keep the pair, and the saved row offers Print Saved Images',async()=>{
  const w=await batchSaveWorld();
  try{
   let outcome=await w.command.save({title:'MIP batch',description:''});
   assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.length,1);
   const sent=w.posts[0].snapshot;assert.equal(sent.version,13);assert.deepEqual(sent.mipBatch,batchRecipe());assert.deepEqual(sent.mip,w.block);
   assert.deepEqual(w.saved,[{value:w.block,volume:sent.volume,batch:batchRecipe()}],'the committed receipt names the sent pair');
-  // The list labels the version 13 row and offers no print; Print Current View refuses the version 13 screen by name.
-  assert.ok(w.text('MIP Batch · 출력 미지원 · 회전 투영 표시 작업'));assert.equal(w.button('Print Saved Images'),null);assert.ok(w.button('Restore Job'));
+  // A11-OUTPUT-1: the list labels the version 13 row as a reconstructed output and offers Print Saved Images; Print Current View still
+  // refuses the version 13 screen by name.
+  assert.ok(w.text('MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업'));assert.ok(w.button('Print Saved Images'));assert.ok(w.button('Restore Job'));
   await w.button('Print Current View').onclick();assert.match(w.status(),/^MIP Batch 작업은 아직 출력할 수 없습니다/);
   // An unknown receipt keeps the body; Retry MIP Save resends it only while the same pair is shown (MB10).
   w.network.lose=true;w.setRecipe(batchRecipe({count:3}));outcome=await w.command.save({title:'MIP batch lost',description:''});
@@ -914,5 +915,132 @@ test('Save MIP Job beside a MIP Batch preview sends one version 13 body; Saved a
   w.network.lose=true;w.setRecipe(null);outcome=await w.command.save({title:'MIP plain lost',description:''});assert.equal(outcome.state,'unconfirmed',outcome.message);
   assert.equal(w.command.pending().version,12);assert.equal(w.command.pending().mipBatch,undefined);
   outcome=await w.command.retry();assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.at(-1).snapshot.version,12);assert.equal(w.saved.at(-1).batch,null);
+ }finally{w.stop();}
+});
+
+// A11-OUTPUT-1 P2: Print Saved Images over the real viewer-jobs.js. Every script the panel requests is answered by the test: `answer`
+// defines what that file would define, or fails its load, so readiness is observed exactly as the panel decides it.
+const PRINT_FILES={
+ 'viewer-job-print.js':s=>{s.kinViewerJobPrint=()=>({open:(...args)=>s.printOpened.push(args),openCurrent(){},close(){},destroy(){}});},
+ 'viewer-editor-link.js':s=>{s.kinViewerEditorLink=()=>({});},
+ 'viewer-volume-job-print.js':s=>{s.kinRenderVolumeJobPrint=async()=>({});},
+ 'volume-mip.js':s=>{s.KinVolumeMip=Object.freeze({...require('../worklist-v0/hpacs-lite/volume-mip.js')});},
+ 'volume-mip-job.js':s=>{s.KinVolumeMipJob=require('../worklist-v0/hpacs-lite/volume-mip-job.js');},
+ 'volume-mip-batch.js':s=>{s.KinVolumeMipBatch=require('../worklist-v0/hpacs-lite/volume-mip-batch.js');},
+ 'volume-mip-output.js':s=>{s.KinVolumeMipOutput=require('../worklist-v0/hpacs-lite/volume-mip-output.js');},
+ 'viewer-volume-mip-print.js':s=>{s.kinRenderVolumeMipPrint=async()=>({});}};
+const PRINT_BASE=['viewer-job-print.js','viewer-editor-link.js'],PRINT_MIP=['viewer-volume-job-print.js','volume-mip.js','volume-mip-job.js','volume-mip-output.js','viewer-volume-mip-print.js'];
+const LOAD_FAILED='출력 화면을 불러오지 못했습니다. 다시 누르세요.';
+async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file](s),capture=null}){
+ const real=context.window.kinCreateVolumeJob;let parts=null;
+ context.window.kinCreateVolumeJob=args=>{parts=args;return real(args);};
+ try{world(1,3,PLANES);}finally{context.window.kinCreateVolumeJob=real;}
+ const requested=[];let sandbox=null;
+ const element=tag=>{const children=[];return {tagName:tag,children,style:{},dataset:{},textContent:'',value:'',checked:false,disabled:false,isConnected:true,
+  append:(...items)=>{children.push(...items);},prepend:(...items)=>{children.unshift(...items);},insertBefore:item=>{children.push(item);},
+  replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute(){},remove(){},querySelector:selector=>children.find(c=>c.tagName===selector)||null};};
+ const layout=element('details');layout.append(element('summary'));
+ const head=element('head');
+ head.append=(...scripts)=>{for(const script of scripts){const file=script.src.split('/').pop();requested.push(file);
+  setTimeout(()=>{let failed;try{failed=answer(file,sandbox)==='error';}catch(_){failed=true;}(failed?script.onerror:script.onload)?.();},0);}};
+ const rows=versions.map((version,i)=>({id:'00000000-0000-4000-8000-'+String(i).padStart(12,'0'),title:'Job v'+version,description:'',snapshotVersion:version,hidden:false,authorActor:'dr.synthetic',authorSub:'u1',createdAt:0,revision:1}));
+ const jobs='/api/studies/'+STUDY+'/viewer-jobs';
+ const fetch=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return {status:body?200:404,ok:!!body,json:async()=>body};};
+ sandbox={document:{createElement:element,head,querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
+  location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
+  kinCreateVolumeJob:capture?()=>({capture,apply(){},resolve(){}}):real,printOpened:[],...present};
+ sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
+ const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
+ panel.mount();
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ const item=version=>find(layout,e=>e.tagName==='div'&&e.children.some(c=>c.tagName==='strong'&&c.textContent==='Job v'+version));
+ const own=(host,label)=>host.children.find(c=>c.tagName==='button'&&c.textContent===label)||null;
+ await until(()=>versions.every(version=>item(version)),'the listed Jobs');
+ const settle=async()=>{for(let n=0;n<20;n++)await new Promise(resolve=>setTimeout(resolve,0));};
+ return {sandbox,requested,item,own,settle,
+  status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,
+  labels:version=>item(version).children.filter(c=>c.tagName==='p').map(c=>c.textContent),
+  button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label),
+  print:async version=>{requested.length=0;await own(item(version),'Print Saved Images').onclick();await settle();},
+  stop:()=>panel.stop()};
+}
+
+test('P2 (a): Print Saved Images is offered for versions 1-6, 12 and 13 only, and the MIP rows are labelled as reconstructed outputs',async()=>{
+ const all=[1,2,3,4,5,6,7,8,9,10,11,12,13,14],w=await printWorld({versions:all});
+ try{
+  for(const version of [1,2,3,4,5,6,12,13])assert.ok(w.own(w.item(version),'Print Saved Images'),'version '+version);
+  for(const version of [7,8,9,10,11,14])assert.equal(w.own(w.item(version),'Print Saved Images'),null,'version '+version);
+  for(const version of all)assert.ok(w.own(w.item(version),'Restore Job'),'version '+version+' restores');
+  assert.ok(w.labels(12).includes('MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업'));assert.ok(w.labels(13).includes('MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업'));
+  assert.ok(![...w.labels(12),...w.labels(13)].some(text=>text.includes('출력 미지원')));
+  // The versions still without output keep their labels.
+  assert.ok(w.labels(7).includes('MPR Plane Layout · 출력 미지원 · 재구성 표시 작업'));assert.ok(w.labels(8).includes('MPR Mixed Layout · 출력 미지원 · 재구성 표시 작업'));
+  assert.ok(w.labels(9).includes('Merged Cell Layout · 출력 미지원'));assert.ok(w.labels(10).includes('Curved MPR · 출력 미지원 · 곡선을 따라 펼친 재구성 표시 작업'));
+  assert.ok(w.labels(11).includes('3D Path · 출력 미지원 · 경로 평면과 경로를 따라 펼친 재구성 표시 작업'));
+ }finally{w.stop();}
+});
+
+test('P2 (b): each printable version requests exactly its print assets before the printer opens that row',async()=>{
+ for(const [version,files] of [[1,PRINT_BASE],[2,PRINT_BASE],[3,PRINT_BASE],[4,[...PRINT_BASE,'viewer-volume-job-print.js']],[5,[...PRINT_BASE,'viewer-volume-job-print.js']],
+   [6,[...PRINT_BASE,'viewer-volume-job-print.js']],[12,[...PRINT_BASE,...PRINT_MIP]],[13,[...PRINT_BASE,...PRINT_MIP,'volume-mip-batch.js']]]){
+  const w=await printWorld({versions:[version]});
+  try{
+   await w.print(version);
+   assert.deepEqual(w.requested,files,'version '+version);assert.deepEqual(w.sandbox.printOpened.map(args=>args.slice(0,1).concat(args[2])),[[STUDY,version]],'version '+version);
+   assert.notEqual(w.status(),LOAD_FAILED);
+   // Every asset is ready now, so printing the same row again requests nothing.
+   await w.print(version);assert.deepEqual(w.requested,[],'version '+version+' again');assert.equal(w.sandbox.printOpened.length,2);
+  }finally{w.stop();}
+ }
+});
+
+test('P2 (c) B1: present MIP models are frozen objects, ready by their members; they are never requested or replaced',async()=>{
+ const present={KinVolumeMip:Object.freeze({...require('../worklist-v0/hpacs-lite/volume-mip.js')}),KinVolumeMipJob:require('../worklist-v0/hpacs-lite/volume-mip-job.js'),
+  KinVolumeMipBatch:require('../worklist-v0/hpacs-lite/volume-mip-batch.js')};
+ for(const [name,value] of Object.entries(present)){assert.equal(typeof value,'object',name);assert.ok(Object.isFrozen(value),name);}
+ const w=await printWorld({versions:[12,13],present});
+ try{
+  await w.print(13);
+  assert.deepEqual(w.requested,[...PRINT_BASE,'viewer-volume-job-print.js','volume-mip-output.js','viewer-volume-mip-print.js']);
+  for(const [name,value] of Object.entries(present))assert.equal(w.sandbox[name],value,name+' is the same object');
+  await w.print(12);assert.deepEqual(w.requested,[],'every version 12 asset is present');
+  assert.deepEqual(w.sandbox.printOpened.map(args=>args[2]),[13,12]);
+ }finally{w.stop();}
+ // A present model that lacks a member is not ready: it is requested and the loaded, complete model replaces it.
+ const partial=Object.freeze({validate(){},intersects(){}}),v=await printWorld({versions:[12],present:{...present,KinVolumeMipJob:partial}});
+ try{
+  await v.print(12);assert.ok(v.requested.includes('volume-mip-job.js'));assert.ok(!v.requested.includes('volume-mip.js'));
+  assert.notEqual(v.sandbox.KinVolumeMipJob,partial);assert.equal(v.sandbox.KinVolumeMip,present.KinVolumeMip);assert.deepEqual(v.sandbox.printOpened.map(args=>args[2]),[12]);
+ }finally{v.stop();}
+});
+
+test('P2 (d): a loaded script whose global fails its predicate, or an aborted load, fails print only; the retry requests only that file',async()=>{
+ for(const [file,broken] of [['volume-mip-output.js',s=>{s.KinVolumeMipOutput=Object.freeze({plan(){},verifyClip(){},verifyDisplay(){},caption(){},supports(){}});}],['viewer-volume-mip-print.js',()=>'error']]){
+  let failing=true;
+  const w=await printWorld({versions:[12,13],answer:(name,s)=>name===file&&failing?broken(s):PRINT_FILES[name](s)});
+  try{
+   await w.print(13);
+   assert.equal(w.status(),LOAD_FAILED,file);assert.deepEqual(w.sandbox.printOpened,[],file);
+   // Saving and restoring stay available after a print-only failure.
+   assert.equal(w.own(w.item(13),'Restore Job').disabled,false,file);assert.equal(w.button('Save New Job').disabled,false,file);
+   await w.print(12);assert.deepEqual(w.requested,[file],file+' is the only asset requested again');assert.equal(w.status(),LOAD_FAILED);assert.deepEqual(w.sandbox.printOpened,[]);
+   failing=false;await w.print(12);assert.deepEqual(w.requested,[file],file+' retry');assert.deepEqual(w.sandbox.printOpened.map(args=>args[2]),[12]);
+   await w.print(13);assert.deepEqual(w.requested,[],file+': version 13 needs nothing more');assert.deepEqual(w.sandbox.printOpened.map(args=>args[2]),[12,13]);
+  }finally{w.stop();}
+ }
+});
+
+test('P2 (e): Print Current View still refuses versions 7 to 13 by name before any asset request',async()=>{
+ const shown={version:7},w=await printWorld({versions:[1],capture:()=>({...shown})});
+ try{
+  for(const [version,message] of [[7,'MPR 평면 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[8,'MPR 평면과 일반 영상이 섞인 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],
+    [9,'칸을 병합한 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[10,'Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],
+    [11,'3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[12,/^MIP Viewer 작업은 아직 출력할 수 없습니다/],[13,/^MIP Batch 작업은 아직 출력할 수 없습니다/]]){
+   shown.version=version;w.requested.length=0;await w.button('Print Current View').onclick();await w.settle();
+   if(typeof message==='string')assert.equal(w.status(),message);else assert.match(w.status(),message);
+   assert.deepEqual(w.requested,[],'version '+version);assert.deepEqual(w.sandbox.printOpened,[],'version '+version);
+  }
  }finally{w.stop();}
 });

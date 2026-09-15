@@ -193,8 +193,9 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   self.assertEqual([saved['mip'][k] for k in ('schema','algorithm','mode','orientation')],[1,'kin-mip-1','Raysum','Coronal'])
   self.assertFalse({'volumeId','affine','history','original','applied','pending','state','pixels','frames','url','blob','angle','size'}&set(json_keys(saved)),json_keys(saved))
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertFalse(v.evaluate('()=>!!batchView()'))
-  jobs_panel=v.locator('#kin-viewer-jobs');expect(jobs_panel).to_contain_text('MIP Batch · 출력 미지원 · 회전 투영 표시 작업')
-  expect(jobs_panel.get_by_role('button',name='Restore Job',exact=True)).to_have_count(1);expect(jobs_panel.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(0)
+  # A11-OUTPUT-1: the version 13 row is labelled as a reconstructed output and offers Print Saved Images (test_volume_mip_output.py).
+  jobs_panel=v.locator('#kin-viewer-jobs');expect(jobs_panel).to_contain_text('MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업')
+  expect(jobs_panel.get_by_role('button',name='Restore Job',exact=True)).to_have_count(1);expect(jobs_panel.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(1)
   # Restore after changing the MPR: frame progress shows while frames regenerate, and success appears once, after the last frame, with Saved.
   self.project(v,1,2);self.assertEqual(v.evaluate(CAPTURE)['version'],4);v.evaluate('()=>{batchStatuses.length=0;batchFrames.length=0}')
   started=time.monotonic();v.get_by_role('button',name='Restore Job',exact=True).click()
@@ -314,10 +315,12 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
                       ('beside a batch',lambda s:s.__setitem__('batch',None)),('display not the active cell',lambda s:s['mip']['display']['voiRange'].__setitem__('lower',s['mip']['display']['voiRange']['lower']+1))):
    self.assertEqual(forged(change),400,name)
   self.assertEqual(forged(lambda s:None,'tech'),403);self.assertEqual(len(self.jobs(a)),jobs_before)
-  # The version 13 row is labelled and has no print; a version 12 row still restores, with no MIP Batch preview.
+  # The version 13 and version 12 rows are labelled as reconstructed outputs and every row offers Print Saved Images (A11-OUTPUT-1);
+  # a version 12 row still restores, with no MIP Batch preview.
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible();self.assertFalse(v.evaluate('()=>!!batchView()'))
-  jobs_panel=v.locator('#kin-viewer-jobs');expect(jobs_panel).to_contain_text('MIP Batch · 출력 미지원 · 회전 투영 표시 작업');expect(jobs_panel).to_contain_text('MIP Viewer · 출력 미지원 · 표시 전용 투영 작업')
-  expect(jobs_panel.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(0)
+  jobs_panel=v.locator('#kin-viewer-jobs');expect(jobs_panel).to_contain_text('MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업');expect(jobs_panel).to_contain_text('MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업')
+  restores=jobs_panel.get_by_role('button',name='Restore Job',exact=True);self.assertGreaterEqual(restores.count(),2)
+  expect(jobs_panel.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(restores.count())
   self.restore_titled(v,a,'MIP batch cleared v12');expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('MIP 작업을 복원했습니다',timeout=90000)
   expect(dialog).to_have_attribute('data-kin-mip-state','final');expect(result).to_be_hidden();expect(summary).to_have_text(label+'Saved')
   restored=v.evaluate(READ_ONLY_CAPTURE);self.assertEqual(restored['version'],12);self.assertNotIn('mipBatch',restored)

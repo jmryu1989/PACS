@@ -65,20 +65,29 @@ window.kinViewerJobs = function (services, model) {
         if (shape === 10) throw new Error('Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         // A 3D path and its unfolded display are derived displays too; saving and restoring only.
         if (shape === 11) throw new Error('3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
-        // A MIP Viewer display is a derived whole-volume projection; it has no print page yet.
-        if (shape === 12) throw new Error('MIP Viewer 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
-        // A MIP Batch is a display-only rotation preview; its frames are never persisted, printed or filmed.
-        if (shape === 13) throw new Error('MIP Batch 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        // A saved MIP Viewer or MIP Batch Job prints from its saved conditions (viewer-volume-mip-print.js). The current MIP screen has
+        // no print page: it is shown behind the MIP Viewer's own modal dialog, and its preview is never output.
+        if (!row && shape === 12) throw new Error('MIP Viewer 작업은 아직 출력할 수 없습니다. 현재 화면 출력은 지원하지 않으며, 저장한 작업은 Print Saved Images로 출력합니다.');
+        if (!row && shape === 13) throw new Error('MIP Batch 작업은 아직 출력할 수 없습니다. 현재 화면 출력은 지원하지 않으며, 저장한 작업은 Print Saved Images로 출력합니다.');
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
-        const assets=[['kinViewerJobPrint','viewer-job-print.js'],['kinViewerEditorLink','viewer-editor-link.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
+        // Each asset is ready by its own predicate. The MIP models are frozen objects rather than functions, and a module already present
+        // (the model of an open or closed MIP Viewer included) is never requested, and so never replaced, again.
+        const fn=name=>()=>typeof window[name]==='function',members=(name,keys)=>()=>{const value=window[name];return !!value&&keys.every(key=>typeof value[key]==='function');};
+        const volumePrint=['viewer-volume-job-print.js',fn('kinRenderVolumeJobPrint')];
+        const mipPrint=[volumePrint,['volume-mip.js',members('KinVolumeMip',['verifyState','clipShader','averageShader','voiPlanes','voiPlane','corners','preset','projectionThickness','sampleDistance','affine','verifyBinding'])],
+          ['volume-mip-job.js',members('KinVolumeMipJob',['validate','restoreRequest','intersects'])],
+          ['volume-mip-output.js',members('KinVolumeMipOutput',['plan','verifyClip','verifyDisplay','caption','supports','timer','saved','frames','bind','displayCaption','bytes'])],
+          ['viewer-volume-mip-print.js',fn('kinRenderVolumeMipPrint')]];
+        const assets=[['viewer-job-print.js',fn('kinViewerJobPrint')],['viewer-editor-link.js',fn('kinViewerEditorLink')],
+          ...([4,5,6].includes(shape)?[volumePrint]:shape===12?mipPrint:shape===13?[...mipPrint,['volume-mip-batch.js',members('KinVolumeMipBatch',['validate','plan','verifyCamera','budget'])]]:[])].filter(([,ready])=>!ready());
         if (assets.length) {
           // A print-only asset failure must leave saving/restoring available.
-          if (!printLoading) printLoading = Promise.all(assets.map(([name,file])=>new Promise((resolve, reject) => {
+          if (!printLoading) printLoading = Promise.all(assets.map(([file,ready])=>new Promise((resolve, reject) => {
             const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/'+file;
             const cancel = () => finish(new Error('출력 화면 확인이 취소되었습니다.'));
             const timer = setTimeout(() => finish(new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.')), 30000);
             function finish(error) { clearTimeout(timer); abort.signal.removeEventListener('abort', cancel); script.onload = script.onerror = null; script.remove(); error ? reject(error) : resolve(); }
-            script.onload = () => finish(typeof window[name] === 'function' ? null : new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
+            script.onload = () => finish(ready() ? null : new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
             script.onerror = () => finish(new Error('출력 화면을 불러오지 못했습니다. 다시 누르세요.'));
             abort.signal.addEventListener('abort', cancel, { once: true }); document.head.append(script);
           })));
@@ -177,11 +186,12 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && ![7,8,9,10,11,12,13].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        // An allowlist of printable versions: a later version stays without Print until it has an output page of its own.
+        if (!row.hidden && [1,2,3,4,5,6,12,13].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
         // A merged layout may hold no reconstructed cell at all, so it is not labelled as one.
         if(row.snapshotVersion===9)text('p','Merged Cell Layout · 출력 미지원',item);
-        else if(row.snapshotVersion===12)text('p','MIP Viewer · 출력 미지원 · 표시 전용 투영 작업',item);
-        else if(row.snapshotVersion===13)text('p','MIP Batch · 출력 미지원 · 회전 투영 표시 작업',item);
+        else if(row.snapshotVersion===12)text('p','MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업',item);
+        else if(row.snapshotVersion===13)text('p','MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업',item);
         else if(row.snapshotVersion===10)text('p','Curved MPR · 출력 미지원 · 곡선을 따라 펼친 재구성 표시 작업',item);
         else if(row.snapshotVersion===11)text('p','3D Path · 출력 미지원 · 경로 평면과 경로를 따라 펼친 재구성 표시 작업',item);
         else if([4,5,6,7,8].includes(row.snapshotVersion))text('p',(row.snapshotVersion===8?'MPR Mixed Layout · 출력 미지원':row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);

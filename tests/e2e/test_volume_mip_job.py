@@ -117,9 +117,10 @@ class VolumeMipJobE2E(VolumeMipE2E):
   mark=self.mark(v);self.voi_button(dialog,'Move Slab').click();self.job_final(v,mark,'Raysum','Coronal');expect(summary).to_have_text(label+'Not Saved')
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible();self.assertEqual(v.evaluate('()=>mipCount()'),0);self.assertEqual(len(posts),1)
   self.assertEqual(v.evaluate(SOURCE_PLANES),source,'saving and closing the MIP Viewer leave the MPR slab planes as they were')
-  # With the dialog closed the Jobs panel is interactive again: the version 12 row is labelled and has no print action.
-  jobs_panel=v.locator('#kin-viewer-jobs');expect(jobs_panel).to_contain_text('MIP Viewer · 출력 미지원 · 표시 전용 투영 작업')
-  expect(jobs_panel.get_by_role('button',name='Restore Job',exact=True)).to_have_count(1);expect(jobs_panel.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(0)
+  # With the dialog closed the Jobs panel is interactive again: the version 12 row is labelled as a reconstructed output and offers
+  # Print Saved Images (A11-OUTPUT-1; the print itself is tested in test_volume_mip_output.py).
+  jobs_panel=v.locator('#kin-viewer-jobs');expect(jobs_panel).to_contain_text('MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업')
+  expect(jobs_panel.get_by_role('button',name='Restore Job',exact=True)).to_have_count(1);expect(jobs_panel.get_by_role('button',name='Print Saved Images',exact=True)).to_have_count(1)
   # Restore after changing the MPR: the success status appears only with the dialog's Final and its Saved state.
   self.project(v,1,2);self.assertEqual(v.evaluate(CAPTURE)['version'],4);v.evaluate(STATUS_WATCH);mark=self.mark(v)
   v.get_by_role('button',name='Restore Job',exact=True).click();expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('MIP 작업을 복원했습니다',timeout=90000)

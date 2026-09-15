@@ -84,6 +84,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   // The editor adapter is injected read-only; its wording lives with it.
   const linkText = reason => globalThis.kinViewerEditorLinkApi?.reasonText(reason) || '편집문 응답을 확인할 수 없습니다.';
   const editorChoice = choice => ['editor', 'editor-prior'].includes(choice);
+  // Printable reconstructed Jobs (MPR 4-6, MIP Viewer 12 and MIP Batch 13) and, among them, the MIP output Jobs; every version gate
+  // of this dialog reads these two, so a later version stays unprintable until it is added here.
+  const reconstructed = version => [4, 5, 6, 12, 13].includes(version), mipOutput = version => [12, 13].includes(version);
+  const MIP_NOTE = '저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증';
+  const mipModel = () => { const model = window.KinVolumeMipOutput; if (typeof model?.timer !== 'function' || typeof model?.saved !== 'function') throw new Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.'); return model; };
   const entries = new Map();
   const scheme = 'kinjobprint';
   // Only run-owned, freshly fetched pixels enter this loader. Never evict or
@@ -177,8 +182,13 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   }
   const valid = (ticket, signal) => { if (!live() || ticket !== serial || !dialog.open || signal.aborted) throw new Error('출력 확인이 취소되었습니다.'); validCurrent(current); };
   async function bounded(work) {
-    controller?.abort(); const c = controller = new AbortController(), timer = setTimeout(() => c.abort(), [4,5,6].includes(current?.version)?120000:30000);
-    try { return await work(c.signal); } finally { clearTimeout(timer); c.abort(); if (controller === c) controller = null; }
+    controller?.abort(); const c = controller = new AbortController(), version = current?.version, started = Date.now(); let timer, expired = false;
+    // A MIP output bound is KinVolumeMipOutput.timer. Version 13 starts at the bound of the largest recipe and is tightened to the
+    // recipe it read, never lengthened; its expiry reads as the MIP timeout rather than a cancel. Other versions keep bound and wording.
+    const arm = ms => { clearTimeout(timer); timer = setTimeout(() => { expired = true; c.abort(); }, Math.max(0, started + ms - Date.now())); };
+    try { arm(mipOutput(version) ? mipModel().timer(version) : reconstructed(version) ? 120000 : 30000); return await work(c.signal, arm); }
+    catch (error) { throw expired && mipOutput(version) ? new Error(mipModel().messages.timeout) : error; }
+    finally { clearTimeout(timer); c.abort(); if (controller === c) controller = null; }
   }
   async function bytes(url, signal, max, budget, accept = 'application/json') {
     const response = await fetch(url, { signal, cache: 'no-store', credentials: 'same-origin', headers: { Accept: accept } });
@@ -442,15 +452,16 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     } finally { engine.destroy(); host.remove(); entries.delete(id); if (core.cache.getImageLoadObject(id)) core.cache.removeImageLoadObject(id); }
   }
   function html(data, images, outputEdits, batchOutput) {
-    const { job, identities } = data, main = el('main'), legends = [];
+    const { job, identities } = data, main = el('main'), legends = [], mipPage = batchOutput?.mip || null;
     const { reportLabel, dateLine, pageName, pageRules, summaryText } = identity;
     // The title block shares the first report's named page, so no forced break.
     const intro = node => { node.className = 'intro'; return node; };
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    intro(el('h1', batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
+    intro(el('h1', mipPage?(mipPage.version===13?'KIN PACS 저장 MIP Batch 출력':'KIN PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
     intro(el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main));
-    intro(el('p', (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
-    if(batchOutput&&!job.transient&&!job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main));
+    intro(el('p', mipPage ? MIP_NOTE : (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
+    if(batchOutput&&!mipPage&&!job.transient&&!job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main));
+    if(mipPage)intro(el('p',mipPage.version===13?`Job ${job.id} · MIP Batch · ${mipPage.recipe.count} frames · ${mipPage.recipe.axis} · Interval ${mipPage.recipe.interval}° · ${mipPage.recipe.reverse?'Reverse':'Forward'}`:`Job ${job.id} · MIP Viewer · 1 frame`,main));
     if(batchOutput&&job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main));
     const summary = summaryText(identities, data.reports);
     intro(el('p', summary, main));
@@ -480,6 +491,19 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 256 256');svg.style.cssText='position:absolute;inset:0;width:256px;height:256px';
       for(const points of batchOutput.scout.guides){const line=document.createElementNS(svg.namespaceURI,'line');for(const [key,value] of Object.entries({x1:points[0][0],y1:points[0][1],x2:points[1][0],y2:points[1][1],stroke:'#ffdb55','stroke-width':1}))line.setAttribute(key,value);svg.append(line);}box.append(svg);
     }
+    if (mipPage) {
+      // MIP output: the 512 px frames in recipe order on two columns with no scout section; the identity is the saved volume's study.
+      const grid = el('div', undefined, main), cell = job.snapshot.cells.find(Boolean), studyIdentity = identities.find(s => s.uid === cell.study);
+      grid.className = 'grid'; grid.style.gridTemplateColumns = 'repeat(2,minmax(0,1fr))';
+      batchOutput.frames.forEach((frame, index) => {
+        const figure = el('section', undefined, grid); figure.className = 'cell'; figure.dataset.mipFrame = String(index + 1);
+        el('strong', mipPage.version === 13 ? 'Frame ' + (index + 1) : 'MIP Viewer', figure);
+        const img = el('img', undefined, figure); img.src = images[index]; img.alt = 'MIP 출력 ' + (index + 1);
+        el('p', `${studyIdentity.name} (${studyIdentity.id}) · ${studyIdentity.date} · ${studyIdentity.desc || studyIdentity.modality}`, figure);
+        el('p', frame.caption, figure).className = 'mip-caption'; el('p', frame.display, figure).className = 'mip-display';
+        el('p', `Study ${cell.study}\nSource series ${cell.series} · ${job.snapshot.volume.sops.length} original CT instances\nReconstructed display · no original SOP for this image`, figure).className = 'reference';
+      });
+    } else {
     const grid = el('div', undefined, main); grid.className = 'grid'; grid.style.gridTemplateColumns = `repeat(${batchOutput&&job.snapshot.batch?2:job.snapshot.cols},minmax(0,1fr))`;
     const cells=batchOutput?batchOutput.frames.map(row=>({...row.cell,camera:row.camera})):job.snapshot.cells;
     cells.forEach((cell, index) => {
@@ -523,6 +547,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         });
       }
     });
+    }
     legends.forEach(legend => main.append(legend));
     const cssPages = pageRules(data.reports, summary);
     return '<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\';img-src blob:;style-src \'unsafe-inline\';base-uri \'none\'"><title>저장 비교 영상</title><style>' +
@@ -542,7 +567,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   }
   async function prepare() {
     if (!current) return; const ticket = ++serial, item = current, reportChoice = reportSource.value; clear(); status.textContent = '저장한 영상 상태를 확인하는 중…';
-    try { await bounded(async signal => {
+    try { await bounded(async (signal, arm) => {
       const data = await state(item, signal, reportChoice); valid(ticket, signal); const snapshot = data.job.snapshot;
       // The MPR renderer assumes a fixed, vacancy-free cell list and the frame renderer
       // assumes no reconstructed cell at all, so a version 7 plane layout and a version 8
@@ -551,21 +576,24 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       if (snapshot.version === 8) throw new Error('MPR 평면과 일반 영상이 섞인 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
       if (snapshot.version === 10) throw new Error('Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
       if (snapshot.version === 11) throw new Error('3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
-      if (![2, 3, 4, 5, 6].includes(snapshot.version)) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
+      if (![2, 3].includes(snapshot.version) && !reconstructed(snapshot.version)) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
+      // A saved MIP Job is checked before any source read, and a version 13 bound is tightened to the recipe it holds.
+      const mipJob = mipOutput(snapshot.version) ? mipModel().saved(snapshot) : null;
+      if (mipJob?.recipe) arm(mipModel().timer(13, mipJob.recipe.count));
       verifyAnnotationSet(data.job);
       if (controlJob && !equal(controlJob.snapshot, snapshot)) edits = [];
       controlJob = data.job; const outputEdits = snapshot.cells.map((_, index) => structuredClone(edits[index] || defaultEdit()));
-      controls.hidden=[4,5,6].includes(snapshot.version);controls.style.display=[4,5,6].includes(snapshot.version)?'none':'flex';
+      controls.hidden=reconstructed(snapshot.version);controls.style.display=reconstructed(snapshot.version)?'none':'flex';
       caption.textContent = (item.snapshot ? '현재 배치·표시 설정으로 원본 재조회 · 화면 캡처 아님 · Job 저장 안 함' : '저장 상태를 기준으로 출력만 조절합니다') + ' · ' + annotationMode(data.job) + ' · 실제 크기 아님.';
       let total = 0;
       for (const cell of snapshot.cells) if (cell) { const { width, height } = cell.viewport || {}; total += width * height;
         if (![width, height].every(n => Number.isInteger(n) && n >= 1 && n <= 8192) || width * height > 16777216 || total > 33554432) throw new Error('저장 화면 크기가 출력 한도를 초과했습니다.'); }
       const images = [], budget = { bytes: 0, sourcePixels: 0 };let batchOutput;
-      if([4,5,6].includes(snapshot.version)){
+      if(reconstructed(snapshot.version)){
         if(typeof window.kinRenderVolumeJobPrint!=='function')throw new Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
         batchOutput=await window.kinRenderVolumeJobPrint({snapshot,api,bytes,signal,check:()=>valid(ticket,signal)});valid(ticket,signal);
         for(const row of batchOutput.frames){const url=URL.createObjectURL(row.blob);urls.push(url);images.push(url);}if(batchOutput.scout){batchOutput.scout.url=URL.createObjectURL(batchOutput.scout.blob);urls.push(batchOutput.scout.url);}
-        caption.textContent=(item.snapshot?'처음 선택한 현재 평면을 재구성하며 Job·표식·판독문을 저장하지 않습니다.':'저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다.')+' 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
+        caption.textContent=mipJob?MIP_NOTE+'.':(item.snapshot?'처음 선택한 현재 평면을 재구성하며 Job·표식·판독문을 저장하지 않습니다.':'저장한 생성 조건과 전체 CT 원본으로 저장한 평면을 재구성합니다.')+' 현재 영상·판독 입력은 유지합니다. 실제 크기 아님.';
       }else for (const [index, cell] of snapshot.cells.entries()) { valid(ticket, signal); images.push(cell ? await render(cell, ticket, signal, budget, cellAnnotations(data.job, cell), outputEdits[index]) : null); }
       const latest = await state(item, signal, reportChoice); valid(ticket, signal); if (!equal(latest, data)) throw new Error('작업 또는 검사 정보·판독문이 변경되었습니다. 다시 확인하세요.');
       ready = { data, reportChoice, html: html(data, images, outputEdits,batchOutput) }; paper.srcdoc = ready.html; printButton.disabled = !supportsIdentity();
@@ -573,7 +601,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       const selected = selection.value; selection.replaceChildren(); el('option', '전체 영상 셀', selection).value = 'all';
       snapshot.cells.forEach((cell, index) => { if (cell) el('option', '셀 ' + (index + 1), selection).value = String(index); });
       selection.value = [...selection.options].some(o => o.value === selected) ? selected : 'all';
-      dirtyControls = false; controls.disabled = [4,5,6].includes(snapshot.version);refresh.disabled = reportSource.disabled = false; syncControls();
+      dirtyControls = false; controls.disabled = reconstructed(snapshot.version);refresh.disabled = reportSource.disabled = false; syncControls();
       status.textContent = printButton.disabled ? '페이지 식별정보를 지원하는 Chrome 또는 Edge에서 여세요.' : '미리보기 내용을 확인하세요. ' + annotationMode(data.job) + ' · 실제 크기 아님.';
     }); } catch (error) { if (ticket === serial) { clear(); controls.disabled = !controlJob; refresh.disabled = reportSource.disabled = false; selection.disabled = false; status.textContent = error.message; } }
   }
@@ -598,10 +626,10 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   dialog.addEventListener('cancel', e => { e.preventDefault(); close(); });
   function open(item) {
     close(); reportSource.value = 'none'; current = item;
-    controls.hidden=[4,5,6].includes(item.version);controls.style.display=[4,5,6].includes(item.version)?'none':'flex';
+    controls.hidden=reconstructed(item.version);controls.style.display=reconstructed(item.version)?'none':'flex';
     for (const option of [...reportSource.options]) if (CHOSEN_OPTIONS.includes(option.value)) option.remove();
     addEditorOptions(null);
-    heading.textContent = item.version===11?'3D Path · 출력 미지원':item.version===10?'Curved MPR · 출력 미지원':item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':[4,5,6].includes(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    heading.textContent = item.version===11?'3D Path · 출력 미지원':item.version===10?'Curved MPR · 출력 미지원':item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':mipOutput(item.version)?(item.version===13?'Saved MIP Batch Output':'Saved MIP Viewer Output'):reconstructed(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();
