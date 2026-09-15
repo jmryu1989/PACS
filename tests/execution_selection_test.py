@@ -187,6 +187,10 @@ class ExecutionSelectionTests(unittest.TestCase):
                      {'test_mip_01_known_voxels_modes_orientations_and_mpr_slab_parity',
                       'test_mip_02_order_delay_failure_capability_and_busy_gates',
                       'test_mip_03_lifecycle_identity_teardown_reentry_and_high_values'})]
+        # The VOI Slab cases are declared on the MIP Viewer class but run only in the volume-mip-voi profile.
+        voi = {'test_mip_04_voi_slab_known_voxels_modes_orientations',
+               'test_mip_05_voi_order_delay_failure_missing_tool_cancel',
+               'test_mip_06_voi_original_undo_reset_scope_lifecycle'}
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(
@@ -199,7 +203,7 @@ class ExecutionSelectionTests(unittest.TestCase):
                 selected = [item['case'] for item in plan['tests']]
                 cls = getattr(runner.load_module(ROOT/'tests'/suite), cls_name)
                 declared = sorted(cls_name+'.'+name for name in cls.__dict__
-                                  if name.startswith(prefix))
+                                  if name.startswith(prefix) and name not in voi)
                 self.assertEqual(sorted(selected), declared)
                 self.assertEqual(len(selected), count)
                 self.assertTrue({cls_name+'.'+name for name in required}.issubset(selected))
@@ -449,6 +453,40 @@ class ExecutionSelectionTests(unittest.TestCase):
         modules = {row[0] for row in profile['suites']}
         self.assertFalse(others & modules)
         self.assertNotIn('e2e/test_volume_current_print.py', modules)
+
+    def test_volume_mip_voi_profile_selects_each_authored_voi_slab_case_once(self):
+        profile = ci.PROFILES['volume-mip-voi']
+        voi = ['test_mip_04_voi_slab_known_voxels_modes_orientations',
+               'test_mip_05_voi_order_delay_failure_missing_tool_cancel',
+               'test_mip_06_voi_original_undo_reset_scope_lifecycle']
+        self.assertEqual(profile['suites'], (('e2e/test_volume_mip_voi.py', None, 'ci-mip-voi'),))
+        suite, class_name, unit = profile['suites'][0]
+        # Planned at the budget CI will actually request for this suite.
+        plan = runner.module_plan('tests/'+suite, unit, 'live', profile['suite_budgets'][unit], class_name)
+        selected = [item['case'] for item in plan['tests']]
+        self.assertEqual(selected, ['VolumeMipVoiE2E.'+name for name in voi])
+        self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), 3)
+        # The local subclass declares no case of its own: each selected case is the authored MIP Viewer method itself.
+        cls = getattr(runner.load_module(ROOT/'tests'/suite), 'VolumeMipVoiE2E')
+        base = getattr(runner.load_module(ROOT/'tests/e2e/test_volume_mip.py'), 'VolumeMipE2E')
+        self.assertEqual(cls.__bases__, (base,))
+        self.assertEqual([name for name in vars(cls) if name.startswith('test')], [])
+        self.assertTrue(all(getattr(cls, name) is vars(base)[name] for name in voi))
+        # With the slab profile's MIP Viewer suite, every authored test_mip_ case runs exactly once across both groups.
+        slab = ci.PROFILES['volume-slab']
+        self.assertIn(('e2e/test_volume_mip.py', None, 'ci-slab-mip-viewer'), slab['suites'])
+        viewer = runner.module_plan('tests/e2e/test_volume_mip.py', 'ci-slab-mip-viewer', 'live',
+                                    slab['suite_budgets']['ci-slab-mip-viewer'])
+        names = [item['case'].split('.', 1)[1] for item in viewer['tests']] + voi
+        self.assertEqual(len(names), 6)
+        self.assertEqual(sorted(names), sorted(name for name in vars(base) if name.startswith('test_')))
+        # No other profile selects this module or shares this unit's attempt ledger.
+        for name, other in ci.PROFILES.items():
+            if name != 'volume-mip-voi':
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+                self.assertNotIn(unit, [row[2] for row in other['suites']], name)
+        print('SELECTION', suite, len(selected), flush=True)
 
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
