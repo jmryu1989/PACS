@@ -283,6 +283,61 @@ test('Undo walks back at most 32 confirmed VOI Slab records, Reset is undoable a
  assert.deepEqual(Object.keys(coronal).sort(),['history','mode','orientation','original','voiSlab']);
  assert.throws(()=>model.normalizeRequest({...final,history:Array(33).fill(null)}),/되돌리기 기록/);
 });
+
+/* A11-ORIENT-1 V1: the manual's Orientation Preset bar A/P/L/R/H/F (IF-RND-502U Rev1.2 p.332 §12.1, placed in the MIP Viewer by
+   p.342 §13). The expected vectors are the accepted contract table, written out here rather than derived from the model, and the
+   screen-right column is the hand-computed viewUp x viewPlaneNormal of that table. */
+const DIRECTIONS=[
+ ['Anterior',[0,-1,0],[0,0,1],[1,0,0]],
+ ['Posterior',[0,1,0],[0,0,1],[-1,0,0]],
+ ['Left',[1,0,0],[0,0,1],[0,1,0]],
+ ['Right',[-1,0,0],[0,0,1],[0,-1,0]],
+ ['Superior',[0,0,1],[0,-1,0],[-1,0,0]],
+ ['Inferior',[0,0,-1],[0,1,0],[-1,0,0]]];
+// A cross product of axis vectors yields -0 components; the sign of zero is not part of the direction, so it is normalised
+// for comparison only. The expected vectors themselves are the accepted table, unchanged.
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]].map(n=>n+0);
+test('the six anatomical presets are the accepted direction table, and the three MPR planes are untouched',()=>{
+ assert.deepEqual(model.directions,['Anterior','Posterior','Left','Right','Superior','Inferior']);
+ // The VOI Slab preset list and the MPR plane list stay exactly the three planes (manual p.337 §12.4).
+ assert.deepEqual(model.orientations,['Axial','Coronal','Sagittal']);
+ assert.deepEqual(model.views,['Axial','Coronal','Sagittal','Anterior','Posterior','Left','Right','Superior','Inferior']);
+ for(const [name,normal,up,right] of DIRECTIONS){
+  const got=model.view(native,name);
+  assert.deepEqual([got.viewPlaneNormal,got.viewUp],[normal,up],name);
+  assert.equal(got.key,null,name+' is written as vectors, not as a native orientation key');
+  assert.deepEqual(cross(up,normal),right,name+' screen right');
+  assert.ok(Math.abs(Math.hypot(...normal)-1)<1e-12&&Math.abs(Math.hypot(...up)-1)<1e-12,name+' unit');
+  assert.equal(normal[0]*up[0]+normal[1]*up[1]+normal[2]*up[2],0,name+' orthogonal');
+  assert.deepEqual(model.normalizeRequest({mode:'MIP',orientation:name}).orientation,name);
+ }
+ // F is the Axial projection turned 180 degrees in plane: same ray axis, up and screen right both negated. It is not Axial.
+ const axial=model.preset(native,'Axial'),foot=model.view(native,'Inferior');
+ assert.deepEqual(foot.viewPlaneNormal,axial.viewPlaneNormal);
+ assert.deepEqual(foot.viewUp,axial.viewUp.map(n=>-n+0));
+ assert.deepEqual(cross(foot.viewUp,foot.viewPlaneNormal),cross(axial.viewUp,axial.viewPlaneNormal).map(n=>-n+0));
+ // H is the left-right mirror of Axial: same up, reversed ray axis.
+ const head=model.view(native,'Superior');
+ assert.deepEqual([head.viewPlaneNormal,head.viewUp],[axial.viewPlaneNormal.map(n=>-n+0),axial.viewUp]);
+ // A and Coronal, L and Sagittal are the same camera under different saved names.
+ assert.deepEqual([model.view(native,'Anterior').viewPlaneNormal,model.view(native,'Anterior').viewUp],[model.preset(native,'Coronal').viewPlaneNormal,model.preset(native,'Coronal').viewUp]);
+ assert.deepEqual([model.view(native,'Left').viewPlaneNormal,model.view(native,'Left').viewUp],[model.preset(native,'Sagittal').viewPlaneNormal,model.preset(native,'Sagittal').viewUp]);
+ // The three planes still resolve through the pinned native table, so a missing table is still refused.
+ for(const name of model.orientations)assert.deepEqual(model.view(native,name),model.preset(native,name));
+ assert.throws(()=>model.view(undefined,'Axial'),/방향 기준값/);
+ // Direction vectors are frozen copies: a caller cannot edit the table through the value it is handed.
+ const copy=model.view(native,'Anterior');copy.viewPlaneNormal[0]=9;
+ assert.deepEqual(model.view(native,'Anterior').viewPlaneNormal,[0,-1,0]);
+ for(const bad of ['Head','Foot','anterior','ANTERIOR','Oblique','',null,undefined])assert.throws(()=>model.normalizeRequest({mode:'MIP',orientation:bad}),/Projection과 Orientation/,String(bad));
+});
+test('the pinned kin-mip-2 table is the product VR direction table, so a VR change cannot silently reinterpret saved rows',()=>{
+ const vr=require('../worklist-v0/hpacs-lite/volume-rendering.js');
+ for(const [name,normal,up] of DIRECTIONS){
+  const turned=vr.orient({focalPoint:[3,4,5],position:[3,4,105],viewUp:[0,1,0]},name);
+  assert.deepEqual([turned.viewPlaneNormal,turned.viewUp],[normal,up],name+' VR parity');
+ }
+ assert.deepEqual(vr.directions,model.directions);
+});
 test('request identity covers the VOI Slab and Original, and the Final label names them',()=>{
  const r={mode:'MIP',orientation:'Axial',voiSlab:a30,original:false,history:[null]};
  assert.equal(model.sameRequest(r,{...r,voiSlab:model.normalizeVoi({...a30})}),true);

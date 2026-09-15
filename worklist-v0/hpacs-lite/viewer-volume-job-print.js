@@ -1,8 +1,8 @@
 /* Reconstruct saved batch output from private, freshly read CT pixels. */
 window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check}){
   const core=window.cornerstone,reference=snapshot.volume,batch=snapshot.batch;
-  // A saved MIP Viewer (12) or MIP Batch (13) Job shares this fresh-pixel loader and hands its frames to viewer-volume-mip-print.js.
-  const mip=[12,13].includes(snapshot.version);
+  // A saved MIP Viewer (12/14) or MIP Batch (13/15) Job shares this fresh-pixel loader and hands its frames to viewer-volume-mip-print.js.
+  const mip=[12,13,14,15].includes(snapshot.version);
   if(![4,5,6].includes(snapshot.version)&&!mip||batch&&(typeof window.KinVolumeBatch?.plan!=='function'||typeof window.KinVolumeBatchScout?.camera!=='function'||typeof window.KinVolumeBatchScout?.line!=='function'||typeof window.kinRenderVolumeScout!=='function'))throw Error('단면 묶음 출력 도구를 불러오지 못했습니다.');
   if(mip&&typeof window.kinRenderVolumeMipPrint!=='function')throw Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.');
   if(!mip&&(batch?[batch.cell]:snapshot.cells).some(cell=>cell.projection.blend===3)&&typeof window.kinPrepareVolumeAverage!=='function')throw Error('평균 투영 출력 도구를 불러오지 못했습니다.');

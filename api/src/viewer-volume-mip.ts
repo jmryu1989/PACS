@@ -13,9 +13,19 @@ const LIMIT=1e6;
 const vector=(v:any)=>Array.isArray(v)&&v.length===3&&v.every((n:any)=>finite(n)&&Math.abs(n)<=LIMIT);
 const dot=(a:number[],b:number[])=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
 
-export function validateVolumeMip(m:any){
+/* A11-ORIENT-1: the six anatomical presets of the manual's Orientation Preset bar are a second algorithm, kin-mip-2, carried by
+   the new snapshot versions 14 and 15 (worklist-v0/hpacs-lite/volume-mip-job.js). The projection semantics are identical; only
+   the direction enum differs. Each version names exactly one algorithm and each algorithm exactly one enum, so kin-mip-2 inside
+   a version 12/13 body and kin-mip-1 inside a version 14/15 body are both refused here, and versions 12/13 keep accepting
+   exactly what they accepted before. */
+const MIP_ALGORITHMS:Record<string,string[]>={'kin-mip-1':['Axial','Coronal','Sagittal'],'kin-mip-2':['Anterior','Posterior','Left','Right','Superior','Inferior']};
+const MIP_VERSIONS:Record<number,string>={12:'kin-mip-1',13:'kin-mip-1',14:'kin-mip-2',15:'kin-mip-2'};
+export const mipAlgorithm=(version:number)=>Object.prototype.hasOwnProperty.call(MIP_VERSIONS,version)?MIP_VERSIONS[version]:invalid();
+
+function validateBlock(m:any,algorithm:string){
+  const orientations=Object.prototype.hasOwnProperty.call(MIP_ALGORITHMS,algorithm)?MIP_ALGORITHMS[algorithm]:invalid();
   keys(m,['schema','algorithm','coordinates','frameOfReference','mode','orientation','display','voiSlab']);
-  if(m.schema!==1||m.algorithm!=='kin-mip-1'||m.coordinates!=='LPS_mm'||!['MIP','MinIP','Raysum'].includes(m.mode)||!['Axial','Coronal','Sagittal'].includes(m.orientation))invalid();
+  if(m.schema!==1||m.algorithm!==algorithm||m.coordinates!=='LPS_mm'||!['MIP','MinIP','Raysum'].includes(m.mode)||!orientations.includes(m.orientation))invalid();
   if(typeof m.frameOfReference!=='string'||m.frameOfReference.length>64||!/^[0-9]+(\.[0-9]+)*$/.test(m.frameOfReference))invalid();
   const d=m.display;keys(d,['voiRange','interpolationType']);keys(d.voiRange,['lower','upper']);
   if(![0,1,2].includes(d.interpolationType)||![d.voiRange.lower,d.voiRange.upper].every((n:any)=>finite(n)&&Math.abs(n)<=1e9)||d.voiRange.upper<=d.voiRange.lower)invalid();
@@ -26,6 +36,11 @@ export function validateVolumeMip(m:any){
   if(!(Math.abs(Math.hypot(s.normal[0],s.normal[1],s.normal[2])-1)<=1e-6))invalid();
 }
 
+/** The accepted version 12/13 display: exactly kin-mip-1, byte for byte what it accepted before. */
+export function validateVolumeMip(m:any){validateBlock(m,'kin-mip-1');}
+/** The version 14/15 display: exactly kin-mip-2, the same rules with the six anatomical directions. */
+export function validateVolumeMipDirection(m:any){validateBlock(m,'kin-mip-2');}
+
 // Server half of kin-mip-batch-1 (worklist-v0/hpacs-lite/volume-mip-batch.js): the rotation series conditions a MIP Viewer Batch
 // preview was generated with, saved beside its kin-mip-1 display. Frames are never stored, and the raster size, camera distance
 // and parallel scale follow from the algorithm and the display, so exactly these keys exist. Another schema or algorithm is refused.
@@ -35,9 +50,10 @@ export function validateVolumeMipBatch(b:any){
   if(!finite(b.interval)||b.interval<1||b.interval>180||!Number.isInteger(b.count)||b.count<2||b.count>64||(b.count-1)*b.interval>360+1e-9)invalid();
 }
 
-/** The display belongs to this original: same frame of reference, and a VOI Slab that keeps at least one voxel centre. */
-export function verifyVolumeMip(m:any,frameOfReference:string,origin:number[],x:number[],y:number[],z:number[],dimensions:number[]){
-  validateVolumeMip(m);
+/** The display belongs to this original: same frame of reference, and a VOI Slab that keeps at least one voxel centre.
+ *  `algorithm` is the one the snapshot version names (mipAlgorithm), so a stored row is re-verified under its own binding. */
+export function verifyVolumeMip(m:any,algorithm:string,frameOfReference:string,origin:number[],x:number[],y:number[],z:number[],dimensions:number[]){
+  validateBlock(m,algorithm);
   if(m.frameOfReference!==frameOfReference)invalid();
   const s=m.voiSlab;if(s===null)return;
   // Signed distances of the eight voxel-centre corners along the slab normal: a slab wholly beyond either side

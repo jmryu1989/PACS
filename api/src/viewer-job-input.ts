@@ -3,7 +3,7 @@ import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference } f
 import { validateVolumeMarks } from './viewer-volume-marks';
 import { validateVolumeCurved } from './viewer-volume-curved';
 import { validateVolumePath } from './viewer-volume-path';
-import { validateVolumeMip, validateVolumeMipBatch } from './viewer-volume-mip';
+import { validateVolumeMip, validateVolumeMipDirection, validateVolumeMipBatch } from './viewer-volume-mip';
 import { createHash } from 'node:crypto';
 
 const invalid = (): never => { throw new BadRequestException('비교 작업의 입력 또는 원본 참조가 올바르지 않습니다'); };
@@ -65,8 +65,8 @@ const MERGE_SHAPES: number[][][] = [
 const PLANE_ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 const CELL_KINDS = ['plane', 'stack'];
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10,11,12,13].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:s?.version===11?['path']:s?.version===12?['mip']:s?.version===13?['mip','mipBatch']:[])]);
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10,11,12,13,14,15].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:s?.version===11?['path']:s?.version===12||s?.version===14?['mip']:s?.version===13||s?.version===15?['mip','mipBatch']:[])]);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
   const planes = s.version === 7, mixed = s.version === 8, merged = s.version === 9;
   // A merged layout of ordinary frame cells alone has no volume to reference, so its
@@ -79,12 +79,18 @@ function validateJobSnapshot(s: any) {
   // with neither a batch, 3D marks, a curve nor a path beside it; its display is the active cell's own W/L.
   // Version 13 is that exact version 12 snapshot plus the MIP Viewer Batch rotation recipe (kin-mip-batch-1) its preview was
   // generated with: conditions only, never frames. A version 12 body with a mipBatch key, or a version 13 body without one, is refused.
-  const volume = [4,5,6,7,8,10,11,12,13].includes(s.version) || merged && s.volume !== null;
+  // Version 14 is the exact version 12 snapshot whose MIP Viewer display names the manual's anatomical Orientation Preset
+  // (kin-mip-2: Anterior/Posterior/Left/Right/Superior/Inferior), and version 15 is that snapshot plus the same unchanged
+  // kin-mip-batch-1 recipe version 13 carries. Each version names exactly one algorithm, so kin-mip-2 in a version 12/13 body
+  // and kin-mip-1 in a version 14/15 body are both refused, as are a version 14 body with a mipBatch key and a version 15
+  // body without one. Versions 12 and 13 accept exactly what they accepted before.
+  const volume = [4,5,6,7,8,10,11,12,13,14,15].includes(s.version) || merged && s.volume !== null;
   if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
   if(s.version===10)validateVolumeCurved(s.curved);
   if(s.version===11)validateVolumePath(s.path);
   if(s.version===12||s.version===13)validateVolumeMip(s.mip);
-  if(s.version===13)validateVolumeMipBatch(s.mipBatch);
+  if(s.version===14||s.version===15)validateVolumeMipDirection(s.mip);
+  if(s.version===13||s.version===15)validateVolumeMipBatch(s.mipBatch);
   const batch=s.version===5||s.version===6&&s.batch!==null;
   if(batch){
     keys(s.batch,['cell','offset','interval','count','reverse']);
@@ -169,7 +175,7 @@ function validateJobSnapshot(s: any) {
   }
   // The MIP Viewer opens on the active cell and takes its W/L and interpolation from it, so a display that is not that
   // cell's own (another cell, a later W/L change) is not the display this snapshot can put back.
-  if (s.version === 12 || s.version === 13) {
+  if (s.version === 12 || s.version === 13 || s.version === 14 || s.version === 15) {
     const p = s.cells[s.active].properties, d = s.mip.display;
     if (d.voiRange.lower !== p.voiRange.lower || d.voiRange.upper !== p.voiRange.upper || d.interpolationType !== p.interpolationType) invalid();
   }

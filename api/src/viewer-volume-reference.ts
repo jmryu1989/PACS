@@ -3,7 +3,7 @@ import { canonical } from './viewer-input';
 import { verifyVolumeMarkBounds } from './viewer-volume-marks';
 import { verifyVolumeCurved } from './viewer-volume-curved';
 import { verifyVolumePath } from './viewer-volume-path';
-import { verifyVolumeMip } from './viewer-volume-mip';
+import { verifyVolumeMip, mipAlgorithm } from './viewer-volume-mip';
 import { createHash } from 'node:crypto';
 
 const invalid = (): never => { throw new BadRequestException('정규 CT 볼륨의 전체 원본과 좌표를 확인할 수 없습니다'); };
@@ -51,7 +51,8 @@ export function verifyVolumeReference(snapshot: any, tags: any[], patient: strin
   // Every tag already shares this FrameOfReferenceUID through the identity key above.
   if(snapshot.version===10){const o=values(tags[0].ImageOrientationPatient);verifyVolumeCurved(snapshot.curved,tags[0].FrameOfReferenceUID,origin,o.slice(0,3).map(n=>n*spacing[1]),o.slice(3).map(n=>n*spacing[0]),step,[Number(tags[0].Columns),Number(tags[0].Rows),tags.length]);}
   if(snapshot.version===11){const o=values(tags[0].ImageOrientationPatient);verifyVolumePath(snapshot.path,tags[0].FrameOfReferenceUID,origin,o.slice(0,3).map(n=>n*spacing[1]),o.slice(3).map(n=>n*spacing[0]),step,[Number(tags[0].Columns),Number(tags[0].Rows),tags.length]);}
-  if(snapshot.version===12||snapshot.version===13){const o=values(tags[0].ImageOrientationPatient);verifyVolumeMip(snapshot.mip,tags[0].FrameOfReferenceUID,origin,o.slice(0,3).map(n=>n*spacing[1]),o.slice(3).map(n=>n*spacing[0]),step,[Number(tags[0].Columns),Number(tags[0].Rows),tags.length]);}
+  // The snapshot version names the one algorithm its display may carry (mipAlgorithm), so a stored row is re-verified under its own binding.
+  if(snapshot.version===12||snapshot.version===13||snapshot.version===14||snapshot.version===15){const o=values(tags[0].ImageOrientationPatient);verifyVolumeMip(snapshot.mip,mipAlgorithm(snapshot.version),tags[0].FrameOfReferenceUID,origin,o.slice(0,3).map(n=>n*spacing[1]),o.slice(3).map(n=>n*spacing[0]),step,[Number(tags[0].Columns),Number(tags[0].Rows),tags.length]);}
   const max=Math.min(1000,Math.hypot((Number(tags[0].Columns)-1)*spacing[1],(Number(tags[0].Rows)-1)*spacing[0],Math.hypot(...step)*(tags.length-1)));
   // A version 7 layout stores its vacancies as null cells; versions 8 and 9 also hold
   // ordinary stack frame cells; only a real plane of this volume has a slab to bound.

@@ -57,14 +57,16 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(value.version===11&&!window.kinMprPath)throw Error('3D Path 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     // A MIP Viewer Job is reopened by the MIP Viewer, so its tool and its computation are checked before any layout
     // change: an algorithm this viewer does not implement is refused (재현 불가), never reinterpreted.
-    if(value.version===12||value.version===13){
+    // Versions 14/15 are the same display under the manual's anatomical Orientation Presets (kin-mip-2); each version names
+    // exactly one algorithm here too, so kin-mip-2 in a 12/13 body and kin-mip-1 in a 14/15 body are both refused.
+    if([12,13,14,15].includes(value.version)){
       if(!window.kinVolumeMipJob)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
-      const m=value.mip;
-      if(!m||m.schema!==1||m.algorithm!=='kin-mip-1'||m.coordinates!=='LPS_mm')throw Error('이 MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
-      // Version 13 adds a MIP Batch recipe. Its model loads lazily with the MIP Viewer inside the restore, so only the ids are
+      const m=value.mip,algorithm=value.version===14||value.version===15?'kin-mip-2':'kin-mip-1';
+      if(!m||m.schema!==1||m.algorithm!==algorithm||m.coordinates!=='LPS_mm')throw Error('이 MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
+      // Version 13/15 adds a MIP Batch recipe. Its model loads lazily with the MIP Viewer inside the restore, so only the ids are
       // checked here; a model that then fails to load throws into the Job rollback instead.
       const b=value.mipBatch;
-      if(value.version===13&&(!b||b.schema!==1||b.algorithm!=='kin-mip-batch-1'))throw Error('MIP Batch 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
+      if((value.version===13||value.version===15)&&(!b||b.schema!==1||b.algorithm!=='kin-mip-batch-1'))throw Error('MIP Batch 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
     }
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
@@ -186,7 +188,12 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       if(d?.voiRange?.lower!==shown.voiRange?.lower||d.voiRange.upper!==shown.voiRange.upper||d.interpolationType!==shown.interpolationType)
         throw Error('MIP Viewer의 밝기 범위·보간이 활성 MPR 평면과 달라 저장하지 않았습니다. MIP Viewer를 닫고 다시 연 뒤 저장하세요.');
       // Version 13 is exactly that snapshot plus the recipe of the MIP Batch preview shown with the display (conditions only).
-      return JSON.parse(JSON.stringify(mipBatch?{version:13,studies,rows,cols,active,volume:reference,cells,mip,mipBatch}:{version:12,studies,rows,cols,active,volume:reference,cells,mip}));
+      // The block's own algorithm names the version pair: an Axial/Coronal/Sagittal display stays kin-mip-1 in 12/13, and only
+      // the manual's anatomical presets write kin-mip-2 in 14/15. The rule is inlined here, as the resolve() gate above inlines
+      // its algorithm ids, so a capture never depends on the MIP model being loaded; KinVolumeMipJob.versionFor is the same rule
+      // and tests/viewer_volume_job_capture_test.cjs pins the two against each other.
+      const version=mip.algorithm==='kin-mip-2'?(mipBatch?15:14):(mipBatch?13:12);
+      return JSON.parse(JSON.stringify(mipBatch?{version,studies,rows,cols,active,volume:reference,cells,mip,mipBatch}:{version,studies,rows,cols,active,volume:reference,cells,mip}));
     }
     // Version 11 is the version 4 snapshot plus one 3D path, under the same rule as a curve; a
     // curve and a path are two reconstructions and one Job holds only one of them.
@@ -341,7 +348,7 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // The MIP Viewer display is reopened last, on the restored active plane and inside the same deadline; a failure or a
     // user cancel throws into the caller's rollback, and every other Job closes an open MIP Viewer. A version 13 Job hands over its
     // MIP Batch recipe, which the viewer regenerates only after that display is Final, under its own explicit budget.
-    if(value.version===12||value.version===13)await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active],value.mipBatch??null);else window.kinVolumeMipJob?.clearForJob();
+    if([12,13,14,15].includes(value.version))await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active],value.mipBatch??null,value.version);else window.kinVolumeMipJob?.clearForJob();
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};

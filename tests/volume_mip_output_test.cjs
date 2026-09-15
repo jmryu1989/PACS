@@ -59,7 +59,12 @@ test('C5/MO4: a version 12 plan refuses exactly the inputs the MIP Batch plan re
  }
  assert.equal(output.plan({version:12,...base,distance:t/2+2e-6}).distance,t/2+2e-6);
  assert.throws(()=>output.plan({version:12,recipe:recipe(),...base}),{message:output.messages.shape});
- assert.throws(()=>output.plan({version:14,...base}),{message:output.messages.shape});
+ // Version 16 is the unknown-version sentinel now that 14/15 are the anatomical-preset pair (A11-ORIENT-1).
+ assert.throws(()=>output.plan({version:16,...base}),{message:output.messages.shape});
+ assert.throws(()=>output.plan({version:14,recipe:recipe(),...base}),{message:output.messages.shape});
+ // A batch version without its recipe is refused by the MIP Batch model it delegates to (the pairing itself is refused with the
+ // output's own wording in saved(), asserted in the A11-ORIENT-1 test below).
+ assert.throws(()=>output.plan({version:15,...base}));
 });
 
 test('MO3: version 13 Coronal Horizontal +90 turns about viewUp and Vertical +90 about the screen right (hard-coded vectors)',()=>{
@@ -133,15 +138,22 @@ test('saved Job and binding refusals: unknown algorithms, version and recipe sha
  const m=output.messages;
  assert.equal(output.saved(snapshot(12)).recipe,null);assert.deepEqual({...output.saved(snapshot(13)).recipe},recipe({interval:90,count:4}));
  for(const [label,value,message] of [
-   ['unknown mip algorithm',snapshot(12,{mip:block({algorithm:'kin-mip-2'})}),m.reproduce],['mip schema 2',snapshot(13,{mip:block({schema:2})}),m.reproduce],
+   // A11-ORIENT-1 named replacement: kin-mip-2 is now a known algorithm, so inside a version 12 body it is a malformed
+   // version/algorithm pair ('shape'); kin-mip-3 takes over as the algorithm this viewer cannot reproduce.
+   ['kin-mip-2 inside version 12',snapshot(12,{mip:block({algorithm:'kin-mip-2'})}),m.shape],
+   ['unknown mip algorithm',snapshot(12,{mip:block({algorithm:'kin-mip-3'})}),m.reproduce],['mip schema 2',snapshot(13,{mip:block({schema:2})}),m.reproduce],
    ['unknown mipBatch algorithm',snapshot(13,{mipBatch:recipe({algorithm:'kin-mip-batch-2'})}),m.reproduce],['mipBatch schema 2',snapshot(13,{mipBatch:recipe({schema:2})}),m.reproduce],
    ['version 12 with mipBatch',{...snapshot(12),mipBatch:recipe()},m.shape],['version 12 with a null mipBatch',{...snapshot(12),mipBatch:null},m.shape],
    ['version 13 without mipBatch',(({mipBatch,...rest})=>rest)(snapshot(13)),m.shape],['version 13 with a null mipBatch',snapshot(13,{mipBatch:null}),m.shape],
    ['version 13 recipe count 1',snapshot(13,{mipBatch:recipe({count:1})}),m.shape],['malformed mip',snapshot(12,{mip:{...block(),history:[]}}),m.shape],
-   ['missing mip',(({mip:_,...rest})=>rest)(snapshot(12)),m.shape],['version 4',{...snapshot(12),version:4},m.shape],['version 14',{...snapshot(13),version:14},m.shape],['null',null,m.shape]])
+   ['missing mip',(({mip:_,...rest})=>rest)(snapshot(12)),m.shape],['version 4',{...snapshot(12),version:4},m.shape],['version 14',{...snapshot(13),version:14},m.shape],
+   ['version 16',{...snapshot(13),version:16},m.shape],['null',null,m.shape]])
   assert.throws(()=>output.saved(value),{message},label);
  assert.equal(m.reproduce,'MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 출력하지 않았습니다.');
- assert.throws(()=>output.direction('kin-mip-2','Axial',TABLE),{message:m.reproduce});
+ // Named replacement: an unknown algorithm has no resolver ('reproduce'); kin-mip-2 has one but never names a plane ('shape').
+ assert.throws(()=>output.direction('kin-mip-3','Axial',TABLE),{message:m.reproduce});
+ assert.throws(()=>output.direction('kin-mip-2','Axial',TABLE),{message:m.shape});
+ assert.deepEqual(output.direction('kin-mip-2','Superior',TABLE),{viewPlaneNormal:[0,0,1],viewUp:[0,-1,0]});
  const g=PHANTOM,affine=mip.affine(g.toWorld),args={saved:output.saved(snapshot(12)),frameOfReference:'1.2.9',volumeId:'kin-batch-print-test',affine,corners:g.corners};
  const request=output.bind(args);
  assert.equal(request.voiSlab.volumeId,'kin-batch-print-test');assert.deepEqual([...request.voiSlab.affine],[...affine]);
@@ -181,13 +193,61 @@ test('C2: captions name frame, display, axis with signed angle, VOI Slab and ras
  assert.equal(text,'VOI -160 ~ 240 (LINEAR) · Normal grayscale');assert.doesNotMatch(text,/W\/L|\bW -?\d|\bL -?\d/);
 });
 
-test('supports exactly versions 12 and 13; the outer bound is 120 s, plus min(count x 15 s, 300 s) for version 13, with its own timeout message',()=>{
- for(const version of [12,13])assert.equal(output.supports(version),true);
- for(const version of [1,2,3,4,5,6,7,8,9,10,11,14,'12',12.5,null,undefined])assert.equal(output.supports(version),false,String(version));
+/* A11-ORIENT-1 V5: versions 14/15 are the same output under the manual's anatomical presets (kin-mip-2). The expected cameras are
+   the accepted contract table written out here, not values taken from the module under test. */
+const DIRECTION_TABLE={Anterior:[[0,-1,0],[0,0,1]],Posterior:[[0,1,0],[0,0,1]],Left:[[1,0,0],[0,0,1]],Right:[[-1,0,0],[0,0,1]],Superior:[[0,0,1],[0,-1,0]],Inferior:[[0,0,-1],[0,1,0]]};
+const directionBlock=(over={})=>block({algorithm:'kin-mip-2',orientation:'Posterior',...over});
+const directionSnapshot=(version,over={})=>({version,studies:['1.2.3'],rows:1,cols:3,active:0,cells:[],volume:{},mip:directionBlock(),
+ ...(version===15?{mipBatch:recipe({interval:90,count:4})}:{}),...over});
+test('A11-ORIENT-1: versions 14/15 print the anatomical presets through the same plan, and each version keeps its own algorithm',()=>{
+ const m=output.messages,g=PHANTOM,t=g.thickness;
+ assert.equal(output.saved(directionSnapshot(14)).recipe,null);
+ assert.deepEqual({...output.saved(directionSnapshot(15)).recipe},recipe({interval:90,count:4}));
+ assert.equal(output.saved(directionSnapshot(14)).mip.algorithm,'kin-mip-2');
+ // Each version names exactly one algorithm, and the batch member of a pair is decided by the recipe key alone.
+ for(const [label,value,message] of [
+   ['kin-mip-1 inside version 14',directionSnapshot(14,{mip:block()}),m.shape],
+   ['kin-mip-1 inside version 15',directionSnapshot(15,{mip:block()}),m.shape],
+   ['kin-mip-2 inside version 13',snapshot(13,{mip:directionBlock()}),m.shape],
+   ['version 14 with mipBatch',{...directionSnapshot(14),mipBatch:recipe()},m.shape],
+   ['version 15 without mipBatch',(({mipBatch,...rest})=>rest)(directionSnapshot(15)),m.shape],
+   ['version 15 with a null mipBatch',directionSnapshot(15,{mipBatch:null}),m.shape],
+   ['plane name inside kin-mip-2',directionSnapshot(14,{mip:directionBlock({orientation:'Axial'})}),m.shape],
+   ['unknown algorithm in version 14',directionSnapshot(14,{mip:directionBlock({algorithm:'kin-mip-3'})}),m.reproduce]])
+  assert.throws(()=>output.saved(value),{message},label);
+ // Every preset frame is its hard-coded camera, and the version 15 frame 0 is the version 14 single frame.
+ for(const [orientation,[normal,up]] of Object.entries(DIRECTION_TABLE)){
+  const one=output.frames({saved:output.saved(directionSnapshot(14,{mip:directionBlock({orientation})})),values:TABLE,dimensions:g.dimensions,spacing:g.spacing,corners:g.corners});
+  assert.equal(one.cameras.length,1);
+  const camera=one.cameras[0];
+  near(camera.viewPlaneNormal,normal,0,orientation+' normal');near(camera.viewUp,up,0,orientation+' up');
+  near(camera.focalPoint,g.focal,1e-12,orientation+' focal');
+  near(camera.position,g.focal.map((x,k)=>x+normal[k]*t),1e-9,orientation+' position');
+  assert.equal(camera.parallelScale,t/2);assert.equal(one.distance,t);assert.equal(one.thickness,t);
+  const series=output.frames({saved:output.saved(directionSnapshot(15,{mip:directionBlock({orientation})})),values:TABLE,dimensions:g.dimensions,spacing:g.spacing,corners:g.corners});
+  assert.equal(series.cameras.length,4);
+  assert.deepEqual({...series.cameras[0],focalPoint:[...series.cameras[0].focalPoint],position:[...series.cameras[0].position],viewPlaneNormal:[...series.cameras[0].viewPlaneNormal],viewUp:[...series.cameras[0].viewUp]},
+   {...camera,focalPoint:[...camera.focalPoint],position:[...camera.position],viewPlaneNormal:[...camera.viewPlaneNormal],viewUp:[...camera.viewUp]},orientation+' frame 0 is the version 14 frame');
+ }
+ // Posterior Horizontal +90 turns about its own viewUp: the hand-computed vectors of the accepted table.
+ const turned=output.frames({saved:output.saved(directionSnapshot(15)),values:TABLE,dimensions:g.dimensions,spacing:g.spacing,corners:g.corners}).cameras;
+ near(turned[1].viewPlaneNormal,[-1,0,0],1e-12,'Posterior Horizontal +90 normal');near(turned[1].viewUp,[0,0,1],1e-12,'Posterior Horizontal +90 up');
+ assert.deepEqual(turned.map(c=>c.angle),[0,90,180,270]);
+ // Captions and the page bound follow the version pair, with the saved preset named as it was saved.
+ assert.equal(output.caption({version:14,index:0,count:1,mode:'Raysum',orientation:'Posterior',voiThickness:20}),'MIP Viewer · Raysum · Posterior · VOI Slab 20 mm · 512 × 512');
+ assert.equal(output.caption({version:15,index:1,count:4,mode:'Raysum',orientation:'Superior',axis:'Vertical',angle:-45,voiThickness:null}),'Frame 2 / 4 · Raysum · Superior · Vertical -45° · VOI Slab Off · 512 × 512');
+ assert.deepEqual([output.single(12),output.single(14),output.single(13),output.single(15)],[true,true,false,false]);
+});
+
+test('supports exactly versions 12-15; the outer bound is 120 s, plus min(count x 15 s, 300 s) for a batch version, with its own timeout message',()=>{
+ for(const version of [12,13,14,15])assert.equal(output.supports(version),true);
+ for(const version of [1,2,3,4,5,6,7,8,9,10,11,16,'12',12.5,null,undefined])assert.equal(output.supports(version),false,String(version));
  assert.equal(output.timer(12),120000);assert.deepEqual([2,20,21,64].map(count=>output.timer(13,count)),[150000,420000,420000,420000]);
+ assert.equal(output.timer(14),120000);assert.deepEqual([2,20,21,64].map(count=>output.timer(15,count)),[150000,420000,420000,420000]);
  assert.equal(output.timer(13),420000,'before its recipe is read, the bound of the largest recipe');
- for(const bad of [1,65,2.5,'4',NaN,null])assert.throws(()=>output.timer(13,bad),undefined,String(bad));
- for(const version of [4,6,11,14])assert.throws(()=>output.timer(version),{message:output.messages.shape});
+ assert.equal(output.timer(15),420000,'before its recipe is read, the bound of the largest recipe');
+ for(const bad of [1,65,2.5,'4',NaN,null]){assert.throws(()=>output.timer(13,bad),undefined,String(bad));assert.throws(()=>output.timer(15,bad),undefined,String(bad));}
+ for(const version of [4,6,11,16])assert.throws(()=>output.timer(version),{message:output.messages.shape});
  assert.equal(output.messages.timeout,'MIP 출력 준비 시간이 지났습니다. 다시 확인하세요.');assert.equal(output.messages.preRender,'MIP 출력 준비 렌더를 확인하지 못했습니다.');
  assert.deepEqual([output.frameMs,output.preRenderMs,output.size],[15000,5000,512]);assert.ok(Object.isFrozen(output)&&Object.isFrozen(output.messages));
 });

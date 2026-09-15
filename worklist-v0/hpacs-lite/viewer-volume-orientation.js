@@ -182,7 +182,7 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   // Placed before the VR button so existing callers that open VR as the panel's last button keep that target.
   const mipButton=document.createElement('button');mipButton.textContent='Open MIP Viewer';vrButton.before(mipButton);let mip=null,mipLoading=false;
   // Open MIP Viewer and a MIP Job restore load the same scripts; a restore bounds every load by its Job deadline. The MIP Batch
-  // model is optional for the viewer and a version 12 restore (its panel then says so) and required only by a version 13 restore.
+  // model is optional for the viewer and a version 12/14 restore (its panel then says so) and required only by a version 13/15 restore.
   const loadMip=async(deadline,failure,batch=false)=>{
     const load=([name,file],message)=>window[name]?Promise.resolve():new Promise((resolve,reject)=>{
       const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
@@ -213,12 +213,12 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
     dirty:()=>{try{return !!mip&&mip.job.dirty();}catch(_){return true;}},
     saved:(value,volume,batch=null)=>{try{mip?.job.saved(value,volume,batch);}catch(_){}},
     cancels:event=>{try{return !!mip&&mip.job.cancels(event);}catch(_){return false;}},
-    async restore(value,current=()=>true,deadline=Date.now()+60000,viewportId,batch=null){
+    async restore(value,current=()=>true,deadline=Date.now()+60000,viewportId,batch=null,version=12){
       try{
         if(!alive())throw Error('MIP Viewer 계정이 변경되어 MIP 작업을 복원하지 않았습니다.');
         await loadMip(deadline,'MIP Viewer 도구를 불러오지 못해 MIP 작업을 복원하지 않았습니다.',batch!==null);
         if(!alive()||!current())throw Error('화면이 변경되어 MIP 작업 복원을 중단했습니다.');
-        await createMip().job.restore(value,{current,deadline,viewportId,batch});
+        await createMip().job.restore(value,{current,deadline,viewportId,batch,version});
       }catch(error){
         // The Job rollback follows every MIP restore failure, so the reason says so even when it names no screen itself.
         const message=error?.message||'MIP 작업을 복원하지 못했습니다.';

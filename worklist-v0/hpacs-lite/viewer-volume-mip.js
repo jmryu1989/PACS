@@ -7,7 +7,9 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   el('p','현재 로드된 CT 볼륨 전체를 선택한 방향으로 투영하는 수동 표시입니다. MIP는 최댓값, MinIP는 최솟값, Raysum은 광선 경로 표본의 평균이며 합계가 아닙니다. 원본 DICOM과 MPR·VR 표시는 바꾸지 않습니다. 조작성 평가 가능·진단 품질 미검증.',side);
   const controls=el('fieldset',undefined,side);el('legend','MIP Display',controls);
   const select=(label,values)=>{const l=el('label',label+' ',controls),s=el('select',undefined,l);s.setAttribute('aria-label','MIP '+label);for(const value of values){const o=el('option',value,s);o.value=value;}return s;};
-  const projection=select('Projection',model.modes),orientation=select('Orientation',model.orientations);
+  // The three MPR planes first, then the manual's six anatomical view directions (p.332 §12.1); the bottom preset bar below writes
+  // the same value, so this select stays the one place the applied orientation is shown.
+  const projection=select('Projection',model.modes),orientation=select('Orientation',model.views);
   // VOI Slab editors are a draft; only Apply, Move, Rotate, Undo, Reset and Original request a display change.
   const voi=el('fieldset',undefined,side);voi.className='kin-mip-voi';el('legend','VOI Slab',voi);
   const voiRow=()=>{const row=el('div',undefined,voi);row.className='kin-mip-voi-row';return row;};
@@ -32,9 +34,21 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   style.textContent+='#kin-volume-mip .kin-mip-batch-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;width:100%}#kin-volume-mip .kin-mip-batch p{width:100%}#kin-volume-mip .kin-mip-batch-result{width:100%}#kin-volume-mip .kin-mip-batch img{display:block;max-width:100%;max-height:260px;object-fit:contain;background:#000}';
   const batchBox=el('fieldset',undefined,side);batchBox.className='kin-mip-batch';el('legend','MIP Batch',batchBox);
   let batchLine=el('div',undefined,batchBox);batchLine.className='kin-mip-batch-row';
-  const batchAxis=(()=>{const l=el('label','Axis ',batchLine),s=el('select',undefined,l);s.setAttribute('aria-label','MIP Batch Axis');s.title='Horizontal은 화면 위쪽 방향(viewUp)을, Vertical은 화면 오른쪽 방향을 축으로 돌립니다.';for(const value of ['Horizontal','Vertical']){const o=el('option',value,s);o.value=value;}return s;})();
+  // The manual's p.328 batch tool names this field Type; its values here are the two rotation kinds p.339 describes
+  // ('rotating transversely or vertically'). The saved recipe key is unchanged.
+  const batchAxis=(()=>{const l=el('label','Type ',batchLine),s=el('select',undefined,l);s.setAttribute('aria-label','MIP Batch Type');s.title='매뉴얼 Batch 도구의 Type 필드입니다. 회전 종류를 고릅니다: Horizontal은 가로 회전(화면 위쪽 방향 viewUp 축), Vertical은 세로 회전(화면 오른쪽 방향 축)입니다.';for(const value of ['Horizontal','Vertical']){const o=el('option',value,s);o.value=value;}return s;})();
   const batchField=(name,title,type='number')=>{const l=el('label',name+' ',batchLine),i=el('input',undefined,l);i.type=type;if(type==='number')i.step='any';i.setAttribute('aria-label','MIP Batch '+name);i.title=title;return i;};
   const batchInterval=batchField('Interval (deg)','프레임 사이 회전 각도(도, 1~180)입니다.'),batchCount=batchField('Number','만들 프레임 수(2~64)입니다. 전체 회전 범위는 360도 이내입니다.'),batchReverse=batchField('Reverse','체크하면 반대 방향으로 돌립니다.','checkbox');
+  /* The manual's p.328 batch tool also shows a Thickness field. This product's MIP Batch has no editable projection depth: every
+     frame projects the whole CT volume, optionally cut by the VOI Slab, so the value the frames actually used is shown read-only
+     here. It is an output, never an input, and it does not satisfy the manual's Thickness input: the only adjustable thickness
+     offered today is VOI Slab Thickness (manual p.337 §12.4). Whether an editable camera-aligned thickness is added at all is an
+     open product decision and is not answered by this viewer. */
+  batchLine=el('div',undefined,batchBox);batchLine.className='kin-mip-batch-row';
+  el('span','Thickness ',batchLine);
+  const batchThickness=el('output','',batchLine);batchThickness.className='kin-mip-batch-thickness';
+  batchThickness.setAttribute('aria-label','MIP Batch Thickness Readout');
+  batchThickness.title='프레임이 실제로 투영한 두께입니다. 읽기 전용 표시이며 입력란이 아닙니다. 조절할 수 있는 두께는 VOI Slab Thickness뿐입니다.';
   batchLine=el('div',undefined,batchBox);batchLine.className='kin-mip-batch-row';
   const batchButton=(text,title)=>{const b=el('button',text,batchLine);b.type='button';b.title=title;return b;};
   const batchMake=batchButton('Make MIP Batch','확인된 Final 표시로 회전 투영 미리보기를 만듭니다.'),batchCancel=batchButton('Cancel MIP Batch','만드는 중인 MIP Batch를 취소하고 이전 미리보기를 유지합니다.');
@@ -44,7 +58,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   batchLine=el('div',undefined,batchResult);batchLine.className='kin-mip-batch-row';
   const batchPrevious=batchButton('Previous Frame','이전 프레임을 봅니다.'),batchNext=batchButton('Next Frame','다음 프레임을 봅니다.'),batchPlay=batchButton('Play MIP Batch','프레임을 차례로 재생합니다.'),batchClear=batchButton('Clear MIP Batch','MIP Batch 미리보기를 비웁니다.');
   const batchNote=el('p','',batchBox);batchNote.className='kin-mip-batch-note';
-  el('p','MIP Batch는 확인된 Final 표시(Projection·Orientation·VOI Slab)를 선택한 축으로 돌려 가며 만든 회전 투영 미리보기입니다. 매뉴얼은 가로·세로로 회전하는 연속 영상만 설명하며, 축 이름(Horizontal=화면 위쪽 방향 축, Vertical=화면 오른쪽 방향 축)·부호(+는 그 축의 오른손 방향, Reverse는 반대)·Interval 1~180도·Number 2~64장·전체 360도 이내·512×512 크기는 이 제품의 선택입니다. 매뉴얼 Batch 도구의 Type·Thickness 입력과 위치 안내(scout) 영상은 없으며 두께는 CT 전체 또는 VOI Slab입니다. 이 창의 임시 미리보기일 뿐 영상 반출·출력·필름·DICOM 저장이 아닙니다. Save MIP Job은 조건만 저장하고 프레임 영상은 저장하지 않으며, 창을 닫으면 미리보기는 사라지고 저장한 조건으로 다시 만들 수 있습니다. 원본 DICOM과 밝기 범위(W/L)는 바뀌지 않습니다.',batchBox).className='kin-mip-batch-scope';
+  el('p','MIP Batch는 확인된 Final 표시(Projection·Orientation·VOI Slab)를 선택한 축으로 돌려 가며 만든 회전 투영 미리보기입니다. 매뉴얼은 가로·세로로 회전하는 연속 영상만 설명하며, 축 이름(Horizontal=화면 위쪽 방향 축, Vertical=화면 오른쪽 방향 축)·부호(+는 그 축의 오른손 방향, Reverse는 반대)·Interval 1~180도·Number 2~64장·전체 360도 이내·512×512 크기는 이 제품의 선택입니다. 매뉴얼 Batch 도구의 Type은 위 회전 종류 선택(Horizontal·Vertical)이고, Thickness는 프레임이 실제로 투영한 두께를 보여 주는 읽기 전용 표시입니다. 입력란이 아니며 매뉴얼의 Thickness 입력을 대신하지 않습니다. 지금 조절할 수 있는 두께는 VOI Slab Thickness(매뉴얼 p.337)뿐이고, 카메라와 함께 도는 별도의 투영 두께 입력을 둘지는 아직 정해지지 않았습니다. 위치 안내(scout) 영상은 없으며 두께는 CT 전체 또는 VOI Slab입니다. 이 창의 임시 미리보기일 뿐 영상 반출·출력·필름·DICOM 저장이 아닙니다. Save MIP Job은 조건만 저장하고 프레임 영상은 저장하지 않으며, 창을 닫으면 미리보기는 사라지고 저장한 조건으로 다시 만들 수 있습니다. 원본 DICOM과 밝기 범위(W/L)는 바뀌지 않습니다.',batchBox).className='kin-mip-batch-scope';
   batchBox.disabled=true;
   const render=el('p','',side);render.className='kin-mip-render';const status=el('p','',side);status.setAttribute('role','status');
   el('p','선택을 바꾸면 최종 렌더를 확인한 뒤 Final로 표시합니다. 확인 전 화면은 Rendering으로 표시하며 결과로 쓰지 않습니다. 밝기 범위는 MIP Viewer를 열 때의 MPR 값을 따릅니다.',side);
@@ -61,7 +75,26 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   const jobNote=el('p','',jobBox);jobNote.className='kin-mip-job-note';jobBox.disabled=true;
   const closeButton=el('button','Close MIP Viewer',side);
   const canvasPane=el('div',undefined,dialog);canvasPane.className='kin-mip-canvas-pane';const canvasHost=el('div',undefined,canvasPane);canvasHost.dataset.kinMipRender='1';canvasHost.style.cssText='width:100%;height:100%;min-height:0;background:black';
-  const label=el('span','',canvasPane);label.className='kin-mip-label';document.body.append(dialog);controls.disabled=true;
+  const label=el('span','',canvasPane);label.className='kin-mip-label';
+  /* The manual's Orientation Preset bar at the bottom of the Viewer (p.332 §12.1 [A][P][L][R][H][F]; p.342 §13 places the same bar
+     in the MIP Viewer). Each title names where the camera stands, which patient direction is up and which is on screen right,
+     because F is the Axial projection turned 180 degrees in plane, not the Axial image. A click requests the same display change
+     the Orientation select does, through the same sequence: nothing is applied until its own render is confirmed. */
+  style.textContent+='#kin-volume-mip .kin-mip-presets{position:absolute;right:10px;bottom:10px;display:flex;gap:4px;border:0;padding:0;margin:0}#kin-volume-mip .kin-mip-presets button{min-width:30px;padding:3px 7px;font-weight:700}#kin-volume-mip .kin-mip-presets button[aria-pressed="true"]{background:#6de6ff;color:#00131d;border-color:#6de6ff}#kin-volume-mip .kin-mip-presets button:disabled{opacity:.5}';
+  const presetBar=el('fieldset',undefined,canvasPane);presetBar.className='kin-mip-presets';presetBar.setAttribute('aria-label','MIP Orientation Preset');
+  const presetButtons=[['A','Anterior','앞쪽에서','위쪽이 위','환자 왼쪽이 화면 오른쪽','Anterior'],
+    ['P','Posterior','뒤쪽에서','위쪽이 위','환자 오른쪽이 화면 오른쪽','Posterior'],
+    ['L','Left','환자 왼쪽에서','위쪽이 위','뒤쪽이 화면 오른쪽','Left'],
+    ['R','Right','환자 오른쪽에서','위쪽이 위','앞쪽이 화면 오른쪽','Right'],
+    ['H','Superior','머리 위에서','앞쪽이 위','환자 오른쪽이 화면 오른쪽','Head (Superior)'],
+    ['F','Inferior','발쪽에서','뒤쪽이 위','환자 오른쪽이 화면 오른쪽','Foot (Inferior)']].map(([letter,name,from,up,right,spoken])=>{
+    const button=el('button',letter,presetBar);button.type='button';button.dataset.kinMipPreset=name;
+    button.setAttribute('aria-label','MIP View From '+spoken);button.setAttribute('aria-pressed','false');
+    button.title=letter+' · '+from+' · '+up+' · '+right;
+    button.onclick=()=>{const op=operation;if(!op?.ready||presetBar.disabled)return;orientation.value=name;changed();};
+    return button;
+  });
+  document.body.append(dialog);controls.disabled=presetBar.disabled=true;
   let ended=false,operation=null,preview=null,batchIndex=0,batchTimer=null;
   // The MIP Batch model is loaded lazily beside this viewer and may arrive later (a version 13 restore retries its load).
   const batchTool=()=>window.KinVolumeMipBatch||null;
@@ -73,7 +106,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   function clearPreview(){stopBatchPlay();preview?.clear();batchIndex=0;if(batchImage.src)batchImage.removeAttribute('src');batchFrame.textContent='';batchResult.hidden=true;}
   function disableBatch(run){if(!run)return;try{if(run.enabled&&run.engine?.getViewport(run.id))run.engine.disableElement(run.id);}catch(_){}run.element?.remove();}
   function close(){
-    const op=operation;operation=null;controls.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=true;
+    const op=operation;operation=null;controls.disabled=presetBar.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=true;
     // Nothing unsaved outlives the dialog: a VOI Slab persists only inside a MIP Job saved with Save MIP Job.
     voiEnable.checked=voiOriginal.checked=false;voiDraftNormal=null;voiState.textContent=voiNote.textContent=voiNormal.textContent='';for(const input of [...voiCenter,...voiPivot,voiThickness,voiMove,voiDegrees])input.value='';
     saveState?.open(null);jobTitle.value=jobDescription.value=jobNote.textContent='';
@@ -92,7 +125,8 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
   }
   function show(op,{status:state,request,message}){
     if(operation!==op)return;
-    if(request){projection.value=request.mode;orientation.value=request.orientation;voiOriginal.checked=request.original===true;}
+    if(request){projection.value=request.mode;orientation.value=request.orientation;voiOriginal.checked=request.original===true;
+      for(const button of presetButtons)button.setAttribute('aria-pressed',String(button.dataset.kinMipPreset===request.orientation));}
     const text=request?model.describe(request,op.thickness):'';dialog.dataset.kinMipState=state;
     label.textContent=state==='final'?text+' · Final':'Rendering · 최종 표시 전';render.textContent=state==='final'?'Final · '+text:'Rendering · 최종 렌더 확인 중';
     voiState.textContent=voiSummary(op,state,request);
@@ -117,7 +151,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const ready=!!op.ready&&!op.restoring&&!!saveState&&!!command,writable=ready&&!!ask(()=>command.writable());
     jobBox.disabled=!op.ready||!!op.restoring;
     jobSave.disabled=!writable||saveState.saving(op);
-    const kept=writable?ask(()=>command.pending()):null,shown=[12,13].includes(kept?.version)?jobBlock(op):null,recipe=op.batchRun?null:shownPreview(op)?.recipe??null;
+    const kept=writable?ask(()=>command.pending()):null,shown=[12,13,14,15].includes(kept?.version)?jobBlock(op):null,recipe=op.batchRun?null:shownPreview(op)?.recipe??null;
     jobRetry.disabled=jobSave.disabled||!shown||!jobs.retryable(kept,shown,recipe);
     jobNote.textContent=!saveState||!command?'영상 작업 저장 도구를 확인할 수 없어 MIP 작업을 저장할 수 없습니다. 영상 창을 새로고침하세요.':ready&&!writable?'판독의 계정에서 MIP 작업을 저장할 수 있습니다.':writable&&recipe?'Save MIP Job은 표시 중인 MIP Batch 조건(Axis·Interval·Number·Reverse)을 함께 저장합니다. 프레임 영상은 저장하지 않습니다.':'';
     refreshBatch(op);
@@ -145,6 +179,16 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     if(!shown)stopBatchPlay();
     if(!preview?.peek()){batchResult.hidden=true;batchFrame.textContent='';}
     batchNote.textContent=tool?'':batchMissing;
+    batchThickness.textContent=thicknessText(op);
+  }
+  /* The projection depth the frames actually use: the whole CT volume, and the VOI Slab of the display shown when one is applied
+     (Original view shows the uncut projection). Read-only; no control here changes it. */
+  function thicknessText(op){
+    if(!op?.ready||!Number.isFinite(op.thickness))return '';
+    let request=null;try{const snapshot=op.sequence?.snapshot();request=snapshot?(snapshot.state==='final'?snapshot.final:snapshot.applied):null;}catch(_){request=null;}
+    const slab=request&&request.original!==true?request.voiSlab??null:null;
+    const mm=value=>Number(Number(value).toFixed(1));
+    return 'CT 전체 '+mm(op.thickness)+' mm'+(slab?' · VOI Slab '+mm(slab.thickness)+' mm (환자 좌표 고정)':'');
   }
   const writeBatchEditors=recipe=>{batchAxis.value=recipe.axis;batchInterval.value=String(recipe.interval);batchCount.value=String(recipe.count);batchReverse.checked=recipe.reverse===true;};
   const batchNumber=input=>{const text=String(input.value??'').trim();return text===''?NaN:Number(text);};
@@ -152,7 +196,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const actors=view.getActors(),actor=actors[0]?.actor,mapper=actor?.getMapper(),camera=view.getCamera();
     return {actors:actors.length,volumeId:view.getVolumeId(),blend:mapper?.getBlendMode(),viewPlaneNormal:camera.viewPlaneNormal,viewUp:camera.viewUp,planes:(mapper?.getClippingPlanes()||[]).map(p=>({origin:p.getOrigin(),normal:p.getNormal()})),sampleDistance:mapper?.getSampleDistance(),interpolationType:actor?.getProperty().getInterpolationType(),voiRange:view.getProperties()?.voiRange};
   }
-  function expected(op,request){const p=model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);return {volumeId:op.volume.volumeId,blend:model.blendMode(request.mode),viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp,thickness:op.thickness,corners:op.corners,sampleDistance:op.sampleDistance,interpolationType:op.display.interpolationType,voiRange:op.display.voiRange,voiSlab:request.original?null:request.voiSlab??null,affine:op.binding.affine};}
+  function expected(op,request){const p=model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);return {volumeId:op.volume.volumeId,blend:model.blendMode(request.mode),viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp,thickness:op.thickness,corners:op.corners,sampleDistance:op.sampleDistance,interpolationType:op.display.interpolationType,voiRange:op.display.voiRange,voiSlab:request.original?null:request.voiSlab??null,affine:op.binding.affine};}
   // The affine captured at open is the VOI Slab's coordinate basis; a changed source geometry is not re-interpreted.
   function binding(op){
     const affine=model.affine(index=>op.volume.imageData.indexToWorld(index));
@@ -176,7 +220,11 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     if(want.blend===3){if(typeof window.kinPrepareVolumeAverage!=='function')throw Error('Raysum 평균 계산 모듈을 확인할 수 없어 적용하지 않았습니다.');window.kinPrepareVolumeAverage(op.view,op.volume);}
     // The pinned setOrientation applies MPR_CAMERA_VALUES and resets to the volume centre; the slab planes are
     // re-derived explicitly afterwards because a camera change alone keeps the previous planes.
-    op.view.setOrientation(model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,next.orientation).key,false);op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
+    // A plane keeps the pinned native orientation key; an anatomical preset writes the same reset path with its own vectors
+    // (the OrientationVectors form). No setCamera fallback is added here: a runtime that ignored the write would fail the
+    // verifyState readback below rather than show an unconfirmed camera.
+    const axes=model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,next.orientation);
+    op.view.setOrientation(axes.key||{viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp]},false);op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
     // VOI planes are written after the camera and slab setters, which rewrite the first two planes; readback proves both.
     writeVoi(op,want.voiSlab);
     const problem=model.verifyState(readState(op),want);if(problem)throw Error(problem);
@@ -255,7 +303,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const block=jobs.block(snapshot,{frameOfReference:op.frameOfReference,display:op.display}),key=tool.key(block),request=snapshot.final,slab=request.voiSlab??null;
     if(slab&&op.voiProblem)throw Error(op.voiProblem);
     // The camera distance is the confirmed Final camera's own; directions come from the preset the Final display was confirmed on.
-    const final=op.view.getCamera(),axes=model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);
+    const final=op.view.getCamera(),axes=model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);
     const distance=Math.hypot(...[0,1,2].map(i=>Number(final?.position?.[i])-Number(final?.focalPoint?.[i])));
     const centre=[0,1,2].map(i=>op.corners.reduce((sum,corner)=>sum+corner[i],0)/op.corners.length);
     const plan=tool.plan({recipe,normal:axes.viewPlaneNormal,viewUp:axes.viewUp,focalPoint:centre,distance,thickness:op.thickness}),blend=model.blendMode(request.mode);
@@ -337,7 +385,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const t=op.target;
     await wait(access(op));await wait(loadVoi(op));const source=t.views.find(v=>v.id===t.source.viewportId),volume=cornerstone.cache.getVolume(source.getVolumeId());check(op);
     if(!cornerstone.Enums?.Events?.IMAGE_RENDERED||!cornerstone.Enums?.ViewportType?.ORTHOGRAPHIC)throw Error('MIP Viewer의 최종 렌더 확인 기능을 찾지 못했습니다.');
-    for(const name of model.orientations)model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,name);
+    for(const name of model.views)model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,name);
     op.volume=volume;op.source=source;op.thickness=model.projectionThickness(volume.dimensions,volume.spacing);op.sampleDistance=model.sampleDistance(volume.spacing);op.corners=model.corners(volume.dimensions,index=>volume.imageData.indexToWorld(index));
     const properties=source.getProperties()||{},range=properties.voiRange;
     // The Job cell records a plane's interpolation as getProperties().interpolationType ?? 1 (viewer-volume-job.js). The pinned
@@ -370,13 +418,13 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const t=target(true);if(!t)throw Error('완전히 로드된 일반 CT의 MPR에서 여세요.');
     const capturedOwner=owner();if(!capturedOwner)throw Error('로그인 상태를 확인하세요.');
     const op={target:t,owner:JSON.stringify(model.normalizeOwner(capturedOwner)),controller:new AbortController(),id:'kin-mip-'+crypto.randomUUID(),pending:new Set()};operation=op;saveState?.open(op);
-    dialog.showModal();controls.disabled=true;dialog.dataset.kinMipState='pending';label.textContent='Rendering · 최종 표시 전';render.textContent='Rendering · 원본 확인 중';status.textContent='원본과 계정을 확인하는 중…';
+    dialog.showModal();controls.disabled=presetBar.disabled=true;dialog.dataset.kinMipState='pending';label.textContent='Rendering · 최종 표시 전';render.textContent='Rendering · 원본 확인 중';status.textContent='원본과 계정을 확인하는 중…';
     op.timeout=setTimeout(()=>fail(op,Error('MIP 원본 확인 시간이 지났습니다. 다시 열어 주세요.')),30000);
     try{
       await prepare(op);
       clearTimeout(op.timeout);
       op.sequence=sequenceFor(op);
-      op.ready=true;controls.disabled=false;voi.disabled=!!op.voiProblem;refreshJob(op);await op.sequence.start({mode:'MIP',orientation:'Axial'});
+      op.ready=true;controls.disabled=presetBar.disabled=false;voi.disabled=!!op.voiProblem;refreshJob(op);await op.sequence.start({mode:'MIP',orientation:'Axial'});
     }catch(error){if(operation===op){close();throw error;}}
   }
   const otherDialog=()=>[...document.querySelectorAll('dialog[open],[role="dialog"][aria-modal="true"],.modal.show')].some(e=>e!==dialog&&!dialog.contains(e));
@@ -384,9 +432,11 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
      Jobs workspace is busy (that is this restore) and never returns silently: a refusal, failure, timeout or user cancel
      throws into the Job rollback and nothing of the failed request stays open. Every wait of the Final display is bounded by
      the Job deadline; a version 13 restore then regenerates its MIP Batch under a second, explicit budget. */
-  async function restore(value,{current:jobCurrent=()=>true,deadline=Date.now()+60000,viewportId,batch=null}={}){
+  async function restore(value,{current:jobCurrent=()=>true,deadline=Date.now()+60000,viewportId,batch=null,version=12}={}){
     if(!jobs||!saveState)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
-    const saved=jobs.validate(value),batchModel=batch===null||batch===undefined?null:batchTool();
+    // The Job's own version names the one algorithm its block may carry, so a kin-mip-2 block inside a version 12/13 Job and a
+    // kin-mip-1 block inside a version 14/15 Job are both refused here before any screen change.
+    const saved=jobs.validateFor(version,value),batchModel=batch===null||batch===undefined?null:batchTool();
     if(batch!==null&&batch!==undefined&&!batchModel)throw Error('MIP Batch 도구를 불러오지 못해 MIP 작업을 복원하지 않았습니다.');
     const recipe=batchModel?batchModel.validate(batch):null;
     if(ended||!alive())throw Error('MIP Viewer 계정이 변경되어 MIP 작업을 복원하지 않았습니다.');
@@ -406,7 +456,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     const capturedOwner=owner();if(!capturedOwner)throw Error('로그인 상태를 확인하세요.');
     const op={target:t,owner:JSON.stringify(model.normalizeOwner(capturedOwner)),controller:new AbortController(),id:'kin-mip-'+crypto.randomUUID(),pending:new Set(),restoring:{current:jobCurrent,deadline}};
     operation=op;saveState.open(op);
-    dialog.showModal();controls.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=true;dialog.dataset.kinMipState='pending';label.textContent='Rendering · 최종 표시 전';render.textContent='Rendering · 원본 확인 중';
+    dialog.showModal();controls.disabled=presetBar.disabled=voi.disabled=jobBox.disabled=batchBox.disabled=true;dialog.dataset.kinMipState='pending';label.textContent='Rendering · 최종 표시 전';render.textContent='Rendering · 원본 확인 중';
     voiState.textContent='VOI Slab · Rendering · Not Saved';status.textContent=(recipe?'저장한 MIP Batch 작업을 복원하는 중입니다.':'저장한 MIP 작업을 복원하는 중입니다.')+' Close MIP Viewer나 Escape로 복원을 취소할 수 있습니다.';
     let timer,cancel;
     let expired=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('MIP 작업 복원 시간이 지났습니다.')),Math.max(0,remaining()));});
@@ -420,7 +470,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
       if(op.display.interpolationType!==saved.display.interpolationType||!near(op.display.voiRange.lower,saved.display.voiRange.lower)||!near(op.display.voiRange.upper,saved.display.voiRange.upper))
         throw Error('저장한 MIP 작업의 밝기 범위·보간이 복원한 MPR 평면과 달라 복원하지 않았습니다.');
       if(saved.voiSlab&&op.voiProblem)throw Error('VOI Slab 도구를 확인할 수 없어 MIP 작업을 복원하지 않았습니다.');
-      const request=jobs.restoreRequest(saved,{frameOfReference:op.frameOfReference,volumeId:op.binding.volumeId,affine:op.binding.affine});
+      const request=jobs.restoreRequest(saved,{frameOfReference:op.frameOfReference,volumeId:op.binding.volumeId,affine:op.binding.affine},version);
       if(!jobs.intersects(saved.voiSlab,op.corners))throw Error('저장한 VOI Slab이 현재 CT 볼륨과 겹치지 않아 MIP 작업을 복원하지 않았습니다.');
       // The editors show the restored record, so Apply VOI Slab right after a restore reapplies it rather than a default slab.
       if(saved.voiSlab){writeEditors(saved.voiSlab);voiEnable.checked=true;voiPreset.value=jobs.presetFor(saved.voiSlab.normal);}else voiEnable.checked=false;
@@ -439,7 +489,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
         await bounded(generateBatch(op,recipe));
         check(op);
       }
-      op.pending.delete(cancel);op.restoring=null;saveState.restored(op,jobs.pair(saved,recipe));controls.disabled=false;voi.disabled=!!op.voiProblem;
+      op.pending.delete(cancel);op.restoring=null;saveState.restored(op,jobs.pair(saved,recipe));controls.disabled=presetBar.disabled=false;voi.disabled=!!op.voiProblem;
       status.textContent=recipe?'MIP Batch 작업을 복원했습니다. 회전 투영 미리보기는 표시 전용이며 원본 영상과 W/L은 바뀌지 않았습니다.':'저장한 MIP 작업을 복원했습니다. 표시 전용 투영이며 되돌릴 VOI Slab 변경은 없습니다.';paintJob(op);
     }catch(error){
       const failure=op.cancelled?Error('MIP 작업 복원을 취소했습니다.'):op.failure||error;

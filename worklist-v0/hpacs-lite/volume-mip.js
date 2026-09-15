@@ -4,6 +4,23 @@
   // The pinned vtk blend modes the Volume Projection panel already uses: 1 maximum, 2 minimum, 3 average.
   // Raysum is the mean along the ray (manual p.326), never the additive blend (4).
   const blends=Object.freeze({MIP:1,MinIP:2,Raysum:3}),keys=Object.freeze({Axial:'axial',Coronal:'coronal',Sagittal:'sagittal'});
+  /* A11-ORIENT-1 direction presets (kin-mip-2): the manual's bottom Orientation Preset bar A/P/L/R/H/F (IF-RND-502U Rev1.2
+     p.332 §12.1 'A- anterior / P- posterior/ L- left/ R- right / H -head / F - foot'; p.342 §13 'The basic operation works
+     the same as it does in the VR mode'). Each entry is [viewPlaneNormal, viewUp] in patient LPS mm: the normal points from
+     the focal point toward the camera and screen right is viewUp x normal. This is a pinned copy of this product's own VR
+     table (volume-rendering.js directions), never a runtime import — a saved kin-mip-2 row must keep its meaning even if VR
+     changes, so a changed VR table is a new algorithm, not a reinterpretation; tests/volume_mip_test.cjs guards the drift.
+     H = Superior, F = Inferior. F is the Axial projection turned 180 degrees in plane (same normal, up and screen right both
+     negated), not the Axial image; Axial itself stays the radiological foot view. */
+  const directions=Object.freeze({
+    Anterior:Object.freeze([Object.freeze([0,-1,0]),Object.freeze([0,0,1])]),
+    Posterior:Object.freeze([Object.freeze([0,1,0]),Object.freeze([0,0,1])]),
+    Left:Object.freeze([Object.freeze([1,0,0]),Object.freeze([0,0,1])]),
+    Right:Object.freeze([Object.freeze([-1,0,0]),Object.freeze([0,0,1])]),
+    Superior:Object.freeze([Object.freeze([0,0,1]),Object.freeze([0,-1,0])]),
+    Inferior:Object.freeze([Object.freeze([0,0,-1]),Object.freeze([0,1,0])]),
+  });
+  const directionNames=Object.freeze(Object.keys(directions)),views=Object.freeze([...orientations,...directionNames]);
   const dot=(a,b)=>a.reduce((n,x,i)=>n+x*b[i],0),vector=v=>{try{const a=Array.from(v||[]);return a.length===3&&a.every(Number.isFinite)?a:null;}catch(_){return null;}};
   /* VOI Slab: a display-only slab in source world (patient LPS mm) bound to one volume and the index-to-world affine
      captured at open. It is never the W/L voiRange. HISTORY bounds the confirmed records Undo can return to. */
@@ -58,7 +75,7 @@
     return Object.freeze(value.map(normalizeVoi));
   }
   function normalizeRequest(value){
-    if(!value||!modes.includes(value.mode)||!orientations.includes(value.orientation))throw Error('Projection과 Orientation을 목록에서 선택하세요.');
+    if(!value||!modes.includes(value.mode)||!views.includes(value.orientation))throw Error('Projection과 Orientation을 목록에서 선택하세요.');
     if(value.original!==undefined&&typeof value.original!=='boolean')throw Error('Original 보기 상태를 확인할 수 없습니다.');
     const voiSlab=normalizeVoi(value.voiSlab),original=value.original===true;
     if(original&&!voiSlab)throw Error('VOI Slab을 적용한 뒤 Original을 볼 수 있습니다.');
@@ -99,6 +116,14 @@
     const key=keys[orientation],entry=key&&values?values[key]:null,normal=vector(entry?.viewPlaneNormal),up=vector(entry?.viewUp);
     if(!normal||!up||Math.abs(Math.hypot(...normal)-1)>1e-6||Math.abs(Math.hypot(...up)-1)>1e-6||Math.abs(dot(normal,up))>1e-6)throw Error('고정 뷰어의 '+(key?orientation:'선택한')+' 방향 기준값을 확인할 수 없습니다.');
     return {key,viewPlaneNormal:normal,viewUp:up};
+  }
+  /* The camera of any of the nine offered displays: the three MPR planes resolve through the pinned MPR_CAMERA_VALUES above,
+     the six anatomical presets through the frozen kin-mip-2 table. `key` is the native orientation key for a plane and null
+     for a direction, which the viewer writes as setOrientation({viewPlaneNormal,viewUp},false). Every camera write, batch
+     frame and print frame resolves here, so no call site keeps a preset lookup of its own. */
+  function view(values,orientation){
+    const entry=Object.prototype.hasOwnProperty.call(directions,orientation)?directions[orientation]:null;
+    return entry?{key:null,viewPlaneNormal:[...entry[0]],viewUp:[...entry[1]]}:preset(values,orientation);
   }
   function geometry(dimensions,spacing){
     const d=Array.from(dimensions||[]),s=Array.from(spacing||[]);
@@ -192,7 +217,7 @@
       snapshot:()=>({applied,final,state,generation,ended}),
     };
   }
-  const api={modes,orientations,normalizeRequest,blendMode,preset,projectionThickness,sampleDistance,corners,verifyState,averageShader,describe,normalizeOwner,createSequence,
+  const api={modes,orientations,directions:directionNames,views,view,normalizeRequest,blendMode,preset,projectionThickness,sampleDistance,corners,verifyState,averageShader,describe,normalizeOwner,createSequence,
     voiHistoryLimit:HISTORY,affine,normalizeVoi,sameVoi,verifyBinding,voiPlanes,voiPlane,sameRequest,withDisplay,voiChange,voiUndo,voiOriginal,clipShader};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeMip=api;
 })(typeof window==='object'?window:globalThis);

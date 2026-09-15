@@ -473,7 +473,11 @@ function mipViewerWorld({planeWrite=null,gpu=true}={}){
     addClippingPlane:plane=>{planeWrite?.();extra.push(plane);return true;},removeClippingPlane:plane=>{const i=extra.indexOf(plane);if(i<0)return false;extra.splice(i,1);return true;}};
    const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
    views.set(viewportId,{mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
-    setOrientation:key=>{camera=structuredClone(presets[key]);},setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;},
+    // The pinned viewport takes either a native orientation key (the three MPR planes) or an OrientationVectors pair, which is
+    // how the manual's anatomical presets are written (A11-ORIENT-1 MF5). Anything else is refused, as the runtime would.
+    setOrientation:(orientation,immediate)=>{const axes=typeof orientation==='string'?presets[orientation]:orientation;
+     if(!axes||!Array.isArray(axes.viewPlaneNormal)||!Array.isArray(axes.viewUp))throw Error('Invalid orientation');
+     camera={viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp]};},setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;},
     setProperties:value=>{properties={...properties,...value};},getProperties:()=>properties,getCamera:()=>structuredClone(camera),
     render:()=>{setTimeout(()=>element.emit('IMAGE_RENDERED'),0);}});
   },getViewport:id=>views.get(id),disableElement:id=>{views.delete(id);}};
@@ -699,7 +703,10 @@ function batchViewerWorld({distance=120,faults={},command=null}={}){
     setViewSpecificProperties:value=>{specific=value;},getViewSpecificProperties:()=>specific};
    const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
    views.set(viewportId,{id:viewportId,batch,mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
-    setOrientation:key=>{camera={...structuredClone(presets[key]),focalPoint:[...centre],position:centre.map((x,i)=>x+presets[key].viewPlaneNormal[i]*distance),parallelScale:60};},
+    // Either a native orientation key or the OrientationVectors pair the anatomical presets write (A11-ORIENT-1 MF5).
+    setOrientation:(orientation,immediate)=>{const axes=typeof orientation==='string'?presets[orientation]:orientation;
+     if(!axes||!Array.isArray(axes.viewPlaneNormal)||!Array.isArray(axes.viewUp))throw Error('Invalid orientation');
+     camera={viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp],focalPoint:[...centre],position:centre.map((x,i)=>x+axes.viewPlaneNormal[i]*distance),parallelScale:60};},
     setCamera:next=>{
      const before=camera;camera={...(camera||{}),...structuredClone(next)};if(batch)events.push({type:'setCamera',camera:structuredClone(next)});
      if(slab&&before&&(dot(camera.focalPoint.map((x,i)=>x-before.focalPoint[i]),camera.viewPlaneNormal)!==0||camera.viewUp.some((x,i)=>x!==before.viewUp[i])))derive();},
@@ -814,7 +821,7 @@ test('Make MIP Batch: gates, the recipe of the generated preview, atomic cancel 
  try{
   await w.viewer.open();assert.equal(w.dialog.dataset.kinMipState,'final');
   const make=()=>w.button('Make MIP Batch').onclick(),set=(label,value)=>{w.field(label).value=String(value);};
-  assert.deepEqual([w.field('MIP Batch Axis').value,w.field('MIP Batch Interval (deg)').value,w.field('MIP Batch Number').value,w.field('MIP Batch Reverse').checked],['Horizontal','10','36',false]);
+  assert.deepEqual([w.field('MIP Batch Type').value,w.field('MIP Batch Interval (deg)').value,w.field('MIP Batch Number').value,w.field('MIP Batch Reverse').checked],['Horizontal','10','36',false]);
   // A span beyond 360 degrees is refused before any native call.
   set('MIP Batch Interval (deg)',90);set('MIP Batch Number',6);await make();
   assert.equal(w.status(),'MIP Batch Interval은 1~180도, Number는 2~64장, 전체 회전 범위((Number-1)×Interval)는 360도 이내로 입력하세요.');assert.equal(renders(),0);
@@ -822,7 +829,7 @@ test('Make MIP Batch: gates, the recipe of the generated preview, atomic cancel 
   assert.equal(w.status(),'MIP Batch 미리보기 3장을 만들었습니다. 표시 전용 임시 미리보기이며 Save MIP Job으로 조건을 저장할 수 있습니다.');
   const first=[...w.created];assert.equal(first.length,3);assert.match(w.find(e=>e.className==='kin-mip-job-note').textContent,/MIP Batch 조건/);
   // The saved recipe is the generated preview's, never the editors changed afterwards (MB5).
-  set('MIP Batch Number',2);w.field('MIP Batch Axis').value='Vertical';assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),batchRecipe({count:3}));
+  set('MIP Batch Number',2);w.field('MIP Batch Type').value='Vertical';assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),batchRecipe({count:3}));
   // A second generation held on its second frame: the previous preview is owned but unavailable, and display change, Save, another
   // Make and Play are refused; Cancel keeps the previous preview exactly (MB9).
   set('MIP Batch Number',4);const holdAt=renders()+2;w.setHold(events=>events.filter(e=>e.type==='render:batch').length===holdAt);
@@ -847,7 +854,7 @@ test('Make MIP Batch: gates, the recipe of the generated preview, atomic cancel 
   await make();assert.equal(w.status(),'MIP 작업 저장이 끝난 뒤 MIP Batch를 만드세요.');
   release({state:'not-saved',sent:false,message:'INJECTED NOT SAVED'});await saving;
   // A complete series replaces the previous one and only then revokes it; Clear revokes the rest.
-  set('MIP Batch Number',2);w.field('MIP Batch Axis').value='Horizontal';await make();
+  set('MIP Batch Number',2);w.field('MIP Batch Type').value='Horizontal';await make();
   assert.deepEqual([...w.revoked].sort(),[...first].sort());assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),batchRecipe({count:2}));
   w.button('Clear MIP Batch').onclick();assert.equal(w.viewer.job.batch(),null);assert.equal(w.revoked.length,w.created.length);assert.equal(w.status(),'MIP Batch 미리보기를 비웠습니다.');
  }finally{w.viewer.dispose();}
@@ -1013,14 +1020,17 @@ test('api() sends a read rejected before any response once more, a declared read
  }finally{w.stop();}
 });
 
-test('P2 (a): Print Saved Images is offered for versions 1-6, 12 and 13 only, and the MIP rows are labelled as reconstructed outputs',async()=>{
- const all=[1,2,3,4,5,6,7,8,9,10,11,12,13,14],w=await printWorld({versions:all});
+test('P2 (a): Print Saved Images is offered for versions 1-6 and 12-15 only, and the MIP rows are labelled as reconstructed outputs',async()=>{
+ // A11-ORIENT-1: versions 14/15 are the anatomical-preset MIP pair and print through the same engine, so version 16 is now the
+ // unknown-version sentinel that must stay without Print.
+ const all=[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],w=await printWorld({versions:all});
  try{
-  for(const version of [1,2,3,4,5,6,12,13])assert.ok(w.own(w.item(version),'Print Saved Images'),'version '+version);
-  for(const version of [7,8,9,10,11,14])assert.equal(w.own(w.item(version),'Print Saved Images'),null,'version '+version);
+  for(const version of [1,2,3,4,5,6,12,13,14,15])assert.ok(w.own(w.item(version),'Print Saved Images'),'version '+version);
+  for(const version of [7,8,9,10,11,16])assert.equal(w.own(w.item(version),'Print Saved Images'),null,'version '+version);
   for(const version of all)assert.ok(w.own(w.item(version),'Restore Job'),'version '+version+' restores');
   assert.ok(w.labels(12).includes('MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업'));assert.ok(w.labels(13).includes('MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업'));
-  assert.ok(![...w.labels(12),...w.labels(13)].some(text=>text.includes('출력 미지원')));
+  assert.ok(w.labels(14).includes('MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업'));assert.ok(w.labels(15).includes('MIP Batch · 회전 투영 재구성 출력 · 표시 조건 작업'));
+  assert.ok(![...w.labels(12),...w.labels(13),...w.labels(14),...w.labels(15)].some(text=>text.includes('출력 미지원')));
   // The versions still without output keep their labels.
   assert.ok(w.labels(7).includes('MPR Plane Layout · 출력 미지원 · 재구성 표시 작업'));assert.ok(w.labels(8).includes('MPR Mixed Layout · 출력 미지원 · 재구성 표시 작업'));
   assert.ok(w.labels(9).includes('Merged Cell Layout · 출력 미지원'));assert.ok(w.labels(10).includes('Curved MPR · 출력 미지원 · 곡선을 따라 펼친 재구성 표시 작업'));
@@ -1030,7 +1040,9 @@ test('P2 (a): Print Saved Images is offered for versions 1-6, 12 and 13 only, an
 
 test('P2 (b): each printable version requests exactly its print assets before the printer opens that row',async()=>{
  for(const [version,files] of [[1,PRINT_BASE],[2,PRINT_BASE],[3,PRINT_BASE],[4,[...PRINT_BASE,'viewer-volume-job-print.js']],[5,[...PRINT_BASE,'viewer-volume-job-print.js']],
-   [6,[...PRINT_BASE,'viewer-volume-job-print.js']],[12,[...PRINT_BASE,...PRINT_MIP]],[13,[...PRINT_BASE,...PRINT_MIP,'volume-mip-batch.js']]]){
+   [6,[...PRINT_BASE,'viewer-volume-job-print.js']],[12,[...PRINT_BASE,...PRINT_MIP]],[13,[...PRINT_BASE,...PRINT_MIP,'volume-mip-batch.js']],
+   // A11-ORIENT-1: the anatomical-preset pair prints through the same modules, so 14 asks for the version 12 set and 15 the version 13 set.
+   [14,[...PRINT_BASE,...PRINT_MIP]],[15,[...PRINT_BASE,...PRINT_MIP,'volume-mip-batch.js']]]){
   const w=await printWorld({versions:[version]});
   try{
    await w.print(version);
@@ -1078,15 +1090,75 @@ test('P2 (d): a loaded script whose global fails its predicate, or an aborted lo
  }
 });
 
-test('P2 (e): Print Current View still refuses versions 7 to 13 by name before any asset request',async()=>{
+test('P2 (e): Print Current View still refuses versions 7 to 15 by name before any asset request',async()=>{
  const shown={version:7},w=await printWorld({versions:[1],capture:()=>({...shown})});
  try{
   for(const [version,message] of [[7,'MPR 평면 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[8,'MPR 평면과 일반 영상이 섞인 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],
     [9,'칸을 병합한 배치 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[10,'Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],
-    [11,'3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[12,/^MIP Viewer 작업은 아직 출력할 수 없습니다/],[13,/^MIP Batch 작업은 아직 출력할 수 없습니다/]]){
+    [11,'3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.'],[12,/^MIP Viewer 작업은 아직 출력할 수 없습니다/],[13,/^MIP Batch 작업은 아직 출력할 수 없습니다/],
+    // A11-ORIENT-1: the anatomical-preset pair has no current-view page either; only the saved row prints.
+    [14,/^MIP Viewer 작업은 아직 출력할 수 없습니다/],[15,/^MIP Batch 작업은 아직 출력할 수 없습니다/]]){
    shown.version=version;w.requested.length=0;await w.button('Print Current View').onclick();await w.settle();
    if(typeof message==='string')assert.equal(w.status(),message);else assert.match(w.status(),message);
    assert.deepEqual(w.requested,[],'version '+version);assert.deepEqual(w.sandbox.printOpened,[],'version '+version);
   }
+ }finally{w.stop();}
+});
+
+/* A11-ORIENT-1 V7: the manual's Orientation Preset bar at the bottom of the MIP Viewer (p.332 12.1, p.342 13), the p.328 Type
+   name for the rotation kind, and the read-only Thickness readout. Expected cameras are the accepted contract table. */
+test('A11-ORIENT-1: the Orientation Preset bar requests the same display the Orientation list does, and Type/Thickness are named',async()=>{
+ const w=batchViewerWorld();
+ try{
+  await w.viewer.open();assert.equal(w.dialog.dataset.kinMipState,'final');
+  const bar=w.find(e=>e.attributes['aria-label']==='MIP Orientation Preset');
+  assert.ok(bar,'the preset bar exists');assert.equal(bar.tagName,'fieldset');
+  assert.deepEqual(bar.children.map(b=>b.textContent),['A','P','L','R','H','F']);
+  assert.deepEqual(bar.children.map(b=>b.attributes['aria-label']),
+   ['MIP View From Anterior','MIP View From Posterior','MIP View From Left','MIP View From Right','MIP View From Head (Superior)','MIP View From Foot (Inferior)']);
+  // MF7: every title names where the camera stands, which patient direction is up and which is on screen right, so the 180 degree
+  // in-plane difference between F and the Axial image is visible to the user.
+  assert.equal(bar.children[4].title,'H · 머리 위에서 · 앞쪽이 위 · 환자 오른쪽이 화면 오른쪽');
+  assert.equal(bar.children[5].title,'F · 발쪽에서 · 뒤쪽이 위 · 환자 오른쪽이 화면 오른쪽');
+  assert.equal(bar.children[0].title,'A · 앞쪽에서 · 위쪽이 위 · 환자 왼쪽이 화면 오른쪽');
+  // The viewer opens on Axial, so no anatomical preset is pressed and the Orientation list holds all nine names.
+  assert.deepEqual(bar.children.map(b=>b.attributes['aria-pressed']),['false','false','false','false','false','false']);
+  assert.deepEqual(w.field('MIP Orientation').children.map(o=>o.value),['Axial','Coronal','Sagittal','Anterior','Posterior','Left','Right','Superior','Inferior']);
+  // The p.328 field names: Type is the rotation kind, Thickness is a read-only output, never an input.
+  assert.equal(w.field('MIP Batch Type').tagName,'select');
+  assert.deepEqual(w.field('MIP Batch Type').children.map(o=>o.value),['Horizontal','Vertical']);
+  const readout=w.field('MIP Batch Thickness Readout');
+  assert.equal(readout.tagName,'output','the Thickness readout is not an input');
+  assert.equal(readout.value,'','it carries no editable value');
+  assert.equal(readout.textContent,'CT 전체 91.6 mm');
+  // A click on H requests the Superior display through the same sequence as the list: pending first, then its own Final.
+  bar.children[4].onclick();
+  await until(()=>w.dialog.dataset.kinMipState==='final'&&w.field('MIP Orientation').value==='Superior','the Superior display is confirmed');
+  assert.deepEqual(bar.children.map(b=>b.attributes['aria-pressed']),['false','false','false','false','true','false']);
+  const camera=w.views.get([...w.views.keys()].find(id=>id.startsWith('kin-mip-')&&!id.startsWith('kin-mipbatch-'))).getCamera();
+  assert.deepEqual([camera.viewPlaneNormal,camera.viewUp],[[0,0,1],[0,-1,0]],'the Superior camera of the accepted table');
+  assert.match(w.find(e=>e.className==='kin-mip-label').textContent,/^MIP · Superior/);
+  // The saved block of that display is kin-mip-2, and the list and the bar agree on the shown value.
+  const block=w.viewer.job.capture();
+  assert.equal(block.algorithm,'kin-mip-2');assert.equal(block.orientation,'Superior');
+  // Choosing a plane from the list again clears every pressed preset and writes the accepted kin-mip-1 block.
+  const list=w.field('MIP Orientation');list.value='Coronal';list.onchange();
+  await until(()=>w.dialog.dataset.kinMipState==='final'&&w.field('MIP Orientation').value==='Coronal','the Coronal display is confirmed');
+  assert.deepEqual(bar.children.map(b=>b.attributes['aria-pressed']),['false','false','false','false','false','false']);
+  assert.equal(w.viewer.job.capture().algorithm,'kin-mip-1');
+  // The bar is disabled exactly while the Orientation list is, and the readout follows the VOI Slab of the shown display.
+  assert.equal(bar.disabled,false);
+  w.viewer.job.clearForJob();
+  assert.equal(bar.disabled,true);
+ }finally{w.viewer.dispose();}
+});
+test('A11-ORIENT-1: an anatomical preset display saves as version 14, and with a MIP Batch preview as version 15',async()=>{
+ const model=require('../worklist-v0/hpacs-lite/volume-mip-job.js');
+ const w=await batchSaveWorld();
+ try{
+  // The capture rule in viewer-volume-job.js and KinVolumeMipJob.versionFor are the same binding.
+  const recipe={schema:1,algorithm:'kin-mip-batch-1',axis:'Horizontal',interval:90,count:4,reverse:false};
+  for(const [algorithm,batch,version] of [['kin-mip-1',null,12],['kin-mip-1',recipe,13],['kin-mip-2',null,14],['kin-mip-2',recipe,15]])
+   assert.equal(model.versionFor({...w.block,algorithm},batch),version,algorithm+(batch?' with a recipe':''));
  }finally{w.stop();}
 });

@@ -99,7 +99,7 @@ def any_case_probes(plan,study,orientation,mode):
 class VolumeMipBatchE2E(VolumeMipJobE2E):
  def batch_button(self,dialog,name):return dialog.locator('.kin-mip-batch').get_by_role('button',name=name,exact=True)
  def batch_inputs(self,dialog,axis,interval,count,reverse=False):
-  box=dialog.locator('.kin-mip-batch');box.get_by_label('MIP Batch Axis',exact=True).select_option(axis)
+  box=dialog.locator('.kin-mip-batch');box.get_by_label('MIP Batch Type',exact=True).select_option(axis)
   box.get_by_label('MIP Batch Interval (deg)',exact=True).fill(str(interval));box.get_by_label('MIP Batch Number',exact=True).fill(str(count))
   if reverse:box.get_by_label('MIP Batch Reverse',exact=True).check()
   else:box.get_by_label('MIP Batch Reverse',exact=True).uncheck()
@@ -159,7 +159,7 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   a,p,v=self.opened_voi_study(intercept,voi);original=self.originals();p.locator('#findings').fill('KEEP MIP BATCH REPORT');source=v.evaluate(SOURCE_PLANES)
   v.evaluate(BATCH_HELPERS);posts=[];v.on('request',lambda r:posts.append(r) if job_post(a.uid)(r) else None)
   dialog=self.open_voi(v);status,summary=dialog.locator('[role=status]'),dialog.locator('.kin-mip-voi-state')
-  for text in ('회전 투영 미리보기','이 제품의 선택','Type·Thickness 입력','영상 반출·출력·필름·DICOM 저장이 아닙니다','프레임 영상은 저장하지 않으며'):expect(dialog.locator('.kin-mip-batch-scope')).to_contain_text(text)
+  for text in ('회전 투영 미리보기','이 제품의 선택','Thickness는 프레임이 실제로 투영한 두께','입력란이 아니며','VOI Slab Thickness','영상 반출·출력·필름·DICOM 저장이 아닙니다','프레임 영상은 저장하지 않으며'):expect(dialog.locator('.kin-mip-batch-scope')).to_contain_text(text)
   expect(dialog.locator('.kin-mip-batch-note')).to_have_text('');expect(self.batch_button(dialog,'Make MIP Batch')).to_be_enabled()
   self.voi_native(self.settled(v,self.apply_voi_case(v,dialog,oblique)),'MIP','Axial',record,voi)
   mark=self.mark(v);self.choose_mip(dialog,'Raysum','Coronal');state=self.job_final(v,mark,'Raysum','Coronal',worlds)
@@ -203,7 +203,7 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   self.batch_announced(v,4,label+'Saved');self.batch_native(v.evaluate('()=>batchFrames.splice(0)'),cameras,record,voi,'Raysum','Horizontal 90 restored')
   shots=v.evaluate(FRAMES,points);self.assertEqual([shot['hash'] for shot in shots],hashes,'the restored frames are the saved preview pixel for pixel');self.batch_pixels(shots,probe_sets,'restored')
   expect(summary).to_have_text(label+'Saved');restored=v.evaluate(READ_ONLY_CAPTURE);self.assertEqual(restored['version'],13);self.assertEqual(restored['mipBatch'],recipe);self.assert_cells(restored['cells'],saved['cells'])
-  box=dialog.locator('.kin-mip-batch');self.assertEqual([box.get_by_label('MIP Batch Axis',exact=True).input_value(),box.get_by_label('MIP Batch Interval (deg)',exact=True).input_value(),box.get_by_label('MIP Batch Number',exact=True).input_value()],['Horizontal','90','4'])
+  box=dialog.locator('.kin-mip-batch');self.assertEqual([box.get_by_label('MIP Batch Type',exact=True).input_value(),box.get_by_label('MIP Batch Interval (deg)',exact=True).input_value(),box.get_by_label('MIP Batch Number',exact=True).input_value()],['Horizontal','90','4'])
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible()
   # A new browser: the MIP Batch model is absent before the restore (RC-3), which loads it and regenerates the same pixels.
   fresh=self.login();self.launch(fresh,[a]);self.ready(fresh);fresh.evaluate(HELPERS);fresh.evaluate(BATCH_HELPERS)
@@ -327,7 +327,7 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   # A session ended while a version 13 POST is held closes the viewer and never shows Saved.
   # The version 12 restore opened a new viewer whose MIP Batch editors hold the defaults (Interval 10, Number 36), not a recipe typed
   # before Close, so this Make enters recipe A itself.
-  box=dialog.locator('.kin-mip-batch');editors=lambda:[box.get_by_label(name,exact=True).input_value() for name in ('MIP Batch Axis','MIP Batch Interval (deg)','MIP Batch Number')]+[box.get_by_label('MIP Batch Reverse',exact=True).is_checked()]
+  box=dialog.locator('.kin-mip-batch');editors=lambda:[box.get_by_label(name,exact=True).input_value() for name in ('MIP Batch Type','MIP Batch Interval (deg)','MIP Batch Number')]+[box.get_by_label('MIP Batch Reverse',exact=True).is_checked()]
   self.assertEqual(editors()[1:3],['10','36']);self.batch_inputs(dialog,'Horizontal',90,3);self.assertEqual(editors(),['Horizontal','90','3',False])
   self.make(v,dialog,3);title.fill('MIP batch held session');held=[]
   def hold(route):

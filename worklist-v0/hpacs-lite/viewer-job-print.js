@@ -109,9 +109,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   // The editor adapter is injected read-only; its wording lives with it.
   const linkText = reason => globalThis.kinViewerEditorLinkApi?.reasonText(reason) || '편집문 응답을 확인할 수 없습니다.';
   const editorChoice = choice => ['editor', 'editor-prior'].includes(choice);
-  // Printable reconstructed Jobs (MPR 4-6, MIP Viewer 12 and MIP Batch 13) and, among them, the MIP output Jobs; every version gate
-  // of this dialog reads these two, so a later version stays unprintable until it is added here.
-  const reconstructed = version => [4, 5, 6, 12, 13].includes(version), mipOutput = version => [12, 13].includes(version);
+  // Printable reconstructed Jobs (MPR 4-6, MIP Viewer 12/14 and MIP Batch 13/15) and, among them, the MIP output Jobs; every version
+  // gate of this dialog reads these two, so a later version stays unprintable until it is added here. Versions 14/15 are the same
+  // MIP output under the manual's anatomical Orientation Presets (kin-mip-2), printed by the same engine.
+  const reconstructed = version => [4, 5, 6, 12, 13, 14, 15].includes(version), mipOutput = version => [12, 13, 14, 15].includes(version);
+  const mipBatchPage = version => version === 13 || version === 15;
   const MIP_NOTE = '저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증';
   const mipModel = () => { const model = window.KinVolumeMipOutput; if (typeof model?.timer !== 'function' || typeof model?.saved !== 'function') throw new Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.'); return model; };
   const entries = new Map();
@@ -477,11 +479,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     // The title block shares the first report's named page, so no forced break.
     const intro = node => { node.className = 'intro'; return node; };
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
-    intro(el('h1', mipPage?(mipPage.version===13?'KIN PACS 저장 MIP Batch 출력':'KIN PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
+    intro(el('h1', mipPage?(mipBatchPage(mipPage.version)?'KIN PACS 저장 MIP Batch 출력':'KIN PACS 저장 MIP Viewer 출력'):batchOutput?(job.transient?'KIN PACS 현재 MPR 3평면':job.snapshot.batch?'KIN PACS 저장 MPR 단면 묶음':'KIN PACS 저장 MPR 3평면'):job.transient ? 'KIN PACS 현재 비교 영상' : 'KIN PACS 저장 비교 영상', main)); intro(el('h2', job.title, main)); intro(el('p', job.description, main));
     intro(el('p', job.transient ? '비교 작업·표식·판독문을 저장하지 않는 출력입니다.' : `작업 작성자 ${job.authorActor} · 저장 ${job.createdAt} · r${job.revision}`, main));
     intro(el('p', mipPage ? MIP_NOTE : (batchOutput?(job.transient?'처음 선택한 표시 조건으로 원본 CT를 다시 읽어 재구성':'저장한 생성 조건으로 원본 CT를 다시 읽어 재구성'):basis + '에 아래 출력 조절값 적용') + ' · ' + annotationMode(job) + ' · 실제 크기 아님', main));
     if(batchOutput&&!mipPage&&!job.transient&&!job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.cells.length} saved planes`,main));
-    if(mipPage)intro(el('p',mipPage.version===13?`Job ${job.id} · MIP Batch · ${mipPage.recipe.count} frames · ${mipPage.recipe.axis} · Interval ${mipPage.recipe.interval}° · ${mipPage.recipe.reverse?'Reverse':'Forward'}`:`Job ${job.id} · MIP Viewer · 1 frame`,main));
+    if(mipPage)intro(el('p',mipBatchPage(mipPage.version)?`Job ${job.id} · MIP Batch · ${mipPage.recipe.count} frames · ${mipPage.recipe.axis} · Interval ${mipPage.recipe.interval}° · ${mipPage.recipe.reverse?'Reverse':'Forward'}`:`Job ${job.id} · MIP Viewer · 1 frame`,main));
     if(batchOutput&&job.snapshot.batch)intro(el('p',`Job ${job.id} · ${job.snapshot.batch.count} planes · Interval ${job.snapshot.batch.interval} mm · ${job.snapshot.batch.reverse?'Reverse':'Forward'}`,main));
     const summary = summaryText(identities, data.reports);
     intro(el('p', summary, main));
@@ -517,7 +519,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       grid.className = 'grid'; grid.style.gridTemplateColumns = 'repeat(2,minmax(0,1fr))';
       batchOutput.frames.forEach((frame, index) => {
         const figure = el('section', undefined, grid); figure.className = 'cell'; figure.dataset.mipFrame = String(index + 1);
-        el('strong', mipPage.version === 13 ? 'Frame ' + (index + 1) : 'MIP Viewer', figure);
+        el('strong', mipBatchPage(mipPage.version) ? 'Frame ' + (index + 1) : 'MIP Viewer', figure);
         const img = el('img', undefined, figure); img.src = images[index]; img.alt = 'MIP 출력 ' + (index + 1);
         el('p', `${studyIdentity.name} (${studyIdentity.id}) · ${studyIdentity.date} · ${studyIdentity.desc || studyIdentity.modality}`, figure);
         el('p', frame.caption, figure).className = 'mip-caption'; el('p', frame.display, figure).className = 'mip-display';
@@ -597,9 +599,9 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       if (snapshot.version === 10) throw new Error('Curved MPR 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
       if (snapshot.version === 11) throw new Error('3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
       if (![2, 3].includes(snapshot.version) && !reconstructed(snapshot.version)) throw new Error('이전 작업에는 화면 크기가 없습니다. 복원 후 새 비교 작업으로 저장하세요.');
-      // A saved MIP Job is checked before any source read, and a version 13 bound is tightened to the recipe it holds.
+      // A saved MIP Job is checked before any source read, and a version 13/15 bound is tightened to the recipe it holds.
       const mipJob = mipOutput(snapshot.version) ? mipModel().saved(snapshot) : null;
-      if (mipJob?.recipe) arm(mipModel().timer(13, mipJob.recipe.count));
+      if (mipJob?.recipe) arm(mipModel().timer(snapshot.version, mipJob.recipe.count));
       verifyAnnotationSet(data.job);
       if (controlJob && !equal(controlJob.snapshot, snapshot)) edits = [];
       controlJob = data.job; const outputEdits = snapshot.cells.map((_, index) => structuredClone(edits[index] || defaultEdit()));
@@ -649,7 +651,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     controls.hidden=reconstructed(item.version);controls.style.display=reconstructed(item.version)?'none':'flex';
     for (const option of [...reportSource.options]) if (CHOSEN_OPTIONS.includes(option.value)) option.remove();
     addEditorOptions(null);
-    heading.textContent = item.version===11?'3D Path · 출력 미지원':item.version===10?'Curved MPR · 출력 미지원':item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':mipOutput(item.version)?(item.version===13?'Saved MIP Batch Output':'Saved MIP Viewer Output'):reconstructed(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
+    heading.textContent = item.version===11?'3D Path · 출력 미지원':item.version===10?'Curved MPR · 출력 미지원':item.version===9?'Merged Cell Layout · 출력 미지원':item.version===8?'MPR Mixed Layout · 출력 미지원':item.version===7?'MPR Plane Layout · 출력 미지원':mipOutput(item.version)?(mipBatchPage(item.version)?'Saved MIP Batch Output':'Saved MIP Viewer Output'):reconstructed(item.version)?(item.snapshot?'Current MPR Output':'Saved MPR Output'):item.snapshot ? '현재 비교 화면 출력 · 저장 안 함' : '저장한 비교 영상 출력';
     reset.textContent = item.snapshot ? '선택 범위 처음 화면으로' : '선택 범위 저장 상태로';
     windowMode.options[0].textContent = item.snapshot ? '처음 선택한 밝기' : '저장 밝기';
     dialog.showModal(); void prepare();
