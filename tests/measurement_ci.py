@@ -247,6 +247,20 @@ PROFILES = {
         # inherited MIP Viewer, VOI Slab, MIP Job, projection and orientation cases stay out.
         'suites': (('e2e/test_volume_mip_batch.py', None, 'ci-mip-batch'),),
     },
+    'volume-mip-output': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-mip-output-ci',
+        'project_prefix': 'kin-mipout-ci-',
+        # The A11-OUTPUT-1 MIP Viewer output cases in their own group, not inside volume-mip-batch, volume-mip-job, volume-mip-voi or
+        # volume-slab, whose caps stay as they are. There is no hosted history yet. The three cases save version 12 and 13 MIP Jobs,
+        # print them from freshly read CT in fresh and MIP-opened browsers (a PDF included), and wait out a 5s pre-render and 15s frame
+        # refusal among their injected failures. That is comparable to the MIP Batch group, so the single suite keeps the same 1200s
+        # cap: (1200+35) = 1235s leaves 265s. Print durations are measured (H-D8), never extended silently.
+        'suite_timeout': 1200,
+        'suite_budgets': {'ci-mip-output': 1200},
+        # The module's load_tests is the allowlist: exactly the authored test_mip_output_* cases of its own class, so the inherited
+        # MIP Viewer, VOI Slab, MIP Job, MIP Batch, projection and orientation cases stay out.
+        'suites': (('e2e/test_volume_mip_output.py', None, 'ci-mip-output'),),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

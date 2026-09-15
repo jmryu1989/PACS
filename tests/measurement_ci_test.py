@@ -173,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -286,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -1350,6 +1350,119 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('tests/viewer_volume_job_capture_test.cjs', tested)
         runtime = next(line for line in text.splitlines() if 'tmp/runtime-ci/volume-api-models' in line)
         self.assertIn('/tests/viewer_volume_job_test.cjs', runtime.rsplit(' --test ', 1)[1])
+
+    def test_volume_mip_output_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-mip-output']
+        self.assertEqual(profile['suites'], (('e2e/test_volume_mip_output.py', None, 'ci-mip-output'),))
+        self.assertEqual(profile['out'].name, 'volume-mip-output-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-mipout-ci-')
+        self.assertEqual(profile['suite_timeout'], 1200)
+        budgets = {'ci-mip-output': 1200}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Adding the MIP output group must not widen or cut the MIP Batch, MIP Job, VOI Slab and slab groups beside it.
+        self.assertEqual(ci.PROFILES['volume-mip-batch']['suite_budgets'], {'ci-mip-batch': 1200})
+        self.assertEqual(ci.PROFILES['volume-mip-job']['suite_budgets'], {'ci-mip-job': 1200})
+        self.assertEqual(ci.PROFILES['volume-mip-voi']['suite_budgets'], {'ci-mip-voi': 1200})
+        self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
+        modules = {row[0] for row in profile['suites']}
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-mip-output':
+                continue
+            self.assertFalse(modules & {row[0] for row in other['suites']}, name)
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+            # A new stable attempt unit: it neither shares nor resets another suite's ledger.
+            self.assertFalse(set(budgets) & {row[2] for row in other['suites']}, name)
+        suite, class_name, unit = profile['suites'][0]
+        command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 1500)
+        # No --class: the module's own load_tests stays the allowlist.
+        self.assertNotIn('--class', command)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_volume_mip_output.py')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-mip-output')
+        self.assertEqual(command[command.index('--timeout')+1], '1200')
+        self.assertEqual(outer, 1235)
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 1235)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+        near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][0], 200)
+        self.assertEqual(near_deadline[near_deadline.index('--timeout')+1], '165')
+        with patch.dict(os.environ, {'KIN_EVIDENCE_DIR': 'caller-value'}, clear=False):
+            env = ci.profile_environment('volume-mip-output', profile['out'],
+                                         {'ORTHANC_PASS': 'generated-orthanc-password'})
+        self.assertNotIn('KIN_EVIDENCE_DIR', env)
+
+    def test_volume_mip_output_module_declares_exactly_the_output_cases_on_the_mip_batch_base(self):
+        import ast
+        cases = ('test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity',
+                 'test_mip_output_02_readiness_delay_failure_missing_tool_cancel_no_partial_page',
+                 'test_mip_output_03_source_access_order_session')
+        module = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_output.py').read_text(encoding='utf-8'))
+        classes = [node for node in module.body if isinstance(node, ast.ClassDef)]
+        self.assertEqual([(node.name, [base.id for base in node.bases]) for node in classes], [('VolumeMipOutputE2E', ['VolumeMipBatchE2E'])])
+        declared = [node.name for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(declared, list(cases))
+        constant = next(node for node in module.body if isinstance(node, ast.Assign)
+                        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ['MIP_OUTPUT_CASES'])
+        self.assertEqual(ast.literal_eval(constant.value), cases)
+        loader = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'load_tests')
+        self.assertIn('MIP_OUTPUT_CASES', {node.id for node in ast.walk(loader) if isinstance(node, ast.Name)})
+        self.assertNotIn('getTestCaseNames', ast.dump(loader))
+        # The MIP Batch base keeps its three authored cases; none of them is redeclared here.
+        batch = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_batch.py').read_text(encoding='utf-8'))
+        base = next(node for node in batch.body if isinstance(node, ast.ClassDef) and node.name == 'VolumeMipBatchE2E')
+        self.assertEqual(len([node for node in base.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]), 3)
+        self.assertFalse(set(cases) & {node.name for node in base.body if isinstance(node, ast.FunctionDef)})
+
+    def test_validate_workflow_runs_volume_mip_output_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-mip-output:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-output job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'python3 -B tests/measurement_ci_test.py',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_mip_batch.py',
+                         '--file tests/e2e/test_volume_mip_output.py',
+                         '--file worklist-v0/hpacs-lite/volume-mip-output.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-mip-print.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-job-print.js',
+                         '--file worklist-v0/hpacs-lite/viewer-job-print.js',
+                         '--file worklist-v0/hpacs-lite/viewer-jobs.js',
+                         '--file worklist-v0/hpacs-lite/viewer-tech-note.js',
+                         'tests/measurement_ci.py --profile volume-mip-output',
+                         'name: synthetic-volume-mip-output-results',
+                         'tests/e2e/artifacts/volume-mip-output-ci/',
+                         'tmp/mipout-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-mip-output'), 1)
+        self.assertNotIn('--profile volume-mip-output', jobs[0])
+        self.assertEqual(text.count('name: synthetic-volume-mip-output-results'), 1)
+        # A job of Validate itself, on the same triggers as every other synthetic group.
+        header = text.split('\njobs:\n')[0]
+        self.assertTrue(header.startswith('name: Validate production image\n'))
+        self.assertIn('\n  pull_request:\n', header)
+        # The other MPR jobs, the MIP Batch group included, keep their own profile and do not run this one.
+        for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch'):
+            self.assertEqual(text.count('--profile '+other), 1)
+            self.assertNotIn('--profile volume-mip-output', text.split('\n  '+other+':\n')[1].split('\n  volume-mip-output:\n')[0])
+        # The pure MIP output model runs in the existing pure model gate (listed and executed), beside the capture harness of its print entry.
+        pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
+        for name in ('--file worklist-v0/hpacs-lite/volume-mip-output.js', '--file tests/volume_mip_output_test.cjs'):
+            self.assertEqual(pure.count(name), 1, name)
+        tested = pure.rsplit(' --test ', 1)[1].split()
+        self.assertIn('tests/volume_mip_output_test.cjs', tested)
+        self.assertIn('tests/viewer_volume_job_capture_test.cjs', tested)
 
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']
