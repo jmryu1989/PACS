@@ -519,3 +519,65 @@ test('a MIP Job restore throws the failed first display reason itself: a plane w
   }finally{world.viewer.dispose();}
  }
 });
+
+// N1-N3 (A11-VOI-2 native-fix-01): Save MIP Job is pressed inside the MIP Viewer's own modal dialog. In the standalone viewer
+// window the MPR tools behind an open dialog refuse a target that is not read-only (viewer-tech-note.js orientation allowed:
+// no dialog[open]; viewer-volume-orientation.js:47), and the marks tool asks for exactly that target (viewer-volume-marks.js
+// capture). The real viewer-jobs.js drives the real viewer-volume-job.js here; the marks tool stands in for that refusal, the
+// MIP tool returns a confirmed block, and fetch answers the account, the Job list and the POST with its committed receipt.
+async function mipSaveWorld(){
+ const real=context.window.kinCreateVolumeJob;let parts=null;
+ context.window.kinCreateVolumeJob=args=>{parts=args;return real(args);};
+ try{world(1,3,PLANES);}finally{context.window.kinCreateVolumeJob=real;}
+ const block=mipBlock(),gate={dialog:false,marks:[],readOnly:[]},posts=[],saved=[];
+ const marks={dirty:()=>false,saved(){},capture(readOnly=false){
+  gate.readOnly.push(readOnly);if(readOnly!==true&&gate.dialog)throw Error('다른 작업을 마친 뒤 MPR 방향을 조절하세요.');
+  return {version:1,visible:true,sync:true,marks:gate.marks};}};
+ const mip={capture:()=>block,dirty:()=>false,viewport:()=>'vp-0',saved:(value,volume)=>{saved.push(JSON.parse(JSON.stringify({value,volume})));}};
+ context.window.kinMprMarks=marks;context.window.kinVolumeMipJob=mip;
+ const element=tag=>{const children=[];return {tagName:tag,children,style:{},dataset:{},textContent:'',value:'',checked:false,disabled:false,isConnected:true,
+  append:(...items)=>{children.push(...items);},prepend:(...items)=>{children.unshift(...items);},insertBefore:item=>{children.push(item);},
+  replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute(){},remove(){},querySelector:selector=>children.find(c=>c.tagName===selector)||null};};
+ const layout=element('details');layout.append(element('summary'));
+ const jobs='/api/studies/'+STUDY+'/viewer-jobs';
+ const fetch=async(url,options={})=>{
+  let body=null;
+  if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};
+  else if(url===jobs&&options.method==='POST'){const sent=JSON.parse(options.body);posts.push(sent);body={id:sent.id,snapshotVersion:sent.snapshot.version};}
+  else if(url.startsWith(jobs+'?'))body={jobs:[]};
+  return {status:body?200:404,ok:!!body,json:async()=>body};};
+ const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
+  location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
+  kinCreateVolumeJob:real,kinMprMarks:marks,kinVolumeMipJob:mip};
+ sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
+ const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
+ panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
+ for(let n=0;n<200&&!command.owner();n++)await new Promise(r=>setTimeout(r,0));await idle();
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ return {command,idle,gate,posts,saved,block,stop:()=>{panel.stop();context.window.kinMprMarks=context.window.kinVolumeMipJob=undefined;},
+  status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label)};
+}
+
+test('Save MIP Job reads the MPR behind its own open dialog read-only; the named refusal still applies and Save New Job still refuses behind a dialog',async()=>{
+ const w=await mipSaveWorld();
+ try{
+  assert.equal(w.command.owner(),JSON.stringify(['I1','u1']));
+  // N2: 3D marks beside the MIP display are refused by name before any request, not by the dialog the save was pressed in.
+  // The panel's opening list read the screen while no dialog was open; only the saves below are counted.
+  w.gate.dialog=true;w.gate.marks=[{id:'synthetic-mark'}];w.gate.readOnly.length=0;
+  let outcome=await w.command.save({title:'MIP gates',description:''});
+  assert.equal(outcome.state,'not-saved');assert.equal(outcome.sent,false);assert.match(outcome.message,/^MIP 작업은 단면 묶음·3D 표식과 함께 저장할 수 없습니다/);
+  assert.deepEqual(w.posts,[]);assert.ok(w.gate.readOnly.length&&w.gate.readOnly.every(r=>r===true),JSON.stringify(w.gate.readOnly));
+  // N1/N3: without marks the same dialog sends exactly one version 12 body and is Saved only by its committed receipt.
+  w.gate.marks=[];w.gate.readOnly.length=0;
+  outcome=await w.command.save({title:'MIP oblique Raysum',description:''});
+  assert.equal(outcome.state,'saved',outcome.message);assert.equal(outcome.sent,true);assert.match(outcome.message,/^MIP 작업을 저장했습니다/);
+  assert.equal(w.posts.length,1);assert.equal(w.posts[0].title,'MIP oblique Raysum');assert.equal(w.posts[0].snapshot.version,12);assert.deepEqual(w.posts[0].snapshot.mip,w.block);
+  assert.ok(w.gate.readOnly.length&&w.gate.readOnly.every(r=>r===true),JSON.stringify(w.gate.readOnly));assert.equal(w.saved.length,1);assert.deepEqual(w.saved[0].value,w.block);
+  // The panel's own Save New Job is not pressed inside that dialog: its capture stays a permitted one and is refused behind it.
+  w.gate.readOnly.length=0;w.button('Save New Job').onclick();await w.idle();
+  assert.match(w.status(),/^다른 작업을 마친 뒤 MPR 방향을 조절하세요\./);assert.equal(w.posts.length,1);assert.ok(w.gate.readOnly.includes(false));
+ }finally{w.stop();}
+});

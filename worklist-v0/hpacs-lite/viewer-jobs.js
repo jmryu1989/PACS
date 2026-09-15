@@ -166,7 +166,7 @@ window.kinViewerJobs = function (services, model) {
       if (cells.every(c => !c)) throw new Error('저장할 영상이 없습니다.');
       return JSON.parse(JSON.stringify({ version: 2, studies, rows, cols, active: views.findIndex(v => v.viewportId === state.activeViewportId), cells }));
     }
-    const signature = () => { try { return JSON.stringify(capture()); } catch (_) { return JSON.stringify(ordered().map(g => [g.viewportId, g.displaySetInstanceUIDs])); } };
+    const signature = (readOnly = false) => { try { return JSON.stringify(capture(false, readOnly)); } catch (_) { return JSON.stringify(ordered().map(g => [g.viewportId, g.displaySetInstanceUIDs])); } };
     function show(rows) {
       list.replaceChildren();
       if (!rows.length) { text('p', '저장한 비교 작업이 없습니다.', list); return; }
@@ -231,7 +231,7 @@ window.kinViewerJobs = function (services, model) {
     // the MIP Viewer's title and description, reporting what actually happened to the request instead of only status text.
     async function run(action, row, reason, initialRestore = false, fields = null, outcome = null) {
       if (!live() || busy || !me) { if (outcome) outcome.message = busy ? '영상 작업 처리가 끝난 뒤 다시 저장하세요.' : '계정이나 화면을 확인할 수 없어 저장하지 않았습니다.'; return; }
-      busy = true; refresh(); const ticket = ++serial, edit = editSerial, before = signature(); status.textContent = '비교 작업 확인 중…';
+      busy = true; refresh(); const ticket = ++serial, edit = editSerial, before = signature(action === 'saveMip'); status.textContent = '비교 작업 확인 중…';
       let dispatched = false;
       try {
         await authenticate();
@@ -294,8 +294,13 @@ window.kinViewerJobs = function (services, model) {
           if (action === 'save' || action === 'saveAnnotations' || action === 'saveMip') {
             // Native frame marks have separate persistence; MPR points are captured in this Job.
             if (window.kinViewerHistoryHasUnsaved?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 작업을 저장하세요.');
-            if (before !== signature()) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
-            const snapshot = capture(true); if (action === 'saveAnnotations') {
+            // Save MIP Job is pressed inside the MIP Viewer's own modal dialog, and the standalone viewer refuses every MPR tool a
+            // permitted target while a dialog is open. Like the print dialog's unchanged check, that save only reads the screen
+            // behind it: each tool still refuses unfinished input, and the MIP Viewer has already checked its source, owner, role,
+            // busy state and Final display. Every other save captures as before.
+            const readOnly = action === 'saveMip';
+            if (before !== signature(readOnly)) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
+            const snapshot = capture(true, readOnly); if (action === 'saveAnnotations') {
               if([4,5,6,7,8,9,10,11,12].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
