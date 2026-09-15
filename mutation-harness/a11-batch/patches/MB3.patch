@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-batch.js b/worklist-v0/hpacs-lite/volume-mip-batch.js
+index 52d3335cc6220b5acde18657988b57571a83fc45..cf0c4120909d8701200922c086e8cd95ad955e27 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-batch.js
++++ b/worklist-v0/hpacs-lite/volume-mip-batch.js
+@@ -77,7 +77,7 @@
+     if(r.count*SIZE*SIZE*4>RAW_BYTES)throw Error(messages.limits);
+     const c=cross(u0,n0),length=Math.hypot(...c),right=c.map(x=>x/length),axis=r.axis==='Horizontal'?u0:right,sign=r.reverse?-1:1,scale=thickness/2;
+     const cameras=Array.from({length:r.count},(_,i)=>{
+-      const angle=i?sign*i*r.interval:0;
++      const angle=sign*(i+1)*r.interval;
+       // Frame 0 is the Final direction itself. A Horizontal turn keeps viewUp, its own axis, bit for bit.
+       const n=i?rotate(n0,axis,angle):[...n0],u=i&&r.axis==='Vertical'?rotate(u0,axis,angle):[...u0];
+       return Object.freeze({index:i,angle,focalPoint:Object.freeze([...f]),position:Object.freeze(f.map((x,k)=>x+n[k]*distance)),viewPlaneNormal:Object.freeze(n),viewUp:Object.freeze(u),parallelScale:scale});

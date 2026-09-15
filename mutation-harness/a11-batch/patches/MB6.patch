@@ -1,0 +1,12 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index ad0252acdf310346dcbbfec84c7e2eed0cc28d83..6edb21a815af7e5c218b43aed645641157e44575 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -169,7 +169,6 @@
+   function apply(op,request){
+     check(op);
+     // Any display request, a rollback re-apply included, ends the MIP Batch preview of the display it replaces before any native write.
+-    op.batchRun?.controller.abort();clearPreview();
+     const next=model.normalizeRequest(request),want=expected(op,next);
+     const bound=model.verifyBinding(next.voiSlab,binding(op));if(bound)throw Error(bound);
+     if(next.voiSlab&&op.voiProblem)throw Error(op.voiProblem);

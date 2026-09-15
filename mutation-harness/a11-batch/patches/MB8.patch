@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index ad0252acdf310346dcbbfec84c7e2eed0cc28d83..517223a8241473735abbc47bc75b909cebea2059 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -436,7 +436,7 @@
+         const budget=batchModel.budget(recipe.count);op.restoring.deadline=Date.now()+budget;
+         expired=new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(batchModel.messages.expired)),budget);});expired.catch(()=>{});
+         writeBatchEditors(recipe);
+-        await bounded(generateBatch(op,recipe));
++        saveState.restored(op,jobs.pair(saved,recipe));paintJob(op);await bounded(generateBatch(op,recipe));
+         check(op);
+       }
+       op.pending.delete(cancel);op.restoring=null;saveState.restored(op,jobs.pair(saved,recipe));controls.disabled=false;voi.disabled=!!op.voiProblem;

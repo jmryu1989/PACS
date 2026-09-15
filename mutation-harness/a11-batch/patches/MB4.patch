@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-batch.js b/worklist-v0/hpacs-lite/volume-mip-batch.js
+index 52d3335cc6220b5acde18657988b57571a83fc45..b68560b1938b0769026ef1f7e18848013a4eab5d 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-batch.js
++++ b/worklist-v0/hpacs-lite/volume-mip-batch.js
+@@ -75,7 +75,7 @@
+     if(!n0||!u0||!f||Math.abs(Math.hypot(...n0)-1)>1e-6||Math.abs(Math.hypot(...u0)-1)>1e-6||Math.abs(dot(n0,u0))>1e-6||!finite(thickness)||!(thickness>0))throw Error(messages.camera);
+     if(!finite(distance)||!(distance>=thickness/2+CAMERA_EDGE))throw Error(messages.distance);
+     if(r.count*SIZE*SIZE*4>RAW_BYTES)throw Error(messages.limits);
+-    const c=cross(u0,n0),length=Math.hypot(...c),right=c.map(x=>x/length),axis=r.axis==='Horizontal'?u0:right,sign=r.reverse?-1:1,scale=thickness/2;
++    const c=cross(u0,n0),length=Math.hypot(...c),right=c.map(x=>x/length),axis=r.axis==='Horizontal'?right:u0,sign=r.reverse?-1:1,scale=thickness/2;
+     const cameras=Array.from({length:r.count},(_,i)=>{
+       const angle=i?sign*i*r.interval:0;
+       // Frame 0 is the Final direction itself. A Horizontal turn keeps viewUp, its own axis, bit for bit.

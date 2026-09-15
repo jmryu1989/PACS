@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-batch.js b/worklist-v0/hpacs-lite/volume-mip-batch.js
+index 52d3335cc6220b5acde18657988b57571a83fc45..4ba8d8b12682565a6fb56d2f018a606b1e0e1301 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-batch.js
++++ b/worklist-v0/hpacs-lite/volume-mip-batch.js
+@@ -120,7 +120,7 @@
+         if(!ticket||ticket!==run||!next||next.key!==ticket.key){drop(next);return false;}
+         run=null;const old=output;output=next;if(old&&old!==next)drop(old);return true;
+       },
+-      fail(ticket){if(!ticket||ticket!==run)return false;run=null;return true;},
++      fail(ticket){if(!ticket||ticket!==run)return false;run=null;clear();return true;},
+       clear,
+       // The preview belongs only to the confirmed Final display it was made from; anything else clears it.
+       current({state,key:owner}={}){

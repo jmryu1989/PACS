@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-batch.js b/worklist-v0/hpacs-lite/volume-mip-batch.js
+index 52d3335cc6220b5acde18657988b57571a83fc45..34d6c74e028bf216963d7fccc36a120baa029dbf 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-batch.js
++++ b/worklist-v0/hpacs-lite/volume-mip-batch.js
+@@ -98,7 +98,7 @@
+   function makeGate({generating=false,restoring=false,saving=false,busy=false,snapshot=null,same=(a,b)=>root.KinVolumeMip.sameRequest(a,b)}={}){
+     if(generating)return messages.generating;
+     if(restoring)return messages.restoring;
+-    if(saving)return messages.saving;
++    
+     if(busy)return messages.busy;
+     const final=snapshot?.final,applied=snapshot?.applied;let confirmed=false;
+     try{confirmed=snapshot?.state==='final'&&!!final&&!!applied&&same(applied,final)===true;}catch(_){confirmed=false;}

@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-job.js b/worklist-v0/hpacs-lite/volume-mip-job.js
+index 3f81ad9e740f7838e0cf98d6ad124c8b1e3ea696..715064aabe96f74ff32753c3379bf2fab01c4054 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-job.js
++++ b/worklist-v0/hpacs-lite/volume-mip-job.js
+@@ -94,7 +94,7 @@
+      the same recipe. A version 12 body has no mipBatch key at all, so both sides are normalized to null before comparing. */
+   function retryable(pending,value,batch=null){
+     if(!pending||!value)return false;
+-    const kept=pending.mipBatch??null,shown=batch??null;
++    const kept=pending.mipBatch,shown=batch;
+     return pending.version===(shown===null?12:13)&&same(pending.mip,value)&&same(kept,shown);
+   }
+   // The saved-state identity of a shown display: its block with the recipe of the MIP Batch preview beside it, or null.

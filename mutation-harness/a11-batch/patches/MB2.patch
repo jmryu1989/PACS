@@ -1,0 +1,12 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index ad0252acdf310346dcbbfec84c7e2eed0cc28d83..37ea81a16400cafa1ef48a7c787a502155bf678e 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -226,7 +226,6 @@
+     run.view.setCamera({focalPoint:[...camera.focalPoint],position:[...camera.position],viewUp:[...camera.viewUp],viewPlaneNormal:[...camera.viewPlaneNormal],parallelScale:camera.parallelScale});
+     // A turn about a fixed viewUp and focal point keeps the previous slab planes (viewer-volume-orientation.js:1-3), so the whole-volume
+     // slab is re-derived from this frame's camera; the VOI Slab planes are then written again in source LPS, never from the camera.
+-    run.view.setSlabThickness(op.thickness/2);
+     writeVoi(op,request.original?null:request.voiSlab??null,run.mapper);
+   }
+   function verifyBatchFrame(op,run,camera,request){

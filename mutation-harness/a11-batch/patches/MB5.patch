@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index ad0252acdf310346dcbbfec84c7e2eed0cc28d83..db6c40414d58a563cd45c54f19117f4fc26fda52 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -569,7 +569,7 @@
+       if(!op.ready||op.restoring)throw Error('MIP Viewer 표시를 확인하는 중에는 MIP 작업을 저장할 수 없습니다.');
+       if(op.batchRun)throw Error(batchTool()?.messages.save||'MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.');
+       if(!current(op))throw Error('원본·선택 또는 계정이 변경되어 MIP 작업을 저장하지 않았습니다.');
+-      const recipe=shownPreview(op)?.recipe;
++      const recipe=batchTool().recipe({axis:batchAxis.value,interval:batchNumber(batchInterval),count:batchNumber(batchCount),reverse:batchReverse.checked===true});
+       return recipe?JSON.parse(JSON.stringify(recipe)):null;
+     },
+     viewport:()=>operation?.target?.source?.viewportId??null,
