@@ -492,7 +492,8 @@ class VolumeMipE2E(VolumeProjectionE2E):
   a,p,v=self.opened_voi_study(intercept,voi);original=self.originals();before=self.volume_state(v);source=v.evaluate(SOURCE_PLANES)
   writes=[];v.on('request',lambda r:writes.append(r.method+' '+r.url) if r.method in ('POST','PUT','PATCH','DELETE') and '/viewer-jobs' in r.url else None)
   dialog=self.open_voi(v);status,summary=dialog.locator('[role=status]'),dialog.locator('.kin-mip-voi-state')
-  for text in ('이 MIP Viewer 화면에만 적용','MPR·VR·batch·출력·영상 작업(Job)에는 적용되지 않고 저장되지 않으며','원본 DICOM과 밝기 범위(W/L)는 바뀌지 않습니다','0 HU가 아니라 배경'):expect(dialog.locator('.kin-mip-voi-scope')).to_contain_text(text)
+  # A11-VOI-2 replaced the "not saved in a Job" sentence: a VOI Slab is saved only by Save MIP Job, and unsaved changes close with the window.
+  for text in ('이 MIP Viewer 화면에만 적용','Save MIP Job으로 저장할 때만','저장하지 않고 창을 닫으면 사라집니다','원본 DICOM과 밝기 범위(W/L)는 바뀌지 않습니다','0 HU가 아니라 배경'):expect(dialog.locator('.kin-mip-voi-scope')).to_contain_text(text)
   expect(summary).to_have_text('VOI Slab · Off · Not Saved');expect(dialog).to_contain_text('조작성 평가 가능·진단 품질 미검증')
   cell=plan[(study,'perpendicular','Axial','MIP')];worlds=[probe['world'] for probe in cell];self.assertTrue(cell)
   clipped=self.settled(v,self.apply_voi_case(v,dialog,perpendicular),worlds);self.voi_native(clipped,'MIP','Axial',rB,voi);self.voi_pixels(clipped,cell,'VOI Slab')

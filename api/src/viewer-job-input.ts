@@ -3,6 +3,7 @@ import { canonical, viewerJson, viewerUid, viewerUuid, verifyViewerReference } f
 import { validateVolumeMarks } from './viewer-volume-marks';
 import { validateVolumeCurved } from './viewer-volume-curved';
 import { validateVolumePath } from './viewer-volume-path';
+import { validateVolumeMip } from './viewer-volume-mip';
 import { createHash } from 'node:crypto';
 
 const invalid = (): never => { throw new BadRequestException('비교 작업의 입력 또는 원본 참조가 올바르지 않습니다'); };
@@ -64,8 +65,8 @@ const MERGE_SHAPES: number[][][] = [
 const PLANE_ORIENTATIONS = ['axial', 'sagittal', 'coronal'];
 const CELL_KINDS = ['plane', 'stack'];
 function validateJobSnapshot(s: any) {
-  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10,11].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:s?.version===11?['path']:[])]);
-  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
+  keys(s, ['version', 'studies', 'rows', 'cols', 'active', 'cells', ...([4,5,6,7,8,9,10,11,12].includes(s?.version) ? ['volume'] : []), ...(s?.version===9?['rects']:[]), ...(s?.version===5?['batch']:s?.version===6?['batch','marks']:s?.version===10?['curved']:s?.version===11?['path']:s?.version===12?['mip']:[])]);
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(s.version) || !Array.isArray(s.studies) || ![1, 2].includes(s.studies.length) || new Set(s.studies).size !== s.studies.length) invalid();
   s.studies.forEach(viewerUid);
   const planes = s.version === 7, mixed = s.version === 8, merged = s.version === 9;
   // A merged layout of ordinary frame cells alone has no volume to reference, so its
@@ -74,10 +75,13 @@ function validateJobSnapshot(s: any) {
   // carries neither a batch nor 3D marks, so neither can be dropped beside a curve.
   // Version 11 is the same exact version 4 three-plane snapshot plus one manual 3D path, with
   // neither a batch, 3D marks nor a curve beside it.
-  const volume = [4,5,6,7,8,10,11].includes(s.version) || merged && s.volume !== null;
+  // Version 12 is the same exact version 4 three-plane snapshot plus one confirmed MIP Viewer display (kin-mip-1),
+  // with neither a batch, 3D marks, a curve nor a path beside it; its display is the active cell's own W/L.
+  const volume = [4,5,6,7,8,10,11,12].includes(s.version) || merged && s.volume !== null;
   if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
   if(s.version===10)validateVolumeCurved(s.curved);
   if(s.version===11)validateVolumePath(s.path);
+  if(s.version===12)validateVolumeMip(s.mip);
   const batch=s.version===5||s.version===6&&s.batch!==null;
   if(batch){
     keys(s.batch,['cell','offset','interval','count','reverse']);
@@ -159,6 +163,12 @@ function validateJobSnapshot(s: any) {
     if (s.version >= 2 && ![0, 1, 2].includes(c.properties.interpolationType)) invalid();
     number(c.properties.voiRange.lower, -1e9, 1e9); number(c.properties.voiRange.upper, -1e9, 1e9);
     if (c.properties.voiRange.upper <= c.properties.voiRange.lower || !['LINEAR', 'LINEAR_EXACT', 'SIGMOID'].includes(c.properties.VOILUTFunction) || typeof c.properties.invert !== 'boolean') invalid();
+  }
+  // The MIP Viewer opens on the active cell and takes its W/L and interpolation from it, so a display that is not that
+  // cell's own (another cell, a later W/L change) is not the display this snapshot can put back.
+  if (s.version === 12) {
+    const p = s.cells[s.active].properties, d = s.mip.display;
+    if (d.voiRange.lower !== p.voiRange.lower || d.voiRange.upper !== p.voiRange.upper || d.interpolationType !== p.interpolationType) invalid();
   }
   if (Buffer.byteLength(canonical(s)) > (volume || merged ? 28000 : 16000)) invalid();
 }

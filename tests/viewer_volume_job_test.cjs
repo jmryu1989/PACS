@@ -336,6 +336,57 @@ test('server arc length and output grid equal the viewer model parity constants'
  assert.ok(Math.abs(curved.length-60.60865760815429)<=1e-9);assert.equal(curved.columns,122);assert.equal(curved.rows,13);
  assert.ok(Math.abs(free.length-60.58665999215323)<=1e-9);assert.equal(free.columns,122);assert.equal(free.rows,13);
 });
+// Version 12 (A11-VOI-2 P1): the exact version 4 three-plane snapshot plus one confirmed MIP Viewer display (kin-mip-1).
+// The fixture volume is 32x32x3 voxels at (column, row, slice) mm: voxel-centre L and P run 0..31 and S runs 0..2.
+const obliqueNormal=[0.7848855672213958,0.49999999999999994,-0.36599815077066683];
+const mipOf=(voiSlab={center:[15.5,15.5,1],normal:obliqueNormal,pivot:[15.75,15.75,1.25],thickness:2})=>({schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'2.25.6',
+ mode:'Raysum',orientation:'Coronal',display:{voiRange:{lower:-1000,upper:1000},interpolationType:0},voiSlab});
+const mipJob={...structuredClone(snapshot),version:12,mip:mipOf()};
+test('a MIP Viewer job is accepted only with a valid kin-mip-1 display on the exact three-plane snapshot',()=>{
+ assert.equal(command(mipJob).snapshot.version,12);assert.match(verifyVolumeReference(mipJob,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const reversed=structuredClone(mipJob);reversed.volume.sops.reverse();assert.match(verifyVolumeReference(reversed,[...tags].reverse(),'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const off={...structuredClone(mipJob),mip:{...mipOf(),voiSlab:null}};assert.equal(command(off).snapshot.version,12);assert.match(verifyVolumeReference(off,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ const thick=structuredClone(mipJob);thick.mip.voiSlab.thickness=1e6;assert.equal(command(thick).snapshot.version,12);assert.match(verifyVolumeReference(thick,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ for(const [label,change] of [
+   ['version 13',s=>{s.version=13;}],['missing mip',s=>{delete s.mip;}],
+   ['mip volumeId',s=>{s.mip.volumeId='volume-1';}],['mip affine',s=>{s.mip.affine=[0,0,0,1,0,0,0,1,0,0,0,1];}],['mip history',s=>{s.mip.history=[];}],['mip original',s=>{s.mip.original=false;}],['mip state',s=>{s.mip.state='final';}],
+   ['extra slab key',s=>{s.mip.voiSlab.volumeId='volume-1';}],['extra display key',s=>{s.mip.display.VOILUTFunction='LINEAR';}],['missing slab key',s=>{delete s.mip.voiSlab.pivot;}],
+   ['schema 2',s=>{s.mip.schema=2;}],['algorithm kin-mip-2',s=>{s.mip.algorithm='kin-mip-2';}],['coordinates RAS_mm',s=>{s.mip.coordinates='RAS_mm';}],
+   ['mode Sum',s=>{s.mip.mode='Sum';}],['orientation axial',s=>{s.mip.orientation='axial';}],
+   ['display lower 1e-9 from the active cell',s=>{s.mip.display.voiRange.lower=-1000+1e-9;}],
+   // The fixture's three cells are one shared object and structuredClone keeps that sharing, so the non-active cell gets its
+   // own copy first; otherwise the change reaches the active cell too and the display is that cell's own.
+   ['display taken from a non-active cell',s=>{s.cells[1]=structuredClone(s.cells[1]);s.cells[1].properties.voiRange={lower:-500,upper:500};s.mip.display.voiRange={lower:-500,upper:500};}],
+   ['interpolation mismatch',s=>{s.mip.display.interpolationType=1;}],['interpolation 3',s=>{s.mip.display.interpolationType=3;s.cells[0].properties.interpolationType=3;}],
+   ['normal length 1+2e-6',s=>{s.mip.voiSlab.normal=s.mip.voiSlab.normal.map(n=>n*(1+2e-6));}],
+   ['thickness 0',s=>{s.mip.voiSlab.thickness=0;}],['thickness -1',s=>{s.mip.voiSlab.thickness=-1;}],['thickness 1e6+1',s=>{s.mip.voiSlab.thickness=1e6+1;}],
+   ['coordinate 1e6+1',s=>{s.mip.voiSlab.pivot=[1e6+1,15.5,1];}],['frame of reference text',s=>{s.mip.frameOfReference='not-a-uid';}],
+   ['mip with batch',s=>{s.batch=null;}],['mip with marks',s=>{s.marks={version:1,visible:true,sync:true,marks:[]};}],['mip with a curve',s=>{s.curved=structuredClone(curve);}],['mip with a path',s=>{s.path=structuredClone(route);}],
+   ['2x2 layout',s=>{s.rows=2;s.cols=2;s.cells.push(structuredClone(cell));}],['null cell',s=>{s.cells[1]=null;}],['orientation key on a cell',s=>{s.cells[0].orientation='axial';}],
+   ['forged digest',s=>{s.volume.sourceDigest='f'.repeat(64);}]]){
+  const s=structuredClone(mipJob);change(s);assert.throws(()=>command(s),e=>e.getStatus?.()===400,label);
+ }
+ // No other version admits a mip key, and no preview renders a MIP Job.
+ for(const version of [4,5,6,7,8,9,10,11]){const s=structuredClone(mipJob);s.version=version;rejected(()=>command(s));}
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:mipJob}))));
+ // The established shapes still parse exactly as before beside it.
+ assert.equal(command(snapshot).snapshot.version,4);assert.equal(command(pathJob).snapshot.version,11);assert.equal(command(curvedJob).snapshot.version,10);
+});
+test('a MIP Viewer job must match the original frame of reference and keep a voxel centre inside its VOI Slab',()=>{
+ const axial=(s,thickness=6)=>({center:[15.5,15.5,s],normal:[0,0,1],pivot:[15.5,15.5,1],thickness});
+ const unit=[.6,0,.8],beyond=[31,31,2].map((x,i)=>x+unit[i]*2);
+ for(const [label,change] of [
+   ['foreign frame of reference',s=>{s.mip.frameOfReference='2.25.7';}],
+   ['slab wholly beyond the + side',s=>{s.mip.voiSlab=axial(5+2e-6);}],['slab wholly beyond the - side',s=>{s.mip.voiSlab=axial(-3-2e-6);}],
+   ['oblique slab beyond the far corner',s=>{s.mip.voiSlab={center:beyond,normal:unit,pivot:beyond,thickness:2};}]]){
+  const s=structuredClone(mipJob);change(s);
+  assert.equal(command(s).snapshot.version,12,label+' is syntactically valid');
+  assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label);
+ }
+ for(const [label,slab] of [['touching the + side at exactly half thickness',axial(5)],['touching the - side at exactly half thickness',axial(-3)],['within the 1e-6 edge',axial(5+.5e-6)]]){
+  const s=structuredClone(mipJob);s.mip.voiSlab=slab;assert.match(verifyVolumeReference(s,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/,label);
+ }
+});
 // TEST-VOLUME-JOB-PERSISTENCE: the compiled ViewerJobService stores and restores every validated snapshot number exactly.
 const {ViewerJobService}=require('/app/dist/viewer-job.service.js');
 const {snapshotText,writeSnapshot,readSnapshot}=require('/app/dist/viewer-job-snapshot.js');
@@ -369,7 +420,7 @@ const accessFake={prepare:async()=>{},snapshot:async()=>{},require:async()=>{},a
 const jobService=options=>{const db=fakeDatabase(options);return {db,jobs:new ViewerJobService(db,orthancFake,accessFake)};};
 const jobBody=(s,title='MPR')=>Buffer.from(JSON.stringify({id:jobId,title,description:'',snapshot:s}));
 function exactJob(version){
- const s=structuredClone(version===11?pathJob:snapshot);
+ const s=structuredClone(version===11?pathJob:version===12?mipJob:snapshot);
  for(const c of s.cells){c.camera.focalPoint=[0.30000000000000004,0,1];c.camera.position=[0.30000000000000004,0,101];}
  return s;
 }
@@ -383,11 +434,13 @@ test('snapshot text keeps the observed 17-digit doubles that the Json write alte
  await assert.rejects(writeSnapshot({$executeRaw:async()=>0},jobId,{version:4}));await assert.rejects(writeSnapshot({$executeRaw:async()=>2},jobId,{version:4}));
  await assert.rejects(readSnapshot({$queryRaw:async()=>[]},jobId));await assert.rejects(readSnapshot({$queryRaw:async()=>[{snapshot:{version:4}}]},jobId));
 });
-test('a created version 4 or 11 Job stores and restores every snapshot number exactly, with replay and conflict unchanged',async()=>{
- for(const version of [4,11]){
+test('a created version 4, 11 or 12 Job stores and restores every snapshot number exactly, with replay and conflict unchanged',async()=>{
+ for(const version of [4,11,12]){
   const {db,jobs}=jobService(),s=exactJob(version);
   assert.ok(numbers(s).filter(x=>engineJson(x)!==x).length>=2,'the fixture carries doubles a 16-digit conversion alters');
   if(version===11)assert.ok(s.path.frame.initialNormal.some(x=>engineJson(x)!==x),'the path normal itself needs 17 digits');
+  // Version 12 is verified against the whole original like every volume Job, so its stored digest proves the service list.
+  if(version===12)assert.ok(s.mip.voiSlab.normal.some(x=>engineJson(x)!==x),'the MIP VOI Slab normal itself needs 17 digits');
   const created=await jobs.create(volume.study,jobBody(s),caller);
   assert.deepEqual([created.id,created.revision,created.snapshotVersion,created.hidden],[jobId,1,version,false]);
   const text=db.store.jobs.get(jobId).snapshot,stored=JSON.parse(text);

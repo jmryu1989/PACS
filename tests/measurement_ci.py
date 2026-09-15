@@ -220,6 +220,20 @@ PROFILES = {
         # inherited MIP Viewer, projection, job and orientation cases stay out.
         'suites': (('e2e/test_volume_mip_voi.py', None, 'ci-mip-voi'),),
     },
+    'volume-mip-job': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-mip-job-ci',
+        'project_prefix': 'kin-mipjob-ci-',
+        # The A11-VOI-2 MIP Viewer Job save/restore cases in their own group, not inside volume-mip-voi or volume-slab, whose
+        # caps stay as they are. The PR33 candidate's hosted volume-mip-voi run (d6271d2) took 125.4s for its three VOI cases
+        # with about 55s of stack setup and 12s of cleanup. These three cases save and restore MIP Jobs in two browsers, read
+        # the VOI Final back after every restore and wait out one 15s render timeout and a changed series, about three times
+        # that work (~380s expected), so the single suite keeps the same 1200s cap: (1200+35) = 1235s leaves 265s.
+        'suite_timeout': 1200,
+        'suite_budgets': {'ci-mip-job': 1200},
+        # The module's load_tests is the allowlist: exactly the authored test_mip_job_* cases of its own class, so the
+        # inherited MIP Viewer, VOI Slab, projection, job and orientation cases stay out.
+        'suites': (('e2e/test_volume_mip_job.py', None, 'ci-mip-job'),),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

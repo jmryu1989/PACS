@@ -41,11 +41,12 @@ const frameHelper=(size={width:256,height:256})=>({cell:(g,measure)=>{measure(si
 // cell, null a vacancy, and {normal} a plane whose request carries no orientation at all.
 // `rects` places the cells in explicit fractional rectangles instead of the uniform grid,
 // which is what a merged screen is; without it every cell fills its own grid position.
-function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path}={}){
+function world(rows,cols,cells,{active=0,batch=null,marks=null,dirtyMarks=false,stack=frameHelper(),rects=null,curved,path,mip}={}){
   // The curved tool's own capture rules are proved in viewer_volume_curved_dom_test.py; here it
   // is the capability shape this module consumes: capture() on a target, dirty() without one.
-  // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape.
-  context.window.kinMprCurved=curved;context.window.kinMprPath=path;
+  // The 3D path tool (viewer_volume_path_dom_test.py) is consumed through the same shape, and so is
+  // the MIP Viewer Job capability (its block rules are proved in volume_mip_job_test.cjs).
+  context.window.kinMprCurved=curved;context.window.kinMprPath=path;context.window.kinVolumeMipJob=mip;
   const viewports=new Map(),lookup=new Map();
   cells.forEach((spec,index)=>{
     const id='vp-'+index,frame=spec==='frame',named=typeof spec==='string'&&!frame?spec:null;
@@ -337,4 +338,280 @@ test('without the frame-cell helper a mixed screen refuses instead of dropping t
   assert.throws(()=>world(2,2,['axial','frame','coronal',null],{stack}).capture(),/저장 도구를 불러오지 못했습니다/);
  // A plane-only layout on the same grid is unaffected by the missing helper.
  assert.equal(world(2,2,['axial','sagittal','coronal',null],{stack:null}).capture().version,7);
+});
+
+// Version 12 (A11-VOI-2 P2): the MIP Viewer Job capability supplies its confirmed block, a dirty answer and the viewport it
+// was opened on; apply() awaits its restore last, on the restored active plane, inside the same deadline.
+const mipBlock=(over={})=>({schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'1.2.9',mode:'Raysum',orientation:'Coronal',
+  display:{voiRange:{lower:-1000,upper:1000},interpolationType:1},voiSlab:{center:[1,2,3],normal:[0,0,1],pivot:[1,2,3],thickness:4},...over});
+const mipTool=(value,{dirty=false,viewport='vp-0',calls=[]}={})=>({capture:readOnly=>{calls.push(readOnly);return value;},dirty:()=>dirty,viewport:()=>viewport});
+
+test('a confirmed MIP Viewer display on the three-plane layout saves as version 12 beside the exact version 4 cells',()=>{
+ for(const [rows,cols] of [[1,3],[3,1]]){
+  const calls=[],block=mipBlock(),value=world(rows,cols,PLANES,{mip:mipTool(block,{calls})}).capture(true);
+  assert.equal(value.version,12);assert.deepEqual(value.mip,block);assert.deepEqual(calls,[true]);
+  assert.deepEqual(Object.keys(value).sort(),['active','cells','cols','mip','rows','studies','version','volume']);
+  const plain=world(rows,cols,PLANES).capture();delete value.mip;value.version=4;assert.deepEqual(value,plain);
+ }
+ // A closed viewer or no capability at all leaves every established version untouched; a VOI-off display is still version 12.
+ assert.equal(world(1,3,PLANES,{mip:mipTool(null)}).capture().version,4);
+ assert.equal(world(1,3,PLANES,{mip:undefined}).capture().version,4);
+ assert.equal(world(1,3,PLANES,{mip:mipTool(mipBlock({voiSlab:null}))}).capture().version,12);
+ // The capability's own refusal (Rendering, Original, geometry) is the save refusal.
+ assert.throws(()=>world(1,3,PLANES,{mip:{capture:()=>{throw Error('최종 표시를 확인한 뒤 MIP 작업을 저장하세요.');},dirty:()=>true,viewport:()=>'vp-0'}}).capture(),/최종 표시를 확인한 뒤/);
+});
+
+test('a MIP display is refused beside a curve, path, batch or marks, off the active plane, with another W/L and off the three-plane layout',()=>{
+ const tool=over=>mipTool(mipBlock(),over),dirty={capture:()=>{throw Error('no target');},dirty:()=>true,viewport:()=>null};
+ const batch={cell:{},offset:0,interval:1,count:2,reverse:false},marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),curved:{capture:()=>({schema:1,kind:'curved'}),dirty:()=>false}}).capture(),/MIP 작업은 곡면 MPR·3D Path와 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),path:{capture:()=>({schema:1,algorithm:'kin-path-1'}),dirty:()=>false}}).capture(),/MIP 작업은 곡면 MPR·3D Path와 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),batch}).capture(),/MIP 작업은 단면 묶음·3D 표식과 함께/);
+ assert.throws(()=>world(3,1,PLANES,{mip:tool(),marks}).capture(),/MIP 작업은 단면 묶음·3D 표식과 함께/);
+ assert.equal(world(1,3,PLANES,{mip:tool(),marks:{version:1,visible:true,sync:true,marks:[]}}).capture().version,12,'a quiet marks tool is not a conflict');
+ assert.throws(()=>world(1,3,PLANES,{mip:tool({viewport:'vp-1'})}).capture(),/활성 평면이 아니어서/);
+ assert.equal(world(1,3,PLANES,{active:1,mip:tool({viewport:'vp-1'})}).capture().active,1);
+ for(const display of [{voiRange:{lower:-1000+1e-9,upper:1000},interpolationType:1},{voiRange:{lower:-1000,upper:999},interpolationType:1},{voiRange:{lower:-1000,upper:1000},interpolationType:0}])
+  assert.throws(()=>world(1,3,PLANES,{mip:mipTool(mipBlock({display}))}).capture(),/밝기 범위·보간이 활성 MPR 평면과 달라/,JSON.stringify(display));
+ assert.throws(()=>world(2,2,['axial','sagittal','coronal',null],{mip:tool()}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+ assert.throws(()=>world(2,2,['axial','frame','coronal',null],{mip:dirty}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+ assert.throws(()=>world(2,2,['axial','coronal',null],{rects:ROW_TOP,mip:dirty}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+ assert.equal(world(2,2,['axial','frame','coronal',null],{mip:{capture:()=>{throw Error('must not be asked');},dirty:()=>false}}).capture().version,8);
+});
+
+// apply() over a fake native grid: setLayout builds the requested viewports, each plane echoes the camera, properties,
+// blend and slab it is given, and the order of layout, active plane and tool calls is logged.
+function restoreWorld(tools={}){
+ const log=[],viewports=new Map(),lookup=new Map();let active=null;
+ context.requestAnimationFrame=callback=>setTimeout(callback,0);context.devicePixelRatio=1;
+ Object.assign(context.window,{kinVolumeBatchState:undefined,cornerstoneTools:undefined,kinMprMarks:tools.marks,kinMprCurved:tools.curved,kinMprPath:tools.path,kinVolumeMipJob:tools.mip});
+ const plane=id=>{let camera={},blend=0,half=.05,properties={};
+  return {id,type:'orthographic',getVolumeId:()=>'volume-1',getCanvas:()=>({width:256,height:256,clientWidth:256,clientHeight:256}),
+   getCamera:()=>structuredClone(camera),setCamera:next=>{camera={...camera,...structuredClone(next)};},getProperties:()=>properties,setProperties:next=>{properties={...properties,...next};},
+   setBlendMode:mode=>{blend=mode;},getSlabThickness:()=>half,setSlabThickness:value=>{half=value;},resetSlabThickness:()=>{half=.05;},render:()=>{},
+   getActors:()=>[{actor:{getMapper:()=>({getBlendMode:()=>blend}),getProperty:()=>({getScalarOpacity:()=>opacity})}}]};};
+ const grid={getState:()=>({layout:{numRows:1,numCols:3,layoutType:'grid'},viewports,activeViewportId:active}),
+  setLayout:async({numRows,numCols,activeViewportId,findOrCreateViewport})=>{
+   log.push('setLayout');viewports.clear();lookup.clear();active=activeViewportId;
+   for(let i=0;i<numRows*numCols;i++){const spec=findOrCreateViewport(i),id=spec.viewportOptions.viewportId;
+    viewports.set(id,{viewportId:id,x:(i%numCols)/numCols,y:Math.floor(i/numCols)/numRows,width:1/numCols,height:1/numRows,displaySetInstanceUIDs:spec.displaySetInstanceUIDs,viewportOptions:spec.viewportOptions,isReady:true});
+    lookup.set(id,plane(id));}},
+  setActiveViewportId:id=>{log.push('active:'+[...viewports.keys()].indexOf(id));active=id;}};
+ const jobs=context.window.kinCreateVolumeJob({grid,cs:{getCornerstoneViewport:id=>lookup.get(id)},
+  ds:{getActiveDisplaySets:()=>[{StudyInstanceUID:STUDY,SeriesInstanceUID:SERIES,displaySetInstanceUID:SET,images:SOPS.map(sop=>({SOPInstanceUID:sop,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}))}]},
+  studies:[STUDY],stack:frameHelper()});
+ return {jobs,log,grid,cameras:()=>[...viewports.keys()].map(id=>lookup.get(id).getCamera())};
+}
+const mipRestorer=(outcome,world)=>({calls:[],cleared:0,
+ restore(value,current,deadline,viewportId){world().log.push('mip');this.calls.push({value,current,deadline,viewportId,active:world().grid.getState().activeViewportId,cameras:world().cameras()});return outcome();},
+ clearForJob(){this.cleared++;world().log.push('clear');}});
+
+test('closing the MIP Viewer a restore opened passes without advancing serial; other outside input is swallowed or advances it',()=>{
+ // CA1: the Jobs panel's input decision over the real viewer-jobs.js. The rollback runs only while serial === ticket, so the
+ // cancel must reach the dialog (not swallowed) and must leave the restore ticket current (not advance serial).
+ const jobsContext=vm.createContext({window:{}});
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),jobsContext);
+ const decide=jobsContext.window.kinViewerJobs.interaction;
+ assert.equal(decide({inPanel:false,applying:true,cancelsRestore:true}),'pass','a restore cancel is neither swallowed nor a serial change');
+ assert.equal(decide({inPanel:false,applying:true,cancelsRestore:false}),'swallow','any other input during a restore');
+ assert.equal(decide({inPanel:false,applying:false,cancelsRestore:false}),'advance');
+ assert.equal(decide({inPanel:false,applying:false,cancelsRestore:true}),'advance','no exemption outside a restore');
+ assert.equal(decide({inPanel:true,applying:true,cancelsRestore:false}),'pass');assert.equal(decide({inPanel:true,applying:false,cancelsRestore:false}),'pass');
+});
+
+test('resolve(v12) refuses a missing MIP tool or an algorithm it cannot reproduce before any layout change',async()=>{
+ const saved=world(1,3,PLANES,{mip:mipTool(mipBlock())}).capture();assert.equal(saved.version,12);
+ let order=restoreWorld({});
+ assert.throws(()=>order.jobs.resolve(saved),/MIP Viewer 도구를 불러오지 못했습니다/);
+ await assert.rejects(order.jobs.apply(structuredClone(saved),()=>true),/MIP Viewer 도구를 불러오지 못했습니다/);assert.deepEqual(order.log,[]);
+ const tool={restore:async()=>{throw Error('must not restore');},clearForJob(){}};
+ for(const [label,change] of [['schema 2',s=>{s.mip.schema=2;}],['algorithm kin-mip-2',s=>{s.mip.algorithm='kin-mip-2';}],['coordinates RAS_mm',s=>{s.mip.coordinates='RAS_mm';}],['missing mip',s=>{delete s.mip;}]]){
+  const s=structuredClone(saved);change(s);order=restoreWorld({mip:tool});
+  assert.throws(()=>order.jobs.resolve(s),/계산 방식을 이 뷰어가 재현할 수 없어/,label);
+  await assert.rejects(order.jobs.apply(s,()=>true),/계산 방식을 이 뷰어가 재현할 수 없어/,label);assert.deepEqual(order.log,[],label);
+ }
+ order=restoreWorld({mip:tool});assert.equal(order.jobs.resolve(saved),SET);
+});
+
+test('apply(v12) awaits the MIP restore after cells and cameras and propagates its failure; every other version closes the MIP',async()=>{
+ const block=mipBlock(),saved=world(1,3,PLANES,{active:2,mip:mipTool(block,{viewport:'vp-2'})}).capture();assert.equal(saved.version,12);
+ let order;const ok=mipRestorer(()=>Promise.resolve(),()=>order);order=restoreWorld({mip:ok});
+ const started=Date.now();await order.jobs.apply(structuredClone(saved),()=>true);
+ assert.deepEqual(order.log,['setLayout','active:2','mip']);assert.equal(ok.calls.length,1);assert.equal(ok.cleared,0);
+ const call=ok.calls[0];assert.deepEqual(call.value,block);assert.equal(call.viewportId,call.active,'the MIP reopens on the restored active plane');
+ assert.equal(typeof call.current,'function');assert.ok(call.deadline>=started+60000&&call.deadline<=Date.now()+60000,'the Job restore deadline');
+ call.cameras.forEach((camera,i)=>{for(const key of ['focalPoint','position','viewUp','viewPlaneNormal','parallelScale'])assert.deepEqual(camera[key],saved.cells[i].camera[key],key);});
+ const failing=mipRestorer(()=>Promise.reject(Error('INJECTED MIP RESTORE FAILURE')),()=>order);order=restoreWorld({mip:failing});
+ await assert.rejects(order.jobs.apply(structuredClone(saved),()=>true),/INJECTED MIP RESTORE FAILURE/);assert.equal(failing.calls.length,1);
+ const v4=world(1,3,PLANES).capture(),closing=mipRestorer(()=>Promise.reject(Error('must not restore')),()=>order);order=restoreWorld({mip:closing});
+ await order.jobs.apply(structuredClone(v4),()=>true);assert.equal(closing.calls.length,0);assert.equal(closing.cleared,1);
+ const route={schema:1,algorithm:'kin-path-1'},v11=world(1,3,PLANES,{path:{capture:()=>route,dirty:()=>false}}).capture(),paths=[];
+ const closing11=mipRestorer(()=>Promise.reject(Error('must not restore')),()=>order);
+ order=restoreWorld({mip:closing11,path:{restore:async value=>{paths.push(value);order.log.push('path');},clearForJob(){}}});
+ await order.jobs.apply(structuredClone(v11),()=>true);assert.deepEqual(paths,[route]);assert.equal(closing11.cleared,1);assert.deepEqual(order.log.slice(-2),['path','clear']);
+});
+
+// B1 (A11-VOI-2 review-01): a failed first display reaches the MIP Viewer only through the sequence's fatal callback, so
+// restore() must throw that same reason into the Job rollback (the Jobs status the native N3 reads), not a generic fallback.
+// The real viewer-volume-mip.js runs in its own browser-like realm beside the real volume-mip.js, volume-voi.js and
+// volume-mip-job.js; only the DOM, the account fetch and the native viewport are stand-ins. A fault-free restore reaching
+// Final proves the stand-ins drive the real restore path, so each fault below is the only difference.
+function mipViewerWorld({planeWrite=null,gpu=true}={}){
+ const node=tag=>{const children=[],on=new Map(),attributes={};const e={tagName:tag,children,attributes,style:{},dataset:{},className:'',textContent:'',value:'',checked:false,disabled:false,open:false,
+  append:(...items)=>{children.push(...items);},remove(){e.removed=true;},replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute:(name,value)=>{attributes[name]=String(value);},
+  addEventListener:(name,listener)=>{if(!on.has(name))on.set(name,new Set());on.get(name).add(listener);},removeEventListener:(name,listener)=>{on.get(name)?.delete(listener);},
+  emit:name=>{for(const listener of [...(on.get(name)||[])])listener({type:name,target:e});},contains:item=>item===e||children.some(c=>c.contains?.(item)),showModal(){e.open=true;},close(){e.open=false;}};return e;};
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ const presets={axial:{viewPlaneNormal:[0,0,-1],viewUp:[0,-1,0]},sagittal:{viewPlaneNormal:[1,0,0],viewUp:[0,0,1]},coronal:{viewPlaneNormal:[0,-1,0],viewUp:[0,0,1]}};
+ const volume={volumeId:'volume-1',dimensions:[64,64,33],spacing:[.5,.5,2.5],imageIds:['image:1'],imageData:{getSpatialExtent:()=>[0,63,0,63,0,32],indexToWorld:i=>[i[0]*.5,i[1]*.5,i[2]*2.5]}};
+ const views=new Map(),shader='for(int i = 0; i < 4; i++) {\n  float rayDirRatio = dot(rayDir, vClipPlaneNormals[i]);\n  if (rayDirRatio < 0.0) dists.y = min(dists.y, result);\n  else dists.x = max(dists.x, result);\n}';
+ const engine={views,enableElement({viewportId,element}){
+   // The MIP viewport: its two slab planes follow the camera and half thickness about the volume centre; VOI planes append.
+   let camera=null,blend=0,half=0,properties={};const extra=[],centre=[15.75,15.75,40];
+   const slab=sign=>({getOrigin:()=>centre.map((x,i)=>x-sign*camera.viewPlaneNormal[i]*half),getNormal:()=>camera.viewPlaneNormal.map(n=>sign*n)});
+   const mapper={getBlendMode:()=>blend,getSampleDistance:()=>(.5+.5+2.5)/6,getClippingPlanes:()=>[...(camera?[slab(1),slab(-1)]:[]),...extra],
+    addClippingPlane:plane=>{planeWrite?.();extra.push(plane);return true;},removeClippingPlane:plane=>{const i=extra.indexOf(plane);if(i<0)return false;extra.splice(i,1);return true;}};
+   const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
+   views.set(viewportId,{mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
+    setOrientation:key=>{camera=structuredClone(presets[key]);},setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;},
+    setProperties:value=>{properties={...properties,...value};},getProperties:()=>properties,getCamera:()=>structuredClone(camera),
+    render:()=>{setTimeout(()=>element.emit('IMAGE_RENDERED'),0);}});
+  },getViewport:id=>views.get(id),disableElement:id=>{views.delete(id);}};
+ // Without this linked program the viewer cannot confirm its clip shader, exactly as when the GPU check fails natively.
+ if(gpu)engine.offscreenMultiRenderWindow={getOpenGLRenderWindow:()=>({getViewNodeFor:mapper=>[...views.values()].some(v=>v.mapper===mapper)?
+  {get:name=>name==='tris'?{tris:{getProgram:()=>({getCompiled:()=>true,getLinked:()=>true,getFragmentShader:()=>({getSource:()=>shader})})}}:null}:null})};
+ const source={id:'vp-0',getVolumeId:()=>volume.volumeId,getRenderingEngine:()=>engine,getActors:()=>[{actor:{getMapper:()=>({})}}],
+  getProperties:()=>({voiRange:{lower:-1100,upper:1100},interpolationType:0})};
+ const target={group:'group-1',selection:'selection-1',views:[source,{id:'vp-1'},{id:'vp-2'}],source:{viewportId:'vp-0',uid:'1.2.3',series:'1.2.4',study:{id:'SYNTHETIC'}}};
+ const document={createElement:node,body:node('body'),head:node('head'),querySelectorAll:()=>[]};
+ const sandbox={document,structuredClone,crypto,AbortController,setTimeout,clearTimeout,clearInterval,
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},ResizeObserver:class{observe(){}disconnect(){}},
+  fetch:async url=>({ok:true,json:async()=>url==='/api/me'?{kind:'member',institution:'I1',sub:'u1'}:[]}),
+  cornerstone:{cache:{getVolume:id=>id===volume.volumeId?volume:null},metaData:{get:(type,id)=>type==='instance'&&id==='image:1'?{FrameOfReferenceUID:'2.25.6'}:null},
+   Enums:{Events:{IMAGE_RENDERED:'IMAGE_RENDERED'},ViewportType:{ORTHOGRAPHIC:'orthographic'}},CONSTANTS:{MPR_CAMERA_VALUES:presets}}};
+ sandbox.window=sandbox;const realm=vm.createContext(sandbox);
+ for(const file of ['volume-mip.js','volume-voi.js','volume-mip-job.js','viewer-volume-mip.js'])
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite',file),'utf8'),realm,{filename:file});
+ const notices=[],viewer=realm.kinCreateVolumeMip({target:()=>target,permitted:()=>true,alive:()=>true,owner:()=>['I1','u1'],notice:message=>notices.push(message)});
+ const dialog=document.body.children[0];
+ return {viewer,dialog,views,notices,window:sandbox,find:match=>find(dialog,match),status:()=>find(dialog,e=>e.attributes.role==='status')?.textContent};
+}
+
+test('a MIP Job restore throws the failed first display reason itself: a plane write fault or an unconfirmed GPU clip shader closes the viewer with that reason',async()=>{
+ const value={schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'2.25.6',mode:'MIP',orientation:'Axial',
+  display:{voiRange:{lower:-1100,upper:1100},interpolationType:0},voiSlab:{center:[8.125,15.75,40],normal:[1,0,0],pivot:[15.75,15.75,40],thickness:22.25}};
+ const restore=world=>world.viewer.job.restore(structuredClone(value),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0'});
+ let world=mipViewerWorld();
+ try{
+  await restore(world);
+  assert.equal(world.dialog.open,true);assert.equal(world.dialog.dataset.kinMipState,'final');assert.match(world.status(),/^저장한 MIP 작업을 복원했습니다/);assert.deepEqual(world.notices,[]);
+ }finally{world.viewer.dispose();}
+ for(const [label,options,reason] of [
+   ['clipping-plane write fault',{planeWrite:()=>{throw Error('INJECTED MIP JOB PLANE WRITE');}},'INJECTED MIP JOB PLANE WRITE'],
+   ['GPU clip shader not confirmed',{gpu:false},'투영 셰이더를 GPU에서 확인하지 못했습니다.']]){
+  world=mipViewerWorld(options);
+  try{
+   const error=await restore(world).then(()=>null,e=>e);
+   assert.ok(error,label+' must refuse the restore');
+   assert.equal(error.message,reason,label+': the Job rollback receives the sequence failure itself');
+   assert.equal(world.dialog.open,false,label);assert.equal(world.views.size,0,label+': the MIP viewport is disabled');
+   assert.deepEqual(world.notices,['MIP Viewer를 닫았습니다. '+reason],label);
+  }finally{world.viewer.dispose();}
+ }
+});
+
+// N1-N3 (A11-VOI-2 native-fix-01): Save MIP Job is pressed inside the MIP Viewer's own modal dialog. In the standalone viewer
+// window the MPR tools behind an open dialog refuse a target that is not read-only (viewer-tech-note.js orientation allowed:
+// no dialog[open]; viewer-volume-orientation.js:47), and the marks tool asks for exactly that target (viewer-volume-marks.js
+// capture). The real viewer-jobs.js drives the real viewer-volume-job.js here; the marks tool stands in for that refusal, the
+// MIP tool returns a confirmed block, and fetch answers the account, the Job list and the POST with its committed receipt.
+async function mipSaveWorld(){
+ const real=context.window.kinCreateVolumeJob;let parts=null;
+ context.window.kinCreateVolumeJob=args=>{parts=args;return real(args);};
+ try{world(1,3,PLANES);}finally{context.window.kinCreateVolumeJob=real;}
+ const block=mipBlock(),gate={dialog:false,marks:[],readOnly:[]},posts=[],saved=[];
+ const marks={dirty:()=>false,saved(){},capture(readOnly=false){
+  gate.readOnly.push(readOnly);if(readOnly!==true&&gate.dialog)throw Error('다른 작업을 마친 뒤 MPR 방향을 조절하세요.');
+  return {version:1,visible:true,sync:true,marks:gate.marks};}};
+ const mip={capture:()=>block,dirty:()=>false,viewport:()=>'vp-0',saved:(value,volume)=>{saved.push(JSON.parse(JSON.stringify({value,volume})));}};
+ context.window.kinMprMarks=marks;context.window.kinVolumeMipJob=mip;
+ const element=tag=>{const children=[];return {tagName:tag,children,style:{},dataset:{},textContent:'',value:'',checked:false,disabled:false,isConnected:true,
+  append:(...items)=>{children.push(...items);},prepend:(...items)=>{children.unshift(...items);},insertBefore:item=>{children.push(item);},
+  replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute(){},remove(){},querySelector:selector=>children.find(c=>c.tagName===selector)||null};};
+ const layout=element('details');layout.append(element('summary'));
+ const jobs='/api/studies/'+STUDY+'/viewer-jobs';
+ const fetch=async(url,options={})=>{
+  let body=null;
+  if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};
+  else if(url===jobs&&options.method==='POST'){const sent=JSON.parse(options.body);posts.push(sent);body={id:sent.id,snapshotVersion:sent.snapshot.version};}
+  else if(url.startsWith(jobs+'?'))body={jobs:[]};
+  return {status:body?200:404,ok:!!body,json:async()=>body};};
+ const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
+  location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
+  kinCreateVolumeJob:real,kinMprMarks:marks,kinVolumeMipJob:mip};
+ sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
+ const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
+ panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
+ for(let n=0;n<200&&!command.owner();n++)await new Promise(r=>setTimeout(r,0));await idle();
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ return {command,idle,gate,posts,saved,block,job:()=>real(parts),stop:()=>{panel.stop();context.window.kinMprMarks=context.window.kinVolumeMipJob=undefined;},
+  status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label)};
+}
+
+test('Save MIP Job reads the MPR behind its own open dialog read-only; the named refusal still applies and Save New Job still refuses behind a dialog',async()=>{
+ const w=await mipSaveWorld();
+ try{
+  assert.equal(w.command.owner(),JSON.stringify(['I1','u1']));
+  // N2: 3D marks beside the MIP display are refused by name before any request, not by the dialog the save was pressed in.
+  // The panel's opening list read the screen while no dialog was open; only the saves below are counted.
+  w.gate.dialog=true;w.gate.marks=[{id:'synthetic-mark'}];w.gate.readOnly.length=0;
+  let outcome=await w.command.save({title:'MIP gates',description:''});
+  assert.equal(outcome.state,'not-saved');assert.equal(outcome.sent,false);assert.match(outcome.message,/^MIP 작업은 단면 묶음·3D 표식과 함께 저장할 수 없습니다/);
+  assert.deepEqual(w.posts,[]);assert.ok(w.gate.readOnly.length&&w.gate.readOnly.every(r=>r===true),JSON.stringify(w.gate.readOnly));
+  // N1/N3: without marks the same dialog sends exactly one version 12 body and is Saved only by its committed receipt.
+  w.gate.marks=[];w.gate.readOnly.length=0;
+  outcome=await w.command.save({title:'MIP oblique Raysum',description:''});
+  assert.equal(outcome.state,'saved',outcome.message);assert.equal(outcome.sent,true);assert.match(outcome.message,/^MIP 작업을 저장했습니다/);
+  assert.equal(w.posts.length,1);assert.equal(w.posts[0].title,'MIP oblique Raysum');assert.equal(w.posts[0].snapshot.version,12);assert.deepEqual(w.posts[0].snapshot.mip,w.block);
+  assert.ok(w.gate.readOnly.length&&w.gate.readOnly.every(r=>r===true),JSON.stringify(w.gate.readOnly));assert.equal(w.saved.length,1);assert.deepEqual(w.saved[0].value,w.block);
+  // The panel's own Save New Job is not pressed inside that dialog: its capture stays a permitted one and is refused behind it.
+  w.gate.readOnly.length=0;w.button('Save New Job').onclick();await w.idle();
+  assert.match(w.status(),/^다른 작업을 마친 뒤 MPR 방향을 조절하세요\./);assert.equal(w.posts.length,1);assert.ok(w.gate.readOnly.includes(false));
+ }finally{w.stop();}
+});
+
+// Native N1 at test_volume_mip_job.py:129 (native-fix-02): with the restored MIP Viewer still open, the e2e read its Job with the
+// permitted capture and met the same refusal. The read-only capture is the very body Save MIP Job sent; the permitted one stays refused.
+test('behind the open MIP Viewer a read-only Job capture is the version 12 body Save MIP Job sent, and a permitted capture is refused',async()=>{
+ const w=await mipSaveWorld();
+ try{
+  w.gate.dialog=true;
+  const outcome=await w.command.save({title:'MIP oblique Raysum',description:''});assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.length,1);
+  w.gate.readOnly.length=0;assert.deepEqual(JSON.parse(JSON.stringify(w.job().capture(true))),w.posts[0].snapshot);assert.deepEqual(w.gate.readOnly,[true]);
+  w.gate.readOnly.length=0;assert.throws(()=>w.job().capture(),{message:'다른 작업을 마친 뒤 MPR 방향을 조절하세요.'});assert.deepEqual(w.gate.readOnly,[false]);
+ }finally{w.stop();}
+});
+
+// Native N2 at test_volume_mip_job.py:241 (native-fix-02): a session ended while Save MIP Job waits disposes the MIP Viewer, which
+// closes its dialog and removes it from the page, so a later read of its summary by selector finds no node. The summary element the
+// reader saw, and the viewer's status, never show a save afterwards, even when the held request then reports a committed one.
+test('a MIP Viewer disposed while Save MIP Job waits is closed and removed, and never shows Saved when that request ends',async()=>{
+ const value={schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'2.25.6',mode:'MIP',orientation:'Axial',
+  display:{voiRange:{lower:-1100,upper:1100},interpolationType:0},voiSlab:{center:[8.125,15.75,40],normal:[1,0,0],pivot:[15.75,15.75,40],thickness:22.25}};
+ const world=mipViewerWorld(),calls=[];let release=null;
+ world.window.kinViewerJobCommand={owner:()=>JSON.stringify(['I1','u1']),writable:()=>true,busy:()=>false,pending:()=>null,
+  save:fields=>{calls.push(fields);return new Promise(resolve=>{release=resolve;});},retry:()=>Promise.reject(Error('must not retry'))};
+ try{
+  await world.viewer.job.restore(structuredClone(value),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0'});
+  const summary=world.find(e=>e.className==='kin-mip-voi-state');assert.match(summary.textContent,/ · Saved$/);
+  world.find(e=>e.attributes['aria-label']==='MIP Job Title').value='MIP held session';world.find(e=>e.tagName==='button'&&e.textContent==='Save MIP Job').onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{title:'MIP held session',description:''}]);assert.match(summary.textContent,/ · Saving$/);
+  world.viewer.dispose();
+  assert.equal(world.dialog.open,false);assert.equal(world.dialog.removed,true);
+  release({state:'saved',sent:true,message:'MIP 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.'});
+  for(let n=0;n<5;n++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert.doesNotMatch(summary.textContent,/Saved/);assert.doesNotMatch(world.status(),/저장했습니다/);
+ }finally{world.viewer.dispose();}
 });

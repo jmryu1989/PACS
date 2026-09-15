@@ -11,6 +11,16 @@ class VolumeOrientationE2E(VolumeJobsE2E):
  def starting(self):
   a,p,v=self.opened_projection();expect(v.locator('#kin-volume-orientation')).to_be_visible();expect(v.get_by_role('button',name='Reset Planes',exact=True)).to_be_enabled()
   v.get_by_role('button',name='Reset Planes',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('시작 MPR 화면');return a,p,v
+ # Each plane's camera beside its canvas [width, height, clientWidth, clientHeight, devicePixelRatio]; the canvas is diagnostic only.
+ GRID_CAMERAS="()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {id,camera:v.getCamera(),canvas:[c.width,c.height,c.clientWidth,c.clientHeight,devicePixelRatio]}})"
+ def mpr(self,v):
+  super().mpr(v)
+  # Rotate and Reset Planes stay unavailable until two identical readings of the settled native presentation confirm the
+  # start screen, or the panel reports it unavailable. Flows wait here before their first click or camera write, so neither
+  # becomes the start screen under test; the confirmed planes are kept for the author-side evidence of test_orientation_06.
+  if v.locator('#kin-volume-orientation').count():
+   caption=v.locator('#kin-volume-orientation .target');expect(caption).to_contain_text('Center L/P/H',timeout=15000);expect(caption).not_to_contain_text('시작 MPR 화면을 확인하는 중',timeout=15000)
+   self.presented_cameras=v.evaluate(self.GRID_CAMERAS)
  def rotate_planes(self,v,axis,angle):
   v.get_by_label('MPR Rotation Axis',exact=True).select_option(str(axis));v.get_by_label('MPR Rotation Degrees',exact=True).fill(str(angle));v.get_by_role('button',name='Rotate Three Planes',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text(str(angle)+'도 회전했습니다')
  def pivot(self,cameras):
@@ -170,11 +180,58 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   # Directly after the call the slab still clips about the initial normal; only the Job's thickness re-apply can correct it.
   self.assertEqual(len(r['planesAfter']),2,message);self.assertEqual(r['planesAfter'],r['planesBefore'],message);np.testing.assert_allclose(r['planesAfter'][0]['normal'],previous['viewPlaneNormal'],atol=1e-6,rtol=0,err_msg=message)
   return r
+ # The same read-only wrapper as RESTORE_CAMERA_TRACE, ended by RESTORE_CAMERA_TRACE_END, on the author's own MPR viewports.
+ RESET_CAMERA_TRACE='''ids=>{if(window.kinRestoreCameraTrace)throw Error('restore camera trace already installed');let owner=cornerstone.VolumeViewport.prototype;while(owner&&!Object.prototype.hasOwnProperty.call(owner,'setCamera'))owner=Object.getPrototypeOf(owner);if(!owner)throw Error('no setCamera owner');
+  const descriptor=Object.getOwnPropertyDescriptor(owner,'setCamera'),original=descriptor.value,records=[],copy=value=>JSON.parse(JSON.stringify(value));
+  const planes=v=>{try{return v.getActors()[0].actor.getMapper().getClippingPlanes().map(p=>({normal:Array.from(p.getNormal()),origin:Array.from(p.getOrigin())}))}catch(error){return {error:String(error)}}};
+  const wrapper=function(camera){if(!(ids.includes(this.id)&&this.type==='orthographic'))return original.apply(this,arguments);
+   const record={index:records.length,id:this.id,volumeId:this.getVolumeId(),half:this.getSlabThickness(),suppliedKeys:Object.keys(camera||{}),supplied:copy(camera||{}),previous:copy(this.getCamera()),planesBefore:planes(this)};records.push(record);
+   try{const result=original.apply(this,arguments);record.after=copy(this.getCamera());record.planesAfter=planes(this);return result}catch(error){record.error=String(error);throw error}};
+  Object.defineProperty(owner,'setCamera',{...descriptor,value:wrapper});window.kinRestoreCameraTrace={owner,descriptor,wrapper,records};return {owner:owner.constructor.name,installed:owner.setCamera===wrapper}}'''
+ # The pinned OHIF resize re-presents each plane from its own view reference (ViewportService performResize -> setPresentations
+ # -> setViewReference): one native snapFocalPointToSlice of the focal point along the normal. Given a focal point, the plane is
+ # first put there; the focal point after the one snap is returned.
+ SLICE_SNAP='''([index,focal])=>{const id=[...services.viewportGridService.getState().viewports.keys()][index],v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCamera();
+  if(c.focalPoint.some((x,i)=>x!==focal[i]))v.setCamera({focalPoint:focal,position:c.position.map((x,i)=>x-(c.focalPoint[i]-focal[i]))});
+  v.setViewReference(v.getViewReference());v.render();return v.getCamera().focalPoint}'''
+ def start_screen(self,records,presented):
+  # Reset Planes writes each plane with a position once (its flip-only call carries none). That first write per plane must be
+  # exactly the planes read when the panel confirmed the start screen, before this flow's click and axial camera write.
+  message='Reset Planes setCamera trace: '+json.dumps({'presented':presented,'records':records});writes={}
+  for r in records:
+   if 'position' in r['suppliedKeys']:writes.setdefault(r['id'],r)
+  self.assertEqual(sorted(writes),sorted(c['id'] for c in presented),message)
+  for c in presented:
+   r=writes[c['id']];self.assertNotIn('error',r,message)
+   for key in ['focalPoint','position','viewUp','viewPlaneNormal','parallelScale']:self.assertEqual(r['supplied'][key],c['camera'][key],f"{c['id']} {key}: "+message)
+  return [writes[c['id']] for c in presented]
  def test_orientation_06_single_axis_saved_job_restores_live_slab_planes(self):
   # An A/P turn keeps the axial focal point, which is the volume centre, and its viewUp while its normal turns. The fresh
   # Restore Job axial viewport is observed (traced) to start there, so native setCamera alone keeps its initial slab.
   # The earlier H/F 40 coronal case did not discriminate: the fresh coronal focal point differs from the author's.
-  a,p,v=self.starting();before=self.cameras(v);original=self.originals();p.locator('#findings').fill('KEEP SINGLE AXIS REPORT')
+  a,p,v=self.opened_projection();expect(v.locator('#kin-volume-orientation')).to_be_visible();reset=v.get_by_role('button',name='Reset Planes',exact=True);expect(reset).to_be_enabled()
+  # Author-side start screen evidence (VP1): Reset Planes writes exactly the confirmed start screen. Natively that screen is the
+  # settled one (its canvas equal to its client box and unchanged up to Reset) with the unsnapped axial volume centre z 16.
+  presented=self.presented_cameras;reset_installed=v.evaluate(self.RESET_CAMERA_TRACE,[c['id'] for c in presented]);self.assertTrue(reset_installed['installed'],reset_installed)
+  try:reset.click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('시작 MPR 화면')
+  except BaseException:
+   # The original Reset Planes failure is re-raised; removing the trace is best effort here.
+   try:v.evaluate(self.RESTORE_CAMERA_TRACE_END)
+   except Exception as error:print('RESET_CAMERA_TRACE_END_FAILED',f'{type(error).__name__}: {error}',flush=True)
+   raise
+  reset_trace=v.evaluate(self.RESTORE_CAMERA_TRACE_END);self.assertTrue(reset_trace['restored'],'setCamera owner not restored after the Reset Planes trace');start=self.start_screen(reset_trace['records'],presented)
+  # Author-side evidence printed before the restore oracles below can fail (native-fix-01): per plane the confirmed start screen
+  # with its canvas, the live camera just before Reset Planes wrote (a native re-presentation after the confirmation shows here),
+  # and the camera and canvas after the Reset.
+  pick=lambda camera:{k:camera[k] for k in ('focalPoint','parallelScale','viewPlaneNormal')};first={};now={c['id']:c for c in v.evaluate(self.GRID_CAMERAS)}
+  for r in reset_trace['records']:first.setdefault(r['id'],r)
+  print('AUTHOR_START_SCREEN',json.dumps([{'id':c['id'],'presented':pick(c['camera']),'canvas':c['canvas'],'before_reset':pick(first[c['id']]['previous']),'after_reset':pick(now[c['id']]['camera']),'canvas_after':now[c['id']]['canvas']} for c in presented]),flush=True)
+  # The discriminating restore below needs the saved axial focal point exactly on the fresh restore's native axial plane. The
+  # fresh MPR is presented through that resize: one snap of the volume centre, z 16 to 15.999999999999996 (restore trace #36). An
+  # author screen that was never resized keeps z 16, and snapping again from 15.999999999999996 is not guaranteed to return it
+  # (the snap adds the focal point's own floating slice step), so the author axial plane gets that one snap from the centre.
+  ax=next(i for i,c in enumerate(presented) if abs(abs(c['camera']['viewPlaneNormal'][2])-1)<1e-6);v.evaluate(self.SLICE_SNAP,[ax,self.volume_center(v,ax)[1]])
+  before=self.cameras(v);original=self.originals();p.locator('#findings').fill('KEEP SINGLE AXIS REPORT')
   self.rotate_planes(v,1,30);moved=self.cameras(v);pivot=self.pivot(before)
   co=next(i for i,c in enumerate(before) if abs(abs(c['viewPlaneNormal'][1])-1)<1e-6);ax=next(i for i,c in enumerate(before) if abs(abs(c['viewPlaneNormal'][2])-1)<1e-6)
   # The discriminating preconditions: exact axial focal point at the volume centre, viewUp within the native 1e-5 guard, a 30 degree turn of the normal.
@@ -182,7 +239,9 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   np.testing.assert_allclose(moved[ax]['focalPoint'],before[ax]['focalPoint'],atol=1e-9,rtol=0);np.testing.assert_allclose(moved[ax]['focalPoint'],center,atol=1e-9,rtol=0);np.testing.assert_allclose(moved[ax]['viewUp'],before[ax]['viewUp'],atol=1e-5,rtol=0)
   self.assertAlmostEqual(abs(float(np.dot(moved[ax]['viewPlaneNormal'],before[ax]['viewPlaneNormal']))),math.cos(math.radians(30)),delta=1e-6);np.testing.assert_allclose(moved[co]['viewPlaneNormal'],before[co]['viewPlaneNormal'],atol=1e-9,rtol=0)
   clip_author=self.assert_clip_planes(v,'rotated author');identity=[1,0,0,0,1,0];authored=self.band_pixels(v,identity)
-  self.save_volume(v);saved=self.get_volume_job(a);cells=saved['snapshot']['cells'];self.cameras_close([c['camera'] for c in cells],moved,1e-6)
+  self.save_volume(v);saved=self.get_volume_job(a);cells=saved['snapshot']['cells']
+  print('AUTHOR_SAVED_PLANES',json.dumps([{'viewport':c['viewport'],'focalPoint':c['camera']['focalPoint'],'parallelScale':c['camera']['parallelScale']} for c in cells]),flush=True)
+  self.cameras_close([c['camera'] for c in cells],moved,1e-6)
   fresh=self.login();errors=[];fresh.on('pageerror',lambda e:errors.append(str(e)));self.launch(fresh,[a]);self.ready(fresh);installed=fresh.evaluate(self.RESTORE_CAMERA_TRACE);self.assertTrue(installed['installed'],installed)
   try:fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=45000)
   except BaseException:
@@ -199,7 +258,7 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   trigger=self.restore_trigger(trace['records'],clip_restored[ax]['id'],restored_volume['volumeId'],cells[ax]['camera'],center,30)
   reopened=self.band_pixels(fresh,identity);self.assertTrue(all(count is not None for count in reopened),reopened)
   expect(p.locator('#findings')).to_have_value('KEEP SINGLE AXIS REPORT');self.assertEqual(self.originals(),original);self.assertEqual(len(self.versions(a)),1);self.assertEqual(errors,[])
-  print('SINGLE_AXIS_RESTORED_PLANES',json.dumps({'axis':1,'degrees':30,'pivot':pivot.tolist(),'coronal':co,'axial':ax,'center':center,'volume':{'author':author_volume,'restored':restored_volume},'samples':authored,'reopened_samples':reopened,'clip_planes':{'author':clip_author,'restored':clip_restored},'trace':{'owner':installed,'trigger':trigger,'records':trace['records']}}),flush=True)
+  print('SINGLE_AXIS_RESTORED_PLANES',json.dumps({'axis':1,'degrees':30,'pivot':pivot.tolist(),'coronal':co,'axial':ax,'center':center,'volume':{'author':author_volume,'restored':restored_volume},'samples':authored,'reopened_samples':reopened,'clip_planes':{'author':clip_author,'restored':clip_restored},'trace':{'owner':installed,'trigger':trigger,'records':trace['records']},'start_screen':{'presented':presented,'writes':start}}),flush=True)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(VolumeOrientationE2E(n) for n in loader.getTestCaseNames(VolumeOrientationE2E) if n.startswith('test_orientation_'))
 if __name__=='__main__':unittest.main(verbosity=2)
