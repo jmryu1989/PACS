@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-job-print.js b/worklist-v0/hpacs-lite/viewer-volume-job-print.js
+index 82a833f2a8238a5b61f5e5261c2852ed427e07f3..18a0586da612f23dbefbd01acb240357f2bf59a9 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-job-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-job-print.js
+@@ -32,7 +32,7 @@
+     }
+   }));check();
+   const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(slices.map((s,i)=>[reference.sops[i],s.digest]))))),n=>n.toString(16).padStart(2,'0')).join('');
+-  if(digest!==reference.sourceDigest)throw Error('저장 당시 전체 원본과 달라 출력하지 않았습니다.');check();
++  if(!mip&&digest!==reference.sourceDigest)throw Error('저장 당시 전체 원본과 달라 출력하지 않았습니다.');check();
+   const first=slices[0],tags=first.tags,orientation=list(tags.ImageOrientationPatient),origin=list(tags.ImagePositionPatient),pixelSpacing=list(tags.PixelSpacing);
+   const step=list(slices[1].tags.ImagePositionPatient).map((n,i)=>n-origin[i]),distance=Math.hypot(...step),slope=Number(tags.RescaleSlope),intercept=Number(tags.RescaleIntercept);
+   if(orientation.length!==6||origin.length!==3||pixelSpacing.length!==2||[...orientation,...origin,...pixelSpacing,distance,slope,intercept].some(n=>!Number.isFinite(n))||pixelSpacing.some(n=>n<=0)||distance<.001||slope===0||!tags.FrameOfReferenceUID)fail();

@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-output.js b/worklist-v0/hpacs-lite/volume-mip-output.js
+index ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b..0970ebc19ed96d9d11277e8195ef5bbb54b9f661 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-output.js
++++ b/worklist-v0/hpacs-lite/volume-mip-output.js
+@@ -72,7 +72,7 @@
+       return Object.freeze({size:SIZE,parallelScale:scale,distance,cameras:Object.freeze([camera])});
+     }
+     if(version!==13)throw Error(messages.shape);
+-    const made=model('KinVolumeMipBatch').plan({recipe,normal:n0,viewUp:u0,focalPoint:f,distance,thickness});
++    const made=model('KinVolumeMipBatch').plan({recipe:recipe&&{...recipe,axis:recipe.axis==='Horizontal'?'Vertical':recipe.axis},normal:n0,viewUp:u0,focalPoint:f,distance,thickness});
+     return Object.freeze({size:SIZE,parallelScale:made.parallelScale,distance:made.distance,cameras:made.cameras});
+   }
+   // The frames of a saved Job on the print volume: f is the voxel-centre box centre and D = t, the whole-volume projection thickness.

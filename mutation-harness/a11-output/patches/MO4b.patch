@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-output.js b/worklist-v0/hpacs-lite/volume-mip-output.js
+index ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b..cf1da488ea8e1b071e13bf1daee73380184b7900 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-output.js
++++ b/worklist-v0/hpacs-lite/volume-mip-output.js
+@@ -112,7 +112,7 @@
+     if(!n||!f||!Array.isArray(corners)||corners.length!==8||a.length!==9||!a.every(finite)||s.length!==3||!s.every(x=>finite(x)&&x>0)||!finite(thickness)||!(thickness>0)||!finite(distance))return messages.clip;
+     let h0=0;
+     for(const corner of corners){const c=vector(corner);if(!c)return messages.clip;h0=Math.max(h0,Math.abs(dot([f[0]-c[0],f[1]-c[1],f[2]-c[2]],n)));}
+-    const e=.5*[0,1,2].reduce((sum,k)=>sum+s[k]*Math.abs(dot(n,a.slice(3*k,3*k+3))),0),m=Math.min(h0+e+DEPTH_EDGE,thickness/2);
++    const e=.5*[0,1,2].reduce((sum,k)=>sum+s[k]*Math.abs(dot(n,a.slice(3*k,3*k+3))),0),m=Math.min(h0+DEPTH_EDGE,thickness/2);
+     return values[0]<=distance-m&&values[1]>=distance+m?'':messages.clip;
+   }
+   // kin-mip-1 stores only voiRange and interpolationType; the rest of the display is written explicitly and must read back exactly.

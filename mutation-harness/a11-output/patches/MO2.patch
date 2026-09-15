@@ -1,0 +1,12 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+index a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d..9f17ff58da301ae14717b2ac7586810d4041eb5d 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+@@ -32,7 +32,6 @@
+     // then written again in source LPS, never derived from the camera.
+     view.setSlabThickness(plan.thickness/2);
+     for(const plane of mapper.getClippingPlanes().slice(2))if(mapper.removeClippingPlane(plane)!==true)throw Error(messages.plane);
+-    if(slab)for(const definition of model.voiPlanes(slab))if(mapper.addClippingPlane(model.voiPlane(definition))!==true)throw Error(messages.plane);
+   }
+   // The display and the depth range are read through their own named steps, so a readback fault can target exactly one of them.
+   function printDisplay(){return view.getProperties();}

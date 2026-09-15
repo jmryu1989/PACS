@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+index a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d..d0374bf87bbb0ecb91dc65ea61c1b13db8b21d59 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+@@ -66,7 +66,7 @@
+   // vtk gives each new mapper a random ray-start texture; the pinned phase makes one saved Job print the same pixels every time.
+   mapper.setViewSpecificProperties({OpenGL:{ShaderReplacements:[{shaderType:'Fragment',originalValue:'float jitter = 0.01 + 0.99*texture2D(jtexture, gl_FragCoord.xy/32.0).r;',replacementValue:'float jitter = 0.5;',replaceFirst:true,replaceAll:false}]}});
+   view.setProperties({invert:false,colormap:{name:'Grayscale',opacity:1}});
+-  view.setProperties({VOILUTFunction:'LINEAR',voiRange:{lower:display.voiRange.lower,upper:display.voiRange.upper},interpolationType:display.interpolationType});
++  view.setProperties({VOILUTFunction:'LINEAR',interpolationType:display.interpolationType});
+   if(plan.blend===3){
+     // A never-rendered private texture carries no volume info for the average patch, so the accepted MPR print order renders once
+     // first. That render only prepares the texture and is never accepted as a frame.

@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-output.js b/worklist-v0/hpacs-lite/volume-mip-output.js
+index ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b..f3490414287055b05aa4f1c28ea6abf8dc9403d5 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-output.js
++++ b/worklist-v0/hpacs-lite/volume-mip-output.js
+@@ -68,7 +68,7 @@
+     if(version===12){
+       if(recipe!==null)throw Error(messages.shape);
+       const scale=thickness/2;
+-      const camera=Object.freeze({index:0,angle:0,focalPoint:Object.freeze([...f]),position:Object.freeze(f.map((x,k)=>x+n0[k]*distance)),viewPlaneNormal:Object.freeze([...n0]),viewUp:Object.freeze([...u0]),parallelScale:scale});
++      const camera=Object.freeze({index:0,angle:0,focalPoint:Object.freeze([...f]),position:Object.freeze(f.map((x,k)=>x+n0[k]*Number(distance.toFixed(12)))),viewPlaneNormal:Object.freeze([...n0]),viewUp:Object.freeze([...u0]),parallelScale:scale});
+       return Object.freeze({size:SIZE,parallelScale:scale,distance,cameras:Object.freeze([camera])});
+     }
+     if(version!==13)throw Error(messages.shape);

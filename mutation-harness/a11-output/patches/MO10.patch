@@ -1,0 +1,15 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+index a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d..23739ff1c57618267005031ad7bddac1df58cd49 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+@@ -70,9 +70,9 @@
+   if(plan.blend===3){
+     // A never-rendered private texture carries no volume info for the average patch, so the accepted MPR print order renders once
+     // first. That render only prepares the texture and is never accepted as a frame.
++    window.kinPrepareVolumeAverage(view,volume);
+     view.setBlendMode(0);view.setSlabThickness(.05);
+     await pending(resolve=>{const done=()=>resolve();element.addEventListener(rendered,done,{once:true});view.render();return ()=>element.removeEventListener(rendered,done);},output.preRenderMs,messages.preRender);check();
+-    window.kinPrepareVolumeAverage(view,volume);
+   }
+   view.setBlendMode(plan.blend);
+   const frames=[];let encoded=0;

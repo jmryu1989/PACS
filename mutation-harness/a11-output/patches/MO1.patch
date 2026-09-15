@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+index a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d..19e5200752f4bef44bd7d289feb8e4142496b803 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+@@ -84,7 +84,7 @@
+       try{view.render();}catch(error){element.removeEventListener(rendered,done);throw error;}
+       return ()=>element.removeEventListener(rendered,done);
+     },output.frameMs,messages.frameTimeout);check();
+-    const blob=await pending((resolve,reject)=>{canvas.toBlob(value=>value?resolve(value):reject(Error(messages.image)),'image/png');});check();
++    const blob=await pending((resolve,reject)=>{document.querySelector('.cornerstone-canvas').toBlob(value=>value?resolve(value):reject(Error(messages.image)),'image/png');});check();
+     encoded=output.bytes(encoded,blob.size);
+     frames.push({blob,index:camera.index,angle:camera.angle,width:size,height:size,display:output.displayCaption(display.voiRange,properties),
+       caption:output.caption({version:job.version,index:camera.index,count:plan.cameras.length,mode:job.mip.mode,orientation:job.mip.orientation,axis:job.recipe?.axis,angle:camera.angle,voiThickness:slab?slab.thickness:null})});

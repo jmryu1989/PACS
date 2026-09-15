@@ -1,0 +1,12 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+index a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d..89c4181ef0a828c2094e4485bc37cc0569c429f9 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+@@ -30,7 +30,6 @@
+     view.setCamera({focalPoint:[...camera.focalPoint],position:[...camera.position],viewUp:[...camera.viewUp],viewPlaneNormal:[...camera.viewPlaneNormal],parallelScale:camera.parallelScale});
+     // A camera write keeps the previous slab planes, so the whole-volume slab is re-derived from this camera. The VOI Slab planes are
+     // then written again in source LPS, never derived from the camera.
+-    view.setSlabThickness(plan.thickness/2);
+     for(const plane of mapper.getClippingPlanes().slice(2))if(mapper.removeClippingPlane(plane)!==true)throw Error(messages.plane);
+     if(slab)for(const definition of model.voiPlanes(slab))if(mapper.addClippingPlane(model.voiPlane(definition))!==true)throw Error(messages.plane);
+   }

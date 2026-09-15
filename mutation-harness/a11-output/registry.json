@@ -1,0 +1,1088 @@
+{
+ "schema": 1,
+ "purpose": "A11-OUTPUT-1 preregistered semantic mutation validation: MO1-MO12 plus MO4b and MO6b, once each. Harness branch only; NEVER MERGE into product.",
+ "job": "mpr-a11-output-mutants-01",
+ "unit": "A11-OUTPUT-1",
+ "policy_version": "v2026-09-16-7",
+ "contract": {
+  "path": "tmp/astra-control/evidence/mpr-a11-output-contract-fix-01/result.json",
+  "sha256": "9d45debda5cd51db3b6e1966f9e73dd0c939aa5fa63fead5a0e194c4badb5deb",
+  "section": "required_tests.mutations_must_fail_by_assertion: 14 variants plus the final once-each instruction (not a fifteenth variant)"
+ },
+ "inputs_sha256": {
+  "tmp/astra-control/evidence/mpr-a11-output-integration/ci-fix-acceptance.json": "0a3a32f494fed2397d2f5f887a16041b0aa42214c4650c5058e5eb3fc4f0afcb",
+  "tmp/astra-control/evidence/mpr-a11-output-review-02/result.json": "a5cc771d5319323ca8397eec9b4475528241e772182a10a1204cb20d46a011da",
+  "tmp/astra-control/evidence/mpr-a11-output-ci-fix-01/result.json": "9d598be7eaca9875706715f83082ff514d5aa7dae6ac1da4185ff15ddfd3a15c",
+  "tmp/astra-control/evidence/mpr-a11-output-integration/ci-02/astra-candidate-verification.json": "6e71d1a826c68d55be3d68571fff11f2dbcad95016fb054d0f6a87463977fa0c",
+  "tmp/astra-control/evidence/mpr-a11-output-impl-01/result.json": "2006c649b0da3e8c108575b4054c0040d86cb90927edc87fcddfb74008932171",
+  "pattern only, not carried: tmp/o-a11-batch-mutants/mutation-harness/a11-batch/mutant.py (harness 832c971)": "6b62745d046a62697c439d15416d685e790140c0c383146fda79cfbfd12da13d"
+ },
+ "candidate": {
+  "sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+  "tree": "cbc83946c058e32709c0fbcc7b9738538d16f4d3",
+  "workflow_blob": "bb683a40436fb8f37504c186805ed40e1428446c"
+ },
+ "harness_ref": "refs/heads/opus/a11-output-mutants-20260916",
+ "expected_ids": [
+  "MO1",
+  "MO2",
+  "MO3",
+  "MO4",
+  "MO4b",
+  "MO5",
+  "MO6",
+  "MO6b",
+  "MO7",
+  "MO8",
+  "MO9",
+  "MO10",
+  "MO11",
+  "MO12"
+ ],
+ "classification": {
+  "DETECTED": "Guards passed (pure: export, recheck and the passing no-mutation control; hosted: restore, install and verify), the trial exited non-zero, and the registered original assertion (named file and line) failed for the registered consequence as the first failure of its test case. The mechanism is recorded separately: 'assertion on the mutated value' (vector, table row, request list, readback, page pixels) or 'original print-status expectation observing the product's own fail-closed refusal', with the exact refusal text.",
+  "NOT_DETECTED_AS_REGISTERED": "The trial failed, but not at the registered assertion for the registered consequence: a different first assertion, a different refusal text, a thrown product or helper Error without an assertion (a generic input error), a timeout or any unregistered failure.",
+  "SURVIVED": "Every original test of the trial passed (exit 0) with guards passing.",
+  "NOT_DETECTABLE_PER_CONTRACT": "MO10 only: the Raysum print got past the average patch before any private render (the texture was ready), so MO10 is not detectable and NOT counted, whatever later order-trace assertion fails.",
+  "HELD_TRANSPORT_INCIDENT": "The registered failure occurred in a hosted test case that also printed a MIP_OUTPUT_TRANSPORT_FAILURE line; not credited here, left for independent review with the incident.",
+  "INVALID": "Any guard, anchor, patch, syntax, import, recorder, export, environment or setup-phase failure (results.json phase other than test_volume_mip_output non-zero), or a failing status that is a transport text ('Failed to fetch', 'network error'); never credited, never re-run in this assignment."
+ },
+ "transport_policy": "Every MIP_OUTPUT_TRANSPORT_FAILURE line in any retained log of a hosted trial is counted and reported as an infrastructure incident beside the result (verify records them per log). No trial is credited from an infrastructure failure. The existing guard (at most one re-attempt per row and three per case) and every row timing, cap and budget stay unchanged. A recurrence across hosted runs calls for a targeted infrastructure correction outside this unit, not fixture retries or tolerance.",
+ "baseline_reuse": {
+  "hosted_native": "Validate run 35003005900 attempt 1 (test merge d748bc9, tree comparison verified in ci-02/astra-candidate-verification.json sha256 6e71d1a8): volume-mip-output 3/3 OK in 174.503 s, 0 MIP_OUTPUT_TRANSPORT_FAILURE lines (test_volume_mip_output.log sha256 be257b1bb9c60ea72f2856492ca94708e34817f99a496bbcd62e33a49b0360f2; results.json sha256 69b6bba135753d96ddf04382f5b4a6f687acee6e044e9f852d0345a4c5560917, every phase exit 0). Not repeated: each hosted trial restores the exact candidate tree and runs those same original steps.",
+  "pure_p1": "ci-fix-01 run 03 (run.json sha256 f5e5ecf12fdd6e939bdb203c5fea956d89a0aa10296c1cce951c0e3bfc6f9108): node --test tests/volume_mip_output_test.cjs, exit 0, 11/11; lf_sha256 of tests/volume_mip_output_test.cjs d8dbc18a, volume-mip-output.js 5b00d03b, volume-mip.js 9d35a401, volume-mip-job.js cfb4272b, volume-mip-batch.js 5872147c equal the candidate blobs.",
+  "pure_p2": "impl-01 run 02 (run.json sha256 a870811b41c241cf4258f2aba5d04e71bf86787066565d43d293b228bb386907): node --test tests/volume_mip_output_test.cjs tests/volume_mip_batch_test.cjs tests/volume_mip_job_test.cjs tests/volume_mip_test.cjs tests/viewer_volume_job_capture_test.cjs, exit 0, 96 tests; lf_sha256 of tests/viewer_volume_job_capture_test.cjs 400f984b, viewer-jobs.js ae1b2d2d, viewer-volume-job.js 7d41f5a0, viewer-volume-mip.js 3291f7eb and the volume-mip models equal the candidate blobs (its older P1 file 1fbeaab6 is superseded by ci-fix-01 run 03).",
+  "not_repeated": "No product full suite, no hosted baseline and no renamed rerun of an exact passed baseline."
+ },
+ "pure_control": {
+  "why": "Pure trials run in a new byte-exact export of the candidate blobs outside every git repository, not in the CRLF worktree C:/Users/norne/PACS/tmp/o-a11-output-impl where the baselines ran, and the baselines did not record the Node version. A detection or a survivor there is interpretable only beside one passing unmutated run of the same mapped test files in that same environment.",
+  "command": [
+   "node",
+   "--test",
+   "tests/volume_mip_output_test.cjs",
+   "tests/viewer_volume_job_capture_test.cjs"
+  ],
+  "recorder_files": [
+   "worklist-v0/hpacs-lite/volume-mip-output.js",
+   "worklist-v0/hpacs-lite/volume-mip.js",
+   "worklist-v0/hpacs-lite/volume-mip-job.js",
+   "worklist-v0/hpacs-lite/volume-mip-batch.js",
+   "worklist-v0/hpacs-lite/viewer-jobs.js",
+   "worklist-v0/hpacs-lite/viewer-volume-job.js",
+   "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "tests/volume_mip_output_test.cjs",
+   "tests/viewer_volume_job_capture_test.cjs"
+  ],
+  "rule": "Runs once before the first pure trial. If it does not exit 0, every pure trial is INVALID and none is run."
+ },
+ "pure_procedure": [
+  "1 export: python scripts/record-run.py --run-dir <evidence>/pure/<ID>/1-export --cwd <harness worktree> -- python mutation-harness/a11-output/mutant.py export --variant <ID> --dest <evidence>/pure/<ID>/tree --manifest <evidence>/pure/<ID>/manifest.json",
+  "2 trial: python scripts/record-run.py --run-dir <evidence>/pure/<ID>/2-trial --cwd <evidence>/pure/<ID>/tree --file <recorder_files> -- <test_command>",
+  "3 recheck: python scripts/record-run.py --run-dir <evidence>/pure/<ID>/3-recheck --cwd <harness worktree> -- python mutation-harness/a11-output/mutant.py recheck --manifest <evidence>/pure/<ID>/manifest.json",
+  "One trial per variant in registry order after the control; never repeated after its outcome is seen."
+ ],
+ "pure_export": {
+  "paths": [
+   "tests/volume_mip_output_test.cjs",
+   "tests/viewer_volume_job_capture_test.cjs",
+   "worklist-v0/hpacs-lite"
+  ],
+  "files": 102,
+  "listing_sha256": "0ad4272f63035adc90e1f34034d816c85aaafb6cd4eb712413986a6269af5a5b"
+ },
+ "native_job": {
+  "original": "volume-mip-output",
+  "harness": "native-mip-output",
+  "harness_jobs": [
+   "native-mip-output",
+   "registry"
+  ],
+  "harness_step_names": [
+   null,
+   "Harness - stage the harness outside the product checkout",
+   "Harness - guard the exact candidate tree and original workflow",
+   "MIP output profile isolation, bounded budget and artifact policy",
+   "Keep pinned browser dependencies independent of unused Chrome APT repository",
+   "Install synthetic DICOM and pinned browser test dependencies",
+   "Confirm exact declared MIP Viewer output selection",
+   "Harness - install the one registered mutation after the original selection checks",
+   "Isolated declared MIP Viewer output tests",
+   "Harness - guard the tracked tree after the trial and record the profile outcome",
+   "Sanitized synthetic MIP Viewer output evidence"
+  ],
+  "allowed_step_changes": [
+   [
+    "        with:\n          persist-credentials: false",
+    "        with:\n          persist-credentials: false\n          fetch-depth: 0"
+   ],
+   [
+    "          name: synthetic-volume-mip-output-results",
+    "          name: mutant-${{ matrix.id }}"
+   ],
+   [
+    "            tmp/mipout-ci/\n          if-no-files-found: error",
+    "            tmp/mipout-ci/\n            tmp/mutant-evidence/\n          if-no-files-found: error"
+   ]
+  ],
+  "always_harness_steps": [
+   "Harness - guard the tracked tree after the trial and record the profile outcome"
+  ]
+ },
+ "budgets": {
+  "pure-local": "node --test with no --test-timeout, --test-concurrency or --test-name-pattern, as the contract command and both baseline records; no retry.",
+  "native-mip-output": "The candidate volume-mip-output job unchanged (plan proves it step by step): job timeout-minutes 40, dependency step 10, live step 28; measurement_ci.py 25-minute deadline, suite_timeout 1200 s and suite_budgets ci-mip-output 1200 s (outer 1235 s); the module's own waits (WAIT_STATUS 300 s, expect 1 s, D8 120 s + count x 15 s); transport re-attempt at most one per row and three per case; run attempt 1 only."
+ },
+ "variants": [
+  {
+   "id": "MO1",
+   "meaning": "MO1 page image from any on-screen canvas or cached blob instead of the fresh reconstruction -> NO1 fresh-browser network (/dicom/lookup and frame reads) and probe assertions",
+   "variant": "Each page frame PNG is encoded from the first on-screen viewer canvas (document.querySelector('.cornerstone-canvas')) instead of the private print viewport canvas. The fresh reads, the private render and every product frame check still run; only the page image is not the reconstruction.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "    const blob=await pending((resolve,reject)=>{canvas.toBlob(value=>value?resolve(value):reject(Error(messages.image)),'image/png');});check();\n",
+   "replacement": "    const blob=await pending((resolve,reject)=>{document.querySelector('.cornerstone-canvas').toBlob(value=>value?resolve(value):reject(Error(messages.image)),'image/png');});check();\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 row (1) reaches the ready page (L277 open_output -> attempt_output L183 passes; L281 four [data-mip-frame]; L283 print_native and assert_order pass on the traced private viewport). First failure expected in print_pixels called from L286: L238 self.assertEqual([shot['width'],shot['height']],[SIZE,SIZE],(label,i)) because the printed image is the on-screen viewport canvas; if that canvas is 512 x 512, L242 grayscale or L244 known-voxel probe (VOI_DELTA 3).",
+   "expected_consequence": "Target stage reached: a printed page whose images are copies of an on-screen canvas although the fresh reads happened (assert_fresh_reads L291 alone would not catch it).",
+   "detection": "DETECTED (assertion on the page pixels) only if NO1's first failure is L238, L242 or L244 inside print_pixels from L286, or the L286 frame-hash inequality.",
+   "not_detection": "A product refusal at L183 (for example 'MIP 출력 영상을 만들지 못했습니다.' for an unencodable canvas, or a TypeError text when no .cornerstone-canvas exists) means the page-from-canvas consequence was not realised: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 87,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "19e5200752f4bef44bd7d289feb8e4142496b803",
+   "mutant_sha256": "915b5f7a1faaaf61691bc5150198b01581e6994d8d7006160229836991325386",
+   "patch": "patches/MO1.patch",
+   "patch_sha256": "c4bd46f3794b976c48844393106690adc27a7d1f5020a03df53638dfac588820",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO2",
+   "meaning": "MO2 VOI planes not written in print -> NO1 plane readback and probes",
+   "variant": "writePrintFrame no longer adds the saved VOI Slab planes (the addClippingPlane loop is removed); stale extra planes are still removed.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "    if(slab)for(const definition of model.voiPlanes(slab))if(mapper.addClippingPlane(model.voiPlane(definition))!==true)throw Error(messages.plane);\n",
+   "replacement": "",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 row (1), the version 13 VOI-on Raysum print: KinVolumeMip.verifyState finds 2 clipping planes where 4 are required and the product refuses with 'VOI Slab 평면을 확인하지 못했습니다.' before any page; attempt_output L183 expect(status).to_contain_text('미리보기 내용을 확인', timeout=1000) fails, called from L277.",
+   "expected_consequence": "Target stage reached: the private print viewport rendered a VOI-on frame without its VOI planes and the product's own frame check refused it. print_native L214 plane count and the probes are unreachable after L183.",
+   "detection": "DETECTED (original print-status expectation observing the product fail-closed refusal) only if NO1 fails first at L183 via L277 with the actual status containing 'VOI Slab 평면을 확인하지 못했습니다.'.",
+   "not_detection": "Another status text or another first failure: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 35,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": null,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "9f17ff58da301ae14717b2ac7586810d4041eb5d",
+   "mutant_sha256": "45da1237301a4d5585ef3bfc2d737b4ba358cb6bfbfe4049e8786a344c1225c1",
+   "patch": "patches/MO2.patch",
+   "patch_sha256": "8e03a6ed0a4935481a41fe91de8dba41ea907d5ce6ccb155ad0315ca695c1d62",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO3",
+   "meaning": "MO3 v13 print Horizontal uses r0, or sign flipped -> P1 hard-coded vectors, NO1 readback vs literal-derived Python cameras",
+   "variant": "KinVolumeMipOutput.plan hands KinVolumeMipBatch.plan a copy of the saved recipe whose Horizontal axis is replaced by Vertical, so every version 13 Horizontal print frame turns about the screen right r0 = u0 x n0 instead of viewUp.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip-output.js",
+   "anchor": "    const made=model('KinVolumeMipBatch').plan({recipe,normal:n0,viewUp:u0,focalPoint:f,distance,thickness});\n",
+   "replacement": "    const made=model('KinVolumeMipBatch').plan({recipe:recipe&&{...recipe,axis:recipe.axis==='Horizontal'?'Vertical':recipe.axis},normal:n0,viewUp:u0,focalPoint:f,distance,thickness});\n",
+   "test": "tests/volume_mip_output_test.cjs (P1)",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "expected_original_assertion": "Test 'MO3: version 13 Coronal Horizontal +90 turns about viewUp and Vertical +90 about the screen right (hard-coded vectors)' fails at L70 near(H.viewPlaneNormal,[1,0,0],1e-12,'H +90 n') (the assert.ok inside near at L15; the variant gives [0,0,-1]). Test 'C5: the version 12 camera is KinVolumeMipBatch.plan frame 0 on every component, for every preset and both axes' fails at L46 assert.ok(same(c[field],direct[i][field]),tag+' frame '+i+' '+field) for 'Axial Horizontal frame 1 position'. The other nine tests pass.",
+   "expected_consequence": "Version 13 Horizontal frames 1..N-1 turn about the wrong axis; frame 0 and version 12 are unchanged.",
+   "detection": "DETECTED (assertion on the mutated vectors) only if node --test exits non-zero with the MO3 test's first failure the L70 AssertionError; the C5 L46 AssertionError is the second registered original assertion.",
+   "not_detection": "A thrown non-assertion Error in those tests or failures only elsewhere: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 75,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b",
+   "candidate_sha256": "5b00d03b3a5e27f1ff656b9aee5b7db7a9a6a940e01f68021003ef8225b261e6",
+   "mutant_blob": "0970ebc19ed96d9d11277e8195ef5bbb54b9f661",
+   "mutant_sha256": "05206110aaabdcb6e76c96a8d4e5f66dc06d907c90591863fb6f51a5799c3196",
+   "patch": "patches/MO3.patch",
+   "patch_sha256": "f6d598e4d22323eeb82f964a21e9fde7c547733f9b7a623e755a928328864b60",
+   "test_source_hashes": {
+    "tests/volume_mip_output_test.cjs": {
+     "blob": "7f676e7b5279daf2ffeca0e46c77fd529bfe18e8",
+     "sha256": "d8dbc18a40594eb8d880d49df7a1dfcc4760a1bf6af7e85e84802756f78b0908"
+    }
+   }
+  },
+  {
+   "id": "MO4",
+   "meaning": "MO4 D = t/4 -> P1 plan refusal, NO1 position readback",
+   "variant": "KinVolumeMipOutput.frames plans the print with distance thickness/4 (D = t/4) instead of D = t.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/volume-mip-output.js",
+   "anchor": "    const made=plan({version:job.version,recipe:job.recipe,normal:axes.viewPlaneNormal,viewUp:axes.viewUp,focalPoint,distance:thickness,thickness});\n",
+   "replacement": "    const made=plan({version:job.version,recipe:job.recipe,normal:axes.viewPlaneNormal,viewUp:axes.viewUp,focalPoint,distance:thickness/4,thickness});\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "plan() refuses D = t/4 < t/2 + 1e-6 with 'MIP 출력 카메라가 CT 볼륨 투영 범위 안에 있어 출력하지 않았습니다.' before any private viewport; NO1 row (1) fails first at attempt_output L183 via L277. Why not pure: in P1 this variant can only throw that product Error inside 'frames on the print volume' (L80) and 'saved Job and binding refusals' (L157), which are not assertions.",
+   "expected_consequence": "Target stage reached: the print frames are planned at D = t/4 and the product's distance guard refuses; print_native L206 position readback is unreachable.",
+   "detection": "DETECTED (original print-status expectation observing the product fail-closed refusal) only if NO1 fails first at L183 via L277 with the actual status containing 'MIP 출력 카메라가 CT 볼륨 투영 범위 안에 있어 출력하지 않았습니다.'.",
+   "not_detection": "Another status text or first failure: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 84,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b",
+   "candidate_sha256": "5b00d03b3a5e27f1ff656b9aee5b7db7a9a6a940e01f68021003ef8225b261e6",
+   "mutant_blob": "41fb24953301ae57a29d020aedebbfc7645f14de",
+   "mutant_sha256": "8d0ca82c1e67127b5d539cbf6b2944d7d1e2dcb347f0bf48a6ff26a6b178959c",
+   "patch": "patches/MO4.patch",
+   "patch_sha256": "51035a997cb713becba012c8e245d5ef75688d3ca1113d19c38d62dde3292868",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO4b",
+   "meaning": "MO4b depth predicate drops the half-voxel margin, uses the zero-margin corner interval, or always accepts -> P1 C1 table rows (half-voxel band, missing, non-finite, near ≥ far)",
+   "variant": "verifyClip drops the projected half voxel e from the margin: m = min(h0 + 1e-6, t/2).",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip-output.js",
+   "anchor": "    const e=.5*[0,1,2].reduce((sum,k)=>sum+s[k]*Math.abs(dot(n,a.slice(3*k,3*k+3))),0),m=Math.min(h0+e+DEPTH_EDGE,thickness/2);\n",
+   "replacement": "    const e=.5*[0,1,2].reduce((sum,k)=>sum+s[k]*Math.abs(dot(n,a.slice(3*k,3*k+3))),0),m=Math.min(h0+DEPTH_EDGE,thickness/2);\n",
+   "test": "tests/volume_mip_output_test.cjs (P1)",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "expected_original_assertion": "Test 'C1/MO4b: the depth range must cover the voxel-centre box plus its projected half voxel, capped at the whole-volume slab' fails at L104 assert.equal(clip(range),want,label) on its first row whose outcome changes, 'zero-margin corner interval' [D-40-2e-6, D+40+2e-6] (Axial PHANTOM: h0 = 40, the variant's m = 40.000001 accepts where the clip refusal is expected). The later half-voxel band rows are unreachable after that first failure. The other ten tests pass.",
+   "expected_consequence": "A depth range cutting the half-voxel border of the volume is accepted.",
+   "detection": "DETECTED (assertion on the table row) only if the first failure of that test is the L104 AssertionError with label 'zero-margin corner interval' or, if float evaluation orders them otherwise, one of 'near inside the half-voxel band', 'far inside the half-voxel band', 'near 1e-7 inside the margin'.",
+   "not_detection": "A first failure on any other row or test, or a thrown non-assertion Error: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 115,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b",
+   "candidate_sha256": "5b00d03b3a5e27f1ff656b9aee5b7db7a9a6a940e01f68021003ef8225b261e6",
+   "mutant_blob": "cf1da488ea8e1b071e13bf1daee73380184b7900",
+   "mutant_sha256": "db86769fadf10cb2503812e2b6095fc8f168ad76a6c142bea20e1be6b3f13e00",
+   "patch": "patches/MO4b.patch",
+   "patch_sha256": "9f70d07d5de78cbcb38d63cda507bebba98a15adfb19fc84a02c7a4ebe21fef0",
+   "test_source_hashes": {
+    "tests/volume_mip_output_test.cjs": {
+     "blob": "7f676e7b5279daf2ffeca0e46c77fd529bfe18e8",
+     "sha256": "d8dbc18a40594eb8d880d49df7a1dfcc4760a1bf6af7e85e84802756f78b0908"
+    }
+   }
+  },
+  {
+   "id": "MO5",
+   "meaning": "MO5 page kept after a frame failure -> NO2",
+   "variant": "A rejected frame (its own check, render timeout, shader or readback fault) is swallowed and skipped: the frame's pending gets .catch(()=>({})) and the loop continues without that frame, so the page keeps the frames that passed.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "    },output.frameMs,messages.frameTimeout);check();\n",
+   "replacement": "    },output.frameMs,messages.frameTimeout).catch(()=>({}));check();if(!canvas)continue;\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_02_readiness_delay_failure_missing_tool_cancel_no_partial_page",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 passes (no frame fails there). NO2 passes the pre-render refusal rows L379-L381 (not a frame). At L383 frame 2 of the 3-frame version 13 print is held (printHoldAt=3), times out after 15 s and is skipped, frame 3 is also held and skipped, and a 1-frame page is kept: refresh_output(v, MESSAGES['frame']) fails at attempt_output L183 expect(status).to_contain_text('MIP 출력 프레임의 최종 렌더를 확인하지 못했습니다.') with the ready text instead.",
+   "expected_consequence": "Target stage reached: a printable page exists after a frame failure; refused() (L191-L193) and the L384 timing assertion are unreachable.",
+   "detection": "DETECTED (assertion on the kept page status) only if NO2's first failure is L183 via L383 with the actual status containing '미리보기 내용을 확인'.",
+   "not_detection": "Another first failure or status: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 86,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "a4cf68a120a2e4fd93e3110eb4d8dd802a594889",
+   "mutant_sha256": "919e8d3d057bda696a983607a766b6286336054d02908003252fb6bd8460d716",
+   "patch": "patches/MO5.patch",
+   "patch_sha256": "c7d4d7c6feb09fae635381c3ed8054f6dfedb6bebf141b60f0b0a5b5554d6df1",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO6",
+   "meaning": "MO6 voiRange not taken from the saved display -> NO1 voiRange readback and probes",
+   "variant": "The print's display write omits voiRange, so the private viewport keeps its own default VOI range instead of the saved display.voiRange.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "  view.setProperties({VOILUTFunction:'LINEAR',voiRange:{lower:display.voiRange.lower,upper:display.voiRange.upper},interpolationType:display.interpolationType});\n",
+   "replacement": "  view.setProperties({VOILUTFunction:'LINEAR',interpolationType:display.interpolationType});\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 row (1): KinVolumeMip.verifyState compares the read-back voiRange with the saved range (-1100 ~ 1100 on the ci-02 trace) and the product refuses with 'MIP 밝기 범위를 확인하지 못했습니다.'; NO1 fails first at attempt_output L183 via L277.",
+   "expected_consequence": "Target stage reached: frames rendered under an unsaved VOI range and the product's frame check refused; print_native L213/L222 voiRange readbacks and the probes are unreachable. If the default range equals the saved one the variant is equivalent here, which is recorded as it happens.",
+   "detection": "DETECTED (original print-status expectation observing the product fail-closed refusal) only if NO1 fails first at L183 via L277 with the actual status containing 'MIP 밝기 범위를 확인하지 못했습니다.'.",
+   "not_detection": "Another status text or first failure: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 69,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "d0374bf87bbb0ecb91dc65ea61c1b13db8b21d59",
+   "mutant_sha256": "175520a26d1c641bc8516365aa002ac76325e47155e8e39c3b9b482dc8503a0e",
+   "patch": "patches/MO6.patch",
+   "patch_sha256": "5476a243e0139613dc1f3cec47c117796aeb9304ebae1e6c03566a73c229143c",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO6b",
+   "meaning": "MO6b initialization omits VOILUTFunction LINEAR or sets invert true -> P1 display table, NO1 per-frame readback and probes",
+   "variant": "The print's first display write initializes invert:true instead of invert:false (colormap unchanged).",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "  view.setProperties({invert:false,colormap:{name:'Grayscale',opacity:1}});\n",
+   "replacement": "  view.setProperties({invert:true,colormap:{name:'Grayscale',opacity:1}});\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 row (1): verifyState passes, KinVolumeMipOutput.verifyDisplay reads invert true and the product refuses with 'MIP 출력 표시 속성을 확인하지 못했습니다.'; NO1 fails first at attempt_output L183 via L277. Why not pure: the P1 display table tests verifyDisplay itself, which this renderer initialization variant does not change.",
+   "expected_consequence": "Target stage reached: frames rendered inverted and the product's display readback refused; print_native L221 display readback and the probes are unreachable.",
+   "detection": "DETECTED (original print-status expectation observing the product fail-closed refusal) only if NO1 fails first at L183 via L277 with the actual status containing 'MIP 출력 표시 속성을 확인하지 못했습니다.'.",
+   "not_detection": "Another status text or first failure: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 68,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "f6488470f6a20fb5431a99fab9da175ed1b23f1e",
+   "mutant_sha256": "8769eee29770ac06ddad61d883e30d53ed266d3aa9be5ab6a8a8660d283e9270",
+   "patch": "patches/MO6b.patch",
+   "patch_sha256": "268cb0474707061803ca5ff4945543413fdd3c4d24733dae824bd552aa964566",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO7",
+   "meaning": "MO7 slab half-thickness not re-applied after setCamera -> NO1 readback",
+   "variant": "writePrintFrame no longer calls view.setSlabThickness(plan.thickness/2) after setCamera.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "    view.setSlabThickness(plan.thickness/2);\n",
+   "replacement": "",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 row (1): the slab planes keep the pre-render 0.05 mm half-thickness (or the previous camera's planes) and KinVolumeMip.verifyState refuses with one of its slab messages 'MIP 투영 평면을 확인하지 못했습니다.', 'MIP 투영 두께를 확인하지 못했습니다.' or 'CT 볼륨 전체가 투영 범위에 들어가지 않아 표시하지 않았습니다.'; NO1 fails first at attempt_output L183 via L277.",
+   "expected_consequence": "Target stage reached: frames rendered with the wrong whole-volume slab and the product's frame check refused; print_native L215-L217 slab readbacks are unreachable.",
+   "detection": "DETECTED (original print-status expectation observing the product fail-closed refusal) only if NO1 fails first at L183 via L277 with the actual status containing one of the three slab messages.",
+   "not_detection": "Another status text or first failure: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 33,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": null,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "89c4181ef0a828c2094e4485bc37cc0569c429f9",
+   "mutant_sha256": "25d13acd0c36bc1a69163e8c4d84073f6b4786fcf0378feb2d6f54ddd7561059",
+   "patch": "patches/MO7.patch",
+   "patch_sha256": "824c15f8f82a4c88be99cae515daaa9d7b1bb116d1550c8698991b0644ac991e",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO8",
+   "meaning": "MO8 L180 allowlist hides 13, or shows 7 or 14 -> P2",
+   "variant": "The Jobs row Print gate becomes the denylist ![7,8,9,10,11].includes(row.snapshotVersion), so a version 14 row (and any later version) shows Print Saved Images.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/viewer-jobs.js",
+   "anchor": "        if (!row.hidden && [1,2,3,4,5,6,12,13].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));\n",
+   "replacement": "        if (!row.hidden && ![7,8,9,10,11].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));\n",
+   "test": "tests/viewer_volume_job_capture_test.cjs (P2)",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/viewer-jobs.js",
+    "worklist-v0/hpacs-lite/viewer-volume-job.js",
+    "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "test_sources": [
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "expected_original_assertion": "Test 'P2 (a): Print Saved Images is offered for versions 1-6, 12 and 13 only, and the MIP rows are labelled as reconstructed outputs' fails at L974 assert.equal(w.own(w.item(version),'Print Saved Images'),null,'version '+version) for version 14. The other tests of the file pass.",
+   "expected_consequence": "A future unprintable version row offers Print Saved Images.",
+   "detection": "DETECTED (assertion on the offered buttons) only if the P2 (a) first failure is the L974 AssertionError for 'version 14'.",
+   "not_detection": "A first failure elsewhere or a thrown non-assertion Error: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 190,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "03048677ed2f8c5bc32c9806334b2b480a4ce41f",
+   "candidate_sha256": "ae1b2d2de60b8803edaf7da180c2111d5d258cf4269ec23b242af114b9e67672",
+   "mutant_blob": "8e3ca0be166f4be18a2bbc883989c14502ce162a",
+   "mutant_sha256": "d3bf9d19949ba221b7af5282d78f66309bc6d2080554e796f4573f4260ab5678",
+   "patch": "patches/MO8.patch",
+   "patch_sha256": "eea3232fb1e4b952b339ee75ce730d2be6d6599ad6e3b8d200afb6a7986eeda1",
+   "test_source_hashes": {
+    "tests/viewer_volume_job_capture_test.cjs": {
+     "blob": "c087d79d12f467df82572994a44b53669cf1a72a",
+     "sha256": "400f984b06132d328a1c927b9d52fc86427f76f0bb0d331d8fd9b0cf5f9dd491"
+    }
+   }
+  },
+  {
+   "id": "MO9",
+   "meaning": "MO9 sourceDigest check skipped for 12/13 -> NO3 changed source",
+   "variant": "The shared loader compares the whole-source digest with the saved sourceDigest only for versions 4-6: if(!mip&&digest!==reference.sourceDigest).",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-job-print.js",
+   "anchor": "  if(digest!==reference.sourceDigest)throw Error('저장 당시 전체 원본과 달라 출력하지 않았습니다.');check();\n",
+   "replacement": "  if(!mip&&digest!==reference.sourceDigest)throw Error('저장 당시 전체 원본과 달라 출력하지 않았습니다.');check();\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_03_source_access_order_session",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "NO1 and NO2 pass (their sources are unchanged). NO3: the V12 print (L445) and the mid-read MD5 row (L452) pass; at L456 every instance's UncompressedMD5 reads consistently as 32 zeros, so the version 13 print is no longer refused and reaches the ready page: open_output(v,a,V13,MESSAGES['digest']) fails at attempt_output L183 expect(status).to_contain_text('저장 당시 전체 원본과 달라 출력하지 않았습니다.').",
+   "expected_consequence": "Target stage reached: a version 13 page printed from a whole source that differs from the saved sourceDigest; refused() at L456 is unreachable.",
+   "detection": "DETECTED (assertion on the page status) only if NO3's first failure is L183 via L456 with the actual status containing '미리보기 내용을 확인'.",
+   "not_detection": "Another first failure or status: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 35,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "82a833f2a8238a5b61f5e5261c2852ed427e07f3",
+   "candidate_sha256": "a7a984a03eabe722be99fdda1214001b905efca0176a0aff252c2a27ce9c2365",
+   "mutant_blob": "18a0586da612f23dbefbd01acb240357f2bf59a9",
+   "mutant_sha256": "a54e46d9d7c03a7b53fea225b4fd15eaf14dd52d8bdcc539cc9d11d0005b7103",
+   "patch": "patches/MO9.patch",
+   "patch_sha256": "2f20674a3f418a392e91c388e2479b4cd0e01d57000258a55ce824b24c8ee8e2",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO10",
+   "meaning": "MO10 Raysum patch before the first private render (B2 order reversed) -> NO1 Raysum row fails to print. If H-B2 shows the texture is ready before any render, record MO10 as not detectable and do not count it.",
+   "variant": "kinPrepareVolumeAverage(view, volume) runs before setBlendMode(0), setSlabThickness(.05) and the bounded pre-render instead of after it.",
+   "tier": "native-mip-output",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+   "anchor": "    view.setBlendMode(0);view.setSlabThickness(.05);\n    await pending(resolve=>{const done=()=>resolve();element.addEventListener(rendered,done,{once:true});view.render();return ()=>element.removeEventListener(rendered,done);},output.preRenderMs,messages.preRender);check();\n    window.kinPrepareVolumeAverage(view,volume);\n",
+   "replacement": "    window.kinPrepareVolumeAverage(view,volume);\n    view.setBlendMode(0);view.setSlabThickness(.05);\n    await pending(resolve=>{const done=()=>resolve();element.addEventListener(rendered,done,{once:true});view.render();return ()=>element.removeEventListener(rendered,done);},output.preRenderMs,messages.preRender);check();\n",
+   "test": "tests/e2e/test_volume_mip_output.py VolumeMipOutputE2E.test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity",
+   "test_command": "\"$RUNNER_TEMP/mipout-python/bin/python\" tests/measurement_ci.py --profile volume-mip-output (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "recorder_files": [],
+   "test_sources": [
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/e2e/test_volume_path.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "expected_original_assertion": "B2, a static inference (the ci-02 trace recorded volume info null at setBlendMode(0), which alone does not prove readiness either way): kinPrepareVolumeAverage refuses the never-rendered private texture with '평균 투영의 픽셀 범위를 확인하지 못했습니다.'; NO1 row (1), the version 13 Raysum print, fails first at attempt_output L183 via L277.",
+   "expected_consequence": "Target stage reached if refused: the Raysum row fails to print because the average patch ran before any private render.",
+   "detection": "DETECTED (original print-status expectation observing the product fail-closed refusal) only if NO1 fails first at L183 via L277 with the actual status containing '평균 투영의 픽셀 범위를 확인하지 못했습니다.' or '평균 투영의 픽셀 변환을 확인하지 못했습니다.'.",
+   "not_detection": "If the version 13 Raysum print passes L183 (the patch was accepted before any private render, so the texture was ready), MO10 is NOT_DETECTABLE_PER_CONTRACT and not counted, even though assert_order L232-L233 (an order trace that observes any reorder by construction) then fails; the first failure, status, events trace and any volume info reached are recorded for review. Any other status or first failure: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 73,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+   "candidate_sha256": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "mutant_blob": "23739ff1c57618267005031ad7bddac1df58cd49",
+   "mutant_sha256": "c385bf9b1e513bd938577202ce1027489579ba38e624a89ff0fe1d32b1b7152b",
+   "patch": "patches/MO10.patch",
+   "patch_sha256": "3e529e2c32d0c344663bd9e8aa3d23fe8194066211a3416da39ab6f5cf92798a",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "7364dea20aa8f4d6896a0240386c00fd5729bf0c",
+     "sha256": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "749afa0ae486973a65541fc9430ed192197e3f81",
+     "sha256": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/e2e/test_volume_path.py": {
+     "blob": "2c82515e9062955ceb950a5a55c07d1c1380bd9a",
+     "sha256": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "39dae6add67d90879354ae47e39ae56a4a21de8e",
+     "sha256": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "002c5904da0a83069a72ee1e8e217c73ea581f42",
+     "sha256": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "10081e00eafbbdf4fda14d88a505001a063114b7",
+     "sha256": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO11",
+   "meaning": "MO11 asset readiness by typeof window[name]==='function' (B1 reverted) -> P2 (c)/(d), NO1 fresh-browser print, NO2 row 5",
+   "variant": "The member predicate of object modules is replaced by typeof window[name]==='function', so the frozen KinVolumeMip, KinVolumeMipJob, KinVolumeMipOutput and KinVolumeMipBatch modules are never ready.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/viewer-jobs.js",
+   "anchor": "        const fn=name=>()=>typeof window[name]==='function',members=(name,keys)=>()=>{const value=window[name];return !!value&&keys.every(key=>typeof value[key]==='function');};\n",
+   "replacement": "        const fn=name=>()=>typeof window[name]==='function',members=(name,keys)=>()=>typeof window[name]==='function';\n",
+   "test": "tests/viewer_volume_job_capture_test.cjs (P2)",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/viewer-jobs.js",
+    "worklist-v0/hpacs-lite/viewer-volume-job.js",
+    "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "test_sources": [
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "expected_original_assertion": "'P2 (c) B1: present MIP models are frozen objects, ready by their members; they are never requested or replaced' fails at L1006 assert.deepEqual(w.requested,[...PRINT_BASE,'viewer-volume-job-print.js','volume-mip-output.js','viewer-volume-mip-print.js']) because present frozen models are requested again. Also 'P2 (b)' fails at L991 (second assertion: printOpened for version 12 is [] because loaded object modules fail readiness) and 'P2 (d)' fails at L1028 assert.deepEqual(w.requested,[file],file+' is the only asset requested again'). The other tests pass.",
+   "expected_consequence": "Present MIP models are requested and replaced, and a loaded object module is never ready, so saved MIP Jobs cannot print.",
+   "detection": "DETECTED (assertion on the requested assets) only if P2 (c) fails first at the L1006 AssertionError; P2 (b) L991 and P2 (d) L1028 are additional registered original assertions.",
+   "not_detection": "P2 (c) failing elsewhere or only by a thrown non-assertion Error: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 75,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "03048677ed2f8c5bc32c9806334b2b480a4ce41f",
+   "candidate_sha256": "ae1b2d2de60b8803edaf7da180c2111d5d258cf4269ec23b242af114b9e67672",
+   "mutant_blob": "9baf0ed28d1896dbc0ac932d214411a1c6697bff",
+   "mutant_sha256": "644a2b96f4565530b26deae56c008c39badcb8ea64977781b535d3fc636e8f8b",
+   "patch": "patches/MO11.patch",
+   "patch_sha256": "6dfd0a6495a52100b62d986489024dde5d0fa751cd8df32e4eded92c63a7362b",
+   "test_source_hashes": {
+    "tests/viewer_volume_job_capture_test.cjs": {
+     "blob": "c087d79d12f467df82572994a44b53669cf1a72a",
+     "sha256": "400f984b06132d328a1c927b9d52fc86427f76f0bb0d331d8fd9b0cf5f9dd491"
+    }
+   }
+  },
+  {
+   "id": "MO12",
+   "meaning": "MO12 v12 camera built differently from plan() frame 0 (e.g. focal = volume origin or position from a separately rounded D) -> P1 === parity, NO1 frame-0 pixel equality",
+   "variant": "The version 12 camera position uses a separately rounded D, Number(distance.toFixed(12)), while KinVolumeMipBatch.plan frame 0 uses D.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip-output.js",
+   "anchor": "      const camera=Object.freeze({index:0,angle:0,focalPoint:Object.freeze([...f]),position:Object.freeze(f.map((x,k)=>x+n0[k]*distance)),viewPlaneNormal:Object.freeze([...n0]),viewUp:Object.freeze([...u0]),parallelScale:scale});\n",
+   "replacement": "      const camera=Object.freeze({index:0,angle:0,focalPoint:Object.freeze([...f]),position:Object.freeze(f.map((x,k)=>x+n0[k]*Number(distance.toFixed(12)))),viewPlaneNormal:Object.freeze([...n0]),viewUp:Object.freeze([...u0]),parallelScale:scale});\n",
+   "test": "tests/volume_mip_output_test.cjs (P1)",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "expected_original_assertion": "Test 'C5: the version 12 camera is KinVolumeMipBatch.plan frame 0 on every component, for every preset and both axes' fails at L41 assert.ok(same(camera[field],first[field]),tag+' '+field+' '+camera[field]+' !== '+first[field]) for 'Axial Horizontal position' on PHANTOM, while L36 near(camera.position,...,1e-12) passes. Preregistration arithmetic (evidence 00-prep-mo12-float-feasibility, no product or test code loaded): Number(t.toFixed(12)) !== t for both geometries, every position differs by at most 3.27e-13, so L36 passes and L41 fails first at PHANTOM Axial. The other ten tests pass.",
+   "expected_consequence": "The version 12 camera is no longer version 13 frame 0 on every component (O4 exact parity).",
+   "detection": "DETECTED (assertion on exact parity) only if the C5 test's first failure is the L41 AssertionError for field position.",
+   "not_detection": "A first failure at L36 or elsewhere, or a thrown non-assertion Error: NOT_DETECTED_AS_REGISTERED. Exit 0: SURVIVED.",
+   "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+   "line": 71,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "ecd3b4680baccd55d4da4f0ee23a9308ce7bb10b",
+   "candidate_sha256": "5b00d03b3a5e27f1ff656b9aee5b7db7a9a6a940e01f68021003ef8225b261e6",
+   "mutant_blob": "f3490414287055b05aa4f1c28ea6abf8dc9403d5",
+   "mutant_sha256": "d3fba108013cd7f1ad0b59be32b42a15bc2fd3de661f798d13945689c419b1a4",
+   "patch": "patches/MO12.patch",
+   "patch_sha256": "2ac692f47d9391127ed2c8acfa745d3c69666b0ebc07bc6cccd1c15ebddf4c80",
+   "test_source_hashes": {
+    "tests/volume_mip_output_test.cjs": {
+     "blob": "7f676e7b5279daf2ffeca0e46c77fd529bfe18e8",
+     "sha256": "d8dbc18a40594eb8d880d49df7a1dfcc4760a1bf6af7e85e84802756f78b0908"
+    }
+   }
+  }
+ ]
+}

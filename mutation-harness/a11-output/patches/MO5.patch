@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+index a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d..a4cf68a120a2e4fd93e3110eb4d8dd802a594889 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip-print.js
+@@ -83,7 +83,7 @@
+       writePrintFrame(camera);element.addEventListener(rendered,done,{once:true});
+       try{view.render();}catch(error){element.removeEventListener(rendered,done);throw error;}
+       return ()=>element.removeEventListener(rendered,done);
+-    },output.frameMs,messages.frameTimeout);check();
++    },output.frameMs,messages.frameTimeout).catch(()=>({}));check();if(!canvas)continue;
+     const blob=await pending((resolve,reject)=>{canvas.toBlob(value=>value?resolve(value):reject(Error(messages.image)),'image/png');});check();
+     encoded=output.bytes(encoded,blob.size);
+     frames.push({blob,index:camera.index,angle:camera.angle,width:size,height:size,display:output.displayCaption(display.voiRange,properties),

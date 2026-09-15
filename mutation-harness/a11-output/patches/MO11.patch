@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-jobs.js b/worklist-v0/hpacs-lite/viewer-jobs.js
+index 03048677ed2f8c5bc32c9806334b2b480a4ce41f..9baf0ed28d1896dbc0ac932d214411a1c6697bff 100644
+--- a/worklist-v0/hpacs-lite/viewer-jobs.js
++++ b/worklist-v0/hpacs-lite/viewer-jobs.js
+@@ -72,7 +72,7 @@
+         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
+         // Each asset is ready by its own predicate. The MIP models are frozen objects rather than functions, and a module already present
+         // (the model of an open or closed MIP Viewer included) is never requested, and so never replaced, again.
+-        const fn=name=>()=>typeof window[name]==='function',members=(name,keys)=>()=>{const value=window[name];return !!value&&keys.every(key=>typeof value[key]==='function');};
++        const fn=name=>()=>typeof window[name]==='function',members=(name,keys)=>()=>typeof window[name]==='function';
+         const volumePrint=['viewer-volume-job-print.js',fn('kinRenderVolumeJobPrint')];
+         const mipPrint=[volumePrint,['volume-mip.js',members('KinVolumeMip',['verifyState','clipShader','averageShader','voiPlanes','voiPlane','corners','preset','projectionThickness','sampleDistance','affine','verifyBinding'])],
+           ['volume-mip-job.js',members('KinVolumeMipJob',['validate','restoreRequest','intersects'])],

@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-jobs.js b/worklist-v0/hpacs-lite/viewer-jobs.js
+index 03048677ed2f8c5bc32c9806334b2b480a4ce41f..8e3ca0be166f4be18a2bbc883989c14502ce162a 100644
+--- a/worklist-v0/hpacs-lite/viewer-jobs.js
++++ b/worklist-v0/hpacs-lite/viewer-jobs.js
+@@ -187,7 +187,7 @@
+         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
+         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
+         // An allowlist of printable versions: a later version stays without Print until it has an output page of its own.
+-        if (!row.hidden && [1,2,3,4,5,6,12,13].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
++        if (!row.hidden && ![7,8,9,10,11].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+         // A merged layout may hold no reconstructed cell at all, so it is not labelled as one.
+         if(row.snapshotVersion===9)text('p','Merged Cell Layout · 출력 미지원',item);
+         else if(row.snapshotVersion===12)text('p','MIP Viewer · 저장 조건 재구성 출력 · 표시 전용 투영 작업',item);
