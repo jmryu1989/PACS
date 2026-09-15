@@ -1,0 +1,10 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-jobs.js b/worklist-v0/hpacs-lite/viewer-jobs.js
+index 323fdf97076e6590cee725d37966bc53b9f8affd..2322e29af07ddeba499ae4117ca0044e9340c776 100644
+--- a/worklist-v0/hpacs-lite/viewer-jobs.js
++++ b/worklist-v0/hpacs-lite/viewer-jobs.js
+@@ -408,4 +408,4 @@
+    advances serial so a pending restore or save sees the screen changed. The one exception is closing the MIP Viewer that a
+    restore opened (Close MIP Viewer, or Escape inside it): that is the user's cancel, and it is neither swallowed nor allowed
+    to advance serial, because the rollback runs only while serial === ticket. */
+-window.kinViewerJobs.interaction = ({ inPanel, applying, cancelsRestore }) => inPanel ? 'pass' : !applying ? 'advance' : cancelsRestore ? 'pass' : 'swallow';
++window.kinViewerJobs.interaction = ({ inPanel, applying, cancelsRestore }) => inPanel ? 'pass' : !applying ? 'advance' : cancelsRestore ? 'swallow' : 'swallow';

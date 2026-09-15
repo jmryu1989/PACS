@@ -1,0 +1,13 @@
+diff --git a/api/src/viewer-job.service.ts b/api/src/viewer-job.service.ts
+index a2c0c24dcef411a7e7a0dc8c6c7295ed890ceaca..14fba13dcf55ef89515ee891a1589280f1a67361 100644
+--- a/api/src/viewer-job.service.ts
++++ b/api/src/viewer-job.service.ts
+@@ -54,7 +54,7 @@
+     // A version 9 merged layout carries both shapes too, and a merged layout of ordinary
+     // frame cells alone carries no volume at all, so the whole-volume verification runs on
+     // the reference it actually has and the per-cell verification below always follows.
+-    let verified = snapshot;
++    let verified = snapshot; if (snapshot.version === 12) return verified;
+     if ([4,5,6,7,8,10,11,12].includes(snapshot.version) || snapshot.version === 9 && snapshot.volume) {
+       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 20000);
+       try {

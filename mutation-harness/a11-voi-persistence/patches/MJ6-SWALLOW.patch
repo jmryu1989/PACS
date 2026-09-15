@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index 3350f12a64de28a70492630f02c1b4b155d6378c..07e6707e64aadbd006e89136ceff29a8fc34d03c 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -251,7 +251,7 @@
+     }catch(error){
+       const failure=op.cancelled?Error('MIP 작업 복원을 취소했습니다.'):op.failure||error;
+       if(operation===op)close();
+-      throw failure;
++      return;
+     }finally{clearTimeout(timer);}
+   }
+   // A plane or projection change keeps the requested VOI Slab fixed in source coordinates.

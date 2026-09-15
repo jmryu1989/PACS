@@ -1,0 +1,508 @@
+{
+ "schema": 1,
+ "purpose": "Preregistered A11-VOI-2 semantic mutants over the exact PR34 candidate. Harness branch only; NEVER merge into product.",
+ "job": "mpr-a11-voi-persistence-mutants-prep-01",
+ "rules_version": "2026-09-15-3",
+ "candidate": {
+  "sha": "e8ac0b964a5a76848edf7964cc52ee33a8960908",
+  "tree": "eaf904d90b8dbf2d97e5e1d343021d43dfe20c65",
+  "workflow_blob": "1fefcc105e881d6b31cdd95aca75d6a675e74b72"
+ },
+ "harness_ref": "refs/heads/opus/a11-voi-persistence-mutants-20260915",
+ "classification": [
+  "INVALID (setup, never detection): registry/restore/install/verify guard not passed; run_attempt != 1; pure or compiled candidate baseline exit != 0; mutant record-run launch_failed or recorder exit 125/127; identical candidate and mutant image ids; native results.json entry database, database-tcp, keycloak-database, stack, ports, services or cleanup exit != 0; a job or step timeout before the registered assertion.",
+  "DETECTED: guards passed, baseline passed, mutant step exit != 0, and the raw output shows the registered test failing with the registered assertion at the registered file:line and message, which lies after the listed preconditions in the same test.",
+  "NOT_DETECTED_AS_REGISTERED: the registered test fails at another line, by a non-assertion error or by timeout; raw is reported, no detection is claimed.",
+  "SURVIVED: the registered test passes; reported as a test gap (for OR1-RESTORE-ORDER: the SLICE_SNAP fixture does not discriminate).",
+  "Other failing tests in the same step are listed and never claimed. A pure or compiled detection proves the defect at that module boundary only; it is not native evidence."
+ ],
+ "tiers": {
+  "pure-p2": {
+   "workflow_job": "pure-p2",
+   "original_job": "volume-rendering",
+   "original_step": "Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models",
+   "baseline": "the same original command on the exact candidate tree first (tmp/vr-ci/pure-volume-models-candidate) must exit 0",
+   "mutant_record": "tmp/vr-ci/pure-volume-models/run.json + stdout.log",
+   "budget": "job timeout 40 min as volume-rendering; the original step has no step timeout; no retry"
+  },
+  "compiled-p1": {
+   "workflow_job": "compiled-p1",
+   "original_job": "runtime",
+   "original_steps": [
+    "Reproduce a private deployment checkout",
+    "Build the production target",
+    "Compiled volume job command and volume mark boundary models"
+   ],
+   "baseline": "candidate image built and the original P1 command run first (tmp/runtime-ci/volume-api-models-candidate) must exit 0; the patched api/ is then rebuilt with the same command and its image id must differ",
+   "mutant_record": "tmp/runtime-ci/volume-api-models/run.json + stdout.log",
+   "budget": "job timeout 20 min as runtime; build and P1 steps have no step timeout; no retry"
+  },
+  "native-mip-job": {
+   "workflow_job": "native-mip-job",
+   "original_job": "volume-mip-job",
+   "profile": "volume-mip-job",
+   "selection": [
+    "VolumeMipJobE2E.test_mip_job_01_save_restore_roundtrip_new_browser_pixels",
+    "VolumeMipJobE2E.test_mip_job_02_save_gates_failure_unconfirmed_retry_roles_account",
+    "VolumeMipJobE2E.test_mip_job_03_restore_failure_missing_tool_cancel_stale_rollback"
+   ],
+   "baseline": "reused, not rerun: CI34936809314 job 104276403480 volume-mip-job success at e8ac0b9 (pull_request checkout 9db1645)",
+   "mutant_record": "tmp/mipjob-ci/live-profile/run.json; tests/e2e/artifacts/volume-mip-job-ci/results.json and test_volume_mip_job.log",
+   "budget": "job 40 min, dependency step 10 min, live step 28 min, profile suite cap ci-mip-job 1200 s (outer 1235 s of 1500 s) in the restored candidate tests/measurement_ci.py; no retry"
+  },
+  "native-path": {
+   "workflow_job": "native-path",
+   "original_job": "volume-path",
+   "profile": "volume-path",
+   "selection": "test_volume_path.py test_path_* 01-04 and test_volume_orientation.py test_orientation_* 01-06 through their load_tests allowlists",
+   "baseline": "reused, not rerun: CI34936809314 job 104276403325 volume-path success at e8ac0b9 (pull_request checkout 9db1645)",
+   "omitted_original_step": "3D path editing, stale results, Go to Path Point and restore rollback on the real panel (DOM test of volume-path.js/viewer-volume-path.js only: neither the mutated file nor part of the profile selection)",
+   "mutant_record": "tmp/path-ci/live-profile/run.json; tests/e2e/artifacts/volume-path-ci/results.json and test_volume_orientation.log",
+   "budget": "job 40 min, dependency step 10 min, live step 28 min, profile caps ci-path-native 420 s + ci-mpr-orientation 300 s (outer 790 s) in the restored candidate tests/measurement_ci.py; no retry"
+  }
+ },
+ "workflow_lines": {
+  "all-jobs": [
+   {
+    "role": "checkout pin",
+    "original": "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
+    "harness": "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4"
+   },
+   {
+    "role": "upload pin",
+    "original": "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+    "harness": "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+   }
+  ],
+  "pure-p2": [
+   {
+    "role": "candidate baseline",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v \"$PWD:/src:ro\" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/viewer_volume_job_capture_test.cjs",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models-candidate --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v \"$PWD:/src:ro\" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/viewer_volume_job_capture_test.cjs"
+   },
+   {
+    "role": "mutant (verbatim)",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v \"$PWD:/src:ro\" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/viewer_volume_job_capture_test.cjs",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v \"$PWD:/src:ro\" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/viewer_volume_job_capture_test.cjs"
+   }
+  ],
+  "compiled-p1": [
+   {
+    "role": "private checkout (before each build)",
+    "original": "run: chmod -R go-rwx api",
+    "harness": "run: chmod -R go-rwx api"
+   },
+   {
+    "role": "build code sha",
+    "original": "CODE_SHA: ${{ github.sha }}",
+    "harness": "CODE_SHA: ${{ github.sha }}"
+   },
+   {
+    "role": "build (candidate, then mutant)",
+    "original": "run: docker build --target production --build-arg \"VCS_REF=$CODE_SHA\" -t kin-api:ci api",
+    "harness": "run: docker build --target production --build-arg \"VCS_REF=$CODE_SHA\" -t kin-api:ci api"
+   },
+   {
+    "role": "candidate baseline",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v \"$PWD/tests:/tests:ro\" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models-candidate --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v \"$PWD/tests:/tests:ro\" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs"
+   },
+   {
+    "role": "mutant (verbatim)",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v \"$PWD/tests:/tests:ro\" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v \"$PWD/tests:/tests:ro\" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs"
+   }
+  ],
+  "native-mip-job": [
+   {
+    "role": "profile isolation (verbatim)",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py"
+   },
+   {
+    "role": "browser apt (verbatim)",
+    "original": "run: sudo env GITHUB_ACTIONS=\"$GITHUB_ACTIONS\" RUNNER_ENVIRONMENT=\"$RUNNER_ENVIRONMENT\" python3 scripts/ci_browser_apt.py",
+    "harness": "run: sudo env GITHUB_ACTIONS=\"$GITHUB_ACTIONS\" RUNNER_ENVIRONMENT=\"$RUNNER_ENVIRONMENT\" python3 scripts/ci_browser_apt.py"
+   },
+   {
+    "role": "venv (verbatim)",
+    "original": "python3 -m venv \"$RUNNER_TEMP/mipjob-python\"",
+    "harness": "python3 -m venv \"$RUNNER_TEMP/mipjob-python\""
+   },
+   {
+    "role": "pip (verbatim)",
+    "original": "\"$RUNNER_TEMP/mipjob-python/bin/python\" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2",
+    "harness": "\"$RUNNER_TEMP/mipjob-python/bin/python\" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2"
+   },
+   {
+    "role": "playwright (verbatim)",
+    "original": "\"$RUNNER_TEMP/mipjob-python/bin/python\" -m playwright install --with-deps chromium",
+    "harness": "\"$RUNNER_TEMP/mipjob-python/bin/python\" -m playwright install --with-deps chromium"
+   },
+   {
+    "role": "exact selection (verbatim)",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_job.py --file tests/e2e/test_volume_projection.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-jobs.js -- \"$RUNNER_TEMP/mipjob-python/bin/python\" -B tests/execution_selection_test.py",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_job.py --file tests/e2e/test_volume_projection.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-jobs.js -- \"$RUNNER_TEMP/mipjob-python/bin/python\" -B tests/execution_selection_test.py"
+   },
+   {
+    "role": "live profile (original command inside record-run for raw exit and hashes)",
+    "original": "\"$RUNNER_TEMP/mipjob-python/bin/python\" tests/measurement_ci.py --profile volume-mip-job",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/live-profile --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file tests/e2e/test_volume_mip_job.py --file tests/measurement_ci.py -- \"$RUNNER_TEMP/mipjob-python/bin/python\" tests/measurement_ci.py --profile volume-mip-job"
+   }
+  ],
+  "native-path": [
+   {
+    "role": "profile isolation (verbatim)",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/path-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/path-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py"
+   },
+   {
+    "role": "venv (verbatim)",
+    "original": "python3 -m venv \"$RUNNER_TEMP/path-python\"",
+    "harness": "python3 -m venv \"$RUNNER_TEMP/path-python\""
+   },
+   {
+    "role": "pip (verbatim)",
+    "original": "\"$RUNNER_TEMP/path-python/bin/python\" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2",
+    "harness": "\"$RUNNER_TEMP/path-python/bin/python\" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2"
+   },
+   {
+    "role": "playwright (verbatim)",
+    "original": "\"$RUNNER_TEMP/path-python/bin/python\" -m playwright install --with-deps chromium",
+    "harness": "\"$RUNNER_TEMP/path-python/bin/python\" -m playwright install --with-deps chromium"
+   },
+   {
+    "role": "exact selection (verbatim)",
+    "original": "run: python3 scripts/record-run.py --run-dir tmp/path-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_path.py --file tests/e2e/test_volume_orientation.py -- \"$RUNNER_TEMP/path-python/bin/python\" -B tests/execution_selection_test.py",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/path-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_path.py --file tests/e2e/test_volume_orientation.py -- \"$RUNNER_TEMP/path-python/bin/python\" -B tests/execution_selection_test.py"
+   },
+   {
+    "role": "live profile (original command inside record-run for raw exit and hashes)",
+    "original": "\"$RUNNER_TEMP/path-python/bin/python\" tests/measurement_ci.py --profile volume-path",
+    "harness": "run: python3 scripts/record-run.py --run-dir tmp/path-ci/live-profile --cwd . --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/e2e/test_volume_orientation.py --file tests/measurement_ci.py -- \"$RUNNER_TEMP/path-python/bin/python\" tests/measurement_ci.py --profile volume-path"
+   }
+  ]
+ },
+ "variants": [
+  {
+   "id": "MJ2-FOR",
+   "plan_ref": "impl-01 MJ2 (frame of reference)",
+   "tier": "compiled-p1",
+   "defect": "verifyVolumeMip no longer requires the saved MIP frameOfReference to equal the original series FrameOfReferenceUID, so the server accepts a version 12 display bound to another frame.",
+   "source": "api/src/viewer-volume-mip.ts",
+   "anchor": "  if(m.frameOfReference!==frameOfReference)invalid();\n",
+   "replacement": "",
+   "claimed_test": "tests/viewer_volume_job_test.cjs: a MIP Viewer job must match the original frame of reference and keep a voxel centre inside its VOI Slab",
+   "expected_failure": {
+    "file": "tests/viewer_volume_job_test.cjs",
+    "line": 384,
+    "assertion": "assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label)",
+    "error": "AssertionError [ERR_ASSERTION]",
+    "message_pattern": "^Missing expected exception.*: foreign frame of reference$",
+    "row": "foreign frame of reference (line 379, the first row)"
+   },
+   "preconditions": [
+    "candidate P1 baseline exit 0 in the same job",
+    "row 'foreign frame of reference': :383 command(s).snapshot.version === 12 passes before :384"
+   ],
+   "proves": "the compiled server FoR equality is load-bearing and compiled P1 detects its removal",
+   "does_not_prove": "native N2 forged-FoR POST 400; client restore FoR refusal (viewer-volume-mip.js:235)",
+   "notes": "the frameOfReference parameter stays unused; api/tsconfig.json has no noUnusedParameters and nest build does not lint",
+   "line": 32,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": null,
+   "candidate_blob": "04e1dae5d5f68b9dbe2d2793e76075592273d2ac",
+   "candidate_sha256": "774e6b031ebc23472c5a70d88c64dcc856382ffad01700803b4dd82aa33ea992",
+   "mutant_blob": "4394024d76493a5203ad84c1545e42e9211e164d",
+   "mutant_sha256": "2394f562747fea26bbf59531cb0462f389de8b06284fc7d5e2122af45ca40630",
+   "patch": "patches/MJ2-FOR.patch",
+   "patch_sha256": "709f6d50040dfbf88b36ef79537552d41189660bb8c9c9ca7163f15ecb3df0d0"
+  },
+  {
+   "id": "MJ2-INTERSECT",
+   "plan_ref": "impl-01 MJ2 (intersection)",
+   "tier": "compiled-p1",
+   "defect": "verifyVolumeMip keeps only the finiteness check and no longer refuses a VOI Slab wholly beyond the voxel-centre box (min distance > t/2+1e-6 or max < -t/2-1e-6).",
+   "source": "api/src/viewer-volume-mip.ts",
+   "anchor": "||Math.min(...distances)>half+1e-6||Math.max(...distances)<-half-1e-6",
+   "replacement": "",
+   "claimed_test": "tests/viewer_volume_job_test.cjs: a MIP Viewer job must match the original frame of reference and keep a voxel centre inside its VOI Slab",
+   "expected_failure": {
+    "file": "tests/viewer_volume_job_test.cjs",
+    "line": 384,
+    "assertion": "assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label)",
+    "error": "AssertionError [ERR_ASSERTION]",
+    "message_pattern": "^Missing expected exception.*: slab wholly beyond the \\+ side$",
+    "row": "slab wholly beyond the + side (line 380, the second row)"
+   },
+   "preconditions": [
+    "candidate P1 baseline exit 0 in the same job",
+    "row 'foreign frame of reference' still throws 400 (FoR check intact)",
+    "row '+ side': :383 command(s).snapshot.version === 12 passes before :384"
+   ],
+   "proves": "the compiled server intersection refusal is load-bearing and compiled P1 detects its removal",
+   "does_not_prove": "native N2 forged slab outside 400; the client intersects() save/restore refusal (volume-mip-job.js, unchanged)",
+   "notes": "half stays declared and unused; api/tsconfig.json has no noUnusedLocals and nest build does not lint",
+   "line": 39,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": null,
+   "candidate_blob": "04e1dae5d5f68b9dbe2d2793e76075592273d2ac",
+   "candidate_sha256": "774e6b031ebc23472c5a70d88c64dcc856382ffad01700803b4dd82aa33ea992",
+   "mutant_blob": "27ba65118f04daa7b88eb061bc6d9d2e3a4579a1",
+   "mutant_sha256": "770fd9f82e487e957d9c7a4c6b42a5a48c7602dbb6fce08b52d21c96032dcacf",
+   "patch": "patches/MJ2-INTERSECT.patch",
+   "patch_sha256": "e8b1fa69e9bc91f75f877e3e945a1cc6d6a7ef9e232f314538fb75f2d007e29f"
+  },
+  {
+   "id": "MJ3-SERVICE-SKIP",
+   "plan_ref": "impl-01 MJ3 (omission of v12 service verification)",
+   "tier": "compiled-p1",
+   "defect": "ViewerJobService.sources returns a version 12 snapshot unverified: no whole-original manifest/tags/digest verification, hence no verifyVolumeMip and no stored sourceDigest.",
+   "source": "api/src/viewer-job.service.ts",
+   "anchor": "let verified = snapshot;",
+   "replacement": "let verified = snapshot; if (snapshot.version === 12) return verified;",
+   "claimed_test": "tests/viewer_volume_job_test.cjs: a created version 4, 11 or 12 Job stores and restores every snapshot number exactly, with replay and conflict unchanged",
+   "expected_failure": {
+    "file": "tests/viewer_volume_job_test.cjs",
+    "line": 447,
+    "assertion": "assert.match(stored.volume.sourceDigest,/^[a-f0-9]{64}$/)",
+    "error": "AssertionError [ERR_ASSERTION]",
+    "message_pattern": "^The \"string\" argument must be of type string\\. Received type undefined",
+    "row": "version 12 iteration of the [4,11,12] loop"
+   },
+   "preconditions": [
+    "candidate P1 baseline exit 0 in the same job",
+    "version 4 and 11 iterations pass (the patch only returns early for version 12)",
+    "version 12: :444 create resolves and :445 receipt [id,1,12,false] passes"
+   ],
+   "proves": "the compiled create path detects an omitted version 12 whole-volume verification (no digest stored)",
+   "does_not_prove": "restore-side 409 on a changed original (native N3 :308 and its UI message)",
+   "line": 57,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "a2c0c24dcef411a7e7a0dc8c6c7295ed890ceaca",
+   "candidate_sha256": "db902980deb6a4af846a7c705f498d8f096b4f70f62dac5d7e76b053334bc7af",
+   "mutant_blob": "14fba13dcf55ef89515ee891a1589280f1a67361",
+   "mutant_sha256": "8697f4297965212b0cab4e9e663f5b2f749c9fdc130699b04b247b7682943c73",
+   "patch": "patches/MJ3-SERVICE-SKIP.patch",
+   "patch_sha256": "02fa7cffc33d1fa11a7ce7df16dbb501bdf2703db5a0f376d3d23e92c7aadf39"
+  },
+  {
+   "id": "MJ4-SILENT-OPEN",
+   "plan_ref": "impl-01 MJ4 (silent open)",
+   "tier": "native-mip-job",
+   "defect": "the kinVolumeMipJob restore capability calls the ordinary open(), which returns silently while the Jobs workspace applies (viewer-volume-mip.js:189), so Restore Job announces the MIP restore with no MIP Viewer and no saved display.",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-orientation.js",
+   "anchor": "await createMip().job.restore(value,{current,deadline,viewportId});",
+   "replacement": "await createMip().open();",
+   "claimed_test": "VolumeMipJobE2E.test_mip_job_01_save_restore_roundtrip_new_browser_pixels",
+   "expected_failure": {
+    "file": "tests/e2e/test_volume_mip_job.py",
+    "line": 127,
+    "assertion": "self.assertEqual(announced[0][1:],['final',label+'Saved'],'the success status follows the confirmed Final and its Saved state')",
+    "error": "AssertionError",
+    "message_pattern": "the success status follows the confirmed Final and its Saved state",
+    "actual": "announced[0][1] == 'closed'"
+   },
+   "preconditions": [
+    "results.json setup and cleanup entries exit 0",
+    "N1 lines up to :126 pass: one POST and Saved (:103), stored v12 equality (:104-:113), change/Undo/close (:115-:119), row label and no Print Saved Images (:121-:122), 'MIP 작업을 복원했습니다' shown (:125), exactly one announcement (:126)"
+   ],
+   "proves": "native N1 detects a false MIP restore success when the capability opens nothing",
+   "does_not_prove": "N2/N3 consequences (N3 may also fail; not claimed)",
+   "notes": "pure P2 only drives a stub capability, so the orientation capability needs native",
+   "line": 215,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 1,
+   "candidate_blob": "74655be63477b9194991c0bcceb48d42b86904ba",
+   "candidate_sha256": "d0682b36f83f594e0d43bd75790908ff222476bec4a441522fd403c2b15b4e37",
+   "mutant_blob": "bb1cfbe0601513240a1f15012d9f95340cfc0f76",
+   "mutant_sha256": "1eb841060e1e482f2254c72e32701fcb43694fa3a491ac1a39fc58f789ec719c",
+   "patch": "patches/MJ4-SILENT-OPEN.patch",
+   "patch_sha256": "0e0cfd1d260c8a4fc8c45be7a7d18f6eae4c059bf31625b1e566deee1b01f935"
+  },
+  {
+   "id": "MJ4-VOI-NULL",
+   "plan_ref": "impl-01 MJ4 (VOI-null false restore)",
+   "tier": "native-mip-job",
+   "defect": "the MIP restore starts its sequence with voiSlab null, so a saved VOI Job reaches Final unclipped and is announced restored without its VOI Slab.",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "anchor": "const shown=await bounded(op.sequence.start(request));",
+   "replacement": "const shown=await bounded(op.sequence.start({...request,voiSlab:null}));",
+   "claimed_test": "VolumeMipJobE2E.test_mip_job_01_save_restore_roundtrip_new_browser_pixels",
+   "expected_failure": {
+    "file": "tests/e2e/test_volume_mip_job.py",
+    "line": 127,
+    "assertion": "self.assertEqual(announced[0][1:],['final',label+'Saved'],'the success status follows the confirmed Final and its Saved state')",
+    "error": "AssertionError",
+    "message_pattern": "the success status follows the confirmed Final and its Saved state",
+    "actual": "announced[0][1] == 'final' and announced[0][2] starts 'VOI Slab · Off · ' (viewer-volume-mip.js:78 labels the displayed request) instead of label+'Saved' ('VOI Slab · On · ... mm · Saved')"
+   },
+   "preconditions": [
+    "results.json setup and cleanup entries exit 0",
+    "N1 lines up to :126 pass as for MJ4-SILENT-OPEN"
+   ],
+   "proves": "native N1 detects a restore announced after a Final that dropped the saved VOI Slab",
+   "does_not_prove": "the VOI-off part of N1 (:145-:154, equivalent under this mutant and not reached); N3",
+   "notes": "check(op) (viewer-volume-mip.js:59) only checks currency and confirm expects an unclipped shader for a null slab, so the restore is not fail-closed. P2 :515 would also fail, only because its injected fault sits in addClippingPlane which a null slab never calls; that incidental pure failure is neither claimed nor run.",
+   "line": 246,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "3350f12a64de28a70492630f02c1b4b155d6378c",
+   "candidate_sha256": "7e4311502c2b76fc053ed05faa252616cbb885b091f529f6045e829d6569ba25",
+   "mutant_blob": "6054c2ac41d8eb44bac8c7f4fffab8a7ec50051b",
+   "mutant_sha256": "b513164661df79a5452146704e54636249f5c0d6bda4c95c8bdc5fd4ec003dea",
+   "patch": "patches/MJ4-VOI-NULL.patch",
+   "patch_sha256": "2ff45bb300e11efa7243acb8297b3da2d4158e072a4f3a96ad4f1d9c22642fe8"
+  },
+  {
+   "id": "MJ6-SWALLOW",
+   "plan_ref": "impl-01 MJ6 (swallowed restore failure)",
+   "tier": "pure-p2",
+   "defect": "restore() catches a failed MIP restore, closes the viewer and resolves instead of throwing, so the Job rollback never receives the failure.",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "anchor": "throw failure;",
+   "replacement": "return;",
+   "claimed_test": "tests/viewer_volume_job_capture_test.cjs: a MIP Job restore throws the failed first display reason itself: a plane write fault or an unconfirmed GPU clip shader closes the viewer with that reason",
+   "expected_failure": {
+    "file": "tests/viewer_volume_job_capture_test.cjs",
+    "line": 515,
+    "assertion": "assert.ok(error,label+' must refuse the restore')",
+    "error": "AssertionError [ERR_ASSERTION]",
+    "message_pattern": "^clipping-plane write fault must refuse the restore$"
+   },
+   "preconditions": [
+    "pure candidate baseline exit 0 in the same job",
+    "same test :506-:507: the fault-free restore of the real viewer-volume-mip.js reaches Final with the restored status"
+   ],
+   "proves": "the real viewer-volume-mip.js restore() swallowing a failure is detected at its own boundary (stand-in DOM/viewport; real volume-mip.js, volume-voi.js, volume-mip-job.js)",
+   "does_not_prove": "native N3 rollback ('이전 화면', camera oracle); apply() propagation is a separate pure test (:436)",
+   "line": 254,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 27,
+   "candidate_blob": "3350f12a64de28a70492630f02c1b4b155d6378c",
+   "candidate_sha256": "7e4311502c2b76fc053ed05faa252616cbb885b091f529f6045e829d6569ba25",
+   "mutant_blob": "07e6707e64aadbd006e89136ceff29a8fc34d03c",
+   "mutant_sha256": "d8b253aebc768070c93e49775c0cd972d1b9d6710353efb1fb7ff2cb6ddba703",
+   "patch": "patches/MJ6-SWALLOW.patch",
+   "patch_sha256": "9e3e84222c6695337df0d69a06937ef919945232e94c27d0ac256ed1898874ae"
+  },
+  {
+   "id": "MJ9-SWALLOW",
+   "plan_ref": "impl-01 MJ9 (Escape/Close cancel swallowed)",
+   "tier": "pure-p2",
+   "defect": "kinViewerJobs.interaction swallows a restore cancel (the exemption is missing), so Close MIP Viewer/Escape never reach the restoring dialog.",
+   "source": "worklist-v0/hpacs-lite/viewer-jobs.js",
+   "anchor": "cancelsRestore ? 'pass' : 'swallow'",
+   "replacement": "cancelsRestore ? 'swallow' : 'swallow'",
+   "claimed_test": "tests/viewer_volume_job_capture_test.cjs: closing the MIP Viewer a restore opened passes without advancing serial; other outside input is swallowed or advances it",
+   "expected_failure": {
+    "file": "tests/viewer_volume_job_capture_test.cjs",
+    "line": 415,
+    "assertion": "assert.equal(decide({inPanel:false,applying:true,cancelsRestore:true}),'pass','a restore cancel is neither swallowed nor a serial change')",
+    "error": "AssertionError [ERR_ASSERTION]",
+    "message_pattern": "^a restore cancel is neither swallowed nor a serial change$",
+    "actual": "'swallow'"
+   },
+   "preconditions": [
+    "pure candidate baseline exit 0 in the same job",
+    "the real viewer-jobs.js loads in its vm context (:413) and exposes interaction (:414)"
+   ],
+   "proves": "the decision the listener applies (viewer-jobs.js:375-376) swallowing a restore cancel is detected by the real-file pure assertion",
+   "does_not_prove": "the listener's cancelsRestore from kinVolumeMipJob.cancels(e) for a native Escape; native N3 cancel timing and rollback",
+   "line": 411,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "323fdf97076e6590cee725d37966bc53b9f8affd",
+   "candidate_sha256": "200786d71112c987477de80a4fb0cedf868fe760d515ded0d294cd2faee9dca5",
+   "mutant_blob": "2322e29af07ddeba499ae4117ca0044e9340c776",
+   "mutant_sha256": "327c3e3c867dd170a24985e3ebe1cce1d16c8a521dbef7347e5e69f4fa5e09af",
+   "patch": "patches/MJ9-SWALLOW.patch",
+   "patch_sha256": "405202e7da7fff2a0580d35d8573b3a3c93f428d34c665c44dfc0d9dd818e133"
+  },
+  {
+   "id": "MJ9-ADVANCE",
+   "plan_ref": "impl-01 MJ9 (serial advanced)",
+   "tier": "pure-p2",
+   "defect": "kinViewerJobs.interaction answers a restore cancel with advance (serial++), so the restore ticket is no longer current and the rollback after the cancel is skipped.",
+   "source": "worklist-v0/hpacs-lite/viewer-jobs.js",
+   "anchor": "cancelsRestore ? 'pass' : 'swallow'",
+   "replacement": "cancelsRestore ? 'advance' : 'swallow'",
+   "claimed_test": "tests/viewer_volume_job_capture_test.cjs: closing the MIP Viewer a restore opened passes without advancing serial; other outside input is swallowed or advances it",
+   "expected_failure": {
+    "file": "tests/viewer_volume_job_capture_test.cjs",
+    "line": 415,
+    "assertion": "assert.equal(decide({inPanel:false,applying:true,cancelsRestore:true}),'pass','a restore cancel is neither swallowed nor a serial change')",
+    "error": "AssertionError [ERR_ASSERTION]",
+    "message_pattern": "^a restore cancel is neither swallowed nor a serial change$",
+    "actual": "'advance'"
+   },
+   "preconditions": [
+    "pure candidate baseline exit 0 in the same job",
+    "the real viewer-jobs.js loads in its vm context (:413) and exposes interaction (:414)"
+   ],
+   "proves": "the decision the listener applies advancing serial on a restore cancel is detected by the real-file pure assertion",
+   "does_not_prove": "native N3 rollback camera oracle after a cancel",
+   "line": 411,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "323fdf97076e6590cee725d37966bc53b9f8affd",
+   "candidate_sha256": "200786d71112c987477de80a4fb0cedf868fe760d515ded0d294cd2faee9dca5",
+   "mutant_blob": "dc0f09f9cd1da5cdea781924d3e1e052f3c7f573",
+   "mutant_sha256": "8892977f08065e4f1664235b4febdcc8c4ca62a4c811be026fc19bffbb415037",
+   "patch": "patches/MJ9-ADVANCE.patch",
+   "patch_sha256": "ab9156b45f3e63a003caea7a27619226d78f4c563b1773398f75cebe1a5c86f1"
+  },
+  {
+   "id": "OR1-RESTORE-ORDER",
+   "plan_ref": "review-05 acceptance_oracle_assessment.discrimination_of_bad_restore_order (historical defect fixed by 377c487)",
+   "tier": "native-path",
+   "defect": "Restore Job applies the saved camera without re-applying the current slab thickness afterwards (the pre-377c487 order), so a fresh plane turned in place about its unchanged focal point keeps its initial slab clipping planes; the readback on the next line stays trivially true.",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-job.js",
+   "anchor": "const half=v.getSlabThickness();if(Math.abs(half-.05)<1e-8)v.resetSlabThickness();else v.setSlabThickness(half);",
+   "replacement": "const half=v.getSlabThickness();",
+   "claimed_test": "VolumeOrientationE2E.test_orientation_06_single_axis_saved_job_restores_live_slab_planes",
+   "expected_failure": {
+    "file": "tests/e2e/test_volume_orientation.py",
+    "line": 255,
+    "assertion": "clip_restored=self.assert_clip_planes(fresh,'restored job') -> :75 np.testing.assert_allclose(s['planes'][0]['normal'],n,atol=1e-6,rtol=0,err_msg=message)",
+    "error": "AssertionError",
+    "message_pattern": "Not equal to tolerance rtol=0, atol=1e-06[\\s\\S]*restored job clipping planes: ",
+    "actual": "at least one rotated plane (the axial one by the fixture's precondition) whose clipping plane normal still follows its initial normal while its live camera normal is turned 30 degrees; restore_trigger (:258) is not reached"
+   },
+   "preconditions": [
+    "results.json setup and cleanup entries exit 0",
+    "orientation06 lines before :255 pass: Reset trace installed (:215), start_screen (:222), SLICE_SNAP (:233), author focal = volume centre 1e-9, viewUp 1e-5, 30-degree normal (:239-:240), 'rotated author' clip planes (:241), saved cells == moved 1e-6 (:244), fresh restore status within 45 s (:246), trace restored (:252), restored cameras == saved 1e-6 (:253)"
+   ],
+   "proves": "the revised SLICE_SNAP fixture still detects the historical restore-order defect through the unchanged restored-clipping assertion and tolerances",
+   "does_not_prove": "anything about path01-04 or orientation01-05 (they may also fail; not claimed)",
+   "if_survived": "the fixture does not discriminate; read SINGLE_AXIS_RESTORED_PLANES trace records after #55 as review-05 directs",
+   "line": 292,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 1,
+   "candidate_blob": "6c937d202fd9a72a0af62695b377542d3f6c7c90",
+   "candidate_sha256": "6a9f5f8a6bcf206314d2a05396280b146e3c0ef835d63d99e168a46f54c7ee62",
+   "mutant_blob": "8f040d5ddb5ab175584fbb2f835a80416e4bcec9",
+   "mutant_sha256": "6d9ce638453f5b465a41b1bb097eabd93b299bdc65407df66c8e4191ea049b3c",
+   "patch": "patches/OR1-RESTORE-ORDER.patch",
+   "patch_sha256": "30045a6828a5a92066dda27b74f27cd2b18e90656a836f1ed108db18e2be54f4"
+  }
+ ],
+ "rejected_variants": [
+  {
+   "id": "MJ3-LIST",
+   "mutation": "remove 12 from [4,5,6,7,8,10,11,12] at api/src/viewer-job.service.ts:58 (impl-01 plan)",
+   "reason": "not an omission: version 12 plane cells then enter the per-cell source loop (:78-:87) without a sop, orthancFake.viewerReference(undefined) yields undefined tags and verifyJobCell/tags.PatientID throws, so create fails closed at tests/viewer_volume_job_test.cjs:444 by a product exception, never the :447 assertion (static reading, not executed)"
+  },
+  {
+   "id": "MJ9-LISTENER",
+   "mutation": "cancelsRestore computed false at viewer-jobs.js:375",
+   "reason": "outside the pure decision assertion; only native N3 Escape could detect it and it was not requested"
+  },
+  {
+   "id": "MJ6-NATIVE",
+   "mutation": "same patch as MJ6-SWALLOW run on native N3",
+   "reason": "not the cheapest: pure P2 :515 runs the real restore() catch; running both would execute one variant twice"
+  }
+ ]
+}

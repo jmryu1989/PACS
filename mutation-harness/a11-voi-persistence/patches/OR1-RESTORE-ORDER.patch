@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-job.js b/worklist-v0/hpacs-lite/viewer-volume-job.js
+index 6c937d202fd9a72a0af62695b377542d3f6c7c90..8f040d5ddb5ab175584fbb2f835a80416e4bcec9 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-job.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-job.js
+@@ -289,7 +289,7 @@
+       // changes, so a fresh plane turned in place about its initial focal point would keep its initial slab. The
+       // exact current half thickness is re-applied from this camera: the 0.05 default is reset, because setting
+       // it would clamp to 0.1 (the same idiom as viewer-volume-job-print.js:93).
+-      const half=v.getSlabThickness();if(Math.abs(half-.05)<1e-8)v.resetSlabThickness();else v.setSlabThickness(half);
++      const half=v.getSlabThickness();
+       if(v.getActors()[0].actor.getMapper().getBlendMode()!==cell.projection.blend||Math.abs(v.getSlabThickness()-half)>1e-9||Math.abs(v.getSlabThickness()*2-cell.projection.thickness)>1e-6)throw Error('저장한 MPR 모드나 두께를 복원하지 못했습니다.');
+       v.render();
+     }

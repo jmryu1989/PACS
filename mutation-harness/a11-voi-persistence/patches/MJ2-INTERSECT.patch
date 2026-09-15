@@ -1,0 +1,11 @@
+diff --git a/api/src/viewer-volume-mip.ts b/api/src/viewer-volume-mip.ts
+index 04e1dae5d5f68b9dbe2d2793e76075592273d2ac..27ba65118f04daa7b88eb061bc6d9d2e3a4579a1 100644
+--- a/api/src/viewer-volume-mip.ts
++++ b/api/src/viewer-volume-mip.ts
+@@ -36,5 +36,5 @@
+   const half=s.thickness/2,distances:number[]=[];
+   for(const i of [0,dimensions[0]-1])for(const j of [0,dimensions[1]-1])for(const k of [0,dimensions[2]-1])
+     distances.push(dot([0,1,2].map(n=>origin[n]+x[n]*i+y[n]*j+z[n]*k-s.center[n]),s.normal));
+-  if(!distances.every(Number.isFinite)||Math.min(...distances)>half+1e-6||Math.max(...distances)<-half-1e-6)invalid();
++  if(!distances.every(Number.isFinite))invalid();
+ }

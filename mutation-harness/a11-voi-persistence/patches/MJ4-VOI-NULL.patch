@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index 3350f12a64de28a70492630f02c1b4b155d6378c..6054c2ac41d8eb44bac8c7f4fffab8a7ec50051b 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -243,7 +243,7 @@
+       if(saved.voiSlab){writeEditors(saved.voiSlab);voiEnable.checked=true;voiPreset.value=jobs.presetFor(saved.voiSlab.normal);}else voiEnable.checked=false;
+       check(op);
+       op.sequence=sequenceFor(op);op.ready=true;
+-      const shown=await bounded(op.sequence.start(request));
++      const shown=await bounded(op.sequence.start({...request,voiSlab:null}));
+       if(shown!==true||operation!==op)throw op.failure||Error('저장한 MIP 표시의 최종 렌더를 확인하지 못해 MIP 작업을 복원하지 않았습니다.');
+       check(op);
+       op.pending.delete(cancel);op.restoring=null;saveState.restored(op,saved);controls.disabled=false;voi.disabled=!!op.voiProblem;
