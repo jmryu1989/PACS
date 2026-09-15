@@ -181,14 +181,18 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   };
   // Placed before the VR button so existing callers that open VR as the panel's last button keep that target.
   const mipButton=document.createElement('button');mipButton.textContent='Open MIP Viewer';vrButton.before(mipButton);let mip=null,mipLoading=false;
-  // Open MIP Viewer and a MIP Job restore load the same scripts; a restore bounds every load by its Job deadline.
-  const loadMip=async(deadline,failure)=>{
-    for(const [name,file] of [['KinVolumeMip','volume-mip.js'],['KinVolumeMipJob','volume-mip-job.js'],['kinCreateVolumeMip','viewer-volume-mip.js']])if(!window[name])await new Promise((resolve,reject)=>{
+  // Open MIP Viewer and a MIP Job restore load the same scripts; a restore bounds every load by its Job deadline. The MIP Batch
+  // model is optional for the viewer and a version 12 restore (its panel then says so) and required only by a version 13 restore.
+  const loadMip=async(deadline,failure,batch=false)=>{
+    const load=([name,file],message)=>window[name]?Promise.resolve():new Promise((resolve,reject)=>{
       const script=document.createElement('script');script.src='/worklist/hpacs-lite/'+file;let finished=false;
       const finish=error=>{if(finished)return;finished=true;clearTimeout(timer);script.onload=script.onerror=null;script.remove();error?reject(error):resolve();};
-      const timer=setTimeout(()=>finish(Error(failure)),Math.max(0,Math.min(30000,deadline-Date.now())));
-      script.onload=()=>finish(window[name]?null:Error('MIP Viewer 도구를 확인하지 못했습니다.'));script.onerror=()=>finish(Error(failure));document.head.append(script);
+      const timer=setTimeout(()=>finish(Error(message)),Math.max(0,Math.min(30000,deadline-Date.now())));
+      script.onload=()=>finish(window[name]?null:Error(name==='KinVolumeMipBatch'?message:'MIP Viewer 도구를 확인하지 못했습니다.'));script.onerror=()=>finish(Error(message));document.head.append(script);
     });
+    for(const entry of [['KinVolumeMip','volume-mip.js'],['KinVolumeMipJob','volume-mip-job.js'],['kinCreateVolumeMip','viewer-volume-mip.js']])await load(entry,failure);
+    const batchFailure='MIP Batch 도구를 불러오지 못해 MIP 작업을 복원하지 않았습니다.';
+    try{await load(['KinVolumeMipBatch','volume-mip-batch.js'],batchFailure);}catch(error){if(batch)throw error;}
   };
   const createMip=()=>mip||=window.kinCreateVolumeMip({target,permitted:()=>!busy&&permitted(),alive,owner,notice:message=>{if(alive())status.textContent=message;}});
   mipButton.onclick=async()=>{
@@ -203,16 +207,18 @@ window.kinCreateVolumeOrientation=function({services,selected,live,allowed=live,
   // every other Job restore performs. A MIP Viewer that was never opened has nothing to capture, lose or close.
   const mipJob={
     capture:readOnly=>mip?mip.job.capture(readOnly):null,
+    // The recipe of the MIP Batch preview shown with that display, or null; it refuses while a MIP Batch is being made.
+    batch:readOnly=>mip?mip.job.batch(readOnly):null,
     viewport:()=>mip?mip.job.viewport():null,
     dirty:()=>{try{return !!mip&&mip.job.dirty();}catch(_){return true;}},
-    saved:(value,volume)=>{try{mip?.job.saved(value,volume);}catch(_){}},
+    saved:(value,volume,batch=null)=>{try{mip?.job.saved(value,volume,batch);}catch(_){}},
     cancels:event=>{try{return !!mip&&mip.job.cancels(event);}catch(_){return false;}},
-    async restore(value,current=()=>true,deadline=Date.now()+60000,viewportId){
+    async restore(value,current=()=>true,deadline=Date.now()+60000,viewportId,batch=null){
       try{
         if(!alive())throw Error('MIP Viewer 계정이 변경되어 MIP 작업을 복원하지 않았습니다.');
-        await loadMip(deadline,'MIP Viewer 도구를 불러오지 못해 MIP 작업을 복원하지 않았습니다.');
+        await loadMip(deadline,'MIP Viewer 도구를 불러오지 못해 MIP 작업을 복원하지 않았습니다.',batch!==null);
         if(!alive()||!current())throw Error('화면이 변경되어 MIP 작업 복원을 중단했습니다.');
-        await createMip().job.restore(value,{current,deadline,viewportId});
+        await createMip().job.restore(value,{current,deadline,viewportId,batch});
       }catch(error){
         // The Job rollback follows every MIP restore failure, so the reason says so even when it names no screen itself.
         const message=error?.message||'MIP 작업을 복원하지 못했습니다.';

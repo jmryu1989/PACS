@@ -67,6 +67,8 @@ window.kinViewerJobs = function (services, model) {
         if (shape === 11) throw new Error('3D Path 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         // A MIP Viewer display is a derived whole-volume projection; it has no print page yet.
         if (shape === 12) throw new Error('MIP Viewer 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
+        // A MIP Batch is a display-only rotation preview; its frames are never persisted, printed or filmed.
+        if (shape === 13) throw new Error('MIP Batch 작업은 아직 출력할 수 없습니다. 저장과 복원만 지원합니다.');
         const unchanged = () => live() && JSON.stringify(currentSnapshot(true)) === JSON.stringify(snapshot);
         const assets=[['kinViewerJobPrint','viewer-job-print.js'],['kinViewerEditorLink','viewer-editor-link.js'],...([4,5,6].includes(row?.snapshotVersion??snapshot?.version)?[['kinRenderVolumeJobPrint','viewer-volume-job-print.js']]:[])].filter(([name])=>typeof window[name]!=='function');
         if (assets.length) {
@@ -175,10 +177,11 @@ window.kinViewerJobs = function (services, model) {
         text('strong', row.title + (row.hidden ? ' · Hidden' : ''), item);
         text('p', row.authorActor + ' · ' + new Date(row.createdAt).toLocaleString() + ' · r' + row.revision, item); text('p', row.description, item);
         if (!row.hidden) button(item, 'Restore Job', () => run('restore', row));
-        if (!row.hidden && ![7,8,9,10,11,12].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
+        if (!row.hidden && ![7,8,9,10,11,12,13].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));
         // A merged layout may hold no reconstructed cell at all, so it is not labelled as one.
         if(row.snapshotVersion===9)text('p','Merged Cell Layout · 출력 미지원',item);
         else if(row.snapshotVersion===12)text('p','MIP Viewer · 출력 미지원 · 표시 전용 투영 작업',item);
+        else if(row.snapshotVersion===13)text('p','MIP Batch · 출력 미지원 · 회전 투영 표시 작업',item);
         else if(row.snapshotVersion===10)text('p','Curved MPR · 출력 미지원 · 곡선을 따라 펼친 재구성 표시 작업',item);
         else if(row.snapshotVersion===11)text('p','3D Path · 출력 미지원 · 경로 평면과 경로를 따라 펼친 재구성 표시 작업',item);
         else if([4,5,6,7,8].includes(row.snapshotVersion))text('p',(row.snapshotVersion===8?'MPR Mixed Layout · 출력 미지원':row.snapshotVersion===7?'MPR Plane Layout · 출력 미지원':row.snapshotVersion===6?'MPR 3D Annotations':row.snapshotVersion===5?'MPR Batch':'MPR')+' · 재구성 표시 작업',item);
@@ -214,7 +217,7 @@ window.kinViewerJobs = function (services, model) {
       throw new Error('원본 프레임 로딩에 실패했습니다.');
     }
     async function apply(value, ticket) {
-      if([4,5,6,7,8,9,10,11,12].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
+      if([4,5,6,7,8,9,10,11,12,13].includes(value.version))return volumeTools().apply(value,()=>live()&&serial===ticket);
       const sets = value.cells.map(resolve), ids = value.cells.map(() => 'kin-job-' + crypto.randomUUID());
       if (JSON.stringify(value.studies) !== JSON.stringify(studies)) throw new Error('저장한 현재·비교 검사를 같은 순서로 먼저 여세요.');
       const current = () => live() && serial === ticket;
@@ -275,7 +278,7 @@ window.kinViewerJobs = function (services, model) {
           // A missing MPR asset is not a shape problem, so that reason is kept as it is.
           let previous; try { previous = capture(); }
           catch (e) { throw new Error(volumeJobs ? '현재 화면을 저장 형식으로 읽을 수 없어 복원하지 않았습니다. 복원할 수 있는 배치를 먼저 여세요.' : e.message); }
-          if([4,5,6,7,8,9,10,11,12].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
+          if([4,5,6,7,8,9,10,11,12,13].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
           try { await apply(job.snapshot, ticket); }
           catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
           finally { applying = false; }
@@ -287,6 +290,7 @@ window.kinViewerJobs = function (services, model) {
             : job.snapshot.version === 10 ? 'Curved MPR 작업을 복원했습니다. 곡선을 따라 펼친 재구성 표시이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
             : job.snapshot.version === 11 ? '3D Path 작업을 복원했습니다. 경로 수직·평행 평면과 펼친 표시는 재구성이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
             : job.snapshot.version === 12 ? 'MIP 작업을 복원했습니다. 표시 전용 투영이며 원본 영상과 W/L은 바뀌지 않았습니다.'
+            : job.snapshot.version === 13 ? 'MIP Batch 작업을 복원했습니다. 회전 투영 미리보기는 표시 전용이며 원본 영상과 W/L은 바뀌지 않았습니다.'
             : [4,5,6,7,8].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
@@ -301,19 +305,22 @@ window.kinViewerJobs = function (services, model) {
             const readOnly = action === 'saveMip';
             if (before !== signature(readOnly)) throw new Error('영상 조작이 변경되었습니다. 다시 저장하세요.');
             const snapshot = capture(true, readOnly); if (action === 'saveAnnotations') {
-              if([4,5,6,7,8,9,10,11,12].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
+              if([4,5,6,7,8,9,10,11,12,13].includes(snapshot.version))throw new Error('MPR 작업은 원본 표식 저장과 별개입니다. Save New Job으로 표시 상태를 저장하세요.');
               snapshot.version = 3;
             }
-            // Save MIP Job sends only a MIP Job; on a screen that is not the three-plane layout the capture is another shape.
-            if (action === 'saveMip' && snapshot.version !== 12) throw new Error('MIP 작업은 3평면 1×3·3×1 MPR 배치에서 저장할 수 있습니다.');
+            // Save MIP Job sends only a MIP Job (version 13 when a MIP Batch preview is shown with it); on a screen that is not the
+            // three-plane layout the capture is another shape.
+            if (action === 'saveMip' && ![12,13].includes(snapshot.version)) throw new Error('MIP 작업은 3평면 1×3·3×1 MPR 배치에서 저장할 수 있습니다.');
             const mipFields = action === 'saveMip';
             pending = { body: JSON.stringify({ id: crypto.randomUUID(), title: mipFields ? String(fields?.title ?? '').trim() : title.value, description: mipFields ? String(fields?.description ?? '') : description.value, snapshot }), url: path };
           } else if (action === 'retryMip') {
-            // Retry MIP Save resends the kept body only while it is the MIP Job the viewer still shows.
-            let kept = null, shown = null;
+            // Retry MIP Save resends the kept body only while it is the display the viewer still shows: the same block with the same
+            // MIP Batch recipe, or none (a version 12 body has no mipBatch key, which the model compares as none).
+            let kept = null, shown = null, shownBatch = null;
             try { kept = pending && JSON.parse(pending.body); } catch (_) { kept = null; }
-            try { shown = window.kinVolumeMipJob?.capture?.(true) ?? null; } catch (_) { shown = null; }
-            if (kept?.snapshot?.version !== 12 || !shown || !window.KinVolumeMipJob?.same(kept.snapshot.mip, shown))
+            try { shown = window.kinVolumeMipJob?.capture?.(true) ?? null; shownBatch = shown ? window.kinVolumeMipJob?.batch?.(true) ?? null : null; } catch (_) { shown = null; }
+            const keptPair = kept?.snapshot ? { version: kept.snapshot.version, mip: kept.snapshot.mip, mipBatch: kept.snapshot.mipBatch } : null;
+            if (!shown || !window.KinVolumeMipJob?.retryable?.(keptPair, shown, shownBatch))
               throw new Error('재시도할 MIP 저장 요청이 현재 표시와 같지 않습니다. MIP Viewer를 닫고 Retry Request로 이전 요청을 확인하세요.');
           } else if (action === 'edit') {
             if (!editRow) throw new Error('수정할 작업의 제목·설명 수정 버튼을 누르세요.'); row = editRow;
@@ -323,15 +330,15 @@ window.kinViewerJobs = function (services, model) {
           }
           if (!pending) throw new Error('재시도할 요청이 없습니다.');
           const sent=JSON.parse(pending.body);dispatched=true;const receipt=await api(pending.url, { method: 'POST', body: pending.body });
-          // A MIP Job is Saved only for this very body: the committed summary names the sent id and version 12. That is
+          // A MIP Job is Saved only for this very body: the committed summary names the sent id and its version, 12 or 13. That is
           // decided here, before the list refresh, so a refresh failure cannot turn a committed save into an error.
-          const committedMip = sent.snapshot?.version === 12 && receipt?.id === sent.id && receipt?.snapshotVersion === 12;
+          const committedMip = [12, 13].includes(sent.snapshot?.version) && receipt?.id === sent.id && receipt?.snapshotVersion === sent.snapshot.version;
           const mipAction = action === 'saveMip' || action === 'retryMip';
           if (outcome) { outcome.state = committedMip ? 'saved' : 'not-saved'; outcome.sent = true; outcome.message = committedMip ? 'MIP 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.' : 'MIP 작업 저장 응답을 확인할 수 없습니다. 작업 목록을 확인하세요.'; }
           if(sent.snapshot?.volume)window.kinMprMarks?.saved(sent.snapshot.marks||{version:1,visible:true,sync:true,marks:[]},sent.snapshot.volume);
           if(sent.snapshot?.volume)window.kinMprCurved?.saved(sent.snapshot.curved||null,sent.snapshot.volume);
           if(sent.snapshot?.volume)window.kinMprPath?.saved(sent.snapshot.path||null,sent.snapshot.volume);
-          if(committedMip)window.kinVolumeMipJob?.saved(sent.snapshot.mip,sent.snapshot.volume);
+          if(committedMip)window.kinVolumeMipJob?.saved(sent.snapshot.mip,sent.snapshot.volume,sent.snapshot.mipBatch??null);
           pending = editRow = null;
           // The MIP Viewer's request never clears the panel's own Job Title or Description.
           if (editSerial === edit && !['hide', 'retry', 'saveMip', 'retryMip'].includes(action)) { title.value = ''; description.value = ''; }
@@ -363,7 +370,8 @@ window.kinViewerJobs = function (services, model) {
       owner: () => live() && me ? JSON.stringify([me.institution, me.sub]) : null,
       writable: () => live() && !!me && !!writable(),
       busy: () => !live() || busy || applying,
-      pending: () => { if (!pending) return null; try { const b = JSON.parse(pending.body); return { version: b?.snapshot?.version, mip: b?.snapshot?.mip }; } catch (_) { return { version: undefined }; } },
+      // A version 12 body has no mipBatch key, so mipBatch is undefined there; the MIP Job model compares it as no preview.
+      pending: () => { if (!pending) return null; try { const b = JSON.parse(pending.body); return { version: b?.snapshot?.version, mip: b?.snapshot?.mip, mipBatch: b?.snapshot?.mipBatch }; } catch (_) { return { version: undefined }; } },
       save: async fields => { const outcome = { state: 'not-saved', message: '', sent: false }; await run('saveMip', null, undefined, false, fields, outcome); return { ...outcome, message: outcome.message || 'MIP 작업을 저장하지 않았습니다.' }; },
       retry: async () => { const outcome = { state: 'not-saved', message: '', sent: false }; await run('retryMip', null, undefined, false, null, outcome); return { ...outcome, message: outcome.message || 'MIP 작업을 저장하지 않았습니다.' }; },
     });

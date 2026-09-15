@@ -57,10 +57,14 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(value.version===11&&!window.kinMprPath)throw Error('3D Path 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
     // A MIP Viewer Job is reopened by the MIP Viewer, so its tool and its computation are checked before any layout
     // change: an algorithm this viewer does not implement is refused (재현 불가), never reinterpreted.
-    if(value.version===12){
+    if(value.version===12||value.version===13){
       if(!window.kinVolumeMipJob)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
       const m=value.mip;
       if(!m||m.schema!==1||m.algorithm!=='kin-mip-1'||m.coordinates!=='LPS_mm')throw Error('이 MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
+      // Version 13 adds a MIP Batch recipe. Its model loads lazily with the MIP Viewer inside the restore, so only the ids are
+      // checked here; a model that then fails to load throws into the Job rollback instead.
+      const b=value.mipBatch;
+      if(value.version===13&&(!b||b.schema!==1||b.algorithm!=='kin-mip-batch-1'))throw Error('MIP Batch 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
     }
     // Every stack cell of a mixed layout must find its own original series and frame before
     // the layout is touched, on exactly the rule the version 2 Job already applies.
@@ -152,6 +156,9 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     // An open MIP Viewer is asked the same two questions: its confirmed Job block where the three-plane target exists
     // (it throws its own refusal for Rendering, Original or geometry), whether closing would lose work where not.
     const mip=named?null:window.kinVolumeMipJob?.capture(readOnly)||null;
+    // The recipe of the MIP Batch preview shown with that display is read in the same synchronous turn as its block, so no preview
+    // change can fall between them; it refuses while a MIP Batch is being made. A preview alone is regenerable and never dirty.
+    const mipBatch=mip?window.kinVolumeMipJob.batch?.(readOnly)??null:null;
     const projecting=named?!!window.kinVolumeMipJob?.dirty?.():!!mip;
     // A batch recipe and 3D marks are three-plane features. Refusing them here keeps the
     // user's own state visible instead of writing a v7 snapshot that quietly lost it.
@@ -178,7 +185,8 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       const shown=cells[active].properties,d=mip.display;
       if(d?.voiRange?.lower!==shown.voiRange?.lower||d.voiRange.upper!==shown.voiRange.upper||d.interpolationType!==shown.interpolationType)
         throw Error('MIP Viewer의 밝기 범위·보간이 활성 MPR 평면과 달라 저장하지 않았습니다. MIP Viewer를 닫고 다시 연 뒤 저장하세요.');
-      return JSON.parse(JSON.stringify({version:12,studies,rows,cols,active,volume:reference,cells,mip}));
+      // Version 13 is exactly that snapshot plus the recipe of the MIP Batch preview shown with the display (conditions only).
+      return JSON.parse(JSON.stringify(mipBatch?{version:13,studies,rows,cols,active,volume:reference,cells,mip,mipBatch}:{version:12,studies,rows,cols,active,volume:reference,cells,mip}));
     }
     // Version 11 is the version 4 snapshot plus one 3D path, under the same rule as a curve; a
     // curve and a path are two reconstructions and one Job holds only one of them.
@@ -331,8 +339,9 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
     if(value.version===10)await window.kinMprCurved.restore(value.curved,current,deadline);else window.kinMprCurved?.clearForJob();
     if(value.version===11)await window.kinMprPath.restore(value.path,current,deadline);else window.kinMprPath?.clearForJob();
     // The MIP Viewer display is reopened last, on the restored active plane and inside the same deadline; a failure or a
-    // user cancel throws into the caller's rollback, and every other Job closes an open MIP Viewer.
-    if(value.version===12)await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active]);else window.kinVolumeMipJob?.clearForJob();
+    // user cancel throws into the caller's rollback, and every other Job closes an open MIP Viewer. A version 13 Job hands over its
+    // MIP Batch recipe, which the viewer regenerates only after that display is Final, under its own explicit budget.
+    if(value.version===12||value.version===13)await window.kinVolumeMipJob.restore(value.mip,current,deadline,ids[value.active],value.mipBatch??null);else window.kinVolumeMipJob?.clearForJob();
     }finally{crosshair.release();}
   }
   return {capture,resolve,apply};
