@@ -288,3 +288,145 @@ test('a draft entry keeps the current role and carries the unsaved footer', () =
   assert.equal(rules.match(/@page report-\d+\{/g).length, 2);
   assert.ok(rules.endsWith('.intro{page:report-0}'));
 });
+
+/* A11-OUTPUT transport fix (hosted diagnostic run 35022850312): the one source read of every saved-image output. Chromium failed a
+ * read bound to an HTTP/2 connection whose GOAWAY arrived before the read's stream existed, with ERR_FAILED and no resend of its
+ * own, so fetch() rejected it with a TypeError before any response. */
+const vm = require('node:vm'), fs = require('node:fs'), path = require('node:path');
+const SOURCE_READ_FAILED = '출력 원본을 읽지 못했습니다. 다시 확인하세요.';
+const transportRejection = () => Promise.reject(new TypeError('Failed to fetch'));
+const aborted = () => Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+function reply(chunks, { ok = true, body = true, failAt = -1, failure = () => new TypeError('network error'), cancelled = [] } = {}) {
+  let index = 0;
+  return { ok, status: ok ? 200 : 503, body: body ? { getReader: () => ({
+    read: async () => { if (index === failAt) { index++; throw failure(); } return index < chunks.length ? { done: false, value: chunks[index++] } : { done: true }; },
+    cancel: async () => { cancelled.push(true); } }) } : null };
+}
+async function withFetch(route, work) {
+  const real = globalThis.fetch, calls = [];
+  globalThis.fetch = (url, init) => { calls.push({ url, init }); return route(url, init, calls.filter(call => call.url === url).length); };
+  // A loader whose other worker is still reading settles against this stub before the real fetch returns.
+  try { return await work(calls); } finally { await new Promise(resolve => setTimeout(resolve, 20)); globalThis.fetch = real; }
+}
+
+test('a source read that fetch() rejects before any response is sent once more on the same signal', async () => {
+  const signal = new AbortController().signal, budget = { bytes: 0 };
+  await withFetch((url, init, n) => n === 1 ? transportRejection() : reply([Uint8Array.of(1, 2), Uint8Array.of(3)]), async calls => {
+    assert.deepEqual([...await identity.sourceBytes('/instances/a/simplified-tags', signal, 16, budget)], [1, 2, 3]);
+    assert.deepEqual(calls.map(call => call.url), ['/instances/a/simplified-tags', '/instances/a/simplified-tags']);
+    for (const { init } of calls)
+      assert.deepEqual([init.signal === signal, init.cache, init.credentials, init.headers.Accept], [true, 'no-store', 'same-origin', 'application/json']);
+    assert.equal(budget.bytes, 3);
+  });
+});
+
+test('a source read rejected on both sends reads as the source-read failure after exactly two sends', async () => {
+  await withFetch(() => transportRejection(), async calls => {
+    await assert.rejects(identity.sourceBytes('/instances/a/frames/0/image-uint16', new AbortController().signal, 16, { bytes: 0 }, 'image/x-portable-arbitrarymap'),
+      error => error.name === 'Error' && error.message === SOURCE_READ_FAILED);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].init.headers.Accept, 'image/x-portable-arbitrarymap');
+  });
+});
+
+test('an abort (close, re-check or the output timer) is never sent again and keeps its own error for bounded()', async () => {
+  const before = new AbortController(); before.abort();
+  await withFetch((url, init) => Promise.reject(init.signal.aborted ? aborted() : new TypeError('Failed to fetch')), async calls => {
+    await assert.rejects(identity.sourceBytes('/a', before.signal, 16, { bytes: 0 }), { name: 'AbortError' });
+    assert.equal(calls.length, 1);
+  });
+  const timer = new AbortController(), expired = aborted();
+  await withFetch((url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(expired), { once: true })), async calls => {
+    const read = identity.sourceBytes('/a', timer.signal, 16, { bytes: 0 }); setTimeout(() => timer.abort(), 5);
+    await assert.rejects(read, thrown => thrown === expired);
+    assert.equal(calls.length, 1);
+  });
+  // A rejection that arrives after the signal was aborted is not sent again either.
+  const late = new AbortController();
+  await withFetch(() => { late.abort(); return transportRejection(); }, async calls => {
+    await assert.rejects(identity.sourceBytes('/a', late.signal, 16, { bytes: 0 }), { name: 'TypeError', message: 'Failed to fetch' });
+    assert.equal(calls.length, 1);
+  });
+});
+
+test('an HTTP error response or a response without a body is not sent again and keeps the source-read message', async () => {
+  for (const answer of [reply([], { ok: false }), reply([], { body: false })])
+    await withFetch(() => answer, async calls => {
+      await assert.rejects(identity.sourceBytes('/a', new AbortController().signal, 16, { bytes: 0 }), { message: SOURCE_READ_FAILED });
+      assert.equal(calls.length, 1);
+    });
+});
+
+test('a failed body read is not sent again: it reads as the source-read failure, cancels the reader, and an aborted read keeps its abort', async () => {
+  const cancelled = [];
+  await withFetch(() => reply([Uint8Array.of(1), Uint8Array.of(2)], { failAt: 1, cancelled }), async calls => {
+    await assert.rejects(identity.sourceBytes('/a', new AbortController().signal, 16, { bytes: 0 }), { message: SOURCE_READ_FAILED });
+    assert.deepEqual([calls.length, cancelled.length], [1, 1]);
+  });
+  const controller = new AbortController(), error = aborted();
+  await withFetch(() => reply([Uint8Array.of(1)], { failAt: 0, failure: () => { controller.abort(); return error; } }), async calls => {
+    await assert.rejects(identity.sourceBytes('/a', controller.signal, 16, { bytes: 0 }), thrown => thrown === error);
+    assert.equal(calls.length, 1);
+  });
+});
+
+test('the size and shared budget limits keep their own message and are not sent again', async () => {
+  await withFetch(() => reply([new Uint8Array(17)]), async calls => {
+    await assert.rejects(identity.sourceBytes('/a', new AbortController().signal, 16, { bytes: 0 }), { message: '출력 원본 용량 한도를 초과했습니다.' });
+    assert.equal(calls.length, 1);
+  });
+  await withFetch(() => reply([new Uint8Array(4)]), async calls => {
+    await assert.rejects(identity.sourceBytes('/a', new AbortController().signal, 16, { bytes: 67108862 }), { message: '출력 원본 용량 한도를 초과했습니다.' });
+    assert.equal(calls.length, 1);
+  });
+});
+
+// The real version 4-6, 12 and 13 volume loader, reading through the shared source read. Its digest check needs every source, so a
+// digest refusal proves every read, the once-rejected one included, completed; the lookup it sends is declared read-only.
+const HPACS = path.join(__dirname, '../worklist-v0/hpacs-lite');
+const STUDY_UID = '1.2.840.1.1', SERIES_UID = '1.2.840.1.2', SOPS = ['1.2.840.1.5', '1.2.840.1.6'];
+const instanceId = index => 'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-' + String(index).padStart(8, '0');
+function loaderWorld(version) {
+  const sandbox = { crypto: globalThis.crypto, TextDecoder, TextEncoder, cornerstone: {}, kinRenderVolumeMipPrint: async () => ({}),
+    KinVolumeBatch: { plan() {} }, KinVolumeBatchScout: { camera() {}, line() {} }, kinRenderVolumeScout: async () => ({}) };
+  sandbox.window = sandbox;
+  vm.runInContext(fs.readFileSync(path.join(HPACS, 'viewer-volume-job-print.js'), 'utf8'), vm.createContext(sandbox), { filename: 'viewer-volume-job-print.js' });
+  const cell = { projection: { blend: 1 } };
+  const snapshot = { version, volume: { study: STUDY_UID, series: SERIES_UID, sops: SOPS, sourceDigest: 'f'.repeat(64) },
+    ...(version === 5 ? { batch: { cell } } : { cells: [cell] }) };
+  return { load: (api, signal) => sandbox.kinRenderVolumeJobPrint({ snapshot, api, bytes: identity.sourceBytes, signal, check() {} }) };
+}
+function source(url) {
+  const [, index, kind] = /^\/instances\/aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-(\d{8})\/(attachments\/dicom\/info|simplified-tags|frames\/0\/image-uint16)$/.exec(url);
+  const json = value => reply([new TextEncoder().encode(JSON.stringify(value))]);
+  if (kind === 'attachments/dicom/info') return json({ UncompressedMD5: String(Number(index)).repeat(32) });
+  if (kind === 'simplified-tags') return json({ StudyInstanceUID: STUDY_UID, SeriesInstanceUID: SERIES_UID, SOPInstanceUID: SOPS[Number(index)],
+    SOPClassUID: '1.2.840.10008.5.1.4.1.1.2', Modality: 'CT', NumberOfFrames: 1, SamplesPerPixel: 1, PhotometricInterpretation: 'MONOCHROME2',
+    Rows: 2, Columns: 2, BitsAllocated: 16, BitsStored: 12, HighBit: 11, PixelRepresentation: 0 });
+  const header = new TextEncoder().encode('P7\nWIDTH 2\nHEIGHT 2\nDEPTH 1\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nENDHDR\n'), frame = new Uint8Array(header.length + 8);
+  frame.set(header);
+  return reply([frame]);
+}
+
+test('the version 4-6, 12 and 13 volume loader reads past one rejected source read, fails on two, and never sends an abort again', async () => {
+  const target = '/instances/' + instanceId(1) + '/simplified-tags';
+  for (const version of [4, 5, 6, 12, 13]) {
+    const world = loaderWorld(version), lookups = [];
+    const api = async (url, options) => { lookups.push([url, options.method, options.idempotent]); return { id: instanceId(SOPS.indexOf(JSON.parse(options.body).sopUid)) }; };
+    await withFetch((url, init, n) => url === target && n === 1 ? transportRejection() : source(url), async calls => {
+      await assert.rejects(world.load(api, new AbortController().signal), { message: '저장 당시 전체 원본과 달라 출력하지 않았습니다.' }, 'version ' + version);
+      assert.equal(calls.filter(call => call.url === target).length, 2, 'version ' + version + ': the rejected read was sent once more');
+      assert.equal(calls.filter(call => call.url.endsWith('/frames/0/image-uint16')).length, 2, 'version ' + version + ': every frame was read');
+      assert.deepEqual(lookups, [['/dicom/lookup', 'POST', true], ['/dicom/lookup', 'POST', true]], 'version ' + version);
+    });
+    await withFetch(url => url === target ? transportRejection() : source(url), async calls => {
+      await assert.rejects(world.load(api, new AbortController().signal), { message: SOURCE_READ_FAILED }, 'version ' + version);
+      assert.equal(calls.filter(call => call.url === target).length, 2, 'version ' + version + ': exactly two sends');
+    });
+    const controller = new AbortController();
+    await withFetch(url => { if (url !== target) return source(url); controller.abort(); return Promise.reject(aborted()); }, async calls => {
+      await assert.rejects(world.load(api, controller.signal), { name: 'AbortError' }, 'version ' + version);
+      assert.equal(calls.filter(call => call.url === target).length, 1, 'version ' + version + ': an abort is not sent again');
+    });
+  }
+});

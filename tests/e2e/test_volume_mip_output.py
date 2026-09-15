@@ -38,7 +38,7 @@ MESSAGES={'load':'출력 화면을 불러오지 못했습니다. 다시 누르�
  'size':'MIP 출력 영상 크기를 확인하지 못했습니다.','capability':'고정 뷰어에서 MIP 출력 기능을 확인하지 못했습니다.','average':'Raysum 평균 계산 모듈을 확인할 수 없어 출력하지 않았습니다.',
  'capacity':'출력 CT 원본은 최대 256장까지 지원합니다.','mid_read':'출력 준비 중 원본이 변경되었습니다.','digest':'저장 당시 전체 원본과 달라 출력하지 않았습니다.',
  'frame_of_reference':'저장한 MIP 작업의 좌표계(Frame of Reference)가 출력 원본과 달라 출력하지 않았습니다.','outside':'저장한 VOI Slab이 출력 CT 볼륨과 겹치지 않아 출력하지 않았습니다.',
- 'reproduce':'MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 출력하지 않았습니다.','ready':'미리보기 내용을 확인'}
+ 'reproduce':'MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 출력하지 않았습니다.','ready':'미리보기 내용을 확인','source_read':'출력 원본을 읽지 못했습니다. 다시 확인하세요.'}
 NOTE='저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증'
 MODELS='()=>[typeof window.KinVolumeMip,typeof window.KinVolumeMipJob,typeof window.KinVolumeMipBatch,typeof window.KinVolumeMipOutput,typeof window.kinRenderVolumeMipPrint,typeof window.kinCreateVolumeMip]'
 PRESET_VALUES="()=>Object.fromEntries(['axial','sagittal','coronal'].map(k=>[k,[Array.from(cornerstone.CONSTANTS.MPR_CAMERA_VALUES[k].viewPlaneNormal),Array.from(cornerstone.CONSTANTS.MPR_CAMERA_VALUES[k].viewUp)]]))"
@@ -455,6 +455,29 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
    response=route.fetch();value=response.json();value['UncompressedMD5']='0'*32;route.fulfill(response=response,json=value)
   v.route('**/attachments/dicom/info',changed);self.open_output(v,a,V13,MESSAGES['digest']);self.refused(v,MESSAGES['digest']);v.unroute('**/attachments/dicom/info',changed)
   self.refresh_output(v);v.evaluate(TAKE)
+  # Transport fix (hosted diagnostic run 35022850312): Chromium failed one source read with net::ERR_FAILED, before any response and
+  # without resending it, when its HTTP/2 connection received nginx's GOAWAY. That page-visible rejection is injected on a direct
+  # print, outside the guarded open_output: a source read or a lookup rejected once is sent once more and the page is ready with every
+  # fresh read; the same read rejected on both sends refuses with the source-read message after exactly two sends and leaves nothing.
+  def rejecting(fragment,times):
+   sent=[]
+   def reject(route,request):
+    if fragment in request.url and (not sent or request.url==sent[0]):
+     sent.append(request.url)
+     if len(sent)<=times:route.abort('failed');return
+    route.continue_()
+   return reject,sent
+  for pattern,fragment,times,message in (('**/simplified-tags','/simplified-tags',1,'ready'),('**/api/dicom/lookup','/api/dicom/lookup',1,'ready'),
+                                         ('**/simplified-tags','/simplified-tags',2,'source_read')):
+   reject,sent=rejecting(fragment,times);v.route(pattern,reject);requests.clear()
+   self.print_titled(v,a,V12);v.wait_for_function(WAIT_STATUS,timeout=300000);v.unroute(pattern,reject)
+   frames=[url for method,url in requests if '/frames/0/image-' in url];lookups=[url for method,url in requests if method=='POST' and url.split('?')[0].endswith('/api/dicom/lookup')]
+   if message=='ready':
+    expect(status).to_contain_text(MESSAGES['ready'],timeout=1000);lookup=fragment=='/api/dicom/lookup'
+    self.assertEqual([len(frames),len(lookups)],[33,34 if lookup else 33],fragment);self.assertEqual(sent.count(sent[0]),34 if lookup else 2,fragment)
+   else:
+    self.refused(v,MESSAGES['source_read']);self.assertNotIn('Failed to fetch',status.text_content());self.assertEqual(sent,[sent[0]]*2,'exactly two sends of the rejected read')
+   v.evaluate(TAKE)
   # Intercepted GET: a Frame of Reference or VOI Slab that does not fit the fresh volume refuses after the read; an algorithm this
   # viewer cannot reproduce refuses before any source read.
   for title,change,message,reads in ((V12,lambda s:s['mip'].__setitem__('frameOfReference','2.25.1234'),'frame_of_reference',True),
