@@ -53,7 +53,9 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     if(op){op.controller.abort();op.sequence?.dispose();clearTimeout(op.timeout);clearTimeout(op.accessTimer);for(const cancel of [...op.pending])cancel();try{if(op.engine?.getViewport(op.id))op.engine.disableElement(op.id);}catch(_){}}
     canvasHost.replaceChildren();identity.textContent=sourceText.textContent=label.textContent=render.textContent='';sourceDetails.open=false;delete dialog.dataset.kinMipState;if(dialog.open)dialog.close();
   }
-  function fail(op,error){if(operation!==op)return;close();notice('MIP Viewer를 닫았습니다. '+(error?.message||'다시 열어 확인하세요.'));}
+  // The first failure is kept on the operation: a restore learns of a failed display only through this close, and must
+  // throw that reason into the Job rollback rather than a generic one.
+  function fail(op,error){if(operation!==op)return;op.failure??=error;close();notice('MIP Viewer를 닫았습니다. '+(error?.message||'다시 열어 확인하세요.'));}
   function check(op){if(!current(op))throw Error('원본이나 계정이 변경되어 MIP Viewer를 닫았습니다.');}
   async function access(op){
     const get=async url=>{const r=await fetch(url,{credentials:'same-origin',cache:'no-store',headers:{'X-KIN-Subject':JSON.parse(op.owner)[1]},signal:op.controller.signal});if(!r.ok)throw Error('MIP 원본 접근 권한을 확인하지 못했습니다.');return r.json();};

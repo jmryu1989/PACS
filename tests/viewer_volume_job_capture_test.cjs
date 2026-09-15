@@ -450,3 +450,72 @@ test('apply(v12) awaits the MIP restore after cells and cameras and propagates i
  order=restoreWorld({mip:closing11,path:{restore:async value=>{paths.push(value);order.log.push('path');},clearForJob(){}}});
  await order.jobs.apply(structuredClone(v11),()=>true);assert.deepEqual(paths,[route]);assert.equal(closing11.cleared,1);assert.deepEqual(order.log.slice(-2),['path','clear']);
 });
+
+// B1 (A11-VOI-2 review-01): a failed first display reaches the MIP Viewer only through the sequence's fatal callback, so
+// restore() must throw that same reason into the Job rollback (the Jobs status the native N3 reads), not a generic fallback.
+// The real viewer-volume-mip.js runs in its own browser-like realm beside the real volume-mip.js, volume-voi.js and
+// volume-mip-job.js; only the DOM, the account fetch and the native viewport are stand-ins. A fault-free restore reaching
+// Final proves the stand-ins drive the real restore path, so each fault below is the only difference.
+function mipViewerWorld({planeWrite=null,gpu=true}={}){
+ const node=tag=>{const children=[],on=new Map(),attributes={};const e={tagName:tag,children,attributes,style:{},dataset:{},className:'',textContent:'',value:'',checked:false,disabled:false,open:false,
+  append:(...items)=>{children.push(...items);},remove(){},replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute:(name,value)=>{attributes[name]=String(value);},
+  addEventListener:(name,listener)=>{if(!on.has(name))on.set(name,new Set());on.get(name).add(listener);},removeEventListener:(name,listener)=>{on.get(name)?.delete(listener);},
+  emit:name=>{for(const listener of [...(on.get(name)||[])])listener({type:name,target:e});},contains:item=>item===e||children.some(c=>c.contains?.(item)),showModal(){e.open=true;},close(){e.open=false;}};return e;};
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ const presets={axial:{viewPlaneNormal:[0,0,-1],viewUp:[0,-1,0]},sagittal:{viewPlaneNormal:[1,0,0],viewUp:[0,0,1]},coronal:{viewPlaneNormal:[0,-1,0],viewUp:[0,0,1]}};
+ const volume={volumeId:'volume-1',dimensions:[64,64,33],spacing:[.5,.5,2.5],imageIds:['image:1'],imageData:{getSpatialExtent:()=>[0,63,0,63,0,32],indexToWorld:i=>[i[0]*.5,i[1]*.5,i[2]*2.5]}};
+ const views=new Map(),shader='for(int i = 0; i < 4; i++) {\n  float rayDirRatio = dot(rayDir, vClipPlaneNormals[i]);\n  if (rayDirRatio < 0.0) dists.y = min(dists.y, result);\n  else dists.x = max(dists.x, result);\n}';
+ const engine={views,enableElement({viewportId,element}){
+   // The MIP viewport: its two slab planes follow the camera and half thickness about the volume centre; VOI planes append.
+   let camera=null,blend=0,half=0,properties={};const extra=[],centre=[15.75,15.75,40];
+   const slab=sign=>({getOrigin:()=>centre.map((x,i)=>x-sign*camera.viewPlaneNormal[i]*half),getNormal:()=>camera.viewPlaneNormal.map(n=>sign*n)});
+   const mapper={getBlendMode:()=>blend,getSampleDistance:()=>(.5+.5+2.5)/6,getClippingPlanes:()=>[...(camera?[slab(1),slab(-1)]:[]),...extra],
+    addClippingPlane:plane=>{planeWrite?.();extra.push(plane);return true;},removeClippingPlane:plane=>{const i=extra.indexOf(plane);if(i<0)return false;extra.splice(i,1);return true;}};
+   const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
+   views.set(viewportId,{mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
+    setOrientation:key=>{camera=structuredClone(presets[key]);},setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;},
+    setProperties:value=>{properties={...properties,...value};},getProperties:()=>properties,getCamera:()=>structuredClone(camera),
+    render:()=>{setTimeout(()=>element.emit('IMAGE_RENDERED'),0);}});
+  },getViewport:id=>views.get(id),disableElement:id=>{views.delete(id);}};
+ // Without this linked program the viewer cannot confirm its clip shader, exactly as when the GPU check fails natively.
+ if(gpu)engine.offscreenMultiRenderWindow={getOpenGLRenderWindow:()=>({getViewNodeFor:mapper=>[...views.values()].some(v=>v.mapper===mapper)?
+  {get:name=>name==='tris'?{tris:{getProgram:()=>({getCompiled:()=>true,getLinked:()=>true,getFragmentShader:()=>({getSource:()=>shader})})}}:null}:null})};
+ const source={id:'vp-0',getVolumeId:()=>volume.volumeId,getRenderingEngine:()=>engine,getActors:()=>[{actor:{getMapper:()=>({})}}],
+  getProperties:()=>({voiRange:{lower:-1100,upper:1100},interpolationType:0})};
+ const target={group:'group-1',selection:'selection-1',views:[source,{id:'vp-1'},{id:'vp-2'}],source:{viewportId:'vp-0',uid:'1.2.3',series:'1.2.4',study:{id:'SYNTHETIC'}}};
+ const document={createElement:node,body:node('body'),head:node('head'),querySelectorAll:()=>[]};
+ const sandbox={document,structuredClone,crypto,AbortController,setTimeout,clearTimeout,clearInterval,
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},ResizeObserver:class{observe(){}disconnect(){}},
+  fetch:async url=>({ok:true,json:async()=>url==='/api/me'?{kind:'member',institution:'I1',sub:'u1'}:[]}),
+  cornerstone:{cache:{getVolume:id=>id===volume.volumeId?volume:null},metaData:{get:(type,id)=>type==='instance'&&id==='image:1'?{FrameOfReferenceUID:'2.25.6'}:null},
+   Enums:{Events:{IMAGE_RENDERED:'IMAGE_RENDERED'},ViewportType:{ORTHOGRAPHIC:'orthographic'}},CONSTANTS:{MPR_CAMERA_VALUES:presets}}};
+ sandbox.window=sandbox;const realm=vm.createContext(sandbox);
+ for(const file of ['volume-mip.js','volume-voi.js','volume-mip-job.js','viewer-volume-mip.js'])
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite',file),'utf8'),realm,{filename:file});
+ const notices=[],viewer=realm.kinCreateVolumeMip({target:()=>target,permitted:()=>true,alive:()=>true,owner:()=>['I1','u1'],notice:message=>notices.push(message)});
+ const dialog=document.body.children[0];
+ return {viewer,dialog,views,notices,status:()=>find(dialog,e=>e.attributes.role==='status')?.textContent};
+}
+
+test('a MIP Job restore throws the failed first display reason itself: a plane write fault or an unconfirmed GPU clip shader closes the viewer with that reason',async()=>{
+ const value={schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'2.25.6',mode:'MIP',orientation:'Axial',
+  display:{voiRange:{lower:-1100,upper:1100},interpolationType:0},voiSlab:{center:[8.125,15.75,40],normal:[1,0,0],pivot:[15.75,15.75,40],thickness:22.25}};
+ const restore=world=>world.viewer.job.restore(structuredClone(value),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0'});
+ let world=mipViewerWorld();
+ try{
+  await restore(world);
+  assert.equal(world.dialog.open,true);assert.equal(world.dialog.dataset.kinMipState,'final');assert.match(world.status(),/^저장한 MIP 작업을 복원했습니다/);assert.deepEqual(world.notices,[]);
+ }finally{world.viewer.dispose();}
+ for(const [label,options,reason] of [
+   ['clipping-plane write fault',{planeWrite:()=>{throw Error('INJECTED MIP JOB PLANE WRITE');}},'INJECTED MIP JOB PLANE WRITE'],
+   ['GPU clip shader not confirmed',{gpu:false},'투영 셰이더를 GPU에서 확인하지 못했습니다.']]){
+  world=mipViewerWorld(options);
+  try{
+   const error=await restore(world).then(()=>null,e=>e);
+   assert.ok(error,label+' must refuse the restore');
+   assert.equal(error.message,reason,label+': the Job rollback receives the sequence failure itself');
+   assert.equal(world.dialog.open,false,label);assert.equal(world.views.size,0,label+': the MIP viewport is disabled');
+   assert.deepEqual(world.notices,['MIP Viewer를 닫았습니다. '+reason],label);
+  }finally{world.viewer.dispose();}
+ }
+});
