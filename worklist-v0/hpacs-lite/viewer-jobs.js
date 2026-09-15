@@ -108,13 +108,22 @@ window.kinViewerJobs = function (services, model) {
     }
     function end() { ended = true; serial++; printer?.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     async function api(url, options = {}) {
+      const { idempotent = false, ...request } = options;
       const controller = new AbortController(), cancel = () => controller.abort(); abort.signal.addEventListener('abort', cancel, { once: true });
       options.signal?.addEventListener('abort', cancel, { once: true });
       if (options.signal?.aborted || abort.signal.aborted) cancel();
       const timer = setTimeout(cancel, 30000);
+      // A read that fetch() rejects before any response is sent once more on this call's own signal and 30-second timer. Hosted
+      // diagnostic run 35022850312: Chromium 148 fails a request whose HTTP/2 connection received GOAWAY before the request's stream
+      // was created with ERR_FAILED, and does not resend it itself. Only GET, HEAD or a POST its caller declares read-only
+      // (idempotent: true) is sent again; an abort, any HTTP response and every write are not, and a second rejection keeps the
+      // browser's own error.
+      const read = idempotent === true || ['GET', 'HEAD'].includes(String(request.method || 'GET').toUpperCase());
+      const send = () => fetch('/api' + url, { ...request, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+        headers: { 'X-KIN-CSRF': '1', ...(me ? { 'X-KIN-Subject': me.sub } : {}), ...(request.body ? { 'Content-Type': 'application/json' } : {}) } });
       try {
-        const r = await fetch('/api' + url, { ...options, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
-          headers: { 'X-KIN-CSRF': '1', ...(me ? { 'X-KIN-Subject': me.sub } : {}), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
+        let r;
+        try { r = await send(); } catch (error) { if (!read || controller.signal.aborted || error?.name !== 'TypeError' || !live()) throw error; r = await send(); }
         if (!live()) throw new Error('화면이 변경되었습니다.');
         if (r.status === 401 || r.status === 403) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
         const value = await r.json().catch(() => null);

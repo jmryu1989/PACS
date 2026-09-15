@@ -931,7 +931,7 @@ const PRINT_FILES={
  'viewer-volume-mip-print.js':s=>{s.kinRenderVolumeMipPrint=async()=>({});}};
 const PRINT_BASE=['viewer-job-print.js','viewer-editor-link.js'],PRINT_MIP=['viewer-volume-job-print.js','volume-mip.js','volume-mip-job.js','volume-mip-output.js','viewer-volume-mip-print.js'];
 const LOAD_FAILED='출력 화면을 불러오지 못했습니다. 다시 누르세요.';
-async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file](s),capture=null}){
+async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file](s),capture=null,transport=null}){
  const real=context.window.kinCreateVolumeJob;let parts=null;
  context.window.kinCreateVolumeJob=args=>{parts=args;return real(args);};
  try{world(1,3,PLANES);}finally{context.window.kinCreateVolumeJob=real;}
@@ -945,7 +945,9 @@ async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file
   setTimeout(()=>{let failed;try{failed=answer(file,sandbox)==='error';}catch(_){failed=true;}(failed?script.onerror:script.onload)?.();},0);}};
  const rows=versions.map((version,i)=>({id:'00000000-0000-4000-8000-'+String(i).padStart(12,'0'),title:'Job v'+version,description:'',snapshotVersion:version,hidden:false,authorActor:'dr.synthetic',authorSub:'u1',createdAt:0,revision:1}));
  const jobs='/api/studies/'+STUDY+'/viewer-jobs';
- const fetch=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return {status:body?200:404,ok:!!body,json:async()=>body};};
+ const base=async url=>{let body=null;if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};return {status:body?200:404,ok:!!body,json:async()=>body};};
+ // A test may stand between the panel and these answers, as the network does.
+ const fetch=transport?(url,init={})=>transport(url,init,base):base;
  sandbox={document:{createElement:element,head,querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
   location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
   setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
@@ -966,6 +968,50 @@ async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file
   print:async version=>{requested.length=0;await own(item(version),'Print Saved Images').onclick();await settle();},
   stop:()=>panel.stop()};
 }
+
+// A11-OUTPUT transport fix (hosted diagnostic run 35022850312): Chromium failed a request bound to an HTTP/2 connection whose GOAWAY
+// arrived before the request's stream existed, with ERR_FAILED and no resend of its own, so fetch() rejected it with a TypeError before
+// any response. The real viewer-jobs.js api() sends such a read once more; a write, an abort and an HTTP answer are never sent again.
+test('api() sends a read rejected before any response once more, a declared read-only POST too, and never a write, an abort or an HTTP answer',async()=>{
+ const sends=[],rejected=()=>Promise.reject(new TypeError('Failed to fetch')),ok=value=>({status:200,ok:true,json:async()=>value});
+ let rule=()=>undefined,factory=null;
+ const transport=(url,init,base)=>{sends.push({url,init});const answer=rule(url,init,sends.filter(s=>s.url===url).length);return answer===undefined?base(url):answer;};
+ const count=url=>sends.filter(s=>s.url===url).length;
+ // The panel's first account read is rejected once. Without the resend the panel stops on the browser's raw error and lists no Job.
+ rule=(url,init,n)=>url==='/api/me'&&n===1?rejected():undefined;
+ const w=await printWorld({versions:[12],transport,
+  answer:(file,s)=>file==='viewer-job-print.js'?void(s.kinViewerJobPrint=args=>{factory=args;return {open(){},openCurrent(){},close(){},destroy(){}};}):PRINT_FILES[file](s)});
+ try{
+  const account=sends.filter(s=>s.url==='/api/me');
+  assert.ok(account.length>=2,'the rejected account read was sent once more');assert.equal(account[1].init.signal,account[0].init.signal,'on the same request signal');
+  assert.ok(!w.status().includes('Failed to fetch'),w.status());
+  rule=()=>undefined;await w.print(12);assert.ok(factory,'the print dialog received the panel api');const api=factory.api;
+  // A POST its caller declares read-only (the source lookup) is sent once more, and the declaration never reaches fetch.
+  rule=(url,init,n)=>url==='/api/dicom/lookup'?(n===1?rejected():ok({id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'})):undefined;
+  assert.deepEqual(await api('/dicom/lookup',{method:'POST',idempotent:true,body:'{}'}),{id:'aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee'});
+  assert.equal(count('/api/dicom/lookup'),2);assert.ok(sends.filter(s=>s.url==='/api/dicom/lookup').every(s=>!('idempotent' in s.init)&&s.init.method==='POST'));
+  // A write is never sent again.
+  const write='/api/studies/'+STUDY+'/viewer-jobs/00000000-0000-4000-8000-000000000000/revisions';
+  rule=url=>url===write?rejected():undefined;
+  await assert.rejects(api(write.slice(4),{method:'POST',body:'{}'}),{name:'TypeError',message:'Failed to fetch'});assert.equal(count(write),1);
+  // A read rejected on both sends is sent exactly twice and keeps the browser's own error in this panel.
+  const job='/api/studies/'+STUDY+'/viewer-jobs/00000000-0000-4000-8000-000000000000';
+  rule=url=>url===job?rejected():undefined;
+  await assert.rejects(api(job.slice(4)),{name:'TypeError',message:'Failed to fetch'});assert.equal(count(job),2);
+  // An abort is never sent again: one while the read was pending, and a rejection that arrives after its caller aborted.
+  const held='/api/studies/'+STUDY+'/report-preview',controller=new AbortController();
+  rule=(url,init)=>url===held?new Promise((_,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(Error('aborted'),{name:'AbortError'})),{once:true})):undefined;
+  const pending=api(held.slice(4),{signal:controller.signal});setTimeout(()=>controller.abort(),5);
+  await assert.rejects(pending,{name:'AbortError'});assert.equal(count(held),1);
+  const late='/api/studies/'+STUDY+'/viewer-jobs/preview',gone=new AbortController();
+  rule=url=>url===late?(gone.abort(),rejected()):undefined;
+  await assert.rejects(api(late.slice(4),{method:'POST',idempotent:true,body:'{}',signal:gone.signal}),{name:'TypeError'});assert.equal(count(late),1);
+  // An HTTP answer is final.
+  const study='/api/studies/'+STUDY;
+  rule=url=>url===study?{status:503,ok:false,json:async()=>({})}:undefined;
+  await assert.rejects(api(study.slice(4)),{message:'서버 연결을 확인한 뒤 다시 시도하세요.'});assert.equal(count(study),1);
+ }finally{w.stop();}
+});
 
 test('P2 (a): Print Saved Images is offered for versions 1-6, 12 and 13 only, and the MIP rows are labelled as reconstructed outputs',async()=>{
  const all=[1,2,3,4,5,6,7,8,9,10,11,12,13,14],w=await printWorld({versions:all});

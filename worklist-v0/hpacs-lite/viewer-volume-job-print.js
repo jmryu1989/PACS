@@ -15,7 +15,8 @@ window.kinRenderVolumeJobPrint=async function({snapshot,api,bytes,signal,check})
   await Promise.all(Array.from({length:Math.min(4,slices.length)},async()=>{
     while(next<slices.length){
       const index=next++,sop=reference.sops[index];check();
-      const location=await api('/dicom/lookup',{signal,method:'POST',body:JSON.stringify({studyUid:reference.study,sopUid:sop})});
+      // The lookup only reads (Orthanc lookup and the access check), so api() may send it again after a rejection before any response.
+      const location=await api('/dicom/lookup',{signal,method:'POST',idempotent:true,body:JSON.stringify({studyUid:reference.study,sopUid:sop})});
       if(!/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(location.id))fail();
       const path='/instances/'+location.id,info=await read(path+'/attachments/dicom/info'),tags=await read(path+'/simplified-tags');check();
       const digest=info.UncompressedMD5?.toLowerCase(),rows=Number(tags.Rows),columns=Number(tags.Columns),signed=Number(tags.PixelRepresentation)===1;

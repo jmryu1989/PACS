@@ -74,8 +74,33 @@
       entries.map((entry, index) => `.report[data-print-page="${pageName(index)}"]{page:${pageName(index)}}`).join('') +
       (entries.length ? `.intro{page:${pageName(0)}}` : '');
   }
+  // The one source read of every saved-image output: the frame cells here and the version 4-6, 12 and 13 volume loader. A read that
+  // fetch() rejects before any response is sent once more on the same signal. Hosted diagnostic run 35022850312 (NetLog
+  // URL_REQUEST 18100): Chromium 148 had bound the read to an HTTP/2 connection whose GOAWAY (nginx keepalive_requests) arrived
+  // before the read's stream was created, failed it with ERR_FAILED without sending it, and did not resend it itself
+  // (net/spdy/spdy_session.cc TryCreateStream, net/http/http_network_transaction.cc HandleIOError), while reads already sent past that
+  // GOAWAY were refused and resent by Chromium. A GET changes nothing on the server, so one more send is safe. An abort (close,
+  // re-check or the output timer), an HTTP error response and a failed body read are never sent again; a second rejection or a
+  // failed body read reads as the source-read failure, and an abort keeps its own error for bounded().
+  const SOURCE_READ_FAILED = '출력 원본을 읽지 못했습니다. 다시 확인하세요.';
+  async function sourceBytes(url, signal, max, budget, accept = 'application/json') {
+    const send = () => fetch(url, { signal, cache: 'no-store', credentials: 'same-origin', headers: { Accept: accept } });
+    let response;
+    try { response = await send(); } catch (error) {
+      if (signal?.aborted || error?.name !== 'TypeError') throw error;
+      try { response = await send(); } catch (again) { if (signal?.aborted || again?.name !== 'TypeError') throw again; throw new Error(SOURCE_READ_FAILED); }
+    }
+    if (!response.ok || !response.body) throw new Error(SOURCE_READ_FAILED);
+    const reader = response.body.getReader(), chunks = []; let size = 0;
+    try { while (true) {
+      let part; try { part = await reader.read(); } catch (error) { if (signal?.aborted) throw error; throw new Error(SOURCE_READ_FAILED); }
+      if (part.done) break; size += part.value.length; budget.bytes += part.value.length;
+      if (size > max || budget.bytes > 67108864) throw new Error('출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
+    } finally { await reader.cancel().catch(() => {}); }
+    return new Uint8Array(await new Blob(chunks).arrayBuffer());
+  }
   const api = { normalizeStudyDate, dateText, dateRelation, relationText, reportTitle, reportLabel, optionLabel,
-    reportEntry, studyLine, dateLine, summaryText, pageIdentity, pageName, cssContent, pageRules };
+    reportEntry, studyLine, dateLine, summaryText, pageIdentity, pageName, cssContent, pageRules, sourceBytes };
   if (typeof module === 'object' && module.exports) module.exports = api; else root.kinViewerJobPrintIdentity = api;
 })(globalThis);
 globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
@@ -190,21 +215,15 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     catch (error) { throw expired && mipOutput(version) ? new Error(mipModel().messages.timeout) : error; }
     finally { clearTimeout(timer); c.abort(); if (controller === c) controller = null; }
   }
-  async function bytes(url, signal, max, budget, accept = 'application/json') {
-    const response = await fetch(url, { signal, cache: 'no-store', credentials: 'same-origin', headers: { Accept: accept } });
-    if (!response.ok || !response.body) throw new Error('출력 원본을 읽지 못했습니다. 다시 확인하세요.');
-    const reader = response.body.getReader(), chunks = []; let size = 0;
-    try { while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length; budget.bytes += part.value.length;
-      if (size > max || budget.bytes > 67108864) throw new Error('출력 원본 용량 한도를 초과했습니다.'); chunks.push(part.value); }
-    } finally { await reader.cancel().catch(() => {}); }
-    return new Uint8Array(await new Blob(chunks).arrayBuffer());
-  }
+  // Frame cells and the volume loader read their sources through the shared read above.
+  const bytes = identity.sourceBytes;
   async function state(item, signal, reportChoice) {
     validCurrent(item);
     await authenticate(signal);
     const readJob = async () => {
       if (!item.snapshot) return api('/studies/' + item.uid + '/viewer-jobs/' + item.id, { signal });
-      const checked = await api('/studies/' + item.uid + '/viewer-jobs/preview', { signal, method: 'POST', body: JSON.stringify({ snapshot: item.snapshot }) });
+      // The preview only checks the current display on the server (no Job, annotation or audit write), so api() may send it again.
+      const checked = await api('/studies/' + item.uid + '/viewer-jobs/preview', { signal, method: 'POST', idempotent: true, body: JSON.stringify({ snapshot: item.snapshot }) });
       // This transient adapter only feeds the renderer; it has no saved id.
       const display = structuredClone(checked.snapshot);
       if (![2,4,6].includes(display?.version) || !Array.isArray(display.cells)) throw new Error('현재 표시 확인 응답이 올바르지 않습니다.');
@@ -370,7 +389,8 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const annotationMode = job => job.snapshot.version === 6 ? ((job.transient?'처음 선택한':'저장 당시')+(job.snapshot.marks.visible?' 수동 3D 표식 포함':' 수동 3D 표식 숨김')) : job.snapshot.version === 3 ? '저장 당시 주석 포함' : '주석 미포함';
   async function render(cell, ticket, signal, budget, annotations, edit) {
     const { width, height } = cell.viewport;
-    const location = await api('/dicom/lookup', { signal, method: 'POST', body: JSON.stringify({ studyUid: cell.study, sopUid: cell.sop }) });
+    // The lookup only reads (Orthanc lookup and the access check), so api() may send it again after a rejection before any response.
+    const location = await api('/dicom/lookup', { signal, method: 'POST', idempotent: true, body: JSON.stringify({ studyUid: cell.study, sopUid: cell.sop }) });
     if (!/^[a-f0-9]{8}(?:-[a-f0-9]{8}){4}$/.test(location.id)) throw new Error('원본 참조가 올바르지 않습니다.');
     const path = '/instances/' + location.id;
     const read = async suffix => JSON.parse(new TextDecoder().decode(await bytes(path + suffix, signal, 524288, budget)));
