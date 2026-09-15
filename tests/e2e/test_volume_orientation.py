@@ -11,7 +11,8 @@ class VolumeOrientationE2E(VolumeJobsE2E):
  def starting(self):
   a,p,v=self.opened_projection();expect(v.locator('#kin-volume-orientation')).to_be_visible();expect(v.get_by_role('button',name='Reset Planes',exact=True)).to_be_enabled()
   v.get_by_role('button',name='Reset Planes',exact=True).click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('시작 MPR 화면');return a,p,v
- GRID_CAMERAS="()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>({id,camera:services.cornerstoneViewportService.getCornerstoneViewport(id).getCamera()}))"
+ # Each plane's camera beside its canvas [width, height, clientWidth, clientHeight, devicePixelRatio]; the canvas is diagnostic only.
+ GRID_CAMERAS="()=>[...services.viewportGridService.getState().viewports.keys()].map(id=>{const v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCanvas();return {id,camera:v.getCamera(),canvas:[c.width,c.height,c.clientWidth,c.clientHeight,devicePixelRatio]}})"
  def mpr(self,v):
   super().mpr(v)
   # Rotate and Reset Planes stay unavailable until two identical readings of the settled native presentation confirm the
@@ -214,6 +215,12 @@ class VolumeOrientationE2E(VolumeJobsE2E):
    except Exception as error:print('RESET_CAMERA_TRACE_END_FAILED',f'{type(error).__name__}: {error}',flush=True)
    raise
   reset_trace=v.evaluate(self.RESTORE_CAMERA_TRACE_END);self.assertTrue(reset_trace['restored'],'setCamera owner not restored after the Reset Planes trace');start=self.start_screen(reset_trace['records'],presented)
+  # Author-side evidence printed before the restore oracles below can fail (native-fix-01): per plane the confirmed start screen
+  # with its canvas, the live camera just before Reset Planes wrote (a native re-presentation after the confirmation shows here),
+  # and the camera and canvas after the Reset.
+  pick=lambda camera:{k:camera[k] for k in ('focalPoint','parallelScale','viewPlaneNormal')};first={};now={c['id']:c for c in v.evaluate(self.GRID_CAMERAS)}
+  for r in reset_trace['records']:first.setdefault(r['id'],r)
+  print('AUTHOR_START_SCREEN',json.dumps([{'id':c['id'],'presented':pick(c['camera']),'canvas':c['canvas'],'before_reset':pick(first[c['id']]['previous']),'after_reset':pick(now[c['id']]['camera']),'canvas_after':now[c['id']]['canvas']} for c in presented]),flush=True)
   before=self.cameras(v);original=self.originals();p.locator('#findings').fill('KEEP SINGLE AXIS REPORT')
   self.rotate_planes(v,1,30);moved=self.cameras(v);pivot=self.pivot(before)
   co=next(i for i,c in enumerate(before) if abs(abs(c['viewPlaneNormal'][1])-1)<1e-6);ax=next(i for i,c in enumerate(before) if abs(abs(c['viewPlaneNormal'][2])-1)<1e-6)
@@ -222,7 +229,9 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   np.testing.assert_allclose(moved[ax]['focalPoint'],before[ax]['focalPoint'],atol=1e-9,rtol=0);np.testing.assert_allclose(moved[ax]['focalPoint'],center,atol=1e-9,rtol=0);np.testing.assert_allclose(moved[ax]['viewUp'],before[ax]['viewUp'],atol=1e-5,rtol=0)
   self.assertAlmostEqual(abs(float(np.dot(moved[ax]['viewPlaneNormal'],before[ax]['viewPlaneNormal']))),math.cos(math.radians(30)),delta=1e-6);np.testing.assert_allclose(moved[co]['viewPlaneNormal'],before[co]['viewPlaneNormal'],atol=1e-9,rtol=0)
   clip_author=self.assert_clip_planes(v,'rotated author');identity=[1,0,0,0,1,0];authored=self.band_pixels(v,identity)
-  self.save_volume(v);saved=self.get_volume_job(a);cells=saved['snapshot']['cells'];self.cameras_close([c['camera'] for c in cells],moved,1e-6)
+  self.save_volume(v);saved=self.get_volume_job(a);cells=saved['snapshot']['cells']
+  print('AUTHOR_SAVED_PLANES',json.dumps([{'viewport':c['viewport'],'focalPoint':c['camera']['focalPoint'],'parallelScale':c['camera']['parallelScale']} for c in cells]),flush=True)
+  self.cameras_close([c['camera'] for c in cells],moved,1e-6)
   fresh=self.login();errors=[];fresh.on('pageerror',lambda e:errors.append(str(e)));self.launch(fresh,[a]);self.ready(fresh);installed=fresh.evaluate(self.RESTORE_CAMERA_TRACE);self.assertTrue(installed['installed'],installed)
   try:fresh.get_by_role('button',name='Restore Job',exact=True).click();expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=45000)
   except BaseException:
