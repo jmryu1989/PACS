@@ -58,11 +58,13 @@ FRAMES="""async probes=>{const d=document.querySelector('#kin-volume-mip'),img=d
   out.push({caption:caption.textContent,width:c.width,height:c.height,hash:hash>>>0,pixels:(probes[i]||[]).map(([x,y])=>data[(y*c.width+x)*4])})}
  return out}"""
 # Faults only inside the batch frame path (stack filter), in the objects the viewer reads through: the VOI plane factory of
-# writeBatchFrame, the rendering engine's window slot inside verifyBatchFrame, and the canvas encoder of the private viewport.
+# writeBatchFrame, the rendering engine's window slot as gpuProblem reads it for verifyBatchFrame, and the canvas encoder of the
+# private viewport. verifyBatchFrame checks ownership first, and a verifyBatchFrame-only filter fired inside that check, so the
+# restore rolled back as a source change and never reached the GPU program; the slot fault therefore also requires gpuProblem.
 BATCH_PLANE_FAULT="""()=>{"use strict";const model=window.KinVolumeMip,real=model.voiPlane;window.batchFault=[];
  model.voiPlane=function(definition){const stack=batchTrace();if(!stack.includes('writeBatchFrame'))return real(definition);model.voiPlane=real;batchFault.push({stack});throw Error('INJECTED MIP BATCH PLANE WRITE')};return model.voiPlane!==real}"""
-BATCH_GPU_FAULT=GPU_FAULT.replace("window.mipFault=[]","window.batchFault=[]").replace("const stack=mipTrace();if(!stack.includes('gpuProblem'))return real;","const stack=batchTrace();if(!stack.includes('verifyBatchFrame'))return real;").replace("mipFault.push({stack})","batchFault.push({stack})")
-assert 'mipTrace' not in BATCH_GPU_FAULT and 'mipFault' not in BATCH_GPU_FAULT and BATCH_GPU_FAULT.count('verifyBatchFrame')==1
+BATCH_GPU_FAULT=GPU_FAULT.replace("window.mipFault=[]","window.batchFault=[]").replace("const stack=mipTrace();if(!stack.includes('gpuProblem'))return real;","const stack=batchTrace();if(!stack.includes('verifyBatchFrame')||!stack.includes('gpuProblem'))return real;").replace("mipFault.push({stack})","batchFault.push({stack})")
+assert 'mipTrace' not in BATCH_GPU_FAULT and 'mipFault' not in BATCH_GPU_FAULT and BATCH_GPU_FAULT.count('verifyBatchFrame')==1 and BATCH_GPU_FAULT.count('gpuProblem')==1
 BLOB_FAULT="""()=>{"use strict";const real=HTMLCanvasElement.prototype.toBlob;window.batchFault=[];
  HTMLCanvasElement.prototype.toBlob=function(callback,...rest){if(!this.closest?.('[data-kin-mip-batch-render]'))return real.call(this,callback,...rest);HTMLCanvasElement.prototype.toBlob=real;batchFault.push({stack:batchTrace()});callback(null)};return true}"""
 MADE='MIP Batch 미리보기 {}장을 만들었습니다. 표시 전용 임시 미리보기이며 Save MIP Job으로 조건을 저장할 수 있습니다.'
@@ -252,7 +254,10 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   self.assertEqual(v.evaluate('()=>batchFrames.length'),0);self.assertFalse(v.evaluate('()=>!!batchView()'))
   # Preview A, then a second Make held on its second frame: display change, Save, capture, another Make and Play are refused, and
   # Cancel keeps A exactly (MB9).
-  A=recipe_of('Horizontal',90,3);self.batch_inputs(dialog,'Horizontal',90,3);self.make(v,dialog,3);first=[shot['hash'] for shot in v.evaluate(FRAMES,[])]
+  A=recipe_of('Horizontal',90,3);self.batch_inputs(dialog,'Horizontal',90,3);self.make(v,dialog,3);shots=v.evaluate(FRAMES,[]);first=[shot['hash'] for shot in shots]
+  # FRAMES leaves its last frame shown (Next Frame); that frame, as recipe A names it, and its image are what the held Make keeps.
+  kept=f"3 / 3 · MIP · Axial · Horizontal +180° · VOI Slab {mm_text(rB['thickness'])} mm · Preview";self.assertEqual(shots[-1]['caption'],kept)
+  frame,image=dialog.locator('.kin-mip-batch-frame'),dialog.locator('.kin-mip-batch img');expect(frame).to_have_text(kept);kept_src=image.get_attribute('src');self.assertTrue(kept_src)
   self.assertEqual(v.evaluate(READ_ONLY_CAPTURE)['mipBatch'],A)
   self.batch_inputs(dialog,'Vertical',30,4);v.evaluate('()=>{batchHoldFrame=2;batchHeld=0}');make.click()
   v.wait_for_function('()=>batchHeld>0',timeout=60000);expect(status).to_have_text('MIP Batch 생성 중 2 / 4')
@@ -261,7 +266,7 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   title.fill('MIP batch held');save.click();expect(status).to_have_text('MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.');self.assertEqual(posts,[])
   self.assertEqual(v.evaluate(READ_REFUSED),'MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.')
   make.click();expect(status).to_have_text('MIP Batch 생성이 끝난 뒤 다시 누르세요.')
-  expect(play).to_be_disabled();expect(clear).to_be_disabled();expect(dialog.locator('.kin-mip-batch-frame')).to_contain_text('1 / 3 · MIP · Axial · Horizontal 0°')
+  expect(play).to_be_disabled();expect(clear).to_be_disabled();expect(frame).to_have_text(kept);expect(image).to_have_attribute('src',kept_src)
   cancel.click();expect(status).to_have_text('MIP Batch 생성을 취소했습니다. 이전 MIP Batch 미리보기를 유지합니다.');v.evaluate('()=>{batchHoldFrame=null}')
   self.assertFalse(v.evaluate('()=>!!batchView()'));self.assertEqual([shot['hash'] for shot in v.evaluate(FRAMES,[])],first);self.assertEqual(v.evaluate(READ_ONLY_CAPTURE)['mipBatch'],A)
   expect(dialog).to_have_attribute('data-kin-mip-state','final');expect(play).to_be_enabled()
@@ -345,10 +350,10 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   rows={row['title']:row['snapshotVersion'] for row in self.jobs(a)};self.assertEqual([rows['MIP batch VOI job'],rows['MIP plain job']],[13,12])
   self.project(v,1,2);previous=v.evaluate(CAPTURE);self.assertEqual(previous['version'],4);status=v.locator('#kin-viewer-jobs-status')
   # A clipping-plane write fault and an unlinked clip program in a regenerated frame, after the Final display confirmed, roll back.
-  for fault,message,step in ((BATCH_PLANE_FAULT,'INJECTED MIP BATCH PLANE WRITE','writeBatchFrame'),(BATCH_GPU_FAULT,'투영 셰이더를 GPU에서 확인하지 못했습니다','verifyBatchFrame')):
+  for fault,message,steps in ((BATCH_PLANE_FAULT,'INJECTED MIP BATCH PLANE WRITE',['writeBatchFrame']),(BATCH_GPU_FAULT,'투영 셰이더를 GPU에서 확인하지 못했습니다',['verifyBatchFrame','gpuProblem'])):
    mark=self.mark(v);v.evaluate('()=>{batchStatuses.length=0}');self.assertTrue(v.evaluate(fault),'fault not installed: '+message)
    self.restore_titled(v,a,'MIP batch VOI job');self.rolled_back(v,message,previous)
-   self.assertEqual(v.evaluate('s=>batchFault.map(t=>t.stack.includes(s))',step),[True],message)
+   self.assertEqual(v.evaluate('s=>batchFault.map(t=>s.every(n=>t.stack.includes(n)))',steps),[True],message)
    self.assertIn('final',v.evaluate('m=>mipTransitions.slice(m)',mark),'the fault came after the Final display');self.assertEqual(v.evaluate('()=>mipCount()'),0)
    self.assertFalse(v.evaluate('()=>!!batchView()'));self.assert_unannounced(v)
   # A held frame render during regeneration times out on its own frame bound inside the batch budget and rolls back.

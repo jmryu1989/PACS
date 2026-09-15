@@ -66,7 +66,8 @@ class VolumeDisplayE2E(VolumeOrientationE2E):
   expect(v.locator('#kin-volume-display')).to_have_count(0);expect(v.get_by_role('button',name='Reset Planes',exact=True)).to_be_enabled();expect(v.get_by_role('button',name='Apply to Active Plane',exact=True)).to_be_enabled()
  def test_mpr_display_06_selection_cancel_restores_only_owned_changes(self):
   a,p,v=self.starting();v.evaluate("()=>{projectionVP.setProperties({voiRange:{lower:0,upper:2000}});projectionVP.render()}");v.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');before=self.volume_state(v)
-  v.evaluate("()=>{const g=services.viewportGridService;g.setActiveViewportId([...g.getState().viewports.keys()][1]);document.querySelector('#kin-volume-display button').click()}")
+  # Reset Windowing is enabled only by the panel's 250 ms refresh and click() on a disabled button dispatches nothing: select and click in one enabled turn.
+  v.wait_for_function("()=>{const b=[...document.querySelectorAll('#kin-volume-display button')].find(b=>b.textContent==='Reset Windowing');if(!b||b.disabled)return false;const g=services.viewportGridService;g.setActiveViewportId([...g.getState().viewports.keys()][1]);b.click();return true}")
   expect(v.locator('#kin-volume-display [role=status]')).to_contain_text(re.compile('선택한 MPR|화면이 변경'));self.preserved_volume(before,self.volume_state(v))
   self.choose_volume(v,v,0);v.wait_for_timeout(300)
   v.evaluate("()=>{const original=projectionVP.setProperties;let once=true;projectionVP.setProperties=function(...args){const r=original.apply(this,args);if(once){once=false;requestAnimationFrame(()=>{original.call(this,{voiRange:{lower:0,upper:3000}});this.render()})}return r};const g=services.viewportGridService;g.setActiveViewportId([...g.getState().viewports.keys()][1]);document.querySelector('#kin-volume-display button').click()}")
