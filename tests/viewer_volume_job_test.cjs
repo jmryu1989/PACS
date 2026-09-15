@@ -354,7 +354,9 @@ test('a MIP Viewer job is accepted only with a valid kin-mip-1 display on the ex
    ['schema 2',s=>{s.mip.schema=2;}],['algorithm kin-mip-2',s=>{s.mip.algorithm='kin-mip-2';}],['coordinates RAS_mm',s=>{s.mip.coordinates='RAS_mm';}],
    ['mode Sum',s=>{s.mip.mode='Sum';}],['orientation axial',s=>{s.mip.orientation='axial';}],
    ['display lower 1e-9 from the active cell',s=>{s.mip.display.voiRange.lower=-1000+1e-9;}],
-   ['display taken from a non-active cell',s=>{s.cells[1].properties.voiRange={lower:-500,upper:500};s.mip.display.voiRange={lower:-500,upper:500};}],
+   // The fixture's three cells are one shared object and structuredClone keeps that sharing, so the non-active cell gets its
+   // own copy first; otherwise the change reaches the active cell too and the display is that cell's own.
+   ['display taken from a non-active cell',s=>{s.cells[1]=structuredClone(s.cells[1]);s.cells[1].properties.voiRange={lower:-500,upper:500};s.mip.display.voiRange={lower:-500,upper:500};}],
    ['interpolation mismatch',s=>{s.mip.display.interpolationType=1;}],['interpolation 3',s=>{s.mip.display.interpolationType=3;s.cells[0].properties.interpolationType=3;}],
    ['normal length 1+2e-6',s=>{s.mip.voiSlab.normal=s.mip.voiSlab.normal.map(n=>n*(1+2e-6));}],
    ['thickness 0',s=>{s.mip.voiSlab.thickness=0;}],['thickness -1',s=>{s.mip.voiSlab.thickness=-1;}],['thickness 1e6+1',s=>{s.mip.voiSlab.thickness=1e6+1;}],
