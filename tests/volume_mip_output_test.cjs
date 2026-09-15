@@ -8,8 +8,9 @@ globalThis.KinVolumeMipBatch=require('../worklist-v0/hpacs-lite/volume-mip-batch
 // Mutation runs load a changed copy; the default is always the product model.
 const output=require(process.env.KIN_MIP_OUTPUT_MODEL_SOURCE||'../worklist-v0/hpacs-lite/volume-mip-output.js');
 const mip=globalThis.KinVolumeMip,batch=globalThis.KinVolumeMipBatch;
-// tests/viewer_volume_orientation_dom_test.py TABLE: the pinned MPR_CAMERA_VALUES as literals.
-const TABLE=Object.freeze({axial:{viewPlaneNormal:[0,0,-1],viewUp:[0,-1,0]},sagittal:{viewPlaneNormal:[1,0,0],viewUp:[0,0,1]},coronal:{viewPlaneNormal:[0,1,0],viewUp:[0,0,1]}});
+// The pinned MPR_CAMERA_VALUES as literals (AXIAL/SAGITTAL/CORONAL of tests/e2e/test_volume_mip_output.py, which checks them against the
+// runtime). Coronal is [0,-1,0]: the orientation DOM stub's [0,1,0] only names a plane axis (A11-OUTPUT-1 hosted ci-01).
+const TABLE=Object.freeze({axial:{viewPlaneNormal:[0,0,-1],viewUp:[0,-1,0]},sagittal:{viewPlaneNormal:[1,0,0],viewUp:[0,0,1]},coronal:{viewPlaneNormal:[0,-1,0],viewUp:[0,0,1]}});
 const PRESETS=[['Axial','axial'],['Coronal','coronal'],['Sagittal','sagittal']];
 const near=(actual,want,tolerance,label)=>{assert.equal(actual.length,want.length,label);actual.forEach((n,i)=>assert.ok(Math.abs(n-want[i])<=tolerance,label+'['+i+'] '+n+' != '+want[i]));};
 const same=(a,b)=>a.length===b.length&&a.every((n,i)=>n===b[i]);
@@ -63,13 +64,15 @@ test('C5/MO4: a version 12 plan refuses exactly the inputs the MIP Batch plan re
 
 test('MO3: version 13 Coronal Horizontal +90 turns about viewUp and Vertical +90 about the screen right (hard-coded vectors)',()=>{
  const t=PHANTOM.thickness,inputs={normal:TABLE.coronal.viewPlaneNormal,viewUp:TABLE.coronal.viewUp,focalPoint:PHANTOM.focal,distance:t,thickness:t};
+ // n0 = -P, u0 = +S. Horizontal +90 about u0: (0,0,1) x (0,-1,0) = (1,0,0). Vertical +90 about the screen right u0 x n0 = (1,0,0):
+ // (1,0,0) x (0,-1,0) = (0,0,-1) for the normal and (1,0,0) x (0,0,1) = (0,-1,0) for viewUp.
  const H=output.plan({version:13,recipe:recipe({interval:90,count:2}),...inputs}).cameras[1];
- near(H.viewPlaneNormal,[-1,0,0],1e-12,'H +90 n');near(H.viewUp,[0,0,1],1e-12,'H +90 u');near(H.position,[15.75-t,15.75,40],1e-9,'H +90 position');
+ near(H.viewPlaneNormal,[1,0,0],1e-12,'H +90 n');near(H.viewUp,[0,0,1],1e-12,'H +90 u');near(H.position,[15.75+t,15.75,40],1e-9,'H +90 position');
  near(H.focalPoint,[15.75,15.75,40],0,'H +90 focal');assert.equal(H.parallelScale,t/2);assert.equal(H.angle,90);
  const V=output.plan({version:13,recipe:recipe({axis:'Vertical',interval:90,count:2}),...inputs}).cameras[1];
- near(V.viewPlaneNormal,[0,0,-1],1e-12,'V +90 n');near(V.viewUp,[0,1,0],1e-12,'V +90 u');near(V.position,[15.75,15.75,40-t],1e-9,'V +90 position');assert.equal(V.angle,90);
+ near(V.viewPlaneNormal,[0,0,-1],1e-12,'V +90 n');near(V.viewUp,[0,-1,0],1e-12,'V +90 u');near(V.position,[15.75,15.75,40-t],1e-9,'V +90 position');assert.equal(V.angle,90);
  const R=output.plan({version:13,recipe:recipe({interval:90,count:2,reverse:true}),...inputs}).cameras[1];
- near(R.viewPlaneNormal,[1,0,0],1e-12,'H -90 n');assert.equal(R.angle,-90);
+ near(R.viewPlaneNormal,[-1,0,0],1e-12,'H -90 n');assert.equal(R.angle,-90);
 });
 
 test('frames on the print volume: f is the voxel-centre box centre, D = t, and blend and sample distance follow the saved display',()=>{
@@ -77,7 +80,7 @@ test('frames on the print volume: f is the voxel-centre box centre, D = t, and b
  const v13=output.frames({saved:output.saved(snapshot(13)),values:TABLE,...geo});
  assert.ok(Math.abs(v13.thickness-t)<=1e-12);assert.equal(v13.distance,v13.thickness);assert.equal(v13.parallelScale,v13.thickness/2);
  assert.equal(v13.blend,3);assert.ok(Math.abs(v13.sampleDistance-3.5/6)<=1e-15);assert.equal(v13.cameras.length,4);
- near(v13.cameras[0].focalPoint,[15.75,15.75,40],1e-12,'focal');near(v13.cameras[0].viewPlaneNormal,[0,1,0],0,'Coronal frame 0');near(v13.cameras[0].position,[15.75,15.75+t,40],1e-9,'frame 0 position');
+ near(v13.cameras[0].focalPoint,[15.75,15.75,40],1e-12,'focal');near(v13.cameras[0].viewPlaneNormal,[0,-1,0],0,'Coronal frame 0');near(v13.cameras[0].position,[15.75,15.75-t,40],1e-9,'frame 0 position');
  const v12=output.frames({saved:output.saved(snapshot(12,{mip:block({mode:'MinIP',orientation:'Sagittal'})})),values:TABLE,...geo});
  assert.equal(v12.blend,2);assert.equal(v12.cameras.length,1);near(v12.cameras[0].viewPlaneNormal,[1,0,0],0,'Sagittal');near(v12.cameras[0].position,[15.75+t,15.75,40],1e-9,'version 12 position');
  assert.throws(()=>output.frames({saved:output.saved(snapshot(12)),values:{},...geo}),{message:/방향 기준값/});

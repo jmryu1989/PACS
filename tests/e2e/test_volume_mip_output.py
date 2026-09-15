@@ -3,6 +3,7 @@
 Batch Job, rebuilt from freshly read, digest-verified CT pixels under analytic cameras in a private print engine, all or nothing."""
 import copy,io,json,math,os,time,unittest,uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 import numpy as np
 from pypdf import PdfReader
 from playwright.sync_api import expect
@@ -17,9 +18,14 @@ from test_volume_path import field_differences
 MIP_OUTPUT_CASES=('test_mip_output_01_v12_v13_fresh_pixel_frames_pdf_identity',
                   'test_mip_output_02_readiness_delay_failure_missing_tool_cancel_no_partial_page',
                   'test_mip_output_03_source_access_order_session')
-# C4: the pinned MPR_CAMERA_VALUES as literals (tests/viewer_volume_orientation_dom_test.py TABLE). Every expected camera below is
-# computed from these and the synthetic geometry only; one assertion proves the page holds exactly these values.
-AXIAL,SAGITTAL,CORONAL=([0,0,-1],[0,-1,0]),([1,0,0],[0,0,1]),([0,1,0],[0,0,1])
+# C4: the pinned MPR_CAMERA_VALUES as literals. Every expected camera below is computed from these and the synthetic geometry only;
+# one assertion proves the page holds exactly these values. Axial and sagittal are the values the hosted runtime matched (ci-01). The
+# coronal [0,1,0] of the orientation DOM stub (tests/viewer_volume_orientation_dom_test.py) only names a plane axis and is not the pinned
+# value. The coronal literal follows from the axial one, not from the page: with screen right = viewUp x viewPlaneNormal (canvas_point),
+# axial [0,-1,0] x [0,0,-1] = [1,0,0] shows patient left on screen right with anterior up. A coronal view in that same convention
+# (superior up, patient left on screen right) needs [0,0,1] x n = [1,0,0], so n = [0,-1,0]: the camera stands anterior to the patient,
+# as the product's own VR Anterior view does (volume-rendering.js: [0,-1,0],[0,0,1]). [0,1,0] would show patient left on screen left.
+AXIAL,SAGITTAL,CORONAL=([0,0,-1],[0,-1,0]),([1,0,0],[0,0,1]),([0,-1,0],[0,0,1])
 LITERALS={'Axial':AXIAL,'Sagittal':SAGITTAL,'Coronal':CORONAL}
 # The known-voxel phantom (test_volume_mip.mip_phantom): world = (column x 0.5, row x 0.5, slice x 2.5) mm, identity index axes.
 CORNERS=[(i*SPACING[0],j*SPACING[1],k*SPACING[2]) for i in (0,COUNTS[0]-1) for j in (0,COUNTS[1]-1) for k in (0,COUNTS[2]-1)]
@@ -39,6 +45,9 @@ PRESET_VALUES="()=>Object.fromEntries(['axial','sagittal','coronal'].map(k=>[k,[
 WAIT_STATUS="()=>{const t=document.querySelector('#kin-job-print [role=status]')?.textContent;return !!t&&t!=='저장한 영상 상태를 확인하는 중…'}"
 NO_LEAKS="()=>{const l=printLeaks();return !l.elements&&!l.volumes&&!l.images&&!l.engines}"
 TAKE='()=>({frames:printFrames.splice(0),events:printEvents.splice(0),volumeInfo:printVolumeInfo.splice(0),faults:printFault.splice(0)})'
+# The browser's own messages for a request rejected in transport (fetch) or a body cut in transport (body read).
+TRANSPORT_TEXTS=('Failed to fetch','network error')
+TRACE_COUNTS='()=>window.printReady?{enables:printEnables,faults:printFault.length,held:printHeld}:null'
 # Installed once per page, before or after the MIP models load (a fresh page loads them inside the print). It only records, except
 # where a test arms one of its hooks:
 # - KinVolumeMip.verifyState is traced only from the print frame stack, with the private viewport's camera, pinned clipping range,
@@ -49,7 +58,7 @@ TAKE='()=>({frames:printFrames.splice(0),events:printEvents.splice(0),volumeInfo
 # - the kin-batch-print-* images and volumes put into the cache are listed so printLeaks() can prove they were removed.
 PRINT_TRACE="""()=>{if(window.printReady)return true;window.printReady=true;
  window.printTrace=()=>{const limit=Error.stackTraceLimit;Error.stackTraceLimit=40;const stack=new Error().stack;Error.stackTraceLimit=limit;return stack};
- window.printFrames=[];window.printEvents=[];window.printVolumeInfo=[];window.printFault=[];window.printHoldAt=null;window.printHeld=0;window.printRenders=0;window.printTracing=false;
+ window.printFrames=[];window.printEvents=[];window.printVolumeInfo=[];window.printFault=[];window.printHoldAt=null;window.printHeld=0;window.printRenders=0;window.printEnables=0;window.printTracing=false;
  window.printViewFault=null;window.printAfterVerify=null;window.printImages=[];window.printVolumes=[];
  window.printView=()=>{for(const engine of cornerstone.getRenderingEngines?.()||[])for(const vp of engine.getViewports())if(vp.id.startsWith('kin-batch-print-'))return vp;return null};
  window.printLeaks=()=>({elements:document.querySelectorAll('[data-kin-batch-print-render]').length,volumes:printVolumes.filter(id=>cornerstone.cache.getVolume(id)).length,
@@ -77,7 +86,7 @@ PRINT_TRACE="""()=>{if(window.printReady)return true;window.printReady=true;
   printEvents.push('rendered')},true);
  const enable=cornerstone.RenderingEngine.prototype.enableElement;
  cornerstone.RenderingEngine.prototype.enableElement=function(input,...rest){const result=enable.call(this,input,...rest);
-  if(input?.element?.dataset?.kinBatchPrintRender){printRenders=0;const vp=this.getViewport(input.viewportId),blend=vp.setBlendMode;
+  if(input?.element?.dataset?.kinBatchPrintRender){printRenders=0;printEnables++;const vp=this.getViewport(input.viewportId),blend=vp.setBlendMode;
    vp.setBlendMode=function(mode,...more){if(mode===0){let info=null;try{const i=vp.getActors()[0]?.actor?.getMapper?.()?.getScalarTexture?.()?.getVolumeInfo?.();info=i?{scale:i.scale?copy(i.scale):null,offset:i.offset?copy(i.offset):null}:null}catch(error){info={error:String(error)}}printVolumeInfo.push(info)}
     printEvents.push('blend:'+mode);return blend.call(this,mode,...more)};
    if(typeof printViewFault==='function')printViewFault(vp,this)}
@@ -145,14 +154,38 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
  def print_titled(self,page,a,title):
   self.close_output(page);page.evaluate("()=>{const s=document.querySelector('#kin-job-print [role=status]');if(s)s.textContent=''}")
   page.locator('#kin-viewer-jobs').get_by_role('button',name='Print Saved Images',exact=True).nth(self.print_index(a,title)).click()
- def open_output(self,page,a,title,expected=MESSAGES['ready'],timeout=300000):
-  self.print_titled(page,a,title);page.wait_for_function(WAIT_STATUS,timeout=timeout)
-  if expected:expect(page.locator('#kin-job-print [role=status]')).to_contain_text(expected,timeout=1000)
+ def watch_transport(self,page):
+  # Request failures as the browser reports them. ERR_ABORTED entries are a print's own cancels (bounded() aborts every read still in
+  # flight once a print ends), so they never count as transport evidence.
+  logs=self.__dict__.setdefault('transport_logs',{})
+  if page not in logs:
+   log=logs[page]=[]
+   page.on('requestfailed',lambda r:log.append({'method':r.method,'url':r.url,'error':r.failure}))
+  return logs[page]
+ def attempt_output(self,page,start,expected,timeout,rearm):
+  status,log,origin=page.locator('#kin-job-print [role=status]'),self.watch_transport(page),urlsplit(page.url).netloc
+  for attempt in (1,2):
+   mark,before=len(log),page.evaluate(TRACE_COUNTS)
+   start();page.wait_for_function(WAIT_STATUS,timeout=timeout)
+   text=(status.text_content() or '').strip()
+   if text not in TRANSPORT_TEXTS:break
+   page.wait_for_timeout(300);after=page.evaluate(TRACE_COUNTS)
+   failed=[e for e in log[mark:] if e['error'] and 'ERR_ABORTED' not in e['error'] and urlsplit(e['url']).netloc==origin and urlsplit(e['url']).path.startswith(('/api/','/instances/'))]
+   print('MIP_OUTPUT_TRANSPORT_FAILURE',json.dumps({'attempt':attempt,'status':text,'failed':failed,'trace_before':before,'trace_after':after}),flush=True)
+   # ci-01 NO2: a same-origin source read was rejected in transport (the proxy never logged it) while the shared loader ran, before any
+   # private print viewport existed. Only such a rejection, with the browser's own failure record, no print viewport created, no
+   # injected fault fired and no render held, is attempted once more. The failed attempt must itself have left no page and no leak,
+   # and the next attempt must give the row's own exact outcome; any other status, or a second rejection, fails the row as it is.
+   if attempt==2 or not failed or before is None or after is None or after!=before:break
+   self.refused(page,text);self.transport_reattempts=getattr(self,'transport_reattempts',0)+1
+   self.assertLessEqual(self.transport_reattempts,3,'more than three transport rejections in one case is not an isolated transport event')
+   if rearm:rearm()
+  if expected:expect(status).to_contain_text(expected,timeout=1000)
   return page.frame_locator('#kin-job-print iframe')
- def refresh_output(self,page,expected=MESSAGES['ready'],timeout=300000):
-  page.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click();page.wait_for_function(WAIT_STATUS,timeout=timeout)
-  if expected:expect(page.locator('#kin-job-print [role=status]')).to_contain_text(expected,timeout=1000)
-  return page.frame_locator('#kin-job-print iframe')
+ def open_output(self,page,a,title,expected=MESSAGES['ready'],timeout=300000,rearm=None):
+  return self.attempt_output(page,lambda:self.print_titled(page,a,title),expected,timeout,rearm)
+ def refresh_output(self,page,expected=MESSAGES['ready'],timeout=300000,rearm=None):
+  return self.attempt_output(page,lambda:page.locator('#kin-job-print').get_by_role('button',name='다시 확인',exact=True).click(),expected,timeout,rearm)
  def refused(self,page,message):
   # D12/O5: a refusal leaves no printable page, Print disabled, and no private print element, image, volume or engine.
   dialog=page.locator('#kin-job-print');expect(dialog.locator('[role=status]')).to_contain_text(message,timeout=1000);self.assertNotIn(MESSAGES['ready'],dialog.locator('[role=status]').text_content())
@@ -237,9 +270,11 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   # C4/H-C4: the runtime presets are exactly the literals every expected camera is computed from.
   self.assertEqual(fresh.evaluate(PRESET_VALUES),{'axial':[AXIAL[0],AXIAL[1]],'sagittal':[SAGITTAL[0],SAGITTAL[1]],'coronal':[CORONAL[0],CORONAL[1]]})
   self.assertEqual(FOCAL,[15.75,15.75,40.0]);fresh.evaluate(PRINT_TRACE);requests=[];fresh.on('request',lambda r:requests.append((r.method,r.url)))
+  # A print attempted again after a transport rejection keeps the page's script loads but not the rejected attempt's partial reads.
+  def keep_scripts():requests[:]=[entry for entry in requests if '/worklist/hpacs-lite/' in entry[1]]
   layout,planes=fresh.evaluate(LAYOUT),fresh.evaluate(SOURCE_PLANES);timings={};status=fresh.locator('#kin-job-print [role=status]');heading=fresh.locator('#kin-job-print h2')
   # (1) Version 13 VOI on, Raysum x Coronal, Horizontal 90 x 4: four frames, the B2 order traced, known voxels on every frame.
-  started=time.monotonic();paper=self.open_output(fresh,a,V13);timings['v13_raysum_4_frames_s']=round(time.monotonic()-started,3)
+  started=time.monotonic();paper=self.open_output(fresh,a,V13,rearm=keep_scripts);timings['v13_raysum_4_frames_s']=round(time.monotonic()-started,3)
   self.assertLess(timings['v13_raysum_4_frames_s'],120+4*15,'D8 bound of a four-frame version 13 print')
   self.assertTrue({'viewer-job-print.js','viewer-volume-job-print.js','volume-mip.js','volume-mip-job.js','volume-mip-batch.js','volume-mip-output.js','viewer-volume-mip-print.js'}<=set(scripts_of(requests)),scripts_of(requests))
   self.assertNotIn('viewer-volume-mip.js',scripts_of(requests),'the MIP Viewer dialog is never loaded to print')
@@ -256,10 +291,10 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.assert_fresh_reads(requests,33)
   hosted={'v13_raysum':{'volume_info_at_pre_render':trace['volumeInfo'],'ranges':[frame['range'] for frame in trace['frames']],'camera_ranges':[frame['cameraRange'] for frame in trace['frames']],'display':trace['frames'][0]['display']}}
   # (4) The same fresh browser recomputes the same pixels: the pinned jitter and the private volume make the page reproducible.
-  started=time.monotonic();paper=self.refresh_output(fresh);timings['v13_raysum_refresh_s']=round(time.monotonic()-started,3)
+  started=time.monotonic();paper=self.refresh_output(fresh,rearm=keep_scripts);timings['v13_raysum_refresh_s']=round(time.monotonic()-started,3)
   self.assertEqual([shot['hash'] for shot in self.page_shots(paper,points)],hashes);fresh.evaluate(TAKE);self.assert_fresh_reads(requests,33)
   # (3) Version 12 of the same block: its one camera is the version 13 frame 0 readback and its pixels are frame 0's (O4/MO12).
-  started=time.monotonic();paper=self.open_output(fresh,a,V12);timings['v12_raysum_1_frame_s']=round(time.monotonic()-started,3);self.assertLess(timings['v12_raysum_1_frame_s'],120)
+  started=time.monotonic();paper=self.open_output(fresh,a,V12,rearm=keep_scripts);timings['v12_raysum_1_frame_s']=round(time.monotonic()-started,3);self.assertLess(timings['v12_raysum_1_frame_s'],120)
   expect(heading).to_have_text('Saved MIP Viewer Output');expect(paper.locator('[data-mip-frame]')).to_have_count(1)
   single=fresh.evaluate(TAKE);self.print_native(single['frames'],print_cameras('Coronal'),record,voi,'Raysum','v12 Raysum');self.assert_order(single['events'],3,1)
   self.assertEqual(single['frames'][0]['camera'],trace['frames'][0]['camera'],'the version 12 camera is version 13 frame 0 on every component')
@@ -267,7 +302,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   expect(paper.locator('.mip-caption')).to_have_text(f'MIP Viewer · Raysum · Coronal · VOI Slab {thickness} mm · 512 × 512');self.assertIn(f'Job {saved[V12][0]["id"]} · MIP Viewer · 1 frame',paper.locator('main').inner_text())
   self.assert_fresh_reads(requests,33)
   # (2) Version 13 VOI off, MinIP x Sagittal, Vertical Reverse 45 x 3: the axis-aligned frames keep the unclipped known voxels.
-  started=time.monotonic();paper=self.open_output(fresh,a,OFF);timings['v13_minip_3_frames_s']=round(time.monotonic()-started,3);self.assertLess(timings['v13_minip_3_frames_s'],120+3*15)
+  started=time.monotonic();paper=self.open_output(fresh,a,OFF,rearm=keep_scripts);timings['v13_minip_3_frames_s']=round(time.monotonic()-started,3);self.assertLess(timings['v13_minip_3_frames_s'],120+3*15)
   off=fresh.evaluate(TAKE);off_cameras=print_cameras('Sagittal',minip);self.print_native(off['frames'],off_cameras,None,voi,'MinIP','v13 MinIP');self.assert_order(off['events'],2,3)
   off_rays=[ray_orientation(camera['viewPlaneNormal']) for camera in off_cameras];self.assertEqual(off_rays,['Sagittal',None,'Axial'])
   off_sets=[any_case_probes(plan,study,ray,'MinIP') if ray else None for ray in off_rays]
@@ -325,7 +360,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.assertEqual([shot['hash'] for shot in self.page_shots(paper,[])],held_hashes,'a fresh browser prints the same pixels')
   # Aborted loads of the renderer and of the MIP Batch model: version 13 is refused, the retry requests only what is not ready, and
   # version 12 prints without the MIP Batch model.
-  f2=self.fresh_page(a,2);f2_requests=[];f2.on('request',lambda r:f2_requests.append((r.method,r.url)));jobs2=f2.locator('#kin-viewer-jobs-status');abort=lambda route:route.abort()
+  f2=self.fresh_page(a,2);f2.evaluate(PRINT_TRACE);f2_requests=[];f2.on('request',lambda r:f2_requests.append((r.method,r.url)));jobs2=f2.locator('#kin-viewer-jobs-status');abort=lambda route:route.abort()
   f2.route('**/viewer-volume-mip-print.js',abort);f2.route('**/volume-mip-batch.js',abort)
   self.print_titled(f2,a,HELD);expect(jobs2).to_have_text(MESSAGES['load'],timeout=60000);expect(f2.locator('#kin-viewer-jobs').get_by_role('button',name='Restore Job',exact=True).first).to_be_enabled()
   f2.unroute('**/viewer-volume-mip-print.js',abort);f2.wait_for_timeout(500);f2.evaluate("()=>{document.querySelector('#kin-viewer-jobs-status').textContent=''}");f2_requests.clear()
@@ -414,7 +449,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
    response=route.fetch();value=response.json();url=route.request.url;seen.append(url)
    if url==seen[0] and seen.count(url)==2:value['UncompressedMD5']='0'*32
    route.fulfill(response=response,json=value)
-  v.route('**/attachments/dicom/info',mid_read);self.open_output(v,a,V12,MESSAGES['mid_read']);self.refused(v,MESSAGES['mid_read']);v.unroute('**/attachments/dicom/info',mid_read)
+  v.route('**/attachments/dicom/info',mid_read);self.open_output(v,a,V12,MESSAGES['mid_read'],rearm=seen.clear);self.refused(v,MESSAGES['mid_read']);v.unroute('**/attachments/dicom/info',mid_read)
   # MO9: a whole source whose instances all read consistently but differ from the saved sourceDigest is refused for version 13 too.
   def changed(route):
    response=route.fetch();value=response.json();value['UncompressedMD5']='0'*32;route.fulfill(response=response,json=value)
@@ -427,9 +462,11 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
                                      (V12,lambda s:s['mip'].__setitem__('algorithm','kin-mip-2'),'reproduce',False),
                                      (V13,lambda s:s['mipBatch'].__setitem__('algorithm','kin-mip-batch-2'),'reproduce',False)):
    pattern=f"**/api/studies/{a.uid}/viewer-jobs/{rows[title]['id']}"
-   def forged(route,change=change):
+   # Playwright passes (route, request) to a handler with two positional parameters, so the bound change comes after both
+   # (ci-01: a handler of (route, change=change) received the Request as change; test_sr_reader.py binds its values the same way).
+   def forged(route,request,change=change):
     response=route.fetch();value=response.json();change(value['snapshot']);route.fulfill(response=response,json=value)
-   v.route(pattern,forged);requests.clear();self.open_output(v,a,title,MESSAGES[message]);self.refused(v,MESSAGES[message])
+   v.route(pattern,forged);requests.clear();self.open_output(v,a,title,MESSAGES[message],rearm=requests.clear);self.refused(v,MESSAGES[message])
    self.assertEqual(len([url for method,url in requests if '/frames/0/image-' in url]),33 if reads else 0,message);v.unroute(pattern,forged)
   # Hide Job during prepare: the re-read before the page is kept refuses it.
   def revise(title,revision,hidden):
