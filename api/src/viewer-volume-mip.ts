@@ -26,6 +26,15 @@ export function validateVolumeMip(m:any){
   if(!(Math.abs(Math.hypot(s.normal[0],s.normal[1],s.normal[2])-1)<=1e-6))invalid();
 }
 
+// Server half of kin-mip-batch-1 (worklist-v0/hpacs-lite/volume-mip-batch.js): the rotation series conditions a MIP Viewer Batch
+// preview was generated with, saved beside its kin-mip-1 display. Frames are never stored, and the raster size, camera distance
+// and parallel scale follow from the algorithm and the display, so exactly these keys exist. Another schema or algorithm is refused.
+export function validateVolumeMipBatch(b:any){
+  keys(b,['schema','algorithm','axis','interval','count','reverse']);
+  if(b.schema!==1||b.algorithm!=='kin-mip-batch-1'||!['Horizontal','Vertical'].includes(b.axis)||typeof b.reverse!=='boolean')invalid();
+  if(!finite(b.interval)||b.interval<1||b.interval>180||!Number.isInteger(b.count)||b.count<2||b.count>64||(b.count-1)*b.interval>360+1e-9)invalid();
+}
+
 /** The display belongs to this original: same frame of reference, and a VOI Slab that keeps at least one voxel centre. */
 export function verifyVolumeMip(m:any,frameOfReference:string,origin:number[],x:number[],y:number[],z:number[],dimensions:number[]){
   validateVolumeMip(m);

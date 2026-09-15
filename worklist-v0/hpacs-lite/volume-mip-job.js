@@ -21,6 +21,7 @@
     useRequest:'이전 요청의 결과가 남아 있습니다. MIP Viewer를 닫고 Retry Request로 먼저 확인하세요.',
     retryOther:'재시도할 MIP 저장 요청이 현재 표시와 같지 않습니다. MIP Viewer를 닫고 Retry Request로 이전 요청을 확인하세요.',
     title:'MIP Job Title을 입력하세요.',
+    generating:'MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.',
   });
   const viewerModel=()=>{const model=root.KinVolumeMip;if(!model)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');return model;};
   const exact=(v,want)=>!!v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).length===want.length&&Object.keys(v).every(k=>want.includes(k));
@@ -89,25 +90,38 @@
     for(const entry of PRESETS){const value=Math.abs(entry[1][0]*normal[0]+entry[1][1]*normal[1]+entry[1][2]*normal[2]);if(value>score){score=value;best=entry;}}
     return best[0];
   }
-  /* The first reason a MIP save is refused, in the order a user can act on it: the account, a request in flight, the
-     display itself, its geometry, an earlier request whose result is unknown, then the title. */
-  function saveGate({writable,busy,snapshot,frameOfReference,display,corners,pending=null,title='',retry=false}){
-    if(!writable)return {message:messages.writable,block:null};
-    if(busy)return {message:messages.busy,block:null};
-    let value;try{value=block(snapshot,{frameOfReference,display});}catch(error){return {message:error.message,block:null};}
-    if(!intersects(value.voiSlab,corners))return {message:messages.outside,block:null};
-    const retryable=!!pending&&pending.version===12&&same(pending.mip,value);
-    if(retry){if(!retryable)return {message:messages.retryOther,block:null};}
-    else if(pending)return {message:retryable?messages.useRetry:messages.useRequest,block:null};
-    if(!retry&&!String(title).trim())return {message:messages.title,block:null};
-    return {message:'',block:value};
+  /* A kept request belongs to the shown display only as the same pair: version 12 with no MIP Batch preview, or version 13 with
+     the same recipe. A version 12 body has no mipBatch key at all, so both sides are normalized to null before comparing. */
+  function retryable(pending,value,batch=null){
+    if(!pending||!value)return false;
+    const kept=pending.mipBatch??null,shown=batch??null;
+    return pending.version===(shown===null?12:13)&&same(pending.mip,value)&&same(kept,shown);
   }
-  /* Saved is a committed 200 for this exact block in this open operation. A rejected request is Not Saved; an unknown
-     receipt keeps the identical body for an idempotent retry and is Save Unconfirmed only while that block is shown. */
+  // The saved-state identity of a shown display: its block with the recipe of the MIP Batch preview beside it, or null.
+  const pair=(value,batch=null)=>value?{mip:value,mipBatch:batch??null}:null;
+  /* The first reason a MIP save is refused, in the order a user can act on it: the account, a request in flight, a MIP Batch
+     still being made, the display itself, its geometry, an earlier request whose result is unknown, then the title. `batch` is
+     the recipe of the MIP Batch preview shown with that display, read in the same turn, or null. */
+  function saveGate({writable,busy,generating=false,snapshot,frameOfReference,display,corners,pending=null,title='',retry=false,batch=null}){
+    if(!writable)return {message:messages.writable,block:null,batch:null};
+    if(busy)return {message:messages.busy,block:null,batch:null};
+    if(generating)return {message:messages.generating,block:null,batch:null};
+    let value;try{value=block(snapshot,{frameOfReference,display});}catch(error){return {message:error.message,block:null,batch:null};}
+    if(!intersects(value.voiSlab,corners))return {message:messages.outside,block:null,batch:null};
+    const kept=retryable(pending,value,batch);
+    if(retry){if(!kept)return {message:messages.retryOther,block:null,batch:null};}
+    else if(pending)return {message:kept?messages.useRetry:messages.useRequest,block:null,batch:null};
+    if(!retry&&!String(title).trim())return {message:messages.title,block:null,batch:null};
+    return {message:'',block:value,batch:batch??null};
+  }
+  /* Saved is a committed 200 for this exact display in this open operation: the pair of its block and MIP Batch recipe (pair()),
+     or a bare block. A rejected request is Not Saved; an unknown receipt keeps the identical body for an idempotent retry and is
+     Save Unconfirmed only while that display is shown. */
   function createSaveState(){
     let operation=null,saved=null,unconfirmed=null,saving=null;
     const key=value=>value===null||value===undefined?null:canonical(value);
-    const record=value=>value?.voiSlab?JSON.stringify([value.mode,value.orientation,[...value.voiSlab.center],[...value.voiSlab.normal],[...value.voiSlab.pivot],value.voiSlab.thickness]):null;
+    // The VOI Slab work of a pair is its block's; a MIP Batch preview is regenerable from the saved conditions and never counts.
+    const record=value=>{const shown=value?.mip??value;return shown?.voiSlab?JSON.stringify([shown.mode,shown.orientation,[...shown.voiSlab.center],[...shown.voiSlab.normal],[...shown.voiSlab.pivot],shown.voiSlab.thickness]):null;};
     return {
       open(op){operation=op??null;saved=unconfirmed=saving=null;},
       begin(op,value){if(!op||op!==operation||saving)return null;saving={op,key:key(value)};return saving;},
@@ -133,6 +147,6 @@
       },
     };
   }
-  const api=Object.freeze({schema:SCHEMA,algorithm:ALGORITHM,coordinates:COORDINATES,messages,supported,validate,block,intersects,restoreRequest,presetFor,saveGate,createSaveState,same});
+  const api=Object.freeze({schema:SCHEMA,algorithm:ALGORITHM,coordinates:COORDINATES,messages,supported,validate,block,intersects,restoreRequest,presetFor,saveGate,createSaveState,same,retryable,pair});
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeMipJob=api;
 })(typeof window==='object'?window:globalThis);

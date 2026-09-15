@@ -200,3 +200,59 @@ test('dirty is an open MIP with typed Job text or a confirmed VOI Slab that is n
  assert.equal(state.dirty(op,mip.withDisplay(voiFinal,{mode:'MinIP'})),true,'the same slab under another projection is another block');
  state.open(null);assert.equal(state.dirty(op,voiFinal,{title:'x'}),false);
 });
+
+// A11-BATCH-1 P4: a MIP Batch preview makes the saved identity of a display the pair of its block and the preview recipe.
+const RECIPE=Object.freeze({schema:1,algorithm:'kin-mip-batch-1',axis:'Horizontal',interval:90,count:4,reverse:false});
+const reorderJson=v=>Array.isArray(v)?v.map(reorderJson):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort((a,b)=>a.length-b.length||(a<b?-1:a>b?1:0)).map(k=>[k,reorderJson(v[k])])):v;
+
+test('the saved state keys the pair of block and MIP Batch recipe, also when read back in jsonb key order',async()=>{
+ const block=job.block(await confirmedSnapshot([{mode:'MIP',orientation:'Axial'},withVoi(oblique)]),{frameOfReference:FOR,display});
+ const withBatch=job.pair(block,RECIPE),without=job.pair(block,null);
+ assert.deepEqual(Object.keys(withBatch),['mip','mipBatch']);assert.equal(job.pair(block).mipBatch,null);assert.equal(job.pair(block,undefined).mipBatch,null);assert.equal(job.pair(null,RECIPE),null);
+ const state=job.createSaveState(),op={};state.open(op);
+ let ticket=state.begin(op,withBatch);state.committed(op,JSON.parse(JSON.stringify(withBatch)));state.end(ticket);
+ assert.equal(state.label(op,withBatch),'Saved');assert.equal(state.label(op,reorderJson(JSON.parse(JSON.stringify(withBatch)))),'Saved');
+ assert.equal(state.label(op,without),'Not Saved','the same block without its preview is another display');
+ assert.equal(state.label(op,job.pair(block,{...RECIPE,count:3})),'Not Saved','another recipe');assert.equal(state.label(op,block),'Not Saved','a bare block is not the pair');
+ ticket=state.begin(op,without);state.committed(op,without);state.end(ticket);assert.equal(state.label(op,without),'Saved');assert.equal(state.label(op,withBatch),'Not Saved');
+ assert.equal(state.restored(op,withBatch),true);assert.equal(state.label(op,withBatch),'Saved');
+ ticket=state.begin(op,without);state.unknown(ticket);state.end(ticket);
+ assert.equal(state.label(op,without),'Save Unconfirmed · Retry MIP Save');assert.equal(state.label(op,withBatch),'Saved');
+});
+
+test('retry needs the same pair and version; a version 12 body without a mipBatch key equals no preview (RC-2 ?? null)',async()=>{
+ const snapshot=await confirmedSnapshot([{mode:'MIP',orientation:'Axial'},withVoi(perpendicular)]);
+ const block=job.block(snapshot,{frameOfReference:FOR,display}),copy=JSON.parse(JSON.stringify(block));
+ // The Jobs panel's pending() reads mipBatch from the kept body; a version 12 body has none.
+ assert.equal(job.retryable({version:12,mip:copy,mipBatch:undefined},block,null),true);assert.equal(job.retryable({version:12,mip:copy},block,undefined),true);
+ assert.equal(job.retryable({version:12,mip:copy,mipBatch:undefined},block,RECIPE),false,'a preview shown beside a version 12 body');
+ assert.equal(job.retryable({version:13,mip:copy,mipBatch:{...RECIPE}},block,RECIPE),true);
+ assert.equal(job.retryable({version:13,mip:copy,mipBatch:reorderJson({...RECIPE})},block,RECIPE),true);
+ assert.equal(job.retryable({version:13,mip:copy,mipBatch:{...RECIPE,reverse:true}},block,RECIPE),false,'another recipe');
+ assert.equal(job.retryable({version:13,mip:copy,mipBatch:{...RECIPE}},block,null),false,'the preview was cleared');
+ assert.equal(job.retryable({version:12,mip:copy,mipBatch:{...RECIPE}},block,RECIPE),false,'version 12 never carries a recipe');
+ assert.equal(job.retryable({version:13,mip:{...copy,mode:'MinIP'},mipBatch:{...RECIPE}},block,RECIPE),false,'another block');
+ assert.equal(job.retryable(null,block,null),false);assert.equal(job.retryable({version:12,mip:copy},null,null),false);
+ const base={writable:true,busy:false,snapshot,frameOfReference:FOR,display,corners,pending:null,title:'MIP batch',retry:false,batch:null};
+ const gate=change=>job.saveGate({...base,...change});
+ assert.equal(gate({retry:true,title:'',pending:{version:12,mip:copy,mipBatch:undefined}}).message,'','a version 12 retry without a preview');
+ assert.equal(gate({retry:true,title:'',pending:{version:12,mip:copy,mipBatch:undefined},batch:RECIPE}).message,job.messages.retryOther);
+ assert.equal(gate({retry:true,title:'',pending:{version:13,mip:copy,mipBatch:{...RECIPE}},batch:RECIPE}).message,'');
+ assert.equal(gate({retry:true,title:'',pending:{version:13,mip:copy,mipBatch:{...RECIPE}}}).message,job.messages.retryOther,'the same block without its recipe');
+ assert.equal(gate({pending:{version:13,mip:copy,mipBatch:{...RECIPE}},batch:RECIPE,title:''}).message,job.messages.useRetry);
+ assert.equal(gate({pending:{version:13,mip:copy,mipBatch:{...RECIPE}},title:''}).message,job.messages.useRequest);
+ const accepted=gate({batch:RECIPE});assert.equal(accepted.message,'');assert.deepEqual(accepted.batch,RECIPE);assert.ok(job.same(accepted.block,block));assert.equal(gate({}).batch,null);
+ // A MIP Batch being made refuses the save right after the account and busy reasons.
+ assert.equal(gate({generating:true,writable:false}).message,job.messages.writable);assert.equal(gate({generating:true,busy:true}).message,job.messages.busy);
+ assert.equal(gate({generating:true,snapshot:{...snapshot,state:'pending'},title:''}).message,job.messages.generating);assert.equal(gate({generating:true}).block,null);
+});
+
+test('dirty reads the block of a saved pair, and a MIP Batch preview alone never makes the viewer dirty',async()=>{
+ const voiFinal=(await confirmedSnapshot([{mode:'MIP',orientation:'Axial'},withVoi(oblique)])).final,plain=(await confirmedSnapshot([{mode:'Raysum',orientation:'Sagittal'}])).final;
+ const voiBlock=job.block({applied:voiFinal,final:voiFinal,state:'final'},{frameOfReference:FOR,display}),plainBlock=job.block({applied:plain,final:plain,state:'final'},{frameOfReference:FOR,display});
+ const state=job.createSaveState(),op={};state.open(op);
+ assert.equal(state.dirty(op,voiFinal),true);assert.equal(state.dirty(op,plain),false);
+ state.committed(op,JSON.parse(JSON.stringify(job.pair(voiBlock,RECIPE))));assert.equal(state.dirty(op,voiFinal),false,'the saved pair holds this VOI Slab');
+ state.committed(op,job.pair(voiBlock,null));assert.equal(state.dirty(op,voiFinal),false);
+ state.committed(op,job.pair(plainBlock,RECIPE));assert.equal(state.dirty(op,voiFinal),true,'an unsaved VOI Slab stays dirty beside a saved preview');assert.equal(state.dirty(op,plain),false);
+});

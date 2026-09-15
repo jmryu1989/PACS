@@ -615,3 +615,304 @@ test('a MIP Viewer disposed while Save MIP Job waits is closed and removed, and 
   assert.doesNotMatch(summary.textContent,/Saved/);assert.doesNotMatch(world.status(),/저장했습니다/);
  }finally{world.viewer.dispose();}
 });
+
+// A11-BATCH-1 P2: version 13 is the exact version 12 snapshot plus the recipe of the MIP Batch preview shown with that display.
+const batchRecipe=(over={})=>({schema:1,algorithm:'kin-mip-batch-1',axis:'Horizontal',interval:90,count:4,reverse:false,...over});
+const batchMipTool=(value,recipe,{calls=[],viewport='vp-0'}={})=>({capture:readOnly=>{calls.push(['capture',readOnly]);return value;},batch:readOnly=>{calls.push(['batch',readOnly]);return recipe;},dirty:()=>false,viewport:()=>viewport});
+const nearly=(actual,want,tolerance,label)=>{assert.equal(actual.length,want.length,label);actual.forEach((n,i)=>assert.ok(Math.abs(n-want[i])<=tolerance,label+'['+i+'] '+n+' != '+want[i]));};
+const until=async(predicate,label='condition')=>{for(let n=0;n<2000&&!predicate();n++)await new Promise(resolve=>setTimeout(resolve,0));assert.ok(predicate(),label);};
+
+test('a MIP Batch preview saves as version 13 = the exact version 12 snapshot plus mipBatch; without one it stays version 12',()=>{
+ for(const [rows,cols] of [[1,3],[3,1]]){
+  const calls=[],block=mipBlock(),recipe=batchRecipe(),value=world(rows,cols,PLANES,{mip:batchMipTool(block,recipe,{calls})}).capture(true);
+  assert.equal(value.version,13);assert.deepEqual(value.mipBatch,recipe);assert.deepEqual(value.mip,block);
+  assert.deepEqual(calls,[['capture',true],['batch',true]],'the block and then its recipe, in one capture');
+  assert.deepEqual(Object.keys(value).sort(),['active','cells','cols','mip','mipBatch','rows','studies','version','volume']);
+  const v12=world(rows,cols,PLANES,{mip:batchMipTool(block,null)}).capture();assert.equal(v12.version,12);assert.equal('mipBatch' in v12,false);
+  delete value.mipBatch;value.version=12;assert.deepEqual(value,v12);
+ }
+ assert.equal(world(1,3,PLANES,{mip:mipTool(mipBlock())}).capture().version,12,'a tool without the batch capability');
+ const calls=[];assert.equal(world(1,3,PLANES,{mip:batchMipTool(null,batchRecipe(),{calls})}).capture().version,4);assert.deepEqual(calls,[['capture',false]],'no display, no recipe asked');
+ // A MIP Batch being made refuses with its own reason; the version 12 exclusivity names the other tools as before.
+ assert.throws(()=>world(1,3,PLANES,{mip:{...batchMipTool(mipBlock(),null),batch:()=>{throw Error('MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.');}}}).capture(),/^Error: MIP Batch 생성을 마친 뒤/);
+ const tool=over=>batchMipTool(mipBlock(),batchRecipe(),over),marks={version:1,visible:true,sync:true,marks:[{point:[0,0,0]}]};
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),path:{capture:()=>({schema:1,algorithm:'kin-path-1'}),dirty:()=>false}}).capture(),/MIP 작업은 곡면 MPR·3D Path와 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),curved:{capture:()=>({schema:1,kind:'curved'}),dirty:()=>false}}).capture(),/MIP 작업은 곡면 MPR·3D Path와 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool(),batch:{cell:{},offset:0,interval:1,count:2,reverse:false}}).capture(),/MIP 작업은 단면 묶음·3D 표식과 함께/);
+ assert.throws(()=>world(3,1,PLANES,{mip:tool(),marks}).capture(),/MIP 작업은 단면 묶음·3D 표식과 함께/);
+ assert.throws(()=>world(1,3,PLANES,{mip:tool({viewport:'vp-1'})}).capture(),/활성 평면이 아니어서/);
+ assert.throws(()=>world(1,3,PLANES,{mip:batchMipTool(mipBlock({display:{voiRange:{lower:-1000,upper:999},interpolationType:1}}),batchRecipe())}).capture(),/밝기 범위·보간이 활성 MPR 평면과 달라/);
+ assert.throws(()=>world(2,2,['axial','sagittal','coronal',null],{mip:tool()}).capture(),/MIP 작업은 3평면 1×3·3×1 MPR 배치에서/);
+});
+
+test('resolve(v13) checks both algorithm ids without the lazily loaded MIP Batch model; apply hands the recipe and the Job deadline to the MIP restore',async()=>{
+ const block=mipBlock(),recipe=batchRecipe(),saved=world(1,3,PLANES,{active:1,mip:batchMipTool(block,recipe,{viewport:'vp-1'})}).capture();assert.equal(saved.version,13);
+ const refusing={restore:async()=>{throw Error('must not restore');},clearForJob(){}};
+ // RC-3: a fresh page has no window.KinVolumeMipBatch until the MIP restore loads it, so resolve must not ask for it.
+ let order=restoreWorld({mip:refusing});assert.equal(context.window.KinVolumeMipBatch,undefined);assert.equal(order.jobs.resolve(saved),SET);
+ order=restoreWorld({});assert.throws(()=>order.jobs.resolve(saved),/MIP Viewer 도구를 불러오지 못했습니다/);
+ for(const [label,change,pattern] of [['batch schema 2',s=>{s.mipBatch.schema=2;},/MIP Batch 작업의 계산 방식을/],['batch algorithm kin-mip-batch-2',s=>{s.mipBatch.algorithm='kin-mip-batch-2';},/MIP Batch 작업의 계산 방식을/],
+   ['missing mipBatch',s=>{delete s.mipBatch;},/MIP Batch 작업의 계산 방식을/],['mip algorithm kin-mip-2',s=>{s.mip.algorithm='kin-mip-2';},/이 MIP 작업의 계산 방식을/]]){
+  const s=structuredClone(saved);change(s);order=restoreWorld({mip:refusing});
+  assert.throws(()=>order.jobs.resolve(s),pattern,label);await assert.rejects(order.jobs.apply(s,()=>true),pattern,label);assert.deepEqual(order.log,[],label);
+ }
+ const restorer={calls:[],cleared:0,restore(value,current,deadline,viewportId,batch){order.log.push('mip');this.calls.push({value,current,deadline,viewportId,batch,active:order.grid.getState().activeViewportId});return Promise.resolve();},clearForJob(){this.cleared++;order.log.push('clear');}};
+ order=restoreWorld({mip:restorer});const started=Date.now();await order.jobs.apply(structuredClone(saved),()=>true);
+ assert.deepEqual(order.log,['setLayout','active:1','mip']);assert.equal(restorer.cleared,0);
+ const call=restorer.calls[0];assert.deepEqual(call.value,block);assert.deepEqual(call.batch,recipe);assert.equal(call.viewportId,call.active);assert.equal(typeof call.current,'function');
+ assert.ok(call.deadline>=started+60000&&call.deadline<=Date.now()+60000,'the unchanged 60 s Job deadline, not a batch budget');
+ // A version 12 Job hands over no recipe, and every other version closes the MIP Viewer and its preview.
+ // Both snapshots are captured before restoreWorld installs the restorer: world() replaces the MIP tool with the one it is given.
+ const v12=world(1,3,PLANES,{mip:mipTool(block)}).capture(),v4=world(1,3,PLANES).capture();assert.deepEqual([v12.version,v4.version],[12,4]);
+ restorer.calls.length=0;order=restoreWorld({mip:restorer});await order.jobs.apply(structuredClone(v12),()=>true);
+ assert.equal(restorer.calls.length,1);assert.equal(restorer.calls[0].batch,null);
+ restorer.calls.length=0;order=restoreWorld({mip:restorer});await order.jobs.apply(structuredClone(v4),()=>true);
+ assert.equal(restorer.calls.length,0);assert.equal(restorer.cleared,1);
+ const failing={restore:()=>Promise.reject(Error('INJECTED MIP BATCH RESTORE FAILURE')),clearForJob(){}};order=restoreWorld({mip:failing});
+ await assert.rejects(order.jobs.apply(structuredClone(saved),()=>true),/INJECTED MIP BATCH RESTORE FAILURE/);
+});
+
+// The real viewer-volume-mip.js and volume-mip-batch.js in the browser-like realm of mipViewerWorld above. This native stand-in also
+// serves the private MIP Batch viewport: its slab planes follow a camera only the way the pinned Viewport does (a slab write, or a
+// setCamera that moves the focal point along the normal or changes viewUp), frames render asynchronously, a canvas encodes to a blob,
+// the linked clip program has one loop per clipping plane, and every batch camera, render, timer and object URL is logged.
+function batchViewerWorld({distance=120,faults={},command=null}={}){
+ const events=[],created=[],revoked=[],timerMs=new WeakMap();let hold=null,held=null,viewer=null,dialog=null;
+ const node=tag=>{const children=[],on=new Map(),attributes={};const e={tagName:tag,children,attributes,style:{},dataset:{},className:'',textContent:'',value:'',checked:false,disabled:false,open:false,
+  append:(...items)=>{children.push(...items);},remove(){e.removed=true;},replaceChildren:(...items)=>{children.splice(0,children.length,...items);},
+  setAttribute:(name,value)=>{attributes[name]=String(value);},removeAttribute:name=>{delete attributes[name];if(name==='src')e.src='';},
+  addEventListener:(name,listener)=>{if(!on.has(name))on.set(name,new Set());on.get(name).add(listener);},removeEventListener:(name,listener)=>{on.get(name)?.delete(listener);},
+  emit:name=>{for(const listener of [...(on.get(name)||[])])listener({type:name,target:e});},contains:item=>item===e||children.some(c=>c.contains?.(item)),showModal(){e.open=true;},close(){e.open=false;}};return e;};
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ const text=className=>dialog?find(dialog,e=>e.className===className)?.textContent:undefined;
+ const status=()=>dialog?find(dialog,e=>e.attributes.role==='status')?.textContent:undefined;
+ const presets={axial:{viewPlaneNormal:[0,0,-1],viewUp:[0,-1,0]},sagittal:{viewPlaneNormal:[1,0,0],viewUp:[0,0,1]},coronal:{viewPlaneNormal:[0,-1,0],viewUp:[0,0,1]}};
+ const centre=[15.75,15.75,40],dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+ const volume={volumeId:'volume-1',dimensions:[64,64,33],spacing:[.5,.5,2.5],imageIds:['image:1'],imageData:{getSpatialExtent:()=>[0,63,0,63,0,32],indexToWorld:i=>[i[0]*.5,i[1]*.5,i[2]*2.5]}};
+ const views=new Map(),loop=n=>'for(int i = 0; i < '+n+'; i++) {\n  float rayDirRatio = dot(rayDir, vClipPlaneNormals[i]);\n  if (rayDirRatio < 0.0) dists.y = min(dists.y, result);\n  else dists.x = max(dists.x, result);\n}';
+ const engine={views,enableElement({viewportId,element}){
+   const batch=viewportId.startsWith('kin-mipbatch-');let camera=null,blend=0,half=0,properties={},slab=null,specific=null;const extra=[];
+   const derive=()=>{slab={focal:[...camera.focalPoint],normal:[...camera.viewPlaneNormal],half};};
+   const plane=sign=>({getOrigin:()=>slab.focal.map((x,i)=>x-sign*slab.normal[i]*slab.half),getNormal:()=>slab.normal.map(n=>sign*n)});
+   const mapper={getBlendMode:()=>blend,getSampleDistance:()=>(.5+.5+2.5)/6,getClippingPlanes:()=>[...(slab?[plane(1),plane(-1)]:[]),...extra],
+    addClippingPlane:p=>{(batch?faults.batchPlane:faults.plane)?.();extra.push(p);return true;},removeClippingPlane:p=>{const i=extra.indexOf(p);if(i<0)return false;extra.splice(i,1);return true;},
+    setViewSpecificProperties:value=>{specific=value;},getViewSpecificProperties:()=>specific};
+   const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
+   views.set(viewportId,{id:viewportId,batch,mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
+    setOrientation:key=>{camera={...structuredClone(presets[key]),focalPoint:[...centre],position:centre.map((x,i)=>x+presets[key].viewPlaneNormal[i]*distance),parallelScale:60};},
+    setCamera:next=>{
+     const before=camera;camera={...(camera||{}),...structuredClone(next)};if(batch)events.push({type:'setCamera',camera:structuredClone(next)});
+     if(slab&&before&&(dot(camera.focalPoint.map((x,i)=>x-before.focalPoint[i]),camera.viewPlaneNormal)!==0||camera.viewUp.some((x,i)=>x!==before.viewUp[i])))derive();},
+    setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;if(camera)derive();},
+    setProperties:value=>{properties={...properties,...value};},getProperties:()=>properties,getCamera:()=>structuredClone(camera),
+    getCanvas:()=>({width:faults.size??512,height:512,toBlob:(callback,type)=>setTimeout(()=>callback(faults.blob?null:{size:1024,type}),0)}),
+    render:()=>{
+     events.push({type:batch?'render:batch':'render:dialog',planes:batch?mapper.getClippingPlanes().map(p=>({origin:p.getOrigin(),normal:p.getNormal()})):null,status:status(),summary:text('kin-mip-voi-state'),
+      cancels:batch&&viewer?viewer.job.cancels({type:'keydown',key:'Escape',target:dialog}):null});
+     if(batch&&hold?.(events)){held=element;return;}
+     setTimeout(()=>element.emit('IMAGE_RENDERED'),0);}});
+  },getViewport:id=>views.get(id),disableElement:id=>{views.delete(id);events.push({type:'disable',id});}};
+ engine.offscreenMultiRenderWindow={getOpenGLRenderWindow:()=>({getViewNodeFor:mapper=>{const view=[...views.values()].find(v=>v.mapper===mapper);if(!view)return null;
+  return {get:name=>name==='tris'?{tris:{getProgram:()=>({getCompiled:()=>true,getLinked:()=>!(view.batch&&faults.batchGpu),getFragmentShader:()=>({getSource:()=>loop(mapper.getClippingPlanes().length)})})}}:null};}})};
+ const source={id:'vp-0',getVolumeId:()=>volume.volumeId,getRenderingEngine:()=>engine,getActors:()=>[{actor:{getMapper:()=>({})}}],getProperties:()=>({voiRange:{lower:-1100,upper:1100},interpolationType:0})};
+ const target={group:'group-1',selection:'selection-1',views:[source,{id:'vp-1'},{id:'vp-2'}],source:{viewportId:'vp-0',uid:'1.2.3',series:'1.2.4',study:{id:'SYNTHETIC'}}};
+ const document={createElement:node,body:node('body'),head:node('head'),querySelectorAll:()=>[]};
+ const sandbox={document,structuredClone,crypto,AbortController,clearInterval,devicePixelRatio:1,
+  setTimeout:(callback,ms,...args)=>{const handle=setTimeout(callback,ms,...args);timerMs.set(handle,ms);events.push({type:'timer',ms,handle});return handle;},
+  clearTimeout:handle=>{if(handle&&timerMs.has(handle))events.push({type:'clear',ms:timerMs.get(handle),handle});clearTimeout(handle);},
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},ResizeObserver:class{observe(){}disconnect(){}},
+  URL:{createObjectURL:()=>{const url='blob:frame-'+(created.length+1);created.push(url);return url;},revokeObjectURL:url=>{revoked.push(url);}},
+  fetch:async url=>({ok:true,json:async()=>url==='/api/me'?{kind:'member',institution:'I1',sub:'u1'}:[]}),kinViewerJobCommand:command||undefined,
+  cornerstone:{cache:{getVolume:id=>id===volume.volumeId?volume:null},metaData:{get:(type,id)=>type==='instance'&&id==='image:1'?{FrameOfReferenceUID:'2.25.6'}:null},
+   Enums:{Events:{IMAGE_RENDERED:'IMAGE_RENDERED'},ViewportType:{ORTHOGRAPHIC:'orthographic'}},CONSTANTS:{MPR_CAMERA_VALUES:presets}}};
+ sandbox.window=sandbox;const realm=vm.createContext(sandbox);
+ for(const file of ['volume-mip.js','volume-voi.js','volume-mip-job.js','volume-mip-batch.js','viewer-volume-mip.js'])
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite',file),'utf8'),realm,{filename:file});
+ const notices=[];viewer=realm.kinCreateVolumeMip({target:()=>target,permitted:()=>true,alive:()=>true,owner:()=>['I1','u1'],notice:message=>notices.push(message)});
+ dialog=document.body.children[0];
+ return {viewer,dialog,views,notices,events,created,revoked,faults,window:sandbox,find:match=>find(dialog,match),status,summary:()=>text('kin-mip-voi-state'),frame:()=>text('kin-mip-batch-frame'),
+  button:label=>find(dialog,e=>e.tagName==='button'&&e.textContent===label),field:label=>find(dialog,e=>e.attributes['aria-label']===label),
+  setHold:predicate=>{hold=predicate;},held:()=>held,release:()=>{const element=held;held=null;hold=null;setTimeout(()=>element?.emit('IMAGE_RENDERED'),0);}};
+}
+const batchValue=Object.freeze({schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'2.25.6',mode:'MIP',orientation:'Axial',
+ display:{voiRange:{lower:-1100,upper:1100},interpolationType:0},voiSlab:{center:[8.125,15.75,40],normal:[1,0,0],pivot:[15.75,15.75,40],thickness:22.25}});
+
+test('a MIP Batch Job restore regenerates every frame after Final under its own explicit budget; success and Saved come only after the last frame',async()=>{
+ const w=batchViewerWorld(),recipe=batchRecipe();
+ try{
+  const started=Date.now();await w.viewer.job.restore(structuredClone(batchValue),{current:()=>true,deadline:started+20000,viewportId:'vp-0',batch:structuredClone(recipe)});
+  assert.equal(w.dialog.open,true);assert.equal(w.dialog.dataset.kinMipState,'final');assert.deepEqual(w.notices,[]);
+  assert.equal(w.status(),'MIP Batch 작업을 복원했습니다. 회전 투영 미리보기는 표시 전용이며 원본 영상과 W/L은 바뀌지 않았습니다.');
+  // Every frame camera is the hard-coded axial Horizontal series about the box centre at the Final camera distance (MB3, MB4, MB11).
+  const centre=[15.75,15.75,40],thickness=Math.hypot(63*.5,63*.5,32*2.5),normals=[[0,0,-1],[1,0,0],[0,0,1],[-1,0,0]];
+  const cameras=w.events.filter(e=>e.type==='setCamera').map(e=>e.camera);assert.equal(cameras.length,4);
+  cameras.forEach((camera,i)=>{nearly(camera.viewPlaneNormal,normals[i],1e-12,'normal '+i);assert.deepEqual(camera.viewUp,[0,-1,0]);assert.deepEqual(camera.focalPoint,centre);
+   nearly(camera.position,centre.map((x,k)=>x+normals[i][k]*120),1e-9,'position '+i);assert.equal(camera.parallelScale,thickness/2);});
+  // Per frame the VOI Slab planes are the saved source-LPS planes (MB1) and the whole-volume slab faces that frame (MB2).
+  const renders=w.events.filter(e=>e.type==='render:batch');assert.equal(renders.length,4);
+  renders.forEach((render,i)=>{
+   // Plane vectors are created in the viewer's realm; a JSON round trip compares their values rather than their prototypes.
+   assert.equal(render.planes.length,4);nearly(render.planes[2].origin,[-3,15.75,40],1e-12,'VOI low '+i);assert.deepEqual(JSON.parse(JSON.stringify(render.planes[2].normal)),[1,0,0]);
+   nearly(render.planes[3].origin,[19.25,15.75,40],1e-12,'VOI high '+i);assert.deepEqual(JSON.parse(JSON.stringify(render.planes[3].normal)),[-1,0,0]);
+   assert.ok(Math.abs(Math.abs(dotOf(render.planes[0].normal,normals[i]))-1)<=1e-12,'slab normal of frame '+i);
+   // Progress while regenerating, the Close/Escape exemption still live (MB13) and no Saved while any frame is pending (MB8).
+   assert.equal(render.status,'MIP Batch 복원 중 '+(i+1)+' / 4 · Close MIP Viewer나 Escape로 취소');assert.equal(render.cancels,true,'cancel exemption at frame '+i);assert.doesNotMatch(render.summary,/ · Saved$/);
+  });
+  // BLK-2: the Final phase timer on the Job deadline is retired, and one explicit 4 x 15 s budget is armed after Final and before frame 1.
+  const index=predicate=>w.events.findIndex(predicate),budget=w.events.filter(e=>e.type==='timer'&&e.ms===60000);assert.equal(budget.length,1);
+  const armed=w.events.indexOf(budget[0]),firstDialog=index(e=>e.type==='render:dialog'),firstBatch=index(e=>e.type==='render:batch');
+  assert.ok(firstDialog>=0&&firstDialog<armed&&armed<firstBatch,'armed after the Final render and before the first frame');
+  const phase=w.events.find(e=>e.type==='timer'&&e.ms>15000&&e.ms<=20000);assert.ok(phase,'the Final phase timer on the Job deadline');
+  assert.ok(w.events.slice(0,armed).some(e=>e.type==='clear'&&e.handle===phase.handle),'the Final phase timer is cleared before the batch budget is armed');
+  assert.ok(w.events.slice(armed).filter(e=>e.type==='timer'&&e.ms===15000).length>=4,'each frame waits at most 15 s of the budget');
+  // After the last frame: Saved is the restored pair, the capability returns the recipe and the private viewport is gone.
+  assert.match(w.summary(),/^VOI Slab · On · 22\.3 mm · Saved$/);assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),recipe);
+  assert.equal(w.frame(),'1 / 4 · MIP · Axial · Horizontal 0° · VOI Slab 22.3 mm · Preview');
+  assert.equal(w.created.length,4);assert.deepEqual(w.revoked,[]);assert.deepEqual([...w.views.keys()].filter(id=>id.startsWith('kin-mipbatch-')),[]);
+  assert.equal(w.viewer.job.cancels({type:'keydown',key:'Escape',target:w.dialog}),false,'no restore is left to cancel');
+  w.button('Next Frame').onclick();assert.equal(w.frame(),'2 / 4 · MIP · Axial · Horizontal +90° · VOI Slab 22.3 mm · Preview');
+  // A display request ends the preview before its native writes (MB6): nothing to capture, every frame URL revoked.
+  let revokedAtNativeWrite=null;
+  w.faults.plane=()=>{if(revokedAtNativeWrite===null)revokedAtNativeWrite=[...w.revoked];};
+  const projection=w.field('MIP Projection');projection.value='MinIP';projection.onchange();
+  assert.deepEqual(revokedAtNativeWrite?.sort(),[...w.created].sort(),'the old preview is cleared before the first native VOI plane write');
+  w.faults.plane=null;
+  assert.equal(w.viewer.job.batch(),null);assert.deepEqual([...w.revoked].sort(),[...w.created].sort());
+ }finally{w.viewer.dispose();}
+});
+const dotOf=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+
+test('a MIP Batch frame failure after Final rolls the restore back with its own reason; nothing is announced, Saved or leaked',async()=>{
+ for(const [label,options,reason] of [
+   ['batch clipping-plane write fault',{faults:{batchPlane:()=>{throw Error('INJECTED MIP BATCH PLANE WRITE');}}},'INJECTED MIP BATCH PLANE WRITE'],
+   ['batch clip shader not linked',{faults:{batchGpu:true}},'투영 셰이더를 GPU에서 확인하지 못했습니다.'],
+   ['PNG encoding returns no blob',{faults:{blob:true}},'MIP Batch 영상을 만들지 못했습니다.'],
+   ['canvas is not 512 px',{faults:{size:511}},'MIP Batch 영상 크기를 확인하지 못했습니다.'],
+   ['camera inside the whole-volume slab',{distance:10},'MIP 투영 카메라가 CT 볼륨 투영 범위 안에 있어 MIP Batch를 만들지 않았습니다.']]){
+  const w=batchViewerWorld(options);
+  try{
+   const error=await w.viewer.job.restore(structuredClone(batchValue),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0',batch:batchRecipe()}).then(()=>null,e=>e);
+   assert.ok(error,label);assert.equal(error.message,reason,label);
+   assert.ok(w.events.some(e=>e.type==='render:dialog'),label+': the Final display was reached first');
+   assert.equal(w.dialog.open,false,label);assert.equal(w.views.size,0,label+': both viewports are disabled');
+   assert.doesNotMatch(w.status(),/복원했습니다/,label);assert.deepEqual(w.revoked,w.created,label+': no frame URL outlives the failure');
+  }finally{w.viewer.dispose();}
+ }
+ // An unknown recipe is refused before the viewer opens.
+ const w=batchViewerWorld();
+ try{
+  await assert.rejects(w.viewer.job.restore(structuredClone(batchValue),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0',batch:batchRecipe({algorithm:'kin-mip-batch-2'})}),{message:'MIP Batch 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.'});
+  assert.equal(w.dialog.open,false);assert.equal(w.events.filter(e=>e.type.startsWith('render')).length,0);
+ }finally{w.viewer.dispose();}
+});
+
+test('Make MIP Batch: gates, the recipe of the generated preview, atomic cancel and failure, and Save refused while generating',async()=>{
+ const posts=[];let release=null;
+ const command={owner:()=>JSON.stringify(['I1','u1']),writable:()=>true,busy:()=>false,pending:()=>null,
+  save:fields=>{posts.push(fields);return new Promise(resolve=>{release=resolve;});},retry:()=>Promise.reject(Error('must not retry'))};
+ const w=batchViewerWorld({command}),renders=()=>w.events.filter(e=>e.type==='render:batch').length;
+ try{
+  await w.viewer.open();assert.equal(w.dialog.dataset.kinMipState,'final');
+  const make=()=>w.button('Make MIP Batch').onclick(),set=(label,value)=>{w.field(label).value=String(value);};
+  assert.deepEqual([w.field('MIP Batch Axis').value,w.field('MIP Batch Interval (deg)').value,w.field('MIP Batch Number').value,w.field('MIP Batch Reverse').checked],['Horizontal','10','36',false]);
+  // A span beyond 360 degrees is refused before any native call.
+  set('MIP Batch Interval (deg)',90);set('MIP Batch Number',6);await make();
+  assert.equal(w.status(),'MIP Batch Interval은 1~180도, Number는 2~64장, 전체 회전 범위((Number-1)×Interval)는 360도 이내로 입력하세요.');assert.equal(renders(),0);
+  set('MIP Batch Number',3);await make();
+  assert.equal(w.status(),'MIP Batch 미리보기 3장을 만들었습니다. 표시 전용 임시 미리보기이며 Save MIP Job으로 조건을 저장할 수 있습니다.');
+  const first=[...w.created];assert.equal(first.length,3);assert.match(w.find(e=>e.className==='kin-mip-job-note').textContent,/MIP Batch 조건/);
+  // The saved recipe is the generated preview's, never the editors changed afterwards (MB5).
+  set('MIP Batch Number',2);w.field('MIP Batch Axis').value='Vertical';assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),batchRecipe({count:3}));
+  // A second generation held on its second frame: the previous preview is owned but unavailable, and display change, Save, another
+  // Make and Play are refused; Cancel keeps the previous preview exactly (MB9).
+  set('MIP Batch Number',4);const holdAt=renders()+2;w.setHold(events=>events.filter(e=>e.type==='render:batch').length===holdAt);
+  const running=make();await until(()=>w.held(),'second frame held');
+  assert.equal(w.status(),'MIP Batch 생성 중 2 / 4');
+  assert.throws(()=>w.viewer.job.batch(),{message:'MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.'});
+  w.field('MIP Job Title').value='held batch';await w.button('Save MIP Job').onclick();
+  assert.equal(w.status(),'MIP Batch 생성을 마친 뒤 MIP 작업을 저장하세요.');assert.deepEqual(posts,[]);
+  await make();assert.equal(w.status(),'MIP Batch 생성이 끝난 뒤 다시 누르세요.');
+  assert.equal(w.button('Play MIP Batch').disabled,true);assert.equal(w.button('Clear MIP Batch').disabled,true);assert.equal(w.button('Cancel MIP Batch').disabled,false);
+  const projection=w.field('MIP Projection');projection.value='MinIP';projection.onchange();
+  assert.equal(w.status(),'MIP Batch 생성이 끝난 뒤 Projection·Orientation·VOI Slab을 바꾸세요.');assert.equal(projection.value,'MIP');
+  w.button('Cancel MIP Batch').onclick();await running;w.setHold(null);
+  assert.equal(w.status(),'MIP Batch 생성을 취소했습니다. 이전 MIP Batch 미리보기를 유지합니다.');
+  assert.deepEqual(w.revoked,[]);assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),batchRecipe({count:3}));
+  assert.deepEqual([...w.views.keys()].filter(id=>id.startsWith('kin-mipbatch-')),[]);assert.equal(w.dialog.dataset.kinMipState,'final');
+  // A frame failure keeps the previous preview as well.
+  w.faults.batchGpu=true;await make();w.faults.batchGpu=false;
+  assert.equal(w.status(),'투영 셰이더를 GPU에서 확인하지 못했습니다. 이전 MIP Batch 미리보기를 유지합니다.');assert.deepEqual(w.revoked,[]);assert.equal(w.dialog.dataset.kinMipState,'final');
+  // Make is refused while a save of this display is in flight (MB6b).
+  w.field('MIP Job Title').value='batch save';const saving=w.button('Save MIP Job').onclick();assert.equal(posts.length,1);
+  await make();assert.equal(w.status(),'MIP 작업 저장이 끝난 뒤 MIP Batch를 만드세요.');
+  release({state:'not-saved',sent:false,message:'INJECTED NOT SAVED'});await saving;
+  // A complete series replaces the previous one and only then revokes it; Clear revokes the rest.
+  set('MIP Batch Number',2);w.field('MIP Batch Axis').value='Horizontal';await make();
+  assert.deepEqual([...w.revoked].sort(),[...first].sort());assert.deepEqual(JSON.parse(JSON.stringify(w.viewer.job.batch())),batchRecipe({count:2}));
+  w.button('Clear MIP Batch').onclick();assert.equal(w.viewer.job.batch(),null);assert.equal(w.revoked.length,w.created.length);assert.equal(w.status(),'MIP Batch 미리보기를 비웠습니다.');
+ }finally{w.viewer.dispose();}
+});
+
+// The real viewer-jobs.js over the real viewer-volume-job.js, as mipSaveWorld above, with a MIP tool that shows a MIP Batch preview, a
+// list that returns the saved rows, and a POST whose receipt can be lost after the server committed it.
+async function batchSaveWorld(){
+ const real=context.window.kinCreateVolumeJob;let parts=null;
+ context.window.kinCreateVolumeJob=args=>{parts=args;return real(args);};
+ try{world(1,3,PLANES);}finally{context.window.kinCreateVolumeJob=real;}
+ const block=mipBlock(),posts=[],saved=[],rows=[],network={lose:false};let recipe=batchRecipe();
+ const mip={capture:()=>block,batch:()=>recipe,dirty:()=>false,viewport:()=>'vp-0',saved:(value,volume,batch)=>{saved.push(JSON.parse(JSON.stringify({value,volume,batch})));}};
+ context.window.kinMprMarks=undefined;context.window.kinVolumeMipJob=mip;
+ const element=tag=>{const children=[];return {tagName:tag,children,style:{},dataset:{},textContent:'',value:'',checked:false,disabled:false,isConnected:true,
+  append:(...items)=>{children.push(...items);},prepend:(...items)=>{children.unshift(...items);},insertBefore:item=>{children.push(item);},
+  replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute(){},remove(){},querySelector:selector=>children.find(c=>c.tagName===selector)||null};};
+ const layout=element('details');layout.append(element('summary'));
+ const jobs='/api/studies/'+STUDY+'/viewer-jobs';
+ const fetch=async(url,options={})=>{
+  let body=null;
+  if(url==='/api/me')body={kind:'member',institution:'I1',sub:'u1',roles:['radiologist']};
+  else if(url===jobs&&options.method==='POST'){
+   const sent=JSON.parse(options.body);posts.push(sent);
+   if(!rows.some(row=>row.id===sent.id))rows.push({id:sent.id,title:sent.title,description:'',snapshotVersion:sent.snapshot.version,hidden:false,authorActor:'dr.synthetic',authorSub:'u1',createdAt:0,revision:1});
+   if(network.lose){network.lose=false;const error=new Error('receipt lost after commit');error.name='AbortError';throw error;}
+   body={id:sent.id,snapshotVersion:sent.snapshot.version};
+  }else if(url.startsWith(jobs+'?'))body={jobs:rows.map(row=>({...row}))};
+  return {status:body?200:404,ok:!!body,json:async()=>body};};
+ const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
+  location:{search:'?StudyInstanceUIDs='+STUDY,origin:'https://kin.test'},fetch,crypto,AbortController,URL,URLSearchParams,setTimeout,clearTimeout,clearInterval,
+  setInterval:(callback,ms)=>{const timer=setInterval(callback,ms);timer.unref();return timer;},addEventListener(){},removeEventListener(){},
+  kinCreateVolumeJob:real,kinVolumeMipJob:mip,KinVolumeMipJob:require('../worklist-v0/hpacs-lite/volume-mip-job.js')};
+ sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
+ const panel=sandbox.kinViewerJobs({viewportGridService:parts.grid,cornerstoneViewportService:parts.cs,displaySetService:parts.ds},{scope:()=>({})});
+ panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
+ for(let n=0;n<200&&!command.owner();n++)await new Promise(r=>setTimeout(r,0));await idle();
+ const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
+ return {command,idle,posts,saved,block,network,setRecipe:value=>{recipe=value;},stop:()=>{panel.stop();context.window.kinVolumeMipJob=undefined;},
+  status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,text:value=>find(layout,e=>e.tagName==='p'&&e.textContent===value),
+  button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label)};
+}
+
+test('Save MIP Job beside a MIP Batch preview sends one version 13 body; Saved and Retry keep the pair, and the Job is never printable',async()=>{
+ const w=await batchSaveWorld();
+ try{
+  let outcome=await w.command.save({title:'MIP batch',description:''});
+  assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.length,1);
+  const sent=w.posts[0].snapshot;assert.equal(sent.version,13);assert.deepEqual(sent.mipBatch,batchRecipe());assert.deepEqual(sent.mip,w.block);
+  assert.deepEqual(w.saved,[{value:w.block,volume:sent.volume,batch:batchRecipe()}],'the committed receipt names the sent pair');
+  // The list labels the version 13 row and offers no print; Print Current View refuses the version 13 screen by name.
+  assert.ok(w.text('MIP Batch · 출력 미지원 · 회전 투영 표시 작업'));assert.equal(w.button('Print Saved Images'),null);assert.ok(w.button('Restore Job'));
+  await w.button('Print Current View').onclick();assert.match(w.status(),/^MIP Batch 작업은 아직 출력할 수 없습니다/);
+  // An unknown receipt keeps the body; Retry MIP Save resends it only while the same pair is shown (MB10).
+  w.network.lose=true;w.setRecipe(batchRecipe({count:3}));outcome=await w.command.save({title:'MIP batch lost',description:''});
+  // pending() parses the kept body in the Jobs panel's realm; a JSON round trip compares its values rather than its prototypes.
+  assert.equal(outcome.state,'unconfirmed',outcome.message);assert.deepEqual(JSON.parse(JSON.stringify(w.command.pending().mipBatch)),batchRecipe({count:3}));
+  w.setRecipe(null);outcome=await w.command.retry();
+  assert.equal(outcome.state,'not-saved');assert.match(outcome.message,/재시도할 MIP 저장 요청이 현재 표시와 같지 않습니다/);assert.equal(w.posts.length,2,'the same block without its preview resends nothing');
+  w.setRecipe(batchRecipe({count:3}));outcome=await w.command.retry();
+  assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.length,3);assert.equal(w.posts[2].id,w.posts[1].id,'the identical body');
+  // A version 12 body kept without any mipBatch key retries while no preview is shown (MB12).
+  w.network.lose=true;w.setRecipe(null);outcome=await w.command.save({title:'MIP plain lost',description:''});assert.equal(outcome.state,'unconfirmed',outcome.message);
+  assert.equal(w.command.pending().version,12);assert.equal(w.command.pending().mipBatch,undefined);
+  outcome=await w.command.retry();assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.at(-1).snapshot.version,12);assert.equal(w.saved.at(-1).batch,null);
+ }finally{w.stop();}
+});

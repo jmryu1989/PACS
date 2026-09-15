@@ -234,6 +234,19 @@ PROFILES = {
         # inherited MIP Viewer, VOI Slab, projection, job and orientation cases stay out.
         'suites': (('e2e/test_volume_mip_job.py', None, 'ci-mip-job'),),
     },
+    'volume-mip-batch': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-mip-batch-ci',
+        'project_prefix': 'kin-mipbatch-ci-',
+        # The A11-BATCH-1 MIP Viewer Batch cases in their own group, not inside volume-mip-job, volume-mip-voi or volume-slab,
+        # whose caps stay as they are. There is no hosted history yet. The three cases generate about 45 rotation frames on
+        # software GL, save and restore version 13 Jobs in up to four browsers, and wait out one 15s frame timeout and a changed
+        # series. That is comparable to the MIP Job group, so the single suite keeps the same 1200s cap: (1200+35) = 1235s leaves 265s.
+        'suite_timeout': 1200,
+        'suite_budgets': {'ci-mip-batch': 1200},
+        # The module's load_tests is the allowlist: exactly the authored test_mip_batch_* cases of its own class, so the
+        # inherited MIP Viewer, VOI Slab, MIP Job, projection and orientation cases stay out.
+        'suites': (('e2e/test_volume_mip_batch.py', None, 'ci-mip-batch'),),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

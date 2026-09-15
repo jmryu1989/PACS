@@ -387,6 +387,39 @@ test('a MIP Viewer job must match the original frame of reference and keep a vox
   const s=structuredClone(mipJob);s.mip.voiSlab=slab;assert.match(verifyVolumeReference(s,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/,label);
  }
 });
+// Version 13 (A11-BATCH-1 P1): the exact version 12 snapshot plus the MIP Viewer Batch rotation recipe (kin-mip-batch-1).
+const batchOf=(over={})=>({schema:1,algorithm:'kin-mip-batch-1',axis:'Horizontal',interval:90,count:4,reverse:false,...over});
+const batchJob={...structuredClone(mipJob),version:13,mipBatch:batchOf()};
+test('a MIP Batch job is accepted only as the exact version 12 snapshot plus one valid kin-mip-batch-1 recipe',()=>{
+ const with_=over=>({...structuredClone(batchJob),mipBatch:batchOf(over)});
+ for(const [label,s] of [['VOI on, Horizontal 90 x 4',batchJob],['VOI off, Vertical reverse 45 x 3',{...with_({axis:'Vertical',interval:45,count:3,reverse:true}),mip:{...mipOf(),voiSlab:null}}],
+   ['count 2, interval 180',with_({interval:180,count:2})],['count 64, interval 1',with_({interval:1,count:64})],['span exactly 360 (37 x 10)',with_({interval:10,count:37})],
+   ['span exactly 360 (3 x 180)',with_({interval:180,count:3})],['span 360 within the 1e-9 edge',with_({interval:(360+5e-10)/36,count:37})],['fractional interval',with_({interval:12.5,count:5})]]){
+  assert.equal(command(s).snapshot.version,13,label);assert.match(verifyVolumeReference(s,tags,'SYNTHETIC'),/^[a-f0-9]{64}$/,label);
+ }
+ for(const [label,change] of [
+   ['missing mipBatch',s=>{delete s.mipBatch;}],['mipBatch null',s=>{s.mipBatch=null;}],['version 14',s=>{s.version=14;}],
+   ['schema 2',s=>{s.mipBatch.schema=2;}],['algorithm kin-mip-batch-2',s=>{s.mipBatch.algorithm='kin-mip-batch-2';}],['axis Oblique',s=>{s.mipBatch.axis='Oblique';}],['axis horizontal',s=>{s.mipBatch.axis='horizontal';}],
+   ['count 1',s=>{s.mipBatch.count=1;}],['count 65',s=>{s.mipBatch.count=65;}],['count 2.5',s=>{s.mipBatch.count=2.5;}],['count text',s=>{s.mipBatch.count='4';}],
+   ['interval 0',s=>{s.mipBatch.interval=0;}],['interval 0.999',s=>{s.mipBatch.interval=.999;}],['interval 180.0001',s=>{s.mipBatch.interval=180.0001;s.mipBatch.count=2;}],['interval text',s=>{s.mipBatch.interval='90';}],
+   ['span 361 (20 x 19)',s=>{s.mipBatch.interval=19;s.mipBatch.count=20;}],['span 370 (38 x 10)',s=>{s.mipBatch.interval=10;s.mipBatch.count=38;}],['span beyond the 1e-9 edge',s=>{s.mipBatch.interval=(360+5e-9)/36;s.mipBatch.count=37;}],
+   ['reverse text',s=>{s.mipBatch.reverse='false';}],['missing reverse',s=>{delete s.mipBatch.reverse;}],['extra recipe key',s=>{s.mipBatch.frames=[];}],['camera in the recipe',s=>{s.mipBatch.parallelScale=45;}],
+   ['recipe array',s=>{s.mipBatch=[batchOf()];}],['frames beside the recipe',s=>{s.frames=[];}],
+   ['beside a batch',s=>{s.batch=null;}],['beside marks',s=>{s.marks={version:1,visible:true,sync:true,marks:[]};}],['beside a curve',s=>{s.curved=structuredClone(curve);}],['beside a path',s=>{s.path=structuredClone(route);}],
+   ['mip algorithm kin-mip-2',s=>{s.mip.algorithm='kin-mip-2';}],['missing mip',s=>{delete s.mip;}],['display 1e-9 from the active cell',s=>{s.mip.display.voiRange.lower=-1000+1e-9;}],
+   ['2x2 layout',s=>{s.rows=2;s.cols=2;s.cells.push(structuredClone(cell));}],['forged digest',s=>{s.volume.sourceDigest='f'.repeat(64);}]]){
+  const s=structuredClone(batchJob);change(s);assert.throws(()=>command(s),e=>e.getStatus?.()===400,label);
+ }
+ // Exact top-level keys: version 12 never carries a recipe and no other version admits one; no preview renders a MIP Batch Job.
+ const v12=structuredClone(mipJob);v12.mipBatch=batchOf();rejected(()=>command(v12));
+ for(const version of [4,5,6,7,8,9,10,11]){const s=structuredClone(batchJob);s.version=version;rejected(()=>command(s));}
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:batchJob}))));
+ // The version 12 display rules still bind the display of a version 13 Job to its original.
+ for(const [label,change] of [['foreign frame of reference',s=>{s.mip.frameOfReference='2.25.7';}],['slab wholly beyond the + side',s=>{s.mip.voiSlab={center:[15.5,15.5,5+2e-6],normal:[0,0,1],pivot:[15.5,15.5,1],thickness:6};}]]){
+  const s=structuredClone(batchJob);change(s);assert.equal(command(s).snapshot.version,13,label+' is syntactically valid');assert.throws(()=>verifyVolumeReference(s,tags,'SYNTHETIC'),e=>e.getStatus?.()===400,label);
+ }
+ assert.equal(command(mipJob).snapshot.version,12);assert.equal(command(snapshot).snapshot.version,4);assert.equal(command(pathJob).snapshot.version,11);assert.equal(command(curvedJob).snapshot.version,10);
+});
 // TEST-VOLUME-JOB-PERSISTENCE: the compiled ViewerJobService stores and restores every validated snapshot number exactly.
 const {ViewerJobService}=require('/app/dist/viewer-job.service.js');
 const {snapshotText,writeSnapshot,readSnapshot}=require('/app/dist/viewer-job-snapshot.js');
@@ -420,7 +453,7 @@ const accessFake={prepare:async()=>{},snapshot:async()=>{},require:async()=>{},a
 const jobService=options=>{const db=fakeDatabase(options);return {db,jobs:new ViewerJobService(db,orthancFake,accessFake)};};
 const jobBody=(s,title='MPR')=>Buffer.from(JSON.stringify({id:jobId,title,description:'',snapshot:s}));
 function exactJob(version){
- const s=structuredClone(version===11?pathJob:version===12?mipJob:snapshot);
+ const s=structuredClone(version===11?pathJob:version===12?mipJob:version===13?batchJob:snapshot);
  for(const c of s.cells){c.camera.focalPoint=[0.30000000000000004,0,1];c.camera.position=[0.30000000000000004,0,101];}
  return s;
 }
@@ -434,13 +467,13 @@ test('snapshot text keeps the observed 17-digit doubles that the Json write alte
  await assert.rejects(writeSnapshot({$executeRaw:async()=>0},jobId,{version:4}));await assert.rejects(writeSnapshot({$executeRaw:async()=>2},jobId,{version:4}));
  await assert.rejects(readSnapshot({$queryRaw:async()=>[]},jobId));await assert.rejects(readSnapshot({$queryRaw:async()=>[{snapshot:{version:4}}]},jobId));
 });
-test('a created version 4, 11 or 12 Job stores and restores every snapshot number exactly, with replay and conflict unchanged',async()=>{
- for(const version of [4,11,12]){
+test('a created version 4, 11, 12 or 13 Job stores and restores every snapshot number exactly, with replay and conflict unchanged',async()=>{
+ for(const version of [4,11,12,13]){
   const {db,jobs}=jobService(),s=exactJob(version);
   assert.ok(numbers(s).filter(x=>engineJson(x)!==x).length>=2,'the fixture carries doubles a 16-digit conversion alters');
   if(version===11)assert.ok(s.path.frame.initialNormal.some(x=>engineJson(x)!==x),'the path normal itself needs 17 digits');
-  // Version 12 is verified against the whole original like every volume Job, so its stored digest proves the service list.
-  if(version===12)assert.ok(s.mip.voiSlab.normal.some(x=>engineJson(x)!==x),'the MIP VOI Slab normal itself needs 17 digits');
+  // Versions 12 and 13 are verified against the whole original like every volume Job, so their stored digest proves the service list.
+  if(version===12||version===13)assert.ok(s.mip.voiSlab.normal.some(x=>engineJson(x)!==x),'the MIP VOI Slab normal itself needs 17 digits');
   const created=await jobs.create(volume.study,jobBody(s),caller);
   assert.deepEqual([created.id,created.revision,created.snapshotVersion,created.hidden],[jobId,1,version,false]);
   const text=db.store.jobs.get(jobId).snapshot,stored=JSON.parse(text);

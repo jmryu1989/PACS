@@ -137,7 +137,7 @@ jobs:
       - name: Volume rendering, sculpt, and personal preset boundaries
         run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs
       - name: Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/viewer_volume_job_capture_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/volume-mip-batch.js --file tests/volume_mip_batch_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/volume_mip_batch_test.cjs tests/viewer_volume_job_capture_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
       - name: Install synthetic DICOM and pinned browser test dependencies
@@ -480,6 +480,42 @@ jobs:
           path: |
             tests/e2e/artifacts/volume-mip-job-ci/
             tmp/mipjob-ci/
+          if-no-files-found: error
+          retention-days: 7
+  volume-mip-batch:
+    # The MIP Viewer Batch cases (A11-BATCH-1) in their own group, not extra cases inside volume-mip-job, volume-mip-voi or
+    # volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the profile's single
+    # cap (1200+35) = 1235s bounds the live step.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: MIP Batch profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mipbatch-python"
+          "$RUNNER_TEMP/mipbatch-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/mipbatch-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared MIP Viewer Batch selection
+        run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_job.py --file tests/e2e/test_volume_mip_batch.py --file tests/e2e/test_volume_projection.py --file tests/e2e/test_volume_path.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip-batch.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-jobs.js -- "$RUNNER_TEMP/mipbatch-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared MIP Viewer Batch tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/mipbatch-python/bin/python" tests/measurement_ci.py --profile volume-mip-batch
+      - name: Sanitized synthetic MIP Viewer Batch evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-volume-mip-batch-results
+          path: |
+            tests/e2e/artifacts/volume-mip-batch-ci/
+            tmp/mipbatch-ci/
           if-no-files-found: error
           retention-days: 7
   hanging-protocols:

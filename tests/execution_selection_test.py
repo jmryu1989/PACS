@@ -511,6 +511,28 @@ class ExecutionSelectionTests(unittest.TestCase):
                 self.assertNotIn(unit, [row[2] for row in other['suites']], name)
         print('SELECTION', suite, len(cases), flush=True)
 
+    def test_volume_mip_batch_profile_selects_each_authored_mip_batch_case_once(self):
+        profile = ci.PROFILES['volume-mip-batch']
+        cases = ['test_mip_batch_01_rotation_voi_frames_save_restore_new_browser',
+                 'test_mip_batch_02_gates_cancel_failure_order_v12_compat',
+                 'test_mip_batch_03_restore_failure_missing_tool_cancel_stale_rollback']
+        self.assertEqual(profile['suites'], (('e2e/test_volume_mip_batch.py', None, 'ci-mip-batch'),))
+        suite, class_name, unit = profile['suites'][0]
+        # Planned at the budget CI will actually request for this suite.
+        plan = runner.module_plan('tests/'+suite, unit, 'live', profile['suite_budgets'][unit], class_name)
+        self.assertEqual([item['case'] for item in plan['tests']], ['VolumeMipBatchE2E.'+name for name in cases])
+        self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), 3)
+        # The class declares exactly these cases on the MIP Job base; no inherited MIP Viewer, VOI Slab or MIP Job case is selected.
+        cls = getattr(runner.load_module(ROOT/'tests'/suite), 'VolumeMipBatchE2E')
+        self.assertEqual([(base.__module__, base.__name__) for base in cls.__bases__], [('test_volume_mip_job', 'VolumeMipJobE2E')])
+        self.assertEqual(sorted(name for name in vars(cls) if name.startswith('test')), cases)
+        for name, other in ci.PROFILES.items():
+            if name != 'volume-mip-batch':
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+                self.assertNotIn(unit, [row[2] for row in other['suites']], name)
+        print('SELECTION', suite, len(cases), flush=True)
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
