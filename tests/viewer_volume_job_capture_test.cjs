@@ -772,7 +772,11 @@ test('a MIP Batch Job restore regenerates every frame after Final under its own 
   assert.equal(w.viewer.job.cancels({type:'keydown',key:'Escape',target:w.dialog}),false,'no restore is left to cancel');
   w.button('Next Frame').onclick();assert.equal(w.frame(),'2 / 4 · MIP · Axial · Horizontal +90° · VOI Slab 22.3 mm · Preview');
   // A display request ends the preview before its native writes (MB6): nothing to capture, every frame URL revoked.
+  let revokedAtNativeWrite=null;
+  w.faults.plane=()=>{if(revokedAtNativeWrite===null)revokedAtNativeWrite=[...w.revoked];};
   const projection=w.field('MIP Projection');projection.value='MinIP';projection.onchange();
+  assert.deepEqual(revokedAtNativeWrite?.sort(),[...w.created].sort(),'the old preview is cleared before the first native VOI plane write');
+  w.faults.plane=null;
   assert.equal(w.viewer.job.batch(),null);assert.deepEqual([...w.revoked].sort(),[...w.created].sort());
  }finally{w.viewer.dispose();}
 });
