@@ -322,6 +322,10 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   expect(dialog).to_have_attribute('data-kin-mip-state','final');expect(result).to_be_hidden();expect(summary).to_have_text(label+'Saved')
   restored=v.evaluate(READ_ONLY_CAPTURE);self.assertEqual(restored['version'],12);self.assertNotIn('mipBatch',restored)
   # A session ended while a version 13 POST is held closes the viewer and never shows Saved.
+  # The version 12 restore opened a new viewer whose MIP Batch editors hold the defaults (Interval 10, Number 36), not a recipe typed
+  # before Close, so this Make enters recipe A itself.
+  box=dialog.locator('.kin-mip-batch');editors=lambda:[box.get_by_label(name,exact=True).input_value() for name in ('MIP Batch Axis','MIP Batch Interval (deg)','MIP Batch Number')]+[box.get_by_label('MIP Batch Reverse',exact=True).is_checked()]
+  self.assertEqual(editors()[1:3],['10','36']);self.batch_inputs(dialog,'Horizontal',90,3);self.assertEqual(editors(),['Horizontal','90','3',False])
   self.make(v,dialog,3);title.fill('MIP batch held session');held=[]
   def hold(route):
    if route.request.method=='POST':held.append(route)
@@ -330,7 +334,7 @@ class VolumeMipBatchE2E(VolumeMipJobE2E):
   for _ in range(100):
    if held:break
    v.wait_for_timeout(100)
-  self.assertEqual(len(held),1);self.assertEqual(json.loads(held[0].request.post_data)['snapshot']['version'],13);expect(summary).to_contain_text('· Saving')
+  self.assertEqual(len(held),1);body=json.loads(held[0].request.post_data)['snapshot'];self.assertEqual([body['version'],body['mipBatch']],[13,A]);expect(summary).to_contain_text('· Saving')
   make.click();expect(status).to_have_text('MIP 작업 저장이 끝난 뒤 MIP Batch를 만드세요.')
   self.assertTrue(v.evaluate("()=>!!(window.batchHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v.evaluate(SESSION_END)
   expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,timeout=10000);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('세션이 변경되었습니다')
