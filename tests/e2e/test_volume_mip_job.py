@@ -12,7 +12,12 @@ from test_volume_path import field_differences,job_post
 MIP_JOB_CASES=('test_mip_job_01_save_restore_roundtrip_new_browser_pixels','test_mip_job_02_save_gates_failure_unconfirmed_retry_roles_account',
                'test_mip_job_03_restore_failure_missing_tool_cancel_stale_rollback')
 JOBS='**/api/studies/*/viewer-jobs*'
-CAPTURE='()=>window.kinCreateVolumeJob({grid:services.viewportGridService,cs:services.cornerstoneViewportService,ds:services.displaySetService,studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture()'
+JOB='window.kinCreateVolumeJob({grid:services.viewportGridService,cs:services.cornerstoneViewportService,ds:services.displaySetService,studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")})'
+CAPTURE='()=>'+JOB+'.capture()'
+# While the MIP Viewer dialog is open the MPR tools refuse a permitted capture (viewer-volume-orientation.js:47 through the marks
+# capture), which is why Save MIP Job reads its MPR read-only (f429401). A read of the Job shown behind that dialog does the same.
+READ_ONLY_CAPTURE='()=>'+JOB+'.capture(true)'
+REFUSED_CAPTURE='()=>{try{'+JOB+'.capture();return null}catch(error){return error.message}}'
 LAYOUT='()=>{const s=services.viewportGridService.getState();return {rows:s.layout.numRows,cols:s.layout.numCols,sets:[...s.viewports.values()].sort((a,b)=>a.y-b.y||a.x-b.x).map(g=>g.displaySetInstanceUIDs||[])}}'
 FRAME="()=>cornerstone.metaData.get('instance',cornerstone.cache.getVolume(mipView().getVolumeId()).imageIds[0]).FrameOfReferenceUID"
 # CA5: the MIP display against the active cell's recorded properties (what the Job cell stores) and both actors.
@@ -126,7 +131,7 @@ class VolumeMipJobE2E(VolumeMipE2E):
    np.testing.assert_allclose(origin,want_origin,atol=1e-6,rtol=0);np.testing.assert_allclose(normal,want_normal,atol=1e-6,rtol=0)
   self.assertEqual(v.evaluate(DISPLAY),display);expect(summary).to_have_text(label+'Saved')
   slab=saved['mip']['voiSlab'];self.assertEqual(v.evaluate(EDITORS),{'center':slab['center'],'pivot':slab['pivot'],'thickness':slab['thickness'],'enable':True,'original':False,'preset':'Sagittal'})
-  restored=v.evaluate(CAPTURE);self.assertEqual(restored['version'],12);self.assertEqual(field_differences(restored['mip'],saved['mip']),[]);self.assert_cells(restored['cells'],saved['cells'])
+  self.assertEqual(v.evaluate(REFUSED_CAPTURE),'다른 작업을 마친 뒤 MPR 방향을 조절하세요.');restored=v.evaluate(READ_ONLY_CAPTURE);self.assertEqual(restored['version'],12);self.assertEqual(field_differences(restored['mip'],saved['mip']),[]);self.assert_cells(restored['cells'],saved['cells'])
   mark=self.mark(v);self.voi_button(dialog,'Undo VOI').click();expect(status).to_contain_text('되돌릴 VOI Slab 변경이 없습니다');self.unchanged(v,mark);expect(self.voi_field(dialog,'Original')).not_to_be_checked()
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible();self.assertEqual(len(posts),1)
   # A new browser restores the same display, pixels, editors and MPR cameras.
@@ -135,7 +140,7 @@ class VolumeMipJobE2E(VolumeMipE2E):
   fresh_dialog=fresh.locator('#kin-volume-mip');expect(fresh_dialog).to_have_attribute('data-kin-mip-state','final');fresh.evaluate(VOI_HELPERS);fresh.evaluate(SETTLE)
   state=fresh.evaluate('p=>mipVoiState(p)',worlds);self.voi_native(state,'Raysum','Coronal',record,voi);self.voi_pixels(state,cell,'new browser')
   expect(fresh_dialog.locator('.kin-mip-voi-state')).to_have_text(label+'Saved');self.assertEqual(fresh.evaluate(EDITORS)['center'],slab['center'])
-  again=fresh.evaluate(CAPTURE);self.assertEqual(field_differences(again['mip'],saved['mip']),[]);self.assert_cells(again['cells'],saved['cells'])
+  again=fresh.evaluate(READ_ONLY_CAPTURE);self.assertEqual(field_differences(again['mip'],saved['mip']),[]);self.assert_cells(again['cells'],saved['cells'])
   fresh_dialog.get_by_role('button',name='Close MIP Viewer',exact=True).click();expect(fresh_dialog).not_to_be_visible()
   # A VOI-off MinIP x Sagittal Job restores two slab planes and the unclipped known-voxel values.
   dialog=self.open_voi(v);mark=self.mark(v);self.choose_mip(dialog,'MinIP','Sagittal');state=self.job_final(v,mark,'MinIP','Sagittal',off_worlds)
@@ -234,11 +239,15 @@ class VolumeMipJobE2E(VolumeMipE2E):
   self.assertEqual(len(held),1);expect(summary).to_contain_text('· Saving')
   # While the save is in flight the existing busy gate refuses a display change; nothing reaches the native viewer.
   mark=self.mark(v);self.choose_mip(dialog,'MinIP');expect(status).to_contain_text('영상 작업 처리가 끝난 뒤');self.unchanged(v,mark)
-  expect(dialog.get_by_label('MIP Projection',exact=True)).to_have_value('MIP');v.evaluate(SESSION_END)
+  expect(dialog.get_by_label('MIP Projection',exact=True)).to_have_value('MIP')
+  # Session end disposes the MPR tools and the MIP Viewer with them, which closes its dialog and removes it from the page
+  # (viewer-volume-mip.js dispose), so the VOI Slab summary the reader saw is held by reference and read after the POST ends.
+  self.assertTrue(v.evaluate("()=>!!(window.mipHeldSummary=document.querySelector('#kin-volume-mip .kin-mip-voi-state'))"));v.evaluate(SESSION_END)
   expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,timeout=10000);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('세션이 변경되었습니다')
   try:held[0].abort()
   except Exception:pass
-  v.wait_for_timeout(500);self.assertNotIn('Saved',v.evaluate("()=>document.querySelector('#kin-volume-mip .kin-mip-voi-state').textContent"))
+  v.wait_for_timeout(500);expect(v.locator('#kin-volume-mip[open]')).to_have_count(0);self.assertNotIn('Saved',v.evaluate('()=>mipHeldSummary.textContent'))
+  self.assertNotIn('저장했습니다',v.locator('#kin-viewer-jobs-status').text_content())
   self.assertEqual(len(self.jobs(a)),jobs_before);self.assertEqual(self.originals(),original)
 
  def test_mip_job_03_restore_failure_missing_tool_cancel_stale_rollback(self):

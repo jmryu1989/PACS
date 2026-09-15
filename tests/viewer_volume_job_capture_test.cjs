@@ -458,7 +458,7 @@ test('apply(v12) awaits the MIP restore after cells and cameras and propagates i
 // Final proves the stand-ins drive the real restore path, so each fault below is the only difference.
 function mipViewerWorld({planeWrite=null,gpu=true}={}){
  const node=tag=>{const children=[],on=new Map(),attributes={};const e={tagName:tag,children,attributes,style:{},dataset:{},className:'',textContent:'',value:'',checked:false,disabled:false,open:false,
-  append:(...items)=>{children.push(...items);},remove(){},replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute:(name,value)=>{attributes[name]=String(value);},
+  append:(...items)=>{children.push(...items);},remove(){e.removed=true;},replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute:(name,value)=>{attributes[name]=String(value);},
   addEventListener:(name,listener)=>{if(!on.has(name))on.set(name,new Set());on.get(name).add(listener);},removeEventListener:(name,listener)=>{on.get(name)?.delete(listener);},
   emit:name=>{for(const listener of [...(on.get(name)||[])])listener({type:name,target:e});},contains:item=>item===e||children.some(c=>c.contains?.(item)),showModal(){e.open=true;},close(){e.open=false;}};return e;};
  const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
@@ -494,7 +494,7 @@ function mipViewerWorld({planeWrite=null,gpu=true}={}){
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite',file),'utf8'),realm,{filename:file});
  const notices=[],viewer=realm.kinCreateVolumeMip({target:()=>target,permitted:()=>true,alive:()=>true,owner:()=>['I1','u1'],notice:message=>notices.push(message)});
  const dialog=document.body.children[0];
- return {viewer,dialog,views,notices,status:()=>find(dialog,e=>e.attributes.role==='status')?.textContent};
+ return {viewer,dialog,views,notices,window:sandbox,find:match=>find(dialog,match),status:()=>find(dialog,e=>e.attributes.role==='status')?.textContent};
 }
 
 test('a MIP Job restore throws the failed first display reason itself: a plane write fault or an unconfirmed GPU clip shader closes the viewer with that reason',async()=>{
@@ -556,7 +556,7 @@ async function mipSaveWorld(){
  panel.mount();const command=sandbox.kinViewerJobCommand,idle=async()=>{for(let n=0;n<200&&command.busy();n++)await new Promise(r=>setTimeout(r,0));};
  for(let n=0;n<200&&!command.owner();n++)await new Promise(r=>setTimeout(r,0));await idle();
  const find=(root,match)=>match(root)?root:root.children.map(c=>find(c,match)).find(Boolean)||null;
- return {command,idle,gate,posts,saved,block,stop:()=>{panel.stop();context.window.kinMprMarks=context.window.kinVolumeMipJob=undefined;},
+ return {command,idle,gate,posts,saved,block,job:()=>real(parts),stop:()=>{panel.stop();context.window.kinMprMarks=context.window.kinVolumeMipJob=undefined;},
   status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label)};
 }
 
@@ -580,4 +580,38 @@ test('Save MIP Job reads the MPR behind its own open dialog read-only; the named
   w.gate.readOnly.length=0;w.button('Save New Job').onclick();await w.idle();
   assert.match(w.status(),/^다른 작업을 마친 뒤 MPR 방향을 조절하세요\./);assert.equal(w.posts.length,1);assert.ok(w.gate.readOnly.includes(false));
  }finally{w.stop();}
+});
+
+// Native N1 at test_volume_mip_job.py:129 (native-fix-02): with the restored MIP Viewer still open, the e2e read its Job with the
+// permitted capture and met the same refusal. The read-only capture is the very body Save MIP Job sent; the permitted one stays refused.
+test('behind the open MIP Viewer a read-only Job capture is the version 12 body Save MIP Job sent, and a permitted capture is refused',async()=>{
+ const w=await mipSaveWorld();
+ try{
+  w.gate.dialog=true;
+  const outcome=await w.command.save({title:'MIP oblique Raysum',description:''});assert.equal(outcome.state,'saved',outcome.message);assert.equal(w.posts.length,1);
+  w.gate.readOnly.length=0;assert.deepEqual(JSON.parse(JSON.stringify(w.job().capture(true))),w.posts[0].snapshot);assert.deepEqual(w.gate.readOnly,[true]);
+  w.gate.readOnly.length=0;assert.throws(()=>w.job().capture(),{message:'다른 작업을 마친 뒤 MPR 방향을 조절하세요.'});assert.deepEqual(w.gate.readOnly,[false]);
+ }finally{w.stop();}
+});
+
+// Native N2 at test_volume_mip_job.py:241 (native-fix-02): a session ended while Save MIP Job waits disposes the MIP Viewer, which
+// closes its dialog and removes it from the page, so a later read of its summary by selector finds no node. The summary element the
+// reader saw, and the viewer's status, never show a save afterwards, even when the held request then reports a committed one.
+test('a MIP Viewer disposed while Save MIP Job waits is closed and removed, and never shows Saved when that request ends',async()=>{
+ const value={schema:1,algorithm:'kin-mip-1',coordinates:'LPS_mm',frameOfReference:'2.25.6',mode:'MIP',orientation:'Axial',
+  display:{voiRange:{lower:-1100,upper:1100},interpolationType:0},voiSlab:{center:[8.125,15.75,40],normal:[1,0,0],pivot:[15.75,15.75,40],thickness:22.25}};
+ const world=mipViewerWorld(),calls=[];let release=null;
+ world.window.kinViewerJobCommand={owner:()=>JSON.stringify(['I1','u1']),writable:()=>true,busy:()=>false,pending:()=>null,
+  save:fields=>{calls.push(fields);return new Promise(resolve=>{release=resolve;});},retry:()=>Promise.reject(Error('must not retry'))};
+ try{
+  await world.viewer.job.restore(structuredClone(value),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0'});
+  const summary=world.find(e=>e.className==='kin-mip-voi-state');assert.match(summary.textContent,/ · Saved$/);
+  world.find(e=>e.attributes['aria-label']==='MIP Job Title').value='MIP held session';world.find(e=>e.tagName==='button'&&e.textContent==='Save MIP Job').onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[{title:'MIP held session',description:''}]);assert.match(summary.textContent,/ · Saving$/);
+  world.viewer.dispose();
+  assert.equal(world.dialog.open,false);assert.equal(world.dialog.removed,true);
+  release({state:'saved',sent:true,message:'MIP 작업을 저장했습니다. 판독문과 원본 영상은 그대로입니다.'});
+  for(let n=0;n<5;n++)await new Promise(resolve=>setTimeout(resolve,0));
+  assert.doesNotMatch(summary.textContent,/Saved/);assert.doesNotMatch(world.status(),/저장했습니다/);
+ }finally{world.viewer.dispose();}
 });
