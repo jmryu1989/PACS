@@ -1,0 +1,146 @@
+{
+ "schema_version": 1,
+ "name": "A11-OUTPUT-1 volume-mip-output transport diagnostic (observation only; NEVER MERGE)",
+ "harness_ref": "refs/heads/opus/a11-output-transport-diagnostics-20260916",
+ "trigger": {
+  "main_failure": "Validate run 35014440552 attempt 1, job 104534192354 on actual main 713788bf957f14797411f06ce22b872f6a45f0cf: test_mip_output_01 line 314 (report selection on the fresh print page, outside the guarded helper) expected ready, got 'Failed to fetch'; 3 tests, 1 failure, 0 errors, 173.214 s; 0 MIP_OUTPUT_TRANSPORT_FAILURE lines; not rerun.",
+  "prior_incidents": "ci-01 run 35000027422 (1), mutation run 35011000385 MO9 and MO10 (2); CI02 run 35003005900 had none.",
+  "status": "A11-OUTPUT-1 main acceptance is blocked; this diagnostic observes, it does not correct or accept."
+ },
+ "baseline": {
+  "sha": "713788bf957f14797411f06ce22b872f6a45f0cf",
+  "tree": "cbc83946c058e32709c0fbcc7b9738538d16f4d3",
+  "candidate_sha": "c3fcff8dbddc2d20d6b678eddf1f46acf13c6895",
+  "workflow_blob": "bb683a40436fb8f37504c186805ed40e1428446c",
+  "proxy_template_blob": "684ad8f459a3c09397f98531f88c75ab156031cf",
+  "compose_blob": "4d1f2c65cd3bc626c05e686b5d09630f6e351018",
+  "source_sha256": {
+   ".github/workflows/validate.yml": "1b8e271422943e6a4054ede6ebb0dca4c419b4c2bd46e1185a030d115cd74cd6",
+   "docker-compose.yml": "a6da17251dc08e81106f0d1ffc1c20e56dcfafd85abf4690cf136435334216ab",
+   "proxy/10-selfsigned.sh": "11ba50b9ed6b9ee52814760aa1b5734a0c82109b4afc6edac5f4bcd8bb538c3a",
+   "proxy/15-kin-config.envsh": "b6d497219434b76858dfbab8742b5b2645fd0f16bcc4ffdd8d251adb704d401b",
+   "proxy/25-nginx-test.sh": "07c75ae1fd5bb85afd41a2b50704fe65bc0365745e06c6b8d083180073ce79b0",
+   "proxy/Dockerfile": "8076d70c79aa32480ed900851cce99b8836ef4e67d4fdace739a021174663dc1",
+   "proxy/nginx.conf.template": "67a277a222330f443038ef3cd462414230fc58e4b44a4b4f3cfb94f4b94cfeaf",
+   "scripts/ci_browser_apt.py": "10cfd62747fe0c496becd3c9dfa6dde294af0933ea5d650c2eb1bbb4895fe80d",
+   "scripts/record-run.py": "a2b5f7246510cbfa7d80ff6221dd532f55d91eb26b60e13bf2d8a1e21e6e71a6",
+   "scripts/run-tests.py": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20",
+   "tests/e2e/requirements.txt": "930c77adf5279e0fb15c0608fdf323f35a15187be1f57b39c77167b1a62d7cb8",
+   "tests/e2e/test_prior_selection.py": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd",
+   "tests/e2e/test_volume_mip.py": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72",
+   "tests/e2e/test_volume_mip_batch.py": "a2b2fb0049523b51f54de9e3713553e8fab882f196ddecab441e84e118ae0be5",
+   "tests/e2e/test_volume_mip_job.py": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f",
+   "tests/e2e/test_volume_mip_output.py": "de2d1f8714f9fc7ccc0959576a80f551e9fb269347fc72f684ede5ed2cc63630",
+   "tests/e2e/test_volume_path.py": "f8bda0db434377f71535f87314124fc18273a72bb38c427f4b8ff0f69970db5d",
+   "tests/e2e/test_volume_projection.py": "c87f9d9e03b6b67a7b7bae98094877fb0bf354d895907a08bf849253c5ef22c2",
+   "tests/e2e/test_worklist.py": "bf3fa71950eacdf55f8f163203d32b340b65224578ef95073c48c5ac0581817e",
+   "tests/execution_selection_test.py": "ec5313ee03ab21f6d3372d835265bfe3ce8629eb594fd8d5764fd53dfe8ee7e5",
+   "tests/live_test_gate.py": "670a808e3d758b229d9962590d9f9e7bcc0c276276c787db7264e9515387edf9",
+   "tests/measurement_ci.py": "5045472f76106645602d330c548bda53d124d3498f3d8de27329da84a58dd17f",
+   "tests/measurement_ci_test.py": "a37e9b8cb3f5820fbfa66b2265e081a6806ae82640ff188c9db139742c30e317",
+   "worklist-v0/hpacs-lite/viewer-job-print.js": "13f7cca94588cab0d2ceedafabc33d21e49c2ef92b46074eda8d1ca109bf9159",
+   "worklist-v0/hpacs-lite/viewer-jobs.js": "ae1b2d2de60b8803edaf7da180c2111d5d258cf4269ec23b242af114b9e67672",
+   "worklist-v0/hpacs-lite/viewer-tech-note.js": "52c0e35f9fe4c3d72ba6a6c03bd2d6341afbe7c8e9645758a0529717c048fe34",
+   "worklist-v0/hpacs-lite/viewer-volume-job-print.js": "a7a984a03eabe722be99fdda1214001b905efca0176a0aff252c2a27ce9c2365",
+   "worklist-v0/hpacs-lite/viewer-volume-job.js": "7d41f5a078e6c63935d73e91e3dddfa3c0f46b40759c7f05bbf757ff87097d5e",
+   "worklist-v0/hpacs-lite/viewer-volume-mip-print.js": "b384c22d6a745cd8cd5cefb5a0a04154c42fd25d1b9bbac6392b79a675fcdb5f",
+   "worklist-v0/hpacs-lite/viewer-volume-mip.js": "3291f7eb497e013977a0e691da7dc1c61cb0d23a759acee0c944045f1f232487",
+   "worklist-v0/hpacs-lite/viewer-volume-orientation.js": "8d93ad4655578fc0330abfceb52f24716f591c7a6413eff811052a1c53e38899",
+   "worklist-v0/hpacs-lite/volume-mip-batch.js": "5872147c679d85ce39e311f0b4be5ed33cd15cdc5494333357dc9ec51c2125a5",
+   "worklist-v0/hpacs-lite/volume-mip-job.js": "cfb4272b45cd9aaceea2076e3e188b8d225504bfd04becfa76af2e7a922b44bd",
+   "worklist-v0/hpacs-lite/volume-mip-output.js": "5b00d03b3a5e27f1ff656b9aee5b7db7a9a6a940e01f68021003ef8225b261e6",
+   "worklist-v0/hpacs-lite/volume-mip.js": "9d35a401fed62f3ffe7364d38fa06b47c0089236aa3836566d48f73e9161ef56",
+   "worklist-v0/hpacs-lite/volume-voi.js": "552810ea439ea01e0aaf116171d05fbcd76e891e569e0f79a79acfa42ebcd98f"
+  },
+  "equality_rule": "The whole tree is proven by checking out the baseline commit and requiring its tree id and an empty status (tracked, untracked and ignored) before any profile step; the listed hashes let a reviewer see the profile inputs, which are all unchanged."
+ },
+ "question": "In one isolated GitHub-hosted synthetic run of the unchanged volume-mip-output profile at the baseline, is every page-visible same-origin source-read rejection a request whose Chromium NetLog URL request and HTTP/2 session and stream prove a relation to a GOAWAY or an HTTP/2 session boundary on that session?",
+ "hypothesis_under_test": "H1 (not demonstrated): nginx ends the browser's HTTP/2 connection at keepalive_requests (default 1000, no directive in proxy/) with GOAWAY, and a stream sent past that boundary is surfaced to the page as a fetch rejection instead of being sent again on a new connection.",
+ "alternatives_kept_open": [
+  "A1: the HTTP/2 connection closes without GOAWAY (reset, idle or lingering close); a session boundary without the request-limit relation.",
+  "A2: a server RST_STREAM on an accepted stream while the session stays open (INCOMPATIBLE).",
+  "A3: a renderer-side or interception-side rejection while the network request completed or never existed (INCOMPATIBLE or UNMAPPED).",
+  "A4: a new connection fails to establish after a boundary (UNMAPPED without an HTTP/2 session binding; raw NetLog kept for review)."
+ ],
+ "observation_added": [
+  "Chromium NetLog in Default capture mode for every Chromium the profile's test worker launches (one per test class), written under RUNNER_TEMP, flushed when the class cleanup closes the browser, kept on pass and on failure; a killed browser leaves a truncated file that analyze.py still parses.",
+  "Context-level requestfailed records for every page of every context (popups and direct report re-prints outside the guarded helper included): wall and monotonic time, method, query-redacted URL, failure text, Playwright request timing, context and page ordinals and the unittest test id; context and page creation and close, route registrations, test start, stop and outcome.",
+  "A generated test-only copy of proxy/nginx.conf.template with one registered logging block ($msec $pid $connection $connection_requests $http2 $server_protocol $remote_addr:$remote_port, method, uri, status, sizes, times, upstream status) written to a mounted directory, an info-level error log there, and the image's main-level stderr error log repeated; an entrypoint dump of nginx -V and nginx -T at container start with the Orthanc Basic credential redacted.",
+  "A NetLog preflight: one Chromium launch through the same hook on a data: URL before the stack, proving the switch, the closed file and the event type names on this runner."
+ ],
+ "unchanged": "Product code, tests, assertions, messages, the guarded re-attempt helper, budgets, selection, the profile and every other profile, the production proxy template and its connection behavior (no keepalive, HTTP/2, timeout, buffer, listener, upstream or location setting), and the profile's own services.log access format.",
+ "native_job": {
+  "original": "volume-mip-output",
+  "harness": "volume-mip-output-transport-diagnostics",
+  "harness_step_names": [
+   null,
+   "Harness - stage the harness outside the product checkout",
+   "Harness - guard the dispatch, the harness scope and the exact baseline tree",
+   "MIP output profile isolation, bounded budget and artifact policy",
+   "Keep pinned browser dependencies independent of unused Chrome APT repository",
+   "Install synthetic DICOM and pinned browser test dependencies",
+   "Confirm exact declared MIP Viewer output selection",
+   "Harness - prepare test-only proxy logging and the browser observation hook",
+   "Harness - NetLog capture preflight before the stack",
+   "Isolated declared MIP Viewer output tests",
+   "Harness - collect and sanitize observation evidence, guard the tree and analyze",
+   "Harness - remove disposable containers and the generated override",
+   "Sanitized synthetic MIP Viewer output evidence"
+  ],
+  "allowed_step_changes": [
+   ["          persist-credentials: false", "          persist-credentials: false\n          fetch-depth: 0"],
+   ["        timeout-minutes: 28\n        run: |", "        timeout-minutes: 28\n        env:\n          PYTHONPATH: ${{ runner.temp }}/transport-harness/observer\n          KIN_TRANSPORT_DIAG_DIR: ${{ runner.temp }}/transport-diagnostics/browser\n        run: |"],
+   ["          name: synthetic-volume-mip-output-results", "          name: diagnostic-volume-mip-output-transport"],
+   ["            tmp/mipout-ci/\n          if-no-files-found: error", "            tmp/mipout-ci/\n            tmp/mipout-diag/\n          if-no-files-found: error"]
+  ],
+  "harness_step_timeouts": {
+   "Harness - NetLog capture preflight before the stack": 3,
+   "Harness - collect and sanitize observation evidence, guard the tree and analyze": 8,
+   "Harness - remove disposable containers and the generated override": 3
+  },
+  "always_harness_steps": [
+   "Harness - collect and sanitize observation evidence, guard the tree and analyze",
+   "Harness - remove disposable containers and the generated override"
+  ],
+  "allowed_env_names": ["EXPECTED_BASELINE_SHA", "EXPECTED_HARNESS_SHA", "KIN_TRANSPORT_DIAG_DIR", "PYTHONPATH"]
+ },
+ "caps": {
+  "job_timeout_minutes": 40,
+  "dependency_install_timeout_minutes": 10,
+  "live_step_timeout_minutes": 28,
+  "profile_suite_timeout_seconds": 1200,
+  "profile_supervisor_margin_seconds": 35,
+  "measurement_ci_deadline_seconds": 1500,
+  "harness_step_timeout_minutes": {"preflight": 3, "collect": 8, "cleanup": 3},
+  "attempts": "first attempt only; the guard refuses GITHUB_RUN_ATTEMPT other than 1",
+  "dispatches": 1
+ },
+ "decision_rules": [
+  {"id": "R0-validity", "rule": "The run is analysable only when the restore, prepare and collect records passed, the post-profile HEAD is the registered baseline and no tracked file differs. Otherwise the result is INCONCLUSIVE and no statement about the hypothesis is made."},
+  {"id": "R1-inputs", "rule": "Page-visible failures count only when the observer recorded a Chromium launch with --log-net-log and --net-log-capture-mode=Default and the profile left its test log; otherwise INCONCLUSIVE. A NetLog is usable when its constants and events parse and it names HTTP2_SESSION, HTTP2_SESSION_SEND_HEADERS, HTTP2_SESSION_RECV_GOAWAY, HTTP2_SESSION_CLOSE, URL_REQUEST_START_JOB and REQUEST_ALIVE; rejections without a usable NetLog are INCONCLUSIVE."},
+  {"id": "R2-rejections", "rule": "A page-visible source-read rejection is a context-level requestfailed record whose failure text does not contain ERR_ABORTED, whose host is the profile origin (port 9443) and whose path starts with /instances/ or /api/, from any page and call path, including direct report re-prints outside the guarded helper. ERR_ABORTED records are the loader's own cancels. When the profile logged a transport text or a MIP_OUTPUT_TRANSPORT_FAILURE line but no such rejection was captured, the result is INCONCLUSIVE."},
+  {"id": "R3-mapping", "rule": "Each rejection is matched to the NetLog URL request with the same host, path and method that started within 1000 ms of Playwright's request startTime (without startTime: that ended within 5 s before to 1 s after the record). COMPATIBLE: the failed request is bound to an HTTP/2 session that received GOAWAY at most 5 s before the request ended and its stream id is above last_accepted_stream_id, or it got no stream on that session, or its accepted stream was still open when the session closed; or, without GOAWAY, it was active without response headers when its session closed within 1 s after it ended. INCOMPATIBLE: the NetLog request failed with a non-transport error, or completed without error while the page reported a failure, or failed on an accepted stream while its session stayed open after GOAWAY, or received a server RST_STREAM without a session boundary, or its session shows no GOAWAY or close near the failure. UNMAPPED: no failed NetLog request matches, the matching request was cancelled, no HTTP/2 session binding exists, GOAWAY lacks last_accepted_stream_id, or an unclosed NetLog ends within 2 s of the failure."},
+  {"id": "R4-classification", "rule": "SUPPORTED only when at least one rejection exists and every rejection is COMPATIBLE. REJECTED when any rejection is INCOMPATIBLE. INCONCLUSIVE when a rejection is UNMAPPED and none is INCOMPATIBLE. PARTIAL when there is no rejection but connection boundaries occurred: a GOAWAY on an origin session, a NetLog restart after ERR_HTTP2_SERVER_REFUSED_STREAM or ERR_HTTP2_GOAWAY_FRAME, or an nginx HTTP/2 connection whose highest $connection_requests equals the effective keepalive_requests. INCONCLUSIVE when there is neither a rejection nor an observed boundary."},
+  {"id": "R5-reporting", "rule": "The native outcome, MIP_OUTPUT_TRANSPORT_FAILURE lines and guarded re-attempts are reported verbatim as existing instrumentation and never counted as detection. $connection_requests at keepalive_requests is corroboration only and never yields SUPPORTED by itself; no cause is inferred from request number 1000 alone. A run without a rejection does not resolve the main-01 failure; SUPPORTED describes this run only, and any correction needs its own reviewed unit."}
+ ],
+ "dispatch": {
+  "precondition": "Independent fixed-SHA review accepts this harness commit; Astra dispatches exactly once. The author does not dispatch.",
+  "command": "gh workflow run validate.yml --repo jmryu1989/PACS --ref opus/a11-output-transport-diagnostics-20260916 -f harness_sha=<reviewed harness SHA> -f baseline_sha=713788bf957f14797411f06ce22b872f6a45f0cf",
+  "never": ["rerun a failed or passed attempt (the guard refuses attempt 2)", "dispatch again for a different outcome", "change inputs, caps or the profile", "merge, open a pull request from, or tag this branch"],
+  "collect": "Run and job JSON and the job log; the artifact diagnostic-volume-mip-output-transport zip with its sha256; extracted tests/e2e/artifacts/volume-mip-output-ci/, tmp/mipout-ci/ and tmp/mipout-diag/ (manifest.json lists every observation file hash)."
+ },
+ "analysis": {
+  "hosted": "The collect step writes tmp/mipout-diag/analysis.json and prints TRANSPORT_DIAGNOSTIC_CLASSIFICATION; it never changes the job's native outcome.",
+  "local_recheck": "From the reviewed harness SHA, through scripts/record-run.py: python -B diagnostic-harness/a11-output-transport/analyze.py --diag <extracted>/tmp/mipout-diag --profile <extracted>/tests/e2e/artifacts/volume-mip-output-ci --out <evidence>/analysis-recheck.json. The recheck classification must equal the hosted one and the manifest hashes must match the extracted files.",
+  "review": "Every UNMAPPED or INCOMPATIBLE reason and every COMPATIBLE relation is checked against the raw NetLog lines, the diagnostic access and error logs and the effective configuration before any conclusion; PARTIAL or INCONCLUSIVE leaves main-01 blocked."
+ },
+ "limits": [
+  "Observer effect: NetLog writing and Python listeners add small latency and could change the probability of a boundary race.",
+  "One run may show no rejection (CI02 and several mutation jobs had none); that is PARTIAL or INCONCLUSIVE and does not resolve main-01.",
+  "NetLog event and parameter names are confirmed on the runner only by the preflight; an unexpected layout becomes UNMAPPED, and the raw sanitized NetLog stays available for review.",
+  "The browser reaches nginx through Docker port publishing (the access log shows the bridge gateway), so an nginx connection is matched to a NetLog session by answered stream paths and times, not by ports; corroboration only.",
+  "Default capture mode strips cookies and credentials; query values, JWTs, bearer and basic tokens, cookie and authorization headers and secret JSON fields are also redacted before upload; raw hashes are recorded and raw files are not uploaded.",
+  "The logging block repeats 'error_log /var/log/nginx/error.log notice;' as the stock nginx:1.27-alpine main-level value; the effective configuration dump shows the value actually in effect.",
+  "Local validation is pure: no browser, container, Docker, hosted run or YAML library; the workflow is checked structurally against the baseline job text."
+ ]
+}

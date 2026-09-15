@@ -1,533 +1,39 @@
-name: Validate production image
-
+name: A11-OUTPUT-1 volume-mip-output transport diagnostic harness (NEVER MERGE)
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
   workflow_dispatch:
-
-# Public PR code runs without production credentials or a persisted Git token.
+    inputs:
+      harness_sha:
+        description: The pushed harness commit this dispatch must run
+        required: true
+        type: string
+      baseline_sha:
+        description: The registered actual-main baseline whose volume-mip-output profile is observed
+        required: true
+        type: string
 permissions:
   contents: read
-
 concurrency:
-  group: validate-${{ github.ref }}
+  group: a11-output-transport-diagnostics-${{ github.ref }}
   cancel-in-progress: false
-
+# One job: the baseline volume-mip-output job's own steps, selection, caps and budgets, with observation-only harness steps. The
+# live step keeps its command and 28-minute timeout; it only receives the observer environment. A genuine native failure keeps
+# this job red, while the collect, cleanup and evidence upload steps always run.
 jobs:
-  measurements:
+  volume-mip-output-transport-diagnostics:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: D-MEASURE2 disposable runner refusal and artifact redaction
-        run: python3 tests/measurement_ci_test.py
-      - name: Execution evidence raw and LF hash preservation
-        run: python3 tests/record_run_test.py
-      - name: Explicit test selection, process leases and bounded retries
-        run: python3 tests/execution_guard_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: |
-          python3 tests/ci_browser_apt_test.py
-          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/measurement-python"
-          "$RUNNER_TEMP/measurement-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/measurement-python/bin/python" -m playwright install --with-deps chromium
-      - name: Image field positions and modality profile DOM integration
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-fields --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file tests/viewer_identity_fields_dom_test.py --file tests/viewer_identity_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_fields_dom_test.py
-      - name: Personal Hanging Protocol form and authenticated mount boundaries
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/hanging-protocols --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file worklist-v0/hpacs-lite/viewer-hanging-protocol.js --file tests/viewer_hanging_protocol_dom_test.py --file tests/viewer_hanging_protocol_mount_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B -m unittest discover -s tests -p 'viewer_hanging_protocol*dom_test.py'
-      - name: Individual image thumbnails identity and bounded page lifecycle
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-thumbnails --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/worklist-image-preview.js --file worklist-v0/hpacs-lite/worklist-image-thumbnails.js --file tests/worklist_image_thumbnails_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_image_thumbnails_dom_test.py
-      - name: Narrow worklist row and image control hit targets
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py --file tests/worklist_image_thumbnails_dom_test.py --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
-      - name: Existing study arrivals and preserved reading inputs
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/worklist_arrivals_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_arrivals_dom_test.py
-      - name: Selected CT display controls and session loader boundaries
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/display-scope --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_display_scope_dom_test.py
-      - name: Cell merge double-click ownership, panel and loader boundaries
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/cell-merge --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-cell-merge.js --file tests/viewer_cell_merge_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_cell_merge_dom_test.py
-      - name: Images Only fullscreen lifecycle and source preservation
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/images-only --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-images-only.js --file tests/viewer_images_only_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_images_only_dom_test.py
-      - name: Images Only config loader mode and session boundaries
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/images-only-loader --cwd . --file config/ohif.js --file tests/viewer_images_only_loader_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_images_only_loader_dom_test.py
-      - name: Image text visibility and source preservation
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-text --cwd . --file worklist-v0/hpacs-lite/viewer-images-only.js --file worklist-v0/hpacs-lite/viewer-image-text.js --file tests/viewer_image_text_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_image_text_dom_test.py
-      - name: Image text config loader lifecycle
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/image-text-loader --cwd . --file config/ohif.js --file tests/viewer_image_text_loader_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_image_text_loader_dom_test.py
-      - name: Source PDF owner identity and popup lifecycle boundaries
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/source-pdf --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-dicom-pdf.js --file tests/viewer_dicom_pdf_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_dicom_pdf_dom_test.py
-      - name: Three-D cursor pick, marker origin and rollback ownership DOM integration
-        timeout-minutes: 3
-        run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/three-d-cursor-dom --cwd . --file worklist-v0/hpacs-lite/three-d-cursor-model.js --file worklist-v0/hpacs-lite/viewer-three-d-cursor.js --file tests/viewer_three_d_cursor_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_three_d_cursor_dom_test.py
-      - name: Saved comparison print page identity and pagination
-        timeout-minutes: 4
-        run: |
-          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/job-print-pages/evidence" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-pages --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_pages_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_pages_test.py
-      - name: Workspace window transition and identity DOM regressions
-        timeout-minutes: 3
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/window-manager --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/viewer-windows.js --file tests/viewer_window_manager_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_window_manager_dom_test.py
-      - name: Worklist DICOM body-part search and saved-search DOM integration
-        timeout-minutes: 3
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/body-parts --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/compound-filter.js --file worklist-v0/hpacs-lite/related-parts.js --file worklist-v0/hpacs-lite/worklist-body-parts.js --file worklist-v0/hpacs-lite/saved-filter-manager.js --file tests/worklist_body_parts_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_body_parts_dom_test.py
-      - name: Current and prior identity position and legacy display preferences
-        timeout-minutes: 3
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-position --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file worklist-v0/hpacs-lite/reading-appearance-account.js --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/viewer_identity_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_position_dom_test.py
-      - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/measurement-python/bin/python" tests/execution_selection_test.py
-          "$RUNNER_TEMP/measurement-python/bin/python" tests/measurement_ci.py --profile measurements
-      - name: Sanitized synthetic measurement evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-measurement-results
-          path: tests/e2e/artifacts/measurement-ci/
-          if-no-files-found: error
-          retention-days: 7
-      - name: Synthetic workspace DOM evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-workspace-dom-results
-          path: tmp/workspace-ui-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-rendering:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: CI profile safeguards and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
-      - name: Volume rendering, sculpt, and personal preset boundaries
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-vr --cwd . --file worklist-v0/hpacs-lite/volume-rendering.js --file tests/volume_rendering_test.cjs --file tests/volume_rendering_presets_test.cjs --file worklist-v0/hpacs-lite/volume-sculpt.js --file tests/volume_sculpt_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_rendering_test.cjs tests/volume_rendering_presets_test.cjs tests/volume_sculpt_test.cjs
-      - name: Volume display, batch, crosshair, marks, curved MPR, orientation, job capture and preference models
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/pure-volume-models --cwd . --file worklist-v0/hpacs-lite/volume-display.js --file tests/volume_display_test.cjs --file worklist-v0/hpacs-lite/volume-batch.js --file tests/volume_batch_test.cjs --file worklist-v0/hpacs-lite/volume-batch-scout.js --file tests/volume_batch_scout_test.cjs --file worklist-v0/hpacs-lite/volume-crosshair.js --file tests/volume_crosshair_test.cjs --file worklist-v0/hpacs-lite/volume-marks.js --file tests/volume_marks_test.cjs --file worklist-v0/hpacs-lite/volume-curved.js --file tests/volume_curved_test.cjs --file worklist-v0/hpacs-lite/volume-path.js --file tests/volume_path_test.cjs --file worklist-v0/hpacs-lite/volume-orientation.js --file tests/volume_orientation_test.cjs --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/volume_preferences_test.cjs --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/volume_average_shader_test.cjs --file worklist-v0/hpacs-lite/volume-mip.js --file tests/volume_mip_test.cjs --file worklist-v0/hpacs-lite/volume-voi.js --file tests/volume_voi_test.cjs --file worklist-v0/hpacs-lite/volume-mip-job.js --file tests/volume_mip_job_test.cjs --file worklist-v0/hpacs-lite/volume-mip-batch.js --file tests/volume_mip_batch_test.cjs --file worklist-v0/hpacs-lite/volume-mip-output.js --file tests/volume_mip_output_test.cjs --file worklist-v0/hpacs-lite/viewer-volume-job.js --file tests/viewer_volume_job_capture_test.cjs --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/volume_display_test.cjs tests/volume_batch_test.cjs tests/volume_batch_scout_test.cjs tests/volume_crosshair_test.cjs tests/volume_marks_test.cjs tests/volume_curved_test.cjs tests/volume_path_test.cjs tests/volume_orientation_test.cjs tests/volume_preferences_test.cjs tests/volume_average_shader_test.cjs tests/volume_mip_test.cjs tests/volume_voi_test.cjs tests/volume_mip_job_test.cjs tests/volume_mip_batch_test.cjs tests/volume_mip_output_test.cjs tests/viewer_volume_job_capture_test.cjs
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/vr-python"
-          "$RUNNER_TEMP/vr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/vr-python/bin/python" -m playwright install --with-deps chromium
-      - name: VR source binding survives transient MPR layout readiness
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-rendering.js --file tests/viewer_vr_binding_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_vr_binding_dom_test.py
-      - name: MPR Basic Orthogonal stays distinct from Reset Planes
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/orientation-basic-dom --cwd . --file worklist-v0/hpacs-lite/volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_orientation_dom_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/viewer_volume_orientation_dom_test.py
-      - name: Confirm exact declared VR-only selection
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/execution_selection_test.py
-      - name: Volume batch recipe rounding precision
-        timeout-minutes: 3
-        run: python3 scripts/record-run.py --run-dir tmp/vr-ci/recipe-precision --cwd . --file tests/volume_recipe_precision_test.py --file tests/e2e/test_volume_batch_save.py -- "$RUNNER_TEMP/vr-python/bin/python" -B tests/volume_recipe_precision_test.py
-      - name: Isolated declared volume rendering tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/vr-python/bin/python" tests/measurement_ci.py --profile volume-rendering
-      - name: Sanitized synthetic volume rendering evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-rendering-results
-          path: |
-            tests/e2e/artifacts/volume-rendering-ci/
-            tmp/vr-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-mpr:
-    # A separate job, not extra suites inside volume-rendering: the MPR e2e
-    # modules must not consume that job's budget. The same 40-minute job policy and
-    # 28-minute live step as the existing e2e jobs; measurement_ci.py's own
-    # 25-minute deadline and the profile's 540s per-suite cap bound the run.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: MPR profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/mpr-python"
-          "$RUNNER_TEMP/mpr-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/mpr-python/bin/python" -m playwright install --with-deps chromium
-      - name: Curved MPR editing, stale results and restore rollback on the real panel
-        timeout-minutes: 5
-        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/curved-dom --cwd . --file worklist-v0/hpacs-lite/volume-curved.js --file worklist-v0/hpacs-lite/viewer-volume-curved.js --file tests/viewer_volume_curved_dom_test.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/viewer_volume_curved_dom_test.py
-      - name: Confirm exact declared crosshair, display and curved selection
-        run: python3 scripts/record-run.py --run-dir tmp/mpr-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_crosshair.py --file tests/e2e/test_volume_display.py --file tests/e2e/test_volume_curved.py -- "$RUNNER_TEMP/mpr-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MPR crosshair, display and curved tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/mpr-python/bin/python" tests/measurement_ci.py --profile volume-mpr
-      - name: Sanitized synthetic MPR crosshair, display and curved evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-mpr-results
-          path: |
-            tests/e2e/artifacts/volume-mpr-ci/
-            tmp/mpr-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-slab:
-    # A second MPR suite group, not extra suites inside volume-mpr: that job's three
-    # suites already commit 1325s of measurement_ci.py's 1500s deadline. The same
-    # 40-minute job policy and 28-minute live step; the profile's per-suite caps bound it.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Slab profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/slab-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/slab-python"
-          "$RUNNER_TEMP/slab-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/slab-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared projection, wheel, average-affine and MIP Viewer selection
-        run: python3 scripts/record-run.py --run-dir tmp/slab-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_projection.py --file tests/e2e/test_volume_wheel.py --file tests/e2e/test_volume_average_affine.py --file tests/e2e/test_volume_mip.py -- "$RUNNER_TEMP/slab-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared slab projection, wheel, average-affine and MIP Viewer tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/slab-python/bin/python" tests/measurement_ci.py --profile volume-slab
-      - name: Sanitized synthetic slab projection, wheel and average-affine evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-slab-results
-          path: |
-            tests/e2e/artifacts/volume-slab-ci/
-            tmp/slab-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-path:
-    # A third MPR suite group, not extra suites inside volume-mpr or volume-slab, whose caps stay
-    # as they are. The manual 3D path suite and the double-oblique orientation suite share this
-    # runner; the profile's per-suite caps (420+35)+(300+35) = 790s bound the live step.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Path profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/path-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/path-python"
-          "$RUNNER_TEMP/path-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/path-python/bin/python" -m playwright install --with-deps chromium
-      - name: 3D path editing, stale results, Go to Path Point and restore rollback on the real panel
-        timeout-minutes: 5
-        run: python3 scripts/record-run.py --run-dir tmp/path-ci/path-dom --cwd . --file worklist-v0/hpacs-lite/volume-path.js --file worklist-v0/hpacs-lite/viewer-volume-path.js --file tests/viewer_volume_path_dom_test.py -- "$RUNNER_TEMP/path-python/bin/python" -B tests/viewer_volume_path_dom_test.py
-      - name: Confirm exact declared path and orientation selection
-        run: python3 scripts/record-run.py --run-dir tmp/path-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_path.py --file tests/e2e/test_volume_orientation.py -- "$RUNNER_TEMP/path-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared 3D path and orientation tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/path-python/bin/python" tests/measurement_ci.py --profile volume-path
-      - name: Sanitized synthetic 3D path and orientation evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-path-results
-          path: |
-            tests/e2e/artifacts/volume-path-ci/
-            tmp/path-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-batch:
-    # A fourth MPR suite group, not extra suites inside volume-mpr, volume-slab or volume-path, whose
-    # caps stay as they are. The existing batch preview, owner/DPR context, saved recipe replay and
-    # scout suites share this runner; the profile's per-suite caps
-    # (240+35)+(240+35)+(360+35)+(240+35) = 1220s bound the live step. The pure batch and scout
-    # models and the recipe precision check stay registered in the volume-rendering job.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Batch profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/batch-python"
-          "$RUNNER_TEMP/batch-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/batch-python/bin/python" -m playwright install --with-deps chromium
-      - name: Batch preview keeps its recipe through render readiness transients on the real panel
-        timeout-minutes: 5
-        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/binding-dom --cwd . --file worklist-v0/hpacs-lite/volume-batch.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-batch.js --file tests/viewer_volume_batch_binding_dom_test.py -- "$RUNNER_TEMP/batch-python/bin/python" -B tests/viewer_volume_batch_binding_dom_test.py
-      - name: Confirm exact declared batch preview, context, save and scout selection
-        run: python3 scripts/record-run.py --run-dir tmp/batch-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_batch.py --file tests/e2e/test_volume_batch_context.py --file tests/e2e/test_volume_batch_save.py --file tests/e2e/test_volume_batch_scout.py --file worklist-v0/hpacs-lite/viewer-volume-batch.js --file worklist-v0/hpacs-lite/viewer-volume-scout.js --file worklist-v0/hpacs-lite/volume-batch.js --file worklist-v0/hpacs-lite/volume-batch-scout.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file config/ohif.js -- "$RUNNER_TEMP/batch-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MPR batch preview, context, save and scout tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/batch-python/bin/python" tests/measurement_ci.py --profile volume-batch
-      - name: Sanitized synthetic MPR batch evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-batch-results
-          path: |
-            tests/e2e/artifacts/volume-batch-ci/
-            tests/e2e/artifacts/MPR-batch-*.png
-            tmp/batch-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-sync-preferences:
-    # A fifth MPR suite group, not extra suites inside volume-mpr, volume-slab, volume-path or volume-batch,
-    # whose caps stay as they are. The existing three-plane Windowing/Zoom synchronization suite and the MPR
-    # display, mouse, account profile and progressive refinement suite share this runner; the profile's
-    # per-suite caps (420+35)+(480+35) = 970s bound the live step. The pure preference model stays
-    # registered in the volume-rendering job.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Sync and preferences profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/syncpref-python"
-          "$RUNNER_TEMP/syncpref-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/syncpref-python/bin/python" -m playwright install --with-deps chromium
-      - name: Applied MPR mouse setting stays bound on a new layout on the real panel
-        timeout-minutes: 5
-        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/preferences-layout-dom --cwd . --file worklist-v0/hpacs-lite/volume-preferences.js --file worklist-v0/hpacs-lite/viewer-volume-preferences.js --file tests/viewer_volume_preferences_layout_dom_test.py -- "$RUNNER_TEMP/syncpref-python/bin/python" -B tests/viewer_volume_preferences_layout_dom_test.py
-      - name: MPR synchronization choices stay on a Hanging Protocol three-plane layout on the real panel
-        timeout-minutes: 5
-        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/sync-layout-dom --cwd . --file worklist-v0/hpacs-lite/viewer-volume-sync.js --file tests/viewer_volume_sync_layout_dom_test.py -- "$RUNNER_TEMP/syncpref-python/bin/python" -B tests/viewer_volume_sync_layout_dom_test.py
-      - name: Confirm exact declared MPR synchronization and preferences selection
-        run: python3 scripts/record-run.py --run-dir tmp/syncpref-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_sync.py --file tests/e2e/test_volume_preferences.py --file worklist-v0/hpacs-lite/viewer-volume-sync.js --file worklist-v0/hpacs-lite/viewer-volume-preferences.js --file worklist-v0/hpacs-lite/volume-preferences.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-display.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/reading-appearance.js --file config/ohif.js --file api/src/pacs.service.ts -- "$RUNNER_TEMP/syncpref-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MPR synchronization and preferences tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/syncpref-python/bin/python" tests/measurement_ci.py --profile volume-sync-preferences
-      - name: Sanitized synthetic MPR synchronization and preferences evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-sync-preferences-results
-          path: |
-            tests/e2e/artifacts/volume-sync-preferences-ci/
-            tmp/syncpref-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-marks:
-    # A sixth MPR suite group, not extra suites inside volume-mpr, volume-slab, volume-path, volume-batch or
-    # volume-sync-preferences, whose caps stay as they are. The manual 3D annotation suite and its saved annotated
-    # three-plane/batch output suite share this runner; the profile's per-suite caps (660+35)+(420+35) = 1150s
-    # bound the live step. The pure annotation model stays registered in the volume-rendering job.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Marks profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/marks-python"
-          "$RUNNER_TEMP/marks-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/marks-python/bin/python" -m playwright install --with-deps chromium
-      - name: Armed 3D annotation pick is not previewed by progressive refinement on the real panel
-        timeout-minutes: 5
-        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/progressive-dom --cwd . --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file tests/viewer_volume_marks_progressive_dom_test.py -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/viewer_volume_marks_progressive_dom_test.py
-      - name: Confirm exact declared manual 3D annotation and annotated output selection
-        run: python3 scripts/record-run.py --run-dir tmp/marks-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_marks.py --file tests/e2e/test_volume_mpr_print.py --file worklist-v0/hpacs-lite/viewer-volume-marks.js --file worklist-v0/hpacs-lite/volume-marks.js --file worklist-v0/hpacs-lite/viewer-volume-progressive.js --file worklist-v0/hpacs-lite/viewer-volume-batch.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-volume-job-print.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file config/ohif.js --file api/src/viewer-volume-marks.ts -- "$RUNNER_TEMP/marks-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared manual 3D annotation and annotated output tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/marks-python/bin/python" tests/measurement_ci.py --profile volume-marks
-      - name: Sanitized synthetic manual 3D annotation evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-marks-results
-          path: |
-            tests/e2e/artifacts/volume-marks-ci/
-            tmp/marks-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-mip-voi:
-    # The MIP Viewer VOI Slab cases in their own group, not extra cases inside volume-slab, whose four suites already
-    # commit 1340s of measurement_ci.py's 1500s deadline and keep their caps. The same 40-minute job policy and
-    # 28-minute live step; the profile's single cap (1200+35) = 1235s bounds the live step.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: MIP VOI profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipvoi-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/mipvoi-python"
-          "$RUNNER_TEMP/mipvoi-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/mipvoi-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared MIP Viewer VOI Slab selection
-        run: python3 scripts/record-run.py --run-dir tmp/mipvoi-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_voi.py --file tests/e2e/test_volume_projection.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js -- "$RUNNER_TEMP/mipvoi-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MIP Viewer VOI Slab tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/mipvoi-python/bin/python" tests/measurement_ci.py --profile volume-mip-voi
-      - name: Sanitized synthetic MIP Viewer VOI Slab evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-mip-voi-results
-          path: |
-            tests/e2e/artifacts/volume-mip-voi-ci/
-            tmp/mipvoi-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-mip-job:
-    # The MIP Viewer Job save/restore cases (A11-VOI-2) in their own group, not extra cases inside volume-mip-voi or
-    # volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the profile's
-    # single cap (1200+35) = 1235s bounds the live step.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: MIP Job profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/mipjob-python"
-          "$RUNNER_TEMP/mipjob-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/mipjob-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared MIP Viewer Job selection
-        run: python3 scripts/record-run.py --run-dir tmp/mipjob-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_job.py --file tests/e2e/test_volume_projection.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-jobs.js -- "$RUNNER_TEMP/mipjob-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MIP Viewer Job tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/mipjob-python/bin/python" tests/measurement_ci.py --profile volume-mip-job
-      - name: Sanitized synthetic MIP Viewer Job evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-mip-job-results
-          path: |
-            tests/e2e/artifacts/volume-mip-job-ci/
-            tmp/mipjob-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-mip-batch:
-    # The MIP Viewer Batch cases (A11-BATCH-1) in their own group, not extra cases inside volume-mip-job, volume-mip-voi or
-    # volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the profile's single
-    # cap (1200+35) = 1235s bounds the live step.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: MIP Batch profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/mipbatch-python"
-          "$RUNNER_TEMP/mipbatch-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/mipbatch-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared MIP Viewer Batch selection
-        run: python3 scripts/record-run.py --run-dir tmp/mipbatch-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_job.py --file tests/e2e/test_volume_mip_batch.py --file tests/e2e/test_volume_projection.py --file tests/e2e/test_volume_path.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip-batch.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-jobs.js -- "$RUNNER_TEMP/mipbatch-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared MIP Viewer Batch tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/mipbatch-python/bin/python" tests/measurement_ci.py --profile volume-mip-batch
-      - name: Sanitized synthetic MIP Viewer Batch evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-volume-mip-batch-results
-          path: |
-            tests/e2e/artifacts/volume-mip-batch-ci/
-            tmp/mipbatch-ci/
-          if-no-files-found: error
-          retention-days: 7
-  volume-mip-output:
-    # The MIP Viewer output cases (A11-OUTPUT-1) in their own group, not extra cases inside volume-mip-batch, volume-mip-job,
-    # volume-mip-voi or volume-slab, whose caps stay as they are. The same 40-minute job policy and 28-minute live step; the
-    # profile's single cap (1200+35) = 1235s bounds the live step.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
+          fetch-depth: 0
+      - name: Harness - stage the harness outside the product checkout
+        run: mkdir "$RUNNER_TEMP/transport-harness" && cp -R diagnostic-harness/a11-output-transport/. "$RUNNER_TEMP/transport-harness/"
+      - name: Harness - guard the dispatch, the harness scope and the exact baseline tree
+        env:
+          EXPECTED_HARNESS_SHA: ${{ inputs.harness_sha }}
+          EXPECTED_BASELINE_SHA: ${{ inputs.baseline_sha }}
+        run: python3 "$RUNNER_TEMP/transport-harness/harness.py" restore
       - name: MIP output profile isolation, bounded budget and artifact policy
         run: python3 scripts/record-run.py --run-dir tmp/mipout-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
@@ -540,237 +46,49 @@ jobs:
           "$RUNNER_TEMP/mipout-python/bin/python" -m playwright install --with-deps chromium
       - name: Confirm exact declared MIP Viewer output selection
         run: python3 scripts/record-run.py --run-dir tmp/mipout-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_mip.py --file tests/e2e/test_volume_mip_job.py --file tests/e2e/test_volume_mip_batch.py --file tests/e2e/test_volume_mip_output.py --file tests/e2e/test_volume_projection.py --file tests/e2e/test_volume_path.py --file worklist-v0/hpacs-lite/volume-mip.js --file worklist-v0/hpacs-lite/volume-voi.js --file worklist-v0/hpacs-lite/volume-mip-job.js --file worklist-v0/hpacs-lite/volume-mip-batch.js --file worklist-v0/hpacs-lite/volume-mip-output.js --file worklist-v0/hpacs-lite/viewer-volume-mip.js --file worklist-v0/hpacs-lite/viewer-volume-mip-print.js --file worklist-v0/hpacs-lite/viewer-volume-job-print.js --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file worklist-v0/hpacs-lite/viewer-volume-orientation.js --file worklist-v0/hpacs-lite/viewer-volume-job.js --file worklist-v0/hpacs-lite/viewer-jobs.js -- "$RUNNER_TEMP/mipout-python/bin/python" -B tests/execution_selection_test.py
+      - name: Harness - prepare test-only proxy logging and the browser observation hook
+        env:
+          EXPECTED_HARNESS_SHA: ${{ inputs.harness_sha }}
+          EXPECTED_BASELINE_SHA: ${{ inputs.baseline_sha }}
+        run: python3 "$RUNNER_TEMP/transport-harness/harness.py" prepare
+      - name: Harness - NetLog capture preflight before the stack
+        timeout-minutes: 3
+        env:
+          EXPECTED_HARNESS_SHA: ${{ inputs.harness_sha }}
+          EXPECTED_BASELINE_SHA: ${{ inputs.baseline_sha }}
+          PYTHONPATH: ${{ runner.temp }}/transport-harness/observer
+          KIN_TRANSPORT_DIAG_DIR: ${{ runner.temp }}/transport-diagnostics/preflight
+        run: |
+          "$RUNNER_TEMP/mipout-python/bin/python" "$RUNNER_TEMP/transport-harness/harness.py" preflight
       - name: Isolated declared MIP Viewer output tests
         timeout-minutes: 28
+        env:
+          PYTHONPATH: ${{ runner.temp }}/transport-harness/observer
+          KIN_TRANSPORT_DIAG_DIR: ${{ runner.temp }}/transport-diagnostics/browser
         run: |
           "$RUNNER_TEMP/mipout-python/bin/python" tests/measurement_ci.py --profile volume-mip-output
+      - name: Harness - collect and sanitize observation evidence, guard the tree and analyze
+        if: always()
+        timeout-minutes: 8
+        env:
+          EXPECTED_HARNESS_SHA: ${{ inputs.harness_sha }}
+          EXPECTED_BASELINE_SHA: ${{ inputs.baseline_sha }}
+        run: python3 "$RUNNER_TEMP/transport-harness/harness.py" collect
+      - name: Harness - remove disposable containers and the generated override
+        if: always()
+        timeout-minutes: 3
+        env:
+          EXPECTED_HARNESS_SHA: ${{ inputs.harness_sha }}
+          EXPECTED_BASELINE_SHA: ${{ inputs.baseline_sha }}
+        run: python3 "$RUNNER_TEMP/transport-harness/harness.py" cleanup
       - name: Sanitized synthetic MIP Viewer output evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: synthetic-volume-mip-output-results
+          name: diagnostic-volume-mip-output-transport
           path: |
             tests/e2e/artifacts/volume-mip-output-ci/
             tmp/mipout-ci/
-          if-no-files-found: error
-          retention-days: 7
-  hanging-protocols:
-    # A separate job, not extra suites inside measurements: the four hanging-protocol
-    # suites must not consume that job's budget, and each profile needs its own fresh
-    # runner with an empty Docker daemon. The same 40-minute job policy and 28-minute
-    # live step as the existing e2e jobs. The profile's own per-suite budgets
-    # (400/240/120/300 plus four 35s margins = 1200s) fit measurement_ci.py's
-    # 25-minute deadline, so the trailing hanging-protocol flows keep their slice
-    # even if the shared invariants and worklist suites run to their caps.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Hanging protocol profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/hp-python"
-          # invariants_live.py runs gateway/agent/test_agent.py with sys.executable, so this
-          # interpreter also needs the gateway agent's own pinned dependency. No other
-          # profile selects invariants_live, so no existing job had to install it.
-          "$RUNNER_TEMP/hp-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared invariants, worklist and hanging protocol selection
-        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared invariants, worklist and hanging protocol tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/hp-python/bin/python" tests/measurement_ci.py --profile hanging-protocols
-      - name: Sanitized synthetic hanging protocol evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-hanging-protocols-results
-          path: |
-            tests/e2e/artifacts/hanging-protocols-ci/
-            tests/e2e/artifacts/HP-*.png
-            tmp/hp-ci/
-          if-no-files-found: error
-          retention-days: 7
-  cell-merge:
-    # A separate job, not extra suites inside measurements: the merge suite opens its own
-    # 2x2 study and must not consume that job's budget, and each profile needs its own
-    # fresh runner. Same 40-minute job policy and 28-minute live step as the existing e2e
-    # jobs; measurement_ci.py's own 25-minute deadline and the profile's single 900s
-    # per-suite cap bound the run.
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Cell merge profile isolation, bounded budget and artifact policy
-        run: python3 scripts/record-run.py --run-dir tmp/cell-merge-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
-      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
-        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
-      - name: Install synthetic DICOM and pinned browser test dependencies
-        timeout-minutes: 10
-        run: |
-          python3 -m venv "$RUNNER_TEMP/cell-merge-python"
-          "$RUNNER_TEMP/cell-merge-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
-          "$RUNNER_TEMP/cell-merge-python/bin/python" -m playwright install --with-deps chromium
-      - name: Confirm exact declared cell merge selection
-        run: python3 scripts/record-run.py --run-dir tmp/cell-merge-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_viewer_cell_merge.py -- "$RUNNER_TEMP/cell-merge-python/bin/python" -B tests/execution_selection_test.py
-      - name: Isolated declared cell merge tests
-        timeout-minutes: 28
-        run: |
-          "$RUNNER_TEMP/cell-merge-python/bin/python" tests/measurement_ci.py --profile cell-merge
-      - name: Sanitized synthetic cell merge evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-cell-merge-results
-          path: |
-            tests/e2e/artifacts/cell-merge-ci/
-            tests/e2e/artifacts/LAYOUT-cell-merge-*.png
-            tmp/cell-merge-ci/
-          if-no-files-found: error
-          retention-days: 7
-  runtime:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - name: Saved comparison print identity model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_identity_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs
-      - name: Editor link model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/editor-link --cwd . --file worklist-v0/hpacs-lite/viewer-editor-link.js --file tests/viewer_editor_link_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_editor_link_test.cjs
-      - name: Three-D cursor geometry model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/three-d-cursor-model --cwd . --file worklist-v0/hpacs-lite/three-d-cursor-model.js --file tests/three_d_cursor_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/three_d_cursor_model_test.cjs
-      - name: Three-D cursor loader flag and pane candidate model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/three-d-cursor-loader --cwd . --file config/ohif.js --file tests/three_d_cursor_wiring_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/three_d_cursor_wiring_test.cjs
-      - name: Existing study instance and series arrival model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
-      - name: CT display target selection and atomic rollback model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/display-scope --cwd . --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_display_scope_test.cjs
-      - name: Cell merge geometry, restore oracle and refusal model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/cell-merge --cwd . --file worklist-v0/hpacs-lite/viewer-cell-merge.js --file tests/viewer_cell_merge_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_cell_merge_test.cjs
-      - name: Images Only fullscreen owner and source lifecycle model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/images-only --cwd . --file worklist-v0/hpacs-lite/viewer-images-only.js --file tests/viewer_images_only_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_images_only_test.cjs
-      - name: Image text visibility source lifecycle model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/image-text --cwd . --file worklist-v0/hpacs-lite/viewer-image-text.js --file tests/viewer_image_text_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_image_text_test.cjs
-      - name: Native PDF source key and mode lifecycle model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/source-pdf-key --cwd . --file config/ohif.js --file tests/viewer_dicom_pdf_key_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_dicom_pdf_key_test.cjs
-      - name: Personal Hanging Protocol shared schema and owner model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/hanging-protocols --cwd . --file api/src/hanging-protocol.ts --file worklist-v0/hpacs-lite/hanging-protocol-model.js --file tests/hanging_protocol_contract_cases.json --file tests/hanging_protocol_model_test.cjs --file tests/hanging_protocol_validator_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --experimental-strip-types --test tests/hanging_protocol_model_test.cjs tests/hanging_protocol_validator_test.cjs
-      - name: Backup safety regressions
-        run: python3 tests/ops_backup_test.py
-      - name: D-MEASURE2 session recovery and SR guard regressions (no containers)
-        run: node --test tests/viewer_recovery_test.cjs tests/viewer_note_connection_test.cjs
-      - name: Automatic prior calendar and identity boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_prior_test.cjs
-      - name: Compound search operators and malformed condition boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/compound_filter_test.cjs tests/worklist_alerts_test.cjs tests/worklist_refresh_test.cjs tests/worklist_startup_test.cjs tests/related_parts_test.cjs tests/worklist_body_parts_test.cjs tests/study_priority_test.cjs
-      - name: Worklist column visibility and account storage model
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/worklist_columns_test.cjs
-      - name: Account and browser workspace storage boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/workspace_layout_test.cjs tests/reading_panel_layout_test.cjs tests/viewer_opening_test.cjs tests/viewer_windows_test.cjs tests/viewer_frame_coverage_test.cjs
-      - name: Explicit recent viewer layout storage boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_layout_test.cjs
-      - name: CT position synchronization geometry boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_sync_test.cjs
-      - name: Cine range, playback ownership and preparation budget boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/cine_budget_test.cjs tests/cine_playback_test.cjs tests/cine_lifecycle_test.cjs
-      - name: Selected classic CT preset command boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/ct_presets_test.cjs
-      - name: SR source tree identity and bounded literal values
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/sr_tree_test.cjs
-      - name: Pinned viewer precision and isolated stack method boundaries
-        run: docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_precision_test.cjs
-      - name: Deployment preflight refusal and shared lock
-        run: python3 tests/ops_deploy_preflight_test.py
-      - name: Deployment state machine and retained operations lock
-        run: python3 -B tests/ops_deploy_runner_test.py
-      - name: Protected deployment host files, UID boundary and synthetic HTTPS
-        run: sudo python3 -B tests/ops_deploy_host_test.py
-      - name: Offline export inventory and image integrity
-        run: python3 tests/ops_export_inventory_test.py
-      - name: Offline storage listing and read-only index reconciliation
-        run: python3 -B tests/ops_storage_reconcile_test.py
-      - name: Pinned SDK collector against synthetic TLS only
-        run: |
-          umask 077
-          sdk_dir=$(mktemp -d "$RUNNER_TEMP/kin-sdk.XXXXXXXX")
-          python3 -m venv "$sdk_dir"
-          "$sdk_dir/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r scripts/requirements-storage-sdk.txt
-          "$sdk_dir/bin/python" -B tests/ops_storage_collect_test.py
-          KIN_REQUIRE_STORAGE_SDK=1 "$sdk_dir/bin/python" -B tests/ops_offsite_backup_test.py
-      - name: Pinned age and local encrypted export preparation
-        run: |
-          umask 077
-          age_dir=$(mktemp -d "$RUNNER_TEMP/kin-age.XXXXXXXX")
-          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --max-time 60 \
-            https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz -o "$age_dir/age.tar.gz"
-          echo "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  $age_dir/age.tar.gz" | sha256sum --check --strict
-          tar -xzf "$age_dir/age.tar.gz" -C "$age_dir" age/age age/age-keygen
-          KIN_TEST_AGE="$age_dir/age/age" python3 -B tests/ops_export_crypto_test.py
-      - name: Monitor failure and notification boundaries
-        run: python3 tests/ops_monitor_test.py
-      - name: SMTP outbox, TLS and duplicate suppression
-        run: python3 tests/ops_email_monitor_test.py
-      - name: Public proxy assets from private checkout
-        run: |
-          chmod -R go-rwx proxy
-          docker build -t kin-proxy:ci proxy
-          docker run --rm --network none --read-only --user nginx --entrypoint sh kin-proxy:ci -c 'test -r /usr/share/nginx/html/kin-brand/kin-favicon-32.png && test -r /usr/share/nginx/html/kin-brand/kin-emblem-j1.svg && test -r /etc/nginx/templates/default.conf.template'
-      - name: Reproduce a private deployment checkout
-        # Production creates files under umask 077. Runtime readability must come
-        # from the image build rather than the checkout host's file permissions.
-        run: chmod -R go-rwx api
-      - name: Build the production target
-        env:
-          CODE_SHA: ${{ github.sha }}
-        run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
-      - name: Prepare disposable database image
-        run: docker pull postgres:16-alpine
-      - name: Compiled viewer input, Unicode and original-plane validation
-        run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs
-      - name: D-MEASURE2 source failures, safe warnings and real read deadlines
-        run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_source_test.cjs
-      - name: Study access policy, fail-closed storage and stale response boundaries
-        run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_access_policy_test.cjs /tests/study_access_service_test.cjs
-      - name: Compiled volume job command and volume mark boundary models
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs
-      - name: Observe an isolated real restart loop
-        run: python3 tests/ops_monitor_container_test.py
-      - name: Production image migration, startup and refusal checks
-        env:
-          KIN_TEST_API_IMAGE: kin-api:ci
-          KIN_EXPECTED_REVISION: ${{ github.sha }}
-        run: python3 tests/production_image_test.py
-      - name: Disposable host adapter API replacement and database preservation
-        run: sudo env KIN_TEST_API_IMAGE=kin-api:ci python3 -B tests/ops_deploy_host_container_test.py
-      - name: Record exact image identity
-        env:
-          CODE_SHA: ${{ github.sha }}
-        run: |
-          echo "Code SHA: $CODE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          docker image inspect kin-api:ci --format 'Image ID: {{.Id}}' >> "$GITHUB_STEP_SUMMARY"
-          echo 'CI checks runtime packaging and disposable-DB startup. The 69 live invariants, 14 browser tests and independent review remain separate release gates. No deployment is performed.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Synthetic runtime print identity evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: synthetic-runtime-print-identity
-          path: |
-            tmp/runtime-ci/job-print-identity/
-            tmp/runtime-ci/hanging-protocols/
-            tmp/runtime-ci/three-d-cursor-model/
-            tmp/runtime-ci/three-d-cursor-loader/
-            tmp/runtime-ci/editor-link/
-            tmp/runtime-ci/volume-api-models/
+            tmp/mipout-diag/
           if-no-files-found: error
           retention-days: 7
