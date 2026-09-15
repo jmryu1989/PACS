@@ -188,6 +188,12 @@ class VolumeOrientationE2E(VolumeJobsE2E):
    const record={index:records.length,id:this.id,volumeId:this.getVolumeId(),half:this.getSlabThickness(),suppliedKeys:Object.keys(camera||{}),supplied:copy(camera||{}),previous:copy(this.getCamera()),planesBefore:planes(this)};records.push(record);
    try{const result=original.apply(this,arguments);record.after=copy(this.getCamera());record.planesAfter=planes(this);return result}catch(error){record.error=String(error);throw error}};
   Object.defineProperty(owner,'setCamera',{...descriptor,value:wrapper});window.kinRestoreCameraTrace={owner,descriptor,wrapper,records};return {owner:owner.constructor.name,installed:owner.setCamera===wrapper}}'''
+ # The pinned OHIF resize re-presents each plane from its own view reference (ViewportService performResize -> setPresentations
+ # -> setViewReference): one native snapFocalPointToSlice of the focal point along the normal. Given a focal point, the plane is
+ # first put there; the focal point after the one snap is returned.
+ SLICE_SNAP='''([index,focal])=>{const id=[...services.viewportGridService.getState().viewports.keys()][index],v=services.cornerstoneViewportService.getCornerstoneViewport(id),c=v.getCamera();
+  if(c.focalPoint.some((x,i)=>x!==focal[i]))v.setCamera({focalPoint:focal,position:c.position.map((x,i)=>x-(c.focalPoint[i]-focal[i]))});
+  v.setViewReference(v.getViewReference());v.render();return v.getCamera().focalPoint}'''
  def start_screen(self,records,presented):
   # Reset Planes writes each plane with a position once (its flip-only call carries none). That first write per plane must be
   # exactly the planes read when the panel confirmed the start screen, before this flow's click and axial camera write.
@@ -204,9 +210,8 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   # Restore Job axial viewport is observed (traced) to start there, so native setCamera alone keeps its initial slab.
   # The earlier H/F 40 coronal case did not discriminate: the fresh coronal focal point differs from the author's.
   a,p,v=self.opened_projection();expect(v.locator('#kin-volume-orientation')).to_be_visible();reset=v.get_by_role('button',name='Reset Planes',exact=True);expect(reset).to_be_enabled()
-  # Author-side start screen evidence (VP1): a start screen read before the pinned native resize snapped the axial focal
-  # point (z 16, not the settled 15.999999999999996) and refit the zoom differs from the confirmed planes, and the Job would
-  # then save an axial focal point off the fresh restore's native plane.
+  # Author-side start screen evidence (VP1): Reset Planes writes exactly the confirmed start screen. Natively that screen is the
+  # settled one (its canvas equal to its client box and unchanged up to Reset) with the unsnapped axial volume centre z 16.
   presented=self.presented_cameras;reset_installed=v.evaluate(self.RESET_CAMERA_TRACE,[c['id'] for c in presented]);self.assertTrue(reset_installed['installed'],reset_installed)
   try:reset.click();expect(v.locator('#kin-volume-orientation [role=status]')).to_contain_text('시작 MPR 화면')
   except BaseException:
@@ -221,6 +226,11 @@ class VolumeOrientationE2E(VolumeJobsE2E):
   pick=lambda camera:{k:camera[k] for k in ('focalPoint','parallelScale','viewPlaneNormal')};first={};now={c['id']:c for c in v.evaluate(self.GRID_CAMERAS)}
   for r in reset_trace['records']:first.setdefault(r['id'],r)
   print('AUTHOR_START_SCREEN',json.dumps([{'id':c['id'],'presented':pick(c['camera']),'canvas':c['canvas'],'before_reset':pick(first[c['id']]['previous']),'after_reset':pick(now[c['id']]['camera']),'canvas_after':now[c['id']]['canvas']} for c in presented]),flush=True)
+  # The discriminating restore below needs the saved axial focal point exactly on the fresh restore's native axial plane. The
+  # fresh MPR is presented through that resize: one snap of the volume centre, z 16 to 15.999999999999996 (restore trace #36). An
+  # author screen that was never resized keeps z 16, and snapping again from 15.999999999999996 is not guaranteed to return it
+  # (the snap adds the focal point's own floating slice step), so the author axial plane gets that one snap from the centre.
+  ax=next(i for i,c in enumerate(presented) if abs(abs(c['camera']['viewPlaneNormal'][2])-1)<1e-6);v.evaluate(self.SLICE_SNAP,[ax,self.volume_center(v,ax)[1]])
   before=self.cameras(v);original=self.originals();p.locator('#findings').fill('KEEP SINGLE AXIS REPORT')
   self.rotate_planes(v,1,30);moved=self.cameras(v);pivot=self.pivot(before)
   co=next(i for i,c in enumerate(before) if abs(abs(c['viewPlaneNormal'][1])-1)<1e-6);ax=next(i for i,c in enumerate(before) if abs(abs(c['viewPlaneNormal'][2])-1)<1e-6)
