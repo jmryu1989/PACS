@@ -38,7 +38,8 @@ MESSAGES={'load':'출력 화면을 불러오지 못했습니다. 다시 누르�
  'size':'MIP 출력 영상 크기를 확인하지 못했습니다.','capability':'고정 뷰어에서 MIP 출력 기능을 확인하지 못했습니다.','average':'Raysum 평균 계산 모듈을 확인할 수 없어 출력하지 않았습니다.',
  'capacity':'출력 CT 원본은 최대 256장까지 지원합니다.','mid_read':'출력 준비 중 원본이 변경되었습니다.','digest':'저장 당시 전체 원본과 달라 출력하지 않았습니다.',
  'frame_of_reference':'저장한 MIP 작업의 좌표계(Frame of Reference)가 출력 원본과 달라 출력하지 않았습니다.','outside':'저장한 VOI Slab이 출력 CT 볼륨과 겹치지 않아 출력하지 않았습니다.',
- 'reproduce':'MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 출력하지 않았습니다.','ready':'미리보기 내용을 확인','source_read':'출력 원본을 읽지 못했습니다. 다시 확인하세요.'}
+ 'reproduce':'MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 출력하지 않았습니다.','shape':'저장한 MIP 작업의 형식을 확인할 수 없어 출력하지 않았습니다.',
+ 'ready':'미리보기 내용을 확인','source_read':'출력 원본을 읽지 못했습니다. 다시 확인하세요.'}
 NOTE='저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증'
 MODELS='()=>[typeof window.KinVolumeMip,typeof window.KinVolumeMipJob,typeof window.KinVolumeMipBatch,typeof window.KinVolumeMipOutput,typeof window.kinRenderVolumeMipPrint,typeof window.kinCreateVolumeMip]'
 PRESET_VALUES="()=>Object.fromEntries(['axial','sagittal','coronal'].map(k=>[k,[Array.from(cornerstone.CONSTANTS.MPR_CAMERA_VALUES[k].viewPlaneNormal),Array.from(cornerstone.CONSTANTS.MPR_CAMERA_VALUES[k].viewUp)]]))"
@@ -482,7 +483,11 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   # viewer cannot reproduce refuses before any source read.
   for title,change,message,reads in ((V12,lambda s:s['mip'].__setitem__('frameOfReference','2.25.1234'),'frame_of_reference',True),
                                      (V12,lambda s:s['mip']['voiSlab'].update(center=[-500.0,-500.0,-500.0],pivot=[-500.0,-500.0,-500.0]),'outside',True),
-                                     (V12,lambda s:s['mip'].__setitem__('algorithm','kin-mip-2'),'reproduce',False),
+                                     # A11-ORIENT-1 named replacement: kin-mip-2 is a known algorithm now (versions 14/15), so inside a
+                                     # version 12 body it is a malformed version/algorithm pair ('shape'); kin-mip-3 is the algorithm
+                                     # this viewer cannot reproduce. Both refuse before any source read, as before.
+                                     (V12,lambda s:s['mip'].__setitem__('algorithm','kin-mip-3'),'reproduce',False),
+                                     (V12,lambda s:s['mip'].__setitem__('algorithm','kin-mip-2'),'shape',False),
                                      (V13,lambda s:s['mipBatch'].__setitem__('algorithm','kin-mip-batch-2'),'reproduce',False)):
    pattern=f"**/api/studies/{a.uid}/viewer-jobs/{rows[title]['id']}"
    # Playwright passes (route, request) to a handler with two positional parameters, so the bound change comes after both

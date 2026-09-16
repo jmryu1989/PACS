@@ -456,7 +456,9 @@ test('apply(v12) awaits the MIP restore after cells and cameras and propagates i
 // The real viewer-volume-mip.js runs in its own browser-like realm beside the real volume-mip.js, volume-voi.js and
 // volume-mip-job.js; only the DOM, the account fetch and the native viewport are stand-ins. A fault-free restore reaching
 // Final proves the stand-ins drive the real restore path, so each fault below is the only difference.
-function mipViewerWorld({planeWrite=null,gpu=true}={}){
+// fittedDistance/fittedScale are what a string-key reset leaves behind (the runtime's own fit); cameraWrite lets a case make the
+// viewport ignore or half-apply the explicit five-field write the anatomical presets use, and omitCamera drop the methods entirely.
+function mipViewerWorld({planeWrite=null,gpu=true,fittedDistance=120,fittedScale=60,cameraWrite=null,omitCamera=false}={}){
  const node=tag=>{const children=[],on=new Map(),attributes={};const e={tagName:tag,children,attributes,style:{},dataset:{},className:'',textContent:'',value:'',checked:false,disabled:false,open:false,
   append:(...items)=>{children.push(...items);},remove(){e.removed=true;},replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute:(name,value)=>{attributes[name]=String(value);},
   addEventListener:(name,listener)=>{if(!on.has(name))on.set(name,new Set());on.get(name).add(listener);},removeEventListener:(name,listener)=>{on.get(name)?.delete(listener);},
@@ -473,13 +475,22 @@ function mipViewerWorld({planeWrite=null,gpu=true}={}){
     addClippingPlane:plane=>{planeWrite?.();extra.push(plane);return true;},removeClippingPlane:plane=>{const i=extra.indexOf(plane);if(i<0)return false;extra.splice(i,1);return true;}};
    const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
    views.set(viewportId,{mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
-    // The pinned viewport takes either a native orientation key (the three MPR planes) or an OrientationVectors pair, which is
-    // how the manual's anatomical presets are written (A11-ORIENT-1 MF5). Anything else is refused, as the runtime would.
-    setOrientation:(orientation,immediate)=>{const axes=typeof orientation==='string'?presets[orientation]:orientation;
-     if(!axes||!Array.isArray(axes.viewPlaneNormal)||!Array.isArray(axes.viewUp))throw Error('Invalid orientation');
-     camera={viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp]};},setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;},
-    setProperties:value=>{properties={...properties,...value};},getProperties:()=>properties,getCamera:()=>structuredClone(camera),
+    /* The pinned viewport takes a native orientation key ONLY: the OrientationVectors form was not honoured by the runtime
+       (run 35039450391), so the product no longer writes it and a permissive stub must not let that shape return. A string
+       reset fits the camera the way the runtime does — focal point at the volume centre, a distance beyond the whole-volume
+       half thickness and a parallel scale — which is what the direction branch reads before its explicit write. */
+    setOrientation:(orientation,immediate)=>{
+     if(typeof orientation!=='string'||!presets[orientation])throw Error('Invalid orientation');
+     const axes=presets[orientation];
+     camera={viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp],focalPoint:[...centre],
+      position:centre.map((x,i)=>x+axes.viewPlaneNormal[i]*fittedDistance),parallelScale:fittedScale};},
+    // The five-field write the anatomical presets use; cameraWrite lets a test make the runtime ignore or half-apply it.
+    setCamera:next=>{const written=structuredClone(next);camera={...(camera||{}),...(cameraWrite?cameraWrite(written):written)};},
+    setBlendMode:value=>{blend=value;},setSlabThickness:value=>{half=value;},
+    setProperties:value=>{properties={...properties,...value};},getProperties:()=>properties,getCamera:()=>camera&&structuredClone(camera),
     render:()=>{setTimeout(()=>element.emit('IMAGE_RENDERED'),0);}});
+   // A pinned viewport without the camera API at all: prepare() must refuse at open, before any display request.
+   if(omitCamera){const view=views.get(viewportId);delete view.setCamera;delete view.getCamera;}
   },getViewport:id=>views.get(id),disableElement:id=>{views.delete(id);}};
  // Without this linked program the viewer cannot confirm its clip shader, exactly as when the GPU check fails natively.
  if(gpu)engine.offscreenMultiRenderWindow={getOpenGLRenderWindow:()=>({getViewNodeFor:mapper=>[...views.values()].some(v=>v.mapper===mapper)?
@@ -703,9 +714,11 @@ function batchViewerWorld({distance=120,faults={},command=null}={}){
     setViewSpecificProperties:value=>{specific=value;},getViewSpecificProperties:()=>specific};
    const actor={getMapper:()=>mapper,getProperty:()=>({getInterpolationType:()=>properties.interpolationType})};
    views.set(viewportId,{id:viewportId,batch,mapper,suppressEvents:true,getVolumeId:()=>volume.volumeId,setVolumes:async()=>{},getActors:()=>[{actor}],
-    // Either a native orientation key or the OrientationVectors pair the anatomical presets write (A11-ORIENT-1 MF5).
-    setOrientation:(orientation,immediate)=>{const axes=typeof orientation==='string'?presets[orientation]:orientation;
-     if(!axes||!Array.isArray(axes.viewPlaneNormal)||!Array.isArray(axes.viewUp))throw Error('Invalid orientation');
+    // A native orientation key ONLY (A11-ORIENT-1 fix design): the OrientationVectors form is not honoured by the pinned runtime
+    // and the product no longer writes it, so the stub refuses it too. The string reset fits the camera as the runtime does.
+    setOrientation:(orientation,immediate)=>{
+     if(typeof orientation!=='string'||!presets[orientation])throw Error('Invalid orientation');
+     const axes=presets[orientation];
      camera={viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp],focalPoint:[...centre],position:centre.map((x,i)=>x+axes.viewPlaneNormal[i]*distance),parallelScale:60};},
     setCamera:next=>{
      const before=camera;camera={...(camera||{}),...structuredClone(next)};if(batch)events.push({type:'setCamera',camera:structuredClone(next)});
@@ -1141,6 +1154,27 @@ test('A11-ORIENT-1: the Orientation Preset bar requests the same display the Ori
   // The saved block of that display is kin-mip-2, and the list and the bar agree on the shown value.
   const block=w.viewer.job.capture();
   assert.equal(block.algorithm,'kin-mip-2');assert.equal(block.orientation,'Superior');
+  /* T3: a MIP Batch made from this direction Final turns about the preset's own vectors, not through MPR_CAMERA_VALUES. The event
+     list records setCamera only for the private batch viewport, so it is already scoped to the generation; it is cleared first so
+     the Final display's own explicit write cannot be read as a frame. */
+  w.events.length=0;
+  w.field('MIP Batch Interval (deg)').value='90';w.field('MIP Batch Number').value='2';w.field('MIP Batch Type').value='Horizontal';
+  await w.button('Make MIP Batch').onclick();
+  assert.match(w.status(),/^MIP Batch 미리보기 2장을 만들었습니다/);
+  const frames=w.events.filter(e=>e.type==='setCamera').map(e=>e.camera);
+  assert.equal(frames.length,2,'one camera write per frame, none from the Final display');
+  // Superior frame 0 and its Horizontal +90 row, hard-coded from the accepted contract table.
+  assert.deepEqual([frames[0].viewPlaneNormal,frames[0].viewUp],[[0,0,1],[0,-1,0]]);
+  assert.deepEqual([frames[1].viewPlaneNormal.map(n=>Math.round(n)),frames[1].viewUp],[[-1,0,0],[0,-1,0]]);
+  const centre=[15.75,15.75,40],thickness=Math.hypot(63*.5,63*.5,32*2.5);
+  for(const [index,frame] of frames.entries()){
+   assert.deepEqual(frame.focalPoint,centre,'frame '+index+' focal point');
+   assert.ok(Math.abs(frame.parallelScale-thickness/2)<=1e-9,'frame '+index+' parallel scale is the whole-volume half thickness');
+   const distance=Math.hypot(...frame.position.map((x,i)=>x-centre[i]));
+   assert.ok(Math.abs(distance-120)<=1e-9,'frame '+index+' keeps the confirmed Final camera distance');
+   frame.position.forEach((x,i)=>assert.ok(Math.abs(x-(centre[i]+frame.viewPlaneNormal[i]*distance))<=1e-9,'frame '+index+' position'));
+  }
+  w.button('Clear MIP Batch').onclick();
   // Choosing a plane from the list again clears every pressed preset and writes the accepted kin-mip-1 block.
   const list=w.field('MIP Orientation');list.value='Coronal';list.onchange();
   await until(()=>w.dialog.dataset.kinMipState==='final'&&w.field('MIP Orientation').value==='Coronal','the Coronal display is confirmed');
@@ -1161,4 +1195,76 @@ test('A11-ORIENT-1: an anatomical preset display saves as version 14, and with a
   for(const [algorithm,batch,version] of [['kin-mip-1',null,12],['kin-mip-1',recipe,13],['kin-mip-2',null,14],['kin-mip-2',recipe,15]])
    assert.equal(model.versionFor({...w.block,algorithm},batch),version,algorithm+(batch?' with a recipe':''));
  }finally{w.stop();}
+});
+
+/* A11-ORIENT-1 T1 + B4: the inlined capture rule through the real capture(), and the version-to-key-set binding of the client
+   resolve gate. Each version names one algorithm AND one key set; a display version carrying a recipe is refused before any
+   layout change, and a batch version without one keeps its existing refusal. */
+test('A11-ORIENT-1: a kin-mip-2 display captures as version 14/15, and a version carrying the wrong key set is refused before any layout change',async()=>{
+ const direction=mipBlock({algorithm:'kin-mip-2',orientation:'Superior'}),recipe=batchRecipe();
+ const v14=world(1,3,PLANES,{mip:mipTool(direction)}).capture();
+ assert.equal(v14.version,14);assert.equal(v14.mip.algorithm,'kin-mip-2');assert.equal('mipBatch' in v14,false);
+ const v15=world(1,3,PLANES,{mip:batchMipTool(direction,recipe)}).capture();
+ assert.equal(v15.version,15);assert.deepEqual(v15.mipBatch,recipe);assert.equal(v15.mip.orientation,'Superior');
+ // The accepted pair still captures exactly as before.
+ const v12=world(1,3,PLANES,{mip:mipTool(mipBlock())}).capture(),v13=world(1,3,PLANES,{mip:batchMipTool(mipBlock(),recipe)}).capture();
+ assert.deepEqual([v12.version,v13.version],[12,13]);
+ const refusing={restore:async()=>{throw Error('must not restore');},clearForJob(){}};
+ for(const [label,body,pattern] of [
+   ['version 14 carrying a mipBatch',{...structuredClone(v14),mipBatch:structuredClone(recipe)},/저장한 MIP 작업의 형식을 확인할 수 없어/],
+   ['version 12 carrying a mipBatch',{...structuredClone(v12),mipBatch:structuredClone(recipe)},/저장한 MIP 작업의 형식을 확인할 수 없어/],
+   ['version 12 carrying a null mipBatch',{...structuredClone(v12),mipBatch:null},/저장한 MIP 작업의 형식을 확인할 수 없어/],
+   ['version 15 without its recipe',(({mipBatch,...rest})=>rest)(structuredClone(v15)),/MIP Batch 작업의 계산 방식을/],
+   ['version 15 with a null recipe',{...structuredClone(v15),mipBatch:null},/MIP Batch 작업의 계산 방식을/],
+   ['kin-mip-1 inside version 14',{...structuredClone(v14),mip:mipBlock()},/이 MIP 작업의 계산 방식을/],
+   ['kin-mip-2 inside version 12',{...structuredClone(v12),mip:structuredClone(direction)},/이 MIP 작업의 계산 방식을/]]){
+  const order=restoreWorld({mip:refusing});
+  assert.throws(()=>order.jobs.resolve(body),pattern,label);
+  await assert.rejects(order.jobs.apply(body,()=>true),pattern,label);
+  assert.deepEqual(order.log,[],label+': nothing is applied');
+ }
+});
+
+/* A11-ORIENT-1 fail-closed camera guards. A direction is written explicitly: the proven string reset first, then the five-field
+   setCamera, validated before and read back after. An unusable reset camera, an ignored or partial write, or a viewport that
+   cannot write a camera at all must refuse rather than confirm an unverified display. */
+test('A11-ORIENT-1: a direction display fails closed on an unusable reset camera, an unhonoured write or a missing camera API',async()=>{
+ // The VOI Slab of the accepted restore case above: this world's linked program is the four-plane shader, so a VOI-on display is
+ // what it can confirm. The direction branch under test is independent of the slab.
+ const value={schema:1,algorithm:'kin-mip-2',coordinates:'LPS_mm',frameOfReference:'2.25.6',mode:'MIP',orientation:'Superior',
+  display:{voiRange:{lower:-1100,upper:1100},interpolationType:0},voiSlab:{center:[8.125,15.75,40],normal:[1,0,0],pivot:[15.75,15.75,40],thickness:22.25}};
+ const restore=world=>world.viewer.job.restore(structuredClone(value),{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0',version:14});
+ let world=mipViewerWorld();
+ try{
+  await restore(world);
+  assert.equal(world.dialog.dataset.kinMipState,'final');
+  // The Final camera is the literal Superior row, written from the reset's own distance and scale.
+  const camera=[...world.views.values()][0].getCamera();
+  assert.deepEqual([camera.viewPlaneNormal,camera.viewUp],[[0,0,1],[0,-1,0]]);
+  assert.deepEqual(camera.focalPoint,[15.75,15.75,40]);
+  assert.deepEqual(camera.position,[15.75,15.75,160]);
+  assert.equal(camera.parallelScale,60);
+ }finally{world.viewer.dispose();}
+ for(const [label,options,reason] of [
+   ['a reset camera inside the whole-volume slab',{fittedDistance:10},'고정 뷰어의 기준 카메라를 확인할 수 없어 방향 표시를 적용하지 않았습니다.'],
+   ['a non-positive parallel scale',{fittedScale:0},'고정 뷰어의 기준 카메라를 확인할 수 없어 방향 표시를 적용하지 않았습니다.'],
+   ['an ignored camera write',{cameraWrite:()=>({})},'방향 카메라를 고정 뷰어에 적용하지 못했습니다.'],
+   ['a partial camera write',{cameraWrite:camera=>({...camera,viewUp:[0,0,1]})},'방향 카메라를 고정 뷰어에 적용하지 못했습니다.'],
+   ['a viewport that cannot write a camera',{omitCamera:true},'고정 뷰어에서 MIP 투영 기능을 확인하지 못했습니다.']]){
+  world=mipViewerWorld(options);
+  try{
+   const error=await restore(world).then(()=>null,e=>e);
+   assert.ok(error,label+' must refuse the direction display');
+   assert.equal(error.message,reason,label);
+   assert.equal(world.dialog.open,false,label);assert.equal(world.views.size,0,label+': the MIP viewport is disabled');
+  }finally{world.viewer.dispose();}
+ }
+ // A plane display is unaffected by the direction guards: it still goes through the string key alone.
+ world=mipViewerWorld({cameraWrite:()=>({})});
+ try{
+  await world.viewer.job.restore({...structuredClone(value),algorithm:'kin-mip-1',orientation:'Axial'},{current:()=>true,deadline:Date.now()+20000,viewportId:'vp-0',version:12});
+  // eslint-disable-next-line no-unused-expressions
+  assert.equal(world.dialog.dataset.kinMipState,'final');
+  assert.deepEqual([...world.views.values()][0].getCamera().viewPlaneNormal,[0,0,-1]);
+ }finally{world.viewer.dispose();}
 });

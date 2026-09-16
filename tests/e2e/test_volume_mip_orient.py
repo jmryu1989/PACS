@@ -5,7 +5,8 @@ versions 14/15, and its output through the existing A11-OUTPUT-1 print engine. E
 accepted contract table and the synthetic geometry, never read back from the code under test."""
 import json,math,unittest
 from playwright.sync_api import expect
-from test_volume_mip import VOI_STUDIES,VOI_CASES,SOURCE_PLANES,mm_text,rodrigues,voi_record
+import numpy as np
+from test_volume_mip import VOI_STUDIES,VOI_CASES,SOURCE_PLANES,BLENDS,TOTAL,mm_text,rodrigues,voi_record,voi_planes,voi_label
 from test_volume_mip_job import LAYOUT
 from test_volume_mip_batch import BATCH_HELPERS,FINAL_CAMERA,recipe_of
 from test_volume_mip_output import VolumeMipOutputE2E,FOCAL,DISTANCE,NOTE,PRINT_TRACE,TAKE,NO_LEAKS,cross
@@ -53,13 +54,34 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
  def near(self,actual,expected,label,tolerance=1e-6):
   self.assertEqual(len(actual),len(expected),label)
   for got,want in zip(actual,expected):self.assertLessEqual(abs(got-want),tolerance,(label,got,want))
- def assert_camera(self,camera,expected,label):
-  """HP1: the pinned runtime accepted the OrientationVectors write and the Final camera is the accepted table's."""
+ def rolled_back(self,page,mark,label):
+  """A direction that did not take effect rolls back to the previous Final; name the reason instead of only the vectors."""
+  status=page.locator('#kin-volume-mip [role=status]').text_content()
+  return (label,status,page.evaluate('m=>mipTransitions.slice(m)',mark))
+ def assert_camera(self,camera,expected,label,fitted=None):
+  """HP1: the Final camera the pinned runtime actually holds equals the accepted table's camera."""
   self.near(camera['viewPlaneNormal'],expected['viewPlaneNormal'],label+' normal')
   self.near(camera['viewUp'],expected['viewUp'],label+' up')
   self.near(camera['focalPoint'],expected['focalPoint'],label+' focal point')
   distance=math.hypot(*[p-f for p,f in zip(camera['position'],camera['focalPoint'])])
   self.assertGreaterEqual(distance,DISTANCE/2+1e-6,label+' camera stands outside the whole-volume slab')
+  # Zoom parity with the plane reset this display was written from: the explicit direction write must not change the scale.
+  if fitted:
+   self.assertAlmostEqual(distance,fitted[0],delta=1e-6,msg=label+' distance parity with the Axial fit')
+   self.assertAlmostEqual(camera['parallelScale'],fitted[1],delta=1e-6,msg=label+' parallel scale parity with the Axial fit')
+ def orient_voi_native(self,state,mode,orientation,record,voi):
+  """voi_native for an anatomical preset: the camera is the literal DIRECTIONS row, every other assertion unchanged."""
+  normal,up=DIRECTIONS[orientation]
+  self.assertEqual(state['state'],'final',state['status']);self.assertEqual([state['mode'],state['orientation'],state['blend']],[mode,orientation,BLENDS[mode]])
+  np.testing.assert_allclose(state['normal'],normal,atol=1e-6,rtol=0);np.testing.assert_allclose(state['up'],up,atol=1e-6,rtol=0)
+  self.assertEqual(len(state['planes']),4 if record else 2,state['planes'])
+  for _,plane_normal in state['planes'][:2]:self.assertAlmostEqual(abs(float(np.dot(plane_normal,normal))),1,delta=1e-6)
+  self.assertAlmostEqual(math.dist(state['planes'][0][0],state['planes'][1][0]),TOTAL,delta=1e-6)
+  for (origin,plane_normal),(want_origin,want_normal) in zip(state['planes'][2:],voi_planes(record) if record else []):
+   np.testing.assert_allclose(origin,want_origin,atol=1e-6,rtol=0);np.testing.assert_allclose(plane_normal,want_normal,atol=1e-6,rtol=0)
+  self.assertAlmostEqual(state['voiRange']['lower'],voi[0],delta=1e-6);self.assertAlmostEqual(state['voiRange']['upper'],voi[1],delta=1e-6)
+  suffix=' · '+voi_label(record) if record else ''
+  self.assertEqual(state['label'],mode+' · '+orientation+' · '+mm_text(TOTAL)+' mm'+suffix+' · Final')
 
  def test_mip_orient_01_presets_save_restore_output(self):
   study,intercept,voi=VOI_STUDIES[0];_,_,oblique=VOI_CASES;record=voi_record(oblique)
@@ -77,11 +99,15 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   # The p.328 field names: Type is the rotation kind; Thickness is a read-only output that is never an input.
   self.assertEqual(v.evaluate(TYPE_LABEL),'SELECT');self.assertEqual(v.evaluate(READOUT_TAG),'OUTPUT')
   self.assertEqual(v.evaluate(READOUT),'CT 전체 '+mm_text(DISTANCE)+' mm')
+  # The opening Axial display is the runtime's own fitted camera; every direction is written from that fit, so its distance and
+  # parallel scale must survive unchanged (a carried-stale or re-fitted camera would show here).
+  axial=v.evaluate(FINAL_CAMERA)
+  fitted=(math.hypot(*[p-f for p,f in zip(axial['position'],axial['focalPoint'])]),axial['parallelScale'])
   # HP1: each preset writes its own Final camera, and only that preset is pressed.
   for name,(normal,up) in DIRECTIONS.items():
    mark=self.mark(v);self.press(dialog,name);self.settled(v,mark)
    expect(dialog).to_have_attribute('data-kin-mip-state','final')
-   self.assert_camera(v.evaluate(FINAL_CAMERA),orient_cameras(name)[0],name)
+   self.assert_camera(v.evaluate(FINAL_CAMERA),orient_cameras(name)[0],self.rolled_back(v,mark,name),fitted)
    self.assertEqual(v.evaluate("()=>document.querySelector('#kin-volume-mip [aria-label=\"MIP Orientation\"]').value"),name)
    self.assertEqual([row[4] for row in v.evaluate(BAR)],['true' if other==name else 'false' for other in DIRECTIONS],name)
    expect(dialog.locator('.kin-mip-label')).to_contain_text(' · '+name+' · ')
@@ -92,7 +118,7 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   # A version 12 row from the same session proves the accepted pair is untouched by the new one.
   self.save_titled(dialog,V12,'VOI Slab · Off · Saved')
   mark=self.mark(v);self.press(dialog,'Posterior');self.settled(v,mark)
-  self.voi_native(self.settled(v,self.apply_voi_case(v,dialog,oblique)),'MIP','Posterior',record,voi)
+  self.orient_voi_native(self.settled(v,self.apply_voi_case(v,dialog,oblique)),'MIP','Posterior',record,voi)
   thickness=mm_text(record['thickness']);label='VOI Slab · On · '+thickness+' mm · '
   self.assertEqual(v.evaluate(READOUT),'CT 전체 '+mm_text(DISTANCE)+' mm · VOI Slab '+thickness+' mm (환자 좌표 고정)')
   mark=self.mark(v);self.choose_mip(dialog,'Raysum');self.job_final(v,mark,'Raysum','Posterior')
@@ -119,6 +145,18 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   self.assertEqual(fresh.evaluate("()=>document.querySelector('#kin-volume-mip [aria-label=\"MIP Orientation\"]').value"),'Posterior')
   self.assert_camera(fresh.evaluate(FINAL_CAMERA),orient_cameras('Posterior')[0],'restored Posterior')
   self.assertEqual([row[4] for row in fresh.evaluate(BAR)],['false','true','false','false','false','false'])
+  restored.get_by_role('button',name='Close MIP Viewer',exact=True).click();expect(restored).not_to_be_visible()
+  # T2: the version 15 row restores to completion in the same fresh login — the saved preset, its pressed state and the frames
+  # regenerated from the saved recipe under the explicit batch budget (the completing oracle MO6 needs).
+  fresh.evaluate('()=>{batchStatuses.length=0;batchFrames.length=0}')
+  self.restore_titled(fresh,a,V15)
+  expect(fresh.locator('#kin-viewer-jobs-status')).to_contain_text('MIP Batch 작업을 복원했습니다',timeout=90000)
+  restored=fresh.locator('#kin-volume-mip');expect(restored).to_have_attribute('data-kin-mip-state','final',timeout=90000)
+  self.assertEqual(fresh.evaluate("()=>document.querySelector('#kin-volume-mip [aria-label=\"MIP Orientation\"]').value"),'Superior')
+  self.assertEqual([row[4] for row in fresh.evaluate(BAR)],['false','false','false','false','true','false'])
+  self.assert_camera(fresh.evaluate(FINAL_CAMERA),orient_cameras('Superior')[0],'restored Superior')
+  self.batch_announced(fresh,3,'VOI Slab · Off · Saved')
+  self.batch_native(fresh.evaluate('()=>batchFrames.splice(0)'),orient_cameras('Superior',vertical),None,voi,'Raysum','v15 Superior restored')
   restored.get_by_role('button',name='Close MIP Viewer',exact=True).click();expect(restored).not_to_be_visible()
   # The saved preset prints through the same engine: every frame is its accepted camera, and frame 0 of the batch is the single frame.
   fresh.evaluate(PRINT_TRACE);fresh.evaluate(TAKE)
@@ -152,22 +190,28 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   # screen change and before any page, whether it is restored or printed.
   def patched(change):
    body=json.loads(json.dumps(detail));change(body['snapshot']);return body
-  cases=[('kin-mip-1 inside version 14',lambda s:s['mip'].update(algorithm='kin-mip-1',orientation='Axial'),'재현할 수 없어'),
-         ('an unknown algorithm',lambda s:s['mip'].update(algorithm='kin-mip-3'),'재현할 수 없어'),
-         ('a plane name inside kin-mip-2',lambda s:s['mip'].update(orientation='Axial'),'형식을 확인할 수 없어'),
-         ('version 16',lambda s:s.update(version=16),'재현할 수 없어'),
-         ('version 14 carrying a recipe',lambda s:s.update(mipBatch=recipe_of('Horizontal',90,2)),'형식을 확인할 수 없어')]
+  # An unknown version is refused by the pre-existing gates, whose messages are the stack resolver's and the print dialog's own;
+  # they are asserted as guards (no MIP dialog, layout unchanged, no page) rather than pinned to an incidental string.
+  cases=[('kin-mip-1 inside version 14',lambda s:s['mip'].update(algorithm='kin-mip-1',orientation='Axial'),'재현할 수 없어','출력하지 않았습니다'),
+         ('an unknown algorithm',lambda s:s['mip'].update(algorithm='kin-mip-3'),'재현할 수 없어','출력하지 않았습니다'),
+         ('a plane name inside kin-mip-2',lambda s:s['mip'].update(orientation='Axial'),'형식을 확인할 수 없어','출력하지 않았습니다'),
+         ('version 16',lambda s:s.update(version=16),None,'이전 작업에는 화면 크기가 없습니다'),
+         ('version 14 carrying a recipe',lambda s:s.update(mipBatch=recipe_of('Horizontal',90,2)),'형식을 확인할 수 없어','출력하지 않았습니다')]
   pattern=f"**/api/studies/{a.uid}/viewer-jobs/{row['id']}"
-  for label,change,expected in cases:
+  for label,change,expected,print_expected in cases:
    body=patched(change)
    v.route(pattern,lambda route,body=body:route.fulfill(status=200,content_type='application/json',body=json.dumps(body)))
    try:
     self.restore_titled(v,a,V14)
-    expect(v.locator('#kin-viewer-jobs-status')).to_contain_text(expected,timeout=90000)
-    expect(v.locator('#kin-volume-mip')).to_have_count(0,label)
+    status=v.locator('#kin-viewer-jobs-status')
+    if expected:expect(status).to_contain_text(expected,timeout=90000)
+    else:
+     expect(status).not_to_contain_text('복원했습니다',timeout=90000)
+     self.assertNotIn('복원했습니다',status.text_content(),label)
+    expect(v.locator('#kin-volume-mip[open]')).to_have_count(0,label)
     self.assertEqual(v.evaluate(LAYOUT),layout,label)
     self.print_titled(v,a,V14)
-    expect(v.locator('#kin-job-print [role=status]')).to_contain_text('출력하지 않았습니다',timeout=120000)
+    expect(v.locator('#kin-job-print [role=status]')).to_contain_text(print_expected,timeout=120000)
     self.assertEqual(v.evaluate("()=>document.querySelector('#kin-job-print iframe')?.srcdoc??''"),'',label)
     self.close_output(v)
    finally:
@@ -184,12 +228,19 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible()
   self.assertEqual(self.mip_job(a,V15)[0]['snapshotVersion'],15)
   before=v.evaluate(LAYOUT)
-  self.restore_titled(v,a,V15)
-  restoring=v.locator('#kin-volume-mip');expect(restoring).to_be_visible(timeout=90000)
-  expect(restoring.locator('[role=status]')).to_contain_text('MIP Batch 복원 중',timeout=90000)
-  restoring.get_by_role('button',name='Close MIP Viewer',exact=True).click()
-  expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('이전 화면',timeout=90000)
-  expect(v.locator('#kin-volume-mip')).to_have_count(0);self.assertEqual(v.evaluate(LAYOUT),before)
+  # B5: hold the second regenerated frame so the cancel is deterministic, exactly as the accepted batch cancel case does; without
+  # a hold a three-frame batch can finish before the click and nothing is cancelled.
+  v.evaluate('()=>{batchStatuses.length=0;batchHoldFrame=2;batchHeld=0}')
+  try:
+   self.restore_titled(v,a,V15)
+   restoring=v.locator('#kin-volume-mip');expect(restoring).to_be_visible(timeout=90000)
+   v.wait_for_function('()=>batchHeld>0',timeout=90000)
+   expect(restoring.locator('[role=status]')).to_contain_text('MIP Batch 복원 중',timeout=90000)
+   restoring.get_by_role('button',name='Close MIP Viewer',exact=True).click()
+   expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('이전 화면',timeout=90000)
+  finally:
+   v.evaluate('()=>{batchHoldFrame=null}')
+  expect(v.locator('#kin-volume-mip[open]')).to_have_count(0);self.assertEqual(v.evaluate(LAYOUT),before)
   self.assertEqual(len(self.versions(a)),1)
   print('MIP_ORIENT_02',json.dumps({'refusals':len(cases)}),flush=True)
 

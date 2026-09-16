@@ -220,11 +220,33 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     if(want.blend===3){if(typeof window.kinPrepareVolumeAverage!=='function')throw Error('Raysum 평균 계산 모듈을 확인할 수 없어 적용하지 않았습니다.');window.kinPrepareVolumeAverage(op.view,op.volume);}
     // The pinned setOrientation applies MPR_CAMERA_VALUES and resets to the volume centre; the slab planes are
     // re-derived explicitly afterwards because a camera change alone keeps the previous planes.
-    // A plane keeps the pinned native orientation key; an anatomical preset writes the same reset path with its own vectors
-    // (the OrientationVectors form). No setCamera fallback is added here: a runtime that ignored the write would fail the
-    // verifyState readback below rather than show an unconfirmed camera.
+    /* A plane keeps the pinned native orientation key. An anatomical preset (kin-mip-2) is written explicitly, because the pinned
+       runtime did not honour the OrientationVectors form (run 35039450391: the display rolled back to the previous Final). The
+       reviewed sequence starts from the runtime's own fitted camera: the proven string-key Axial reset runs first inside this same
+       apply(), so every path — the first click, a version 14/15 restore whose first request is a direction, and a rollback re-apply —
+       has a trusted distance and parallel scale rather than whatever camera happens to be in the viewport. Nothing renders between
+       the reset and the explicit write (confirm() renders later), so the intermediate Axial camera is never shown. */
     const axes=model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,next.orientation);
-    op.view.setOrientation(axes.key||{viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp]},false);op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
+    if(axes.key)op.view.setOrientation(axes.key,false);
+    else{
+      op.view.setOrientation(model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,'Axial').key,false);
+      const fitted=op.view.getCamera(),centre=[0,1,2].map(i=>op.corners.reduce((sum,corner)=>sum+corner[i],0)/op.corners.length);
+      const distance=Math.hypot(...[0,1,2].map(i=>Number(fitted?.position?.[i])-Number(fitted?.focalPoint?.[i]))),scale=Number(fitted?.parallelScale);
+      // The KinVolumeMipBatch.plan precondition applied at the display, so a batch or a print made from this Final can never be
+      // refused for its camera distance. An unusable fitted camera refuses here instead of writing an unverifiable one.
+      if(!Number.isFinite(distance)||!(distance>=op.thickness/2+1e-6)||!Number.isFinite(scale)||!(scale>0)||!centre.every(Number.isFinite))
+        throw Error('고정 뷰어의 기준 카메라를 확인할 수 없어 방향 표시를 적용하지 않았습니다.');
+      const camera={focalPoint:[...centre],position:centre.map((x,i)=>x+axes.viewPlaneNormal[i]*distance),viewPlaneNormal:[...axes.viewPlaneNormal],viewUp:[...axes.viewUp],parallelScale:scale};
+      op.view.setCamera(camera);
+      // An ignored or partial write fails closed here, in the product, not only in the hosted readback (the batch verifyCamera rule,
+      // inlined so this does not depend on the lazily loaded MIP Batch model).
+      const got=op.view.getCamera();
+      const near=(a,b)=>{let x;try{x=Array.from(a||[]);}catch(_){return false;}return x.length===b.length&&x.every((n,i)=>Number.isFinite(n)&&Math.abs(n-b[i])<=1e-6);};
+      if(!near(got?.focalPoint,camera.focalPoint)||!near(got?.position,camera.position)||!near(got?.viewPlaneNormal,camera.viewPlaneNormal)||
+        !near(got?.viewUp,camera.viewUp)||!Number.isFinite(got?.parallelScale)||!(Math.abs(got.parallelScale-scale)<=1e-6))
+        throw Error('방향 카메라를 고정 뷰어에 적용하지 못했습니다.');
+    }
+    op.view.setBlendMode(want.blend);op.view.setSlabThickness(op.thickness/2);
     // VOI planes are written after the camera and slab setters, which rewrite the first two planes; readback proves both.
     writeVoi(op,want.voiSlab);
     const problem=model.verifyState(readState(op),want);if(problem)throw Error(problem);
@@ -403,7 +425,7 @@ window.kinCreateVolumeMip=function({target,permitted,alive,owner,notice=()=>{}})
     await wait(op.view.setVolumes([{volumeId:volume.volumeId}]));check(op);
     op.mapper=op.view.getActors()[0]?.actor?.getMapper?.();
     if(op.view.getActors().length!==1||!op.mapper||op.mapper===source.getActors()[0].actor.getMapper())throw Error('독립 MIP 표시를 만들지 못했습니다.');
-    if(['setOrientation','setBlendMode','setSlabThickness','setProperties'].some(n=>typeof op.view[n]!=='function')||['getBlendMode','getClippingPlanes','getSampleDistance'].some(n=>typeof op.mapper[n]!=='function'))throw Error('고정 뷰어에서 MIP 투영 기능을 확인하지 못했습니다.');
+    if(['setOrientation','setCamera','getCamera','setBlendMode','setSlabThickness','setProperties'].some(n=>typeof op.view[n]!=='function')||['getBlendMode','getClippingPlanes','getSampleDistance'].some(n=>typeof op.mapper[n]!=='function'))throw Error('고정 뷰어에서 MIP 투영 기능을 확인하지 못했습니다.');
     op.binding={volumeId:volume.volumeId,affine:model.affine(index=>volume.imageData.indexToWorld(index))};
     // A missing VOI Slab tool or clipping API disables only the VOI Slab; Projection and Orientation keep working.
     op.voiProblem=voiProblem(op);

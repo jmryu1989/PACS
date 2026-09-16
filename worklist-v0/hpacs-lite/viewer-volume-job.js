@@ -63,6 +63,10 @@ window.kinCreateVolumeJob = function({grid,cs,ds,studies,stack}) {
       if(!window.kinVolumeMipJob)throw Error('MIP Viewer 도구를 불러오지 못했습니다. 영상 창을 새로고침하세요.');
       const m=value.mip,algorithm=value.version===14||value.version===15?'kin-mip-2':'kin-mip-1';
       if(!m||m.schema!==1||m.algorithm!==algorithm||m.coordinates!=='LPS_mm')throw Error('이 MIP 작업의 계산 방식을 이 뷰어가 재현할 수 없어 복원하지 않았습니다.');
+      // Each version names one key set as well as one algorithm: a display version carrying a MIP Batch recipe is a malformed pair
+      // and is refused here, before any layout change, rather than restored as a batch. The server input gate makes such a row
+      // impossible to store, so this only closes a tampered response; the message is KinVolumeMipJob.messages.shape verbatim.
+      if((value.version===12||value.version===14)&&Object.prototype.hasOwnProperty.call(value,'mipBatch'))throw Error('저장한 MIP 작업의 형식을 확인할 수 없어 복원하지 않았습니다.');
       // Version 13/15 adds a MIP Batch recipe. Its model loads lazily with the MIP Viewer inside the restore, so only the ids are
       // checked here; a model that then fails to load throws into the Job rollback instead.
       const b=value.mipBatch;
