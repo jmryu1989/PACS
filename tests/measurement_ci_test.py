@@ -1559,6 +1559,52 @@ class MeasurementCiTests(unittest.TestCase):
         tested = pure.rsplit(' --test ', 1)[1].split()
         for name in ('tests/volume_mip_test.cjs', 'tests/volume_mip_job_test.cjs', 'tests/volume_mip_batch_test.cjs', 'tests/volume_mip_output_test.cjs', 'tests/viewer_volume_job_capture_test.cjs'):
             self.assertIn(name, tested, name)
+    def test_e2e_route_handlers_bind_payloads_after_route_and_request(self):
+        """A11-ORIENT-1 ci-02 regression (static, not a runtime exercise of any callback).
+
+        Playwright calls a route handler with (route, route.request), passing as many of them as the handler declares. A handler
+        that declares two parameters therefore receives the Request as its second one, so a payload bound as the second parameter
+        default is overwritten by the Request (ci-02: json.dumps(Request) raised inside the handler and resurfaced at unroute).
+        The rule this encodes: the leading non-defaulted parameters are exactly (route) or (route, request), and any bound default
+        comes after both. Verified against every handler in tests/e2e at the time of writing.
+        """
+        import ast
+        checked, violations = 0, []
+        for path in sorted((ci.ROOT/'tests/e2e').glob('*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+            for call in ast.walk(tree):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in ('route', 'unroute')):
+                    continue
+                if len(call.args) < 2:
+                    continue
+                handler = call.args[1]
+                node = handler if isinstance(handler, ast.Lambda) else functions.get(handler.id) if isinstance(handler, ast.Name) else None
+                if node is None:
+                    continue
+                checked += 1
+                declared = len(node.args.posonlyargs) + len(node.args.args)
+                defaulted = len(node.args.defaults)
+                leading = declared - defaulted
+                if leading not in (1, 2) or (defaulted and leading != 2):
+                    violations.append((path.name, call.lineno, declared, defaulted))
+        self.assertEqual(violations, [])
+        self.assertGreaterEqual(checked, 300, 'the scan must still reach the e2e route handlers')
+
+    def test_mip_orient_camera_diagnostics_compose_as_strings(self):
+        """A11-ORIENT-1 ci-02 regression (static): assert_camera must not concatenate its label with +, and rolled_back must
+        return a string, so a diagnostic value can never raise before the 1e-6 camera comparisons run."""
+        import ast
+        tree = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        camera = functions['assert_camera']
+        concatenations = [node for node in ast.walk(camera)
+                          if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+                          and isinstance(node.left, ast.Name) and node.left.id == 'label']
+        self.assertEqual(concatenations, [], 'compose the message with an f-string, not label + ...')
+        returns = [node.value for node in ast.walk(functions['rolled_back']) if isinstance(node, ast.Return)]
+        self.assertTrue(returns and all(isinstance(value, ast.JoinedStr) for value in returns),
+                        'rolled_back must return a formatted string')
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']
         commands=[]

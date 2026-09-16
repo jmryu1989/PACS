@@ -55,20 +55,22 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   self.assertEqual(len(actual),len(expected),label)
   for got,want in zip(actual,expected):self.assertLessEqual(abs(got-want),tolerance,(label,got,want))
  def rolled_back(self,page,mark,label):
-  """A direction that did not take effect rolls back to the previous Final; name the reason instead of only the vectors."""
+  """A direction that did not take effect rolls back to the previous Final. The diagnostics are folded into the label as a STRING:
+  assert_camera composes its messages from it, so a tuple here would raise before any camera comparison (ci-02 NA1)."""
   status=page.locator('#kin-volume-mip [role=status]').text_content()
-  return (label,status,page.evaluate('m=>mipTransitions.slice(m)',mark))
+  return f'{label} · status={status!r} · transitions={page.evaluate("m=>mipTransitions.slice(m)",mark)!r}'
  def assert_camera(self,camera,expected,label,fitted=None):
-  """HP1: the Final camera the pinned runtime actually holds equals the accepted table's camera."""
-  self.near(camera['viewPlaneNormal'],expected['viewPlaneNormal'],label+' normal')
-  self.near(camera['viewUp'],expected['viewUp'],label+' up')
-  self.near(camera['focalPoint'],expected['focalPoint'],label+' focal point')
+  """HP1: the Final camera the pinned runtime actually holds equals the accepted table's camera. Every message is composed with
+  f-strings so a non-string label can never raise instead of comparing; the numeric checks stay at 1e-6."""
+  self.near(camera['viewPlaneNormal'],expected['viewPlaneNormal'],f'{label} normal')
+  self.near(camera['viewUp'],expected['viewUp'],f'{label} up')
+  self.near(camera['focalPoint'],expected['focalPoint'],f'{label} focal point')
   distance=math.hypot(*[p-f for p,f in zip(camera['position'],camera['focalPoint'])])
-  self.assertGreaterEqual(distance,DISTANCE/2+1e-6,label+' camera stands outside the whole-volume slab')
+  self.assertGreaterEqual(distance,DISTANCE/2+1e-6,f'{label} camera stands outside the whole-volume slab')
   # Zoom parity with the plane reset this display was written from: the explicit direction write must not change the scale.
   if fitted:
-   self.assertAlmostEqual(distance,fitted[0],delta=1e-6,msg=label+' distance parity with the Axial fit')
-   self.assertAlmostEqual(camera['parallelScale'],fitted[1],delta=1e-6,msg=label+' parallel scale parity with the Axial fit')
+   self.assertAlmostEqual(distance,fitted[0],delta=1e-6,msg=f'{label} distance parity with the Axial fit')
+   self.assertAlmostEqual(camera['parallelScale'],fitted[1],delta=1e-6,msg=f'{label} parallel scale parity with the Axial fit')
  def orient_voi_native(self,state,mode,orientation,record,voi):
   """voi_native for an anatomical preset: the camera is the literal DIRECTIONS row, every other assertion unchanged."""
   normal,up=DIRECTIONS[orientation]
@@ -200,7 +202,11 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   pattern=f"**/api/studies/{a.uid}/viewer-jobs/{row['id']}"
   for label,change,expected,print_expected in cases:
    body=patched(change)
-   v.route(pattern,lambda route,body=body:route.fulfill(status=200,content_type='application/json',body=json.dumps(body)))
+   # Playwright calls a route handler with TWO positional arguments, (route, route.request), so a bound default must come third:
+   # binding it second made json.dumps receive the Request and the TypeError resurfaced at unroute (ci-02 NA2). This is the shape
+   # the accepted output fixture already uses (test_volume_mip_output.py forged(route,request,change=change)).
+   def forged(route,request,body=body):route.fulfill(status=200,content_type='application/json',body=json.dumps(body))
+   v.route(pattern,forged)
    try:
     self.restore_titled(v,a,V14)
     status=v.locator('#kin-viewer-jobs-status')
@@ -215,7 +221,7 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
     self.assertEqual(v.evaluate("()=>document.querySelector('#kin-job-print iframe')?.srcdoc??''"),'',label)
     self.close_output(v)
    finally:
-    v.unroute(pattern)
+    v.unroute(pattern,forged)
   v.wait_for_function(NO_LEAKS,timeout=10000)
   # The current MIP screen still has no output page of its own, under the new versions too.
   dialog=self.open_voi(v);mark=self.mark(v);self.press(dialog,'Inferior');self.job_final(v,mark,'MIP','Inferior')
