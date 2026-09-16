@@ -4,6 +4,7 @@ import copy,json,os,unittest,uuid
 from pathlib import Path
 from playwright.sync_api import expect
 from test_volume_sync import VolumeSyncE2E
+from marks_receipt_observer import ReceiptObserver  # NEVER MERGE: stage1-marks-receipt-diagnosis-02 observation only
 
 class VolumeMarksE2E(VolumeSyncE2E):
  def same_marks(self,actual,expected):
@@ -117,17 +118,17 @@ class VolumeMarksE2E(VolumeSyncE2E):
   a,p,v=self.starting();self.add_mark(v);v.evaluate('()=>{for(const id of services.viewportGridService.getState().viewports.keys()){const view=services.cornerstoneViewportService.getCornerstoneViewport(id),c=view.getCamera(),d=c.viewPlaneNormal.map(n=>n*3);view.setCamera({focalPoint:c.focalPoint.map((n,i)=>n+d[i]),position:c.position.map((n,i)=>n+d[i])});view.render()}const view=services.cornerstoneViewportService.getCornerstoneViewport([...services.viewportGridService.getState().viewports.keys()][1]),set=view.setCamera;let once=true;view.setCamera=function(...args){set.apply(this,args);if(once){once=false;throw Error("PARTIAL GO FAILURE")}}}');before=self.volume_state(v)
   self.marks(v).get_by_role('button',name='Go to Point',exact=True).click();expect(self.marks(v).locator('[role=status]')).to_contain_text('이전 화면으로 복구했습니다');self.preserved_volume(before,self.volume_state(v));self.assertTrue(v.evaluate('()=>kinMprMarks.dirty()'))
  def test_marks_19_receipt_after_layout_change_acknowledges_saved_source(self):
-  a,p,v=self.starting();marks=self.add_mark(v);waiting=[];pattern='**/api/studies/*/viewer-jobs';v.get_by_label('Job Title',exact=True).fill('Receipt during layout change')
+  a,p,v=self.starting();marks=self.add_mark(v);waiting=[];pattern='**/api/studies/*/viewer-jobs';v.get_by_label('Job Title',exact=True).fill('Receipt during layout change');observer=ReceiptObserver(v);self.addCleanup(observer.finish,self.id())
   def hold(route):
-   if route.request.method=='POST':waiting.append((route,route.fetch()))
-   else:route.continue_()
-  v.route(pattern,hold);v.get_by_role('button',name='Save New Job',exact=True).click()
+   if route.request.method=='POST':observer.mark('post-paused');waiting.append((route,route.fetch()));observer.mark('post-fetched')
+   else:observer.mark('get-continue');route.continue_();observer.mark('get-continued')
+  v.route(pattern,hold);observer.mark('routed');v.get_by_role('button',name='Save New Job',exact=True).click();observer.mark('save-clicked')
   for _ in range(100):
    if waiting:break
    v.wait_for_timeout(50)
-  self.assertEqual(len(waiting),1);self.assertEqual(len(self.jobs(a)),1);v.locator('[data-cy=Layout]').click();v.locator('[data-cy=Layout-0-0]').click();expect(v.locator('.kin-mpr-marks-overlay')).to_have_count(0)
-  route,response=waiting.pop();route.fulfill(response=response);v.unroute(pattern,hold);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다',timeout=45000);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));self.assertEqual(len(self.jobs(a)),1)
-  self.mpr(v);self.choose_volume(v,v,0);self.same_marks(v.evaluate('()=>kinMprMarks.capture()'),marks);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'))
+  observer.mark('held');self.assertEqual(len(waiting),1);observer.mark('python-list');self.assertEqual(len(self.jobs(a)),1);observer.mark('python-listed');v.locator('[data-cy=Layout]').click();v.locator('[data-cy=Layout-0-0]').click();observer.mark('layout-chosen');expect(v.locator('.kin-mpr-marks-overlay')).to_have_count(0);observer.mark('overlays-absent')
+  route,response=waiting.pop();observer.mark('fulfill');route.fulfill(response=response);observer.mark('fulfilled');v.unroute(pattern,hold);observer.mark('unrouted');expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다',timeout=45000);observer.mark('saved-seen');self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));self.assertEqual(len(self.jobs(a)),1);observer.mark('saved-checked')
+  self.mpr(v);self.choose_volume(v,v,0);self.same_marks(v.evaluate('()=>kinMprMarks.capture()'),marks);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));observer.mark('restored-compared')
  def test_marks_20_progressive_slab_pick_final_batch_save_and_restore(self):
   from test_volume_batch import VolumeBatchE2E
   from test_volume_batch_save import VolumeBatchSaveE2E,CAPTURE
