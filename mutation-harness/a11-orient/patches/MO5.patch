@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-output.js b/worklist-v0/hpacs-lite/volume-mip-output.js
+index 6f28fcfd7ac9001629fe16b20f814c7cb2eb6eb0..0d24cfb1e8a154ecbf356ab41f6c1e1c7e79d240 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-output.js
++++ b/worklist-v0/hpacs-lite/volume-mip-output.js
+@@ -60,7 +60,7 @@
+     'kin-mip-1':(orientation,values)=>{const p=model('KinVolumeMip').preset(values,orientation);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},
+     // kin-mip-2 names the frozen anatomical table instead, which KinVolumeMip.view resolves; the print path itself is unchanged.
+     // It never names an MPR plane: that pairing is a malformed block, not another computation.
+-    'kin-mip-2':(orientation,values)=>{const m=model('KinVolumeMip');if(!m.directions.includes(orientation))throw Error(messages.shape);const p=m.view(values,orientation);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},
++    'kin-mip-2':(orientation,values)=>{const m=model('KinVolumeMip');if(!m.directions.includes(orientation))throw Error(messages.shape);const p=m.view(values,m.directions[0]);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},
+   });
+   function direction(algorithm,orientation,values){
+     if(!Object.prototype.hasOwnProperty.call(resolvers,algorithm))throw Error(messages.reproduce);

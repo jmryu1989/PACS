@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip.js b/worklist-v0/hpacs-lite/volume-mip.js
+index eea67a4374a9608be9ee81cfc496398aa14ca492..82d99a5ae3178e0bedf83426c261dce0082c6a7c 100644
+--- a/worklist-v0/hpacs-lite/volume-mip.js
++++ b/worklist-v0/hpacs-lite/volume-mip.js
+@@ -18,7 +18,7 @@
+     Left:Object.freeze([Object.freeze([1,0,0]),Object.freeze([0,0,1])]),
+     Right:Object.freeze([Object.freeze([-1,0,0]),Object.freeze([0,0,1])]),
+     Superior:Object.freeze([Object.freeze([0,0,1]),Object.freeze([0,-1,0])]),
+-    Inferior:Object.freeze([Object.freeze([0,0,-1]),Object.freeze([0,1,0])]),
++    Inferior:Object.freeze([Object.freeze([0,0,-1]),Object.freeze([0,-1,0])]),
+   });
+   const directionNames=Object.freeze(Object.keys(directions)),views=Object.freeze([...orientations,...directionNames]);
+   const dot=(a,b)=>a.reduce((n,x,i)=>n+x*b[i],0),vector=v=>{try{const a=Array.from(v||[]);return a.length===3&&a.every(Number.isFinite)?a:null;}catch(_){return null;}};

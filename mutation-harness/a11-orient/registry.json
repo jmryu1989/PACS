@@ -1,0 +1,545 @@
+{
+ "schema": 1,
+ "purpose": "A11-ORIENT-1 preregistered semantic mutation validation: MO1-MO8, once each, alone on the fixed candidate. Harness branch only; NEVER MERGE into product.",
+ "job": "mpr-a11-orient-mutants-prepare-01",
+ "unit": "A11-ORIENT-1",
+ "policy_version": "v2026-09-16-7",
+ "preparation_only": "This registry was written and frozen without executing any variant, any candidate baseline or any test. An independent Fable 5.1 high review of this frozen preregistration must precede the eight trials.",
+ "contract": {
+  "path": "tmp/astra-control/evidence/mpr-a11-orient-contract-fix-01/result.json",
+  "sha256": "354df00d78366eaece075afefc90833c8434832c479fa92e7df63ee1fd7dc8c0",
+  "section": "verification.mutants: MO1-MO8, each once, alone, on the fixed candidate; no assertion, tolerance, cap or budget weakened; none repeats the historical 14.",
+  "accepted_by": "tmp/astra-control/evidence/mpr-a11-orient-integration/contract-acceptance.json"
+ },
+ "meaning_sources": {
+  "camera_truth": "contract camera_truth.new_direction_table_kin_mip_2 (A [0,-1,0]/[0,0,1]; P [0,1,0]/[0,0,1]; L [1,0,0]/[0,0,1]; R [-1,0,0]/[0,0,1]; H [0,0,1]/[0,-1,0]; F [0,0,-1]/[0,1,0])",
+  "persistence": "contract persistence.matrix_accepted_by_review (v12/v13 = kin-mip-1, v14/v15 = kin-mip-2; each version names exactly one algorithm)",
+  "camera_api_superseded": "The contract's MF5 setOrientation object form was superseded by the accepted bounded fix design (mpr-a11-orient-integration/fix-design-acceptance.json): the six directions use the Axial fitted reset then an explicit five-field setCamera with an immediate 1e-6 readback (viewer-volume-mip.js L229-247). Anchors follow the actual candidate source, not the superseded text.",
+  "runtime_over_prediction": "mpr-a11-orient-fixture-delta-review-06 corrected an author and reviewer prediction about the capture guard order; runtime evidence overrides predicted paths. No variant here depends on the corrected prediction."
+ },
+ "candidate": {
+  "sha": "a0e0846e38738643649cb868cf246a6110ead795",
+  "tree": "016d265145578a93b48d8e03acf03502a57f4942",
+  "workflow_blob": "9270f57a74f48f8abc31e1bb4e2675e42a249988",
+  "ci": "ordinary candidate run 35054658120 attempt 1 PASSED (6 workflows, 26 checks, 16 Validate jobs, 17 artifacts, 256 native tests / 15 profiles, 62 records, 644 source and 124 log hashes); receipt evidence/mpr-a11-orient-integration/ci-06/astra-candidate-verification.json. Five earlier failures preserved."
+ },
+ "harness_ref": "refs/heads/opus/a11-orient-mutants-20260916",
+ "harness_jobs": [
+  "compiled-api",
+  "native-mip-orient",
+  "registry"
+ ],
+ "staged_paths": [
+  ".github/workflows/validate.yml",
+  "mutation-harness/a11-orient/mutant.py",
+  "mutation-harness/a11-orient/patches/MO1.patch",
+  "mutation-harness/a11-orient/patches/MO2.patch",
+  "mutation-harness/a11-orient/patches/MO3.patch",
+  "mutation-harness/a11-orient/patches/MO4.patch",
+  "mutation-harness/a11-orient/patches/MO5.patch",
+  "mutation-harness/a11-orient/patches/MO6.patch",
+  "mutation-harness/a11-orient/patches/MO7.patch",
+  "mutation-harness/a11-orient/patches/MO8.patch",
+  "mutation-harness/a11-orient/registry.json"
+ ],
+ "expected_ids": [
+  "MO1",
+  "MO2",
+  "MO3",
+  "MO4",
+  "MO5",
+  "MO6",
+  "MO7",
+  "MO8"
+ ],
+ "classification": {
+  "DETECTED": "Guards passed (pure: export, recheck and a passing no-mutation control; hosted: restore, install, verify), the trial exited non-zero, and the registered original assertion failed for the registered consequence as the first failure of its test case. The mechanism is recorded: 'assertion on the mutated value' or 'original expectation observing the product's own fail-closed refusal', with the exact text.",
+  "NOT_DETECTED_AS_REGISTERED": "The trial failed, but not at the registered assertion for the registered consequence: a different first assertion, a different refusal text, a thrown product or helper Error without an assertion, a timeout or any unregistered failure.",
+  "SURVIVED": "Every original test of the trial passed (exit 0) with guards passing.",
+  "INVALID_INFRASTRUCTURE": "Any guard, anchor, patch, parse, import, docker build, recorder, export, environment or setup-phase failure, or a failing status that is a transport text. A source parse/import/anchor error or a generic setup failure is never semantic detection; never credited, never re-run inside the assignment.",
+  "HELD_TRANSPORT_INCIDENT": "The registered failure occurred in a hosted case that also printed a MIP_OUTPUT_TRANSPORT_FAILURE line; not credited, left for independent review with the incident."
+ },
+ "transport_policy": "Every MIP_OUTPUT_TRANSPORT_FAILURE line in any retained log of a hosted trial is counted and reported beside the result (verify records them per log). The orient module inherits the accepted A11-OUTPUT-1 print helpers, so the accepted guard and its evidence line apply unchanged. No trial is credited from an infrastructure failure, and no cap, timeout or retry bound is changed.",
+ "budgets": {
+  "pure-local": "node --test with no --test-timeout, --test-concurrency or --test-name-pattern; one trial per variant, no retry.",
+  "native-mip-orient": "The candidate volume-mip-orient job unchanged (plan proves it step by step): job timeout-minutes 40, dependency step 10, live step 28; measurement_ci.py profile volume-mip-orient suite_timeout 900 and suite_budgets ci-mip-orient 900 (outer 935); the module's own waits; run attempt 1 only.",
+  "compiled-api": "The candidate runtime job's own runner and timeout (ubuntu-24.04, timeout-minutes 20) with only its build and compiled-test lines copied verbatim; no other runtime step, no whole normal CI."
+ },
+ "pure_export": {
+  "paths": [
+   "tests/viewer_volume_job_capture_test.cjs",
+   "tests/volume_mip_job_test.cjs",
+   "tests/volume_mip_output_test.cjs",
+   "tests/volume_mip_test.cjs",
+   "worklist-v0/hpacs-lite"
+  ],
+  "files": 104,
+  "listing_sha256": "729f0c7c2bba42906993909fb842a3e6e536a5bf4454522d37989edf15be0b72"
+ },
+ "pure_procedure": [
+  "1 export: record-run -- python mutation-harness/a11-orient/mutant.py export --variant <ID> --dest <evidence>/pure/<ID>/tree --manifest <evidence>/pure/<ID>/manifest.json",
+  "2 trial: record-run --cwd <evidence>/pure/<ID>/tree --file <recorder_files> -- <test_command>",
+  "3 recheck: record-run -- python mutation-harness/a11-orient/mutant.py recheck --manifest <evidence>/pure/<ID>/manifest.json",
+  "One no-mutation control first (node --test over the four mapped pure files), then one trial per variant in registry order; never repeated after its outcome is seen."
+ ],
+ "native_job": {
+  "original": "volume-mip-orient",
+  "harness": "native-mip-orient",
+  "harness_step_names": [
+   null,
+   "Harness - stage the harness outside the product checkout",
+   "Harness - guard the exact candidate tree and original workflow",
+   "MIP orientation profile isolation, bounded budget and artifact policy",
+   "Keep pinned browser dependencies independent of unused Chrome APT repository",
+   "Install synthetic DICOM and pinned browser test dependencies",
+   "Confirm exact declared MIP Viewer orientation selection",
+   "Harness - install the one registered mutation after the original selection checks",
+   "Isolated declared MIP Viewer orientation tests",
+   "Harness - guard the tracked tree after the trial and record the profile outcome",
+   "Sanitized synthetic MIP Viewer orientation evidence"
+  ],
+  "allowed_step_changes": [
+   [
+    "        with:\n          persist-credentials: false",
+    "        with:\n          persist-credentials: false\n          fetch-depth: 0"
+   ],
+   [
+    "          name: synthetic-volume-mip-orient-results",
+    "          name: mutant-${{ matrix.id }}"
+   ],
+   [
+    "            tmp/miporient-ci/\n          if-no-files-found: error",
+    "            tmp/miporient-ci/\n            tmp/mutant-evidence/\n          if-no-files-found: error"
+   ]
+  ],
+  "always_harness_steps": [
+   "Harness - guard the tracked tree after the trial and record the profile outcome"
+  ]
+ },
+ "compiled_job": {
+  "original": "runtime",
+  "harness": "compiled-api",
+  "why_not_step_by_step": "The runtime job also builds the proxy, pulls a database image and runs the ops, production-image and host-adapter suites. Copying it whole would be a whole normal CI run inside the harness, which is forbidden, and would re-run accepted tests. The harness therefore copies only the three runtime lines the one registered compiled oracle needs, each proven verbatim in both workflows, and asserts that no other product command is present.",
+  "copied_lines": [
+   "        run: chmod -R go-rwx api",
+   "        run: docker build --target production --build-arg \"VCS_REF=$CODE_SHA\" -t kin-api:ci api",
+   "        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v \"$PWD/tests:/tests:ro\" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs"
+  ],
+  "declared_env_difference": "The original build step reads CODE_SHA from ${{ github.sha }}, which on the harness branch would label the image with the harness commit. The harness pins CODE_SHA to the candidate SHA so VCS_REF names the tree actually built. The run line itself is byte-identical; this is the only declared difference and it changes no command, cap or selection.",
+  "harness_step_names": [
+   null,
+   "Harness - stage the harness outside the product checkout",
+   "Harness - guard the exact candidate tree and original workflow",
+   "Harness - install the one registered mutation before the image is built",
+   "Reproduce a private deployment checkout",
+   "Build the production target",
+   "Harness - record the mutant image identity",
+   "Compiled volume job command and volume mark boundary models",
+   "Harness - guard the tracked tree after the trial and record the compiled outcome",
+   "Sanitized compiled mutant evidence"
+  ],
+  "always_harness_steps": [
+   "Harness - guard the tracked tree after the trial and record the compiled outcome"
+  ],
+  "forbidden": [
+   "postgres:16-alpine",
+   "ops_monitor_container_test",
+   "production_image_test",
+   "ops_deploy_host_container_test",
+   "measurement_ci.py",
+   "invariants_live",
+   "node:22-alpine",
+   "viewer_input_test",
+   "viewer_source_test",
+   "study_access_policy_test",
+   "kin-proxy:ci"
+  ]
+ },
+ "variants": [
+  {
+   "id": "MO1",
+   "meaning": "MO1 Inferior up set to [0,-1,0]",
+   "variant": "The frozen kin-mip-2 direction table gives Inferior (F) the Axial viewUp [0,-1,0] instead of the contract's [0,1,0], so F becomes the Axial image rather than the Axial projection turned 180 degrees in plane.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip.js",
+   "anchor": "    Inferior:Object.freeze([Object.freeze([0,0,-1]),Object.freeze([0,1,0])]),\n",
+   "replacement": "    Inferior:Object.freeze([Object.freeze([0,0,-1]),Object.freeze([0,-1,0])]),\n",
+   "test": "tests/volume_mip_test.cjs",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-rendering.js",
+    "tests/volume_mip_test.cjs"
+   ],
+   "expected_original_assertion": "V1 test 'the six anatomical presets are the accepted direction table, and the three MPR planes are untouched' (L300) fails at L307 assert.deepEqual([got.viewPlaneNormal,got.viewUp],[normal,up],name) for name 'Inferior', whose expected row is the literal L296 ['Inferior',[0,0,-1],[0,1,0],[-1,0,0]]. Secondary registered assertions: L317 (F up is the negated Axial up) and the V2 drift guard L337 (VR parity).",
+   "expected_stage": "Reached: the model returns a table value; the five earlier rows pass and the failure is the Inferior row itself.",
+   "classification_note": "Assertion on the mutated value. A thrown Error instead of the L307 failure would be NOT_DETECTED_AS_REGISTERED.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 21,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "eea67a4374a9608be9ee81cfc496398aa14ca492",
+   "candidate_sha256": "e61dded2fe815a23070b6130426812c0d9d9887d8d09515f601a3032b6ca1cb8",
+   "mutant_blob": "82d99a5ae3178e0bedf83426c261dce0082c6a7c",
+   "mutant_sha256": "38f93cefa6b61079d8ca3a929eff61eef3cb34602e91a8bf84f9f41f0e3326bf",
+   "patch": "patches/MO1.patch",
+   "patch_sha256": "635b4ea827a7fc962a992f85a530c39eb7c3519d1af949bdd92733e6313095f4",
+   "test_source_hashes": {
+    "tests/volume_mip_test.cjs": {
+     "blob": "72fbb1a9a17c068674e834598f4de4bdbb738917",
+     "sha256": "55b3d36bee628547f21faa7a3743bd953e7e894974ce23fc570444aa8f58e9a4"
+    }
+   }
+  },
+  {
+   "id": "MO2",
+   "meaning": "MO2 Posterior normal flipped",
+   "variant": "The frozen kin-mip-2 table gives Posterior the normal [0,-1,0] instead of [0,1,0], making the Posterior view the Anterior camera (the left-right mirror is lost and screen right becomes [1,0,0]).",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip.js",
+   "anchor": "    Posterior:Object.freeze([Object.freeze([0,1,0]),Object.freeze([0,0,1])]),\n",
+   "replacement": "    Posterior:Object.freeze([Object.freeze([0,-1,0]),Object.freeze([0,0,1])]),\n",
+   "test": "tests/volume_mip_test.cjs",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-rendering.js",
+    "tests/volume_mip_test.cjs"
+   ],
+   "expected_original_assertion": "V1 test at L300 fails at L307 for name 'Posterior' against the literal L292 ['Posterior',[0,1,0],[0,0,1],[-1,0,0]]. Secondary: L309 screen-right cross product and the V2 drift guard L337 (VR parity against volume-rendering.js).",
+   "expected_stage": "Reached: the Anterior row passes first, then the Posterior row fails.",
+   "classification_note": "Assertion on the mutated value.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 17,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "eea67a4374a9608be9ee81cfc496398aa14ca492",
+   "candidate_sha256": "e61dded2fe815a23070b6130426812c0d9d9887d8d09515f601a3032b6ca1cb8",
+   "mutant_blob": "09aa01f666f8b2b619646e4efbdcbf33f57ef521",
+   "mutant_sha256": "0e68155f2ea8f8368c4f7ce70c2d10fec88ed2bef233be64fb291a6b3d09450d",
+   "patch": "patches/MO2.patch",
+   "patch_sha256": "ad0821d40e4c2d766c4827ae7f9b7f6357fb28e9acc5fe39bfd175536d7a9111",
+   "test_source_hashes": {
+    "tests/volume_mip_test.cjs": {
+     "blob": "72fbb1a9a17c068674e834598f4de4bdbb738917",
+     "sha256": "55b3d36bee628547f21faa7a3743bd953e7e894974ce23fc570444aa8f58e9a4"
+    }
+   }
+  },
+  {
+   "id": "MO3",
+   "meaning": "MO3 server accepts kin-mip-2 inside v12",
+   "variant": "The server's version-to-validator binding skips the kin-mip-1 validation when a version 12/13 body carries a kin-mip-2 block, so the accepted pair no longer refuses the other algorithm. Version 14/15 validation and every kin-mip-1 body are untouched.",
+   "tier": "compiled-api",
+   "source": "api/src/viewer-job-input.ts",
+   "anchor": "  if(s.version===12||s.version===13)validateVolumeMip(s.mip);\n",
+   "replacement": "  if((s.version===12||s.version===13)&&s.mip?.algorithm!=='kin-mip-2')validateVolumeMip(s.mip);\n",
+   "test": "tests/viewer_volume_job_test.cjs (compiled, inside the built kin-api:ci image)",
+   "test_command": "the candidate runtime line: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v \"$PWD/tests:/tests:ro\" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs",
+   "test_sources": [
+    "tests/viewer_volume_job_test.cjs",
+    "tests/viewer_volume_marks_test.cjs"
+   ],
+   "recorder_files": [],
+   "why_not_pure": "This test is never run by the pure gate; the candidate workflow runs it only inside the built API image (validate.yml L783), because it exercises the compiled api/src validator. No pure test covers the server binding.",
+   "expected_original_assertion": "Test 'a MIP Viewer job is accepted only with a valid kin-mip-1 display on the exact three-plane snapshot' (L345) fails at its rejected() row 'algorithm kin-mip-2' (L354): a version 12 body carrying a kin-mip-2 algorithm is now accepted. Secondary registered assertion: test 'versions 14 and 15 accept exactly one kin-mip-2 display with the manual anatomical presets' (L506) at L534, where version 12/13 bodies with kin-mip-2 + 'Superior' must be rejected.",
+   "expected_stage": "Reached: the command validator returns success where it must refuse; the refusal assertion is the first failure.",
+   "classification_note": "Assertion on the mutated value. A docker build failure, an image pull failure or any recorder failure is INVALID_INFRASTRUCTURE, never detection. This is the only variant whose source is TypeScript: no local parse is possible (no api/node_modules in this worktree), so the build is its syntax gate.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 91,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "ffd89d20540837b4dbd844ba1c1108bcca6b961d",
+   "candidate_sha256": "bc5bb56d7e88d8b0b12814c2e178f4d9c09f1e969e0d83a7e7155cef553ef3e9",
+   "mutant_blob": "93c364562cd5a9fbd600bf03dc91a2952c0c0314",
+   "mutant_sha256": "130afe141682714df05dc20101396d9acd4105d1b087ea087ad57f0c0bf17adc",
+   "patch": "patches/MO3.patch",
+   "patch_sha256": "7e1d77c9ff756bf6e4d8585168860f11dbf79e874e30477e7173755def1069e4",
+   "test_source_hashes": {
+    "tests/viewer_volume_job_test.cjs": {
+     "blob": "8bb20c150b80ce424bba77fea457c0e7d31d265a",
+     "sha256": "dc0eaa867ffd46960fed4764c88eb04810a40e201091833fea204c45fa848ab0"
+    },
+    "tests/viewer_volume_marks_test.cjs": {
+     "blob": "3dab99e102b432e284a015c1d86cae0b706333f2",
+     "sha256": "bde341e750a4b26f93afaef3ef5b4d63ca8cf6d75d674cc921743dfca45b915a"
+    }
+   }
+  },
+  {
+   "id": "MO4",
+   "meaning": "MO4 an Axial display saved as kin-mip-2/v14",
+   "variant": "'Axial' is added to the client kin-mip-2 direction enum, so algorithmFor('Axial') answers kin-mip-2, block() writes a kin-mip-2 block for an Axial display and the capture rule (viewer-volume-job.js L199 reads mip.algorithm) makes that display version 14.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip-job.js",
+   "anchor": "  const DIRECTIONS=['Anterior','Posterior','Left','Right','Superior','Inferior'];\n",
+   "replacement": "  const DIRECTIONS=['Anterior','Posterior','Left','Right','Superior','Inferior','Axial'];\n",
+   "test": "tests/volume_mip_job_test.cjs",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_job_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_job_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-voi.js",
+    "tests/volume_mip_job_test.cjs"
+   ],
+   "expected_original_assertion": "V3 test 'an anatomical preset saves as kin-mip-2 in versions 14/15 while a plane display stays kin-mip-1 in 12/13' (L41) fails at L43 assert.equal(plane.algorithm,'kin-mip-1'): the Axial block now reports kin-mip-2. Secondary: L50 (algorithmFor('Axial') is kin-mip-1) and L60 (validateFor refuses the wrong pair).",
+   "expected_stage": "Reached: block() succeeds and produces the kin-mip-2/v14 encoding of an Axial display, so the consequence is realised rather than refused. (A variant forcing algorithmFor alone would have been refused by block()'s own problemFor guard and would have failed as a thrown Error, not an assertion; this enum variant was chosen so the registered assertion is the one that fails.)",
+   "classification_note": "Assertion on the mutated value.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 11,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "3b8993e2c4f9879a3158dd6ca3d63856ab58e7aa",
+   "candidate_sha256": "9857a3698ae36e0698f6b7f1d32ba8ce957fd8537770658a486c721337a057b3",
+   "mutant_blob": "5f1275ab33ff4737a42d6ed407a5d7e101cc548c",
+   "mutant_sha256": "36b973ad88a74a4b65c82da4148c6fe93d741d889ac9c2597694df4e97757e52",
+   "patch": "patches/MO4.patch",
+   "patch_sha256": "9aa1253534b2eb72d2351ccfd7bc9f39cf37a498e9b13e5f4ca7c6f8583b7191",
+   "test_source_hashes": {
+    "tests/volume_mip_job_test.cjs": {
+     "blob": "74657714c455dc3bbb519957904d3aaf7505d477",
+     "sha256": "62250ba310b37c1a649d5053d53f9ce2312b979a83d9a720583de71caf7eb518"
+    }
+   }
+  },
+  {
+   "id": "MO5",
+   "meaning": "MO5 print resolver ignores the kin-mip-2 orientation",
+   "variant": "The print output model's kin-mip-2 resolver still refuses a plane name but then resolves the frozen table at a fixed direction (the first, Anterior) instead of the saved orientation, so every version 14/15 page is printed from the Anterior camera.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/volume-mip-output.js",
+   "anchor": "    'kin-mip-2':(orientation,values)=>{const m=model('KinVolumeMip');if(!m.directions.includes(orientation))throw Error(messages.shape);const p=m.view(values,orientation);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},\n",
+   "replacement": "    'kin-mip-2':(orientation,values)=>{const m=model('KinVolumeMip');if(!m.directions.includes(orientation))throw Error(messages.shape);const p=m.view(values,m.directions[0]);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},\n",
+   "test": "tests/volume_mip_output_test.cjs",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "test_sources": [
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "tests/volume_mip_output_test.cjs"
+   ],
+   "expected_original_assertion": "The named-replacement assertion at L156 assert.deepEqual(output.direction('kin-mip-2','Superior',TABLE),{viewPlaneNormal:[0,0,1],viewUp:[0,-1,0]}) fails with the Anterior vectors. Secondary: the V5 per-direction print camera assertions (L196-240). The plane-name refusal at L155 still passes, which is the point: only the orientation is ignored.",
+   "expected_stage": "Reached: the resolver returns a camera for a kin-mip-2 job, but not the saved one.",
+   "classification_note": "Assertion on the mutated value.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 63,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "6f28fcfd7ac9001629fe16b20f814c7cb2eb6eb0",
+   "candidate_sha256": "47e7b4b8dbaad901c716aee0d6cd66cd4d4615528b92d3eba3afe1ef43a94e77",
+   "mutant_blob": "0d24cfb1e8a154ecbf356ab41f6c1e1c7e79d240",
+   "mutant_sha256": "ed2affc65623b488e6efb702b78e98404f50d5920609cdd459e6e71b77692f68",
+   "patch": "patches/MO5.patch",
+   "patch_sha256": "aa8aa20f5acd6dd137c1d0943af56f262061cef8a103e3b60e48f6905f21cec1",
+   "test_source_hashes": {
+    "tests/volume_mip_output_test.cjs": {
+     "blob": "e0be62f0e970d8f81ad22d2f029ffcfee6f6d006",
+     "sha256": "e293c73fee175c99a38bb6c149c07134c2dde37c42252c1eb7485c6c05dc5b63"
+    }
+   }
+  },
+  {
+   "id": "MO6",
+   "meaning": "MO6 a v15 restore opens Axial",
+   "variant": "The MIP Viewer restore overrides the restored request's orientation to 'Axial' when, and only when, the snapshot version is 15, so a saved v15 direction Job reopens on the Axial plane and its regenerated batch frames turn about the Axial camera. Version 13 and 14 restores are untouched.",
+   "tier": "native-mip-orient",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "anchor": "      const request=jobs.restoreRequest(saved,{frameOfReference:op.frameOfReference,volumeId:op.binding.volumeId,affine:op.binding.affine},version);\n",
+   "replacement": "      const request=Object.assign(jobs.restoreRequest(saved,{frameOfReference:op.frameOfReference,volumeId:op.binding.volumeId,affine:op.binding.affine},version),version===15?{orientation:'Axial'}:{});\n",
+   "test": "tests/e2e/test_volume_mip_orient.py VolumeMipOrientE2E.test_mip_orient_01_presets_save_restore_output",
+   "test_command": "\"$RUNNER_TEMP/miporient-python/bin/python\" tests/measurement_ci.py --profile volume-mip-orient (after the original measurement-ci, APT, dependency and execution-selection steps)",
+   "test_sources": [
+    "tests/e2e/test_volume_mip_orient.py",
+    "tests/e2e/test_volume_mip_output.py",
+    "tests/e2e/test_volume_mip_batch.py",
+    "tests/e2e/test_volume_mip_job.py",
+    "tests/e2e/test_volume_mip.py",
+    "tests/e2e/test_prior_selection.py",
+    "tests/measurement_ci.py",
+    "tests/measurement_ci_test.py",
+    "tests/execution_selection_test.py",
+    "scripts/run-tests.py"
+   ],
+   "recorder_files": [],
+   "why_not_pure": "No pure test completes a version 15 restore. The pure direction restore (viewer_volume_job_capture_test.cjs L1231-1247) passes version 14 with no recipe, and the pure batch restore (L760) is a kin-mip-1 version 13 Job; both are untouched by a version-15-only override. NA1 is the only oracle that restores a saved v15 to completion, which the fixture states in its own comment at L158-159.",
+   "expected_original_assertion": "NA1 fails at L164 self.assertEqual(fresh.evaluate(\"...'MIP Orientation'...value\"),'Superior') with the actual value 'Axial', after the restore completes at L162-163. Secondary registered assertions: L165 (the pressed preset row), L167 assert_camera against the literal Superior row, and L176-179 (the regenerated frame cameras).",
+   "expected_stage": "Reached: the v15 restore completes and announces success, so the wrong-preset consequence is realised rather than refused; the version 14 restore earlier in the same case (L150-156) still passes.",
+   "classification_note": "Assertion on the mutated value. A MIP_OUTPUT_TRANSPORT_FAILURE line in this case, or a failure before L162, is HELD_TRANSPORT_INCIDENT or NOT_DETECTED_AS_REGISTERED.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 495,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "9ac0ad40b250f648c438cb33d930055c19836ea0",
+   "candidate_sha256": "614ce846305699ec5e73f93cd2a7d52dff871c2533f5d859cc0dd762a311a4ad",
+   "mutant_blob": "aaee4a9538b0ef136abccb7b8fa407200a91b9f3",
+   "mutant_sha256": "f1b4f28c761e6b74fc64f3394c0d9b002397068716b9fa67375a070e01553981",
+   "patch": "patches/MO6.patch",
+   "patch_sha256": "81d337385c3afd97c1833163668733234af661c33ba1791830b2c862a8375c7b",
+   "test_source_hashes": {
+    "tests/e2e/test_volume_mip_orient.py": {
+     "blob": "f480a13420e42967476139a0efaf249e9e1a29ce",
+     "sha256": "4b4a82d003013b83603a384d80fa74a95de35de5a6dc50cc2ae0ffc8845d107a"
+    },
+    "tests/e2e/test_volume_mip_output.py": {
+     "blob": "356799566def5276588e3d54e0e73f144f510f73",
+     "sha256": "b68f90804de9e8efcc166f288331b513563e28e2a196c01d9731811640301566"
+    },
+    "tests/e2e/test_volume_mip_batch.py": {
+     "blob": "d4473483aa8fdae92dfd8e1102fa76a00f6d2229",
+     "sha256": "51af4fb04262ba848ac0a64b54fa2451e9a03c95083ed6cfd61b0af302f34c4f"
+    },
+    "tests/e2e/test_volume_mip_job.py": {
+     "blob": "a1ec6b33b330975c2a430f326cf5fa216ea2bdcf",
+     "sha256": "7dd24ab2056f7248d4c0be6f7977bd4157b652a32f0ad51a75a2731d0aa3b43f"
+    },
+    "tests/e2e/test_volume_mip.py": {
+     "blob": "3a7c012f5a840780c752b69d13e046455b38c135",
+     "sha256": "a8014ba8871ca8584189303a2f21f0930a9abb861accc9f0f27f4ef007cebc72"
+    },
+    "tests/e2e/test_prior_selection.py": {
+     "blob": "9a83a23f581b098768ffbe26587af08a5843368f",
+     "sha256": "00c058c7c62fafa8656b2b09d50dcee8f90716c50fbb4aefa5deee252b5470bd"
+    },
+    "tests/measurement_ci.py": {
+     "blob": "6fd8a57b9b1fafa7d454ed2e594bfbf099b6c1f2",
+     "sha256": "f41813a138f24315120efc3f2afee0360eaf26c7e89ec3eeff6ad55c51a3da29"
+    },
+    "tests/measurement_ci_test.py": {
+     "blob": "4f4e402ec4b70a436e48c7da1c691e067c62a277",
+     "sha256": "f1fb9ad837ee651f5bd7918e7443234226fff96325f53c0d3b13f07a11ba43ed"
+    },
+    "tests/execution_selection_test.py": {
+     "blob": "14c83dc60792f65bd18111623916d55bd32ed34d",
+     "sha256": "68c37159be4a7308d492844f175ce19840e48bf0489b9c637335ec6ff7857d36"
+    },
+    "scripts/run-tests.py": {
+     "blob": "60f38a8c03d9b5aef58be889c473a116fc23df47",
+     "sha256": "c50f47aca44b418c6b0dfe2839f983bef4c1447dbb892abe4d8a581356096a20"
+    }
+   }
+  },
+  {
+   "id": "MO7",
+   "meaning": "MO7 the batch planner resolves a direction through MPR_CAMERA_VALUES",
+   "variant": "generateBatch resolves its rotation axes with KinVolumeMip.preset (the pinned MPR_CAMERA_VALUES lookup) instead of KinVolumeMip.view, so an anatomical preset has no entry and the MIP Batch of a direction display cannot be made. The three MPR planes are unaffected.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+   "anchor": "    const final=op.view.getCamera(),axes=model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);\n",
+   "replacement": "    const final=op.view.getCamera(),axes=model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);\n",
+   "test": "tests/viewer_volume_job_capture_test.cjs",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "test_sources": [
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+    "worklist-v0/hpacs-lite/viewer-jobs.js",
+    "worklist-v0/hpacs-lite/viewer-volume-job.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "expected_original_assertion": "V7 test 'A11-ORIENT-1: the Orientation Preset bar requests the same display the Orientation list does, and Type/Thickness are named' (L1123) fails in its T3 section at L1163 assert.match(w.status(),/^MIP Batch 미리보기 2장을 만들었습니다/): the Superior batch is refused with '고정 뷰어의 선택한 방향 기준값을 확인할 수 없습니다.' instead. Secondary: L1165 (one camera write per frame) and L1167-1168 (the hard-coded Superior frame rows).",
+   "expected_stage": "Reached: the batch planner asks the MPR table for a direction name. The product catches the refusal into the status text (viewer-volume-mip.js L390), so the registered failure is an assertion on the observable status, not an unhandled rejection.",
+   "classification_note": "Original expectation observing the product's own fail-closed refusal; the exact status text must be recorded. If the click instead rejects unhandled, that is NOT_DETECTED_AS_REGISTERED.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 328,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "9ac0ad40b250f648c438cb33d930055c19836ea0",
+   "candidate_sha256": "614ce846305699ec5e73f93cd2a7d52dff871c2533f5d859cc0dd762a311a4ad",
+   "mutant_blob": "736235bfae407588c7390e22091b26c4f4c5a40c",
+   "mutant_sha256": "1adce0153b9bc7058ebe1d03b5d42e21d91bc87b39af6a545082fb861f514b32",
+   "patch": "patches/MO7.patch",
+   "patch_sha256": "0312ee79b0750c862e1c0f79fd230ba21755371785458e8b5c0f3a9f837ee268",
+   "test_source_hashes": {
+    "tests/viewer_volume_job_capture_test.cjs": {
+     "blob": "92fe57b6fd66f947faf1b83f1f7ff7434e868f1c",
+     "sha256": "f613cb4e017dab5288b17d1c48268050b62bb6d223a836ad127e7a401895d807"
+    }
+   }
+  },
+  {
+   "id": "MO8",
+   "meaning": "MO8 Print Saved Images hidden for v15",
+   "variant": "The Jobs row print gate drops 15 from its version allowlist, so a saved MIP Batch direction Job (v15) offers no Print Saved Images button while v12/v13/v14 keep theirs.",
+   "tier": "pure-local",
+   "source": "worklist-v0/hpacs-lite/viewer-jobs.js",
+   "anchor": "        if (!row.hidden && [1,2,3,4,5,6,12,13,14,15].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));\n",
+   "replacement": "        if (!row.hidden && [1,2,3,4,5,6,12,13,14].includes(row.snapshotVersion)) button(item, 'Print Saved Images', () => openPrint(row));\n",
+   "test": "tests/viewer_volume_job_capture_test.cjs",
+   "test_command": [
+    "node",
+    "--test",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "test_sources": [
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "recorder_files": [
+    "worklist-v0/hpacs-lite/viewer-jobs.js",
+    "worklist-v0/hpacs-lite/viewer-volume-job.js",
+    "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip.js",
+    "worklist-v0/hpacs-lite/volume-mip-job.js",
+    "worklist-v0/hpacs-lite/volume-mip-batch.js",
+    "worklist-v0/hpacs-lite/volume-mip-output.js",
+    "tests/viewer_volume_job_capture_test.cjs"
+   ],
+   "expected_original_assertion": "P2 (a) test 'Print Saved Images is offered for versions 1-6 and 12-15 only, and the MIP rows are labelled as reconstructed outputs' (L1036) fails at L1041 assert.ok(w.own(w.item(version),'Print Saved Images'),'version '+version) for version 15.",
+   "expected_stage": "Reached: the row list is built and the v15 row carries no Print button; versions 1-6, 12, 13 and 14 still pass before it.",
+   "classification_note": "Assertion on the mutated value.",
+   "candidate_sha": "a0e0846e38738643649cb868cf246a6110ead795",
+   "line": 199,
+   "anchor_count": 1,
+   "replacement_count_in_candidate": 0,
+   "candidate_blob": "0a72c9d8df5fbd84023e718347d4740ffe3bcc54",
+   "candidate_sha256": "1cbfca9ce4c95f93b97a7f2293a419847726eeff68349359c742b91ade4dc642",
+   "mutant_blob": "db7bbd6bd43b9abfd66e5e7c107161deba1703b1",
+   "mutant_sha256": "84fe06e67adf48932c8350af3149c5720c92114d7dc51b5a5c0b7d878cdb57f9",
+   "patch": "patches/MO8.patch",
+   "patch_sha256": "a6951c877a020677ce59e89c90b95af7c98f967b7edd4bc89694a128fca1c319",
+   "test_source_hashes": {
+    "tests/viewer_volume_job_capture_test.cjs": {
+     "blob": "92fe57b6fd66f947faf1b83f1f7ff7434e868f1c",
+     "sha256": "f613cb4e017dab5288b17d1c48268050b62bb6d223a836ad127e7a401895d807"
+    }
+   }
+  }
+ ]
+}

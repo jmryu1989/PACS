@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip-job.js b/worklist-v0/hpacs-lite/volume-mip-job.js
+index 3b8993e2c4f9879a3158dd6ca3d63856ab58e7aa..5f1275ab33ff4737a42d6ed407a5d7e101cc548c 100644
+--- a/worklist-v0/hpacs-lite/volume-mip-job.js
++++ b/worklist-v0/hpacs-lite/volume-mip-job.js
+@@ -8,7 +8,7 @@
+      The projection semantics are identical (whole volume or VOI Slab, same blend modes, same LPS_mm); only the direction enum
+      differs, so each algorithm refuses the other's names and one display has exactly one encoding. Versions 12/13 stay exactly
+      kin-mip-1 and their accepted bytes never change. api/src/viewer-volume-mip.ts applies the same binding on the server. */
+-  const DIRECTIONS=['Anterior','Posterior','Left','Right','Superior','Inferior'];
++  const DIRECTIONS=['Anterior','Posterior','Left','Right','Superior','Inferior','Axial'];
+   const ALGORITHMS=Object.freeze({'kin-mip-1':Object.freeze([...ORIENTATIONS]),'kin-mip-2':Object.freeze([...DIRECTIONS])});
+   const VERSIONS=Object.freeze({12:ALGORITHM,13:ALGORITHM,14:DIRECTION_ALGORITHM,15:DIRECTION_ALGORITHM});
+   const has=(table,name)=>typeof name==='string'&&Object.prototype.hasOwnProperty.call(table,name);

@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index 9ac0ad40b250f648c438cb33d930055c19836ea0..aaee4a9538b0ef136abccb7b8fa407200a91b9f3 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -492,7 +492,7 @@
+       if(op.display.interpolationType!==saved.display.interpolationType||!near(op.display.voiRange.lower,saved.display.voiRange.lower)||!near(op.display.voiRange.upper,saved.display.voiRange.upper))
+         throw Error('저장한 MIP 작업의 밝기 범위·보간이 복원한 MPR 평면과 달라 복원하지 않았습니다.');
+       if(saved.voiSlab&&op.voiProblem)throw Error('VOI Slab 도구를 확인할 수 없어 MIP 작업을 복원하지 않았습니다.');
+-      const request=jobs.restoreRequest(saved,{frameOfReference:op.frameOfReference,volumeId:op.binding.volumeId,affine:op.binding.affine},version);
++      const request=Object.assign(jobs.restoreRequest(saved,{frameOfReference:op.frameOfReference,volumeId:op.binding.volumeId,affine:op.binding.affine},version),version===15?{orientation:'Axial'}:{});
+       if(!jobs.intersects(saved.voiSlab,op.corners))throw Error('저장한 VOI Slab이 현재 CT 볼륨과 겹치지 않아 MIP 작업을 복원하지 않았습니다.');
+       // The editors show the restored record, so Apply VOI Slab right after a restore reapplies it rather than a default slab.
+       if(saved.voiSlab){writeEditors(saved.voiSlab);voiEnable.checked=true;voiPreset.value=jobs.presetFor(saved.voiSlab.normal);}else voiEnable.checked=false;

@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/volume-mip.js b/worklist-v0/hpacs-lite/volume-mip.js
+index eea67a4374a9608be9ee81cfc496398aa14ca492..09aa01f666f8b2b619646e4efbdcbf33f57ef521 100644
+--- a/worklist-v0/hpacs-lite/volume-mip.js
++++ b/worklist-v0/hpacs-lite/volume-mip.js
+@@ -14,7 +14,7 @@
+      negated), not the Axial image; Axial itself stays the radiological foot view. */
+   const directions=Object.freeze({
+     Anterior:Object.freeze([Object.freeze([0,-1,0]),Object.freeze([0,0,1])]),
+-    Posterior:Object.freeze([Object.freeze([0,1,0]),Object.freeze([0,0,1])]),
++    Posterior:Object.freeze([Object.freeze([0,-1,0]),Object.freeze([0,0,1])]),
+     Left:Object.freeze([Object.freeze([1,0,0]),Object.freeze([0,0,1])]),
+     Right:Object.freeze([Object.freeze([-1,0,0]),Object.freeze([0,0,1])]),
+     Superior:Object.freeze([Object.freeze([0,0,1]),Object.freeze([0,-1,0])]),

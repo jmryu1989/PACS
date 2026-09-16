@@ -1,0 +1,13 @@
+diff --git a/api/src/viewer-job-input.ts b/api/src/viewer-job-input.ts
+index ffd89d20540837b4dbd844ba1c1108bcca6b961d..93c364562cd5a9fbd600bf03dc91a2952c0c0314 100644
+--- a/api/src/viewer-job-input.ts
++++ b/api/src/viewer-job-input.ts
+@@ -88,7 +88,7 @@
+   if(s.version===6){validateVolumeMarks(s.marks);if(s.batch!==null&&!s.batch)invalid();}
+   if(s.version===10)validateVolumeCurved(s.curved);
+   if(s.version===11)validateVolumePath(s.path);
+-  if(s.version===12||s.version===13)validateVolumeMip(s.mip);
++  if((s.version===12||s.version===13)&&s.mip?.algorithm!=='kin-mip-2')validateVolumeMip(s.mip);
+   if(s.version===14||s.version===15)validateVolumeMipDirection(s.mip);
+   if(s.version===13||s.version===15)validateVolumeMipBatch(s.mipBatch);
+   const batch=s.version===5||s.version===6&&s.batch!==null;

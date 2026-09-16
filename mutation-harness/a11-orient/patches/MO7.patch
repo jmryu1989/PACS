@@ -1,0 +1,13 @@
+diff --git a/worklist-v0/hpacs-lite/viewer-volume-mip.js b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+index 9ac0ad40b250f648c438cb33d930055c19836ea0..736235bfae407588c7390e22091b26c4f4c5a40c 100644
+--- a/worklist-v0/hpacs-lite/viewer-volume-mip.js
++++ b/worklist-v0/hpacs-lite/viewer-volume-mip.js
+@@ -325,7 +325,7 @@
+     const block=jobs.block(snapshot,{frameOfReference:op.frameOfReference,display:op.display}),key=tool.key(block),request=snapshot.final,slab=request.voiSlab??null;
+     if(slab&&op.voiProblem)throw Error(op.voiProblem);
+     // The camera distance is the confirmed Final camera's own; directions come from the preset the Final display was confirmed on.
+-    const final=op.view.getCamera(),axes=model.view(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);
++    const final=op.view.getCamera(),axes=model.preset(cornerstone.CONSTANTS?.MPR_CAMERA_VALUES,request.orientation);
+     const distance=Math.hypot(...[0,1,2].map(i=>Number(final?.position?.[i])-Number(final?.focalPoint?.[i])));
+     const centre=[0,1,2].map(i=>op.corners.reduce((sum,corner)=>sum+corner[i],0)/op.corners.length);
+     const plan=tool.plan({recipe,normal:axes.viewPlaneNormal,viewUp:axes.viewUp,focalPoint:centre,distance,thickness:op.thickness}),blend=model.blendMode(request.mode);
