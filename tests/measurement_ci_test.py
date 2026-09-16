@@ -1605,6 +1605,144 @@ class MeasurementCiTests(unittest.TestCase):
         returns = [node.value for node in ast.walk(functions['rolled_back']) if isinstance(node, ast.Return)]
         self.assertTrue(returns and all(isinstance(value, ast.JoinedStr) for value in returns),
                         'rolled_back must return a formatted string')
+    # A11-ORIENT-1 ci-03 regressions. Two static rules and one real execution of the module's own helper code; none of them
+    # imports Playwright, launches a browser or mirrors the fixture.
+    PLAYWRIGHT_ASSERTION_POSITIONALS = {
+        'to_have_count': 1, 'to_have_text': 1, 'to_contain_text': 1, 'to_have_value': 1, 'to_have_values': 1,
+        'to_have_class': 1, 'to_have_id': 1, 'to_have_title': 1, 'to_have_url': 1, 'to_have_attribute': 2,
+        'to_have_js_property': 2, 'to_have_css': 2, 'to_be_visible': 0, 'to_be_hidden': 0, 'to_be_enabled': 0,
+        'to_be_disabled': 0, 'to_be_checked': 0, 'to_be_editable': 0, 'to_be_empty': 0, 'to_be_focused': 0,
+        'to_be_attached': 0, 'to_be_in_viewport': 0,
+    }
+
+    def test_playwright_assertions_take_only_their_expected_value_positionally(self):
+        """expect(...).to_have_count(0, label) raised TypeError in ci-03: these assertions take the expected value positionally
+        and everything else, timeout included, by keyword. A message never goes into the assertion call."""
+        import ast
+        violations, checked = [], 0
+        for path in sorted((ci.ROOT/'tests/e2e').glob('*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for call in ast.walk(tree):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+                    continue
+                name = call.func.attr
+                limit = self.PLAYWRIGHT_ASSERTION_POSITIONALS.get(name[4:] if name.startswith('not_') else name)
+                if limit is None:
+                    continue
+                receiver = call.func.value
+                while isinstance(receiver, ast.Attribute):
+                    receiver = receiver.value
+                if not (isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id == 'expect'):
+                    continue
+                checked += 1
+                if len(call.args) > limit:
+                    violations.append((path.name, call.lineno, name, len(call.args), limit))
+        self.assertEqual(violations, [])
+        self.assertGreater(checked, 500, 'the scan must still reach the e2e assertions')
+
+    def test_mip_orient_page_helpers_are_installed_before_use(self):
+        """ci-03 NA1: FINAL_CAMERA calls mipView(), which only exists after HELPERS has been evaluated on THAT page. fresh_page()
+        installs nothing, so every page must receive its helpers before the first use. Checked per page variable, in source order."""
+        import ast
+        installs = {'HELPERS': {'mipView', 'mipCount', 'canvasPixel', 'mipState'},
+                    'VOI_HELPERS': {'mipVoiState', 'mipTransitions', 'mipStatuses'},
+                    'BATCH_HELPERS': {'batchFrames', 'batchStatuses', 'batchHoldFrame', 'batchHeld', 'batchView'},
+                    'PRINT_TRACE': {'printFrames', 'printEvents', 'printFault', 'printLeaks', 'printReady'}}
+        constant_needs = {'FINAL_CAMERA': {'mipView'}, 'TAKE': {'printFrames'}, 'NO_LEAKS': {'printLeaks'}}
+        method_needs = {'mark': {'mipTransitions'}, 'settled': {'mipTransitions'}, 'job_final': {'mipTransitions'},
+                        'apply_voi_case': {'mipTransitions'}, 'batch_announced': {'batchStatuses'}, 'make': {'batchFrames'},
+                        'rolled_back': {'mipTransitions'}, 'open_output': {'printFrames'}}
+        # Helper methods that install helpers themselves (verified in test_volume_mip.py): opened_voi_study evaluates HELPERS on
+        # the page it returns third, and open_voi evaluates VOI_HELPERS on the page it is given.
+        installers = {'opened_voi_study': ('return3', installs['HELPERS']), 'open_voi': ('arg0', installs['VOI_HELPERS'])}
+        tree = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        problems = []
+        for function in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')]:
+            have = {}
+            for node in sorted([n for n in ast.walk(function) if isinstance(n, (ast.Call, ast.Assign))],
+                               key=lambda n: (n.lineno, n.col_offset)):
+                if isinstance(node, ast.Assign):
+                    call = node.value
+                    if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                            and isinstance(call.func.value, ast.Name) and call.func.value.id == 'self'):
+                        spec = installers.get(call.func.attr)
+                        if spec and spec[0] == 'return3' and isinstance(node.targets[0], ast.Tuple) and len(node.targets[0].elts) == 3:
+                            have.setdefault(node.targets[0].elts[2].id, set()).update(spec[1])
+                    continue
+                function_node = node.func
+                if isinstance(function_node, ast.Attribute) and isinstance(function_node.value, ast.Name) and function_node.value.id == 'self':
+                    spec = installers.get(function_node.attr)
+                    if spec and spec[0] == 'arg0' and node.args and isinstance(node.args[0], ast.Name):
+                        have.setdefault(node.args[0].id, set()).update(spec[1])
+                    if function_node.attr in method_needs and node.args and isinstance(node.args[0], ast.Name):
+                        missing = method_needs[function_node.attr] - have.get(node.args[0].id, set())
+                        if missing:
+                            problems.append((function.name, node.lineno, node.args[0].id + '.' + function_node.attr, sorted(missing)))
+                # wait_for_function and evaluate_handle run page code exactly like evaluate, so a predicate such as NO_LEAKS needs
+                # its helpers installed on that same page too (ci-03 N1: printLeaks was only ever installed by PRINT_TRACE).
+                if (isinstance(function_node, ast.Attribute) and function_node.attr in ('evaluate', 'wait_for_function', 'evaluate_handle')
+                        and isinstance(function_node.value, ast.Name)):
+                    page, needed = function_node.value.id, set()
+                    if node.args and isinstance(node.args[0], ast.Name):
+                        if node.args[0].id in installs:
+                            have.setdefault(page, set()).update(installs[node.args[0].id])
+                        needed |= constant_needs.get(node.args[0].id, set())
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        for symbol in {s for group in installs.values() for s in group}:
+                            if symbol in node.args[0].value:
+                                needed.add(symbol)
+                    missing = needed - have.get(page, set())
+                    if missing:
+                        problems.append((function.name, node.lineno, page, sorted(missing)))
+        self.assertEqual(problems, [])
+
+    def test_mip_orient_camera_diagnostics_execute_without_playwright(self):
+        """Runs the module's own near/assert_camera/rolled_back on stubs: the ci-02 label defect was a runtime TypeError that a
+        parse cannot see. A mismatch must raise AssertionError carrying the label, never TypeError."""
+        import ast, math, unittest as ut
+        source = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        klass = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'VolumeMipOrientE2E')
+        wanted = {'near', 'assert_camera', 'rolled_back'}
+        extracted = ast.Module(body=[n for n in klass.body if isinstance(n, ast.FunctionDef) and n.name in wanted], type_ignores=[])
+        self.assertEqual({n.name for n in extracted.body}, wanted)
+        ast.fix_missing_locations(extracted)
+        namespace = {'math': math, 'DISTANCE': 100.0}
+        exec(compile(extracted, '<orient-helpers>', 'exec'), namespace)
+
+        class Probe(ut.TestCase):
+            def runTest(self):
+                pass
+        for name in wanted:
+            setattr(Probe, name, namespace[name])
+        probe = Probe()
+
+        class Page:
+            def locator(self, selector):
+                return self
+            def text_content(self):
+                return 'ROLLED BACK STATUS'
+            def evaluate(self, expression, argument=None):
+                return ['pending', 'final']
+        label = probe.rolled_back(Page(), 3, 'Anterior')
+        self.assertIsInstance(label, str)
+        self.assertIn('Anterior', label)
+        self.assertIn('ROLLED BACK STATUS', label)
+        camera = {'viewPlaneNormal': [0, -1, 0], 'viewUp': [0, 0, 1], 'focalPoint': [1.0, 2.0, 3.0],
+                  'position': [1.0, 2.0 - 60.0, 3.0], 'parallelScale': 30.0}
+        expected = {'viewPlaneNormal': [0, -1, 0], 'viewUp': [0, 0, 1], 'focalPoint': [1.0, 2.0, 3.0]}
+        probe.assert_camera(camera, expected, label, (60.0, 30.0))
+        wrong = dict(camera, viewPlaneNormal=[0, 1, 0])
+        with self.assertRaises(AssertionError) as raised:
+            probe.assert_camera(wrong, expected, label, (60.0, 30.0))
+        self.assertIn('Anterior', str(raised.exception))
+        # A tuple label must still compare and fail as an assertion, never as a TypeError (the ci-02 defect).
+        with self.assertRaises(AssertionError):
+            probe.assert_camera(wrong, expected, ('Anterior', 'status', []), (60.0, 30.0))
+        # The zoom parity and the distance floor are still enforced.
+        with self.assertRaises(AssertionError):
+            probe.assert_camera(dict(camera, parallelScale=31.0), expected, label, (60.0, 30.0))
+        with self.assertRaises(AssertionError):
+            probe.assert_camera(dict(camera, position=[1.0, 2.0 - 40.0, 3.0]), expected, label, (40.0, 30.0))
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']
         commands=[]
