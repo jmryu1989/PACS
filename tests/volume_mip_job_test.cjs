@@ -33,6 +33,65 @@ async function confirmedSnapshot(requests){
 }
 const withVoi=(slab,display={mode:'Raysum',orientation:'Coronal'})=>snapshot=>({...mip.withDisplay(mip.voiChange(snapshot.final,snapshot.applied,slab),display)});
 
+/* A11-ORIENT-1 V3: the manual's anatomical Orientation Presets are a second algorithm, kin-mip-2, carried by the new versions
+   14/15. Each version names exactly one algorithm and each algorithm exactly one enum, so one display has exactly one encoding
+   and every accepted version 12/13 byte, message and refusal stays as it was. */
+const ORIENT_RECIPE={schema:1,algorithm:'kin-mip-batch-1',axis:'Horizontal',interval:90,count:4,reverse:false};
+const blockOf=async orientation=>job.block(await confirmedSnapshot([{mode:'MIP',orientation}]),{frameOfReference:FOR,display});
+test('an anatomical preset saves as kin-mip-2 in versions 14/15 while a plane display stays kin-mip-1 in 12/13',async()=>{
+ const plane=await blockOf('Axial'),direction=await blockOf('Posterior');
+ assert.equal(plane.algorithm,'kin-mip-1');assert.equal(direction.algorithm,'kin-mip-2');
+ assert.equal(direction.orientation,'Posterior');
+ // The kin-mip-2 body is the kin-mip-1 body with one enum swapped: the same exact key set, no thickness and no camera.
+ assert.deepEqual(Object.keys(direction).sort(),KEYS);
+ assert.deepEqual([job.versionFor(plane,null),job.versionFor(plane,ORIENT_RECIPE)],[12,13]);
+ assert.deepEqual([job.versionFor(direction,null),job.versionFor(direction,ORIENT_RECIPE)],[14,15]);
+ for(const name of ['Anterior','Posterior','Left','Right','Superior','Inferior'])assert.equal(job.algorithmFor(name),'kin-mip-2',name);
+ for(const name of ['Axial','Coronal','Sagittal'])assert.equal(job.algorithmFor(name),'kin-mip-1',name);
+ assert.deepEqual([job.algorithmOf(12),job.algorithmOf(13),job.algorithmOf(14),job.algorithmOf(15),job.algorithmOf(16)],['kin-mip-1','kin-mip-1','kin-mip-2','kin-mip-2',null]);
+ for(const bad of [{algorithm:'kin-mip-3'},{},null,undefined])assert.equal(job.versionFor(bad,null),null,JSON.stringify(bad));
+});
+test('each version accepts exactly its own algorithm and enum, and the kin-mip-1 entry points keep their meaning',async()=>{
+ const plane=await blockOf('Coronal'),direction=await blockOf('Superior');
+ for(const [version,value] of [[12,plane],[13,plane],[14,direction],[15,direction]])assert.equal(job.validateFor(version,value).orientation,value.orientation,'v'+version);
+ assert.deepEqual([job.supportedFor(12,plane),job.supportedFor(14,direction),job.supportedFor(12,direction),job.supportedFor(14,plane),job.supportedFor(16,plane)],[true,true,false,false,false]);
+ // A known algorithm carried by the wrong version is a malformed pair; an unknown algorithm, schema or coordinate system is not
+ // a computation this viewer can reproduce.
+ for(const [version,value] of [[12,direction],[13,direction],[14,plane],[15,plane]])assert.throws(()=>job.validateFor(version,value),{message:job.messages.shape},'v'+version);
+ for(const version of [12,14]){
+  for(const algorithm of ['kin-mip-3','kin-mip-batch-1',''])assert.throws(()=>job.validateFor(version,{...plane,algorithm}),{message:job.messages.reproduce},algorithm);
+  assert.throws(()=>job.validateFor(version,{...plane,schema:2}),{message:job.messages.reproduce});
+  assert.throws(()=>job.validateFor(version,{...plane,coordinates:'RAS_mm'}),{message:job.messages.reproduce});
+ }
+ for(const version of [11,16,17,'14',14.5,null,undefined])assert.throws(()=>job.validateFor(version,plane),{message:job.messages.shape},String(version));
+ assert.throws(()=>job.validateFor(12,{...plane,orientation:'Anterior'}),{message:job.messages.shape});
+ assert.throws(()=>job.validateFor(14,{...direction,orientation:'Axial'}),{message:job.messages.shape});
+ // Unchanged: validate()/supported() are kin-mip-1 only, which is what the accepted version 12/13 callers rely on.
+ assert.equal(job.supported(plane),true);assert.equal(job.supported(direction),false);
+ assert.equal(job.validate(plane).orientation,'Coronal');
+ assert.throws(()=>job.validate(direction),{message:job.messages.reproduce});
+ // restoreRequest is bound to the version and still defaults to the accepted kin-mip-1 behaviour.
+ const binding={frameOfReference:FOR,volumeId:'volume-1',affine};
+ assert.equal(job.restoreRequest(plane,binding).orientation,'Coronal');
+ assert.equal(job.restoreRequest(direction,binding,14).orientation,'Superior');
+ assert.throws(()=>job.restoreRequest(direction,binding),{message:job.messages.reproduce});
+ assert.throws(()=>job.restoreRequest(plane,binding,14),{message:job.messages.shape});
+});
+test('a kept MIP save request pairs with the version its own block names',async()=>{
+ const plane=await blockOf('Sagittal'),direction=await blockOf('Right');
+ const pendingOf=(version,mip,mipBatch)=>mipBatch===undefined?{version,mip}:{version,mip,mipBatch};
+ assert.equal(job.retryable(pendingOf(12,plane),plane,null),true);
+ assert.equal(job.retryable(pendingOf(14,direction),direction,null),true);
+ assert.equal(job.retryable(pendingOf(13,plane,ORIENT_RECIPE),plane,ORIENT_RECIPE),true);
+ assert.equal(job.retryable(pendingOf(15,direction,ORIENT_RECIPE),direction,ORIENT_RECIPE),true);
+ // A body kept under the other pair, or under the batch member of its own pair, is not this display's request.
+ assert.equal(job.retryable(pendingOf(12,direction),direction,null),false);
+ assert.equal(job.retryable(pendingOf(14,plane),plane,null),false);
+ assert.equal(job.retryable(pendingOf(14,direction),direction,ORIENT_RECIPE),false);
+ assert.equal(job.retryable(pendingOf(15,direction,ORIENT_RECIPE),direction,null),false);
+ assert.equal(job.retryable(pendingOf(14,direction),plane,null),false);
+});
+
 test('a Job block is the confirmed Final request with exact keys, no runtime state and bit-exact numbers',async()=>{
  const snapshot=await confirmedSnapshot([{mode:'MIP',orientation:'Axial'},withVoi(oblique)]);
  assert.equal(snapshot.state,'final');assert.ok(snapshot.final.voiSlab);

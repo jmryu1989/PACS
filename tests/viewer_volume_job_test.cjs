@@ -496,3 +496,55 @@ test('a Job whose snapshot write, history or limit fails leaves no Job, history 
   assert.deepEqual([db.store.jobs.size,db.store.revisions.length,db.store.audit.length],[0,0,0],JSON.stringify(options));
  }
 });
+
+/* A11-ORIENT-1 V6: versions 14/15 on the compiled server. Each version names exactly one algorithm and exactly one key set, so
+   the accepted version 12/13 bodies are unchanged, neither pair can carry the other's block, and no preset outside the manual's
+   six anatomical directions is accepted. */
+const directionMip=(over={})=>({...structuredClone(mipJob.mip),algorithm:'kin-mip-2',orientation:'Superior',...over});
+const directionJob=()=>({...structuredClone(mipJob),version:14,mip:directionMip()});
+const directionBatchJob=()=>({...directionJob(),version:15,mipBatch:batchOf()});
+test('versions 14 and 15 accept exactly one kin-mip-2 display with the manual anatomical presets',()=>{
+ assert.equal(command(directionJob()).snapshot.version,14);
+ assert.equal(command(directionBatchJob()).snapshot.version,15);
+ assert.match(verifyVolumeReference(directionJob(),tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ assert.match(verifyVolumeReference(directionBatchJob(),tags,'SYNTHETIC'),/^[a-f0-9]{64}$/);
+ for(const orientation of ['Anterior','Posterior','Left','Right','Superior','Inferior'])
+  assert.equal(command({...directionJob(),mip:directionMip({orientation})}).snapshot.version,14,orientation);
+ for(const [label,change] of [
+   ['kin-mip-1 inside version 14',s=>{s.mip.algorithm='kin-mip-1';s.mip.orientation='Axial';}],
+   ['kin-mip-1 name inside kin-mip-2',s=>{s.mip.orientation='Axial';}],
+   ['lower-case preset',s=>{s.mip.orientation='superior';}],
+   ['Head instead of Superior',s=>{s.mip.orientation='Head';}],
+   ['unknown algorithm',s=>{s.mip.algorithm='kin-mip-3';}],
+   ['schema 2',s=>{s.mip.schema=2;}],['coordinates RAS_mm',s=>{s.mip.coordinates='RAS_mm';}],
+   ['a thickness key in the block',s=>{s.mip.thickness=20;}],
+   ['version 14 carrying a mipBatch',s=>{s.mipBatch=batchOf();}],
+   ['display taken from a non-active cell',s=>{s.cells[1]=structuredClone(s.cells[1]);s.cells[1].properties.voiRange={lower:-500,upper:500};s.mip.display.voiRange={lower:-500,upper:500};}],
+   ['mip with a batch',s=>{s.batch=null;}],['mip with marks',s=>{s.marks={version:1,visible:true,sync:true,marks:[]};}],
+   ['2x2 layout',s=>{s.rows=2;s.cols=2;s.cells.push(structuredClone(cell));}]]){
+  const s=directionJob();change(s);rejected(()=>command(s),label);
+ }
+ for(const [label,change] of [
+   ['version 15 without its recipe',s=>{delete s.mipBatch;}],['version 15 with a null recipe',s=>{s.mipBatch=null;}],
+   ['version 15 with kin-mip-1',s=>{s.mip.algorithm='kin-mip-1';s.mip.orientation='Coronal';}],
+   ['unknown batch algorithm',s=>{s.mipBatch.algorithm='kin-mip-batch-2';}],['recipe count 65',s=>{s.mipBatch.count=65;}]]){
+  const s=directionBatchJob();change(s);rejected(()=>command(s),label);
+ }
+ // kin-mip-2 never enters the accepted version 12/13 pair, and 14/15 are not preview shapes.
+ for(const version of [12,13]){const s=structuredClone(version===13?batchJob:mipJob);s.mip.algorithm='kin-mip-2';s.mip.orientation='Superior';rejected(()=>command(s));}
+ for(const version of [16,17]){const s=directionJob();s.version=version;rejected(()=>command(s));}
+ const {previewCommand}=require('/app/dist/viewer-job-input.js');
+ for(const body of [directionJob(),directionBatchJob()])rejected(()=>previewCommand(Buffer.from(JSON.stringify({snapshot:body}))));
+ // The accepted shapes still parse exactly as before beside the new pair.
+ assert.equal(command(structuredClone(mipJob)).snapshot.version,12);
+ assert.equal(command(structuredClone(batchJob)).snapshot.version,13);
+ assert.equal(command(snapshot).snapshot.version,4);
+});
+test('a version 14/15 display is held to the original frame of reference and the voxel-centre box',()=>{
+ const foreign=directionJob();foreign.mip.frameOfReference='2.25.7';
+ assert.equal(command(foreign).snapshot.version,14,'syntactically valid');
+ assert.throws(()=>verifyVolumeReference(foreign,tags,'SYNTHETIC'),e=>e.getStatus?.()===400);
+ const outside=directionBatchJob();outside.mip.voiSlab={center:[15.5,15.5,5+2e-6],normal:[0,0,1],pivot:[15.5,15.5,1],thickness:6};
+ assert.equal(command(outside).snapshot.version,15,'syntactically valid');
+ assert.throws(()=>verifyVolumeReference(outside,tags,'SYNTHETIC'),e=>e.getStatus?.()===400);
+});

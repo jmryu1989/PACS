@@ -36,16 +36,19 @@
   const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
   const object=v=>!!v&&typeof v==='object'&&!Array.isArray(v);
   const model=name=>{const value=root[name];if(!value)throw Error(name==='KinVolumeMipBatch'?messages.batchTool:messages.tool);return value;};
-  const supports=version=>version===12||version===13;
-  // The saved Job as this viewer prints it: version 12 is a mip block without a recipe key, version 13 the same block with its recipe.
+  // Versions 12/13 carry a kin-mip-1 display, 14/15 the same display under the manual's anatomical presets (kin-mip-2).
+  const supports=version=>version===12||version===13||version===14||version===15;
+  const single=version=>version===12||version===14;
+  /* The saved Job as this viewer prints it: 12 and 14 are a mip block without a recipe key, 13 and 15 the same block with its
+     recipe. The snapshot version names the one algorithm its block may carry, so a block of the other known algorithm is a
+     malformed pair ('shape') and an unknown algorithm stays 'reproduce'. */
   function saved(snapshot){
     const version=object(snapshot)?snapshot.version:undefined;
     if(!supports(version)||!object(snapshot.mip))throw Error(messages.shape);
     const jobs=model('KinVolumeMipJob');
-    if(!jobs.supported(snapshot.mip))throw Error(messages.reproduce);
-    let mip;try{mip=jobs.validate(snapshot.mip);}catch(_){throw Error(messages.shape);}
+    let mip;try{mip=jobs.validateFor(version,snapshot.mip);}catch(error){throw Error(error?.message===jobs.messages.reproduce?messages.reproduce:messages.shape);}
     const recipe=Object.prototype.hasOwnProperty.call(snapshot,'mipBatch');
-    if(version===12){if(recipe)throw Error(messages.shape);return Object.freeze({version,mip,recipe:null});}
+    if(single(version)){if(recipe)throw Error(messages.shape);return Object.freeze({version,mip,recipe:null});}
     if(!recipe||!object(snapshot.mipBatch))throw Error(messages.shape);
     const batch=model('KinVolumeMipBatch'),reason=batch.problem(snapshot.mipBatch);
     if(reason)throw Error(messages[reason]);
@@ -53,7 +56,12 @@
   }
   // One direction resolver per saved algorithm. kin-mip-1 names the pinned MPR_CAMERA_VALUES presets its display was confirmed on;
   // a later algorithm adds its own resolver here rather than a print change.
-  const resolvers=Object.freeze({'kin-mip-1':(orientation,values)=>{const p=model('KinVolumeMip').preset(values,orientation);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};}});
+  const resolvers=Object.freeze({
+    'kin-mip-1':(orientation,values)=>{const p=model('KinVolumeMip').preset(values,orientation);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},
+    // kin-mip-2 names the frozen anatomical table instead, which KinVolumeMip.view resolves; the print path itself is unchanged.
+    // It never names an MPR plane: that pairing is a malformed block, not another computation.
+    'kin-mip-2':(orientation,values)=>{const m=model('KinVolumeMip');if(!m.directions.includes(orientation))throw Error(messages.shape);const p=m.view(values,orientation);return {viewPlaneNormal:p.viewPlaneNormal,viewUp:p.viewUp};},
+  });
   function direction(algorithm,orientation,values){
     if(!Object.prototype.hasOwnProperty.call(resolvers,algorithm))throw Error(messages.reproduce);
     return resolvers[algorithm](orientation,values);
@@ -65,13 +73,13 @@
     const n0=vector(normal),u0=vector(viewUp),f=vector(focalPoint);
     if(!n0||!u0||!f||Math.abs(Math.hypot(...n0)-1)>1e-6||Math.abs(Math.hypot(...u0)-1)>1e-6||Math.abs(dot(n0,u0))>1e-6||!finite(thickness)||!(thickness>0))throw Error(messages.camera);
     if(!finite(distance)||!(distance>=thickness/2+CAMERA_EDGE))throw Error(messages.distance);
-    if(version===12){
+    if(single(version)){
       if(recipe!==null)throw Error(messages.shape);
       const scale=thickness/2;
       const camera=Object.freeze({index:0,angle:0,focalPoint:Object.freeze([...f]),position:Object.freeze(f.map((x,k)=>x+n0[k]*distance)),viewPlaneNormal:Object.freeze([...n0]),viewUp:Object.freeze([...u0]),parallelScale:scale});
       return Object.freeze({size:SIZE,parallelScale:scale,distance,cameras:Object.freeze([camera])});
     }
-    if(version!==13)throw Error(messages.shape);
+    if(version!==13&&version!==15)throw Error(messages.shape);
     const made=model('KinVolumeMipBatch').plan({recipe,normal:n0,viewUp:u0,focalPoint:f,distance,thickness});
     return Object.freeze({size:SIZE,parallelScale:made.parallelScale,distance:made.distance,cameras:made.cameras});
   }
@@ -89,7 +97,7 @@
   function bind({saved:job,frameOfReference,volumeId,affine,corners}={}){
     if(typeof frameOfReference!=='string'||frameOfReference!==job?.mip?.frameOfReference)throw Error(messages.frame);
     const jobs=model('KinVolumeMipJob'),mip=model('KinVolumeMip');
-    let request;try{request=jobs.restoreRequest(job.mip,{frameOfReference,volumeId,affine});}catch(_){throw Error(messages.shape);}
+    let request;try{request=jobs.restoreRequest(job.mip,{frameOfReference,volumeId,affine},job.version);}catch(_){throw Error(messages.shape);}
     const bound=mip.verifyBinding(request.voiSlab,{volumeId,affine});if(bound)throw Error(bound);
     if(!jobs.intersects(job.mip.voiSlab,corners))throw Error(messages.outside);
     return request;
@@ -124,8 +132,8 @@
   const degrees=value=>(value>0?'+':'')+Number(Number(value).toFixed(3))+'°';
   function caption({version,index,count,mode,orientation,axis,angle,voiThickness=null}){
     const slab='VOI Slab '+(voiThickness===null?'Off':mm(voiThickness)+' mm'),size=SIZE+' × '+SIZE;
-    if(version===13)return 'Frame '+(index+1)+' / '+count+' · '+mode+' · '+orientation+' · '+axis+' '+degrees(angle)+' · '+slab+' · '+size;
-    if(version===12)return 'MIP Viewer · '+mode+' · '+orientation+' · '+slab+' · '+size;
+    if(version===13||version===15)return 'Frame '+(index+1)+' / '+count+' · '+mode+' · '+orientation+' · '+axis+' '+degrees(angle)+' · '+slab+' · '+size;
+    if(single(version))return 'MIP Viewer · '+mode+' · '+orientation+' · '+slab+' · '+size;
     throw Error(messages.shape);
   }
   // The saved lower~upper range in the MPR print's own figure form; a W/L label would misname these numbers as width and level.
@@ -133,14 +141,14 @@
   // The outer print bound: 120 s for version 12, 120 s plus the MIP Batch restore budget (at most 300 s) for version 13. Without a
   // count it is the bound of the largest recipe, which a print arms before it has read its own.
   function timer(version,count){
-    if(version===12)return OUTER_MS;
-    if(version!==13)throw Error(messages.shape);
+    if(single(version))return OUTER_MS;
+    if(version!==13&&version!==15)throw Error(messages.shape);
     const batch=model('KinVolumeMipBatch');
     return OUTER_MS+batch.budget(count===undefined?batch.limits.count[1]:count);
   }
   // Encoded frames share the 32 MiB page budget of the MPR batch output.
   function bytes(total,size){const next=total+size;if(!finite(total)||!finite(size)||size<0||!(next<=BLOB_BYTES))throw Error(messages.memory);return next;}
   const api=Object.freeze({size:SIZE,outerMs:OUTER_MS,frameMs:FRAME_MS,preRenderMs:PRE_RENDER_MS,blobBytes:BLOB_BYTES,messages,
-    supports,saved,direction,plan,frames,bind,verifyCamera,verifyClip,verifyDisplay,caption,displayCaption,timer,bytes});
+    supports,single,saved,direction,plan,frames,bind,verifyCamera,verifyClip,verifyDisplay,caption,displayCaption,timer,bytes});
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeMipOutput=api;
 })(typeof window==='object'?window:globalThis);

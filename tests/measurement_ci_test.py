@@ -173,7 +173,7 @@ class MeasurementCiTests(unittest.TestCase):
         # budgets are asserted in test_volume_mpr_profile_is_exact_bounded_and_isolated.
         # volume-slab opted in as the second MPR suite group; see its own exact test.
         for name, profile in ci.PROFILES.items():
-            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output'):
+            if name in ('hanging-protocols', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient'):
                 self.assertIn('suite_budgets', profile)
                 continue
             with self.subTest(profile=name):
@@ -286,7 +286,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -1464,6 +1464,285 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertIn('tests/volume_mip_output_test.cjs', tested)
         self.assertIn('tests/viewer_volume_job_capture_test.cjs', tested)
 
+    def test_volume_mip_orient_profile_is_exact_bounded_and_isolated(self):
+        profile = ci.PROFILES['volume-mip-orient']
+        self.assertEqual(profile['suites'], (('e2e/test_volume_mip_orient.py', None, 'ci-mip-orient'),))
+        self.assertEqual(profile['out'].name, 'volume-mip-orient-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-miporient-ci-')
+        self.assertEqual(profile['suite_timeout'], 900)
+        budgets = {'ci-mip-orient': 900}
+        self.assertEqual(profile['suite_budgets'], budgets)
+        # Adding the Orientation Preset group must not widen or cut the MIP output, MIP Batch, MIP Job, VOI Slab or slab groups.
+        self.assertEqual(ci.PROFILES['volume-mip-output']['suite_budgets'], {'ci-mip-output': 1200})
+        self.assertEqual(ci.PROFILES['volume-mip-batch']['suite_budgets'], {'ci-mip-batch': 1200})
+        self.assertEqual(ci.PROFILES['volume-mip-job']['suite_budgets'], {'ci-mip-job': 1200})
+        self.assertEqual(ci.PROFILES['volume-mip-voi']['suite_budgets'], {'ci-mip-voi': 1200})
+        self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
+                         {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
+        modules = {row[0] for row in profile['suites']}
+        for name, other in ci.PROFILES.items():
+            if name == 'volume-mip-orient':
+                continue
+            self.assertFalse(modules & {row[0] for row in other['suites']}, name)
+            self.assertNotEqual(profile['out'], other['out'])
+            self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+            self.assertFalse(set(budgets) & {row[2] for row in other['suites']}, name)
+        suite, class_name, unit = profile['suites'][0]
+        command, outer = ci.guarded_profile_run(profile, suite, class_name, unit, 1500)
+        self.assertNotIn('--class', command)
+        self.assertEqual(command[command.index('--module')+1], 'tests/e2e/test_volume_mip_orient.py')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-mip-orient')
+        self.assertEqual(command[command.index('--timeout')+1], '900')
+        self.assertEqual(outer, 935)
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 935)
+        self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
+        self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
+
+    def test_volume_mip_orient_module_declares_exactly_the_orient_cases_on_the_mip_output_base(self):
+        import ast
+        cases = ('test_mip_orient_01_presets_save_restore_output',
+                 'test_mip_orient_02_refusals_current_view_cancel')
+        module = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        classes = [node for node in module.body if isinstance(node, ast.ClassDef)]
+        self.assertEqual([(node.name, [base.id for base in node.bases]) for node in classes], [('VolumeMipOrientE2E', ['VolumeMipOutputE2E'])])
+        declared = [node.name for node in classes[0].body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]
+        self.assertEqual(declared, list(cases))
+        constant = next(node for node in module.body if isinstance(node, ast.Assign)
+                        and [target.id for target in node.targets if isinstance(target, ast.Name)] == ['MIP_ORIENT_CASES'])
+        self.assertEqual(ast.literal_eval(constant.value), cases)
+        loader = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == 'load_tests')
+        self.assertIn('MIP_ORIENT_CASES', {node.id for node in ast.walk(loader) if isinstance(node, ast.Name)})
+        self.assertNotIn('getTestCaseNames', ast.dump(loader))
+        # The MIP output base keeps its three authored cases; none of them is redeclared here.
+        output = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_output.py').read_text(encoding='utf-8'))
+        base = next(node for node in output.body if isinstance(node, ast.ClassDef) and node.name == 'VolumeMipOutputE2E')
+        self.assertEqual(len([node for node in base.body if isinstance(node, ast.FunctionDef) and node.name.startswith('test_')]), 3)
+        self.assertFalse(set(cases) & {node.name for node in base.body if isinstance(node, ast.FunctionDef)})
+
+    def test_validate_workflow_runs_volume_mip_orient_in_its_own_bounded_job(self):
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        jobs = text.split('\n  volume-mip-orient:\n')
+        self.assertEqual(len(jobs), 2, 'validate.yml must declare one volume-mip-orient job')
+        body = []
+        for line in jobs[1].splitlines():
+            if line.startswith('  ') and not line.startswith('   '):
+                break
+            body.append(line)
+        job = '\n'.join(body)
+        for required in ['runs-on: ubuntu-24.04',
+                         'timeout-minutes: 40',
+                         'persist-credentials: false',
+                         'python3 -B tests/measurement_ci_test.py',
+                         'tests/execution_selection_test.py',
+                         '--file tests/e2e/test_volume_mip_orient.py',
+                         '--file worklist-v0/hpacs-lite/volume-mip.js',
+                         '--file worklist-v0/hpacs-lite/volume-mip-job.js',
+                         '--file worklist-v0/hpacs-lite/volume-mip-output.js',
+                         '--file worklist-v0/hpacs-lite/viewer-volume-mip.js',
+                         '--file worklist-v0/hpacs-lite/viewer-jobs.js',
+                         'tests/measurement_ci.py --profile volume-mip-orient',
+                         'name: synthetic-volume-mip-orient-results',
+                         'tests/e2e/artifacts/volume-mip-orient-ci/',
+                         'tmp/miporient-ci/',
+                         'if: always()', 'if-no-files-found: error',
+                         'retention-days: 7']:
+            self.assertIn(required, job)
+        self.assertEqual(job.count('timeout-minutes: 28'), 1)
+        self.assertEqual(text.count('--profile volume-mip-orient'), 1)
+        self.assertNotIn('--profile volume-mip-orient', jobs[0])
+        self.assertEqual(text.count('name: synthetic-volume-mip-orient-results'), 1)
+        # Every other synthetic group keeps its own profile and does not run this one.
+        for other in ('volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output'):
+            self.assertEqual(text.count('--profile '+other), 1)
+        # The pure models of the new presets run in the existing pure model gate, with no new pure job.
+        pure = next(line for line in text.splitlines() if 'tmp/vr-ci/pure-volume-models' in line)
+        tested = pure.rsplit(' --test ', 1)[1].split()
+        for name in ('tests/volume_mip_test.cjs', 'tests/volume_mip_job_test.cjs', 'tests/volume_mip_batch_test.cjs', 'tests/volume_mip_output_test.cjs', 'tests/viewer_volume_job_capture_test.cjs'):
+            self.assertIn(name, tested, name)
+    def test_e2e_route_handlers_bind_payloads_after_route_and_request(self):
+        """A11-ORIENT-1 ci-02 regression (static, not a runtime exercise of any callback).
+
+        Playwright calls a route handler with (route, route.request), passing as many of them as the handler declares. A handler
+        that declares two parameters therefore receives the Request as its second one, so a payload bound as the second parameter
+        default is overwritten by the Request (ci-02: json.dumps(Request) raised inside the handler and resurfaced at unroute).
+        The rule this encodes: the leading non-defaulted parameters are exactly (route) or (route, request), and any bound default
+        comes after both. Verified against every handler in tests/e2e at the time of writing.
+        """
+        import ast
+        checked, violations = 0, []
+        for path in sorted((ci.ROOT/'tests/e2e').glob('*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+            for call in ast.walk(tree):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr in ('route', 'unroute')):
+                    continue
+                if len(call.args) < 2:
+                    continue
+                handler = call.args[1]
+                node = handler if isinstance(handler, ast.Lambda) else functions.get(handler.id) if isinstance(handler, ast.Name) else None
+                if node is None:
+                    continue
+                checked += 1
+                declared = len(node.args.posonlyargs) + len(node.args.args)
+                defaulted = len(node.args.defaults)
+                leading = declared - defaulted
+                if leading not in (1, 2) or (defaulted and leading != 2):
+                    violations.append((path.name, call.lineno, declared, defaulted))
+        self.assertEqual(violations, [])
+        self.assertGreaterEqual(checked, 300, 'the scan must still reach the e2e route handlers')
+
+    def test_mip_orient_camera_diagnostics_compose_as_strings(self):
+        """A11-ORIENT-1 ci-02 regression (static): assert_camera must not concatenate its label with +, and rolled_back must
+        return a string, so a diagnostic value can never raise before the 1e-6 camera comparisons run."""
+        import ast
+        tree = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        camera = functions['assert_camera']
+        concatenations = [node for node in ast.walk(camera)
+                          if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+                          and isinstance(node.left, ast.Name) and node.left.id == 'label']
+        self.assertEqual(concatenations, [], 'compose the message with an f-string, not label + ...')
+        returns = [node.value for node in ast.walk(functions['rolled_back']) if isinstance(node, ast.Return)]
+        self.assertTrue(returns and all(isinstance(value, ast.JoinedStr) for value in returns),
+                        'rolled_back must return a formatted string')
+    # A11-ORIENT-1 ci-03 regressions. Two static rules and one real execution of the module's own helper code; none of them
+    # imports Playwright, launches a browser or mirrors the fixture.
+    PLAYWRIGHT_ASSERTION_POSITIONALS = {
+        'to_have_count': 1, 'to_have_text': 1, 'to_contain_text': 1, 'to_have_value': 1, 'to_have_values': 1,
+        'to_have_class': 1, 'to_have_id': 1, 'to_have_title': 1, 'to_have_url': 1, 'to_have_attribute': 2,
+        'to_have_js_property': 2, 'to_have_css': 2, 'to_be_visible': 0, 'to_be_hidden': 0, 'to_be_enabled': 0,
+        'to_be_disabled': 0, 'to_be_checked': 0, 'to_be_editable': 0, 'to_be_empty': 0, 'to_be_focused': 0,
+        'to_be_attached': 0, 'to_be_in_viewport': 0,
+    }
+
+    def test_playwright_assertions_take_only_their_expected_value_positionally(self):
+        """expect(...).to_have_count(0, label) raised TypeError in ci-03: these assertions take the expected value positionally
+        and everything else, timeout included, by keyword. A message never goes into the assertion call."""
+        import ast
+        violations, checked = [], 0
+        for path in sorted((ci.ROOT/'tests/e2e').glob('*.py')):
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for call in ast.walk(tree):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+                    continue
+                name = call.func.attr
+                limit = self.PLAYWRIGHT_ASSERTION_POSITIONALS.get(name[4:] if name.startswith('not_') else name)
+                if limit is None:
+                    continue
+                receiver = call.func.value
+                while isinstance(receiver, ast.Attribute):
+                    receiver = receiver.value
+                if not (isinstance(receiver, ast.Call) and isinstance(receiver.func, ast.Name) and receiver.func.id == 'expect'):
+                    continue
+                checked += 1
+                if len(call.args) > limit:
+                    violations.append((path.name, call.lineno, name, len(call.args), limit))
+        self.assertEqual(violations, [])
+        self.assertGreater(checked, 500, 'the scan must still reach the e2e assertions')
+
+    def test_mip_orient_page_helpers_are_installed_before_use(self):
+        """ci-03 NA1: FINAL_CAMERA calls mipView(), which only exists after HELPERS has been evaluated on THAT page. fresh_page()
+        installs nothing, so every page must receive its helpers before the first use. Checked per page variable, in source order."""
+        import ast
+        installs = {'HELPERS': {'mipView', 'mipCount', 'canvasPixel', 'mipState'},
+                    'VOI_HELPERS': {'mipVoiState', 'mipTransitions', 'mipStatuses'},
+                    'BATCH_HELPERS': {'batchFrames', 'batchStatuses', 'batchHoldFrame', 'batchHeld', 'batchView'},
+                    'PRINT_TRACE': {'printFrames', 'printEvents', 'printFault', 'printLeaks', 'printReady'}}
+        constant_needs = {'FINAL_CAMERA': {'mipView'}, 'TAKE': {'printFrames'}, 'NO_LEAKS': {'printLeaks'}}
+        method_needs = {'mark': {'mipTransitions'}, 'settled': {'mipTransitions'}, 'job_final': {'mipTransitions'},
+                        'apply_voi_case': {'mipTransitions'}, 'batch_announced': {'batchStatuses'}, 'make': {'batchFrames'},
+                        'rolled_back': {'mipTransitions'}, 'open_output': {'printFrames'}}
+        # Helper methods that install helpers themselves (verified in test_volume_mip.py): opened_voi_study evaluates HELPERS on
+        # the page it returns third, and open_voi evaluates VOI_HELPERS on the page it is given.
+        installers = {'opened_voi_study': ('return3', installs['HELPERS']), 'open_voi': ('arg0', installs['VOI_HELPERS'])}
+        tree = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        problems = []
+        for function in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')]:
+            have = {}
+            for node in sorted([n for n in ast.walk(function) if isinstance(n, (ast.Call, ast.Assign))],
+                               key=lambda n: (n.lineno, n.col_offset)):
+                if isinstance(node, ast.Assign):
+                    call = node.value
+                    if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                            and isinstance(call.func.value, ast.Name) and call.func.value.id == 'self'):
+                        spec = installers.get(call.func.attr)
+                        if spec and spec[0] == 'return3' and isinstance(node.targets[0], ast.Tuple) and len(node.targets[0].elts) == 3:
+                            have.setdefault(node.targets[0].elts[2].id, set()).update(spec[1])
+                    continue
+                function_node = node.func
+                if isinstance(function_node, ast.Attribute) and isinstance(function_node.value, ast.Name) and function_node.value.id == 'self':
+                    spec = installers.get(function_node.attr)
+                    if spec and spec[0] == 'arg0' and node.args and isinstance(node.args[0], ast.Name):
+                        have.setdefault(node.args[0].id, set()).update(spec[1])
+                    if function_node.attr in method_needs and node.args and isinstance(node.args[0], ast.Name):
+                        missing = method_needs[function_node.attr] - have.get(node.args[0].id, set())
+                        if missing:
+                            problems.append((function.name, node.lineno, node.args[0].id + '.' + function_node.attr, sorted(missing)))
+                # wait_for_function and evaluate_handle run page code exactly like evaluate, so a predicate such as NO_LEAKS needs
+                # its helpers installed on that same page too (ci-03 N1: printLeaks was only ever installed by PRINT_TRACE).
+                if (isinstance(function_node, ast.Attribute) and function_node.attr in ('evaluate', 'wait_for_function', 'evaluate_handle')
+                        and isinstance(function_node.value, ast.Name)):
+                    page, needed = function_node.value.id, set()
+                    if node.args and isinstance(node.args[0], ast.Name):
+                        if node.args[0].id in installs:
+                            have.setdefault(page, set()).update(installs[node.args[0].id])
+                        needed |= constant_needs.get(node.args[0].id, set())
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        for symbol in {s for group in installs.values() for s in group}:
+                            if symbol in node.args[0].value:
+                                needed.add(symbol)
+                    missing = needed - have.get(page, set())
+                    if missing:
+                        problems.append((function.name, node.lineno, page, sorted(missing)))
+        self.assertEqual(problems, [])
+
+    def test_mip_orient_camera_diagnostics_execute_without_playwright(self):
+        """Runs the module's own near/assert_camera/rolled_back on stubs: the ci-02 label defect was a runtime TypeError that a
+        parse cannot see. A mismatch must raise AssertionError carrying the label, never TypeError."""
+        import ast, math, unittest as ut
+        source = ast.parse((ci.ROOT/'tests/e2e/test_volume_mip_orient.py').read_text(encoding='utf-8'))
+        klass = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'VolumeMipOrientE2E')
+        wanted = {'near', 'assert_camera', 'rolled_back'}
+        extracted = ast.Module(body=[n for n in klass.body if isinstance(n, ast.FunctionDef) and n.name in wanted], type_ignores=[])
+        self.assertEqual({n.name for n in extracted.body}, wanted)
+        ast.fix_missing_locations(extracted)
+        namespace = {'math': math, 'DISTANCE': 100.0}
+        exec(compile(extracted, '<orient-helpers>', 'exec'), namespace)
+
+        class Probe(ut.TestCase):
+            def runTest(self):
+                pass
+        for name in wanted:
+            setattr(Probe, name, namespace[name])
+        probe = Probe()
+
+        class Page:
+            def locator(self, selector):
+                return self
+            def text_content(self):
+                return 'ROLLED BACK STATUS'
+            def evaluate(self, expression, argument=None):
+                return ['pending', 'final']
+        label = probe.rolled_back(Page(), 3, 'Anterior')
+        self.assertIsInstance(label, str)
+        self.assertIn('Anterior', label)
+        self.assertIn('ROLLED BACK STATUS', label)
+        camera = {'viewPlaneNormal': [0, -1, 0], 'viewUp': [0, 0, 1], 'focalPoint': [1.0, 2.0, 3.0],
+                  'position': [1.0, 2.0 - 60.0, 3.0], 'parallelScale': 30.0}
+        expected = {'viewPlaneNormal': [0, -1, 0], 'viewUp': [0, 0, 1], 'focalPoint': [1.0, 2.0, 3.0]}
+        probe.assert_camera(camera, expected, label, (60.0, 30.0))
+        wrong = dict(camera, viewPlaneNormal=[0, 1, 0])
+        with self.assertRaises(AssertionError) as raised:
+            probe.assert_camera(wrong, expected, label, (60.0, 30.0))
+        self.assertIn('Anterior', str(raised.exception))
+        # A tuple label must still compare and fail as an assertion, never as a TypeError (the ci-02 defect).
+        with self.assertRaises(AssertionError):
+            probe.assert_camera(wrong, expected, ('Anterior', 'status', []), (60.0, 30.0))
+        # The zoom parity and the distance floor are still enforced.
+        with self.assertRaises(AssertionError):
+            probe.assert_camera(dict(camera, parallelScale=31.0), expected, label, (60.0, 30.0))
+        with self.assertRaises(AssertionError):
+            probe.assert_camera(dict(camera, position=[1.0, 2.0 - 40.0, 3.0]), expected, label, (40.0, 30.0))
     def test_output_integration_commands_are_exact_ordered_local_classes(self):
         profile=ci.PROFILES['output-integration']
         commands=[]

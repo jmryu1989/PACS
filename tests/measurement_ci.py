@@ -261,6 +261,21 @@ PROFILES = {
         # MIP Viewer, VOI Slab, MIP Job, MIP Batch, projection and orientation cases stay out.
         'suites': (('e2e/test_volume_mip_output.py', None, 'ci-mip-output'),),
     },
+    'volume-mip-orient': {
+        'out': ROOT / 'tests/e2e/artifacts/volume-mip-orient-ci',
+        'project_prefix': 'kin-miporient-ci-',
+        # The A11-ORIENT-1 Orientation Preset cases in their own group, not inside volume-mip-output, volume-mip-batch,
+        # volume-mip-job, volume-mip-voi or volume-slab, whose caps stay exactly as they are. Two cases: the first confirms the six
+        # anatomical presets against their literal cameras, saves version 12/14/15 Jobs, restores one in a fresh login and prints a
+        # single-frame and a three-frame page; the second walks five intercepted version/algorithm refusals, the current-view
+        # refusal and one cancelled version 15 restore. It has no injected pre-render or frame timeout to wait out, so it is
+        # bounded below the MIP output group at 900s: (900+35) = 935s leaves 565s of the 25-minute live step.
+        'suite_timeout': 900,
+        'suite_budgets': {'ci-mip-orient': 900},
+        # The module's load_tests is the allowlist: exactly the authored test_mip_orient_* cases of its own class, so the inherited
+        # MIP Viewer, VOI Slab, MIP Job, MIP Batch, MIP output, projection and orientation cases stay out.
+        'suites': (('e2e/test_volume_mip_orient.py', None, 'ci-mip-orient'),),
+    },
     'output-integration': {
         'out': ROOT / 'tests/e2e/artifacts/output-integration-ci',
         'project_prefix': 'kin-output-ci-',

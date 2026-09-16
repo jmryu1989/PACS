@@ -154,3 +154,36 @@ test('the preview caption names frame, display, axis with signed angle and the V
  assert.equal(batch.caption({index:0,count:3,mode:'MinIP',orientation:'Sagittal',axis:'Vertical',angle:0,voiThickness:null}),'1 / 3 · MinIP · Sagittal · Vertical 0° · VOI Slab Off · Preview');
  assert.equal(batch.caption({index:2,count:3,mode:'MIP',orientation:'Axial',axis:'Vertical',angle:-90,voiThickness:22.25}),'3 / 3 · MIP · Axial · Vertical -90° · VOI Slab 22.3 mm · Preview');
 });
+
+/* A11-ORIENT-1 V4: the same planner under the manual's anatomical presets. The frame-0 vectors and the +90 degree results are the
+   accepted contract table, hand-computed from the right-handed Rodrigues rule, never values read back from this module. */
+const ORIENT_ROWS=[
+ ['Anterior',[0,-1,0],[0,0,1],[1,0,0],[0,0,1],[0,0,-1],[0,-1,0]],
+ ['Posterior',[0,1,0],[0,0,1],[-1,0,0],[0,0,1],[0,0,-1],[0,1,0]],
+ ['Left',[1,0,0],[0,0,1],[0,1,0],[0,0,1],[0,0,-1],[1,0,0]],
+ ['Right',[-1,0,0],[0,0,1],[0,-1,0],[0,0,1],[0,0,-1],[-1,0,0]],
+ ['Superior',[0,0,1],[0,-1,0],[-1,0,0],[0,-1,0],[0,1,0],[0,0,1]],
+ ['Inferior',[0,0,-1],[0,1,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,-1]]];
+test('A11-ORIENT-1: every anatomical preset turns about its own viewUp and screen right (hard-coded vectors)',()=>{
+ const focalPoint=[15.75,15.75,40],distance=120,thickness=91.6;
+ for(const [name,n0,u0,hNormal,hUp,vNormal,vUp] of ORIENT_ROWS){
+  const horizontal=batch.plan({recipe:recipe({axis:'Horizontal',interval:90,count:2}),normal:n0,viewUp:u0,focalPoint,distance,thickness});
+  near(horizontal.cameras[0].viewPlaneNormal,n0,0,name+' frame 0 normal');near(horizontal.cameras[0].viewUp,u0,0,name+' frame 0 up');
+  near(horizontal.cameras[1].viewPlaneNormal,hNormal,1e-12,name+' Horizontal +90 normal');
+  near(horizontal.cameras[1].viewUp,hUp,1e-12,name+' Horizontal +90 up');
+  // Horizontal keeps its own axis, the Final viewUp, bit for bit.
+  assert.deepEqual([...horizontal.cameras[1].viewUp],[...u0],name+' Horizontal keeps viewUp');
+  const vertical=batch.plan({recipe:recipe({axis:'Vertical',interval:90,count:2}),normal:n0,viewUp:u0,focalPoint,distance,thickness});
+  near(vertical.cameras[1].viewPlaneNormal,vNormal,1e-12,name+' Vertical +90 normal');
+  near(vertical.cameras[1].viewUp,vUp,1e-12,name+' Vertical +90 up');
+  // The rotation axis is the screen right of the Final camera, and every frame keeps the focal point and the parallel scale.
+  near([...vertical.axis],cross(u0,n0).map(x=>x+0),1e-12,name+' Vertical axis is screen right');
+  for(const camera of [...horizontal.cameras,...vertical.cameras]){
+   near([...camera.focalPoint],focalPoint,0,name+' focal');assert.equal(camera.parallelScale,thickness/2);
+   near([...camera.position],focalPoint.map((x,k)=>x+camera.viewPlaneNormal[k]*distance),1e-9,name+' position');
+  }
+ }
+ // Reverse negates the same turn, and a preset frame 0 is the preset itself.
+ const reversed=batch.plan({recipe:recipe({axis:'Horizontal',interval:90,count:2,reverse:true}),normal:[0,0,1],viewUp:[0,-1,0],focalPoint,distance,thickness});
+ near(reversed.cameras[1].viewPlaneNormal,[1,0,0],1e-12,'Superior Horizontal -90 normal');
+});

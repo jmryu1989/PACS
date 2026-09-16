@@ -2,8 +2,27 @@
    restore request. The block names the accepted A11/A11-VOI-1 projection semantics; a runtime volume id, the affine, undo
    history, Original or a pending request never enter it. api/src/viewer-volume-mip.ts applies the same schema rule. */
 (function(root){
-  const SCHEMA=1,ALGORITHM='kin-mip-1',COORDINATES='LPS_mm',LIMIT=1e6,EDGE=1e-6;
+  const SCHEMA=1,ALGORITHM='kin-mip-1',DIRECTION_ALGORITHM='kin-mip-2',COORDINATES='LPS_mm',LIMIT=1e6,EDGE=1e-6;
   const MODES=['MIP','MinIP','Raysum'],ORIENTATIONS=['Axial','Coronal','Sagittal'];
+  /* A11-ORIENT-1: the six anatomical presets are a second algorithm, kin-mip-2, carried by the new snapshot versions 14 and 15.
+     The projection semantics are identical (whole volume or VOI Slab, same blend modes, same LPS_mm); only the direction enum
+     differs, so each algorithm refuses the other's names and one display has exactly one encoding. Versions 12/13 stay exactly
+     kin-mip-1 and their accepted bytes never change. api/src/viewer-volume-mip.ts applies the same binding on the server. */
+  const DIRECTIONS=['Anterior','Posterior','Left','Right','Superior','Inferior'];
+  const ALGORITHMS=Object.freeze({'kin-mip-1':Object.freeze([...ORIENTATIONS]),'kin-mip-2':Object.freeze([...DIRECTIONS])});
+  const VERSIONS=Object.freeze({12:ALGORITHM,13:ALGORITHM,14:DIRECTION_ALGORITHM,15:DIRECTION_ALGORITHM});
+  const has=(table,name)=>typeof name==='string'&&Object.prototype.hasOwnProperty.call(table,name);
+  const enumOf=algorithm=>has(ALGORITHMS,algorithm)?ALGORITHMS[algorithm]:null;
+  // The one algorithm a version carries, and the one algorithm an orientation belongs to.
+  const algorithmOf=version=>Object.prototype.hasOwnProperty.call(VERSIONS,version)?VERSIONS[version]:null;
+  const algorithmFor=orientation=>DIRECTIONS.includes(orientation)?DIRECTION_ALGORITHM:ALGORITHM;
+  /* The one snapshot version a saved pair belongs to: the block's algorithm picks the pair (12/13 or 14/15) and the presence of
+     a MIP Batch recipe picks the member of it. Null for a block this viewer does not write. */
+  function versionFor(value,batch=null){
+    const algorithm=value&&typeof value==='object'?value.algorithm:null;
+    if(algorithm!==ALGORITHM&&algorithm!==DIRECTION_ALGORITHM)return null;
+    return (algorithm===DIRECTION_ALGORITHM?14:12)+((batch??null)===null?0:1);
+  }
   const KEYS=['schema','algorithm','coordinates','frameOfReference','mode','orientation','display','voiSlab'];
   // The VOI Slab tool's preset normals (volume-voi.js orientationNormals), in its list order.
   const PRESETS=[['Axial',[0,0,1]],['Coronal',[0,1,0]],['Sagittal',[1,0,0]]];
@@ -30,11 +49,26 @@
   // JSON text is the saved form: jsonb keeps every decimal digit but not the key order, so the comparison text sorts keys.
   const canonical=v=>Array.isArray(v)?'['+v.map(canonical).join(',')+']':v&&typeof v==='object'?'{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canonical(v[k])).join(',')+'}':JSON.stringify(v);
   const same=(a,b)=>a!==undefined&&b!==undefined&&canonical(a)===canonical(b);
-  function supported(value){return !!value&&typeof value==='object'&&value.schema===SCHEMA&&value.algorithm===ALGORITHM&&value.coordinates===COORDINATES;}
+  const supportedBy=(value,algorithm)=>!!value&&typeof value==='object'&&value.schema===SCHEMA&&value.algorithm===algorithm&&value.coordinates===COORDINATES;
+  // kin-mip-1 only, unchanged: every other algorithm is 'reproduce' here, which is what the accepted v12/v13 callers rely on.
+  function supported(value){return supportedBy(value,ALGORITHM);}
   // '' for a block this viewer reproduces, 'reproduce' for another algorithm, 'shape' for anything malformed.
   function problem(value){
     if(!supported(value))return 'reproduce';
-    if(!exact(value,KEYS)||!MODES.includes(value.mode)||!ORIENTATIONS.includes(value.orientation))return 'shape';
+    return shapeProblem(value,ORIENTATIONS);
+  }
+  /* The same block rules bound to one algorithm's direction enum. A block naming the OTHER known algorithm is 'shape' — a
+     malformed version/algorithm pair, not a computation this viewer cannot reproduce — while an unknown algorithm, schema or
+     coordinate system stays 'reproduce'. Only the version-bound callers use this; validate()/supported() stay kin-mip-1. */
+  function problemFor(algorithm,value){
+    const names=enumOf(algorithm);
+    if(!names)return 'reproduce';
+    if(supportedBy(value,algorithm))return shapeProblem(value,names);
+    const known=!!value&&typeof value==='object'&&value.schema===SCHEMA&&value.coordinates===COORDINATES&&has(ALGORITHMS,value.algorithm);
+    return known?'shape':'reproduce';
+  }
+  function shapeProblem(value,orientations){
+    if(!exact(value,KEYS)||!MODES.includes(value.mode)||!orientations.includes(value.orientation))return 'shape';
     if(typeof value.frameOfReference!=='string'||value.frameOfReference.length>64||!/^[0-9]+(\.[0-9]+)*$/.test(value.frameOfReference))return 'shape';
     const d=value.display;
     if(!exact(d,['voiRange','interpolationType'])||!exact(d.voiRange,['lower','upper'])||![0,1,2].includes(d.interpolationType)||
@@ -47,6 +81,14 @@
   const freeze=value=>Object.freeze({...value,display:Object.freeze({voiRange:Object.freeze({...value.display.voiRange}),interpolationType:value.display.interpolationType}),
     voiSlab:value.voiSlab&&Object.freeze({center:Object.freeze([...value.voiSlab.center]),normal:Object.freeze([...value.voiSlab.normal]),pivot:Object.freeze([...value.voiSlab.pivot]),thickness:value.voiSlab.thickness})});
   function validate(value){const reason=problem(value);if(reason)throw Error(messages[reason]);return freeze(value);}
+  // The block of one snapshot version: 12/13 accept exactly kin-mip-1, 14/15 exactly kin-mip-2, and an unknown version accepts none.
+  const supportedFor=(version,value)=>{const algorithm=algorithmOf(version);return !!algorithm&&supportedBy(value,algorithm);};
+  function validateFor(version,value){
+    const algorithm=algorithmOf(version);
+    const reason=algorithm?problemFor(algorithm,value):'shape';
+    if(reason)throw Error(messages[reason]);
+    return freeze(value);
+  }
   /* The saved block is the confirmed Final request exactly as confirmed: a pending or superseded request, a display before
      its first Final and Original view are refused, and every number is copied without rounding or renormalization. */
   function block(snapshot,{frameOfReference,display}={}){
@@ -55,10 +97,12 @@
     if(!confirmed)throw Error(messages.rendering);
     if(final.original===true)throw Error(messages.original);
     const s=final.voiSlab??null;
-    const value={schema:SCHEMA,algorithm:ALGORITHM,coordinates:COORDINATES,frameOfReference,mode:final.mode,orientation:final.orientation,
+    // The direction enum the confirmed orientation belongs to names the algorithm, so an Axial/Coronal/Sagittal display still
+    // writes exactly the accepted kin-mip-1 bytes and only the six anatomical presets write kin-mip-2.
+    const value={schema:SCHEMA,algorithm:algorithmFor(final.orientation),coordinates:COORDINATES,frameOfReference,mode:final.mode,orientation:final.orientation,
       display:{voiRange:{lower:display?.voiRange?.lower,upper:display?.voiRange?.upper},interpolationType:display?.interpolationType},
       voiSlab:s&&{center:[...s.center],normal:[...s.normal],pivot:[...s.pivot],thickness:s.thickness}};
-    if(problem(value))throw Error(messages.value);
+    if(problemFor(value.algorithm,value))throw Error(messages.value);
     return freeze(value);
   }
   // A slab keeps at least one voxel centre: the eight voxel-centre corners are not all beyond one side (1e-6 mm edge).
@@ -72,8 +116,10 @@
   /* The saved record bound to this runtime volume with its numbers unchanged. normalizeVoi divides the normal by its length
      again, which is not idempotent for every unit normal, so that division is left to the renderer's own write and never
      feeds back into the record the saved state is compared with. Undo starts empty and Original is off. */
-  function restoreRequest(value,binding){
-    const saved=validate(value);
+  function restoreRequest(value,binding,version){
+    // Without a version this is the accepted kin-mip-1 restore, unchanged: any other algorithm is 'reproduce', never 'shape'.
+    // A caller that knows the Job's version passes it, and the block is then held to that version's own algorithm.
+    const saved=version===undefined?validate(value):validateFor(version,value);
     if(!binding||typeof binding.frameOfReference!=='string'||saved.frameOfReference!==binding.frameOfReference)throw Error(messages.frame);
     const s=saved.voiSlab;
     if(s&&(typeof binding.volumeId!=='string'||!binding.volumeId||!Array.isArray(binding.affine)||binding.affine.length!==12||!binding.affine.every(finite)))throw Error(messages.shape);
@@ -95,7 +141,7 @@
   function retryable(pending,value,batch=null){
     if(!pending||!value)return false;
     const kept=pending.mipBatch??null,shown=batch??null;
-    return pending.version===(shown===null?12:13)&&same(pending.mip,value)&&same(kept,shown);
+    return pending.version===versionFor(value,shown)&&same(pending.mip,value)&&same(kept,shown);
   }
   // The saved-state identity of a shown display: its block with the recipe of the MIP Batch preview beside it, or null.
   const pair=(value,batch=null)=>value?{mip:value,mipBatch:batch??null}:null;
@@ -147,6 +193,7 @@
       },
     };
   }
-  const api=Object.freeze({schema:SCHEMA,algorithm:ALGORITHM,coordinates:COORDINATES,messages,supported,validate,block,intersects,restoreRequest,presetFor,saveGate,createSaveState,same,retryable,pair});
+  const api=Object.freeze({schema:SCHEMA,algorithm:ALGORITHM,directionAlgorithm:DIRECTION_ALGORITHM,coordinates:COORDINATES,messages,supported,validate,block,intersects,restoreRequest,presetFor,saveGate,createSaveState,same,retryable,pair,
+    algorithmFor,algorithmOf,versionFor,supportedFor,validateFor,problemFor});
   if(typeof module==='object'&&module.exports)module.exports=api;else root.KinVolumeMipJob=api;
 })(typeof window==='object'?window:globalThis);

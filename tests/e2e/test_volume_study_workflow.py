@@ -9,10 +9,13 @@ from test_window_return import WindowReturnE2E
 
 class VolumeStudyWorkflowE2E(VolumePatientCopyE2E):
  def preserved_volume(self,before,after):
+  # Reporting only: ci-02 truncated the differing entry to 946 characters, so the viewport and the field that changed could not be
+  # named from the artifact. The comparison itself, its fields and its tolerances are unchanged.
+  self.maxDiff=None
   self.assertEqual(len(before),len(after))
-  for left,right in zip(before,after):
-   self.assertEqual({k:v for k,v in left.items() if k!='camera'},{k:v for k,v in right.items() if k!='camera'})
-   self.assertEqual(left['camera'].keys(),right['camera'].keys())
+  for index,(left,right) in enumerate(zip(before,after)):
+   self.assertEqual({k:v for k,v in left.items() if k!='camera'},{k:v for k,v in right.items() if k!='camera'},('viewport',index,left.get('id')))
+   self.assertEqual(left['camera'].keys(),right['camera'].keys(),('viewport',index,left.get('id')))
    for key,value in left['camera'].items():
     other=right['camera'][key]
     if isinstance(value,list):

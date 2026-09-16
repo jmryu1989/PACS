@@ -68,7 +68,14 @@ class VolumeDisplayE2E(VolumeOrientationE2E):
   a,p,v=self.starting();v.evaluate("()=>{projectionVP.setProperties({voiRange:{lower:0,upper:2000}});projectionVP.render()}");v.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))');before=self.volume_state(v)
   # Reset Windowing is enabled only by the panel's 250 ms refresh and click() on a disabled button dispatches nothing: select and click in one enabled turn.
   v.wait_for_function("()=>{const b=[...document.querySelectorAll('#kin-volume-display button')].find(b=>b.textContent==='Reset Windowing');if(!b||b.disabled)return false;const g=services.viewportGridService;g.setActiveViewportId([...g.getState().viewports.keys()][1]);b.click();return true}")
-  expect(v.locator('#kin-volume-display [role=status]')).to_contain_text(re.compile('선택한 MPR|화면이 변경'));self.preserved_volume(before,self.volume_state(v))
+  expect(v.locator('#kin-volume-display [role=status]')).to_contain_text(re.compile('선택한 MPR|화면이 변경'))
+  # The refusal can arrive on either path: before any native write, or after the panel applied the reset, rendered it and then
+  # detected the changed selection, in which case the rollback restores the properties and issues its own render
+  # (viewer-volume-display.js L100-106) while the status is set first (L109). The canvas therefore repaints one frame after the
+  # text appears, so the baseline's own two-frame settle (line 68) is applied here too before reading it back. The comparison,
+  # its fields and its exactness are unchanged: a state that was not restored, or a repaint that never came, still fails.
+  v.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
+  self.preserved_volume(before,self.volume_state(v))
   self.choose_volume(v,v,0);v.wait_for_timeout(300)
   v.evaluate("()=>{const original=projectionVP.setProperties;let once=true;projectionVP.setProperties=function(...args){const r=original.apply(this,args);if(once){once=false;requestAnimationFrame(()=>{original.call(this,{voiRange:{lower:0,upper:3000}});this.render()})}return r};const g=services.viewportGridService;g.setActiveViewportId([...g.getState().viewports.keys()][1]);document.querySelector('#kin-volume-display button').click()}")
   expect(v.locator('#kin-volume-display [role=status]')).to_contain_text('화면이 변경');v.wait_for_function('()=>[...services.viewportGridService.getState().viewports.keys()].every(id=>services.cornerstoneViewportService.getCornerstoneViewport(id).getProperties().voiRange.upper===3000)')

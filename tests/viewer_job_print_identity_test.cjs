@@ -408,9 +408,11 @@ function source(url) {
   return reply([frame]);
 }
 
-test('the version 4-6, 12 and 13 volume loader reads past one rejected source read, fails on two, and never sends an abort again', async () => {
+test('the version 4-6 and 12-15 volume loader reads past one rejected source read, fails on two, and never sends an abort again', async () => {
   const target = '/instances/' + instanceId(1) + '/simplified-tags';
-  for (const version of [4, 5, 6, 12, 13]) {
+  // A11-ORIENT-1: versions 14/15 are the anatomical-preset MIP pair and share this loader, so the bounded transport recovery
+  // (D12 addendum) is proven for them too.
+  for (const version of [4, 5, 6, 12, 13, 14, 15]) {
     const world = loaderWorld(version), lookups = [];
     const api = async (url, options) => { lookups.push([url, options.method, options.idempotent]); return { id: instanceId(SOPS.indexOf(JSON.parse(options.body).sopUid)) }; };
     await withFetch((url, init, n) => url === target && n === 1 ? transportRejection() : source(url), async calls => {
