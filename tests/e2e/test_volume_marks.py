@@ -126,7 +126,7 @@ class VolumeMarksE2E(VolumeSyncE2E):
    if waiting:break
    v.wait_for_timeout(50)
   self.assertEqual(len(waiting),1);self.assertEqual(len(self.jobs(a)),1);v.locator('[data-cy=Layout]').click();v.locator('[data-cy=Layout-0-0]').click();expect(v.locator('.kin-mpr-marks-overlay')).to_have_count(0)
-  route,response=waiting.pop();route.fulfill(response=response);v.unroute(pattern,hold);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다',timeout=45000);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));self.assertEqual(len(self.jobs(a)),1)
+  route,response=waiting.pop();route.fulfill(response=response);expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('저장했습니다',timeout=45000);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'));self.assertEqual(len(self.jobs(a)),1);v.unroute(pattern,hold)
   self.mpr(v);self.choose_volume(v,v,0);self.same_marks(v.evaluate('()=>kinMprMarks.capture()'),marks);self.assertFalse(v.evaluate('()=>kinMprMarks.dirty()'))
  def test_marks_20_progressive_slab_pick_final_batch_save_and_restore(self):
   from test_volume_batch import VolumeBatchE2E
