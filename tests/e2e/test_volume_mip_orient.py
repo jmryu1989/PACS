@@ -255,7 +255,18 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   v.wait_for_function(NO_LEAKS,timeout=10000)
   # The current MIP screen still has no output page of its own, under the new versions too.
   dialog=self.open_voi(v);mark=self.mark(v);self.press(dialog,'Inferior');self.job_final(v,mark,'MIP','Inferior')
-  v.locator('#kin-viewer-jobs').get_by_role('button',name='Print Current View',exact=True).click()
+  # The refusal is a defensive gate, not a pointer-reachable flow: while the MIP Viewer is open its <dialog> is modal and the Jobs
+  # panel behind it is inert by design (viewer-volume-mip.js showModal and its own note), and ci-04 recorded exactly that — the
+  # dialog subtree intercepted every click attempt for 30 s. Closing the dialog first would test something else entirely, because
+  # KinVolumeMipJob.capture() returns null once the viewer is closed, so the current snapshot would be a plain version 4 MPR and the
+  # button would open an ordinary current-view print instead of refusing. The handler is therefore invoked the way the accepted
+  # pure P2(e) oracle invokes it, through the element's own click handler (viewer-jobs.js binds b.onclick), using the repo's
+  # dispatch_event idiom for a control the UI itself prevents (test_volume_display.py L60). No force flag and no assertion weakened.
+  # dispatch_event delivers a synthetic click to the button's own handler without any pointer or hit-testing, so this step proves
+  # the refusal contract of openPrint for a version 14 capture, not that a user can reach the button while the modal is open
+  # (no pointer route exists; the modal is the product's intent). The refusal text, no-page guard and later no-leak wait are unchanged.
+  self.assertEqual(v.locator('#kin-volume-mip[open]').count(),1,'the modal is open, which is why the panel button cannot be clicked')
+  v.locator('#kin-viewer-jobs').get_by_role('button',name='Print Current View',exact=True).dispatch_event('click')
   expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('MIP Viewer 작업은 아직 출력할 수 없습니다',timeout=60000)
   self.assertEqual(v.locator('#kin-job-print[open]').count(),0)
   # The restore of a version 15 Job is cancelled by Close MIP Viewer while its frames are being made, and rolls back.
