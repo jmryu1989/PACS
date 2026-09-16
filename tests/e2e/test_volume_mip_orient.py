@@ -257,23 +257,35 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
   dialog=self.open_voi(v);mark=self.mark(v);self.press(dialog,'Inferior');self.job_final(v,mark,'MIP','Inferior')
   # The refusal is a defensive gate, not a pointer-reachable flow: while the MIP Viewer is open its <dialog> is modal and the Jobs
   # panel behind it is inert by design (viewer-volume-mip.js showModal and its own note), and ci-04 recorded exactly that — the
-  # dialog subtree intercepted every click attempt for 30 s. Closing the dialog first would test something else entirely, because
-  # KinVolumeMipJob.capture() returns null once the viewer is closed, so the current snapshot would be a plain version 4 MPR and the
-  # button would open an ordinary current-view print instead of refusing. The handler is therefore invoked the way the accepted
-  # pure P2(e) oracle invokes it, through the element's own click handler (viewer-jobs.js binds b.onclick), using the repo's
-  # dispatch_event idiom for a control the UI itself prevents (test_volume_display.py L60). No force flag and no assertion weakened.
-  # dispatch_event delivers a synthetic click to the button's own handler without any pointer or hit-testing, so this step proves
-  # the refusal contract of openPrint for a version 14 capture, not that a user can reach the button while the modal is open
-  # (no pointer route exists; the modal is the product's intent). The refusal text, no-page guard and later no-leak wait are unchanged.
+  # dialog subtree intercepted every click attempt for 30 s. The handler is therefore invoked through the element's own click
+  # handler (viewer-jobs.js:107 binds b.onclick; :382 binds Print Current View to openPrint(null)) with the repo's dispatch_event
+  # idiom for a control the UI itself prevents (test_volume_display.py L60). No force flag and no assertion weakened.
+  # ci-05 falsified the fix-05/delta-05 prediction that this press would reach the MIP-specific refusal at viewer-jobs.js:70: in
+  # this window it never can, and not because the click is synthetic. openPrint captures BEFORE it reads the shape — :53-54 call
+  # currentSnapshot() with readOnly=false, :173 hands that to viewer-volume-job.js capture(), which asks each three-plane tool for
+  # its state at :153, and viewer-volume-marks.js:52 reads the shared orientation target(true,readOnly). This page is the separate
+  # viewer window test_volume_projection.py:41-42 opens, where viewer-tech-note.js:545 builds that module with
+  # allowed=()=>…&&!document.querySelector('dialog[open],…'), so viewer-volume-orientation.js:12/:47 refuses while this very dialog
+  # is open. viewer-jobs.js:320-323 states that lock as the product's own rule, with Save MIP Job its one documented readOnly
+  # exception; the output capture is deliberately not one. Asserted here is therefore the refusal this window actually produces —
+  # still written by openPrint's own catch (viewer-jobs.js:101 assigns e.message verbatim, where the request path at :368 would
+  # have appended ' 입력은 유지됩니다.'), which is itself the proof that the dispatched click reached the handler.
+  # The version 14/15 branch of viewer-jobs.js:70-71 keeps its own proof in tests/viewer_volume_job_capture_test.cjs:1106 P2 (e),
+  # which pins both messages with no asset requested and no page opened; this case claims no native reach of that branch. What it
+  # adds is that the refusal costs the new kin-mip-2 display nothing: no page, no leak, same Final display, same pressed preset.
   self.assertEqual(v.locator('#kin-volume-mip[open]').count(),1,'the modal is open, which is why the panel button cannot be clicked')
   v.locator('#kin-viewer-jobs').get_by_role('button',name='Print Current View',exact=True).dispatch_event('click')
-  expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('MIP Viewer 작업은 아직 출력할 수 없습니다',timeout=60000)
-  self.assertEqual(v.locator('#kin-job-print[open]').count(),0)
+  expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('다른 작업을 마친 뒤 MPR 방향을 조절하세요',timeout=60000)
+  self.assertEqual(v.locator('#kin-job-print[open]').count(),0);v.wait_for_function(NO_LEAKS,timeout=10000)
+  expect(dialog).to_have_attribute('data-kin-mip-state','final')
+  self.assertEqual([row[4] for row in v.evaluate(BAR)],['false','false','false','false','false','true'])
   # The restore of a version 15 Job is cancelled by Close MIP Viewer while its frames are being made, and rolls back.
   vertical=recipe_of('Vertical',45,3);self.batch_inputs(dialog,'Vertical',45,3);self.make(v,dialog,3)
   V15='MIP orient cancel v15';self.save_titled(dialog,V15,'VOI Slab · Off · Saved')
   self.voi_button(dialog,'Close MIP Viewer').click();expect(dialog).not_to_be_visible()
-  self.assertEqual(self.mip_job(a,V15)[0]['snapshotVersion'],15)
+  saved_row,saved_detail=self.mip_job(a,V15);self.assertEqual(saved_row['snapshotVersion'],15)
+  # The cancelled restore below is only a cancel of THIS recipe if the saved row carries it, as the accepted pair does at L142.
+  self.assertEqual(saved_detail['snapshot']['mipBatch'],vertical)
   before=v.evaluate(LAYOUT)
   # B5: hold the second regenerated frame so the cancel is deterministic, exactly as the accepted batch cancel case does; without
   # a hold a three-frame batch can finish before the click and nothing is cancelled.
@@ -284,7 +296,12 @@ class VolumeMipOrientE2E(VolumeMipOutputE2E):
    v.wait_for_function('()=>batchHeld>0',timeout=90000)
    expect(restoring.locator('[role=status]')).to_contain_text('MIP Batch 복원 중',timeout=90000)
    restoring.get_by_role('button',name='Close MIP Viewer',exact=True).click()
-   expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('이전 화면',timeout=90000)
+   # '이전 화면' alone does not name a cancel: viewer-volume-orientation.js:225 appends that same suffix to EVERY MIP restore
+   # failure, so the held-frame timeout this hold could also produce (test_volume_mip_batch.py:369) would satisfy it just as well.
+   # The cancel's own reason is viewer-volume-mip.js:517 (op.cancelled), which is what the accepted MB13 case pins at
+   # test_volume_mip_batch.py:379; both halves are asserted here, and the closed viewer and rollback of `before` follow below.
+   jobs_status=v.locator('#kin-viewer-jobs-status')
+   expect(jobs_status).to_contain_text('MIP 작업 복원을 취소했습니다',timeout=90000);expect(jobs_status).to_contain_text('이전 화면')
   finally:
    v.evaluate('()=>{batchHoldFrame=null}')
   expect(v.locator('#kin-volume-mip[open]')).to_have_count(0);self.assertEqual(v.evaluate(LAYOUT),before)
