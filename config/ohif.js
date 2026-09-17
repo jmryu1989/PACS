@@ -888,10 +888,12 @@ function kinCreateViewerHistory() {
       reset('이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
       button(actions, 'Recheck Access', () => load());
     }
-    function end() {
+    function end(modeExit = false) {
       if (ended) return;
       recovery.clear(); reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); ended = true; me = null; subject = ''; actions.replaceChildren();
-      window.dispatchEvent(new Event('kin-viewer-access-ended'));
+      // Mode exit keeps this document and its login; the Findings section holds its drafts for the
+      // next mode entry instead of destroying them as it must for a real logout or 401.
+      window.dispatchEvent(Object.assign(new Event('kin-viewer-access-ended'), { kinModeExit: modeExit === true }));
       // A shared workstation must not retain unsaved labels after logout either.
       for (const a of ct.annotation.state.getAllAnnotations()) if (kinds[a.metadata.toolName]) {
         ct.annotation.state.removeAnnotation(a.annotationUID);
@@ -1382,10 +1384,21 @@ function kinCreateViewerHistory() {
     const onFocus = () => { lastAuth = 0; };
     const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) ||
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
+    // Finding drafts (including ones held for another study) count for the whole-viewer guards:
+    // worklist Next Study, window reuse/close, cell merge/hanging protocol and page unload. They are
+    // deliberately not part of the mark-only kinViewerHistoryHasUnsaved used by Job save/restore,
+    // which never touches a finding. An unreadable state is uncertainty, not permission.
+    const findingsWork = () => {
+      try { const f = typeof window.kinViewerFindingsState === 'function' ? window.kinViewerFindingsState() : null; return { dirty: f?.dirty === true, busy: f?.busy === true }; }
+      catch (_) { return { dirty: true, busy: true }; }
+    };
     // Native marks exist before the next history scan; warn during that gap too.
-    const beforeUnload = e => { if (jobGuard()) { e.preventDefault(); e.returnValue = ''; } };
+    const beforeUnload = e => { if (jobGuard() || findingsWork().dirty) { e.preventDefault(); e.returnValue = ''; } };
     window.kinViewerHistoryHasUnsaved = jobGuard;
-    const workspaceState = () => ({ dirty: jobGuard(), busy: [...entries.values()].some(x => x.busy || x.pending) });
+    const workspaceState = () => {
+      const findings = findingsWork();
+      return { dirty: jobGuard() || findings.dirty, busy: [...entries.values()].some(x => x.busy || x.pending) || findings.busy };
+    };
     window.kinViewerHistoryWorkspaceState = workspaceState;
     window.kinViewerHistoryNavigate = navigateTo;
     window.kinViewerHistoryState = historyState;
@@ -1401,7 +1414,7 @@ function kinCreateViewerHistory() {
     const stackEvent = cs.Enums.Events.STACK_NEW_IMAGE;
     document.addEventListener(stackEvent, onImage, true);
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
-    stop = () => { end(); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
+    stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     const previousStop = stop;
     stop = () => {
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;

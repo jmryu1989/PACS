@@ -87,7 +87,7 @@ window.KinReadingWorkspace = function (app) {
   const back = button('Return to Previous Viewer', () => { if (shown) app.select(shown.reportUid); }, recovery);
   const retry = button('Reopen Viewer', () => { if (pending) attempt(pending, false); }, recovery);
   const discard = button('Discard Viewer Changes & Open', () => {
-    if (pending && confirm('이전 영상의 저장하지 않은 표식과 작업 제목·설명을 버리고 선택한 영상을 엽니다. 판독문 초안은 별도로 유지됩니다. 계속할까요?')) attempt(pending, true);
+    if (pending && confirm('이전 영상의 저장하지 않은 표식·소견 작성 내용(보관 중인 다른 검사 소견 포함)과 작업 제목·설명을 버리고 선택한 영상을 엽니다. 판독문 초안은 별도로 유지됩니다. 계속할까요?')) attempt(pending, true);
   }, recovery);
   const reportTarget = node('div'); reportTarget.id = 'reading-report-target'; reportTarget.hidden = true;
   $('.report-p').prepend(reportTarget);

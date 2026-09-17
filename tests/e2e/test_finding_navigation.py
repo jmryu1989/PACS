@@ -1,18 +1,24 @@
 # coding: utf-8
 """TEST-S2-UI-01/02 (REQ-S2-RECORD/FRESHNESS/NAVIGATE/IDEMPOTENT/PRESERVE): real pinned OHIF, BFF login,
 owned synthetic multi-slice CT and the real findings API. Image identity is asserted from the viewport's
-current image id, never from a success message."""
+current image id, never from a success message. Tests 05/06 (REQ-S2B-GUARD): unsaved and pending
+findings block Next Study, window reuse/close and unload while clean viewers stay usable, and survive a
+study switch, a 403 and a same-document mode exit until logout."""
 from pathlib import Path
-import sys, json, math, unittest, uuid
+from urllib.parse import parse_qs, urlsplit
+import sys, json, math, re, unittest, uuid
 from unittest.mock import patch
 import test_worklist as base
-from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal
+from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal, canvas_ready
 from finding_api_test import FindingStack
 
 CURRENT_IMAGE = "sop=>cornerstone.getRenderingEngines().filter(e=>e.id!=='_thumbnails').flatMap(e=>e.getViewports()).some(v=>v.getCurrentImageId?.().includes('/instances/'+sop+'/frames/1'))"
 ACTIVE_IMAGE = "uid=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId())?.getCurrentImageId?.().includes('/studies/'+uid+'/')}"
 ANNOTATIONS = "()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').map(a=>({highlighted:!!a.highlighted,selected:cornerstoneTools.annotation.selection.isAnnotationSelected(a.annotationUID),image:a.metadata.referencedImageId}))"
 HIGHLIGHTED = "()=>cornerstoneTools.annotation.state.getAllAnnotations().some(a=>a.metadata.toolName==='Length'&&a.highlighted&&cornerstoneTools.annotation.selection.isAnnotationSelected(a.annotationUID))"
+UNLOAD = "()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented}"
+GUARDS = "()=>({workspace:kinViewerHistoryWorkspaceState(),findings:kinViewerFindingsState(),marks:kinViewerHistoryHasUnsaved()})"
+LIFECYCLE = "n=>{for(const id of ['kin.viewer-history','kin.viewer-findings'])window.config.extensions.find(e=>e.id===id)[n]()}"
 
 class FindingNavigationE2E(ViewerHistoryE2E):
     @classmethod
@@ -240,6 +246,173 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
         expect(p.locator('#kin-viewer-findings')).to_contain_text('다시 로그인'); self.assertEqual(p.locator('#kin-viewer-findings article').count(), 0)
         self.assertEqual(p.evaluate("t=>window.kinViewerHistoryNavigate?window.kinViewerHistoryNavigate(t):{ok:false,reason:'tool-missing'}", dict(studyUid=f.uid, seriesUid=saved['item']['sources'][0]['seriesUid'], sopUid=saved['item']['sources'][0]['sopUid'], frame=1)), dict(ok=False, reason='ended'))
+
+    # ---- S2-B draft protection: guards, clean controls and held drafts ----
+    def seed_key(self, f, title):
+        found = self.stack._orthanc_request('POST', '/tools/lookup', f.uid.encode())
+        study = next(x['ID'] for x in found.body if x['Type'] == 'Study')
+        series = self.stack._orthanc_request('GET', '/studies/'+study+'/series').body[0]['MainDicomTags']['SeriesInstanceUID']
+        body = dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=1, kind='key', seriesUid=series, sopUid=self.sops(f)[0], frame=1, title=title, description=''))
+        r = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items', 'doctor', body); self.assertEqual(r.status, 200, r.text)
+
+    def viewer_ready(self, p):
+        studies = parse_qs(urlsplit(p.url).query)['StudyInstanceUIDs'][0].split(',')
+        canvas_ready(p, len(studies)); self.open_measurement_tools(p)
+        expect(p.locator('#kin-viewer-history [role=status]')).to_contain_text('개 저장 항목')
+        self.panel(p); return studies
+
+    def workspace(self, w, f):
+        if not w.locator('.left').is_visible(): w.get_by_role('button', name='Worklist', exact=True).click()
+        self.select(w, f)
+        if w.locator('#m-reading').text_content() != 'Back to Worklist': w.locator('#m-reading').click()
+        expect(w.locator('#reading-target')).to_contain_text(f.uid)
+        expect(w.locator('#reading-status')).to_have_text('영상 작업공간 연결됨', timeout=60000)
+        frame = w.locator('#reading-frame').element_handle().content_frame()
+        self.assertEqual(self.viewer_ready(frame)[0], f.uid); return frame
+
+    def activate(self, p, uid):
+        p.evaluate('''uid=>{const s=__d05c1.services;const d=s.displaySetService.getActiveDisplaySets().find(d=>d.StudyInstanceUID===uid);if(!d)throw Error('missing display set');s.viewportGridService.setDisplaySetsForViewport({viewportId:s.viewportGridService.getActiveViewportId(),displaySetInstanceUIDs:[d.displaySetInstanceUID]});}''', uid)
+        p.wait_for_function(ACTIVE_IMAGE, arg=uid)
+        expect(p.locator('#kin-viewer-findings')).to_have_attribute('data-study-uid', uid)
+
+    def test_05_finding_draft_guards_next_study_window_reuse_close_and_clean_controls(self):
+        f = self.specimen(slices=2)
+        b = synthetic_ct(self.stack, f.patient_id, 'findprior', '20260801', [0, 0, 0], [1, 0, 0, 0, 1, 0], [.7, 1.3], slices=2)
+        self.seed_key(f, 'guard key A'); self.seed_key(b, 'guard key B')
+        original, items = self.hashes(), (self.saved(f), self.saved(b))
+        w = self.login(); w.set_viewport_size(dict(width=1680, height=1100))
+        w.on('dialog', lambda d: d.accept())  # Frame Coverage confirmations of clean viewers only.
+        frame = self.workspace(w, f)
+        self.assertEqual(frame.evaluate(GUARDS)['workspace'], dict(dirty=False, busy=False))
+        # A separate window with an unsaved finding: dirty for every whole-viewer guard, not for the mark-only flag.
+        with w.context.expect_page() as opened: w.get_by_role('button', name='Open Viewer Window', exact=True).click()
+        popup = opened.value; popup.wait_for_url('**/ohif/viewer?**')
+        popup_studies = self.viewer_ready(popup)
+        popup.wait_for_function("()=>typeof kinViewerWindowOwner==='function'&&!!kinViewerWindowOwner()")
+        self.assertFalse(popup.evaluate(UNLOAD), 'a clean window closes without a prompt')
+        self.compose(popup, 'POPUP DRAFT', '창 재사용 보호', 'Link Key Image')
+        guards = popup.evaluate(GUARDS)
+        self.assertEqual((guards['workspace'], guards['findings']['dirty'], guards['marks']), (dict(dirty=True, busy=False), True, False))
+        self.assertTrue(popup.evaluate(UNLOAD))
+        # The clean embedded viewer follows a selection change.
+        frame = self.workspace(w, b)
+        # Window reuse for another study is refused for the unsaved finding; the window keeps its study and draft.
+        w.get_by_role('button', name='Open Viewer Window', exact=True).click()
+        expect(w.locator('#toast')).to_contain_text('저장하지 않은 표식이나 작업 내용(소견 작성 내용 포함)')
+        self.assertEqual(parse_qs(urlsplit(popup.url).query)['StudyInstanceUIDs'][0].split(','), popup_studies)
+        expect(self.panel(popup).get_by_label('Finding Title')).to_have_value('POPUP DRAFT')
+        # Close Window is refused for the same reason, visible as Unsaved in the window list.
+        w.locator('#m-reading').click(); expect(w.locator('#m-reading')).to_have_text('Reading Workspace')
+        w.locator('#viewer-windows-open').click(); expect(w.locator('#viewer-windows-dialog')).to_be_visible()
+        expect(w.locator('.viewer-window-row')).to_have_count(1); expect(w.locator('.viewer-window-row')).to_contain_text('Unsaved')
+        w.locator('[data-window-action="close"]').click()
+        expect(w.locator('#viewer-windows-status')).to_contain_text('창을 닫지 않았습니다'); self.assertFalse(popup.is_closed())
+        w.locator('#viewer-windows-done').click()
+        # Discarding the draft makes the same window reusable: it now shows the selected study.
+        self.panel(popup).get_by_role('button', name='Discard Draft', exact=True).click()
+        popup.wait_for_function('()=>!kinViewerHistoryWorkspaceState().dirty&&!kinViewerHistoryWorkspaceState().busy')
+        w.locator('#m-reading').click(); expect(w.locator('#reading-status')).to_have_text('영상 작업공간 연결됨', timeout=60000)
+        w.get_by_role('button', name='Open Viewer Window', exact=True).click()
+        expect(popup).to_have_url(re.compile(r'[?&]StudyInstanceUIDs=' + re.escape(b.uid) + r'(?:[,&#]|$)'), timeout=60000)
+        self.assertFalse(popup.is_closed()); self.assertEqual(self.viewer_ready(popup)[0], b.uid)
+        # An unsaved finding in the embedded viewer stops Next Study; the draft stays and Return restores the viewer.
+        frame = self.workspace(w, f)
+        self.compose(frame, 'WORKSPACE DRAFT', 'Next Study 보호', 'Link Key Image')
+        self.assertEqual(frame.evaluate(GUARDS)['workspace'], dict(dirty=True, busy=False))
+        order = w.locator('#rows tr[data-uid]').evaluate_all('rows=>rows.map(r=>r.dataset.uid)')
+        self.assertEqual(sorted(order), sorted([f.uid, b.uid]))
+        step = 'Next Study' if order.index(f.uid) == 0 else 'Previous Study'
+        w.get_by_role('button', name=step, exact=True).click()
+        expect(w.locator('#reading-target')).to_contain_text(b.uid)
+        expect(w.locator('#reading-status')).to_contain_text('저장하지 않은 작업이 있습니다')
+        expect(w.get_by_role('button', name='Discard Viewer Changes & Open', exact=True)).to_be_visible()
+        expect(w.locator('#reading-frame')).to_be_hidden()
+        expect(self.panel(frame).get_by_label('Finding Title')).to_have_value('WORKSPACE DRAFT')
+        w.get_by_role('button', name='Return to Previous Viewer', exact=True).click()
+        expect(w.locator('#reading-target')).to_contain_text(f.uid); expect(w.locator('#reading-frame')).to_be_visible()
+        expect(self.panel(frame).get_by_label('Finding Title')).to_have_value('WORKSPACE DRAFT')
+        # Without the draft the same Next Study proceeds.
+        self.panel(frame).get_by_role('button', name='Discard Draft', exact=True).click()
+        frame.wait_for_function('()=>!kinViewerHistoryWorkspaceState().dirty')
+        w.get_by_role('button', name=step, exact=True).click()
+        expect(w.locator('#reading-target')).to_contain_text(b.uid)
+        expect(w.locator('#reading-status')).to_have_text('영상 작업공간 연결됨', timeout=60000)
+        frame = w.locator('#reading-frame').element_handle().content_frame()
+        self.assertEqual(self.viewer_ready(frame)[0], b.uid)
+        # A clean window closes.
+        popup.wait_for_function("()=>typeof kinViewerWindowOwner==='function'&&!!kinViewerWindowOwner()&&!kinViewerHistoryWorkspaceState().dirty")
+        w.locator('#m-reading').click(); w.locator('#viewer-windows-open').click()
+        expect(w.locator('.viewer-window-row')).to_contain_text('Open')
+        w.locator('[data-window-action="close"]').click()
+        expect(w.locator('#viewer-windows-status')).to_contain_text('영상 창을 닫았습니다'); self.assertTrue(popup.is_closed())
+        self.assertEqual((self.findings(f), self.findings(b)), ([], []))
+        self.assertEqual((self.saved(f), self.saved(b)), items); self.assertEqual(self.hashes(), original)
+
+    def test_06_held_drafts_survive_study_switch_403_and_mode_exit_until_logout(self):
+        f = self.specimen(slices=2); b = self.fixture(f.patient_id)
+        self.seed_key(f, 'held key'); original = self.hashes(); keys = self.saved(f)
+        w, p = self.open_viewer(f, extra=b, observer=True)
+        panel = p.locator('#kin-viewer-findings'); held = panel.locator('#kin-viewer-findings-held')
+        status = panel.locator('#kin-viewer-findings-status')
+        self.activate(p, f.uid); expect(status).to_contain_text('개 소견')
+        self.assertFalse(p.evaluate(UNLOAD))
+        self.compose(p, 'HELD DRAFT', '보관 확인', 'Link Key Image')
+        # A study switch in the comparison layout holds the draft: counted by study, content not shown, still guarded.
+        self.activate(p, b.uid); expect(status).to_contain_text('0개 소견')
+        expect(held).to_contain_text('1건'); expect(held).to_contain_text(f.uid)
+        expect(panel.get_by_label('Finding Title')).to_have_count(0); expect(panel).not_to_contain_text('보관 확인')
+        self.assertEqual(p.evaluate(GUARDS), dict(workspace=dict(dirty=True, busy=False), findings=dict(scope=b.uid, dirty=True, busy=False, held=1), marks=False))
+        self.assertTrue(p.evaluate(UNLOAD))
+        # Back on A the draft returns with A's authenticated list.
+        self.activate(p, f.uid)
+        draft = panel.locator('article[data-saved=false]'); expect(draft).to_have_count(1)
+        expect(draft.get_by_label('Finding Title')).to_have_value('HELD DRAFT'); expect(draft.get_by_label('Finding Text')).to_have_value('보관 확인')
+        expect(draft.locator('[data-kin-sources] [data-item-id]')).to_have_count(1)
+        expect(draft).to_contain_text('보관했던 작성 내용을 복원했습니다'); expect(held).to_be_hidden()
+        # A refused list (403) holds it again and shows nothing of it; the next authorized list restores it.
+        pattern = '**/studies/'+f.uid+'/findings?*'
+        def refused(r): r.fulfill(status=403, content_type='application/json', body='{"message":"synthetic refusal"}')
+        p.route(pattern, refused); panel.get_by_role('button', name='Reload Findings', exact=True).click()
+        expect(status).to_contain_text('접근할 수 없습니다'); expect(panel.get_by_label('Finding Title')).to_have_count(0)
+        expect(held).to_contain_text('현재 검사'); self.assertTrue(p.evaluate('()=>kinViewerHistoryWorkspaceState().dirty'))
+        p.unroute(pattern, refused); panel.get_by_role('button', name='Reload Findings', exact=True).click()
+        expect(draft.get_by_label('Finding Title')).to_have_value('HELD DRAFT'); expect(held).to_be_hidden()
+        # An unconfirmed save (503) is held across a switch with its request; Retry sends the same body once.
+        seen = []
+        def unavailable(r):
+            seen.append(r.request.post_data); r.fulfill(status=503, content_type='application/json', body='{"message":"synthetic unavailable"}')
+        post = '**/studies/'+f.uid+'/findings'
+        p.route(post, unavailable); draft.get_by_role('button', name='Save', exact=True).click()
+        expect(draft).to_contain_text('저장 결과를 확인하지 못했습니다'); p.unroute(post, unavailable)
+        self.assertEqual(len(seen), 1); self.assertEqual(p.evaluate('()=>kinViewerHistoryWorkspaceState()'), dict(dirty=True, busy=True))
+        self.activate(p, b.uid); expect(held).to_contain_text('1건')
+        self.assertEqual(p.evaluate('()=>kinViewerHistoryWorkspaceState()'), dict(dirty=True, busy=False))
+        self.activate(p, f.uid); expect(draft).to_contain_text('보관했던 저장 요청을 복원했습니다')
+        self.assertEqual(p.evaluate('()=>kinViewerHistoryWorkspaceState()'), dict(dirty=True, busy=True))
+        with p.expect_response(lambda r: r.request.method == 'POST' and r.url.endswith('/studies/'+f.uid+'/findings')) as response:
+            draft.get_by_role('button', name='Retry Request', exact=True).click()
+        self.assertEqual(response.value.request.post_data, seen[0]); self.assertEqual(response.value.status, 200)
+        expect(panel.locator('article[data-saved=true]')).to_have_count(1); expect(draft).to_have_count(0)
+        saved = self.findings(f); self.assertEqual([x['item']['title'] for x in saved], ['HELD DRAFT'])
+        p.wait_for_function('()=>{const s=kinViewerHistoryWorkspaceState();return !s.dirty&&!s.busy}')
+        # A mode exit of this same document holds a new draft (still guarded); the next entry restores it after its list.
+        self.compose(p, 'MODE DRAFT', '', 'Link Key Image')
+        p.evaluate(LIFECYCLE, 'onModeExit')
+        expect(p.locator('#kin-viewer-findings')).to_have_count(0)
+        self.assertEqual(p.evaluate("()=>[typeof kinViewerFindingsState,typeof kinViewerHistoryWorkspaceState]"), ['undefined', 'undefined'])
+        self.assertTrue(p.evaluate(UNLOAD))
+        p.evaluate(LIFECYCLE, 'onModeEnter')
+        restored = p.locator('#kin-viewer-findings article[data-saved=false]')
+        expect(restored.get_by_label('Finding Title')).to_have_value('MODE DRAFT', timeout=30000)
+        expect(restored).to_contain_text('보관했던 작성 내용을 복원했습니다')
+        expect(p.locator('#kin-viewer-findings article[data-saved=true]')).to_have_count(1)
+        self.assertTrue(p.evaluate('()=>kinViewerHistoryWorkspaceState().dirty'))
+        # Logout destroys the draft; nothing of it remains or is counted.
+        p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
+        expect(p.locator('#kin-viewer-findings')).to_contain_text('다시 로그인'); expect(p.locator('#kin-viewer-findings article')).to_have_count(0)
+        self.assertEqual(p.evaluate('()=>[kinViewerHistoryWorkspaceState(),kinViewerFindingsState()]'),
+                         [dict(dirty=False, busy=False), dict(scope=f.uid, dirty=False, busy=False, held=0)])
+        self.assertEqual(len(self.findings(f)), 1); self.assertEqual(self.saved(f), keys); self.assertEqual(self.hashes(), original)
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')

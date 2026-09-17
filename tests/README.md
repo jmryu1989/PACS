@@ -201,7 +201,7 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 24개 migration·37개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
 관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
 
-소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (7개)와 `python tests/e2e/test_finding_navigation.py` (4개).
+소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (7개)와 `python tests/e2e/test_finding_navigation.py` (6개).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
 409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
@@ -211,6 +211,11 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 URL 불변, 세션 종료 후 `ended`를 확인한다. 순수 시험 `node --test tests/finding_link_model_test.cjs`는 출하되는
 `config/ohif.js`의 `kinViewerNavigateTo`와 `finding-link-model.js`의 저장소를 그대로 실행한다. MPR/볼륨 화면은 `viewport-unsupported`로
 거절하며 다른 검사·워크리스트 연결(S2-B)과 판독문 연결(3단계)은 이 시험 범위 밖이다.
+소견 작성 보호(S2-B 첫 수정): 작성·대기 중 소견은 검사 전환·403·mode exit에서 계정·검사별 사본으로 보관되고, 인증된 해당 검사 목록 뒤에만
+복원되며 로그아웃·401·계정 변경에서 폐기된다. 순수 시험은 같은 요청 본문 재시도, 늦은 응답의 사본 불변, 한 행 수렴, 뷰어 전체
+dirty/busy·이탈 경고와 표식 전용 `kinViewerHistoryHasUnsaved` 유지, 판독 작업공간·창 재사용·Hanging Protocol·칸 병합 판정을
+출하 코드로 확인한다. 브라우저 시험 5·6은 Next Study·창 재사용/닫기·이탈 경고의 차단과 깨끗한 화면의 통과, 비교 화면 전환·403·
+mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)의 다른 검사 복원 차단은 원문 위치 확인만 하며 브라우저로 실행하지 않았다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.

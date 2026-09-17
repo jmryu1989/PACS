@@ -110,14 +110,34 @@
     return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
   }
 
+  /* Unsaved, editing and pending findings survive a study switch, a 403 and a mode exit as held
+   * copies bound to {subject, study}; only a logout, a 401 or a subject change destroys them. The
+   * copy never shares an object with the entry an in-flight request still holds, so a late answer
+   * cannot mutate or re-insert it, and its pending URL/body (with the requestId) stay byte-identical. */
+  const heldKey = (subject, scope) => JSON.stringify([subject, scope]);
+  function heldCopy(e) {
+    return { id: e.id, head: e.head ? clone(e.head) : null, draft: clone(e.draft), links: clone(e.links || []), editing: !!e.editing,
+      latest: e.latest ? clone(e.latest) : null, pending: e.pending ? { url: e.pending.url, body: e.pending.body } : null,
+      busy: false, message: String(e.message || ''), staleSource: e.staleSource ? clone(e.staleSource) : null };
+  }
+  function heldRecords(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter(r => r && typeof r.subject === 'string' && r.subject && uid(r.scope) && Array.isArray(r.entries) &&
+      r.entries.every(e => e && typeof e.id === 'string' && e.draft && typeof e.draft === 'object' &&
+        (e.pending === null || (typeof e.pending?.url === 'string' && typeof e.pending?.body === 'string'))))
+      .map(r => ({ subject: r.subject, scope: r.scope, entries: r.entries.map(heldCopy) }));
+  }
+
   /* The store owns scope, generation, read sequence and every pending request. `deps.fetch`,
    * `deps.uuid`, `deps.navigate` (window.kinViewerHistoryNavigate) and `deps.notify` are injected
-   * so the same decisions run under Node with fake transports. */
+   * so the same decisions run under Node with fake transports. `deps.recovered` carries the
+   * records a previous store of this same document handed over with detach(). */
   function createStore(deps) {
     const fetchImpl = deps.fetch, makeId = deps.uuid, timeoutMs = Number.isFinite(deps.timeoutMs) ? deps.timeoutMs : 30000;
     const listeners = new Set();
     const s = { scope: '', subject: '', me: null, ended: false, generation: 0, readSequence: 0, loading: false, suspended: true,
-      status: '', history: null, entries: new Map(), heads: new Map() };
+      status: '', history: null, entries: new Map(), heads: new Map(), parked: new Map() };
+    for (const record of heldRecords(deps.recovered)) s.parked.set(heldKey(record.subject, record.scope), record);
     let controller = typeof AbortController === 'function' ? new AbortController() : null;
     const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (_) {} } };
     const valid = ticket => !s.ended && ticket === s.generation;
@@ -128,11 +148,61 @@
       s.generation++; s.readSequence++; controller?.abort(); controller = typeof AbortController === 'function' ? new AbortController() : null;
       s.entries.clear(); s.loading = false; s.suspended = true; s.status = message; notify();
     }
+    // Hold every entry with work for the current {subject, study} before the entries are cleared.
+    function park() {
+      if (!s.scope || !s.subject) return;
+      const work = [...s.entries.values()].filter(hasWork);
+      if (!work.length) return;
+      const key = heldKey(s.subject, s.scope), record = s.parked.get(key) || { subject: s.subject, scope: s.scope, entries: [] };
+      for (const e of work) { const copy = heldCopy(e); record.entries = record.entries.filter(x => x.id !== copy.id).concat([copy]); }
+      s.parked.set(key, record);
+    }
+    // Called only after this study's list was read with the current login: the same subject, a
+    // successful authorization of this study and a writable role. Otherwise the copies stay held.
+    function restore() {
+      const key = heldKey(s.subject, s.scope), record = s.parked.get(key);
+      if (!record || !writable()) return;
+      s.parked.delete(key);
+      for (const copy of record.entries) {
+        const current = s.entries.get(copy.id);
+        if (current && hasWork(current)) continue;
+        const e = heldCopy(copy);
+        e.message = e.pending ? '보관했던 저장 요청을 복원했습니다. Retry Request로 저장 결과를 확인하세요.' : '보관했던 작성 내용을 복원했습니다. 저장 전 내용을 확인하세요.';
+        s.entries.set(e.id, e);
+      }
+    }
+    function heldEntries() { return [...s.parked.values()].reduce((n, r) => n + r.entries.length, 0); }
+    // Counts and study identifiers only: the held text and sources are never shown before restore.
+    function held() {
+      const studies = [...s.parked.values()].filter(r => s.subject && r.subject === s.subject)
+        .map(r => ({ scope: r.scope, count: r.entries.length, current: r.scope === s.scope }));
+      return { count: studies.reduce((n, r) => n + r.count, 0), studies };
+    }
+    // Whole-viewer guard state: held copies are unsaved work too; only live entries can be in flight.
+    function workState() {
+      const live = [...s.entries.values()];
+      return { dirty: live.some(hasWork) || heldEntries() > 0, busy: live.some(e => !!(e.busy || e.pending)), held: heldEntries() };
+    }
+    function discardHeld() {
+      if (s.ended || !s.subject) return 0;
+      let removed = 0;
+      for (const [key, r] of [...s.parked]) if (r.subject === s.subject) { removed += r.entries.length; s.parked.delete(key); }
+      notify(); return removed;
+    }
     function end() {
       if (s.ended) return;
+      s.parked.clear();
       reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); s.ended = true; s.me = null; s.subject = ''; notify();
     }
-    function deny() { reset('이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.'); s.me = null; }
+    // Mode exit: hand every entry with work to the next store of this document and stop this one.
+    function detach() {
+      if (s.ended) return [];
+      park();
+      const records = heldRecords([...s.parked.values()]);
+      s.parked.clear(); reset(''); s.ended = true; s.me = null; notify();
+      return records;
+    }
+    function deny() { park(); reset('이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.'); s.me = null; }
     async function api(path, options, ticket) {
       options = options || {};
       const parentSignal = controller?.signal, request = typeof AbortController === 'function' ? new AbortController() : null;
@@ -154,11 +224,15 @@
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
       if (!user || !user.sub || (s.subject && s.subject !== user.sub)) { end(); throw { stale: true }; }
-      s.me = user; s.subject = user.sub; return user;
+      s.me = user; s.subject = user.sub;
+      // Copies handed over from another login are never restored or counted for this one.
+      for (const [key, r] of [...s.parked]) if (r.subject !== s.subject) s.parked.delete(key);
+      return user;
     }
     const path = () => '/studies/' + s.scope + '/findings';
     function setScope(scope) {
       if (s.ended || scope === s.scope) return;
+      park();
       reset(scope ? '소견 확인 중…' : '');
       s.scope = uid(scope) ? scope : '';
       if (s.scope) load();
@@ -190,6 +264,7 @@
         } while (cursor);
         if (!valid(ticket) || seq !== s.readSequence) return;
         s.suspended = false;
+        restore();
         const seen = new Set();
         for (const head of heads) {
           if (!uuid(head.id) || !head.item || !Array.isArray(head.item.sources)) throw new Error('Invalid page');
@@ -321,7 +396,8 @@
       if (!valid(ticket) || s.entries.get(e.id) !== e) return null;
       return data;
     }
-    return { state: () => s, subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); }, valid, writable, hasWork,
+    return { state: () => s, subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); }, valid, writable, hasWork, held, workState,
+      discardHeld, detach,
       setScope, syncHistory, load, newDraft, updateDraft, toggleSource, setPrimary, refreshSource, useLatest, discard, edit, save, navigate, history, end,
       dispose: () => { listeners.clear(); controller?.abort(); } };
   }
