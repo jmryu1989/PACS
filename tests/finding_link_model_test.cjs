@@ -1158,7 +1158,7 @@ test('anchored store: the comparison viewport keeps entries, drafts, pending bod
   assert.deepEqual(t.log.map(x => x.url), ['/api/me', '/api/studies/' + A + '/findings?includeHidden=true&limit=100', '/api/studies/' + B + '/viewer-items?limit=100']);
   assert.equal(store.state().pair.status, 'ready'); assert.deepEqual([...store.state().pair.heads.keys()], [P1, P2]);
   assert.deepEqual(plain(store.state().pair.heads.get(P1)), { id: P1, studyUid: B, revision: 1, hidden: false, kind: 'key', label: 'P비교키', seriesUid: '4.5.6.1',
-    sopUid: '4.5.6.1.2', frame: 1, authorSub: 'reader-1', referenceStatus: null, values: null, working: false });
+    sopUid: '4.5.6.1.2', frame: 1, authorSub: 'reader-1', referenceStatus: null, values: null, calculator: null, working: false });
   const saved = store.state().entries.get(F1);
   const e = store.newDraft(); store.updateDraft(e, { title: '비교 소견', text: '본문' });
   assert.equal(store.toggleSource(e, ITEM), true);
@@ -1773,6 +1773,273 @@ test('mounted comparison viewer: a held anchor list read survives comparison act
   assert.deepEqual([textOf(next).includes('new A'), textOf(next).includes('old A'), next.dataset.studyUid], [true, false, XS]);
   assert.equal(h.all().filter(e => e.id === 'kin-viewer-findings').length, 1);
   h.findings.stop();
+});
+
+/* ---------- copied measurement values (S2-V R8 with design corrections C1-C8) ---------- */
+const CALC = 'kin-native-manual-v1', UNV = '수치(단위 미확인): ';
+const E5 = [400.26, 45, -20, 80, 1234];
+const E5_TEXT = '면적 400.3 mm² · 평균 45.0 HU · 최소 -20.0 HU · 최대 80.0 HU · 화소 수 1234';
+
+test('valueText: names and units only for a known provenance with the exact calculator, count and number shape', () => {
+  const V = model.valueText;
+  assert.equal(V('length', CALC, [12.34], 'server-copy'), '12.3 mm');
+  assert.equal(V('angle', CALC, [12.34], 'server-copy'), '12.3°');
+  assert.equal(V('ellipse', CALC, E5, 'server-copy'), E5_TEXT);
+  // The calculator's order [area, mean, min, max, count]: distinct values pin every name.
+  assert.equal(V('ellipse', CALC, [1, 2, 3, 4, 5], 'server-copy'), '면적 1.0 mm² · 평균 2.0 HU · 최소 3.0 HU · 최대 4.0 HU · 화소 수 5');
+  // C1: a server copy needs exactly the pinned calculator.
+  for (const calculator of [undefined, null, '', 'other-v9', 'kin-native-manual-v2', 'KIN-NATIVE-MANUAL-V1', ' kin-native-manual-v1', 0, {}, [CALC]])
+    assert.equal(V('length', calculator, [12.34], 'server-copy'), UNV + '12.3', 'server-copy ' + String(calculator));
+  // Only a live Measurements head may omit it; null or another value is still unverified.
+  assert.equal(V('length', undefined, [12.34], 'live-head'), '12.3 mm');
+  assert.equal(V('angle', undefined, [12.34], 'live-head'), '12.3°');
+  assert.equal(V('ellipse', undefined, E5, 'live-head'), E5_TEXT);
+  assert.equal(V('length', CALC, [12.34], 'live-head'), '12.3 mm');
+  for (const calculator of [null, '', 'other-v9', 0, false])
+    assert.equal(V('length', calculator, [12.34], 'live-head'), UNV + '12.3', 'live-head ' + String(calculator));
+  // A missing or unknown provenance never names a unit, whatever the calculator.
+  for (const provenance of [undefined, null, '', 'server', 'live', 'Server-Copy', 'LIVE-HEAD', 'saved', 'comparison', 'server-copy ', {}, 1])
+    for (const calculator of [CALC, undefined])
+      assert.equal(V('length', calculator, [12.34], provenance), UNV + '12.3', String(provenance) + ' ' + String(calculator));
+  assert.equal(V('ellipse', CALC, E5), UNV + '400.3 / 45.0 / -20.0 / 80.0 / 1234.0', 'provenance omitted');
+  // Exactly 1/1/5 values; an empty list of a measurement kind is unverified, not silent.
+  for (const [kind, values, shown] of [['length', [20, 3.14159], '20.0 / 3.1'], ['length', [], ''], ['angle', [], ''], ['angle', [1, 2], '1.0 / 2.0'],
+    ['ellipse', E5.slice(0, 4), '400.3 / 45.0 / -20.0 / 80.0'], ['ellipse', [...E5, 9], '400.3 / 45.0 / -20.0 / 80.0 / 1234.0 / 9.0'], ['ellipse', [7], '7.0']])
+    for (const provenance of ['server-copy', 'live-head']) assert.equal(V(kind, CALC, values, provenance), UNV + shown, kind + ' ' + values.length + ' ' + provenance);
+  // C3: finite number primitives in fixed notation only; otherwise the whole source is unverified.
+  for (const [value, shown] of [[NaN, '?'], [Infinity, '?'], [-Infinity, '?'], ['12.3', '?'], [null, '?'], [undefined, '?'], [12n, '?'], [new Number(12), '?'],
+    [1e21, '1e+21'], [-1e21, '-1e+21'], [Number.MAX_VALUE, '1.7976931348623157e+308']])
+    assert.equal(V('length', CALC, [value], 'server-copy'), UNV + shown, String(value));
+  assert.equal(V('length', CALC, [999999999999999e5], 'server-copy'), '99999999999999901696.0 mm', 'below 1e21 stays in fixed notation');
+  assert.equal(V('ellipse', CALC, [400.26, NaN, -20, Infinity, 1234], 'server-copy'), UNV + '400.3 / ? / -20.0 / ? / 1234.0');
+  assert.equal(V('ellipse', CALC, [400.26, 45, -20, 80, '1234'], 'live-head'), UNV + '400.3 / 45.0 / -20.0 / 80.0 / ?');
+  // The pixel count: a non-negative safe integer shown as is, never rounded into one.
+  for (const [count, shown] of [[1234.5, '1234.5'], [1234.04, '1234.0'], [-1, '-1.0'], [-0.5, '-0.5'], [-0.04, '0.0'], [2 ** 53, '9007199254740992.0'], [NaN, '?']])
+    assert.equal(V('ellipse', CALC, [400.26, 45, -20, 80, count], 'server-copy'), UNV + '400.3 / 45.0 / -20.0 / 80.0 / ' + shown, String(count));
+  for (const [count, shown] of [[-0, '0'], [0, '0'], [7, '7'], [Number.MAX_SAFE_INTEGER, '9007199254740991']])
+    assert.equal(V('ellipse', CALC, [400.26, 45, -20, 80, count], 'server-copy'), E5_TEXT.replace('화소 수 1234', '화소 수 ' + shown), String(count));
+  // One decimal after Math.round(n * 10) / 10; negative zero never shows as '-0.0'.
+  for (const [n, shown] of [[-0, '0.0'], [0, '0.0'], [-0.04, '0.0'], [-0.05, '0.0'], [0.04, '0.0'], [0.05, '0.1'], [-0.06, '-0.1'], [12.25, '12.3'],
+    [12.35, '12.4'], [-12.35, '-12.3'], [1.005, '1.0'], [-20, '-20.0'], [99.95, '100.0'], [5e-324, '0.0']]) {
+    assert.equal(V('length', CALC, [n], 'server-copy'), shown + ' mm', String(n));
+    assert.equal(V('angle', undefined, [n], 'live-head'), shown + '°', String(n));
+    assert.equal(V('length', 'other', [n], 'server-copy'), UNV + shown, String(n));
+  }
+  assert.equal(V('ellipse', CALC, [-0, -0.04, -0.05, -0, -0], 'server-copy'), '면적 0.0 mm² · 평균 0.0 HU · 최소 0.0 HU · 최대 0.0 HU · 화소 수 0');
+  // C4: other kinds show nothing without values and unverified numbers with them.
+  for (const kind of ['volume3d', 'Length', 'constructor', 'toString', '__proto__', 'hasOwnProperty', '', null, undefined, 7]) {
+    assert.equal(V(kind, CALC, [7], 'server-copy'), UNV + '7.0', String(kind));
+    assert.equal(V(kind, undefined, [7], 'live-head'), UNV + '7.0', String(kind));
+  }
+  for (const kind of ['arrow', 'key', 'volume3d', 'constructor'])
+    for (const values of [null, undefined, []]) for (const provenance of ['server-copy', 'live-head']) assert.equal(V(kind, null, values, provenance), '', kind);
+  assert.equal(V('arrow', CALC, [7], 'server-copy'), UNV + '7.0');
+  assert.equal(V('key', null, [1, 2], 'server-copy'), UNV + '1.0 / 2.0');
+  // Values that are not an array show nothing; a hostile list never throws and never names a unit.
+  for (const values of ['12.3', 12.3, { length: 1, 0: 12.3 }, new Float64Array([12.3]), new Set([12.3]), null, undefined])
+    assert.equal(V('length', CALC, values, 'server-copy'), '', Object.prototype.toString.call(values));
+  const throwing = [1]; Object.defineProperty(throwing, 0, { get() { throw new Error('getter'); } });
+  assert.equal(V('length', CALC, throwing, 'server-copy'), UNV + '?');
+  const proxy = new Proxy([1], { get(target, key) { if (key === 'length') throw new Error('length'); return target[key]; } });
+  assert.equal(V('length', CALC, proxy, 'server-copy'), UNV + '?');
+  let reads = 0; const once = [5]; Object.defineProperty(once, 0, { get() { reads++; return reads === 1 ? 5 : NaN; } });
+  assert.equal(V('length', CALC, once, 'server-copy'), '5.0 mm'); assert.equal(reads, 1, 'each value is read once');
+  assert.equal(V('ellipse', CALC, vm.runInNewContext('[400.26, 45, -20, 80, 1234]'), 'server-copy'), E5_TEXT, 'another realm');
+  const frozen = Object.freeze([...E5]); assert.equal(V('ellipse', CALC, frozen, 'server-copy'), E5_TEXT); assert.deepEqual(frozen, E5);
+});
+
+test('comparisonHead keeps a string calculator for display and nulls anything else, as it does for values (S2-V C2)', () => {
+  const head = baseline => model.comparisonHead({ id: P1, studyUid: B, revision: 1, hidden: false, authorSub: 'reader-1', referenceStatus: 'verified',
+    item: { schemaVersion: 1, kind: 'length', seriesUid: '4.5.6.1', sopUid: '4.5.6.1.2', frame: 1, label: 'P 길이', baseline } }, B);
+  assert.deepEqual([head({ calculator: CALC, values: [12.34] }).calculator, head({ calculator: CALC, values: [12.34] }).values], [CALC, [12.34]]);
+  for (const [baseline, calculator] of [[{ calculator: 'other-v9', values: [1] }, 'other-v9'], [{ calculator: '', values: [1] }, ''], [{ values: [1] }, null],
+    [{ calculator: null, values: [1] }, null], [{ calculator: 7, values: [1] }, null], [{ calculator: {}, values: [1] }, null], [undefined, null], ['x', null], [null, null]])
+    assert.equal(head(baseline).calculator, calculator, JSON.stringify(baseline));
+  const text = baseline => { const h = head(baseline); return model.valueText(h.kind, h.calculator, h.values, 'server-copy'); };
+  assert.equal(text({ calculator: CALC, values: [12.34] }), '12.3 mm');
+  assert.equal(text({ values: [12.34] }), UNV + '12.3');
+  assert.equal(text({ calculator: 7, values: [12.34] }), UNV + '12.3');
+  assert.equal(text({ calculator: CALC, values: [12.34, '1'] }), '', 'a list with a non-number is dropped by comparisonHead as before');
+});
+
+test('calculators and copied values never reach a request, draft, pending or held body, a navigation target or the history key (S2-V I1)', async () => {
+  const t = pairTransport();
+  t.pair.items = [pItem(P1, 1, { item: { schemaVersion: 1, kind: 'length', seriesUid: '4.5.6.1', sopUid: '4.5.6.1.2', frame: 1, label: 'P길이', baseline: { calculator: CALC, values: [7.5] } } })];
+  t.state.items = [t.head(F1, 1)];
+  const liveHeads = [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false, kind: 'length', label: 'L', values: [20], calculator: CALC }];
+  const { store, navigations } = makeStore(t, { uuid: counter(), studies: [A, B] });
+  store.syncHistory(history(A, liveHeads)); await tick(40);
+  assert.equal(store.state().heads.get(ITEM), liveHeads[0], 'live heads are kept as given');
+  assert.equal(store.state().pair.heads.get(P1).calculator, CALC);
+  const e = store.state().entries.get(F1);
+  assert.equal(e.head.item.sources[0].calculator, CALC);
+  assert.deepEqual(e.draft, { title: 'T', text: 'X', primary: 0, sources: [{ itemId: ITEM, revision: 2 }] });
+  const key = store.state().historyKey;
+  store.syncHistory(history(A, liveHeads.map(h => ({ ...h, calculator: 'other-v9', values: [99] }))));
+  assert.equal(store.state().historyKey, key, 'the history key ignores calculator and values');
+  const d = store.newDraft(); store.updateDraft(d, { title: '새 소견' });
+  assert.equal(store.toggleSource(d, ITEM), true); assert.equal(store.toggleSource(d, P1, B), true);
+  assert.deepEqual(d.draft.sources, [{ itemId: ITEM, revision: 2 }, { itemId: P1, revision: 1, studyUid: B }]);
+  t.state.responses.push({ status: 503, body: { message: 'delayed' } });
+  assert.equal(await store.save(d, 'create'), false);
+  const requestId = JSON.parse(d.pending.body).requestId;
+  assert.deepEqual(d.pending, { url: '/studies/' + A + '/findings', body: '{"requestId":"' + requestId + '","item":{"schemaVersion":1,"title":"새 소견","text":"",' +
+    '"sources":[{"itemId":"' + ITEM + '","revision":2},{"itemId":"' + P1 + '","revision":1}],"primary":0}}' });
+  store.edit(e); store.updateDraft(e, { text: '수정' });
+  t.state.responses.push({ status: 503, body: { message: 'delayed' } });
+  assert.equal(await store.save(e, 'edit'), false);
+  const editId = JSON.parse(e.pending.body).requestId;
+  assert.equal(e.pending.body, '{"requestId":"' + editId + '","item":{"schemaVersion":1,"title":"T","text":"수정","sources":[{"itemId":"' + ITEM + '","revision":2}],"primary":0},' +
+    '"expectedRevision":1,"action":"edit"}');
+  for (const post of posts(t)) assert.equal(/calculator|values|kind|label|mm|HU/.test(post.options.body), false, post.options.body);
+  assert.deepEqual(plain(await store.navigate(e, 0)), { ok: true, highlighted: true, annotation: 'shown' });
+  assert.deepEqual(navigations, [{ studyUid: A, seriesUid: SERIES, sopUid: SOP, frame: 1, itemId: ITEM }]);
+  const pending = [d, e].map(x => ({ id: x.id, pending: { ...x.pending } }));
+  const [record] = store.detach();
+  assert.deepEqual(record.entries.map(x => ({ id: x.id, pending: x.pending })).sort((a, b) => a.id.localeCompare(b.id)), pending.sort((a, b) => a.id.localeCompare(b.id)));
+});
+
+/* The shipped Findings section over a synthetic Measurements history: live heads in the shape of
+ * config/ohif.js historyState() (values of the saved head, no calculator), a two-study URL, one saved
+ * finding and the comparison study's own viewer-items list. */
+const VX = '1.1', VP = '2.2', VF = 'f0000000-0000-4000-8000-00000000c001';
+const VL = 'e0000000-0000-4000-8000-000000000001', VE = 'e0000000-0000-4000-8000-000000000002', VM = 'e0000000-0000-4000-8000-000000000003';
+const VA = 'e0000000-0000-4000-8000-000000000004', VN = 'e0000000-0000-4000-8000-000000000005', VW = 'e0000000-0000-4000-8000-000000000006';
+const VK = 'e0000000-0000-4000-8000-000000000007', VQ = 'e0000000-0000-4000-8000-000000000008';
+const VO = 'e0000000-0000-4000-8000-000000000009';
+const PL = 'e0000000-0000-4000-8000-00000000b001', PN = 'e0000000-0000-4000-8000-00000000b002', PC = 'e0000000-0000-4000-8000-00000000b003';
+const PD = 'e0000000-0000-4000-8000-00000000b004';
+async function valueViewer() {
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
+  document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
+  const host = new Element('div'); host.id = 'kin-viewer-history'; document.body.append(host);
+  const live = (id, revision, kind, label, values, extra) => Object.assign({ id, revision, hidden: false, kind, label, seriesUid: '1.2', sopUid: '1.3', frame: 1,
+    authorSub: 'doctor', referenceStatus: ['length', 'angle', 'ellipse'].includes(kind) ? 'verified' : null, values, working: false }, extra);
+  const heads = [live(VL, 2, 'length', '길이', [25]), live(VE, 1, 'ellipse', '관심', [...E5]), live(VM, 1, 'length', '새 길이', [20]),
+    live(VA, 1, 'angle', '각도', [12.34]), live(VN, 1, 'length', '계산 없음', [30], { calculator: null }), live(VW, 1, 'ellipse', '넷', E5.slice(0, 4)),
+    live(VK, 1, 'key', '키', null), live(VQ, 1, 'arrow', '화살표', [7])];
+  const copy = (itemId, study, kind, label, values) => ({ itemId, revision: 1, studyUid: study, kind, seriesUid: study === VX ? '1.2' : '2.3', sopUid: study === VX ? '1.3' : '2.4',
+    frame: 1, frameOfReferenceUid: null, label, values, calculator: CALC, sourceDigest: null, authorActor: 'Doctor' });
+  // VO is a copy without the calculator key: a server copy of unknown identity.
+  const { calculator: _omitted, ...old } = copy(VO, VX, 'length', '옛 길이', [9.99]);
+  const item = { schemaVersion: 1, title: '값 소견', text: '본문', hidden: false, primary: 0,
+    sources: [copy(VL, VX, 'length', '길이', [12.34]), copy(VE, VX, 'ellipse', '관심', E5), copy(PL, VP, 'length', 'P 길이', [77.77]), old] };
+  const finding = { id: VF, studyUid: VX, authorSub: 'doctor', authorActor: 'Doctor', revision: 1, hidden: false, createdAt: 't', updatedAt: 't', item,
+    links: [{ itemId: VL, linkState: 'revised', headRevision: 2, headHidden: false }, { itemId: VE, linkState: 'current', headRevision: 1, headHidden: false },
+      { itemId: PL, linkState: 'current', headRevision: 1, headHidden: false }, { itemId: VO, linkState: 'current', headRevision: 1, headHidden: false }] };
+  const pairItem = (id, label, baseline) => ({ id, studyUid: VP, revision: 1, hidden: false, authorSub: 'doctor', referenceStatus: 'verified',
+    item: { schemaVersion: 1, kind: 'length', seriesUid: '2.3', sopUid: '2.4', frame: 1, label, baseline } });
+  const server = { denied: false, log: [], pair: [pairItem(PL, 'P 길이', { calculator: CALC, values: [77.77] }), pairItem(PN, 'P 무계산', { values: [66.6] }),
+    pairItem(PC, 'P 계산', { calculator: CALC, values: [55.55] }), pairItem(PD, 'P 지운 계산', { calculator: CALC, values: [44.44] })] };
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => JSON.parse(JSON.stringify(body)) });
+  const window = new EventTarget(), ticks = [];
+  window.fetch = async (url, options) => {
+    const method = (options && options.method) || 'GET';
+    server.log.push({ method, url, body: options && options.body });
+    if (url === '/api/me') return json(200, { sub: 'doctor', kind: 'member', roles: ['radiologist'] });
+    if (url.startsWith('/api/studies/' + VP + '/viewer-items?')) return server.denied ? json(403, { message: 'refused' }) : json(200, { items: server.pair, nextCursor: null });
+    if (method === 'POST') return json(503, { message: 'synthetic' });
+    if (url.startsWith('/api/studies/' + VX + '/findings/' + VF + '/revisions?'))
+      return json(200, { revisions: [{ revision: 1, action: 'create', actor: 'Doctor', at: 't1', reason: '', item }], nextCursor: null });
+    if (url.startsWith('/api/studies/' + VX + '/findings?')) return json(200, { items: [finding], nextCursor: null });
+    return json(404, {});
+  };
+  window.kinViewerHistoryState = () => ({ scope: VX, subject: 'doctor', ended: false, suspended: false, writable: true, heads });
+  window.prompt = () => '사유'; window.confirm = () => true;
+  const sandbox = { window, document, crypto: webcrypto, console, Event, AbortController, URLSearchParams, setTimeout, clearTimeout,
+    location: { search: '?StudyInstanceUIDs=' + VX + ',' + VP }, setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {} };
+  vm.createContext(sandbox);
+  vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
+  vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
+  // The shipped model, with its store kept for the tests that reshape a comparison head.
+  const linkModel = sandbox.kinFindingLinkModel;
+  let store = null;
+  const findings = window.kinViewerFindings({}, Object.assign({}, linkModel, { createStore: deps => (store = linkModel.createStore(deps)) }));
+  assert.equal(findings.mount(), true);
+  const sync = async () => { for (let i = 0; i < 3; i++) { for (const fn of [...ticks]) fn(); await flush(); } };
+  await sync();
+  const panel = () => document.body.all().find(e => e.id === 'kin-viewer-findings');
+  const row = () => panel().all().find(e => e.tagName === 'article' && e.dataset.findingId === VF);
+  return { server, heads, findings, sync, panel, row, store: () => store,
+    line: id => row().all().find(e => e.dataset.itemId === id),
+    choices: summary => panel().all().find(e => e.tagName === 'details' && e.children[0]?.textContent === summary).children.filter(e => e.tagName === 'label')
+      .map(l => [l.children[0].attributes['aria-label'], l.children[1].textContent]),
+    press: async (scope, name) => { const [b] = scope.all().filter(e => e.tagName === 'button' && e.textContent === name); assert.ok(b, name); b.click(); await flush(); await sync(); } };
+}
+
+test('mounted values: a saved finding shows its frozen server copies with units, the revised one included, and history lines stay count-only (S2-V C1, C5a/b)', async () => {
+  const h = await valueViewer();
+  assert.equal(h.panel().dataset.comparisonState, 'ready');
+  const first = line => line.children[0].textContent;
+  assert.equal(first(h.line(VL)), '[현재 검사] ★ Length · 길이 · 프레임 1 · r1 · 12.3 mm · ');
+  assert.equal(h.line(VL).dataset.linkState, 'revised');
+  assert.ok(textOf(h.line(VL)).includes(' (현재 r2)'));
+  assert.equal(textOf(h.row()).includes('25.0'), false, 'the current head value of a revised link is not shown');
+  assert.equal(first(h.line(VE)), '[현재 검사] Ellipse ROI · 관심 · 프레임 1 · r1 · ' + E5_TEXT + ' · ');
+  assert.equal(first(h.line(PL)), '[비교 검사] Length · P 길이 · 프레임 1 · r1 · 77.8 mm · ');
+  // A saved copy without a calculator is a server copy of unknown identity, never a live head.
+  assert.equal(first(h.line(VO)), '[현재 검사] Length · 옛 길이 · 프레임 1 · r1 · 수치(단위 미확인): 10.0 · ');
+  assert.ok(h.heads.every(x => !Object.prototype.hasOwnProperty.call(x, 'calculator') || x.id === VN), 'no calculator is stamped on live heads');
+  await h.press(h.row(), 'History');
+  const lines = h.row().all().filter(e => e.tagName === 'p' && /^r1 · /.test(e.textContent)).map(e => e.textContent);
+  assert.deepEqual(lines, ['r1 · 생성 · Doctor · t1 ·  · 값 소견 · 표식 4개']);
+  h.findings.stop();
+});
+
+test('mounted values: live heads show units without a calculator, comparison heads only with it; checkbox names and new pairs carry no values (S2-V C1, C5d)', async () => {
+  const h = await valueViewer();
+  // A comparison head that lost its calculator key is still a server copy: no unit.
+  delete h.store().state().pair.heads.get(PD).calculator;
+  await h.press(h.row(), 'Edit');
+  assert.equal(h.line(VO).children[0].textContent, '[현재 검사] Length · 옛 길이 · 프레임 1 · r1 · 수치(단위 미확인): 10.0 · ');
+  assert.deepEqual(h.choices('Link Saved Items'), [
+    ['Link Length · 새 길이 · 프레임 1 · r1', ' Length · 새 길이 · 프레임 1 · r1 · 20.0 mm · Verified'],
+    ['Link Angle · 각도 · 프레임 1 · r1', ' Angle · 각도 · 프레임 1 · r1 · 12.3° · Verified'],
+    ['Link Length · 계산 없음 · 프레임 1 · r1', ' Length · 계산 없음 · 프레임 1 · r1 · 수치(단위 미확인): 30.0 · Verified'],
+    ['Link Ellipse ROI · 넷 · 프레임 1 · r1', ' Ellipse ROI · 넷 · 프레임 1 · r1 · 수치(단위 미확인): 400.3 / 45.0 / -20.0 / 80.0 · Verified'],
+    ['Link Key Image · 키 · 프레임 1 · r1', ' Key Image · 키 · 프레임 1 · r1'],
+    ['Link Arrow · 화살표 · 프레임 1 · r1', ' Arrow · 화살표 · 프레임 1 · r1 · 수치(단위 미확인): 7.0']]);
+  assert.deepEqual(h.choices('Link Comparison Items'), [
+    ['Link Comparison Length · P 무계산 · 프레임 1 · r1', ' Length · P 무계산 · 프레임 1 · r1 · 수치(단위 미확인): 66.6 · Verified'],
+    ['Link Comparison Length · P 계산 · 프레임 1 · r1', ' Length · P 계산 · 프레임 1 · r1 · 55.6 mm · Verified'],
+    ['Link Comparison Length · P 지운 계산 · 프레임 1 · r1', ' Length · P 지운 계산 · 프레임 1 · r1 · 수치(단위 미확인): 44.4 · Verified']]);
+  // A newly linked pair has no server copy yet: it is named from the head, without numbers.
+  const box = h.panel().all().find(e => e.attributes['aria-label'] === 'Link Length · 새 길이 · 프레임 1 · r1');
+  box.checked = true; box.dispatchEvent(new Event('change')); await h.sync();
+  assert.equal(h.line(VM).children[0].textContent, '[현재 검사] Length · 새 길이 · 프레임 1 · r1 · ');
+  await h.press(h.row(), 'Save');
+  const post = h.server.log.filter(x => x.method === 'POST');
+  assert.equal(post.length, 1);
+  const body = JSON.parse(post[0].body);
+  assert.equal(post[0].body, JSON.stringify({ requestId: body.requestId, item: { schemaVersion: 1, title: '값 소견', text: '본문',
+    sources: [{ itemId: VL, revision: 1 }, { itemId: VE, revision: 1 }, { itemId: PL, revision: 1 }, { itemId: VO, revision: 1 }, { itemId: VM, revision: 1 }], primary: 0 },
+    expectedRevision: 1, action: 'edit' }));
+  h.findings.stop();
+});
+
+test('mounted values: a refused comparison study leaves no copied or listed number of it on screen (S2-V C5c, I5)', async () => {
+  const h = await valueViewer();
+  await h.press(h.row(), 'Edit');
+  assert.ok(textOf(h.panel()).includes('77.8 mm') && textOf(h.panel()).includes('66.6'));
+  h.server.denied = true;
+  await h.press(h.panel(), 'Reload Comparison Items');
+  assert.equal(h.panel().dataset.comparisonState, 'denied');
+  assert.ok(h.row(), 'the finding being edited stays');
+  assert.equal(h.line(PL).children[0].textContent, '[비교 검사] 접근할 수 없는 비교 검사의 표식 · ');
+  assert.deepEqual(h.choices('Link Comparison Items'), []);
+  const shown = textOf(h.panel());
+  for (const secret of ['77.8', '66.6', '55.6', '44.4', 'P 길이', 'P 무계산', 'P 계산', 'P 지운 계산']) assert.equal(shown.includes(secret), false, secret);
+  assert.ok(shown.includes('12.3 mm') && shown.includes(E5_TEXT), 'the first study copies stay');
+  h.findings.stop();
+});
+
+test('the live head premise: config/ohif.js historyState() copies the values of the saved server head', () => {
+  const start = source.indexOf('const historyState = () => ({'), end = source.indexOf('function hydrate()', start);
+  assert.ok(start > 0 && end > start);
+  const text = source.slice(start, end);
+  assert.ok(text.includes('values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null'));
+  assert.ok(text.includes('heads: [...entries.values()].filter(e => e.head)'), 'only saved heads');
 });
 
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step

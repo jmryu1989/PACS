@@ -59,14 +59,18 @@ test('every worklist and viewer reason has Korean text; superseded and timeout n
 /* ---------- rows ---------- */
 test('a server item becomes a plain read-only row with DB link states and frozen values, never a Verified label', () => {
   const states = ['current', 'revised', 'hidden', 'missing'];
-  const sources = states.map((state, i) => source({ itemId: 'bbbbbbbb-0000-4000-8000-00000000000' + (i + 1), frame: i + 1, values: i ? null : [20, 3.14159] }));
+  const sources = states.map((state, i) => source({ itemId: 'bbbbbbbb-0000-4000-8000-00000000000' + (i + 1), frame: i + 1, values: i ? null : [3.14159] }));
   const item = finding({ links: sources.map((s, i) => ({ itemId: s.itemId, linkState: states[i], headRevision: i === 1 ? 4 : s.revision, headHidden: i === 2 })) }, sources);
   item.item.primary = 1;
   const row = command.rowOf(item, X);
   assert.deepEqual(row.sources.map(s => [s.linkState, s.linkLabel]), states.map(s => [s, links.LINK_LABELS[s]]));
   assert.ok(row.sources.every(s => s.linkText === links.sourceStatus(s, { linkState: s.linkState }, null).text));
   assert.equal(row.sources[1].headRevision, 4);
-  assert.equal(row.sources[0].description, 'Length · 길이 · 프레임 1 · r1 · 20.0 / 3.1');
+  assert.equal(row.sources[0].description, 'Length · 길이 · 프레임 1 · r1 · 3.1 mm');
+  assert.deepEqual([row.sources[0].calculator, row.sources[0].values], ['kin-native-manual-v1', [3.14159]]);
+  // A length never carries two values; such a copy shows both numbers without a unit (S2-V C6).
+  const twice = command.rowOf(finding({}, [source({ values: [20, 3.14159] })]), X).sources[0];
+  assert.equal(twice.description, 'Length · 길이 · 프레임 1 · r1 · 수치(단위 미확인): 20.0 / 3.1');
   assert.equal(row.primary, 1); assert.equal(row.title, item.item.title); assert.equal(row.author, 'Doctor A');
   assert.match(row.updated, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   assert.equal(command.timeText('not a date'), '시각 미확인'); assert.equal(command.timeText(null), '시각 미확인');
@@ -84,6 +88,46 @@ test('a server item becomes a plain read-only row with DB link states and frozen
     Object.assign(finding(), { item: { title: 't', text: 't', primary: 3, sources: [source()] } }), null,
   ];
   for (const bad of broken) assert.throws(() => command.rowOf(bad, X), undefined, JSON.stringify(bad)?.slice(0, 80));
+});
+
+// S2-V: the frozen copy's numbers with names and units only for the exact calculator; display only.
+const itemN = n => 'bbbbbbbb-0000-4000-8000-0000000002' + String(n).padStart(2, '0');
+const ELLIPSE_VALUES = [400.26, 45, -20, 80, 1234];
+const ELLIPSE_TEXT = '면적 400.3 mm² · 평균 45.0 HU · 최소 -20.0 HU · 최대 80.0 HU · 화소 수 1234';
+test('rows keep the copied calculator for display only: exact identity names the units, another string shows unverified numbers, another type invalidates the page (S2-V C2)', () => {
+  const { calculator: _omitted, ...old } = source({ itemId: itemN(7) });
+  const cases = [
+    [source({ itemId: itemN(1) }), 'kin-native-manual-v1', 'Length · 길이 · 프레임 1 · r1 · 20.0 mm'],
+    [source({ itemId: itemN(2), kind: 'ellipse', label: '관심 영역', values: ELLIPSE_VALUES }), 'kin-native-manual-v1', 'Ellipse ROI · 관심 영역 · 프레임 1 · r1 · ' + ELLIPSE_TEXT],
+    [source({ itemId: itemN(3), kind: 'angle', label: '각', values: [12.34] }), 'kin-native-manual-v1', 'Angle · 각 · 프레임 1 · r1 · 12.3°'],
+    [source({ itemId: itemN(4), calculator: 'kin-native-manual-v2' }), 'kin-native-manual-v2', 'Length · 길이 · 프레임 1 · r1 · 수치(단위 미확인): 20.0'],
+    [source({ itemId: itemN(5), calculator: '' }), '', 'Length · 길이 · 프레임 1 · r1 · 수치(단위 미확인): 20.0'],
+    [source({ itemId: itemN(6), calculator: null }), null, 'Length · 길이 · 프레임 1 · r1 · 수치(단위 미확인): 20.0'],
+    [old, null, 'Length · 길이 · 프레임 1 · r1 · 수치(단위 미확인): 20.0'],
+    [source({ itemId: itemN(8), kind: 'ellipse', label: '관심 영역', values: [400.26, 45, -20, 80, 1234.5] }), 'kin-native-manual-v1',
+      'Ellipse ROI · 관심 영역 · 프레임 1 · r1 · 수치(단위 미확인): 400.3 / 45.0 / -20.0 / 80.0 / 1234.5'],
+    [source({ itemId: itemN(9), kind: 'ellipse', label: '관심 영역', values: ELLIPSE_VALUES.slice(0, 4) }), 'kin-native-manual-v1',
+      'Ellipse ROI · 관심 영역 · 프레임 1 · r1 · 수치(단위 미확인): 400.3 / 45.0 / -20.0 / 80.0'],
+    [source({ itemId: itemN(10), kind: 'arrow', label: '화살표', values: [7] }), 'kin-native-manual-v1', 'Arrow · 화살표 · 프레임 1 · r1 · 수치(단위 미확인): 7.0'],
+    [source({ itemId: itemN(11), kind: 'volume3d', label: '부피', values: [7] }), 'kin-native-manual-v1', 'volume3d · 부피 · 프레임 1 · r1 · 수치(단위 미확인): 7.0'],
+    [source({ itemId: itemN(12), kind: 'key', label: '키', values: null, calculator: null }), null, 'Key Image · 키 · 프레임 1 · r1'],
+    [source({ itemId: itemN(13), kind: 'key', label: '키', values: [], calculator: null }), null, 'Key Image · 키 · 프레임 1 · r1'],
+  ];
+  for (const [s, calculator, description] of cases) {
+    const input = freeze(finding({}, [s])), before = JSON.stringify(input);
+    const row = command.rowOf(input, X), copy = row.sources[0];
+    assert.deepEqual([copy.calculator, copy.description], [calculator, description], description);
+    assert.equal(JSON.stringify(input), before, 'the server item is not changed');
+    // The pin and the navigation target are the same with or without a calculator: it is never sent.
+    assert.deepEqual(plain(command.pinSource(row, 0, 3)), { generation: 3, id: ID1, revision: 1, index: 0, itemId: s.itemId, sourceRevision: 1,
+      studyUid: X, seriesUid: SERIES, sopUid: SOP, frame: 1 });
+    assert.deepEqual(command.targetOf(copy), { studyUid: X, seriesUid: SERIES, sopUid: SOP, frame: 1, itemId: s.itemId });
+  }
+  for (const calculator of [1, 0, true, {}, ['kin-native-manual-v1'], NaN])
+    assert.throws(() => command.rowOf(finding({}, [source({ calculator })]), X), undefined, String(calculator));
+  // describeSource names the row copy as a server copy: a missing calculator never gains a unit.
+  assert.equal(command.describeSource({ kind: 'length', label: 'L', frame: 2, revision: 3, values: [1] }), 'Length · L · 프레임 2 · r3 · 수치(단위 미확인): 1.0');
+  assert.equal(command.describeSource({ kind: 'length', label: '', frame: 2, revision: 3, values: [-0.04], calculator: 'kin-native-manual-v1' }), 'Length · 프레임 2 · r3 · 0.0 mm');
 });
 
 /* ---------- list store ---------- */
@@ -585,7 +629,7 @@ test('adapter: the panel lists the selected study read-only with textContent, li
   assert.equal(h.articles().length, 1);
   const article = h.articles()[0];
   assert.ok(article.textContent.includes('결절 <img src=x onerror=alert(1)>'), 'external text stays text');
-  assert.ok(article.textContent.includes('Length · 길이 · 프레임 1 · r1 · 20.0'));
+  assert.ok(article.textContent.includes('Length · 길이 · 프레임 1 · r1 · 20.0 mm · Current'));
   assert.deepEqual(article.all().filter(e => e.dataset.kinLinkState).map(e => e.textContent), ['Current', 'Current']);
   assert.ok(!h.panel().textContent.includes('Verified'));
   assert.ok(h.panel().textContent.includes('영상 원본 확인 결과가 아닙니다'));
@@ -609,6 +653,28 @@ test('adapter: the panel lists the selected study read-only with textContent, li
   // Escape and Close return focus to the toggle.
   const escape = new Event('keydown', { cancelable: true }); escape.key = 'Escape'; h.panel().dispatchEvent(escape);
   assert.equal(h.panel().hidden, true); assert.equal(h.document.activeElement, toggle);
+});
+
+test('adapter: copied values are text with names and units; button names and the navigation target stay as they were (S2-V)', async () => {
+  const h = worklist(), v = viewer(); h.embed(v);
+  const ellipse = source({ itemId: itemN(21), kind: 'ellipse', label: '<b>관심</b>', values: ELLIPSE_VALUES });
+  const odd = source({ itemId: itemN(22), label: '다른 계산', calculator: 'other-v9', values: [12.35] });
+  h.s.respond = () => Promise.resolve(page([finding({}, [source(), ellipse, odd])]));
+  await h.open();
+  const labels = h.articles()[0].children.find(e => e.tagName === 'ul').children.map(li => li.children[0]);
+  assert.deepEqual(labels.map(e => [e.tagName, e.children.length, e.textContent]), [
+    ['span', 0, '★ Length · 길이 · 프레임 1 · r1 · 20.0 mm · '],
+    ['span', 0, 'Ellipse ROI · <b>관심</b> · 프레임 1 · r1 · ' + ELLIPSE_TEXT + ' · '],
+    ['span', 0, 'Length · 다른 계산 · 프레임 1 · r1 · 수치(단위 미확인): 12.4 · ']]);
+  // The Go to Image name is unchanged; its description (heading + this label) now carries the unit text.
+  const go = h.source(ID1, 1);
+  assert.equal(go.textContent, 'Go to Image');
+  assert.equal(go.getAttribute('aria-label'), null);
+  const [, label] = go.getAttribute('aria-describedby').split(' ');
+  assert.equal(h.byId(label), labels[1]);
+  await h.click(go);
+  assert.deepEqual([...v.calls].map(c => JSON.parse(c)), [target(X, SOP, itemN(21))], 'no calculator or value leaves the worklist');
+  assert.deepEqual(h.s.api.map(([method]) => method), ['GET']);
 });
 
 test('adapter: Go to Image calls the embedded viewer function read at call time with the frozen source, then announces and focuses', async () => {

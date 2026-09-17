@@ -60,7 +60,8 @@ window.kinViewerFindings = function (services, model) {
     };
     const names = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
     const describe = h => (names[h.kind] || h.kind) + ' · ' + (h.label || '') + ' · 프레임 ' + h.frame + ' · r' + h.revision;
-    const values = v => Array.isArray(v) && v.length ? ' · ' + v.map(n => Number.isFinite(n) ? (Math.round(n * 10) / 10).toFixed(1) : '?').join(' / ') : '';
+    // Copied numbers with names and units only for a known provenance (S2-V); a source's are its frozen revision's.
+    const values = (h, provenance) => { const t = model.valueText(h.kind, h.calculator, h.values, provenance); return t ? ' · ' + t : ''; };
     const rows = new Map();
     function sourceLine(parent, e, s, index, editing) {
       const st = store.state(), study = store.studyOf(e, s), own = study === st.scope;
@@ -71,7 +72,7 @@ window.kinViewerFindings = function (services, model) {
       line.style.cssText = 'margin:2px 0 2px 6px;padding-left:6px;border-left:2px solid ' + (own ? '#405777' : '#b08a3c');
       // Nothing copied from a comparison study that this login can no longer read stays on screen.
       const withheld = !own && st.pair.status === 'denied';
-      const label = withheld ? '접근할 수 없는 비교 검사의 표식' : s.kind ? describe(s) + values(s.values) : head ? describe(head) : '표식 ' + s.itemId.slice(0, 8);
+      const label = withheld ? '접근할 수 없는 비교 검사의 표식' : s.kind ? describe(s) + values(s, 'server-copy') : head ? describe(head) : '표식 ' + s.itemId.slice(0, 8);
       const tag = own ? (store.pairOf() ? '[현재 검사] ' : '') : '[비교 검사] ';
       text(line, 'span', tag + (index === (e.head ? e.head.item.primary ?? 0 : e.draft.primary) ? '★ ' : '') + label + ' · ');
       const badge = text(line, 'strong', status.label); badge.dataset.kinLinkState = status.linkState;
@@ -88,14 +89,15 @@ window.kinViewerFindings = function (services, model) {
         if (index !== e.draft.primary) button(line, 'Set Primary', () => store.setPrimary(e, index), !!(e.busy || e.pending));
       }
     }
-    function choices(box, e, heads, name, study) {
+    // `provenance`: 'live-head' for this document's Measurements heads, 'server-copy' for the comparison list.
+    function choices(box, e, heads, name, study, provenance) {
       for (const h of heads) {
         const wrap = text(box, 'label', ''); wrap.style.display = 'block';
         const check = document.createElement('input'); check.type = 'checkbox'; check.checked = false;
         check.disabled = !!(h.hidden || h.working || e.busy || e.pending || e.draft.sources.length >= model.LIMITS.sources || (study && study.blocked));
         check.setAttribute('aria-label', name + describe(h));
         check.addEventListener('change', () => { if (!store.toggleSource(e, h.id, study ? study.uid : undefined)) check.checked = false; });
-        wrap.append(check, document.createTextNode(' ' + describe(h) + values(h.values) + (h.hidden ? ' · Hidden' : h.working ? ' · 미저장 수정 중' : '') +
+        wrap.append(check, document.createTextNode(' ' + describe(h) + values(h, provenance) + (h.hidden ? ' · Hidden' : h.working ? ' · 미저장 수정 중' : '') +
           (h.referenceStatus ? ' · ' + (h.referenceStatus === 'verified' ? 'Verified' : 'Unverified') : '')));
       }
     }
@@ -105,7 +107,7 @@ window.kinViewerFindings = function (services, model) {
       const box = text(parent, 'details', ''); box.open = true; text(box, 'summary', 'Link Saved Items');
       if (!store.anchorLive()) text(box, 'p', '현재 검사의 표식은 현재 검사의 영상 칸을 선택하면 연결할 수 있습니다.');
       else if (!heads.length) text(box, 'p', '연결할 수 있는 저장 표식이 없습니다. 먼저 표식을 저장하세요.');
-      choices(box, e, heads, 'Link ', null);
+      choices(box, e, heads, 'Link ', null, 'live-head');
       if (!pair) return;
       // The comparison study's own saved list; an entry that already names another comparison study cannot add these.
       const other = store.comparisonOf(e), blocked = !!other && other !== pair;
@@ -117,7 +119,7 @@ window.kinViewerFindings = function (services, model) {
       else if (note) text(group, 'p', note);
       const pairHeads = st.pair.status === 'ready' ? [...st.pair.heads.values()].filter(h => !linked(h.id)).map(h => ({ ...h, working: st.pair.working.has(h.id) })) : [];
       if (st.pair.status === 'ready' && !pairHeads.length) text(group, 'p', '연결할 수 있는 비교 검사 저장 표식이 없습니다.');
-      choices(group, e, pairHeads, 'Link Comparison ', { uid: pair, blocked });
+      choices(group, e, pairHeads, 'Link Comparison ', { uid: pair, blocked }, 'server-copy');
       button(group, 'Reload Comparison Items', () => store.loadPair(), st.pair.status === 'loading' || !!e.busy);
     }
     function row(e) {

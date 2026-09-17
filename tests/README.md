@@ -216,7 +216,7 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 dirty/busy·이탈 경고와 표식 전용 `kinViewerHistoryHasUnsaved` 유지, 판독 작업공간·창 재사용·Hanging Protocol·칸 병합 판정을
 출하 코드로 확인한다. 브라우저 시험 5·6은 Next Study·창 재사용/닫기·이탈 경고의 차단과 깨끗한 화면의 통과, 비교 검사 영상 칸
 활성화 동안 작성·대기 소견의 유지(보관하지 않음), 403·mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)의 다른 검사 복원 차단은 원문 위치 확인만 하며 브라우저로 실행하지 않았다.
-영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (33개, 8개는 S2-B2; `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
+영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (35개, 8개는 S2-B2, 2개는 S2-V; `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
 `python tests/e2e/test_finding_worklist.py` (4개, 4는 S2-B2; 기존 `measurements` 프로필의 19번째 suite). 워크리스트·통합 작업공간의 Image Findings는 선택한
 판독 대상 검사의 기존 소견 목록 읽기만 하며, Go to Image는 이미 그 검사를 표시하는 통합 작업공간 영상 또는 연결된 영상 창 하나에만 보낸다.
 순수 시험은 대상 선택(여러 창·미연결·소유자·로딩), 호출 전 거절, 호출 시점의 함수 조회, 대기 후 계정·선택·문서·범위 확인, 15초 제한,
@@ -225,6 +225,16 @@ dirty/busy·이탈 경고와 표식 전용 `kinViewerHistoryHasUnsaved` 유지, 
 호출 없이 list-changed로 거절한다(다른 원본으로 바꿔 보내지 않음). 브라우저 시험은 실제 영상의
 `getCurrentImageId`로 도착을 증명하고, 거절·대체된 명령은 성공 문구 없음·URL 검사 범위·DB 행 바이트 동일만 확인한다(영상 화면은 이미 이동했을 수 있음).
 MPR/볼륨 화면 거절은 영상 쪽 순수 시험 범위이며 비교 검사 원본(S2-B2)과 판독문 연결은 포함하지 않는다.
+소견 수치 이름·단위(S2-V): 뷰어 Findings와 워크리스트 Image Findings는 서버가 복사한 수치를 다시 계산하지 않고 이름·단위와 함께 보인다(길이 `12.3 mm`, 각도 `12.3°`,
+타원 `면적 … mm² · 평균 … HU · 최소 … HU · 최대 … HU · 화소 수 …`). 순서는 고정 계산기(`config/ohif.js` sample)를, 문구는 `viewer-job-print.js`를 따르며
+인쇄의 반올림은 달라 같은 값의 소수 자릿수가 다를 수 있다(인쇄 코드는 바꾸지 않음). `valueText(kind, calculator, values, provenance)`는 출처가 필수다.
+서버 사본(소견 원본·비교 검사 viewer-items)은 계산기가 정확히 `kin-native-manual-v1`일 때만, 뷰어 Measurements의 저장 표식은 계산기가 없거나 같을 때만 단위를 붙인다.
+그 밖의 출처·계산기, 종류별 개수(1/1/5) 불일치, 유한수가 아니거나 1e21 이상인 값, 음이 아닌 안전 정수가 아닌 화소 수는 원본 전체를
+`수치(단위 미확인): a / b`로 보인다. 반올림은 `Math.round(n*10)/10` 후 한 자리이며 `-0`은 `0.0`, 화소 수는 그대로 쓴다. 계산기는 표시에만 쓰며
+요청 본문·초안·보관 사본·이동 대상에 들어가지 않는다. Revised 연결은 연결 당시 값을, 이력 줄은 표식 개수만, 접근할 수 없는 비교 검사는 수치 없이 보인다.
+순수 시험은 `finding_link_model_test.cjs` 58개 중 7개(형식 행렬, comparisonHead, 요청 바이트, 출하 Findings 화면 3개, 저장 표식 값 출처)와 위 2개다.
+기존 `measurements` 프로필 안의 `test_finding_worklist.py` 1·4와 `test_finding_navigation.py` 1은 API로 넣은 길이·축 정렬 타원의 목록·뷰어 표시,
+그린 길이의 선택지와 저장 사본의 `mm`, 비교 검사 회수 뒤 비교 길이 수치의 부재를 확인한다(suite 수·시간 한도 변경 없음). 3D 위치 연결(D1)과 특성(D2)은 이 범위 밖이다.
 비교 검사 원본 서버(S2-B2 B2-S): `finding_api_test.py` 8~10(기존 `measurements` 프로필 17번째 suite 안)과 `finding_input_test.cjs`의
 `comparisonStudies`. 검사 X의 소견은 같은 비어 있지 않은 PatientID·같은 기관이며 둘 다 현재 읽을 수 있는 비교 검사 P 하나의 표식을
 평생 하나만 연결한다(다른 P는 409 `FINDING_COMPARISON_STUDY`, 새 소견으로 기록). 모든 개정의 계보에 읽을 수 없는 검사가 있으면 목록·이력·
