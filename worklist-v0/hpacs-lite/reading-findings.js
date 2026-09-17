@@ -31,7 +31,7 @@ window.KinReadingFindings = function (app) {
   const result = node('p', '', panel); result.id = 'reading-findings-nav'; result.setAttribute('role', 'status'); result.dataset.result = '';
   const recovery = node('p', '', panel); recovery.id = 'reading-findings-recovery'; recovery.hidden = true;
   const openImage = button('Open Image', openViewer, recovery);
-  const retry = button('Retry Go to Image', () => { if (last) go(last.id, last.index); }, recovery);
+  const retry = button('Retry Go to Image', () => { if (last) go(last.id, last.index, last); }, recovery);
   node('p', 'Current·Revised·Hidden·Missing은 저장된 표식과의 DB 연결 상태이며 영상 원본 확인 결과가 아닙니다. 수치는 연결 당시 서버 사본입니다.', panel);
   const list = node('section', '', panel); list.id = 'reading-findings-list'; list.setAttribute('aria-label', 'Image Findings List');
   panel.addEventListener('keydown', e => { if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); show(false); toggle.focus(); } });
@@ -137,10 +137,12 @@ window.KinReadingFindings = function (app) {
   }
 
   /* ---------- commands ---------- */
-  async function go(id, index) {
+  // A retry passes the pin of the source first pressed; a reloaded row that no longer matches it is list-changed.
+  async function go(id, index, pinned) {
     sync();
-    const st = store.state(), row = st.rows.find(r => r.id === id), source = row ? row.sources[index] : null;
-    last = { id, index };
+    const st = store.state(), row = st.rows.find(r => r.id === id), pin = command.pinSource(row, index, st.generation);
+    const source = pin && (!pinned || command.samePin(pinned, pin)) ? row.sources[index] : null;
+    last = source ? pin : null;
     setResult('영상 이동 중… 결과를 확인하고 있습니다.', 'pending', false);
     await commands.run({
       expected: { owner: live() ? owner() : null, sub: sub(), uid: st.uid, generation: st.generation },

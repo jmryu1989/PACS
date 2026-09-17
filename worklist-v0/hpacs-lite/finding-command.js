@@ -232,6 +232,17 @@
       return links.validTarget(target) ? target : null;
     } catch (_) { return null; }
   }
+  /* Retry replays the source the user pressed, never whatever sits at its index after a reload: the pin
+   * holds the list generation, the finding id, revision and source index, and the source's item and
+   * immutable image identity. A row that no longer matches it is list-changed before any target is read. */
+  const PIN = ['generation', 'id', 'revision', 'index', 'itemId', 'sourceRevision', 'studyUid', 'seriesUid', 'sopUid', 'frame'];
+  function pinSource(row, index, generation) {
+    const source = row && Array.isArray(row.sources) && Number.isSafeInteger(index) && index >= 0 ? row.sources[index] : null;
+    if (!source || typeof source !== 'object') return null;
+    return Object.freeze({ generation, id: row.id, revision: row.revision, index, itemId: source.itemId, sourceRevision: source.revision,
+      studyUid: source.studyUid, seriesUid: source.seriesUid, sopUid: source.sopUid, frame: source.frame });
+  }
+  const samePin = (a, b) => !!a && !!b && PIN.every(key => a[key] === b[key]);
   /* One command at a time is current. `job` = {expected:{owner, sub, uid, generation}, source,
    * choose() -> refusal | {kind, probe(), invoke(target)}, announce(result, choice)}. The checks, the
    * call and (after the await) the identity check and the announcement each happen in one tick;
@@ -288,7 +299,7 @@
   }
 
   const api = { reasonText, retryable, openable, arrivalText, readinessText, describeSource, timeText, rowOf, listPath, createListStore,
-    chooseTarget, precheck, sameIdentity, validResult, targetOf, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)) };
+    chooseTarget, precheck, sameIdentity, validResult, targetOf, pinSource, samePin, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)) };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.kinFindingCommand = api;
 })(globalThis);

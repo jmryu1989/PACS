@@ -287,6 +287,42 @@ test('result: only the exact viewer shape from any realm counts; everything else
     assert.equal(command.targetOf(bad), null);
 });
 
+const ITEM3 = 'bbbbbbbb-0000-4000-8000-000000000003';
+const KEY_SOURCE = () => source({ itemId: ITEM2, kind: 'key', sopUid: SOP2, label: '키 영상', values: null, revision: 2 });
+test('retry pin: list generation, finding id/revision/index and the source item and image identity; any difference is another source', () => {
+  const row = command.rowOf(finding(), X), pin = command.pinSource(row, 0, 3);
+  assert.deepEqual(plain(pin), { generation: 3, id: ID1, revision: 1, index: 0, itemId: ITEM1, sourceRevision: 1, studyUid: X, seriesUid: SERIES, sopUid: SOP, frame: 1 });
+  assert.equal(Object.isFrozen(pin), true);
+  const pinOf = (item, index = 0, generation = 3) => command.pinSource(command.rowOf(item, X), index, generation);
+  assert.equal(command.samePin(pin, pinOf(finding())), true, 'an identical reloaded row keeps the pin');
+  assert.equal(command.samePin(pin, pinOf(finding({ links: [{ itemId: ITEM1, linkState: 'revised', headRevision: 4, headHidden: false }] }))), true,
+    'a DB link state is not image identity');
+  const differ = other => Object.keys(pin).filter(key => pin[key] !== other[key]);
+  const cases = [
+    [command.pinSource(row, 0, 4), ['generation']],
+    [command.pinSource(row, 1, 3), ['index', 'itemId', 'sourceRevision', 'sopUid']],
+    [pinOf(finding({}, [source(), source()]), 1), ['index']],
+    [pinOf(finding({ revision: 2 }, [KEY_SOURCE(), source()])), ['revision', 'itemId', 'sourceRevision', 'sopUid']],
+    [pinOf(finding({}, [KEY_SOURCE(), source()])), ['itemId', 'sourceRevision', 'sopUid']],
+    [pinOf(finding({ revision: 2 })), ['revision']],
+    [pinOf(finding({ id: ID2 })), ['id']],
+    [pinOf(finding({}, [source({ itemId: ITEM3 })])), ['itemId']],
+    [pinOf(finding({}, [source({ revision: 2 })])), ['sourceRevision']],
+    [pinOf(finding({}, [source({ studyUid: B })])), ['studyUid']],
+    [pinOf(finding({}, [source({ seriesUid: '1.2.840.10.2' })])), ['seriesUid']],
+    [pinOf(finding({}, [source({ sopUid: SOP2 })])), ['sopUid']],
+    [pinOf(finding({}, [source({ frame: 2 })])), ['frame']],
+  ];
+  for (const [other, keys] of cases) {
+    assert.deepEqual(differ(other), keys);
+    assert.equal(command.samePin(pin, other), false, keys.join());
+  }
+  for (const [value, index] of [[null, 0], [row, 2], [row, -1], [row, '0'], [row, 0.5], [{ id: ID1, sources: 'x' }, 0], [{ id: ID1, sources: [null] }, 0]])
+    assert.equal(command.pinSource(value, index, 3), null, JSON.stringify(index));
+  assert.equal(command.samePin(null, pin), false); assert.equal(command.samePin(pin, undefined), false);
+  assert.equal(command.samePin(pin, { ...pin }), true);
+});
+
 /* ---------- the command race ---------- */
 function clock() {
   let now = 0, id = 0; const timers = new Map();
@@ -775,6 +811,135 @@ test('adapter: selection A-B-A, 403/404/503 and session end clear rows and drop 
   const other = worklist(); await other.open();
   const ended = new Event('storage'); ended.key = 'kin-session-ended'; other.sandbox.dispatchEvent(ended);
   assert.deepEqual([other.panel().dataset.state, other.articles().length], ['ended', 0]);
+});
+
+/* Retry after a refused Go to Image: the user fixes the viewer, another authorized edit changes the
+ * finding meanwhile and window focus reloads the list. Retry replays only the source first pressed. */
+const sent = v => Array.from(v.calls, call => JSON.parse(call));
+async function refusedRetry(press, first) {
+  const h = worklist(), v = viewer(), frame = h.embed(v);
+  if (first) h.s.respond = () => Promise.resolve(first);
+  v.modal = true;
+  await h.open();
+  await h.click(press(h));
+  assert.deepEqual([h.result().dataset.result, v.calls.length], ['modal', 0], 'the first command is refused before any call');
+  const retry = h.named(h.panel(), 'Retry Go to Image')[0];
+  assert.equal(retry.hidden, false);
+  v.modal = false;
+  return { h, v, frame, retry };
+}
+async function focusReload(h, answer) {
+  const reads = h.s.api.length;
+  h.s.respond = () => Promise.resolve(answer);
+  h.sandbox.dispatchEvent(new Event('focus')); await flush();
+  assert.equal(h.s.api.length, reads + 1, 'focus reloaded the list');
+}
+const listChanged = (h, v, frame, retry, label) => {
+  assert.deepEqual(sent(v), [], label + ': Retry never calls the viewer with a changed or other source');
+  assert.deepEqual([h.result().dataset.result, h.result().textContent], ['list-changed', command.reasonText('list-changed')], label);
+  assert.deepEqual([frame.focused, v.focused, retry.hidden], [0, 0, true], label);
+};
+
+test('adapter: Retry Go to Image after a reload that reorders, replaces, revises or removes the pressed source refuses list-changed before any viewer call', async () => {
+  const cases = [
+    ['reversed order (new revision)', page([finding({ revision: 2 }, [KEY_SOURCE(), source()])])],
+    ['reversed order (same revision)', page([finding({}, [KEY_SOURCE(), source()])])],
+    ['replaced source item', page([finding({ revision: 2 }, [source({ itemId: ITEM3 }), KEY_SOURCE()])])],
+    ['source revision', page([finding({ revision: 2 }, [source({ revision: 2 }), KEY_SOURCE()])])],
+    ['finding revision only', page([finding({ revision: 2, item: { ...finding().item, title: '수정한 제목' } })])],
+    ['other image, same revision', page([finding({}, [source({ sopUid: SOP2, frame: 2 }), KEY_SOURCE()])])],
+    ['finding removed', page([])],
+    ['finding hidden', page([finding({ revision: 2, hidden: true })])],
+  ];
+  for (const [label, answer] of cases) {
+    const { h, v, frame, retry } = await refusedRetry(x => x.source(ID1, 0));
+    await focusReload(h, answer);
+    assert.equal(retry.hidden, false, label + ': the reload alone keeps the offer');
+    await h.click(retry);
+    listChanged(h, v, frame, retry, label);
+    if (label === 'reversed order (new revision)') {
+      // Only an explicit press on the reloaded row goes to the source now shown at that place.
+      await h.click(h.source(ID1, 0));
+      assert.deepEqual(sent(v), [target(X, SOP2, ITEM2)]);
+      assert.equal(h.result().dataset.result, 'ok');
+    }
+  }
+  // Go to Primary Image is pinned to the source that was primary: here it stays primary but moves to index 0.
+  const primary = finding({}, [source(), KEY_SOURCE()]); primary.item.primary = 1;
+  const { h, v, frame, retry } = await refusedRetry(x => x.primary(ID1), page([primary]));
+  await focusReload(h, page([finding({ revision: 2 }, [KEY_SOURCE(), source()])]));
+  await h.click(retry);
+  listChanged(h, v, frame, retry, 'primary source moved to another index');
+});
+
+test('adapter: Retry Go to Image after an unchanged reload, during a pending reload and across owner or selection changes calls only the pinned source', async () => {
+  // Unchanged rows (fresh copies) after the focus reload: exactly the source first pressed, then success.
+  {
+    const { h, v, frame, retry } = await refusedRetry(x => x.source(ID1, 1));
+    await focusReload(h, page([finding()]));
+    await h.click(retry);
+    assert.deepEqual(sent(v), [target(X, SOP2, ITEM2)]);
+    assert.deepEqual([h.result().dataset.result, h.result().textContent], ['ok', '영상 이동 확인 · 통합 작업공간']);
+    assert.deepEqual([frame.focused, v.focused, retry.hidden], [1, 1, true]);
+  }
+  {
+    const primary = finding({}, [source(), KEY_SOURCE()]); primary.item.primary = 1;
+    const { h, v, retry } = await refusedRetry(x => x.primary(ID1), page([primary]));
+    await focusReload(h, page([primary]));
+    await h.click(retry);
+    assert.deepEqual([sent(v), h.result().dataset.result], [[target(X, SOP2, ITEM2)], 'ok']);
+  }
+  // Retry while the reload is still pending uses the retained rows; the late reordered page neither
+  // retargets nor repeats the command, and it does not re-offer Retry.
+  {
+    const { h, v, retry } = await refusedRetry(x => x.source(ID1, 0));
+    const late = deferred();
+    h.s.respond = () => late.promise;
+    h.sandbox.dispatchEvent(new Event('focus')); await flush();
+    assert.equal(h.panel().dataset.state, 'reloading');
+    await h.click(retry);
+    assert.deepEqual([sent(v), h.result().dataset.result], [[target()], 'ok']);
+    late.resolve(page([finding({ revision: 2 }, [KEY_SOURCE(), source()])])); await flush();
+    assert.equal(h.panel().dataset.state, 'ready');
+    assert.equal(h.source(ID1, 0).parent.dataset.itemId, ITEM2, 'the reordered list is shown');
+    assert.deepEqual([v.calls.length, h.result().dataset.result, retry.hidden], [1, 'ok', true]);
+  }
+  // A viewer answer that is still pending when a reordered reload lands reports the source actually sent.
+  {
+    const { h, v, retry } = await refusedRetry(x => x.source(ID1, 0));
+    await focusReload(h, page([finding()]));
+    v.hold();
+    await h.click(retry);
+    assert.deepEqual(sent(v), [target()]);
+    h.s.respond = () => Promise.resolve(page([finding({ revision: 2 }, [KEY_SOURCE(), source()])]));
+    await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+    assert.equal(h.source(ID1, 0).parent.dataset.itemId, ITEM2);
+    v.release(); await flush();
+    assert.deepEqual([v.calls.length, h.result().dataset.result, retry.hidden], [1, 'ok', true]);
+  }
+  // Owner B then A, or selection B then A, with the same rows: the refused command is gone, never replayed.
+  for (const [label, away, back] of [
+    ['owner A-B-A', h => { h.s.owner = '["hallym","sub-b"]'; }, h => { h.s.owner = OWNER; }],
+    ['selection A-B-A', h => { h.s.selected = B; }, h => { h.s.selected = X; }],
+  ]) {
+    const { h, v, frame, retry } = await refusedRetry(x => x.source(ID1, 0));
+    away(h); h.ui.sync(); await flush();
+    back(h); h.ui.sync(); await flush();
+    assert.equal(h.articles().length, 1, label + ': same rows again');
+    assert.deepEqual([retry.hidden, h.result().dataset.result], [true, ''], label);
+    await h.click(retry);
+    assert.deepEqual([v.calls.length, h.result().dataset.result, frame.focused], [0, '', 0], label + ': a hidden Retry does nothing');
+  }
+  // An owner change seen first by the Retry click itself: the pin belongs to the old list, nothing is called.
+  {
+    const { h, v, frame, retry } = await refusedRetry(x => x.source(ID1, 0));
+    h.s.owner = '["hallym","sub-b"]';
+    await h.click(retry);
+    assert.deepEqual([v.calls.length, h.result().dataset.result, frame.focused, retry.hidden], [0, 'list-changed', 0, true]);
+    assert.equal(h.articles().length, 1, 'the list of the new owner is read again');
+    await h.click(retry);
+    assert.equal(v.calls.length, 0, 'the refused command of the old owner is never replayed on the new list');
+  }
 });
 
 /* ---------- shipped wiring ---------- */
