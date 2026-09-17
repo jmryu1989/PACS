@@ -155,12 +155,16 @@ PROFILES = {
         # suite no profile ran before. volume-mpr and volume-slab keep their suites and caps.
         # Caps are about twice the native history (curved four cases 46s on CI main, orientation
         # about 30s per case): (420+35)+(300+35) = 790s of the shared 1500s deadline.
+        # S2-L2b adds the findings saved-location suite (three cases on the same synthetic MPR studies, a
+        # continuation into a new page included; about 150s estimated, capped at 360s):
+        # (420+35)+(300+35)+(360+35) = 1185s, 1335s with the 150s stack reserve.
         'suite_timeout': 540,
-        'suite_budgets': {'ci-path-native': 420, 'ci-mpr-orientation': 300},
-        # Each module's load_tests is the allowlist: declared test_path_* and test_orientation_*
-        # only. Passing no class keeps inherited base-class cases out.
+        'suite_budgets': {'ci-path-native': 420, 'ci-mpr-orientation': 300, 'ci-finding-location': 360},
+        # Each module's load_tests is the allowlist: declared test_path_*, test_orientation_* and
+        # test_location_* only. Passing no class keeps inherited base-class cases out.
         'suites': (('e2e/test_volume_path.py', None, 'ci-path-native'),
-                   ('e2e/test_volume_orientation.py', None, 'ci-mpr-orientation')),
+                   ('e2e/test_volume_orientation.py', None, 'ci-mpr-orientation'),
+                   ('e2e/test_finding_locations.py', None, 'ci-finding-location')),
     },
     'volume-batch': {
         'out': ROOT / 'tests/e2e/artifacts/volume-batch-ci',

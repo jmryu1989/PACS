@@ -578,11 +578,12 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(profile['suites'], (
             ('e2e/test_volume_path.py', None, 'ci-path-native'),
             ('e2e/test_volume_orientation.py', None, 'ci-mpr-orientation'),
+            ('e2e/test_finding_locations.py', None, 'ci-finding-location'),
         ))
         self.assertEqual(profile['out'].name, 'volume-path-ci')
         self.assertEqual(profile['project_prefix'], 'kin-path-ci-')
         self.assertEqual(profile['suite_timeout'], 540)
-        budgets = {'ci-path-native': 420, 'ci-mpr-orientation': 300}
+        budgets = {'ci-path-native': 420, 'ci-mpr-orientation': 300, 'ci-finding-location': 360}
         self.assertEqual(profile['suite_budgets'], budgets)
         # Registering the path group must not widen or cut the first two MPR groups.
         self.assertEqual(ci.PROFILES['volume-mpr']['suite_budgets'],
@@ -606,13 +607,14 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual(command[command.index('--timeout')+1], str(budgets[unit]))
             self.assertEqual(outer, budgets[unit]+35)
         self.assertEqual([command[command.index('--module')+1] for command in commands],
-                         ['tests/e2e/test_volume_path.py', 'tests/e2e/test_volume_orientation.py'])
+                         ['tests/e2e/test_volume_path.py', 'tests/e2e/test_volume_orientation.py',
+                          'tests/e2e/test_finding_locations.py'])
         self.assertEqual([command[command.index('--unit')+1] for command in commands],
-                         ['ci-path-native', 'ci-mpr-orientation'])
-        # Both suites at full cap plus their reserved margins fit the shared deadline with stack time left.
+                         ['ci-path-native', 'ci-mpr-orientation', 'ci-finding-location'])
+        # All three suites at full cap plus their reserved margins fit the shared deadline with stack time left.
         self.assertIn('deadline = time.monotonic()+25*60',
                       (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
-        self.assertEqual(sum(budget+35 for budget in budgets.values()), 790)
+        self.assertEqual(sum(budget+35 for budget in budgets.values()), 1185)
         self.assertLessEqual(sum(budget+35 for budget in budgets.values())+150, 25*60)
         self.assertTrue(all(budget <= profile['suite_timeout'] for budget in budgets.values()))
         near_deadline, _ = ci.guarded_profile_run(profile, *profile['suites'][1], 200)
@@ -626,7 +628,8 @@ class MeasurementCiTests(unittest.TestCase):
         import ast
         for suite, class_name, prefix, count in (
                 ('e2e/test_volume_path.py', 'VolumePathE2E', 'test_path_', 4),
-                ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E', 'test_orientation_', 6)):
+                ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E', 'test_orientation_', 6),
+                ('e2e/test_finding_locations.py', 'FindingLocationsE2E', 'test_location_', 3)):
             tree = ast.parse((ci.ROOT/'tests'/suite).read_text(encoding='utf-8'))
             cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == class_name)
@@ -638,6 +641,32 @@ class MeasurementCiTests(unittest.TestCase):
                               and node.name == 'load_tests')
             self.assertTrue([node.value for node in ast.walk(load_tests)
                              if isinstance(node, ast.Constant) and node.value == prefix])
+
+    def test_finding_location_suite_is_selected_only_by_volume_path(self):
+        # S2-L adds one module to volume-path and nothing anywhere else (no new profile).
+        suite = 'e2e/test_finding_locations.py'
+        owners = [name for name, profile in ci.PROFILES.items()
+                  if suite in {row[0] for row in profile['suites']}]
+        self.assertEqual(owners, ['volume-path'])
+        self.assertNotIn(suite, ci.SUITES)
+        units = [row[2] for profile in ci.PROFILES.values() for row in profile['suites']]
+        self.assertEqual(units.count('ci-finding-location'), 1)
+        for name, profile in ci.PROFILES.items():
+            if name != 'volume-path':
+                self.assertNotIn('ci-finding-location', profile.get('suite_budgets', {}), name)
+        # The measurements profile keeps its 19 suites and its unchanged per-suite cap.
+        measurements = ci.PROFILES['measurements']
+        self.assertEqual(len(measurements['suites']), 19)
+        self.assertEqual(measurements['suite_timeout'], 540)
+        self.assertNotIn('suite_budgets', measurements)
+        # Its base class belongs to volume-marks, which does not gain the location module or its unit.
+        marks = ci.PROFILES['volume-marks']
+        self.assertNotIn(suite, {row[0] for row in marks['suites']})
+        self.assertNotIn('e2e/test_volume_marks.py', {row[0] for row in ci.PROFILES['volume-path']['suites']})
+        text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        self.assertEqual(text.count('--file tests/e2e/test_finding_locations.py'), 1)
+        self.assertIn('--file tests/e2e/test_finding_locations.py',
+                      text.split('\n  volume-path:\n')[1].split('\n  volume-batch:\n')[0])
 
     def test_validate_workflow_runs_volume_path_in_its_own_bounded_job(self):
         text = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
@@ -658,6 +687,7 @@ class MeasurementCiTests(unittest.TestCase):
                          'tests/execution_selection_test.py',
                          '--file tests/e2e/test_volume_path.py',
                          '--file tests/e2e/test_volume_orientation.py',
+                         '--file tests/e2e/test_finding_locations.py',
                          'tests/e2e/artifacts/volume-path-ci/',
                          'if: always()', 'if-no-files-found: error',
                          'retention-days: 7']:
@@ -697,7 +727,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
                          {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
         self.assertEqual(ci.PROFILES['volume-path']['suite_budgets'],
-                         {'ci-path-native': 420, 'ci-mpr-orientation': 300})
+                         {'ci-path-native': 420, 'ci-mpr-orientation': 300, 'ci-finding-location': 360})
         modules = {row[0] for row in profile['suites']}
         # Saved batch print is its own requirement and suite; it is not part of this group.
         self.assertNotIn('e2e/test_volume_batch_print.py', modules)
@@ -811,7 +841,7 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(ci.PROFILES['volume-slab']['suite_budgets'],
                          {'ci-slab-projection': 420, 'ci-slab-wheel': 300, 'ci-slab-average-affine': 240, 'ci-slab-mip-viewer': 240})
         self.assertEqual(ci.PROFILES['volume-path']['suite_budgets'],
-                         {'ci-path-native': 420, 'ci-mpr-orientation': 300})
+                         {'ci-path-native': 420, 'ci-mpr-orientation': 300, 'ci-finding-location': 360})
         self.assertEqual(ci.PROFILES['volume-batch']['suite_budgets'],
                          {'ci-batch-preview': 240, 'ci-batch-context': 240, 'ci-batch-save': 360, 'ci-batch-scout': 240})
         modules = {row[0] for row in profile['suites']}
