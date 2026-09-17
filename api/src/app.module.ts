@@ -19,6 +19,8 @@ import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
 import { ViewerController } from './viewer.controller';
 import { ViewerService } from './viewer.service';
+import { FindingController } from './finding.controller';
+import { FindingService } from './finding.service';
 import { ViewerJobController } from './viewer-job.controller';
 import { ViewerJobService } from './viewer-job.service';
 import { ConnectController } from './connect.controller';
@@ -37,9 +39,9 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [PacsController, AuthController, AdminController, ViewerController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, StudyAccessController],
+  controllers: [PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, StudyAccessController],
   providers: [
-    StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService,
+    StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
   ],
@@ -47,6 +49,6 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     // 가드가 401/403으로 먼저 끝내는 응답도 브라우저 캐시에 남지 않아야 한다.
-    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, StudyAccessController);
+    consumer.apply(adminNoStore).forRoutes(AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, StudyAccessController);
   }
 }

@@ -12,6 +12,51 @@ import ops_backup as ops
 ROOT=Path(__file__).resolve().parents[1]
 
 class ViewerMigration(unittest.TestCase):
+    def test_findings_additive_restrict_owner_key_and_failed_ddl(self):
+        """TEST-S2-MIGRATION: additive finding tables, request receipt key, RESTRICT and rollback."""
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260917120000_findings' in p)
+        self.create('findings_before')
+        for source in self.sources[:index]:self.sql('findings_before',source)
+        item='00000000-0000-4000-8000-000000000001'
+        self.sql('findings_before','INSERT INTO "StudyState" (uid,"institutionId","updatedAt") VALUES '+f"('{self.uid}','SYNTHETIC-hospital','2026-09-17'); "+
+                 'INSERT INTO "ViewerItem" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt") VALUES '+
+                 f"('{item}','{self.uid}','SYNTHETIC-sub','SYNTHETIC-reader',1,false,'{{\"schemaVersion\":1,\"kind\":\"key\",\"seriesUid\":\"2.25.1\",\"sopUid\":\"2.25.2\",\"frame\":1,\"title\":\"SYNTHETIC key\",\"description\":\"\",\"hidden\":false}}','2026-09-17')")
+        tables=self.sql('findings_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def old():return {name:self.sql('findings_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=old()
+        # A failed statement inside the additive transaction must leave no finding table behind.
+        broken=self.sources[index].decode().replace('COMMIT;','SELECT * FROM s2a_nonexistent_relation; COMMIT;')
+        self.sql('findings_before',broken,success=False);self.assertEqual(old(),before)
+        self.assertEqual(self.sql('findings_before',"SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'Finding%'"),'0')
+        self.sql('findings_before',self.sources[index]);self.assertEqual(old(),before)
+        self.sql('findings_before',self.sources[index],success=False);self.assertEqual(old(),before)
+        self.assertEqual(self.sql('findings_before',"SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'Finding%'"),'2')
+        finding='00000000-0000-4000-8000-000000000a01'
+        snapshot=('{"schemaVersion":1,"title":"SYNTHETIC finding","text":"","hidden":false,"primary":0,"sources":[{"itemId":"'+item+
+                  '","revision":1,"studyUid":"'+self.uid+'","kind":"key","seriesUid":"2.25.1","sopUid":"2.25.2","frame":1,"frameOfReferenceUid":null,'
+                  '"label":"SYNTHETIC key","values":null,"calculator":null,"sourceDigest":null,"authorActor":"SYNTHETIC-reader"}]}')
+        self.sql('findings_before','INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt") VALUES '+
+                 f"('{finding}','{self.uid}','SYNTHETIC-sub','SYNTHETIC-reader',1,false,'{snapshot}','2026-09-17')")
+        row=('INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes") VALUES '+
+             f"('{finding}',1,'{snapshot}','create','','SYNTHETIC-reader','SYNTHETIC-sub','00000000-0000-4000-8000-000000000b01',repeat('a',64),octet_length(convert_to('{snapshot}'::jsonb::text,'UTF8')))")
+        self.sql('findings_before',row)
+        # The request receipt is unique per author; the same request id from another author is a different receipt.
+        self.sql('findings_before',row.replace("',1,'","',2,'"),success=False)
+        self.sql('findings_before',row.replace("',1,'","',2,'").replace('SYNTHETIC-sub','SYNTHETIC-other'))
+        self.assertEqual(self.sql('findings_before','SELECT count(*) FROM "FindingRevision"'),'2')
+        # Byte equality, action vocabulary, source bounds and fingerprint shape fail closed.
+        self.sql('findings_before','UPDATE "FindingRevision" SET "payloadBytes"="payloadBytes"+1',success=False)
+        self.sql('findings_before',"UPDATE \"FindingRevision\" SET action='delete'",success=False)
+        self.sql('findings_before',"UPDATE \"FindingRevision\" SET fingerprint='SYNTHETIC'",success=False)
+        self.sql('findings_before',"UPDATE \"Finding\" SET snapshot=snapshot-'sources'",success=False)
+        self.sql('findings_before',"UPDATE \"Finding\" SET snapshot=jsonb_set(snapshot,'{sources}','[]'::jsonb)",success=False)
+        self.sql('findings_before','UPDATE "Finding" SET revision=1001',success=False)
+        # Parent and history rows are protected; hiding is a revision, not a delete.
+        self.sql('findings_before',f'''DELETE FROM "StudyState" WHERE uid='{self.uid}' ''',success=False)
+        self.sql('findings_before','DELETE FROM "Finding"',success=False)
+        self.sql('findings_before','DELETE FROM "ViewerItem"',success=False)
+        self.assertEqual(old(),before)
+
     def test_workspace_shortcuts_additive_and_owner_key(self):
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910044500_workspace_shortcuts' in p)
         self.create('shortcuts_before')
@@ -152,6 +197,7 @@ class ViewerMigration(unittest.TestCase):
         self.sql('foreign_restore',f'DELETE FROM "StudyState" WHERE uid={transfer.sql_literal(self.uid)}',success=False)
         self.sql('foreign_restore','DELETE FROM "ViewerItem"',success=False)
         self.sql('foreign_restore','DELETE FROM "ViewerRevision"',success=False)
+        self.sql('foreign_restore','DELETE FROM "Finding"',success=False)
         self.assertEqual(transfer.observe(self.db,'foreign_restore'),frozen)
 
     def test_04_fixed_old_app_reads_writes_and_restricts_parent_delete(self):

@@ -12,13 +12,16 @@ SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
           'e2e/test_worklist_body_parts.py', 'reading_appearance_live.py',
           'reading_appearance_position_live.py', 'e2e/test_viewer_identity_position.py',
           'reading_appearance_fields_live.py', 'e2e/test_viewer_identity_fields.py',
-          'e2e/test_cine.py', 'e2e/test_volume_cine.py']
+          'e2e/test_cine.py', 'e2e/test_volume_cine.py',
+          # S2-A findings: API suite then the browser navigation suite, after every existing suite.
+          'finding_api_test.py', 'e2e/test_finding_navigation.py']
 SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'HeldMeasurementE2E', 'ManualSrE2E', 'MeasurementRecheckE2E',
                  'ViewerRecoveryE2E', 'MeasurementCalibrationE2E', 'WorklistBodyPartsE2E',
                  'ReadingAppearanceLive', 'ReadingAppearancePositionLive', 'ViewerIdentityPositionE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
-                 'CineE2E', 'VolumeCineE2E']
+                 'CineE2E', 'VolumeCineE2E',
+                 'FindingAPI', 'FindingNavigationE2E']
 PROFILES = {
     'image-text': {
         'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
@@ -291,6 +294,17 @@ PROFILES = {
             ('e2e/test_editor_compare_output.py', 'EditorCompareOutputE2E',
              'ci-output-editor-compare-output'),
         ),
+    },
+    'findings': {
+        'out': ROOT / 'tests/e2e/artifacts/findings-ci',
+        'project_prefix': 'kin-findings-ci-',
+        # The two S2-A suites also run at the end of the shared measurements profile. This separate
+        # profile is for a bounded dispatch of only these suites: the API suite seeds up to 16 MiB of
+        # synthetic revision rows once and the browser suite opens six viewers, so each keeps the 540s cap.
+        'suite_timeout': 540,
+        'suite_budgets': {'ci-finding-api-test': 540, 'ci-test-finding-navigation': 540},
+        'suites': (('finding_api_test.py', 'FindingAPI', 'ci-finding-api-test'),
+                   ('e2e/test_finding_navigation.py', 'FindingNavigationE2E', 'ci-test-finding-navigation')),
     },
     'vr-resize-probe': {
         'out': ROOT / 'tests/e2e/artifacts/vr-resize-probe-ci',

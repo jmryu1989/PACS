@@ -122,6 +122,11 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/manual-sr/:id/store"): Route(Kind.TENANT),
     ("GET", "studies/:uid/viewer-items/:id/revisions"): Route(Kind.TENANT),
     ("POST", "studies/:uid/viewer-items/:id/revisions"): Route(Kind.TENANT),
+    # 소견은 표시 항목과 같은 기관·P 지정·작성자 경계를 쓴다(finding.service.ts member/visible).
+    ("GET", "studies/:uid/findings"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/findings"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/findings/:id/revisions"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/findings/:id/revisions"): Route(Kind.TENANT),
     ("GET", "prefs"): Route(Kind.USER),
     ("GET", "favorite-folders"): Route(Kind.USER),
     ("POST", "favorite-folders"): Route(Kind.USER),

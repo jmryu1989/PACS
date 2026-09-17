@@ -198,8 +198,19 @@ A5는 `test_measurement_calibration.py`의 실제 일반 CT 열기/재열기/프
 원본 조회 전체 10초 제한/실제 취소, 열린 시리즈의 문서 선택·늦은 load/이탈을 검사한다.
 전송 지연은 시험 프로세스 또는 브라우저에만 주입한다. 수신 SR 재계산/편집은 허용하지 않는다.
 DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`로
-7개 migration·21개 표·25개 합성 행의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
+24개 migration·34개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
 관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
+
+소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (6개)와 `python tests/e2e/test_finding_navigation.py` (4개).
+저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
+수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
+409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
+표식 수정→Revised(수치는 저장 당시 값)·숨김→Hidden·미존재→Missing, 본문 수정 시 기존 사본 바이트 유지, 명시적 Refresh Link의 새 판,
+승인 후 소견 편집이 판독 행을 바꾸지 않음을 검사한다. 브라우저 시험은 새 로그인 뒤 목록·Go to Image가 실제 저장 SOP/프레임을
+`getCurrentImageId`로 증명하고 표식 강조, 응답 유실 재시도, 두 창 충돌, A→B→A 늦은 목록 폐기, 다른 검사 소견의 `scope` 거절과
+URL 불변, 세션 종료 후 `ended`를 확인한다. 순수 시험 `node --test tests/finding_link_model_test.cjs`는 출하되는
+`config/ohif.js`의 `kinViewerNavigateTo`와 `finding-link-model.js`의 저장소를 그대로 실행한다. MPR/볼륨 화면은 `viewport-unsupported`로
+거절하며 다른 검사·워크리스트 연결(S2-B)과 판독문 연결(3단계)은 이 시험 범위 밖이다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.
@@ -269,7 +280,7 @@ GSPS/KO, 비CT/volume·물리 다중모니터의 전체 Job은 잔여다.
 표식과 Job의 본문/이력 보호는 서로 별도다. 본문은 서비스에서 수정 경로를 제공하지 않는다.
 관련 회귀는 viewer-layout/history/display, 저장 DB 확인은
 `python tests/viewer_migration_test.py ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`다.
-합성 복원 원장은 5개 migration·20개 사용자 표와22개 합성 행을 대조한다.
+합성 복원 원장은 위 D05B 복원 시험과 같은 24개 migration·34개 표·49개 합성 행을 대조한다.
 
 E01-GATE 전송 근거/요청 관문: `python tests/connect_gate_test.py` (별도 API12).
 실제 C-STORE·임시 두 기관 계정으로 admin 근거/계약 기록과 철회, 기사 요청/철회,

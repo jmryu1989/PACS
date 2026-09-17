@@ -100,6 +100,7 @@ model StudyState {
   manualSrs ManualSr[]
   viewerJobs ViewerJob[]
   viewerBudget ViewerStorageBudget?
+  findings Finding[]
   transferBases TransferBasis[]
   transfers Transfer[]
 
@@ -435,6 +436,42 @@ model ViewerRequest {
 
   @@id([authorSub, requestId])
   @@index([itemId, revision])
+}
+
+/// 소견은 저장된 표식의 서버 사본(식별·판·수치)을 고정한다. 숨김도 이전 판과 원본 항목을 삭제하지 않는다.
+model Finding {
+  id          String   @id @db.Uuid
+  studyUid    String
+  authorSub   String
+  authorActor String
+  revision    Int
+  hidden      Boolean  @default(false)
+  snapshot    Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime
+  study       StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  revisions   FindingRevision[]
+
+  @@index([studyUid, id])
+}
+
+/// Each revision carries its own request receipt: a replay reproduces this row, never a re-validation.
+model FindingRevision {
+  findingId    String   @db.Uuid
+  revision     Int
+  snapshot     Json
+  action       String   @db.VarChar(16)
+  reason       String   @db.VarChar(1000)
+  actor        String
+  authorSub    String
+  requestId    String   @db.Uuid
+  fingerprint  String
+  payloadBytes Int
+  at           DateTime @default(now())
+  finding      Finding @relation(fields: [findingId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([findingId, revision])
+  @@unique([authorSub, requestId])
 }
 
 /// Only display preferences roam. A cleared value keeps its revision to reject stale writes.
