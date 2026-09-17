@@ -330,6 +330,72 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         expect(w.locator('#reading-findings-nav')).to_have_text(''); expect(panel.locator('article')).to_have_count(0)
         self.assertEqual(self.owned_rows(f, prior, other), rows); self.assertEqual(self.hashes(), original)
 
+    # ---- S2-B2 H4: a comparison source through the worklist ------------------------------------
+    def test_worklist_04_comparison_source_exact_frame_refused_reload_pinned_retry_and_withdrawal(self):
+        f = self.specimen(slices=2)
+        prior = synthetic_ct(self.stack, f.patient_id, 'wlcompare', '20250917', [0, 0, 0], [1, 0, 0, 0, 1, 0], [.7, 1.3], slices=3)
+        shown, _ = self.seed(f)
+        label = '워크리스트 비교 키 '+uuid.uuid4().hex[:8]
+        pk = self.key_at(prior, 1, label); prior_sops = self.sops(prior)
+        cross = self.post('/studies/'+f.uid+'/findings', dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=1, title='비교 원본 소견', text='워크리스트 비교',
+            primary=1, sources=[dict(itemId=shown['item']['sources'][0]['itemId'], revision=1), dict(itemId=pk['id'], revision=1)])))
+        self.assertEqual(cross['item']['sources'][1]['studyUid'], prior.uid)
+        original, rows = self.hashes(), self.owned_rows(f, prior)
+        w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
+        p, studies = self.separate(w, f); self.assertEqual(studies, [f.uid, prior.uid])
+        panel = self.open_findings(w, f)
+        item = self.row(w, cross['id']).locator('[data-kin-sources] > li')
+        expect(item.nth(0)).to_have_attribute('data-source-study', 'current'); expect(item.nth(1)).to_have_attribute('data-source-study', 'comparison')
+        expect(item.nth(1)).to_contain_text('비교 검사 영상')
+        vx, vp = self.viewport_of(p, f.uid), self.viewport_of(p, prior.uid)
+        self.select_viewport(p, vx, f.uid)
+        self.scroll_viewport(p, vp, 0, prior_sops[1])
+        x_image = p.evaluate(navigation.IMAGE_OF, vx)
+        p.evaluate(navigation.RECORD_NAVIGATION)
+        target = dict(studyUid=prior.uid, seriesUid=pk['item']['seriesUid'], sopUid=prior_sops[1], frame=1, itemId=pk['id'])
+        # From the selected study's viewport the comparison source lands on its exact SOP/frame in that one window.
+        self.go(w, cross['id'], 1)
+        expect(self.result(w, 'ok')).to_have_text('영상 이동 확인 · 영상 창 1 · 비교 검사 영상 칸 · 키 이미지 프레임으로 이동했습니다.')
+        arrived = dict(active=p.evaluate(navigation.ACTIVE_ID), history=p.evaluate(navigation.HISTORY_IMAGE), image=p.evaluate(navigation.IMAGE_OF, vp),
+                       first=p.evaluate(navigation.IMAGE_OF, vx), bar=p.evaluate(navigation.BAR, vp), sent=p.evaluate('()=>window.__navs'))
+        self.assertEqual((arrived['active'], arrived['history']['scope'], arrived['history']['image']),
+                         (vp, prior.uid, dict(study=prior.uid, seriesUid=target['seriesUid'], sopUid=prior_sops[1], frame=1)))
+        self.assertIn('/instances/'+prior_sops[1]+'/frames/1', arrived['image']); self.assertEqual(arrived['first'], x_image)
+        self.assertEqual((arrived['bar'], arrived['sent']), (18, [target]))
+        self.evidence('S2B2-worklist-comparison-navigation', dict(window=studies, target=target, arrived=arrived), p)
+        # Forced failure: the comparison history reload is refused after activation. Busy, no call, no viewport restore.
+        self.select_viewport(p, vx, f.uid); self.scroll_viewport(p, vp, 0, prior_sops[1])
+        refused_reads = []
+        def unavailable(r):
+            refused_reads.append(r.request.url); r.fulfill(status=503, content_type='application/json', body='{"message":"synthetic unavailable"}')
+        items = '**/studies/'+prior.uid+'/viewer-items?*'
+        p.route(items, unavailable)
+        self.go(w, cross['id'], 1)
+        nav = self.result(w, 'busy')
+        expect(nav).to_contain_text('원본 프레임으로는 이동하지 않았습니다'); expect(nav).not_to_contain_text('영상 이동 확인')
+        self.assertTrue(any('includeHidden=true' in u for u in refused_reads), refused_reads)
+        self.assertEqual((p.evaluate(navigation.ACTIVE_ID), p.evaluate('()=>window.__navs.length')), (vp, 1))
+        self.assertNotIn('/instances/'+prior_sops[1]+'/', p.evaluate(navigation.IMAGE_OF, vp))
+        retry = panel.get_by_role('button', name='Retry Go to Image', exact=True); expect(retry).to_be_visible()
+        p.unroute(items, unavailable)
+        # The user selects the first study again; Retry replays exactly the pinned comparison source through activation.
+        self.select_viewport(p, vx, f.uid)
+        retry.click()
+        self.result(w, 'ok')
+        self.assertEqual(p.evaluate('()=>window.__navs'), [target, target])
+        self.assertEqual(p.evaluate(navigation.ACTIVE_ID), vp)
+        self.assertIn('/instances/'+prior_sops[1]+'/frames/1', p.evaluate(navigation.IMAGE_OF, vp))
+        # The comparison study is withdrawn: the reloaded list has no row and no text of it.
+        restore = self.withdraw(prior.uid)
+        panel.get_by_role('button', name='Reload Findings', exact=True).click()
+        expect(self.row(w, cross['id'])).to_have_count(0); expect(self.row(w, shown['id'])).to_have_count(1)
+        text = panel.inner_text()
+        for secret in [label, prior_sops[1], pk['id'], '비교 원본 소견', '비교 검사 영상(']: self.assertNotIn(secret, text)
+        restore()
+        panel.get_by_role('button', name='Reload Findings', exact=True).click()
+        expect(self.row(w, cross['id'])).to_have_count(1)
+        self.assertEqual(self.owned_rows(f, prior), rows); self.assertEqual(self.hashes(), original)
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')

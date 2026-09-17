@@ -201,23 +201,23 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 24개 migration·37개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
 관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
 
-소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (10개, 8~10은 S2-B2 서버)와 `python tests/e2e/test_finding_navigation.py` (6개).
+소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (10개, 8~10은 S2-B2 서버)와 `python tests/e2e/test_finding_navigation.py` (7개, 7은 S2-B2 화면).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
 409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
 표식 수정→Revised(수치는 저장 당시 값)·숨김→Hidden·미존재→Missing, 본문 수정 시 기존 사본 바이트 유지, 명시적 Refresh Link의 새 판,
 승인 후 소견 편집이 판독 행을 바꾸지 않음을 검사한다. 브라우저 시험은 새 로그인 뒤 목록·Go to Image가 실제 저장 SOP/프레임을
-`getCurrentImageId`로 증명하고 표식 강조, 응답 유실 재시도, 두 창 충돌, A→B→A 늦은 목록 폐기, 다른 검사 소견의 `scope` 거절과
-URL 불변, 세션 종료 후 `ended`를 확인한다. 순수 시험 `node --test tests/finding_link_model_test.cjs`는 출하되는
+`getCurrentImageId`로 증명하고 표식 강조, 응답 유실 재시도, 두 창 충돌, 같은 문서의 mode 재진입(A→B→A) 뒤 늦은 목록 폐기,
+다른 검사 소견의 `scope` 거절과 URL 불변, 세션 종료 후 `ended`를 확인한다. 순수 시험 `node --test tests/finding_link_model_test.cjs`는 출하되는
 `config/ohif.js`의 `kinViewerNavigateTo`와 `finding-link-model.js`의 저장소를 그대로 실행한다. MPR/볼륨 화면은 `viewport-unsupported`로
 거절하며 다른 검사·워크리스트 연결(S2-B)과 판독문 연결(3단계)은 이 시험 범위 밖이다.
 소견 작성 보호(S2-B 첫 수정): 작성·대기 중 소견은 검사 전환·403·mode exit에서 계정·검사별 사본으로 보관되고, 인증된 해당 검사 목록 뒤에만
 복원되며 로그아웃·401·계정 변경에서 폐기된다. 순수 시험은 같은 요청 본문 재시도, 늦은 응답의 사본 불변, 한 행 수렴, 뷰어 전체
 dirty/busy·이탈 경고와 표식 전용 `kinViewerHistoryHasUnsaved` 유지, 판독 작업공간·창 재사용·Hanging Protocol·칸 병합 판정을
-출하 코드로 확인한다. 브라우저 시험 5·6은 Next Study·창 재사용/닫기·이탈 경고의 차단과 깨끗한 화면의 통과, 비교 화면 전환·403·
-mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)의 다른 검사 복원 차단은 원문 위치 확인만 하며 브라우저로 실행하지 않았다.
-영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (25개, `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
-`python tests/e2e/test_finding_worklist.py` (3개, 기존 `measurements` 프로필의 19번째 suite). 워크리스트·통합 작업공간의 Image Findings는 선택한
+출하 코드로 확인한다. 브라우저 시험 5·6은 Next Study·창 재사용/닫기·이탈 경고의 차단과 깨끗한 화면의 통과, 비교 검사 영상 칸
+활성화 동안 작성·대기 소견의 유지(보관하지 않음), 403·mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)의 다른 검사 복원 차단은 원문 위치 확인만 하며 브라우저로 실행하지 않았다.
+영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (33개, 8개는 S2-B2; `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
+`python tests/e2e/test_finding_worklist.py` (4개, 4는 S2-B2; 기존 `measurements` 프로필의 19번째 suite). 워크리스트·통합 작업공간의 Image Findings는 선택한
 판독 대상 검사의 기존 소견 목록 읽기만 하며, Go to Image는 이미 그 검사를 표시하는 통합 작업공간 영상 또는 연결된 영상 창 하나에만 보낸다.
 순수 시험은 대상 선택(여러 창·미연결·소유자·로딩), 호출 전 거절, 호출 시점의 함수 조회, 대기 후 계정·선택·문서·범위 확인, 15초 제한,
 최신 명령만의 알림과 A-B-A·403/404/503·세션 종료 목록 폐기를 출하 코드와 별도 vm 영상 문서로 확인한다. Retry Go to Image는 처음 누른
@@ -235,7 +235,21 @@ MPR/볼륨 화면 거절은 영상 쪽 순수 시험 범위이며 비교 검사 
 바뀐 표식판 409, 잠금 대기 중 P가 RS=P 비지정으로 바뀐 새 연결·재요청·숨김의 404와 무기록, 쓰기가 잡은 접근 조건 공유 잠금 뒤에서
 기다린 제한(쓰기가 먼저 확정되고 그 뒤 재요청·편집 404)과 먼저 확정된 제한을 공유 잠금 대기 뒤에 읽은 숨김·새 연결의 404(pg_locks·
 pg_stat_activity로 대기 확인 후 해제), 읽을 수 없는 행 포함 X 전체 한도(본문은 code/message뿐)와 256개·1000판·거의 16MiB 목록/이력 응답을 확인한다. 기존
-시험 2의 다른 환자 검사 표식은 B2 계약에 따라 404 대신 400이다. 화면(B2-U)은 이 묶음에 없다.
+시험 2의 다른 환자 검사 표식은 B2 계약에 따라 404 대신 400이다.
+비교 검사 원본 화면(S2-B2 B2-U): 서버·경로·권한 변경 없이 기존 API만 쓴다. 비교 화면(URL의 검사 X,P)의 Findings는 첫 검사 X에 고정되어
+P 영상 칸을 활성화해도 X의 소견·작성·대기 요청 본문을 보관하거나 버리지 않으며, 실제 기준 검사·계정·세션 변화만 기존 보관·격리를 쓴다.
+P 표식은 `GET /studies/P/viewer-items`의 저장·비숨김 판에서만 고르고 `{itemId, revision}`만 보낸다(소견 하나에 비교 검사 하나,
+다른 비교 검사를 이미 가진 소견은 고를 수 없음). P 목록 403/404는 목록·표식을 지우고 X 목록을 한 번 다시 읽어 그 검사를 연결한 소견을
+화면에서 빼며, 작성 중이던 소견은 작성자 제목·본문과 X 연결만 새 초안으로 남긴다. 400·403·404·409(`FINDING_COMPARISON_STUDY`)·한도
+문구는 초안을 유지하고, 한도 문구는 보이지 않는 소견도 한도에 들어간다고 알린다. P 원본 Go to Image는 그 뷰어에서 P를 표시하는 영상 칸이
+정확히 하나일 때만 그 칸을 활성화(`kinViewerHistoryActivate`, 0개 `viewport-missing`·여러 개 `viewport-ambiguous`)하고 기존 15초 안에서
+그 칸의 기록이 P를 불러온 뒤 한 번만 이동하며, 성공은 viewer의 ok와 같은 세대·같은 칸·정확한 series/SOP/frame 재확인이 모두 맞을 때뿐이다.
+시간 초과·거절은 이동하지 않고 칸을 되돌리지 않으며 칸 선택이 바뀌었을 수 있다고 알린다. 워크리스트는 X와 P를 함께 표시하는 화면에만
+보내고(없으면 `comparison-viewer`, 자동 열기 없음) Retry는 고정한 P 원본만 다시 보낸다. 순수 시험은 `config/ohif.js`의 활성화 함수 조각,
+`crossNavigate`의 지연·거절·시간 초과·A-B-A·계정·재확인, 고정 저장소의 P 활성화 유지·늦은/대체 P 목록 폐기·회수·오류 문구, 두 영상 칸 vm 뷰어의
+실제 기록·Findings 연결과 워크리스트 대상 선택·명령·vm 문서 어댑터를 실행한다. 브라우저 시험(탐색 7, 워크리스트 4)은 같은 환자 합성 CT 두 개의
+hpCompare에서 X 고정·초안/대기 본문 유지·P 연결 저장, X 활성 상태의 P SOP/frame 도착(영상 id·기록 재확인·픽셀 막대 폭), P 기록 다시 읽기
+503 뒤 busy와 고정 원본 Retry, P 기관 이탈(합성 경계 변경 후 복원) 뒤 P 행·문구 부재를 확인하고 JSON·화면을 `measurement-ci` 산출물에 남긴다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.

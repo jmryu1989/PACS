@@ -4,9 +4,9 @@
  * cross-window read guarded) and renders with textContent. Control names English, messages Korean. */
 window.KinReadingFindings = function (app) {
   'use strict';
-  const command = window.kinFindingCommand;
+  const command = window.kinFindingCommand, links = window.kinFindingLinkModel;
   const header = document.querySelector('#reltabs'), region = document.querySelector('.related-p');
-  if (!command || !header || !region) throw new Error('Image Findings unavailable');
+  if (!command || !links || !header || !region) throw new Error('Image Findings unavailable');
   const node = (tag, value, parent) => { const el = document.createElement(tag); if (value) el.textContent = value; if (parent) parent.append(el); return el; };
   const button = (label, run, parent) => { const b = node('button', label, parent); b.type = 'button'; b.addEventListener('click', run); return b; };
   const toggle = button('Image Findings', () => show(panel.hidden), null);
@@ -19,7 +19,8 @@ window.KinReadingFindings = function (app) {
   panel.setAttribute('aria-labelledby', 'reading-findings-title');
   const title = node('strong', 'Image Findings', panel); title.id = 'reading-findings-title';
   const close = button('Close Image Findings', () => { show(false); toggle.focus(); }, panel); close.id = 'reading-findings-close';
-  node('p', '선택한 판독 대상 검사에 저장된 소견입니다(읽기 전용). 작성·수정·숨김은 영상 화면의 Findings에서 하며 판독문에는 기록되지 않습니다.', panel);
+  node('p', '선택한 판독 대상 검사에 저장된 소견입니다(읽기 전용). 작성·수정·숨김은 영상 화면의 Findings에서 하며 판독문에는 기록되지 않습니다. ' +
+    '같은 환자의 비교 검사 하나의 표식을 함께 연결한 소견은 그 비교 검사를 볼 수 있을 때만 표시됩니다.', panel);
   const status = node('p', '', panel); status.id = 'reading-findings-status'; status.setAttribute('role', 'status');
   const controls = node('p', '', panel);
   const reload = button('Reload Findings', () => { sync(); if (live()) store.load(); }, controls);
@@ -71,8 +72,11 @@ window.KinReadingFindings = function (app) {
   }
   function viewerFacts(w, doc) {
     const state = w.kinViewerHistoryState, h = typeof state === 'function' ? state.call(w) : null;
+    // historyScope/image are the comparison arrival readback (S2-B2), copied as primitives, never identity facts.
+    const shown = links.plainState(h);
     return { historyPresent: !!h && typeof h === 'object', ended: !!h && h.ended === true, suspended: !!h && h.suspended === true,
-      subject: h && typeof h.subject === 'string' ? h.subject : null, modal: modalIn(doc), navigate: typeof w.kinViewerHistoryNavigate === 'function' };
+      subject: h && typeof h.subject === 'string' ? h.subject : null, modal: modalIn(doc), navigate: typeof w.kinViewerHistoryNavigate === 'function',
+      activate: typeof w.kinViewerHistoryActivate === 'function', historyScope: shown ? shown.scope : null, image: shown ? shown.image : null };
   }
   function sessionView() {
     const st = store.state();
@@ -105,9 +109,17 @@ window.KinReadingFindings = function (app) {
     if (typeof navigate !== 'function') return { ok: false, reason: 'tool-missing' };
     return navigate.call(w, target);
   }
-  // Plain snapshot for chooseTarget plus the live references behind it.
-  function choose(study) {
-    const plain = { uid: study, workspace: null, windows: [] }, popups = new Map(), slots = new Map();
+  // The chosen document's history, activation and navigation for a comparison source, each read at call time.
+  function envOf(current) {
+    return {
+      state: () => { const w = current(), fn = w.kinViewerHistoryState; return typeof fn === 'function' ? fn.call(w) : null; },
+      activate: study => { const w = current(), fn = w.kinViewerHistoryActivate; return typeof fn === 'function' ? fn.call(w, study) : { ok: false, reason: 'tool-missing' }; },
+      navigate: target => invokeIn(current(), target),
+    };
+  }
+  // Plain snapshot for chooseTarget plus the live references behind it; `comparison` is the row's other study.
+  function choose(study, comparison) {
+    const plain = { uid: study, comparison: comparison || null, workspace: null, windows: [] }, popups = new Map(), slots = new Map();
     const t = guarded(() => app.workspace.viewerTarget(), null);
     if (t) plain.workspace = { active: !!t.active, sameTarget: !!t.sameTarget, loaded: !!t.loaded, inert: !!t.inert, hidden: !!t.hidden, studies: [...t.studies] };
     for (const row of windows()) {
@@ -126,12 +138,12 @@ window.KinReadingFindings = function (app) {
     if (choice.kind === 'embedded') {
       const frame = t.frame;
       return { kind: 'embedded', label: '통합 작업공간', probe: () => embeddedView(frame), invoke: target => invokeIn(frame.contentWindow, target),
-        focus: () => guarded(() => { frame.focus(); frame.contentWindow.focus(); }) };
+        env: () => envOf(() => frame.contentWindow), focus: () => guarded(() => { frame.focus(); frame.contentWindow.focus(); }) };
     }
     if (choice.kind === 'window') {
       const popup = popups.get(choice.index), index = choice.index;
       return { kind: 'window', index, label: '영상 창 ' + (index + 1), probe: () => windowView(popup, index), invoke: target => invokeIn(popup, target),
-        focus: () => guarded(() => popup.focus()) };
+        env: () => envOf(() => popup), focus: () => guarded(() => popup.focus()) };
     }
     return choice.reason === 'unattached' ? { ...choice, slot: slots.get(choice.index) || null } : choice;
   }
@@ -143,14 +155,18 @@ window.KinReadingFindings = function (app) {
     const st = store.state(), row = st.rows.find(r => r.id === id), pin = command.pinSource(row, index, st.generation);
     const source = pin && (!pinned || command.samePin(pinned, pin)) ? row.sources[index] : null;
     last = source ? pin : null;
+    // A comparison source is sent only to a viewer that shows both studies (S2-B2).
+    const comparison = source && source.studyUid !== st.uid ? row.comparison : null;
     setResult('영상 이동 중… 결과를 확인하고 있습니다.', 'pending', false);
     await commands.run({
       expected: { owner: live() ? owner() : null, sub: sub(), uid: st.uid, generation: st.generation },
-      source: source || null,
-      choose: () => choose(st.uid),
+      source: source || null, comparison,
+      choose: () => choose(st.uid, comparison),
       announce: (value, choice) => {
         if (value.ok) { setResult(command.arrivalText(value, choice.label), 'ok', false); choice.focus(); }
-        else setResult(command.reasonText(value.reason), value.reason, command.retryable(value.reason));
+        else setResult(command.resultText(value), value.reason, command.retryable(value.reason));
+        // The comparison history refused after activation: re-read the list so no withdrawn row stays shown.
+        if (comparison && value.reason === 'busy' && value.phase !== 'before' && live()) store.load();
         renderReadiness();
       },
     });
@@ -199,7 +215,8 @@ window.KinReadingFindings = function (app) {
         const badge = node('strong', s.linkLabel, item); badge.dataset.kinLinkState = s.linkState;
         if (s.linkState === 'revised' && s.headRevision) node('span', ' (현재 r' + s.headRevision + ')', item);
         if (s.linkState !== 'current') node('span', ' · ' + s.linkText, item);
-        if (s.foreign) node('span', ' · 다른 검사의 영상이라 이 목록에서 이동하지 않습니다.', item);
+        item.dataset.sourceStudy = s.foreign ? 'comparison' : 'current';
+        if (s.foreign) node('span', ' · 비교 검사 영상(선택한 검사와 이 비교 검사를 함께 표시하는 화면으로만 이동)', item);
         const target = button('Go to Image', () => go(row.id, i), item);
         target.dataset.focusKey = row.id + ':' + i; target.setAttribute('aria-describedby', heading.id + ' ' + label.id);
         if (target.dataset.focusKey === key) refocus = target;

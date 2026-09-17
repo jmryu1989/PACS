@@ -26,15 +26,18 @@
     owner: '영상 화면의 계정이 현재 로그인과 다릅니다. 영상 화면을 닫고 다시 연 뒤 이동하세요.',
     modal: '영상 화면에 열린 대화상자가 있습니다. 닫은 뒤 다시 누르세요.',
     scope: '영상 화면에서 이 검사가 아닌 영상 칸이 선택되어 있습니다. 그 화면에서 이 검사의 영상 칸을 선택한 뒤 다시 누르세요.',
+    'comparison-viewer': '이 원본의 비교 검사를 함께 표시하는 영상 화면이 없습니다. 선택한 검사와 그 비교 검사를 한 화면에 연 뒤 다시 누르세요. 자동으로 열거나 이동하지 않습니다.',
     superseded: '이동을 확인하는 동안 선택·로그인·영상 화면이 바뀌어 성공으로 처리하지 않았습니다. 영상 화면은 이미 이동했을 수 있으니 현재 영상을 확인하세요.',
     timeout: '이동 결과를 확인하지 못했습니다. 영상 화면은 이미 이동했을 수 있으니 현재 영상을 확인한 뒤 다시 누르세요.',
   };
   function reasonText(reason) { return TEXT[reason] || links.reasonText(reason); }
+  // A comparison Go to Image also says what may already have changed in the viewer (S2-B2).
+  function resultText(result) { return reasonText(result.reason) + links.phaseText(result.phase); }
   const retryable = reason => reason !== 'invalid' && reason !== 'foreign' && reason !== 'list-changed';
   const openable = reason => reason === 'no-viewer' || reason === 'unattached';
   function arrivalText(result, where) {
     const note = links.annotationText(result && result.annotation);
-    return '영상 이동 확인 · ' + where + (note ? ' · ' + note : '');
+    return '영상 이동 확인 · ' + where + (result && result.phase ? ' · 비교 검사 영상 칸' : '') + (note ? ' · ' + note : '');
   }
   const READINESS = {
     loading: '이동 대상: 영상 준비 중', ambiguous: '이동 대상 미정: 이 검사를 표시하는 영상 창이 여러 개입니다',
@@ -70,9 +73,13 @@
     if (!text(body.title) || !text(body.text) || !Array.isArray(sources) || sources.length < 1 || sources.length > links.LIMITS.sources ||
         !Number.isSafeInteger(primary) || primary < 0 || primary >= sources.length) throw INVALID;
     const serverLinks = Array.isArray(item.links) ? item.links : [];
+    // The server admits at most one comparison study per finding; anything else is not a valid row.
+    const comparisons = new Set(sources.map(s => s && s.studyUid).filter(value => value !== study));
+    if (comparisons.size > 1) throw INVALID;
     return {
       id: item.id, revision: item.revision, hidden: item.hidden, title: body.title, text: body.text, primary,
       author: text(item.authorActor) ? item.authorActor : '', updated: timeText(item.updatedAt),
+      comparison: comparisons.size ? [...comparisons][0] : null,
       sources: sources.map((s, index) => {
         if (!s || typeof s !== 'object' || !uuid(s.itemId) || !count(s.revision) || !uid(s.studyUid) || !uid(s.seriesUid) || !uid(s.sopUid) ||
             !count(s.frame) || !text(s.kind) || !text(s.label) ||
@@ -169,11 +176,15 @@
   function chooseTarget(snapshot) {
     const study = snapshot && snapshot.uid;
     if (!uid(study)) return { kind: 'refused', reason: 'invalid' };
+    // A comparison source (S2-B2) needs a viewer that shows the selected study AND that comparison study.
+    const other = snapshot.comparison === undefined || snapshot.comparison === null ? null : snapshot.comparison;
+    if (other !== null && (!uid(other) || other === study)) return { kind: 'refused', reason: 'invalid' };
+    const shows = list => has(list, study) && (other === null || has(list, other));
     const w = snapshot.workspace;
-    if (w && w.active && w.sameTarget && has(w.studies, study)) {
+    if (w && w.active && w.sameTarget && shows(w.studies)) {
       return !w.loaded || w.inert || w.hidden ? { kind: 'refused', reason: 'loading' } : { kind: 'embedded' };
     }
-    const windows = (Array.isArray(snapshot.windows) ? snapshot.windows : []).filter(x => x && has(x.studies, study));
+    const windows = (Array.isArray(snapshot.windows) ? snapshot.windows : []).filter(x => x && shows(x.studies));
     const attached = windows.filter(x => x.attached && !x.closed), detached = windows.filter(x => !x.attached);
     if (attached.length + detached.length > 1) return { kind: 'refused', reason: 'ambiguous' };
     if (attached.length === 1) {
@@ -184,13 +195,13 @@
       return { kind: 'window', index: x.index };
     }
     if (detached.length === 1) return { kind: 'refused', reason: 'unattached', index: detached[0].index };
-    return { kind: 'refused', reason: 'no-viewer' };
+    return { kind: 'refused', reason: other === null ? 'no-viewer' : 'comparison-viewer' };
   }
   /* `view` is the plain fact sheet one probe reads synchronously from the worklist session and the
    * target document: {error, live, owner, sub, uid, selection, generation, kind, ref, window, document,
    * scope, attached, closed, visible, historyPresent, ended, suspended, subject, windowOwner, modal,
    * navigate}. The viewer remains the authority for scope/busy/series/frame/viewport. */
-  function precheck(view, expected) {
+  function precheck(view, expected, cross) {
     if (!expected || !text(expected.owner) || !expected.owner || !text(expected.sub) || !expected.sub || !uid(expected.uid)) return 'session';
     if (!view || view.live !== true) return 'session';
     if (view.owner !== expected.owner || view.sub !== expected.sub || view.uid !== expected.uid || view.selection !== expected.uid ||
@@ -204,12 +215,15 @@
     if (view.suspended) return 'busy';
     if (view.modal) return 'modal';
     if (!view.navigate) return 'tool-missing';
+    if (cross && !view.activate) return 'tool-missing';
     return null;
   }
   const IDENTITY = ['kind', 'ref', 'window', 'document', 'scope', 'owner', 'sub', 'uid', 'selection', 'generation', 'subject', 'windowOwner'];
-  function sameIdentity(before, after) {
+  // `loading`: a comparison command is between its activation and the history reload of that study,
+  // so a suspended history is expected; every other fact must still hold.
+  function sameIdentity(before, after, loading) {
     if (!before || !after || before.error || after.error) return false;
-    if (after.live !== true || after.closed || !after.attached || !after.visible || !after.historyPresent || after.ended || after.suspended) return false;
+    if (after.live !== true || after.closed || !after.attached || !after.visible || !after.historyPresent || after.ended || (after.suspended && !loading)) return false;
     return IDENTITY.every(key => before[key] === after[key]);
   }
   // The value comes from the viewer document's realm: read each field once, copy primitives only.
@@ -223,6 +237,15 @@
       }
       if (ok === false) { const reason = value.reason; return text(reason) && VIEWER_REASONS.includes(reason) ? refusal(reason) : refusal('invalid'); }
       return refusal('invalid');
+    } catch (_) { return refusal('invalid'); }
+  }
+  // crossNavigate answers with a viewer result or one of its own refusals; both are checked field by field.
+  function crossResult(value) {
+    const result = links.viewerResult(value);
+    if (result.ok || result.reason !== 'invalid') return result;
+    try {
+      const reason = value && typeof value === 'object' && value.ok === false ? value.reason : null;
+      return typeof reason === 'string' && links.CROSS_REASONS.includes(reason) ? refusal(reason) : refusal('invalid');
     } catch (_) { return refusal('invalid'); }
   }
   function targetOf(source) {
@@ -243,11 +266,17 @@
       studyUid: source.studyUid, seriesUid: source.seriesUid, sopUid: source.sopUid, frame: source.frame });
   }
   const samePin = (a, b) => !!a && !!b && PIN.every(key => a[key] === b[key]);
-  /* One command at a time is current. `job` = {expected:{owner, sub, uid, generation}, source,
-   * choose() -> refusal | {kind, probe(), invoke(target)}, announce(result, choice)}. The checks, the
+  /* One command at a time is current. `job` = {expected:{owner, sub, uid, generation}, source, comparison,
+   * choose() -> refusal | {kind, probe(), invoke(target), env()}, announce(result, choice)}. The checks, the
    * call and (after the await) the identity check and the announcement each happen in one tick;
-   * `invoke` must read the viewer function at that moment. Only the latest command announces. */
+   * `invoke` must read the viewer function at that moment. Only the latest command announces.
+   * S2-B2: a source of the row's one comparison study goes through links.crossNavigate with `env()`
+   * (state/activate/navigate of the chosen document read at call time); every poll re-checks this
+   * command's identity, the result carries the phase reached, and success also needs the chosen
+   * document to report that study and the exact image after the await. */
   const THROWN = {};
+  const sameImage = (image, target) => !!image && image.study === target.studyUid && image.seriesUid === target.seriesUid &&
+    image.sopUid === target.sopUid && image.frame === target.frame;
   function createNavigator(options) {
     const o = options || {};
     const timeoutMs = Number.isFinite(o.timeoutMs) ? o.timeoutMs : 15000, watchMs = Number.isFinite(o.watchMs) ? o.watchMs : 250;
@@ -266,40 +295,49 @@
       if (job.source === null || job.source === undefined) return finish(refusal('list-changed'));
       const target = targetOf(job.source);
       if (!target) return finish(refusal('invalid'));
-      // Never substitute the selected study for a source of another study (review C7).
-      if (target.studyUid !== expected.uid) return finish(refusal('foreign'));
+      // Never substitute the selected study for a source of another study (review C7); the only other
+      // study is the row's own comparison study, and it goes to that study's viewport alone.
+      const cross = target.studyUid !== expected.uid;
+      if (cross && (!uid(job.comparison) || job.comparison !== target.studyUid)) return finish(refusal('foreign'));
       const choice = safe(job.choose);
       if (!choice || choice.kind === 'refused') return finish(refusal(choice && choice.reason ? choice.reason : 'no-viewer'));
-      const before = safe(choice.probe), reason = precheck(before, expected);
+      const before = safe(choice.probe), reason = precheck(before, expected, cross);
       if (reason) return finish(refusal(reason));
-      let pending;
-      try { pending = choice.invoke(target); } catch (_) { pending = THROWN; }
+      let pending, settled = false, phase = 'before';
+      const marked = result => cross ? { ...result, phase } : result;
+      const live = () => !settled && seq === sequence && sameIdentity(before, safe(choice.probe), cross);
+      const control = { stopped: () => live() ? null : 'superseded', phase: name => { phase = name; },
+        wait: ms => new Promise(resolve => later(resolve, ms)) };
+      try { pending = cross ? links.crossNavigate(choice.env(), target, control) : choice.invoke(target); } catch (_) { pending = THROWN; }
       let timer = null, watch = null;
       const outcome = pending === THROWN ? { thrown: true } : await new Promise(resolve => {
         timer = later(() => resolve({ timeout: true }), timeoutMs);
         // A closed, replaced or re-scoped target, a session end or a newer command settles early.
         const check = () => {
           watch = null;
-          if (seq !== sequence || !sameIdentity(before, safe(choice.probe))) { resolve({ changed: true }); return; }
+          if (seq !== sequence || !sameIdentity(before, safe(choice.probe), cross)) { resolve({ changed: true }); return; }
           watch = later(check, watchMs);
         };
         watch = later(check, watchMs);
         Promise.resolve().then(() => pending).then(value => resolve({ value }), () => resolve({ thrown: true }));
       });
+      settled = true;
       if (timer !== null) cancelTimer(timer);
       if (watch !== null) cancelTimer(watch);
-      if (seq !== sequence) return { ...refusal('superseded'), latest: false };
+      if (seq !== sequence) return { ...marked(refusal('superseded')), latest: false };
       const after = safe(choice.probe);
-      if (outcome.changed || !sameIdentity(before, after)) return finish(refusal('superseded'), choice);
-      if (outcome.timeout) return finish(refusal('timeout'), choice);
-      if (outcome.thrown) return finish(refusal('tool-missing'), choice);
-      return finish(validResult(outcome.value), choice);
+      const value = !('value' in outcome) ? null : cross ? crossResult(outcome.value) : validResult(outcome.value);
+      if (outcome.changed || !sameIdentity(before, after, cross && !(value && value.ok))) return finish(marked(refusal('superseded')), choice);
+      if (outcome.timeout) return finish(marked(refusal('timeout')), choice);
+      if (outcome.thrown) return finish(marked(refusal('tool-missing')), choice);
+      if (cross && value.ok && (after.historyScope !== target.studyUid || !sameImage(after.image, target))) return finish(marked(refusal('superseded')), choice);
+      return finish(marked(value), choice);
     }
     return { run, cancel: () => { sequence++; }, sequence: () => sequence };
   }
 
-  const api = { reasonText, retryable, openable, arrivalText, readinessText, describeSource, timeText, rowOf, listPath, createListStore,
-    chooseTarget, precheck, sameIdentity, validResult, targetOf, pinSource, samePin, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)) };
+  const api = { reasonText, resultText, retryable, openable, arrivalText, readinessText, describeSource, timeText, rowOf, listPath, createListStore,
+    chooseTarget, precheck, sameIdentity, validResult, crossResult, targetOf, pinSource, samePin, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)) };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.kinFindingCommand = api;
 })(globalThis);
