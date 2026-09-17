@@ -736,15 +736,18 @@ test('adapter: a window closed, re-navigated or detached during the await is sup
   assert.equal(h.result().dataset.result, 'superseded');
 });
 
-test('adapter: a foreign source, an unattached window and no viewer never navigate; Open Image uses only the existing open paths', async () => {
+test('adapter: a comparison source without a viewer of both studies, an unattached window and no viewer never navigate; Open Image uses only the existing open paths', async () => {
   const h = worklist(), v = viewer();
   h.s.respond = () => Promise.resolve(page([finding({}, [source(), source({ itemId: ITEM2, studyUid: B })])]));
   h.windows(() => [{ index: 0, popup: v }]);
   await h.open();
-  assert.ok(h.articles()[0].textContent.includes('다른 검사의 영상'));
+  // S2-B2: a source of the row's one comparison study is labelled as such and goes only to a viewer of both studies.
+  assert.ok(h.articles()[0].textContent.includes('비교 검사 영상(선택한 검사와 이 비교 검사를 함께 표시하는 화면으로만 이동)'));
+  assert.deepEqual(h.articles()[0].all().filter(e => e.dataset.sourceStudy).map(e => e.dataset.sourceStudy), ['current', 'comparison']);
   await h.click(h.source(ID1, 1));
-  assert.deepEqual([h.result().dataset.result, v.calls.length], ['foreign', 0]);
-  assert.equal(h.named(h.panel(), 'Retry Go to Image')[0].hidden, true);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent, v.calls.length], ['comparison-viewer', command.reasonText('comparison-viewer'), 0]);
+  assert.equal(h.named(h.panel(), 'Retry Go to Image')[0].hidden, false, 'the user may open both studies and retry');
+  assert.equal(h.named(h.panel(), 'Open Image')[0].hidden, true, 'no automatic open for the comparison');
   // A reloaded worklist knows the window only by its announced address.
   h.windows(() => [{ index: 1, href: ORIGIN + '/ohif/viewer?StudyInstanceUIDs=' + X + ',' + P + '&initialSeriesInstanceUID=' + SERIES }]);
   await h.click(h.source(ID1, 0));
@@ -940,6 +943,320 @@ test('adapter: Retry Go to Image after an unchanged reload, during a pending rel
     await h.click(retry);
     assert.equal(v.calls.length, 0, 'the refused command of the old owner is never replayed on the new list');
   }
+});
+
+/* ---------- S2-B2 comparison sources (TEST-S2B2-PURE-WL: REQ-S2B2-NAVIGATE/RETRY/REVOKE) ----------
+ * The worklist sends a source of the row's one comparison study only to a viewer that shows both studies,
+ * through links.crossNavigate with that document's functions; the navigator keeps B1's identity watch. */
+const P_SERIES = '1.2.840.30.1', P_SOP = '1.2.840.30.1.2';
+const P_SOURCE = extra => source(Object.assign({ itemId: ITEM2, studyUid: P, seriesUid: P_SERIES, sopUid: P_SOP, kind: 'key', label: '비교 키', values: null, revision: 2 }, extra));
+const crossFinding = extra => finding(extra, [source(), P_SOURCE()]);
+const P_TARGET = { studyUid: P, seriesUid: P_SERIES, sopUid: P_SOP, frame: 1, itemId: ITEM2 };
+
+test('comparison rows and targets: one comparison study per row; only a viewer of both studies is chosen, embedded first', () => {
+  const row = command.rowOf(crossFinding(), X);
+  assert.equal(row.comparison, P); assert.deepEqual(row.sources.map(s => s.foreign), [false, true]);
+  assert.equal(command.rowOf(finding(), X).comparison, null);
+  assert.throws(() => command.rowOf(finding({}, [source(), P_SOURCE(), source({ itemId: ITEM3, studyUid: B })]), X), undefined, 'two comparison studies');
+  const cases = [
+    [{ workspace: ws({ studies: [X, P] }), windows: [win({ studies: [X, P] })] }, { kind: 'embedded' }],
+    [{ workspace: ws({ studies: [P, X], loaded: false }), windows: [] }, { kind: 'refused', reason: 'loading' }],
+    [{ workspace: ws(), windows: [win({ studies: [X, P], index: 2 })] }, { kind: 'window', index: 2 }],
+    [{ workspace: ws(), windows: [win()] }, { kind: 'refused', reason: 'comparison-viewer' }],
+    [{ workspace: ws({ studies: [P] }), windows: [win({ studies: [P, B] })] }, { kind: 'refused', reason: 'comparison-viewer' }],
+    [{ windows: [win({ studies: [X, P] }), win({ index: 1, studies: [P, X] })] }, { kind: 'refused', reason: 'ambiguous' }],
+    [{ windows: [win({ studies: [X, P] }), win({ index: 1 })] }, { kind: 'window', index: 0 }],
+    [{ windows: [win({ studies: [X, P], attached: false, index: 3 })] }, { kind: 'refused', reason: 'unattached', index: 3 }],
+    [{ windows: [win({ studies: [X, P], owner: 'other' })] }, { kind: 'refused', reason: 'owner' }],
+  ];
+  for (const [snapshot, expected] of cases) assert.deepEqual(command.chooseTarget(freeze(Object.assign({ uid: X, comparison: P }, snapshot))), expected, JSON.stringify(snapshot));
+  for (const bad of ['x', X]) assert.deepEqual(command.chooseTarget({ uid: X, comparison: bad, windows: [win({ studies: [X, P] })] }), { kind: 'refused', reason: 'invalid' });
+  assert.deepEqual(command.chooseTarget({ uid: X, comparison: null, windows: [] }), { kind: 'refused', reason: 'no-viewer' }, 'no comparison keeps B1');
+  assert.equal(command.retryable('comparison-viewer'), true); assert.equal(command.openable('comparison-viewer'), false);
+  for (const reason of links.CROSS_REASONS) assert.ok(command.reasonText(reason).length > 10, reason);
+  assert.equal(command.resultText({ reason: 'timeout', phase: 'activated' }), command.reasonText('timeout') + links.phaseText('activated'));
+  assert.equal(command.resultText({ reason: 'modal' }), command.reasonText('modal'));
+  assert.equal(command.arrivalText({ ok: true, annotation: 'key', phase: 'navigating' }, '영상 창 1'), '영상 이동 확인 · 영상 창 1 · 비교 검사 영상 칸 · ' + links.annotationText('key'));
+});
+
+test('comparison pre-call and identity: an activation tool is required; a loading history is tolerated only while the command waits', () => {
+  assert.equal(command.precheck(view({ activate: false }), expected), null, 'B1 does not need it');
+  assert.equal(command.precheck(view({ activate: false }), expected, true), 'tool-missing');
+  assert.equal(command.precheck(view({ activate: true }), expected, true), null);
+  assert.equal(command.precheck(view({ activate: true, suspended: true }), expected, true), 'busy', 'a loading history refuses before the call');
+  assert.equal(command.sameIdentity(view(), view({ suspended: true }), true), true);
+  assert.equal(command.sameIdentity(view(), view({ suspended: true })), false);
+  for (const change of [{ document: {} }, { closed: true }, { ended: true }, { subject: 'other' }, { owner: '["x","y"]' }, { live: false }, { historyPresent: false }])
+    assert.equal(command.sameIdentity(view(), view({ suspended: true, ...change }), true), false, JSON.stringify(change));
+  const other = code => vm.runInNewContext(code);
+  assert.deepEqual(command.crossResult(other('({ ok: false, reason: "viewport-ambiguous" })')), { ok: false, reason: 'viewport-ambiguous' });
+  assert.deepEqual(command.crossResult({ ok: false, reason: 'timeout' }), { ok: false, reason: 'timeout' });
+  assert.deepEqual(command.crossResult({ ok: true, highlighted: true, annotation: 'shown', phase: 'x' }), { ok: true, highlighted: true, annotation: 'shown' });
+  for (const bad of [{ ok: false, reason: 'loading' }, { ok: false, reason: 'foreign' }, { ok: true }, null, { get ok() { throw new Error('x'); } }])
+    assert.deepEqual(command.crossResult(bad), { ok: false, reason: 'invalid' });
+});
+
+// A command whose chosen document is driven by the fake clock: the history reloads the comparison study
+// `readyAfter` ms after activation unless `never`; probe facts follow that history.
+function crossJob(o) {
+  const opts = o || {}, c = opts.clock, log = [], announced = [];
+  const h = { scope: X, subject: SUB, ended: false, suspended: false, loading: false, generation: 3, viewportId: 'vp-x', image: null };
+  const facts = view({ scope: X + ',' + P, activate: true });
+  const env = {
+    state: () => { log.push('state'); return { ...h, image: h.image && { ...h.image } }; },
+    activate: study => {
+      log.push(['activate', study]);
+      if (opts.activation) return opts.activation;
+      h.viewportId = 'vp-p'; Object.assign(h, { scope: study, suspended: true, loading: true, generation: h.generation + 1 });
+      // Loaded (or refused, which leaves the history suspended) after `readyAfter` ms.
+      if (!opts.never) c.setTimeout(() => { if (h.scope === study) Object.assign(h, { loading: false, suspended: !!opts.refused }); }, opts.readyAfter ?? 300);
+      return { ok: true, viewportId: 'vp-p', changed: true };
+    },
+    navigate: target => {
+      log.push(['navigate', plain(target)]);
+      h.image = { study: target.studyUid, seriesUid: target.seriesUid, sopUid: target.sopUid, frame: target.frame };
+      return opts.answer ? opts.answer() : Promise.resolve({ ok: true, highlighted: false, annotation: 'key' });
+    },
+  };
+  const choice = { kind: 'window', label: '영상 창 1', env: () => env,
+    probe: () => ({ ...facts, suspended: h.suspended, historyScope: h.scope, image: opts.probeImage ? opts.probeImage() : h.image && { ...h.image } }),
+    invoke: () => { throw new Error('the B1 call is not used for a comparison source'); } };
+  const job = { expected, source: P_SOURCE(), comparison: 'comparison' in opts ? opts.comparison : P,
+    choose: () => { log.push('choose'); return choice; }, announce: result => announced.push(plain(result)) };
+  return { job, log, announced, h, facts };
+}
+const calledWith = (log, name) => log.filter(x => Array.isArray(x) && x[0] === name).map(x => x[1]);
+
+test('comparison command: activation, a reload wait that tolerates the loading history, one call, readback and one announcement', async () => {
+  const c = clock(), nav = command.createNavigator(c), j = crossJob({ clock: c, readyAfter: 600 });
+  const running = nav.run(j.job);
+  await c.advance(1000);
+  assert.deepEqual(await running, { ok: true, highlighted: false, annotation: 'key', phase: 'navigating', latest: true });
+  assert.deepEqual(calledWith(j.log, 'activate'), [P]); assert.deepEqual(calledWith(j.log, 'navigate'), [P_TARGET]);
+  assert.deepEqual(j.announced, [{ ok: true, highlighted: false, annotation: 'key', phase: 'navigating' }]);
+  assert.equal(c.pending(), 0);
+  // No declared comparison, or another one: refused before a target is chosen.
+  for (const comparison of [undefined, null, B, 'x']) {
+    const k = crossJob({ clock: c, comparison });
+    assert.deepEqual(await nav.run(k.job), { ok: false, reason: 'foreign', latest: true }, String(comparison));
+    assert.deepEqual(k.log, []);
+  }
+  // A viewer without the activation tool, or a refused activation: nothing further.
+  const noTool = crossJob({ clock: c }); noTool.facts.activate = false;
+  assert.deepEqual(await nav.run(noTool.job), { ok: false, reason: 'tool-missing', latest: true });
+  assert.deepEqual(noTool.log, ['choose']);
+  const refusedActivation = crossJob({ clock: c, activation: { ok: false, reason: 'viewport-ambiguous' } });
+  assert.deepEqual(await nav.run(refusedActivation.job), { ok: false, reason: 'viewport-ambiguous', phase: 'before', latest: true });
+  assert.deepEqual(calledWith(refusedActivation.log, 'navigate'), []);
+});
+
+test('comparison command: timeout, refusal, a replaced document or a newer command while waiting never calls the viewer, then or later', async () => {
+  {
+    const c = clock(), nav = command.createNavigator(c), j = crossJob({ clock: c, never: true });
+    const running = nav.run(j.job);
+    await c.advance(14999); assert.equal(j.announced.length, 0, 'a loading history does not settle the watch');
+    await c.advance(1);
+    assert.deepEqual(await running, { ok: false, reason: 'timeout', phase: 'activated', latest: true });
+    Object.assign(j.h, { suspended: false, loading: false }); await c.advance(2000);
+    assert.deepEqual(calledWith(j.log, 'navigate'), []); assert.equal(j.h.viewportId, 'vp-p', 'no automatic viewport restore');
+    assert.equal(c.pending(), 0);
+  }
+  {
+    const c = clock(), nav = command.createNavigator(c), j = crossJob({ clock: c, refused: true, readyAfter: 200 });
+    const running = nav.run(j.job); await c.advance(1000);
+    assert.deepEqual(await running, { ok: false, reason: 'busy', phase: 'activated', latest: true });
+    assert.deepEqual(calledWith(j.log, 'navigate'), []);
+  }
+  for (const change of [f => { f.document = {}; }, f => { f.owner = '["hallym","sub-b"]'; }, f => { f.closed = true; }, f => { f.selection = B; }]) {
+    const c = clock(), nav = command.createNavigator(c), j = crossJob({ clock: c, readyAfter: 800 });
+    const running = nav.run(j.job);
+    await c.advance(200); change(j.facts); await c.advance(2000);
+    assert.deepEqual(await running, { ok: false, reason: 'superseded', phase: 'activated', latest: true }, String(change));
+    assert.deepEqual(calledWith(j.log, 'navigate'), [], String(change));
+    // Between two 250 ms watch ticks the reload poll itself re-checks the identity before calling.
+    const d = clock(), later = command.createNavigator(d), k = crossJob({ clock: d, never: true });
+    const pending = later.run(k.job);
+    await d.advance(260); change(k.facts); Object.assign(k.h, { suspended: false, loading: false }); await d.advance(2000);
+    assert.deepEqual(await pending, { ok: false, reason: 'superseded', phase: 'activated', latest: true }, 'between ticks ' + String(change));
+    assert.deepEqual(calledWith(k.log, 'navigate'), [], 'between ticks ' + String(change));
+  }
+  {
+    const c = clock(), nav = command.createNavigator(c), older = crossJob({ clock: c, never: true }), newer = crossJob({ clock: c, readyAfter: 100 });
+    const a = nav.run(older.job); await c.advance(100);
+    const b = nav.run(newer.job); await c.advance(1000);
+    assert.equal((await b).ok, true);
+    Object.assign(older.h, { suspended: false, loading: false }); await c.advance(500);
+    assert.deepEqual(await a, { ok: false, reason: 'superseded', phase: 'activated', latest: false });
+    assert.deepEqual([calledWith(older.log, 'navigate'), older.announced], [[], []]);
+  }
+});
+
+test('comparison command: an ok answer is success only if the chosen document still reports that study and the exact image', async () => {
+  const cases = [
+    [{ probeImage: () => ({ study: P, seriesUid: P_SERIES, sopUid: SOP2, frame: 1 }) }, 'superseded'],
+    [{ probeImage: () => null }, 'superseded'],
+    [{ answer: () => Promise.resolve({ ok: false, reason: 'series-missing' }) }, 'series-missing'],
+    [{ answer: () => Promise.resolve({ ok: true }) }, 'invalid'],
+    [{ answer: () => Promise.reject(new Error('x')) }, 'tool-missing'],
+  ];
+  for (const [o, reason] of cases) {
+    const c = clock(), nav = command.createNavigator(c), j = crossJob(Object.assign({ clock: c, readyAfter: 100 }, o));
+    const running = nav.run(j.job); await c.advance(1000);
+    assert.deepEqual(await running, { ok: false, reason, phase: 'navigating', latest: true }, reason);
+    assert.equal(calledWith(j.log, 'navigate').length, 1);
+  }
+  // The history moving away from the study after the answer is caught by the viewer-side readback.
+  const c = clock(), nav = command.createNavigator(c);
+  let gate; const answer = new Promise(resolve => { gate = resolve; });
+  const j = crossJob({ clock: c, readyAfter: 100, answer: () => answer });
+  const running = nav.run(j.job); await c.advance(300);
+  assert.equal(calledWith(j.log, 'navigate').length, 1);
+  Object.assign(j.h, { scope: X, generation: 99 }); gate({ ok: true, highlighted: false, annotation: 'key' }); await c.advance(10);
+  assert.deepEqual(await running, { ok: false, reason: 'superseded', phase: 'navigating', latest: true });
+});
+
+// A viewer document of its own realm with two viewports (URL X,P) and the S2-B2 exports.
+function pairedViewer(o) {
+  const options = o || {};
+  const ctx = vm.createContext({ setTimeout });
+  vm.runInContext(`
+    this.calls = []; this.activations = []; this.modal = false; this.focused = 0; this.closed = false; this.gates = [];
+    this.shows = { 'vp-x': ${JSON.stringify(X)}, 'vp-p': ${JSON.stringify(P)} };
+    this.first = { ${JSON.stringify(X)}: { seriesUid: ${JSON.stringify(SERIES)}, sopUid: ${JSON.stringify(SOP)} }, ${JSON.stringify(P)}: { seriesUid: ${JSON.stringify(P_SERIES)}, sopUid: '1.2.840.30.1.1' } };
+    this.history = { scope: ${JSON.stringify(X)}, subject: ${JSON.stringify(SUB)}, ended: false, suspended: false, loading: false, generation: 1, viewportId: 'vp-x',
+      image: { study: ${JSON.stringify(X)}, seriesUid: ${JSON.stringify(SERIES)}, sopUid: ${JSON.stringify(SOP)}, frame: 1 } };
+    this.loadMs = 30; this.refuse = false; this.never = false;
+    this.document = { querySelectorAll: () => this.modal ? [{ getClientRects: () => [{}] }] : [] };
+    this.location = { href: ${JSON.stringify(ORIGIN + '/ohif/viewer?StudyInstanceUIDs=' + X + ',' + P + '#kin-window-slot=0')} };
+    this.focus = () => { this.focused++; };
+    this.kinViewerWindowOwner = () => ${JSON.stringify(OWNER)};
+    this.kinViewerHistoryState = () => ({ ...this.history, image: this.history.image && { ...this.history.image }, heads: [] });
+    // The user (or the command) selects a viewport; the history resets and reloads that study later.
+    this.select = id => {
+      const study = this.shows[id];
+      this.history.viewportId = id;
+      if (study === this.history.scope) return;
+      Object.assign(this.history, { scope: study, suspended: true, loading: true, generation: this.history.generation + 1, image: { study, ...this.first[study], frame: 1 } });
+      const generation = this.history.generation;
+      setTimeout(() => {
+        if (this.history.generation !== generation || this.never) return;
+        this.history.loading = false; if (!this.refuse) this.history.suspended = false;
+      }, this.loadMs);
+    };
+    this.kinViewerHistoryActivate = study => {
+      this.activations.push(study);
+      const ids = Object.keys(this.shows).filter(id => this.shows[id] === study);
+      if (ids.length === 0) return { ok: false, reason: 'viewport-missing' };
+      if (ids.length > 1) return { ok: false, reason: 'viewport-ambiguous' };
+      if (this.history.viewportId === ids[0]) return { ok: true, viewportId: ids[0], changed: false };
+      this.select(ids[0]);
+      return { ok: true, viewportId: ids[0], changed: true };
+    };
+    this.kinViewerHistoryNavigate = target => {
+      this.calls.push(JSON.stringify(target));
+      const land = () => {
+        if (target.studyUid !== this.history.scope) return { ok: false, reason: 'scope' };
+        this.history.image = { study: target.studyUid, seriesUid: target.seriesUid, sopUid: target.sopUid, frame: target.frame };
+        return { ok: true, highlighted: false, annotation: 'key' };
+      };
+      if (this.holding) return new Promise(resolve => this.gates.push(() => resolve(land())));
+      return Promise.resolve(land());
+    };
+  `, ctx);
+  return ctx;
+}
+const settle = async (h, ms = 3000) => { const end = Date.now() + ms; while (h.result().dataset.result === 'pending' && Date.now() < end) { await new Promise(r => setTimeout(r, 10)); await flush(); } };
+
+test('adapter comparison: a viewer of both studies activates the comparison viewport, waits for its reload, lands on the exact frame and says where', async () => {
+  const h = worklist(), v = pairedViewer(), frame = h.embed(v, { studies: [X, P] });
+  h.s.respond = () => Promise.resolve(page([crossFinding()]));
+  await h.open();
+  assert.equal(h.byId('reading-findings-target').dataset.target, 'embedded');
+  await h.click(h.source(ID1, 1)); await settle(h);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent], ['ok', '영상 이동 확인 · 통합 작업공간 · 비교 검사 영상 칸 · ' + links.annotationText('key')]);
+  assert.deepEqual([plain(v.activations), sent(v)], [[P], [P_TARGET]]);
+  assert.deepEqual(plain(v.history.image), { study: P, seriesUid: P_SERIES, sopUid: P_SOP, frame: 1 });
+  assert.deepEqual([frame.focused, v.focused, v.history.viewportId], [1, 1, 'vp-p']);
+  // The selected study's own source while the comparison viewport is active: the B1 call, refused by the viewer.
+  await h.click(h.source(ID1, 0)); await settle(h);
+  assert.deepEqual([h.result().dataset.result, v.activations.length, v.calls.length], ['scope', 1, 2]);
+  // Pressed again with the comparison already active and loaded: no activation change, one more call.
+  await h.click(h.source(ID1, 1)); await settle(h);
+  assert.deepEqual([h.result().dataset.result, plain(v.activations), v.history.viewportId, v.calls.length], ['ok', [P, P], 'vp-p', 3]);
+});
+
+test('adapter comparison: missing, duplicated or refused comparison viewports and Retry of the pinned comparison source', async () => {
+  const h = worklist(), v = pairedViewer();
+  let studies = [X];
+  const frame = h.embed(v, () => ({ studies }));
+  h.s.respond = () => Promise.resolve(page([crossFinding()]));
+  await h.open();
+  // The embedded viewer shows only the selected study: no call, Retry offered.
+  await h.click(h.source(ID1, 1));
+  assert.deepEqual([h.result().dataset.result, v.activations.length, v.calls.length], ['comparison-viewer', 0, 0]);
+  const retry = h.named(h.panel(), 'Retry Go to Image')[0];
+  assert.equal(retry.hidden, false);
+  studies = [X, P];
+  for (const [arrange, reason] of [[() => { v.shows['vp-p'] = X; }, 'viewport-missing'], [() => { v.shows['vp-x'] = P; v.shows['vp-p'] = P; }, 'viewport-ambiguous']]) {
+    arrange();
+    await h.click(retry); await settle(h);
+    assert.deepEqual([h.result().dataset.result, h.result().textContent, v.calls.length], [reason, command.reasonText(reason), 0], reason);
+    assert.equal(retry.hidden, false);
+    Object.assign(v.shows, { 'vp-x': X, 'vp-p': P });
+  }
+  // The comparison history refuses after activation: busy, the display may have changed, the list is read again.
+  v.refuse = true;
+  const reads = h.s.api.length;
+  await h.click(retry); await settle(h);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent], ['busy', command.reasonText('busy') + links.phaseText('activated')]);
+  assert.deepEqual([v.calls.length, v.history.viewportId, h.s.api.length], [0, 'vp-p', reads + 1], 'no call, no restore, one list read');
+  // The user returns to the selected study; Retry replays exactly the pinned comparison source.
+  v.refuse = false; v.select('vp-x'); await new Promise(r => setTimeout(r, 60));
+  await h.click(retry); await settle(h);
+  assert.deepEqual([h.result().dataset.result, sent(v)], ['ok', [P_TARGET]]);
+  assert.equal(frame.focused, 1);
+  // A reload that replaces the comparison source: Retry refuses list-changed before any call.
+  v.modal = true; v.select('vp-x'); await new Promise(r => setTimeout(r, 60));
+  await h.click(h.source(ID1, 1));
+  assert.equal(h.result().dataset.result, 'modal');
+  await focusReload(h, page([finding({ revision: 2 }, [source(), P_SOURCE({ revision: 3 })])]));
+  v.modal = false;
+  await h.click(retry);
+  assert.deepEqual([h.result().dataset.result, v.calls.length], ['list-changed', 1]);
+});
+
+test('adapter comparison: a document replaced, an account change or a withdrawn row during the wait is never success nor a later call', async () => {
+  for (const change of [
+    (v, h, state) => { state.document = { querySelectorAll: () => [] }; },
+    (v, h) => { h.s.owner = '["hallym","sub-b"]'; },
+    (v, h) => { h.s.selected = B; h.ui.sync(); },
+    (v, h, state) => { state.studies = [X]; },
+  ]) {
+    const h = worklist(), v = pairedViewer(), state = { studies: [X, P] };
+    h.embed(v, () => state);
+    h.s.respond = () => Promise.resolve(page([crossFinding()]));
+    await h.open();
+    v.never = true;
+    await h.click(h.source(ID1, 1));
+    assert.equal(h.result().dataset.result, 'pending');
+    change(v, h, state);
+    await new Promise(r => setTimeout(r, 400)); await flush();
+    Object.assign(v.history, { suspended: false, loading: false });
+    await new Promise(r => setTimeout(r, 300)); await flush();
+    assert.equal(v.calls.length, 0, String(change));
+    assert.ok(['superseded', ''].includes(h.result().dataset.result), String(change) + ' ' + h.result().dataset.result);
+    assert.ok(!h.result().textContent.includes('영상 이동 확인'));
+  }
+  // The comparison study is withdrawn: the reloaded list has no row, and nothing of it stays in the panel.
+  const h = worklist(), v = pairedViewer();
+  h.embed(v, { studies: [X, P] });
+  h.s.respond = () => Promise.resolve(page([crossFinding()]));
+  await h.open();
+  assert.ok(h.panel().textContent.includes('비교 키'));
+  h.s.respond = () => Promise.resolve(page([]));
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  assert.equal(h.articles().length, 0);
+  for (const secret of ['비교 키', P_SOP, P_SERIES, ITEM2]) assert.equal(h.panel().textContent.includes(secret), false, secret);
 });
 
 /* ---------- shipped wiring ---------- */

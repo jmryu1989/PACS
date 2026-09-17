@@ -19,9 +19,11 @@ function slice() {
   assert.ok(start > 0 && end > start, 'navigation anchors present once');
   const text = source.slice(start, end);
   assert.ok(text.includes('async function kinViewerNavigateTo'), 'the shipped navigation function is in the slice');
+  assert.ok(text.includes('function kinViewerActivateStudy'), 'the shipped activation function is in the slice');
   const sandbox = { Number, Array, Object, Promise, JSON, RegExp, Error, console };
   vm.createContext(sandbox);
-  vm.runInContext(text + ';this.reference = kinViewerImageReference; this.navigateTo = kinViewerNavigateTo; this.REASONS = KIN_NAVIGATION_REASONS;', sandbox);
+  vm.runInContext(text + ';this.reference = kinViewerImageReference; this.navigateTo = kinViewerNavigateTo; this.REASONS = KIN_NAVIGATION_REASONS;' +
+    'this.activate = kinViewerActivateStudy; this.ACTIVATION_REASONS = KIN_ACTIVATION_REASONS;', sandbox);
   return sandbox;
 }
 const shipped = slice();
@@ -925,6 +927,852 @@ test('mounted viewer: the worklist command reaches the real exported navigation;
   await other.switch('2.2');
   const scope = await worklistCommand(other, findingTarget());
   assert.deepEqual([scope.result, scope.loads, other.viewport.switched], [{ ok: false, reason: 'scope', latest: true }, 0, undefined]);
+});
+
+/* ---------- S2-B2 comparison sources (TEST-S2B2-PURE-*: REQ-S2B2-ANCHOR/PICK/NAVIGATE/RETRY/REVOKE) ----------
+ * The shipped activation function sliced from config/ohif.js, crossNavigate and the anchored store of
+ * finding-link-model.js, then the whole history extension with the Findings section in a two-viewport vm
+ * viewer. Grid, viewports and transports are synthetic. */
+const XS = '1.1', PS = '2.2';
+const textOf = el => el.all().map(e => e.textContent).join('\n');
+const waitFor = async (predicate, label, ms = 3000) => {
+  const end = Date.now() + ms;
+  for (;;) { await flush(); if (predicate()) return; assert.ok(Date.now() < end, 'timed out waiting for ' + label); await new Promise(r => setTimeout(r, 10)); }
+};
+
+test('activation: exactly one stack viewport showing the study becomes active; none, several, other kinds and errors change nothing', () => {
+  assert.equal(source.split('function kinViewerActivateStudy(').length - 1, 1);
+  assert.ok(source.includes('const activateStudy = study => kinViewerActivateStudy(navigationEnv, study);'));
+  assert.ok(source.includes('window.kinViewerHistoryActivate = activateStudy;'));
+  assert.ok(source.includes('if (window.kinViewerHistoryActivate === activateStudy) delete window.kinViewerHistoryActivate;'));
+  assert.deepEqual([...shipped.ACTIVATION_REASONS], model.ACTIVATION_REASONS);
+  function grid(o) {
+    const calls = [], state = { active: 'vp-1', ended: false };
+    const sets = { 'ds-x': { StudyInstanceUID: XS }, 'ds-p': { StudyInstanceUID: PS }, 'ds-p2': { StudyInstanceUID: PS } }, views = o.views || {};
+    const env = { ended: () => state.ended, services: {
+      viewportGridService: {
+        getState: () => { if (o.throwGrid) throw new Error('grid'); return { viewports: new Map(Object.entries(o.shows).map(([id, ids]) => [id, { viewportId: id, displaySetInstanceUIDs: ids }])) }; },
+        getActiveViewportId: () => state.active, setActiveViewportId: id => { calls.push(id); if (o.throwSet) throw new Error('set'); state.active = id; } },
+      displaySetService: { getDisplaySetByUID: id => sets[id] },
+      cornerstoneViewportService: { getCornerstoneViewport: id => id in views ? views[id] : { type: 'stack', getImageIds: () => [] } } } };
+    return { calls, state, run: study => plain(shipped.activate(env, study)) };
+  }
+  const two = grid({ shows: { 'vp-1': ['ds-x'], 'vp-2': ['ds-p'] } });
+  assert.deepEqual(two.run(PS), { ok: true, viewportId: 'vp-2', changed: true }); assert.deepEqual(two.calls, ['vp-2']);
+  assert.deepEqual(two.run(PS), { ok: true, viewportId: 'vp-2', changed: false }); assert.deepEqual(two.calls, ['vp-2'], 'an active viewport is not activated again');
+  assert.deepEqual(two.run(XS), { ok: true, viewportId: 'vp-1', changed: true }); assert.deepEqual(two.calls, ['vp-2', 'vp-1']);
+  const pair = { 'vp-1': ['ds-x'], 'vp-2': ['ds-p'] };
+  const cases = [
+    [{ shows: { 'vp-1': ['ds-x'] } }, PS, 'viewport-missing'],
+    [{ shows: { 'vp-1': ['ds-x'], 'vp-2': [] } }, PS, 'viewport-missing'],
+    [{ shows: { 'vp-1': ['ds-x'], 'vp-2': ['ds-unknown'] } }, PS, 'viewport-missing'],
+    [{ shows: pair, views: { 'vp-2': undefined } }, PS, 'viewport-missing'],
+    [{ shows: { 'vp-1': ['ds-x'], 'vp-2': ['ds-p'], 'vp-3': ['ds-p2'] } }, PS, 'viewport-ambiguous'],
+    [{ shows: { 'vp-1': ['ds-p'], 'vp-2': ['ds-p'] } }, PS, 'viewport-ambiguous'],
+    [{ shows: { 'vp-1': ['ds-x', 'ds-p'], 'vp-2': ['ds-p'] } }, PS, 'viewport-ambiguous'],
+    [{ shows: pair, views: { 'vp-2': { type: 'orthographic', getImageIds: () => [] } } }, PS, 'viewport-unsupported'],
+    [{ shows: pair, views: { 'vp-2': { type: 'stack' } } }, PS, 'viewport-unsupported'],
+    [{ shows: pair, throwGrid: true }, PS, 'tool-missing'],
+    [{ shows: pair }, 'x', 'invalid'], [{ shows: pair }, undefined, 'invalid'], [{ shows: pair }, '1.' + '2'.repeat(70), 'invalid'],
+  ];
+  for (const [o, study, reason] of cases) {
+    const g = grid(o);
+    assert.deepEqual(g.run(study), { ok: false, reason }, reason + ' ' + JSON.stringify(o.shows));
+    assert.deepEqual(g.calls, [], reason + ': nothing was activated');
+  }
+  const ended = grid({ shows: pair }); ended.state.ended = true;
+  assert.deepEqual(ended.run(PS), { ok: false, reason: 'ended' }); assert.deepEqual(ended.calls, []);
+  const thrown = grid({ shows: pair, throwSet: true });
+  assert.deepEqual(thrown.run(PS), { ok: false, reason: 'tool-missing', changed: true }, 'a throwing grid may already have moved');
+});
+
+function crossKit(o) {
+  const opts = o || {};
+  const log = [], phases = [];
+  const view = { scope: XS, subject: 'reader-1', ended: false, suspended: false, loading: false, generation: 4, viewportId: 'vp-x',
+    image: { study: XS, seriesUid: '1.2', sopUid: '1.3', frame: 1 }, heads: [] };
+  Object.assign(view, opts.view);
+  const target = { studyUid: PS, seriesUid: '2.3', sopUid: '2.6', frame: 1, itemId: ITEM };
+  // Applied after each wait: the grid moves, the history resets and loads the comparison study.
+  const script = opts.script || [
+    s => Object.assign(s, { viewportId: 'vp-p' }),
+    s => Object.assign(s, { scope: PS, suspended: true, loading: true, generation: 5, image: { study: PS, seriesUid: '2.3', sopUid: '2.4', frame: 1 } }),
+    s => Object.assign(s, { suspended: false, loading: false }),
+  ];
+  let polls = 0, stop = null;
+  const env = {
+    state: () => { log.push('state'); if (opts.state) return opts.state(view); return { ...view, image: view.image && { ...view.image } }; },
+    activate: study => { log.push(['activate', study]); if (opts.activateThrows) throw new Error('gone'); return 'activation' in opts ? opts.activation : { ok: true, viewportId: 'vp-p', changed: true }; },
+    navigate: async t => {
+      log.push(['navigate', plain(t)]);
+      if (opts.navigateThrows) throw new Error('gone');
+      const answer = 'answer' in opts ? opts.answer : { ok: true, highlighted: false, annotation: 'key' };
+      if (answer && answer.ok && !opts.noMove) view.image = { study: t.studyUid, seriesUid: t.seriesUid, sopUid: t.sopUid, frame: t.frame };
+      if (opts.during) opts.during(view, value => { stop = value; });
+      return answer;
+    },
+  };
+  const control = { stopped: () => stop, phase: name => phases.push(name),
+    wait: async ms => { assert.equal(ms, 100); polls++; log.push('wait'); const step = script[polls - 1]; if (step) step(view); if (opts.onWait) opts.onWait(polls, view, value => { stop = value; }); } };
+  return { env, control, view, target, log, phases, polls: () => polls, setStop: value => { stop = value; },
+    run: async t => plain(await model.crossNavigate(env, t === undefined ? target : t, control)) };
+}
+const navigated = log => log.filter(x => Array.isArray(x) && x[0] === 'navigate').map(x => x[1]);
+const activated = log => log.filter(x => Array.isArray(x) && x[0] === 'activate').map(x => x[1]);
+
+test('cross navigation: activation, a delayed history reload of that viewport, one navigation call and the exact frame read back', async () => {
+  const kit = crossKit();
+  assert.deepEqual(await kit.run(), { ok: true, highlighted: false, annotation: 'key' });
+  assert.deepEqual(activated(kit.log), [PS]);
+  assert.deepEqual(navigated(kit.log), [kit.target], 'the frozen target, never another study or frame');
+  assert.equal(kit.polls(), 3); assert.deepEqual(kit.phases, ['activated', 'navigating']);
+  // The comparison viewport is already active and loaded: no wait, and the display was not moved by activation.
+  const ready = crossKit({ view: { scope: PS, viewportId: 'vp-p', generation: 9, image: { study: PS, seriesUid: '2.3', sopUid: '2.4', frame: 1 } },
+    activation: { ok: true, viewportId: 'vp-p', changed: false } });
+  assert.equal((await ready.run()).ok, true);
+  assert.deepEqual([ready.polls(), ready.phases], [0, ['navigating']]);
+  // The target viewport is already active but the history has not scanned it yet: waited for, not refused.
+  const lagging = crossKit({ view: { viewportId: 'vp-p' }, activation: { ok: true, viewportId: 'vp-p', changed: false },
+    script: [s => Object.assign(s, { scope: PS, generation: 6 })] });
+  assert.equal((await lagging.run()).ok, true); assert.deepEqual([lagging.polls(), lagging.phases], [1, ['navigating']]);
+  // A history that is still loading when the command starts is busy before anything is asked (B1 pre-call rule).
+  const loading = crossKit({ view: { scope: PS, viewportId: 'vp-p', suspended: true, loading: true } });
+  assert.deepEqual(await loading.run(), { ok: false, reason: 'busy' }); assert.deepEqual(activated(loading.log), []);
+});
+
+test('cross navigation: refusals before or at activation call nothing further and claim no display change', async () => {
+  const cases = [
+    [{}, null, 'invalid', 0], [{}, { ...crossKit().target, frame: 0 }, 'invalid', 0], [{}, { ...crossKit().target, studyUid: 'x' }, 'invalid', 0],
+    [{ state: () => null }, undefined, 'tool-missing', 0], [{ state: () => ({ scope: XS }) }, undefined, 'tool-missing', 0],
+    [{ state: () => { throw new Error('gone'); } }, undefined, 'tool-missing', 0],
+    [{ view: { ended: true } }, undefined, 'ended', 0], [{ view: { suspended: true } }, undefined, 'busy', 0],
+  ];
+  for (const [o, t, reason, calls] of cases) {
+    const kit = crossKit(o);
+    assert.deepEqual(await kit.run(t), { ok: false, reason }, reason);
+    assert.equal(activated(kit.log).length, calls, reason); assert.deepEqual(navigated(kit.log), []); assert.deepEqual(kit.phases, []);
+  }
+  const stopped = crossKit(); stopped.setStop('superseded');
+  assert.deepEqual(await stopped.run(), { ok: false, reason: 'superseded' }); assert.deepEqual(activated(stopped.log), []);
+  for (const [activation, reason, phases] of [
+    [{ ok: false, reason: 'viewport-missing' }, 'viewport-missing', []], [{ ok: false, reason: 'viewport-ambiguous' }, 'viewport-ambiguous', []],
+    [{ ok: false, reason: 'viewport-unsupported' }, 'viewport-unsupported', []], [{ ok: false, reason: 'ended' }, 'ended', []],
+    [{ ok: false, reason: 'scope' }, 'tool-missing', []], [{ ok: true }, 'tool-missing', []], [null, 'tool-missing', []],
+    [{ ok: false, reason: 'tool-missing', changed: true }, 'tool-missing', ['activated']],
+  ]) {
+    const kit = crossKit({ activation });
+    assert.deepEqual(await kit.run(), { ok: false, reason }, JSON.stringify(activation));
+    assert.deepEqual(navigated(kit.log), []); assert.deepEqual(kit.phases, phases); assert.equal(kit.polls(), 0);
+  }
+  const thrown = crossKit({ activateThrows: true });
+  assert.deepEqual(await thrown.run(), { ok: false, reason: 'tool-missing' }); assert.deepEqual(thrown.phases, []);
+});
+
+test('cross navigation: another active viewport, A-B-A, login change, refusal, timeout or supersession while waiting never navigates', async () => {
+  const cases = [
+    ['user picks another viewport after activation', [s => Object.assign(s, { viewportId: 'vp-p' }), s => Object.assign(s, { viewportId: 'vp-3' })], 'superseded'],
+    ['layout moves to a third viewport first', [s => Object.assign(s, { viewportId: 'vp-3' })], 'superseded'],
+    ['A-B-A of the active viewport', [s => Object.assign(s, { viewportId: 'vp-p' }), s => Object.assign(s, { viewportId: 'vp-x' }), s => Object.assign(s, { viewportId: 'vp-p', scope: PS, generation: 7 })], 'superseded'],
+    ['another login', [s => Object.assign(s, { viewportId: 'vp-p', subject: 'reader-2' })], 'superseded'],
+    ['session ended', [s => Object.assign(s, { viewportId: 'vp-p', ended: true, subject: '' })], 'ended'],
+    ['unreadable history', [s => Object.assign(s, { viewportId: 'vp-p', generation: 'x' })], 'tool-missing'],
+    ['comparison history refused or holding parked marks', [s => Object.assign(s, { viewportId: 'vp-p' }), s => Object.assign(s, { scope: PS, suspended: true, loading: false, generation: 5 })], 'busy'],
+  ];
+  for (const [label, script, reason] of cases) {
+    const kit = crossKit({ script });
+    assert.deepEqual(await kit.run(), { ok: false, reason }, label);
+    assert.deepEqual(navigated(kit.log), [], label); assert.deepEqual(kit.phases, ['activated'], label);
+  }
+  // The caller's 15 s bound or a newer command stops the wait; a history that becomes ready later is not used.
+  for (const value of ['timeout', 'superseded']) {
+    const kit = crossKit({ onWait: (n, view, stop) => { if (n === 2) stop(value); } });
+    assert.deepEqual(await kit.run(), { ok: false, reason: value });
+    Object.assign(kit.view, { scope: PS, suspended: false, loading: false, generation: 8 });
+    await flush();
+    assert.deepEqual(navigated(kit.log), [], value); assert.deepEqual(kit.phases, ['activated'], value);
+  }
+});
+
+test('cross navigation: after the call only the viewer ok plus the same generation, viewport and exact image is success', async () => {
+  const passes = await crossKit({ answer: { ok: false, reason: 'series-missing' } }).run();
+  assert.deepEqual(passes, { ok: false, reason: 'series-missing' });
+  const cases = [
+    [{ answer: { ok: true } }, 'invalid'], [{ answer: { ok: false, reason: 'viewport-missing' } }, 'invalid'], [{ answer: null }, 'invalid'],
+    [{ navigateThrows: true }, 'tool-missing'],
+    [{ noMove: true }, 'frame-missing'],
+    [{ during: view => { view.generation++; } }, 'superseded'],
+    [{ during: view => { view.viewportId = 'vp-x'; } }, 'superseded'],
+    [{ during: view => { view.suspended = true; } }, 'superseded'],
+    [{ during: view => { view.scope = XS; } }, 'superseded'],
+    [{ during: view => { view.subject = 'reader-2'; } }, 'superseded'],
+    [{ during: view => { view.ended = true; } }, 'superseded'],
+    [{ during: view => { view.image = { ...view.image, frame: 2 }; } }, 'frame-missing'],
+    [{ during: view => { view.image = { ...view.image, sopUid: '2.4' }; } }, 'frame-missing'],
+    [{ during: view => { view.image = null; } }, 'frame-missing'],
+    [{ during: (view, stop) => stop('superseded') }, 'superseded'],
+    [{ during: (view, stop) => stop('timeout') }, 'timeout'],
+  ];
+  for (const [o, reason] of cases) {
+    const kit = crossKit(o);
+    assert.deepEqual(await kit.run(), { ok: false, reason }, JSON.stringify(o) + ' ' + String(o.during));
+    assert.equal(navigated(kit.log).length, 1); assert.deepEqual(kit.phases, ['activated', 'navigating']);
+  }
+  assert.deepEqual(model.CROSS_REASONS.filter(r => !model.reasonText(r) || model.reasonText(r) === model.reasonText('nope')), ['invalid']);
+  assert.equal(model.phaseText('before'), ''); assert.ok(model.phaseText('activated').includes('자동으로 되돌리지 않습니다'));
+  assert.ok(model.phaseText('navigating').includes('이미 이동했을 수 있으니'));
+});
+
+/* The anchored store: studies [A, B] as in the URL of a comparison viewer. */
+const P1 = '00000000-0000-4000-8000-00000000b001', P2 = '00000000-0000-4000-8000-00000000b002', F2 = 'f0000000-0000-4000-8000-000000000002';
+const pItem = (id, revision, extra) => Object.assign({ id, studyUid: B, authorSub: 'reader-1', authorActor: 'Reader', revision, hidden: false, createdAt: 't', updatedAt: 't',
+  item: { schemaVersion: 1, kind: 'key', seriesUid: '4.5.6.1', sopUid: '4.5.6.1.2', frame: 1, title: 'P비교키', description: '', hidden: false } }, extra);
+const pCopy = (id, revision) => ({ itemId: id, revision, studyUid: B, kind: 'key', seriesUid: '4.5.6.1', sopUid: '4.5.6.1.2', frame: 1, frameOfReferenceUid: null,
+  label: 'P비교키', values: null, calculator: null, sourceDigest: null, authorActor: 'Reader' });
+function pairTransport() {
+  const t = transport(), base = t.fetch;
+  const pair = { items: [pItem(P1, 1), pItem(P2, 3)], status: 200, manual: false, calls: [] };
+  const answer = (status, items) => ({ status, ok: status === 200, json: async () => status === 200 ? { items, nextCursor: null } : { message: 'refused' } });
+  t.fetch = async (url, options) => {
+    if (!url.startsWith('/api/studies/' + B + '/viewer-items')) return base(url, options);
+    t.log.push({ url, options, body: null });
+    if (pair.manual) return new Promise(resolve => pair.calls.push((status, items) => resolve(answer(status, items))));
+    return answer(typeof pair.status === 'function' ? pair.status() : pair.status, pair.items);
+  };
+  t.pair = pair;
+  t.cross = (id, revision, extra) => t.head(id, revision, Object.assign({ item: { schemaVersion: 1, title: 'T', text: 'X', hidden: false, primary: 0,
+    sources: [t.head(id, 1).item.sources[0], pCopy(P1, 1)] }, links: [{ itemId: ITEM, linkState: 'current', headRevision: 2, headHidden: false },
+    { itemId: P1, linkState: 'current', headRevision: 1, headHidden: false }] }, extra));
+  return t;
+}
+const reads = (t, study, kind) => t.log.filter(x => (x.options?.method || 'GET') === 'GET' && x.url.startsWith('/api/studies/' + study + '/' + kind)).length;
+async function anchored(t, extra) {
+  const kit = makeStore(t, Object.assign({ uuid: counter(), studies: [A, B] }, extra));
+  kit.store.syncHistory(history(A, heads2())); await tick(40);
+  return kit;
+}
+
+test('anchored store: the comparison viewport keeps entries, drafts, pending bodies and generation; only a study outside the pair re-anchors', async () => {
+  const t = pairTransport(); t.state.items = [t.head(F1, 1)];
+  const { store } = await anchored(t);
+  assert.deepEqual([store.state().scope, store.pairOf(), store.anchorLive()], [A, B, true]);
+  assert.deepEqual(t.log.map(x => x.url), ['/api/me', '/api/studies/' + A + '/findings?includeHidden=true&limit=100', '/api/studies/' + B + '/viewer-items?limit=100']);
+  assert.equal(store.state().pair.status, 'ready'); assert.deepEqual([...store.state().pair.heads.keys()], [P1, P2]);
+  assert.deepEqual(plain(store.state().pair.heads.get(P1)), { id: P1, studyUid: B, revision: 1, hidden: false, kind: 'key', label: 'P비교키', seriesUid: '4.5.6.1',
+    sopUid: '4.5.6.1.2', frame: 1, authorSub: 'reader-1', referenceStatus: null, values: null, working: false });
+  const saved = store.state().entries.get(F1);
+  const e = store.newDraft(); store.updateDraft(e, { title: '비교 소견', text: '본문' });
+  assert.equal(store.toggleSource(e, ITEM), true);
+  assert.equal(store.toggleSource(e, P1, 'other-study'), false, 'only the pair study');
+  assert.equal(store.toggleSource(e, P1, B), true);
+  assert.deepEqual(e.draft.sources, [{ itemId: ITEM, revision: 2 }, { itemId: P1, revision: 1, studyUid: B }]);
+  assert.equal(store.studyOf(e, e.draft.sources[1]), B); assert.equal(store.comparisonOf(e), B);
+  t.state.responses.push({ status: 503, body: { message: 'delayed' } });
+  assert.equal(await store.save(e, 'create'), false);
+  const pendingBody = e.pending.body, generation = store.state().generation;
+  assert.deepEqual(JSON.parse(pendingBody), { requestId: 'd0000000-0000-4000-8000-000000000002', item: { schemaVersion: 1, title: '비교 소견', text: '본문', primary: 0,
+    sources: [{ itemId: ITEM, revision: 2 }, { itemId: P1, revision: 1 }] } }, 'only {itemId, revision} pairs are sent');
+  // The comparison viewport becomes active: nothing is parked, reset or re-keyed; its saved list is read again.
+  store.syncHistory(history(B, [{ id: P1, revision: 1, hidden: false, referenceStatus: null, working: true }, { id: P2, revision: 3, hidden: false, referenceStatus: null, working: false }]));
+  await tick(40);
+  assert.deepEqual([store.state().scope, store.state().generation, store.anchorLive()], [A, generation, false]);
+  assert.equal(store.state().entries.get(e.id), e); assert.equal(store.state().entries.get(F1), saved);
+  assert.equal(e.pending.body, pendingBody); assert.equal(e.draft.title, '비교 소견');
+  assert.deepEqual(plain(store.held()), { count: 0, studies: [] }); assert.deepEqual(store.workState(), { dirty: true, busy: true, held: 0 });
+  assert.equal(reads(t, B, 'viewer-items'), 2); assert.equal(reads(t, A, 'findings'), 1, 'no anchor reload on activation');
+  const d = store.newDraft();
+  assert.equal(store.toggleSource(d, ITEM2), false, 'anchor heads need the anchor viewport');
+  assert.equal(store.toggleSource(d, P1, B), false, 'an item being edited in the comparison viewport');
+  assert.equal(store.toggleSource(d, P2, B), true); assert.deepEqual(d.draft.sources, [{ itemId: P2, revision: 3, studyUid: B }]);
+  // Retry while the comparison is active replays the byte-identical body.
+  t.state.responses.push({ status: 200, body: t.cross(F2, 1) }); t.state.items = [t.head(F1, 1), t.cross(F2, 1)];
+  assert.equal(await store.save(e), true);
+  assert.equal(posts(t).length, 2); assert.equal(posts(t)[1].options.body, pendingBody);
+  assert.equal(store.state().entries.get(F2), e); assert.deepEqual(e.draft.sources, [{ itemId: ITEM, revision: 2 }, { itemId: P1, revision: 1, studyUid: B }]);
+  // Back on the anchor viewport nothing moves either.
+  store.syncHistory(history(A, heads2())); await tick(40);
+  assert.deepEqual([store.state().generation, store.anchorLive(), store.state().entries.get(d.id) === d], [generation, true, true]);
+  // A study outside the pair is a real anchor change: the B1 parking and isolation apply.
+  t.state.items = [];
+  store.syncHistory(history('7.7.7', [])); await tick(40);
+  assert.deepEqual([store.state().scope, store.pairOf(), store.state().entries.size], ['7.7.7', '', 0]);
+  assert.deepEqual(plain(store.held()), { count: 1, studies: [{ scope: A, count: 1, current: false }] });
+  const cleared = store.state().pair;
+  assert.deepEqual([cleared.status, cleared.heads.size, cleared.working.size, cleared.key, cleared.refused], ['none', 0, 0, '', false]);
+});
+
+test('comparison list: late, superseded, other-login and other-anchor answers are dropped; 403/404 clears it, re-reads the anchor once and blocks new commands', async () => {
+  {
+    const t = pairTransport(); t.state.items = [t.head(F1, 1)];
+    const { store } = await anchored(t);
+    t.pair.manual = true;
+    store.loadPair(); await tick();
+    store.syncHistory(history(B, [{ id: P2, revision: 4, hidden: false, referenceStatus: null, working: false }])); await tick();
+    assert.equal(t.pair.calls.length, 2); assert.equal(store.state().pair.status, 'loading');
+    t.pair.calls[1](200, [pItem(P2, 4)]); await tick();
+    t.pair.calls[0](200, [pItem(P1, 1), pItem(P2, 3)]); await tick();
+    assert.deepEqual([...store.state().pair.heads.values()].map(h => [h.id, h.revision]), [[P2, 4]], 'only the newest answer');
+    // A pending read, then a real anchor change: the late heads never appear under the new anchor.
+    store.loadPair(); await tick();
+    store.syncHistory(history('7.7.7', [])); await tick();
+    t.pair.calls[2](200, [pItem(P1, 9)]); await tick();
+    assert.equal(store.state().pair.heads.size, 0); assert.equal(store.state().pair.status, 'none');
+  }
+  {
+    const t = pairTransport(); t.state.items = [t.head(F1, 1)];
+    const { store } = await anchored(t);
+    t.pair.manual = true; store.loadPair(); await tick();
+    t.state.me = { sub: 'reader-2', kind: 'member', roles: ['radiologist'] }; await store.load(); await tick();
+    assert.equal(store.state().ended, true);
+    t.pair.calls[0](200, [pItem(P1, 9)]); await tick();
+    assert.equal(store.state().pair.heads.size, 0, 'another login ends the store and drops the late list');
+  }
+  {
+    const t = pairTransport(); t.state.items = [t.head(F1, 1)];
+    const { store } = await anchored(t);
+    for (const [status, items, expected] of [[503, [], 'failed'], [200, [pItem(P1, 1, { studyUid: A })], 'failed'], [200, [pItem('bad', 1)], 'failed']]) {
+      t.pair.status = status; t.pair.items = items;
+      const before = reads(t, A, 'findings');
+      await store.loadPair(); await tick();
+      assert.deepEqual([store.state().pair.status, store.state().pair.heads.size, reads(t, A, 'findings')], [expected, 0, before], JSON.stringify(items));
+    }
+  }
+  for (const status of [403, 404]) {
+    const t = pairTransport(); t.state.items = [t.head(F1, 1), t.cross(F2, 1)];
+    const { store } = await anchored(t);
+    const lost = store.state().entries.get(F2);
+    store.edit(lost); store.updateDraft(lost, { text: '내 수정' }); store.toggleSource(lost, P1, B); store.toggleSource(lost, P2, B);
+    assert.deepEqual(lost.draft.sources, [{ itemId: ITEM, revision: 2 }, { itemId: P2, revision: 3, studyUid: B }]);
+    const fresh = store.newDraft(); store.updateDraft(fresh, { title: '새 초안' }); store.toggleSource(fresh, P2, B);
+    // The comparison study is withdrawn: its list is refused and the server no longer lists F2.
+    t.pair.status = status; t.state.items = [t.head(F1, 1)];
+    const before = reads(t, A, 'findings');
+    await store.loadPair(); await tick(60);
+    assert.deepEqual([store.state().pair.status, store.state().pair.heads.size], ['denied', 0]);
+    assert.equal(reads(t, A, 'findings'), before + 1, 'exactly one anchor re-read, no loop');
+    assert.equal(store.state().entries.has(F2), false);
+    assert.equal(store.state().entries.get(lost.id), lost); assert.notEqual(lost.id, F2);
+    assert.deepEqual(plain(lost.draft), { title: 'T', text: '내 수정', sources: [{ itemId: ITEM, revision: 2 }], primary: 0 });
+    assert.deepEqual([lost.head, lost.links, lost.latest, lost.pending, lost.editing], [null, [], null, null, true]);
+    assert.ok(lost.message.startsWith('이 소견을 더 이상 볼 수 없어'));
+    const shown = JSON.stringify(plain([...store.state().entries.values()].map(x => ({ head: x.head, draft: x.draft, links: x.links, message: x.message }))));
+    for (const secret of ['P비교키', '4.5.6.1.2', P1, F2]) assert.equal(shown.includes(secret), false, secret);
+    assert.equal(shown.includes(P2), true, 'the unsaved pair of the fresh draft stays until the user unlinks it');
+    // New comparison picks and saves that still name the withdrawn study are refused without a request.
+    const other = store.newDraft(); store.updateDraft(other, { title: 'x' });
+    assert.equal(store.toggleSource(other, P1, B), false);
+    const postsBefore = posts(t).length;
+    assert.equal(await store.save(fresh, 'create'), false);
+    assert.equal(fresh.message, '비교 검사에 접근할 수 없어 이 소견을 저장·수정하지 않았습니다. 비교 검사 표식 연결을 해제하거나 접근을 확인한 뒤 다시 시도하세요.');
+    assert.equal(posts(t).length, postsBefore);
+    assert.equal(store.toggleSource(fresh, P2), true, 'Unlink still works'); store.toggleSource(fresh, ITEM);
+    t.state.responses.push({ status: 200, body: t.head(F1, 1) });
+    assert.equal(await store.save(fresh, 'create'), true, 'an anchor-only draft saves');
+    // Another denial in a row reads the anchor list no more.
+    const again = reads(t, A, 'findings');
+    await store.loadPair(); await tick(40);
+    assert.equal(reads(t, A, 'findings'), again);
+  }
+});
+
+test('comparison saves: 400/403/404/409 and quota texts keep the draft; a comparison 403 re-checks the anchor instead of holding drafts', async () => {
+  const t = pairTransport(); t.state.items = [t.head(F1, 1)];
+  const { store } = await anchored(t);
+  const e = store.newDraft(); store.updateDraft(e, { title: '비교' }); store.toggleSource(e, ITEM); store.toggleSource(e, P1, B);
+  const cases = [
+    [{ status: 400, body: { message: '같은 환자의 검사만 소견에 연결할 수 있습니다' } }, '같은 환자의 비교 검사 하나만 연결할 수 있습니다', 0, 0],
+    [{ status: 409, body: { code: 'FINDING_COMPARISON_STUDY' } }, '이미 다른 비교 검사가 연결된 적이 있어', 0, 0],
+    // Every anchor list read also refreshes the comparison list.
+    [{ status: 409, body: { code: 'FINDING_STORAGE_LIMIT' } }, '한도에는 이 화면에 표시되지 않는 소견도 포함됩니다', 1, 1],
+    [{ status: 404, body: { message: '연결할 표식이 이 검사에 없습니다' } }, '그 검사에 더 이상 접근할 수 없습니다', 0, 1],
+    [{ status: 403, body: { message: '소견에 접근할 수 없습니다' } }, '다른 기관 소속이거나 접근할 수 없어', 1, 1],
+  ];
+  for (const [answer, text, anchorReads, pairReads] of cases) {
+    const a = reads(t, A, 'findings'), p = reads(t, B, 'viewer-items');
+    t.state.responses.push(answer);
+    assert.equal(await store.save(e, 'create'), false); await tick(40);
+    assert.ok(e.message.includes(text), text + ' / ' + e.message);
+    assert.deepEqual([e.pending, e.editing, store.state().entries.get(e.id) === e, store.state().suspended, store.held().count], [null, true, true, false, 0], text);
+    assert.deepEqual([reads(t, A, 'findings') - a, reads(t, B, 'viewer-items') - p], [anchorReads, pairReads], text);
+  }
+  assert.equal(model.errorMessage({ status: 404 }), '연결한 표식이 이 검사에 없습니다. 작성 내용은 저장되지 않았습니다.', 'same-study text unchanged');
+  assert.equal(model.errorMessage({ status: 400 }), '입력 길이와 연결 표식을 확인하세요. 작성 내용은 저장되지 않았습니다.');
+  assert.equal(model.errorMessage({ status: 403 }), '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.');
+  // The comparison 403 was really the anchor: the re-read denies and holds the draft as in B1.
+  t.state.responses.push({ status: 403, body: {} }, { status: 403, body: {} });
+  assert.equal(await store.save(e, 'create'), false); await tick(40);
+  assert.deepEqual([store.state().suspended, store.state().entries.size, store.held().count], [true, 0, 1]);
+  assert.equal(store.state().status, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.');
+  // A same-study 403 still holds at once (B1), without an extra list read.
+  const u = pairTransport(); u.state.items = [];
+  const same = await anchored(u);
+  const x = same.store.newDraft(); same.store.updateDraft(x, { title: 'x' }); same.store.toggleSource(x, ITEM);
+  const before = reads(u, A, 'findings');
+  u.state.responses.push({ status: 403, body: {} });
+  assert.equal(await same.store.save(x, 'create'), false); await tick(40);
+  assert.deepEqual([same.store.state().suspended, same.store.held().count, reads(u, A, 'findings')], [true, 1, before]);
+  // An entry that already names another comparison study cannot pick from this one.
+  const w = pairTransport(), other = w.head(F1, 1); other.item.sources = [{ ...pCopy(P1, 1), studyUid: '9.9.9' }];
+  w.state.items = [other];
+  const blocked = await anchored(w);
+  const f = blocked.store.state().entries.get(F1);
+  blocked.store.edit(f);
+  assert.equal(blocked.store.comparisonOf(f), '9.9.9');
+  assert.equal(blocked.store.toggleSource(f, P2, B), false);
+  assert.deepEqual(f.draft.sources, [{ itemId: P1, revision: 1, studyUid: '9.9.9' }]);
+});
+
+test('lost findings: 404 on an edit, a pending hide and a restored held copy of a withdrawn finding leave no copied content', async () => {
+  const t = pairTransport(); t.state.items = [t.head(F1, 1), t.cross(F2, 1)];
+  const { store } = await anchored(t);
+  const e = store.state().entries.get(F2);
+  store.edit(e); store.updateDraft(e, { title: '내 제목' });
+  t.state.responses.push({ status: 404, body: { message: '소견이 없습니다' } }); t.state.items = [t.head(F1, 1)];
+  assert.equal(await store.save(e, 'edit'), false); await tick(40);
+  assert.deepEqual([e.head, e.pending, e.editing, store.state().entries.has(F2)], [null, null, true, false]);
+  assert.deepEqual(e.draft.sources, [{ itemId: ITEM, revision: 2 }]); assert.equal(e.draft.title, '내 제목');
+  assert.ok(e.message.startsWith('이 소견을 더 이상 볼 수 없어'));
+  // A 404 on an edit of a finding that is still listed is only an item refusal.
+  t.state.items = [t.head(F1, 1), t.cross(F2, 1)]; await store.load(); await tick(40);
+  const again = store.state().entries.get(F2);
+  store.edit(again);
+  t.state.responses.push({ status: 404, body: {} });
+  assert.equal(await store.save(again, 'edit'), false); await tick(40);
+  assert.equal(store.state().entries.get(F2), again); assert.ok(again.head);
+  assert.ok(again.message.includes('그 검사에 더 이상 접근할 수 없습니다'));
+  store.discard(again);
+  // A hide whose answer was lost, then the finding is withdrawn: dropped with a note, no draft invented.
+  t.state.responses.push({ status: 503, body: {} });
+  assert.equal(await store.save(again, 'hide', '숨김'), false); assert.ok(again.pending);
+  t.state.items = [t.head(F1, 1)]; await store.load(); await tick(40);
+  assert.equal(store.state().entries.has(F2), false);
+  assert.equal([...store.state().entries.values()].filter(x => !x.head).length, 1, 'only the earlier converted draft');
+  assert.ok(store.state().status.includes('더 이상 볼 수 없어 목록에서 뺐습니다'));
+  // A held copy of that finding (parked by a real anchor change) is converted the same way after its list.
+  const u = pairTransport(); u.state.items = [u.head(F1, 1), u.cross(F2, 1)];
+  const kit = await anchored(u);
+  const h = kit.store.state().entries.get(F2); kit.store.edit(h); kit.store.updateDraft(h, { text: '보관 수정' });
+  kit.store.syncHistory(history('7.7.7', [])); await tick(40);
+  u.state.items = [u.head(F1, 1)];
+  kit.store.syncHistory(history(A, heads2())); await tick(60);
+  const back = [...kit.store.state().entries.values()].find(x => !x.head);
+  assert.ok(back); assert.deepEqual(plain(back.draft), { title: 'T', text: '보관 수정', sources: [{ itemId: ITEM, revision: 2 }], primary: 0 });
+  assert.equal(kit.store.state().entries.has(F2), false);
+});
+
+function fakeClock() {
+  let now = 0, id = 0; const timers = new Map();
+  return {
+    setTimeout: (fn, ms) => { timers.set(++id, { at: now + ms, fn }); return id; },
+    clearTimeout: key => { timers.delete(key); },
+    pending: () => timers.size,
+    async advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        const next = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        timers.delete(next[0]); now = next[1].at; next[1].fn(); await tick(4);
+      }
+      now = end; await tick(4);
+    },
+  };
+}
+function viewerDouble() {
+  const v = { view: { scope: A, subject: 'reader-1', ended: false, suspended: false, loading: false, generation: 1, viewportId: 'vp-a', image: null, heads: [] },
+    activations: [], calls: [], ready: true, answer: { ok: true, highlighted: false, annotation: 'key' } };
+  v.history = () => ({ ...v.view });
+  v.activate = study => {
+    v.activations.push(study);
+    if (study !== B) return { ok: false, reason: 'viewport-missing' };
+    v.view.viewportId = 'vp-b';
+    if (v.ready) Object.assign(v.view, { scope: B, generation: v.view.generation + 1 });
+    return { ok: true, viewportId: 'vp-b', changed: true };
+  };
+  v.navigate = async target => {
+    v.calls.push(plain(target));
+    if (v.gate) await v.gate;
+    if (target.studyUid !== v.view.scope) return { ok: false, reason: 'scope' };
+    v.view.image = { study: target.studyUid, seriesUid: target.seriesUid, sopUid: target.sopUid, frame: target.frame };
+    return v.answer;
+  };
+  return v;
+}
+
+test('store comparison Go to Image: arrival text, 15 s bound, newest wins, the anchor source while the comparison is active, and nothing outside the pair', async () => {
+  const t = pairTransport(); t.state.items = [t.head(F1, 1), t.cross(F2, 1)];
+  const c = fakeClock(), v = viewerDouble();
+  const { store } = await anchored(t, { setTimeout: c.setTimeout, clearTimeout: c.clearTimeout, history: v.history, activate: v.activate, navigate: v.navigate });
+  const e = store.state().entries.get(F2);
+  const target = { studyUid: B, seriesUid: '4.5.6.1', sopUid: '4.5.6.1.2', frame: 1, itemId: P1 };
+  assert.deepEqual(await store.navigate(e, 1), { ok: true, highlighted: false, annotation: 'key', phase: 'navigating' });
+  assert.deepEqual([v.activations, v.calls], [[B], [target]]);
+  assert.equal(e.message, '비교 검사 영상 칸에서 원본 프레임으로 이동했습니다. 키 이미지 프레임으로 이동했습니다.');
+  assert.equal(c.pending(), 0, 'no timer survives');
+  // The history never loads the study: the bound answers timeout and nothing navigates later.
+  Object.assign(v.view, { scope: A, viewportId: 'vp-a' }); v.ready = false;
+  const waiting = store.navigate(e, 1); await tick();
+  await c.advance(14999); assert.equal(v.calls.length, 1);
+  await c.advance(1);
+  const pending = Symbol('pending');
+  assert.deepEqual(await Promise.race([waiting, tick(10).then(() => pending)]), { ok: false, reason: 'timeout', phase: 'activated' }, 'settled at the 15 s bound');
+  assert.equal(e.message, model.reasonText('timeout') + model.phaseText('activated'));
+  Object.assign(v.view, { scope: B, generation: 9 }); await c.advance(1000);
+  assert.equal(v.calls.length, 1, 'no navigation after the bound');
+  assert.equal(v.view.viewportId, 'vp-b', 'the activated viewport is not restored');
+  // Two presses: only the newest may navigate and write.
+  Object.assign(v.view, { scope: A, viewportId: 'vp-a' });
+  const older = store.navigate(e, 1); await tick();
+  v.ready = true; Object.assign(v.view, { scope: A, viewportId: 'vp-a' });
+  const newer = store.navigate(e, 1);
+  assert.deepEqual((await newer).ok, true);
+  await c.advance(200);
+  assert.deepEqual(await older, { ok: false, reason: 'superseded', phase: 'activated' });
+  assert.equal(v.calls.length, 2);
+  // A slow viewer answer past the bound: timeout, the display may already have moved.
+  Object.assign(v.view, { scope: A, viewportId: 'vp-a' });
+  let open; v.gate = new Promise(resolve => { open = resolve; });
+  const slow = store.navigate(e, 1); await tick();
+  await c.advance(15000);
+  assert.deepEqual(await Promise.race([slow, tick(10).then(() => pending)]), { ok: false, reason: 'timeout', phase: 'navigating' });
+  assert.ok(e.message.endsWith(model.phaseText('navigating')));
+  open(); v.gate = null; await tick();
+  // The anchor's own source while the comparison viewport is active goes to the B1 path and names the viewport to select.
+  Object.assign(v.view, { scope: B, viewportId: 'vp-b' });
+  store.syncHistory(history(B, [])); await tick(40);
+  const anchorResult = await store.navigate(e, 0);
+  assert.deepEqual(anchorResult, { ok: false, reason: 'scope' });
+  assert.equal(e.message, '현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다. 현재 검사의 영상 칸을 선택한 뒤 다시 누르세요.');
+  assert.equal(v.activations.length, 5, 'the anchor source never activates anything');
+  // A study outside the pair, a refused comparison list and missing viewer tools never reach the viewer.
+  const outside = t.cross(F2, 1); outside.item.sources[1] = { ...pCopy(P1, 1), studyUid: '9.9.9' };
+  e.head = outside;
+  assert.deepEqual(await store.navigate(e, 1), { ok: false, reason: 'scope', phase: 'before' });
+  e.head = t.cross(F2, 1);
+  store.state().pair.status = 'denied';
+  assert.deepEqual(await store.navigate(e, 1), { ok: false, reason: 'busy', phase: 'before' });
+  store.state().pair.status = 'ready';
+  assert.deepEqual([v.activations.length, v.calls.length], [5, 4]);
+  const noTools = makeStore(t, { studies: [A, B], uuid: counter() });
+  noTools.store.syncHistory(history(A, heads2())); await tick(40);
+  assert.deepEqual(await noTools.store.navigate(noTools.store.state().entries.get(F2), 1), { ok: false, reason: 'tool-missing', phase: 'before' });
+});
+
+const ANCHOR_REFUSAL = '현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다. 현재 검사의 영상 칸을 선택한 뒤 다시 누르세요.';
+test('store anchor refusal: its text follows the viewer history at the answer, not the 250 ms snapshot; other logins, ended, outside the pair or unreadable stay generic', async () => {
+  const t = pairTransport(); t.state.items = [t.head(F1, 1), t.cross(F2, 1)];
+  let live = { scope: A, subject: 'reader-1', ended: false, suspended: false, heads: [] }, gate = null;
+  const calls = [], activations = [];
+  const { store } = await anchored(t, {
+    history: () => { if (live instanceof Error) throw live; return live; },
+    activate: study => { activations.push(study); return { ok: false, reason: 'viewport-missing' }; },
+    navigate: async target => {
+      calls.push(plain(target)); if (gate) await gate;
+      return !(live instanceof Error) && !live.refuse && live.scope === target.studyUid ? { ok: true, highlighted: false, annotation: 'none' } : { ok: false, reason: 'scope' };
+    } });
+  const e = store.state().entries.get(F2);
+  const anchorTarget = { studyUid: A, seriesUid: SERIES, sopUid: SOP, frame: 1, itemId: ITEM };
+  // The viewer already shows the comparison study (still loading); the store's snapshot has not synced it yet.
+  live = { ...live, scope: B, suspended: true, loading: true };
+  assert.equal(store.state().history.scope, A);
+  assert.deepEqual(await store.navigate(e, 0), { ok: false, reason: 'scope' });
+  assert.equal(e.message, ANCHOR_REFUSAL);
+  assert.deepEqual([calls, activations], [[anchorTarget], []], 'one viewer call for the anchor source, no activation');
+  for (const [label, value] of [
+    ['another login', { scope: B, subject: 'reader-2', ended: false }],
+    ['ended session', { scope: B, subject: 'reader-1', ended: true }],
+    ['a study outside the pair', { scope: '7.7.7', subject: 'reader-1', ended: false }],
+    ['the anchor itself refusing', { scope: A, subject: 'reader-1', ended: false, refuse: true }],
+    ['unreadable history', new Error('gone')],
+    ['no scope', { subject: 'reader-1', ended: false }],
+  ]) {
+    live = value; e.message = 'before';
+    assert.deepEqual(await store.navigate(e, 0), { ok: false, reason: 'scope' }, label);
+    assert.equal(e.message, model.reasonText('scope'), label);
+  }
+  assert.deepEqual([calls.length, activations], [7, []]);
+  // A snapshot still on the comparison study while the viewer is back on the anchor: the viewer's real answer counts.
+  store.syncHistory(history(B, [])); await tick(40);
+  live = { scope: A, subject: 'reader-1', ended: false };
+  assert.equal(store.state().history.scope, B);
+  assert.deepEqual(await store.navigate(e, 0), { ok: true, highlighted: false, annotation: 'none' });
+  assert.equal(e.message, '');
+  // An anchor change during the viewer call: superseded, nothing written, even though the viewer is on B.
+  live = { scope: B, subject: 'reader-1', ended: false };
+  e.message = 'marker';
+  let open; gate = new Promise(resolve => { open = resolve; });
+  const pending = store.navigate(e, 0); await tick();
+  t.state.items = [];
+  store.syncHistory(history('7.7.7', [])); await tick(40);
+  open(); gate = null;
+  assert.deepEqual(await pending, { ok: false, reason: 'superseded' });
+  assert.deepEqual([e.message, store.state().entries.has(F2), activations], ['marker', false, []]);
+});
+
+/* The whole history extension and the Findings section in a two-viewport comparison viewer. */
+async function paired() {
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
+  document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
+  const window = new EventTarget(), annotations = new Map();
+  const ticks = []; let ticked = 0; const tickAll = () => { ticked++; for (const fn of [...ticks]) fn(); };
+  const me = { sub: 'doctor', kind: 'member', roles: ['radiologist'] };
+  const XK = 'a0000000-0000-4000-8000-000000000011', PK = 'a0000000-0000-4000-8000-000000000022';
+  const keyOf = (id, study, series, sop, title) => ({ id, studyUid: study, revision: 1, hidden: false, authorSub: 'doctor', authorActor: 'Doctor', createdAt: 't', updatedAt: 't',
+    item: { schemaVersion: 1, kind: 'key', seriesUid: series, sopUid: sop, frame: 1, title, description: '', hidden: false } });
+  const server = { items: { [XS]: [keyOf(XK, XS, '1.2', '1.3', 'X 키')], [PS]: [keyOf(PK, PS, '2.3', '2.6', 'P 비교 키')] },
+    findings: [], posts: [], gets: [], denied: new Set(), requests: new Map(), next: 0, holdFindings: false, held: [] };
+  const copy = ref => {
+    for (const [study, list] of Object.entries(server.items)) {
+      const item = list.find(i => i.id === ref.itemId && i.revision === ref.revision);
+      if (item) return { itemId: item.id, revision: item.revision, studyUid: study, kind: 'key', seriesUid: item.item.seriesUid, sopUid: item.item.sopUid, frame: 1,
+        frameOfReferenceUid: null, label: item.item.title, values: null, calculator: null, sourceDigest: null, authorActor: 'Doctor' };
+    }
+    return null;
+  };
+  const readable = f => f.lineage.every(study => !server.denied.has(study));
+  const shown = f => ({ ...JSON.parse(JSON.stringify(f.head)), links: f.head.item.sources.map(s => ({ itemId: s.itemId, linkState: 'current', headRevision: s.revision, headHidden: false })) });
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => JSON.parse(JSON.stringify(body)) });
+  const fetch = async (path, options) => {
+    const method = (options && options.method) || 'GET';
+    if (path === '/api/me') return json(200, me);
+    server.gets.push(method + ' ' + path);
+    const m = path.match(/^\/api\/studies\/([0-9.]+)\/(viewer-items|findings)(?:\/([0-9a-f-]+)\/revisions)?/);
+    if (!m) return json(404, {});
+    if (server.denied.has(m[1])) return json(403, { message: 'refused' });
+    if (m[2] === 'viewer-items') return json(200, { items: (server.items[m[1]] || []).filter(i => path.includes('includeHidden=true') || !i.hidden), nextCursor: null });
+    if (method !== 'POST') {
+      // Answered with the rows of the moment it was asked, now or when a held read is released.
+      const answer = json(200, { items: server.findings.filter(readable).map(shown), nextCursor: null });
+      return server.holdFindings ? new Promise(resolve => server.held.push(() => resolve(answer))) : answer;
+    }
+    const body = JSON.parse(options.body); server.posts.push({ path, body, raw: options.body });
+    if (server.fail) { const status = server.fail; server.fail = null; return json(status, { message: 'synthetic' }); }
+    if (server.requests.has(body.requestId)) return json(200, shown(server.requests.get(body.requestId)));
+    const sources = body.item.sources.map(copy);
+    if (sources.some(s => !s || server.denied.has(s.studyUid))) return json(404, { message: '연결할 표식이 이 검사에 없습니다' });
+    let f = m[3] ? server.findings.find(x => x.head.id === m[3]) : null;
+    if (m[3] && (!f || !readable(f))) return json(404, { message: '소견이 없습니다' });
+    if (!f) { f = { head: { id: 'f0000000-0000-4000-8000-' + String(++server.next).padStart(12, '0'), studyUid: XS, authorSub: 'doctor', authorActor: 'Doctor', revision: 0, hidden: false, createdAt: 't', updatedAt: 't' }, lineage: [] }; server.findings.push(f); }
+    f.head.revision++; f.head.item = { schemaVersion: 1, title: body.item.title, text: body.item.text, hidden: false, primary: body.item.primary, sources };
+    f.lineage = [...new Set([...f.lineage, ...sources.map(s => s.studyUid)])];
+    server.requests.set(body.requestId, f);
+    return json(200, shown(f));
+  };
+  const images = { [XS]: ['/studies/1.1/series/1.2/instances/1.3/frames/1', '/studies/1.1/series/1.2/instances/1.5/frames/1'],
+    [PS]: ['/studies/2.2/series/2.3/instances/2.4/frames/1', '/studies/2.2/series/2.3/instances/2.6/frames/1'] };
+  const shows = new Map([['vp-x', XS], ['vp-p', PS]]);
+  const views = new Map([...shows.keys()].map(id => [id, { id, type: 'stack', index: 0, pending: [], renders: 0,
+    getImageIds() { return images[shows.get(id)]; }, getCurrentImageId() { return images[shows.get(id)][this.index]; },
+    setImageIdIndex(index) { return new Promise(resolve => this.pending.push(() => { this.index = index; resolve(); })); }, render() { this.renders++; } }]));
+  const grid = { active: 'vp-x', activations: [], handlers: [] };
+  const services = {
+    cornerstoneViewportService: { getCornerstoneViewport: id => views.get(id) },
+    viewportGridService: { EVENTS: { ACTIVE: 'active' }, getActiveViewportId: () => grid.active,
+      subscribe: (event, fn) => { grid.handlers.push(fn); return { unsubscribe: () => { grid.handlers = grid.handlers.filter(h => h !== fn); } }; },
+      getState: () => ({ activeViewportId: grid.active, viewports: new Map([...shows].map(([id, study]) => [id, { viewportId: id, displaySetInstanceUIDs: ['ds-' + study] }])) }),
+      setActiveViewportId(id) { grid.activations.push(id); grid.active = id; for (const fn of [...grid.handlers]) fn(); },
+      setDisplaySetsForViewport() { throw new Error('no display set change expected'); } },
+    displaySetService: { getDisplaySetByUID: id => ({ ['ds-' + XS]: { StudyInstanceUID: XS }, ['ds-' + PS]: { StudyInstanceUID: PS } })[id],
+      getActiveDisplaySets: () => [
+        { displaySetInstanceUID: 'ds-' + XS, StudyInstanceUID: XS, SeriesInstanceUID: '1.2', instances: [{ SOPInstanceUID: '1.3' }, { SOPInstanceUID: '1.5' }] },
+        { displaySetInstanceUID: 'ds-' + PS, StudyInstanceUID: PS, SeriesInstanceUID: '2.3', instances: [{ SOPInstanceUID: '2.4' }, { SOPInstanceUID: '2.6' }] }] },
+    measurementService: { getMeasurements: () => [], getMeasurement: () => undefined, remove() {}, update() {} },
+    uiNotificationService: { show() {} },
+  };
+  window.cornerstone = { Enums: { Events: { STACK_NEW_IMAGE: 'image' } }, metaData: { get() {} } };
+  window.cornerstoneTools = { annotation: { locking: { setAnnotationLocked() {}, isAnnotationLocked: () => true }, selection: { setAnnotationSelected() {} },
+    state: { getAnnotation: uid => annotations.get(uid), getAllAnnotations: () => [...annotations.values()], removeAnnotation: uid => annotations.delete(uid) } },
+    ToolGroupManager: { getToolGroupForViewport() {} } };
+  window.prompt = () => '사유'; window.confirm = () => true; window.fetch = fetch;
+  const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController, URLSearchParams, fetch,
+    location: { search: '?StudyInstanceUIDs=' + XS + ',' + PS + '&hangingProtocolId=@ohif/hpCompare' },
+    setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {}, setTimeout, clearTimeout };
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox);
+  const extension = window.config.extensions.find(e => e.id === 'kin.viewer-history');
+  extension.preRegistration({ servicesManager: { services }, commandsManager: { getCommand: () => undefined, registerCommand() {} } });
+  extension.onModeEnter(); await flush();
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'finding-link-model.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'viewer-findings.js'), 'utf8'), sandbox);
+  const findings = window.kinViewerFindings(services, sandbox.kinFindingLinkModel);
+  assert.equal(findings.mount(), true);
+  tickAll(); await flush(); tickAll(); await flush();
+  const h = { window, server, views, shows, grid, findings, XK, PK, all: () => document.body.all(), text: () => document.body.all().map(e => e.textContent).join('\n'),
+    sync: async () => { tickAll(); await flush(); tickAll(); await flush(); },
+    ticked: () => ticked,
+    async activate(id) { services.viewportGridService.setActiveViewportId(id); await h.sync(); },
+    // The grid event alone: the history scans at once, the Findings section has not polled it yet.
+    async select(id) { services.viewportGridService.setActiveViewportId(id); await flush(); },
+    async release(id) { const next = views.get(id).pending.shift(); assert.ok(next, 'no pending image load in ' + id); next(); await flush(); await h.sync(); } };
+  return h;
+}
+const panelOf = h => h.all().find(e => e.id === 'kin-viewer-findings');
+const rowsOf = h => panelOf(h).all().filter(e => e.tagName === 'article');
+const buttonIn = (el, name) => { const found = el.all().filter(e => e.tagName === 'button' && e.textContent === name); assert.equal(found.length, 1, name); return found[0]; };
+const lineOf = (row, study) => row.all().find(e => e.dataset.sourceStudy === study);
+async function check(h, label) {
+  const [box] = labelled(h, label); assert.ok(box, label); assert.equal(box.disabled, false, label);
+  box.checked = true; box.dispatchEvent(new Event('change')); await flush();
+}
+
+test('mounted comparison viewer: the section stays on the first study, links a comparison item from its own list, and Go to Image activates exactly that viewport and proves the frame', async () => {
+  const h = await paired(), panel = panelOf(h);
+  assert.deepEqual([panel.dataset.studyUid, panel.dataset.comparisonUid, panel.dataset.comparisonState], [XS, PS, 'ready']);
+  assert.ok(h.server.gets.includes('GET /api/studies/' + PS + '/viewer-items?limit=100'), 'the comparison list is its own viewer-items read');
+  assert.equal(h.all().find(e => e.id === 'kin-viewer-findings-pair-note').hidden, false);
+  assert.equal(typeof h.window.kinViewerHistoryActivate, 'function');
+  buttonIn(panel, 'New Finding').click(); await flush();
+  const [title] = labelled(h, 'Finding Title'); title.value = 'PAIRED DRAFT'; title.dispatchEvent(new Event('input'));
+  await check(h, 'Link Key Image · X 키 · 프레임 1 · r1');
+  await check(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1');
+  // The comparison viewport becomes active: the draft stays live on the first study, nothing is held.
+  await h.activate('vp-p');
+  assert.equal(h.window.kinViewerHistoryState().scope, PS);
+  assert.equal(panel.dataset.studyUid, XS);
+  assert.equal(labelled(h, 'Finding Title')[0].value, 'PAIRED DRAFT');
+  assert.deepEqual(plain(h.window.kinViewerFindingsState()), { scope: XS, dirty: true, busy: false, held: 0 });
+  assert.equal(h.all().find(e => e.id === 'kin-viewer-findings-held').hidden, true);
+  const draft = rowsOf(h)[0];
+  assert.deepEqual(draft.all().filter(e => e.dataset.sourceStudy).map(e => e.dataset.sourceStudy), ['current', 'comparison']);
+  assert.ok(textOf(draft).includes('[비교 검사] Key Image · P 비교 키'));
+  assert.ok(textOf(draft).includes('현재 검사의 표식은 현재 검사의 영상 칸을 선택하면 연결할 수 있습니다.'));
+  // Saved while the comparison viewport is active: exactly the two pairs.
+  buttonIn(draft, 'Save').click(); await flush(); await h.sync();
+  assert.deepEqual(h.server.posts.map(p => p.body.item.sources), [[{ itemId: h.XK, revision: 1 }, { itemId: h.PK, revision: 1 }]]);
+  const saved = rowsOf(h).find(e => e.dataset.saved === 'true');
+  assert.ok(saved && textOf(saved).includes('Saved r1'));
+  // Back on the first study, Go to Image of the comparison source.
+  await h.activate('vp-x');
+  const activationsBefore = h.grid.activations.length;
+  buttonIn(lineOf(saved, 'comparison'), 'Go to Image').click();
+  await waitFor(() => h.views.get('vp-p').pending.length === 1, 'the comparison image load');
+  assert.deepEqual(h.grid.activations.slice(activationsBefore), ['vp-p'], 'exactly the comparison viewport');
+  assert.equal(h.window.kinViewerHistoryState().scope, PS);
+  assert.deepEqual([h.views.get('vp-x').pending.length, h.views.get('vp-x').index], [0, 0], 'the first study viewport is untouched');
+  await h.release('vp-p');
+  await waitFor(() => textOf(saved).includes('비교 검사 영상 칸에서 원본 프레임으로 이동했습니다.'), 'the arrival text');
+  assert.equal(h.views.get('vp-p').index, 1);
+  assert.deepEqual(plain(h.window.kinViewerHistoryState().image), { study: PS, seriesUid: '2.3', sopUid: '2.6', frame: 1 });
+  assert.equal(h.grid.active, 'vp-p');
+  // The first study's source while the comparison viewport is active: no activation, no image load.
+  buttonIn(lineOf(saved, 'current'), 'Go to Image').click(); await flush(); await h.sync();
+  assert.ok(textOf(saved).includes('현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다.'));
+  assert.deepEqual([h.grid.activations.length, h.views.get('vp-x').pending.length, h.views.get('vp-p').pending.length], [activationsBefore + 1, 0, 0]);
+  // With the first study active, its source navigates as in B1.
+  await h.activate('vp-x');
+  buttonIn(lineOf(saved, 'current'), 'Go to Image').click();
+  await waitFor(() => h.views.get('vp-x').pending.length === 1, 'the first study image load');
+  await h.release('vp-x');
+  await waitFor(() => textOf(saved).includes('키 이미지 프레임으로 이동했습니다.') && !textOf(saved).includes('비교 검사 영상 칸에서'), 'the B1 arrival');
+  assert.equal(h.grid.active, 'vp-x');
+  h.findings.stop();
+});
+
+test('mounted comparison viewer: missing or duplicated comparison viewports refuse before activation; withdrawal leaves no comparison row or text', async () => {
+  const h = await paired(), panel = panelOf(h);
+  buttonIn(panel, 'New Finding').click(); await flush();
+  const [title] = labelled(h, 'Finding Title'); title.value = 'CROSS'; title.dispatchEvent(new Event('input'));
+  await check(h, 'Link Key Image · X 키 · 프레임 1 · r1');
+  await check(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1');
+  buttonIn(rowsOf(h)[0], 'Save').click(); await flush(); await h.sync();
+  const saved = () => rowsOf(h).find(e => e.dataset.saved === 'true');
+  const press = async () => { buttonIn(lineOf(saved(), 'comparison'), 'Go to Image').click(); await new Promise(r => setTimeout(r, 30)); await h.sync(); };
+  h.shows.set('vp-p', XS);
+  await press();
+  assert.ok(textOf(saved()).includes('이 원본의 검사를 표시하는 영상 칸이 이 화면에 없습니다.'));
+  h.shows.set('vp-p', PS); h.shows.set('vp-x', PS);
+  await press();
+  assert.ok(textOf(saved()).includes('영상 칸이 여러 개라 이동할 칸을 정하지 않았습니다.'));
+  assert.deepEqual([h.grid.activations, h.views.get('vp-p').pending.length], [[], 0], 'nothing was activated or loaded');
+  h.shows.set('vp-x', XS);
+  // The author edits the finding, then the comparison study is withdrawn from this login.
+  buttonIn(saved(), 'Edit').click(); await flush();
+  const [edit] = labelled(h, 'Finding Text'); edit.value = '작성자 수정'; edit.dispatchEvent(new Event('input'));
+  h.server.denied.add(PS);
+  buttonIn(panel, 'Reload Findings').click();
+  await waitFor(() => panel.dataset.comparisonState === 'denied' && !rowsOf(h).some(e => e.dataset.saved === 'true'), 'the withdrawal');
+  await h.sync();
+  const text = textOf(panel);
+  for (const secret of ['P 비교 키', '2.6', h.PK, '[비교 검사]']) assert.equal(text.includes(secret), false, secret);
+  const kept = rowsOf(h);
+  assert.equal(kept.length, 1); assert.equal(kept[0].dataset.saved, 'false');
+  assert.equal(labelled(h, 'Finding Text')[0].value, '작성자 수정');
+  assert.deepEqual(kept[0].all().filter(e => e.dataset.sourceStudy).map(e => e.dataset.sourceStudy), ['current']);
+  assert.ok(text.includes('이 소견을 더 이상 볼 수 없어 저장하지 않았습니다.'));
+  assert.ok(text.includes('비교 검사에 접근할 수 없어 표식을 연결할 수 없습니다.'));
+  assert.equal(labelled(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1').length, 0);
+  assert.equal(h.server.gets.filter(g => g.startsWith('GET /api/studies/' + XS + '/findings')).length >= 3, true);
+});
+
+// Hosted navigation test 04 presses the first study's source right after activating the comparison viewport.
+test('mounted comparison viewer: before any Findings sync after a viewport change, the first study source refuses with the right viewport text and loads nothing; back on it, it arrives', async () => {
+  const h = await paired();
+  buttonIn(panelOf(h), 'New Finding').click(); await flush();
+  const [title] = labelled(h, 'Finding Title'); title.value = 'IMMEDIATE'; title.dispatchEvent(new Event('input'));
+  await check(h, 'Link Key Image · X 키 · 프레임 1 · r1');
+  await check(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1');
+  buttonIn(rowsOf(h)[0], 'Save').click(); await flush(); await h.sync();
+  const saved = () => rowsOf(h).find(e => e.dataset.saved === 'true');
+  assert.ok(saved());
+  const ticked = h.ticked(), activations = h.grid.activations.length;
+  await h.select('vp-p');
+  assert.deepEqual([h.window.kinViewerHistoryState().scope, h.window.kinViewerHistoryState().suspended], [PS, false]);
+  buttonIn(lineOf(saved(), 'current'), 'Go to Image').click(); await flush();
+  assert.equal(h.ticked(), ticked, 'no Findings sync ran between the viewport change and the press');
+  assert.ok(textOf(saved()).includes(ANCHOR_REFUSAL), textOf(saved()));
+  assert.ok(!textOf(saved()).includes(model.reasonText('scope')));
+  assert.deepEqual([h.grid.activations.length, h.grid.active, h.views.get('vp-x').pending.length, h.views.get('vp-p').pending.length],
+    [activations + 1, 'vp-p', 0, 0], 'only the user selection; no activation or image load by the press');
+  // Back on the first study, again before any sync: its source goes to the viewer and the frame is proven.
+  await h.select('vp-x');
+  buttonIn(lineOf(saved(), 'current'), 'Go to Image').click();
+  await waitFor(() => h.views.get('vp-x').pending.length === 1, 'the first study image load');
+  assert.equal(h.ticked(), ticked);
+  await h.release('vp-x');
+  await waitFor(() => textOf(saved()).includes('키 이미지 프레임으로 이동했습니다.'), 'the first study arrival');
+  assert.ok(!textOf(saved()).includes(ANCHOR_REFUSAL));
+  assert.deepEqual([h.grid.activations.length, h.grid.active, h.views.get('vp-p').pending.length], [activations + 2, 'vp-x', 0]);
+  h.findings.stop();
+});
+
+// Hosted navigation test 04 holds the first study's list read and then activates the comparison viewport.
+test('mounted comparison viewer: a held anchor list read survives comparison activation with its rows and reading status; only a mode exit drops its late answer', async () => {
+  const h = await paired();
+  const statusText = () => h.all().find(e => e.id === 'kin-viewer-findings-status').textContent;
+  const saved = () => rowsOf(h).find(e => e.dataset.saved === 'true');
+  buttonIn(panelOf(h), 'New Finding').click(); await flush();
+  const [title] = labelled(h, 'Finding Title'); title.value = 'old A'; title.dispatchEvent(new Event('input'));
+  await check(h, 'Link Key Image · X 키 · 프레임 1 · r1');
+  buttonIn(rowsOf(h)[0], 'Save').click(); await flush(); await h.sync();
+  assert.ok(textOf(saved()).includes('old A')); assert.match(statusText(), /^1개 소견/);
+  // The next read is held with the rows of that moment; then the server changes the finding.
+  const first = panelOf(h);
+  h.server.holdFindings = true;
+  buttonIn(first, 'Reload Findings').click(); await h.sync();
+  assert.deepEqual([h.server.held.length, statusText()], [1, '소견 확인 중…']);
+  h.server.findings[0].head.item.title = 'new A'; h.server.findings[0].head.revision++;
+  await h.activate('vp-p');
+  assert.equal(h.window.kinViewerHistoryState().scope, PS);
+  assert.deepEqual([first.dataset.studyUid, statusText(), h.server.held.length], [XS, '소견 확인 중…', 1], 'still reading: neither answered, cancelled nor repeated');
+  assert.ok(saved() && textOf(saved()).includes('old A'), 'the rows the read will replace stay shown');
+  assert.equal(h.all().find(e => e.id === 'kin-viewer-findings-held').hidden, true);
+  // The first study's source refuses with the anchor viewport text; nothing is activated or loaded.
+  const activations = h.grid.activations.length;
+  buttonIn(lineOf(saved(), 'current'), 'Go to Image').click(); await flush(); await h.sync();
+  assert.ok(textOf(saved()).includes('현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다.'));
+  assert.deepEqual([h.grid.activations.length, h.views.get('vp-x').pending.length, h.views.get('vp-p').pending.length, statusText()],
+    [activations, 0, 0, '소견 확인 중…']);
+  // Mode exit and entry: the next section reads the new row; the old read's late answer changes nothing.
+  h.findings.stop(); h.server.holdFindings = false;
+  assert.equal(h.findings.mount(), true); await h.sync();
+  const next = panelOf(h);
+  assert.notEqual(next, first); assert.equal(first.isConnected, false);
+  assert.ok(textOf(next).includes('new A'));
+  for (const release of h.server.held.splice(0)) release();
+  await h.sync();
+  assert.match(statusText(), /^1개 소견/);
+  assert.deepEqual([textOf(next).includes('new A'), textOf(next).includes('old A'), next.dataset.studyUid], [true, false, XS]);
+  assert.equal(h.all().filter(e => e.id === 'kin-viewer-findings').length, 1);
+  h.findings.stop();
 });
 
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step

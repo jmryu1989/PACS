@@ -580,6 +580,29 @@ async function kinViewerNavigateTo(env, target) {
   }
   return live() ? refusal('frame-missing') : refusal('superseded');
 }
+// Go to Image for the other study of this viewer (S2-B2): exactly one viewport may show that study and
+// only that viewport becomes active; the history scan then loads the study. No display set, layout,
+// camera or URL changes, and a refused request changes nothing. The caller waits for the history and
+// navigates only afterwards; `changed` tells it whether the active viewport really moved.
+const KIN_ACTIVATION_REASONS = ['invalid', 'ended', 'viewport-missing', 'viewport-ambiguous', 'viewport-unsupported', 'tool-missing'];
+function kinViewerActivateStudy(env, study) {
+  const refusal = reason => ({ ok: false, reason });
+  if (typeof study !== 'string' || study.length > 64 || !/^[0-9]+(?:\.[0-9]+)+$/.test(study)) return refusal('invalid');
+  if (env.ended()) return refusal('ended');
+  try {
+    const grid = env.services.viewportGridService, sets = env.services.displaySetService;
+    const shown = [...grid.getState().viewports].filter(([, view]) =>
+      (view?.displaySetInstanceUIDs || []).some(id => sets.getDisplaySetByUID(id)?.StudyInstanceUID === study)).map(([id]) => id);
+    if (shown.length > 1) return refusal('viewport-ambiguous');
+    const v = shown.length ? env.services.cornerstoneViewportService.getCornerstoneViewport(shown[0]) : null;
+    if (!v) return refusal('viewport-missing');
+    if (v.type !== 'stack' || typeof v.getImageIds !== 'function') return refusal('viewport-unsupported');
+    if (grid.getActiveViewportId() === shown[0]) return { ok: true, viewportId: shown[0], changed: false };
+    // From here the grid may have moved even if the service throws.
+    try { grid.setActiveViewportId(shown[0]); } catch (_) { return { ok: false, reason: 'tool-missing', changed: true }; }
+    return { ok: true, viewportId: shown[0], changed: true };
+  } catch (_) { return refusal('tool-missing'); }
+}
 
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
@@ -1271,6 +1294,14 @@ function kinCreateViewerHistory() {
       generation: () => generation, valid, navigation: () => navigation, beginNavigation: () => ++navigation,
       delay: () => new Promise(resolve => setTimeout(resolve, 100)) };
     const navigateTo = target => kinViewerNavigateTo(navigationEnv, target);
+    const activateStudy = study => kinViewerActivateStudy(navigationEnv, study);
+    // The active viewport and the frame it shows: the Findings section's arrival proof after an activation.
+    const shownImage = () => {
+      try {
+        const id = services.viewportGridService.getActiveViewportId();
+        return { viewportId: typeof id === 'string' ? id : null, image: reference(services.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.()) };
+      } catch (_) { return { viewportId: null, image: null }; }
+    };
     async function navigate(e) {
       if (!valid(generation) || suspended || recovery.has(scope) || entries.get(e.id) !== e) return;
       const outcome = await navigateTo({ studyUid: scope, seriesUid: e.draft.seriesUid, sopUid: e.draft.sopUid, frame: e.draft.frame });
@@ -1282,6 +1313,7 @@ function kinCreateViewerHistory() {
     // Read-only view of the saved heads for the Findings section: only saved rows are linkable and
     // the Orthanc verdict travels with them, separate from any database link state.
     const historyState = () => ({ scope, subject, ended, suspended: suspended || recovery.has(scope), writable: writable({}),
+      generation, loading, ...shownImage(),
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
         frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
@@ -1401,6 +1433,7 @@ function kinCreateViewerHistory() {
     };
     window.kinViewerHistoryWorkspaceState = workspaceState;
     window.kinViewerHistoryNavigate = navigateTo;
+    window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
     let channel;
     try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
@@ -1420,6 +1453,7 @@ function kinCreateViewerHistory() {
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
       if (window.kinViewerHistoryWorkspaceState === workspaceState) delete window.kinViewerHistoryWorkspaceState;
       if (window.kinViewerHistoryNavigate === navigateTo) delete window.kinViewerHistoryNavigate;
+      if (window.kinViewerHistoryActivate === activateStudy) delete window.kinViewerHistoryActivate;
       if (window.kinViewerHistoryState === historyState) delete window.kinViewerHistoryState;
       if (measurementService.getMeasurements === projectedMeasurements) measurementService.getMeasurements = originalMeasurements;
       reportRestores.reverse().forEach(restore => restore());

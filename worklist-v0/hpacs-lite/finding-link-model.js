@@ -13,6 +13,10 @@
   };
   const REFERENCE_TEXT = { verified: 'Verified', unverified: 'Unverified' };
   const NAVIGATION_REASONS = ['invalid', 'ended', 'scope', 'busy', 'series-missing', 'viewport-unsupported', 'frame-missing', 'superseded', 'tool-missing'];
+  // Viewport activation refusals of config/ohif.js (kinViewerActivateStudy) and every reason a Go to Image
+  // into the other study of the same viewer can end with, the caller's 15 s bound included (S2-B2).
+  const ACTIVATION_REASONS = ['invalid', 'ended', 'viewport-missing', 'viewport-ambiguous', 'viewport-unsupported', 'tool-missing'];
+  const CROSS_REASONS = [...NAVIGATION_REASONS, 'viewport-missing', 'viewport-ambiguous', 'timeout'];
   const REASONS = {
     invalid: '이동할 영상 식별이 올바르지 않습니다.',
     ended: '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.',
@@ -23,7 +27,18 @@
     'frame-missing': '원본 프레임을 열지 못했습니다.',
     superseded: '이동 중 화면이 바뀌어 이 이동을 취소했습니다. 다시 시도하세요.',
     'tool-missing': '영상 이동 도구가 준비되지 않았습니다. 뷰어를 다시 여세요.',
+    'viewport-missing': '이 원본의 검사를 표시하는 영상 칸이 이 화면에 없습니다. 그 검사를 영상 칸에 표시한 뒤 다시 누르세요.',
+    'viewport-ambiguous': '이 원본의 검사를 표시하는 영상 칸이 여러 개라 이동할 칸을 정하지 않았습니다. 그 검사의 영상 칸을 하나만 남긴 뒤 다시 누르세요.',
+    timeout: '제한 시간 안에 원본 영상으로의 이동을 확인하지 못했습니다. 현재 영상을 확인한 뒤 다시 누르세요.',
   };
+  // A comparison Go to Image that stopped after the active viewport moved never claims an unchanged display.
+  const PHASE_TEXT = {
+    activated: ' 원본 검사의 영상 칸이 선택되었을 수 있지만 원본 프레임으로는 이동하지 않았습니다. 이전 영상 칸 선택은 자동으로 되돌리지 않습니다.',
+    navigating: ' 영상 화면은 이미 이동했을 수 있으니 현재 영상을 확인하세요.',
+  };
+  const ANCHOR_SCOPE_TEXT = '현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다. 현재 검사의 영상 칸을 선택한 뒤 다시 누르세요.';
+  const COMPARISON_ARRIVAL = '비교 검사 영상 칸에서 원본 프레임으로 이동했습니다.';
+  const COMPARISON_DENIED = '비교 검사에 접근할 수 없어 이 소견을 저장·수정하지 않았습니다. 비교 검사 표식 연결을 해제하거나 접근을 확인한 뒤 다시 시도하세요.';
   const ANNOTATION_TEXT = {
     shown: '', none: '', key: '키 이미지 프레임으로 이동했습니다.',
     hidden: '이동했습니다. 표식이 숨겨져 있어 그리지 않습니다.',
@@ -78,6 +93,103 @@
     return !!target && typeof target === 'object' && !Array.isArray(target) && uid(target.studyUid) && uid(target.seriesUid) &&
       uid(target.sopUid) && revision(target.frame) && (target.itemId === undefined || target.itemId === null || uuid(target.itemId));
   }
+
+  /* ---------- Go to Image into the other study of the same viewer (S2-B2) ---------- */
+  function phaseText(phase) { return PHASE_TEXT[phase] || ''; }
+  // Values below may come from another window's realm: every field is read once and copied as a primitive.
+  function plainImage(value) {
+    try {
+      if (!value || typeof value !== 'object') return null;
+      const image = { study: value.study, seriesUid: value.seriesUid, sopUid: value.sopUid, frame: value.frame };
+      return uid(image.study) && uid(image.seriesUid) && uid(image.sopUid) && revision(image.frame) ? image : null;
+    } catch (_) { return null; }
+  }
+  function plainState(value) {
+    try {
+      if (!value || typeof value !== 'object') return null;
+      const state = { scope: value.scope, subject: value.subject, ended: value.ended === true, suspended: value.suspended === true,
+        loading: value.loading === true, generation: value.generation, viewportId: value.viewportId, image: plainImage(value.image) };
+      return typeof state.scope === 'string' && typeof state.subject === 'string' && Number.isSafeInteger(state.generation) &&
+        (state.viewportId === null || typeof state.viewportId === 'string') ? state : null;
+    } catch (_) { return null; }
+  }
+  function viewerResult(value) {
+    try {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return refusal('invalid');
+      const ok = value.ok;
+      if (ok === true) {
+        const highlighted = value.highlighted, annotation = value.annotation;
+        return typeof highlighted === 'boolean' && typeof annotation === 'string' ? { ok: true, highlighted, annotation } : refusal('invalid');
+      }
+      const reason = ok === false ? value.reason : null;
+      return typeof reason === 'string' && NAVIGATION_REASONS.includes(reason) ? refusal(reason) : refusal('invalid');
+    } catch (_) { return refusal('invalid'); }
+  }
+  function activationResult(value) {
+    try {
+      if (!value || typeof value !== 'object') return { ok: false, reason: 'tool-missing', changed: false };
+      const ok = value.ok, changed = value.changed === true, viewportId = value.viewportId, reason = value.reason;
+      if (ok === true) return typeof viewportId === 'string' && viewportId ? { ok: true, viewportId, changed } : { ok: false, reason: 'tool-missing', changed };
+      return { ok: false, reason: typeof reason === 'string' && ACTIVATION_REASONS.includes(reason) ? reason : 'tool-missing', changed };
+    } catch (_) { return { ok: false, reason: 'tool-missing', changed: false }; }
+  }
+  const sameImage = (image, target) => !!image && image.study === target.studyUid && image.seriesUid === target.seriesUid &&
+    image.sopUid === target.sopUid && image.frame === target.frame;
+  const POLL_MS = 100;
+  /* `env` reads ONE viewer document at call time: state() is its kinViewerHistoryState, activate(study)
+   * its kinViewerHistoryActivate and navigate(target) its kinViewerHistoryNavigate. `control` belongs to
+   * the caller, which owns the 15 s bound, its own session/document/selection checks and the message:
+   * stopped() -> null | 'timeout' | 'superseded', wait(ms), phase(name). Exactly one viewport showing the
+   * study is activated (the viewer decides), then the history of THAT viewport must load the study
+   * (scope, not suspended, same login) before the one navigation call. Success needs the viewer's ok and,
+   * afterwards, the same history generation and viewport showing the exact series/SOP/frame. There is no
+   * fallback to another viewport, no retry and no viewport restoration. */
+  async function crossNavigate(env, target, control) {
+    const read = () => { try { return plainState(env.state()); } catch (_) { return null; } };
+    const stopped = () => { try { return control.stopped(); } catch (_) { return 'superseded'; } };
+    const mark = name => { try { control.phase(name); } catch (_) {} };
+    if (!validTarget(target)) return refusal('invalid');
+    const study = target.studyUid, start = read();
+    if (!start) return refusal('tool-missing');
+    if (start.ended) return refusal('ended');
+    if (start.suspended) return refusal('busy');
+    let stop = stopped();
+    if (stop) return refusal(stop);
+    let activation;
+    try { activation = activationResult(env.activate(study)); } catch (_) { activation = activationResult(null); }
+    if (activation.changed) mark('activated');
+    if (!activation.ok) return refusal(activation.reason);
+    const viewportId = activation.viewportId;
+    let seen = start.viewportId === viewportId, ready = null;
+    while (!ready) {
+      stop = stopped();
+      if (stop) return refusal(stop);
+      const now = read();
+      if (!now) return refusal('tool-missing');
+      if (now.ended) return refusal('ended');
+      if (now.subject !== start.subject) return refusal('superseded');
+      // The activated viewport must become and stay active; any other active viewport is a user or layout change.
+      if (now.viewportId === viewportId) seen = true;
+      else if (seen || now.viewportId !== start.viewportId) return refusal('superseded');
+      if (seen && now.scope === study) {
+        if (!now.suspended) { ready = now; break; }
+        // Loaded but refused, failed or holding parked marks: the viewer would refuse the navigation too.
+        if (!now.loading) return refusal('busy');
+      }
+      await control.wait(POLL_MS);
+    }
+    mark('navigating');
+    let value;
+    try { value = await env.navigate(target); } catch (_) { return refusal('tool-missing'); }
+    const result = viewerResult(value);
+    stop = stopped();
+    if (stop) return refusal(stop);
+    if (!result.ok) return result;
+    const after = read();
+    if (!after || after.ended || after.suspended || after.subject !== start.subject || after.scope !== study ||
+        after.generation !== ready.generation || after.viewportId !== viewportId) return refusal('superseded');
+    return sameImage(after.image, target) ? result : refusal('frame-missing');
+  }
   // The client sends only {itemId, revision} pairs; every copied field comes from the server.
   function commandBody(draft, head, action, reason, requestId) {
     const sources = Array.isArray(draft.sources) ? draft.sources.map(s => ({ itemId: s.itemId, revision: s.revision })) : [];
@@ -98,17 +210,39 @@
     if (!String(draft.title ?? '').trim() && !String(draft.text ?? '').trim()) return '제목 또는 본문을 입력하세요.';
     return null;
   }
+  // A pair copied from the comparison study keeps that study in the draft for display only; commandBody never sends it.
   const itemOnly = head => ({ title: head.item.title, text: head.item.text, primary: head.item.primary ?? 0,
-    sources: head.item.sources.map(s => ({ itemId: s.itemId, revision: s.revision })) });
-  function errorMessage(error) {
-    if (error.code === 'FINDING_STORAGE_LIMIT') return '소견 저장 한도입니다. 숨김으로 공간이 회수되지는 않습니다. 작성 내용은 미저장 상태로 남아 있습니다.';
+    sources: head.item.sources.map(s => uid(s.studyUid) && uid(head.studyUid) && s.studyUid !== head.studyUid
+      ? { itemId: s.itemId, revision: s.revision, studyUid: s.studyUid } : { itemId: s.itemId, revision: s.revision }) });
+  // `context.comparison`: the command named a comparison study, so 400/403/404 may be about that study.
+  function errorMessage(error, context) {
+    const comparison = !!(context && context.comparison);
+    if (error.code === 'FINDING_STORAGE_LIMIT') return '소견 저장 한도입니다. 한도에는 이 화면에 표시되지 않는 소견도 포함됩니다. 숨김으로 공간이 회수되지는 않습니다. 작성 내용은 미저장 상태로 남아 있습니다.';
+    if (error.code === 'FINDING_COMPARISON_STUDY') return '이 소견에는 이미 다른 비교 검사가 연결된 적이 있어 이 비교 검사의 표식을 연결할 수 없습니다. 이 비교 검사의 소견은 새 소견으로 기록하세요. 작성 내용은 저장되지 않았습니다.';
     if (error.code === 'FINDING_SOURCE_STALE') return error.headHidden ? '연결하려는 표식이 숨겨졌습니다. 연결을 해제하거나 표식을 복원한 뒤 다시 저장하세요.'
       : '연결하려는 표식에 더 새로운 판(r' + error.headRevision + ')이 있습니다. Refresh Link로 최신판을 확인한 뒤 다시 저장하세요.';
     if (error.status === 409) return '다른 판 또는 저장 조건과 충돌했습니다. 최신판을 확인한 뒤 다시 저장하세요.';
-    if (error.status === 404) return '연결한 표식이 이 검사에 없습니다. 작성 내용은 저장되지 않았습니다.';
+    if (error.status === 404) return comparison ? '소견이나 연결한 표식을 찾을 수 없거나 그 검사에 더 이상 접근할 수 없습니다. 작성 내용은 저장되지 않았습니다.'
+      : '연결한 표식이 이 검사에 없습니다. 작성 내용은 저장되지 않았습니다.';
+    if (error.status === 403 && comparison) return '비교 검사가 이 검사와 다른 기관 소속이거나 접근할 수 없어 연결하지 않았습니다. 작성 내용은 저장되지 않았습니다.';
+    if (error.status === 400 && comparison) return '같은 환자의 비교 검사 하나만 연결할 수 있습니다. 비교 검사와 입력 내용을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     if (error.status === 400 || error.status === 413) return '입력 길이와 연결 표식을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
   }
+  // One viewer-items head of the comparison study, in the shape of kinViewerHistoryState().heads.
+  function comparisonHead(item, study) {
+    if (!item || typeof item !== 'object' || !uuid(item.id) || item.studyUid !== study || !revision(item.revision) ||
+        typeof item.hidden !== 'boolean' || !item.item || typeof item.item !== 'object') throw new Error('Invalid page');
+    const body = item.item, values = body.baseline && Array.isArray(body.baseline.values) ? body.baseline.values : null;
+    if (typeof body.kind !== 'string' || !uid(body.seriesUid) || !uid(body.sopUid) || !revision(body.frame)) throw new Error('Invalid page');
+    return { id: item.id, studyUid: study, revision: item.revision, hidden: item.hidden, kind: body.kind,
+      label: typeof body.label === 'string' ? body.label : typeof body.title === 'string' ? body.title : '',
+      seriesUid: body.seriesUid, sopUid: body.sopUid, frame: body.frame, authorSub: typeof item.authorSub === 'string' ? item.authorSub : '',
+      referenceStatus: item.referenceStatus === 'verified' || item.referenceStatus === 'unverified' ? item.referenceStatus : null,
+      values: values && values.every(n => typeof n === 'number') ? [...values] : null, working: false };
+  }
+  const studySet = value => Array.isArray(value) && value.length >= 1 && value.length <= 2 && value.every(uid) &&
+    new Set(value).size === value.length ? [...value] : null;
 
   /* Unsaved, editing and pending findings survive a study switch, a 403 and a mode exit as held
    * copies bound to {subject, study}; only a logout, a 401 or a subject change destroys them. The
@@ -131,12 +265,22 @@
   /* The store owns scope, generation, read sequence and every pending request. `deps.fetch`,
    * `deps.uuid`, `deps.navigate` (window.kinViewerHistoryNavigate) and `deps.notify` are injected
    * so the same decisions run under Node with fake transports. `deps.recovered` carries the
-   * records a previous store of this same document handed over with detach(). */
+   * records a previous store of this same document handed over with detach().
+   * S2-B2: `deps.studies` is the viewer document's study set in URL order. With two studies the first
+   * anchors the store and the second is its comparison study: activating the comparison viewport keeps
+   * the anchor's entries, drafts and pending bodies, and the comparison heads come from that study's own
+   * viewer-items list. `deps.history`/`deps.activate` read the viewer for crossNavigate; `deps.setTimeout`,
+   * `deps.clearTimeout` and `deps.navigationMs` bound it. */
   function createStore(deps) {
     const fetchImpl = deps.fetch, makeId = deps.uuid, timeoutMs = Number.isFinite(deps.timeoutMs) ? deps.timeoutMs : 30000;
+    const later = typeof deps.setTimeout === 'function' ? deps.setTimeout : (fn, ms) => setTimeout(fn, ms);
+    const cancelLater = typeof deps.clearTimeout === 'function' ? deps.clearTimeout : id => clearTimeout(id);
+    const navigationMs = Number.isFinite(deps.navigationMs) ? deps.navigationMs : 15000;
+    const studies = studySet(deps.studies);
     const listeners = new Set();
     const s = { scope: '', subject: '', me: null, ended: false, generation: 0, readSequence: 0, loading: false, suspended: true,
-      status: '', history: null, entries: new Map(), heads: new Map(), parked: new Map() };
+      status: '', history: null, entries: new Map(), heads: new Map(), parked: new Map(), studies, navigation: 0,
+      pair: { status: 'none', heads: new Map(), working: new Set(), key: '', sequence: 0, refused: false } };
     for (const record of heldRecords(deps.recovered)) s.parked.set(heldKey(record.subject, record.scope), record);
     let controller = typeof AbortController === 'function' ? new AbortController() : null;
     const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (_) {} } };
@@ -144,9 +288,30 @@
     const writable = entry => !s.suspended && s.me?.kind === 'member' && Array.isArray(s.me.roles) && s.me.roles.includes('radiologist') &&
       (!entry || !entry.head || entry.head.authorSub === s.subject);
     const hasWork = e => !!(e.editing || e.pending || e.busy);
+    const anchorOf = scope => studies && studies.length === 2 && studies.includes(scope) ? studies[0] : scope;
+    const pairOf = () => studies && studies.length === 2 && s.scope === studies[0] ? studies[1] : '';
+    // The anchor's saved heads are selectable only while its own viewport feeds the Measurements panel.
+    const anchorLive = () => !!s.history && s.history.scope === s.scope && !!s.scope;
+    function clearPair() {
+      s.pair.sequence++; s.pair.heads = new Map(); s.pair.working = new Set(); s.pair.key = ''; s.pair.refused = false;
+      s.pair.status = pairOf() ? 'idle' : 'none';
+    }
+    // Where a pair or copied source comes from: its own study, the saved copy of the same item, else the anchor.
+    function studyOf(e, source) {
+      if (source && uid(source.studyUid)) return source.studyUid;
+      const copy = [...(e.head?.item.sources || []), ...(e.latest?.item.sources || [])].find(x => x.itemId === source?.itemId);
+      return copy && uid(copy.studyUid) ? copy.studyUid : s.scope;
+    }
+    function comparisonOf(e) {
+      const found = new Set();
+      for (const x of [...(e.head?.item.sources || []), ...(e.draft?.sources || [])]) { const study = studyOf(e, x); if (study !== s.scope) found.add(study); }
+      return [...found].sort().join(',');
+    }
+    // A refused comparison list blocks new commands on every entry that names a comparison study.
+    const pairBlocked = e => s.pair.status === 'denied' && comparisonOf(e) !== '';
     function reset(message) {
       s.generation++; s.readSequence++; controller?.abort(); controller = typeof AbortController === 'function' ? new AbortController() : null;
-      s.entries.clear(); s.loading = false; s.suspended = true; s.status = message; notify();
+      s.entries.clear(); s.loading = false; s.again = false; s.suspended = true; s.status = message; clearPair(); notify();
     }
     // Hold every entry with work for the current {subject, study} before the entries are cleared.
     function park() {
@@ -203,7 +368,9 @@
       return records;
     }
     function deny() { park(); reset('이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.'); s.me = null; }
-    async function api(path, options, ticket) {
+    // `foreign`: a 403 may concern the comparison study, so it is returned to the caller instead of
+    // holding this study's drafts; the caller re-reads the anchor list, which denies if the anchor is gone.
+    async function api(path, options, ticket, foreign) {
       options = options || {};
       const parentSignal = controller?.signal, request = typeof AbortController === 'function' ? new AbortController() : null;
       const abort = () => request?.abort();
@@ -214,7 +381,7 @@
           headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         if (!valid(ticket)) throw { stale: true };
         if (res.status === 401 || (res.status === 403 && path === '/me')) { end(); throw { stale: true }; }
-        if (res.status === 403) { deny(); throw { stale: true }; }
+        if (res.status === 403 && !foreign) { deny(); throw { stale: true }; }
         const data = await res.json().catch(() => null);
         if (!valid(ticket)) throw { stale: true };
         if (!res.ok || !data) throw { status: res.status, code: data?.code, headRevision: data?.headRevision ?? null, headHidden: data?.headHidden ?? null, itemId: data?.itemId ?? null };
@@ -235,19 +402,30 @@
       park();
       reset(scope ? '소견 확인 중…' : '');
       s.scope = uid(scope) ? scope : '';
+      clearPair();
       if (s.scope) load();
     }
-    // The Measurements panel is the source of truth for saved heads and their reference verdict.
+    // The Measurements panel is the source of truth for saved heads and their reference verdict. Its
+    // scope follows the active viewport; the store follows only the anchor of that scope.
     function syncHistory(state) {
       if (s.ended) return;
       if (!state || typeof state !== 'object') { s.history = null; return; }
       if (state.ended) { end(); return; }
-      const key = JSON.stringify([state.scope, state.suspended, state.heads.map(h => [h.id, h.revision, h.hidden, h.referenceStatus, h.working])]);
+      const heads = Array.isArray(state.heads) ? state.heads : [];
+      const key = JSON.stringify([state.scope, state.suspended, heads.map(h => [h.id, h.revision, h.hidden, h.referenceStatus, h.working])]);
       const changed = key !== s.historyKey;
       s.historyKey = key; s.history = state;
-      s.heads = new Map((state.heads || []).map(h => [h.id, h]));
-      if (state.scope !== s.scope) setScope(state.scope);
-      else if (changed) notify();
+      const anchor = anchorOf(state.scope), moved = anchor !== s.scope;
+      if (moved) s.heads = new Map();
+      if (state.scope === anchor) s.heads = new Map(heads.map(h => [h.id, h]));
+      if (moved) { setScope(anchor); return; }
+      // While the comparison viewport is active its panel marks items being edited; a changed saved set
+      // (or a new activation) re-reads the comparison list.
+      const onPair = !!pairOf() && state.scope === pairOf();
+      const pairKey = onPair ? JSON.stringify(heads.map(h => [h.id, h.revision, h.hidden])) : '';
+      s.pair.working = new Set(onPair ? heads.filter(h => h.working).map(h => h.id) : []);
+      if (pairKey !== s.pair.key) { s.pair.key = pairKey; if (onPair) loadPair(); }
+      if (changed) notify();
     }
     async function load() {
       if (!s.scope || s.ended || s.loading) return;
@@ -278,10 +456,63 @@
           if (!e) { e = { id: head.id }; s.entries.set(e.id, e); }
           Object.assign(e, { head, draft: itemOnly(head), links: head.links || [], editing: false, latest: null, pending: null, busy: false, message: '', staleSource: null });
         }
-        for (const [id, e] of [...s.entries]) if (e.head && !seen.has(id) && !hasWork(e)) s.entries.delete(id);
-        s.status = heads.length + '개 소견 · 소견 저장은 판독 확정과 별개입니다.';
+        let dropped = 0;
+        for (const [id, e] of [...s.entries]) {
+          if (!e.head || seen.has(id) || e.busy) continue;
+          if (!hasWork(e)) s.entries.delete(id);
+          else if (!lose(e)) dropped++;
+        }
+        s.status = heads.length + '개 소견 · 소견 저장은 판독 확정과 별개입니다.' +
+          (dropped ? ' · 결과를 확인하지 못한 숨김·복원 요청이 있던 소견을 더 이상 볼 수 없어 목록에서 뺐습니다.' : '');
+        if (pairOf()) loadPair();
       } catch (e) { if (!e.stale && valid(ticket)) s.status = '소견 목록을 확인하지 못했습니다. Refresh로 다시 확인하세요.'; }
-      finally { if (ticket === s.generation) s.loading = false; notify(); }
+      finally {
+        // A comparison refusal seen during this read asks for one more read of the anchor list.
+        if (ticket === s.generation) { s.loading = false; if (s.again) { s.again = false; Promise.resolve().then(load); } }
+        notify();
+      }
+    }
+    /* The authoritative list no longer contains a finding this login was working on (for example its
+     * comparison study was withdrawn): nothing copied from it stays on screen. An edit keeps only the
+     * user's own title and text, with the pairs of this study, as a new unsaved draft of this study that
+     * is saved only by an explicit Save; a pending hide/restore is dropped. Returns false when dropped. */
+    function lose(e) {
+      s.entries.delete(e.id);
+      if (!e.editing) return false;
+      const own = e.draft.sources.filter(p => studyOf(e, p) === s.scope).map(p => ({ itemId: p.itemId, revision: p.revision }));
+      Object.assign(e, { id: makeId(), head: null, links: [], latest: null, pending: null, staleSource: null, editing: true, busy: false,
+        draft: { title: e.draft.title, text: e.draft.text, sources: own, primary: 0 },
+        message: '이 소견을 더 이상 볼 수 없어 저장하지 않았습니다. 작성한 제목과 본문만 이 검사의 새 소견 초안으로 남겼고 비교 검사 연결은 뺐습니다. 저장 전 내용과 연결 표식을 확인하세요.' });
+      s.entries.set(e.id, e);
+      return true;
+    }
+    // Saved, non-hidden heads of the comparison study from its own list; the pair ticket drops a late or
+    // superseded answer, and a refusal clears the heads without a trace of their content.
+    async function loadPair() {
+      const study = pairOf();
+      if (!study || s.ended || s.suspended || !s.subject) return;
+      const ticket = s.generation, seq = ++s.pair.sequence, subject = s.subject, anchor = s.scope;
+      const current = () => valid(ticket) && seq === s.pair.sequence && s.subject === subject && s.scope === anchor;
+      s.pair.status = 'loading'; notify();
+      try {
+        const items = []; let cursor = null;
+        do {
+          const page = await api('/studies/' + study + '/viewer-items?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket, true);
+          if (!current()) return;
+          if (!page || !Array.isArray(page.items) || items.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
+          items.push(...page.items); cursor = page.nextCursor;
+        } while (cursor);
+        const heads = items.map(item => comparisonHead(item, study)).filter(h => !h.hidden);
+        if (!current()) return;
+        s.pair.heads = new Map(heads.map(h => [h.id, h])); s.pair.status = 'ready'; s.pair.refused = false;
+      } catch (error) {
+        if (!current()) return;
+        s.pair.heads = new Map();
+        s.pair.status = error && (error.status === 403 || error.status === 404) ? 'denied' : 'failed';
+        // Findings naming that study are no longer readable either; the anchor list drops them, once per
+        // refusal (the flag survives superseded reads and clears only with an answered list or a new anchor).
+        if (s.pair.status === 'denied' && !s.pair.refused) { s.pair.refused = true; if (s.loading) s.again = true; else load(); }
+      } finally { if (current()) notify(); }
     }
     function newDraft() {
       if (s.ended || s.suspended || !writable()) return null;
@@ -294,14 +525,22 @@
       if (typeof patch.text === 'string') e.draft.text = patch.text;
     }
     // Selection only from saved heads that are visible and not mid-edit; a new pair always
-    // takes the current head revision, so the server copies exactly that revision.
-    function toggleSource(e, itemId) {
+    // takes the current head revision, so the server copies exactly that revision. `study` names the
+    // comparison study for its own list; an entry never mixes two comparison studies.
+    function toggleSource(e, itemId, study) {
       if (s.entries.get(e.id) !== e || !e.editing || e.busy || e.pending) return false;
       const index = e.draft.sources.findIndex(x => x.itemId === itemId);
       if (index >= 0) { e.draft.sources.splice(index, 1); if (e.draft.primary >= e.draft.sources.length) e.draft.primary = 0; notify(); return true; }
-      const head = s.heads.get(itemId);
-      if (!head || head.hidden || head.working || e.draft.sources.length >= LIMITS.sources) return false;
-      e.draft.sources.push({ itemId, revision: head.revision }); notify(); return true;
+      if (e.draft.sources.length >= LIMITS.sources) return false;
+      if (study === undefined || study === s.scope) {
+        const head = s.heads.get(itemId);
+        if (!anchorLive() || !head || head.hidden || head.working) return false;
+        e.draft.sources.push({ itemId, revision: head.revision }); notify(); return true;
+      }
+      const pair = pairOf(), head = s.pair.heads.get(itemId), other = comparisonOf(e);
+      if (!pair || study !== pair || s.pair.status !== 'ready' || (other && other !== pair)) return false;
+      if (!head || head.hidden || s.pair.working.has(itemId)) return false;
+      e.draft.sources.push({ itemId, revision: head.revision, studyUid: pair }); notify(); return true;
     }
     function setPrimary(e, index) {
       if (s.entries.get(e.id) !== e || !e.editing || e.busy || e.pending) return;
@@ -310,8 +549,9 @@
     // Explicit refresh is an edit that replaces one {itemId, revision} pair by the current head
     // pair; ordinary text edits keep every existing pair and therefore every frozen copy.
     function refreshSource(e, itemId) {
-      if (s.entries.get(e.id) !== e || !e.head || e.busy || e.pending || !writable(e)) return false;
-      const link = (e.links || []).find(l => l.itemId === itemId), head = s.heads.get(itemId);
+      if (s.entries.get(e.id) !== e || !e.head || e.busy || e.pending || !writable(e) || pairBlocked(e)) return false;
+      const link = (e.links || []).find(l => l.itemId === itemId);
+      const head = studyOf(e, { itemId }) === s.scope ? s.heads.get(itemId) : s.pair.heads.get(itemId);
       const target = link && link.headRevision ? { revision: link.headRevision, hidden: !!link.headHidden } : head ? { revision: head.revision, hidden: !!head.hidden } : null;
       const pair = e.draft.sources.find(x => x.itemId === itemId);
       if (!pair || !target || target.hidden || target.revision === pair.revision) return false;
@@ -331,14 +571,17 @@
       e.editing = false; e.draft = itemOnly(e.head); e.staleSource = null; e.message = ''; notify();
     }
     function edit(e) {
-      if (s.entries.get(e.id) !== e || !e.head || e.head.hidden || e.busy || e.pending || !writable(e)) return;
+      if (s.entries.get(e.id) !== e || !e.head || e.head.hidden || e.busy || e.pending || !writable(e) || pairBlocked(e)) return;
       e.editing = true; notify();
     }
     async function save(e, action, reason) {
       if (!valid(s.generation) || s.entries.get(e.id) !== e || !writable(e) || e.busy || s.ended) return false;
+      // Computed before the request: a pending retry keeps the context of the body it replays.
+      const comparison = comparisonOf(e) !== '';
       if (!e.pending) {
         if (e.head && action !== 'edit' && action !== 'hide' && action !== 'restore') return false;
         if (!e.head && action && action !== 'create') return false;
+        if (pairBlocked(e)) { e.message = COMPARISON_DENIED; notify(); return false; }
         const problem = draftProblem(e.draft);
         if (problem) { e.message = problem; notify(); return false; }
         const body = commandBody(e.draft, e.head, action, reason, makeId());
@@ -347,7 +590,7 @@
       const ticket = s.generation; e.busy = true; notify();
       try {
         await authenticate(ticket);
-        const head = await api(e.pending.url, { method: 'POST', body: e.pending.body }, ticket);
+        const head = await api(e.pending.url, { method: 'POST', body: e.pending.body }, ticket, comparison);
         if (!valid(ticket) || !s.entries.has(e.id)) return false;
         if (!uuid(head?.id) || !head.item || !Array.isArray(head.item.sources)) throw { status: 200 };
         const duplicate = s.entries.get(head.id);
@@ -363,10 +606,14 @@
         return true;
       } catch (error) {
         if (error.stale || !valid(ticket)) return false;
-        e.message = errorMessage(error);
+        e.message = errorMessage(error, { comparison });
         if (error.status >= 400 && error.status < 500) e.pending = null;
         if (error.code === 'FINDING_SOURCE_STALE') e.staleSource = { itemId: error.itemId, headRevision: error.headRevision, headHidden: error.headHidden };
-        else if (error.status === 409) await load();
+        else if (error.status === 409 && error.code !== 'FINDING_COMPARISON_STUDY') await load();
+        // A saved finding that answers 404 may have become unreadable, and a comparison 403 may hide an
+        // anchor refusal: the authoritative list decides (lose() or deny()) and the draft stays otherwise.
+        else if ((error.status === 404 && e.head) || (error.status === 403 && comparison)) { e.busy = false; await load(); }
+        else if (error.status === 404 && comparison) loadPair();
         return false;
       } finally { if (valid(ticket) && s.entries.has(e.id)) { e.busy = false; notify(); } }
     }
@@ -377,17 +624,53 @@
       if (!source) return refusal('invalid');
       const go = deps.navigate;
       const ticket = s.generation;
+      const target = { studyUid: source.studyUid ?? s.scope, seriesUid: source.seriesUid, sopUid: source.sopUid, frame: source.frame, itemId: source.itemId };
+      if (target.studyUid !== s.scope && validTarget(target)) return navigateAcross(e, target);
       let result;
       if (typeof go !== 'function') result = refusal('tool-missing');
       else {
-        const target = { studyUid: source.studyUid ?? s.scope, seriesUid: source.seriesUid, sopUid: source.sopUid, frame: source.frame, itemId: source.itemId };
         if (!validTarget(target)) result = refusal('invalid');
         else { try { result = await go(target); } catch (_) { result = refusal('tool-missing'); } }
       }
       if (!result || typeof result !== 'object') result = refusal('invalid');
       if (!valid(ticket) || s.entries.get(e.id) !== e) return refusal('superseded');
-      e.message = result.ok ? annotationText(result.annotation) : reasonText(result.reason);
+      // In a two-study viewer the anchor's source needs the anchor's own viewport selected. The viewer refused
+      // with its live scope, so that scope (not the snapshot synced every 250 ms) names the viewport to select.
+      const shown = result.reason === 'scope' ? liveScope() : '';
+      const away = !!shown && shown !== s.scope && !!studies && studies.includes(shown);
+      e.message = result.ok ? annotationText(result.annotation) : away ? ANCHOR_SCOPE_TEXT : reasonText(result.reason);
       notify(); return result;
+    }
+    // The viewer's current history scope for this same login, read once through deps.history; '' when unknown.
+    function liveScope() {
+      try {
+        const h = typeof deps.history === 'function' ? deps.history() : null;
+        const scope = h && h.scope, subject = h && h.subject, ended = h && h.ended;
+        return typeof scope === 'string' && !!s.subject && subject === s.subject && ended !== true ? scope : '';
+      } catch (_) { return ''; }
+    }
+    // A source of the comparison study: only through crossNavigate within the 15 s bound; the newest
+    // Go to Image of this store, an anchor/session change or a replaced entry stops it.
+    async function navigateAcross(e, target) {
+      const ticket = s.generation, seq = ++s.navigation;
+      const history = deps.history, activate = deps.activate, go = deps.navigate;
+      let result, phase = 'before', expired = false, timer = null;
+      if (target.studyUid !== pairOf()) result = refusal('scope');
+      else if (s.pair.status === 'denied') result = refusal('busy');
+      else if (typeof history !== 'function' || typeof activate !== 'function' || typeof go !== 'function') result = refusal('tool-missing');
+      else {
+        const live = () => valid(ticket) && seq === s.navigation && s.entries.get(e.id) === e;
+        const control = { stopped: () => expired ? 'timeout' : live() ? null : 'superseded', phase: name => { phase = name; },
+          wait: ms => new Promise(resolve => later(resolve, ms)) };
+        const bound = new Promise(resolve => { timer = later(() => { expired = true; resolve(refusal('timeout')); }, navigationMs); });
+        try { result = await Promise.race([crossNavigate({ state: history, activate, navigate: go }, target, control), bound]); }
+        catch (_) { result = refusal('tool-missing'); }
+        finally { cancelLater(timer); }
+      }
+      if (!valid(ticket) || seq !== s.navigation || s.entries.get(e.id) !== e) return { ...refusal('superseded'), phase };
+      e.message = result.ok ? COMPARISON_ARRIVAL + (annotationText(result.annotation) ? ' ' + annotationText(result.annotation) : '')
+        : reasonText(result.reason) + phaseText(phase);
+      notify(); return { ...result, phase };
     }
     async function history(e, cursor) {
       if (!valid(s.generation) || s.entries.get(e.id) !== e || !e.head) return null;
@@ -397,12 +680,13 @@
       return data;
     }
     return { state: () => s, subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); }, valid, writable, hasWork, held, workState,
-      discardHeld, detach,
+      discardHeld, detach, pairOf, anchorLive, studyOf, comparisonOf, pairBlocked, loadPair,
       setScope, syncHistory, load, newDraft, updateDraft, toggleSource, setPrimary, refreshSource, useLatest, discard, edit, save, navigate, history, end,
       dispose: () => { listeners.clear(); controller?.abort(); } };
   }
 
-  const api = { LINK_STATES, LINK_LABELS, NAVIGATION_REASONS, LIMITS, linkState, sourceStatus, reasonText, annotationText, validReply, validTarget,
+  const api = { LINK_STATES, LINK_LABELS, NAVIGATION_REASONS, ACTIVATION_REASONS, CROSS_REASONS, LIMITS, linkState, sourceStatus, reasonText, annotationText,
+    phaseText, validReply, validTarget, plainState, viewerResult, activationResult, crossNavigate, comparisonHead,
     commandBody, draftProblem, itemOnly, errorMessage, createStore };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.kinFindingLinkModel = api;
