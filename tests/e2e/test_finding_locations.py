@@ -88,8 +88,15 @@ class FindingLocationsE2E(VolumeMarksE2E):
         row = panel.locator('article[data-row-key="'+key+'"]')
         row.get_by_label('Finding Title').fill(title)
         row.get_by_label('Finding Characteristics', exact=True).fill(traits)
-        row.locator('details[data-kin-locations]').get_by_label('Link 3D Point '+label+' · 저장 작업 r'+str(revision), exact=True).check()
+        # The panel offers each unlinked pair once: linking removes that checkbox and shows the source line with Unlink, exactly
+        # as the 2D Link Saved Items choices do (test_finding_navigation.compose). So the click is proven by the new state, not by
+        # a checkbox that stays checked - Locator.check() waits for that element and cannot pass here (run 35258893346).
+        point = row.locator('details[data-kin-locations]').get_by_label('Link 3D Point '+label+' · 저장 작업 r'+str(revision), exact=True)
+        expect(point).to_be_enabled()
+        point.click()
         expect(row.locator('[data-job-id]')).to_have_count(1)
+        expect(point).to_have_count(0)
+        expect(row.locator('[data-job-id][data-source-kind="point"]')).to_have_count(1)
         row.get_by_role('button', name='Save', exact=True).click()
         expect(row).to_contain_text('저장 완료', timeout=30000)
         return panel, row

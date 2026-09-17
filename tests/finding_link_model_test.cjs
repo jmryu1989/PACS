@@ -2450,8 +2450,15 @@ test('mounted locations: the editor names its characteristics field and helper, 
   const box = h.row().all().find(e => e.tagName === 'details' && e.dataset.kinLocations === '');
   const choices = box.all().filter(e => e.tagName === 'input').map(e => e.attributes['aria-label']);
   assert.deepEqual(choices, ['Link 3D Point 두번째 · 저장 작업 r1', 'Link Saved View 평면 배치 · v7 · r1'], 'linked pairs are not offered again');
-  const pick = label => { const input = box.all().find(e => e.attributes['aria-label'] === label); input.checked = true; input.dispatchEvent(new Event('change')); };
-  pick('Link 3D Point 두번째 · 저장 작업 r1'); pick('Link Saved View 평면 배치 · v7 · r1'); await h.sync();
+  const pick = label => { const input = box.all().find(e => e.attributes['aria-label'] === label); input.checked = true; input.dispatchEvent(new Event('change')); return input; };
+  const clicked = pick('Link 3D Point 두번째 · 저장 작업 r1'); pick('Link Saved View 평면 배치 · v7 · r1'); await h.sync();
+  // Each choice is offered once: the linked pair leaves the list, so the clicked checkbox is removed from the panel rather than
+  // left checked in it, and the linked source line appears instead. A hosted click must assert that state, never the checkbox.
+  const listed = h.row().all().find(e => e.tagName === 'details' && e.dataset.kinLocations === '');
+  assert.deepEqual(listed.all().filter(e => e.tagName === 'input').map(e => e.attributes['aria-label']), [], 'every offered pair is linked');
+  assert.equal(h.panel().all().includes(clicked), false, 'the clicked checkbox is gone from the panel');
+  assert.deepEqual(h.row().all().filter(e => e.dataset.jobId).map(e => e.dataset.jobId).sort(),
+    [LJ, LJ, LM2, viewCopy().jobId].sort(), 'the two new pairs are shown as source lines');
   field.value = '분엽상 경계'; field.dispatchEvent(new Event('input'));
   const edited = h.row().all().find(e => e.attributes['aria-label'] === 'Finding Characteristics');
   edited.value = '분엽상 경계'; edited.dispatchEvent(new Event('input'));
