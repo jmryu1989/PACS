@@ -1,13 +1,14 @@
-"""TEST-S2-API-01..06 (REQ-S2-RECORD/PROVENANCE/FRESHNESS/BOUNDARY/IDEMPOTENT/PRESERVE).
+"""TEST-S2-API-01..10 (REQ-S2-RECORD/PROVENANCE/FRESHNESS/BOUNDARY/IDEMPOTENT/PRESERVE, S2-B2 comparison source).
 
-Real Nest/Prisma, Keycloak and Orthanc with an owned synthetic CT. Direct SQL touches only this
-run's study identities for lock, fault and limit setup; every write effect is compared through
-the persisted rows. No clinical fixture is used.
+Real Nest/Prisma, Keycloak and Orthanc with owned synthetic CTs. Direct SQL touches only this
+run's study identities, run-owned readers' SYNTHETIC access policies and lock, fault and limit
+setup; every write effect is compared through the persisted rows. No clinical fixture is used.
 """
 from __future__ import annotations
 import io, json, re, subprocess, sys, time, unittest, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from pydicom import dcmread
 from invariants_live import ROOT, psql
 from viewer_api_test import ViewerStack, literal
@@ -15,6 +16,9 @@ sys.path.insert(0, str(ROOT/'tests/e2e'))
 from viewer_precision_fixture import synthetic_ct
 
 FINDING_TABLES = ('Finding', 'FindingRevision')
+SNAPSHOT_TABLES = FINDING_TABLES+('ViewerItem', 'ViewerRevision', 'ViewerRequest', 'ViewerStorageBudget', 'AuditLog')
+# The StudyState columns that decide who may read a study; comparison tests change and restore only these.
+BOUNDARY_COLUMNS = ('rs', 'preDoc', 'preReviewer', 'institutionId', 'teleInstitutionId')
 
 class FindingStack(ViewerStack):
     """ViewerStack already tears down Finding/FindingRevision before StudyState; this name marks the suites that rely on it."""
@@ -31,6 +35,10 @@ class FindingAPI(unittest.TestCase):
         cls.stack.require_stack()
         cls.stack.create_test_identity('adminonly', ['admin'], 'hallym')
         cls.stack.token('adminonly')
+        # Comparison-study readers whose access policies the S2-B2 tests restrict and always clear.
+        for user in ('xauthor', 'xreader'):
+            cls.stack.create_test_identity(user, ['radiologist'], 'hallym')
+            cls.stack.token(user)
         started = time.monotonic()
         required = {cls.stack.actor(user) for user in ['jmryu', 'doctor2']}
         while True:
@@ -73,25 +81,25 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(response.status, status, response.text)
         return response.body
 
-    def length_item(self, index=0, extent=20.0, label='길이'):
-        ds = self.slices[index]; ipp = [float(x) for x in ds.ImagePositionPatient]
+    def length_item(self, index=0, extent=20.0, label='길이', slices=None):
+        ds = (slices or self.slices)[index]; ipp = [float(x) for x in ds.ImagePositionPatient]
         return dict(schemaVersion=1, kind='length', seriesUid=str(ds.SeriesInstanceUID), sopUid=str(ds.SOPInstanceUID), frame=1,
                     frameOfReferenceUid=str(ds.FrameOfReferenceUID), label=label,
                     points=[[ipp[0]+10, ipp[1]+10, ipp[2]], [ipp[0]+10+extent, ipp[1]+10, ipp[2]]],
                     viewPlaneNormal=[0, 0, 1], viewUp=[0, 1, 0], baseline=dict(calculator='kin-native-manual-v1', values=[extent]))
 
-    def key_item(self, index=1, title='키 <script>'):
-        ds = self.slices[index]
+    def key_item(self, index=1, title='키 <script>', slices=None):
+        ds = (slices or self.slices)[index]
         return dict(schemaVersion=1, kind='key', seriesUid=str(ds.SeriesInstanceUID), sopUid=str(ds.SOPInstanceUID), frame=1, title=title, description='')
 
     def item(self, item, user='doctor', status=200):
         return self.call(body=dict(requestId=str(uuid.uuid4()), item=item), user=user, path=self.items_path, status=status)
 
-    def revise_item(self, head, action='edit', item=None, reason=None, user='doctor', status=200):
+    def revise_item(self, head, action='edit', item=None, reason=None, user='doctor', status=200, items_path=None):
         snapshot = {k: v for k, v in head['item'].items() if k not in ('hidden', 'sourceDigest')} if item is None else item
         command = dict(requestId=str(uuid.uuid4()), expectedRevision=head['revision'], action=action, item=snapshot)
         if reason is not None: command['reason'] = reason
-        return self.call(body=command, path=self.items_path+'/'+head['id']+'/revisions', user=user, status=status)
+        return self.call(body=command, path=(items_path or self.items_path)+'/'+head['id']+'/revisions', user=user, status=status)
 
     def finding_body(self, sources, title='소견 <b>제목</b>', text='본문 한글', primary=None, request_id=None):
         item = dict(schemaVersion=1, title=title, text=text, sources=[dict(itemId=s['id'], revision=s['revision']) if 'id' in s else s for s in sources])
@@ -111,13 +119,27 @@ class FindingAPI(unittest.TestCase):
         if reason is not None: command['reason'] = reason
         return self.call(body=command, path=self.path+'/'+head['id']+'/revisions', user=user, status=status), command
 
-    def snapshot(self, tables=FINDING_TABLES+('ViewerItem', 'ViewerRevision', 'ViewerRequest', 'ViewerStorageBudget', 'AuditLog')):
-        uid = literal(self.uid)
-        where = {'Finding': f'"studyUid"={uid}', 'FindingRevision': f'"findingId" IN (SELECT id FROM "Finding" WHERE "studyUid"={uid})',
-                 'ViewerItem': f'"studyUid"={uid}', 'ViewerRevision': f'"itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid})',
-                 'ViewerRequest': f'"itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid})', 'ViewerStorageBudget': f'"studyUid"={uid}',
-                 'AuditLog': f'target={uid}'}
+    def scoped(self, uid):
+        assert uid in self.stack.active
+        uid = literal(uid)
+        return {'Finding': f'"studyUid"={uid}', 'FindingRevision': f'"findingId" IN (SELECT id FROM "Finding" WHERE "studyUid"={uid})',
+                'ViewerItem': f'"studyUid"={uid}', 'ViewerRevision': f'"itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid})',
+                'ViewerRequest': f'"itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid})', 'ViewerStorageBudget': f'"studyUid"={uid}',
+                'AuditLog': f'target={uid}'}
+
+    def snapshot(self, tables=SNAPSHOT_TABLES):
+        where = self.scoped(self.uid)
         return {t: psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE {where[t]} ORDER BY to_jsonb(t)::text COLLATE "C"') for t in tables}
+
+    def state(self, uid=None, tables=SNAPSHOT_TABLES):
+        """snapshot() of any run-owned study in one psql round trip: the same rows in the same per-table order."""
+        where = self.scoped(uid or self.uid)
+        union = ' UNION ALL '.join(f'SELECT {literal(t)} AS tbl, to_jsonb(x)::text AS payload FROM "{t}" x WHERE {where[t]}' for t in tables)
+        state = {t: [] for t in tables}
+        for line in psql(f'SELECT tbl, payload FROM ({union}) s ORDER BY tbl, payload COLLATE "C"'):
+            name, row = line.split('|', 1)
+            state[name].append(row)
+        return state
 
     def revision_rows(self, finding_id):
         return psql(f'SELECT to_jsonb(t)::text FROM "FindingRevision" t WHERE "findingId"={literal(finding_id)}::uuid ORDER BY revision')
@@ -136,27 +158,29 @@ class FindingAPI(unittest.TestCase):
         return {t: psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE uid={literal(self.uid)} ORDER BY to_jsonb(t)::text')
                 for t in ['StudyState', 'Report', 'ReportDraft', 'ReportVersion']}
 
-    def study_update(self, changes):
-        assert self.uid in self.stack.active
-        psql(f'UPDATE "StudyState" SET {changes} WHERE uid={literal(self.uid)}')
+    def study_update(self, changes, uid=None):
+        uid = uid or self.uid
+        assert uid in self.stack.active
+        psql(f'UPDATE "StudyState" SET {changes} WHERE uid={literal(uid)}')
 
-    def parent_lock(self, inside=None):
+    def parent_lock(self, inside=None, uid=None):
         # Same shape as viewer_api_test.parent_lock; `inside` runs while the parent row is locked.
-        assert self.uid in self.stack.active
+        uid = uid or self.uid
+        assert uid in self.stack.active
         process = subprocess.Popen(['docker', 'exec', '-i', 'kin-db', 'psql', '-XqAt', '-U', 'kin', '-d', 'kin', '-v', 'ON_ERROR_STOP=1'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
-        process.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; "+f'SELECT uid FROM "StudyState" WHERE uid={literal(self.uid)} FOR UPDATE'+"; SELECT 'LOCKED';\n"); process.stdin.flush()
+        process.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; "+f'SELECT uid FROM "StudyState" WHERE uid={literal(uid)} FOR UPDATE'+"; SELECT 'LOCKED';\n"); process.stdin.flush()
         while process.stdout.readline().strip() != 'LOCKED':
             if process.poll() is not None: raise RuntimeError('Parent lock setup failed')
         return process
 
-    def wait_blocked(self):
-        deadline = time.monotonic()+2
+    def wait_blocked(self, count=1, timeout=2):
+        deadline = time.monotonic()+timeout
         while time.monotonic() < deadline:
             query = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%FROM \"StudyState\"%' AND pid<>pg_backend_pid()"
-            if int(psql(query)[0]) > 0: return
+            if int(psql(query)[0]) >= count: return
             time.sleep(.03)
-        self.fail('API did not observably wait on the parent lock')
+        self.fail(f'API did not observably wait on the parent lock ({count} waiting request(s) expected)')
 
     def finish_lock(self, process, sql=''):
         process.stdin.write(sql+' COMMIT;\n'); process.stdin.flush()
@@ -164,9 +188,9 @@ class FindingAPI(unittest.TestCase):
         except subprocess.TimeoutExpired: process.kill(); process.communicate(); raise
         self.assertEqual(process.returncode, 0, 'Parent lock transaction failed')
 
-    def expected_copy(self, head):
+    def expected_copy(self, head, study=None):
         item = head['item']
-        return dict(itemId=head['id'], revision=head['revision'], studyUid=self.uid, kind=item['kind'], seriesUid=item['seriesUid'], sopUid=item['sopUid'],
+        return dict(itemId=head['id'], revision=head['revision'], studyUid=study or self.uid, kind=item['kind'], seriesUid=item['seriesUid'], sopUid=item['sopUid'],
                     frame=item['frame'], frameOfReferenceUid=item.get('frameOfReferenceUid'), label=item.get('label', item.get('title', '')),
                     values=item.get('baseline', {}).get('values'), calculator=item.get('baseline', {}).get('calculator'),
                     sourceDigest=item.get('sourceDigest'), authorActor=head['authorActor'])
@@ -219,7 +243,9 @@ class FindingAPI(unittest.TestCase):
         foreign = self.call(body=dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=1, kind='key', seriesUid=str(ds.SeriesInstanceUID), sopUid=str(ds.SOPInstanceUID), frame=1, title='다른 검사', description='')),
                             path='/studies/'+other.uid+'/viewer-items')
         before = self.snapshot()
-        self.create([foreign], status=404)
+        # S2-B2: an item of another readable study is a comparison source now; this one belongs to a different
+        # patient, so it is refused with 400 (test_09 covers unreadable studies, which answer like unknown ids).
+        self.create([foreign], status=400)
         self.create([dict(itemId=str(uuid.uuid4()), revision=1)], status=404)
         stale = self.call(body=self.finding_body([dict(itemId=length['id'], revision=2)]), status=409)
         self.assertEqual((stale['code'], stale['itemId'], stale['headRevision'], stale['headHidden']), ('FINDING_SOURCE_STALE', length['id'], 1, False))
@@ -500,6 +526,411 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(row['payloadBytes'], int(psql(f'SELECT octet_length(convert_to(snapshot::text,\'UTF8\')) FROM "FindingRevision" WHERE "findingId"={literal(head["id"])}::uuid')[0]))
         self.assertLessEqual(row['payloadBytes'], 65536); self.assertGreater(row['payloadBytes'], 36000)
         self.assertEqual(self.call(method='GET')['items'][0]['item'], head['item'])
+
+    # ---- S2-B2 comparison-study helpers ------------------------------------------------------
+    def originals_of(self, uid):
+        found = self.stack._orthanc_request('POST', '/tools/lookup', uid.encode())
+        study = next(x['ID'] for x in found.body if x['Type'] == 'Study')
+        raws = [self.stack.orthanc_bytes('/instances/'+i['ID']+'/file') for i in self.stack._orthanc_request('GET', '/studies/'+study+'/instances').body]
+        return {str(dcmread(io.BytesIO(raw)).SOPInstanceUID): raw for raw in raws}
+
+    def study(self, uid, slices):
+        return SimpleNamespace(uid=uid, path='/studies/'+uid+'/findings', items='/studies/'+uid+'/viewer-items', slices=slices)
+
+    def comparison(self, patient=None, label='prior'):
+        """A run-owned synthetic CT of the anchor's patient unless another id is given; its originals must survive."""
+        fixture = synthetic_ct(self.stack, patient or self.fixture.patient_id, label, '20250917', [0, 0, 0], [1, 0, 0, 0, 1, 0], [.7, 1.3])
+        self.addCleanup(self.stack.cleanup_fixture, fixture.uid)
+        originals = self.originals_of(fixture.uid)
+        self.addCleanup(lambda: self.assertEqual(self.originals_of(fixture.uid), originals))
+        return self.study(fixture.uid, sorted((dcmread(io.BytesIO(raw)) for raw in originals.values()), key=lambda ds: int(ds.InstanceNumber)))
+
+    def item_in(self, study, item, user='xauthor', status=200):
+        return self.call(body=dict(requestId=str(uuid.uuid4()), item=item), user=user, path=study.items, status=status)
+
+    def edit_body(self, sources, title='수정', primary=0):
+        return dict(schemaVersion=1, title=title, text='', primary=primary, sources=[dict(itemId=s['id'], revision=s['revision']) for s in sources])
+
+    def ids(self, user, query='?includeHidden=true&limit=100', path=None):
+        body = self.call(method='GET', user=user, path=(path or self.path)+query)
+        self.assertIsNone(body['nextCursor'])
+        return [item['id'] for item in body['items']]
+
+    def access(self, user, uids=None, rules=None):
+        """SYNTHETIC study-access policy for a run-owned reader; no uids and no rules lifts the restriction."""
+        admin = self.call(method='GET', path='/me', user='jmryu')
+        subject = self.call(method='GET', path='/me', user=user)['sub']
+        subjects = vars(self).setdefault('access_subjects', set())
+        if subject not in subjects:
+            subjects.add(subject); self.addCleanup(self.clear_access, subject)
+        if uids is not None: rules = [dict(patientId=None, modalities=[], dateFrom=None, dateTo=None, studyUids=sorted(uids))]
+        policy = dict(version=1, restricted=rules is not None, startsAt=None, endsAt=None, rules=rules or [])
+        path = '/admin/users/'+subject+'/study-access'
+        revision = self.call(method='GET', path=path, user='jmryu')['revision']
+        self.call(path=path, user='jmryu', status=201, body=dict(expectedOwner=[admin['institution'], admin['sub']], policy=policy,
+                  revision=revision, reason='SYNTHETIC finding comparison access', requestId=str(uuid.uuid4())))
+
+    def clear_access(self, subject):
+        self.assertIn(subject, self.stack.user_ids.values())
+        for table in ('StudyAccessRevision', 'StudyAccessPolicy'):
+            for raw in psql(f'SELECT to_jsonb(t)::text FROM "{table}" t WHERE subject={literal(subject)}'):
+                self.assertTrue(json.loads(raw)['reason'].startswith('SYNTHETIC'))
+                self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)={literal(raw)}::jsonb RETURNING 1'), ['1'])
+        for raw in psql(f"SELECT to_jsonb(t)::text FROM \"AuditLog\" t WHERE target={literal(subject)} AND action='study.access'"):
+            self.assertTrue(json.loads(json.loads(raw)['detail'])['reason'].startswith('SYNTHETIC'))
+            self.assertEqual(psql(f'DELETE FROM "AuditLog" t WHERE to_jsonb(t)={literal(raw)}::jsonb RETURNING 1'), ['1'])
+
+    def boundary(self, uid):
+        columns = ', '.join("'%s', \"%s\"" % (c, c) for c in BOUNDARY_COLUMNS)
+        return json.loads(psql(f'SELECT jsonb_build_object({columns})::text FROM "StudyState" WHERE uid={literal(uid)}')[0])
+
+    def restore_boundary(self, uid, saved):
+        assert uid in self.stack.active
+        assignments = ', '.join("\"%s\"=s.j->>'%s'" % (c, c) for c in BOUNDARY_COLUMNS)
+        psql(f'UPDATE "StudyState" t SET {assignments} FROM (SELECT {literal(json.dumps(saved))}::jsonb AS j) s WHERE t.uid={literal(uid)}')
+        self.assertEqual(self.boundary(uid), saved)
+
+    def job_command(self, studies):
+        cells = []
+        for study in studies:
+            ds = study.slices[0]; z = float(ds.ImagePositionPatient[2])
+            cells.append(dict(study=study.uid, series=str(ds.SeriesInstanceUID), sop=str(ds.SOPInstanceUID), frame=1,
+                camera=dict(focalPoint=[128, 128, z], position=[128, 128, z+1000], viewUp=[0, -1, 0], viewPlaneNormal=[0, 0, 1], parallelScale=128,
+                            rotation=0, flipHorizontal=False, flipVertical=False),
+                properties=dict(voiRange=dict(lower=-1000, upper=-1), VOILUTFunction='LINEAR', invert=False)))
+        return dict(id=str(uuid.uuid4()), title='SYNTHETIC comparison lock order', description='Synthetic lock order',
+                    snapshot=dict(version=1, studies=[s.uid for s in studies], rows=1, cols=len(studies), active=0, cells=cells))
+
+    def clear_jobs(self, uid):
+        # Full-row equality guards and run-owned authors only, as test_viewer_jobs cleans its jobs.
+        for raw in psql(f'SELECT to_jsonb(j)::text FROM "ViewerJob" j WHERE "studyUid"={literal(uid)}'):
+            job = json.loads(raw); self.assertIn(job['authorSub'], self.stack.user_ids.values())
+            sql = 'BEGIN; '
+            for rev in psql(f'SELECT to_jsonb(r)::text FROM "ViewerJobRevision" r WHERE "jobId"={literal(job["id"])}::uuid'):
+                sql += f'DELETE FROM "ViewerJobRevision" r WHERE to_jsonb(r)={literal(rev)}::jsonb; '
+            psql(sql+f'DELETE FROM "ViewerJob" j WHERE to_jsonb(j)={literal(raw)}::jsonb; COMMIT;')
+        self.assertEqual(psql(f'SELECT count(*) FROM "ViewerJob" WHERE "studyUid"={literal(uid)}'), ['0'])
+
+    def locked_request(self, uid, requests, then='', probe=None):
+        """Hold `uid`'s row until every request waits on it; optionally prove, from the holder's own session and
+        without delay, that no waiting request holds the `probe` row; run `then` and release; return the responses."""
+        lock = self.parent_lock(uid=uid)
+        try:
+            with ThreadPoolExecutor(len(requests)) as pool:
+                futures = [pool.submit(self.stack.request, method, path, user, body) for method, path, user, body in requests]
+                self.wait_blocked(len(requests), timeout=30)
+                if probe is not None:
+                    lock.stdin.write(f'SELECT uid FROM "StudyState" WHERE uid={literal(probe)} FOR UPDATE NOWAIT; SELECT \'PROBED\';\n'); lock.stdin.flush()
+                    lines = []
+                    while (line := lock.stdout.readline().strip()) != 'PROBED':
+                        if lock.poll() is not None: self.fail('A waiting request already held the probed row')
+                        if line: lines.append(line)
+                    self.assertEqual(lines, [probe])
+                holder, lock = lock, None
+                self.finish_lock(holder, then)
+                return [future.result(timeout=30) for future in futures]
+        finally:
+            if lock is not None and lock.poll() is None: self.finish_lock(lock)
+
+    # ---- TEST-S2-API-08 (S2-B2 T08a-h) -------------------------------------------------------
+    def test_08_comparison_lineage_visibility_history_replay_and_refused_edits(self):
+        prior, anchor = self.comparison(), self.study(self.uid, self.slices)
+        label = 'P비교표식'+uuid.uuid4().hex[:8]
+        x = self.item_in(anchor, self.length_item())
+        p = self.item_in(prior, self.key_item(0, title=label, slices=prior.slices))
+        # T08a: an anchor item and a same-patient prior item are copied from their own heads.
+        f1, create1 = self.create([x, p], user='xauthor', primary=1)
+        self.assertEqual((f1['studyUid'], f1['item']['primary']), (self.uid, 1))
+        self.assertEqual(f1['item']['sources'], [self.expected_copy(x), self.expected_copy(p, prior.uid)])
+        current = [dict(itemId=x['id'], linkState='current', headRevision=1, headHidden=False), dict(itemId=p['id'], linkState='current', headRevision=1, headHidden=False)]
+        self.assertEqual(self.call(method='GET', user='xauthor')['items'], [{**f1, 'links': current}])
+        history = self.call(method='GET', user='xauthor', path=self.path+'/'+f1['id']+'/revisions')
+        self.assertEqual(([r['item'] for r in history['revisions']], history['nextCursor']), ([f1['item']], None))
+        self.assertNotIn(prior.uid, ' '.join(self.state(tables=('AuditLog',))['AuditLog']))
+        # Cross-study findings interleave by random id with same-study ones: one keeps P only in an older
+        # revision (T08e), one is hidden (restore target for T08g).
+        cross = [f1] + [self.create([x, p], user='xauthor', title='P '+str(i))[0] for i in range(2)]
+        f2, edit2 = self.revise(cross[1], user='xauthor', item=self.edit_body([x], title='X만 남김'))
+        f3, _ = self.revise(cross[2], 'hide', reason='보류', user='xauthor')
+        own = []
+        while len(own) < 4 or not any(min(o['id'] for o in own) < c['id'] < max(o['id'] for o in own) for c in cross):
+            self.assertLess(len(own), 24, 'random ids never interleaved')
+            own.append(self.create([x], user='xauthor', title='X '+str(len(own)))[0])
+        visible, hidden = sorted(o['id'] for o in own), sorted(c['id'] for c in cross)
+        # T08h preparation: the prior item moves to revision 2 after it was copied.
+        p2 = self.revise_item(p, item=self.key_item(0, title=label+' r2', slices=prior.slices), user='xauthor', items_path=prior.items)
+        self.assertEqual(p2['revision'], 2)
+        def captured():
+            return dict(listed=self.call(method='GET', user='xauthor', path=self.path+'?includeHidden=true&limit=100'),
+                        histories={c['id']: self.call(method='GET', user='xauthor', path=self.path+'/'+c['id']+'/revisions') for c in cross},
+                        rows={c['id']: self.revision_rows(c['id']) for c in cross})
+        before = captured()
+        self.assertEqual([i['id'] for i in before['listed']['items']], sorted(visible+hidden))
+        self.assertEqual(next(i for i in before['listed']['items'] if i['id'] == f1['id'])['links'][1],
+                         dict(itemId=p['id'], linkState='revised', headRevision=2, headHidden=False))
+        absent = self.stack.request('GET', self.path+'/'+str(uuid.uuid4())+'/revisions', 'xreader')
+        self.assertEqual((absent.status, absent.body['message']), (404, '소견이 없습니다'))
+        # T08b: a reader restricted to X sees only same-study findings and no text of P.
+        self.access('xreader', [self.uid])
+        listed = self.stack.request('GET', self.path+'?includeHidden=true&limit=100', 'xreader')
+        self.assertEqual(listed.status, 200, listed.text)
+        self.assertEqual(([i['id'] for i in listed.body['items']], listed.body['nextCursor']), (visible, None))
+        for secret in [prior.uid, label, p['id'], str(prior.slices[0].SeriesInstanceUID)]+[str(ds.SOPInstanceUID) for ds in prior.slices]+hidden:
+            self.assertNotIn(secret, listed.text)
+        # T08c: filtering happens before LIMIT; every page is full and every cursor is readable.
+        pages, cursor = [], None
+        while True:
+            body = self.call(method='GET', user='xreader', path=self.path+'?includeHidden=true&limit=1'+('&cursor='+cursor if cursor else ''))
+            self.assertEqual(len(body['items']), 1)
+            pages.append(body['items'][0]['id']); cursor = body['nextCursor']
+            if cursor is None: break
+            self.assertIn(cursor, visible)
+        self.assertEqual(pages, visible)
+        for hidden_id in hidden:
+            neighbour = str(uuid.UUID(int=uuid.UUID(hidden_id).int-1))
+            at, near = (self.stack.request('GET', self.path+'?includeHidden=true&limit=100&cursor='+c, 'xreader') for c in (hidden_id, neighbour))
+            self.assertEqual((at.status, at.text), (near.status, near.text))
+            self.assertEqual([i['id'] for i in at.body['items']], [v for v in visible if v > hidden_id])
+        # T08e: history of every unreadable finding, including f2 whose head no longer names P, is an absent id.
+        for c in cross:
+            response = self.stack.request('GET', self.path+'/'+c['id']+'/revisions', 'xreader')
+            self.assertEqual((response.status, response.text), (absent.status, absent.text))
+        # T08d: the prior becoming non-designated RS=P, leaving the institution, or tele-only in another
+        # institution hides the lineage from an unrestricted reader too, until it is reverted.
+        saved, full = self.boundary(prior.uid), self.call(method='GET', user='doctor', path=self.path+'?includeHidden=true&limit=100')
+        self.assertEqual([i['id'] for i in full['items']], sorted(visible+hidden))
+        for changes in ["rs='P', \"preDoc\"='SYNTHETIC-A', \"preReviewer\"='SYNTHETIC-B'",
+                        "\"institutionId\"='kin-center', \"teleInstitutionId\"=NULL",
+                        "\"institutionId\"='kin-center', \"teleInstitutionId\"='hallym'"]:
+            with self.subTest(prior=changes):
+                self.study_update(changes, prior.uid)
+                try:
+                    self.assertEqual(self.ids('doctor'), visible)
+                    response = self.stack.request('GET', self.path+'/'+f1['id']+'/revisions', 'doctor')
+                    self.assertEqual((response.status, response.text), (absent.status, absent.text))
+                finally: self.restore_boundary(prior.uid, saved)
+                self.assertEqual(self.call(method='GET', user='doctor', path=self.path+'?includeHidden=true&limit=100'), full)
+        # T08f/T08g: the author loses P. Replays, edits keeping or dropping the pair, hide and restore are all
+        # an absent finding, and nothing of X or P changes.
+        self.access('xauthor', [self.uid])
+        x_before, p_before = self.state(), self.state(prior.uid)
+        refused = [self.stack.request('POST', self.path, 'xauthor', create1),
+                   self.stack.request('POST', self.path+'/'+cross[1]['id']+'/revisions', 'xauthor', edit2)]
+        refused += [self.stack.request('POST', self.path+'/'+head['id']+'/revisions', 'xauthor', dict(
+            requestId=str(uuid.uuid4()), expectedRevision=head['revision'], action=action, item=item, **extra)) for head, action, item, extra in [
+            (f1, 'edit', self.edit_body([x, p], title='쌍 유지', primary=1), {}),
+            (f1, 'edit', self.edit_body([x], title='쌍 제거'), {}),
+            (f1, 'hide', self.edit_body([x, p], title='숨김', primary=1), {'reason': '숨김'}),
+            (f1, 'restore', self.edit_body([x, p], title='복원', primary=1), {'reason': '복원'}),
+            (f3, 'restore', self.edit_body([x, p], title='복원'), {'reason': '복원'})]]
+        self.assertEqual([(r.status, r.text) for r in refused], [(absent.status, absent.text)]*len(refused))
+        self.assertEqual((self.state(), self.state(prior.uid)), (x_before, p_before))
+        self.assertEqual(self.ids('xauthor'), visible)
+        # T08h: re-granting P restores byte-equal list, history and rows; replays return the recorded rows,
+        # and an edit keeps the frozen P copy although the P head is at revision 2.
+        self.access('xauthor')
+        self.assertEqual(captured(), before)
+        self.assertEqual(self.call(body=create1, user='xauthor'), f1)
+        self.assertEqual(self.call(body=edit2, path=self.path+'/'+cross[1]['id']+'/revisions', user='xauthor'), f2)
+        kept, _ = self.revise(f1, user='xauthor', item=self.edit_body([x, p], title='재허용 후 수정', primary=1))
+        self.assertEqual((kept['revision'], kept['item']['sources']), (2, f1['item']['sources']))
+        self.assertEqual(self.revision_rows(f1['id'])[:1], before['rows'][f1['id']])
+        self.assertEqual(self.ids('xreader'), visible)
+
+    # ---- TEST-S2-API-09 (S2-B2 T09a-g) -------------------------------------------------------
+    def test_09_same_patient_institution_access_and_one_comparison_study(self):
+        prior, second = self.comparison(label='prior'), self.comparison(label='second')
+        other = self.comparison(patient='FINDING-OTHER-'+uuid.uuid4().hex[:8], label='other')
+        x = self.item_in(self.study(self.uid, self.slices), self.length_item())
+        p, p2, o = (self.item_in(s, self.key_item(0, title='비교 '+name, slices=s.slices)) for s, name in ((prior, 'P'), (second, 'P2'), (other, 'O')))
+        before = self.state()
+        # T09a: another patient's study. T09d: a request spanning two comparison studies.
+        wrong = self.call(body=self.finding_body([x, o]), user='xauthor', status=400)
+        self.assertEqual(wrong['message'], '같은 환자의 검사만 소견에 연결할 수 있습니다')
+        self.call(body=self.finding_body([x, p, p2]), user='xauthor', status=400)
+        self.call(body=self.finding_body([p, p2]), user='xauthor', status=400)
+        self.assertEqual(self.state(), before)
+        # T09b: another institution that the caller can open through tele access is refused with 403.
+        saved = self.boundary(second.uid)
+        self.study_update("\"institutionId\"='kin-center', \"teleInstitutionId\"='hallym'", second.uid)
+        try:
+            self.call(method='GET', user='xauthor', path=second.items)
+            self.call(body=self.finding_body([x, p2]), user='xauthor', status=403)
+        finally: self.restore_boundary(second.uid, saved)
+        self.assertEqual(self.state(), before)
+        # T09c: an item of a study the caller cannot open answers exactly like an unknown id, in either
+        # position next to a stale anchor pair, and writes nothing.
+        stale = dict(itemId=x['id'], revision=2)
+        def probes(ref):
+            return [self.stack.request('POST', self.path, 'xauthor', self.finding_body(order)) for order in ([ref], [ref, stale], [stale, ref])]
+        def unknown_like(ref, case):
+            with self.subTest(unreadable=case):
+                actual, unknown = probes(ref), probes(dict(itemId=str(uuid.uuid4()), revision=1))
+                self.assertEqual([(r.status, r.text) for r in actual], [(r.status, r.text) for r in unknown])
+                self.assertEqual([r.status for r in actual], [404, 404, 409])
+        target = dict(itemId=p2['id'], revision=1)
+        self.access('xauthor', [self.uid, prior.uid])
+        unknown_like(target, 'policy')
+        self.access('xauthor')
+        for case, changes in [('institution', "\"institutionId\"='kin-center', \"teleInstitutionId\"=NULL"),
+                              ('preliminary', "rs='P', \"preDoc\"='SYNTHETIC-A', \"preReviewer\"='SYNTHETIC-B'")]:
+            self.study_update(changes, second.uid)
+            try: unknown_like(target, case)
+            finally: self.restore_boundary(second.uid, saved)
+        self.assertEqual(self.state(), before)
+        # T09e: role, tenant and author boundaries keep test_04's codes on a cross-study finding.
+        head, command = self.create([x, p], user='xauthor')
+        revision_path = self.path+'/'+head['id']+'/revisions'
+        edit = dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=self.edit_body([x, p], title='t'))
+        routes = [('GET', self.path, None), ('POST', self.path, command), ('GET', revision_path, None), ('POST', revision_path, edit)]
+        for method, path, body in routes:
+            self.call(method, body, 'kdoctor', path, 403)
+            self.assertEqual(self.stack.bearer_request(method, path, self.stack.service_token('gateway'), body).status, 403)
+            self.call(method, body, 'adminonly', path, 200 if method == 'GET' else 403)
+            self.call(method, body, 'tech', path, 200 if method == 'GET' else 403)
+        self.call(body=edit, path=revision_path, user='doctor2', status=403)
+        self.assertIn(head['id'], self.ids('tech'))
+        # T09f: a patient metadata rule matching X and P needs Orthanc tags for both, prepared before any lock.
+        rule = dict(patientId=self.fixture.patient_id, modalities=[], dateFrom=None, dateTo=None, studyUids=[])
+        self.access('xauthor', rules=[rule])
+        ruled, _ = self.create([x, p], user='xauthor', title='규칙 허용')
+        self.assertEqual(set(self.ids('xauthor')), {head['id'], ruled['id']})
+        self.call(method='GET', user='xauthor', path=self.path+'/'+ruled['id']+'/revisions')
+        self.assertEqual(self.call(body=command, user='xauthor'), head)
+        self.access('xauthor', rules=[{**rule, 'studyUids': [self.uid]}])
+        self.assertEqual(self.ids('xauthor'), [])
+        self.call(method='GET', user='xauthor', path=revision_path, status=404)
+        ruled_before = self.state()
+        self.assertEqual(self.call(body=self.finding_body([x, p]), user='xauthor', status=404)['message'], '연결할 표식이 이 검사에 없습니다')
+        self.assertEqual(self.state(), ruled_before)
+        self.access('xauthor')
+        # T09g: one comparison study per finding for life, even after the head dropped it.
+        dropped, _ = self.revise(head, user='xauthor', item=self.edit_body([x], title='X만'))
+        dropped_before = self.state()
+        for sources in ([x, p2], [p2]):
+            refused, _ = self.revise(dropped, user='xauthor', status=409, item=self.edit_body(sources, title='P2 추가'))
+            self.assertEqual(refused['code'], 'FINDING_COMPARISON_STUDY')
+        # Replacing the comparison study of a head that still links P is refused the same way.
+        refused, _ = self.revise(ruled, user='xauthor', status=409, item=self.edit_body([x, p2], title='P를 P2로'))
+        self.assertEqual(refused['code'], 'FINDING_COMPARISON_STUDY')
+        self.assertEqual(self.state(), dropped_before)
+        readded, _ = self.revise(dropped, user='xauthor', item=self.edit_body([x, p], title='P 다시'))
+        self.assertEqual((readded['revision'], readded['item']['sources']), (3, head['item']['sources']))
+
+    # ---- TEST-S2-API-10 (S2-B2 T10a-f) -------------------------------------------------------
+    def test_10_two_study_lock_order_races_invisible_quota_and_scale(self):
+        prior, anchor = self.comparison(), self.study(self.uid, self.slices)
+        x = self.item_in(anchor, self.length_item())
+        p = self.item_in(prior, self.key_item(0, title='비교', slices=prior.slices))
+        lower, higher = psql(f'SELECT uid FROM "StudyState" WHERE uid IN ({literal(self.uid)},{literal(prior.uid)}) ORDER BY uid')
+        # T10a: with the lower row held, a write anchored X/P and a mirrored one anchored P/X both wait
+        # without holding the higher row (a NOWAIT lock on it succeeds), then both complete without 40P01.
+        forward, mirrored = self.locked_request(lower, [('POST', self.path, 'xauthor', self.finding_body([x, p])),
+                                                        ('POST', prior.path, 'xauthor', self.finding_body([p, x]))], probe=higher)
+        self.assertEqual((forward.status, mirrored.status), (200, 200), forward.text+mirrored.text)
+        self.assertEqual([s['studyUid'] for s in forward.body['item']['sources']], [self.uid, prior.uid])
+        self.assertEqual((mirrored.body['studyUid'], [s['studyUid'] for s in mirrored.body['item']['sources']]), (prior.uid, [prior.uid, self.uid]))
+        # T10b: the higher row held past lock_timeout is a retryable, inert 503.
+        before = (self.state(), self.state(prior.uid))
+        command = self.finding_body([x, p])
+        lock = self.parent_lock(uid=higher)
+        try:
+            with ThreadPoolExecutor(1) as pool:
+                future = pool.submit(self.stack.request, 'POST', self.path, 'xauthor', command)
+                self.wait_blocked(timeout=30)
+                timed_out = future.result(timeout=30)
+        finally: self.finish_lock(lock)
+        self.assertEqual(timed_out.status, 503, timed_out.text)
+        self.assertEqual((self.state(), self.state(prior.uid)), before)
+        retried = self.call(body=command, user='xauthor')
+        self.assertEqual(self.call(body=command, user='xauthor'), retried)
+        # T10c: the prior item moving to revision 2 while the write waits on P's row is seen after the lock.
+        before = (self.state(), self.state(prior.uid))
+        [stale] = self.locked_request(prior.uid, [('POST', self.path, 'xauthor', self.finding_body([x, p]))],
+                                      f'UPDATE "ViewerItem" SET revision=2 WHERE id={literal(p["id"])}::uuid;')
+        try:
+            self.assertEqual(stale.status, 409, stale.text)
+            self.assertEqual((stale.body['code'], stale.body['itemId'], stale.body['headRevision']), ('FINDING_SOURCE_STALE', p['id'], 2))
+        finally: psql(f'UPDATE "ViewerItem" SET revision=1 WHERE id={literal(p["id"])}::uuid')
+        self.assertEqual((self.state(), self.state(prior.uid)), before)
+        # T10d: identical parallel cross-study creates store one row; a ViewerJob on [X, P] and a finding write
+        # lock the same rows in the same order and both complete.
+        twin = self.finding_body([x, p])
+        with ThreadPoolExecutor(2) as pool:
+            twins = list(pool.map(lambda _: self.stack.request('POST', self.path, 'xauthor', twin), range(2)))
+        self.assertEqual([r.status for r in twins], [200, 200], [r.text for r in twins]); self.assertEqual(twins[0].body, twins[1].body)
+        self.assertEqual(psql(f'SELECT count(*) FROM "FindingRevision" WHERE "requestId"={literal(twin["requestId"])}::uuid'), ['1'])
+        self.addCleanup(self.clear_jobs, self.uid)
+        job, written = self.locked_request(lower, [('POST', '/studies/'+self.uid+'/viewer-jobs', 'doctor', self.job_command([anchor, prior])),
+                                                   ('POST', self.path, 'xauthor', self.finding_body([x, p]))])
+        self.assertEqual((job.status, written.status), (200, 200), job.text+written.text)
+        # T10e: X filled to the findings limit with rows the caller cannot read. The refusal carries only the
+        # code and message; the caller's list still shows only what it may read.
+        self.access('xauthor', [self.uid]); self.access('xreader', [self.uid])
+        own, _ = self.create([x], user='xauthor', title='읽을 수 있는 소견')
+        uid = literal(self.uid)
+        def seeded_snapshot(study, size=0):
+            return literal(json.dumps(dict(schemaVersion=1, title='SYNTHETIC', text='s'*size, hidden=False, primary=0, sources=[dict(
+                itemId=str(uuid.uuid4()), revision=1, studyUid=study, kind='length', seriesUid='2.25.1', sopUid='2.25.2', frame=1,
+                frameOfReferenceUid=None, label='', values=None, calculator=None, sourceDigest=None, authorActor='SYNTHETIC')])))
+        def unseed():
+            psql(f'DELETE FROM "FindingRevision" WHERE "findingId" IN (SELECT id FROM "Finding" WHERE "studyUid"={uid} AND "authorSub"=\'SYNTHETIC\'); '
+                 f'DELETE FROM "Finding" WHERE "studyUid"={uid} AND "authorSub"=\'SYNTHETIC\'')
+        def usage():
+            return [int(v) for v in psql(f'''SELECT (SELECT count(*) FROM "Finding" WHERE "studyUid"={uid}) || ' ' ||
+                (SELECT count(*) FROM "FindingRevision" r JOIN "Finding" f ON f.id=r."findingId" WHERE f."studyUid"={uid}) || ' ' ||
+                (SELECT COALESCE(sum(r."payloadBytes"),0) FROM "FindingRevision" r JOIN "Finding" f ON f.id=r."findingId" WHERE f."studyUid"={uid})''')[0].split()]
+        findings, revisions, used = usage()
+        count = 256-findings
+        # One seeded finding at the 1000-revision history cap; the others share the lifetime revision budget, and
+        # every seeded snapshot is sized so the byte budget ends about 20 KiB short: only the finding count refuses.
+        each = (4096-revisions-8-1000)//(count-1)
+        overhead = max(int(psql(f"SELECT octet_length(convert_to({seeded_snapshot(s)}::jsonb::text,'UTF8'))")[0]) for s in (prior.uid, self.uid))
+        size = (16*1024*1024-used-20000)//(1000+(count-1)*each)-overhead
+        self.addCleanup(unseed)
+        psql(f'''WITH seeded AS (INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
+            SELECT gen_random_uuid(),{uid},'SYNTHETIC','SYNTHETIC',CASE WHEN n=1 THEN 1000 ELSE {each} END,false,
+              CASE WHEN n%2=1 THEN {seeded_snapshot(prior.uid, size)}::jsonb ELSE {seeded_snapshot(self.uid, size)}::jsonb END,now()
+            FROM generate_series(1,{count}) n RETURNING id,revision,snapshot)
+            INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes")
+            SELECT s.id,k,s.snapshot,CASE WHEN k=1 THEN 'create' ELSE 'edit' END,'','SYNTHETIC','SYNTHETIC',gen_random_uuid(),repeat('0',64),
+              octet_length(convert_to(s.snapshot::text,'UTF8')) FROM seeded s CROSS JOIN LATERAL generate_series(1,s.revision) k''')
+        totals = usage()
+        self.assertEqual(totals[0], 256); self.assertGreater(totals[1], 4000); self.assertLess(totals[1], 4096)
+        # Study uids may differ by a few digits in length, so rows of the shorter one are a little smaller.
+        self.assertGreater(totals[2], 16*1024*1024-64000); self.assertLessEqual(totals[2], 16*1024*1024-20000)
+        # Refusals only ever insert, so full Finding/audit rows plus revision totals prove nothing was written.
+        seeded_before = self.state(tables=('Finding', 'AuditLog'))
+        refused = self.stack.request('POST', self.path, 'xauthor', self.finding_body([x]))
+        self.assertEqual((refused.status, refused.body), (409, dict(code='FINDING_STORAGE_LIMIT', message='소견 저장 한도에 도달했습니다')))
+        self.assertEqual((self.state(tables=('Finding', 'AuditLog')), usage()), (seeded_before, totals))
+        readable = psql(f'''SELECT f.id FROM "Finding" f WHERE f."studyUid"={uid} AND NOT EXISTS (SELECT 1 FROM "FindingRevision" r,
+            jsonb_array_elements(r.snapshot->'sources') s WHERE r."findingId"=f.id AND s.value->>'studyUid'<>{uid}) ORDER BY f.id''')
+        self.assertIn(own['id'], readable); self.assertGreater(len(readable), 100); self.assertLess(len(readable), 200)
+        # T10f: full pages through the limit-filled, byte- and revision-heavy study within the statement timeout.
+        def pages(user):
+            ids, cursor, seconds = [], None, []
+            while True:
+                started = time.monotonic()
+                response = self.stack.request('GET', self.path+'?includeHidden=true&limit=100'+('&cursor='+cursor if cursor else ''), user)
+                seconds.append(round(time.monotonic()-started, 3))
+                self.assertEqual(response.status, 200, response.text)
+                ids += [i['id'] for i in response.body['items']]; cursor = response.body['nextCursor']
+                if cursor is None: return ids, seconds
+                self.assertEqual((len(response.body['items']), cursor), (100, ids[-1]))
+        for user, expected in (('xauthor', readable), ('xreader', readable),
+                               ('doctor', psql(f'SELECT id FROM "Finding" WHERE "studyUid"={uid} ORDER BY id'))):
+            ids, seconds = pages(user)
+            print(f'T10f list user={user} rows={len(ids)} seconds={seconds}', flush=True)
+            self.assertEqual(ids, expected)
+        [capped] = psql(f'SELECT id FROM "Finding" WHERE "studyUid"={uid} AND revision=1000')
+        for query, first in (('?limit=100', 1), ('?limit=100&cursor=900', 901)):
+            started = time.monotonic()
+            response = self.stack.request('GET', self.path+'/'+capped+'/revisions'+query, 'doctor')
+            print(f'T10f history query={query} seconds={round(time.monotonic()-started, 3)}', flush=True)
+            self.assertEqual(response.status, 200, response.text)
+            self.assertEqual([r['revision'] for r in response.body['revisions']], list(range(first, first+100)))
+        self.call(method='GET', user='xreader', path=self.path+'/'+capped+'/revisions', status=404)
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
