@@ -68,9 +68,14 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         r = self.stack.request('GET', '/studies/'+f.uid+'/findings?includeHidden=true', 'doctor')
         self.assertEqual(r.status, 200, r.text); return r.body['items']
 
-    def panel(self, p):
+    def panel(self, p, reading=False):
+        """The Findings section with an answered list, or (`reading`) with its list read still unanswered: that
+        read keeps the rows it replaces on screen and says so. S2-B2: activating the comparison viewport of
+        the same viewer does not cancel it, so a test that holds the read must expect exactly that state."""
         panel = p.locator('#kin-viewer-findings'); expect(panel).to_have_count(1)
-        expect(panel.locator('#kin-viewer-findings-status')).to_contain_text('개 소견')
+        status = panel.locator('#kin-viewer-findings-status')
+        if reading: expect(status).to_have_text('소견 확인 중…')
+        else: expect(status).to_contain_text('개 소견')
         return panel
 
     def compose(self, p, title, text, link_text):
@@ -83,8 +88,8 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         expect(row.locator('[data-kin-sources] [data-item-id]')).to_have_count(1)
         return row
 
-    def saved_row(self, p, finding_id):
-        return self.panel(p).locator('article[data-finding-id="'+finding_id+'"]')
+    def saved_row(self, p, finding_id, reading=False):
+        return self.panel(p, reading).locator('article[data-finding-id="'+finding_id+'"]')
 
     def refresh_both(self, p):
         # The Measurements panel owns the exact name 'Refresh' (unique on the page); the nested
@@ -239,9 +244,11 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         self.assertEqual(len(delayed), 1)
         edit = dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=dict(schemaVersion=1, title='new A', text='', sources=[dict(itemId=s['itemId'], revision=s['revision']) for s in saved['item']['sources']]))
         self.assertEqual(self.stack.request('POST', '/studies/'+f.uid+'/findings/'+saved['id']+'/revisions', 'doctor', edit).status, 200)
-        # S2-B2: activating the other study of this comparison viewer keeps the first study's list as it is.
+        # S2-B2: activating the other study of this comparison viewer keeps the first study's list as it is,
+        # with its reload still unanswered (held above): the old rows stay and the status says it is reading.
         switch(b.uid)
-        expect(self.saved_row(p, saved['id'])).to_contain_text('old A')
+        self.assertEqual(len(delayed), 1)
+        expect(self.saved_row(p, saved['id'], reading=True)).to_contain_text('old A')
         url = p.url
         # The finding of A is refused for scope while B is active: no display-set change, no URL change.
         result = p.evaluate("t=>window.kinViewerHistoryNavigate(t)", dict(studyUid=f.uid, seriesUid=saved['item']['sources'][0]['seriesUid'], sopUid=saved['item']['sources'][0]['sopUid'], frame=1, itemId=saved['item']['sources'][0]['itemId']))
@@ -250,8 +257,8 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         for bad, reason in [(dict(studyUid=b.uid, seriesUid='2.25.1', sopUid='2.25.2', frame=1), 'series-missing'), (dict(studyUid=b.uid, seriesUid='x', sopUid='2.25.2', frame=1), 'invalid')]:
             self.assertEqual(p.evaluate("t=>window.kinViewerHistoryNavigate(t)", bad), dict(ok=False, reason=reason))
         # The panel's own Go to Image for A names the viewport to select and moves nothing.
-        self.saved_row(p, saved['id']).locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
-        expect(self.saved_row(p, saved['id'])).to_contain_text('현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다')
+        self.saved_row(p, saved['id'], reading=True).locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
+        expect(self.saved_row(p, saved['id'], reading=True)).to_contain_text('현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다')
         self.assertTrue(p.evaluate(ACTIVE_IMAGE, b.uid)); self.assertEqual(p.url, url)
         # A real document-level change (mode exit and entry) drops the late list of the first store (A-B-A).
         p.evaluate(LIFECYCLE, 'onModeExit'); p.unroute(pattern, hold); p.evaluate(LIFECYCLE, 'onModeEnter')

@@ -1468,7 +1468,7 @@ async function paired() {
   const keyOf = (id, study, series, sop, title) => ({ id, studyUid: study, revision: 1, hidden: false, authorSub: 'doctor', authorActor: 'Doctor', createdAt: 't', updatedAt: 't',
     item: { schemaVersion: 1, kind: 'key', seriesUid: series, sopUid: sop, frame: 1, title, description: '', hidden: false } });
   const server = { items: { [XS]: [keyOf(XK, XS, '1.2', '1.3', 'X 키')], [PS]: [keyOf(PK, PS, '2.3', '2.6', 'P 비교 키')] },
-    findings: [], posts: [], gets: [], denied: new Set(), requests: new Map(), next: 0 };
+    findings: [], posts: [], gets: [], denied: new Set(), requests: new Map(), next: 0, holdFindings: false, held: [] };
   const copy = ref => {
     for (const [study, list] of Object.entries(server.items)) {
       const item = list.find(i => i.id === ref.itemId && i.revision === ref.revision);
@@ -1488,7 +1488,11 @@ async function paired() {
     if (!m) return json(404, {});
     if (server.denied.has(m[1])) return json(403, { message: 'refused' });
     if (m[2] === 'viewer-items') return json(200, { items: (server.items[m[1]] || []).filter(i => path.includes('includeHidden=true') || !i.hidden), nextCursor: null });
-    if (method !== 'POST') return json(200, { items: server.findings.filter(readable).map(shown), nextCursor: null });
+    if (method !== 'POST') {
+      // Answered with the rows of the moment it was asked, now or when a held read is released.
+      const answer = json(200, { items: server.findings.filter(readable).map(shown), nextCursor: null });
+      return server.holdFindings ? new Promise(resolve => server.held.push(() => resolve(answer))) : answer;
+    }
     const body = JSON.parse(options.body); server.posts.push({ path, body, raw: options.body });
     if (server.fail) { const status = server.fail; server.fail = null; return json(status, { message: 'synthetic' }); }
     if (server.requests.has(body.requestId)) return json(200, shown(server.requests.get(body.requestId)));
@@ -1643,6 +1647,47 @@ test('mounted comparison viewer: missing or duplicated comparison viewports refu
   assert.ok(text.includes('비교 검사에 접근할 수 없어 표식을 연결할 수 없습니다.'));
   assert.equal(labelled(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1').length, 0);
   assert.equal(h.server.gets.filter(g => g.startsWith('GET /api/studies/' + XS + '/findings')).length >= 3, true);
+});
+
+// Hosted navigation test 04 holds the first study's list read and then activates the comparison viewport.
+test('mounted comparison viewer: a held anchor list read survives comparison activation with its rows and reading status; only a mode exit drops its late answer', async () => {
+  const h = await paired();
+  const statusText = () => h.all().find(e => e.id === 'kin-viewer-findings-status').textContent;
+  const saved = () => rowsOf(h).find(e => e.dataset.saved === 'true');
+  buttonIn(panelOf(h), 'New Finding').click(); await flush();
+  const [title] = labelled(h, 'Finding Title'); title.value = 'old A'; title.dispatchEvent(new Event('input'));
+  await check(h, 'Link Key Image · X 키 · 프레임 1 · r1');
+  buttonIn(rowsOf(h)[0], 'Save').click(); await flush(); await h.sync();
+  assert.ok(textOf(saved()).includes('old A')); assert.match(statusText(), /^1개 소견/);
+  // The next read is held with the rows of that moment; then the server changes the finding.
+  const first = panelOf(h);
+  h.server.holdFindings = true;
+  buttonIn(first, 'Reload Findings').click(); await h.sync();
+  assert.deepEqual([h.server.held.length, statusText()], [1, '소견 확인 중…']);
+  h.server.findings[0].head.item.title = 'new A'; h.server.findings[0].head.revision++;
+  await h.activate('vp-p');
+  assert.equal(h.window.kinViewerHistoryState().scope, PS);
+  assert.deepEqual([first.dataset.studyUid, statusText(), h.server.held.length], [XS, '소견 확인 중…', 1], 'still reading: neither answered, cancelled nor repeated');
+  assert.ok(saved() && textOf(saved()).includes('old A'), 'the rows the read will replace stay shown');
+  assert.equal(h.all().find(e => e.id === 'kin-viewer-findings-held').hidden, true);
+  // The first study's source refuses with the anchor viewport text; nothing is activated or loaded.
+  const activations = h.grid.activations.length;
+  buttonIn(lineOf(saved(), 'current'), 'Go to Image').click(); await flush(); await h.sync();
+  assert.ok(textOf(saved()).includes('현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다.'));
+  assert.deepEqual([h.grid.activations.length, h.views.get('vp-x').pending.length, h.views.get('vp-p').pending.length, statusText()],
+    [activations, 0, 0, '소견 확인 중…']);
+  // Mode exit and entry: the next section reads the new row; the old read's late answer changes nothing.
+  h.findings.stop(); h.server.holdFindings = false;
+  assert.equal(h.findings.mount(), true); await h.sync();
+  const next = panelOf(h);
+  assert.notEqual(next, first); assert.equal(first.isConnected, false);
+  assert.ok(textOf(next).includes('new A'));
+  for (const release of h.server.held.splice(0)) release();
+  await h.sync();
+  assert.match(statusText(), /^1개 소견/);
+  assert.deepEqual([textOf(next).includes('new A'), textOf(next).includes('old A'), next.dataset.studyUid], [true, false, XS]);
+  assert.equal(h.all().filter(e => e.id === 'kin-viewer-findings').length, 1);
+  h.findings.stop();
 });
 
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step
