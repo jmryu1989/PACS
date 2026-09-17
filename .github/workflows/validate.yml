@@ -775,6 +775,9 @@ jobs:
         run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
       - name: Prepare disposable database image
         run: docker pull postgres:16-alpine
+      - name: Findings migration preservation, restrict, action CHECK and synthetic dump/restore
+        # Explicit selection: the old-image case (test_04) is excluded because it skips without KIN_TEST_OLD_API_IMAGE.
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/findings-migration --cwd . --file api/prisma/migrations/20260917120000_findings/migration.sql --file tests/ops_product_transfer_fixture.py --file tests/viewer_migration_test.py -- python3 -B tests/viewer_migration_test.py ViewerMigration.test_findings_additive_restrict_owner_key_and_failed_ddl ViewerMigration.test_findings_action_check_survives_pg_dump_restore ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk
       - name: Compiled viewer input, Unicode and original-plane validation
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_input_test.cjs
       - name: Compiled finding input allow-list, fingerprint and copied provenance
@@ -813,5 +816,6 @@ jobs:
             tmp/runtime-ci/three-d-cursor-loader/
             tmp/runtime-ci/editor-link/
             tmp/runtime-ci/volume-api-models/
+            tmp/runtime-ci/findings-migration/
           if-no-files-found: error
           retention-days: 7

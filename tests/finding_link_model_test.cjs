@@ -188,9 +188,10 @@ const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setIm
 async function mounted(options) {
   const o = options || {};
   const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
-  document.querySelector = () => null;
+  document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
+  document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   const window = new EventTarget(), annotations = new Map();
-  let study = '1.1', tick;
+  let study = '1.1'; const ticks = []; const tick = () => { for (const fn of [...ticks]) fn(); };
   const me = { sub: 'doctor', kind: 'member', roles: ['radiologist'] };
   const keyHead = { id: 'a0000000-0000-4000-8000-000000000001', revision: 1, hidden: false, authorSub: 'doctor', authorActor: 'Doctor', referenceStatus: 'verified',
     item: { schemaVersion: 1, kind: 'key', seriesUid: '1.2', sopUid: '1.3', frame: 1, title: 'saved key', description: '', hidden: false } };
@@ -212,14 +213,28 @@ async function mounted(options) {
     state: { getAnnotation: uid => annotations.get(uid), getAllAnnotations: () => [...annotations.values()], removeAnnotation: uid => annotations.delete(uid) } },
     ToolGroupManager: { getToolGroupForViewport() {} } };
   window.prompt = () => 'reason'; window.confirm = () => true;
-  vm.runInNewContext(source, { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
-    setInterval: fn => { tick = fn; return 1; }, clearInterval() {}, setTimeout, clearTimeout,
-    fetch: async path => ({ status: 200, ok: true, json: async () => path === '/api/me' ? me : { items: study === '1.1' ? [JSON.parse(JSON.stringify(keyHead))] : [], nextCursor: null } }) });
+  const fetch = async path => ({ status: 200, ok: true, json: async () => path === '/api/me' ? me
+    : path.includes('/findings') ? { items: [], nextCursor: null } : { items: study === '1.1' ? [JSON.parse(JSON.stringify(keyHead))] : [], nextCursor: null } });
+  window.fetch = fetch;
+  const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
+    setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {}, setTimeout, clearTimeout, fetch };
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox);
   const extension = window.config.extensions.find(e => e.id === 'kin.viewer-history');
   extension.preRegistration({ servicesManager: { services }, commandsManager: { getCommand: () => undefined, registerCommand() {} } });
   extension.onModeEnter(); await flush();
   const all = () => document.body.all();
-  return { window, viewport, extension, all, text: () => all().map(e => e.textContent).join('\n'),
+  // Optionally mount the shipped Findings section itself inside the history panel.
+  let findings = null;
+  if (o.findings) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'finding-link-model.js'), 'utf8'), sandbox);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'worklist-v0', 'hpacs-lite', 'viewer-findings.js'), 'utf8'), sandbox);
+    // In the browser globalThis is window; in this vm context the UMD root is the sandbox itself.
+    findings = window.kinViewerFindings(services, window.kinFindingLinkModel || sandbox.kinFindingLinkModel);
+    assert.equal(findings.mount(), true, 'the Findings section mounts inside #kin-viewer-history');
+    tick(); await flush();
+  }
+  return { window, viewport, extension, all, findings, text: () => all().map(e => e.textContent).join('\n'),
     button: name => { const found = all().filter(e => e.tagName === 'button' && e.textContent === name); assert.equal(found.length, 1, name); return found[0]; },
     switch: async uid => { study = uid; tick(); await flush(); },
     release: async () => { const next = viewport.pending.shift(); assert.ok(next, 'no pending image load'); next(); await flush(); } };
@@ -268,6 +283,29 @@ test('mounted history: of two navigations in flight only the latest may report a
   assert.deepEqual(plain(await first), { ok: false, reason: 'superseded' });
   assert.equal(plain(await second).ok, true);
   assert.equal(h.viewport.index, 0);
+});
+
+test('mounted findings section: reload action name is unique and no findings control reuses a page-level Measurements name', async () => {
+  const h = await mounted({ findings: true });
+  const panel = h.all().find(e => e.id === 'kin-viewer-findings');
+  assert.ok(panel, 'findings section present'); assert.equal(panel.parent?.id, 'kin-viewer-history', 'nested inside the Measurements panel');
+  const buttons = h.all().filter(e => e.tagName === 'button');
+  const named = name => buttons.filter(b => b.textContent === name);
+  // The hosted suites address these Measurements actions at page level with exact names.
+  for (const name of ['Refresh', 'Add Key Image', 'Download SR', 'Store SR', 'Length', 'Angle', 'Ellipse ROI']) {
+    assert.equal(named(name).length, 1, name + ' must resolve to exactly one button');
+    assert.equal(panel.contains ? panel.contains(named(name)[0]) : panel.all().includes(named(name)[0]), false, name + ' belongs to the Measurements panel');
+  }
+  const reload = named('Reload Findings');
+  assert.equal(reload.length, 1); assert.ok(panel.all().includes(reload[0]), 'Reload Findings belongs to the Findings section');
+  const inside = new Set(panel.all().filter(e => e.tagName === 'button').map(b => b.textContent));
+  assert.deepEqual([...inside].sort(), ['New Finding', 'Reload Findings']);
+  assert.equal(h.all().filter(e => e.tagName === 'section' && panel.all().includes(e)).length, 0, 'findings rows never use <section>');
+  assert.equal(panel.all().some(e => e.attributes.role === 'status'), false, 'no role=status inside the findings section');
+  assert.equal(typeof h.window.kinViewerFindingsState, 'function');
+  h.findings.stop();
+  assert.equal(h.all().some(e => e.id === 'kin-viewer-findings'), false, 'stop() removes the section');
+  assert.equal(h.window.kinViewerFindingsState, undefined);
 });
 
 test('mounted history: session end and other-study targets are refused; the Saved Items button keeps its messages', async () => {

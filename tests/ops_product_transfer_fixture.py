@@ -17,7 +17,7 @@ orth, pg = combined.orth, combined.pg
 image_transfer, inventory = combined.image_transfer, combined.inventory
 require, command, record = combined.require, combined.command, combined.record
 LIMITS = combined.LIMITS
-# The 34-table catalog plus synthetic rows exceeds 128 KiB (136,191 bytes
+# The 37-table catalog plus synthetic rows exceeds 128 KiB (136,191 bytes
 # measured at 32 tables). Keep producer, bounded copy and parser on one finite cap.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
@@ -309,6 +309,37 @@ def sorted_rows(rows):
     return {key: sorted(value, key=canonical) for key, value in rows.items()}
 
 
+# Schema-metadata-only diagnostic for a catalog mismatch: names, types and definitions of the
+# synthetic product schema, never rows, credentials or dump bytes. Bounded so a log stays readable.
+DIAGNOSTIC_ENTRIES = 8
+DIAGNOSTIC_BYTES = 4096
+
+
+def catalog_difference(expected, actual):
+    report = {}
+    for key in sorted(set(expected) | set(actual)):
+        left = {canonical(item).decode() for item in (expected.get(key) or [])}
+        right = {canonical(item).decode() for item in (actual.get(key) or [])}
+        if left == right:
+            continue
+        report[key] = dict(expected_count=len(left), actual_count=len(right),
+                           only_expected=sorted(left - right)[:DIAGNOSTIC_ENTRIES], only_actual=sorted(right - left)[:DIAGNOSTIC_ENTRIES])
+    return report
+
+
+def bounded_diagnostic(report):
+    text = json.dumps(report, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    while len(text.encode()) > DIAGNOSTIC_BYTES:
+        longest = max(((len(entry), key, side) for key, value in report.items() for side in ('only_expected', 'only_actual')
+                       for entry in [value[side]] if entry), default=None)
+        if longest is None:
+            break
+        _, key, side = longest
+        report[key][side].pop(); report[key]['truncated'] = True
+        text = json.dumps(report, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    return text[:DIAGNOSTIC_BYTES]
+
+
 def verify_product(name, db, expected):
     actual = observe(name, db)
     for key in ('catalog', 'rows', 'sequences'):
@@ -316,6 +347,9 @@ def verify_product(name, db, expected):
         if key == 'rows':
             left, right = sorted_rows(left), sorted_rows(right)
         if canonical(left) != canonical(right):
+            if key == 'catalog':
+                print('Synthetic catalog difference (expected vs restored, schema metadata only): '+
+                      bounded_diagnostic(catalog_difference(right, left)), file=sys.stderr, flush=True)
             raise ProductMismatch('Synthetic product '+key+' mismatch')
     return actual
 

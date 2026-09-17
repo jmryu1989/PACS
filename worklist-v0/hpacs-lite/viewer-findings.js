@@ -89,7 +89,8 @@ window.kinViewerFindings = function (services, model) {
       shown.forEach((s, index) => sourceLine(sources, e, s, index, editing));
       if (editing) selection(el, e);
       if (e.message) text(el, 'p', e.message).dataset.kinMessage = '';
-      if (e.head && !editing) button(el, 'Go to Image', () => store.navigate(e), !!e.busy);
+      // Distinct from the per-source 'Go to Image' lines above, so neither name is ambiguous within a row.
+      if (e.head && !editing) button(el, 'Go to Primary Image', () => store.navigate(e), !!e.busy);
       if (store.writable(e)) {
         if (e.pending) button(el, 'Retry Request', () => store.save(e), !!e.busy);
         else if (editing) {
@@ -119,7 +120,8 @@ window.kinViewerFindings = function (services, model) {
       status.textContent = s.status;
       panel.dataset.studyUid = s.scope || '';
       actions.replaceChildren();
-      button(actions, 'Refresh', () => store.load(), s.ended || !s.scope);
+      // A distinct accessible name: the Measurements panel already owns the exact name 'Refresh'.
+      button(actions, 'Reload Findings', () => store.load(), s.ended || !s.scope);
       button(actions, 'New Finding', () => store.newDraft(), s.ended || s.suspended || !store.writable());
       if (!s.ended && !s.suspended && !store.writable()) text(actions, 'span', ' Read-only');
       for (const [e, el] of [...rows]) if (!s.entries.has(e.id) || s.entries.get(e.id) !== e) { el.remove(); rows.delete(e); }

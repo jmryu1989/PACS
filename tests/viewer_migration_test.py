@@ -57,6 +57,30 @@ class ViewerMigration(unittest.TestCase):
         self.sql('findings_before','DELETE FROM "ViewerItem"',success=False)
         self.assertEqual(old(),before)
 
+    def test_findings_action_check_survives_pg_dump_restore(self):
+        """Actual dump/restore evidence for the action CHECK: the shipped explicit-text form must deparse
+        identically after pg_restore; the legacy IN-list form on character varying is observed and
+        reported, not asserted either way."""
+        legacy='CREATE TABLE "ProbeLegacy" ("action" VARCHAR(16) NOT NULL, CONSTRAINT "ProbeLegacy_action_check" CHECK ("action" IN (\'create\',\'edit\',\'hide\',\'restore\')))'
+        current='CREATE TABLE "ProbeCurrent" ("action" VARCHAR(16) NOT NULL, CONSTRAINT "ProbeCurrent_action_check" CHECK ("action"::text = ANY (ARRAY[\'create\'::text,\'edit\'::text,\'hide\'::text,\'restore\'::text])))'
+        self.create('check_probe'); self.sql('check_probe',legacy+'; '+current)
+        query='''SELECT c.relname||' '||pg_get_constraintdef(k.oid,true) FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid WHERE c.relname LIKE 'Probe%' AND k.contype='c' ORDER BY c.relname'''
+        before=self.sql('check_probe',query).splitlines()
+        self.create('check_probe_restored')
+        with tempfile.TemporaryDirectory(prefix='kin-check-probe-') as folder:
+            path=Path(folder)/'probe.dump'
+            with path.open('wb') as out:subprocess.run(['docker','exec',self.db,'pg_dump','-U','postgres','-Fc','check_probe'],stdout=out,check=True,timeout=30)
+            with path.open('rb') as incoming:subprocess.run(['docker','exec','-i',self.db,'pg_restore','-U','postgres','-d','check_probe_restored','--no-owner','--no-privileges','--exit-on-error'],stdin=incoming,check=True,timeout=30)
+        after=self.sql('check_probe_restored',query).splitlines()
+        self.assertEqual(len(before),2); self.assertEqual(len(after),2)
+        print('ACTION-CHECK legacy before:',before[1]); print('ACTION-CHECK legacy after: ',after[1])
+        print('ACTION-CHECK current before:',before[0]); print('ACTION-CHECK current after: ',after[0])
+        self.assertEqual(after[0],before[0],'the shipped explicit-text CHECK must survive pg_dump/pg_restore unchanged')
+        source=(ROOT/'api/prisma/migrations/20260917120000_findings/migration.sql').read_text(encoding='utf-8')
+        self.assertIn('''CHECK ("action"::text = ANY (ARRAY['create'::text,'edit'::text,'hide'::text,'restore'::text]))''',source)
+        for value,ok in [('create',True),('delete',False)]:
+            self.sql('check_probe_restored',f'''INSERT INTO "ProbeCurrent" VALUES ('{value}')''',success=ok)
+
     def test_workspace_shortcuts_additive_and_owner_key(self):
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910044500_workspace_shortcuts' in p)
         self.create('shortcuts_before')

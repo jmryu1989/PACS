@@ -64,6 +64,12 @@ class FindingNavigationE2E(ViewerHistoryE2E):
     def saved_row(self, p, finding_id):
         return self.panel(p).locator('article[data-finding-id="'+finding_id+'"]')
 
+    def refresh_both(self, p):
+        # The Measurements panel owns the exact name 'Refresh' (unique on the page); the nested
+        # Findings section owns 'Reload Findings'. Neither selector may rely on ordinal picking.
+        p.locator('#kin-viewer-history').get_by_role('button', name='Refresh', exact=True).click()
+        self.panel(p).get_by_role('button', name='Reload Findings', exact=True).click()
+
     def test_01_save_finding_new_login_and_exact_frame_navigation(self):
         f = self.specimen(); sops = self.sops(f); self.seed_report(f)
         w, p = self.open_viewer(f)
@@ -83,7 +89,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         # Scroll away, navigate back through the finding: the viewport must show the saved SOP and the annotation must be highlighted.
         self.scroll(p, 5)
         self.assertFalse(p.evaluate(CURRENT_IMAGE, sops[2]))
-        saved_row.get_by_role('button', name='Go to Image', exact=True).first.click()
+        saved_row.locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
         p.wait_for_function(CURRENT_IMAGE, arg=sops[2])
         p.wait_for_function(HIGHLIGHTED)
         marks = p.evaluate(ANNOTATIONS); self.assertEqual(len(marks), 1); self.assertIn('/instances/'+sops[2]+'/', marks[0]['image'])
@@ -92,7 +98,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         saved_row = self.saved_row(p, saved[0]['id'])
         expect(saved_row).to_contain_text('3번 단면 길이'); expect(saved_row.locator('[data-kin-link-state]')).to_have_text('Current')
         self.assertFalse(p.evaluate(CURRENT_IMAGE, sops[2]))
-        saved_row.get_by_role('button', name='Go to Image', exact=True).first.click()
+        saved_row.locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
         p.wait_for_function(CURRENT_IMAGE, arg=sops[2])
         p.wait_for_function(HIGHLIGHTED)
         artifacts = Path(__file__).parent/'artifacts'; artifacts.mkdir(exist_ok=True); p.screenshot(path=str(artifacts/'S2A-finding-navigation.png'))
@@ -115,9 +121,8 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         item['points'] = [item['points'][0], [item['points'][1][0]+5, item['points'][1][1], item['points'][1][2]]]
         moved = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor', dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=item))
         self.assertEqual(moved.status, 200, moved.text); self.assertNotEqual(moved.body['item']['baseline']['values'], head['item']['baseline']['values'])
-        p.get_by_role('button', name='Refresh', exact=True).first.click()
+        self.refresh_both(p)
         panel = self.panel(p); saved_row = self.saved_row(p, saved['id'])
-        panel.get_by_role('button', name='Refresh', exact=True).click()
         expect(saved_row.locator('[data-kin-link-state]')).to_have_text('Revised')
         expect(saved_row).to_contain_text('현재 r2')
         self.assertEqual(self.findings(f)[0]['item']['sources'][0]['values'], head['item']['baseline']['values'])
@@ -138,10 +143,10 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         # Hiding the measurement reads Hidden; navigation still reaches the frame and says why nothing is drawn.
         hidden = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor', dict(requestId=str(uuid.uuid4()), expectedRevision=2, action='hide', reason='다른 창 숨김', item=item))
         self.assertEqual(hidden.status, 200, hidden.text)
-        p.get_by_role('button', name='Refresh', exact=True).first.click(); panel.get_by_role('button', name='Refresh', exact=True).click()
+        self.refresh_both(p)
         expect(saved_row.locator('[data-kin-link-state]')).to_have_text('Hidden')
         self.scroll(p, 2); self.assertFalse(p.evaluate(CURRENT_IMAGE, sops[0]))
-        saved_row.get_by_role('button', name='Go to Image', exact=True).first.click()
+        saved_row.locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
         p.wait_for_function(CURRENT_IMAGE, arg=sops[0]); expect(saved_row).to_contain_text('표식이 숨겨져 있어 그리지 않습니다')
         self.assertEqual(p.evaluate("()=>cornerstoneTools.annotation.state.getAllAnnotations().filter(a=>a.metadata.toolName==='Length').length"), 0)
         self.assertEqual(self.hashes(), original)
@@ -173,7 +178,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         # A source that moved between selection and save is refused with its current revision; Refresh Link re-pairs it.
         item = {k: v for k, v in head['item'].items() if k not in ['hidden', 'sourceDigest']}
         item['points'] = [item['points'][0], [item['points'][1][0]+3, item['points'][1][1], item['points'][1][2]]]
-        p.get_by_role('button', name='Refresh', exact=True).first.click(); panel.get_by_role('button', name='Refresh', exact=True).click()
+        self.refresh_both(p)
         expect(saved_row.locator('[data-kin-link-state]')).to_have_text('Current')
         new_row = self.compose(p, '늦은 저장', '', 'Link Length')
         moved = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor', dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=item))
@@ -201,7 +206,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         delayed = []
         def hold(r): delayed.append((r, r.fetch()))
         pattern = '**/studies/'+f.uid+'/findings?*'; p.route(pattern, hold)
-        p.locator('#kin-viewer-findings').get_by_role('button', name='Refresh', exact=True).click()
+        p.locator('#kin-viewer-findings').get_by_role('button', name='Reload Findings', exact=True).click()
         for _ in range(50):
             if delayed: break
             p.wait_for_timeout(20)
@@ -225,7 +230,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         p.evaluate("()=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId()).setImageIdIndex(1)}")
         p.wait_for_function("sop=>{const s=__d05c1.services;return !s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId()).getCurrentImageId().includes('/instances/'+sop+'/')}", arg=sops[0])
         finding_row = self.saved_row(p, saved['id'])
-        finding_row.get_by_role('button', name='Go to Image', exact=True).first.click()
+        finding_row.locator('[data-kin-sources] [data-item-id]').get_by_role('button', name='Go to Image', exact=True).click()
         p.wait_for_function("sop=>{const s=__d05c1.services;return s.cornerstoneViewportService.getCornerstoneViewport(s.viewportGridService.getActiveViewportId()).getCurrentImageId().includes('/instances/'+sop+'/frames/1')}", arg=sops[0])
         p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
         expect(p.locator('#kin-viewer-findings')).to_contain_text('다시 로그인'); self.assertEqual(p.locator('#kin-viewer-findings article').count(), 0)

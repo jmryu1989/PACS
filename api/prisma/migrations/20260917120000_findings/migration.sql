@@ -32,7 +32,9 @@ CREATE TABLE "FindingRevision" (
   CONSTRAINT "FindingRevision_pkey" PRIMARY KEY ("findingId", "revision"),
   CONSTRAINT "FindingRevision_revision_check" CHECK ("revision" BETWEEN 1 AND 1000),
   CONSTRAINT "FindingRevision_payload_check" CHECK ("payloadBytes" BETWEEN 1 AND 65536 AND "payloadBytes" = octet_length(convert_to("snapshot"::text, 'UTF8'))),
-  CONSTRAINT "FindingRevision_action_check" CHECK ("action" IN ('create','edit','hide','restore')),
+  -- Explicit text operands, as in 20260910123000_consultation_predicates: an IN-list on a
+  -- character varying column is deparsed differently after pg_dump/pg_restore.
+  CONSTRAINT "FindingRevision_action_check" CHECK ("action"::text = ANY (ARRAY['create'::text,'edit'::text,'hide'::text,'restore'::text])),
   CONSTRAINT "FindingRevision_fingerprint_check" CHECK ("fingerprint" ~ '^[0-9a-f]{64}$')
 );
 CREATE INDEX "Finding_studyUid_id_idx" ON "Finding"("studyUid", "id");

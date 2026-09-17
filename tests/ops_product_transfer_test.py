@@ -238,6 +238,42 @@ class Pure(unittest.TestCase):
             with patch.object(transfer, 'observe', return_value=changed), self.assertRaises(transfer.ProductMismatch):
                 transfer.verify_product('owned', 'kin', product)
 
+    def test_07b_catalog_diagnostic_is_exact_directional_bounded_and_schema_only(self):
+        import io, contextlib
+        body, _, _, _ = fixture(); product = body['product']; expected = product['catalog']
+        self.assertEqual(transfer.catalog_difference(expected, copy.deepcopy(expected)), {})
+        changed = copy.deepcopy(expected)
+        changed['constraints'][0]['name'] = 'restored-form'
+        changed['indexes'].append(dict(name='extra-index'))
+        report = transfer.catalog_difference(expected, changed)
+        self.assertEqual(set(report), {'constraints', 'indexes'})
+        self.assertEqual(report['constraints']['only_expected'], [transfer.canonical(expected['constraints'][0]).decode()])
+        self.assertEqual(report['constraints']['only_actual'], [transfer.canonical(dict(name='restored-form')).decode()])
+        self.assertEqual((report['indexes']['only_expected'], report['indexes']['only_actual']), ([], [transfer.canonical(dict(name='extra-index')).decode()]))
+        self.assertEqual((report['indexes']['expected_count'], report['indexes']['actual_count']), (1, 2))
+        # Bounds: at most 8 entries per side and 4096 UTF-8 bytes in total, still naming the sub-key.
+        wide = copy.deepcopy(expected); wide['constraints'] = [dict(name='c'+str(n), definition='x'*600) for n in range(20)]
+        report = transfer.catalog_difference(expected, wide)
+        self.assertEqual((len(report['constraints']['only_expected']), len(report['constraints']['only_actual'])), (1, 8))
+        text = transfer.bounded_diagnostic(report)
+        self.assertLessEqual(len(text.encode()), transfer.DIAGNOSTIC_BYTES)
+        parsed = json.loads(text); self.assertIn('constraints', parsed); self.assertTrue(parsed['constraints']['truncated'])
+        self.assertEqual(parsed['constraints']['actual_count'], 20)
+        # verify_product prints the diagnostic only for a catalog mismatch and still raises; rows never appear.
+        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences')}
+        actual['catalog']['constraints'][0]['name'] = 'restored-form'
+        stream = io.StringIO()
+        with patch.object(transfer, 'observe', return_value=actual), contextlib.redirect_stderr(stream), self.assertRaises(transfer.ProductMismatch):
+            transfer.verify_product('owned', 'kin', product)
+        self.assertIn('"only_actual":["{\\"name\\":\\"restored-form\\"}"]', stream.getvalue())
+        self.assertNotIn('SYNTHETIC', stream.getvalue())
+        actual = {key: copy.deepcopy(product[key]) for key in ('catalog', 'rows', 'sequences')}
+        actual['rows']['ReportVersion'][0]['findings'] = 'SYNTHETIC foreign'
+        stream = io.StringIO()
+        with patch.object(transfer, 'observe', return_value=actual), contextlib.redirect_stderr(stream), self.assertRaises(transfer.ProductMismatch):
+            transfer.verify_product('owned', 'kin', product)
+        self.assertEqual(stream.getvalue(), '')
+
     def test_08_negative_requires_real_restore_success_then_row_mismatch(self):
         body, _, _, _ = fixture()
         with tempfile.TemporaryDirectory() as folder, patch.object(transfer, 'create_product'), \
