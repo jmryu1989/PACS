@@ -881,3 +881,52 @@ test('mounted recovery line: held drafts are named by count and study only and c
   await h.switch('1.1');
   assert.equal(labelled(h, 'Finding Title').length, 0, 'a discarded draft never returns');
 });
+
+/* ---------- S2-B1: the worklist command (finding-command.js) against this mounted production viewer ---------- */
+const findingCommand = require('../worklist-v0/hpacs-lite/finding-command.js');
+async function worklistCommand(h, source, during) {
+  const owner = '["hospital","doctor"]', announced = [];
+  const probe = () => {
+    const s = typeof h.window.kinViewerHistoryState === 'function' ? h.window.kinViewerHistoryState() : null;
+    return { error: false, live: true, owner, sub: 'doctor', uid: '1.1', selection: '1.1', generation: 1, kind: 'window', ref: h.window, window: h.window,
+      document: 'viewer-document', scope: '1.1', attached: true, closed: false, visible: true, historyPresent: !!s, ended: s?.ended === true,
+      suspended: s?.suspended === true, subject: s?.subject ?? null, windowOwner: owner, modal: false, navigate: typeof h.window.kinViewerHistoryNavigate === 'function' };
+  };
+  const running = findingCommand.createNavigator({ timeoutMs: 60000 }).run({
+    expected: { owner, sub: 'doctor', uid: '1.1', generation: 1 }, source,
+    // The exported function is read from the viewer window when the command is sent.
+    choose: () => ({ kind: 'window', label: 'window', probe, invoke: target => { const go = h.window.kinViewerHistoryNavigate; return go(target); } }),
+    announce: result => announced.push(plain(result)),
+  });
+  await flush();
+  if (during) await during();
+  const loads = h.viewport.pending.length;
+  if (loads) await h.release();
+  return { result: plain(await running), announced, loads };
+}
+test('mounted viewer: the worklist command reaches the real exported navigation; a switched, ended or foreign target is never arrival', async () => {
+  const key = 'a0000000-0000-4000-8000-000000000001';
+  const arrived = await mounted();
+  assert.deepEqual(await worklistCommand(arrived, findingTarget({ itemId: key })),
+    { result: { ok: true, highlighted: false, annotation: 'key', latest: true }, announced: [{ ok: true, highlighted: false, annotation: 'key' }], loads: 1 });
+  assert.equal(arrived.viewport.index, 1, 'the saved SOP/frame is shown');
+  const switched = await mounted();
+  const moved = await worklistCommand(switched, findingTarget({ itemId: key }), () => switched.switch('2.2'));
+  assert.deepEqual([moved.result, moved.announced, moved.loads], [{ ok: false, reason: 'superseded', latest: true }, [{ ok: false, reason: 'superseded' }], 1]);
+  const ended = await mounted();
+  const logout = await worklistCommand(ended, findingTarget(), () => { const e = new Event('storage'); e.key = 'kin-session-ended'; ended.window.dispatchEvent(e); });
+  assert.deepEqual([logout.result, logout.loads], [{ ok: false, reason: 'superseded', latest: true }, 1]);
+  // A source of another study is refused by the worklist before the viewer is asked at all.
+  const foreign = await mounted();
+  const refused = await worklistCommand(foreign, findingTarget({ studyUid: '2.2' }));
+  assert.deepEqual([refused.result, refused.loads, foreign.viewport.switched], [{ ok: false, reason: 'foreign', latest: true }, 0, undefined]);
+  // The viewer stays the scope authority: its own refusal is passed through unchanged.
+  const other = await mounted();
+  await other.switch('2.2');
+  const scope = await worklistCommand(other, findingTarget());
+  assert.deepEqual([scope.result, scope.loads, other.viewport.switched], [{ ok: false, reason: 'scope', latest: true }, 0, undefined]);
+});
+
+// The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step
+// for this file also executes it; `node --test tests/finding_command_test.cjs` runs it alone.
+require('./finding_command_test.cjs');

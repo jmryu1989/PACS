@@ -293,6 +293,26 @@ class MeasurementCiTests(unittest.TestCase):
         identity = ci.PROFILES['identity-fields']
         self.assertEqual([row[:2] for row in measurements['suites']],
                          list(zip(ci.SUITES, ci.SUITE_CLASSES)))
+        # S2-B1 appends one browser suite to this existing profile (review C5): the exact 19
+        # suites in order, the unchanged per-suite cap and shared deadline, and no new profile.
+        self.assertEqual(list(zip(ci.SUITES, ci.SUITE_CLASSES)), [
+            ('viewer_api_test.py', 'ViewerAPI'), ('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),
+            ('e2e/test_measurement_panel.py', 'MeasurementPanelE2E'), ('e2e/test_held_measurements.py', 'HeldMeasurementE2E'),
+            ('e2e/test_manual_sr.py', 'ManualSrE2E'), ('e2e/test_measurement_recheck.py', 'MeasurementRecheckE2E'),
+            ('e2e/test_viewer_recovery.py', 'ViewerRecoveryE2E'), ('e2e/test_measurement_calibration.py', 'MeasurementCalibrationE2E'),
+            ('e2e/test_worklist_body_parts.py', 'WorklistBodyPartsE2E'), ('reading_appearance_live.py', 'ReadingAppearanceLive'),
+            ('reading_appearance_position_live.py', 'ReadingAppearancePositionLive'), ('e2e/test_viewer_identity_position.py', 'ViewerIdentityPositionE2E'),
+            ('reading_appearance_fields_live.py', 'ReadingAppearanceFieldsLive'), ('e2e/test_viewer_identity_fields.py', 'ViewerIdentityFieldsE2E'),
+            ('e2e/test_cine.py', 'CineE2E'), ('e2e/test_volume_cine.py', 'VolumeCineE2E'),
+            ('finding_api_test.py', 'FindingAPI'), ('e2e/test_finding_navigation.py', 'FindingNavigationE2E'),
+            ('e2e/test_finding_worklist.py', 'FindingWorklistE2E')])
+        self.assertEqual(measurements['suites'][-1],
+                         ('e2e/test_finding_worklist.py', 'FindingWorklistE2E', 'ci-test-finding-worklist'))
+        self.assertEqual(len({row[2] for row in measurements['suites']}), 19)
+        self.assertEqual(measurements['suite_timeout'], 540)
+        self.assertNotIn('suite_budgets', measurements)
+        self.assertIn('deadline = time.monotonic()+25*60',
+                      (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
         self.assertEqual(volume['suites'], (('e2e/test_volume_rendering.py',
                          None, 'ci-volume-rendering'),))
         self.assertEqual(output['suites'], (

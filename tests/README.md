@@ -216,6 +216,15 @@ URL 불변, 세션 종료 후 `ended`를 확인한다. 순수 시험 `node --tes
 dirty/busy·이탈 경고와 표식 전용 `kinViewerHistoryHasUnsaved` 유지, 판독 작업공간·창 재사용·Hanging Protocol·칸 병합 판정을
 출하 코드로 확인한다. 브라우저 시험 5·6은 Next Study·창 재사용/닫기·이탈 경고의 차단과 깨끗한 화면의 통과, 비교 화면 전환·403·
 mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)의 다른 검사 복원 차단은 원문 위치 확인만 하며 브라우저로 실행하지 않았다.
+영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (25개, `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
+`python tests/e2e/test_finding_worklist.py` (3개, 기존 `measurements` 프로필의 19번째 suite). 워크리스트·통합 작업공간의 Image Findings는 선택한
+판독 대상 검사의 기존 소견 목록 읽기만 하며, Go to Image는 이미 그 검사를 표시하는 통합 작업공간 영상 또는 연결된 영상 창 하나에만 보낸다.
+순수 시험은 대상 선택(여러 창·미연결·소유자·로딩), 호출 전 거절, 호출 시점의 함수 조회, 대기 후 계정·선택·문서·범위 확인, 15초 제한,
+최신 명령만의 알림과 A-B-A·403/404/503·세션 종료 목록 폐기를 출하 코드와 별도 vm 영상 문서로 확인한다. Retry Go to Image는 처음 누른
+원본(목록 세대·소견 id/개정·원본 위치·원본 항목과 영상 식별)이 다시 읽은 목록에 그대로 있을 때만 그 원본으로 보내고, 순서 변경·교체·개정·삭제면
+호출 없이 list-changed로 거절한다(다른 원본으로 바꿔 보내지 않음). 브라우저 시험은 실제 영상의
+`getCurrentImageId`로 도착을 증명하고, 거절·대체된 명령은 성공 문구 없음·URL 검사 범위·DB 행 바이트 동일만 확인한다(영상 화면은 이미 이동했을 수 있음).
+MPR/볼륨 화면 거절은 영상 쪽 순수 시험 범위이며 비교 검사 원본(S2-B2)과 판독문 연결은 포함하지 않는다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.

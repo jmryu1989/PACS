@@ -364,6 +364,18 @@ window.KinReadingWorkspace = function (app) {
       return w;
     } catch (_) { return null; }
   }
+  // Read-only view of the embedded viewer for Image Findings: no focus, layout or load side effect.
+  function viewerTarget() {
+    try {
+      if (ended || !frame || !shown) return null;
+      const w = frame.contentWindow, doc = w.document, url = new URL(w.location.href);
+      if (url.origin !== window.location.origin || url.pathname !== '/ohif/viewer') return null;
+      const studies = (url.searchParams.get('StudyInstanceUIDs') || '').split(',');
+      const scoped = studies.join(',') === [shown.uid, shown.prior].filter(Boolean).join(',');
+      return { frame, window: w, document: doc, href: url.href, studies, active, sameTarget: sameTarget(), loaded: loaded && scoped && !failed,
+        inert: !!frame.inert, hidden: !!frame.hidden };
+    } catch (_) { return null; }
+  }
   function noteTarget() {
     try {
       const selected = noteWindow()?.kinViewerSelectedNoteTarget?.();
@@ -616,7 +628,7 @@ window.KinReadingWorkspace = function (app) {
   window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') end(); });
   window.addEventListener('pagehide', () => { end(); channel?.close(); });
   window.addEventListener('beforeunload', e => { const s = viewerState(); let warn=false;try{warn=frame?.contentWindow.kinViewerFrameCoverageState?.().warn;}catch(_){}if (s.busy || s.dirty || warn) { e.preventDefault(); e.returnValue = ''; } });
-  return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels,
+  return { open, openJob, resume, exit: leave, selectionChanged, refreshNote: updateNote, active: () => active, end, snapshotPanels, applyPanels, viewerTarget,
     preferences: { host: nav, read: () => autoNote.checked, generation: () => preferenceGeneration,
       apply: value => { syncAutoNote(); if (autoNote.disabled) return false; autoNote.checked = value; autoNote.onchange(); return true; } } };
 };
