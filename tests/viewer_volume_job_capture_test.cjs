@@ -1268,3 +1268,427 @@ test('A11-ORIENT-1: a direction display fails closed on an unusable reset camera
   assert.deepEqual([...world.views.values()][0].getCamera().viewPlaneNormal,[0,0,-1]);
  }finally{world.viewer.dispose();}
 });
+/* ---------- S2-L2a saved locations: restoreJob / kinViewerJobLocation over the real viewer-jobs.js (TEST-S2L-RESTORE) ----------
+   The shipped panel runs in its own realm. Synthetic parts: the DOM, the API answers, a stub MPR Job (capture/resolve/apply with
+   injected outcomes), the 3D marks capability and a clock whose timers of more than one second fire only when a case advances it.
+   Refused outcomes are proved by an unchanged apply log; rolled-back and screen-unknown by injected apply failures; the point step by
+   the marks capability, which also asks the panel whether its pass is the active restore ticket. */
+const L_STUDY='1.2.3',L_OTHER='1.2.30',L_SERIES='1.2.4',L_SOPS=['1.2.5','1.2.6','1.2.7'],L_JOB='00000000-0000-4000-8000-00000000a001';
+const L_MARK='00000000-0000-4000-8000-00000000b001',L_HEX='c'.repeat(64),L_FRAME='2.25.66',L_FINDING='00000000-0000-4000-8000-00000000f001';
+const L_STACK_SERIES='1.2.14',L_STACK_SOP='1.2.15',L_DOUBLE=-0.33113281957650276;
+function lClock(){
+ let now=1e9,seq=0;const timers=new Map();
+ return {now:()=>now,pending:()=>[...timers.values()].filter(t=>!t.short).map(t=>t.at-now).sort((a,b)=>a-b),
+  setTimeout:(fn,ms=0)=>{const id=++seq;if(ms<=1000){timers.set(id,{short:true});setImmediate(()=>{if(timers.delete(id))fn();});}else timers.set(id,{at:now+ms,fn});return id;},
+  clearTimeout:id=>{timers.delete(id);},
+  advance:ms=>{now+=ms;for(const [id,t] of [...timers])if(!t.short&&t.at<=now){timers.delete(id);t.fn();}}};
+}
+const lSettle=async(n=40)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
+const lSnapshot=(extra={})=>({version:6,studies:[L_STUDY],rows:1,cols:3,active:0,volume:{study:L_STUDY,series:L_SERIES,sops:[...L_SOPS],sourceDigest:L_HEX},
+ cells:[{},{},{}],batch:null,marks:{version:1,visible:true,sync:true,marks:[{id:L_MARK,label:'병변',point:[L_DOUBLE,2,3]}]},...extra});
+const lStack=()=>({version:2,studies:[L_STUDY],rows:1,cols:1,active:0,cells:[{study:L_STUDY,series:L_STACK_SERIES,sop:L_STACK_SOP,frame:1,viewport:{width:1,height:1},
+ camera:{focalPoint:[0,0,0],position:[0,0,1],viewUp:[0,1,0],viewPlaneNormal:[0,0,1],parallelScale:1,rotation:0,flipHorizontal:false,flipVertical:false},
+ properties:{voiRange:{lower:0,upper:1},VOILUTFunction:'LINEAR',invert:false,interpolationType:1}}]});
+const lMark=(extra={})=>({id:L_MARK,label:'병변',point:[L_DOUBLE,2,3],volume:{study:L_STUDY,series:L_SERIES,frameOfReferenceUid:L_FRAME,sourceDigest:L_HEX,sopCount:3},...extra});
+const lRequest=(extra={})=>({subject:'u1',jobId:L_JOB,revision:1,snapshotVersion:6,studies:[L_STUDY],mode:'same-document',mark:lMark(),...extra});
+async function locationWorld({snapshot=lSnapshot(),studies=[L_STUDY]}={}){
+ const c=lClock(),log=[],calls=[],assigned=[],storage=new Map(),listeners=new Map();
+ const element=tag=>{const children=[];return {tagName:tag,children,style:{},dataset:{},textContent:'',value:'',checked:false,disabled:false,isConnected:true,
+  append:(...items)=>{children.push(...items);},prepend:(...items)=>{children.unshift(...items);},insertBefore:item=>{children.push(item);},
+  replaceChildren:(...items)=>{children.splice(0,children.length,...items);},setAttribute(){},remove(){},querySelector:selector=>children.find(x=>x.tagName===selector)||null,contains:()=>false};};
+ const layout=element('details');layout.append(element('summary'));
+ const server={me:{kind:'member',institution:'I1',sub:'u1',roles:['radiologist']},
+  row:{id:L_JOB,studyUid:L_STUDY,authorSub:'u1',authorActor:'dr',title:'위치',description:'',hidden:false,revision:1,createdAt:0,updatedAt:0,snapshotVersion:snapshot.version},
+  list:null,hold:null};
+ server.job=server.good=()=>({status:200,body:{id:L_JOB,revision:server.row.revision,snapshotVersion:snapshot.version,snapshot:structuredClone(snapshot)}});
+ const jobsPath='/api/studies/'+L_STUDY+'/viewer-jobs';
+ const answer=(status,body)=>({status,ok:status>=200&&status<300,json:async()=>body});
+ const fetch=async url=>{
+  calls.push(url);
+  if(server.hold)await server.hold(url);
+  if(url==='/api/me')return answer(200,server.me);
+  if(url.startsWith(jobsPath+'?'))return server.list?server.list(url):answer(200,{jobs:[{...server.row}]});
+  if(url===jobsPath+'/'+L_JOB){const r=server.job();return answer(r.status,r.body);}
+  return answer(404,{message:'none'});
+ };
+ const w={shows:L_STACK_SOP,apply:[],captured:{version:4,studies:[L_STUDY],cells:[]}};
+ // The screen: three orthographic planes (captured by the MPR Job stub) or the stack cells a version 2 restore laid out.
+ const views=new Map(),lookup=new Map();
+ const stackView=()=>{let index=0;return {type:'stack',getImageIds:()=>['img:'+L_STACK_SOP],getCurrentImageId:()=>'img:'+w.shows,
+  setImageIdIndex:async i=>{index=i;},scroll(){},getTargetImageIdIndex:()=>index,setProperties(){},setCamera(){},render(){},getDefaultActor:()=>({actor:{}})};};
+ const grid={active:'vp-0',
+  getState:()=>({layout:{numRows:1,numCols:views.size,layoutType:'grid'},viewports:views,activeViewportId:grid.active}),
+  setLayout:async opts=>{log.push('setLayout');views.clear();lookup.clear();const n=opts.numRows*opts.numCols;
+   for(let i=0;i<n;i++){const o=opts.findOrCreateViewport(i),id=o.viewportOptions.viewportId;views.set(id,{viewportId:id,x:i/n,y:0,width:1/n,height:1,displaySetInstanceUIDs:o.displaySetInstanceUIDs});lookup.set(id,stackView());}
+   grid.active=opts.activeViewportId;},
+  setActiveViewportId:id=>{grid.active=id;}};
+ const planes=()=>{views.clear();lookup.clear();for(let i=0;i<3;i++){views.set('vp-'+i,{viewportId:'vp-'+i,x:i/3,y:0,width:1/3,height:1,displaySetInstanceUIDs:['ds-volume']});
+  lookup.set('vp-'+i,{type:'orthographic',getDefaultActor:()=>({actor:{}})});}};
+ planes();
+ const cs={getCornerstoneViewport:id=>lookup.get(id)};
+ const ds={getActiveDisplaySets:()=>[{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_SERIES,displaySetInstanceUID:'ds-volume',images:L_SOPS.map(sop=>({SOPInstanceUID:sop,FrameOfReferenceUID:w.frame??L_FRAME}))},
+  {StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,displaySetInstanceUID:'ds-stack',images:[{SOPInstanceUID:L_STACK_SOP,SOPClassUID:'1.2.840.10008.5.1.4.1.1.2'}]},
+  ...studies.slice(1).map(uid=>({StudyInstanceUID:uid,SeriesInstanceUID:uid+'.1',displaySetInstanceUID:'ds-'+uid,images:[]}))]};
+ // The MPR Job stub: the current screen is a version 4 capture; apply outcomes come from w.apply (one per call). A version 6 apply
+ // restores the saved marks into the marks capability, as viewer-volume-job.js does.
+ const volumeJob={capture:()=>structuredClone(w.captured),resolve:()=>'ds-volume',
+  apply:async(value,current)=>{log.push('apply:'+value.version);const next=w.apply.shift();if(typeof next==='function')await next(value,current);else if(next instanceof Error)throw next;
+   if(value.version===6)marks.restore(value.marks);}};
+ const marks={records:[],value:null,dirty:()=>false,saved(){},restore(v){marks.value=structuredClone(v);},capture:()=>structuredClone(marks.value),
+  goTo:(id,expected,pass)=>{const location=sandbox.kinViewerJobLocation;marks.records.push({id,expected:structuredClone(expected),owns:location.owns(pass),forged:location.owns({live:()=>true}),
+   busy:sandbox.kinViewerJobWorkspaceState().busy});return w.go?w.go(id,expected,pass):{ok:true,moved:'all'};}};
+ const sessionStorage={setItem:(k,v)=>{storage.set(k,v);},getItem:k=>storage.get(k)??null,removeItem:k=>storage.delete(k)};
+ class FakeDate extends Date{static now(){return c.now();}}
+ const sandbox={document:{createElement:element,head:element('head'),querySelector:selector=>selector==='#kin-viewer-layout'?layout:null,addEventListener(){},removeEventListener(){}},
+  location:{search:'?StudyInstanceUIDs='+studies.join(','),origin:'https://kin.test',assign:url=>assigned.push(url)},fetch,crypto,AbortController,URL,URLSearchParams,sessionStorage,Date:FakeDate,
+  setTimeout:c.setTimeout,clearTimeout:c.clearTimeout,setInterval:()=>0,clearInterval(){},
+  addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener(){},
+  kinCreateVolumeJob:()=>volumeJob,kinMprMarks:marks,KinVolumeMarks:{normalize:v=>structuredClone(v)},
+  cornerstone:{metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'?{StudyInstanceUID:L_STUDY,SeriesInstanceUID:L_STACK_SERIES,SOPInstanceUID:id.slice(4)}:null}}};
+ sandbox.window=sandbox.top=sandbox;const realm=vm.createContext(sandbox);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite/viewer-jobs.js'),'utf8'),realm,{filename:'viewer-jobs.js'});
+ const panel=sandbox.kinViewerJobs({viewportGridService:grid,cornerstoneViewportService:cs,displaySetService:ds},{scope:()=>({})});
+ panel.mount();
+ const find=(root,match)=>match(root)?root:root.children.map(x=>find(x,match)).find(Boolean)||null;
+ await lSettle();
+ assert.equal(typeof sandbox.kinViewerJobLocation?.restore,'function','the location API is exported');
+ return Object.assign(w,{c,log,calls,assigned,storage,server,marks,sandbox,planes,
+  location:()=>sandbox.kinViewerJobLocation,restore:req=>sandbox.kinViewerJobLocation.restore(req),
+  endSession:()=>listeners.get('storage')({key:'kin-session-ended'}),
+  status:()=>find(layout,e=>e.id==='kin-viewer-jobs-status').textContent,button:label=>find(layout,e=>e.tagName==='button'&&e.textContent===label),
+  gets:()=>calls.filter(u=>u.endsWith('/viewer-jobs/'+L_JOB)).length,stop:()=>panel.stop()});
+}
+const L_UNCHANGED='영상은 바꾸지 않았습니다';
+
+test('S2-L2a restore: a verified version 6 view, then the point inside the same owned operation with the active-ticket pass only',async()=>{
+ const w=await locationWorld();
+ try{
+  assert.equal(w.location().version,1);assert.ok(Object.isFrozen(w.location()));
+  assert.equal(w.location().shown(),null,'nothing applied or saved yet');
+  const outcome=await w.restore(lRequest());
+  assert.deepEqual(JSON.parse(JSON.stringify(outcome)),{state:'restored',reason:null,message:'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.',point:'all-planes',
+   pointMessage:'',metadataRevision:null,snapshotVersion:6});
+  assert.deepEqual(w.log,['apply:6']);
+  assert.equal(w.marks.records.length,1);
+  const call=w.marks.records[0];
+  assert.deepEqual([call.id,call.owns,call.forged,call.busy],[L_MARK,true,false,true],'the pass is the active ticket; a forged pass is not; the panel is still busy');
+  assert.deepEqual(call.expected,{label:'병변',point:[L_DOUBLE,2,3],volume:{study:L_STUDY,series:L_SERIES,frameOfReferenceUid:L_FRAME}});
+  assert.equal(w.location().owns({live:()=>true}),false,'no pass is valid after the restore');
+  assert.equal(w.sandbox.kinViewerJobWorkspaceState().busy,false);
+  assert.equal(w.status(),'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.');
+  assert.deepEqual(JSON.parse(JSON.stringify(w.location().shown())),{jobId:L_JOB,revision:1,snapshotVersion:6,studies:[L_STUDY],marks:[{id:L_MARK,label:'병변'}]});
+  // Changed marks on screen are not the saved Job any more.
+  w.marks.value.marks[0].label='편집';assert.equal(w.location().shown(),null);
+  // The point step moves only the source plane when sync is off, and a metadata revision is reported, not refused.
+  w.server.row.revision=3;w.go=()=>({ok:true,moved:'source'});
+  const renamed=await w.restore(lRequest());
+  assert.deepEqual([renamed.state,renamed.point,renamed.metadataRevision],['restored','source-plane',3]);
+  // A saved view (no mark) never moves a point.
+  const view=await w.restore(lRequest({mark:null}));
+  assert.deepEqual([view.state,view.point,w.marks.records.length],['restored','none',2]);
+ }finally{w.stop();}
+});
+
+test('S2-L2a B3: a failed point move after a verified view stays restored with its own text; a mismatch is named; nothing is rolled back',async()=>{
+ const w=await locationWorld();
+ try{
+  for(const [moved,reason,text] of [
+    [{ok:false,reason:'failed',rolledBack:true},'point-failed','저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.'],
+    [{ok:false,reason:'mismatch',rolledBack:null},'point-mismatch','저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다. 연결 당시의 표식·볼륨과 다릅니다.'],
+    [{ok:false,reason:'failed',rolledBack:false},'point-failed','저장 화면은 복원했지만 3D 표식 위치로 이동하지 못했고 이동 전 평면으로도 되돌리지 못했습니다. 현재 영상을 확인하세요.']]){
+   w.go=()=>moved;const before=w.log.length;
+   const outcome=await w.restore(lRequest());
+   assert.deepEqual([outcome.state,outcome.point,outcome.reason,outcome.pointMessage],['restored','failed',reason,text]);
+   assert.deepEqual(w.log.slice(before),['apply:6'],'the verified view is never rolled back for a point failure');
+   assert.ok(w.status().endsWith(text),w.status());
+  }
+  // A marks tool without goTo cannot move the point: restored, point failed, tool-missing.
+  delete w.marks.goTo;
+  const missing=await w.restore(lRequest());
+  assert.deepEqual([missing.state,missing.point,missing.reason],['restored','failed','tool-missing']);
+ }finally{w.stop();}
+});
+
+test('S2-L2a refusals: hidden, absent, conflict, unreadable and changed sources change nothing on screen',async()=>{
+ const w=await locationWorld();
+ try{
+  const refused=async(request,reason,{gets=0,text=L_UNCHANGED}={})=>{
+   const before=w.gets(),logged=w.log.length;
+   const outcome=await w.restore(request);
+   assert.deepEqual([outcome.state,outcome.reason],['refused',reason],reason+': '+outcome.message);
+   assert.equal(w.gets()-before,gets,reason+' GET count');
+   assert.deepEqual(w.log.slice(logged),[],reason+': no layout or apply');
+   if(text)assert.ok(outcome.message.includes(text),reason+': '+outcome.message);
+   assert.equal(w.marks.records.length,0);
+   return outcome;
+  };
+  w.server.row.hidden=true;await refused(lRequest(),'job-hidden');
+  w.server.row.hidden=false;
+  w.server.list=()=>({status:200,ok:true,json:async()=>({jobs:[]})});await refused(lRequest(),'job-unavailable');
+  w.server.list=null;
+  // B3: the Job GET answering 409 happens before any capture or apply: refused, never rolled back.
+  w.server.job=()=>({status:409,body:{message:'저장 당시 볼륨 원본과 달라 복원하지 않았습니다'}});
+  const conflict=await refused(lRequest(),'job-conflict',{gets:1,text:''});
+  assert.equal(conflict.message,'저장 당시 볼륨 원본과 달라 복원하지 않았습니다');
+  // A 403 on the Job is that Job's refusal; the anchor list is read again and the panel stays.
+  w.server.job=()=>({status:403,body:{message:'no'}});
+  const lists=w.calls.filter(u=>u.includes('/viewer-jobs?')).length;
+  await refused(lRequest(),'job-unavailable',{gets:1});await lSettle();
+  assert.equal(w.calls.filter(u=>u.includes('/viewer-jobs?')).length,lists+2,'the pre-read and one re-list');
+  assert.notEqual(w.status(),'세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
+  w.server.job=()=>({status:404,body:{message:'none'}});await refused(lRequest(),'job-unavailable',{gets:1});
+  const variants=[['version',s=>{s.version=4;}],['studies',s=>{s.studies=[L_STUDY,L_OTHER];}],['digest',s=>{s.volume.sourceDigest='d'.repeat(64);}],
+   ['series',s=>{s.volume.series='1.2.99';}],['size',s=>{s.volume.sops.pop();}],['label',s=>{s.marks.marks[0].label='다른';}],
+   ['point',s=>{s.marks.marks[0].point[0]=-0.3311328195765028;}],['mark',s=>{s.marks.marks=[];}]];
+  for(const [name,change] of variants){
+   w.server.job=()=>{const snapshot=lSnapshot();change(snapshot);return {status:200,body:{id:L_JOB,revision:1,snapshotVersion:6,snapshot}};};
+   await refused(lRequest(),'source-changed',{gets:1});
+  }
+  w.server.job=w.server.good;
+  // The shown frame of reference differs from the frozen one: refused before apply.
+  w.frame='2.25.67';await refused(lRequest(),'source-changed',{gets:1});
+  w.frame=undefined;
+  // The pre-read already names another snapshot version.
+  await refused(lRequest({snapshotVersion:5,mark:null}),'source-changed');
+  // Another login, and malformed requests.
+  await refused(lRequest({subject:'u2'}),'owner',{text:''});
+  await refused({...lRequest(),jobId:'x'},'tool-missing',{text:''});
+  await refused({...lRequest(),studies:[L_STUDY,L_STUDY]},'tool-missing',{text:''});
+  await refused(lRequest({mark:lMark({point:[1,2]})}),'tool-missing',{text:''});
+  await refused(lRequest({snapshotVersion:4}),'tool-missing',{text:''});
+  await refused(lRequest({snapshotVersion:16,mark:null}),'tool-missing',{text:''});
+  await refused(lRequest({mode:'continue'}),'tool-missing',{text:''});
+  w.marks.dirty=()=>true;await refused(lRequest(),'unsaved',{text:'미저장 표식'});
+  w.marks.dirty=()=>false;
+  // A layout with merged cells is refused as the button refuses it.
+  w.sandbox.kinCellMergeWorkspaceState=()=>({busy:false,merged:true});await refused(lRequest(),'layout-merged',{gets:1,text:'병합한 칸'});
+  delete w.sandbox.kinCellMergeWorkspaceState;
+  // A study set that differs from this document is not restored here without a continuation.
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:6,snapshot:lSnapshot({studies:[L_STUDY,L_OTHER]})}});
+  await refused(lRequest({studies:[L_STUDY,L_OTHER]}),'job-studies',{gets:1});
+  assert.deepEqual(w.assigned,[]);
+  w.server.job=w.server.good;
+  // Nothing was ever applied: the first restore of this world happens only now.
+  assert.equal((await w.restore(lRequest())).state,'restored');
+  assert.deepEqual(w.log,['apply:6']);
+ }finally{w.stop();}
+});
+
+test('S2-L2a outcomes: a failed apply re-applied as before is rolled-back; a failed rollback or an ended session is screen-unknown; 1-3 are read back',async()=>{
+ const w=await locationWorld();
+ try{
+  w.apply=[Error('INJECTED APPLY FAILURE')];
+  const back=await w.restore(lRequest());
+  assert.deepEqual([back.state,back.reason,back.message],['rolled-back','apply-failed','영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.']);
+  assert.deepEqual(w.log,['apply:6','apply:4'],'the saved state, then the previous screen');
+  assert.equal(w.marks.records.length,0,'no point step after a failed view');
+  w.log.length=0;w.apply=[Error('저장한 MPR 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.'),Error('INJECTED ROLLBACK FAILURE')];
+  const unknown=await w.restore(lRequest());
+  assert.deepEqual([unknown.state,unknown.reason,unknown.message],['screen-unknown','apply-failed','복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.']);
+  // Version 1-3 layouts are read back before a restore is claimed: a cell showing another original is rolled back.
+  w.log.length=0;
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:2,snapshot:lStack()}});w.server.row.snapshotVersion=2;
+  w.shows='1.2.99';
+  const misplaced=await w.restore(lRequest({snapshotVersion:2,mark:null}));
+  assert.deepEqual([misplaced.state,misplaced.message],['rolled-back','저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.']);
+  assert.deepEqual(w.log,['setLayout','apply:4']);
+  w.shows=L_STACK_SOP;w.log.length=0;w.planes();
+  const placed=await w.restore(lRequest({snapshotVersion:2,mark:null}));
+  assert.deepEqual([placed.state,placed.message,placed.point],['restored','비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.','none']);
+  assert.deepEqual(w.log,['setLayout']);
+ }finally{w.stop();}
+ // A session that ends while the saved state is applied supersedes it: no rollback, and the screen is unknown.
+ const ended=await locationWorld();
+ try{
+  ended.apply=[async()=>{ended.endSession();throw Error('화면이 변경되어 MPR 복원을 중단했습니다.');}];
+  const outcome=await ended.restore(lRequest());
+  assert.deepEqual([outcome.state,outcome.reason],['screen-unknown','apply-failed']);
+  assert.deepEqual(ended.log,['apply:6'],'no rollback on a screen this restore no longer owns');
+  assert.equal((await ended.restore(lRequest())).reason,'ended');
+ }finally{ended.stop();}
+});
+
+test('S2-L2a B4: one owned deadline refuses before the Job read and before apply; an apply that started always settles',async()=>{
+ const w=await locationWorld();
+ try{
+  // Requests are cut at 120 s: a pre-read held past it is a refusal with nothing applied.
+  let release;w.server.hold=url=>url.includes('mine=false&includeHidden=true')?new Promise(r=>{release=r;}):null;
+  const cut=w.restore(lRequest());await lSettle();
+  assert.ok(w.c.pending().includes(120000),'the request cut is armed at 120 s: '+w.c.pending());
+  w.c.advance(120000);release();
+  const timed=await cut;
+  assert.deepEqual([timed.state,timed.reason],['refused','timeout']);assert.deepEqual(w.log,[]);assert.equal(w.gets(),0);
+  assert.deepEqual(w.c.pending(),[],'no timer of the refused restore survives');
+  // The Job read ends inside the window but past it for apply: refused before capture or apply.
+  w.server.hold=url=>{if(url.endsWith('/viewer-jobs/'+L_JOB))w.c.advance(120001);return null;};
+  const late=await w.restore(lRequest());
+  assert.deepEqual([late.state,late.reason],['refused','timeout']);assert.deepEqual(w.log,[]);
+  w.server.hold=null;
+  // An apply that starts in time settles however long it takes, with its real outcome; the panel stays busy until then.
+  let finish;w.apply=[()=>new Promise(r=>{finish=r;})];
+  const slow=w.restore(lRequest());await lSettle();
+  assert.deepEqual(w.log,['apply:6']);
+  w.c.advance(600000);await lSettle();
+  assert.equal(w.sandbox.kinViewerJobWorkspaceState().busy,true,'still owned after the internal deadline');
+  const other=await w.restore(lRequest());
+  assert.deepEqual([other.state,other.reason],['refused','busy'],'a second restore is refused while the first applies');
+  finish();
+  const done=await slow;
+  assert.deepEqual([done.state,done.point],['restored','all-planes']);
+  assert.equal(w.sandbox.kinViewerJobWorkspaceState().busy,false);
+  // After settlement the next restore runs normally.
+  assert.equal((await w.restore(lRequest())).state,'restored');
+ }finally{w.stop();}
+});
+
+test('S2-L2a continuation: another study set continues in a new page with a one-use nonce and a generic text; drafts refuse it',async()=>{
+ const w=await locationWorld();
+ try{
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:6,snapshot:lSnapshot({studies:[L_STUDY,L_OTHER]})}});
+  const request=lRequest({studies:[L_STUDY,L_OTHER],mode:'continue',finding:{id:L_FINDING,revision:4,source:2}});
+  w.sandbox.kinViewerFindingsState=()=>({dirty:true,busy:false});
+  const held=await w.restore(request);
+  assert.deepEqual([held.state,held.reason],['refused','findings-unsaved']);assert.deepEqual(w.assigned,[]);
+  w.sandbox.kinViewerFindingsState=()=>({dirty:false,busy:false});
+  const outcome=await w.restore(request);
+  assert.deepEqual([outcome.state,outcome.message],['continuing','저장 작업의 검사 조합으로 새 화면을 엽니다. 결과는 새 화면의 이 소견에 표시됩니다.']);
+  assert.equal(w.status(),outcome.message);
+  assert.deepEqual(w.log,[],'nothing is applied in this page');
+  assert.equal(w.assigned.length,1);
+  const next=new URL(w.assigned[0]);
+  assert.equal(next.pathname,'/ohif/viewer');assert.equal(next.searchParams.get('StudyInstanceUIDs'),L_STUDY+','+L_OTHER);
+  assert.equal(next.searchParams.get('kinJob'),null,'no Job page restore');
+  assert.deepEqual(['kinFinding','kinFindingRevision','kinFindingSource'].map(k=>next.searchParams.get(k)),[L_FINDING,'4','2']);
+  const nonce=next.searchParams.get('kinFindingNonce');assert.match(nonce,/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.deepEqual(JSON.parse(w.storage.get('kin-finding-continue:'+nonce)),{finding:L_FINDING,revision:4,source:2,jobId:L_JOB});
+ }finally{w.stop();}
+ // A one-study Job opened from a two-study page continues with the same generic text.
+ const pair=await locationWorld({studies:[L_STUDY,L_OTHER]});
+ try{
+  const single=await pair.restore(lRequest({mode:'continue',finding:{id:L_FINDING,revision:1,source:0}}));
+  assert.deepEqual([single.state,single.message],['continuing','저장 작업의 검사 조합으로 새 화면을 엽니다. 결과는 새 화면의 이 소견에 표시됩니다.']);
+  assert.equal(new URL(pair.assigned[0]).searchParams.get('StudyInstanceUIDs'),L_STUDY);
+  assert.equal(single.message.includes('비교 검사를 함께 여는'),false);
+ }finally{pair.stop();}
+});
+
+test('S2-L2a the Restore Job button keeps its texts and never moves a point, pre-reads or writes a continuation nonce',async()=>{
+ const w=await locationWorld();
+ try{
+  w.button('Restore Job').onclick();await lSettle();
+  assert.equal(w.status(),'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.');
+  assert.equal(w.marks.records.length,0,'the button never moves to a point');
+  assert.equal(w.calls.filter(u=>u.includes('mine=false&includeHidden=true')).length,0,'no location pre-read');
+  w.apply=[Error('INJECTED APPLY FAILURE')];
+  w.button('Restore Job').onclick();await lSettle();
+  assert.equal(w.status(),'영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요. 입력은 유지됩니다.');
+  w.server.job=()=>({status:200,body:{id:L_JOB,revision:1,snapshotVersion:6,snapshot:lSnapshot({studies:[L_STUDY,L_OTHER]})}});
+  w.button('Restore Job').onclick();await lSettle();
+  assert.equal(w.assigned.length,1);
+  const next=new URL(w.assigned[0]);
+  assert.equal(next.searchParams.get('kinJob'),L_JOB);assert.equal(next.searchParams.get('kinFindingNonce'),null);
+  assert.equal(w.storage.size,0);
+  assert.equal(w.status(),'저장한 비교 검사를 함께 여는 중…');
+  // A 403 on the button path still ends the panel, as it always did.
+  w.server.job=()=>({status:403,body:{message:'no'}});
+  w.button('Restore Job').onclick();await lSettle();
+  assert.equal(w.status(),'세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
+ }finally{w.stop();}
+});
+
+/* The real viewer-volume-marks.js goTo (S2-L2a B3) in its own realm with the real volume-marks.js model. Synthetic parts: a small DOM
+   for the panel template, three camera-holding planes and the Jobs panel's location API. */
+function marksToolWorld(){
+ const make=tag=>{const e={tagName:tag,children:[],dataset:{},style:{},attributes:{},textContent:'',value:'',checked:true,disabled:false,hidden:false,
+  append(...items){e.children.push(...items);},replaceChildren(...items){e.children=items;},remove(){},insertBefore(){},addEventListener(){},removeEventListener(){},
+  setAttribute(k,v){e.attributes[k]=v;},querySelector:selector=>e.index?.[selector]??null,querySelectorAll:()=>e.all||[],get offsetHeight(){return 10;}};return e;};
+ const panel=make('section');
+ Object.defineProperty(panel,'innerHTML',{set(){
+  const input=make('input'),status=make('p'),list=make('div'),drafts=make('div'),actions={};
+  for(const name of ['pick','edit','cancel','revert','visible','sync'])actions[name]=make(name==='visible'||name==='sync'?'input':'button');
+  panel.index={'input:not([type=checkbox])':input,'[role=status]':status,'.marks':list,'.drafts':drafts};
+  for(const [name,el] of Object.entries(actions))panel.index['[data-action='+name+']']=el;
+  panel.all=[input,...Object.values(actions)];panel.parts={input,status,list,actions};}});
+ const host=make('div');
+ const camera=i=>({focalPoint:[10,10,10],position:[10,10,10+(i+1)*100],viewPlaneNormal:[[0,0,1],[1,0,0],[0,1,0]][i].map(n=>n),viewUp:[0,1,0],parallelScale:50});
+ const w={frame:'2.25.66',fail:null,live:true};
+ const views=[0,1,2].map(i=>{let cam=camera(i);const element=make('div');return {id:'vp-'+i,element,getVolumeId:()=>'volume-1',getCanvas:()=>({clientWidth:200,clientHeight:200}),
+  getCamera:()=>structuredClone(cam),setCamera:next=>{if(w.fail&&w.fail(i,next))throw Error('INJECTED CAMERA FAILURE');cam={...cam,...structuredClone(next)};},render(){},
+  worldToCanvas:()=>[100,100],canvasToWorld:()=>[0,0,0]};});
+ const volume={imageIds:['image:1','image:2'],dimensions:[64,64,33],imageData:{worldToIndex:p=>p}};
+ let group='group-1';
+ const t=()=>w.live?{group,views,source:{uid:'1.2.3',series:'1.2.4',viewportId:'vp-0'}}:null;
+ const sandbox={document:{createElement:tag=>tag==='section'?panel:make(tag),createElementNS:(ns,tag)=>make(tag)},crypto,structuredClone,
+  setInterval:()=>0,clearInterval(){},addEventListener(){},removeEventListener(){},
+  cornerstone:{cache:{getVolume:id=>id==='volume-1'?volume:null},metaData:{get:(type,id)=>type==='instance'&&typeof id==='string'&&id.startsWith('image:')?{SOPInstanceUID:id,FrameOfReferenceUID:id==='image:1'?w.frame:'2.25.66'}:null},Enums:{Events:{CAMERA_MODIFIED:'camera'}}}};
+ sandbox.window=sandbox;const realm=vm.createContext(sandbox);
+ for(const file of ['volume-marks.js','viewer-volume-marks.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../worklist-v0/hpacs-lite',file),'utf8'),realm,{filename:file});
+ let busy=false;const tickets=new Set();
+ sandbox.kinViewerJobWorkspaceState=()=>({busy,dirty:false});
+ sandbox.kinViewerJobLocation={version:1,owns:pass=>tickets.has(pass)&&pass.live()===true};
+ const tool=sandbox.kinCreateVolumeMarks({target:()=>t(),permitted:()=>true,alive:()=>true,owner:()=>['I1','u1'],host});
+ const marks=sandbox.kinMprMarks;
+ const saved={version:1,visible:true,sync:true,marks:[{id:'00000000-0000-4000-8000-00000000b001',label:'병변',point:[20,30,5]}]};
+ marks.restore(saved);
+ return Object.assign(w,{sandbox,marks,views,panel,saved,cameras:()=>views.map(v=>v.getCamera()),setBusy:v=>{busy=v;},tickets,setGroup:g=>{group=g;},dispose:()=>tool.dispose()});
+}
+const MARK_EXPECTED={label:'병변',point:[20,30,5],volume:{study:'1.2.3',series:'1.2.4',frameOfReferenceUid:'2.25.66'}};
+
+test('S2-L2a marks goTo: exact expected copy, refusals change nothing, a failure rolls back its own cameras, the button keeps its texts',()=>{
+ const w=marksToolWorld(),id='00000000-0000-4000-8000-00000000b001';
+ try{
+  const start=w.cameras();
+  assert.deepEqual(JSON.parse(JSON.stringify(w.marks.goTo(id,MARK_EXPECTED))),{ok:true,moved:'all'});
+  assert.deepEqual(w.cameras().map(c=>c.focalPoint),[[20,30,5],[20,30,5],[20,30,5]]);
+  for(const [label,expected,reason] of [['label',{...MARK_EXPECTED,label:'x'},'mismatch'],['point',{...MARK_EXPECTED,point:[20,30,5.000000000000001]},'mismatch'],
+    ['series',{...MARK_EXPECTED,volume:{...MARK_EXPECTED.volume,series:'1.2.40'}},'mismatch'],['study',{...MARK_EXPECTED,volume:{...MARK_EXPECTED.volume,study:'1.2.30'}},'mismatch'],
+    ['frame',{...MARK_EXPECTED,volume:{...MARK_EXPECTED.volume,frameOfReferenceUid:'2.25.67'}},'mismatch']]){
+   const before=w.cameras(),result=w.marks.goTo(id,expected);
+   assert.deepEqual([result.ok,result.reason,result.rolledBack],[false,reason,null],label);
+   assert.deepEqual(w.cameras(),before,label+': nothing moved');
+  }
+  assert.equal(w.marks.goTo('00000000-0000-4000-8000-00000000b009',MARK_EXPECTED).reason,'mark-missing');
+  w.frame=undefined;assert.equal(w.marks.goTo(id,MARK_EXPECTED).reason,'mismatch','an unknown frame of reference is not a match');
+  w.frame='2.25.66';
+  // Sync off moves only the source plane.
+  w.marks.restore({...w.saved,sync:false});
+  for(const v of w.views)v.setCamera({focalPoint:[1,1,1]});
+  assert.deepEqual(JSON.parse(JSON.stringify(w.marks.goTo(id,MARK_EXPECTED))),{ok:true,moved:'source'});
+  assert.deepEqual(w.cameras().map(c=>c.focalPoint),[[20,30,5],[1,1,1],[1,1,1]]);
+  w.marks.restore(w.saved);
+  // A failing plane: this move's own cameras are put back.
+  const before=w.cameras();let calls=0;
+  w.fail=i=>i===1&&++calls===1;
+  const failed=w.marks.goTo(id,MARK_EXPECTED);
+  assert.deepEqual([failed.ok,failed.reason,failed.rolledBack,failed.message],[false,'failed',true,'표식 위치로 이동하지 못했습니다. 이전 화면으로 복구했습니다.']);
+  assert.deepEqual(w.cameras(),before);
+  w.fail=i=>i===1;
+  const stuck=w.marks.goTo(id,MARK_EXPECTED);
+  assert.deepEqual([stuck.ok,stuck.rolledBack,stuck.message],[false,false,'표식 이동과 이전 화면 복구에 실패했습니다. 현재 영상을 확인하세요.']);
+  w.fail=null;
+  // The Jobs panel busy: refused without a pass, and a pass is honoured only while the panel names it as its active ticket.
+  w.setBusy(true);
+  assert.deepEqual([w.marks.goTo(id).ok,w.marks.goTo(id).reason,w.marks.goTo(id).message],[false,'target','현재 MPR 원본과 작업 상태를 확인하세요.']);
+  const forged={live:()=>true};
+  assert.equal(w.marks.goTo(id,MARK_EXPECTED,forged).reason,'target','a pass the panel does not own');
+  let owner=true;const pass={live:()=>owner};w.tickets.add(pass);
+  assert.equal(w.marks.goTo(id,MARK_EXPECTED,pass).ok,true,'the active ticket waives only the Jobs busy flag');
+  owner=false;
+  assert.equal(w.marks.goTo(id,MARK_EXPECTED,pass).reason,'target','a ticket whose owner or serial moved');
+  owner=true;w.sandbox.kinVolumeBatchState={busy:()=>true};
+  assert.equal(w.marks.goTo(id,MARK_EXPECTED,pass).reason,'target','every other clause stays');
+  delete w.sandbox.kinVolumeBatchState;w.setBusy(false);
+  // Unsaved marks refuse a location move but not the button.
+  w.marks.restore(w.saved);w.panel.parts.input.value='draft';
+  assert.equal(w.marks.goTo(id,MARK_EXPECTED).reason,'dirty');
+  w.panel.parts.input.value='';
+  // The button path: the same move, with the shipped refusal text on failure.
+  const row=w.panel.parts.list.children[0],go=row.children.find(b=>b.textContent==='Go to Point');
+  assert.ok(go,'the Go to Point button');
+  let once=true;w.fail=i=>i===0&&once&&!(once=false);go.onclick();w.fail=null;
+  assert.equal(w.panel.parts.status.textContent,'표식 위치로 이동하지 못했습니다. 이전 화면으로 복구했습니다.');
+  w.live=false;go.onclick();
+  assert.equal(w.panel.parts.status.textContent,'현재 MPR 원본과 작업 상태를 확인하세요.');
+  assert.equal(start.length,3);
+ }finally{w.dispose();}
+});

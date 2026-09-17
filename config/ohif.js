@@ -1274,20 +1274,23 @@ function kinCreateViewerHistory() {
     }
     // Selection and highlight of the hydrated annotation behind a finding source; a hidden,
     // unverified or key-image source navigates just the same and reports why nothing is drawn.
+    // S2-C: every answer for a linked item also reports this viewer's own entry at arrival (present, its saved revision, hidden,
+    // and whether it is being edited or saved), so the finding discloses what is drawn instead of its list state.
     function highlight(itemId) {
       if (!itemId) return { highlighted: false, annotation: 'none' };
       const e = [...entries.values()].find(x => x.head?.id === itemId);
-      if (!e) return { highlighted: false, annotation: 'missing' };
-      if (e.head.hidden) return { highlighted: false, annotation: 'hidden' };
-      if (!tools[e.draft.kind]) return { highlighted: false, annotation: 'key' };
+      if (!e) return { highlighted: false, annotation: 'missing', present: false };
+      const live = { present: true, revision: e.head.revision, hidden: !!e.head.hidden, working: !!(e.editing || e.pending || e.busy) };
+      if (e.head.hidden) return { highlighted: false, annotation: 'hidden', ...live };
+      if (!tools[e.draft.kind]) return { highlighted: false, annotation: 'key', ...live };
       const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
-      if (!a) return { highlighted: false, annotation: manual(e.draft.kind) && e.head.referenceStatus !== 'verified' ? 'unverified' : 'none' };
+      if (!a) return { highlighted: false, annotation: manual(e.draft.kind) && e.head.referenceStatus !== 'verified' ? 'unverified' : 'none', ...live };
       for (const other of ct.annotation.state.getAllAnnotations())
         if (other.annotationUID !== a.annotationUID && kinds[other.metadata.toolName] && other.highlighted) other.highlighted = false;
       a.highlighted = true;
       try { ct.annotation.selection?.setAnnotationSelected?.(a.annotationUID, true, false); } catch (_) {}
       render();
-      return { highlighted: true, annotation: 'shown' };
+      return { highlighted: true, annotation: 'shown', ...live };
     }
     const navigationEnv = { services, viewport, reference, matches, hydrate, highlight,
       ended: () => ended, scope: () => scope, busy: () => suspended || recovery.has(scope),

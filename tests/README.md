@@ -201,7 +201,7 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 24개 migration·37개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
 관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
 
-소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (10개, 8~10은 S2-B2 서버)와 `python tests/e2e/test_finding_navigation.py` (7개, 7은 S2-B2 화면).
+소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (12개, 8~10은 S2-B2 서버, 11·12는 S2-L)와 `python tests/e2e/test_finding_navigation.py` (8개, 7은 S2-B2 화면, 8은 S2-C).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
 409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
@@ -216,8 +216,8 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 dirty/busy·이탈 경고와 표식 전용 `kinViewerHistoryHasUnsaved` 유지, 판독 작업공간·창 재사용·Hanging Protocol·칸 병합 판정을
 출하 코드로 확인한다. 브라우저 시험 5·6은 Next Study·창 재사용/닫기·이탈 경고의 차단과 깨끗한 화면의 통과, 비교 검사 영상 칸
 활성화 동안 작성·대기 소견의 유지(보관하지 않음), 403·mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)의 다른 검사 복원 차단은 원문 위치 확인만 하며 브라우저로 실행하지 않았다.
-영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (35개, 8개는 S2-B2, 2개는 S2-V; `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
-`python tests/e2e/test_finding_worklist.py` (4개, 4는 S2-B2; 기존 `measurements` 프로필의 19번째 suite). 워크리스트·통합 작업공간의 Image Findings는 선택한
+영상 소견 목록·이동(S2-B1): `node --test tests/finding_command_test.cjs` (43개, 8개는 S2-B2, 2개는 S2-V, 8개는 S2-C·S2-L; `finding_link_model_test.cjs`가 같은 프로세스에서 함께 실행)와
+`python tests/e2e/test_finding_worklist.py` (5개, 4는 S2-B2, 5는 S2-L; 기존 `measurements` 프로필의 19번째 suite). 워크리스트·통합 작업공간의 Image Findings는 선택한
 판독 대상 검사의 기존 소견 목록 읽기만 하며, Go to Image는 이미 그 검사를 표시하는 통합 작업공간 영상 또는 연결된 영상 창 하나에만 보낸다.
 순수 시험은 대상 선택(여러 창·미연결·소유자·로딩), 호출 전 거절, 호출 시점의 함수 조회, 대기 후 계정·선택·문서·범위 확인, 15초 제한,
 최신 명령만의 알림과 A-B-A·403/404/503·세션 종료 목록 폐기를 출하 코드와 별도 vm 영상 문서로 확인한다. Retry Go to Image는 처음 누른
@@ -232,7 +232,7 @@ MPR/볼륨 화면 거절은 영상 쪽 순수 시험 범위이며 비교 검사 
 그 밖의 출처·계산기, 종류별 개수(1/1/5) 불일치, 유한수가 아니거나 1e21 이상인 값, 음이 아닌 안전 정수가 아닌 화소 수는 원본 전체를
 `수치(단위 미확인): a / b`로 보인다. 반올림은 `Math.round(n*10)/10` 후 한 자리이며 `-0`은 `0.0`, 화소 수는 그대로 쓴다. 계산기는 표시에만 쓰며
 요청 본문·초안·보관 사본·이동 대상에 들어가지 않는다. Revised 연결은 연결 당시 값을, 이력 줄은 표식 개수만, 접근할 수 없는 비교 검사는 수치 없이 보인다.
-순수 시험은 `finding_link_model_test.cjs` 58개 중 7개(형식 행렬, comparisonHead, 요청 바이트, 출하 Findings 화면 3개, 저장 표식 값 출처)와 위 2개다.
+순수 시험은 `finding_link_model_test.cjs` 70개 중 7개(형식 행렬, comparisonHead, 요청 바이트, 출하 Findings 화면 3개, 저장 표식 값 출처)와 위 2개다.
 기존 `measurements` 프로필 안의 `test_finding_worklist.py` 1·4와 `test_finding_navigation.py` 1은 API로 넣은 길이·축 정렬 타원의 목록·뷰어 표시,
 그린 길이의 선택지와 저장 사본의 `mm`, 비교 검사 회수 뒤 비교 길이 수치의 부재를 확인한다(suite 수·시간 한도 변경 없음). 3D 위치 연결(D1)과 특성(D2)은 이 범위 밖이다.
 비교 검사 원본 서버(S2-B2 B2-S): `finding_api_test.py` 8~10(기존 `measurements` 프로필 17번째 suite 안)과 `finding_input_test.cjs`의
@@ -260,6 +260,33 @@ P 표식은 `GET /studies/P/viewer-items`의 저장·비숨김 판에서만 고�
 실제 기록·Findings 연결과 워크리스트 대상 선택·명령·vm 문서 어댑터를 실행한다. 브라우저 시험(탐색 7, 워크리스트 4)은 같은 환자 합성 CT 두 개의
 hpCompare에서 X 고정·초안/대기 본문 유지·P 연결 저장, X 활성 상태의 P SOP/frame 도착(영상 id·기록 재확인·픽셀 막대 폭), P 기록 다시 읽기
 503 뒤 busy와 고정 원본 Retry, P 기관 이탈(합성 경계 변경 후 복원) 뒤 P 행·문구 부재를 확인하고 JSON·화면을 `measurement-ci` 산출물에 남긴다.
+소견 특성·저장 작업 위치(S2-C·S2-L): 새 migration·경로·의존성 없이 소견 원본에 저장 작업(`ViewerJob`) 참조 `{jobId, revision, markId?}`를
+schemaVersion 2 요청에서만 받는다. 서버는 작업 판·검사 조합(1~2개, 첫 검사가 작업 검사)·제목·작성자·Snapshot 판(1~15)·3D 표식(식별·라벨·점·
+원본 volume series/SOP/digest/SOP 수)·FrameOfReferenceUID를 복사하고 작업 원문은 바꾸지 않는다. 다른 검사 기준 작업은 접근 확인·잠금·Orthanc
+읽기 없이 없는 id와 같은 404이고, 검사 조합 전체의 접근 확인 뒤에만 판·표식을 보고(숨김·판 불일치 409, 표식 없음 400 `FINDING_JOB_MARK`,
+판 밖 400 `FINDING_JOB_VERSION`), FoR는 작업당 한 번·20초 안에 읽는다(불일치 409, 쓰기 시점 누락은 재시도 409). 특성은 사용자가 직접 입력하는
+자유 문자열(1000 code point, 브라우저 `maxLength`는 UTF-16 단위)이며 판독문에 들어가지 않고, 요청 본문 한도는 60640바이트다.
+판 협상: 새 화면은 `X-KIN-Finding-Schema: 2`를 보내고 서버는 모든 소견 응답에 같은 헤더를 붙인다. 헤더 없는 옛 화면은 v2 행이 있는 페이지에서
+409 `FINDING_CLIENT_OUTDATED`, 헤더 없는 성공 응답(옛 API)을 받은 새 화면은 저장하지 않고 읽기만 한다. v1 요청의 v2 head 수정·숨김은 409
+`FINDING_SCHEMA_VERSION`, v2 수정은 v1 소견을 v2로 올리고 숨김·복원은 head 판과 내용을 유지한다. 기존 v1 재요청·이력 바이트는 그대로다.
+모양이 틀린 작업 계보 행(배열 길이·문자열·중복·첫 검사·투영 불일치)은 읽을 수 없는 검사로 취급한다(합성 행 시험, 운영 행 수정 없음).
+화면: 뷰어 Findings의 `Link 3D Point`·`Link Saved View`, `Go to 3D Point`·`Open Saved View`는 저장 작업 버튼과 같은 복원·이동 함수를 쓴다.
+복원 전 작업을 다시 읽고(GET 409는 거절) 적용 뒤 읽기 확인과 동결된 점·FoR 비교가 맞을 때만 복원으로 알린다. 결과는 거절·되돌림·화면
+미확인·복원(점 이동 실패 포함)·새 화면 계속이며, 한 복원은 180초 기한(적용 60초, 요청 120초 중단, 준비 대기 20초)을 갖고 호출 쪽 270초 뒤에도
+적용이 끝날 때까지 다른 이동을 막는다. 검사 조합이 다른 작업은 새 화면(URL `kinFinding*`와 한 번 쓰는 sessionStorage 표시)에서 입력 없이 한 번만
+복원하고 새로고침은 거절한다. Go to Image 도착 문구는 현재 뷰어 소견의 판·숨김·작성 중 여부를 알린다(2D만, 3D 커서 없음). 워크리스트는 특성·작업 줄을
+보이고 작업 복원은 그 검사 조합을 정확히 표시하는 창에만 보낸다. 목록 읽기는 헤더를 붙인 같은 출처 GET이며 401은 기존 `app.api`로 넘긴다.
+위치 결과의 기계 판독 값(`locationResult`, 뷰어 문구의 `data-kin-location-result`, 워크리스트 `data-result`)은 요청한 3D 표식에 도달했을 때만
+`ok`다. 화면은 복원했지만 표식 이동이 실패하면 복원 결과(state `restored`, point `failed`, 뷰어의 사유)와 문구는 그대로 두고 `point-failed`로
+표시하며 전체 화면을 되돌렸다고 하지 않고 Retry도 두지 않는다. 확인된 되돌림은 `rolled-back`이다. `test_location_02`는 화면을 바꾼 v6 적용의
+3D 표식 단계에서 기존 `kinMprMarks.restore`를 한 번만 실패시키고(시험 안에서만 감싸고 finally에서 원래대로 되돌림, 제품 시험용 경로 없음)
+`rolled-back` 문구, 새 viewport에 다시 세운 이전 화면(볼륨·활성 평면·투영·카메라 1e-6, 저장 화면과 6 mm 차이)과 표식, 점 이동 없음,
+작업·소견·판독 행 불변을 확인한다. 이 호스트 시험은 로컬에서 실행하지 않았다.
+순수 시험은 `finding_input_test.cjs` 11개 중 6개, `finding_link_model_test.cjs` 70개 중 12개, `finding_command_test.cjs` 43개 중 8개,
+`viewer_volume_job_capture_test.cjs` 51개 중 8개(위치 복원 7, `goTo` 1)와 `measurement_ci_test.py`의 음성 선택 1개다. 브라우저·DB 시험은
+`finding_api_test.py` 11·12, `test_finding_navigation.py` 8, `test_finding_worklist.py` 5(기존 `measurements` 19개 suite·540초 한도 그대로)와
+새 `python tests/e2e/test_finding_locations.py` (3개, `VolumeMarksE2E` 상속, `test_location_`만)이다. 새 모듈은 기존 `volume-path` 프로필의
+세 번째 suite `ci-finding-location`(360초)이며 (420+35)+(300+35)+(360+35)=1185초에 예비 150초를 더해 1335≤1500초다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.

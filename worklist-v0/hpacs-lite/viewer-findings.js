@@ -20,15 +20,44 @@ window.kinViewerFindings = function (services, model) {
       return values.length === 1 ? values[0].split(',') : null;
     } catch (_) { return null; }
   }
+  /* S2-L2b continuation: a page opened by a finding's saved location names that finding, revision and source with a one-use nonce
+   * the opening page stored in this tab's session storage. The nonce is consumed once; without session storage the request runs
+   * at most once in this document. A missing or different record refuses the automatic restore. */
+  let continued = false;
+  function continuation() {
+    if (continued) return null;
+    let params;
+    try { params = new URLSearchParams(location.search); } catch (_) { return null; }
+    const finding = params.get('kinFinding'), nonce = params.get('kinFindingNonce');
+    if (finding === null && nonce === null) return null;
+    continued = true;
+    const request = { finding, revision: Number(params.get('kinFindingRevision')), source: Number(params.get('kinFindingSource')), jobId: null, refused: false };
+    let record = null, storage = true;
+    try {
+      const key = 'kin-finding-continue:' + nonce, raw = window.sessionStorage.getItem(key);
+      window.sessionStorage.removeItem(key);
+      record = raw ? JSON.parse(raw) : null;
+    } catch (_) { storage = false; }
+    if (storage && (!record || record.finding !== request.finding || record.revision !== request.revision || record.source !== request.source ||
+        typeof record.jobId !== 'string')) request.refused = true;
+    else if (storage) request.jobId = record.jobId;
+    return request;
+  }
   function mount() {
     stop();
     const host = document.querySelector('#kin-viewer-history');
     if (!host) return false;
+    // A section of another record-format version than its model is never mounted beside it.
+    if (model.SCHEMA !== 2) {
+      const refused = document.createElement('p'); refused.id = 'kin-viewer-findings'; refused.textContent = model.MODULE_MISMATCH_TEXT || '화면 구성 요소 판이 다릅니다. 새로고침하세요.';
+      host.append(refused); stop = () => { refused.remove(); stop = () => {}; }; return false;
+    }
     const studies = urlStudies();
     const store = model.createStore({ fetch: (url, options) => window.fetch(url, options), uuid: () => crypto.randomUUID(), recovered: held, studies,
       navigate: target => typeof window.kinViewerHistoryNavigate === 'function' ? window.kinViewerHistoryNavigate(target) : { ok: false, reason: 'tool-missing' },
       history: () => typeof window.kinViewerHistoryState === 'function' ? window.kinViewerHistoryState() : null,
-      activate: study => typeof window.kinViewerHistoryActivate === 'function' ? window.kinViewerHistoryActivate(study) : { ok: false, reason: 'tool-missing' } });
+      activate: study => typeof window.kinViewerHistoryActivate === 'function' ? window.kinViewerHistoryActivate(study) : { ok: false, reason: 'tool-missing' },
+      location: () => window.kinViewerJobLocation || null, continuation: continuation() });
     held = [];
     const panel = document.createElement('details'); panel.id = 'kin-viewer-findings'; panel.open = true;
     panel.style.cssText = 'border-top:1px solid #405777;margin-top:10px;padding-top:8px';
@@ -63,7 +92,42 @@ window.kinViewerFindings = function (services, model) {
     // Copied numbers with names and units only for a known provenance (S2-V); a source's are its frozen revision's.
     const values = (h, provenance) => { const t = model.valueText(h.kind, h.calculator, h.values, provenance); return t ? ' · ' + t : ''; };
     const rows = new Map();
+    const CHARACTERISTICS_HELP = '사용자가 직접 입력하는 병변 특성입니다. 정해진 용어나 항목은 없으며 판독문에 자동 반영하지 않습니다.';
+    const LOCATION_HELP = '저장 화면(Saved View)은 저장 작업의 영상 상태 전체를, 3D 표식(3D Point)은 MPR 3D Annotations 작업에 저장한 점 하나를 연결합니다. ' +
+      '3D 표식은 그 작업을 복원하거나 저장해 지금 화면에 표시한 뒤 고르세요. 표식을 바꾸면 Save New Job으로 새 작업을 저장해야 하며, 검사별 저장 작업은 200개까지입니다. ' +
+      '비교 검사를 판독 대상으로 연 화면에서 저장한 작업은 연결할 수 없으니, 현재 검사를 판독 대상으로 연 화면에서 같은 위치를 새 작업으로 저장해 연결하세요.';
+    // A saved location line: a frozen server copy (saved finding) or an unsaved {jobId, revision[, markId]} pair.
+    function jobLine(parent, e, s, index, editing) {
+      const st = store.state(), copy = model.isJob(s) ? s : null, markId = copy ? (copy.mark ? copy.mark.id : undefined) : s.markId;
+      const study = store.studyOf(e, s), own = study === st.scope, listed = st.jobs.list.get(s.jobId) || null;
+      const link = copy && e.head ? (e.links || []).find(l => l && l.jobId === s.jobId && (l.markId || null) === (markId || null)) || null : null;
+      const status = model.jobStatus({ jobId: s.jobId, revision: s.revision, jobStudyUid: copy ? copy.jobStudyUid : st.scope, markId }, link, copy ? null : listed);
+      const shown = markId && !copy ? store.shownJob() : null, shownMark = shown && shown.jobId === s.jobId ? shown.marks.find(m => m.id === markId) : null;
+      const name = copy ? model.jobName(copy) : markId ? '3D Point · ' + (shownMark ? shownMark.label : '표식 ' + markId.slice(0, 8)) + ' · 저장 작업 r' + s.revision
+        : 'Saved View · ' + (listed ? (listed.title || '(제목 없음)') + ' · v' + listed.snapshotVersion : '저장 작업 ' + s.jobId.slice(0, 8)) + ' · r' + s.revision;
+      const line = text(parent, 'div', ''); line.dataset.jobId = s.jobId; line.dataset.sourceKind = markId ? 'point' : 'view';
+      line.dataset.linkState = status.linkState; line.dataset.sourceStudy = own ? 'current' : 'comparison';
+      line.style.cssText = 'margin:2px 0 2px 6px;padding-left:6px;border-left:2px solid ' + (own ? '#405777' : '#b08a3c');
+      const withheld = !own && st.pair.status === 'denied';
+      const tag = own ? (store.pairOf() ? '[현재 검사] ' : '') : '[비교 검사] ';
+      text(line, 'span', tag + (index === (e.head && !editing ? e.head.item.primary ?? 0 : e.draft.primary) ? '★ ' : '') + (withheld ? '접근할 수 없는 비교 검사의 저장 위치' : name) + ' · ');
+      const badge = text(line, 'strong', status.label); badge.dataset.kinLinkState = status.linkState;
+      if (status.linkState === 'metadata-changed' && status.headRevision) text(line, 'span', ' (현재 r' + status.headRevision + ')');
+      if (e.staleSource && e.staleSource.jobId === s.jobId && (e.staleSource.markId || undefined) === markId)
+        text(line, 'span', e.staleSource.headHidden ? ' · 서버에서 숨겨짐' : ' · 서버 최신판 r' + e.staleSource.headRevision);
+      if (status.linkState !== 'current') text(line, 'p', status.text);
+      if (e.head && copy && !editing) {
+        button(line, markId ? 'Go to 3D Point' : 'Open Saved View', () => store.navigate(e, index), !!e.busy || withheld || !!st.jobNavigation);
+        if (store.writable(e) && status.linkState === 'metadata-changed' && !e.pending && !store.pairBlocked(e))
+          button(line, 'Refresh Link', () => store.refreshSource(e, { jobId: s.jobId, markId }), !!e.busy);
+      }
+      if (editing) {
+        button(line, 'Unlink', () => store.toggleJob(e, s.jobId, markId), !!(e.busy || e.pending));
+        if (index !== e.draft.primary) button(line, 'Set Primary', () => store.setPrimary(e, index), !!(e.busy || e.pending));
+      }
+    }
     function sourceLine(parent, e, s, index, editing) {
+      if (model.isJob(s) || model.isJobPair(s)) return jobLine(parent, e, s, index, editing);
       const st = store.state(), study = store.studyOf(e, s), own = study === st.scope;
       const link = (e.links || []).find(l => l.itemId === s.itemId) || null, head = (own ? st.heads : st.pair.heads).get(s.itemId) || null;
       const status = model.sourceStatus(s, e.head ? link : null, head);
@@ -122,25 +186,98 @@ window.kinViewerFindings = function (services, model) {
       choices(group, e, pairHeads, 'Link Comparison ', { uid: pair, blocked }, 'server-copy');
       button(group, 'Reload Comparison Items', () => store.loadPair(), st.pair.status === 'loading' || !!e.busy);
     }
+    // Saved views of this anchor's Jobs and the 3D points of the Job shown now (S2-L2b).
+    function locations(parent, e) {
+      const st = store.state(), shown = store.shownJob();
+      if (st.jobs.status === 'idle') Promise.resolve().then(() => store.loadJobs());
+      const box = text(parent, 'details', ''); box.open = true; box.dataset.kinLocations = ''; text(box, 'summary', 'Link Saved Locations');
+      text(box, 'p', LOCATION_HELP);
+      const linked = (jobId, markId) => e.draft.sources.some(x => model.isJobPair(x) && x.jobId === jobId && (x.markId || undefined) === markId);
+      const full = e.draft.sources.length >= model.LIMITS.sources, busy = !!(e.busy || e.pending);
+      const choice = (label, run) => {
+        const wrap = text(box, 'label', ''); wrap.style.display = 'block';
+        const check = document.createElement('input'); check.type = 'checkbox'; check.checked = false; check.disabled = busy || full;
+        check.setAttribute('aria-label', label);
+        check.addEventListener('change', () => { if (!run()) check.checked = false; });
+        wrap.append(check, document.createTextNode(' ' + label));
+      };
+      if (shown && shown.snapshotVersion === 6)
+        for (const mark of shown.marks) if (!linked(shown.jobId, mark.id)) choice('Link 3D Point ' + mark.label + ' · 저장 작업 r' + shown.revision, () => store.toggleJob(e, shown.jobId, mark.id));
+      if (!shown || shown.snapshotVersion !== 6) text(box, 'p', '연결할 3D 표식은 그 표식을 저장한 작업을 복원하거나 저장해 화면에 표시하면 나타납니다.');
+      for (const job of st.jobs.list.values())
+        if (!linked(job.id, undefined)) choice('Link Saved View ' + (job.title || '(제목 없음)') + ' · v' + job.snapshotVersion + ' · r' + job.revision, () => store.toggleJob(e, job.id));
+      const note = { loading: '저장 작업 목록 확인 중…', failed: '저장 작업 목록을 확인하지 못했습니다. Reload Saved Jobs로 다시 확인하세요.' }[st.jobs.status];
+      if (note) text(box, 'p', note);
+      else if (st.jobs.status === 'ready' && !st.jobs.list.size) text(box, 'p', '이 검사에 연결할 수 있는 저장 작업이 없습니다.');
+      button(box, 'Reload Saved Jobs', () => store.loadJobs(), st.jobs.status === 'loading' || busy);
+    }
+    /* The draft's own fields are made once per entry and moved into each later render of its row. A render can be caused by
+     * anything (a saved-Jobs answer, a message, a head change, the 250 ms history sync), and rebuilding these elements would
+     * drop what the user is typing: the keystrokes and the caret follow the element, and one replaced between a keypress and
+     * its delivery is lost silently. Their values follow the draft only while the user is not in them. */
+    const editors = new Map();
+    function editor(e) {
+      let box = editors.get(e);
+      if (!box) {
+        const host = document.createElement('div');
+        const title = field(host, 'Finding Title', 'input', e.draft.title, model.LIMITS.title, v => store.updateDraft(e, { title: v }), false);
+        // Characteristics: native maxLength counts UTF-16 units (astral characters stop earlier); the saved limit is code points.
+        const traits = field(host, 'Characteristics (병변 특성)', 'textarea', typeof e.draft.characteristics === 'string' ? e.draft.characteristics : '',
+          model.CHARACTERISTICS, v => store.updateDraft(e, { characteristics: v }), false);
+        traits.setAttribute('aria-label', 'Finding Characteristics');
+        const help = text(host, 'p', CHARACTERISTICS_HELP); help.id = 'kin-finding-characteristics-help-' + crypto.randomUUID();
+        traits.setAttribute('aria-describedby', help.id);
+        const body = field(host, 'Finding Text', 'textarea', e.draft.text, model.LIMITS.text, v => store.updateDraft(e, { text: v }), false);
+        box = { host, fields: [[title, 'title'], [traits, 'characteristics'], [body, 'text']] };
+        editors.set(e, box);
+      }
+      let active = null; try { active = document.activeElement; } catch (_) { active = null; }
+      for (const [node, key] of box.fields) {
+        const value = typeof e.draft[key] === 'string' ? e.draft[key] : '';
+        // A draft changed elsewhere (a restored copy, Use Latest) is shown; the field being typed into is never overwritten.
+        if (node !== active && node.value !== value) node.value = value;
+        node.disabled = !!(e.busy || e.pending);
+      }
+      return box.host;
+    }
     function row(e) {
-      let el = rows.get(e);
-      if (!el) { el = document.createElement('article'); el.dataset.rowKey = crypto.randomUUID(); el.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; rows.set(e, el); list.append(el); }
-      el.replaceChildren(); el.dataset.findingId = e.head?.id || ''; el.dataset.saved = e.head ? 'true' : 'false';
-      text(el, 'strong', 'Finding · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
-      if (e.head) text(el, 'div', e.head.authorActor + (store.writable(e) ? ' · My Finding' : ' · Read-only'));
+      let box = rows.get(e);
+      if (!box) {
+        const article = document.createElement('article');
+        article.dataset.rowKey = crypto.randomUUID(); article.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px';
+        // Three stable parts in reading order: the head line, the draft's own fields (kept across renders) and everything else.
+        const head = document.createElement('div'), slot = document.createElement('div'), rest = document.createElement('div');
+        article.append(head, slot, rest); rows.set(e, box = { article, head, slot, rest }); list.append(article);
+      }
+      const el = box.rest;
+      box.head.replaceChildren(); el.replaceChildren();
+      box.article.dataset.findingId = e.head?.id || ''; box.article.dataset.saved = e.head ? 'true' : 'false';
+      text(box.head, 'strong', 'Finding · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head) text(box.head, 'div', e.head.authorActor + (store.writable(e) ? ' · My Finding' : ' · Read-only'));
       const editing = e.editing && store.writable(e);
       if (editing) {
-        field(el, 'Finding Title', 'input', e.draft.title, model.LIMITS.title, v => store.updateDraft(e, { title: v }), !!(e.busy || e.pending));
-        field(el, 'Finding Text', 'textarea', e.draft.text, model.LIMITS.text, v => store.updateDraft(e, { text: v }), !!(e.busy || e.pending));
+        const host = editor(e);
+        // Attached once: re-attaching would take the focus and the caret out of the field being typed into.
+        if (box.slot.children[0] !== host) box.slot.replaceChildren(host);
       } else {
+        box.slot.replaceChildren(); editors.delete(e);
         text(el, 'p', e.head ? e.head.item.title : e.draft.title).style.fontWeight = '600';
         const body = text(el, 'p', e.head ? e.head.item.text : e.draft.text); body.style.whiteSpace = 'pre-wrap';
+        // Version 1 records show no characteristics line; old prose is never relabelled.
+        const traits = e.head && e.head.item.schemaVersion === 2 ? e.head.item.characteristics : '';
+        if (traits) { const line = text(el, 'p', 'Characteristics (병변 특성): ' + traits); line.style.whiteSpace = 'pre-wrap'; line.dataset.kinCharacteristics = ''; }
       }
-      const shown = e.head && !editing ? e.head.item.sources : e.draft.sources.map(pair => (e.head?.item.sources || []).find(s => s.itemId === pair.itemId && s.revision === pair.revision) || pair);
+      const same = (s, pair) => (model.isJob(s) ? 'job:' + s.jobId + ':' + (s.mark ? s.mark.id : '') : s.itemId) ===
+        (model.isJobPair(pair) ? 'job:' + pair.jobId + ':' + (pair.markId || '') : pair.itemId) && s.revision === pair.revision;
+      const shown = e.head && !editing ? e.head.item.sources : e.draft.sources.map(pair => (e.head?.item.sources || []).find(s => same(s, pair)) || pair);
       const sources = text(el, 'div', ''); sources.dataset.kinSources = '';
       shown.forEach((s, index) => sourceLine(sources, e, s, index, editing));
-      if (editing) selection(el, e);
-      if (e.message) text(el, 'p', e.message).dataset.kinMessage = '';
+      if (editing) { selection(el, e); locations(el, e); }
+      if (e.message) {
+        const note = text(el, 'p', e.message); note.dataset.kinMessage = '';
+        // A saved-location text carries its machine-readable result ('ok' only when the requested point was reached, N1).
+        if (e.location && e.location.message === e.message) note.dataset.kinLocationResult = e.location.result;
+      }
       // Distinct from the per-source 'Go to Image' lines above, so neither name is ambiguous within a row.
       if (e.head && !editing) button(el, 'Go to Primary Image', () => store.navigate(e), !!e.busy);
       if (store.writable(e)) {
@@ -160,7 +297,15 @@ window.kinViewerFindings = function (services, model) {
         const more = async () => {
           const data = await store.history(e, cursor);
           if (!data || !el.isConnected) return;
-          for (const r of data.revisions) text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + r.item.title + ' · 표식 ' + r.item.sources.length + '개');
+          for (const r of data.revisions) {
+            text(history, 'p', 'r' + r.revision + ' · ' + ({ create: '생성', edit: '수정', hide: '숨김', restore: '복원' }[r.action] || r.action) + ' · ' + r.actor + ' · ' + r.at + ' · ' + r.reason + ' · ' + r.item.title + ' · 표식 ' + r.item.sources.length + '개');
+            // Each revision's own text, characteristics (version 2) and the kinds it linked, counted only.
+            const detail = text(history, 'div', ''); detail.dataset.kinRevision = String(r.revision); detail.style.marginLeft = '8px';
+            if (r.item.text) text(detail, 'p', '본문: ' + r.item.text).style.whiteSpace = 'pre-wrap';
+            if (r.item.schemaVersion === 2) text(detail, 'p', r.item.characteristics ? 'Characteristics (병변 특성): ' + r.item.characteristics : 'Characteristics (병변 특성): 없음').style.whiteSpace = 'pre-wrap';
+            const count = kind => r.item.sources.filter(kind).length;
+            text(detail, 'p', '연결: 2D 표식 ' + count(x => !model.isJob(x)) + '개 · Saved View ' + count(x => model.isJob(x) && !x.mark) + '개 · 3D Point ' + count(x => model.isJob(x) && !!x.mark) + '개 · v' + (r.item.schemaVersion || 1));
+          }
           count += data.revisions.length; cursor = data.nextCursor;
           if (cursor && count < 1000) button(history, 'Load More History', more);
         };
@@ -192,7 +337,7 @@ window.kinViewerFindings = function (services, model) {
       // A finding that names a comparison study this login can no longer read is not shown unless the
       // user is working on it; the anchor list read that follows removes it for good.
       const shown = e => s.entries.get(e.id) === e && !(store.pairBlocked(e) && !store.hasWork(e));
-      for (const [e, el] of [...rows]) if (!shown(e)) { el.remove(); rows.delete(e); }
+      for (const [e, box] of [...rows]) if (!shown(e)) { box.article.remove(); rows.delete(e); editors.delete(e); }
       for (const e of s.entries.values()) if (shown(e)) row(e);
     }
     const unsubscribe = store.subscribe(render);
@@ -210,7 +355,7 @@ window.kinViewerFindings = function (services, model) {
       clearInterval(timer); unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); window.removeEventListener('kin-viewer-access-ended', onAccessEnded);
       keep(store.detach());
       if (window.kinViewerFindingsState === state) delete window.kinViewerFindingsState;
-      store.dispose(); panel.remove(); rows.clear(); stop = () => {};
+      store.dispose(); panel.remove(); rows.clear(); editors.clear(); stop = () => {};
     };
     render();
     return true;

@@ -430,6 +430,83 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         expect(self.row(w, cross['id'])).to_have_count(1)
         self.assertEqual(self.owned_rows(f, prior), rows); self.assertEqual(self.hashes(), original)
 
+    # ---- S2-L2b saved locations from the worklist -----------------------------------------------------
+    def stack_job(self, f, ds, title):
+        """A version 1 saved view of one slice of `f`, through the product Job API."""
+        z = float(ds.ImagePositionPatient[2])
+        cell = dict(study=f.uid, series=str(ds.SeriesInstanceUID), sop=str(ds.SOPInstanceUID), frame=1,
+                    camera=dict(focalPoint=[128, 128, z], position=[128, 128, z+1000], viewUp=[0, -1, 0], viewPlaneNormal=[0, 0, 1], parallelScale=128,
+                                rotation=0, flipHorizontal=False, flipVertical=False),
+                    properties=dict(voiRange=dict(lower=-1000, upper=-1), VOILUTFunction='LINEAR', invert=False))
+        job = self.post('/studies/'+f.uid+'/viewer-jobs', dict(id=str(uuid.uuid4()), title=title, description='',
+                        snapshot=dict(version=1, studies=[f.uid], rows=1, cols=1, active=0, cells=[cell])))
+        self.addCleanup(self.clear_jobs, f)
+        return job
+
+    def clear_jobs(self, f):
+        for raw in base.psql(f'SELECT to_jsonb(j)::text FROM "ViewerJob" j WHERE "studyUid"={literal(f.uid)}'):
+            job_id = re.search(r'"id": "([0-9a-f-]{36})"', raw).group(1)
+            base.psql(f'''BEGIN; DELETE FROM "ViewerJobRevision" WHERE "jobId"={literal(job_id)}::uuid; DELETE FROM "ViewerJob" WHERE id={literal(job_id)}::uuid; COMMIT;''')
+
+    def test_worklist_05_saved_view_characteristics_exact_viewer_restore_and_refusals(self):
+        f = self.specimen(slices=4); self.seed_report(f)
+        slices = self.dicom(f); sops = self.sops(f)
+        length = self.length_at(f, slices[0], '길이', 20)
+        job = self.stack_job(f, slices[2], '세 번째 단면 위치')
+        created = self.post('/studies/'+f.uid+'/findings', dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=2, title='위치 연결 소견',
+            text='', characteristics='분엽상 경계 <b>', primary=1, sources=[dict(itemId=length['id'], revision=1), dict(jobId=job['id'], revision=1)])))
+        self.assertEqual(created['item']['sources'][1]['kind'], 'job')
+        original, rows = self.hashes(), self.owned_rows(f)
+        w = self.login(); w.set_viewport_size(dict(width=1680, height=1100)); self.observe(w)
+        w.on('dialog', lambda d: d.accept())
+        self.select(w, f)
+        panel = self.open_findings(w, f)
+        article = self.row(w, created['id'])
+        expect(article.locator('[data-kin-characteristics]')).to_have_text('Characteristics (병변 특성): 분엽상 경계 <b>')
+        expect(article.locator('b')).to_have_count(0)
+        location = article.locator('[data-kin-sources] > li[data-job-id="'+job['id']+'"]')
+        expect(location).to_have_attribute('data-source-kind', 'view')
+        expect(location).to_contain_text('★ Saved View · 세 번째 단면 위치 · v1 · r1 · Current')
+        # No viewer shows exactly this study: refused, nothing opened.
+        pages = len(w.context.pages)
+        location.get_by_role('button', name='Open Saved View', exact=True).click()
+        expect(self.result(w, 'saved-view-viewer')).to_contain_text('저장 작업의 검사 조합을 표시하는 영상 화면이 없습니다')
+        self.assertEqual(len(w.context.pages), pages)
+        # The embedded viewer of exactly [f]: the Job's own panel restores it and the worklist says so.
+        self.close_findings(w)
+        frame = self.workspace(w, f)
+        frame.wait_for_function('()=>window.kinViewerJobLocation?.version===1')
+        panel = self.open_findings(w, f)
+        self.target(w, 'embedded')
+        self.away(frame, 0, sops[2])
+        before, url = (self.state(f), self.versions(f)), frame.url
+        self.row(w, created['id']).locator('[data-kin-sources] > li[data-job-id="'+job['id']+'"]').get_by_role('button', name='Open Saved View', exact=True).click()
+        expect(self.result(w, 'ok')).to_contain_text('저장 위치 확인 · 통합 작업공간 · 저장 화면을 복원했습니다(병변 위치 표식 없음).', timeout=60000)
+        frame.wait_for_function(SHOWS, arg=sops[2])
+        self.assertEqual(frame.url, url, 'the viewer URL study set is unchanged')
+        self.assertEqual((self.state(f), self.versions(f)), before)
+        # The Job's title changed: restored with the metadata note; hidden: refused before any screen change.
+        renamed = self.stack.request('POST', '/studies/'+f.uid+'/viewer-jobs/'+job['id']+'/revisions', 'doctor',
+                                     dict(expectedRevision=1, title='바뀐 제목', description='', hidden=False, reason=''))
+        self.assertEqual(renamed.status, 200, renamed.text)
+        self.away(frame, 0, sops[2])
+        panel.get_by_role('button', name='Reload Findings', exact=True).click()
+        location = self.row(w, created['id']).locator('[data-kin-sources] > li[data-job-id="'+job['id']+'"]')
+        expect(location.locator('[data-kin-link-state]')).to_have_text('Details Changed')
+        location.get_by_role('button', name='Open Saved View', exact=True).click()
+        expect(self.result(w, 'ok')).to_contain_text('저장 작업의 제목·설명만 연결 이후 바뀌었고(현재 r2)', timeout=60000)
+        hidden = self.stack.request('POST', '/studies/'+f.uid+'/viewer-jobs/'+job['id']+'/revisions', 'doctor',
+                                    dict(expectedRevision=2, title='바뀐 제목', description='', hidden=True, reason='숨김 확인'))
+        self.assertEqual(hidden.status, 200, hidden.text)
+        self.away(frame, 0, sops[2])
+        shown = frame.evaluate(ACTIVE)
+        location.get_by_role('button', name='Open Saved View', exact=True).click()
+        expect(self.result(w, 'job-hidden')).to_contain_text('영상은 바꾸지 않았습니다')
+        self.assertEqual(frame.evaluate(ACTIVE), shown)
+        # Navigation wrote no finding, item, job revision or report row.
+        self.assertEqual(self.owned_rows(f), rows); self.assertEqual(self.hashes(), original)
+        self.assertEqual(base.psql(f'SELECT count(*) FROM "ViewerJobRevision" WHERE "jobId"={literal(job["id"])}::uuid'), ['3'])
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')

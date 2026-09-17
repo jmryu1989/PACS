@@ -1,11 +1,12 @@
-"""TEST-S2-API-01..10 (REQ-S2-RECORD/PROVENANCE/FRESHNESS/BOUNDARY/IDEMPOTENT/PRESERVE, S2-B2 comparison source).
+"""TEST-S2-API-01..12 (REQ-S2-RECORD/PROVENANCE/FRESHNESS/BOUNDARY/IDEMPOTENT/PRESERVE, S2-B2 comparison source,
+S2-L1 saved locations: 11 version 2 records, schema handshake, version rule and exact copies; 12 malformed job copies and races).
 
 Real Nest/Prisma, Keycloak and Orthanc with owned synthetic CTs. Direct SQL touches only this
 run's study identities, run-owned readers' SYNTHETIC access policies and lock, fault and limit
 setup; every write effect is compared through the persisted rows. No clinical fixture is used.
 """
 from __future__ import annotations
-import io, json, re, subprocess, sys, time, unittest, uuid
+import io, json, re, subprocess, sys, time, unittest, urllib.error, urllib.request, uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -1054,6 +1055,197 @@ class FindingAPI(unittest.TestCase):
             self.assertEqual(response.status, 200, response.text)
             self.assertEqual([r['revision'] for r in response.body['revisions']], list(range(first, first+100)))
         self.call(method='GET', user='xreader', path=self.path+'/'+capped+'/revisions', status=404)
+
+    # ---- S2-L1 saved locations, version 2 records and the schema handshake -------------------------
+    def schema_call(self, method, path, user='xauthor', body=None, schema='2'):
+        """(status, response X-KIN-Finding-Schema, body) of a request that names (or omits) the record format."""
+        headers = {'Accept': 'application/json', 'Authorization': 'Bearer '+self.stack.token(user)}
+        if schema is not None: headers['X-KIN-Finding-Schema'] = schema
+        data = None
+        if body is not None: data = json.dumps(body).encode('utf-8'); headers['Content-Type'] = 'application/json'
+        request = urllib.request.Request(self.stack.api+path, data=data, headers=headers, method=method)
+        try:
+            with self.stack._open(request) as response:
+                return response.status, response.headers.get('X-KIN-Finding-Schema'), json.loads(response.read() or b'null')
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers.get('X-KIN-Finding-Schema'), json.loads(error.read() or b'null')
+
+    def v2(self, sources, characteristics='', title='위치 소견', text='', primary=0, request_id=None):
+        refs = [dict(itemId=s['id'], revision=s['revision']) if 'item' in s else s for s in sources]
+        return dict(requestId=request_id or str(uuid.uuid4()), item=dict(schemaVersion=2, title=title, text=text,
+                    characteristics=characteristics, sources=refs, primary=primary))
+
+    def saved_job(self, studies, user='doctor'):
+        self.addCleanup(self.clear_jobs, studies[0].uid)
+        return self.call(body=self.job_command(studies), user=user, path='/studies/'+studies[0].uid+'/viewer-jobs')
+
+    def revise_job(self, study, job, status=200, **changes):
+        body = dict(expectedRevision=job['revision'], title=job['title'], description=job['description'], hidden=job['hidden'], reason='')
+        body.update(changes)
+        return self.call(body=body, user='doctor', path='/studies/'+study.uid+'/viewer-jobs/'+job['id']+'/revisions', status=status)
+
+    def job_copy(self, job, studies, anchor):
+        return dict(kind='job', jobId=job['id'], revision=job['revision'], jobStudyUid=anchor, studyUid=studies[1] if len(studies) > 1 else studies[0],
+                    studies=studies, snapshotVersion=1, title=job['title'], authorActor=job['authorActor'], mark=None)
+
+    # ---- TEST-S2-API-11 (S2-L1 §2.3, R5, version rule, E1) ----------------------------------------
+    def test_11_saved_views_version_two_handshake_version_rule_and_exact_copies(self):
+        anchor, prior = self.study(self.uid, self.slices), self.comparison()
+        length = self.length_item(); length['baseline']['values'] = [-0.33113281957650276]
+        x = self.item_in(anchor, length)
+        view = self.saved_job([anchor])
+        pair = self.saved_job([anchor, prior])
+        original = self.report_rows()
+        # A version 2 record with characteristics links a one-study saved view and a two-study one (projection = comparison).
+        created = self.v2([x, dict(jobId=view['id'], revision=1), dict(jobId=pair['id'], revision=1)], characteristics='경계 불명확 😀'*3, primary=1)
+        status, header, head = self.schema_call('POST', self.path, body=created)
+        self.assertEqual((status, header), (200, '2'), head)
+        self.assertEqual(head['item']['schemaVersion'], 2); self.assertEqual(head['item']['characteristics'], '경계 불명확 😀'*3)
+        self.assertEqual(head['item']['sources'][1:], [self.job_copy(view, [self.uid], self.uid), self.job_copy(pair, [self.uid, prior.uid], self.uid)])
+        # E1: the 17-digit copied value is the item row's own text, in the stored revision and in every answer.
+        item_text = psql(f'''SELECT snapshot->'baseline'->'values'->>0 FROM "ViewerItem" WHERE id={literal(x['id'])}::uuid''')
+        copy_text = psql(f'''SELECT snapshot->'sources'->0->'values'->>0 FROM "FindingRevision" WHERE "findingId"={literal(head['id'])}::uuid''')
+        self.assertEqual(copy_text, item_text); self.assertEqual(copy_text, ['-0.33113281957650276'])
+        self.assertEqual(repr(head['item']['sources'][0]['values'][0]), copy_text[0])
+        # R5: without the request header a page or history holding version 2 is refused whole; with it both are served.
+        for path in (self.path+'?includeHidden=true', self.path+'/'+head['id']+'/revisions'):
+            status, header, body = self.schema_call('GET', path, schema=None)
+            self.assertEqual((status, header, body['code']), (409, '2', 'FINDING_CLIENT_OUTDATED'), path)
+            self.assertNotIn('경계', json.dumps(body, ensure_ascii=False))
+        status, header, listed = self.schema_call('GET', self.path+'?includeHidden=true')
+        self.assertEqual((status, header), (200, '2'))
+        self.assertEqual(listed['items'][0]['links'], [dict(itemId=x['id'], linkState='current', headRevision=1, headHidden=False),
+            dict(jobId=view['id'], markId=None, linkState='current', headRevision=1, headHidden=False),
+            dict(jobId=pair['id'], markId=None, linkState='current', headRevision=1, headHidden=False)])
+        self.assertEqual(repr(listed['items'][0]['item']['sources'][0]['values'][0]), copy_text[0])
+        status, _, history = self.schema_call('GET', self.path+'/'+head['id']+'/revisions')
+        self.assertEqual((status, [r['item'] for r in history['revisions']]), (200, [head['item']]))
+        # A study whose pages hold only version 1 records is unchanged for a shipped client, and a service refusal names the format too.
+        status, header, empty = self.schema_call('GET', prior.path, schema=None)
+        self.assertEqual((status, header, empty['items']), (200, '2', []))
+        status, header, _ = self.schema_call('GET', self.path+'/'+str(uuid.uuid4())+'/revisions')
+        self.assertEqual((status, header), (404, '2'))
+        # Metadata changes: the link reads metadata-changed, then hidden; a stale pair is refused with the Job named.
+        renamed = self.revise_job(anchor, view, title='새 제목')
+        stale = self.v2([dict(jobId=view['id'], revision=1)])
+        status, _, refused = self.schema_call('POST', self.path, body=stale)
+        self.assertEqual((status, refused['code'], refused['jobId'], refused['headRevision'], refused['headHidden']), (409, 'FINDING_SOURCE_STALE', view['id'], 2, False))
+        links = lambda: self.schema_call('GET', self.path+'?includeHidden=true')[2]['items'][0]['links'][1]
+        self.assertEqual((links()['linkState'], links()['headRevision']), ('metadata-changed', 2))
+        # A refresh re-copies the title only; the location it names is the frozen one.
+        refresh = dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=dict(created['item'], sources=[
+            dict(itemId=x['id'], revision=1), dict(jobId=view['id'], revision=2), dict(jobId=pair['id'], revision=1)]))
+        status, _, refreshed = self.schema_call('POST', self.path+'/'+head['id']+'/revisions', body=refresh)
+        self.assertEqual(status, 200, refreshed)
+        self.assertEqual(refreshed['item']['sources'][1], dict(self.job_copy(renamed, [self.uid], self.uid)))
+        self.assertEqual(refreshed['item']['sources'][0], head['item']['sources'][0], 'the item copy stays byte-equal')
+        hidden_view = self.revise_job(anchor, renamed, hidden=True, reason='숨김 확인')
+        self.assertEqual(links()['linkState'], 'hidden')
+        status, _, refused = self.schema_call('POST', self.path, body=self.v2([dict(jobId=view['id'], revision=hidden_view['revision'])]))
+        self.assertEqual((status, refused['code'], refused['headHidden']), (409, 'FINDING_SOURCE_STALE', True))
+        # W1-W4: an unknown Job, one anchored on the comparison study and a point on a version 1 Job.
+        elsewhere = self.saved_job([prior])
+        unknown = self.schema_call('POST', self.path, body=self.v2([dict(jobId=str(uuid.uuid4()), revision=1)]))
+        self.assertEqual((unknown[0], unknown[2]['message']), (404, '연결할 저장 작업이 이 검사에 없습니다'))
+        foreign = self.schema_call('POST', self.path, body=self.v2([dict(jobId=elsewhere['id'], revision=1)]))
+        self.assertEqual((foreign[0], foreign[2]), (unknown[0], unknown[2]), 'a Job of another anchor is an unknown Job')
+        mark = self.schema_call('POST', self.path, body=self.v2([dict(jobId=pair['id'], revision=1, markId=str(uuid.uuid4()))]))
+        self.assertEqual((mark[0], mark[2]['code']), (400, 'FINDING_JOB_MARK'))
+        # One comparison study for life: a head that names P through a saved view cannot add P2.
+        second = self.comparison(label='second')
+        p2 = self.item_in(second, self.key_item(0, slices=second.slices))
+        status, _, refused = self.schema_call('POST', self.path+'/'+head['id']+'/revisions', body=dict(requestId=str(uuid.uuid4()), expectedRevision=2,
+            action='edit', item=dict(refresh['item'], sources=[dict(itemId=x['id'], revision=1), dict(itemId=p2['id'], revision=1)])))
+        self.assertEqual((status, refused['code']), (409, 'FINDING_COMPARISON_STUDY'))
+        # Version rule: a shipped (version 1) edit or hide of a version 2 record is refused; a version 2 hide keeps the content.
+        items_only, v1_create = self.create([x], user='xauthor')
+        promoted_request = self.v2([x], characteristics='승격', title=items_only['item']['title'], text=items_only['item']['text'])
+        status, _, promoted = self.schema_call('POST', self.path+'/'+items_only['id']+'/revisions', body=dict(promoted_request, expectedRevision=1, action='edit'))
+        self.assertEqual((status, promoted['item']['schemaVersion'], promoted['revision']), (200, 2, 2))
+        before = self.state()
+        self.revise(promoted, 'edit', user='xauthor', status=409, item=self.edit_body([x], title=promoted['item']['title']))
+        refused, _ = self.revise(promoted, 'hide', reason='숨김', user='xauthor', status=409)
+        self.assertEqual(refused['code'], 'FINDING_SCHEMA_VERSION')
+        v2_hide = dict(requestId=str(uuid.uuid4()), expectedRevision=2, action='hide', reason='숨김', item=promoted_request['item'])
+        changed = dict(v2_hide, requestId=str(uuid.uuid4()), item=dict(promoted_request['item'], characteristics='바뀜'))
+        status, _, refused = self.schema_call('POST', self.path+'/'+items_only['id']+'/revisions', body=changed)
+        self.assertEqual((status, refused['code']), (409, 'FINDING_SCHEMA_VERSION'))
+        self.assertEqual(self.state(), before)
+        status, _, hidden = self.schema_call('POST', self.path+'/'+items_only['id']+'/revisions', body=v2_hide)
+        self.assertEqual((status, hidden['hidden'], hidden['item']['characteristics']), (200, True, '승격'))
+        # The recorded version 1 create and the version 2 promotion replay as recorded after the record changed again.
+        self.assertEqual(self.call(body=v1_create, user='xauthor'), items_only)
+        status, _, replayed = self.schema_call('POST', self.path+'/'+items_only['id']+'/revisions', body=dict(promoted_request, expectedRevision=1, action='edit'))
+        self.assertEqual((status, replayed), (200, promoted))
+        self.assertEqual(self.report_rows(), original)
+
+    # ---- TEST-S2-API-12 (S2-L1 R6 malformed lineage rows, job-hide and revocation races) -------------
+    def test_12_malformed_job_copies_are_unreadable_and_races_serialize(self):
+        anchor, prior = self.study(self.uid, self.slices), self.comparison()
+        x = self.item_in(anchor, self.length_item())
+        pair = self.saved_job([anchor, prior])
+        good, _ = self.create([x], user='xauthor')
+        status, _, linked = self.schema_call('POST', self.path, body=self.v2([x, dict(jobId=pair['id'], revision=1)]))
+        self.assertEqual(status, 200, linked)
+        copy = linked['item']['sources'][1]
+        # R6: rows the service never writes, seeded as a version 2 revision and head. Each is unreadable even to a reader of every study.
+        uid, third = literal(self.uid), self.comparison(label='third')
+        malformed = {'three studies': dict(studies=[self.uid, prior.uid, third.uid]), 'duplicate': dict(studies=[self.uid, prior.uid, prior.uid]),
+                     'empty': dict(studies=[]), 'scalar': dict(studies=self.uid), 'projection is the anchor': dict(studyUid=self.uid),
+                     'anchor is the comparison': dict(jobStudyUid=prior.uid), 'reversed': dict(studies=[prior.uid, self.uid]), 'number': dict(studies=[self.uid, 7]),
+                     'missing studies': dict(studies=None)}
+        seeded = {}
+        for name, patch in malformed.items():
+            bad = dict(copy, **patch)
+            if patch.get('studies', 0) is None: del bad['studies']
+            snapshot = literal(json.dumps(dict(schemaVersion=2, title='SYNTHETIC '+name, text='', characteristics='', hidden=False, primary=0, sources=[bad])))
+            fid = str(uuid.uuid4()); seeded[name] = fid
+            psql(f'''INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
+                VALUES ({literal(fid)}::uuid,{uid},'SYNTHETIC','SYNTHETIC',1,false,{snapshot}::jsonb,now())''')
+            psql(f'''INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes")
+                VALUES ({literal(fid)}::uuid,1,{snapshot}::jsonb,'create','','SYNTHETIC','SYNTHETIC',{literal(str(uuid.uuid4()))}::uuid,{literal('0'*64)},
+                octet_length(convert_to({snapshot}::jsonb::text,'UTF8')))''')
+        self.addCleanup(lambda: psql(f'''DELETE FROM "FindingRevision" WHERE "findingId" IN (SELECT id FROM "Finding" WHERE "studyUid"={uid} AND "authorSub"='SYNTHETIC');
+            DELETE FROM "Finding" WHERE "studyUid"={uid} AND "authorSub"='SYNTHETIC' '''))
+        def listed(user):
+            status, _, body = self.schema_call('GET', self.path+'?includeHidden=true&limit=100', user=user)
+            self.assertEqual(status, 200, body); return {i['id'] for i in body['items']}
+        for user in ('doctor', 'xauthor'):
+            ids = listed(user)
+            self.assertIn(linked['id'], ids); self.assertIn(good['id'], ids)
+            for name, fid in seeded.items():
+                self.assertNotIn(fid, ids, name)
+                status, _, body = self.schema_call('GET', self.path+'/'+fid+'/revisions', user=user)
+                self.assertEqual((status, body['message']), (404, '소견이 없습니다'), name)
+        # A reader restricted to X loses the finding that names P through its saved view; a well-formed copy stays readable otherwise.
+        self.access('xreader', [self.uid])
+        self.assertEqual(listed('xreader'), {good['id']})
+        self.access('xreader')
+        # Job hide racing a link: whichever commits first, the finding never copies a hidden Job.
+        view = self.saved_job([anchor])
+        link = self.v2([dict(jobId=view['id'], revision=1)])
+        hide = dict(expectedRevision=1, title=view['title'], description=view['description'], hidden=True, reason='경합 숨김')
+        headers = {'X-KIN-Finding-Schema': '2'}
+        before = self.state()
+        created, hidden = self.locked_request(self.uid, [('POST', self.path, 'xauthor', link),
+                                                         ('POST', '/studies/'+self.uid+'/viewer-jobs/'+view['id']+'/revisions', 'doctor', hide)])
+        self.assertEqual(hidden.status, 200, hidden.text)
+        if created.status == 200:
+            state = self.schema_call('GET', self.path+'?includeHidden=true&limit=100')[2]['items']
+            self.assertEqual(next(i for i in state if i['id'] == created.body['id'])['links'][0]['linkState'], 'hidden')
+        else:
+            self.assertEqual((created.status, created.body['code'], created.body['headHidden']), (409, 'FINDING_SOURCE_STALE', True))
+            self.assertEqual(self.state(tables=('Finding', 'FindingRevision')), dict((t, before[t]) for t in ('Finding', 'FindingRevision')))
+        print(f'S2-L1 job-hide race: link answered {created.status}', flush=True)
+        # Revocation racing a link: P becomes unreadable while the link waits on P's row; the answer is an unknown Job and nothing is written.
+        unknown = self.schema_call('POST', self.path, body=self.v2([dict(jobId=str(uuid.uuid4()), revision=1)]))
+        saved, before = self.boundary(prior.uid), (self.state(), self.state(prior.uid))
+        try:
+            [revoked] = self.locked_request(prior.uid, [('POST', self.path, 'xauthor', self.v2([dict(jobId=pair['id'], revision=1)]))],
+                f"UPDATE \"StudyState\" SET rs='P', \"preDoc\"='SYNTHETIC-A', \"preReviewer\"='SYNTHETIC-B' WHERE uid={literal(prior.uid)};")
+        finally: self.restore_boundary(prior.uid, saved)
+        self.assertEqual((revoked.status, revoked.body), (unknown[0], unknown[2]))
+        self.assertEqual((self.state(), self.state(prior.uid)), before)
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')

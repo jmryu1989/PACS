@@ -248,7 +248,8 @@ jobs:
   volume-path:
     # A third MPR suite group, not extra suites inside volume-mpr or volume-slab, whose caps stay
     # as they are. The manual 3D path suite and the double-oblique orientation suite share this
-    # runner; the profile's per-suite caps (420+35)+(300+35) = 790s bound the live step.
+    # runner, and so does the finding 3D point location suite; the profile's per-suite caps
+    # (420+35)+(300+35)+(360+35) = 1185s bound the live step.
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -269,7 +270,7 @@ jobs:
         timeout-minutes: 5
         run: python3 scripts/record-run.py --run-dir tmp/path-ci/path-dom --cwd . --file worklist-v0/hpacs-lite/volume-path.js --file worklist-v0/hpacs-lite/viewer-volume-path.js --file tests/viewer_volume_path_dom_test.py -- "$RUNNER_TEMP/path-python/bin/python" -B tests/viewer_volume_path_dom_test.py
       - name: Confirm exact declared path and orientation selection
-        run: python3 scripts/record-run.py --run-dir tmp/path-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_path.py --file tests/e2e/test_volume_orientation.py -- "$RUNNER_TEMP/path-python/bin/python" -B tests/execution_selection_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/path-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_volume_path.py --file tests/e2e/test_volume_orientation.py --file tests/e2e/test_finding_locations.py -- "$RUNNER_TEMP/path-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared 3D path and orientation tests
         timeout-minutes: 28
         run: |

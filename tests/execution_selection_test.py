@@ -229,7 +229,13 @@ class ExecutionSelectionTests(unittest.TestCase):
                       'test_path_02_go_to_path_point_native_planes_pixels_and_rotation_semantics'}),
                     ('e2e/test_volume_orientation.py', 'VolumeOrientationE2E',
                      'test_orientation_', 'ci-mpr-orientation', 6,
-                     {'test_orientation_01_double_oblique_pixels_reset_and_saved_reopen'})]
+                     {'test_orientation_01_double_oblique_pixels_reset_and_saved_reopen'}),
+                    # S2-L: the finding location suite inherits every marks case; only its own three run here.
+                    ('e2e/test_finding_locations.py', 'FindingLocationsE2E',
+                     'test_location_', 'ci-finding-location', 3,
+                     {'test_location_01_prior_point_link_new_login_continuation_and_exact_arrival',
+                      'test_location_02_refusals_metadata_hidden_sync_off_and_server_matrix',
+                      'test_location_03_same_document_restore_keeps_finding_drafts_and_withdrawal_removes_the_finding'})]
         self.assertEqual([row[0] for row in profile['suites']], [row[0] for row in expected])
         self.assertEqual([row[2] for row in profile['suites']], [row[3] for row in expected])
         for (suite, class_name, unit), (_, cls_name, prefix, _, count, required) in zip(

@@ -576,8 +576,18 @@ function worklist() {
   const region = document.createElement('div'); region.className = 'panel related-p';
   const tabs = document.createElement('div'); tabs.id = 'reltabs'; region.append(tabs); document.body.append(region);
   for (const name of ['finding-link-model.js', 'viewer-windows.js', 'finding-command.js', 'reading-findings.js']) vm.runInContext(shipped(name), ctx, { filename: name });
-  const s = { selected: X, allowed: true, owner: OWNER, sub: SUB, target: null, rows: () => [], api: [], popups: [], opened: [],
+  const s = { selected: X, allowed: true, owner: OWNER, sub: SUB, target: null, rows: () => [], api: [], popups: [], opened: [], fetched: [], schema: '2',
     respond: p => Promise.resolve(p.includes(encodeURIComponent(X)) ? page([finding()]) : page([])) };
+  // S2-L R5: the panel reads its list itself with the schema request header (the host api has no header option). This transport
+  // answers those reads from s.respond as the current API (with its schema response header, unless s.schema is changed) and
+  // records them in s.api exactly where host api reads were recorded; a rejection {status} becomes that HTTP status.
+  sandbox.fetch = async (url, init) => {
+    const p = String(url).replace(/^\/api/, '');
+    s.api.push([init && init.method || 'GET', p]); s.fetched.push({ url: String(url), init });
+    const headers = { get: name => String(name).toLowerCase() === 'x-kin-finding-schema' ? s.schema : null };
+    try { const body = await s.respond(p); return { status: 200, ok: true, headers, json: async () => body }; }
+    catch (error) { return { status: error && error.status || 500, ok: false, headers, json: async () => ({ message: 'refused' }) }; }
+  };
   const app = {
     current: () => s.selected, allowed: () => s.allowed, owner: () => s.owner, sub: () => s.sub,
     api: (method, p) => { s.api.push([method, p]); return s.respond(p); },
@@ -1346,4 +1356,290 @@ test('wiring: the worklist loads the modules in order, mounts once, follows sele
   assert.equal(ui.split("app.api('GET', path)").length - 1, 1, 'the only request is the list read');
   assert.ok(ui.includes('const navigate = w.kinViewerHistoryNavigate;'), 'navigate is read at call time');
   assert.equal(ui.split('kinViewerHistoryNavigate').length - 1, 2);
+});
+/* ---------- S2-L saved locations and S2-C live facts in the worklist (TEST-S2L-WORKLIST) ----------
+ * finding-command.js directly and the shipped panel in the worklist realm; the viewer's kinViewerJobLocation is a double of its own realm. */
+const WJ = 'dddddddd-0000-4000-8000-000000000001', WM = 'dddddddd-0000-4000-8000-000000000002', WV = 'dddddddd-0000-4000-8000-000000000003';
+const WHEX = 'f'.repeat(64);
+const wPoint = extra => Object.assign({ kind: 'job', jobId: WJ, revision: 1, jobStudyUid: X, studyUid: X, studies: [X], snapshotVersion: 6, title: 'MPR 위치', authorActor: 'Doctor A',
+  mark: { id: WM, label: '결절', point: [-0.33113281957650276, 2, 3], volume: { study: X, series: SERIES, frameOfReferenceUid: '1.2.3', sourceDigest: WHEX, sopCount: 33 } } }, extra);
+const wView = extra => wPoint(Object.assign({ jobId: WV, mark: null, snapshotVersion: 2, studies: [X, P], studyUid: P, title: '비교 배치' }, extra));
+function v2Finding(extra, sources) {
+  const s = sources || [source(), wPoint(), wView()];
+  const f = finding(extra, s);
+  f.item = { ...f.item, schemaVersion: 2, characteristics: '경계 불명확' };
+  f.links = s.map(x => x && x.kind === 'job' ? { jobId: x.jobId, markId: x.mark ? x.mark.id : null, linkState: 'current', headRevision: x.revision, headHidden: false }
+    : { itemId: x && x.itemId, linkState: 'current', headRevision: x && x.revision, headHidden: false });
+  return f;
+}
+
+test('S2-L rows: version 2 characteristics and saved locations are read field by field; one bad copy invalidates the page', () => {
+  const item = v2Finding();
+  item.links[2] = { jobId: WV, markId: null, linkState: 'metadata-changed', headRevision: 4, headHidden: false };
+  const row = command.rowOf(freeze(item), X);
+  assert.deepEqual([row.schemaVersion, row.characteristics, row.comparison], [2, '경계 불명확', P]);
+  assert.deepEqual(row.sources.map(s => [s.kind, s.linkState, s.linkLabel, s.foreign, s.description]), [
+    ['length', 'current', 'Current', false, 'Length · 길이 · 프레임 1 · r1 · 20.0 mm'],
+    ['job', 'current', 'Current', false, '3D Point · 결절 · MPR 위치 · v6 · r1'],
+    ['job', 'metadata-changed', 'Details Changed', true, 'Saved View · 비교 배치 · v2 · r1']]);
+  assert.equal(row.sources[2].headRevision, 4);
+  assert.ok(row.sources[2].linkText.includes('제목·설명만'));
+  assert.deepEqual(plain(row.sources[1].mark), plain(wPoint().mark));
+  assert.equal(row.sources[1].mark.point[0], -0.33113281957650276);
+  assert.deepEqual([command.rowOf(finding(), X).schemaVersion, command.rowOf(finding(), X).characteristics], [1, null]);
+  const bad = [
+    ['version 1 naming a job', finding({}, [wPoint()])],
+    ['version 2 without characteristics', (() => { const f = v2Finding(); delete f.item.characteristics; return f; })()],
+    ['version 3', (() => { const f = v2Finding(); f.item.schemaVersion = 3; return f; })()],
+    ['another anchor', v2Finding({}, [wPoint({ jobStudyUid: B, studies: [B], studyUid: B })])],
+    ['reversed set', v2Finding({}, [wPoint({ studies: [P, X], studyUid: X })])],
+    ['projection is the anchor', v2Finding({}, [wView({ studyUid: X })])],
+    ['point on version 4', v2Finding({}, [wPoint({ snapshotVersion: 4 })])],
+    ['point volume elsewhere', v2Finding({}, [wPoint({ mark: { ...wPoint().mark, volume: { ...wPoint().mark.volume, study: B } } })])],
+    ['digest', v2Finding({}, [wPoint({ mark: { ...wPoint().mark, volume: { ...wPoint().mark.volume, sourceDigest: 'x' } } })])],
+    ['version 16', v2Finding({}, [wView({ snapshotVersion: 16 })])],
+    ['missing mark key', v2Finding({}, [(({ mark, ...rest }) => rest)(wPoint())])],
+    ['two comparison studies', v2Finding({}, [source({ studyUid: B }), wView()])],
+  ];
+  for (const [name, value] of bad) assert.throws(() => command.rowOf(value, X), undefined, name);
+});
+
+test('S2-L target: a saved location needs a viewer whose study list is exactly the Job\'s, in order', () => {
+  const cases = [
+    [{ exact: [X], workspace: ws(), windows: [] }, { kind: 'embedded' }],
+    [{ exact: [X], workspace: ws({ studies: [X, P] }), windows: [win()] }, { kind: 'window', index: 0 }],
+    [{ exact: [X, P], workspace: ws({ studies: [X, P] }) }, { kind: 'embedded' }],
+    [{ exact: [X, P], workspace: ws({ studies: [P, X] }), windows: [win({ studies: [X] })] }, { kind: 'refused', reason: 'saved-view-viewer' }],
+    [{ exact: [X, P], windows: [win({ studies: [X, P, B] })] }, { kind: 'refused', reason: 'saved-view-viewer' }],
+    [{ exact: [X], windows: [win(), win({ index: 1 })] }, { kind: 'refused', reason: 'ambiguous' }],
+    [{ exact: [X], windows: [win({ attached: false, index: 2 })] }, { kind: 'refused', reason: 'unattached', index: 2 }],
+    [{ exact: [X], windows: [win({ owner: 'other' })] }, { kind: 'refused', reason: 'owner' }],
+    [{ exact: [X], workspace: ws({ loaded: false }) }, { kind: 'refused', reason: 'loading' }],
+  ];
+  for (const [snapshot, want] of cases) assert.deepEqual(command.chooseTarget(freeze(Object.assign({ uid: X }, snapshot))), want, JSON.stringify(snapshot));
+  for (const exact of [[P], [P, X], [X, X], [X, 'bad'], [], [X, P, B], 'x'])
+    assert.deepEqual(command.chooseTarget({ uid: X, exact, windows: [win()] }), { kind: 'refused', reason: 'invalid' }, JSON.stringify(exact));
+  assert.deepEqual(command.chooseTarget({ uid: X, exact: [X], comparison: P, windows: [win()] }), { kind: 'refused', reason: 'invalid' });
+  assert.ok(command.reasonText('saved-view-viewer').includes('자동으로 열지 않습니다'));
+  assert.equal(command.retryable('saved-view-viewer'), true); assert.equal(command.openable('saved-view-viewer'), false);
+  assert.equal(command.SCHEMA, 2);
+});
+
+test('S2-L pre-call: a saved location needs the exact scope and the location API, not history navigation or a loaded history', () => {
+  const exp = { ...expected, studies: [X] };
+  assert.equal(command.precheck(view({ location: true }), exp, 'location'), null);
+  assert.equal(command.precheck(view({ location: true, suspended: true }), exp, 'location'), null);
+  assert.equal(command.precheck(view({ location: false }), exp, 'location'), 'tool-missing');
+  assert.equal(command.precheck(view({ location: true, scope: X + ',' + P }), exp, 'location'), 'saved-view-viewer');
+  assert.equal(command.precheck(view({ location: true, scope: X + ',' + P }), { ...expected, studies: [X, P] }, 'location'), null);
+  assert.equal(command.precheck(view({ location: true, modal: true }), exp, 'location'), 'modal');
+  assert.equal(command.precheck(view({ location: true, subject: 'other' }), exp, 'location'), 'owner');
+  assert.equal(command.precheck(view({ location: true, ended: true }), exp, 'location'), 'ended');
+  assert.equal(command.precheck(view({ location: true, navigate: false }), exp, 'location'), null);
+  assert.equal(command.precheck(view({ location: true, suspended: true }), expected), 'busy', 'a 2D source still needs a loaded history');
+});
+
+test('S2-C worklist: the viewer result carries its live entry as primitives and the arrival text names what is drawn', () => {
+  const other = vm.runInNewContext('({ ok: true, highlighted: true, annotation: "shown", present: true, revision: 3, hidden: false, working: true })');
+  const live = { present: true, revision: 3, hidden: false, working: true };
+  assert.deepEqual(plain(command.validResult(other)), { ok: true, highlighted: true, annotation: 'shown', live });
+  assert.deepEqual(plain(command.crossResult(other)), { ok: true, highlighted: true, annotation: 'shown', live });
+  const result = command.validResult(other);
+  assert.equal(command.arrivalText(result, '영상 창 1', source()), '영상 이동 확인 · 영상 창 1 · ' + links.LIVE_TEXT.revised(3, 1) + ' ' + links.LIVE_TEXT.working);
+  assert.equal(command.arrivalText(result, '영상 창 1'), '영상 이동 확인 · 영상 창 1', 'without the pressed source no note is made');
+  const current = command.validResult({ ok: true, highlighted: true, annotation: 'shown', present: true, revision: 1, hidden: false, working: false });
+  assert.equal(command.arrivalText(current, '영상 창 1', source()), '영상 이동 확인 · 영상 창 1');
+});
+
+function locationJob(o) {
+  const log = [], announced = [];
+  const state = { view: view(Object.assign({ location: true }, o && o.view)),
+    answer: o && 'answer' in o ? o.answer : Promise.resolve({ state: 'restored', message: 'MPR 작업을 복원했습니다.', point: 'all-planes' }) };
+  const choice = { kind: 'window', label: '영상 창 1',
+    probe: () => { log.push('probe'); return { ...state.view }; },
+    invoke: () => { throw new Error('a saved location never uses history navigation'); },
+    restore: request => { log.push(['restore', plain(request)]); if (state.throwRestore) throw new Error('sync'); return state.answer; } };
+  const value = { expected, source: o && 'source' in o ? o.source : wPoint(),
+    choose: () => { log.push('choose'); return o && 'choice' in o ? o.choice : choice; },
+    announce: (result, picked) => announced.push({ result: plain(result), label: picked ? picked.label : null }) };
+  return { value, log, announced, state, choice };
+}
+
+test('S2-L command: the request is the frozen copy made at the call; outcomes are copied; refusals come before the call', async () => {
+  const c = clock(), nav = command.createNavigator(c);
+  const j = locationJob();
+  const result = await nav.run(j.value);
+  assert.deepEqual(plain(result), { ok: true, reason: null, state: 'restored', message: 'MPR 작업을 복원했습니다.', point: 'all-planes', pointMessage: '',
+    metadataRevision: null, snapshotVersion: null, latest: true });
+  assert.deepEqual(j.log, ['choose', 'probe', ['restore', { subject: SUB, jobId: WJ, revision: 1, snapshotVersion: 6, studies: [X], mode: 'same-document', mark: plain(wPoint().mark) }], 'probe']);
+  assert.equal(command.locationText(result, wPoint(), '영상 창 1'), '저장 위치 확인 · 영상 창 1 · 3D 표식 위치로 이동했습니다. MPR 작업을 복원했습니다.');
+  const cases = [
+    [{ source: wPoint({ studies: [P] }) }, 'invalid', []],
+    [{ source: wPoint({ jobStudyUid: B, studies: [B], studyUid: B }) }, 'invalid', []],
+    [{ choice: { kind: 'refused', reason: 'saved-view-viewer' } }, 'saved-view-viewer', ['choose']],
+    [{ choice: null }, 'saved-view-viewer', ['choose']],
+    [{ view: { location: false } }, 'tool-missing', ['choose', 'probe']],
+    [{ view: { scope: X + ',' + P } }, 'saved-view-viewer', ['choose', 'probe']],
+    [{ view: { subject: 'other' } }, 'owner', ['choose', 'probe']],
+  ];
+  for (const [options, reason, log] of cases) {
+    const k = locationJob(options);
+    assert.deepEqual(await nav.run(k.value), { ok: false, reason, latest: true }, reason);
+    assert.deepEqual(k.log, log, reason);
+  }
+  const thrown = locationJob(); thrown.state.throwRestore = true;
+  assert.deepEqual(await nav.run(thrown.value), { ok: false, reason: 'tool-missing', latest: true });
+  const rejected = await nav.run(locationJob({ answer: Promise.reject(new Error('x')) }).value);
+  assert.deepEqual([rejected.ok, rejected.reason, rejected.state], [false, 'tool-missing', 'screen-unknown']);
+  for (const [answer, state, text] of [
+    [{ state: 'refused', reason: 'job-hidden', message: '연결한 저장 작업이 숨겨져 있어 복원하지 않았습니다. 영상은 바꾸지 않았습니다.' }, 'refused', '연결한 저장 작업이 숨겨져 있어 복원하지 않았습니다. 영상은 바꾸지 않았습니다.'],
+    [{ state: 'rolled-back', reason: 'apply-failed', message: 'x' }, 'rolled-back', links.LOCATION_TEXT.rolledBack + ' x'],
+    [vm.runInNewContext('({ state: "weird" })'), 'screen-unknown', links.LOCATION_TEXT.unknown],
+    [{ state: 'restored', point: 'failed', pointMessage: '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.' }, 'restored', '저장 위치 확인 · 영상 창 1 · 저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.']]) {
+    const k = locationJob({ answer: Promise.resolve(answer) });
+    const outcome = await nav.run(k.value);
+    assert.equal(outcome.state, state);
+    assert.equal(command.locationText(outcome, wPoint(), '영상 창 1'), text);
+    assert.equal(outcome.ok, false, JSON.stringify(answer));
+  }
+  // N1: ok only when the requested point was reached; the failed point keeps its composite outcome and the viewer's reason.
+  const oneView = wView({ studies: [X], studyUid: X });
+  for (const [answer, source, ok, result] of [
+    [{ state: 'restored', point: 'all-planes' }, wPoint(), true, 'ok'],
+    [{ state: 'restored', point: 'source-plane' }, wPoint(), true, 'ok'],
+    [{ state: 'restored', point: 'failed', reason: 'point-mismatch' }, wPoint(), false, 'point-failed'],
+    [{ state: 'restored', point: 'failed', reason: 'tool-missing' }, wPoint(), false, 'point-failed'],
+    [{ state: 'restored', point: 'none' }, wPoint(), false, 'point-failed'],
+    [{ state: 'restored', point: 'none' }, oneView, true, 'ok'],
+    [{ state: 'rolled-back', reason: 'apply-failed' }, oneView, false, 'rolled-back'],
+    [{ state: 'screen-unknown', reason: 'apply-failed' }, oneView, false, 'apply-failed'],
+    [{ state: 'continuing' }, oneView, false, 'continuing']]) {
+    const k = locationJob({ answer: Promise.resolve(answer), source });
+    const outcome = await nav.run(k.value);
+    assert.deepEqual([outcome.ok, outcome.state, outcome.point, outcome.reason], [ok, answer.state, answer.point || 'none', answer.reason || null], JSON.stringify(answer));
+    assert.deepEqual([command.locationResult(outcome, source), k.announced[0].result.ok], [result, ok], JSON.stringify(answer));
+  }
+  assert.deepEqual([command.locationResult({ ok: false, reason: 'saved-view-viewer' }, wPoint()), command.locationResult({ ok: false, reason: 'restore-timeout', state: 'screen-unknown' }, wPoint())],
+    ['saved-view-viewer', 'restore-timeout']);
+});
+
+test('S2-L command B4: 270 s is an unknown result; nothing else runs until the viewer answers or its document ends', async () => {
+  const c = clock(), nav = command.createNavigator(c), d = deferred(), j = locationJob({ answer: d.promise });
+  const running = nav.run(j.value);
+  await c.advance(269999); assert.equal(j.announced.length, 0);
+  await c.advance(1);
+  const timed = await running;
+  assert.deepEqual([timed.ok, timed.reason, timed.state], [false, 'restore-timeout', 'screen-unknown']);
+  assert.equal(command.locationText(timed, wPoint(), '영상 창 1'), command.reasonText('restore-timeout'));
+  assert.equal(nav.restoring(), true, 'still waiting for the viewer after the backstop');
+  const item = job();
+  assert.deepEqual(await nav.run(item.value), { ok: false, reason: 'restore-pending', latest: true });
+  assert.equal(invoked(item.log), 0);
+  const second = locationJob();
+  assert.equal((await nav.run(second.value)).reason, 'restore-pending'); assert.deepEqual(second.log, []);
+  nav.cancel();
+  assert.equal(nav.restoring(), true, 'a selection change does not release it');
+  d.resolve({ state: 'restored', point: 'all-planes' }); await flush();
+  assert.equal(nav.restoring(), false);
+  assert.equal(j.announced.length, 1, 'the late answer is not announced');
+  assert.equal((await nav.run(job().value)).ok, true, 'the next command runs');
+  // A document replaced while the restore is pending: superseded, and that document can no longer be changed by it.
+  const e = deferred(), k = locationJob({ answer: e.promise });
+  const pending = nav.run(k.value);
+  await c.advance(250);
+  assert.equal(nav.restoring(), true);
+  k.state.view.document = {};
+  await c.advance(250);
+  assert.equal((await pending).reason, 'superseded');
+  assert.equal(nav.restoring(), false);
+  // A history reload during the restore is tolerated.
+  const f = deferred(), m = locationJob({ answer: f.promise });
+  const reloading = nav.run(m.value);
+  m.state.view.suspended = true;
+  await c.advance(250);
+  f.resolve({ state: 'restored', message: '', point: 'none' });
+  assert.equal((await reloading).state, 'restored');
+});
+
+function locationViewerRealm() {
+  const ctx = viewer();
+  vm.runInContext(`
+    this.restores = []; this.restoreGates = [];
+    this.kinViewerJobLocation = { version: 1, owns: () => false, shown: () => null,
+      restore: request => { this.restores.push(JSON.stringify(request)); if (this.holdRestore) return new Promise(resolve => this.restoreGates.push(resolve));
+        return Promise.resolve({ state: 'restored', message: 'MPR 작업을 복원했습니다.', point: 'all-planes', pointMessage: '', metadataRevision: null, snapshotVersion: 6 }); } };
+  `, ctx);
+  return ctx;
+}
+
+test('adapter locations: the list read names the record format; characteristics and locations are listed; a location restores only in the exact viewer', async () => {
+  const h = worklist(), v = locationViewerRealm();
+  let studies = [X];
+  const frame = h.embed(v, () => ({ studies }));
+  h.s.respond = () => Promise.resolve(page([v2Finding()]));
+  await h.open();
+  assert.deepEqual(h.s.fetched.map(f => [f.url, f.init.method, f.init.headers['X-KIN-Finding-Schema'], f.init.headers['X-KIN-CSRF'], f.init.credentials]),
+    [['/api/studies/' + X + '/findings?includeHidden=false&limit=100', 'GET', '2', '1', 'same-origin']]);
+  const article = h.articles()[0];
+  assert.ok(article.all().some(e => e.dataset.kinCharacteristics === '' && e.textContent === 'Characteristics (병변 특성): 경계 불명확'));
+  const list = () => h.articles()[0].children.find(e => e.tagName === 'ul').children;
+  assert.deepEqual(list().map(e => [e.dataset.sourceKind || 'item', e.dataset.sourceStudy, e.dataset.jobId || e.dataset.itemId]),
+    [['item', 'current', ITEM1], ['point', 'current', WJ], ['view', 'comparison', WV]]);
+  assert.equal(h.named(list()[1], 'Go to 3D Point').length, 1); assert.equal(h.named(list()[2], 'Open Saved View').length, 1);
+  assert.equal(h.named(list()[1], 'Go to Image').length, 0);
+  await h.click(h.named(list()[1], 'Go to 3D Point')[0]); await settle(h);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent], ['ok', '저장 위치 확인 · 통합 작업공간 · 3D 표식 위치로 이동했습니다. MPR 작업을 복원했습니다.']);
+  assert.deepEqual(Array.from(v.restores, r => JSON.parse(r)), [{ subject: SUB, jobId: WJ, revision: 1, snapshotVersion: 6, studies: [X], mode: 'same-document', mark: plain(wPoint().mark) }]);
+  assert.deepEqual([v.calls.length, frame.focused, v.focused], [0, 1, 1]);
+  // The two-study saved view: the embedded viewer shows only the selected study, so nothing is restored and Retry is offered.
+  await h.click(h.named(list()[2], 'Open Saved View')[0]);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent, v.restores.length], ['saved-view-viewer', command.reasonText('saved-view-viewer'), 1]);
+  assert.equal(h.named(h.panel(), 'Retry Go to Image')[0].hidden, false);
+  studies = [X, P];
+  await h.click(h.named(h.panel(), 'Retry Go to Image')[0]); await settle(h);
+  assert.equal(h.result().dataset.result, 'ok');
+  assert.deepEqual(JSON.parse(v.restores[1]), { subject: SUB, jobId: WV, revision: 1, snapshotVersion: 2, studies: [X, P], mode: 'same-document', mark: null });
+  // N1: the view restored but the 3D point was not reached: the text is unchanged, the result is point-failed (never ok),
+  // no Retry is offered for the changed screen and that viewer still gets the focus.
+  studies = [X]; v.holdRestore = true;
+  const focused = frame.focused;
+  await h.click(h.named(list()[1], 'Go to 3D Point')[0]);
+  v.restoreGates.shift()({ state: 'restored', message: '', point: 'failed', reason: 'point-failed', pointMessage: '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.' });
+  await settle(h);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent], ['point-failed', '저장 위치 확인 · 통합 작업공간 · 저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.']);
+  assert.deepEqual([h.named(h.panel(), 'Retry Go to Image')[0].hidden, frame.focused, v.restores.length], [true, focused + 1, 3]);
+  studies = [X, P];
+  // A restore in progress: the next command of any kind waits for it; the viewer answers for itself.
+  v.holdRestore = true;
+  await h.click(h.named(list()[2], 'Open Saved View')[0]);
+  assert.equal(h.result().textContent, '저장 작업 복원 중…');
+  await h.click(h.named(list()[0], 'Go to Image')[0]);
+  assert.deepEqual([h.result().dataset.result, v.calls.length], ['restore-pending', 0]);
+  v.restoreGates.shift()({ state: 'restored', point: 'none' }); await flush();
+  studies = [X];
+  await h.click(h.named(list()[0], 'Go to Image')[0]); await flush();
+  assert.equal(v.calls.length, 1, 'the 2D source runs once the restore answered');
+});
+
+test('adapter locations: an older API answer is marked, still read-only; a 401 is handed to the worklist session', async () => {
+  const h = worklist(), v = locationViewerRealm();
+  h.embed(v);
+  h.s.schema = null;
+  h.s.respond = () => Promise.resolve(page([finding()]));
+  await h.open();
+  assert.equal(h.articles().length, 1);
+  assert.ok(h.byId('reading-findings-status').textContent.endsWith(links.OLD_API_TEXT));
+  h.s.schema = '2';
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  assert.equal(h.byId('reading-findings-status').textContent.includes(links.OLD_API_TEXT), false);
+  // A 401: the same read goes through the worklist's own request function, which ends the session there.
+  const reads = h.s.api.length;
+  h.s.respond = p => h.s.api.length > reads + 1 ? Promise.reject({ status: 401 }) : Promise.reject({ status: 401 });
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  assert.deepEqual(h.s.api.slice(reads).map(([method]) => method), ['GET', 'GET'], 'the panel read, then the same read by the worklist');
+  assert.equal(h.panel().dataset.state, 'ended');
+  const ui = shipped('reading-findings.js');
+  assert.equal(ui.split("fetch('/api' + path").length - 1, 1, 'one list read of its own');
+  assert.ok(!/'(POST|PUT|PATCH|DELETE)'/.test(ui));
+  assert.ok(ui.includes("const location = w.kinViewerJobLocation;"), 'the location API is read from the chosen document at the call');
 });

@@ -108,7 +108,9 @@ window.kinViewerJobs = function (services, model) {
     }
     function end() { ended = true; serial++; printer?.close(); abort.abort(); me = null; pending = editRow = null; title.value = description.value = ''; list.replaceChildren(); status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
     async function api(url, options = {}) {
-      const { idempotent = false, ...request } = options;
+      // `foreign`: a saved-location restore reads a Job that may name a comparison study; its 403 is that Job's refusal,
+      // and only the anchor list read that follows may end the panel.
+      const { idempotent = false, foreign = false, ...request } = options;
       const controller = new AbortController(), cancel = () => controller.abort(); abort.signal.addEventListener('abort', cancel, { once: true });
       options.signal?.addEventListener('abort', cancel, { once: true });
       if (options.signal?.aborted || abort.signal.aborted) cancel();
@@ -125,7 +127,7 @@ window.kinViewerJobs = function (services, model) {
         let r;
         try { r = await send(); } catch (error) { if (!read || controller.signal.aborted || error?.name !== 'TypeError' || !live()) throw error; r = await send(); }
         if (!live()) throw new Error('화면이 변경되었습니다.');
-        if (r.status === 401 || r.status === 403) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
+        if (r.status === 401 || r.status === 403 && !foreign) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
         const value = await r.json().catch(() => null);
         if (!live()) throw new Error('화면이 변경되었습니다.');
         if (!r.ok || !value) { const e = new Error(typeof value?.message === 'string' ? value.message : '서버 연결을 확인한 뒤 다시 시도하세요.'); e.status = r.status; throw e; }
@@ -248,7 +250,282 @@ window.kinViewerJobs = function (services, model) {
         await applyStackCell(ids[i], cell, current);
       }
       if (!current()) throw new Error('화면이 변경되었습니다.'); grid.setActiveViewportId(ids[value.active]);
+      return ids;
     }
+    // A saved-location restore of a version 1-3 layout proves what the stack cells show before it reports a restore: every
+    // saved cell's original instance and the active cell. Versions 4 and later are proved inside the MPR apply.
+    function readBack(value, ids) {
+      if (!Array.isArray(ids)) return;
+      value.cells.forEach((cell, i) => {
+        if (!cell) return;
+        const v = cs.getCornerstoneViewport(ids[i]), shown = window.cornerstone.metaData.get('instance', v?.getCurrentImageId?.());
+        if (shown?.StudyInstanceUID !== cell.study || shown?.SeriesInstanceUID !== cell.series || shown?.SOPInstanceUID !== cell.sop)
+          throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+      });
+      if (grid.getState().activeViewportId !== ids[value.active]) throw new Error('저장한 영상 위치를 확인하지 못했습니다. 이전 화면을 확인하세요.');
+    }
+    /* One restore for Restore Job, the kinJob page and a finding's saved location (S2-L2a). It returns {state:'restored'|'continuing',
+       message} or throws an Error carrying kinRestore {state, reason}: 'refused' changed nothing on screen, 'rolled-back' applied the
+       saved state, failed and re-applied the previous screen, 'screen-unknown' could prove neither. Every text is the shipped one.
+       `ctx.location` (a finding's request) adds the live pre-read, the frozen-copy checks, the read-back of versions 1-3, the
+       continuation URL and the owned deadline; without it the Restore Job button behaves as it always did. */
+    const outcome = (state, reason, message) => Object.assign(new Error(message), { kinRestore: { state, reason } });
+    const refusal = (reason, message) => outcome('refused', reason, message);
+    const LOCATION_TEXT = {
+      'job-unavailable': '연결한 저장 작업을 볼 수 없거나 더 이상 없어 복원하지 않았습니다. 영상은 바꾸지 않았습니다.',
+      'job-hidden': '연결한 저장 작업이 숨겨져 있어 복원하지 않았습니다. 영상은 바꾸지 않았습니다.',
+      'source-changed': '연결 당시와 저장 작업의 영상 상태나 3D 표식이 달라 복원하지 않았습니다. 영상은 바꾸지 않았습니다.',
+      'job-studies': '이 화면의 검사 조합이 저장 작업과 달라 복원하지 않았습니다. 영상은 바꾸지 않았습니다.',
+      timeout: '제한 시간 안에 저장 작업을 확인하지 못해 복원하지 않았습니다. 영상은 바꾸지 않았습니다.',
+      owner: '다른 계정의 영상 화면이라 복원하지 않았습니다.',
+      busy: '영상 작업 처리가 끝난 뒤 다시 누르세요. 영상은 바꾸지 않았습니다.',
+      ended: '로그인이나 화면이 바뀌어 복원하지 않았습니다.',
+      'tool-missing': '저장 작업 복원 도구가 준비되지 않았습니다. 뷰어를 다시 여세요.',
+      waiting: '영상 로딩을 기다리는 동안 복원하지 않았습니다. 목록의 이 소견 위치로 다시 시도하세요.',
+      continuing: '저장 작업의 검사 조합으로 새 화면을 엽니다. 결과는 새 화면의 이 소견에 표시됩니다.',
+    };
+    const VOLUME_VERSIONS = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let lastJob = null, restoring = null;
+    const sameNumbers = (a, b) => Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((n, i) => n === b[i]);
+    // The frame of reference of a volume's first original from its displayed metadata, when the display set carries it.
+    function shownFrame(volume) {
+      try {
+        const set = ds.getActiveDisplaySets().find(d => d.StudyInstanceUID === volume.study && d.SeriesInstanceUID === volume.series);
+        const image = (set?.images || []).find(i => i.SOPInstanceUID === volume.sops[0]), value = image?.FrameOfReferenceUID;
+        return typeof value === 'string' && value ? value : null;
+      } catch (_) { return null; }
+    }
+    function restoredText(version) {
+      // A merged layout is restored as the screen it was saved as. The grid it was merged
+      // from was never part of that snapshot, so the message says so instead of implying
+      // that Restore Grid - which has no record of this screen - could undo it.
+      return version === 9
+        ? '병합한 칸 배치를 복원했습니다. 병합 전 격자는 저장된 적이 없어 되돌릴 수 없으며, 다른 배치를 적용하거나 다른 저장 작업을 복원하세요.'
+        : version === 10 ? 'Curved MPR 작업을 복원했습니다. 곡선을 따라 펼친 재구성 표시이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
+        : version === 11 ? '3D Path 작업을 복원했습니다. 경로 수직·평행 평면과 펼친 표시는 재구성이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
+        : version === 12 || version === 14 ? 'MIP 작업을 복원했습니다. 표시 전용 투영이며 원본 영상과 W/L은 바뀌지 않았습니다.'
+        : version === 13 || version === 15 ? 'MIP Batch 작업을 복원했습니다. 회전 투영 미리보기는 표시 전용이며 원본 영상과 W/L은 바뀌지 않았습니다.'
+        : [4,5,6,7,8].includes(version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
+    }
+    async function restoreJob(row, ctx) {
+      const { ticket, before, initialRestore } = ctx, located = ctx.location;
+      if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw refusal('unsaved', '미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요.');
+      if (window.kinMprCurved?.dirty?.()) throw refusal('unsaved', '미저장 곡면 MPR 곡선이 있어 복원하지 않았습니다. 곡선을 저장하거나 Clear Curve로 지운 뒤 복원하세요.');
+      if (window.kinMprPath?.dirty?.()) throw refusal('unsaved', '미저장 3D Path가 있어 복원하지 않았습니다. 경로를 저장하거나 Clear Path로 지운 뒤 복원하세요.');
+      let listed = null;
+      if (located) {
+        // The live pre-read of this anchor's Jobs (a 403 here is the anchor's and ends the panel): hidden and absent Jobs are
+        // refused before the Job itself is read; a changed title or description is only reported.
+        located.ensure();
+        const page = await api(path + '?mine=false&includeHidden=true', { signal: located.signal });
+        listed = Array.isArray(page?.jobs) ? page.jobs.find(j => j?.id === row.id) || null : null;
+        if (!listed) throw refusal('job-unavailable', LOCATION_TEXT['job-unavailable']);
+        if (listed.hidden === true) throw refusal('job-hidden', LOCATION_TEXT['job-hidden']);
+        if (listed.snapshotVersion !== located.request.snapshotVersion) throw refusal('source-changed', LOCATION_TEXT['source-changed']);
+        located.ensure();
+      }
+      const job = await api(path + '/' + row.id, located ? { signal: located.signal, foreign: true } : {}); await authenticate(located?.signal);
+      // On a fresh kinJob document, native hanging-protocol initialization
+      // can change the grid while the saved job is fetched. User interaction
+      // still advances serial; only that initial automatic layout is allowed.
+      if (!live() || ticket !== serial || !initialRestore && before !== signature()) throw refusal(live() ? 'busy' : 'ended', '영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
+      if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw refusal('unsaved', '미저장 표식이 있어 복원하지 않았습니다.');
+      if (window.kinMprCurved?.dirty?.()) throw refusal('unsaved', '미저장 곡면 MPR 곡선이 있어 복원하지 않았습니다. 곡선을 저장하거나 Clear Curve로 지운 뒤 복원하세요.');
+      if (window.kinMprPath?.dirty?.()) throw refusal('unsaved', '미저장 3D Path가 있어 복원하지 않았습니다. 경로를 저장하거나 Clear Path로 지운 뒤 복원하세요.');
+      // Restore Grid exists only in the cell merge module's memory, keyed by viewports a
+      // restored Job never reuses. A restore that failed after its layout landed would roll
+      // back onto fresh viewports and silently discard that record with the cells it hid, so
+      // a held or in-flight merge is refused here, before any dispatch or navigation. With no
+      // module loaded there is no record to lose; a reader that will not answer is refused.
+      const mergeState = window.kinCellMergeWorkspaceState;
+      if (typeof mergeState === 'function') {
+        let held = null; try { held = mergeState(); } catch (_) { held = null; }
+        if (!held || typeof held !== 'object') throw refusal('layout-merged', '칸 병합 상태를 확인할 수 없어 복원하지 않았습니다. 뷰어를 다시 연 뒤 복원하세요.');
+        if (held.busy) throw refusal('busy', '칸 배치 요청이 끝난 뒤 다시 복원하세요.');
+        if (held.merged) throw refusal('layout-merged', '병합한 칸이 있어 복원하지 않았습니다. 복원에 실패하면 병합 전 격자로 돌아갈 수 없게 되므로 Restore Grid로 격자를 되돌린 뒤 복원하세요.');
+      }
+      if (located) {
+        // §2.4: the Job read now must be the one the finding copied: its version and ordered studies, and for a 3D point the
+        // same volume (study, series, digest, size) and the exact mark. The frame of reference is compared when shown already.
+        const request = located.request, snapshot = job?.snapshot, mark = request.mark;
+        if (job?.id !== request.jobId || snapshot?.version !== request.snapshotVersion || JSON.stringify(snapshot?.studies) !== JSON.stringify(request.studies))
+          throw refusal('source-changed', LOCATION_TEXT['source-changed']);
+        if (mark) {
+          const volume = snapshot.volume, saved = Array.isArray(snapshot.marks?.marks) ? snapshot.marks.marks.find(m => m?.id === mark.id) : null;
+          if (!volume || volume.study !== mark.volume.study || volume.series !== mark.volume.series || volume.sourceDigest !== mark.volume.sourceDigest ||
+              !Array.isArray(volume.sops) || volume.sops.length !== mark.volume.sopCount || !saved || saved.label !== mark.label || !sameNumbers(saved.point, mark.point))
+            throw refusal('source-changed', LOCATION_TEXT['source-changed']);
+          const frame = shownFrame(volume);
+          if (frame !== null && frame !== mark.volume.frameOfReferenceUid) throw refusal('source-changed', LOCATION_TEXT['source-changed']);
+        }
+      }
+      if (JSON.stringify(job.snapshot.studies) !== JSON.stringify(studies)) {
+        if (located && located.request.mode !== 'continue') throw refusal('job-studies', LOCATION_TEXT['job-studies']);
+        if (title.value || description.value) throw refusal('unsaved', '작성 중인 작업 제목·설명을 저장하거나 비운 뒤 비교 검사를 여세요.');
+        // Opening the saved comparison replaces this document; finding drafts (held ones included)
+        // would be lost. A same-document restore stays allowed: a study switch holds them.
+        let findings = null; try { findings = typeof window.kinViewerFindingsState === 'function' ? window.kinViewerFindingsState() : null; } catch (_) { findings = { dirty: true }; }
+        if (findings?.dirty || findings?.busy) { ctx.refused = 'findings-unsaved'; throw new Error('저장하지 않은 소견 작성 내용이 있어 비교 검사를 열지 않았습니다. 소견을 저장하거나 버린 뒤 복원하세요.'); }
+        // The server rechecks both studies on the new page before applying;
+        // this same-origin navigation never changes the worklist report target.
+        const next = new URL('/ohif/viewer', location.origin);
+        next.searchParams.set('StudyInstanceUIDs', job.snapshot.studies.join(','));
+        if (located) {
+          // A finding continues in the new page, where its own store proves the result: no kinJob, a one-use nonce, and a text
+          // that holds for a one- or two-study target alike.
+          const finding = located.request.finding, nonce = crypto.randomUUID();
+          try { sessionStorage.setItem('kin-finding-continue:' + nonce, JSON.stringify({ finding: finding.id, revision: finding.revision, source: finding.source, jobId: job.id })); } catch (_) {}
+          for (const [key, value] of [['kinFinding', finding.id], ['kinFindingRevision', String(finding.revision)], ['kinFindingSource', String(finding.source)], ['kinFindingNonce', nonce]])
+            next.searchParams.set(key, value);
+          status.textContent = LOCATION_TEXT.continuing;
+        } else {
+          status.textContent = '저장한 비교 검사를 함께 여는 중…';
+          next.searchParams.set('kinJob', job.id);
+        }
+        location.assign(next.href);
+        return { state: 'continuing', message: located ? LOCATION_TEXT.continuing : '' };
+      }
+      // No restore without a rollback snapshot of the current screen. When this screen is
+      // one no saved shape can hold, that is a reason not to restore — but it is not the
+      // saved Job's problem, so it must not be reported with the Save guidance.
+      // A missing MPR asset is not a shape problem, so that reason is kept as it is.
+      let previous; try { previous = capture(); }
+      catch (e) { throw refusal(volumeJobs ? 'busy' : 'tool-missing', volumeJobs ? '현재 화면을 저장 형식으로 읽을 수 없어 복원하지 않았습니다. 복원할 수 있는 배치를 먼저 여세요.' : e.message); }
+      try { if (VOLUME_VERSIONS.includes(job.snapshot.version)) volumeTools().resolve(job.snapshot); else job.snapshot.cells.forEach(resolve); }
+      catch (e) { throw refusal(/도구/.test(e.message) ? 'tool-missing' : 'job-studies', e.message); }
+      located?.ensure();
+      ctx.mutating = true; applying = true;
+      try { const ids = await apply(job.snapshot, ticket); if (located && !VOLUME_VERSIONS.includes(job.snapshot.version)) readBack(job.snapshot, ids); }
+      catch (e) {
+        const message = /[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.';
+        if (!(live() && serial === ticket)) throw outcome('screen-unknown', 'apply-failed', message);
+        try { await apply(previous, ticket); } catch (_) { throw outcome('screen-unknown', 'apply-failed', '복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); }
+        throw outcome('rolled-back', 'apply-failed', message);
+      }
+      finally { if (!located) applying = false; }
+      const marks = job.snapshot.version === 6 ? window.KinVolumeMarks?.normalize?.(job.snapshot.marks) ?? null : null;
+      lastJob = { jobId: job.id, revision: job.revision, snapshotVersion: job.snapshot.version, marks };
+      return { state: 'restored', message: restoredText(job.snapshot.version), revision: job.revision, snapshotVersion: job.snapshot.version };
+    }
+    /* A finding's saved location (kinViewerJobLocation.restore). The restore owns one deadline: requests stop before the last
+       60 s, apply never starts with less than the 60 s apply bound left, and once it starts the promise settles after the apply
+       and, when needed, the rollback (worst case LOCATION_MS + 60 s = 240 s after the claim, plus at most WAIT_MS before it).
+       The point moves inside the same owned operation; a verified view whose point move fails stays restored. */
+    const LOCATION_MS = 180000, APPLY_MS = 60000, WAIT_MS = 20000;
+    const uuidOk = s => typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
+    const uidOk = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)+$/.test(s);
+    const countOk = n => Number.isSafeInteger(n) && n >= 1 && n <= 2147483647;
+    // The request comes from the Findings store of this or another document: every field is read once and copied.
+    function locationRequest(value) {
+      try {
+        const studiesIn = value.studies, markIn = value.mark, findingIn = value.finding;
+        const request = { subject: value.subject, jobId: value.jobId, revision: value.revision, snapshotVersion: value.snapshotVersion, mode: value.mode,
+          waitReady: value.waitReady === true, studies: Array.isArray(studiesIn) ? Array.from({ length: studiesIn.length }, (_, i) => studiesIn[i]) : null, mark: null, finding: null };
+        if (typeof request.subject !== 'string' || !request.subject || !uuidOk(request.jobId) || !countOk(request.revision) ||
+            !VOLUME_VERSIONS.concat([1, 2, 3]).includes(request.snapshotVersion) || !['same-document', 'continue'].includes(request.mode) ||
+            !request.studies || request.studies.length < 1 || request.studies.length > 2 || !request.studies.every(uidOk) ||
+            new Set(request.studies).size !== request.studies.length) return null;
+        if (markIn !== null && markIn !== undefined) {
+          const point = markIn.point, volume = markIn.volume;
+          const mark = { id: markIn.id, label: markIn.label, point: Array.isArray(point) && point.length === 3 ? [point[0], point[1], point[2]] : null,
+            volume: { study: volume.study, series: volume.series, frameOfReferenceUid: volume.frameOfReferenceUid, sourceDigest: volume.sourceDigest, sopCount: volume.sopCount } };
+          if (request.snapshotVersion !== 6 || !uuidOk(mark.id) || typeof mark.label !== 'string' || !mark.point || !mark.point.every(n => typeof n === 'number' && Number.isFinite(n)) ||
+              !request.studies.includes(mark.volume.study) || !uidOk(mark.volume.series) || !uidOk(mark.volume.frameOfReferenceUid) ||
+              typeof mark.volume.sourceDigest !== 'string' || !/^[0-9a-f]{64}$/.test(mark.volume.sourceDigest) || !countOk(mark.volume.sopCount)) return null;
+          request.mark = mark;
+        }
+        if (request.mode === 'continue') {
+          const finding = { id: findingIn.id, revision: findingIn.revision, source: findingIn.source };
+          if (!uuidOk(finding.id) || !countOk(finding.revision) || !Number.isSafeInteger(finding.source) || finding.source < 0 || finding.source > 7) return null;
+          request.finding = finding;
+        }
+        return request;
+      } catch (_) { return null; }
+    }
+    const plainOutcome = result => ({ state: result.state, reason: result.reason ?? null, message: String(result.message ?? ''), point: result.point ?? 'none',
+      pointMessage: String(result.pointMessage ?? ''), metadataRevision: result.metadataRevision ?? null, snapshotVersion: result.snapshotVersion ?? null });
+    async function waitReady(request) {
+      const until = Date.now() + WAIT_MS;
+      while (Date.now() < until) {
+        if (!live()) return false;
+        let loaded = null;
+        try { loaded = new Set(ds.getActiveDisplaySets().map(d => d.StudyInstanceUID)); } catch (_) { loaded = null; }
+        if (me && !busy && loaded && studies.every(s => loaded.has(s)) && ordered().some(g => cs.getCornerstoneViewport(g.viewportId)?.getDefaultActor?.()?.actor)) return true;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return false;
+    }
+    async function restoreLocation(input) {
+      const request = locationRequest(input);
+      const refuse = reason => plainOutcome({ state: 'refused', reason, message: LOCATION_TEXT[reason] });
+      if (!request) return refuse('tool-missing');
+      if (request.waitReady && !await waitReady(request)) return refuse(live() ? 'busy' : 'ended');
+      if (!live() || !me) return refuse('ended');
+      if (request.subject !== me.sub) return refuse('owner');
+      if (busy) return refuse('busy');
+      busy = true; refresh();
+      const ticket = ++serial, before = signature(), controller = new AbortController(), deadline = Date.now() + LOCATION_MS;
+      // Requests are cut before the last apply window; nothing started after it may change the screen.
+      const timer = setTimeout(() => controller.abort(), LOCATION_MS - APPLY_MS);
+      const ctx = { ticket, before, initialRestore: request.waitReady, mutating: false, location: { request, signal: controller.signal,
+        ensure: () => { if (controller.signal.aborted || Date.now() > deadline - APPLY_MS) throw refusal('timeout', LOCATION_TEXT.timeout); } } };
+      const pass = Object.freeze({ live: () => live() && serial === ticket && applying && restoring === pass });
+      let result;
+      status.textContent = '저장 작업 복원 중…';
+      try {
+        await authenticate(controller.signal);
+        if (me.sub !== request.subject) throw refusal('owner', LOCATION_TEXT.owner);
+        const restored = await restoreJob({ id: request.jobId }, ctx);
+        result = { ...restored, metadataRevision: restored.state === 'restored' && restored.revision !== request.revision ? restored.revision : null, point: 'none' };
+        if (restored.state === 'restored' && request.mark) {
+          // B3: the point moves while this restore still owns the screen; only its own camera move is rolled back on failure.
+          let moved;
+          restoring = pass;
+          try { moved = typeof window.kinMprMarks?.goTo === 'function' ? window.kinMprMarks.goTo(request.mark.id, { label: request.mark.label, point: request.mark.point,
+            volume: { study: request.mark.volume.study, series: request.mark.volume.series, frameOfReferenceUid: request.mark.volume.frameOfReferenceUid } }, pass) : { ok: false, reason: 'tool-missing', rolledBack: null }; }
+          catch (_) { moved = { ok: false, reason: 'failed', rolledBack: false }; }
+          finally { restoring = null; }
+          if (moved?.ok === true) result.point = moved.moved === 'all' ? 'all-planes' : 'source-plane';
+          else {
+            result.point = 'failed';
+            result.reason = moved?.reason === 'mismatch' ? 'point-mismatch' : moved?.reason === 'tool-missing' ? 'tool-missing' : 'point-failed';
+            result.pointMessage = moved?.rolledBack === false ? '저장 화면은 복원했지만 3D 표식 위치로 이동하지 못했고 이동 전 평면으로도 되돌리지 못했습니다. 현재 영상을 확인하세요.'
+              : '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.' + (moved?.reason === 'mismatch' ? ' 연결 당시의 표식·볼륨과 다릅니다.' : '');
+          }
+        }
+      } catch (e) {
+        const known = e?.kinRestore;
+        if (known) result = { state: known.state, reason: known.reason, message: e.message };
+        else if (ctx.refused && !ctx.mutating) result = { state: 'refused', reason: ctx.refused, message: e.message };
+        else if (ctx.mutating) result = { state: 'screen-unknown', reason: 'apply-failed', message: '복원 결과를 확인하지 못했습니다. 현재 영상을 확인하세요.' };
+        else if (!live()) result = { state: 'refused', reason: 'ended', message: LOCATION_TEXT.ended };
+        else if (e?.name === 'AbortError' || controller.signal.aborted) result = { state: 'refused', reason: 'timeout', message: LOCATION_TEXT.timeout };
+        else if (e?.status === 403 || e?.status === 404) {
+          result = { state: 'refused', reason: 'job-unavailable', message: LOCATION_TEXT['job-unavailable'] };
+          // A refused Job may mean a withdrawn comparison study: the anchor list decides whether this panel ends.
+          if (e.status === 403) load().catch(() => {});
+        } else if (e?.status === 409 || e?.status === 400) result = { state: 'refused', reason: 'job-conflict', message: e.message };
+        else result = { state: 'refused', reason: 'job-unavailable', message: LOCATION_TEXT['job-unavailable'] };
+      } finally { clearTimeout(timer); controller.abort(); restoring = null; busy = false; applying = false; refresh(); }
+      if (live()) status.textContent = [result.message, result.pointMessage].filter(Boolean).join(' ');
+      return plainOutcome(result);
+    }
+    const jobLocation = Object.freeze({
+      version: 1,
+      // The Job this panel last applied or saved, while the 3D marks shown are exactly its saved marks.
+      shown: () => {
+        try {
+          if (!live() || !me || !lastJob || busy || applying || window.kinMprMarks?.dirty?.()) return null;
+          const marks = lastJob.snapshotVersion === 6 ? window.kinMprMarks?.capture?.(true) : null;
+          if (lastJob.snapshotVersion === 6 && (!marks || JSON.stringify(marks) !== JSON.stringify(lastJob.marks))) return null;
+          return { jobId: lastJob.jobId, revision: lastJob.revision, snapshotVersion: lastJob.snapshotVersion, studies: [...studies],
+            marks: lastJob.snapshotVersion === 6 ? lastJob.marks.marks.map(m => ({ id: m.id, label: m.label })) : [] };
+        } catch (_) { return null; }
+      },
+      restore: input => restoreLocation(input),
+      owns: pass => pass !== null && pass !== undefined && pass === restoring && pass.live() === true,
+    });
+    window.kinViewerJobLocation = jobLocation;
     // `fields` and `outcome` belong to the MIP Viewer's own Save MIP Job and Retry MIP Save: the same request path with
     // the MIP Viewer's title and description, reporting what actually happened to the request instead of only status text.
     async function run(action, row, reason, initialRestore = false, fields = null, outcome = null) {
@@ -259,62 +536,8 @@ window.kinViewerJobs = function (services, model) {
         await authenticate();
         if (action === 'list') { await load(); status.textContent = '현재 판독 대상의 저장 작업 목록입니다.'; return; }
         if (action === 'restore') {
-          if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식을 먼저 저장하거나 편집을 마친 뒤 복원하세요.');
-          if (window.kinMprCurved?.dirty?.()) throw new Error('미저장 곡면 MPR 곡선이 있어 복원하지 않았습니다. 곡선을 저장하거나 Clear Curve로 지운 뒤 복원하세요.');
-          if (window.kinMprPath?.dirty?.()) throw new Error('미저장 3D Path가 있어 복원하지 않았습니다. 경로를 저장하거나 Clear Path로 지운 뒤 복원하세요.');
-          const job = await api(path + '/' + row.id); await authenticate();
-          // On a fresh kinJob document, native hanging-protocol initialization
-          // can change the grid while the saved job is fetched. User interaction
-          // still advances serial; only that initial automatic layout is allowed.
-          if (!live() || ticket !== serial || !initialRestore && before !== signature()) throw new Error('영상 조작이 변경되어 복원하지 않았습니다. 다시 시도하세요.');
-          if (window.kinViewerHistoryHasUnsaved?.() || window.kinMprMarks?.dirty?.()) throw new Error('미저장 표식이 있어 복원하지 않았습니다.');
-          if (window.kinMprCurved?.dirty?.()) throw new Error('미저장 곡면 MPR 곡선이 있어 복원하지 않았습니다. 곡선을 저장하거나 Clear Curve로 지운 뒤 복원하세요.');
-          if (window.kinMprPath?.dirty?.()) throw new Error('미저장 3D Path가 있어 복원하지 않았습니다. 경로를 저장하거나 Clear Path로 지운 뒤 복원하세요.');
-          // Restore Grid exists only in the cell merge module's memory, keyed by viewports a
-          // restored Job never reuses. A restore that failed after its layout landed would roll
-          // back onto fresh viewports and silently discard that record with the cells it hid, so
-          // a held or in-flight merge is refused here, before any dispatch or navigation. With no
-          // module loaded there is no record to lose; a reader that will not answer is refused.
-          const mergeState = window.kinCellMergeWorkspaceState;
-          if (typeof mergeState === 'function') {
-            let held = null; try { held = mergeState(); } catch (_) { held = null; }
-            if (!held || typeof held !== 'object') throw new Error('칸 병합 상태를 확인할 수 없어 복원하지 않았습니다. 뷰어를 다시 연 뒤 복원하세요.');
-            if (held.busy) throw new Error('칸 배치 요청이 끝난 뒤 다시 복원하세요.');
-            if (held.merged) throw new Error('병합한 칸이 있어 복원하지 않았습니다. 복원에 실패하면 병합 전 격자로 돌아갈 수 없게 되므로 Restore Grid로 격자를 되돌린 뒤 복원하세요.');
-          }
-          if (JSON.stringify(job.snapshot.studies) !== JSON.stringify(studies)) {
-            if (title.value || description.value) throw new Error('작성 중인 작업 제목·설명을 저장하거나 비운 뒤 비교 검사를 여세요.');
-            // Opening the saved comparison replaces this document; finding drafts (held ones included)
-            // would be lost. A same-document restore stays allowed: a study switch holds them.
-            let findings = null; try { findings = typeof window.kinViewerFindingsState === 'function' ? window.kinViewerFindingsState() : null; } catch (_) { findings = { dirty: true }; }
-            if (findings?.dirty || findings?.busy) throw new Error('저장하지 않은 소견 작성 내용이 있어 비교 검사를 열지 않았습니다. 소견을 저장하거나 버린 뒤 복원하세요.');
-            status.textContent = '저장한 비교 검사를 함께 여는 중…';
-            // The server rechecks both studies on the new page before applying;
-            // this same-origin navigation never changes the worklist report target.
-            const next = new URL('/ohif/viewer', location.origin);
-            next.searchParams.set('StudyInstanceUIDs', job.snapshot.studies.join(',')); next.searchParams.set('kinJob', job.id);
-            location.assign(next.href); return;
-          }
-          // No restore without a rollback snapshot of the current screen. When this screen is
-          // one no saved shape can hold, that is a reason not to restore — but it is not the
-          // saved Job's problem, so it must not be reported with the Save guidance.
-          // A missing MPR asset is not a shape problem, so that reason is kept as it is.
-          let previous; try { previous = capture(); }
-          catch (e) { throw new Error(volumeJobs ? '현재 화면을 저장 형식으로 읽을 수 없어 복원하지 않았습니다. 복원할 수 있는 배치를 먼저 여세요.' : e.message); }
-          if([4,5,6,7,8,9,10,11,12,13,14,15].includes(job.snapshot.version))volumeTools().resolve(job.snapshot);else job.snapshot.cells.forEach(resolve); applying = true;
-          try { await apply(job.snapshot, ticket); }
-          catch (e) { if (live() && serial === ticket) { try { await apply(previous, ticket); } catch (_) { throw new Error('복원과 이전 화면 복구에 실패했습니다. 검사를 다시 여세요.'); } } throw new Error(/[가-힣]/.test(e.message) ? e.message : '영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.'); }
-          finally { applying = false; }
-          // A merged layout is restored as the screen it was saved as. The grid it was merged
-          // from was never part of that snapshot, so the message says so instead of implying
-          // that Restore Grid - which has no record of this screen - could undo it.
-          status.textContent = job.snapshot.version === 9
-            ? '병합한 칸 배치를 복원했습니다. 병합 전 격자는 저장된 적이 없어 되돌릴 수 없으며, 다른 배치를 적용하거나 다른 저장 작업을 복원하세요.'
-            : job.snapshot.version === 10 ? 'Curved MPR 작업을 복원했습니다. 곡선을 따라 펼친 재구성 표시이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
-            : job.snapshot.version === 11 ? '3D Path 작업을 복원했습니다. 경로 수직·평행 평면과 펼친 표시는 재구성이며 원본 영상이 아니고 직선 거리·측정 의미가 없습니다.'
-            : job.snapshot.version === 12 || job.snapshot.version === 14 ? 'MIP 작업을 복원했습니다. 표시 전용 투영이며 원본 영상과 W/L은 바뀌지 않았습니다.'
-            : job.snapshot.version === 13 || job.snapshot.version === 15 ? 'MIP Batch 작업을 복원했습니다. 회전 투영 미리보기는 표시 전용이며 원본 영상과 W/L은 바뀌지 않았습니다.'
-            : [4,5,6,7,8].includes(job.snapshot.version) ? 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.' : '비교 작업을 복원했습니다. 표식은 별도 저장한 최신 이력입니다.';
+          const restored = await restoreJob(row, { ticket, before, initialRestore, location: null });
+          if (restored.state === 'restored') status.textContent = restored.message;
         } else {
           if (!writable()) throw new Error('판독의 계정에서 저장할 수 있습니다.');
           if (action !== 'retry' && action !== 'retryMip' && pending) throw new Error('이전 요청의 결과를 먼저 같은 요청 재시도로 확인하세요.');
@@ -362,6 +585,10 @@ window.kinViewerJobs = function (services, model) {
           if(sent.snapshot?.volume)window.kinMprCurved?.saved(sent.snapshot.curved||null,sent.snapshot.volume);
           if(sent.snapshot?.volume)window.kinMprPath?.saved(sent.snapshot.path||null,sent.snapshot.volume);
           if(committedMip)window.kinVolumeMipJob?.saved(sent.snapshot.mip,sent.snapshot.volume,sent.snapshot.mipBatch??null);
+          // The saved Job is the one shown now (kinViewerJobLocation.shown), named by its committed receipt.
+          if (sent.snapshot && receipt?.id === sent.id && receipt?.snapshotVersion === sent.snapshot.version)
+            lastJob = { jobId: sent.id, revision: receipt.revision, snapshotVersion: sent.snapshot.version,
+              marks: sent.snapshot.version === 6 ? window.KinVolumeMarks?.normalize?.(sent.snapshot.marks) ?? null : null };
           pending = editRow = null;
           // The MIP Viewer's request never clears the panel's own Job Title or Description.
           if (editSerial === edit && !['hide', 'retry', 'saveMip', 'retryMip'].includes(action)) { title.value = ''; description.value = ''; }
@@ -431,7 +658,7 @@ window.kinViewerJobs = function (services, model) {
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; if (window.kinViewerJobCommand === mipCommand) delete window.kinViewerJobCommand; end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; if (window.kinViewerJobCommand === mipCommand) delete window.kinViewerJobCommand; if (window.kinViewerJobLocation === jobLocation) delete window.kinViewerJobLocation; end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };

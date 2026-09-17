@@ -29,15 +29,25 @@
     'comparison-viewer': '이 원본의 비교 검사를 함께 표시하는 영상 화면이 없습니다. 선택한 검사와 그 비교 검사를 한 화면에 연 뒤 다시 누르세요. 자동으로 열거나 이동하지 않습니다.',
     superseded: '이동을 확인하는 동안 선택·로그인·영상 화면이 바뀌어 성공으로 처리하지 않았습니다. 영상 화면은 이미 이동했을 수 있으니 현재 영상을 확인하세요.',
     timeout: '이동 결과를 확인하지 못했습니다. 영상 화면은 이미 이동했을 수 있으니 현재 영상을 확인한 뒤 다시 누르세요.',
+    // S2-L2b: a saved location opens only in a connected viewer that shows exactly its studies, in order.
+    'saved-view-viewer': '저장 작업의 검사 조합을 표시하는 영상 화면이 없습니다. 그 조합으로 연 뒤 다시 누르세요. 자동으로 열지 않습니다.',
+    'restore-pending': '이전 저장 위치 복원의 결과를 기다리는 중입니다. 영상 화면의 결과를 확인한 뒤 다시 누르세요.',
+    'restore-timeout': '결과를 확인하지 못했습니다. 영상 화면의 Saved Comparison Jobs 상태를 확인하세요.',
   };
   function reasonText(reason) { return TEXT[reason] || links.reasonText(reason); }
   // A comparison Go to Image also says what may already have changed in the viewer (S2-B2).
   function resultText(result) { return reasonText(result.reason) + links.phaseText(result.phase); }
   const retryable = reason => reason !== 'invalid' && reason !== 'foreign' && reason !== 'list-changed';
   const openable = reason => reason === 'no-viewer' || reason === 'unattached';
-  function arrivalText(result, where) {
-    const note = links.annotationText(result && result.annotation);
-    return '영상 이동 확인 · ' + where + (result && result.phase ? ' · 비교 검사 영상 칸' : '') + (note ? ' · ' + note : '');
+  // `source` (the pressed copy) adds the S2-C notes from the viewer's live entry.
+  function arrivalText(result, where, source) {
+    const note = links.annotationText(result && result.annotation), live = source ? links.liveText(result, source.revision) : '';
+    return '영상 이동 확인 · ' + where + (result && result.phase ? ' · 비교 검사 영상 칸' : '') + (note ? ' · ' + note : '') + (live ? ' · ' + live : '');
+  }
+  // A saved-location outcome from the viewer, in the worklist's words.
+  function locationText(result, source, where) {
+    if (result.state === undefined || result.reason === 'restore-timeout') return reasonText(result.reason);
+    return (result.state === 'restored' ? '저장 위치 확인 · ' + where + ' · ' : '') + links.locationText(result, source);
   }
   const READINESS = {
     loading: '이동 대상: 영상 준비 중', ambiguous: '이동 대상 미정: 이 검사를 표시하는 영상 창이 여러 개입니다',
@@ -55,6 +65,7 @@
   const KINDS = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
   // A row source is the server's frozen copy: named units need its exact calculator (S2-V).
   function describeSource(s) {
+    if (s && s.kind === 'job') return links.jobName(s);
     const values = links.valueText(s.kind, s.calculator, s.values, 'server-copy');
     return (KINDS[s.kind] || s.kind) + (s.label ? ' · ' + s.label : '') + ' · 프레임 ' + s.frame + ' · r' + s.revision + (values ? ' · ' + values : '');
   }
@@ -70,17 +81,33 @@
     if (!item || typeof item !== 'object' || !uuid(item.id) || item.studyUid !== study || !count(item.revision) ||
         typeof item.hidden !== 'boolean' || !item.item || typeof item.item !== 'object') throw INVALID;
     const body = item.item, sources = body.sources, primary = body.primary === undefined ? 0 : body.primary;
+    // Version 1 is the shipped shape; version 2 adds the free-text characteristics and saved locations.
+    const version = body.schemaVersion === undefined ? 1 : body.schemaVersion;
+    if (![1, 2].includes(version) || (version === 2 && !text(body.characteristics))) throw INVALID;
     if (!text(body.title) || !text(body.text) || !Array.isArray(sources) || sources.length < 1 || sources.length > links.LIMITS.sources ||
         !Number.isSafeInteger(primary) || primary < 0 || primary >= sources.length) throw INVALID;
     const serverLinks = Array.isArray(item.links) ? item.links : [];
-    // The server admits at most one comparison study per finding; anything else is not a valid row.
-    const comparisons = new Set(sources.map(s => s && s.studyUid).filter(value => value !== study));
+    // The server admits at most one comparison study per finding, a saved location's whole study set included.
+    const named = sources.flatMap(s => s && s.kind === 'job' ? (version === 2 && Array.isArray(s.studies) ? s.studies : [null]) : [s && s.studyUid]);
+    const comparisons = new Set(named.filter(value => value !== study));
     if (comparisons.size > 1) throw INVALID;
     return {
       id: item.id, revision: item.revision, hidden: item.hidden, title: body.title, text: body.text, primary,
+      schemaVersion: version, characteristics: version === 2 ? body.characteristics : null,
       author: text(item.authorActor) ? item.authorActor : '', updated: timeText(item.updatedAt),
       comparison: comparisons.size ? [...comparisons][0] : null,
       sources: sources.map((s, index) => {
+        if (s && s.kind === 'job') {
+          const copy = version === 2 ? links.jobCopy(s, study) : null;
+          if (!copy) throw INVALID;
+          const link = serverLinks[index] && serverLinks[index].jobId === copy.jobId ? serverLinks[index]
+            : serverLinks.find(l => l && l.jobId === copy.jobId && (l.markId || null) === (copy.mark ? copy.mark.id : null)) || null;
+          const status = links.jobStatus(copy, link, null);
+          const source = { ...copy, linkState: status.linkState, linkLabel: status.label, linkText: status.text,
+            headRevision: count(status.headRevision) ? status.headRevision : null, foreign: copy.studies.length > 1 };
+          source.description = describeSource(source);
+          return source;
+        }
         if (!s || typeof s !== 'object' || !uuid(s.itemId) || !count(s.revision) || !uid(s.studyUid) || !uid(s.seriesUid) || !uid(s.sopUid) ||
             !count(s.frame) || !text(s.kind) || !text(s.label) ||
             !(s.values === null || s.values === undefined || (Array.isArray(s.values) && s.values.every(n => typeof n === 'number'))) ||
@@ -180,7 +207,12 @@
     // A comparison source (S2-B2) needs a viewer that shows the selected study AND that comparison study.
     const other = snapshot.comparison === undefined || snapshot.comparison === null ? null : snapshot.comparison;
     if (other !== null && (!uid(other) || other === study)) return { kind: 'refused', reason: 'invalid' };
-    const shows = list => has(list, study) && (other === null || has(list, other));
+    // A saved location (S2-L2b) needs a viewer whose URL study list is exactly the Job's, in order; never a subset or superset.
+    const exact = snapshot.exact === undefined || snapshot.exact === null ? null : snapshot.exact;
+    if (exact !== null && (!Array.isArray(exact) || exact.length < 1 || exact.length > 2 || exact[0] !== study || !exact.every(uid) ||
+        new Set(exact).size !== exact.length || other !== null)) return { kind: 'refused', reason: 'invalid' };
+    const shows = list => exact !== null ? Array.isArray(list) && list.length === exact.length && list.every((value, index) => value === exact[index])
+      : has(list, study) && (other === null || has(list, other));
     const w = snapshot.workspace;
     if (w && w.active && w.sameTarget && shows(w.studies)) {
       return !w.loaded || w.inert || w.hidden ? { kind: 'refused', reason: 'loading' } : { kind: 'embedded' };
@@ -196,25 +228,29 @@
       return { kind: 'window', index: x.index };
     }
     if (detached.length === 1) return { kind: 'refused', reason: 'unattached', index: detached[0].index };
-    return { kind: 'refused', reason: other === null ? 'no-viewer' : 'comparison-viewer' };
+    return { kind: 'refused', reason: exact !== null ? 'saved-view-viewer' : other === null ? 'no-viewer' : 'comparison-viewer' };
   }
   /* `view` is the plain fact sheet one probe reads synchronously from the worklist session and the
    * target document: {error, live, owner, sub, uid, selection, generation, kind, ref, window, document,
    * scope, attached, closed, visible, historyPresent, ended, suspended, subject, windowOwner, modal,
    * navigate}. The viewer remains the authority for scope/busy/series/frame/viewport. */
+  // `cross` is true for a comparison source; 'location' for a saved location, which needs the viewer's exact study list and its
+  // kinViewerJobLocation instead of history navigation, and does not depend on the history panel being loaded.
   function precheck(view, expected, cross) {
     if (!expected || !text(expected.owner) || !expected.owner || !text(expected.sub) || !expected.sub || !uid(expected.uid)) return 'session';
     if (!view || view.live !== true) return 'session';
     if (view.owner !== expected.owner || view.sub !== expected.sub || view.uid !== expected.uid || view.selection !== expected.uid ||
         view.generation !== expected.generation) return 'superseded';
     if (view.error || view.closed || !view.attached || !text(view.scope) || !view.scope.split(',').includes(expected.uid)) return 'no-viewer';
+    if (cross === 'location' && view.scope !== expected.studies.join(',')) return 'saved-view-viewer';
     if (!view.visible) return 'loading';
     if (!view.historyPresent) return 'tool-missing';
     if (view.ended) return 'ended';
     if (view.subject !== expected.sub) return 'owner';
     if (view.kind === 'window' && view.windowOwner !== expected.owner) return 'owner';
-    if (view.suspended) return 'busy';
+    if (cross !== 'location' && view.suspended) return 'busy';
     if (view.modal) return 'modal';
+    if (cross === 'location') return view.location ? null : 'tool-missing';
     if (!view.navigate) return 'tool-missing';
     if (cross && !view.activate) return 'tool-missing';
     return null;
@@ -234,7 +270,9 @@
       const ok = value.ok;
       if (ok === true) {
         const highlighted = value.highlighted, annotation = value.annotation;
-        return typeof highlighted === 'boolean' && text(annotation) ? { ok: true, highlighted, annotation } : refusal('invalid');
+        if (typeof highlighted !== 'boolean' || !text(annotation)) return refusal('invalid');
+        const live = links.liveOf(value);
+        return { ok: true, highlighted, annotation, ...(live ? { live } : {}) };
       }
       if (ok === false) { const reason = value.reason; return text(reason) && VIEWER_REASONS.includes(reason) ? refusal(reason) : refusal('invalid'); }
       return refusal('invalid');
@@ -259,12 +297,22 @@
   /* Retry replays the source the user pressed, never whatever sits at its index after a reload: the pin
    * holds the list generation, the finding id, revision and source index, and the source's item and
    * immutable image identity. A row that no longer matches it is list-changed before any target is read. */
-  const PIN = ['generation', 'id', 'revision', 'index', 'itemId', 'sourceRevision', 'studyUid', 'seriesUid', 'sopUid', 'frame'];
+  // A saved location adds its Job, mark and ordered study set to the pin (absent keys for a 2D item).
+  const PIN = ['generation', 'id', 'revision', 'index', 'itemId', 'sourceRevision', 'studyUid', 'seriesUid', 'sopUid', 'frame', 'jobId', 'markId', 'studies'];
   function pinSource(row, index, generation) {
     const source = row && Array.isArray(row.sources) && Number.isSafeInteger(index) && index >= 0 ? row.sources[index] : null;
     if (!source || typeof source !== 'object') return null;
-    return Object.freeze({ generation, id: row.id, revision: row.revision, index, itemId: source.itemId, sourceRevision: source.revision,
-      studyUid: source.studyUid, seriesUid: source.seriesUid, sopUid: source.sopUid, frame: source.frame });
+    const pin = { generation, id: row.id, revision: row.revision, index, itemId: source.itemId, sourceRevision: source.revision,
+      studyUid: source.studyUid, seriesUid: source.seriesUid, sopUid: source.sopUid, frame: source.frame };
+    if (source.kind === 'job') Object.assign(pin, { jobId: source.jobId, markId: source.mark ? source.mark.id : null, studies: source.studies.join(',') });
+    return Object.freeze(pin);
+  }
+  // The request a saved location sends to kinViewerJobLocation.restore, from the row copy; null when it is not a job copy.
+  function locationOf(source, subject) {
+    const copy = source && source.kind === 'job' ? links.jobCopy(source) : null;
+    if (!copy || !text(subject) || !subject) return null;
+    return { subject, jobId: copy.jobId, revision: copy.revision, snapshotVersion: copy.snapshotVersion, studies: [...copy.studies], mode: 'same-document',
+      mark: copy.mark ? { id: copy.mark.id, label: copy.mark.label, point: [...copy.mark.point], volume: { ...copy.mark.volume } } : null };
   }
   const samePin = (a, b) => !!a && !!b && PIN.every(key => a[key] === b[key]);
   /* One command at a time is current. `job` = {expected:{owner, sub, uid, generation}, source, comparison,
@@ -281,8 +329,10 @@
   function createNavigator(options) {
     const o = options || {};
     const timeoutMs = Number.isFinite(o.timeoutMs) ? o.timeoutMs : 15000, watchMs = Number.isFinite(o.watchMs) ? o.watchMs : 250;
+    // B4: above the viewer's own restore bound; a restore that outlives it is still waited for before anything else navigates.
+    const locationMs = Number.isFinite(o.locationMs) ? o.locationMs : 270000;
     const later = o.setTimeout || ((fn, ms) => setTimeout(fn, ms)), cancelTimer = o.clearTimeout || (id => clearTimeout(id));
-    let sequence = 0;
+    let sequence = 0, restoring = null;
     const safe = fn => { try { return typeof fn === 'function' ? fn() : null; } catch (_) { return null; } };
     async function run(job) {
       const seq = ++sequence;
@@ -293,7 +343,9 @@
       };
       const expected = job && job.expected;
       if (!expected || !text(expected.owner) || !expected.owner || !text(expected.sub) || !expected.sub || !uid(expected.uid)) return finish(refusal('session'));
+      if (restoring) return finish(refusal('restore-pending'));
       if (job.source === null || job.source === undefined) return finish(refusal('list-changed'));
+      if (job.source && job.source.kind === 'job') return runLocation(job, seq, finish);
       const target = targetOf(job.source);
       if (!target) return finish(refusal('invalid'));
       // Never substitute the selected study for a source of another study (review C7); the only other
@@ -334,11 +386,54 @@
       if (cross && value.ok && (after.historyScope !== target.studyUid || !sameImage(after.image, target))) return finish(marked(refusal('superseded')), choice);
       return finish(marked(value), choice);
     }
-    return { run, cancel: () => { sequence++; }, sequence: () => sequence };
+    /* S2-L2b: a saved location in the one connected viewer that shows exactly its studies. kinViewerJobLocation is read at the call;
+     * the viewer owns the restore, its refusals and its rollback. The identity watch tolerates history suspension; the backstop
+     * announces an unknown result, never success or an unchanged screen, and new commands wait until the viewer answers. */
+    async function runLocation(job, seq, finish) {
+      const expected = job.expected, request = locationOf(job.source, expected.sub);
+      if (!request || request.studies[0] !== expected.uid) return finish(refusal('invalid'));
+      const choice = safe(job.choose);
+      if (!choice || choice.kind === 'refused') return finish(refusal(choice && choice.reason ? choice.reason : 'saved-view-viewer'));
+      const before = safe(choice.probe), reason = precheck(before, { ...expected, studies: request.studies }, 'location');
+      if (reason) return finish(refusal(reason));
+      let pending;
+      try { pending = choice.restore(request); } catch (_) { pending = THROWN; }
+      if (pending === THROWN) return finish(refusal('tool-missing'), choice);
+      const gate = Promise.resolve(pending).then(value => ({ value }), () => ({ thrown: true }));
+      // Suspended until the viewer answers or its document ends: an ended document can no longer be changed by this restore.
+      restoring = gate;
+      const release = () => { if (restoring === gate) restoring = null; };
+      gate.then(release);
+      const gone = () => { const view = safe(choice.probe); return !view || view.closed || view.document !== before.document || view.window !== before.window; };
+      const watchEnd = () => { if (restoring !== gate) return; if (gone()) release(); else later(watchEnd, watchMs); };
+      later(watchEnd, watchMs);
+      let timer = null, watch = null, changed = false;
+      const outcome = await new Promise(resolve => {
+        timer = later(() => resolve({ timeout: true }), locationMs);
+        const check = () => {
+          watch = null;
+          if (seq !== sequence || !sameIdentity(before, safe(choice.probe), true)) { changed = true; resolve({ changed: true }); return; }
+          watch = later(check, watchMs);
+        };
+        watch = later(check, watchMs);
+        gate.then(resolve);
+      });
+      if (timer !== null) cancelTimer(timer);
+      if (watch !== null) cancelTimer(watch);
+      if (seq !== sequence) return { ...refusal('superseded'), latest: false };
+      if (outcome.timeout) return finish({ ...refusal('restore-timeout'), state: 'screen-unknown' }, choice);
+      if (changed || !sameIdentity(before, safe(choice.probe), true)) return finish(refusal('superseded'), choice);
+      if (outcome.thrown) return finish({ ...refusal('tool-missing'), state: 'screen-unknown' }, choice);
+      const result = links.locationOutcome(outcome.value);
+      // N1: a restored view whose requested 3D point was not reached is not ok; the outcome keeps state, point and reason.
+      return finish({ ok: links.locationResult(result, job.source) === 'ok', reason: result.reason, ...result }, choice);
+    }
+    return { run, cancel: () => { sequence++; }, sequence: () => sequence, restoring: () => restoring !== null };
   }
 
   const api = { reasonText, resultText, retryable, openable, arrivalText, readinessText, describeSource, timeText, rowOf, listPath, createListStore,
-    chooseTarget, precheck, sameIdentity, validResult, crossResult, targetOf, pinSource, samePin, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)) };
+    chooseTarget, precheck, sameIdentity, validResult, crossResult, targetOf, pinSource, samePin, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)),
+    SCHEMA: 2, locationOf, locationText, locationResult: links.locationResult };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.kinFindingCommand = api;
 })(globalThis);
