@@ -17,6 +17,7 @@ services:
     volumes: !override
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
+      - /etc/kin-workflow/nginx:/etc/nginx/workflow:ro
     logging: *bounded-logging
 
   orthanc:
