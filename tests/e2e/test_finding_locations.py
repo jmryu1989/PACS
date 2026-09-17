@@ -5,8 +5,9 @@ BFF login, run-owned same-patient synthetic CTs and the real findings/Job APIs.
 L1 proves first that the Findings section keeps the reading study through the MPR layout (U1), then saves a 3D point on the
 comparison study's volume in an [X, P] document (the bounded prior route), links it with characteristics, and reopens it after a
 new login from a one-study document: the viewer continues in a new [X, P] page with a one-use nonce and proves the restored Job,
-the point and the frame of reference there. L2 covers refusals and states (unsaved mark, an intercepted Job GET 409, a metadata
-change, a hidden Job, sync off) and the server's markId/anchor matrix. L3 shows that a same-document restore keeps an unsaved
+the point and the frame of reference there. L2 covers refusals and states (unsaved mark, an intercepted Job GET 409, a failure
+injected after the apply replaced the screen with its verified rollback, a metadata change, a hidden Job, sync off) and the
+server's markId/anchor matrix. L3 shows that a same-document restore keeps an unsaved
 finding draft and that a withdrawn comparison study withdraws the finding. Nothing here writes a report or an original."""
 import io, json, unittest, uuid
 from urllib.parse import parse_qs, urlsplit
@@ -31,6 +32,18 @@ USE_STUDY = """uid=>{const set=services.displaySetService.getActiveDisplaySets()
  services.viewportGridService.setDisplaySetsForViewports([...services.viewportGridService.getState().viewports.keys()].map(viewportId=>({viewportId,displaySetInstanceUIDs:[set.displaySetInstanceUID]})))}"""
 LOADED = """uid=>{try{return [...services.viewportGridService.getState().viewports.keys()].every(id=>{const view=services.cornerstoneViewportService.getCornerstoneViewport(id),volume=cornerstone.cache.getVolume(view.getVolumeId());
  return volume?.loadStatus.loaded&&cornerstone.metaData.get('instance',volume.imageIds[0]).StudyInstanceUID===uid})}catch(_){return false}}"""
+# The saved-screen reading test_volume_jobs.py uses for its rollback proof, read-only here.
+CAPTURE = ('()=>window.kinCreateVolumeJob({grid:services.viewportGridService,cs:services.cornerstoneViewportService,ds:services.displaySetService,'
+           'studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture(true)')
+VIEWPORT_IDS = '()=>[...services.viewportGridService.getState().viewports.keys()]'
+# N7: one synthetic failure after a v6 apply has replaced the screen. Its 3D marks step (viewer-volume-job.js) runs only after the
+# saved layout, planes and cameras were applied and verified; the wrapper puts the original back before it throws, so the rollback
+# re-applies the previous screen with the real capability. Test-only interception of an existing capability, undone in finally.
+INJECT_APPLY_FAILURE = """()=>{const marks=window.kinMprMarks,original=marks.restore,state={calls:0,restored:false};
+ const undo=()=>{if(marks.restore!==original)marks.restore=original;state.restored=marks.restore===original&&window.kinMprMarks===marks;};
+ marks.restore=function(){state.calls++;undo();throw Error('SYNTHETIC APPLY FAILURE AFTER LAYOUT')};
+ window.__s2lApplyFailure={state,undo}}"""
+UNDO_APPLY_FAILURE = "()=>{const f=window.__s2lApplyFailure;if(!f)return null;f.undo();delete window.__s2lApplyFailure;return f.state}"
 
 
 class FindingLocationsE2E(VolumeMarksE2E):
@@ -91,6 +104,15 @@ class FindingLocationsE2E(VolumeMarksE2E):
         self.addCleanup(restore)
         psql(f'''UPDATE "StudyState" SET "institutionId"='kin-center', "teleInstitutionId"=NULL WHERE uid={literal(uid)}''')
         return restore
+
+    def same_screen(self, before, after):
+        """The previous MPR screen is back: the same volume, active plane and plane set, projections and cameras (1e-6)."""
+        self.assertEqual((before['version'], before['volume'], before['active'], len(before['cells'])),
+                         (after['version'], after['volume'], after['active'], len(after['cells'])))
+        for x, y in zip(before['cells'], after['cells']):
+            self.assertEqual((x.get('orientation'), x['projection']), (y.get('orientation'), y['projection']))
+            for field in ['position', 'focalPoint', 'viewUp', 'viewPlaneNormal']:
+                for left, right in zip(x['camera'][field], y['camera'][field]): self.assertAlmostEqual(left, right, delta=1e-6)
 
     def at_point(self, page, point):
         cameras = page.evaluate(PLANES)
@@ -208,6 +230,29 @@ class FindingLocationsE2E(VolumeMarksE2E):
         expect(saved_row()).not_to_contain_text('이전 화면으로 되돌렸습니다')
         v.unroute('**/api/studies/*/viewer-jobs/'+job['id'], conflict)
         self.preserved_volume(before, self.volume_state(v))
+        # N7: a failure after the apply has replaced the screen is rolled back to the previous screen and said so, never restored.
+        v.evaluate(SHIFT)
+        before, ids = v.evaluate(CAPTURE), v.evaluate(VIEWPORT_IDS)
+        marks_before, jobs_before = v.evaluate('()=>kinMprMarks.capture(true)'), self.jobs(a)
+        # The previous screen is not the saved one (each plane 6 mm off), so a skipped rollback cannot pass as this screen.
+        self.assertEqual(len(before['cells']), len(job['snapshot']['cells']))
+        for shown, saved in zip(before['cells'], job['snapshot']['cells']):
+            self.assertGreater(sum((p - q) ** 2 for p, q in zip(shown['camera']['focalPoint'], saved['camera']['focalPoint'])) ** 0.5, 5)
+        injected = None
+        try:
+            v.evaluate(INJECT_APPLY_FAILURE)
+            line().get_by_role('button', name='Go to 3D Point', exact=True).click()
+            expect(saved_row().locator('[data-kin-message]')).to_have_attribute('data-kin-location-result', 'rolled-back', timeout=120000)
+        finally:
+            injected = v.evaluate(UNDO_APPLY_FAILURE)
+        self.assertEqual(injected, {'calls': 1, 'restored': True}, 'the failure happened once, inside the apply, and the capability is back')
+        expect(saved_row().locator('[data-kin-message]')).to_have_text('저장 화면을 적용하지 못해 이전 화면으로 되돌렸습니다. 영상 상태를 적용하지 못했습니다. 이전 화면을 확인하세요.')
+        expect(v.locator('#kin-viewer-jobs-status')).to_contain_text('영상 상태를 적용하지 못했습니다')
+        # The apply had replaced the viewports; the rollback rebuilt the previous screen on new ones, with its marks and without the point move.
+        self.assertNotEqual(v.evaluate(VIEWPORT_IDS), ids)
+        self.same_screen(before, v.evaluate(CAPTURE))
+        self.same_marks(v.evaluate('()=>kinMprMarks.capture(true)'), marks_before)
+        self.assertEqual(self.jobs(a), jobs_before)
         # A retitled Job restores exactly and names its current metadata revision.
         renamed = self.stack.request('POST', f'/studies/{a.uid}/viewer-jobs/{job["id"]}/revisions', 'doctor',
                                      dict(expectedRevision=1, title='바뀐 위치 제목', description='', hidden=False, reason=''))

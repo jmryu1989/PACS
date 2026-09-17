@@ -2254,12 +2254,20 @@ test('S2-L2b navigation: the exact request, outcomes copied field by field, and 
     [1, null, model.LOCATION_TEXT.unknown],
     [1, vm.runInNewContext('({ state: "restored", message: "다른 창", point: "none", reason: 7 })'), '저장 화면을 복원했습니다(병변 위치 표식 없음). 다른 창'],
   ];
-  for (const [index, answer, text] of cases) {
+  // N1: the machine-readable result per case; a restored view whose 3D point was not reached is never ok.
+  const results = ['ok', 'ok', 'point-failed', 'point-failed', 'ok', 'job-hidden', 'job-conflict', 'rolled-back', 'apply-failed', 'continuing',
+    'screen-unknown', 'screen-unknown', 'ok'];
+  assert.equal(results.length, cases.length);
+  for (const [at, [index, answer, text]] of cases.entries()) {
     k.loc.answers.push(answer);
     const result = await k.store.navigate(e, index);
     assert.equal(e.message, text, JSON.stringify(answer));
-    assert.equal(result.ok, !!answer && answer.state === 'restored');
+    assert.deepEqual([result.ok, result.result], [results[at] === 'ok', results[at]], JSON.stringify(answer));
+    assert.deepEqual(JSON.parse(JSON.stringify(e.location)), { result: results[at], message: text });
   }
+  // The failed point keeps the composite outcome: the view restored, the point failed, the viewer's own reason.
+  k.loc.answers.push(cases[2][1]);
+  assert.deepEqual(await k.store.navigate(e, 0), { ok: false, result: 'point-failed', reason: 'point-mismatch', state: 'restored', point: 'failed' });
   // Each request names exactly the frozen copy; another study set continues with the finding named, a same one does not.
   const [first, , , , second] = k.loc.requests;
   assert.deepEqual(first, { subject: 'reader-1', jobId: LJ, revision: 1, snapshotVersion: 6, studies: [A], mode: 'same-document', waitReady: false,
@@ -2402,9 +2410,17 @@ test('mounted locations: characteristics line, point and view lines with their o
   assert.equal(h.loc.requests.length, 1);
   assert.deepEqual([h.loc.requests[0].jobId, h.loc.requests[0].mark.id, h.loc.requests[0].mode], [LJ, LM, 'same-document']);
   assert.ok(textOf(h.row()).includes('3D 표식 위치로 이동했습니다.'));
+  const note = () => h.row().all().find(e => e.tagName === 'p' && e.dataset.kinMessage === '');
+  assert.equal(note().dataset.kinLocationResult, 'ok');
+  // N1: the view restored but the point was not reached: the text says so and the panel's result is point-failed, never ok.
+  h.loc.answers.push({ state: 'restored', message: '', point: 'failed', reason: 'point-failed', pointMessage: '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.' });
+  await h.press(h.row().all().filter(e => e.dataset.jobId)[0], 'Go to 3D Point');
+  assert.deepEqual([note().textContent, note().dataset.kinLocationResult], ['저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.', 'point-failed']);
   h.loc.answers.push({ state: 'refused', reason: 'job-hidden', message: '숨김' });
   await h.press(h.row().all().filter(e => e.dataset.jobId)[1], 'Open Saved View');
-  assert.equal(h.loc.requests[1].mark, null);
+  assert.equal(h.loc.requests.length, 3);
+  assert.equal(h.loc.requests[2].mark, null);
+  assert.deepEqual([note().textContent, note().dataset.kinLocationResult], ['숨김', 'job-hidden']);
   // History: every revision's characteristics and linked kinds, counted; the main line keeps the shipped shape.
   await h.press(h.row(), 'History');
   const shown = h.row().all().filter(e => e.tagName === 'p').map(e => e.textContent);
@@ -2413,6 +2429,10 @@ test('mounted locations: characteristics line, point and view lines with their o
   assert.ok(shown.includes('연결: 2D 표식 0개 · Saved View 1개 · 3D Point 1개 · v2'));
   assert.ok(shown.includes('연결: 2D 표식 0개 · Saved View 0개 · 3D Point 0개 · v1'));
   assert.equal(shown.filter(e => e.startsWith('Characteristics')).length, 2, 'the version 1 revision has no characteristics line');
+  // Another text replacing the location text carries no location result.
+  await h.press(h.row(), 'Edit'); await h.press(h.row(), 'Save');
+  assert.ok(note().textContent && note().textContent !== '숨김', note().textContent);
+  assert.equal(note().dataset.kinLocationResult, undefined);
   h.findings.stop();
 });
 

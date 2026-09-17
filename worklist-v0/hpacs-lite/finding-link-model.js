@@ -175,6 +175,16 @@
         metadataRevision: revision(metadataRevision) ? metadataRevision : null, snapshotVersion: JOB_VERSIONS.includes(snapshotVersion) ? snapshotVersion : null };
     } catch (_) { return { state: 'screen-unknown', reason: null, message: '', point: 'none', pointMessage: '', metadataRevision: null, snapshotVersion: null }; }
   }
+  // N1: the machine-readable result of a saved-location outcome for `source` (the pressed copy). Success only when everything
+  // asked for was reached: a restored view whose requested 3D point was not reached keeps state 'restored', point 'failed' and
+  // the viewer's reason in the outcome, but its result is 'point-failed', never 'ok'. A verified rollback is 'rolled-back' (N7),
+  // distinct from an apply failure whose screen is unknown; anything else is its reason or state.
+  function locationResult(result, source) {
+    const state = result && result.state;
+    if (state === 'restored') return !!source && (!source.mark || result.point === 'all-planes' || result.point === 'source-plane') ? 'ok' : 'point-failed';
+    if (state === 'rolled-back' || state === 'continuing') return state;
+    return (result && result.reason) || state || 'failed';
+  }
   function locationText(result, source) {
     const withView = text => joined(text, result.message);
     if (result.state === 'restored') {
@@ -962,7 +972,9 @@
      * suspended until the restore settles or this document ends, and a late answer is shown only for the same login, anchor and entry. */
     async function navigateJob(e, source, index, waitReady) {
       const copy = jobCopy(source, s.scope), ticket = s.generation, seq = ++s.navigation, subject = s.subject;
-      const finish = (message, result) => { e.message = message; notify(); return result; };
+      // `e.location` pairs the shown text with its machine-readable result (locationResult), so the panel never labels another text.
+      const say = (message, result) => { e.message = message; e.location = { result, message }; };
+      const finish = (message, result) => { say(message, result.result || result.reason); notify(); return result; };
       if (!copy) return finish(LOCATION_TEXT.invalid, { ok: false, reason: 'invalid', state: 'refused' });
       if (s.ended) return finish(reasonText('ended'), { ok: false, reason: 'ended', state: 'refused' });
       if (s.suspended || !subject) return finish(reasonText('busy'), { ok: false, reason: 'busy', state: 'refused' });
@@ -977,15 +989,16 @@
         mode: same ? 'same-document' : 'continue', waitReady: waitReady === true,
         ...(same ? {} : { finding: { id: e.head.id, revision: e.head.revision, source: index } }) };
       const pending = { seq, ticket };
-      s.jobNavigation = pending; e.message = LOCATION_TEXT.pending; notify();
+      s.jobNavigation = pending; say(LOCATION_TEXT.pending, 'pending'); notify();
       const current = () => valid(ticket) && s.subject === subject && s.entries.get(e.id) === e;
-      const backstop = later(() => { if (s.jobNavigation === pending && current()) { e.message = LOCATION_TEXT.backstop; notify(); } }, jobMs);
+      const backstop = later(() => { if (s.jobNavigation === pending && current()) { say(LOCATION_TEXT.backstop, 'restore-timeout'); notify(); } }, jobMs);
       let value;
       try { value = await location.restore(request); } catch (_) { value = null; }
       finally { cancelLater(backstop); if (s.jobNavigation === pending) s.jobNavigation = null; }
       const result = locationOutcome(value);
       if (!current()) return { ok: false, reason: 'superseded', state: result.state };
-      return finish(locationText(result, copy), { ok: result.state === 'restored', reason: result.reason, state: result.state, point: result.point });
+      const reached = locationResult(result, copy);
+      return finish(locationText(result, copy), { ok: reached === 'ok', result: reached, reason: result.reason, state: result.state, point: result.point });
     }
     // The new document of a continuation: once, after the first authorized list, only for the exact finding, revision and source.
     async function continueLocation() {
@@ -1047,7 +1060,7 @@
     commandBody, draftProblem, itemOnly, errorMessage, createStore,
     SCHEMA, SCHEMA_HEADER, CHARACTERISTICS, JOB_VERSIONS, JOB_LINK_STATES, JOB_LINK_LABELS, RESTORE_STATES, RESTORE_REASONS, POINTS,
     OLD_API_TEXT, MODULE_MISMATCH_TEXT, CONTINUE_REFUSED_TEXT, LOCATION_TEXT, LIVE_TEXT,
-    isJob, isJobPair, jobCopy, jobLinkState, jobStatus, jobName, liveOf, liveText, locationOutcome, locationText, schemaOf };
+    isJob, isJobPair, jobCopy, jobLinkState, jobStatus, jobName, liveOf, liveText, locationOutcome, locationResult, locationText, schemaOf };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.kinFindingLinkModel = api;
 })(globalThis);

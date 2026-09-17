@@ -190,9 +190,12 @@ window.KinReadingFindings = function (app) {
       choose: () => choose(st.uid, comparison, located ? source.studies : null),
       announce: (value, choice) => {
         if (located) {
-          const state = value.state === 'restored' ? 'ok' : value.reason || value.state || 'failed';
-          setResult(command.locationText(value, source, choice ? choice.label : ''), state, !value.ok && command.retryable(value.reason) && value.state !== 'rolled-back' && value.state !== 'screen-unknown');
-          if (value.ok && choice) choice.focus();
+          // N1: 'ok' only when the requested point was reached; a restored view with a failed point is 'point-failed'. A restored
+          // screen is not retried (as before) and its viewer still gets the focus, since that screen did change.
+          const state = command.locationResult(value, source), restored = value.state === 'restored';
+          setResult(command.locationText(value, source, choice ? choice.label : ''), state,
+            !value.ok && !restored && command.retryable(value.reason) && value.state !== 'rolled-back' && value.state !== 'screen-unknown');
+          if (restored && choice) choice.focus();
         } else if (value.ok) { setResult(command.arrivalText(value, choice.label, source), 'ok', false); choice.focus(); }
         else setResult(command.resultText(value), value.reason, command.retryable(value.reason));
         // The comparison history refused after activation: re-read the list so no withdrawn row stays shown.

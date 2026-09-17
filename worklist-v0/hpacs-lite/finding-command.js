@@ -425,14 +425,15 @@
       if (changed || !sameIdentity(before, safe(choice.probe), true)) return finish(refusal('superseded'), choice);
       if (outcome.thrown) return finish({ ...refusal('tool-missing'), state: 'screen-unknown' }, choice);
       const result = links.locationOutcome(outcome.value);
-      return finish({ ok: result.state === 'restored', reason: result.reason, ...result }, choice);
+      // N1: a restored view whose requested 3D point was not reached is not ok; the outcome keeps state, point and reason.
+      return finish({ ok: links.locationResult(result, job.source) === 'ok', reason: result.reason, ...result }, choice);
     }
     return { run, cancel: () => { sequence++; }, sequence: () => sequence, restoring: () => restoring !== null };
   }
 
   const api = { reasonText, resultText, retryable, openable, arrivalText, readinessText, describeSource, timeText, rowOf, listPath, createListStore,
     chooseTarget, precheck, sameIdentity, validResult, crossResult, targetOf, pinSource, samePin, createNavigator, LOCAL_REASONS: Object.freeze(Object.keys(TEXT)),
-    SCHEMA: 2, locationOf, locationText };
+    SCHEMA: 2, locationOf, locationText, locationResult: links.locationResult };
   if (typeof module === 'object' && module.exports) module.exports = api;
   root.kinFindingCommand = api;
 })(globalThis);

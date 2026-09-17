@@ -240,7 +240,11 @@ window.kinViewerFindings = function (services, model) {
       const sources = text(el, 'div', ''); sources.dataset.kinSources = '';
       shown.forEach((s, index) => sourceLine(sources, e, s, index, editing));
       if (editing) { selection(el, e); locations(el, e); }
-      if (e.message) text(el, 'p', e.message).dataset.kinMessage = '';
+      if (e.message) {
+        const note = text(el, 'p', e.message); note.dataset.kinMessage = '';
+        // A saved-location text carries its machine-readable result ('ok' only when the requested point was reached, N1).
+        if (e.location && e.location.message === e.message) note.dataset.kinLocationResult = e.location.result;
+      }
       // Distinct from the per-source 'Go to Image' lines above, so neither name is ambiguous within a row.
       if (e.head && !editing) button(el, 'Go to Primary Image', () => store.navigate(e), !!e.busy);
       if (store.writable(e)) {

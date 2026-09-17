@@ -1500,7 +1500,27 @@ test('S2-L command: the request is the frozen copy made at the call; outcomes ar
     const outcome = await nav.run(k.value);
     assert.equal(outcome.state, state);
     assert.equal(command.locationText(outcome, wPoint(), '영상 창 1'), text);
+    assert.equal(outcome.ok, false, JSON.stringify(answer));
   }
+  // N1: ok only when the requested point was reached; the failed point keeps its composite outcome and the viewer's reason.
+  const oneView = wView({ studies: [X], studyUid: X });
+  for (const [answer, source, ok, result] of [
+    [{ state: 'restored', point: 'all-planes' }, wPoint(), true, 'ok'],
+    [{ state: 'restored', point: 'source-plane' }, wPoint(), true, 'ok'],
+    [{ state: 'restored', point: 'failed', reason: 'point-mismatch' }, wPoint(), false, 'point-failed'],
+    [{ state: 'restored', point: 'failed', reason: 'tool-missing' }, wPoint(), false, 'point-failed'],
+    [{ state: 'restored', point: 'none' }, wPoint(), false, 'point-failed'],
+    [{ state: 'restored', point: 'none' }, oneView, true, 'ok'],
+    [{ state: 'rolled-back', reason: 'apply-failed' }, oneView, false, 'rolled-back'],
+    [{ state: 'screen-unknown', reason: 'apply-failed' }, oneView, false, 'apply-failed'],
+    [{ state: 'continuing' }, oneView, false, 'continuing']]) {
+    const k = locationJob({ answer: Promise.resolve(answer), source });
+    const outcome = await nav.run(k.value);
+    assert.deepEqual([outcome.ok, outcome.state, outcome.point, outcome.reason], [ok, answer.state, answer.point || 'none', answer.reason || null], JSON.stringify(answer));
+    assert.deepEqual([command.locationResult(outcome, source), k.announced[0].result.ok], [result, ok], JSON.stringify(answer));
+  }
+  assert.deepEqual([command.locationResult({ ok: false, reason: 'saved-view-viewer' }, wPoint()), command.locationResult({ ok: false, reason: 'restore-timeout', state: 'screen-unknown' }, wPoint())],
+    ['saved-view-viewer', 'restore-timeout']);
 });
 
 test('S2-L command B4: 270 s is an unknown result; nothing else runs until the viewer answers or its document ends', async () => {
@@ -1579,6 +1599,16 @@ test('adapter locations: the list read names the record format; characteristics 
   await h.click(h.named(h.panel(), 'Retry Go to Image')[0]); await settle(h);
   assert.equal(h.result().dataset.result, 'ok');
   assert.deepEqual(JSON.parse(v.restores[1]), { subject: SUB, jobId: WV, revision: 1, snapshotVersion: 2, studies: [X, P], mode: 'same-document', mark: null });
+  // N1: the view restored but the 3D point was not reached: the text is unchanged, the result is point-failed (never ok),
+  // no Retry is offered for the changed screen and that viewer still gets the focus.
+  studies = [X]; v.holdRestore = true;
+  const focused = frame.focused;
+  await h.click(h.named(list()[1], 'Go to 3D Point')[0]);
+  v.restoreGates.shift()({ state: 'restored', message: '', point: 'failed', reason: 'point-failed', pointMessage: '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.' });
+  await settle(h);
+  assert.deepEqual([h.result().dataset.result, h.result().textContent], ['point-failed', '저장 위치 확인 · 통합 작업공간 · 저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다.']);
+  assert.deepEqual([h.named(h.panel(), 'Retry Go to Image')[0].hidden, frame.focused, v.restores.length], [true, focused + 1, 3]);
+  studies = [X, P];
   // A restore in progress: the next command of any kind waits for it; the viewer answers for itself.
   v.holdRestore = true;
   await h.click(h.named(list()[2], 'Open Saved View')[0]);

@@ -276,6 +276,12 @@ schemaVersion 2 요청에서만 받는다. 서버는 작업 판·검사 조합(1
 적용이 끝날 때까지 다른 이동을 막는다. 검사 조합이 다른 작업은 새 화면(URL `kinFinding*`와 한 번 쓰는 sessionStorage 표시)에서 입력 없이 한 번만
 복원하고 새로고침은 거절한다. Go to Image 도착 문구는 현재 뷰어 소견의 판·숨김·작성 중 여부를 알린다(2D만, 3D 커서 없음). 워크리스트는 특성·작업 줄을
 보이고 작업 복원은 그 검사 조합을 정확히 표시하는 창에만 보낸다. 목록 읽기는 헤더를 붙인 같은 출처 GET이며 401은 기존 `app.api`로 넘긴다.
+위치 결과의 기계 판독 값(`locationResult`, 뷰어 문구의 `data-kin-location-result`, 워크리스트 `data-result`)은 요청한 3D 표식에 도달했을 때만
+`ok`다. 화면은 복원했지만 표식 이동이 실패하면 복원 결과(state `restored`, point `failed`, 뷰어의 사유)와 문구는 그대로 두고 `point-failed`로
+표시하며 전체 화면을 되돌렸다고 하지 않고 Retry도 두지 않는다. 확인된 되돌림은 `rolled-back`이다. `test_location_02`는 화면을 바꾼 v6 적용의
+3D 표식 단계에서 기존 `kinMprMarks.restore`를 한 번만 실패시키고(시험 안에서만 감싸고 finally에서 원래대로 되돌림, 제품 시험용 경로 없음)
+`rolled-back` 문구, 새 viewport에 다시 세운 이전 화면(볼륨·활성 평면·투영·카메라 1e-6, 저장 화면과 6 mm 차이)과 표식, 점 이동 없음,
+작업·소견·판독 행 불변을 확인한다. 이 호스트 시험은 로컬에서 실행하지 않았다.
 순수 시험은 `finding_input_test.cjs` 11개 중 6개, `finding_link_model_test.cjs` 70개 중 12개, `finding_command_test.cjs` 43개 중 8개,
 `viewer_volume_job_capture_test.cjs` 51개 중 8개(위치 복원 7, `goTo` 1)와 `measurement_ci_test.py`의 음성 선택 1개다. 브라우저·DB 시험은
 `finding_api_test.py` 11·12, `test_finding_navigation.py` 8, `test_finding_worklist.py` 5(기존 `measurements` 19개 suite·540초 한도 그대로)와
