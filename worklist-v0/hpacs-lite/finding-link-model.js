@@ -71,6 +71,39 @@
       referenceLabel: referenceStatus ? REFERENCE_TEXT[referenceStatus] : null,
       headRevision: link ? link.headRevision ?? null : head ? head.revision : null };
   }
+  /* Copied measurement values (S2-V), display only. The server stores the viewer's numbers as sent and never
+   * recomputes them, so names and units are a convention of the pinned calculator identity alone: the order of
+   * config/ohif.js sample() ([length] | [angle] | [area, mean, min, max, count]) and the wording of
+   * viewer-job-print.js (whose own rounding may show other decimals). `provenance` is required:
+   * 'server-copy' (a finding source or a viewer-items read) needs the exact calculator; 'live-head' (the
+   * Measurements panel's saved heads, which omit it) accepts it absent but not null. Any other provenance or
+   * calculator, a wrong count (an empty list of a measurement kind included), a non-finite number, one that
+   * toFixed would write in exponent form (>= 1e21) or a pixel count that is not a non-negative safe integer
+   * shows every value, one decimal each, without names or units. Other kinds without values show nothing.
+   * Values may come from another document: each is read once as a primitive. */
+  const CALCULATOR = 'kin-native-manual-v1', ARITY = { length: 1, angle: 1, ellipse: 5 };
+  const UNVERIFIED = '수치(단위 미확인): ';
+  const finite = n => typeof n === 'number' && Number.isFinite(n);
+  // -0 and -0.04 round to -0, which toFixed writes as '0.0'; from 1e21 on toFixed would write String(n) anyway.
+  const decimal = n => !finite(n) ? '?' : Math.abs(n) < 1e21 ? (Math.round(n * 10) / 10).toFixed(1) : String(n);
+  function valueText(kind, calculator, values, provenance) {
+    let list;
+    try {
+      if (!Array.isArray(values)) return '';
+      list = Array.from({ length: values.length }, (_, i) => { const n = values[i]; return typeof n === 'number' ? n : null; });
+    } catch (_) { return UNVERIFIED + '?'; }
+    const arity = typeof kind === 'string' && Object.prototype.hasOwnProperty.call(ARITY, kind) ? ARITY[kind] : 0;
+    if (!list.length && !arity) return '';
+    const known = provenance === 'server-copy' ? calculator === CALCULATOR
+      : provenance === 'live-head' ? calculator === undefined || calculator === CALCULATOR : false;
+    const exact = known && list.length === arity && list.every(n => finite(n) && Math.abs(n) < 1e21) &&
+      (kind !== 'ellipse' || (Number.isSafeInteger(list[4]) && list[4] >= 0));
+    if (!exact) return UNVERIFIED + list.map(decimal).join(' / ');
+    const [a, b, c, d] = list.map(decimal);
+    if (kind === 'length') return a + ' mm';
+    if (kind === 'angle') return a + '°';
+    return '면적 ' + a + ' mm² · 평균 ' + b + ' HU · 최소 ' + c + ' HU · 최대 ' + d + ' HU · 화소 수 ' + String(list[4]);
+  }
   const refusal = reason => ({ ok: false, reason });
   // Navigation reply from another window (S2-B): only the exact answer to this request counts.
   function validReply(message, expected) {
@@ -229,17 +262,19 @@
     if (error.status === 400 || error.status === 413) return '입력 길이와 연결 표식을 확인하세요. 작성 내용은 저장되지 않았습니다.';
     return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
   }
-  // One viewer-items head of the comparison study, in the shape of kinViewerHistoryState().heads.
+  // One viewer-items head of the comparison study, in the shape of kinViewerHistoryState().heads plus its
+  // calculator, which only valueText reads.
   function comparisonHead(item, study) {
     if (!item || typeof item !== 'object' || !uuid(item.id) || item.studyUid !== study || !revision(item.revision) ||
         typeof item.hidden !== 'boolean' || !item.item || typeof item.item !== 'object') throw new Error('Invalid page');
     const body = item.item, values = body.baseline && Array.isArray(body.baseline.values) ? body.baseline.values : null;
+    const calculator = body.baseline && typeof body.baseline.calculator === 'string' ? body.baseline.calculator : null;
     if (typeof body.kind !== 'string' || !uid(body.seriesUid) || !uid(body.sopUid) || !revision(body.frame)) throw new Error('Invalid page');
     return { id: item.id, studyUid: study, revision: item.revision, hidden: item.hidden, kind: body.kind,
       label: typeof body.label === 'string' ? body.label : typeof body.title === 'string' ? body.title : '',
       seriesUid: body.seriesUid, sopUid: body.sopUid, frame: body.frame, authorSub: typeof item.authorSub === 'string' ? item.authorSub : '',
       referenceStatus: item.referenceStatus === 'verified' || item.referenceStatus === 'unverified' ? item.referenceStatus : null,
-      values: values && values.every(n => typeof n === 'number') ? [...values] : null, working: false };
+      values: values && values.every(n => typeof n === 'number') ? [...values] : null, calculator, working: false };
   }
   const studySet = value => Array.isArray(value) && value.length >= 1 && value.length <= 2 && value.every(uid) &&
     new Set(value).size === value.length ? [...value] : null;
@@ -685,7 +720,7 @@
       dispose: () => { listeners.clear(); controller?.abort(); } };
   }
 
-  const api = { LINK_STATES, LINK_LABELS, NAVIGATION_REASONS, ACTIVATION_REASONS, CROSS_REASONS, LIMITS, linkState, sourceStatus, reasonText, annotationText,
+  const api = { LINK_STATES, LINK_LABELS, NAVIGATION_REASONS, ACTIVATION_REASONS, CROSS_REASONS, LIMITS, linkState, sourceStatus, valueText, reasonText, annotationText,
     phaseText, validReply, validTarget, plainState, viewerResult, activationResult, crossNavigate, comparisonHead,
     commandBody, draftProblem, itemOnly, errorMessage, createStore };
   if (typeof module === 'object' && module.exports) module.exports = api;

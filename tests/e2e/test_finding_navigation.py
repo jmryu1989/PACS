@@ -36,6 +36,12 @@ BAR = """id=>{const v=__d05c1.services.cornerstoneViewportService.getCornerstone
 HISTORY_IMAGE = "()=>{const h=kinViewerHistoryState();return {scope:h.scope,viewportId:h.viewportId,image:h.image}}"
 RECORD_NAVIGATION = "()=>{const f=window.kinViewerHistoryNavigate;window.__navs=[];window.kinViewerHistoryNavigate=function(t){window.__navs.push(JSON.parse(JSON.stringify(t)));return f.call(this,t)}}"
 
+def one_decimal(n):
+    """A copied value as finding-link-model.js valueText writes it: Math.round(n * 10) / 10, then toFixed(1)."""
+    x = n * 10; r = math.floor(x)
+    if x - r >= .5: r += 1
+    return '%.1f' % (r / 10 + 0.0)
+
 class FindingNavigationE2E(ViewerHistoryE2E):
     @classmethod
     def setUpClass(cls):
@@ -78,12 +84,14 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         else: expect(status).to_contain_text('개 소견')
         return panel
 
-    def compose(self, p, title, text, link_text):
+    def compose(self, p, title, text, link_text, shows=None):
+        """`shows`: text the choice's own label must contain before it is linked (its checkbox name stays `link_text`)."""
         panel = self.panel(p)
         panel.get_by_role('button', name='New Finding', exact=True).click()
         key = panel.locator('article[data-saved=false]').last.get_attribute('data-row-key')
         row = panel.locator('article[data-row-key="'+key+'"]')
         row.get_by_label('Finding Title').fill(title); row.get_by_label('Finding Text').fill(text)
+        if shows: expect(row.get_by_label(link_text).locator('xpath=..')).to_contain_text(shows)
         row.get_by_label(link_text).click()
         expect(row.locator('[data-kin-sources] [data-item-id]')).to_have_count(1)
         return row
@@ -104,14 +112,19 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         self.scroll(p, 2)
         row = self.draw_length(p); row.get_by_role('button', name='Save', exact=True).click(); expect(row).to_contain_text('저장 완료')
         head = self.saved(f)[0]; self.assertEqual(head['item']['sopUid'], sops[2]); self.assertEqual(head['item']['kind'], 'length')
-        finding_row = self.compose(p, '우폐 결절 <img src=x onerror="window.bad=1">', '3번 단면 길이', 'Link Length')
+        # S2-V: the live head (no calculator in the panel's state) and the saved copy both read in mm.
+        length = ' · r1 · ' + one_decimal(head['item']['baseline']['values'][0]) + ' mm'
+        finding_row = self.compose(p, '우폐 결절 <img src=x onerror="window.bad=1">', '3번 단면 길이', 'Link Length', shows=length)
         finding_row.get_by_role('button', name='Save', exact=True).click()
         expect(finding_row).to_contain_text('저장 완료')
         saved = self.findings(f); self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0]['item']['sources'][0]['itemId'], head['id']); self.assertEqual(saved[0]['item']['sources'][0]['values'], head['item']['baseline']['values'])
+        self.assertEqual(saved[0]['item']['sources'][0]['calculator'], 'kin-native-manual-v1')
         self.assertEqual(saved[0]['item']['sources'][0]['sopUid'], sops[2]); self.assertEqual(saved[0]['links'][0]['linkState'], 'current')
         saved_row = self.saved_row(p, saved[0]['id'])
         expect(saved_row).to_contain_text('Saved r1'); expect(saved_row.locator('[data-kin-link-state]')).to_have_text('Current')
+        expect(saved_row.locator('[data-kin-sources] [data-item-id]')).to_contain_text(length + ' · Current')
+        expect(saved_row).not_to_contain_text('단위 미확인')
         self.assertEqual(saved_row.locator('img').count(), 0); self.assertIsNone(p.evaluate('()=>window.bad'))
         # Scroll away, navigate back through the finding: the viewport must show the saved SOP and the annotation must be highlighted.
         self.scroll(p, 5)

@@ -53,10 +53,10 @@
 
   /* ---------- list ---------- */
   const KINDS = { arrow: 'Arrow', key: 'Key Image', length: 'Length', angle: 'Angle', ellipse: 'Ellipse ROI' };
-  const number = n => Number.isFinite(n) ? (Math.round(n * 10) / 10).toFixed(1) : '?';
+  // A row source is the server's frozen copy: named units need its exact calculator (S2-V).
   function describeSource(s) {
-    return (KINDS[s.kind] || s.kind) + (s.label ? ' · ' + s.label : '') + ' · 프레임 ' + s.frame + ' · r' + s.revision +
-      (s.values && s.values.length ? ' · ' + s.values.map(number).join(' / ') : '');
+    const values = links.valueText(s.kind, s.calculator, s.values, 'server-copy');
+    return (KINDS[s.kind] || s.kind) + (s.label ? ' · ' + s.label : '') + ' · 프레임 ' + s.frame + ' · r' + s.revision + (values ? ' · ' + values : '');
   }
   function timeText(value) {
     const d = text(value) ? new Date(value) : null;
@@ -83,12 +83,13 @@
       sources: sources.map((s, index) => {
         if (!s || typeof s !== 'object' || !uuid(s.itemId) || !count(s.revision) || !uid(s.studyUid) || !uid(s.seriesUid) || !uid(s.sopUid) ||
             !count(s.frame) || !text(s.kind) || !text(s.label) ||
-            !(s.values === null || s.values === undefined || (Array.isArray(s.values) && s.values.every(n => typeof n === 'number')))) throw INVALID;
+            !(s.values === null || s.values === undefined || (Array.isArray(s.values) && s.values.every(n => typeof n === 'number'))) ||
+            !(s.calculator === null || s.calculator === undefined || text(s.calculator))) throw INVALID;
         const link = serverLinks[index] && serverLinks[index].itemId === s.itemId ? serverLinks[index] : serverLinks.find(l => l && l.itemId === s.itemId) || null;
         // DB link state only: no head is passed, so no Verified/Unverified label can appear here.
         const status = links.sourceStatus(s, link, null);
         const source = { itemId: s.itemId, revision: s.revision, studyUid: s.studyUid, seriesUid: s.seriesUid, sopUid: s.sopUid, frame: s.frame,
-          kind: s.kind, label: s.label, values: Array.isArray(s.values) ? [...s.values] : null,
+          kind: s.kind, label: s.label, values: Array.isArray(s.values) ? [...s.values] : null, calculator: text(s.calculator) ? s.calculator : null,
           linkState: status.linkState, linkLabel: status.label, linkText: status.text, headRevision: count(status.headRevision) ? status.headRevision : null,
           foreign: s.studyUid !== study };
         source.description = describeSource(source);

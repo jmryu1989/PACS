@@ -27,6 +27,10 @@ READY = "uid=>{const h=window.kinViewerHistoryState?.();return !!h&&(uid===null?
 MODAL = "()=>{const d=document.createElement('dialog');d.id='s2b-modal';d.textContent='S2-B modal';document.body.append(d);d.showModal()}"
 ENDED = "()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}"
 OWNED_TABLES = ('Finding', 'FindingRevision', 'ViewerItem', 'ViewerRevision', 'Report', 'ReportDraft', 'ReportVersion')
+# S2-V: the frozen copies read with names and units; the ellipse numbers are API-seeded, never recomputed.
+ELLIPSE_VALUES = [400.26, 45.0, -20.0, 80.0, 1234]
+LENGTH_TEXT = '★ Length · 길이 · 프레임 1 · r1 · 20.0 mm · Current'
+ELLIPSE_TEXT = 'Ellipse ROI · 타원 · 프레임 1 · r1 · 면적 400.3 mm² · 평균 45.0 HU · 최소 -20.0 HU · 최대 80.0 HU · 화소 수 1234 · Current'
 
 
 class FindingWorklistE2E(navigation.FindingNavigationE2E):
@@ -40,23 +44,38 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
     def post(self, path, body):
         r = self.stack.request('POST', path, 'doctor', body); self.assertEqual(r.status, 200, r.text); return r.body
 
-    def seed(self, f):
-        """A length on slice 0, a key image on slice 1, one visible and one hidden finding."""
-        slices = self.dicom(f); ds, key_ds = slices[0], slices[1]; ipp = [float(x) for x in ds.ImagePositionPatient]
-        length = self.post('/studies/'+f.uid+'/viewer-items', dict(requestId=str(uuid.uuid4()), item=dict(
+    def length_at(self, f, ds, label, extent):
+        ipp = [float(x) for x in ds.ImagePositionPatient]
+        return self.post('/studies/'+f.uid+'/viewer-items', dict(requestId=str(uuid.uuid4()), item=dict(
             schemaVersion=1, kind='length', seriesUid=str(ds.SeriesInstanceUID), sopUid=str(ds.SOPInstanceUID), frame=1,
-            frameOfReferenceUid=str(ds.FrameOfReferenceUID), label='길이', points=[[ipp[0]+10, ipp[1]+10, ipp[2]], [ipp[0]+30, ipp[1]+10, ipp[2]]],
-            viewPlaneNormal=[0, 0, 1], viewUp=[0, 1, 0], baseline=dict(calculator='kin-native-manual-v1', values=[20.0]))))
+            frameOfReferenceUid=str(ds.FrameOfReferenceUID), label=label, points=[[ipp[0]+10, ipp[1]+10, ipp[2]], [ipp[0]+10+extent, ipp[1]+10, ipp[2]]],
+            viewPlaneNormal=[0, 0, 1], viewUp=[0, 1, 0], baseline=dict(calculator='kin-native-manual-v1', values=[float(extent)]))))
+
+    def seed(self, f, ellipse=False):
+        """A length on slice 0, a key image on slice 1, one visible and one hidden finding. `ellipse` adds an
+        axis-aligned API ellipse on slice 0 as the visible finding's third source (S2-V value names and units)."""
+        slices = self.dicom(f); ds, key_ds = slices[0], slices[1]; ipp = [float(x) for x in ds.ImagePositionPatient]
+        length = self.length_at(f, ds, '길이', 20)
         key = self.post('/studies/'+f.uid+'/viewer-items', dict(requestId=str(uuid.uuid4()), item=dict(
             schemaVersion=1, kind='key', seriesUid=str(key_ds.SeriesInstanceUID), sopUid=str(key_ds.SOPInstanceUID), frame=1, title='키 영상', description='')))
-        pairs = [dict(itemId=h['id'], revision=h['revision']) for h in (length, key)]
+        heads = [length, key]
+        if ellipse:
+            # Bottom/top then left/right handles around one centre, both axes on the image axes (server rule).
+            cx, cy, z = ipp[0]+60, ipp[1]+60, ipp[2]
+            heads.append(self.post('/studies/'+f.uid+'/viewer-items', dict(requestId=str(uuid.uuid4()), item=dict(
+                schemaVersion=1, kind='ellipse', seriesUid=str(ds.SeriesInstanceUID), sopUid=str(ds.SOPInstanceUID), frame=1,
+                frameOfReferenceUid=str(ds.FrameOfReferenceUID), label='타원', points=[[cx, cy-10, z], [cx, cy+10, z], [cx-15, cy, z], [cx+15, cy, z]],
+                viewPlaneNormal=[0, 0, 1], viewUp=[0, 1, 0], baseline=dict(calculator='kin-native-manual-v1', values=ELLIPSE_VALUES)))))
+        pairs = [dict(itemId=h['id'], revision=h['revision']) for h in heads]
         shown = self.post('/studies/'+f.uid+'/findings', dict(requestId=str(uuid.uuid4()), item=dict(
             schemaVersion=1, title='우엽 결절 <img src=x onerror="window.bad=1">', text='목록 확인 본문', primary=0, sources=pairs)))
         hidden = self.post('/studies/'+f.uid+'/findings', dict(requestId=str(uuid.uuid4()), item=dict(
             schemaVersion=1, title='숨긴 소견', text='', primary=0, sources=pairs[1:])))
         hidden = self.post('/studies/'+f.uid+'/findings/'+hidden['id']+'/revisions', dict(requestId=str(uuid.uuid4()), expectedRevision=1,
             action='hide', reason='목록 숨김 확인', item=dict(schemaVersion=1, title='숨긴 소견', text='', primary=0, sources=pairs[1:])))
-        self.assertEqual([s['sopUid'] for s in shown['item']['sources']], [str(ds.SOPInstanceUID), str(key_ds.SOPInstanceUID)])
+        self.assertEqual([s['sopUid'] for s in shown['item']['sources']], [str(ds.SOPInstanceUID), str(key_ds.SOPInstanceUID)] + ([str(ds.SOPInstanceUID)] if ellipse else []))
+        self.assertEqual([(s['values'], s['calculator']) for s in shown['item']['sources']],
+                         [([20.0], 'kin-native-manual-v1'), (None, None)] + ([(ELLIPSE_VALUES, 'kin-native-manual-v1')] if ellipse else []))
         return shown, hidden
 
     def owned_rows(self, *fixtures):
@@ -127,7 +146,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
     # ---- H1 + list states ---------------------------------------------------------------------
     def test_worklist_01_embedded_list_states_exact_frame_and_refusals(self):
         f = self.specimen(slices=4); self.seed_report(f)
-        shown, hidden = self.seed(f); sops = self.sops(f)
+        shown, hidden = self.seed(f, ellipse=True); sops = self.sops(f)
         original, rows = self.hashes(), self.owned_rows(f)
         w = self.login(); w.set_viewport_size(dict(width=1680, height=1100)); self.observe(w)
         w.on('dialog', lambda d: d.accept())
@@ -138,9 +157,13 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         article = self.row(w, shown['id'])
         expect(article).to_contain_text('우엽 결절 <img src=x onerror="window.bad=1">')
         expect(article.locator('img')).to_have_count(0); self.assertIsNone(w.evaluate('()=>window.bad'))
-        expect(article).to_contain_text('Length · 길이 · 프레임 1 · r1 · 20.0')
-        expect(article).to_contain_text('Key Image · 키 영상 · 프레임 1 · r1')
-        expect(article.locator('[data-kin-link-state]')).to_have_text(['Current', 'Current'])
+        sources = article.locator('[data-kin-sources] > li')
+        expect(sources).to_have_count(3)
+        expect(sources.nth(0)).to_contain_text(LENGTH_TEXT)
+        expect(sources.nth(1)).to_contain_text('Key Image · 키 영상 · 프레임 1 · r1 · Current')
+        expect(sources.nth(2)).to_contain_text(ELLIPSE_TEXT)
+        expect(article).not_to_contain_text('단위 미확인')
+        expect(article.locator('[data-kin-link-state]')).to_have_text(['Current', 'Current', 'Current'])
         expect(panel).to_contain_text('영상 원본 확인 결과가 아닙니다'); expect(panel).not_to_contain_text('Verified')
         for name in ['Save', 'Edit', 'Hide', 'Restore', 'New Finding', 'Refresh Link']:
             expect(panel.get_by_role('button', name=name, exact=True)).to_have_count(0)
@@ -158,6 +181,10 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         # Reading Workspace: the embedded viewer is the target.
         self.close_findings(w)
         frame = self.workspace(w, f)
+        # The viewer's Findings section shows the same frozen copies with the same names and units.
+        copies = frame.locator('#kin-viewer-findings article[data-finding-id="'+shown['id']+'"] [data-kin-sources] [data-item-id]')
+        expect(copies).to_have_count(3)
+        expect(copies.nth(0)).to_contain_text(LENGTH_TEXT); expect(copies.nth(2)).to_contain_text(ELLIPSE_TEXT)
         panel = self.open_findings(w, f)
         self.target(w, 'embedded')
         before, url = (self.state(f), self.versions(f)), frame.url
@@ -337,9 +364,12 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         shown, _ = self.seed(f)
         label = '워크리스트 비교 키 '+uuid.uuid4().hex[:8]
         pk = self.key_at(prior, 1, label); prior_sops = self.sops(prior)
+        # A comparison length copy whose numbers must leave with the withdrawn study (S2-V).
+        prior_label = '워크리스트 비교 길이 '+uuid.uuid4().hex[:8]
+        pl = self.length_at(prior, self.dicom(prior)[0], prior_label, 31)
         cross = self.post('/studies/'+f.uid+'/findings', dict(requestId=str(uuid.uuid4()), item=dict(schemaVersion=1, title='비교 원본 소견', text='워크리스트 비교',
-            primary=1, sources=[dict(itemId=shown['item']['sources'][0]['itemId'], revision=1), dict(itemId=pk['id'], revision=1)])))
-        self.assertEqual(cross['item']['sources'][1]['studyUid'], prior.uid)
+            primary=1, sources=[dict(itemId=shown['item']['sources'][0]['itemId'], revision=1), dict(itemId=pk['id'], revision=1), dict(itemId=pl['id'], revision=1)])))
+        self.assertEqual([s['studyUid'] for s in cross['item']['sources']], [f.uid, prior.uid, prior.uid])
         original, rows = self.hashes(), self.owned_rows(f, prior)
         w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
         p, studies = self.separate(w, f); self.assertEqual(studies, [f.uid, prior.uid])
@@ -347,6 +377,9 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         item = self.row(w, cross['id']).locator('[data-kin-sources] > li')
         expect(item.nth(0)).to_have_attribute('data-source-study', 'current'); expect(item.nth(1)).to_have_attribute('data-source-study', 'comparison')
         expect(item.nth(1)).to_contain_text('비교 검사 영상')
+        expect(item.nth(0)).to_contain_text('Length · 길이 · 프레임 1 · r1 · 20.0 mm · Current')
+        expect(item.nth(2)).to_have_attribute('data-source-study', 'comparison')
+        expect(item.nth(2)).to_contain_text('Length · '+prior_label+' · 프레임 1 · r1 · 31.0 mm · Current')
         vx, vp = self.viewport_of(p, f.uid), self.viewport_of(p, prior.uid)
         self.select_viewport(p, vx, f.uid)
         self.scroll_viewport(p, vp, 0, prior_sops[1])
@@ -390,7 +423,8 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         panel.get_by_role('button', name='Reload Findings', exact=True).click()
         expect(self.row(w, cross['id'])).to_have_count(0); expect(self.row(w, shown['id'])).to_have_count(1)
         text = panel.inner_text()
-        for secret in [label, prior_sops[1], pk['id'], '비교 원본 소견', '비교 검사 영상(']: self.assertNotIn(secret, text)
+        for secret in [label, prior_sops[1], pk['id'], '비교 원본 소견', '비교 검사 영상(', prior_label, pl['id'], '31.0 mm']: self.assertNotIn(secret, text)
+        self.assertIn('20.0 mm', text)
         restore()
         panel.get_by_role('button', name='Reload Findings', exact=True).click()
         expect(self.row(w, cross['id'])).to_have_count(1)
