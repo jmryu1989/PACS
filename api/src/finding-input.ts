@@ -79,6 +79,8 @@ export function findingPage(query: any, revisions = false) {
 
 /// Server-copied provenance of one linked display item at link time. `label` holds the item
 /// label, or the key image title; `values` are the completed baseline numbers or null.
+/// `studyUid` is always copied from the item head. It is the finding's own (anchor) study or,
+/// since S2-B2, the single comparison study that finding's whole revision lineage may link.
 export interface FindingSource {
   itemId: string; revision: number; studyUid: string; kind: string; seriesUid: string; sopUid: string; frame: number;
   frameOfReferenceUid: string | null; label: string; values: number[] | null; calculator: string | null;
@@ -91,6 +93,15 @@ export function copySource(head: any): FindingSource {
     label: item.kind === 'key' ? item.title ?? '' : item.label ?? '', values: Array.isArray(item.baseline?.values) ? item.baseline.values : null,
     calculator: item.baseline?.calculator ?? null, sourceDigest: item.sourceDigest ?? null, authorActor: head.authorActor };
 }
+/// Distinct studies other than the anchor, in code-unit order. This order is for stable results
+/// only; row locks follow the database's ORDER BY, never this sort. A missing or non-string
+/// study reads as '', which no study row can match, so it stays unreadable.
+export function comparisonStudies(anchor: string, studyUids: Iterable<unknown>): string[] {
+  const found = new Set<string>();
+  for (const uid of studyUids) if (uid !== anchor) found.add(typeof uid === 'string' ? uid : '');
+  return [...found].sort();
+}
+
 export type LinkState = 'current' | 'revised' | 'hidden' | 'missing';
 export function linkState(source: { itemId: string; revision: number; studyUid?: string }, head: any): LinkState {
   if (!head || head.id !== source.itemId || (source.studyUid !== undefined && head.studyUid !== source.studyUid)) return 'missing';

@@ -68,3 +68,15 @@ test('page queries fail closed and copySource/linkState follow the contract', ()
   assert.equal(f.linkState(source, { ...head, studyUid: '2.25.9' }), 'missing');
   assert.deepEqual(f.FINDING_LIMITS, { findings: 256, revisions: 4096, bytes: 16777216, snapshot: 65536, history: 1000, sources: 8, title: 200, text: 4000 });
 });
+
+test('S2-B2 comparison studies: distinct, anchor excluded, stable order, a missing uid never names a study', () => {
+  assert.deepEqual(f.comparisonStudies('1.2.3', ['1.2.3', '1.2.10', '1.2.9', '1.2.10', '1.2.3']), ['1.2.10', '1.2.9']);
+  assert.deepEqual(f.comparisonStudies('1.2.3', ['1.2.3']), []);
+  assert.deepEqual(f.comparisonStudies('1.2.3', []), []);
+  assert.deepEqual(f.comparisonStudies('1.2.3', new Set(['2.5', '1.2.3'])), ['2.5']);
+  // null/undefined/non-string uids collapse to '' so a lineage holding one is never fully readable.
+  assert.deepEqual(f.comparisonStudies('1.2.3', [null, undefined, 7, '1.2.3']), ['']);
+  assert.deepEqual(f.comparisonStudies('1.2.3', ['2.5', null, '1.2.30']), ['', '1.2.30', '2.5']);
+  // The pair allow-list is unchanged: a client still cannot name the source study.
+  reject(() => f.findingCommand(raw({ ...body, item: { ...item, sources: [{ itemId: ID, revision: 2, studyUid: '2.25.9' }] } }), true));
+});

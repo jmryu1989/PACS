@@ -201,7 +201,7 @@ DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real
 24개 migration·37개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
 관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
 
-소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (7개)와 `python tests/e2e/test_finding_navigation.py` (6개).
+소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (10개, 8~10은 S2-B2 서버)와 `python tests/e2e/test_finding_navigation.py` (6개).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
 409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
@@ -225,6 +225,17 @@ mode exit 뒤 복원과 로그아웃 폐기를 확인한다. 저장 작업(Job)�
 호출 없이 list-changed로 거절한다(다른 원본으로 바꿔 보내지 않음). 브라우저 시험은 실제 영상의
 `getCurrentImageId`로 도착을 증명하고, 거절·대체된 명령은 성공 문구 없음·URL 검사 범위·DB 행 바이트 동일만 확인한다(영상 화면은 이미 이동했을 수 있음).
 MPR/볼륨 화면 거절은 영상 쪽 순수 시험 범위이며 비교 검사 원본(S2-B2)과 판독문 연결은 포함하지 않는다.
+비교 검사 원본 서버(S2-B2 B2-S): `finding_api_test.py` 8~10(기존 `measurements` 프로필 17번째 suite 안)과 `finding_input_test.cjs`의
+`comparisonStudies`. 검사 X의 소견은 같은 비어 있지 않은 PatientID·같은 기관이며 둘 다 현재 읽을 수 있는 비교 검사 P 하나의 표식을
+평생 하나만 연결한다(다른 P는 409 `FINDING_COMPARISON_STUDY`, 새 소견으로 기록). 모든 개정의 계보에 읽을 수 없는 검사가 있으면 목록·이력·
+재요청에서 없는 소견과 같고 수정·숨김·복원도 404이며, 거르기는 LIMIT 전에 해 페이지가 차고 cursor에 보이지 않는 id가 없다. 시험은 X만 허용된
+독자의 누락 없는 1개 페이지·이웃 uuid cursor, P의 RS=P 비지정·기관 이탈·원격 전용, 권한 회수 중 재요청·편집·숨김·복원 404와 X/P 행 바이트
+불변, 재허용 후 바이트 동일 이력과 동결 사본 유지, 다른 환자 400·다른 기관 403·읽을 수 없는 검사 표식=임의 id(앞뒤 순서 포함), 환자
+메타데이터 규칙, 두 행 정렬 잠금(낮은 행 대기 중 높은 행 NOWAIT 성공, 대칭 쓰기·ViewerJob 동시 완료), 높은 행 잠금 503 후 재시도, P 잠금 대기 중
+바뀐 표식판 409, 잠금 대기 중 P가 RS=P 비지정으로 바뀐 새 연결·재요청·숨김의 404와 무기록, 쓰기가 잡은 접근 조건 공유 잠금 뒤에서
+기다린 제한(쓰기가 먼저 확정되고 그 뒤 재요청·편집 404)과 먼저 확정된 제한을 공유 잠금 대기 뒤에 읽은 숨김·새 연결의 404(pg_locks·
+pg_stat_activity로 대기 확인 후 해제), 읽을 수 없는 행 포함 X 전체 한도(본문은 code/message뿐)와 256개·1000판·거의 16MiB 목록/이력 응답을 확인한다. 기존
+시험 2의 다른 환자 검사 표식은 B2 계약에 따라 404 대신 400이다. 화면(B2-U)은 이 묶음에 없다.
 
 외부 SR 출처/원문 표식: `python tests/e2e/test_sr_provenance.py` (5개).
 실제 C-STORE TID1500 SR의 NUM·단위와 출처를 native SR 캔버스/패널에서 대조한다.
