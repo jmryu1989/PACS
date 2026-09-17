@@ -284,6 +284,10 @@ window.kinViewerJobs = function (services, model) {
           }
           if (JSON.stringify(job.snapshot.studies) !== JSON.stringify(studies)) {
             if (title.value || description.value) throw new Error('작성 중인 작업 제목·설명을 저장하거나 비운 뒤 비교 검사를 여세요.');
+            // Opening the saved comparison replaces this document; finding drafts (held ones included)
+            // would be lost. A same-document restore stays allowed: a study switch holds them.
+            let findings = null; try { findings = typeof window.kinViewerFindingsState === 'function' ? window.kinViewerFindingsState() : null; } catch (_) { findings = { dirty: true }; }
+            if (findings?.dirty || findings?.busy) throw new Error('저장하지 않은 소견 작성 내용이 있어 비교 검사를 열지 않았습니다. 소견을 저장하거나 버린 뒤 복원하세요.');
             status.textContent = '저장한 비교 검사를 함께 여는 중…';
             // The server rechecks both studies on the new page before applying;
             // this same-origin navigation never changes the worklist report target.

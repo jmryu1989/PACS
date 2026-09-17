@@ -4,12 +4,22 @@
 window.kinViewerFindings = function (services, model) {
   'use strict';
   let stop = () => {};
+  // Drafts held across a mode exit of this same document, in memory only. They return only through
+  // the next store's authenticated load; a logout clears them even while no section is mounted.
+  let held = [];
+  const keep = records => { if (Array.isArray(records) && records.length) held = held.concat(records); };
+  const dropHeld = () => { held = []; };
+  window.addEventListener('storage', e => { if (e.key === 'kin-session-ended') dropHeld(); });
+  try { const session = new BroadcastChannel('kin-session'); session.onmessage = e => { if (e.data?.type === 'session-ended') dropHeld(); }; } catch (_) {}
+  window.addEventListener('kin-viewer-access-ended', e => { if (e?.kinModeExit !== true) dropHeld(); });
+  window.addEventListener('beforeunload', e => { if (held.length) { e.preventDefault(); e.returnValue = ''; } });
   function mount() {
     stop();
     const host = document.querySelector('#kin-viewer-history');
     if (!host) return false;
-    const store = model.createStore({ fetch: (url, options) => window.fetch(url, options), uuid: () => crypto.randomUUID(),
+    const store = model.createStore({ fetch: (url, options) => window.fetch(url, options), uuid: () => crypto.randomUUID(), recovered: held,
       navigate: target => typeof window.kinViewerHistoryNavigate === 'function' ? window.kinViewerHistoryNavigate(target) : { ok: false, reason: 'tool-missing' } });
+    held = [];
     const panel = document.createElement('details'); panel.id = 'kin-viewer-findings'; panel.open = true;
     panel.style.cssText = 'border-top:1px solid #405777;margin-top:10px;padding-top:8px';
     const text = (parent, tag, value) => { const el = document.createElement(tag); el.textContent = value; parent.append(el); return el; };
@@ -18,6 +28,7 @@ window.kinViewerFindings = function (services, model) {
     // Not role=status and not <section> rows: the Measurements panel's own tests and scans address
     // `#kin-viewer-history [role=status]` and `#kin-viewer-history section` and must keep matching only theirs.
     const status = text(panel, 'p', '검사 확인 중…'); status.id = 'kin-viewer-findings-status'; status.setAttribute('aria-live', 'polite');
+    const recovery = text(panel, 'p', ''); recovery.id = 'kin-viewer-findings-held'; recovery.hidden = true;
     const actions = document.createElement('div'), list = document.createElement('div'); panel.append(actions, list);
     host.append(panel);
     const button = (parent, label, run, disabled = false) => {
@@ -124,6 +135,14 @@ window.kinViewerFindings = function (services, model) {
       button(actions, 'Reload Findings', () => store.load(), s.ended || !s.scope);
       button(actions, 'New Finding', () => store.newDraft(), s.ended || s.suspended || !store.writable());
       if (!s.ended && !s.suspended && !store.writable()) text(actions, 'span', ' Read-only');
+      // Held drafts are named by count and study only, so the unsaved-work guards never fire with nothing to resolve.
+      const kept = store.held();
+      recovery.hidden = !kept.count; recovery.dataset.count = String(kept.count);
+      recovery.textContent = kept.count ? '보관 중인 소견 작성 내용 ' + kept.count + '건 · ' + kept.studies.map(r => (r.current ? '현재 검사 ' : '다른 검사 ') + r.scope + ' ' + r.count + '건').join(' · ') +
+        ' · 해당 검사의 영상 칸을 선택하면 접근과 계정을 확인한 뒤 복원합니다. 현재 검사는 Reload Findings로 다시 확인하세요.' : '';
+      if (kept.count && !s.ended) button(actions, 'Discard Held Drafts', () => {
+        if (window.confirm('보관 중인 소견 작성 내용 ' + store.held().count + '건을 버립니다. 결과를 확인하지 못한 저장 요청은 서버에 이미 저장되었을 수 있습니다. 계속할까요?')) store.discardHeld();
+      });
       for (const [e, el] of [...rows]) if (!s.entries.has(e.id) || s.entries.get(e.id) !== e) { el.remove(); rows.delete(e); }
       for (const e of s.entries.values()) row(e);
     }
@@ -132,11 +151,15 @@ window.kinViewerFindings = function (services, model) {
     const timer = setInterval(() => { try { store.syncHistory(typeof window.kinViewerHistoryState === 'function' ? window.kinViewerHistoryState() : null); } catch (_) {} }, 250);
     const onStorage = e => { if (e.key === 'kin-session-ended') store.end(); };
     let channel; try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') store.end(); }; } catch (_) {}
-    window.addEventListener('storage', onStorage); window.addEventListener('kin-viewer-access-ended', store.end);
-    window.kinViewerFindingsState = () => ({ scope: store.state().scope, dirty: [...store.state().entries.values()].some(store.hasWork) });
+    // The Measurements panel announces both a real session end and its own mode exit; only the
+    // former destroys drafts, the latter hands them to the next mode entry of this document.
+    const onAccessEnded = e => { if (e?.kinModeExit === true) keep(store.detach()); else store.end(); };
+    window.addEventListener('storage', onStorage); window.addEventListener('kin-viewer-access-ended', onAccessEnded);
+    window.kinViewerFindingsState = () => ({ scope: store.state().scope, ...store.workState() });
     const state = window.kinViewerFindingsState;
     stop = () => {
-      clearInterval(timer); unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); window.removeEventListener('kin-viewer-access-ended', store.end);
+      clearInterval(timer); unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); window.removeEventListener('kin-viewer-access-ended', onAccessEnded);
+      keep(store.detach());
       if (window.kinViewerFindingsState === state) delete window.kinViewerFindingsState;
       store.dispose(); panel.remove(); rows.clear(); stop = () => {};
     };
