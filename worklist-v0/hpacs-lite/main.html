@@ -991,6 +991,9 @@
   <script src="viewer-workspace-dock.js"></script>
   <script src="workspace-shortcuts.js"></script>
   <script src="reading-workspace.js"></script>
+  <script src="finding-link-model.js"></script>
+  <script src="finding-command.js"></script>
+  <script src="reading-findings.js"></script>
   <link rel="stylesheet" href="tech-note.css">
   <script src="tech-note.js"></script>
   <script src="reading-preferences.js"></script>
@@ -2369,6 +2372,7 @@
       loadReport({ force: forceReport });
       updateReportButtons();
       readingWorkspace.selectionChanged(deferViewer);
+      readingFindings?.sync();
     }
 
     function renderClinical() {
@@ -4457,6 +4461,17 @@
       if (!selectedUid) { toast('판독할 검사를 먼저 선택하세요.', 'info'); return; }
       readingWorkspace.resume(selectedUid, relatedUid || autoPrior(selectedUid));
     });
+    // Read-only Image Findings of the selected study; an unavailable list must not block reading.
+    let readingFindings = null;
+    try {
+      readingFindings = KinReadingFindings({
+        current: () => selectedUid, allowed: () => !!sess && serverMode && !demoMode && !offline, api,
+        owner: () => { const key = KinViewerOpening.key(KinAuth.session()); return key ? key.slice(KinViewerOpening.PREFIX.length) : null; },
+        sub: () => KinAuth.session()?.sub || null,
+        workspace: readingWorkspace, windows: () => viewerWindows?.available() ? viewerWindows.rows() : [],
+        popup: openOhifWindow, open: uid => openFilmbox(uid),
+      });
+    } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
 
     // ── 패널 크기 조절 ──
     function bindPanelResize(selector, axis, resize) {

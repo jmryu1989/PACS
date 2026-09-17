@@ -71,6 +71,26 @@ body.reading .redit textarea { min-height: 65px; }
 body.reading .menubar { overflow-x: auto; }
 body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 #m-reading { color: #dceaff; background: #244c80; border: 1px solid #668dbd; border-radius: 4px; }
+/* Image Findings: a fixed panel owned by the related region, so opening it never resizes the lists. */
+#reading-findings-open { flex: none; white-space: nowrap; }
+#reading-findings[hidden], #reading-findings [hidden] { display: none !important; }
+#reading-findings { position: fixed; right: 12px; bottom: 12px; z-index: 80; width: min(420px, calc(100vw - 24px)); max-height: min(62vh, 640px);
+  overflow: auto; padding: 10px 12px; background: #101a2b; color: #e5efff; border: 1px solid #7893b8; border-radius: 6px;
+  box-shadow: 0 10px 28px #000a; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+#reading-findings p { margin: 4px 0; }
+#reading-findings #reading-findings-close { float: right; }
+#reading-findings label { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; color: inherit; }
+#reading-findings button { margin: 2px 4px 2px 0; padding: 3px 7px; border: 1px solid #657c9f; border-radius: 4px; background: #1b2c45; color: #e5efff; }
+#reading-findings button:disabled { opacity: .55; }
+#reading-findings button:focus-visible, #reading-findings input:focus-visible { outline: 2px solid #93c5fd; outline-offset: 1px; }
+#reading-findings-status, #reading-findings-target { color: #bdd3f4; }
+#reading-findings-nav:not(:empty) { padding: 5px 7px; border-left: 3px solid #93c5fd; background: #172b47; }
+#reading-findings-nav[data-result="ok"] { border-left-color: #6fcf97; }
+#reading-findings article { border-top: 1px solid #45658b; margin-top: 8px; padding-top: 6px; }
+#reading-findings .reading-findings-text { white-space: pre-wrap; }
+#reading-findings .reading-findings-meta { color: #9fb9dc; }
+#reading-findings ul { margin: 4px 0; padding-left: 16px; }
+#reading-findings li { margin: 3px 0; }
 @media (max-width: 1250px) {
   body.reading .rbtns button, body.reading .rfoot2 button { padding: 5px 7px; }
 }

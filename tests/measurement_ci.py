@@ -14,14 +14,16 @@ SUITES = ['viewer_api_test.py', 'e2e/test_measurement_readback.py',
           'reading_appearance_fields_live.py', 'e2e/test_viewer_identity_fields.py',
           'e2e/test_cine.py', 'e2e/test_volume_cine.py',
           # S2-A findings: API suite then the browser navigation suite, after every existing suite.
-          'finding_api_test.py', 'e2e/test_finding_navigation.py']
+          'finding_api_test.py', 'e2e/test_finding_navigation.py',
+          # S2-B1 worklist Image Findings list and Go to Image, in the same profile and deadline.
+          'e2e/test_finding_worklist.py']
 SUITE_CLASSES = ['ViewerAPI', 'MeasurementReadbackE2E', 'MeasurementPanelE2E',
                  'HeldMeasurementE2E', 'ManualSrE2E', 'MeasurementRecheckE2E',
                  'ViewerRecoveryE2E', 'MeasurementCalibrationE2E', 'WorklistBodyPartsE2E',
                  'ReadingAppearanceLive', 'ReadingAppearancePositionLive', 'ViewerIdentityPositionE2E',
                  'ReadingAppearanceFieldsLive', 'ViewerIdentityFieldsE2E',
                  'CineE2E', 'VolumeCineE2E',
-                 'FindingAPI', 'FindingNavigationE2E']
+                 'FindingAPI', 'FindingNavigationE2E', 'FindingWorklistE2E']
 PROFILES = {
     'image-text': {
         'out': ROOT / 'tests/e2e/artifacts/image-text-ci',
