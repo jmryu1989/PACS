@@ -167,12 +167,54 @@ class FindingAPI(unittest.TestCase):
         # Same shape as viewer_api_test.parent_lock; `inside` runs while the parent row is locked.
         uid = uid or self.uid
         assert uid in self.stack.active
+        return self.hold(f'SELECT uid FROM "StudyState" WHERE uid={literal(uid)} FOR UPDATE')
+
+    def hold(self, statement):
+        """An open psql transaction that has run the row-locking `statement`; finish_lock() commits it."""
         process = subprocess.Popen(['docker', 'exec', '-i', 'kin-db', 'psql', '-XqAt', '-U', 'kin', '-d', 'kin', '-v', 'ON_ERROR_STOP=1'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8')
-        process.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; "+f'SELECT uid FROM "StudyState" WHERE uid={literal(uid)} FOR UPDATE'+"; SELECT 'LOCKED';\n"); process.stdin.flush()
+        process.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; "+statement+"; SELECT 'LOCKED';\n"); process.stdin.flush()
         while process.stdout.readline().strip() != 'LOCKED':
             if process.poll() is not None: raise RuntimeError('Parent lock setup failed')
         return process
+
+    def holder_rows(self, holder, sql):
+        """Read-only `sql` run in the holder's own open session: no process start-up delay while requests wait on
+        its lock. pg_stat_clear_snapshot() drops the per-transaction activity cache so every call sees fresh data."""
+        holder.stdin.write(f"SELECT pg_stat_clear_snapshot(); {sql}; SELECT 'DONE';\n"); holder.stdin.flush()
+        rows = []
+        while (line := holder.stdout.readline().strip()) != 'DONE':
+            if not line and holder.poll() is not None: self.fail('The lock holder session ended: '+holder.stderr.read())
+            if line: rows.append(line)
+        return rows
+
+    def waiting(self, fragment, count, event='%'):
+        """SQL condition: at least `count` other sessions wait on a lock (wait_event LIKE `event`) in a statement containing `fragment`."""
+        return (f"(SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND wait_event LIKE {literal(event)} "
+                f"AND query LIKE {literal('%'+fragment+'%')} AND pid<>pg_backend_pid()) >= {count}")
+
+    def holder_wait(self, holder, condition, timeout=10):
+        deadline = time.monotonic()+timeout
+        while time.monotonic() < deadline:
+            if self.holder_rows(holder, f'SELECT ({condition})::int') == ['1']: return
+            time.sleep(.02)
+        self.fail('Requests were not observed waiting: '+condition)
+
+    def staged(self, holder, stages, then='', check=None):
+        """With `holder` open, submit each stage's requests and wait (bounded) until that stage's SQL condition holds;
+        run `check(holder)`, then `then` inside the holder, release it and return every response in submission order."""
+        try:
+            with ThreadPoolExecutor(sum(len(requests) for requests, _ in stages)) as pool:
+                futures = []
+                for requests, condition in stages:
+                    futures += [pool.submit(self.stack.request, method, path, user, body) for method, path, user, body in requests]
+                    self.holder_wait(holder, condition)
+                if check is not None: check(holder)
+                current, holder = holder, None
+                self.finish_lock(current, then)
+                return [future.result(timeout=30) for future in futures]
+        finally:
+            if holder is not None and holder.poll() is None: self.finish_lock(holder)
 
     def wait_blocked(self, count=1, timeout=2):
         deadline = time.monotonic()+timeout
@@ -551,6 +593,13 @@ class FindingAPI(unittest.TestCase):
     def edit_body(self, sources, title='수정', primary=0):
         return dict(schemaVersion=1, title=title, text='', primary=primary, sources=[dict(itemId=s['id'], revision=s['revision']) for s in sources])
 
+    def hide_body(self, head, reason):
+        """A hide command for `head` that keeps its exact pairs, title and text."""
+        item = head['item']
+        return dict(requestId=str(uuid.uuid4()), expectedRevision=head['revision'], action='hide', reason=reason, item=dict(
+            schemaVersion=1, title=item['title'], text=item['text'], primary=item['primary'],
+            sources=[dict(itemId=s['itemId'], revision=s['revision']) for s in item['sources']]))
+
     def ids(self, user, query='?includeHidden=true&limit=100', path=None):
         body = self.call(method='GET', user=user, path=(path or self.path)+query)
         self.assertIsNone(body['nextCursor'])
@@ -558,6 +607,11 @@ class FindingAPI(unittest.TestCase):
 
     def access(self, user, uids=None, rules=None):
         """SYNTHETIC study-access policy for a run-owned reader; no uids and no rules lifts the restriction."""
+        method, path, admin, body = self.access_request(user, uids, rules)
+        self.call(method, body, admin, path, 201)
+
+    def access_request(self, user, uids=None, rules=None):
+        """The admin policy write of access() as (method, path, user, body), based on the current revision."""
         admin = self.call(method='GET', path='/me', user='jmryu')
         subject = self.call(method='GET', path='/me', user=user)['sub']
         subjects = vars(self).setdefault('access_subjects', set())
@@ -567,8 +621,8 @@ class FindingAPI(unittest.TestCase):
         policy = dict(version=1, restricted=rules is not None, startsAt=None, endsAt=None, rules=rules or [])
         path = '/admin/users/'+subject+'/study-access'
         revision = self.call(method='GET', path=path, user='jmryu')['revision']
-        self.call(path=path, user='jmryu', status=201, body=dict(expectedOwner=[admin['institution'], admin['sub']], policy=policy,
-                  revision=revision, reason='SYNTHETIC finding comparison access', requestId=str(uuid.uuid4())))
+        return ('POST', path, 'jmryu', dict(expectedOwner=[admin['institution'], admin['sub']], policy=policy,
+                revision=revision, reason='SYNTHETIC finding comparison access', requestId=str(uuid.uuid4())))
 
     def clear_access(self, subject):
         self.assertIn(subject, self.stack.user_ids.values())
@@ -612,25 +666,21 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(psql(f'SELECT count(*) FROM "ViewerJob" WHERE "studyUid"={literal(uid)}'), ['0'])
 
     def locked_request(self, uid, requests, then='', probe=None):
-        """Hold `uid`'s row until every request waits on it; optionally prove, from the holder's own session and
-        without delay, that no waiting request holds the `probe` row; run `then` and release; return the responses."""
-        lock = self.parent_lock(uid=uid)
-        try:
-            with ThreadPoolExecutor(len(requests)) as pool:
-                futures = [pool.submit(self.stack.request, method, path, user, body) for method, path, user, body in requests]
-                self.wait_blocked(len(requests), timeout=30)
-                if probe is not None:
-                    lock.stdin.write(f'SELECT uid FROM "StudyState" WHERE uid={literal(probe)} FOR UPDATE NOWAIT; SELECT \'PROBED\';\n'); lock.stdin.flush()
-                    lines = []
-                    while (line := lock.stdout.readline().strip()) != 'PROBED':
-                        if lock.poll() is not None: self.fail('A waiting request already held the probed row')
-                        if line: lines.append(line)
-                    self.assertEqual(lines, [probe])
-                holder, lock = lock, None
-                self.finish_lock(holder, then)
-                return [future.result(timeout=30) for future in futures]
-        finally:
-            if lock is not None and lock.poll() is None: self.finish_lock(lock)
+        """Hold `uid`'s row until every request waits on a StudyState lock; optionally prove from the holder's session
+        that no waiting request holds the `probe` row (NOWAIT succeeds); run `then` and release; return the responses."""
+        def check(holder):
+            self.assertEqual(self.holder_rows(holder, f'SELECT uid FROM "StudyState" WHERE uid={literal(probe)} FOR UPDATE NOWAIT'), [probe])
+        return self.staged(self.parent_lock(uid=uid), [(requests, self.waiting('FROM "StudyState"', len(requests)))], then,
+                           None if probe is None else check)
+
+    def advisory_locks(self, holder, key):
+        """'shared-granted exclusive-granted shared-waiting exclusive-waiting' for the study-access advisory lock of `key`
+        (a bigint key shows its high half in classid and its low half in objid, objsubid 1)."""
+        [counts] = self.holder_rows(holder, f"""SELECT count(*) FILTER (WHERE mode='ShareLock' AND granted)||' '||
+            count(*) FILTER (WHERE mode='ExclusiveLock' AND granted)||' '||count(*) FILTER (WHERE mode='ShareLock' AND NOT granted)||' '||
+            count(*) FILTER (WHERE mode='ExclusiveLock' AND NOT granted) FROM pg_locks l CROSS JOIN (SELECT hashtextextended({literal(key)}, 0) AS h) k
+            WHERE l.locktype='advisory' AND l.objsubid=1 AND l.classid::text::bigint=((k.h>>32)&4294967295) AND l.objid::text::bigint=(k.h&4294967295)""")
+        return counts
 
     # ---- TEST-S2-API-08 (S2-B2 T08a-h) -------------------------------------------------------
     def test_08_comparison_lineage_visibility_history_replay_and_refused_edits(self):
@@ -817,7 +867,7 @@ class FindingAPI(unittest.TestCase):
         readded, _ = self.revise(dropped, user='xauthor', item=self.edit_body([x, p], title='P 다시'))
         self.assertEqual((readded['revision'], readded['item']['sources']), (3, head['item']['sources']))
 
-    # ---- TEST-S2-API-10 (S2-B2 T10a-f) -------------------------------------------------------
+    # ---- TEST-S2-API-10 (S2-B2 T10a-i) -------------------------------------------------------
     def test_10_two_study_lock_order_races_invisible_quota_and_scale(self):
         prior, anchor = self.comparison(), self.study(self.uid, self.slices)
         x = self.item_in(anchor, self.length_item())
@@ -864,6 +914,78 @@ class FindingAPI(unittest.TestCase):
         job, written = self.locked_request(lower, [('POST', '/studies/'+self.uid+'/viewer-jobs', 'doctor', self.job_command([anchor, prior])),
                                                    ('POST', self.path, 'xauthor', self.finding_body([x, p]))])
         self.assertEqual((job.status, written.status), (200, 200), job.text+written.text)
+        # T10g: while a new link, a replay and a hide all wait on the study locks, P becomes non-designated RS=P in the
+        # holder's own transaction. Each request reads P's committed row under its lock and answers exactly like an
+        # unknown item or an absent finding, writing nothing; with P restored the same replay returns its recorded row
+        # and the same hide succeeds.
+        absent = self.stack.request('GET', self.path+'/'+str(uuid.uuid4())+'/revisions', 'xauthor')
+        unknown = self.stack.request('POST', self.path, 'xauthor', self.finding_body([dict(itemId=str(uuid.uuid4()), revision=1)]))
+        self.assertEqual((absent.status, unknown.status), (404, 404))
+        hide = self.hide_body(forward.body, '경계 변경 중 숨김')
+        saved, before = self.boundary(prior.uid), (self.state(), self.state(prior.uid))
+        try:
+            responses = self.locked_request(prior.uid, [('POST', self.path, 'xauthor', self.finding_body([x, p])), ('POST', self.path, 'xauthor', command),
+                                                        ('POST', self.path+'/'+forward.body['id']+'/revisions', 'xauthor', hide)],
+                                            f"UPDATE \"StudyState\" SET rs='P', \"preDoc\"='SYNTHETIC-A', \"preReviewer\"='SYNTHETIC-B' WHERE uid={literal(prior.uid)};")
+        finally: self.restore_boundary(prior.uid, saved)
+        self.assertEqual([(r.status, r.text) for r in responses], [(unknown.status, unknown.text)]+[(absent.status, absent.text)]*2)
+        self.assertEqual((self.state(), self.state(prior.uid)), before)
+        self.assertEqual(self.call(body=command, user='xauthor'), retried)
+        self.assertTrue(self.call(body=hide, path=self.path+'/'+forward.body['id']+'/revisions', user='xauthor')['hidden'])
+        # T10h: a create holding the shared study-access lock of its author waits on a study row. The admin restriction
+        # of that author is then observed waiting for the exclusive lock of the same key while the committed policy is
+        # unchanged. After release the create, authorized before the change, commits first (a response that crosses the
+        # change may still be answered 409 STUDY_ACCESS_CHANGED by the interceptor) and the restriction commits after it;
+        # from then on the same request and an edit of that finding are an absent finding.
+        me = self.call(method='GET', path='/me', user='xauthor')
+        key = 'study-access:'+json.dumps([me['institution'], me['sub']], separators=(',', ':'), ensure_ascii=False)
+        policy_revision = f'SELECT COALESCE(max(revision), 0) FROM "StudyAccessPolicy" WHERE subject={literal(me["sub"])}'
+        committed, before = psql(policy_revision), (self.state(), self.state(prior.uid))
+        early, restrict = self.finding_body([x, p]), self.access_request('xauthor', [self.uid])
+        def in_flight(holder):
+            self.assertEqual(self.advisory_locks(holder, key), '1 0 0 1')
+            self.assertEqual(self.holder_rows(holder, policy_revision), committed)
+        written, restricted = self.staged(self.parent_lock(uid=lower), [
+            ([('POST', self.path, 'xauthor', early)], self.waiting('FROM "StudyState"', 1)),
+            ([restrict], self.waiting('pg_advisory_xact_lock(', 1, 'advisory'))], check=in_flight)
+        print(f'T10h in-flight create answered {written.status}', flush=True)
+        self.assertEqual(restricted.status, 201, restricted.text)
+        self.assertTrue(written.status == 200 or (written.status == 409 and written.body.get('code') == 'STUDY_ACCESS_CHANGED'), written.text)
+        self.assertEqual(int(psql(policy_revision)[0]), int(committed[0])+1)
+        rows = psql(f'''SELECT r."findingId"||' '||r.revision||' '||(SELECT string_agg(s.value->>'studyUid', ',' ORDER BY s.ordinality)
+            FROM jsonb_array_elements(r.snapshot->'sources') WITH ORDINALITY s) FROM "FindingRevision" r WHERE r."requestId"={literal(early["requestId"])}::uuid''')
+        self.assertEqual(len(rows), 1, rows)
+        finding_id, revision, studies = rows[0].split(' ')
+        self.assertEqual((revision, studies), ('1', self.uid+','+prior.uid))
+        after = self.state()
+        self.assertEqual({t: [r for r in before[0][t] if r not in after[t]] for t in after}, {t: [] for t in after})
+        self.assertEqual({t: len([r for r in after[t] if r not in before[0][t]]) for t in after},
+                         {**{t: 0 for t in after}, 'Finding': 1, 'FindingRevision': 1, 'AuditLog': 1})
+        self.assertEqual(self.state(prior.uid), before[1])
+        refused = [self.stack.request('POST', self.path, 'xauthor', early),
+                   self.stack.request('POST', self.path+'/'+finding_id+'/revisions', 'xauthor', dict(requestId=str(uuid.uuid4()), expectedRevision=1,
+                                      action='edit', item=self.edit_body([x], title='제한 뒤 편집')))]
+        self.assertEqual([(r.status, r.text) for r in refused], [(absent.status, absent.text)]*2)
+        self.assertEqual((self.state(), self.state(prior.uid)), (after, before[1]))
+        self.access('xauthor')
+        # T10i: the admin restriction holds the exclusive lock while it waits on its own policy row; a hide and a new link
+        # authorized under the old policy are then observed waiting for the shared lock. Once the restriction commits
+        # they read it under that lock and are refused, writing nothing; lifting it lets the same hide succeed.
+        before, target = (self.state(), self.state(prior.uid)), twins[0].body
+        hide, late, restrict = self.hide_body(target, '제한 확정 뒤 숨김'), self.finding_body([x, p]), self.access_request('xauthor', [self.uid])
+        self.assertEqual((int(psql(policy_revision)[0]), restrict[3]['revision']), (int(committed[0])+2,)*2, 'the policy row to hold must exist')
+        policy_row = self.hold(f'SELECT revision FROM "StudyAccessPolicy" WHERE institution={literal(me["institution"])} '
+                               f'AND subject={literal(me["sub"])} FOR UPDATE')
+        restricted, hidden, created = self.staged(policy_row, [
+            ([restrict], self.waiting('"StudyAccessPolicy" WHERE institution=', 1)),
+            ([('POST', self.path+'/'+target['id']+'/revisions', 'xauthor', hide), ('POST', self.path, 'xauthor', late)],
+             self.waiting('pg_advisory_xact_lock_shared(', 2, 'advisory'))],
+            check=lambda holder: self.assertEqual(self.advisory_locks(holder, key), '0 1 2 0'))
+        self.assertEqual(restricted.status, 201, restricted.text)
+        self.assertEqual([(r.status, r.text) for r in (hidden, created)], [(absent.status, absent.text), (unknown.status, unknown.text)])
+        self.assertEqual((self.state(), self.state(prior.uid)), before)
+        self.access('xauthor')
+        self.assertTrue(self.call(body=hide, path=self.path+'/'+target['id']+'/revisions', user='xauthor')['hidden'])
         # T10e: X filled to the findings limit with rows the caller cannot read. The refusal carries only the
         # code and message; the caller's list still shows only what it may read.
         self.access('xauthor', [self.uid]); self.access('xreader', [self.uid])
@@ -882,21 +1004,22 @@ class FindingAPI(unittest.TestCase):
                 (SELECT COALESCE(sum(r."payloadBytes"),0) FROM "FindingRevision" r JOIN "Finding" f ON f.id=r."findingId" WHERE f."studyUid"={uid})''')[0].split()]
         findings, revisions, used = usage()
         count = 256-findings
-        # One seeded finding at the 1000-revision history cap; the others share the lifetime revision budget, and
-        # every seeded snapshot is sized so the byte budget ends about 20 KiB short: only the finding count refuses.
-        each = (4096-revisions-8-1000)//(count-1)
+        # One seeded finding at the 1000-revision history cap; the others share the lifetime revision budget up to 8 short
+        # of it, and every seeded snapshot is sized so the byte budget ends about 20 KiB short: only the finding count refuses.
+        budget = 4096-revisions-8-1000
+        each, extra = divmod(budget, count-1)
         overhead = max(int(psql(f"SELECT octet_length(convert_to({seeded_snapshot(s)}::jsonb::text,'UTF8'))")[0]) for s in (prior.uid, self.uid))
-        size = (16*1024*1024-used-20000)//(1000+(count-1)*each)-overhead
+        size = (16*1024*1024-used-20000)//(1000+budget)-overhead
         self.addCleanup(unseed)
         psql(f'''WITH seeded AS (INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt")
-            SELECT gen_random_uuid(),{uid},'SYNTHETIC','SYNTHETIC',CASE WHEN n=1 THEN 1000 ELSE {each} END,false,
+            SELECT gen_random_uuid(),{uid},'SYNTHETIC','SYNTHETIC',CASE WHEN n=1 THEN 1000 WHEN n<={1+extra} THEN {each+1} ELSE {each} END,false,
               CASE WHEN n%2=1 THEN {seeded_snapshot(prior.uid, size)}::jsonb ELSE {seeded_snapshot(self.uid, size)}::jsonb END,now()
             FROM generate_series(1,{count}) n RETURNING id,revision,snapshot)
             INSERT INTO "FindingRevision" ("findingId",revision,snapshot,action,reason,actor,"authorSub","requestId",fingerprint,"payloadBytes")
             SELECT s.id,k,s.snapshot,CASE WHEN k=1 THEN 'create' ELSE 'edit' END,'','SYNTHETIC','SYNTHETIC',gen_random_uuid(),repeat('0',64),
               octet_length(convert_to(s.snapshot::text,'UTF8')) FROM seeded s CROSS JOIN LATERAL generate_series(1,s.revision) k''')
         totals = usage()
-        self.assertEqual(totals[0], 256); self.assertGreater(totals[1], 4000); self.assertLess(totals[1], 4096)
+        self.assertEqual(totals[:2], [256, 4096-8])
         # Study uids may differ by a few digits in length, so rows of the shorter one are a little smaller.
         self.assertGreater(totals[2], 16*1024*1024-64000); self.assertLessEqual(totals[2], 16*1024*1024-20000)
         # Refusals only ever insert, so full Finding/audit rows plus revision totals prove nothing was written.
