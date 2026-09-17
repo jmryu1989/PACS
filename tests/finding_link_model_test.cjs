@@ -12,6 +12,9 @@ const model = require('../worklist-v0/hpacs-lite/finding-link-model.js');
 const source = fs.readFileSync(path.join(__dirname, '..', 'config', 'ohif.js'), 'utf8');
 const A = '1.2.3', B = '4.5.6', SERIES = '1.2.3.4', SOP = '1.2.3.4.5', ITEM = '00000000-0000-4000-8000-000000000001';
 const REQUEST = '11111111-2222-3333-4444-555555555555';
+// S2-L R5: every synthetic API answer below models the current API, which names its record format in this response header;
+// the old-API cases build answers without it on purpose.
+const API_HEADERS = Object.freeze({ get: name => String(name).toLowerCase() === 'x-kin-finding-schema' ? '2' : null });
 
 /* ---------- navigation sliced from config/ohif.js ---------- */
 function slice() {
@@ -215,7 +218,7 @@ async function mounted(options) {
     state: { getAnnotation: uid => annotations.get(uid), getAllAnnotations: () => [...annotations.values()], removeAnnotation: uid => annotations.delete(uid) } },
     ToolGroupManager: { getToolGroupForViewport() {} } };
   window.prompt = () => 'reason'; window.confirm = () => true;
-  const fetch = async path => ({ status: 200, ok: true, json: async () => path === '/api/me' ? me
+  const fetch = async path => ({ status: 200, ok: true, headers: API_HEADERS, json: async () => path === '/api/me' ? me
     : path.includes('/findings') ? { items: [], nextCursor: null } : { items: study === '1.1' ? [JSON.parse(JSON.stringify(keyHead))] : [], nextCursor: null } });
   window.fetch = fetch;
   const sandbox = { window, document, crypto: webcrypto, TextEncoder, console, Event, AbortController,
@@ -403,7 +406,7 @@ function transport() {
     item: { schemaVersion: 1, title: 'T', text: 'X', hidden: false, primary: 0, sources: [{ itemId: ITEM, revision: 2, studyUid: A, kind: 'length', seriesUid: SERIES, sopUid: SOP, frame: 1, frameOfReferenceUid: '1.9', label: 'L', values: [20], calculator: 'kin-native-manual-v1', sourceDigest: 'd', authorActor: 'Reader' }] },
     links: [{ itemId: ITEM, linkState: 'current', headRevision: 2, headHidden: false }] }, extra);
   const state = { items: [], responses: [], hold: false };
-  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => body });
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: API_HEADERS, json: async () => body });
   const fetch = async (url, options) => {
     const entry = { url, options, body: options.body ? JSON.parse(options.body) : null };
     log.push(entry);
@@ -458,7 +461,8 @@ test('store save sends the exact pairs once, replays the same body on retry and 
   assert.equal(await store.save(e, 'create'), false);
   assert.ok(e.pending); assert.equal(e.message, '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.');
   const firstBody = t.log.filter(x => x.options.method === 'POST')[0].body;
-  assert.deepEqual(firstBody, { requestId: REQUEST, item: { schemaVersion: 1, title: '소견', text: '본문', primary: 0, sources: [{ itemId: ITEM, revision: 2 }] } });
+  // S2-L DN7: a new client creates and edits version 2 records (the one expected-value change of this assertion).
+  assert.deepEqual(firstBody, { requestId: REQUEST, item: { schemaVersion: 2, title: '소견', text: '본문', characteristics: '', primary: 0, sources: [{ itemId: ITEM, revision: 2 }] } });
   t.state.items = [t.head('f0000000-0000-4000-8000-000000000001', 1)];
   assert.equal(await store.save(e), true);
   const posts = t.log.filter(x => x.options.method === 'POST');
@@ -628,7 +632,7 @@ test('held drafts: a pending 503 create keeps its exact URL and body across A-B-
 test('held drafts: a save in flight at the switch cannot touch the held copy; the committed head and Retry leave one finding', async () => {
   const t = transport(); const { store, e } = await drafting(t);
   let release; const gate = new Promise(resolve => { release = resolve; });
-  t.state.responses.push(async () => { await gate; return { status: 200, ok: true, json: async () => t.head(F1, 1) }; });
+  t.state.responses.push(async () => { await gate; return { status: 200, ok: true, headers: API_HEADERS, json: async () => t.head(F1, 1) }; });
   const saving = store.save(e, 'create'); await tick();
   assert.equal(posts(t).length, 1); assert.equal(e.busy, true);
   assert.deepEqual(store.workState(), { dirty: true, busy: true, held: 0 });
@@ -909,8 +913,10 @@ async function worklistCommand(h, source, during) {
 test('mounted viewer: the worklist command reaches the real exported navigation; a switched, ended or foreign target is never arrival', async () => {
   const key = 'a0000000-0000-4000-8000-000000000001';
   const arrived = await mounted();
+  // S2-C: the answer also carries the viewer's live entry of the item (the one expected addition to this assertion).
+  const live = { present: true, revision: 1, hidden: false, working: false };
   assert.deepEqual(await worklistCommand(arrived, findingTarget({ itemId: key })),
-    { result: { ok: true, highlighted: false, annotation: 'key', latest: true }, announced: [{ ok: true, highlighted: false, annotation: 'key' }], loads: 1 });
+    { result: { ok: true, highlighted: false, annotation: 'key', live, latest: true }, announced: [{ ok: true, highlighted: false, annotation: 'key', live }], loads: 1 });
   assert.equal(arrived.viewport.index, 1, 'the saved SOP/frame is shown');
   const switched = await mounted();
   const moved = await worklistCommand(switched, findingTarget({ itemId: key }), () => switched.switch('2.2'));
@@ -1169,7 +1175,7 @@ test('anchored store: the comparison viewport keeps entries, drafts, pending bod
   t.state.responses.push({ status: 503, body: { message: 'delayed' } });
   assert.equal(await store.save(e, 'create'), false);
   const pendingBody = e.pending.body, generation = store.state().generation;
-  assert.deepEqual(JSON.parse(pendingBody), { requestId: 'd0000000-0000-4000-8000-000000000002', item: { schemaVersion: 1, title: '비교 소견', text: '본문', primary: 0,
+  assert.deepEqual(JSON.parse(pendingBody), { requestId: 'd0000000-0000-4000-8000-000000000002', item: { schemaVersion: 2, title: '비교 소견', text: '본문', characteristics: '', primary: 0,
     sources: [{ itemId: ITEM, revision: 2 }, { itemId: P1, revision: 1 }] } }, 'only {itemId, revision} pairs are sent');
   // The comparison viewport becomes active: nothing is parked, reset or re-keyed; its saved list is read again.
   store.syncHistory(history(B, [{ id: P1, revision: 1, hidden: false, referenceStatus: null, working: true }, { id: P2, revision: 3, hidden: false, referenceStatus: null, working: false }]));
@@ -1530,7 +1536,7 @@ async function paired() {
   };
   const readable = f => f.lineage.every(study => !server.denied.has(study));
   const shown = f => ({ ...JSON.parse(JSON.stringify(f.head)), links: f.head.item.sources.map(s => ({ itemId: s.itemId, linkState: 'current', headRevision: s.revision, headHidden: false })) });
-  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => JSON.parse(JSON.stringify(body)) });
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: API_HEADERS, json: async () => JSON.parse(JSON.stringify(body)) });
   const fetch = async (path, options) => {
     const method = (options && options.method) || 'GET';
     if (path === '/api/me') return json(200, me);
@@ -1883,13 +1889,13 @@ test('calculators and copied values never reach a request, draft, pending or hel
   t.state.responses.push({ status: 503, body: { message: 'delayed' } });
   assert.equal(await store.save(d, 'create'), false);
   const requestId = JSON.parse(d.pending.body).requestId;
-  assert.deepEqual(d.pending, { url: '/studies/' + A + '/findings', body: '{"requestId":"' + requestId + '","item":{"schemaVersion":1,"title":"새 소견","text":"",' +
+  assert.deepEqual(d.pending, { url: '/studies/' + A + '/findings', body: '{"requestId":"' + requestId + '","item":{"schemaVersion":2,"title":"새 소견","text":"","characteristics":"",' +
     '"sources":[{"itemId":"' + ITEM + '","revision":2},{"itemId":"' + P1 + '","revision":1}],"primary":0}}' });
   store.edit(e); store.updateDraft(e, { text: '수정' });
   t.state.responses.push({ status: 503, body: { message: 'delayed' } });
   assert.equal(await store.save(e, 'edit'), false);
   const editId = JSON.parse(e.pending.body).requestId;
-  assert.equal(e.pending.body, '{"requestId":"' + editId + '","item":{"schemaVersion":1,"title":"T","text":"수정","sources":[{"itemId":"' + ITEM + '","revision":2}],"primary":0},' +
+  assert.equal(e.pending.body, '{"requestId":"' + editId + '","item":{"schemaVersion":2,"title":"T","text":"수정","characteristics":"","sources":[{"itemId":"' + ITEM + '","revision":2}],"primary":0},' +
     '"expectedRevision":1,"action":"edit"}');
   for (const post of posts(t)) assert.equal(/calculator|values|kind|label|mm|HU/.test(post.options.body), false, post.options.body);
   assert.deepEqual(plain(await store.navigate(e, 0)), { ok: true, highlighted: true, annotation: 'shown' });
@@ -1932,7 +1938,7 @@ async function valueViewer() {
     item: { schemaVersion: 1, kind: 'length', seriesUid: '2.3', sopUid: '2.4', frame: 1, label, baseline } });
   const server = { denied: false, log: [], pair: [pairItem(PL, 'P 길이', { calculator: CALC, values: [77.77] }), pairItem(PN, 'P 무계산', { values: [66.6] }),
     pairItem(PC, 'P 계산', { calculator: CALC, values: [55.55] }), pairItem(PD, 'P 지운 계산', { calculator: CALC, values: [44.44] })] };
-  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => JSON.parse(JSON.stringify(body)) });
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, headers: API_HEADERS, json: async () => JSON.parse(JSON.stringify(body)) });
   const window = new EventTarget(), ticks = [];
   window.fetch = async (url, options) => {
     const method = (options && options.method) || 'GET';
@@ -2012,7 +2018,7 @@ test('mounted values: live heads show units without a calculator, comparison hea
   const post = h.server.log.filter(x => x.method === 'POST');
   assert.equal(post.length, 1);
   const body = JSON.parse(post[0].body);
-  assert.equal(post[0].body, JSON.stringify({ requestId: body.requestId, item: { schemaVersion: 1, title: '값 소견', text: '본문',
+  assert.equal(post[0].body, JSON.stringify({ requestId: body.requestId, item: { schemaVersion: 2, title: '값 소견', text: '본문', characteristics: '',
     sources: [{ itemId: VL, revision: 1 }, { itemId: VE, revision: 1 }, { itemId: PL, revision: 1 }, { itemId: VO, revision: 1 }, { itemId: VM, revision: 1 }], primary: 0 },
     expectedRevision: 1, action: 'edit' }));
   h.findings.stop();
@@ -2040,6 +2046,475 @@ test('the live head premise: config/ohif.js historyState() copies the values of 
   const text = source.slice(start, end);
   assert.ok(text.includes('values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null'));
   assert.ok(text.includes('heads: [...entries.values()].filter(e => e.head)'), 'only saved heads');
+});
+
+/* ---------- S2-C live disclosure and S2-L2b saved locations (TEST-S2C-LIVE, TEST-S2L-STORE, TEST-S2L-MOUNTED) ----------
+ * The shipped model and Findings section; the viewer location API, the transports and the clock are synthetic. */
+const LJ = 'c0000000-0000-4000-8000-00000000000a', LM = 'c0000000-0000-4000-8000-00000000000b', LM2 = 'c0000000-0000-4000-8000-00000000000c';
+const LF = 'f0000000-0000-4000-8000-00000000d001', LHEX = 'e'.repeat(64), LV = 'c0000000-0000-4000-8000-00000000000d';
+const liveEntry = extra => Object.assign({ present: true, revision: 2, hidden: false, working: false }, extra);
+const jobCopy = extra => Object.assign({ kind: 'job', jobId: LJ, revision: 1, jobStudyUid: A, studyUid: A, studies: [A], snapshotVersion: 6, title: '저장 위치',
+  authorActor: 'Reader', mark: { id: LM, label: '결절', point: [-0.33113281957650276, 2, 3], volume: { study: A, series: SERIES, frameOfReferenceUid: '1.2.9', sourceDigest: LHEX, sopCount: 33 } } }, extra);
+const viewCopy = extra => jobCopy(Object.assign({ mark: null, snapshotVersion: 4, jobId: LV }, extra));
+
+test('S2-C: live entry facts are copied as primitives from another realm and the notes come from them only', () => {
+  const other = vm.runInNewContext('({ ok: true, highlighted: true, annotation: "shown", present: true, revision: 3, hidden: false, working: true, extra: 1 })');
+  assert.deepEqual(plain(model.viewerResult(other)), { ok: true, highlighted: true, annotation: 'shown', live: { present: true, revision: 3, hidden: false, working: true } });
+  assert.deepEqual(model.viewerResult({ ok: true, highlighted: false, annotation: 'missing', present: false }), { ok: true, highlighted: false, annotation: 'missing', live: { present: false, revision: null, hidden: false, working: false } });
+  assert.deepEqual(model.viewerResult({ ok: true, highlighted: true, annotation: 'shown', present: 'yes', revision: 3 }), { ok: true, highlighted: true, annotation: 'shown' }, 'no live facts without a boolean present');
+  assert.equal(model.viewerResult({ ok: true, highlighted: true, annotation: 'shown', present: true, revision: 0 }).live.revision, null);
+  const reply = model.validReply({ type: 'kin-finding-nav-reply', request: REQUEST, owner: 'o', studies: [A], activeUid: A, result: 'ok', highlighted: true, annotation: 'shown', present: true, revision: 2, hidden: false, working: false },
+    { request: REQUEST, owner: 'o', studies: [A], activeUid: A });
+  assert.deepEqual(reply.live, liveEntry());
+  const note = (live, frozen) => model.liveText({ ok: true, live }, frozen);
+  assert.equal(note(liveEntry(), 2), '');
+  assert.equal(note(liveEntry({ revision: 3 }), 2), '표시한 표식은 현재판 r3이며 소견의 수치는 연결 당시 r2의 사본입니다(위치·수치가 다를 수 있음).');
+  assert.equal(note(liveEntry({ working: true }), 2), '편집 중인 미저장 위치일 수 있습니다.');
+  assert.equal(note(liveEntry({ revision: null }), 2), '연결 당시 판인지 확인하지 못했습니다.');
+  assert.equal(note(liveEntry({ revision: 4, working: true }), 2), model.LIVE_TEXT.revised(4, 2) + ' ' + model.LIVE_TEXT.working);
+  assert.equal(note(liveEntry({ hidden: true, revision: 9 }), 2), '', 'a hidden entry keeps the "not drawn" arrival text');
+  assert.equal(note({ present: false, revision: null, hidden: false, working: false }, 2), '');
+  assert.equal(model.liveText({ ok: true }, 2), '', 'a viewer without live facts adds nothing');
+});
+
+test('S2-C: the store shows the live note of the arrival, never the list state', async () => {
+  const t = transport();
+  const saved = t.head('f0000000-0000-4000-8000-000000000001', 1, { links: [{ itemId: ITEM, linkState: 'current', headRevision: 2, headHidden: false }] });
+  t.state.items = [saved];
+  let live = liveEntry({ revision: 3 });
+  const { store } = makeStore(t, { navigate: async () => ({ ok: true, highlighted: true, annotation: 'shown', ...live }) });
+  store.syncHistory(history(A, [])); await tick();
+  const e = store.state().entries.get(saved.id);
+  assert.equal((await store.navigate(e)).ok, true);
+  assert.equal(e.message, model.LIVE_TEXT.revised(3, 2), 'the list said current; the viewer shows r3');
+  saved.links = [{ itemId: ITEM, linkState: 'revised', headRevision: 5, headHidden: false }]; t.state.items = [saved];
+  await store.load(); live = liveEntry({ revision: 2 });
+  const same = store.state().entries.get(saved.id);
+  await store.navigate(same);
+  assert.equal(same.message, '', 'the list said revised; the viewer shows the linked revision');
+  live = liveEntry({ working: true }); await store.navigate(same);
+  assert.equal(same.message, model.LIVE_TEXT.working);
+  // The shipped history closure reports its entry at arrival, and an unknown item as absent.
+  const h = await mounted();
+  const arrived = h.window.kinViewerHistoryNavigate(findingTarget({ sopUid: '1.3', itemId: 'a0000000-0000-4000-8000-000000000001' }));
+  await flush(); await h.release();
+  assert.deepEqual(plain(await arrived), { ok: true, highlighted: false, annotation: 'key', present: true, revision: 1, hidden: false, working: false });
+  const unknown = h.window.kinViewerHistoryNavigate(findingTarget({ itemId: 'a0000000-0000-4000-8000-00000000ffff' }));
+  await flush(); await h.release();
+  assert.deepEqual(plain(await unknown), { ok: true, highlighted: false, annotation: 'missing', present: false });
+});
+
+test('S2-L R5: only a successful findings answer without the schema header makes the store read-only; errors never do; every request names it', async () => {
+  const t = transport(); t.state.items = [t.head('f0000000-0000-4000-8000-000000000001', 1)];
+  let header = null;
+  const base = t.fetch;
+  t.fetch = async (url, options) => { const res = await base(url, options); return url.includes('/findings') ? { ...res, headers: { get: name => name === 'X-KIN-Finding-Schema' ? header : null } } : res; };
+  const { store } = makeStore(t);
+  store.syncHistory(history(A, [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false }])); await tick();
+  assert.equal(store.state().compat, 'old-api');
+  assert.equal(store.state().entries.size, 1, 'saved findings stay visible');
+  assert.ok(store.state().status.endsWith(model.OLD_API_TEXT), store.state().status);
+  assert.deepEqual([store.writable(), store.newDraft()], [false, null]);
+  const e = store.state().entries.get('f0000000-0000-4000-8000-000000000001');
+  store.edit(e); assert.equal(e.editing, false);
+  assert.equal(await store.save(e, 'hide', '사유'), false);
+  assert.equal(t.log.filter(x => x.options.method === 'POST').length, 0, 'never a version 1 fallback write');
+  // The current API names itself: writable again. A refused or failed answer without the header changes nothing.
+  header = '2'; await store.load();
+  assert.deepEqual([store.state().compat, store.writable()], ['v2', true]);
+  const d = store.newDraft(); store.updateDraft(d, { title: '새 소견', characteristics: '경계 불명확' });
+  assert.equal(store.toggleSource(d, ITEM), true);
+  header = null;
+  t.state.responses.push({ status: 503, body: { message: 'proxy' } });
+  assert.equal(await store.save(d, 'create'), false);
+  assert.equal(store.state().compat, 'v2', 'a 503 without the header is not an old API');
+  t.state.responses.push({ status: 409, body: { code: 'FINDING_SOURCE_STALE', itemId: ITEM, headRevision: 3, headHidden: false } });
+  assert.equal(await store.save(d), false);
+  assert.equal(store.state().compat, 'v2');
+  assert.ok(t.log.every(x => x.options.headers['X-KIN-Finding-Schema'] === '2'), 'every request names the record format');
+  // A pending body kept across an older API answer is not sent while that API answers.
+  const p = store.newDraft(); store.updateDraft(p, { title: '보류' }); store.toggleSource(p, ITEM);
+  t.state.responses.push({ status: 503, body: { message: 'later' } });
+  assert.equal(await store.save(p, 'create'), false); assert.ok(p.pending);
+  await store.load(); assert.equal(store.state().compat, 'old-api');
+  const posts = t.log.filter(x => x.options.method === 'POST').length;
+  assert.equal(await store.save(p), false);
+  assert.equal(t.log.filter(x => x.options.method === 'POST').length, posts);
+  assert.ok(p.pending, 'the pending request is kept for the current API');
+  assert.ok(p.message.startsWith(model.OLD_API_TEXT));
+});
+
+test('S2-L DN7: version 2 bodies, drafts and code-point limits; version 1 heads keep their shape and their hide', async () => {
+  const draft = { title: '', text: '', characteristics: '가', primary: 5, sources: [{ itemId: ITEM, revision: 2, studyUid: B }, { jobId: LJ, revision: 3, markId: LM, studyUid: B }, { jobId: LJ, revision: 3 }] };
+  assert.equal(JSON.stringify(model.commandBody(draft, null, 'create', '', REQUEST, 2)), JSON.stringify({ requestId: REQUEST, item: { schemaVersion: 2, title: '', text: '', characteristics: '가',
+    sources: [{ itemId: ITEM, revision: 2 }, { jobId: LJ, revision: 3, markId: LM }, { jobId: LJ, revision: 3 }], primary: 0 } }));
+  assert.equal(model.draftProblem(draft), null, 'characteristics alone are enough');
+  const astral = '\u{1F600}'.repeat(1000);
+  assert.equal(model.draftProblem({ ...draft, characteristics: astral }), null);
+  assert.equal(model.draftProblem({ ...draft, characteristics: astral + '\u{1F600}' }), '병변 특성은 1000자 이하여야 합니다.');
+  assert.equal(model.draftProblem({ ...draft, characteristics: ' ' }), '제목, 본문 또는 병변 특성을 입력하세요.');
+  assert.equal(model.draftProblem({ ...draft, sources: [{ jobId: 'x', revision: 1 }] }), '연결한 표식의 저장 정보를 확인하세요.');
+  assert.equal(model.draftProblem({ ...draft, sources: [{ jobId: LJ, revision: 1, markId: 'x' }] }), '연결한 표식의 저장 정보를 확인하세요.');
+  assert.equal(model.draftProblem({ ...draft, sources: [{ jobId: LJ, revision: 1 }, { jobId: LJ, revision: 2 }] }), '같은 표식을 두 번 연결할 수 없습니다.');
+  assert.equal(model.CHARACTERISTICS, 1000); assert.equal(model.SCHEMA, 2);
+  // Draft copies: a version 2 head names its characteristics and job pairs; a version 1 head keeps the shipped draft shape.
+  const v2 = { id: LF, studyUid: A, revision: 3, item: { schemaVersion: 2, title: 'T', text: '', characteristics: astral, primary: 1,
+    sources: [jobCopy({ studyUid: B, studies: [A, B], mark: { ...jobCopy().mark, volume: { ...jobCopy().mark.volume, study: B } } }), viewCopy()] } };
+  assert.deepEqual(model.itemOnly(v2), { title: 'T', text: '', characteristics: astral, primary: 1,
+    sources: [{ jobId: LJ, revision: 1, markId: LM, studyUid: B }, { jobId: viewCopy().jobId, revision: 1 }] });
+  const edit = JSON.parse(JSON.stringify(model.commandBody(model.itemOnly(v2), v2, 'edit', '', REQUEST, 2)));
+  assert.equal(Buffer.compare(Buffer.from(edit.item.characteristics), Buffer.from(astral)), 0, 'a 1000-astral value round-trips byte for byte');
+  assert.deepEqual(Object.keys(model.itemOnly({ studyUid: A, item: { schemaVersion: 1, title: 'T', text: 'X', primary: 0, sources: [{ itemId: ITEM, revision: 2, studyUid: A }] } })), ['title', 'text', 'primary', 'sources']);
+  // The store: create and edit are version 2 (a version 1 head is promoted); hide keeps the head's version and content.
+  const t = transport();
+  const v1head = t.head('f0000000-0000-4000-8000-000000000001', 1);
+  const v2head = t.head('f0000000-0000-4000-8000-000000000002', 2, { item: { schemaVersion: 2, title: 'V2', text: '본문', characteristics: astral, hidden: false, primary: 0, sources: [v1head.item.sources[0]] } });
+  t.state.items = [v1head, v2head];
+  const { store } = makeStore(t);
+  store.syncHistory(history(A, [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false }])); await tick();
+  const posts = () => t.log.filter(x => x.options.method === 'POST').map(x => x.options.body);
+  t.state.responses.push({ status: 503, body: {} }, { status: 503, body: {} }, { status: 503, body: {} });
+  const one = store.state().entries.get(v1head.id), two = store.state().entries.get(v2head.id);
+  await store.save(one, 'hide', '사유');
+  assert.equal(posts()[0], JSON.stringify({ requestId: REQUEST, item: { schemaVersion: 1, title: 'T', text: 'X', sources: [{ itemId: ITEM, revision: 2 }], primary: 0 }, expectedRevision: 1, action: 'hide', reason: '사유' }));
+  await store.save(two, 'hide', '사유');
+  assert.equal(posts()[1], JSON.stringify({ requestId: REQUEST, item: { schemaVersion: 2, title: 'V2', text: '본문', characteristics: astral, sources: [{ itemId: ITEM, revision: 2 }], primary: 0 }, expectedRevision: 2, action: 'hide', reason: '사유' }));
+  one.pending = null; store.edit(one); store.updateDraft(one, { characteristics: '승격' });
+  await store.save(one, 'edit');
+  assert.equal(JSON.parse(posts()[2]).item.schemaVersion, 2); assert.equal(JSON.parse(posts()[2]).item.characteristics, '승격');
+  // New error codes keep the draft with their own texts.
+  assert.ok(model.errorMessage({ status: 409, code: 'FINDING_SCHEMA_VERSION' }).includes('새로고침'));
+  assert.ok(model.errorMessage({ status: 400, code: 'FINDING_JOB_MARK' }).includes('3D 표식'));
+  assert.ok(model.errorMessage({ status: 409, code: 'FINDING_SOURCE_STALE', jobId: LJ, headRevision: 4, headHidden: false }).includes('r4'));
+  assert.ok(model.errorMessage({ status: 404 }, { job: true }).includes('현재 검사를 판독 대상으로 연 화면'));
+});
+
+// A location API double in the shape of viewer-jobs.js kinViewerJobLocation; restore() answers from a queue or holds.
+function locationDouble() {
+  const d = { requests: [], answers: [], held: [], shownValue: null };
+  d.api = { version: 1, shown: () => d.shownValue, owns: () => false,
+    restore: request => { d.requests.push(JSON.parse(JSON.stringify(request))); const next = d.answers.shift();
+      if (next === 'hold') return new Promise(resolve => d.held.push(resolve)); return Promise.resolve(next); } };
+  return d;
+}
+async function locatedStore(items, extra) {
+  const t = transport(); t.state.items = items;
+  const loc = locationDouble(), clock = fakeClock();
+  const kit = makeStore(t, Object.assign({ location: () => loc.api, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, studies: [A] }, extra));
+  kit.store.syncHistory(history(A, [{ id: ITEM, revision: 2, hidden: false, referenceStatus: 'verified', working: false }])); await tick();
+  return { t, loc, clock, ...kit };
+}
+const located = (id, sources, extra) => ({ id, studyUid: A, authorSub: 'reader-1', authorActor: 'Reader', revision: 2, hidden: false, createdAt: 't', updatedAt: 't',
+  item: { schemaVersion: 2, title: 'L', text: '', characteristics: '', hidden: false, primary: 0, sources }, links: [], ...extra });
+
+test('S2-L2b saved locations: the saved view list, marks only from the Job shown now, and the one-comparison rule', async () => {
+  const k = await locatedStore([]);
+  const views = { jobs: [{ id: LJ, studyUid: A, revision: 2, hidden: false, snapshotVersion: 6, title: 'MPR', authorActor: 'R' },
+    { id: LM, studyUid: B, revision: 1, hidden: false, snapshotVersion: 4, title: 'other anchor' }, { id: LM2, studyUid: A, revision: 1, hidden: false, snapshotVersion: 16, title: 'future' },
+    { id: LF, studyUid: A, revision: 1, hidden: true, snapshotVersion: 2, title: 'hidden' }] };
+  k.t.state.responses.push({ status: 200, body: views });
+  await k.store.loadJobs();
+  assert.equal(k.t.log.at(-1).url, '/api/studies/' + A + '/viewer-jobs?mine=false&includeHidden=false');
+  assert.deepEqual([...k.store.state().jobs.list.keys()], [LJ], 'this anchor, visible, linkable versions only');
+  const d = k.store.newDraft();
+  assert.equal(k.store.toggleJob(d, LJ), true);
+  assert.deepEqual(d.draft.sources, [{ jobId: LJ, revision: 2 }]);
+  assert.equal(k.store.toggleJob(d, LJ, LM), false, 'no 3D point unless its Job is shown');
+  k.loc.shownValue = { jobId: LJ, revision: 2, snapshotVersion: 6, studies: [A, B], marks: [{ id: LM, label: '결절' }] };
+  assert.equal(k.store.toggleJob(d, LJ, LM2), false, 'a mark that is not shown');
+  assert.equal(k.store.toggleJob(d, LJ, LM), true);
+  assert.deepEqual(d.draft.sources[1], { jobId: LJ, revision: 2, markId: LM, studyUid: B });
+  assert.equal(k.store.comparisonOf(d), B);
+  k.loc.shownValue = { jobId: LM2, revision: 1, snapshotVersion: 6, studies: [A, '9.9.9'], marks: [{ id: LM2, label: 'x' }] };
+  assert.equal(k.store.toggleJob(d, LM2, LM2), false, 'another comparison study than the draft names');
+  k.loc.shownValue = { jobId: LM2, revision: 1, snapshotVersion: 6, studies: ['9.9.9'], marks: [{ id: LM2, label: 'x' }] };
+  assert.equal(k.store.shownJob(), null, 'a Job of another anchor is never shown for linking');
+  assert.equal(k.store.toggleJob(d, LJ), true, 'toggling again unlinks'); assert.equal(d.draft.sources.length, 1);
+  const body = JSON.parse(JSON.stringify(model.commandBody(d.draft, null, 'create', '', REQUEST, 2)));
+  assert.deepEqual(body.item.sources, [{ jobId: LJ, revision: 2, markId: LM }]);
+});
+
+test('S2-L2b navigation: the exact request, outcomes copied field by field, and every text', async () => {
+  const point = jobCopy(), view = viewCopy(), pair = jobCopy({ jobId: LM2, studyUid: B, studies: [A, B], mark: null, snapshotVersion: 2 });
+  const k = await locatedStore([located(LF, [point, view, pair])]);
+  const e = k.store.state().entries.get(LF);
+  const cases = [
+    [0, { state: 'restored', message: 'MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.', point: 'all-planes' }, '3D 표식 위치로 이동했습니다. MPR 작업을 복원했습니다. 재구성 표시이며 원본 프레임 표식과 별개입니다.'],
+    [0, { state: 'restored', message: '', point: 'source-plane', metadataRevision: 4 }, '3D 표식 위치로 이동했습니다. 기준 평면만 이동했습니다. ' + model.LOCATION_TEXT.metadata(4)],
+    [0, { state: 'restored', message: '', point: 'failed', pointMessage: '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다. 연결 당시의 표식·볼륨과 다릅니다.', reason: 'point-mismatch' },
+      '저장 화면은 복원했지만 3D 표식 위치로는 이동하지 않았습니다. 연결 당시의 표식·볼륨과 다릅니다.'],
+    [0, { state: 'restored', message: '', point: 'none' }, model.LOCATION_TEXT.pointFailed],
+    [1, { state: 'restored', message: 'MPR 작업을 복원했습니다.', point: 'none' }, '저장 화면을 복원했습니다(병변 위치 표식 없음). MPR 작업을 복원했습니다.'],
+    [1, { state: 'refused', reason: 'job-hidden', message: '연결한 저장 작업이 숨겨져 있어 복원하지 않았습니다. 영상은 바꾸지 않았습니다.' }, '연결한 저장 작업이 숨겨져 있어 복원하지 않았습니다. 영상은 바꾸지 않았습니다.'],
+    [1, { state: 'refused', reason: 'job-conflict', message: '' }, '저장 위치를 열지 않았습니다. 영상은 바꾸지 않았습니다.'],
+    [1, { state: 'rolled-back', reason: 'apply-failed', message: '영상 상태를 적용하지 못했습니다.' }, '저장 화면을 적용하지 못해 이전 화면으로 되돌렸습니다. 영상 상태를 적용하지 못했습니다.'],
+    [1, { state: 'screen-unknown', reason: 'apply-failed', message: '복원과 이전 화면 복구에 실패했습니다.' }, '복원 결과를 확인하지 못했습니다. 현재 영상을 확인하세요. 복원과 이전 화면 복구에 실패했습니다.'],
+    [2, { state: 'continuing' }, model.LOCATION_TEXT.continuing],
+    [1, { state: 'maybe' }, model.LOCATION_TEXT.unknown],
+    [1, null, model.LOCATION_TEXT.unknown],
+    [1, vm.runInNewContext('({ state: "restored", message: "다른 창", point: "none", reason: 7 })'), '저장 화면을 복원했습니다(병변 위치 표식 없음). 다른 창'],
+  ];
+  for (const [index, answer, text] of cases) {
+    k.loc.answers.push(answer);
+    const result = await k.store.navigate(e, index);
+    assert.equal(e.message, text, JSON.stringify(answer));
+    assert.equal(result.ok, !!answer && answer.state === 'restored');
+  }
+  // Each request names exactly the frozen copy; another study set continues with the finding named, a same one does not.
+  const [first, , , , second] = k.loc.requests;
+  assert.deepEqual(first, { subject: 'reader-1', jobId: LJ, revision: 1, snapshotVersion: 6, studies: [A], mode: 'same-document', waitReady: false,
+    mark: { id: LM, label: '결절', point: [-0.33113281957650276, 2, 3], volume: { study: A, series: SERIES, frameOfReferenceUid: '1.2.9', sourceDigest: LHEX, sopCount: 33 } } });
+  assert.deepEqual([second.jobId, second.mark, second.mode], [view.jobId, null, 'same-document']);
+  const continuing = k.loc.requests[9];
+  assert.deepEqual([continuing.mode, continuing.studies, continuing.finding], ['continue', [A, B], { id: LF, revision: 2, source: 2 }]);
+  // A malformed copy, a denied comparison, a missing or other-version API: refused before any request.
+  const before = k.loc.requests.length;
+  const broken = located('f0000000-0000-4000-8000-00000000d002', [jobCopy({ studies: [B, A] })]);
+  k.t.state.items = [located(LF, [point, view, pair]), broken]; await k.store.load();
+  const bad = k.store.state().entries.get(broken.id);
+  assert.equal((await k.store.navigate(bad)).reason, 'invalid'); assert.equal(bad.message, model.LOCATION_TEXT.invalid);
+  const noApi = await locatedStore([located(LF, [point])], { location: () => ({ version: 2, restore: () => assert.fail('another version') }) });
+  const n = noApi.store.state().entries.get(LF);
+  assert.equal((await noApi.store.navigate(n)).reason, 'tool-missing'); assert.equal(n.message, model.LOCATION_TEXT['tool-missing']);
+  assert.equal(k.loc.requests.length, before);
+});
+
+test('S2-L2b B4: the backstop only changes the text; nothing else navigates until the restore settles; a late answer needs the same entry', async () => {
+  const k = await locatedStore([located(LF, [jobCopy(), viewCopy()]), { ...located('f0000000-0000-4000-8000-00000000d003', []), item: { schemaVersion: 1, title: 'item', text: '', hidden: false, primary: 0,
+    sources: [transport().head('x', 1).item.sources[0]] } }]);
+  const e = k.store.state().entries.get(LF);
+  k.loc.answers.push('hold');
+  const pending = k.store.navigate(e, 0); await tick();
+  assert.equal(e.message, model.LOCATION_TEXT.pending);
+  assert.ok(k.store.state().jobNavigation);
+  await k.clock.advance(269999); assert.equal(e.message, model.LOCATION_TEXT.pending);
+  await k.clock.advance(1); assert.equal(e.message, model.LOCATION_TEXT.backstop, 'at 270 s the result is unknown, never success or unchanged');
+  assert.ok(k.store.state().jobNavigation, 'still suspended after the backstop');
+  // No second navigation of any kind while the first may still change the screen.
+  assert.deepEqual(await k.store.navigate(e, 1), { ok: false, reason: 'busy' });
+  const item = k.store.state().entries.get('f0000000-0000-4000-8000-00000000d003');
+  assert.deepEqual(await k.store.navigate(item), { ok: false, reason: 'busy' });
+  assert.equal(item.message, model.LOCATION_TEXT.waiting);
+  assert.equal(k.loc.requests.length, 1); assert.equal(k.navigations.length, 0);
+  // Drafts are untouched by the wait.
+  const d = k.store.newDraft(); k.store.updateDraft(d, { title: '대기 중 초안' }); assert.equal(d.draft.title, '대기 중 초안');
+  k.loc.held.shift()({ state: 'restored', message: '', point: 'all-planes' }); await pending;
+  assert.equal(e.message, model.LOCATION_TEXT.point, 'the late verified answer of the same entry is shown');
+  assert.equal(k.store.state().jobNavigation, null);
+  assert.equal(k.clock.pending(), 0, 'no timer survives');
+  k.loc.answers.push({ state: 'refused', reason: 'busy', message: 'x' });
+  assert.equal((await k.store.navigate(e, 1)).state, 'refused', 'the next navigation runs');
+  // An anchor change during the wait: superseded, nothing written; the late answer releases the suspension only.
+  k.loc.answers.push('hold');
+  e.message = 'marker';
+  const moved = k.store.navigate(e, 0); await tick();
+  k.store.syncHistory(history(B, [])); await tick();
+  k.loc.held.shift()({ state: 'restored', message: '', point: 'all-planes' });
+  assert.deepEqual(await moved, { ok: false, reason: 'superseded', state: 'restored' });
+  assert.equal(e.message, model.LOCATION_TEXT.pending, 'the detached entry was not updated after the anchor changed');
+  assert.equal(k.store.state().jobNavigation, null);
+  // A session end during the wait: the late answer changes nothing.
+  const s = await locatedStore([located(LF, [jobCopy()])]);
+  const f = s.store.state().entries.get(LF);
+  s.loc.answers.push('hold');
+  const ended = s.store.navigate(f, 0); await tick();
+  s.store.end();
+  s.loc.held.shift()({ state: 'restored', point: 'all-planes' });
+  assert.equal((await ended).reason, 'superseded');
+});
+
+test('S2-L2b continuation: once, after the first authorized list, only for the exact finding, revision and source', async () => {
+  const items = [located(LF, [jobCopy(), jobCopy({ jobId: LM2, mark: null, snapshotVersion: 2 })])];
+  const run = async continuation => { const k = await locatedStore(items, { continuation }); await tick(); return k; };
+  let k = await run({ finding: LF, revision: 2, source: 0, jobId: LJ, refused: false });
+  assert.equal(k.loc.requests.length, 1);
+  assert.deepEqual([k.loc.requests[0].mode, k.loc.requests[0].waitReady, k.loc.requests[0].jobId], ['same-document', true, LJ]);
+  await k.store.load(); await tick();
+  assert.equal(k.loc.requests.length, 1, 'a later list never runs it again');
+  for (const [name, c] of [['refused marker', { finding: LF, revision: 2, source: 0, jobId: null, refused: true }],
+    ['other revision', { finding: LF, revision: 1, source: 0, jobId: LJ, refused: false }], ['other source', { finding: LF, revision: 2, source: 1, jobId: LJ, refused: false }],
+    ['item source', { finding: LF, revision: 2, source: 5, jobId: LJ, refused: false }]]) {
+    k = await run(c);
+    assert.equal(k.loc.requests.length, 0, name);
+    assert.equal(k.store.state().entries.get(LF).message, model.CONTINUE_REFUSED_TEXT, name);
+  }
+  k = await run({ finding: 'f0000000-0000-4000-8000-00000000dfff', revision: 2, source: 0, jobId: LJ, refused: false });
+  assert.ok(k.store.state().status.endsWith(model.CONTINUE_REFUSED_TEXT)); assert.equal(k.loc.requests.length, 0);
+  // Without session storage the URL alone names it, still once.
+  k = await run({ finding: LF, revision: 2, source: 1, jobId: null, refused: false });
+  assert.deepEqual(k.loc.requests.map(r => r.jobId), [LM2]);
+});
+
+/* The shipped Findings section with a version 2 finding holding a characteristics line, a 3D point and a saved view. */
+async function locationViewer({ schemaHeader = '2', modelOverride } = {}) {
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
+  document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
+  const host = new Element('div'); host.id = 'kin-viewer-history'; document.body.append(host);
+  const loc = locationDouble();
+  const item = { schemaVersion: 2, title: '위치 소견', text: '본문', characteristics: '경계 불명확한 간유리 결절', hidden: false, primary: 0, sources: [jobCopy({ studies: [VX], jobStudyUid: VX, studyUid: VX,
+    mark: { ...jobCopy().mark, volume: { ...jobCopy().mark.volume, study: VX } } }), viewCopy({ studies: [VX], jobStudyUid: VX, studyUid: VX })] };
+  const finding = { id: LF, studyUid: VX, authorSub: 'doctor', authorActor: 'Doctor', revision: 2, hidden: false, createdAt: 't', updatedAt: 't', item,
+    links: [{ jobId: LJ, markId: LM, linkState: 'current', headRevision: 1, headHidden: false }, { jobId: viewCopy().jobId, markId: null, linkState: 'metadata-changed', headRevision: 3, headHidden: false }] };
+  const server = { log: [] };
+  const headers = { get: name => name === 'X-KIN-Finding-Schema' ? schemaHeader : null };
+  const json = (status, body) => ({ status, ok: status >= 200 && status < 300, headers, json: async () => JSON.parse(JSON.stringify(body)) });
+  const window = new EventTarget(), ticks = [];
+  window.fetch = async (url, options) => {
+    const method = (options && options.method) || 'GET';
+    server.log.push({ method, url, body: options && options.body, headers: options && options.headers });
+    if (url === '/api/me') return json(200, { sub: 'doctor', kind: 'member', roles: ['radiologist'] });
+    if (method === 'POST') return json(503, { message: 'synthetic' });
+    if (url.startsWith('/api/studies/' + VX + '/viewer-jobs?')) return json(200, { jobs: [{ id: LM2, studyUid: VX, revision: 1, hidden: false, snapshotVersion: 7, title: '평면 배치', authorActor: 'D' }] });
+    if (url.startsWith('/api/studies/' + VX + '/findings/' + LF + '/revisions?'))
+      return json(200, { revisions: [{ revision: 1, action: 'create', actor: 'Doctor', at: 't1', reason: '', item: { schemaVersion: 1, title: '처음', text: '', hidden: false, primary: 0, sources: [] } },
+        { revision: 2, action: 'edit', actor: 'Doctor', at: 't2', reason: '', item }], nextCursor: null });
+    if (url.startsWith('/api/studies/' + VX + '/findings?')) return json(200, { items: [finding], nextCursor: null });
+    return json(404, {});
+  };
+  window.kinViewerHistoryState = () => ({ scope: VX, subject: 'doctor', ended: false, suspended: false, writable: true, heads: [] });
+  window.kinViewerJobLocation = loc.api;
+  window.prompt = () => '사유'; window.confirm = () => true;
+  const sandbox = { window, document, crypto: webcrypto, console, Event, AbortController, URLSearchParams, setTimeout, clearTimeout,
+    location: { search: '?StudyInstanceUIDs=' + VX }, setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {} };
+  vm.createContext(sandbox);
+  vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
+  vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
+  const findings = window.kinViewerFindings({}, modelOverride ? modelOverride(sandbox.kinFindingLinkModel) : sandbox.kinFindingLinkModel);
+  const mountedOk = findings.mount();
+  const sync = async () => { for (let i = 0; i < 3; i++) { for (const fn of [...ticks]) fn(); await flush(); } };
+  await sync();
+  const panel = () => document.body.all().find(e => e.id === 'kin-viewer-findings');
+  const row = () => panel().all().find(e => e.tagName === 'article' && e.dataset.findingId === LF);
+  return { server, loc, findings, mountedOk, sync, panel, row, host,
+    press: async (scope, name) => { const [b] = scope.all().filter(e => e.tagName === 'button' && e.textContent === name); assert.ok(b, name); b.click(); await flush(); await sync(); } };
+}
+
+test('mounted locations: characteristics line, point and view lines with their own buttons, and the restore request', async () => {
+  const h = await locationViewer();
+  const lines = h.row().all().filter(e => e.dataset.jobId);
+  assert.deepEqual(lines.map(e => [e.dataset.sourceKind, e.dataset.linkState, e.children[0].textContent]), [
+    ['point', 'current', '★ 3D Point · 결절 · 저장 위치 · v6 · r1 · '], ['view', 'metadata-changed', 'Saved View · 저장 위치 · v4 · r1 · ']]);
+  assert.ok(textOf(lines[1]).includes(' (현재 r3)') && textOf(lines[1]).includes('제목·설명만'));
+  assert.ok(h.row().all().some(e => e.dataset.kinCharacteristics === '' && e.textContent === 'Characteristics (병변 특성): 경계 불명확한 간유리 결절'));
+  h.loc.answers.push({ state: 'restored', message: '', point: 'all-planes' });
+  await h.press(lines[0], 'Go to 3D Point');
+  assert.equal(h.loc.requests.length, 1);
+  assert.deepEqual([h.loc.requests[0].jobId, h.loc.requests[0].mark.id, h.loc.requests[0].mode], [LJ, LM, 'same-document']);
+  assert.ok(textOf(h.row()).includes('3D 표식 위치로 이동했습니다.'));
+  h.loc.answers.push({ state: 'refused', reason: 'job-hidden', message: '숨김' });
+  await h.press(h.row().all().filter(e => e.dataset.jobId)[1], 'Open Saved View');
+  assert.equal(h.loc.requests[1].mark, null);
+  // History: every revision's characteristics and linked kinds, counted; the main line keeps the shipped shape.
+  await h.press(h.row(), 'History');
+  const shown = h.row().all().filter(e => e.tagName === 'p').map(e => e.textContent);
+  assert.ok(shown.includes('r2 · 수정 · Doctor · t2 ·  · 위치 소견 · 표식 2개'));
+  assert.ok(shown.includes('Characteristics (병변 특성): 경계 불명확한 간유리 결절'));
+  assert.ok(shown.includes('연결: 2D 표식 0개 · Saved View 1개 · 3D Point 1개 · v2'));
+  assert.ok(shown.includes('연결: 2D 표식 0개 · Saved View 0개 · 3D Point 0개 · v1'));
+  assert.equal(shown.filter(e => e.startsWith('Characteristics')).length, 2, 'the version 1 revision has no characteristics line');
+  h.findings.stop();
+});
+
+test('mounted locations: the editor names its characteristics field and helper, lists saved views and shown points, and saves version 2', async () => {
+  const h = await locationViewer();
+  h.loc.shownValue = { jobId: LJ, revision: 1, snapshotVersion: 6, studies: [VX], marks: [{ id: LM, label: '결절' }, { id: LM2, label: '두번째' }] };
+  await h.press(h.row(), 'Edit');
+  const field = h.row().all().find(e => e.attributes['aria-label'] === 'Finding Characteristics');
+  assert.ok(field, 'the labelled characteristics field');
+  assert.equal(field.maxLength, 1000); assert.equal(field.value, '경계 불명확한 간유리 결절');
+  const help = h.row().all().find(e => e.id === field.attributes['aria-describedby']);
+  assert.equal(help.textContent, '사용자가 직접 입력하는 병변 특성입니다. 정해진 용어나 항목은 없으며 판독문에 자동 반영하지 않습니다.');
+  const labels = h.row().all().filter(e => e.tagName === 'label');
+  assert.ok(labels.some(l => l.children[0] === field || l.textContent === 'Characteristics (병변 특성)'));
+  const box = h.row().all().find(e => e.tagName === 'details' && e.dataset.kinLocations === '');
+  const choices = box.all().filter(e => e.tagName === 'input').map(e => e.attributes['aria-label']);
+  assert.deepEqual(choices, ['Link 3D Point 두번째 · 저장 작업 r1', 'Link Saved View 평면 배치 · v7 · r1'], 'linked pairs are not offered again');
+  const pick = label => { const input = box.all().find(e => e.attributes['aria-label'] === label); input.checked = true; input.dispatchEvent(new Event('change')); };
+  pick('Link 3D Point 두번째 · 저장 작업 r1'); pick('Link Saved View 평면 배치 · v7 · r1'); await h.sync();
+  field.value = '분엽상 경계'; field.dispatchEvent(new Event('input'));
+  const edited = h.row().all().find(e => e.attributes['aria-label'] === 'Finding Characteristics');
+  edited.value = '분엽상 경계'; edited.dispatchEvent(new Event('input'));
+  await h.press(h.row(), 'Save');
+  const post = h.server.log.filter(x => x.method === 'POST');
+  assert.equal(post.length, 1);
+  const body = JSON.parse(post[0].body);
+  assert.equal(post[0].body, JSON.stringify({ requestId: body.requestId, item: { schemaVersion: 2, title: '위치 소견', text: '본문', characteristics: '분엽상 경계',
+    sources: [{ jobId: LJ, revision: 1, markId: LM }, { jobId: viewCopy().jobId, revision: 1 }, { jobId: LJ, revision: 1, markId: LM2 }, { jobId: LM2, revision: 1 }], primary: 0 },
+    expectedRevision: 2, action: 'edit' }));
+  assert.equal(post[0].headers['X-KIN-Finding-Schema'], '2');
+  assert.ok(h.server.log.some(x => x.url === '/api/studies/' + VX + '/viewer-jobs?mine=false&includeHidden=false'));
+  h.findings.stop();
+});
+
+test('mounted locations: an older API makes the section read-only; another model version is never mounted', async () => {
+  const h = await locationViewer({ schemaHeader: null });
+  const buttons = h.panel().all().filter(e => e.tagName === 'button');
+  assert.equal(buttons.find(b => b.textContent === 'New Finding').disabled, true);
+  assert.equal(buttons.some(b => b.textContent === 'Edit' || b.textContent === 'Hide'), false);
+  assert.ok(h.panel().all().find(e => e.id === 'kin-viewer-findings-status').textContent.endsWith(OLD_TEXT()));
+  assert.ok(h.row(), 'the saved finding is still shown');
+  h.findings.stop();
+  const other = await locationViewer({ modelOverride: m => Object.assign({}, m, { SCHEMA: 1 }) });
+  assert.equal(other.mountedOk, false);
+  assert.equal(other.host.all().find(e => e.id === 'kin-viewer-findings').textContent, '화면 구성 요소 판이 다릅니다. 새로고침하세요.');
+  assert.equal(other.host.all().some(e => e.tagName === 'button'), false);
+  other.findings.stop();
+  assert.equal(other.host.all().some(e => e.id === 'kin-viewer-findings'), false);
+});
+const OLD_TEXT = () => model.OLD_API_TEXT;
+
+test('mounted continuation: the one-use nonce is consumed once; a missing record refuses the automatic restore', async () => {
+  const load = async (search, stored, storage = true) => {
+    const store = new Map(stored ? [[stored[0], stored[1]]] : []);
+    const saved = globalThis.__kinStorage;
+    const viewer = await (async () => {
+      const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+      document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
+      document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
+      const host = new Element('div'); host.id = 'kin-viewer-history'; document.body.append(host);
+      const loc = locationDouble(); loc.answers.push({ state: 'restored', message: '', point: 'all-planes' }, { state: 'restored', message: '', point: 'all-planes' });
+      const item = { schemaVersion: 2, title: 'C', text: '', characteristics: '', hidden: false, primary: 0, sources: [jobCopy({ jobStudyUid: VX, studyUid: VX, studies: [VX],
+        mark: { ...jobCopy().mark, volume: { ...jobCopy().mark.volume, study: VX } } })] };
+      const window = new EventTarget(), ticks = [];
+      const json = body => ({ status: 200, ok: true, headers: { get: () => '2' }, json: async () => JSON.parse(JSON.stringify(body)) });
+      window.fetch = async url => url === '/api/me' ? json({ sub: 'doctor', kind: 'member', roles: ['radiologist'] })
+        : json({ items: [{ id: LF, studyUid: VX, authorSub: 'doctor', authorActor: 'D', revision: 4, hidden: false, createdAt: 't', updatedAt: 't', item, links: [] }], nextCursor: null });
+      window.kinViewerHistoryState = () => ({ scope: VX, subject: 'doctor', ended: false, suspended: false, writable: true, heads: [] });
+      window.kinViewerJobLocation = loc.api;
+      window.sessionStorage = storage ? { getItem: k => store.get(k) ?? null, removeItem: k => store.delete(k), setItem: (k, v) => store.set(k, v) }
+        : { getItem: () => { throw new Error('blocked'); }, removeItem: () => { throw new Error('blocked'); } };
+      const sandbox = { window, document, crypto: webcrypto, console, Event, AbortController, URLSearchParams, setTimeout, clearTimeout,
+        location: { search }, setInterval: fn => { ticks.push(fn); return ticks.length; }, clearInterval() {} };
+      vm.createContext(sandbox);
+      vm.runInContext(shippedFile('finding-link-model.js'), sandbox);
+      vm.runInContext(shippedFile('viewer-findings.js'), sandbox);
+      const findings = window.kinViewerFindings({}, sandbox.kinFindingLinkModel);
+      const sync = async () => { for (let i = 0; i < 3; i++) { for (const fn of [...ticks]) fn(); await flush(); } };
+      findings.mount(); await sync();
+      return { loc, findings, sync, store, text: () => textOf(document.body) };
+    })();
+    globalThis.__kinStorage = saved;
+    return viewer;
+  };
+  const nonce = '11111111-2222-4333-8444-555555555555';
+  const search = '?StudyInstanceUIDs=' + VX + '&kinFinding=' + LF + '&kinFindingRevision=4&kinFindingSource=0&kinFindingNonce=' + nonce;
+  const record = JSON.stringify({ finding: LF, revision: 4, source: 0, jobId: LJ });
+  const good = await load(search, ['kin-finding-continue:' + nonce, record]);
+  assert.equal(good.loc.requests.length, 1); assert.equal(good.loc.requests[0].waitReady, true);
+  assert.equal(good.store.size, 0, 'the nonce is consumed');
+  // A second mount in the same document (mode re-entry) never runs it again.
+  good.findings.stop(); good.findings.mount(); await good.sync();
+  assert.equal(good.loc.requests.length, 1);
+  const missing = await load(search, null);
+  assert.equal(missing.loc.requests.length, 0); assert.ok(missing.text().includes(model.CONTINUE_REFUSED_TEXT));
+  const mismatched = await load(search, ['kin-finding-continue:' + nonce, JSON.stringify({ finding: LF, revision: 3, source: 0, jobId: LJ })]);
+  assert.equal(mismatched.loc.requests.length, 0);
+  const blocked = await load(search, null, false);
+  assert.equal(blocked.loc.requests.length, 1, 'without session storage the request runs once in this document');
+  const plainPage = await load('?StudyInstanceUIDs=' + VX, null);
+  assert.equal(plainPage.loc.requests.length, 0); assert.equal(plainPage.text().includes(model.CONTINUE_REFUSED_TEXT), false);
+  for (const v of [good, missing, mismatched, blocked, plainPage]) v.findings.stop();
 });
 
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step

@@ -7,6 +7,8 @@ window.KinReadingFindings = function (app) {
   const command = window.kinFindingCommand, links = window.kinFindingLinkModel;
   const header = document.querySelector('#reltabs'), region = document.querySelector('.related-p');
   if (!command || !links || !header || !region) throw new Error('Image Findings unavailable');
+  // S2-L: this panel, its command module and the link model must be the same record-format version.
+  if (links.SCHEMA !== 2 || command.SCHEMA !== 2) throw new Error(links.MODULE_MISMATCH_TEXT || '화면 구성 요소 판이 다릅니다. 새로고침하세요.');
   const node = (tag, value, parent) => { const el = document.createElement(tag); if (value) el.textContent = value; if (parent) parent.append(el); return el; };
   const button = (label, run, parent) => { const b = node('button', label, parent); b.type = 'button'; b.addEventListener('click', run); return b; };
   const toggle = button('Image Findings', () => show(panel.hidden), null);
@@ -37,13 +39,25 @@ window.KinReadingFindings = function (app) {
   const list = node('section', '', panel); list.id = 'reading-findings-list'; list.setAttribute('aria-label', 'Image Findings List');
   panel.addEventListener('keydown', e => { if (e.key === 'Escape' && !e.defaultPrevented) { e.preventDefault(); show(false); toggle.focus(); } });
 
-  let ended = false, last = null, shownRows = null, retryShown = false, lastFocusLoad = 0, labels = 0;
+  let ended = false, last = null, shownRows = null, retryShown = false, lastFocusLoad = 0, labels = 0, oldApi = false;
   const guarded = (fn, fallback) => { try { return fn(); } catch (_) { return fallback; } };
   const owner = () => guarded(() => app.owner() || null, null);
   const sub = () => guarded(() => app.sub() || null, null);
   const current = () => guarded(() => app.current() || null, null);
   const live = () => !ended && guarded(() => app.allowed() === true, false) && !!owner() && !!sub();
-  const store = command.createListStore({ fetch: path => app.api('GET', path), changed: () => render() });
+  // R5: the list read names the record format this panel reads (the worklist's shared request function has no header option),
+  // same-origin like the viewer's findings reads. A 401 is handed to that shared function, which ends the session as it always
+  // does. Only a successful answer without the API's own header marks an older API; this panel never writes either way.
+  async function listRead(path) {
+    const response = await fetch('/api' + path, { method: 'GET', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'X-KIN-CSRF': '1', [links.SCHEMA_HEADER]: String(links.SCHEMA) } });
+    if (response.status === 401) return app.api('GET', path);
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data) throw { status: response.status, code: data && data.code };
+    oldApi = links.schemaOf(response) !== String(links.SCHEMA);
+    return data;
+  }
+  const store = command.createListStore({ fetch: listRead, changed: () => render() });
   const commands = command.createNavigator({ timeoutMs: 15000 });
 
   function show(open) {
@@ -74,9 +88,11 @@ window.KinReadingFindings = function (app) {
     const state = w.kinViewerHistoryState, h = typeof state === 'function' ? state.call(w) : null;
     // historyScope/image are the comparison arrival readback (S2-B2), copied as primitives, never identity facts.
     const shown = links.plainState(h);
+    const location = w.kinViewerJobLocation;
     return { historyPresent: !!h && typeof h === 'object', ended: !!h && h.ended === true, suspended: !!h && h.suspended === true,
       subject: h && typeof h.subject === 'string' ? h.subject : null, modal: modalIn(doc), navigate: typeof w.kinViewerHistoryNavigate === 'function',
-      activate: typeof w.kinViewerHistoryActivate === 'function', historyScope: shown ? shown.scope : null, image: shown ? shown.image : null };
+      activate: typeof w.kinViewerHistoryActivate === 'function', historyScope: shown ? shown.scope : null, image: shown ? shown.image : null,
+      location: !!location && location.version === 1 && typeof location.restore === 'function' };
   }
   function sessionView() {
     const st = store.state();
@@ -117,9 +133,16 @@ window.KinReadingFindings = function (app) {
       navigate: target => invokeIn(current(), target),
     };
   }
-  // Plain snapshot for chooseTarget plus the live references behind it; `comparison` is the row's other study.
-  function choose(study, comparison) {
-    const plain = { uid: study, comparison: comparison || null, workspace: null, windows: [] }, popups = new Map(), slots = new Map();
+  // A saved location is restored by the chosen document's own kinViewerJobLocation, read at the call.
+  function restoreIn(w, request) {
+    const location = w.kinViewerJobLocation;
+    if (!location || location.version !== 1 || typeof location.restore !== 'function') return { state: 'refused', reason: 'tool-missing' };
+    return location.restore.call(location, request);
+  }
+  // Plain snapshot for chooseTarget plus the live references behind it; `comparison` is the row's other study and `exact` a saved
+  // location's ordered study set.
+  function choose(study, comparison, exact) {
+    const plain = { uid: study, comparison: comparison || null, exact: exact || null, workspace: null, windows: [] }, popups = new Map(), slots = new Map();
     const t = guarded(() => app.workspace.viewerTarget(), null);
     if (t) plain.workspace = { active: !!t.active, sameTarget: !!t.sameTarget, loaded: !!t.loaded, inert: !!t.inert, hidden: !!t.hidden, studies: [...t.studies] };
     for (const row of windows()) {
@@ -138,12 +161,13 @@ window.KinReadingFindings = function (app) {
     if (choice.kind === 'embedded') {
       const frame = t.frame;
       return { kind: 'embedded', label: '통합 작업공간', probe: () => embeddedView(frame), invoke: target => invokeIn(frame.contentWindow, target),
+        restore: request => restoreIn(frame.contentWindow, request),
         env: () => envOf(() => frame.contentWindow), focus: () => guarded(() => { frame.focus(); frame.contentWindow.focus(); }) };
     }
     if (choice.kind === 'window') {
       const popup = popups.get(choice.index), index = choice.index;
       return { kind: 'window', index, label: '영상 창 ' + (index + 1), probe: () => windowView(popup, index), invoke: target => invokeIn(popup, target),
-        env: () => envOf(() => popup), focus: () => guarded(() => popup.focus()) };
+        restore: request => restoreIn(popup, request), env: () => envOf(() => popup), focus: () => guarded(() => popup.focus()) };
     }
     return choice.reason === 'unattached' ? { ...choice, slot: slots.get(choice.index) || null } : choice;
   }
@@ -155,15 +179,21 @@ window.KinReadingFindings = function (app) {
     const st = store.state(), row = st.rows.find(r => r.id === id), pin = command.pinSource(row, index, st.generation);
     const source = pin && (!pinned || command.samePin(pinned, pin)) ? row.sources[index] : null;
     last = source ? pin : null;
-    // A comparison source is sent only to a viewer that shows both studies (S2-B2).
-    const comparison = source && source.studyUid !== st.uid ? row.comparison : null;
-    setResult('영상 이동 중… 결과를 확인하고 있습니다.', 'pending', false);
+    // A saved location opens only in a viewer showing exactly its studies (S2-L2b); a comparison 2D source only in a viewer that
+    // shows both studies (S2-B2).
+    const located = !!source && source.kind === 'job';
+    const comparison = source && !located && source.studyUid !== st.uid ? row.comparison : null;
+    setResult(located ? '저장 작업 복원 중…' : '영상 이동 중… 결과를 확인하고 있습니다.', 'pending', false);
     await commands.run({
       expected: { owner: live() ? owner() : null, sub: sub(), uid: st.uid, generation: st.generation },
       source: source || null, comparison,
-      choose: () => choose(st.uid, comparison),
+      choose: () => choose(st.uid, comparison, located ? source.studies : null),
       announce: (value, choice) => {
-        if (value.ok) { setResult(command.arrivalText(value, choice.label), 'ok', false); choice.focus(); }
+        if (located) {
+          const state = value.state === 'restored' ? 'ok' : value.reason || value.state || 'failed';
+          setResult(command.locationText(value, source, choice ? choice.label : ''), state, !value.ok && command.retryable(value.reason) && value.state !== 'rolled-back' && value.state !== 'screen-unknown');
+          if (value.ok && choice) choice.focus();
+        } else if (value.ok) { setResult(command.arrivalText(value, choice.label, source), 'ok', false); choice.focus(); }
         else setResult(command.resultText(value), value.reason, command.retryable(value.reason));
         // The comparison history refused after activation: re-read the list so no withdrawn row stays shown.
         if (comparison && value.reason === 'busy' && value.phase !== 'before' && live()) store.load();
@@ -207,17 +237,25 @@ window.KinReadingFindings = function (app) {
       const heading = node('p', '', article); heading.className = 'reading-findings-title'; heading.id = 'reading-findings-label-' + (++labels);
       node('strong', row.title || '(제목 없음)', heading);
       if (row.text) node('p', row.text, article).className = 'reading-findings-text';
+      // Version 2: the user's own lesion characteristics, labelled; never interpreted or mapped to a vocabulary.
+      if (row.characteristics) {
+        const line = node('p', 'Characteristics (병변 특성): ' + row.characteristics, article);
+        line.className = 'reading-findings-characteristics'; line.dataset.kinCharacteristics = '';
+      }
       node('p', (row.author || '작성자 미확인') + ' · r' + row.revision + ' · ' + row.updated + (row.hidden ? ' · Hidden' : ''), article).className = 'reading-findings-meta';
       const sources = node('ul', '', article); sources.dataset.kinSources = '';
       row.sources.forEach((s, i) => {
-        const item = node('li', '', sources); item.dataset.itemId = s.itemId; item.dataset.linkState = s.linkState;
+        const job = s.kind === 'job';
+        const item = node('li', '', sources); item.dataset.linkState = s.linkState;
+        if (job) { item.dataset.jobId = s.jobId; item.dataset.sourceKind = s.mark ? 'point' : 'view'; } else item.dataset.itemId = s.itemId;
         const label = node('span', (i === row.primary ? '★ ' : '') + s.description + ' · ', item); label.id = 'reading-findings-label-' + (++labels);
         const badge = node('strong', s.linkLabel, item); badge.dataset.kinLinkState = s.linkState;
-        if (s.linkState === 'revised' && s.headRevision) node('span', ' (현재 r' + s.headRevision + ')', item);
+        if ((s.linkState === 'revised' || s.linkState === 'metadata-changed') && s.headRevision) node('span', ' (현재 r' + s.headRevision + ')', item);
         if (s.linkState !== 'current') node('span', ' · ' + s.linkText, item);
         item.dataset.sourceStudy = s.foreign ? 'comparison' : 'current';
-        if (s.foreign) node('span', ' · 비교 검사 영상(선택한 검사와 이 비교 검사를 함께 표시하는 화면으로만 이동)', item);
-        const target = button('Go to Image', () => go(row.id, i), item);
+        if (job) node('span', s.foreign ? ' · 저장 작업의 두 검사를 같은 순서로 표시하는 영상 화면에서만 엽니다' : ' · 이 검사만 표시하는 영상 화면에서만 엽니다', item);
+        else if (s.foreign) node('span', ' · 비교 검사 영상(선택한 검사와 이 비교 검사를 함께 표시하는 화면으로만 이동)', item);
+        const target = button(job ? (s.mark ? 'Go to 3D Point' : 'Open Saved View') : 'Go to Image', () => go(row.id, i), item);
         target.dataset.focusKey = row.id + ':' + i; target.setAttribute('aria-describedby', heading.id + ' ' + label.id);
         if (target.dataset.focusKey === key) refocus = target;
       });
@@ -232,7 +270,8 @@ window.KinReadingFindings = function (app) {
     const st = store.state();
     if (!ended && !live() && st.uid) { sync(); return; }
     const usable = live() && !!st.uid;
-    status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 확인하세요.' : !live() ? '로그인과 서버 연결을 확인한 뒤 소견을 확인하세요.' : st.message;
+    status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 확인하세요.' : !live() ? '로그인과 서버 연결을 확인한 뒤 소견을 확인하세요.'
+      : st.message + (oldApi && st.status === 'ready' ? ' · ' + links.OLD_API_TEXT : '');
     panel.dataset.studyUid = usable ? st.uid : ''; panel.dataset.state = ended ? 'ended' : st.status;
     reload.disabled = !usable || st.loading;
     hiddenBox.disabled = !usable; hiddenBox.checked = st.includeHidden;
