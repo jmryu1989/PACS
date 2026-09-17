@@ -21,6 +21,11 @@ class ViewerMigration(unittest.TestCase):
         self.sql('findings_before','INSERT INTO "StudyState" (uid,"institutionId","updatedAt") VALUES '+f"('{self.uid}','SYNTHETIC-hospital','2026-09-17'); "+
                  'INSERT INTO "ViewerItem" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt") VALUES '+
                  f"('{item}','{self.uid}','SYNTHETIC-sub','SYNTHETIC-reader',1,false,'{{\"schemaVersion\":1,\"kind\":\"key\",\"seriesUid\":\"2.25.1\",\"sopUid\":\"2.25.2\",\"frame\":1,\"title\":\"SYNTHETIC key\",\"description\":\"\",\"hidden\":false}}','2026-09-17')")
+        # The service never stores an item without its create revision; that history row, not any finding
+        # link, is what RESTRICTs deleting the item (ViewerRevision_itemId_fkey).
+        self.sql('findings_before','INSERT INTO "ViewerRevision" ("itemId",revision,snapshot,action,reason,actor,"payloadBytes",at) '+
+                 f"SELECT id,1,snapshot,'create','',\"authorActor\",octet_length(convert_to(snapshot::text,'UTF8')),'2026-09-17' FROM \"ViewerItem\" WHERE id='{item}'")
+        self.assertEqual(self.sql('findings_before','SELECT count(*) FROM "ViewerRevision"'),'1')
         tables=self.sql('findings_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
         def old():return {name:self.sql('findings_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
         before=old()
@@ -41,18 +46,18 @@ class ViewerMigration(unittest.TestCase):
              f"('{finding}',1,'{snapshot}','create','','SYNTHETIC-reader','SYNTHETIC-sub','00000000-0000-4000-8000-000000000b01',repeat('a',64),octet_length(convert_to('{snapshot}'::jsonb::text,'UTF8')))")
         self.sql('findings_before',row)
         # The request receipt is unique per author; the same request id from another author is a different receipt.
-        self.sql('findings_before',row.replace("',1,'","',2,'"),success=False)
+        self.refuses('findings_before',row.replace("',1,'","',2,'"),'FindingRevision_authorSub_requestId_key','unique_violation')
         self.sql('findings_before',row.replace("',1,'","',2,'").replace('SYNTHETIC-sub','SYNTHETIC-other'))
         self.assertEqual(self.sql('findings_before','SELECT count(*) FROM "FindingRevision"'),'2')
         def findings():return {name:self.sql('findings_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in ('Finding','FindingRevision')}
         kept=findings()
         # Byte equality, action vocabulary, source bounds and fingerprint shape fail closed.
-        self.sql('findings_before','UPDATE "FindingRevision" SET "payloadBytes"="payloadBytes"+1',success=False)
-        self.sql('findings_before',"UPDATE \"FindingRevision\" SET action='delete'",success=False)
-        self.sql('findings_before',"UPDATE \"FindingRevision\" SET fingerprint='SYNTHETIC'",success=False)
+        self.refuses('findings_before','UPDATE "FindingRevision" SET "payloadBytes"="payloadBytes"+1','FindingRevision_payload_check')
+        self.refuses('findings_before',"UPDATE \"FindingRevision\" SET action='delete'",'FindingRevision_action_check')
+        self.refuses('findings_before',"UPDATE \"FindingRevision\" SET fingerprint='SYNTHETIC'",'FindingRevision_fingerprint_check')
         self.sql('findings_before',"UPDATE \"Finding\" SET snapshot=snapshot-'sources'",success=False)
         self.sql('findings_before',"UPDATE \"Finding\" SET snapshot=jsonb_set(snapshot,'{sources}','[]'::jsonb)",success=False)
-        self.sql('findings_before','UPDATE "Finding" SET revision=1001',success=False)
+        self.refuses('findings_before','UPDATE "Finding" SET revision=1001','Finding_revision_check')
         # Every invalid head and history shape is refused by its own snapshot CHECK, never passed as
         # UNKNOWN nor failed by another error. History rows get a recomputed payloadBytes so only the
         # shape can refuse them. An aggregate whose argument names only the UPDATE row belongs to the
@@ -82,8 +87,18 @@ UPDATE "FindingRevision" SET snapshot={eight},"payloadBytes"=octet_length(conver
 SELECT (SELECT count(*) FROM "Finding" WHERE jsonb_array_length(snapshot->'sources')=8)||','||(SELECT count(*) FROM "FindingRevision" WHERE jsonb_array_length(snapshot->'sources')=8); ROLLBACK;'''),'1,2')
         # Parent and history rows are protected; hiding is a revision, not a delete.
         self.sql('findings_before',f'''DELETE FROM "StudyState" WHERE uid='{self.uid}' ''',success=False)
-        self.sql('findings_before','DELETE FROM "Finding"',success=False)
-        self.sql('findings_before','DELETE FROM "ViewerItem"',success=False)
+        self.refuses('findings_before','DELETE FROM "Finding"','FindingRevision_findingId_fkey','foreign_key_violation')
+        self.refuses('findings_before','DELETE FROM "ViewerItem"','ViewerRevision_itemId_fkey','foreign_key_violation')
+        # Each study restriction holds on its own: with the other family's rows removed inside the probe
+        # (rolled back with it), only the named foreign key can refuse the study delete.
+        study=f'''DELETE FROM "StudyState" WHERE uid='{self.uid}' '''
+        self.refuses('findings_before','DELETE FROM "ViewerRevision"; DELETE FROM "ViewerItem"; '+study,'Finding_studyUid_fkey','foreign_key_violation')
+        self.refuses('findings_before','DELETE FROM "FindingRevision"; DELETE FROM "Finding"; '+study,'ViewerItem_studyUid_fkey','foreign_key_violation')
+        # Sources are frozen copies, not relational links: no finding FK names the viewer tables, and the
+        # item may go (with its own history, rolled back) while the finding and its history stay.
+        self.assertEqual(self.sql('findings_before','''SELECT count(*) FROM pg_constraint WHERE contype='f' AND conrelid IN ('"Finding"'::regclass,'"FindingRevision"'::regclass) AND confrelid IN ('"ViewerItem"'::regclass,'"ViewerRevision"'::regclass)'''),'0')
+        self.assertEqual(self.sql('findings_before','''BEGIN; DELETE FROM "ViewerRevision"; DELETE FROM "ViewerItem";
+SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding")||','||(SELECT count(*) FROM "FindingRevision"); ROLLBACK;'''),'0,1,2')
         self.assertEqual(old(),before)
         self.assertEqual(findings(),kept)
 
@@ -202,11 +217,11 @@ SELECT (SELECT count(*) FROM "Finding" WHERE jsonb_array_length(snapshot->'sourc
         self.assertEqual(reply.returncode==0,success,reply.stderr.decode(errors='replace'))
         return reply.stdout.decode().strip()
 
-    def refuses(self,db,statement,constraint):
-        """Only the named CHECK may refuse: acceptance (a NULL pass) or any other error fails the case,
+    def refuses(self,db,statement,constraint,condition='check_violation'):
+        """Only the named constraint may refuse: acceptance (a NULL pass) or any other error fails the case,
         and the refused write rolls back with the block's subtransaction."""
         self.sql(db,f'''DO $probe$ DECLARE refused text; BEGIN {statement}; RAISE EXCEPTION 'SYNTHETIC write accepted';
-EXCEPTION WHEN check_violation THEN GET STACKED DIAGNOSTICS refused = CONSTRAINT_NAME;
+EXCEPTION WHEN {condition} THEN GET STACKED DIAGNOSTICS refused = CONSTRAINT_NAME;
 IF refused IS DISTINCT FROM '{constraint}' THEN RAISE EXCEPTION 'SYNTHETIC refused by %', refused; END IF; END $probe$''')
 
     def create(self,name):ops.run(['docker','exec',self.db,'createdb','-U','postgres',name])
