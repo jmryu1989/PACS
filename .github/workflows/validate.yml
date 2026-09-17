@@ -817,5 +817,6 @@ jobs:
             tmp/runtime-ci/editor-link/
             tmp/runtime-ci/volume-api-models/
             tmp/runtime-ci/findings-migration/
+            tmp/runtime-ci/finding-link-model/
           if-no-files-found: error
           retention-days: 7

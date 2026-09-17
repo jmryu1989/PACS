@@ -15,7 +15,10 @@ CREATE TABLE "Finding" (
   "updatedAt" TIMESTAMP(3) NOT NULL,
   CONSTRAINT "Finding_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "Finding_revision_check" CHECK ("revision" BETWEEN 1 AND 1000),
-  CONSTRAINT "Finding_snapshot_check" CHECK (jsonb_typeof("snapshot") = 'object' AND jsonb_typeof("snapshot"->'sources') = 'array' AND jsonb_array_length("snapshot"->'sources') BETWEEN 1 AND 8 AND octet_length(convert_to("snapshot"::text, 'UTF8')) <= 65536)
+  -- A CHECK accepts UNKNOWN: a missing "sources" key made a plain AND chain NULL and let the row in.
+  -- CASE measures only a proven array (a scalar never raises in place of a check violation) and
+  -- IS TRUE demands a definite true.
+  CONSTRAINT "Finding_snapshot_check" CHECK ((CASE WHEN jsonb_typeof("snapshot") = 'object' AND jsonb_typeof("snapshot"->'sources') = 'array' THEN jsonb_array_length("snapshot"->'sources') BETWEEN 1 AND 8 AND octet_length(convert_to("snapshot"::text, 'UTF8')) <= 65536 ELSE false END) IS TRUE)
 );
 CREATE TABLE "FindingRevision" (
   "findingId" UUID NOT NULL,
@@ -35,7 +38,9 @@ CREATE TABLE "FindingRevision" (
   -- Explicit text operands, as in 20260910123000_consultation_predicates: an IN-list on a
   -- character varying column is deparsed differently after pg_dump/pg_restore.
   CONSTRAINT "FindingRevision_action_check" CHECK ("action"::text = ANY (ARRAY['create'::text,'edit'::text,'hide'::text,'restore'::text])),
-  CONSTRAINT "FindingRevision_fingerprint_check" CHECK ("fingerprint" ~ '^[0-9a-f]{64}$')
+  CONSTRAINT "FindingRevision_fingerprint_check" CHECK ("fingerprint" ~ '^[0-9a-f]{64}$'),
+  -- History keeps the same fail-closed source shape as the head; the byte bound is the payload check.
+  CONSTRAINT "FindingRevision_snapshot_check" CHECK ((CASE WHEN jsonb_typeof("snapshot") = 'object' AND jsonb_typeof("snapshot"->'sources') = 'array' THEN jsonb_array_length("snapshot"->'sources') BETWEEN 1 AND 8 ELSE false END) IS TRUE)
 );
 CREATE INDEX "Finding_studyUid_id_idx" ON "Finding"("studyUid", "id");
 CREATE UNIQUE INDEX "FindingRevision_authorSub_requestId_key" ON "FindingRevision"("authorSub", "requestId");

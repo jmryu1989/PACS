@@ -44,6 +44,8 @@ class ViewerMigration(unittest.TestCase):
         self.sql('findings_before',row.replace("',1,'","',2,'"),success=False)
         self.sql('findings_before',row.replace("',1,'","',2,'").replace('SYNTHETIC-sub','SYNTHETIC-other'))
         self.assertEqual(self.sql('findings_before','SELECT count(*) FROM "FindingRevision"'),'2')
+        def findings():return {name:self.sql('findings_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in ('Finding','FindingRevision')}
+        kept=findings()
         # Byte equality, action vocabulary, source bounds and fingerprint shape fail closed.
         self.sql('findings_before','UPDATE "FindingRevision" SET "payloadBytes"="payloadBytes"+1',success=False)
         self.sql('findings_before',"UPDATE \"FindingRevision\" SET action='delete'",success=False)
@@ -51,11 +53,37 @@ class ViewerMigration(unittest.TestCase):
         self.sql('findings_before',"UPDATE \"Finding\" SET snapshot=snapshot-'sources'",success=False)
         self.sql('findings_before',"UPDATE \"Finding\" SET snapshot=jsonb_set(snapshot,'{sources}','[]'::jsonb)",success=False)
         self.sql('findings_before','UPDATE "Finding" SET revision=1001',success=False)
+        # Every invalid head and history shape is refused by its own snapshot CHECK, never passed as
+        # UNKNOWN nor failed by another error. History rows get a recomputed payloadBytes so only the
+        # shape can refuse them.
+        nine="(SELECT jsonb_agg(snapshot->'sources'->0) FROM generate_series(1,9))"
+        for shape in ["snapshot-'sources'","(snapshot-'sources')||jsonb_build_object('Sources',snapshot->'sources')",
+                      "jsonb_set(snapshot,'{sources}','null')","jsonb_set(snapshot,'{sources}','{}')",
+                      "jsonb_set(snapshot,'{sources}','\"SYNTHETIC\"')","jsonb_set(snapshot,'{sources}','1')",
+                      "jsonb_set(snapshot,'{sources}','[]')","jsonb_set(snapshot,'{sources}',"+nine+")",
+                      "'null'::jsonb","'\"SYNTHETIC\"'::jsonb","jsonb_build_array(snapshot)"]:
+            self.refuses('findings_before',f'UPDATE "Finding" SET snapshot={shape}','Finding_snapshot_check')
+            self.refuses('findings_before',f'''UPDATE "FindingRevision" SET snapshot={shape},"payloadBytes"=octet_length(convert_to(({shape})::text,'UTF8'))''',
+                         'FindingRevision_snapshot_check')
+        self.refuses('findings_before',"UPDATE \"Finding\" SET snapshot=jsonb_set(snapshot,'{title}',to_jsonb(repeat('x',65536)))",'Finding_snapshot_check')
+        self.refuses('findings_before','INSERT INTO "Finding" (id,"studyUid","authorSub","authorActor",revision,hidden,snapshot,"updatedAt") VALUES '+
+                     f"('00000000-0000-4000-8000-000000000a02','{self.uid}','SYNTHETIC-sub','SYNTHETIC-reader',1,false,"
+                     "'{\"schemaVersion\":1,\"title\":\"SYNTHETIC\",\"text\":\"\",\"hidden\":false,\"primary\":0}','2026-09-17')",'Finding_snapshot_check')
+        # SQL NULL never reaches a CHECK: NOT NULL refuses it on both tables.
+        for table in ('Finding','FindingRevision'):
+            self.sql('findings_before',f'''DO $probe$ BEGIN UPDATE "{table}" SET snapshot=NULL; RAISE EXCEPTION 'SYNTHETIC write accepted';
+EXCEPTION WHEN not_null_violation THEN NULL; END $probe$''')
+        # The fail-closed form still admits a valid upper bound on both rows; the probe is rolled back.
+        eight="jsonb_set(snapshot,'{sources}',(SELECT jsonb_agg(snapshot->'sources'->0) FROM generate_series(1,8)))"
+        self.assertEqual(self.sql('findings_before',f'''BEGIN; UPDATE "Finding" SET snapshot={eight};
+UPDATE "FindingRevision" SET snapshot={eight},"payloadBytes"=octet_length(convert_to(({eight})::text,'UTF8'));
+SELECT (SELECT count(*) FROM "Finding" WHERE jsonb_array_length(snapshot->'sources')=8)||','||(SELECT count(*) FROM "FindingRevision" WHERE jsonb_array_length(snapshot->'sources')=8); ROLLBACK;'''),'1,2')
         # Parent and history rows are protected; hiding is a revision, not a delete.
         self.sql('findings_before',f'''DELETE FROM "StudyState" WHERE uid='{self.uid}' ''',success=False)
         self.sql('findings_before','DELETE FROM "Finding"',success=False)
         self.sql('findings_before','DELETE FROM "ViewerItem"',success=False)
         self.assertEqual(old(),before)
+        self.assertEqual(findings(),kept)
 
     def test_findings_action_check_survives_pg_dump_restore(self):
         """Actual dump/restore evidence for the action CHECK: the shipped explicit-text form must deparse
@@ -171,6 +199,13 @@ class ViewerMigration(unittest.TestCase):
             input=source.encode() if isinstance(source,str) else source,capture_output=True,timeout=30)
         self.assertEqual(reply.returncode==0,success,reply.stderr.decode(errors='replace'))
         return reply.stdout.decode().strip()
+
+    def refuses(self,db,statement,constraint):
+        """Only the named CHECK may refuse: acceptance (a NULL pass) or any other error fails the case,
+        and the refused write rolls back with the block's subtransaction."""
+        self.sql(db,f'''DO $probe$ DECLARE refused text; BEGIN {statement}; RAISE EXCEPTION 'SYNTHETIC write accepted';
+EXCEPTION WHEN check_violation THEN GET STACKED DIAGNOSTICS refused = CONSTRAINT_NAME;
+IF refused IS DISTINCT FROM '{constraint}' THEN RAISE EXCEPTION 'SYNTHETIC refused by %', refused; END IF; END $probe$''')
 
     def create(self,name):ops.run(['docker','exec',self.db,'createdb','-U','postgres',name])
 

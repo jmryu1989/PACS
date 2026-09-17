@@ -440,6 +440,10 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing finding payload check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "Finding" SET snapshot=snapshot-'sources';
         RAISE EXCEPTION 'missing finding source check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "Finding" SET snapshot=jsonb_set(snapshot,'{sources}','null');
+        RAISE EXCEPTION 'missing finding null source check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "FindingRevision" SET snapshot=snapshot-'sources',"payloadBytes"=octet_length(convert_to((snapshot-'sources')::text,'UTF8'));
+        RAISE EXCEPTION 'missing finding revision source check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "WorkspaceLayout" SELECT * FROM "WorkspaceLayout" LIMIT 1;
         RAISE EXCEPTION 'missing workspace owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
       BEGIN UPDATE "WorkspaceLayout" SET revision=0;
