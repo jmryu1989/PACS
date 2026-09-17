@@ -6,6 +6,9 @@ x-logging: &bounded-logging
 
 services:
   proxy:
+    networks:
+      default: {}
+      workflow: {}
     environment:
       DEPLOYMENT_MODE: production
       PUBLIC_PORT: "443"
@@ -17,6 +20,7 @@ services:
     volumes: !override
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
+      - /etc/kin-workflow/nginx:/etc/nginx/workflow:ro
     logging: *bounded-logging
 
   orthanc:
@@ -49,3 +53,10 @@ services:
     # 배포한 이미지와 실제 실행 코드가 달라져 재현 가능한 롤백이 사라진다.
     volumes: !reset []
     logging: *bounded-logging
+
+# Only the HTTPS proxy joins this auxiliary network from the PACS stack.
+# The separately managed workflow receiver has no route to clinical containers.
+networks:
+  workflow:
+    name: kin-workflow
+    internal: true
