@@ -3,7 +3,7 @@
 owned synthetic multi-slice CT and the real findings API. Image identity is asserted from the viewport's
 current image id, never from a success message."""
 from pathlib import Path
-import sys, json, unittest, uuid
+import sys, json, math, unittest, uuid
 from unittest.mock import patch
 import test_worklist as base
 from test_viewer_history import ViewerHistoryE2E, synthetic_ct, expect, literal
@@ -117,10 +117,15 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         finding_row = self.compose(p, '소견', '본문', 'Link Length'); finding_row.get_by_role('button', name='Save', exact=True).click()
         expect(finding_row).to_contain_text('저장 완료'); saved = self.findings(f)[0]
         # Another window moves the measurement: the finding keeps its frozen numbers and reads Revised.
+        # The API stores the window's native Length result as sent and never recomputes it; the browser
+        # saved the world distance of these exact points, so the other window sends the moved distance.
+        self.assertAlmostEqual(head['item']['baseline']['values'][0], math.dist(*head['item']['points']), delta=1e-9)
         item = {k: v for k, v in head['item'].items() if k not in ['hidden', 'sourceDigest']}
         item['points'] = [item['points'][0], [item['points'][1][0]+5, item['points'][1][1], item['points'][1][2]]]
+        item['baseline'] = dict(item['baseline'], values=[math.dist(*item['points'])])
         moved = self.stack.request('POST', '/studies/'+f.uid+'/viewer-items/'+head['id']+'/revisions', 'doctor', dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', item=item))
         self.assertEqual(moved.status, 200, moved.text); self.assertNotEqual(moved.body['item']['baseline']['values'], head['item']['baseline']['values'])
+        self.assertEqual((moved.body['item']['points'], moved.body['item']['baseline']), (item['points'], item['baseline']))
         self.refresh_both(p)
         panel = self.panel(p); saved_row = self.saved_row(p, saved['id'])
         expect(saved_row.locator('[data-kin-link-state]')).to_have_text('Revised')

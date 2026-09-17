@@ -55,12 +55,14 @@ class ViewerMigration(unittest.TestCase):
         self.sql('findings_before','UPDATE "Finding" SET revision=1001',success=False)
         # Every invalid head and history shape is refused by its own snapshot CHECK, never passed as
         # UNKNOWN nor failed by another error. History rows get a recomputed payloadBytes so only the
-        # shape can refuse them.
-        nine="(SELECT jsonb_agg(snapshot->'sources'->0) FROM generate_series(1,9))"
+        # shape can refuse them. An aggregate whose argument names only the UPDATE row belongs to the
+        # UPDATE itself, which PostgreSQL refuses, so repeated sources are built without one.
+        def repeated(count):return "jsonb_set(snapshot,'{sources}',jsonb_build_array("+','.join(["snapshot->'sources'->0"]*count)+'))'
+        nine=repeated(9)
         for shape in ["snapshot-'sources'","(snapshot-'sources')||jsonb_build_object('Sources',snapshot->'sources')",
                       "jsonb_set(snapshot,'{sources}','null')","jsonb_set(snapshot,'{sources}','{}')",
                       "jsonb_set(snapshot,'{sources}','\"SYNTHETIC\"')","jsonb_set(snapshot,'{sources}','1')",
-                      "jsonb_set(snapshot,'{sources}','[]')","jsonb_set(snapshot,'{sources}',"+nine+")",
+                      "jsonb_set(snapshot,'{sources}','[]')",nine,
                       "'null'::jsonb","'\"SYNTHETIC\"'::jsonb","jsonb_build_array(snapshot)"]:
             self.refuses('findings_before',f'UPDATE "Finding" SET snapshot={shape}','Finding_snapshot_check')
             self.refuses('findings_before',f'''UPDATE "FindingRevision" SET snapshot={shape},"payloadBytes"=octet_length(convert_to(({shape})::text,'UTF8'))''',
@@ -74,7 +76,7 @@ class ViewerMigration(unittest.TestCase):
             self.sql('findings_before',f'''DO $probe$ BEGIN UPDATE "{table}" SET snapshot=NULL; RAISE EXCEPTION 'SYNTHETIC write accepted';
 EXCEPTION WHEN not_null_violation THEN NULL; END $probe$''')
         # The fail-closed form still admits a valid upper bound on both rows; the probe is rolled back.
-        eight="jsonb_set(snapshot,'{sources}',(SELECT jsonb_agg(snapshot->'sources'->0) FROM generate_series(1,8)))"
+        eight=repeated(8)
         self.assertEqual(self.sql('findings_before',f'''BEGIN; UPDATE "Finding" SET snapshot={eight};
 UPDATE "FindingRevision" SET snapshot={eight},"payloadBytes"=octet_length(convert_to(({eight})::text,'UTF8'));
 SELECT (SELECT count(*) FROM "Finding" WHERE jsonb_array_length(snapshot->'sources')=8)||','||(SELECT count(*) FROM "FindingRevision" WHERE jsonb_array_length(snapshot->'sources')=8); ROLLBACK;'''),'1,2')
