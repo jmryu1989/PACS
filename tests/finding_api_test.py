@@ -223,7 +223,28 @@ class FindingAPI(unittest.TestCase):
         self.create([dict(itemId=str(uuid.uuid4()), revision=1)], status=404)
         stale = self.call(body=self.finding_body([dict(itemId=length['id'], revision=2)]), status=409)
         self.assertEqual((stale['code'], stale['itemId'], stale['headRevision'], stale['headHidden']), ('FINDING_SOURCE_STALE', length['id'], 1, False))
+        self.assertEqual(self.snapshot(), before)
         hidden_key = self.revise_item(key, 'hide', reason='숨김')
+        self.assertEqual((hidden_key['hidden'], hidden_key['revision']), (True, 2))
+        # The deliberate source hide is the only change, checked row by row; the post-hide state is then
+        # the baseline every later refused request must leave untouched.
+        after_hide = self.snapshot()
+        def parsed(state, table): return [json.loads(row) for row in state[table]]
+        for table in FINDING_TABLES: self.assertEqual(after_hide[table], before[table])
+        def others(state): return [row for row in parsed(state, 'ViewerItem') if row['id'] != key['id']]
+        self.assertEqual(others(after_hide), others(before))
+        self.assertEqual([(row['hidden'], row['revision']) for row in parsed(after_hide, 'ViewerItem') if row['id'] == key['id']], [(True, 2)])
+        added = {}
+        for table, expected in [('ViewerRevision', dict(itemId=key['id'], revision=2, action='hide', reason='숨김')),
+                                ('ViewerRequest', dict(itemId=key['id'], revision=2)), ('AuditLog', dict(action='viewer.hide', target=self.uid))]:
+            rows = list(after_hide[table])
+            for row in before[table]: rows.remove(row)
+            added[table] = [json.loads(row) for row in rows]
+            self.assertEqual([{k: row[k] for k in expected} for row in added[table]], [expected])
+        [(items, revisions, used)] = [(r['itemCount'], r['revisionCount'], r['payloadBytes']) for r in parsed(before, 'ViewerStorageBudget')]
+        self.assertEqual([(r['itemCount'], r['revisionCount'], r['payloadBytes']) for r in parsed(after_hide, 'ViewerStorageBudget')],
+                         [(items, revisions+1, used+added['ViewerRevision'][0]['payloadBytes'])])
+        before = after_hide
         refused = self.call(body=self.finding_body([key]), status=409)
         self.assertEqual((refused['code'], refused['headHidden'], refused['headRevision']), ('FINDING_SOURCE_STALE', True, 2))
         for forged in [{'values': [1]}, {'kind': 'length'}, {'sourceDigest': 'x'}, {'seriesUid': '2.25.1'}, {'studyUid': self.uid}]:
