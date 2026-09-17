@@ -97,6 +97,9 @@ class FindingLocationsE2E(VolumeMarksE2E):
         expect(row.locator('[data-job-id]')).to_have_count(1)
         expect(point).to_have_count(0)
         expect(row.locator('[data-job-id][data-source-kind="point"]')).to_have_count(1)
+        # What was typed is still in its fields after the renders this click and the saved-Jobs answer cause.
+        expect(row.get_by_label('Finding Title')).to_have_value(title)
+        expect(row.get_by_label('Finding Characteristics', exact=True)).to_have_value(traits)
         row.get_by_role('button', name='Save', exact=True).click()
         expect(row).to_contain_text('저장 완료', timeout=30000)
         return panel, row

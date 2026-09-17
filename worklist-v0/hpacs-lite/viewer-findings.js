@@ -211,23 +211,56 @@ window.kinViewerFindings = function (services, model) {
       else if (st.jobs.status === 'ready' && !st.jobs.list.size) text(box, 'p', '이 검사에 연결할 수 있는 저장 작업이 없습니다.');
       button(box, 'Reload Saved Jobs', () => store.loadJobs(), st.jobs.status === 'loading' || busy);
     }
+    /* The draft's own fields are made once per entry and moved into each later render of its row. A render can be caused by
+     * anything (a saved-Jobs answer, a message, a head change, the 250 ms history sync), and rebuilding these elements would
+     * drop what the user is typing: the keystrokes and the caret follow the element, and one replaced between a keypress and
+     * its delivery is lost silently. Their values follow the draft only while the user is not in them. */
+    const editors = new Map();
+    function editor(e) {
+      let box = editors.get(e);
+      if (!box) {
+        const host = document.createElement('div');
+        const title = field(host, 'Finding Title', 'input', e.draft.title, model.LIMITS.title, v => store.updateDraft(e, { title: v }), false);
+        // Characteristics: native maxLength counts UTF-16 units (astral characters stop earlier); the saved limit is code points.
+        const traits = field(host, 'Characteristics (병변 특성)', 'textarea', typeof e.draft.characteristics === 'string' ? e.draft.characteristics : '',
+          model.CHARACTERISTICS, v => store.updateDraft(e, { characteristics: v }), false);
+        traits.setAttribute('aria-label', 'Finding Characteristics');
+        const help = text(host, 'p', CHARACTERISTICS_HELP); help.id = 'kin-finding-characteristics-help-' + crypto.randomUUID();
+        traits.setAttribute('aria-describedby', help.id);
+        const body = field(host, 'Finding Text', 'textarea', e.draft.text, model.LIMITS.text, v => store.updateDraft(e, { text: v }), false);
+        box = { host, fields: [[title, 'title'], [traits, 'characteristics'], [body, 'text']] };
+        editors.set(e, box);
+      }
+      let active = null; try { active = document.activeElement; } catch (_) { active = null; }
+      for (const [node, key] of box.fields) {
+        const value = typeof e.draft[key] === 'string' ? e.draft[key] : '';
+        // A draft changed elsewhere (a restored copy, Use Latest) is shown; the field being typed into is never overwritten.
+        if (node !== active && node.value !== value) node.value = value;
+        node.disabled = !!(e.busy || e.pending);
+      }
+      return box.host;
+    }
     function row(e) {
-      let el = rows.get(e);
-      if (!el) { el = document.createElement('article'); el.dataset.rowKey = crypto.randomUUID(); el.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; rows.set(e, el); list.append(el); }
-      el.replaceChildren(); el.dataset.findingId = e.head?.id || ''; el.dataset.saved = e.head ? 'true' : 'false';
-      text(el, 'strong', 'Finding · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
-      if (e.head) text(el, 'div', e.head.authorActor + (store.writable(e) ? ' · My Finding' : ' · Read-only'));
+      let box = rows.get(e);
+      if (!box) {
+        const article = document.createElement('article');
+        article.dataset.rowKey = crypto.randomUUID(); article.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px';
+        // Three stable parts in reading order: the head line, the draft's own fields (kept across renders) and everything else.
+        const head = document.createElement('div'), slot = document.createElement('div'), rest = document.createElement('div');
+        article.append(head, slot, rest); rows.set(e, box = { article, head, slot, rest }); list.append(article);
+      }
+      const el = box.rest;
+      box.head.replaceChildren(); el.replaceChildren();
+      box.article.dataset.findingId = e.head?.id || ''; box.article.dataset.saved = e.head ? 'true' : 'false';
+      text(box.head, 'strong', 'Finding · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
+      if (e.head) text(box.head, 'div', e.head.authorActor + (store.writable(e) ? ' · My Finding' : ' · Read-only'));
       const editing = e.editing && store.writable(e);
       if (editing) {
-        field(el, 'Finding Title', 'input', e.draft.title, model.LIMITS.title, v => store.updateDraft(e, { title: v }), !!(e.busy || e.pending));
-        // Characteristics: native maxLength counts UTF-16 units (astral characters stop earlier); the saved limit is code points.
-        const traits = field(el, 'Characteristics (병변 특성)', 'textarea', typeof e.draft.characteristics === 'string' ? e.draft.characteristics : '',
-          model.CHARACTERISTICS, v => store.updateDraft(e, { characteristics: v }), !!(e.busy || e.pending));
-        traits.setAttribute('aria-label', 'Finding Characteristics');
-        const help = text(el, 'p', CHARACTERISTICS_HELP); help.id = 'kin-finding-characteristics-help-' + el.dataset.rowKey;
-        traits.setAttribute('aria-describedby', help.id);
-        field(el, 'Finding Text', 'textarea', e.draft.text, model.LIMITS.text, v => store.updateDraft(e, { text: v }), !!(e.busy || e.pending));
+        const host = editor(e);
+        // Attached once: re-attaching would take the focus and the caret out of the field being typed into.
+        if (box.slot.children[0] !== host) box.slot.replaceChildren(host);
       } else {
+        box.slot.replaceChildren(); editors.delete(e);
         text(el, 'p', e.head ? e.head.item.title : e.draft.title).style.fontWeight = '600';
         const body = text(el, 'p', e.head ? e.head.item.text : e.draft.text); body.style.whiteSpace = 'pre-wrap';
         // Version 1 records show no characteristics line; old prose is never relabelled.
@@ -304,7 +337,7 @@ window.kinViewerFindings = function (services, model) {
       // A finding that names a comparison study this login can no longer read is not shown unless the
       // user is working on it; the anchor list read that follows removes it for good.
       const shown = e => s.entries.get(e.id) === e && !(store.pairBlocked(e) && !store.hasWork(e));
-      for (const [e, el] of [...rows]) if (!shown(e)) { el.remove(); rows.delete(e); }
+      for (const [e, box] of [...rows]) if (!shown(e)) { box.article.remove(); rows.delete(e); editors.delete(e); }
       for (const e of s.entries.values()) if (shown(e)) row(e);
     }
     const unsubscribe = store.subscribe(render);
@@ -322,7 +355,7 @@ window.kinViewerFindings = function (services, model) {
       clearInterval(timer); unsubscribe(); channel?.close(); window.removeEventListener('storage', onStorage); window.removeEventListener('kin-viewer-access-ended', onAccessEnded);
       keep(store.detach());
       if (window.kinViewerFindingsState === state) delete window.kinViewerFindingsState;
-      store.dispose(); panel.remove(); rows.clear(); stop = () => {};
+      store.dispose(); panel.remove(); rows.clear(); editors.clear(); stop = () => {};
     };
     render();
     return true;

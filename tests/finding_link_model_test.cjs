@@ -2474,6 +2474,39 @@ test('mounted locations: the editor names its characteristics field and helper, 
   h.findings.stop();
 });
 
+test('mounted draft: composed title, characteristics and text survive every later render of the row', async () => {
+  const h = await locationViewer();
+  h.loc.shownValue = { jobId: LJ, revision: 1, snapshotVersion: 6, studies: [VX], marks: [{ id: LM2, label: '두번째' }] };
+  await h.press(h.panel(), 'New Finding');
+  const draft = () => h.panel().all().find(e => e.tagName === 'article' && e.dataset.saved === 'false');
+  const input = label => draft().all().find(e => e.attributes['aria-label'] === label);
+  const type = (label, value) => { const el = input(label); el.value = value; el.dispatchEvent(new Event('input')); };
+  // The fields the user types into are made once and kept: a render caused by anything else (the saved-Jobs answer of the
+  // section below them, a message, a head change, the history sync) must not replace them, because a keystroke delivered to a
+  // replaced element is lost with its caret and never reaches the draft (candidate run 35258893346, measurements).
+  const fields = ['Finding Title', 'Finding Characteristics', 'Finding Text'].map(input);
+  assert.ok(fields.every(Boolean));
+  const slot = fields[0].parent.parent.parent;
+  let attached = 0; const append = slot.replaceChildren.bind(slot);
+  slot.replaceChildren = (...args) => { attached++; return append(...args); };
+  const same = () => ['Finding Title', 'Finding Characteristics', 'Finding Text'].map((label, i) => input(label) === fields[i]);
+  await h.sync();
+  assert.deepEqual(same(), [true, true, true], 'the draft fields survive the renders of their row');
+  type('Finding Title', 'WORKSPACE DRAFT'); type('Finding Text', 'Next Study 보호'); type('Finding Characteristics', '경계 불명확');
+  const choice = draft().all().find(e => e.attributes['aria-label'] === 'Link 3D Point 두번째 · 저장 작업 r1');
+  choice.checked = true; choice.dispatchEvent(new Event('change')); await h.sync(); await h.sync();
+  assert.deepEqual(same(), [true, true, true], 'and every render after the typing');
+  assert.deepEqual(fields.map(e => e.value), ['WORKSPACE DRAFT', '경계 불명확', 'Next Study 보호']);
+  assert.equal(draft().all().filter(e => e.dataset.jobId).length, 1);
+  // The head line and everything below the fields still follow the state, and the draft holds what was typed.
+  assert.ok(draft().all().some(e => e.tagName === 'strong' && e.textContent === 'Finding · Unsaved'));
+  assert.equal(attached, 0, 'the fields are attached once, never taken out of the document and put back');
+  await h.press(draft(), 'Save');
+  const body = JSON.parse(h.server.log.filter(x => x.method === 'POST').at(-1).body);
+  assert.deepEqual([body.item.title, body.item.characteristics, body.item.text], ['WORKSPACE DRAFT', '경계 불명확', 'Next Study 보호']);
+  h.findings.stop();
+});
+
 test('mounted locations: an older API makes the section read-only; another model version is never mounted', async () => {
   const h = await locationViewer({ schemaHeader: null });
   const buttons = h.panel().all().filter(e => e.tagName === 'button');

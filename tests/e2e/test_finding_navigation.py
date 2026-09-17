@@ -98,6 +98,10 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         if shows: expect(row.get_by_label(link_text).locator('xpath=..')).to_contain_text(shows)
         row.get_by_label(link_text).click()
         expect(row.locator('[data-kin-sources] [data-item-id]')).to_have_count(1)
+        # What was typed is still in its fields after the renders this click and the section's saved-Jobs answer cause.
+        expect(row.get_by_label('Finding Title')).to_have_value(title)
+        expect(row.get_by_label('Finding Text')).to_have_value(text)
+        if characteristics is not None: expect(row.get_by_label('Finding Characteristics', exact=True)).to_have_value(characteristics)
         return row
 
     def saved_row(self, p, finding_id, reading=False):
