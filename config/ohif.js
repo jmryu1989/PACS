@@ -524,6 +524,63 @@ function kinCreateSRProvenance() {
     onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
 
+// Study/series/SOP/frame identity of a stack image id; frame is 1-based like the saved items.
+function kinViewerImageReference(imageId) {
+  const m = typeof imageId === 'string' && imageId.match(/\/studies\/([0-9.]+)\/series\/([0-9.]+)\/instances\/([0-9.]+)\/frames\/([1-9][0-9]*)(?:$|[?#])/);
+  return m ? { study: m[1], seriesUid: m[2], sopUid: m[3], frame: Number(m[4]) } : null;
+}
+// Exact-frame navigation shared by the Saved Items "Go to Image" button and the Findings section.
+// `env` exposes the live closure state of kinCreateViewerHistory through getters, so every decision
+// after an await is re-taken against the current session and never against a copy. The result is
+// { ok: true, highlighted, annotation } or { ok: false, reason }; it never throws, never changes the
+// URL study set and never reslices a volume viewport (3D cursor stays off).
+const KIN_NAVIGATION_REASONS = ['invalid', 'ended', 'scope', 'busy', 'series-missing', 'viewport-unsupported', 'frame-missing', 'superseded', 'tool-missing'];
+async function kinViewerNavigateTo(env, target) {
+  const refusal = reason => ({ ok: false, reason });
+  const uid = s => typeof s === 'string' && s.length <= 64 && /^[0-9]+(?:\.[0-9]+)+$/.test(s);
+  if (!target || typeof target !== 'object' || !uid(target.studyUid) || !uid(target.seriesUid) || !uid(target.sopUid) ||
+      !Number.isSafeInteger(target.frame) || target.frame < 1) return refusal('invalid');
+  if (env.ended()) return refusal('ended');
+  const scope = env.scope();
+  if (!scope || target.studyUid !== scope) return refusal('scope');
+  if (env.busy()) return refusal('busy');
+  const ticket = env.generation(), nav = env.beginNavigation();
+  const live = () => !env.ended() && env.valid(ticket) && nav === env.navigation() && env.scope() === scope;
+  const identity = { seriesUid: target.seriesUid, sopUid: target.sopUid, frame: target.frame };
+  let sets;
+  try {
+    sets = env.services.displaySetService.getActiveDisplaySets().filter(d => d.StudyInstanceUID === scope && d.SeriesInstanceUID === target.seriesUid && (d.images || d.instances || []).some(i => i.SOPInstanceUID === target.sopUid));
+  } catch (_) { return refusal('tool-missing'); }
+  if (sets.length !== 1) return refusal('series-missing');
+  const viewportId = env.services.viewportGridService.getActiveViewportId();
+  const stack = v => v && v.type === 'stack' && typeof v.getImageIds === 'function' && typeof v.setImageIdIndex === 'function';
+  const first = env.viewport();
+  // A volume/MPR viewport has no stack image list to index: refuse instead of reslicing or retargeting.
+  if (first && !stack(first)) return refusal('viewport-unsupported');
+  if (!(first ? first.getImageIds() : []).some(id => env.matches(env.reference(id), identity))) {
+    if (!live()) return refusal('superseded');
+    env.services.viewportGridService.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [sets[0].displaySetInstanceUID] });
+  }
+  for (let n = 0; n < 100; n++) {
+    if (!live()) return refusal('superseded');
+    const v = env.services.cornerstoneViewportService.getCornerstoneViewport(viewportId);
+    if (v && !stack(v)) return refusal('viewport-unsupported');
+    const index = (v ? v.getImageIds() : []).findIndex(id => env.matches(env.reference(id), identity));
+    if (index >= 0) {
+      try { await v.setImageIdIndex(index); } catch (_) { return live() ? refusal('frame-missing') : refusal('superseded'); }
+      if (!live() || env.services.viewportGridService.getActiveViewportId() !== viewportId) return refusal('superseded');
+      // The frame actually shown after the await is the only proof; a user scroll or a
+      // display-set change during the load must not be reported as arrival.
+      if (!env.matches(env.reference(v.getCurrentImageId?.()), identity)) return refusal('frame-missing');
+      try { v.render(); } catch (_) {}
+      env.hydrate();
+      return { ok: true, ...env.highlight(target.itemId) };
+    }
+    await env.delay();
+  }
+  return live() ? refusal('frame-missing') : refusal('superseded');
+}
+
 function kinCreateViewerHistory() {
   let services, commands, extensions, stop;
   const tools = { arrow: 'ArrowAnnotate', length: 'Length', angle: 'Angle', ellipse: 'EllipticalROI' };
@@ -774,10 +831,7 @@ function kinCreateViewerHistory() {
       el.addEventListener('input', () => change(el.value)); wrap.append(el); return el;
     };
     const viewport = () => services.cornerstoneViewportService.getCornerstoneViewport(services.viewportGridService.getActiveViewportId());
-    const reference = imageId => {
-      const m = typeof imageId === 'string' && imageId.match(/\/studies\/([0-9.]+)\/series\/([0-9.]+)\/instances\/([0-9.]+)\/frames\/([1-9][0-9]*)(?:$|[?#])/);
-      return m ? { study: m[1], seriesUid: m[2], sopUid: m[3], frame: Number(m[4]) } : null;
-    };
+    const reference = kinViewerImageReference;
     const matches = (r, item) => r?.study === scope && r.seriesUid === item.seriesUid && r.sopUid === item.sopUid && r.frame === item.frame;
     const current = () => reference(viewport()?.getCurrentImageId?.());
     const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);
@@ -1193,24 +1247,43 @@ function kinCreateViewerHistory() {
         if (error.status === 409) await load();
       } finally { if (valid(ticket) && entries.has(e.id)) { e.busy = false; row(e); } }
     }
+    // Selection and highlight of the hydrated annotation behind a finding source; a hidden,
+    // unverified or key-image source navigates just the same and reports why nothing is drawn.
+    function highlight(itemId) {
+      if (!itemId) return { highlighted: false, annotation: 'none' };
+      const e = [...entries.values()].find(x => x.head?.id === itemId);
+      if (!e) return { highlighted: false, annotation: 'missing' };
+      if (e.head.hidden) return { highlighted: false, annotation: 'hidden' };
+      if (!tools[e.draft.kind]) return { highlighted: false, annotation: 'key' };
+      const a = e.annotationUID && ct.annotation.state.getAnnotation(e.annotationUID);
+      if (!a) return { highlighted: false, annotation: manual(e.draft.kind) && e.head.referenceStatus !== 'verified' ? 'unverified' : 'none' };
+      for (const other of ct.annotation.state.getAllAnnotations())
+        if (other.annotationUID !== a.annotationUID && kinds[other.metadata.toolName] && other.highlighted) other.highlighted = false;
+      a.highlighted = true;
+      try { ct.annotation.selection?.setAnnotationSelected?.(a.annotationUID, true, false); } catch (_) {}
+      render();
+      return { highlighted: true, annotation: 'shown' };
+    }
+    const navigationEnv = { services, viewport, reference, matches, hydrate, highlight,
+      ended: () => ended, scope: () => scope, busy: () => suspended || recovery.has(scope),
+      generation: () => generation, valid, navigation: () => navigation, beginNavigation: () => ++navigation,
+      delay: () => new Promise(resolve => setTimeout(resolve, 100)) };
+    const navigateTo = target => kinViewerNavigateTo(navigationEnv, target);
     async function navigate(e) {
       if (!valid(generation) || suspended || recovery.has(scope) || entries.get(e.id) !== e) return;
-      const ticket = generation, nav = ++navigation;
-      const sets = services.displaySetService.getActiveDisplaySets().filter(d => d.StudyInstanceUID === scope && d.SeriesInstanceUID === e.draft.seriesUid && (d.images || d.instances || []).some(i => i.SOPInstanceUID === e.draft.sopUid));
-      if (sets.length !== 1) { e.message = '현재 검사에서 원본 시리즈를 찾을 수 없습니다.'; row(e); return; }
-      const viewportId = services.viewportGridService.getActiveViewportId();
-      if (!(viewport()?.getImageIds?.() || []).some(id => matches(reference(id), e.draft))) {
-        services.viewportGridService.setDisplaySetsForViewport({ viewportId, displaySetInstanceUIDs: [sets[0].displaySetInstanceUID] });
-      }
-      for (let n = 0; n < 100; n++) {
-        if (!valid(ticket) || nav !== navigation) return;
-        const v = services.cornerstoneViewportService.getCornerstoneViewport(viewportId);
-        const index = (v?.getImageIds?.() || []).findIndex(id => matches(reference(id), e.draft));
-        if (index >= 0) { await v.setImageIdIndex(index); if (valid(ticket) && nav === navigation) { v.render(); hydrate(); } return; }
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-      if (valid(ticket)) { e.message = '원본 프레임을 열지 못했습니다.'; row(e); }
+      const outcome = await navigateTo({ studyUid: scope, seriesUid: e.draft.seriesUid, sopUid: e.draft.sopUid, frame: e.draft.frame });
+      if (outcome.ok || !valid(generation) || entries.get(e.id) !== e) return;
+      const message = { 'series-missing': '현재 검사에서 원본 시리즈를 찾을 수 없습니다.', 'frame-missing': '원본 프레임을 열지 못했습니다.',
+        'viewport-unsupported': '현재 화면은 원본 프레임 목록이 없는 MPR/볼륨 화면입니다. 일반 프레임 화면을 선택한 뒤 이동하세요.' }[outcome.reason];
+      if (message) { e.message = message; row(e); }
     }
+    // Read-only view of the saved heads for the Findings section: only saved rows are linkable and
+    // the Orthanc verdict travels with them, separate from any database link state.
+    const historyState = () => ({ scope, subject, ended, suspended: suspended || recovery.has(scope), writable: writable({}),
+      heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
+        kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
+        frame: e.head.item.frame, authorSub: e.head.authorSub, referenceStatus: manual(e.draft.kind) ? e.head.referenceStatus ?? 'unverified' : null,
+        values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
       if (!r || r.study !== scope || !subject || ended || suspended || recovery.has(scope)) return;
@@ -1314,6 +1387,8 @@ function kinCreateViewerHistory() {
     window.kinViewerHistoryHasUnsaved = jobGuard;
     const workspaceState = () => ({ dirty: jobGuard(), busy: [...entries.values()].some(x => x.busy || x.pending) });
     window.kinViewerHistoryWorkspaceState = workspaceState;
+    window.kinViewerHistoryNavigate = navigateTo;
+    window.kinViewerHistoryState = historyState;
     let channel;
     try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
     window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
@@ -1331,6 +1406,8 @@ function kinCreateViewerHistory() {
     stop = () => {
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
       if (window.kinViewerHistoryWorkspaceState === workspaceState) delete window.kinViewerHistoryWorkspaceState;
+      if (window.kinViewerHistoryNavigate === navigateTo) delete window.kinViewerHistoryNavigate;
+      if (window.kinViewerHistoryState === historyState) delete window.kinViewerHistoryState;
       if (measurementService.getMeasurements === projectedMeasurements) measurementService.getMeasurements = originalMeasurements;
       reportRestores.reverse().forEach(restore => restore());
       previousStop();
@@ -2144,6 +2221,30 @@ function kinCreateViewerJobs() {
   }, onModeExit() { epoch++; current?.stop(); current = null; } };
 }
 
+// Findings live inside the Measurements panel; the dock keeps its two panels unchanged.
+function kinCreateViewerFindings() {
+  let ready, current, epoch = 0;
+  return { id: 'kin.viewer-findings', preRegistration({ servicesManager }) {
+    const load = name => new Promise((resolve, reject) => {
+      const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error('소견 화면을 불러오지 못했습니다. 뷰어를 다시 여세요.')); document.head.append(script);
+    });
+    ready = load('finding-link-model.js').then(() => load('viewer-findings.js')).then(() => {
+      if (typeof window.kinViewerFindings !== 'function' || !window.kinFindingLinkModel) throw new Error('소견 화면을 불러오지 못했습니다. 뷰어를 다시 여세요.');
+      return window.kinViewerFindings(servicesManager.services, window.kinFindingLinkModel);
+    });
+    ready.catch(() => {});
+  }, onModeEnter() {
+    const ticket = ++epoch;
+    ready.then(extension => { if (ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+      if (ticket !== epoch) return;
+      const host = document.querySelector('#kin-viewer-history');
+      if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = e.message; host.append(p); }
+    });
+  }, onModeExit() { epoch++; current?.stop(); current = null; } };
+}
+
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
   function connect() {
@@ -2589,7 +2690,7 @@ function kinCreateDicomPdf() {
 }
 
 window.config = {
-  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor()],
+  extensions: [kinStackPrecision, kinCreateSRProvenance(), kinCreateViewerHistory(), kinCreateViewerFindings(), kinCreateViewerLayout(), kinCreateViewerJobs(), kinCreateViewerTechNote(), kinCreateFrameCoverage(), '@ohif/extension-dicom-pdf', kinCreateDicomPdf(), kinCreateCTSync(), kinCreateCine(), kinCreateDisplayScope(), kinCreateCellMerge(), kinCreateImagesOnly(), kinCreateImageText(), kinCreateCTPresets(), kinCreateThreeDCursor()],
   // REQ-D-3D-CURSOR. 평가 빌드에 커밋되는 리터럴은 false다. 활성화는 체크리스트 12조건과
   // B10(허용된 분리 환경의 실제 CT 확인) 뒤의 별도 결정이며, === true 하나만 ON이다.
   kinThreeDCursor: { enabled: false },

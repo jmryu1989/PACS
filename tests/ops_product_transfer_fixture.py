@@ -17,8 +17,8 @@ orth, pg = combined.orth, combined.pg
 image_transfer, inventory = combined.image_transfer, combined.inventory
 require, command, record = combined.require, combined.command, combined.record
 LIMITS = combined.LIMITS
-# The 32-table catalog plus synthetic rows now exceeds 128 KiB (136,191
-# bytes measured). Keep producer, bounded copy and parser on one finite cap.
+# The 37-table catalog plus synthetic rows exceeds 128 KiB (136,191 bytes
+# measured at 32 tables). Keep producer, bounded copy and parser on one finite cap.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -44,10 +44,11 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910123000_consultation_predicates/migration.sql',
               'api/prisma/migrations/20260910130000_study_access/migration.sql',
               'api/prisma/migrations/20260910133000_study_access_subject/migration.sql',
-              'api/prisma/migrations/20260912100000_hanging_protocol_preferences/migration.sql']
+              'api/prisma/migrations/20260912100000_hanging_protocol_preferences/migration.sql',
+              'api/prisma/migrations/20260917120000_findings/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
-                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
+                 'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
@@ -144,6 +145,22 @@ def expected_rows(uid):
         payloadBytes=sum(row['payloadBytes'] for row in rows['ViewerRevision']))]
     rows['ViewerRequest'] = [dict(authorSub='SYNTHETIC-sub', requestId='00000000-0000-4000-8000-00000000000'+str(n),
         fingerprint=str(n)*64, itemId=item_id, revision=n) for n in (1,2)]
+    # A finding freezes a server copy of the key item above at revision 1; the
+    # later hide of that item does not rewrite this copy. ASCII keeps the jsonb
+    # text byte count equal to json.dumps for the payload CHECK.
+    finding_id = '00000000-0000-4000-8000-000000000a01'
+    finding_source = dict(itemId=item_id, revision=1, studyUid=uid, kind='key', seriesUid=uid+'.1', sopUid=uid+'.2',
+        frame=1, frameOfReferenceUid=None, label='SYNTHETIC key', values=None, calculator=None, sourceDigest=None,
+        authorActor='SYNTHETIC-reader')
+    finding_snapshot = dict(schemaVersion=1, title='SYNTHETIC finding', text='SYNTHETIC finding text', hidden=False,
+        primary=0, sources=[finding_source])
+    finding_snapshots = [finding_snapshot, {**finding_snapshot, 'hidden': True}]
+    rows['Finding'] = [dict(id=finding_id, studyUid=uid, authorSub='SYNTHETIC-sub', authorActor='SYNTHETIC-reader',
+        revision=2, hidden=True, snapshot=finding_snapshots[1], createdAt=STAMP, updatedAt=STAMP)]
+    rows['FindingRevision'] = [dict(findingId=finding_id, revision=n+1, snapshot=value,
+        action='create' if n==0 else 'hide', reason='' if n==0 else 'SYNTHETIC reason', actor='SYNTHETIC-reader',
+        authorSub='SYNTHETIC-sub', requestId='00000000-0000-4000-8000-000000000b0'+str(n+1), fingerprint=str(n+1)*64,
+        payloadBytes=len(json.dumps(value).encode()), at=STAMP) for n,value in enumerate(finding_snapshots)]
     layout = dict(version=2, mode='auto', portrait=dict(top=280), landscape=dict(main=720),
         reading=dict(version=1,reportWidth=540,imageHeight=390,relatedHeight=None,
             relatedListHeight=180,relatedHidden=True))
@@ -235,7 +252,7 @@ def create_product(name, db, uid):
         execute(name, db, raw.decode())
     data = expected_rows(uid)
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
-                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'WorkspaceLayout', 'WorklistColumns',
+                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'):
         rows = data[table]
@@ -292,6 +309,37 @@ def sorted_rows(rows):
     return {key: sorted(value, key=canonical) for key, value in rows.items()}
 
 
+# Schema-metadata-only diagnostic for a catalog mismatch: names, types and definitions of the
+# synthetic product schema, never rows, credentials or dump bytes. Bounded so a log stays readable.
+DIAGNOSTIC_ENTRIES = 8
+DIAGNOSTIC_BYTES = 4096
+
+
+def catalog_difference(expected, actual):
+    report = {}
+    for key in sorted(set(expected) | set(actual)):
+        left = {canonical(item).decode() for item in (expected.get(key) or [])}
+        right = {canonical(item).decode() for item in (actual.get(key) or [])}
+        if left == right:
+            continue
+        report[key] = dict(expected_count=len(left), actual_count=len(right),
+                           only_expected=sorted(left - right)[:DIAGNOSTIC_ENTRIES], only_actual=sorted(right - left)[:DIAGNOSTIC_ENTRIES])
+    return report
+
+
+def bounded_diagnostic(report):
+    text = json.dumps(report, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    while len(text.encode()) > DIAGNOSTIC_BYTES:
+        longest = max(((len(entry), key, side) for key, value in report.items() for side in ('only_expected', 'only_actual')
+                       for entry in [value[side]] if entry), default=None)
+        if longest is None:
+            break
+        _, key, side = longest
+        report[key][side].pop(); report[key]['truncated'] = True
+        text = json.dumps(report, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    return text[:DIAGNOSTIC_BYTES]
+
+
 def verify_product(name, db, expected):
     actual = observe(name, db)
     for key in ('catalog', 'rows', 'sequences'):
@@ -299,6 +347,9 @@ def verify_product(name, db, expected):
         if key == 'rows':
             left, right = sorted_rows(left), sorted_rows(right)
         if canonical(left) != canonical(right):
+            if key == 'catalog':
+                print('Synthetic catalog difference (expected vs restored, schema metadata only): '+
+                      bounded_diagnostic(catalog_difference(right, left)), file=sys.stderr, flush=True)
             raise ProductMismatch('Synthetic product '+key+' mismatch')
     return actual
 
@@ -381,6 +432,18 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing viewer history restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
       BEGIN DELETE FROM "ViewerRevision";
         RAISE EXCEPTION 'missing viewer replay restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN DELETE FROM "Finding";
+        RAISE EXCEPTION 'missing finding history restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN INSERT INTO "FindingRevision" SELECT * FROM "FindingRevision" LIMIT 1;
+        RAISE EXCEPTION 'missing finding revision PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "FindingRevision" SET "payloadBytes"="payloadBytes"+1;
+        RAISE EXCEPTION 'missing finding payload check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "Finding" SET snapshot=snapshot-'sources';
+        RAISE EXCEPTION 'missing finding source check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "Finding" SET snapshot=jsonb_set(snapshot,'{sources}','null');
+        RAISE EXCEPTION 'missing finding null source check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "FindingRevision" SET snapshot=snapshot-'sources',"payloadBytes"=octet_length(convert_to((snapshot-'sources')::text,'UTF8'));
+        RAISE EXCEPTION 'missing finding revision source check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "WorkspaceLayout" SELECT * FROM "WorkspaceLayout" LIMIT 1;
         RAISE EXCEPTION 'missing workspace owner PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
       BEGIN UPDATE "WorkspaceLayout" SET revision=0;
@@ -432,7 +495,7 @@ def constraint_probes(name, product):
     execute(name, 'kin', sql)
     verify_product(name, 'kin', product)
     return dict(version_unique=True, report_study_fk=True, draft_composite_pk=True,
-                viewer_restrict=True, rolled_back_unchanged=True)
+                viewer_restrict=True, finding_restrict=True, rolled_back_unchanged=True)
 
 
 def negative_restore(name, folder, product):
