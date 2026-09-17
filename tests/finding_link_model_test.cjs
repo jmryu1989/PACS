@@ -1456,13 +1456,64 @@ test('store comparison Go to Image: arrival text, 15 s bound, newest wins, the a
   assert.deepEqual(await noTools.store.navigate(noTools.store.state().entries.get(F2), 1), { ok: false, reason: 'tool-missing', phase: 'before' });
 });
 
+const ANCHOR_REFUSAL = '현재 검사의 영상 칸이 선택되어 있지 않아 이동하지 않았습니다. 현재 검사의 영상 칸을 선택한 뒤 다시 누르세요.';
+test('store anchor refusal: its text follows the viewer history at the answer, not the 250 ms snapshot; other logins, ended, outside the pair or unreadable stay generic', async () => {
+  const t = pairTransport(); t.state.items = [t.head(F1, 1), t.cross(F2, 1)];
+  let live = { scope: A, subject: 'reader-1', ended: false, suspended: false, heads: [] }, gate = null;
+  const calls = [], activations = [];
+  const { store } = await anchored(t, {
+    history: () => { if (live instanceof Error) throw live; return live; },
+    activate: study => { activations.push(study); return { ok: false, reason: 'viewport-missing' }; },
+    navigate: async target => {
+      calls.push(plain(target)); if (gate) await gate;
+      return !(live instanceof Error) && !live.refuse && live.scope === target.studyUid ? { ok: true, highlighted: false, annotation: 'none' } : { ok: false, reason: 'scope' };
+    } });
+  const e = store.state().entries.get(F2);
+  const anchorTarget = { studyUid: A, seriesUid: SERIES, sopUid: SOP, frame: 1, itemId: ITEM };
+  // The viewer already shows the comparison study (still loading); the store's snapshot has not synced it yet.
+  live = { ...live, scope: B, suspended: true, loading: true };
+  assert.equal(store.state().history.scope, A);
+  assert.deepEqual(await store.navigate(e, 0), { ok: false, reason: 'scope' });
+  assert.equal(e.message, ANCHOR_REFUSAL);
+  assert.deepEqual([calls, activations], [[anchorTarget], []], 'one viewer call for the anchor source, no activation');
+  for (const [label, value] of [
+    ['another login', { scope: B, subject: 'reader-2', ended: false }],
+    ['ended session', { scope: B, subject: 'reader-1', ended: true }],
+    ['a study outside the pair', { scope: '7.7.7', subject: 'reader-1', ended: false }],
+    ['the anchor itself refusing', { scope: A, subject: 'reader-1', ended: false, refuse: true }],
+    ['unreadable history', new Error('gone')],
+    ['no scope', { subject: 'reader-1', ended: false }],
+  ]) {
+    live = value; e.message = 'before';
+    assert.deepEqual(await store.navigate(e, 0), { ok: false, reason: 'scope' }, label);
+    assert.equal(e.message, model.reasonText('scope'), label);
+  }
+  assert.deepEqual([calls.length, activations], [7, []]);
+  // A snapshot still on the comparison study while the viewer is back on the anchor: the viewer's real answer counts.
+  store.syncHistory(history(B, [])); await tick(40);
+  live = { scope: A, subject: 'reader-1', ended: false };
+  assert.equal(store.state().history.scope, B);
+  assert.deepEqual(await store.navigate(e, 0), { ok: true, highlighted: false, annotation: 'none' });
+  assert.equal(e.message, '');
+  // An anchor change during the viewer call: superseded, nothing written, even though the viewer is on B.
+  live = { scope: B, subject: 'reader-1', ended: false };
+  e.message = 'marker';
+  let open; gate = new Promise(resolve => { open = resolve; });
+  const pending = store.navigate(e, 0); await tick();
+  t.state.items = [];
+  store.syncHistory(history('7.7.7', [])); await tick(40);
+  open(); gate = null;
+  assert.deepEqual(await pending, { ok: false, reason: 'superseded' });
+  assert.deepEqual([e.message, store.state().entries.has(F2), activations], ['marker', false, []]);
+});
+
 /* The whole history extension and the Findings section in a two-viewport comparison viewer. */
 async function paired() {
   const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
   document.querySelector = selector => document.body.all().find(e => selector === '#' + e.id) || null;
   document.createTextNode = value => { const node = new Element('#text'); node.textContent = value; return node; };
   const window = new EventTarget(), annotations = new Map();
-  const ticks = []; const tickAll = () => { for (const fn of [...ticks]) fn(); };
+  const ticks = []; let ticked = 0; const tickAll = () => { ticked++; for (const fn of [...ticks]) fn(); };
   const me = { sub: 'doctor', kind: 'member', roles: ['radiologist'] };
   const XK = 'a0000000-0000-4000-8000-000000000011', PK = 'a0000000-0000-4000-8000-000000000022';
   const keyOf = (id, study, series, sop, title) => ({ id, studyUid: study, revision: 1, hidden: false, authorSub: 'doctor', authorActor: 'Doctor', createdAt: 't', updatedAt: 't',
@@ -1547,7 +1598,10 @@ async function paired() {
   tickAll(); await flush(); tickAll(); await flush();
   const h = { window, server, views, shows, grid, findings, XK, PK, all: () => document.body.all(), text: () => document.body.all().map(e => e.textContent).join('\n'),
     sync: async () => { tickAll(); await flush(); tickAll(); await flush(); },
+    ticked: () => ticked,
     async activate(id) { services.viewportGridService.setActiveViewportId(id); await h.sync(); },
+    // The grid event alone: the history scans at once, the Findings section has not polled it yet.
+    async select(id) { services.viewportGridService.setActiveViewportId(id); await flush(); },
     async release(id) { const next = views.get(id).pending.shift(); assert.ok(next, 'no pending image load in ' + id); next(); await flush(); await h.sync(); } };
   return h;
 }
@@ -1647,6 +1701,37 @@ test('mounted comparison viewer: missing or duplicated comparison viewports refu
   assert.ok(text.includes('비교 검사에 접근할 수 없어 표식을 연결할 수 없습니다.'));
   assert.equal(labelled(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1').length, 0);
   assert.equal(h.server.gets.filter(g => g.startsWith('GET /api/studies/' + XS + '/findings')).length >= 3, true);
+});
+
+// Hosted navigation test 04 presses the first study's source right after activating the comparison viewport.
+test('mounted comparison viewer: before any Findings sync after a viewport change, the first study source refuses with the right viewport text and loads nothing; back on it, it arrives', async () => {
+  const h = await paired();
+  buttonIn(panelOf(h), 'New Finding').click(); await flush();
+  const [title] = labelled(h, 'Finding Title'); title.value = 'IMMEDIATE'; title.dispatchEvent(new Event('input'));
+  await check(h, 'Link Key Image · X 키 · 프레임 1 · r1');
+  await check(h, 'Link Comparison Key Image · P 비교 키 · 프레임 1 · r1');
+  buttonIn(rowsOf(h)[0], 'Save').click(); await flush(); await h.sync();
+  const saved = () => rowsOf(h).find(e => e.dataset.saved === 'true');
+  assert.ok(saved());
+  const ticked = h.ticked(), activations = h.grid.activations.length;
+  await h.select('vp-p');
+  assert.deepEqual([h.window.kinViewerHistoryState().scope, h.window.kinViewerHistoryState().suspended], [PS, false]);
+  buttonIn(lineOf(saved(), 'current'), 'Go to Image').click(); await flush();
+  assert.equal(h.ticked(), ticked, 'no Findings sync ran between the viewport change and the press');
+  assert.ok(textOf(saved()).includes(ANCHOR_REFUSAL), textOf(saved()));
+  assert.ok(!textOf(saved()).includes(model.reasonText('scope')));
+  assert.deepEqual([h.grid.activations.length, h.grid.active, h.views.get('vp-x').pending.length, h.views.get('vp-p').pending.length],
+    [activations + 1, 'vp-p', 0, 0], 'only the user selection; no activation or image load by the press');
+  // Back on the first study, again before any sync: its source goes to the viewer and the frame is proven.
+  await h.select('vp-x');
+  buttonIn(lineOf(saved(), 'current'), 'Go to Image').click();
+  await waitFor(() => h.views.get('vp-x').pending.length === 1, 'the first study image load');
+  assert.equal(h.ticked(), ticked);
+  await h.release('vp-x');
+  await waitFor(() => textOf(saved()).includes('키 이미지 프레임으로 이동했습니다.'), 'the first study arrival');
+  assert.ok(!textOf(saved()).includes(ANCHOR_REFUSAL));
+  assert.deepEqual([h.grid.activations.length, h.grid.active, h.views.get('vp-p').pending.length], [activations + 2, 'vp-x', 0]);
+  h.findings.stop();
 });
 
 // Hosted navigation test 04 holds the first study's list read and then activates the comparison viewport.

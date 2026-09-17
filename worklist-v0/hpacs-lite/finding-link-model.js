@@ -634,10 +634,20 @@
       }
       if (!result || typeof result !== 'object') result = refusal('invalid');
       if (!valid(ticket) || s.entries.get(e.id) !== e) return refusal('superseded');
-      // In a two-study viewer the anchor's source needs the anchor's own viewport selected.
-      const away = result.reason === 'scope' && !!s.history && s.history.scope !== s.scope && !!studies && studies.includes(s.history.scope);
+      // In a two-study viewer the anchor's source needs the anchor's own viewport selected. The viewer refused
+      // with its live scope, so that scope (not the snapshot synced every 250 ms) names the viewport to select.
+      const shown = result.reason === 'scope' ? liveScope() : '';
+      const away = !!shown && shown !== s.scope && !!studies && studies.includes(shown);
       e.message = result.ok ? annotationText(result.annotation) : away ? ANCHOR_SCOPE_TEXT : reasonText(result.reason);
       notify(); return result;
+    }
+    // The viewer's current history scope for this same login, read once through deps.history; '' when unknown.
+    function liveScope() {
+      try {
+        const h = typeof deps.history === 'function' ? deps.history() : null;
+        const scope = h && h.scope, subject = h && h.subject, ended = h && h.ended;
+        return typeof scope === 'string' && !!s.subject && subject === s.subject && ended !== true ? scope : '';
+      } catch (_) { return ''; }
     }
     // A source of the comparison study: only through crossNavigate within the 15 s bound; the newest
     // Go to Image of this store, an anchor/session change or a replaced entry stops it.
