@@ -198,10 +198,10 @@ A5는 `test_measurement_calibration.py`의 실제 일반 CT 열기/재열기/프
 원본 조회 전체 10초 제한/실제 취소, 열린 시리즈의 문서 선택·늦은 load/이탈을 검사한다.
 전송 지연은 시험 프로세스 또는 브라우저에만 주입한다. 수신 SR 재계산/편집은 허용하지 않는다.
 DB 복원은 `python tests/viewer_migration_test.py ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`로
-24개 migration·34개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
+24개 migration·37개 표·49개 합성 행(소견 `Finding`/`FindingRevision` 3행 포함)의 원문/바이트·pending intent·만료 tombstone까지 대조한다.
 관련 회귀는 measurement-panel/sr-provenance/viewer-api, DB 공유 경로 변경은69→14까지 확인한다.
 
-소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (6개)와 `python tests/e2e/test_finding_navigation.py` (4개).
+소견 기록/정확한 영상 이동(S2-A): `python tests/finding_api_test.py` (7개)와 `python tests/e2e/test_finding_navigation.py` (4개).
 저장한 표식 1~8개를 같은 검사 안에서 소견에 연결하고 서버가 식별·판·수치·digest를 복사한다. 클라이언트가 보낸
 수치/종류/digest 거절, 같은 요청 ID 재시도의 동일 결과, 다른 본문 409, 동시 편집 하나만 200, 부모 잠금 대기 중 바뀐 표식판의
 409, 잠금 지연 503 후 재시도, 검사당 256개·누적 4096판·16MiB와 소견당 1000판 한도, 기관/P 지정/작성자/서비스 토큰 경계,
@@ -280,7 +280,7 @@ GSPS/KO, 비CT/volume·물리 다중모니터의 전체 Job은 잔여다.
 표식과 Job의 본문/이력 보호는 서로 별도다. 본문은 서비스에서 수정 경로를 제공하지 않는다.
 관련 회귀는 viewer-layout/history/display, 저장 DB 확인은
 `python tests/viewer_migration_test.py ViewerMigration.test_03_real_dump_restore_every_row_revision_replay_budget_and_fk`다.
-합성 복원 원장은 위 D05B 복원 시험과 같은 24개 migration·34개 표·49개 합성 행을 대조한다.
+합성 복원 원장은 위 D05B 복원 시험과 같은 24개 migration·37개 표·49개 합성 행을 대조한다.
 
 E01-GATE 전송 근거/요청 관문: `python tests/connect_gate_test.py` (별도 API12).
 실제 C-STORE·임시 두 기관 계정으로 admin 근거/계약 기록과 철회, 기사 요청/철회,

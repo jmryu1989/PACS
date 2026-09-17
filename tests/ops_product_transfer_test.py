@@ -196,7 +196,12 @@ class Pure(unittest.TestCase):
         for uid in (body['snapshot']['instance'], '1;DROP', '1.'+'2'*64, True, 'single'):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
-        self.assertEqual(sum(len(value) for value in rows.values()), 46)
+        # S2-A added Finding (1 row) and FindingRevision (2 rows) to the 35-table, 46-row ledger.
+        self.assertEqual(len(transfer.MIGRATIONS), 24)
+        self.assertEqual(len(transfer.TABLES), 37)
+        self.assertEqual(set(rows), set(transfer.TABLES))
+        self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2)
         hp = rows['HangingProtocolPreference']
         self.assertEqual(len(hp), 3)
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)

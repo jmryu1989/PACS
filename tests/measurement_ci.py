@@ -295,17 +295,6 @@ PROFILES = {
              'ci-output-editor-compare-output'),
         ),
     },
-    'findings': {
-        'out': ROOT / 'tests/e2e/artifacts/findings-ci',
-        'project_prefix': 'kin-findings-ci-',
-        # The two S2-A suites also run at the end of the shared measurements profile. This separate
-        # profile is for a bounded dispatch of only these suites: the API suite seeds up to 16 MiB of
-        # synthetic revision rows once and the browser suite opens six viewers, so each keeps the 540s cap.
-        'suite_timeout': 540,
-        'suite_budgets': {'ci-finding-api-test': 540, 'ci-test-finding-navigation': 540},
-        'suites': (('finding_api_test.py', 'FindingAPI', 'ci-finding-api-test'),
-                   ('e2e/test_finding_navigation.py', 'FindingNavigationE2E', 'ci-test-finding-navigation')),
-    },
     'vr-resize-probe': {
         'out': ROOT / 'tests/e2e/artifacts/vr-resize-probe-ci',
         'project_prefix': 'kin-vr-probe-ci-',
