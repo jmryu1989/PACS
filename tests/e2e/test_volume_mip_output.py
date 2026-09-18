@@ -147,6 +147,46 @@ def depth_margin(camera):
  n=camera['viewPlaneNormal'];h0=max(abs(sum((f-c)*k for f,c,k in zip(FOCAL,corner,n))) for corner in CORNERS)
  return min(h0+.5*sum(s*abs(k) for s,k in zip(SPACING,n))+1e-6,DISTANCE/2)
 def scripts_of(requests):return [url.split('?')[0].rsplit('/',1)[1] for method,url in requests if '/worklist/hpacs-lite/' in url and url.split('?')[0].endswith('.js')]
+# The print loader's source reads (viewer-volume-job-print.js), one predicate each. The page's request log and the browser's own
+# failure log are filtered with exactly the same test on both sides, so a rejection is never counted against a differently selected
+# set of requests.
+def is_frame_read(method,url):return '/frames/0/image-' in url
+def is_lookup_read(method,url):return method=='POST' and url.split('?')[0].endswith('/api/dicom/lookup')
+def is_tags_read(method,url):return method=='GET' and url.split('?')[0].endswith('/simplified-tags')
+SOURCE_READS=(('frame',is_frame_read),('lookup',is_lookup_read),('tags',is_tags_read))
+INJECTED_READ={'/api/dicom/lookup':'lookup','/simplified-tags':'tags'}
+# The guarded path's rule, reused: more than three transport rejections in one case is not an isolated transport event.
+TRANSPORT_CEILING=3
+def transport_accounting(requests,failures,sent,fragment,times,count):
+ # One ready sub-case of the injected-rejection loop, accounted against the browser's own requestfailed records instead of assuming
+ # the browser rejected nothing of its own. The loader reads each of the count instances once; the only requests beyond that are one
+ # resend of each read this page reported as failed, injected (times, on fragment's category) or natural. ERR_ABORTED is a print's
+ # own cancel and is never subtracted, so an aborted and reissued read stays red; a missing failure record drives that category's
+ # natural count below zero, so a dead or late listener is red too, never green. Pure: no page, no clock, no I/O.
+ reads={name:[url for method,url in requests if match(method,url)] for name,match in SOURCE_READS}
+ failed={name:[e for e in failures if e['error'] and 'ERR_ABORTED' not in e['error'] and match(e['method'],e['url'])] for name,match in SOURCE_READS}
+ injected=INJECTED_READ[fragment];natural={name:len(rejects)-(times if name==injected else 0) for name,rejects in failed.items()}
+ total=sum(natural.values());problems=[]
+ for name,value in sorted(natural.items()):
+  if value<0:problems.append(f'{name}: {len(failed[name])} failure records for {times if name==injected else 0} injected rejections')
+ if total>TRANSPORT_CEILING:problems.append(f'{total} natural transport rejections in one sub-case is not an isolated transport event')
+ frames,rejected=reads['frame'],[e['url'] for e in failed['frame']]
+ if len(set(frames))!=count:problems.append(f'frame: {len(set(frames))} distinct reads, not {count}')
+ if len(frames)!=count+natural['frame']:problems.append(f'frame: {len(frames)} requests for {count} instances and {natural["frame"]} rejections')
+ for url in sorted(set(frames)|set(rejected)):
+  if rejected.count(url)>1 or frames.count(url)!=(2 if url in rejected else 1):problems.append(f'frame: {url} rejected {rejected.count(url)}x, requested {frames.count(url)}x')
+ if len(reads['lookup'])!=count+(times if injected=='lookup' else 0)+natural['lookup']:
+  problems.append(f'lookup: {len(reads["lookup"])} requests for {count} instances, {times if injected=="lookup" else 0} injected and {natural["lookup"]} natural rejections')
+ sends=count+times+natural['lookup'] if injected=='lookup' else times+1
+ if not sent:problems.append('the injected rejection never fired')
+ elif sent.count(sent[0])!=sends:problems.append(f'{sent.count(sent[0])} sends of the injected read, not {sends}')
+ # Reported whenever the browser rejected anything beyond the injected rejections, or anything did not add up: method, url and the
+ # browser's own error text of every failure in the window that was not a print's own cancel, so the next incident stays
+ # attributable. The reads this accounting does not total (the two attachments/dicom/info reads per instance) are in it too.
+ reported=[{'method':e['method'],'url':e['url'],'error':e['error']} for e in failures if e['error'] and 'ERR_ABORTED' not in e['error']]
+ report={'fragment':fragment,'times':times,'natural':natural,'reads':{name:len(urls) for name,urls in reads.items()},'sends':len(sent),
+  'problems':problems,'failed':reported,'aborted':sum(1 for e in failures if e['error'] and 'ERR_ABORTED' in e['error'])} if total or problems or len(reported)>times else None
+ return problems,report
 
 class VolumeMipOutputE2E(VolumeMipBatchE2E):
  def print_index(self,a,title):return next(i for i,row in enumerate(self.jobs(a)) if row['title']==title)
@@ -179,7 +219,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
    # and the next attempt must give the row's own exact outcome; any other status, or a second rejection, fails the row as it is.
    if attempt==2 or not failed or before is None or after is None or after!=before:break
    self.refused(page,text);self.transport_reattempts=getattr(self,'transport_reattempts',0)+1
-   self.assertLessEqual(self.transport_reattempts,3,'more than three transport rejections in one case is not an isolated transport event')
+   self.assertLessEqual(self.transport_reattempts,TRANSPORT_CEILING,'more than three transport rejections in one case is not an isolated transport event')
    if rearm:rearm()
   if expected:expect(status).to_contain_text(expected,timeout=1000)
   return page.frame_locator('#kin-job-print iframe')
@@ -195,7 +235,7 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
  def page_shots(self,paper,points):return paper.locator('.cell img').evaluate_all(PAGE_FRAMES,points)
  def assert_fresh_reads(self,requests,count):
   # O1/MO1: the page was computed from fresh reads, one lookup and one frame body per saved original instance.
-  lookups=[url for method,url in requests if method=='POST' and url.split('?')[0].endswith('/api/dicom/lookup')];frames=[url for method,url in requests if '/frames/0/image-' in url]
+  lookups=[url for method,url in requests if is_lookup_read(method,url)];frames=[url for method,url in requests if is_frame_read(method,url)]
   self.assertEqual([len(lookups),len(frames)],[count,count],(lookups[:2],frames[:2]));requests.clear()
  def print_native(self,frames,cameras,record,voi,mode,label):
   self.assertEqual(len(frames),len(cameras),(label,[frame['problem'] for frame in frames]))
@@ -460,6 +500,12 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   # without resending it, when its HTTP/2 connection received nginx's GOAWAY. That page-visible rejection is injected on a direct
   # print, outside the guarded open_output: a source read or a lookup rejected once is sent once more and the page is ready with every
   # fresh read; the same read rejected on both sends refuses with the source-read message after exactly two sends and leaves nothing.
+  # Validate 35357376546 lost this row on the exact totals alone: a 34th frame request against 33 frame reads at the proxy, all 200,
+  # with the page ready. The browser can reject a read of its own inside this window too, so the totals are accounted against the
+  # browser's own failure records (transport_accounting) rather than assuming it rejected nothing: only a read this page reported as
+  # failed, and did not abort itself, may be requested twice, at most TRANSPORT_CEILING of them in one sub-case, each rejected once
+  # and sent exactly twice, and every such window is reported. The cause of that rejection is not established by that run and is not
+  # asserted here.
   def rejecting(fragment,times):
    sent=[]
    def reject(route,request):
@@ -470,12 +516,13 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
    return reject,sent
   for pattern,fragment,times,message in (('**/simplified-tags','/simplified-tags',1,'ready'),('**/api/dicom/lookup','/api/dicom/lookup',1,'ready'),
                                          ('**/simplified-tags','/simplified-tags',2,'source_read')):
-   reject,sent=rejecting(fragment,times);v.route(pattern,reject);requests.clear()
+   reject,sent=rejecting(fragment,times);v.route(pattern,reject);requests.clear();log=self.watch_transport(v);mark=len(log)
    self.print_titled(v,a,V12);v.wait_for_function(WAIT_STATUS,timeout=300000);v.unroute(pattern,reject)
-   frames=[url for method,url in requests if '/frames/0/image-' in url];lookups=[url for method,url in requests if method=='POST' and url.split('?')[0].endswith('/api/dicom/lookup')]
    if message=='ready':
-    expect(status).to_contain_text(MESSAGES['ready'],timeout=1000);lookup=fragment=='/api/dicom/lookup'
-    self.assertEqual([len(frames),len(lookups)],[33,34 if lookup else 33],fragment);self.assertEqual(sent.count(sent[0]),34 if lookup else 2,fragment)
+    expect(status).to_contain_text(MESSAGES['ready'],timeout=1000);v.wait_for_timeout(300)
+    problems,report=transport_accounting(requests,log[mark:],sent,fragment,times,33)
+    if report:print('MIP_OUTPUT_03_TRANSPORT',json.dumps(report),flush=True)
+    self.assertEqual(problems,[],(fragment,report))
    else:
     self.refused(v,MESSAGES['source_read']);self.assertNotIn('Failed to fetch',status.text_content());self.assertEqual(sent,[sent[0]]*2,'exactly two sends of the rejected read')
    v.evaluate(TAKE)
