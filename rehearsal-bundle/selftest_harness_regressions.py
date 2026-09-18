@@ -43,6 +43,8 @@ NETWORK_NOT_FOUND = "Error response from daemon: network kin-workflow not found\
 # `docker inspect` of one real container is ~8-12 KB. A model that always answers in a few
 # hundred bytes cannot reproduce a stdout-tail defect, so the payload is padded to that order.
 INSPECT_PADDING = 9000
+# "leave this field exactly as the model built it", so that None and "" stay usable as values.
+_KEEP = object()
 
 
 class FakeDocker:
@@ -53,7 +55,7 @@ class FakeDocker:
     """
 
     def __init__(self, step_exit=0, up_changes_id=True, stop_stops=True, migrate_exit=7,
-                 malformed_inspect=None):
+                 malformed_inspect=None, inspect_exit=0, id_value=_KEEP, id_drifts=False):
         self.containers = {}
         self.network = False
         self.step_exit = step_exit
@@ -61,7 +63,11 @@ class FakeDocker:
         self.stop_stops = stop_stops
         self.migrate_exit = migrate_exit
         self.malformed_inspect = malformed_inspect
+        self.inspect_exit = inspect_exit
+        self.id_value = id_value
+        self.id_drifts = id_drifts
         self.serial = 0
+        self.reads = 0
         self.calls = []
 
     def create(self, name):
@@ -97,16 +103,24 @@ class FakeDocker:
         elif args[:2] == ["docker", "inspect"]:
             name = args[-1]
             body = self.containers.get(name)
-            if body is None:
-                code, err = 1, "Error: No such object: " + name
+            if body is None or self.inspect_exit:
+                code, err = self.inspect_exit or 1, "Error: No such object: " + name
             elif self.malformed_inspect is not None:
                 out = self.malformed_inspect
             else:
-                out = json.dumps([{"Id": body["Id"], "State": {"Running": body["running"],
-                                                               "StartedAt": body["StartedAt"]},
-                                   "NetworkSettings": {"Networks": {n: {} for n in body["networks"]}},
-                                   "Mounts": [{"Destination": d} for d in body["mounts"]],
-                                   "Config": {"Labels": {"pad": "x" * INSPECT_PADDING}}}])
+                self.reads += 1
+                entry = {"Id": body["Id"], "State": {"Running": body["running"],
+                                                     "StartedAt": body["StartedAt"]},
+                         "NetworkSettings": {"Networks": {n: {} for n in body["networks"]}},
+                         "Mounts": [{"Destination": d} for d in body["mounts"]],
+                         "Config": {"Labels": {"pad": "x" * INSPECT_PADDING}}}
+                if self.id_drifts:  # a container that really WAS replaced between two reads
+                    entry["Id"] = body["Id"] + "-read" + str(self.reads)
+                if self.id_value is not _KEEP:
+                    entry.pop("Id")
+                    if self.id_value is not None:
+                        entry["Id"] = self.id_value
+                out = json.dumps([entry])
         elif args[:2] == ["docker", "compose"] and "up" in args:
             code = 0 if "--force-recreate" in args and "proxy" in args else self.step_exit
             if code == 0:
@@ -284,6 +298,55 @@ def test_receipts_and_versions():
           escaped is None and out.exists() and body.get("passed") is False and code == 1,
           "escaped=" + str(escaped)[:80])
     check("HB7 the setup error is preserved in the receipt", "synthetic" in body.get("setup_error", ""))
+
+
+# ---------------------------------------------------------------- B1: S6's identity claim
+UNPROVEN = "identity is unproven"
+
+
+def test_b1_s6_requires_an_observed_identity():
+    """The vacuous S6 pass the independent review reproduced.
+
+    container_facts() answers a typed non-fact for an inspect answer it cannot read, and S6's only
+    identity test was `before.get("Id") != after.get("Id")`. With no Id on either side that is
+    None == None, so the receipt passed while claiming "the api/orthanc container Ids are
+    unchanged" having read no Id at all. The same hole was already open on the base for an inspect
+    that merely exits non-zero, where both sides are {exists: False}.
+    """
+    for label, kwargs in (("empty inspect output", {"malformed_inspect": ""}),
+                          ("an empty array", {"malformed_inspect": "[]"}),
+                          ("non-JSON output", {"malformed_inspect": "docker: oops"}),
+                          ("a non-object entry", {"malformed_inspect": "[1]"}),
+                          ("inspect exiting 1", {"inspect_exit": 1}),
+                          ("a missing Id", {"id_value": None}),
+                          ("an empty Id", {"id_value": ""})):
+        receipt, _, _ = run_scenario("partial-failure", kwargs)
+        check("B1 the vacuous pass is gone: " + label + " never passes S6",
+              receipt["passed"] is False and any(UNPROVEN in p for p in receipt["problems"]),
+              json.dumps(receipt["problems"])[:240])
+        check("B1 " + label + " is named on all four observations, before AND after",
+              sum(1 for p in receipt["problems"] if UNPROVEN in p) == 4,
+              json.dumps(receipt["problems"])[:240])
+        check("B1 " + label + " is never reported as a changed identity",
+              not any("identity changed" in p for p in receipt["problems"]),
+              json.dumps(receipt["problems"])[:240])
+
+    receipt, _, _ = run_scenario("partial-failure", {})
+    check("B1 healthy unchanged identities still pass", receipt["passed"] is True,
+          json.dumps(receipt.get("problems"))[:240])
+    check("B1 and the healthy receipt carries the Ids it claims",
+          all(isinstance(receipt[phase][svc].get("Id"), str) and receipt[phase][svc]["Id"]
+              for phase in ("before", "after") for svc in ("api", "orthanc"))
+          and receipt["before"]["api"]["Id"] == receipt["after"]["api"]["Id"]
+          and receipt["before"]["orthanc"]["Id"] == receipt["after"]["orthanc"]["Id"],
+          json.dumps({"before": receipt["before"], "after": receipt["after"]})[:240])
+
+    receipt, _, _ = run_scenario("partial-failure", {"id_drifts": True})
+    check("B1 a genuinely CHANGED identity still fails, and on its own wording",
+          receipt["passed"] is False
+          and any("container identity changed during the failure" in p for p in receipt["problems"])
+          and not any(UNPROVEN in p for p in receipt["problems"]),
+          json.dumps(receipt["problems"])[:240])
 
 
 # ---------------------------------------------------------------- HB11: inspect output
@@ -549,6 +612,7 @@ def main():
     test_hb3()
     test_hb4()
     test_hb5()
+    test_b1_s6_requires_an_observed_identity()
     test_hb11_inspect_output()
     test_hb12_unhandled_failure_still_writes_a_receipt()
     test_receipts_and_versions()

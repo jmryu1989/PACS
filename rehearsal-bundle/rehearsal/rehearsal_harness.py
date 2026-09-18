@@ -27,6 +27,8 @@ Corrections in this pass:
       malformed or non-JSON answer as a typed non-fact instead of raising.
   HB12 any unhandled scenario failure still writes a failing receipt, so one dispatch never
       loses evidence to an escaping exception.
+  B1  S6 requires each api/orthanc observation to be a real one - exists True and a non-empty
+      string Id - before it compares identities, so an unread fact cannot pass as "unchanged".
 
 Usage: python3 rehearsal_harness.py --scenario <name> --out <receipt.json>
 """
@@ -513,6 +515,17 @@ def scenario_partial_failure():
         problems.append("the record is not NEEDS_ATTENTION/apply")
     if not (root / ".kin-ops.lock").exists():
         problems.append("the lock was released")
+    # B1: an identity claim needs an identity that was actually READ. container_facts() reports a
+    # typed non-fact for an inspect answer it could not read (exists None) and {exists: False} for
+    # one that failed, and neither carries an Id; comparing two absent Ids is None == None, which
+    # would let this receipt claim "the api/orthanc container Ids are unchanged" having observed
+    # no Id at all. Each observation is required to be a real one before it is compared.
+    for phase, facts in (("before", before), ("after", after)):
+        for service in sorted(facts):
+            fact = facts[service]
+            if fact.get("exists") is not True or not isinstance(fact.get("Id"), str) or not fact["Id"]:
+                problems.append(phase + ": " + service + " container facts were not read; "
+                                "identity is unproven")
     if before["api"].get("Id") != after["api"].get("Id") or before["orthanc"].get("Id") != after["orthanc"].get("Id"):
         problems.append("container identity changed during the failure")
     if any("up" in call for call in argv_log) or any("checkout" in call for call in argv_log):
