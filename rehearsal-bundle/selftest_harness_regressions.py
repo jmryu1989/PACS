@@ -38,16 +38,29 @@ def load_harness(tmp):
     return module
 
 
-class FakeDocker:
-    """A minimal model: containers with Ids and running state, and one optional network."""
+# Verbatim from run 35337766905: what Docker 28.0.4 writes when the network is absent.
+NETWORK_NOT_FOUND = "Error response from daemon: network kin-workflow not found\n"
+# `docker inspect` of one real container is ~8-12 KB. A model that always answers in a few
+# hundred bytes cannot reproduce a stdout-tail defect, so the payload is padded to that order.
+INSPECT_PADDING = 9000
 
-    def __init__(self, step_exit=0, up_changes_id=True, stop_stops=True, migrate_exit=7):
+
+class FakeDocker:
+    """A minimal model: containers with Ids and running state, and one optional network.
+
+    It returns what raw() returns, INCLUDING raw()'s stdout bound, so a caller that parses a
+    truncated tail fails here exactly as it failed on the runner.
+    """
+
+    def __init__(self, step_exit=0, up_changes_id=True, stop_stops=True, migrate_exit=7,
+                 malformed_inspect=None):
         self.containers = {}
         self.network = False
         self.step_exit = step_exit
         self.up_changes_id = up_changes_id
         self.stop_stops = stop_stops
         self.migrate_exit = migrate_exit
+        self.malformed_inspect = malformed_inspect
         self.serial = 0
         self.calls = []
 
@@ -57,7 +70,7 @@ class FakeDocker:
                                  "StartedAt": "2026-09-18T10:00:0" + str(self.serial) + "Z",
                                  "networks": ["kin_default"], "mounts": ["/etc/letsencrypt"]}
 
-    def __call__(self, args, check=False, timeout=900, cwd=None, env=None):
+    def __call__(self, args, check=False, timeout=900, cwd=None, env=None, stdout_limit=4000):
         self.calls.append(list(args))
         text = " ".join(args)
         out, err, code = "", "", 0
@@ -79,18 +92,21 @@ class FakeDocker:
         elif args[:2] == ["docker", "compose"] and "version" in args:
             out = "Docker Compose version v2.29.0"
         elif args[:2] == ["docker", "inspect"] and "--type" in args:
-            code, err = (0, "") if self.network else (1, "Error: No such network: kin-workflow")
+            code, err = (0, "") if self.network else (1, NETWORK_NOT_FOUND)
             out = "[{}]" if self.network else ""
         elif args[:2] == ["docker", "inspect"]:
             name = args[-1]
             body = self.containers.get(name)
             if body is None:
                 code, err = 1, "Error: No such object: " + name
+            elif self.malformed_inspect is not None:
+                out = self.malformed_inspect
             else:
                 out = json.dumps([{"Id": body["Id"], "State": {"Running": body["running"],
                                                                "StartedAt": body["StartedAt"]},
                                    "NetworkSettings": {"Networks": {n: {} for n in body["networks"]}},
-                                   "Mounts": [{"Destination": d} for d in body["mounts"]]}])
+                                   "Mounts": [{"Destination": d} for d in body["mounts"]],
+                                   "Config": {"Labels": {"pad": "x" * INSPECT_PADDING}}}])
         elif args[:2] == ["docker", "compose"] and "up" in args:
             code = 0 if "--force-recreate" in args and "proxy" in args else self.step_exit
             if code == 0:
@@ -107,14 +123,16 @@ class FakeDocker:
             code = self.migrate_exit if "exit 7" in text else self.step_exit
         elif "python" in args[0].lower():
             out = "Python 3.12.0"
-        return {"argv": args, "exit": code, "stdout": out, "stderr": err}
+        return {"argv": args, "exit": code,
+                "stdout": out if stdout_limit is None else out[-stdout_limit:], "stderr": err}
 
 
 def with_fake(module, fake):
     module.raw = fake
     # rollout.network_absent must see the same model, so route its spawn through the fake too.
+    # The stdout bound belongs to raw(), not to the process: rollout.spawn() gets the whole answer.
     def spawn(args, **kwargs):
-        answer = fake(list(args))
+        answer = fake(list(args), stdout_limit=None)
 
         class R:
             returncode = answer["exit"]
@@ -180,7 +198,7 @@ def test_hb3():
                 seen["injected"] = True
                 return {"argv": args, "exit": 1, "stdout": "",
                         "stderr": "Cannot connect to the Docker daemon at tcp://127.0.0.1:1"}
-            return {"argv": args, "exit": 1, "stdout": "", "stderr": "Error: No such network: kin-workflow"}
+            return {"argv": args, "exit": 1, "stdout": "", "stderr": NETWORK_NOT_FOUND}
         return {"argv": args, "exit": 0, "stdout": "", "stderr": ""}
 
     with_fake(module, fake)
@@ -237,7 +255,11 @@ def test_receipts_and_versions():
     check("I8 the receipt records the three versions",
           set(receipt["versions"]) == {"docker", "docker_compose", "python3"})
     check("I8 the receipt keeps the raw stderr of the network inspect",
-          "No such network" in receipt["before"]["network"]["raw_stderr"])
+          NETWORK_NOT_FOUND.strip() in receipt["before"]["network"]["raw_stderr"])
+    check("I8 the runner reads that real answer as absent, not as indeterminate",
+          receipt["before"]["network"]["absent"] is True
+          and receipt["before"]["network"]["indeterminate"] is False,
+          json.dumps(receipt["before"]["network"])[:200])
     tmp = tempfile.mkdtemp()
     module = load_harness(tmp)
     fake = FakeDocker()
@@ -262,6 +284,89 @@ def test_receipts_and_versions():
           escaped is None and out.exists() and body.get("passed") is False and code == 1,
           "escaped=" + str(escaped)[:80])
     check("HB7 the setup error is preserved in the receipt", "synthetic" in body.get("setup_error", ""))
+
+
+# ---------------------------------------------------------------- HB11: inspect output
+def test_hb11_inspect_output():
+    """The S1/S6 crash of run 35337766905, reproduced without a daemon.
+
+    raw() keeps a stdout TAIL so receipts stay bounded. `docker inspect` of a container is far
+    larger than that bound, and the tail of a JSON document is not JSON, so container_facts()
+    died with JSONDecodeError before either scenario could write a receipt.
+    """
+    module = load_harness(tempfile.mkdtemp())
+    payload = json.dumps([{"Id": "kin-api-1", "State": {"Running": True}, "Pad": "y" * 12000}])
+    emit = "import sys; sys.stdout.write(sys.argv[1])"
+    argv = [sys.executable, "-B", "-c", emit, payload]
+
+    bounded = module.raw(argv)
+    check("HB11 the receipt bound is unchanged for ordinary commands", len(bounded["stdout"]) == 4000)
+    check("HB11 and that bounded tail is NOT parseable, which is what crashed S1 and S6",
+          _json_raises(bounded["stdout"]), bounded["stdout"][:40])
+    whole = module.raw(argv, stdout_limit=None)
+    check("HB11 a parsing caller can ask for the whole answer",
+          whole["stdout"] == payload and json.loads(whole["stdout"])[0]["Id"] == "kin-api-1")
+
+    # Through container_facts, against a model that applies the same bound.
+    fake = FakeDocker()
+    with_fake(module, fake)
+    fake.create("kin-api")
+    facts = module.container_facts("kin-api")
+    check("HB11 container_facts parses an oversize inspect answer",
+          facts.get("exists") is True and facts.get("Id") == "kin-api-1"
+          and facts.get("running") is True, json.dumps(facts)[:200])
+
+    # An exit-0 answer that is empty, `[]` or not JSON is a typed non-fact, never a raise.
+    for label, body in (("empty", ""), ("an empty array", "[]"), ("not JSON", "docker: oops")):
+        fake = FakeDocker(malformed_inspect=body)
+        with_fake(module, fake)
+        fake.create("kin-api")
+        facts = module.container_facts("kin-api")
+        check("HB11 " + label + " inspect output is a typed non-fact, not a crash",
+              facts.get("exists") is None and "unreadable_inspect" in facts, json.dumps(facts)[:200])
+
+    # And the scenario that consumes it still reaches its own honest failing receipt.
+    receipt, _, _ = run_scenario("compose-network", {"malformed_inspect": "[]"})
+    check("HB11 a scenario with unreadable inspect output fails honestly instead of dying",
+          receipt["passed"] is False and any("baseline stack was not created" in p
+                                             for p in receipt["problems"]),
+          json.dumps(receipt["problems"])[:200])
+
+
+def _json_raises(text):
+    try:
+        json.loads(text)
+        return False
+    except ValueError:
+        return True
+
+
+# ---------------------------------------------------------------- HB12: no lost receipt
+def test_hb12_unhandled_failure_still_writes_a_receipt():
+    """Run 35337766905 lost s1, s2 and s6: the exception escaped and the gate saw only absence."""
+    tmp = tempfile.mkdtemp()
+    module = load_harness(tmp)
+
+    def exploding():
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    module.SCENARIOS["compose-network"] = exploding
+    out = pathlib.Path(tmp) / "hb12.json"
+    saved = sys.argv
+    sys.argv = ["harness", "--scenario", "compose-network", "--out", str(out)]
+    code, escaped = None, None
+    try:
+        code = module.main()
+    except BaseException as error:  # noqa: BLE001 - the point of the test is that nothing escapes
+        escaped = type(error).__name__ + ": " + str(error)
+    finally:
+        sys.argv = saved
+    body = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
+    check("HB12 an unhandled scenario exception still writes a FAILING receipt",
+          escaped is None and out.exists() and body.get("passed") is False and code == 1,
+          "escaped=" + str(escaped)[:80])
+    check("HB12 the traceback is preserved so the cause is in the evidence",
+          "JSONDecodeError" in body.get("harness_error", ""), json.dumps(body)[:200])
 
 
 # ---------------------------------------------------------------- HB10: the workflow gate
@@ -376,7 +481,7 @@ def with_split(module, fake):
     def spawn(args, **kwargs):
         fake.channel = "runner"
         try:
-            answer = fake(list(args))
+            answer = fake(list(args), stdout_limit=None)
         finally:
             fake.channel = "control"
 
@@ -444,6 +549,8 @@ def main():
     test_hb3()
     test_hb4()
     test_hb5()
+    test_hb11_inspect_output()
+    test_hb12_unhandled_failure_still_writes_a_receipt()
     test_receipts_and_versions()
     print("FAILURES=" + str(len(FAILURES)) + (" " + ",".join(FAILURES) if FAILURES else ""))
     return 1 if FAILURES else 0

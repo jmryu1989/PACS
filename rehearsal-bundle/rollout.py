@@ -122,8 +122,18 @@ CHECKOUT_UMASK = 0o022
 PROXY_CONTAINER = "kin-proxy"
 WORKFLOW_NETWORK = "kin-workflow"
 WORKFLOW_MOUNT = "/etc/kin-workflow"
-# The explicit typed answer docker gives for an absent network. Anything else refuses (C5).
-NETWORK_ABSENT = re.compile(r"no such network", re.I)
+# The explicit typed answers docker gives for an absent network. Anything else refuses (C5).
+# Both forms NAME the network that was asked about, and both are the WHOLE message. The daemon
+# form is what Docker 28.0.4 actually answered on the hosted rehearsal runner; the object form is
+# what older CLIs answer. A substring test was used here before and matched neither reliably nor
+# narrowly: it accepted a message about a DIFFERENT network, so the recognition is now an exact
+# match against the forms built for the name under inspection.
+NETWORK_ABSENT_FORMS = ("Error response from daemon: network {name} not found",
+                        "Error: No such network: {name}")
+# docker's CLI sometimes appends its own `exit status N` after the daemon's message. It carries
+# no answer of its own, so it is dropped before matching; on its own it leaves nothing to match
+# and still refuses.
+EXIT_STATUS_LINE = re.compile(r"\Aexit status \d+\Z", re.I)
 # C6: finding rows are counted, never read, and never deleted or rewritten.
 FINDING_TABLES = ("Finding", "FindingRevision")
 
@@ -616,13 +626,28 @@ def verify_observed_migration_state(facts, manifest):
             "unfinished_or_rolled_back": facts.get("unfinished_or_rolled_back", 0)}
 
 
+def typed_network_absence(name, message):
+    """C5: True only when `message` IS one of the typed not-found answers for exactly `name`.
+
+    Whole-message, name-bound and case-insensitive. Anything with an extra diagnostic line, any
+    answer about another network, and any daemon failure that merely quotes the words are all
+    False, so the caller refuses instead of reading them as absence.
+    """
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    lines = [line for line in lines if not EXIT_STATUS_LINE.match(line)]
+    if len(lines) != 1:
+        return False
+    accepted = {form.format(name=name).casefold() for form in NETWORK_ABSENT_FORMS}
+    return lines[0].casefold() in accepted
+
+
 def network_absent(name):
     """C5: only the explicit typed not-found answer means absent; any other error refuses."""
     result = spawn(["docker", "inspect", "--type", "network", name], timeout=60)
     if result.returncode == 0:
         return False
     message = (result.stderr or b"").decode("utf-8", "replace").strip()
-    if NETWORK_ABSENT.search(message):
+    if typed_network_absence(name, message):
         return True
     raise Refuse("Could not determine whether network " + name + " exists; refusing rather than "
                  "guessing. docker said: " + message[:300])

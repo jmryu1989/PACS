@@ -101,26 +101,44 @@ function testPinnedAnchors() {
 }
 
 /* ---------------------------------------------------------------- T3/T4: handshake selector */
+
+/* T4: loadHandshakeSelector() checks the file MODE first, so every fixture that is meant to reach
+   a later refusal has to be 0600 - including the negative ones. Only the positive fixture was
+   chmod'ed before, which is invisible on win32 (where the product check is a documented no-op)
+   and made all four negatives fail with SELECTOR_PERMISSIONS on the Linux runner of run
+   35337766905, never reaching the refusal they name. writeFileSync's `mode` is masked by the
+   umask, so the chmod after it is the authoritative one. */
+function writeSelector(dir, name, body) {
+  const path = join(dir, name);
+  writeFileSync(path, JSON.stringify(body), { mode: 0o600 });
+  try { chmodSync(path, 0o600); } catch (_) { /* windows has no mode bits */ }
+  return path;
+}
+
 function testSelector() {
   const dir = mkdtempSync(join(tmpdir(), 'stage2-sel-'));
-  const good = join(dir, 'selector.json');
-  writeFileSync(good, JSON.stringify({ studyUid: STUDY, synthetic: true, expectedFindings: 0 }));
-  try { chmodSync(good, 0o600); } catch (_) { /* windows */ }
+  const good = writeSelector(dir, 'selector.json', { studyUid: STUDY, synthetic: true, expectedFindings: 0 });
   assert('T4 a 0600 synthetic selector yields the study', check.loadHandshakeSelector(good) === STUDY);
 
-  const clinical = join(dir, 'clinical.json');
-  writeFileSync(clinical, JSON.stringify({ studyUid: STUDY, synthetic: false, expectedFindings: 0 }));
+  const clinical = writeSelector(dir, 'clinical.json', { studyUid: STUDY, synthetic: false, expectedFindings: 0 });
   throws('T4 a non-synthetic study is refused', 'SELECTOR_NOT_SYNTHETIC', () => check.loadHandshakeSelector(clinical));
-  const populated = join(dir, 'populated.json');
-  writeFileSync(populated, JSON.stringify({ studyUid: STUDY, synthetic: true, expectedFindings: 3 }));
+  const populated = writeSelector(dir, 'populated.json', { studyUid: STUDY, synthetic: true, expectedFindings: 3 });
   throws('T4 a study expected to hold findings is refused', 'SELECTOR_NOT_EMPTY_STUDY',
     () => check.loadHandshakeSelector(populated));
-  const extra = join(dir, 'extra.json');
-  writeFileSync(extra, JSON.stringify({ studyUid: STUDY, synthetic: true, expectedFindings: 0, note: 'x' }));
+  const extra = writeSelector(dir, 'extra.json', { studyUid: STUDY, synthetic: true, expectedFindings: 0, note: 'x' });
   throws('T4 an unexpected selector key is refused', 'SELECTOR_SHAPE', () => check.loadHandshakeSelector(extra));
-  const badUid = join(dir, 'bad.json');
-  writeFileSync(badUid, JSON.stringify({ studyUid: '../etc/passwd', synthetic: true, expectedFindings: 0 }));
+  const badUid = writeSelector(dir, 'bad.json', { studyUid: '../etc/passwd', synthetic: true, expectedFindings: 0 });
   throws('T4 a non-UID selector is refused', 'SELECTOR_UID', () => check.loadHandshakeSelector(badUid));
+
+  /* The permission gate itself, and the proof that the fixtures above are genuinely 0600: a
+     group-readable selector must still be refused BEFORE its contents are looked at. Asserted
+     only where mode bits exist, which is the platform the gate runs on. */
+  if (process.platform !== 'win32') {
+    const loose = writeSelector(dir, 'loose.json', { studyUid: STUDY, synthetic: true, expectedFindings: 0 });
+    chmodSync(loose, 0o644);
+    throws('T4 a group-readable selector is refused before its contents are read',
+      'SELECTOR_PERMISSIONS', () => check.loadHandshakeSelector(loose));
+  }
 
   // T3: the before phase refuses a selector, and no phase accepts a UID on argv.
   const source = require('node:fs').readFileSync(require.resolve('./stage2_post_reflection_check_v3.cjs'), 'utf8');
