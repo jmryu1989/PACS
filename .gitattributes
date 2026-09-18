@@ -3,3 +3,11 @@ api/prisma/migrations/** text eol=lf
 api/prisma/*.mjs text eol=lf
 api/prisma/baseline.json text eol=lf
 api/start-production.sh text eol=lf
+
+# Stage-2 rehearsal bundle: the job verifies rehearsal-bundle/ with `sha256sum -c`
+# bundle-sha256.txt and `cmp`s its vendored workflow copy against the installed workflow, so
+# every digest is over the bytes exactly as committed - preflight-report-for-tests.json is CRLF
+# throughout and target-compose.yml carries one CRLF line. `-text` forbids eol conversion on
+# checkin and checkout on every platform; `diff` keeps the files reviewable as text.
+rehearsal-bundle/** -text diff
+.github/workflows/stage2-rollout-rehearsal.yml -text diff

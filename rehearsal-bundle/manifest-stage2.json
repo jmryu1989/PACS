@@ -1,0 +1,842 @@
+{
+  "schema": 1,
+  "purpose": "Pinned inputs for the Stage-1 rollout runner. Preparation only; not an authorization to deploy.",
+  "baseline_sha": "17980d522b260b59fa97c96924f96038b63551ae",
+  "target_sha": "5dd76a6318cb751c531b2e61f9f0d4f94577c5fd",
+  "target_tree": "c8ec68e5ef97fddac5c2e928e1d43ead3aa4c747",
+  "live": {
+    "host_repository": "/home/ubuntu/pacs-starter-kit",
+    "previous_api_image": "sha256:24380d3d02423824345ceac12ea3b3d2f76568bb437d319ef748b8773cc3a131",
+    "previous_api_revision": "17980d522b260b59fa97c96924f96038b63551ae",
+    "previous_api_user": "node",
+    "origin": "https://pacs.koreaimagingnetwork.com",
+    "containers": [
+      "kin-proxy",
+      "kin-orthanc",
+      "kin-db",
+      "kin-keycloak",
+      "kin-api"
+    ],
+    "source": "evidence/stage1-server-access/verify-01/execution.json, rollout_status DEPLOYED, observed.image_id and observed.revision at 2026-09-16T23:58:13Z",
+    "delivery": {
+      "services": [
+        "api",
+        "orthanc"
+      ],
+      "running_proxy": "untouched",
+      "reason": "config/ohif.js and worklist-v0 are bind-mounted into orthanc; the proxy template is baked into the proxy image and is not delivered"
+    }
+  },
+  "compatibility_boundary_unchanged": {
+    "keycloak": "b81e8684630326dd07dc00e76c4085a4993c3e1b",
+    "gateway": "9351c580d79770edca0b4480164f9e8219ad40b5",
+    "docker-compose.yml": "4d1f2c65cd3bc626c05e686b5d09630f6e351018",
+    "docker-compose.monitor.yml": "41f26a4e8e1399174dbff631d712ae0030513eb5",
+    "api/Dockerfile": "f211f9d239fe5db49c41d33d0e6b3e8e7621d95f",
+    "api/start-production.sh": "4584fa0b1683d9bbd2ff9ad73c9b21a33f2c5856",
+    "api/package.json": "7c7855c032d4d6787e5fc01eff1b78a99dd1db5a",
+    "api/package-lock.json": "05f62fc5464ae00eb6c4c6af50fe5b90151c128c",
+    "proxy/10-selfsigned.sh": "3627b67cbf4786dc93d09d0b67028265145469ed",
+    "proxy/15-kin-config.envsh": "3ad6ef6b5a7854202c7e27439d08f7ce108683cb",
+    "proxy/25-nginx-test.sh": "c96dda36853baf4943e32a4ac27fcea97f25661b",
+    "proxy/Dockerfile": "ca35a52800d6c79009422c585f24e46dbe3c1617",
+    "proxy/branding/kin-emblem-j1.svg": "b5ff9be9f9e64a83ec324026c61fceb02018a3e9",
+    "proxy/branding/kin-favicon-32.png": "cbded2d2b8f910b8808247f8a2c5550c22b87cd4",
+    "proxy/branding/viewer-manifest.json": "b910c7d0bbc7ac1fc36e343e00a15ee774ea265a"
+  },
+  "delivered_trees": {
+    "api": {
+      "baseline": "2571393c18b78d06d848739969406d4a8afee703",
+      "target": "99db40de9c218b5417bce1f2613133d6dead3ad1"
+    },
+    "api/prisma": {
+      "baseline": "7716fe28c050d8517244b4bd7b4d2bcce612cf00",
+      "target": "b961bd544e5e45ca0c254030af2a4d6716eaff38"
+    },
+    "api/src": {
+      "baseline": "5a63e6f47d538a8c5b518ac47992fbb3c28a620f",
+      "target": "d218e50709596a5bdd66f8bf0c5e32082860229f"
+    },
+    "worklist-v0": {
+      "baseline": "cceed940bb5c70bfeee48c2a7d34fd9c8973f8e4",
+      "target": "88d099e316d64f974e40d4394f9a1d565f71b13d"
+    },
+    "config": {
+      "baseline": "57e1429dc21e322a046ee7111ad93f9524495f0c",
+      "target": "a6a6f5540b301c087853219639206374228205c4"
+    }
+  },
+  "delivered_files_sha256": {
+    "config/ohif.js": "b55b7b92892e98ffc88eff65cd3bd5deb879a84d38ebefb95b87d8cc50653732"
+  },
+  "drift_pins": {
+    "docker-compose.prod.yml": {
+      "baseline": "6dc9d6acaf33f4bb5184f440c9a35ba8eadbc016",
+      "target": "2991dfc426a00f221a64f788f4eaa0b00ff0c0e2",
+      "baseline_sha256": "47646d139277d4f1b1a2d2532ccc2de961fbeaed048e1eea614f02d66dd286f1",
+      "target_sha256": "36103acd7a3a22222edbbcecb303fe0c7f1579ce6e6f27621cc4269dba0b0236",
+      "delivered_to_running_container": false
+    },
+    "proxy/nginx.conf.template": {
+      "baseline": "684ad8f459a3c09397f98531f88c75ab156031cf",
+      "target": "bbf9c8f5d432587afd129002d37bb8e104bb2d69",
+      "baseline_sha256": "67a277a222330f443038ef3cd462414230fc58e4b44a4b4f3cfb94f4b94cfeaf",
+      "target_sha256": "54934ac884989b04bded50a821f3ea7f222921f630aa41b67aa88455a5d87749",
+      "delivered_to_running_container": false
+    }
+  },
+  "change_classes": {
+    "delivered": [
+      "api/prisma",
+      "api/src",
+      "worklist-v0",
+      "config",
+      "config/ohif.js",
+      "api/src",
+      "api/prisma"
+    ],
+    "drift": [
+      "docker-compose.prod.yml",
+      "proxy/nginx.conf.template"
+    ],
+    "declared_inert": [
+      "tests",
+      ".github"
+    ],
+    "changed_count": 37,
+    "changed_sha256": "213f4286d1de469afb9514fa74f61d5677395e2dcaae630f757fb08e58cc39b6",
+    "counts": {
+      "delivered": 16,
+      "drift": 2,
+      "declared_inert": 19
+    },
+    "rule": "The FULL baseline..target diff, additions and deletions included, must be classified exactly once. declared_inert paths reach no running container. Anything unclassified refuses here and again in the runner."
+  },
+  "static": {
+    "root": "worklist-v0/",
+    "url_prefix": "/worklist/",
+    "count": 108,
+    "changed_count": 9,
+    "set_sha256": "7a2e3927a282ec28b3a09682e0e6479eb6799df372b560c83dec276746bc0ae4",
+    "paths": [
+      [
+        "worklist-v0/hpacs-lite/admin.html",
+        "04a3a8ec93479b15e047604001e6bbe2331971f1",
+        "/worklist/hpacs-lite/admin.html"
+      ],
+      [
+        "worklist-v0/hpacs-lite/auth.js",
+        "1cdefcd787091e19068622bafaa8d8e17980d9da",
+        "/worklist/hpacs-lite/auth.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/compound-filter.js",
+        "91da952b1704884530d9f47ef7e7b68e07902547",
+        "/worklist/hpacs-lite/compound-filter.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/consultations.css",
+        "6f160ec5402f3fe23d683c07d7bdf40ac741a698",
+        "/worklist/hpacs-lite/consultations.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/consultations.js",
+        "ffc09feda395bd8d5b95b33a964c65657f6ce56d",
+        "/worklist/hpacs-lite/consultations.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/favorite-list.js",
+        "166f2db868f1e71be297152814214810b32dd76a",
+        "/worklist/hpacs-lite/favorite-list.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/favorites.css",
+        "deab3b8a3477878b7dd5ad1f98e2da5201bd3c19",
+        "/worklist/hpacs-lite/favorites.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/favorites.js",
+        "81417cc2a11a2cf5a339bb3d606c3753923587e9",
+        "/worklist/hpacs-lite/favorites.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/finding-command.js",
+        "ddbfbb75934c4d37f7015fb98a9c77df789483c8",
+        "/worklist/hpacs-lite/finding-command.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/finding-link-model.js",
+        "d29ce66422cb04920d0236d0c6aaf7b05c5eaedc",
+        "/worklist/hpacs-lite/finding-link-model.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/hanging-protocol-model.js",
+        "d6e24069bd9297bed69d4f88a3661548a0900129",
+        "/worklist/hpacs-lite/hanging-protocol-model.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/index.html",
+        "1dce724446a29dbcbb97bcee18612eadb28317f3",
+        "/worklist/hpacs-lite/index.html"
+      ],
+      [
+        "worklist-v0/hpacs-lite/kin-emblem-j1.svg",
+        "45f82f9ba320a4dc05294f381d7077fd1e3197f3",
+        "/worklist/hpacs-lite/kin-emblem-j1.svg"
+      ],
+      [
+        "worklist-v0/hpacs-lite/main.html",
+        "0a830d193e2924b8f373cdf7d5d64c073b8a6b94",
+        "/worklist/hpacs-lite/main.html"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reader-assignment.css",
+        "7e1e8a1cbf3ee06592cc029e76b85557ee60ca63",
+        "/worklist/hpacs-lite/reader-assignment.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reader-assignment.js",
+        "b2f5073f9a6b65620a61d5bd819181bede14b957",
+        "/worklist/hpacs-lite/reader-assignment.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-appearance-account.js",
+        "9060a39204e58870d01235b87a7284e397acb7fe",
+        "/worklist/hpacs-lite/reading-appearance-account.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-appearance.js",
+        "d62d3d5990ffc902dba83339720ad20789cfb88d",
+        "/worklist/hpacs-lite/reading-appearance.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-findings.js",
+        "f4c8559a3db0b9e5aa4f8682ce446caa1f1a02aa",
+        "/worklist/hpacs-lite/reading-findings.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-panel-layout.js",
+        "696461f61ff72a524b4239f5b545f026e12f812a",
+        "/worklist/hpacs-lite/reading-panel-layout.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-preferences.js",
+        "1cfe78a935ec80a20cabedbd93ae34b964dc1649",
+        "/worklist/hpacs-lite/reading-preferences.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-workspace.css",
+        "15b319e8573008014f7d3a1a1fbbbc693f00be8f",
+        "/worklist/hpacs-lite/reading-workspace.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/reading-workspace.js",
+        "286c72ba001ba7b0049cae06cd5f4094308af436",
+        "/worklist/hpacs-lite/reading-workspace.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/related-parts.js",
+        "6baf49a7808441b1001110c47fac0c2c691c315a",
+        "/worklist/hpacs-lite/related-parts.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/report-preview.js",
+        "cae9792370296c4ff174ad5912f2fead903a629a",
+        "/worklist/hpacs-lite/report-preview.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/saved-filter-manager.css",
+        "4ae66e430a9fcf3c699ab68560e7302f71d8f3b5",
+        "/worklist/hpacs-lite/saved-filter-manager.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/saved-filter-manager.js",
+        "073e817db2d3add4d472bca4d7cc2d8b4aba0fdb",
+        "/worklist/hpacs-lite/saved-filter-manager.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/shared-filter-manager.js",
+        "bf7e6f5a9c73c14843c27fb3f01d5f5400c06a8f",
+        "/worklist/hpacs-lite/shared-filter-manager.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-access-admin.js",
+        "96aaec440c42b8dc2e19f9fa2234e1ab696d2caf",
+        "/worklist/hpacs-lite/study-access-admin.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-access-status.js",
+        "6cbd7bceebc561c740908c5a6738b5be433aae96",
+        "/worklist/hpacs-lite/study-access-status.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-arrivals.js",
+        "e25f1e6db7645cf585f95085e7aa6fe948b37ebb",
+        "/worklist/hpacs-lite/study-arrivals.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-pages.js",
+        "0b3c8ec33ff77ae88952d129580dae03f1f3176d",
+        "/worklist/hpacs-lite/study-pages.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-priority.js",
+        "8a369662cb17bccd6bbf0ed59edd6c58720a503c",
+        "/worklist/hpacs-lite/study-priority.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-tags.css",
+        "2b72343089bb3872d131a26917a32e63df82ca59",
+        "/worklist/hpacs-lite/study-tags.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/study-tags.js",
+        "a6329bde4d78472534d8029eac039ffc1cfbbac8",
+        "/worklist/hpacs-lite/study-tags.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/tech-note.css",
+        "3db520ade5952220741b09065705ad25f7b80fd6",
+        "/worklist/hpacs-lite/tech-note.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/tech-note.js",
+        "4a207730a15a0882135b52c95c27fa26f9b52f3b",
+        "/worklist/hpacs-lite/tech-note.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/three-d-cursor-model.js",
+        "2d07187c1397b6d7ca11ce93d2204c779e24d6fb",
+        "/worklist/hpacs-lite/three-d-cursor-model.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-cell-merge.js",
+        "042a40b8a8508d17a4646a968417154b6b452bee",
+        "/worklist/hpacs-lite/viewer-cell-merge.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-dicom-pdf.js",
+        "8a4bf801a573ba38c15057a812af255f816ae0ac",
+        "/worklist/hpacs-lite/viewer-dicom-pdf.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-display-layout.js",
+        "7e08f531ae9bde3f406a1b2ecd3bffaaa84d094d",
+        "/worklist/hpacs-lite/viewer-display-layout.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-display-scope.js",
+        "408d393996b740703148f94b9a90723fc0b03723",
+        "/worklist/hpacs-lite/viewer-display-scope.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-editor-link.js",
+        "b942a4526e78a40ab6a0269084fd39a07f5d7fa0",
+        "/worklist/hpacs-lite/viewer-editor-link.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-findings.js",
+        "3871a500c76001f97d11b4c5e4be171451bfcbd9",
+        "/worklist/hpacs-lite/viewer-findings.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-frame-coverage.js",
+        "73b28981e1aad8b295c64ce3a868d08dc373d7d2",
+        "/worklist/hpacs-lite/viewer-frame-coverage.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-hanging-protocol.js",
+        "942578c36b70d4c8921fb001c9eee21f58397d04",
+        "/worklist/hpacs-lite/viewer-hanging-protocol.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-identity.js",
+        "a502a632807b840ef4e8ecc48cb529de120da8d2",
+        "/worklist/hpacs-lite/viewer-identity.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-image-text.js",
+        "fc1ee3615f0616a7d37d7b05bf036c61d86ee192",
+        "/worklist/hpacs-lite/viewer-image-text.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-images-only.js",
+        "aa164807296b72828eb885ce747c2e968ce9fb94",
+        "/worklist/hpacs-lite/viewer-images-only.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-job-print.js",
+        "dc346a10fbc871a366a7ba622f721dacfa9933dd",
+        "/worklist/hpacs-lite/viewer-job-print.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-jobs.js",
+        "31d8aa0805d60c75f99a1eab8dfb8c4068cb090d",
+        "/worklist/hpacs-lite/viewer-jobs.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-opening.js",
+        "a97c477fd136a8c36a96b5f7af19dd1de3cacaaa",
+        "/worklist/hpacs-lite/viewer-opening.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-tech-note.js",
+        "6dbbdab87e0a4709f20405b00b3fb5e55e1a829a",
+        "/worklist/hpacs-lite/viewer-tech-note.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-three-d-cursor.js",
+        "2721e20195e4f7c2b74f1aef9c09f0f0d5870d11",
+        "/worklist/hpacs-lite/viewer-three-d-cursor.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-batch.js",
+        "415c552fc30896749d13ae052294ef508a261191",
+        "/worklist/hpacs-lite/viewer-volume-batch.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-crosshair.js",
+        "021dcb415603d31cdeab405a3fceec92fcad3c1a",
+        "/worklist/hpacs-lite/viewer-volume-crosshair.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-curved.js",
+        "c6d112663b4db236d0b72e29ead22991407bfe09",
+        "/worklist/hpacs-lite/viewer-volume-curved.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-display.js",
+        "b58cd1cdbdd450f507f2199a9ab5f3928207aa9b",
+        "/worklist/hpacs-lite/viewer-volume-display.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-job-print.js",
+        "343a048908e9812b62b5b456e10b9d561351e2d2",
+        "/worklist/hpacs-lite/viewer-volume-job-print.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-job.js",
+        "7ceeedc4f9e0feee037c7fc89d6e19600c17a148",
+        "/worklist/hpacs-lite/viewer-volume-job.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-marks.js",
+        "1e600130bf7f0bd45b44f620e5c07bc530b91770",
+        "/worklist/hpacs-lite/viewer-volume-marks.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-mip-print.js",
+        "a5b6fe0bdbf9fe039ed5f6635a524510facd4e6d",
+        "/worklist/hpacs-lite/viewer-volume-mip-print.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-mip.js",
+        "9ac0ad40b250f648c438cb33d930055c19836ea0",
+        "/worklist/hpacs-lite/viewer-volume-mip.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-orientation.js",
+        "af96d6f20d3de9d4434ddccffd5bebe8fb8982fc",
+        "/worklist/hpacs-lite/viewer-volume-orientation.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-path.js",
+        "ff68c3af50b06ccaaf8613ecb494e1b6a86ce631",
+        "/worklist/hpacs-lite/viewer-volume-path.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-preferences.js",
+        "81dae1efe88fb201d82b1afdd9001059df1eab45",
+        "/worklist/hpacs-lite/viewer-volume-preferences.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-progressive.js",
+        "26955a0f6d6b7c37647874819d6e16275f6f7bb7",
+        "/worklist/hpacs-lite/viewer-volume-progressive.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-rendering.js",
+        "7d03e4e37070944a3945652f18c6f80e5c5fb500",
+        "/worklist/hpacs-lite/viewer-volume-rendering.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-scout.js",
+        "a362107667d12d41b41828356db4e68bcb54e310",
+        "/worklist/hpacs-lite/viewer-volume-scout.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-sculpt.js",
+        "c3ac3ad25798b6139a43be9c752d6633956d37a0",
+        "/worklist/hpacs-lite/viewer-volume-sculpt.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-volume-sync.js",
+        "fd8d8823893b917fad097a014347648822d8b8f5",
+        "/worklist/hpacs-lite/viewer-volume-sync.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-windows.js",
+        "48d63c10029d2ff16e93c112812c4f727636a856",
+        "/worklist/hpacs-lite/viewer-windows.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/viewer-workspace-dock.js",
+        "9385ea8176edc09e3930109c831ae933040469b9",
+        "/worklist/hpacs-lite/viewer-workspace-dock.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-batch-scout.js",
+        "7039c03eb2e0ee6d8a2e10a11c0d50e3bb61036d",
+        "/worklist/hpacs-lite/volume-batch-scout.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-batch.js",
+        "2a2556c3bc8c682598c96641e06a8b6c685d7322",
+        "/worklist/hpacs-lite/volume-batch.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-crosshair.js",
+        "215a51daf20f0ff51baf77b7eff9ade13856d076",
+        "/worklist/hpacs-lite/volume-crosshair.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-curved.js",
+        "ed4e3aa4bba4eadd8e4a06513fada29cd5e83f14",
+        "/worklist/hpacs-lite/volume-curved.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-display.js",
+        "e436550ce266d71c6e47b26e3ee82d1e2b14e93a",
+        "/worklist/hpacs-lite/volume-display.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-marks.js",
+        "102e071304ab8d8d6148842c7a94931e5df16569",
+        "/worklist/hpacs-lite/volume-marks.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-mask-renderer.js",
+        "d27cd85dd577bf6283b00fbb3fbf39df3cff0805",
+        "/worklist/hpacs-lite/volume-mask-renderer.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-mip-batch.js",
+        "52d3335cc6220b5acde18657988b57571a83fc45",
+        "/worklist/hpacs-lite/volume-mip-batch.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-mip-job.js",
+        "3b8993e2c4f9879a3158dd6ca3d63856ab58e7aa",
+        "/worklist/hpacs-lite/volume-mip-job.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-mip-output.js",
+        "6f28fcfd7ac9001629fe16b20f814c7cb2eb6eb0",
+        "/worklist/hpacs-lite/volume-mip-output.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-mip.js",
+        "eea67a4374a9608be9ee81cfc496398aa14ca492",
+        "/worklist/hpacs-lite/volume-mip.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-orientation.js",
+        "b416ccaa06dbbb718ca596ccf2b6b3233d191abf",
+        "/worklist/hpacs-lite/volume-orientation.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-path.js",
+        "5c343caa8b363cdbfbf9d4f040328b8145472418",
+        "/worklist/hpacs-lite/volume-path.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-preferences.js",
+        "f4df0a48b0651ab62b8d0d6aca877da357c83d07",
+        "/worklist/hpacs-lite/volume-preferences.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-rendering.js",
+        "5720e193f685448347605998b046c73829e5f88f",
+        "/worklist/hpacs-lite/volume-rendering.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-sculpt.js",
+        "5b29df3fa756ba4a6936fe29b9f6bd67e9912bda",
+        "/worklist/hpacs-lite/volume-sculpt.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/volume-voi.js",
+        "bff589ae8212195bda3217b95a0a15041ca0c5ba",
+        "/worklist/hpacs-lite/volume-voi.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-alerts.js",
+        "f80315edfc52706f98f13e0e7e043fbc8391413d",
+        "/worklist/hpacs-lite/worklist-alerts.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-body-parts.js",
+        "de3766ca936707fef5349b553c8ae38a277397eb",
+        "/worklist/hpacs-lite/worklist-body-parts.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-columns.css",
+        "4d0869cd2fbd05571f28a8545aa89eac43eeb5a0",
+        "/worklist/hpacs-lite/worklist-columns.css"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-columns.js",
+        "256a303d3cc33da58b6c40ed158ff56c2439fc69",
+        "/worklist/hpacs-lite/worklist-columns.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-image-preview.js",
+        "ca82163d0fd918780bab3421da9ccec10ca0eabf",
+        "/worklist/hpacs-lite/worklist-image-preview.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-image-thumbnails.js",
+        "484af471776274177b4e14e17313426d0d60065a",
+        "/worklist/hpacs-lite/worklist-image-thumbnails.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-refresh.js",
+        "2e6c5e7824b9e7e68cf59d4d83bb169aa10d4a29",
+        "/worklist/hpacs-lite/worklist-refresh.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-row-navigation.js",
+        "c6cf7da910fcc5062dc0e96a2f068ab6891dd4be",
+        "/worklist/hpacs-lite/worklist-row-navigation.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-search.js",
+        "614d19b07aec793dd1398bb8401720912b6ba745",
+        "/worklist/hpacs-lite/worklist-search.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-selection.js",
+        "6c284a00051c90f1f27c8c7bbfc27d92d981bf38",
+        "/worklist/hpacs-lite/worklist-selection.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/worklist-startup.js",
+        "591a0bb411142d51e4255b74169edaefcbe35502",
+        "/worklist/hpacs-lite/worklist-startup.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/workspace-layout.js",
+        "4ee9d14a14334f49ca198ae3ae15ec515db708bd",
+        "/worklist/hpacs-lite/workspace-layout.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/workspace-roaming.js",
+        "0bc69ba6f52ce38f0e36dc2cd0a7c7d95818dc72",
+        "/worklist/hpacs-lite/workspace-roaming.js"
+      ],
+      [
+        "worklist-v0/hpacs-lite/workspace-shortcuts.js",
+        "00cb1401a9877bb92356341d84e83fb6043d3b74",
+        "/worklist/hpacs-lite/workspace-shortcuts.js"
+      ],
+      [
+        "worklist-v0/index.html",
+        "e3af54990fe3b66d3d6336db449e61869f254cbf",
+        "/worklist/index.html"
+      ],
+      [
+        "worklist-v0/worklist-v1.html",
+        "112eea4e8650530ee45a8a7c919997b9fa190b0b",
+        "/worklist/worklist-v1.html"
+      ],
+      [
+        "worklist-v0/worklist-v2.html",
+        "e2a30a2ae3a717c582de741ba5d52c3b7791978b",
+        "/worklist/worklist-v2.html"
+      ],
+      [
+        "worklist-v0/worklist-v3.html",
+        "d442637b8d46fab6ccc21a717e7b3bbf86d99065",
+        "/worklist/worklist-v3.html"
+      ]
+    ]
+  },
+  "delta": {
+    "added_count": 15,
+    "modified_count": 22,
+    "deleted_count": 0,
+    "added_sha256": "709a055edcb6a0c6b1e2571ed9ccb4be4fc068430afb694cdbc9f233a13c23d2",
+    "added_paths": [
+      "api/prisma/migrations/20260917120000_findings/migration.sql",
+      "api/src/finding-input.ts",
+      "api/src/finding.controller.ts",
+      "api/src/finding.service.ts",
+      "tests/e2e/test_finding_locations.py",
+      "tests/e2e/test_finding_navigation.py",
+      "tests/e2e/test_finding_worklist.py",
+      "tests/finding_api_test.py",
+      "tests/finding_command_test.cjs",
+      "tests/finding_input_test.cjs",
+      "tests/finding_link_model_test.cjs",
+      "worklist-v0/hpacs-lite/finding-command.js",
+      "worklist-v0/hpacs-lite/finding-link-model.js",
+      "worklist-v0/hpacs-lite/reading-findings.js",
+      "worklist-v0/hpacs-lite/viewer-findings.js"
+    ],
+    "deleted_paths": []
+  },
+  "migrations": {
+    "baseline_count": 24,
+    "target_count": 25,
+    "baseline_names": [
+      "0_init",
+      "20260907040000_viewer_history",
+      "20260908020000_workspace_layout",
+      "20260908081500_connect_gate",
+      "20260908120000_manual_sr",
+      "20260908180000_viewer_jobs",
+      "20260908200000_manual_sr_recovery",
+      "20260909060000_saved_filter_organization",
+      "20260909100000_tech_note_revision",
+      "20260909180000_worklist_columns",
+      "20260909220000_favorite_workspace",
+      "20260909233000_study_tags",
+      "20260910000500_reader_assignment",
+      "20260910013000_reading_preferences",
+      "20260910023000_reading_appearance",
+      "20260910044500_workspace_shortcuts",
+      "20260910090000_filter_folders",
+      "20260910100000_shared_filters",
+      "20260910110000_study_consultation",
+      "20260910123000_consultation_predicates",
+      "20260910130000_study_access",
+      "20260910133000_study_access_subject",
+      "20260912100000_hanging_protocol_preferences"
+    ],
+    "target_names": [
+      "0_init",
+      "20260907040000_viewer_history",
+      "20260908020000_workspace_layout",
+      "20260908081500_connect_gate",
+      "20260908120000_manual_sr",
+      "20260908180000_viewer_jobs",
+      "20260908200000_manual_sr_recovery",
+      "20260909060000_saved_filter_organization",
+      "20260909100000_tech_note_revision",
+      "20260909180000_worklist_columns",
+      "20260909220000_favorite_workspace",
+      "20260909233000_study_tags",
+      "20260910000500_reader_assignment",
+      "20260910013000_reading_preferences",
+      "20260910023000_reading_appearance",
+      "20260910044500_workspace_shortcuts",
+      "20260910090000_filter_folders",
+      "20260910100000_shared_filters",
+      "20260910110000_study_consultation",
+      "20260910123000_consultation_predicates",
+      "20260910130000_study_access",
+      "20260910133000_study_access_subject",
+      "20260912100000_hanging_protocol_preferences",
+      "20260917120000_findings"
+    ],
+    "baseline_migration_count": 23,
+    "new": [
+      "20260917120000_findings"
+    ],
+    "detail": {
+      "20260917120000_findings": {
+        "sha256": "950d9eb8a127ce27b135518da36690ec07ed22aff635671ac7db1d36d1a06118",
+        "statements": [
+          "ALTER TABLE",
+          "CREATE INDEX",
+          "CREATE TABLE",
+          "CREATE UNIQUE INDEX",
+          "UPDATE "
+        ],
+        "additive_only": false
+      }
+    },
+    "observed_state_rule": "The runner reads _prisma_migrations and refuses on a duplicate, a missing baseline name, a row the target does not contain, an unfinished or rolled-back row, or a pending set that is not exactly `new`. This derivation alone never authorizes an operation."
+  },
+  "hanging_protocol": {
+    "table": "HangingProtocolPreference",
+    "baseline_sha": "17980d522b260b59fa97c96924f96038b63551ae",
+    "baseline_owns_table": true,
+    "evidence": {
+      "migration_present": true,
+      "prisma_model_present": true,
+      "read_by_api_source": true
+    },
+    "rule": "rows only block a rollback when the baseline does NOT own the table; otherwise they are recorded as information"
+  },
+  "snapshot_versions": {
+    "previous_api_accepts": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "target_api_accepts": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ]
+  },
+  "gate": {
+    "required_workflows": [
+      ".github/workflows/restore-combined.yml",
+      ".github/workflows/restore-database.yml",
+      ".github/workflows/restore-image.yml",
+      ".github/workflows/restore-orthanc.yml",
+      ".github/workflows/restore-product.yml",
+      ".github/workflows/validate.yml"
+    ],
+    "derivation": "Workflow files at the target that trigger on push to branch main. Dispatch-only workflows (candidate, isolated integration) are candidate evidence, not the main gate.",
+    "receipt_blocks_required": [
+      "workflows",
+      "checks",
+      "candidate",
+      "independent_review_refs",
+      "release_tag"
+    ],
+    "all_runs_rule": "Every workflow run recorded for the target head SHA must be success, not only the required ones; the adapter includes every run and drops none.",
+    "candidate_rule": "candidate.tree must equal target_tree and candidate.conclusion must be success. Candidate counts are candidate evidence and never substitute for the main gate.",
+    "independent_review_rule": "independent_review_refs must name at least one accepted independent review.",
+    "release_tag_rule": "release_tag is mandatory: annotated, remote_verified, peeled_sha == target_sha, and tag CI matched from the raw run export with tag_ci_head_sha == target_sha and every required workflow's tag run completed/success. There is no untagged path: a null tag and any user_decision_ref are refused. Prior main CI never substitutes for a failed tag CI."
+  },
+  "backup": {
+    "procedure": "scripts/ops_backup.py backup --output <fresh owned parent>",
+    "components": [
+      "kin.dump",
+      "keycloak.dump",
+      "orthanc.tgz",
+      ".env",
+      "docker-compose.yml",
+      "docker-compose.prod.yml"
+    ],
+    "disk_rule": "ops_backup.py requires free >= 2*(orthanc volume bytes + kin+keycloak database bytes) + 512 MiB"
+  }
+}

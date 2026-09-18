@@ -1,0 +1,157 @@
+# Isolated synthetic rehearsal for the Stage-2 option-B rollout guards.
+# PREPARED, NOT DISPATCHED. Installing this file is a separately reviewed product change; see
+# rehearsal-contract.md. It follows the repository's existing isolated-hosted pattern:
+# ubuntu-24.04, dispatch only, contents: read, pinned action SHAs, persist-credentials false,
+# artifact upload. No product image, no clinical fixture, no credential, no main-server contact.
+name: Stage-2 option-B rollout rehearsal (synthetic)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stage2-rollout-rehearsal-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Repo-referenced images only: proxy/Dockerfile builds FROM nginx:1.27-alpine and
+  # docker-compose.yml:64 uses postgres:16-alpine. I9 is closed here, at installation: each tag
+  # was resolved to the digest the PUBLIC registry itself reports for it (registry-1.docker.io,
+  # anonymous read of the OCI image index, linux/amd64 present). No digest is invented, nothing
+  # was pulled, built or run to obtain them, and the tag is kept beside the digest so the
+  # reference stays readable. Both compose files interpolate REHEARSAL_IMAGE through the project
+  # .env the harness writes, so this block is the single place either image is pinned.
+  REHEARSAL_IMAGE: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+  REHEARSAL_POSTGRES: postgres:16-alpine@sha256:3c5c8892d184f738f4fe282d14ddaa613a38f00f4189d2d94725ebe6f2909ddb
+  BUNDLE: rehearsal-bundle
+  # I7: the manifest's own digest is a literal here, so the checksum file cannot be swapped
+  # together with the files it lists.
+  BUNDLE_MANIFEST_SHA256: c3d2b86d960df9568c7d713e277a111714db71ecfb2edd7b072872eae4e0de6d
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # I3/S4: rederive spans baseline..target, which a shallow checkout cannot do.
+          fetch-depth: 0
+
+      - name: Verify the bundle manifest, then the bundle
+        run: |
+          cd "$BUNDLE"
+          echo "$BUNDLE_MANIFEST_SHA256  bundle-sha256.txt" | sha256sum -c -
+          sha256sum -c bundle-sha256.txt
+
+      # This workflow file cannot appear in a manifest whose digest is a literal inside it, so
+      # the bundle's copy (which selftest_harness_regressions.py extracts the gate from) is
+      # instead required to be byte-identical to the installed file.
+      - name: The bundle's workflow copy must equal this installed workflow
+        run: cmp "$BUNDLE/rehearsal/stage2-rollout-rehearsal.yml" .github/workflows/stage2-rollout-rehearsal.yml
+
+      - name: Confirm both baseline and target objects are present
+        run: |
+          git cat-file -t 17980d522b260b59fa97c96924f96038b63551ae
+          git cat-file -t 5dd76a6318cb751c531b2e61f9f0d4f94577c5fd
+
+      - name: Pure suites first (no daemon involved)
+        if: always()
+        run: |
+          python3 -B selftest_rollout_stage2.py
+          python3 -B selftest_rollout_modes.py
+          python3 -B selftest_harness_regressions.py
+          node selftest_post_check_v3.cjs
+        working-directory: ${{ env.BUNDLE }}
+
+      # I8/HB7: every scenario runs even after an earlier failure, so one dispatch never loses
+      # evidence. The receipt gate below is the only verdict.
+      - name: S7 an unreachable daemon is indeterminate, never absent
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario indeterminate-control --out "$RUNNER_TEMP/s7.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      - name: S2 a baseline-created proxy is inert
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario guard-clean --out "$RUNNER_TEMP/s2.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      - name: S1 the runner's real stop/run/up sequence against the target file
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario compose-network --out "$RUNNER_TEMP/s1.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      - name: S4 pin drift, with a positive control
+        if: always()
+        env:
+          REHEARSAL_REPO: ${{ github.workspace }}
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario pin-drift --out "$RUNNER_TEMP/s4.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      - name: S6 the real run() path with apply_migration's argv shape fails with exactly exit 7
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario partial-failure --out "$RUNNER_TEMP/s6.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      - name: S5 findings rollback against a throwaway synthetic database
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario findings-rollback --out "$RUNNER_TEMP/s5.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      # S3 runs last: it attaches the workflow network, a one-way change to this throwaway
+      # runner. The runner under test never creates or deletes a network.
+      - name: S3 the guard function against a real daemon, both network variants
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario guard-function-against-daemon --out "$RUNNER_TEMP/s3.json"
+        working-directory: ${{ env.BUNDLE }}
+
+      - name: Collect receipts and require all seven to pass
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/receipts" "$RUNNER_TEMP/receipts/state-records"
+          cp "$RUNNER_TEMP"/s[1-7].json "$RUNNER_TEMP/receipts/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/record-s*.json "$RUNNER_TEMP/receipts/state-records/" 2>/dev/null || true
+          docker version --format '{{.Server.Version}}' > "$RUNNER_TEMP/receipts/docker-version.txt" || true
+          docker compose version > "$RUNNER_TEMP/receipts/compose-version.txt" || true
+          python3 --version > "$RUNNER_TEMP/receipts/python-version.txt" || true
+          python3 - "$RUNNER_TEMP/receipts" <<'PY'
+          import json, pathlib, sys
+          # HB10: consume exactly the seven expected receipt names. Rollout STATE RECORDS live
+          # beside them (state-records/) and must never be read as scenario receipts. A missing
+          # file, unreadable JSON, an absent `passed` key or a non-boolean value all refuse by
+          # name instead of raising.
+          root = pathlib.Path(sys.argv[1])
+          expected = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"]
+          missing, failed, malformed = [], [], []
+          for stem in expected:
+              path = root / (stem + ".json")
+              if not path.is_file():
+                  missing.append(stem)
+                  continue
+              try:
+                  body = json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  malformed.append(stem)
+                  continue
+              if not isinstance(body, dict) or "passed" not in body:
+                  malformed.append(stem)
+              elif not isinstance(body["passed"], bool):
+                  malformed.append(stem)
+              elif body["passed"] is not True:
+                  failed.append(stem)
+          summary = {"expected": expected, "missing": missing, "failed": failed, "malformed": malformed,
+                     "state_records_kept_separately": sorted(p.name for p in (root / "state-records").glob("*.json"))}
+          print(json.dumps(summary))
+          if missing or failed or malformed:
+              raise SystemExit("rehearsal incomplete: " + json.dumps(summary))
+          PY
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: stage2-rollout-rehearsal
+          path: ${{ runner.temp }}/receipts
+          retention-days: 7

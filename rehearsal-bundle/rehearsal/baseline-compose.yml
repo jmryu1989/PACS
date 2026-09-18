@@ -1,0 +1,28 @@
+# R1: BASELINE-shaped synthetic stack. Used ONCE, only to create kin-proxy the way production
+# has it: created from a compose file that knows nothing about the workflow network or the
+# /etc/kin-workflow mount. Every command under test afterwards uses target-compose.yml.
+# Synthetic only: no product image, no clinical data, no secret.
+# The `image:` keys keep ${REHEARSAL_IMAGE} on purpose: HB8 - child_env() strips the job's
+# variables, so Compose must read the reference from the project .env the harness writes.
+# That reference is digest-pinned exactly once, in the workflow's env block (I9), and is
+# deliberately not repeated here so the two cannot drift apart.
+services:
+  api:
+    image: ${REHEARSAL_IMAGE}
+    container_name: kin-api
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+
+  orthanc:
+    image: ${REHEARSAL_IMAGE}
+    container_name: kin-orthanc
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+    volumes:
+      - ./config/ohif.js:/etc/orthanc/ohif.js:ro
+      - ./worklist-v0:/worklist:ro
+
+  # R7: start_services() runs `docker exec kin-proxy nginx -t` and `nginx -s reload`, so the
+  # rehearsal proxy must actually own an `nginx` executable for the real function to be usable.
+  proxy:
+    image: ${REHEARSAL_IMAGE}
+    container_name: kin-proxy
+    command: ["nginx", "-g", "daemon off;"]
