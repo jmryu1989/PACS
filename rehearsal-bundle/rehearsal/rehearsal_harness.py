@@ -23,6 +23,12 @@ Corrections in this pass:
       interpolate under the runner's stripped child environment.
   HB9 the baseline file creates api, orthanc AND proxy, so `--force-recreate` acts on
       baseline-created containers, which is the production shape.
+  HB11 container_facts() parses UNtruncated `docker inspect` output and reports an empty,
+      malformed or non-JSON answer as a typed non-fact instead of raising.
+  HB12 any unhandled scenario failure still writes a failing receipt, so one dispatch never
+      loses evidence to an escaping exception.
+  B1  S6 requires each api/orthanc observation to be a real one - exists True and a non-empty
+      string Id - before it compares identities, so an unread fact cannot pass as "unchanged".
 
 Usage: python3 rehearsal_harness.py --scenario <name> --out <receipt.json>
 """
@@ -38,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -61,11 +68,18 @@ rollout = load_rollout()
 MANIFEST = json.loads((BUNDLE / "manifest-stage2.json").read_text(encoding="utf-8"))
 
 
-def raw(args, check=False, timeout=900, cwd=None, env=None):
+def raw(args, check=False, timeout=900, cwd=None, env=None, stdout_limit=4000):
+    """Run a command and keep a bounded record of it.
+
+    HB11: stdout is kept as a TAIL so receipts stay small, and the tail of a JSON document is not
+    JSON. A caller that must PARSE the output passes stdout_limit=None and keeps only the fields
+    it extracted, never the whole record.
+    """
     result = subprocess.run(args, cwd=None if cwd is None else str(cwd), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, env=env)
+    out = result.stdout.decode("utf-8", "replace")
     record = {"argv": args, "exit": result.returncode,
-              "stdout": result.stdout.decode("utf-8", "replace")[-4000:],
+              "stdout": out if stdout_limit is None else out[-stdout_limit:],
               "stderr": result.stderr.decode("utf-8", "replace")[-4000:]}
     if check and result.returncode != 0:
         raise SystemExit("rehearsal command failed: " + json.dumps(record)[:1500])
@@ -161,10 +175,24 @@ class ArgvLog:
 
 
 def container_facts(name):
-    found = raw(["docker", "inspect", name])
+    """HB11: facts about one container, or a typed non-fact. This never raises.
+
+    `docker inspect` of a real container is several times larger than raw()'s stdout bound, so the
+    full output is requested and only the extracted fields are kept. An answer that exits 0 but is
+    empty, `[]` or not JSON is reported as unreadable, so the scenario records a problem and still
+    writes its honest failing receipt instead of dying before one exists.
+    """
+    found = raw(["docker", "inspect", name], stdout_limit=None)
     if found["exit"] != 0:
         return {"exists": False, "raw_stderr": found["stderr"][-400:]}
-    body = json.loads(found["stdout"])[0]
+    try:
+        body = json.loads(found["stdout"])[0]
+    except (ValueError, IndexError, TypeError) as error:
+        return {"exists": None, "unreadable_inspect": type(error).__name__ + ": " + str(error)[:200],
+                "raw_stdout_head": found["stdout"][:200]}
+    if not isinstance(body, dict):
+        return {"exists": None, "unreadable_inspect": "the inspect entry is not an object",
+                "raw_stdout_head": found["stdout"][:200]}
     return {"exists": True, "Id": body.get("Id"), "running": (body.get("State") or {}).get("Running"),
             "StartedAt": (body.get("State") or {}).get("StartedAt"),
             "networks": sorted((body.get("NetworkSettings") or {}).get("Networks") or {}),
@@ -487,6 +515,17 @@ def scenario_partial_failure():
         problems.append("the record is not NEEDS_ATTENTION/apply")
     if not (root / ".kin-ops.lock").exists():
         problems.append("the lock was released")
+    # B1: an identity claim needs an identity that was actually READ. container_facts() reports a
+    # typed non-fact for an inspect answer it could not read (exists None) and {exists: False} for
+    # one that failed, and neither carries an Id; comparing two absent Ids is None == None, which
+    # would let this receipt claim "the api/orthanc container Ids are unchanged" having observed
+    # no Id at all. Each observation is required to be a real one before it is compared.
+    for phase, facts in (("before", before), ("after", after)):
+        for service in sorted(facts):
+            fact = facts[service]
+            if fact.get("exists") is not True or not isinstance(fact.get("Id"), str) or not fact["Id"]:
+                problems.append(phase + ": " + service + " container facts were not read; "
+                                "identity is unproven")
     if before["api"].get("Id") != after["api"].get("Id") or before["orthanc"].get("Id") != after["orthanc"].get("Id"):
         problems.append("container identity changed during the failure")
     if any("up" in call for call in argv_log) or any("checkout" in call for call in argv_log):
@@ -558,6 +597,12 @@ def main():
     except SystemExit as error:
         # I8: a setup failure still produces a receipt, so one dispatch never loses the evidence.
         receipt = {"scenario": args.scenario, "passed": False, "setup_error": str(error)[:1500]}
+    except Exception:
+        # HB12: and so does any other unhandled failure. Run 35337766905 lost the s1, s2 and s6
+        # receipts to escaping exceptions, leaving the gate to report them as missing rather than
+        # as what actually broke. This records the failure; it can never turn one into a pass.
+        receipt = {"scenario": args.scenario, "passed": False,
+                   "harness_error": traceback.format_exc()[-3000:]}
     receipt["isolated"] = True
     receipt["clinical_fixtures"] = False
     receipt["product_image"] = False

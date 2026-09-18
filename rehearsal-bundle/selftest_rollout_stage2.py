@@ -120,15 +120,52 @@ def test_allowlist_new_refusals():
 
 
 # ---------------------------------------------------------------- C5: network inspection
+def _absent_answer(stderr):
+    return mock_exec([(lambda a: True, Result(1, b"", stderr))])
+
+
 def test_network_absent_is_typed_only():
-    absent = mock_exec([(lambda a: True, Result(1, b"", b"Error response from daemon: network kin-workflow not found"))])
-    check("plain not-found text is not accepted",
-          with_exec(absent, lambda: _swallow(lambda: rollout.network_absent("kin-workflow"))) == "refused")
-    typed = mock_exec([(lambda a: True, Result(1, b"", b"Error: No such network: kin-workflow"))])
+    # The OLD failure, reproduced: this is verbatim what Docker 28.0.4 wrote to stderr for
+    # `docker inspect --type network kin-workflow` on the hosted runner of run 35337766905. The
+    # previous substring rule did not match it, so an absent network was read as indeterminate
+    # and S2, S5 and S7's positive control all refused. It is a typed absence.
+    daemon_form = _absent_answer(b"Error response from daemon: network kin-workflow not found\n")
+    check("the daemon's typed not-found means absent",
+          with_exec(daemon_form, lambda: rollout.network_absent("kin-workflow")) is True)
+    typed = _absent_answer(b"Error: No such network: kin-workflow")
     check("the explicit typed not-found means absent",
           with_exec(typed, lambda: rollout.network_absent("kin-workflow")) is True)
+    trailing = _absent_answer(b"Error response from daemon: network kin-workflow not found\nexit status 1\n")
+    check("docker's own trailing exit-status line does not change the answer",
+          with_exec(trailing, lambda: rollout.network_absent("kin-workflow")) is True)
     present = mock_exec([(lambda a: True, Result(0, b"[{}]", b""))])
     check("exit 0 means present", with_exec(present, lambda: rollout.network_absent("kin-workflow")) is False)
+
+    # The recognition is name-bound and whole-message: nothing else may be read as absence.
+    other_name = _absent_answer(b"Error response from daemon: network kin-other not found")
+    refuses("an answer about another network refuses",
+            lambda: with_exec(other_name, lambda: rollout.network_absent("kin-workflow")),
+            "refusing rather than guessing")
+    other_typed = _absent_answer(b"Error: No such network: kin-other")
+    refuses("the object form about another network refuses",
+            lambda: with_exec(other_typed, lambda: rollout.network_absent("kin-workflow")),
+            "refusing rather than guessing")
+    quoting = _absent_answer(b"Cannot connect to the Docker daemon: No such network: kin-workflow")
+    refuses("a daemon error that merely quotes the words refuses",
+            lambda: with_exec(quoting, lambda: rollout.network_absent("kin-workflow")),
+            "refusing rather than guessing")
+    noisy = _absent_answer(b"Error: No such network: kin-workflow\ncontext deadline exceeded")
+    refuses("a typed line with an extra diagnostic line refuses",
+            lambda: with_exec(noisy, lambda: rollout.network_absent("kin-workflow")),
+            "refusing rather than guessing")
+    only_status = _absent_answer(b"exit status 1\n")
+    refuses("an exit-status line on its own refuses",
+            lambda: with_exec(only_status, lambda: rollout.network_absent("kin-workflow")),
+            "refusing rather than guessing")
+    empty = _absent_answer(b"")
+    refuses("a non-zero exit with no message refuses",
+            lambda: with_exec(empty, lambda: rollout.network_absent("kin-workflow")),
+            "refusing rather than guessing")
     daemon_down = mock_exec([(lambda a: True, Result(1, b"", b"Cannot connect to the Docker daemon"))])
     refuses("any other error refuses instead of guessing",
             lambda: with_exec(daemon_down, lambda: rollout.network_absent("kin-workflow")), "refusing rather than guessing")
@@ -137,14 +174,6 @@ def test_network_absent_is_typed_only():
     with_exec(typed2, lambda: rollout.network_absent("kin-workflow"))
     check("it inspects by explicit network type", called and called[0][:4] == ["docker", "inspect", "--type", "network"],
           json.dumps(called[:1]))
-
-
-def _swallow(body):
-    try:
-        body()
-        return "returned"
-    except rollout.Refuse:
-        return "refused"
 
 
 def proxy_mock(networks, mounts, network_present=False):
