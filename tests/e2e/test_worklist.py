@@ -356,9 +356,15 @@ class WorklistE2E(unittest.TestCase):
         expect(page.locator(f'#rows tr[data-uid="{current.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
         expect(page.locator("#findings")).to_have_value(current.secret)
         # Require actual loaded image viewports, not just a correctly constructed URL.
-        expect(viewer.locator(".cornerstone-canvas")).to_have_count(2, timeout=60000)
-        for canvas in viewer.locator(".cornerstone-canvas").all():
-            expect(canvas).to_be_visible()
+        canvases = viewer.locator(".cornerstone-canvas")
+        expect(canvases).to_have_count(2, timeout=60000)
+        # Locator.all() reads the element count once without retrying and returns that
+        # many nth() locators. A canvas that lives only while the compare layout settles
+        # raises that count to three, and the loop then waits out its whole timeout on an
+        # nth(2) the settled compare layout never has. Bind the loop to the count this
+        # contract asserts, not to whatever happened to be in the DOM at that instant.
+        for index in range(2):
+            expect(canvases.nth(index)).to_be_visible()
         # Cornerstone draws to 2D viewport canvases. An allocated but blank canvas
         # must not pass: real CT pixels have a range of grayscale intensities.
         viewer.wait_for_function("""() => {

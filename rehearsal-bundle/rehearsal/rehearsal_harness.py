@@ -29,6 +29,11 @@ Corrections in this pass:
       loses evidence to an escaping exception.
   B1  S6 requires each api/orthanc observation to be a real one - exists True and a non-empty
       string Id - before it compares identities, so an unread fact cannot pass as "unchanged".
+  I1  S2 and S3 test PRESERVATION, not absence: S3 records a baseline observation first and then
+      changes the topology under the runner, which must refuse. S8 is new and is the only
+      scenario that starts from the OBSERVED PRODUCTION SHAPE - the proxy joined to kin-workflow
+      with the read-only route mount and an independently managed receiver attached - and drives
+      the runner's real stop/run/up through it.
 
 Usage: python3 rehearsal_harness.py --scenario <name> --out <receipt.json>
 """
@@ -53,7 +58,10 @@ BASELINE_COMPOSE = "baseline-compose.yml"
 TARGET_COMPOSE = "target-compose.yml"
 NETWORK = "kin-workflow"
 PROXY, API, ORTHANC = "kin-proxy", "kin-api", "kin-orthanc"
-SYNTHETIC_CONTAINERS = (PROXY, API, ORTHANC, "kin-db")
+# S8's stand-in for the independently managed workflow receiver. It is attached and removed by the
+# HARNESS only, exactly as the real one is managed outside this repository.
+RECEIVER = "kin-workflow-receiver"
+SYNTHETIC_CONTAINERS = (PROXY, API, ORTHANC, "kin-db", RECEIVER)
 
 
 def load_rollout():
@@ -216,9 +224,19 @@ def network_state():
 
 
 def start_baseline_stack(root):
-    """HB9: api, orthanc AND proxy are created from the BASELINE-shaped file, as production is."""
+    """HB9: api, orthanc AND proxy are created from the BASELINE-shaped file, which has no
+    workflow network and no route mount. That is the GREENFIELD shape, not the production one."""
     raw(["docker", "pull", os.environ["REHEARSAL_IMAGE"]], check=True)
     return raw(compose_argv(root, BASELINE_COMPOSE, "up", "-d", "--force-recreate",
+                            "api", "orthanc", "proxy"), check=True, cwd=root)
+
+
+def start_target_stack(root):
+    """I1: api, orthanc AND proxy from the TARGET-shaped file, which is the shape the production
+    host was observed in on 2026-09-19: the proxy joins the internal kin-workflow network and
+    carries the route directory as a read-only bind."""
+    raw(["docker", "pull", os.environ["REHEARSAL_IMAGE"]], check=True)
+    return raw(compose_argv(root, TARGET_COMPOSE, "up", "-d", "--force-recreate",
                             "api", "orthanc", "proxy"), check=True, cwd=root)
 
 
@@ -280,24 +298,47 @@ def scenario_compose_network():
 
 # ---------------------------------------------------------------- S2
 def scenario_guard_clean():
+    """I3: the greenfield stack is COHERENT ABSENCE - a usable baseline only when that absence is
+    acknowledged, because on the product's own host the ingress was observed present."""
     root = project_dir()
     cleaned = cleanup(root)
     start_baseline_stack(root)
-    guard = rollout.proxy_guard()
+    observation = rollout.ingress_observation()
     try:
-        rollout.require_proxy_inert("rehearsal-clean")
-        refused = None
+        rollout.require_coherent_ingress("rehearsal-clean", allow_absent=True)
+        acknowledged_refusal = None
     except rollout.Refuse as error:
-        refused = str(error)[:300]
-    return {"scenario": "guard-clean", "cleanup": cleaned, "guard": guard, "refusal": refused,
-            "network": network_state(),
-            "expected": "a proxy created from the BASELINE-shaped file is inert and the guard returns",
-            "passed": guard["inert"] is True and refused is None}
+        acknowledged_refusal = str(error)[:300]
+    try:
+        rollout.require_coherent_ingress("rehearsal-clean")
+        unacknowledged_refusal = None
+    except rollout.Refuse as error:
+        unacknowledged_refusal = str(error)
+    problems = []
+    if observation["shape"] != "absent":
+        problems.append("the baseline-shaped stack is not coherent absence: "
+                        + json.dumps(observation["shape_problems"])[:300])
+    if acknowledged_refusal:
+        problems.append("an acknowledged absence was refused")
+    if "--acknowledge-absent-ingress-baseline" not in (unacknowledged_refusal or ""):
+        problems.append("an UNacknowledged absence was not refused by the production gate")
+    return {"scenario": "guard-clean", "cleanup": cleaned, "observation": observation,
+            "acknowledged_refusal": acknowledged_refusal,
+            "unacknowledged_refusal": (unacknowledged_refusal or "")[:300],
+            "network": network_state(), "problems": problems,
+            "expected": "a stack created from the BASELINE-shaped file is coherent absence; the gate "
+                        "accepts it only with the explicit acknowledgement and refuses it without one",
+            "passed": not problems}
 
 
 # ---------------------------------------------------------------- S3 (HB5, I6)
 def scenario_guard_function_against_daemon():
-    """HB5: a guard-FUNCTION test against a real daemon, in both network-present variants."""
+    """HB5/I1: a preservation test against a real daemon, in both network-present variants.
+
+    The baseline observation is taken from the running stack FIRST and put on the record, then the
+    topology is changed underneath the runner. Detecting that change is the whole point of the
+    guard, and it is what the absence rule could never distinguish from the normal production host.
+    """
     root = project_dir()
     cleaned = cleanup(root)
     start_baseline_stack(root)
@@ -305,8 +346,10 @@ def scenario_guard_function_against_daemon():
     variants, problems = [], []
 
     for variant in ("network-only", "network-and-joined"):
+        baseline = rollout.ingress_observation()
         state = {"schema": rollout.SCHEMA, "status": "MIGRATED_ROWS_PRESERVED",
-                 "target": MANIFEST["target_sha"], "baseline": MANIFEST["baseline_sha"]}
+                 "target": MANIFEST["target_sha"], "baseline": MANIFEST["baseline_sha"],
+                 "ingress_baseline": baseline}
         record.write_text(json.dumps(state), encoding="utf-8")
         created = raw(["docker", "network", "create", "--internal", NETWORK])
         joined = None
@@ -314,20 +357,24 @@ def scenario_guard_function_against_daemon():
             joined = raw(["docker", "network", "connect", NETWORK, PROXY], check=True)
         with ArgvLog() as log:
             try:
-                rollout.guard_or_needs_attention(record, state, "proxy_guard_post_apply", "post-apply")
+                rollout.ingress_checkpoint(record, state, "ingress_post_apply", "post-apply")
                 refusal = None
             except rollout.Refuse as error:
                 refusal = str(error)
             runner_network_commands = log.network_commands()
         on_disk = json.loads(record.read_text(encoding="utf-8"))
+        checkpoint = on_disk.get("ingress_post_apply") or {}
         ok = (bool(refusal) and on_disk.get("status") == "NEEDS_ATTENTION_LOCK_RETAINED"
               and on_disk.get("manual_next_action") == rollout.GUARD_NEXT_ACTION
-              and on_disk.get("proxy_guard_post_apply") is not None
+              and baseline.get("shape") == "absent"
+              and checkpoint.get("comparison", {}).get("unchanged") is False
+              and bool(checkpoint.get("comparison", {}).get("differences"))
               and on_disk.get("guard_tripped_this_invocation") is True
               and not runner_network_commands)
         if not ok:
             problems.append(variant)
         variants.append({"variant": variant, "network_create": created, "network_connect": joined,
+                         "baseline_shape": baseline.get("shape"),
                          "refusal": (refusal or "")[:300], "record": on_disk,
                          "runner_network_commands": runner_network_commands, "ok": ok})
         # Reset between variants; harness-owned, synthetic only.
@@ -336,9 +383,10 @@ def scenario_guard_function_against_daemon():
 
     return {"scenario": "guard-function-against-daemon", "cleanup": cleaned, "variants": variants,
             "problems": problems,
-            "expected": "both an unreferenced network and a joined proxy trip the guard, record "
-                        "NEEDS_ATTENTION with the network manual action, and the runner issues no "
-                        "network command (observed argv, not a literal)",
+            "expected": "a network that appears after the baseline observation, with or without the "
+                        "proxy joined to it, is a preservation failure: NEEDS_ATTENTION with the "
+                        "preservation manual action, and the runner issues no network command "
+                        "(observed argv, not a literal)",
             "passed": not problems}
 
 
@@ -573,6 +621,110 @@ def scenario_indeterminate_control():
             "passed": not problems}
 
 
+# ---------------------------------------------------------------- S8 (I1, I4)
+def scenario_live_shape():
+    """The runner's real stop/run/up against the OBSERVED PRODUCTION topology.
+
+    S1-S7 all start from baseline-compose.yml, which has no workflow ingress at all. That is the
+    greenfield case and it validated a host that does not exist. This scenario starts from
+    target-compose.yml, so the proxy really joins the internal kin-workflow network and really
+    carries the route directory as a read-only bind, and it attaches a foreign container to that
+    network as a stand-in for the independently managed kin-workflow-receiver.
+
+    One documented substitution: the hosted runner may not create /etc/kin-workflow, so the compose
+    file binds the project's own route directory and WORKFLOW_ROUTE_SOURCE is pointed at it for the
+    duration of the scenario. The destination, the bind type, the read-only flag, the internal
+    network and the proxy membership are the product's own declared values, and the substitution is
+    recorded in the receipt rather than hidden.
+    """
+    root = project_dir()
+    cleaned = cleanup(root)
+    target_up = start_target_stack(root)
+    route_source = str((root / "kin-workflow-nginx").resolve())
+    receiver = raw(["docker", "run", "-d", "--name", RECEIVER, "--network", NETWORK,
+                    os.environ["REHEARSAL_IMAGE"], "sh", "-c", "while true; do sleep 3600; done"],
+                   check=True)
+    previous_source = rollout.WORKFLOW_ROUTE_SOURCE
+    rollout.WORKFLOW_ROUTE_SOURCE = route_source
+    steps, problems = [], []
+    try:
+        before = {"api": container_facts(API), "orthanc": container_facts(ORTHANC),
+                  "proxy": container_facts(PROXY)}
+        baseline = rollout.ingress_observation()
+        if baseline["shape"] != "present":
+            problems.append("the target-shaped stack is not the present ingress: "
+                            + json.dumps(baseline["shape_problems"])[:400])
+        if RECEIVER not in (baseline["network"].get("member_names") or []):
+            problems.append("the synthetic receiver is not attached to the network")
+        with ArgvLog() as log:
+            sequence = [
+                ("stop", compose_argv(root, TARGET_COMPOSE, "stop", "api", "orthanc")),
+                ("migrate-shape", compose_argv(root, TARGET_COMPOSE, "run", "--rm", "--no-deps",
+                                               "--entrypoint", "sh", "api", "-c", "true")),
+                ("up", compose_argv(root, TARGET_COMPOSE, "up", "-d", "--no-deps", "--no-build",
+                                    "--pull", "never", "--force-recreate", "api", "orthanc")),
+            ]
+            for label, argv in sequence:
+                executed = raw(argv, cwd=root)
+                observed = rollout.ingress_observation()
+                comparison = rollout.compare_ingress(baseline, observed)
+                if executed["exit"] != 0:
+                    problems.append(label + ": exit " + str(executed["exit"]))
+                if comparison.get("unchanged") is not True:
+                    problems.append(label + ": the ingress changed: "
+                                    + json.dumps(comparison.get("differences"))[:300])
+                if observed["shape"] != "present":
+                    problems.append(label + ": the ingress is no longer the declared shape")
+                steps.append({"step": label, "command": executed, "shape": observed["shape"],
+                              "comparison": comparison})
+            # I4: the receiver is managed outside this repository. Its restart rotates the network's
+            # member endpoints and must be observational only, never a preservation failure.
+            restarted = raw(["docker", "restart", RECEIVER], check=True)
+            after_restart = rollout.ingress_observation()
+            receiver_comparison = rollout.compare_ingress(baseline, after_restart)
+            if receiver_comparison.get("unchanged") is not True:
+                problems.append("a receiver restart was treated as a preservation failure: "
+                                + json.dumps(receiver_comparison.get("differences"))[:300])
+            runner_network_commands = log.network_commands()
+        after = {"api": container_facts(API), "orthanc": container_facts(ORTHANC),
+                 "proxy": container_facts(PROXY)}
+    finally:
+        rollout.WORKFLOW_ROUTE_SOURCE = previous_source
+
+    # B1: an identity claim needs an identity that was actually read, on both sides.
+    for phase, facts in (("before", before), ("after", after)):
+        for service in sorted(facts):
+            fact = facts[service]
+            if fact.get("exists") is not True or not isinstance(fact.get("Id"), str) or not fact["Id"]:
+                problems.append(phase + ": " + service + " container facts were not read; "
+                                "identity is unproven")
+    if before["proxy"].get("Id") != after["proxy"].get("Id"):
+        problems.append("the proxy was recreated by a command that names only api and orthanc")
+    for service in ("api", "orthanc"):
+        if before[service].get("Id") == after[service].get("Id"):
+            problems.append(service + ": container Id did not change, so nothing was recreated")
+        if after[service].get("running") is not True:
+            problems.append(service + ": not running after up")
+    if runner_network_commands:
+        problems.append("the runner issued a docker network command")
+    return {"scenario": "live-shape", "versions": versions(), "cleanup": cleaned,
+            "target_up": target_up, "receiver": receiver, "receiver_restart": restarted,
+            "route_source_substitution": {
+                "expected_source_under_test": route_source,
+                "product_value": previous_source,
+                "reason": "the hosted runner may not create /etc/kin-workflow; every other field of "
+                          "the route tuple is the product's own declared value"},
+            "baseline": baseline, "steps": steps, "after_receiver_restart": receiver_comparison,
+            "runner_network_commands": runner_network_commands,
+            "before": before, "after": after, "problems": problems,
+            "expected": "starting from the observed production shape, the runner's real stop/run/up "
+                        "leaves the proxy identity, its network membership and its whole mount table "
+                        "and the kin-workflow network identity unchanged, recreates api and orthanc, "
+                        "issues no docker network command, and treats an independent receiver "
+                        "restart as observational only",
+            "passed": not problems}
+
+
 SCENARIOS = {
     "compose-network": scenario_compose_network,
     "guard-clean": scenario_guard_clean,
@@ -581,6 +733,7 @@ SCENARIOS = {
     "findings-rollback": scenario_findings_rollback,
     "partial-failure": scenario_partial_failure,
     "indeterminate-control": scenario_indeterminate_control,
+    "live-shape": scenario_live_shape,
 }
 
 

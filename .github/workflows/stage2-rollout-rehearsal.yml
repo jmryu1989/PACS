@@ -28,7 +28,7 @@ env:
   BUNDLE: rehearsal-bundle
   # I7: the manifest's own digest is a literal here, so the checksum file cannot be swapped
   # together with the files it lists.
-  BUNDLE_MANIFEST_SHA256: d5cf1c9885287771f119248db337a9046037d580f9e966412172a53c823a0b06
+  BUNDLE_MANIFEST_SHA256: bf5a5e52d934d37c69049e20cea4fb672dd719821b9629c17bf963754712020d
 
 jobs:
   rehearsal:
@@ -84,6 +84,15 @@ jobs:
         run: python3 -B rehearsal/rehearsal_harness.py --scenario compose-network --out "$RUNNER_TEMP/s1.json"
         working-directory: ${{ env.BUNDLE }}
 
+      # S8 is the only scenario that starts from the topology the production host was actually
+      # observed in on 2026-09-19: the proxy joined to the internal kin-workflow network with the
+      # route directory bound read-only, plus a foreign container on that network standing in for
+      # the independently managed receiver. S1-S7 are the greenfield case.
+      - name: S8 the real stop/run/up against the observed production shape preserves the ingress
+        if: always()
+        run: python3 -B rehearsal/rehearsal_harness.py --scenario live-shape --out "$RUNNER_TEMP/s8.json"
+        working-directory: ${{ env.BUNDLE }}
+
       - name: S4 pin drift, with a positive control
         if: always()
         env:
@@ -108,23 +117,23 @@ jobs:
         run: python3 -B rehearsal/rehearsal_harness.py --scenario guard-function-against-daemon --out "$RUNNER_TEMP/s3.json"
         working-directory: ${{ env.BUNDLE }}
 
-      - name: Collect receipts and require all seven to pass
+      - name: Collect receipts and require all eight to pass
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/receipts" "$RUNNER_TEMP/receipts/state-records"
-          cp "$RUNNER_TEMP"/s[1-7].json "$RUNNER_TEMP/receipts/" 2>/dev/null || true
+          cp "$RUNNER_TEMP"/s[1-8].json "$RUNNER_TEMP/receipts/" 2>/dev/null || true
           cp "$RUNNER_TEMP"/record-s*.json "$RUNNER_TEMP/receipts/state-records/" 2>/dev/null || true
           docker version --format '{{.Server.Version}}' > "$RUNNER_TEMP/receipts/docker-version.txt" || true
           docker compose version > "$RUNNER_TEMP/receipts/compose-version.txt" || true
           python3 --version > "$RUNNER_TEMP/receipts/python-version.txt" || true
           python3 - "$RUNNER_TEMP/receipts" <<'PY'
           import json, pathlib, sys
-          # HB10: consume exactly the seven expected receipt names. Rollout STATE RECORDS live
+          # HB10: consume exactly the eight expected receipt names. Rollout STATE RECORDS live
           # beside them (state-records/) and must never be read as scenario receipts. A missing
           # file, unreadable JSON, an absent `passed` key or a non-boolean value all refuse by
           # name instead of raising.
           root = pathlib.Path(sys.argv[1])
-          expected = ["s1", "s2", "s3", "s4", "s5", "s6", "s7"]
+          expected = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]
           missing, failed, malformed = [], [], []
           for stem in expected:
               path = root / (stem + ".json")
