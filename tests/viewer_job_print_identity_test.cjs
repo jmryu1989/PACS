@@ -11,6 +11,9 @@ const approved = { version: 1, rs: 'A', author: 'doctor', repDoc: 'doctor', conf
   findings: 'F', conclusion: 'C', recommendation: 'R' };
 const unapproved = { version: 2, rs: 'W', author: 'doctor', repDoc: null, confirm: null,
   findings: 'F', conclusion: 'C', recommendation: 'R' };
+// S3-U1: the head version row's own action, as the report-preview response now carries it.
+const addendum = { version: 3, rs: 'A', action: 'addendum', author: 'doctor2', repDoc: 'doctor2',
+  confirm: '2026-08-03T00:00:00Z', findings: 'F', conclusion: 'C', recommendation: 'R' };
 const CURRENT = 'uid-current', COMPARE = 'uid-compare';
 
 function pair(comparisonDate, currentDate = '20260801') {
@@ -76,6 +79,7 @@ test('reportTitle and reportLabel keep the strings other tests depend on', () =>
   assert.equal(identity.reportLabel({ version: 0, rs: 'W' }), '저장된 판독문 없음');
   assert.equal(identity.reportLabel(approved), '승인된 저장본 · v1 · RS A');
   assert.equal(identity.reportLabel(unapproved), '미승인 저장본 · v2 · RS W');
+  assert.equal(identity.reportLabel(addendum), '승인된 추가기재 · v3 · RS A');
 });
 
 test('optionLabel describes the comparison by its own date', () => {
@@ -238,7 +242,7 @@ const draft = { version: null, rs: null, unsaved: true, author: 'doctor',
 test('reportLabel marks an unsaved editor body instead of a stored version', () => {
   assert.equal(identity.reportLabel(draft), '미확정 편집문 · 저장·승인되지 않음');
   // The wording must not be reachable from any saved report shape.
-  for (const report of [approved, unapproved, { version: 0, rs: 'W' }])
+  for (const report of [approved, unapproved, addendum, { version: 0, rs: 'W' }])
     assert.ok(!identity.reportLabel(report).includes('미확정'), JSON.stringify(report));
   for (const label of ['v', 'RS', '저장본'])
     assert.ok(!identity.reportLabel(draft).includes(label), label);
@@ -287,6 +291,65 @@ test('a draft entry keeps the current role and carries the unsaved footer', () =
   assert.ok(rules.includes(`@page report-0{@bottom-left{content:${identity.cssContent(identity.pageIdentity(entry))};`), rules.slice(0, 120));
   assert.equal(rules.match(/@page report-\d+\{/g).length, 2);
   assert.ok(rules.endsWith('.intro{page:report-0}'));
+});
+
+/* S3-U1 (R12): the output names an Addendum by its own name and its own version
+ * number. ReportVersion has no parent-version column and a discarded row can sit
+ * at a lower number, so any lineage number on a page would be invented. */
+
+test('reportLabel names an addendum by its own version and leaves every other action alone', () => {
+  assert.equal(identity.reportLabel(addendum), '승인된 추가기재 · v3 · RS A');
+  // Exactly one version number appears, and it is this row's own.
+  assert.deepEqual(identity.reportLabel(addendum).match(/v\d+/g), ['v3']);
+  assert.ok(!identity.reportLabel(addendum).includes('저장본'));
+  // Every other stored action keeps the saved wording byte for byte, including
+  // a response that predates the field.
+  for (const action of ['approve', 'save', 'reset', 'preliminary', 'defer', 'discarded', '', null, undefined])
+    assert.equal(identity.reportLabel({ ...approved, action }), '승인된 저장본 · v1 · RS A', String(action));
+  for (const action of ['approve', 'save', 'defer', null, undefined])
+    assert.equal(identity.reportLabel({ ...unapproved, action }), '미승인 저장본 · v2 · RS W', String(action));
+  // An addendum row that is not the approved state still says addendum, and the
+  // version and unsaved rules keep winning over the action.
+  assert.equal(identity.reportLabel({ version: 4, rs: 'W', action: 'addendum' }), '미승인 추가기재 · v4 · RS W');
+  assert.equal(identity.reportLabel({ version: 0, rs: 'A', action: 'addendum' }), '저장된 판독문 없음');
+  assert.equal(identity.reportLabel({ ...addendum, unsaved: true }), '미확정 편집문 · 저장·승인되지 않음');
+});
+
+test('the repeated page identity and the summary say addendum for that study alone', () => {
+  const identities = [study(CURRENT, '20260801'), study(COMPARE, '20260901')];
+  const head = identity.reportEntry(CURRENT, addendum, identities, CURRENT);
+  const compare = identity.reportEntry(COMPARE, unapproved, identities, CURRENT);
+  assert.equal(identity.pageIdentity(head), [
+    'Current Study Report · 20260801',
+    '홍 길동 (PID-uid-current) · CHEST CT · Acc ACC-uid-current',
+    'Study uid-current',
+    '승인된 추가기재 · v3 · RS A',
+  ].join('\n'));
+  const summary = identity.summaryText(identities, [head, compare]);
+  assert.ok(summary.includes('Current Study Report: 20260801 · 승인된 추가기재 · v3 · RS A'), summary);
+  // The comparison study keeps its own label: one addendum does not rename the other page.
+  assert.ok(summary.includes('Comparison Study Report: 20260901 · 현재 검사보다 이후 · 미승인 저장본 · v2 · RS W'), summary);
+  assert.equal(summary.match(/추가기재/g).length, 1);
+  const rules = identity.pageRules([head, compare], summary);
+  assert.ok(rules.includes(`@page report-0{@bottom-left{content:${identity.cssContent(identity.pageIdentity(head))};`), rules.slice(0, 160));
+  assert.ok(rules.includes(identity.cssContent(identity.pageIdentity(compare))));
+});
+
+/* The reading window's preview header prints the same stored report from the same
+ * response. The two output surfaces must not name the same row differently. */
+const reportPreview = require('../worklist-v0/hpacs-lite/report-preview.js');
+
+test('the reading window preview and this dialog agree on every saved label', () => {
+  assert.equal(typeof reportPreview.savedLabel, 'function');
+  for (const version of [0, 1, 3])
+    for (const rs of ['A', 'W', 'T', 'P', 'H'])
+      for (const action of ['approve', 'addendum', 'save', 'reset', 'preliminary', 'defer', 'discarded', null, undefined]) {
+        const report = { version, rs, action }, label = identity.reportLabel(report), where = JSON.stringify(report);
+        assert.equal(reportPreview.savedLabel(report, true), label, where);
+        // The preview's repeated identity line is the same text without RS.
+        assert.equal(reportPreview.savedLabel(report, false), version ? label.replace(` · RS ${rs}`, '') : label, where);
+        assert.equal(label.includes('추가기재'), !!version && action === 'addendum', where);
+      }
 });
 
 /* A11-OUTPUT transport fix (hosted diagnostic run 35022850312): the one source read of every saved-image output. Chromium failed a

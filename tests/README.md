@@ -124,6 +124,8 @@ REQ-D-WORKSPACE-WINDOW-RETURN → RISK-WRONG-REPORT-FOCUS/WORK-LOSS/STALE-WINDOW
 
 REQ-D09-OUTPUT-IDENTITY → RISK-D09-REPORT-MISATTRIBUTION → TEST-D09-OUTPUT-IDENTITY: `node --test tests/viewer_job_print_identity_test.cjs`의 순수 14건은 현재/비교 검사 명칭, 실제 달력 날짜와 선후 관계, 판독문 선택 항목, 환자·검사 식별행, 보고서별 named page와 margin-box CSS를 검사한다. `python tests/viewer_job_print_pages_test.py`의 격리 Chromium 6건은 현재보다 이후·이전·같은 날짜와 미상 날짜, 긴 식별정보의 하단 여백, 단일 검사, named-page 미지원 거절 및 preview 무쓰기를 실제 PDF 페이지에서 확인한다. validate의 runtime과 measurements job은 각각 `record-run.py`로 원문과 소스 해시를 남기고 합성 artifact만 게시한다. 실제 프린터의 물리 여백·색·DPI 수용은 별도다.
 
+REQ-S3-U1-ADDENDUM-OUTPUT → RISK-S3-ADDENDUM-MISLABEL → TEST-S3-U1-ADDENDUM-OUTPUT: `node --test tests/report_preview_label_test.cjs`의 순수 5건과 `viewer_job_print_identity_test.cjs`에 더한 3건은 머리 판 행의 `action`이 `addendum`이면 미리보기 머리글과 페이지마다 반복되는 식별 줄이 「추가기재」와 **그 판 자신의 번호**를 말하는지, 다른 action과 판 없음·미확정 편집문의 문자열이 바이트 그대로인지 확인한다. `ReportVersion`에는 부모 판 칸이 없고 `discarded` 행이 더 낮은 번호를 가질 수 있어 계보 번호는 출력하지 않는다. 두 출력 표면이 같은 행을 다르게 부르지 않는지는 `viewer_job_print_identity_test.cjs`의 교차 확인 1건이 검사한다. `report_preview_label_test.cjs`는 아직 validate의 runtime job에 선언되지 않았다 — 등록과 실제 CI 성공은 구분한다. 실제 스택에서 추가기재를 확정한 뒤의 PDF 확인은 호스티드 잔여다.
+
 프론트엔드·UI/UX와 필수 API를 통합한 뒤 의사에게 평가 후보를 전달한다. 전달 전 중간 버전은 사용자가 사용하지 않는다. 전달 뒤에는 의사 피드백과 단일 병원 도입용 백엔드 준비를 병행하되, 평가 버전·데이터를 안정적으로 유지하고 백엔드는 별도 브랜치·환경에서 작업한다. 의사 재확인과 운영 검증 후 배포하며 병원 간 Connect 확장은 보류한다.
 
 | 시점 또는 변경 | 실행할 검증 |
