@@ -685,8 +685,21 @@ def network_state(name):
     `state` is "present" with the identity fields, "absent" only for the exact typed not-found
     answer for exactly this name, or "indeterminate". Indeterminate is a fact about what could
     not be learned, never an absence, and the callers refuse on it before any mutation.
+
+    An inspect that does not RETURN is one more way of not learning the answer: a wedged container
+    can block its own inspect until the 60 s timeout while the rest of the daemon answers. That is
+    the same indeterminate observation, not an exception thrown through every caller, so the one
+    stage that only reports - rollback-start - can still restore the previous api and orthanc.
+    Only the exception TYPE is kept: TimeoutExpired carries the argv and whatever output was
+    captured, OSError carries host paths, and neither belongs in this record. A Refuse from
+    check_command is deliberately NOT caught: a command that breaks the argv rules is a defect in
+    this runner, never an observation about the host.
     """
-    result = spawn(["docker", "inspect", "--type", "network", name], timeout=60)
+    try:
+        result = spawn(["docker", "inspect", "--type", "network", name], timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return {"name": name, "state": "indeterminate",
+                "message": "docker inspect did not return: " + type(error).__name__}
     if result.returncode != 0:
         message = (result.stderr or b"").decode("utf-8", "replace").strip()
         if typed_network_absence(name, message):
@@ -733,8 +746,17 @@ def proxy_state():
     An unreadable answer is recorded as unreadable so the caller refuses on an unknown state
     rather than on an exception, and so a read-only observation still produces a report. Only the
     exit code of a failed inspect is kept; the daemon's message is not part of the answer.
+
+    An inspect that never returns is unreadable in the same way, and for the same reason it is an
+    answer rather than an exception: a sick proxy is exactly when someone needs the previous api
+    back, and the rollback does not touch the proxy at all. Only the exception TYPE is recorded,
+    never its argv, output or host paths, and a Refuse from check_command still propagates.
     """
-    result = spawn(["docker", "inspect", PROXY_CONTAINER], timeout=60)
+    try:
+        result = spawn(["docker", "inspect", PROXY_CONTAINER], timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return {"container": PROXY_CONTAINER, "readable": False,
+                "reason": "docker inspect did not return: " + type(error).__name__}
     if result.returncode != 0:
         return {"container": PROXY_CONTAINER, "readable": False,
                 "reason": "docker inspect exited " + str(result.returncode)}

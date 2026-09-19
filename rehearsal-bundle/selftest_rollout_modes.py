@@ -18,6 +18,7 @@ import importlib.util
 import json
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -694,6 +695,150 @@ def test_i3_apply_gate_and_baseline():
               not record.exists() and not (repo / ".kin-ops.lock").exists())
 
 
+# ---------------------------------------------------------------- B-1: a raising inspect
+# The OLD failure, reproduced: the rollback-start relaxation covered a DIFFERENT ingress and an
+# unreadable one, but `docker inspect kin-proxy` can also fail to return at all - a wedged
+# container blocks its own inspect for the full 60 s while the rest of the daemon answers. That
+# exception escaped the enforce=False checkpoint into mode_rollback's handler, so the record ended
+# NEEDS_ATTENTION before stop_writers, before the baseline checkout and before the previous image
+# was re-tagged: the previous API was not restored, for an ingress-observation reason alone.
+HUNG_INSPECT = subprocess.TimeoutExpired(
+    ["docker", "inspect", "kin-proxy"], 60,
+    output=b'[{"Id": "proxy-1", "Config": {"Env": ["WORKFLOW_ROUTE_TOKEN=s3cret-value"]}}]',
+    stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+NO_CLIENT = PermissionError(13, "Permission denied: '/home/ubuntu/.docker/config.json'")
+
+
+def hung_inspect_host(host, error, what="proxy", until_quiesced=True):
+    """`host`, except that one of the two ingress inspects RAISES instead of answering.
+
+    until_quiesced=True makes it a transient failure that is over by the `compose stop`, which is
+    the case in which the rollback may still reach its terminal status.
+    """
+    def run(args, **kwargs):
+        selected = (list(args)[:2] == ["docker", "inspect"]
+                    and ("--type" in args if what == "network" else args[-1] == "kin-proxy"))
+        if selected and not (until_quiesced and host.quiesced):
+            host.calls.append(list(args))
+            raise error
+        return host(args, **kwargs)
+    return run
+
+
+def test_b1_a_raising_ingress_inspect_never_blocks_recovery():
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, manifest_path, record = scaffold(tmp)
+        host = Host(record, findings=(0, 0), ingress=PRESENT)
+        outcome = run_mode(rollout.mode_rollback, hung_inspect_host(host, HUNG_INSPECT),
+                           manifest_path, repo, record, stubs=FULL_ROLLBACK_STUBS)
+        state = read_record(record)
+        start = state.get("ingress_rollback_start") or {}
+        check("B-1 the writers were quiesced despite the hung proxy inspect",
+              any(c[:2] == ["docker", "compose"] and "stop" in c for c in host.calls),
+              json.dumps(outcome)[:240])
+        check("B-1 the baseline checkout still happened",
+              any("checkout" in c for c in host.calls), json.dumps(host.calls[-4:])[:240])
+        check("B-1 the previous image was re-tagged and the services were started",
+              any(c[:2] == ["docker", "tag"] and c[2] == "sha256:previous" for c in host.calls)
+              and any(c[:2] == ["docker", "compose"] and "up" in c for c in host.calls),
+              json.dumps(host.calls[-4:])[:240])
+        check("B-1 rollback-start is RECORDED as an unreadable observation, not an exception",
+              start.get("enforced") is False
+              and start.get("observed", {}).get("shape") == "indeterminate"
+              and start.get("comparison", {}).get("unchanged") is False,
+              json.dumps(start.get("observed", {}).get("shape_problems"))[:240])
+        check("B-1 the record keeps the exception type only, with no argv, output or secret",
+              "TimeoutExpired" in json.dumps(start)
+              and "s3cret-value" not in json.dumps(state) and "docker.sock" not in json.dumps(state),
+              json.dumps(start.get("observed", {}).get("proxy"))[:240])
+        check("B-1 a transient start-only failure still reaches the terminal status",
+              outcome["outcome"] == "return" and state["status"] == "ROLLED_BACK_DATABASE_RETAINED",
+              json.dumps(outcome)[:240])
+        check("B-1 rollback-end observed a healthy ingress and released the lock",
+              state["ingress_rollback_end"]["comparison"]["unchanged"] is True
+              and not (repo / ".kin-ops.lock").exists())
+        check("B-1 no docker network command was issued while the inspect was hung",
+              not any(c[:2] == ["docker", "network"] for c in host.calls))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, manifest_path, record = scaffold(tmp)
+        host = Host(record, findings=(0, 0), ingress=PRESENT)
+        outcome = run_mode(rollout.mode_rollback,
+                           hung_inspect_host(host, NO_CLIENT, what="network"),
+                           manifest_path, repo, record, stubs=FULL_ROLLBACK_STUBS)
+        state = read_record(record)
+        check("B-1 the OTHER spawn site behaves the same: an OSError on the network inspect",
+              outcome["outcome"] == "return" and state["status"] == "ROLLED_BACK_DATABASE_RETAINED"
+              and any("checkout" in c for c in host.calls), json.dumps(outcome)[:240])
+        check("B-1 and its recorded reason is the exception type, not the host path",
+              "PermissionError" in json.dumps(state["ingress_rollback_start"])
+              and "/home/ubuntu" not in json.dumps(state),
+              json.dumps(state["ingress_rollback_start"]["observed"]["network"])[:240])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, manifest_path, record = scaffold(tmp)
+        host = Host(record, findings=(0, 0), ingress=PRESENT)
+        # The inspect never recovers: the api is restored, but the END is still enforced.
+        outcome = run_mode(rollout.mode_rollback,
+                           hung_inspect_host(host, HUNG_INSPECT, until_quiesced=False),
+                           manifest_path, repo, record, stubs=FULL_ROLLBACK_STUBS)
+        state = read_record(record)
+        check("B-1 a persistent hang still restores the previous api and orthanc",
+              any("checkout" in c for c in host.calls)
+              and any(c[:2] == ["docker", "compose"] and "up" in c for c in host.calls),
+              json.dumps(outcome)[:240])
+        check("B-1 but an ingress that cannot be read at the END is NEEDS_ATTENTION, lock retained",
+              outcome["outcome"] == "refuse" and state["status"] == "NEEDS_ATTENTION_LOCK_RETAINED"
+              and (repo / ".kin-ops.lock").exists() and record.exists(), json.dumps(outcome)[:240])
+        check("B-1 the terminal ROLLED_BACK status is not left on the record",
+              state["ingress_rollback_end"]["enforced"] is True
+              and state["ingress_rollback_end"]["comparison"]["unchanged"] is False
+              and state["manual_next_action"] == rollout.GUARD_NEXT_ACTION, state["status"])
+        check("B-1 nothing about the network or the proxy was repaired automatically",
+              not any(c[:2] == ["docker", "network"] for c in host.calls)
+              and not any(c[:3] == ["docker", "compose", "restart"] for c in host.calls))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, manifest_path, record = scaffold(tmp)
+        # An UNRELATED guard: the relaxation is about the ingress comparison and nothing else.
+        host = Host(record, findings=(3, 4), ingress=PRESENT)
+        outcome = run_mode(rollout.mode_rollback, hung_inspect_host(host, HUNG_INSPECT),
+                           manifest_path, repo, record, stubs=FULL_ROLLBACK_STUBS)
+        state = read_record(record)
+        check("B-1 the unacknowledged finding guard still refuses under a hung inspect",
+              outcome["outcome"] == "refuse" and "finding data exists" in outcome.get("error", ""),
+              json.dumps(outcome)[:240])
+        check("B-1 and it refuses BEFORE anything is stopped, tagged or checked out",
+              not any(c[:2] == ["docker", "compose"] and "stop" in c for c in host.calls)
+              and not any("checkout" in c for c in host.calls)
+              and not any(c[:2] == ["docker", "tag"] for c in host.calls),
+              json.dumps(host.calls)[:240])
+        check("B-1 the unreadable observation is on the record without becoming the reason",
+              (state.get("ingress_rollback_start") or {}).get("observed", {}).get("shape")
+              == "indeterminate"
+              and state.get("manual_next_action") != rollout.GUARD_NEXT_ACTION
+              and state["status"] == "NEEDS_ATTENTION_LOCK_RETAINED"
+              and (repo / ".kin-ops.lock").exists(), json.dumps(state.get("failed_action")))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        repo, manifest_path, record = scaffold(tmp, with_record=False, with_lock=False)
+        host = Host(record, ingress=PRESENT)
+        # Pre-apply is NOT relaxed: an unreadable ingress refuses before the record and the lock.
+        outcome = drive_apply(hung_inspect_host(host, HUNG_INSPECT, until_quiesced=False),
+                              manifest_path, repo, record)
+        check("B-1 pre-apply still fails closed on an inspect that never returns",
+              outcome["outcome"] == "refuse"
+              and "not in a state this rollout can take as a baseline" in outcome.get("error", ""),
+              json.dumps(outcome)[:240])
+        check("B-1 the pre-apply refusal leaks no captured output",
+              "s3cret-value" not in outcome.get("error", "")
+              and "docker.sock" not in outcome.get("error", ""), outcome.get("error", "")[:200])
+        check("B-1 no record, no lock, nothing stopped or checked out before that refusal",
+              not record.exists() and not (repo / ".kin-ops.lock").exists()
+              and not any("stop" in c for c in host.calls)
+              and not any("checkout" in c for c in host.calls), json.dumps(host.calls)[:240])
+
+
 def test_nb5_call_sites():
     """NB5: removing the rollback-END checkpoint or the post-quiesce write must be caught."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -782,6 +927,7 @@ def main():
     test_b3_verify_guard()
     test_i6_nginx_is_proved_before_the_lock()
     test_i3_apply_gate_and_baseline()
+    test_b1_a_raising_ingress_inspect_never_blocks_recovery()
     test_nb5_call_sites()
     test_nb1_stale_next_action()
     test_b3_fail_does_not_overwrite_guard_action()

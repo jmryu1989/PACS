@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 
@@ -345,6 +346,124 @@ def test_ingress_shape_refuses_every_half_state():
           "never creates or deletes a Docker network" in text)
 
 
+# ---------------------------------------------------------------- B-1: an inspect that never returns
+# The reviewed defect: network_state and proxy_state documented that they never raise, but only a
+# non-zero exit and an unparsable body were answers. A `docker inspect` that hangs on a wedged
+# container until its 60 s timeout, or a client that cannot be started at all, threw out of the
+# rollback-start observation and stopped the previous api and orthanc from being restored.
+HUNG_PROXY = subprocess.TimeoutExpired(
+    ["docker", "inspect", "kin-proxy"], 60,
+    output=b'[{"Id": "proxy-1", "Config": {"Env": ["WORKFLOW_ROUTE_TOKEN=s3cret-value"]}}]',
+    stderr=b"Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+HUNG_NETWORK = subprocess.TimeoutExpired(["docker", "inspect", "--type", "network", "kin-workflow"], 60)
+NO_CLIENT = PermissionError(13, "Permission denied: '/home/ubuntu/.docker/config.json'")
+
+
+def raising_exec(error, calls=None):
+    def run(args, **kwargs):
+        if calls is not None:
+            calls.append(list(args))
+        raise error
+    return run
+
+
+def ingress_exec_raising(where, error, calls=None):
+    """The two inspects ingress_observation issues, with exactly ONE of them raising."""
+    answering = ingress_mock(**LIVE)
+
+    def run(args, **kwargs):
+        if calls is not None:
+            calls.append(list(args))
+        is_network = bool(args[:2] == ["docker", "inspect"] and "--type" in args)
+        if is_network == (where == "network"):
+            raise error
+        return answering(args, **kwargs)
+    return run
+
+
+def raises_type(name, expected, run):
+    try:
+        run()
+        check(name, False, "no exception")
+    except expected:
+        check(name, True)
+    except BaseException as error:  # noqa: BLE001 - any other exception is still a failure
+        check(name, False, type(error).__name__ + ": " + str(error)[:120])
+
+
+def test_an_inspect_that_never_returns_is_an_observation():
+    for label, error in (("TimeoutExpired", HUNG_NETWORK), ("OSError", NO_CLIENT)):
+        calls = []
+        state = with_exec(raising_exec(error, calls),
+                          lambda: rollout.network_state("kin-workflow"))
+        check("a network inspect that raises " + label + " is indeterminate",
+              state["state"] == "indeterminate", json.dumps(state))
+        check("and " + label + " is never read as an absent network", state["state"] != "absent")
+        check("the " + label + " answer keeps the exception TYPE only",
+              state["message"] == "docker inspect did not return: " + type(error).__name__,
+              json.dumps(state["message"]))
+        check("the " + label + " answer carries no argv, message, stdout or stderr",
+              "docker inspect --type" not in json.dumps(state) and "Permission denied" not in json.dumps(state)
+              and "/home/ubuntu" not in json.dumps(state), json.dumps(state))
+        check("the restricted inspect argv is unchanged when it raises",
+              calls == [["docker", "inspect", "--type", "network", "kin-workflow"]], json.dumps(calls))
+        refuses("network_absent still refuses on a " + label + " rather than guessing absence",
+                lambda e=error: with_exec(raising_exec(e), lambda: rollout.network_absent("kin-workflow")),
+                "refusing rather than guessing")
+
+    for label, error in (("TimeoutExpired", HUNG_PROXY), ("OSError", NO_CLIENT)):
+        calls = []
+        proxy = with_exec(raising_exec(error, calls), rollout.proxy_state)
+        check("a proxy inspect that raises " + label + " is unreadable",
+              proxy["readable"] is False, json.dumps(proxy))
+        check("the unreadable " + label + " reason is the exception TYPE only",
+              proxy["reason"] == "docker inspect did not return: " + type(error).__name__,
+              json.dumps(proxy["reason"]))
+        check("no captured stdout, stderr or credential text reaches the " + label + " record",
+              "s3cret-value" not in json.dumps(proxy) and "docker.sock" not in json.dumps(proxy)
+              and "Permission denied" not in json.dumps(proxy), json.dumps(proxy))
+        check("the restricted proxy inspect argv is unchanged when it raises",
+              calls == [["docker", "inspect", "kin-proxy"]], json.dumps(calls))
+
+    # The whole observation, both spawn sites, and the pre-mutation gate on top of it.
+    for where, error in (("proxy", HUNG_PROXY), ("network", HUNG_NETWORK), ("proxy", NO_CLIENT)):
+        observation = with_exec(ingress_exec_raising(where, error), rollout.ingress_observation)
+        check("a " + where + " inspect that raises " + type(error).__name__
+              + " makes the whole ingress indeterminate",
+              observation["shape"] == "indeterminate" and bool(observation["shape_problems"]),
+              json.dumps(observation["shape_problems"]))
+        check("the indeterminate observation still reports the stage it could not read",
+              any(("kin-proxy" if where == "proxy" else "kin-workflow") in problem
+                  for problem in observation["shape_problems"]),
+              json.dumps(observation["shape_problems"]))
+        refuses("a raising " + where + " inspect refuses before any mutation, even with the absence flag",
+                lambda w=where, e=error: with_exec(
+                    ingress_exec_raising(w, e),
+                    lambda: rollout.require_coherent_ingress("pre-apply", allow_absent=True)),
+                "not in a state this rollout can take as a baseline")
+
+    # The catch is confined to the two observation helpers: nothing that MUTATES may swallow a
+    # timeout and report a healthy exit code.
+    raises_type("a hung `nginx -t` still raises rather than reading as a passing check",
+                subprocess.TimeoutExpired,
+                lambda: with_exec(raising_exec(HUNG_PROXY), rollout.nginx_config_ok))
+    raises_type("a hung `docker tag` still raises out of run()", subprocess.TimeoutExpired,
+                lambda: with_exec(raising_exec(HUNG_PROXY), lambda: rollout.run(["docker", "tag", "a", "b"])))
+
+    # Refuse is not an observation: the argv rules must keep raising through both helpers.
+    check("Refuse can never be caught by the new subprocess handler",
+          not issubclass(rollout.Refuse, (subprocess.TimeoutExpired, OSError)))
+    denied = rollout.Refuse("docker subcommand not allowed: network")
+    refuses("a Refuse raised under network_state propagates instead of becoming indeterminate",
+            lambda: with_exec(raising_exec(denied), lambda: rollout.network_state("kin-workflow")),
+            "not allowed")
+    refuses("a Refuse raised under proxy_state propagates instead of becoming unreadable",
+            lambda: with_exec(raising_exec(denied), rollout.proxy_state), "not allowed")
+    refuses("the docker network argv is still refused by the rules themselves",
+            lambda: rollout.check_command(["docker", "network", "inspect", "kin-workflow"]),
+            "not allowed")
+
+
 def test_ingress_comparison_preserves_what_this_rollout_owns():
     baseline = observe(**LIVE)
     same = with_exec(ingress_mock(**LIVE), rollout.ingress_observation)
@@ -598,6 +717,7 @@ def main():
     test_network_absent_is_typed_only()
     test_ingress_shape_against_the_real_topology()
     test_ingress_shape_refuses_every_half_state()
+    test_an_inspect_that_never_returns_is_an_observation()
     test_ingress_comparison_preserves_what_this_rollout_owns()
     test_nginx_check_is_exit_code_only()
     test_finding_rows_and_rollback_clause()
