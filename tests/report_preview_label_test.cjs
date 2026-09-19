@@ -11,7 +11,12 @@ const preview = require('../worklist-v0/hpacs-lite/report-preview.js');
 const approved = { version: 1, rs: 'A', action: 'approve' };
 const unapproved = { version: 2, rs: 'W', action: 'save' };
 const addendum = { version: 3, rs: 'A', action: 'addendum' };
-const ACTIONS = ['approve', 'save', 'reset', 'preliminary', 'defer', 'discarded', '', null, undefined];
+// Stored actions plus near misses. Only an exact 'addendum' may change the
+// wording: a loose comparison would accept ['addendum'], and savedLabel does not
+// type-check the value before comparing it.
+const ACTIONS = ['approve', 'save', 'reset', 'preliminary', 'defer', 'discarded', '',
+  'Addendum', 'ADDENDUM', 'addendum ', ' addendum', ['addendum'], true, {}, null, undefined];
+const show = value => JSON.stringify(value) ?? String(value);
 
 test('only the pure label is exported and the browser factory still exists', () => {
   assert.deepEqual(Object.keys(preview), ['savedLabel']);
@@ -25,8 +30,8 @@ test('the printed header keeps the saved wording byte for byte', () => {
   assert.equal(preview.savedLabel(unapproved, true), '미승인 저장본 · v2 · RS W');
   // A response that predates the field, or carries any other action, reads as before.
   for (const action of ACTIONS) {
-    assert.equal(preview.savedLabel({ ...approved, action }, true), '승인된 저장본 · v1 · RS A', String(action));
-    assert.equal(preview.savedLabel({ ...unapproved, action }, true), '미승인 저장본 · v2 · RS W', String(action));
+    assert.equal(preview.savedLabel({ ...approved, action }, true), '승인된 저장본 · v1 · RS A', show(action));
+    assert.equal(preview.savedLabel({ ...unapproved, action }, true), '미승인 저장본 · v2 · RS W', show(action));
   }
 });
 
@@ -62,8 +67,8 @@ test('the label never says addendum for a version that was not one', () => {
     for (const rs of ['A', 'W', 'T', 'P', 'H'])
       for (const action of [...ACTIONS, 'addendum'])
         for (const withRs of [true, false]) {
-          const report = { version, rs, action }, text = preview.savedLabel(report, withRs);
-          assert.equal(text.includes('추가기재'), !!version && action === 'addendum', JSON.stringify(report));
-          assert.equal(text.includes('v' + version), !!version, JSON.stringify(report));
+          const report = { version, rs, action }, text = preview.savedLabel(report, withRs), where = show(report);
+          assert.equal(text.includes('추가기재'), !!version && action === 'addendum', where);
+          assert.equal(text.includes('v' + version), !!version, where);
         }
 });

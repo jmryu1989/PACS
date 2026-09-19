@@ -831,6 +831,99 @@ class ViewerJobPrintPages(unittest.TestCase):
                 self.no_writes(page)
                 page.close()
 
+    # TEST-S3-U1-ADDENDUM-OUTPUT: the head version's own action reaches this
+    # dialog in the report-preview response. An Addendum is named by its own
+    # name and its own number on the summary, its section and the footer of
+    # every page it owns; the comparison report on the same sheets keeps its
+    # own label, and no page may call the Addendum an ordinary saved report.
+    def addendum_data(self, action="addendum", version=3):
+        current = dict(report(version, "A", (CURRENT_MARK + "\n") * 80), action=action)
+        return self.data("20260801", "20260901", current_report=current)
+
+    def footer_text(self, pdf_page):
+        """The @page margin-box text of one page, page counter removed.
+
+        Joined without separators, so a line that wraps inside the box keeps its
+        characters contiguous (the parser rule of test_parser_01).
+        """
+        rows = runs(pdf_page)
+        self.assertTrue(rows, "page has no text")
+        footer = [row for row in rows if row[0] < BOTTOM_MARGIN_PT]
+        self.assertTrue(footer, "page has no footer text")
+        return "".join(flat(line) for line in lines(footer) if not re.fullmatch(r"[\d/]+", flat(line)))
+
+    def test_pages_14_addendum_is_named_by_its_own_version_on_every_page(self):
+        data = self.addendum_data()
+        page = self.prepared(data, "both", 'data-report-uid="' + UID_B + '"')
+        srcdoc = self.srcdoc(page)
+        self.assertIn("승인된 추가기재 · v3 · RS A", srcdoc)
+        self.assertIn("Current Study Report: 20260801 · 승인된 추가기재 · v3 · RS A", srcdoc)
+        self.assertIn("Comparison Study Report: 20260901 · 현재 검사보다 이후 · 미승인 저장본 · v2 · RS W", srcdoc)
+        # The wording an approved Addendum must never fall back to, and the
+        # lineage number the append-only history cannot support.
+        self.assertNotIn("승인된 저장본", srcdoc)
+        self.assertNotIn("과거", srcdoc)
+        reader, path = self.printed(srcdoc, "addendum-both.pdf")
+        texts = [sheet.extract_text() for sheet in reader.pages]
+        flats = [flat(text) for text in texts]
+        total = len(texts)
+        self.assertGreaterEqual(total, 4)
+        self.assertNotIn(flat("승인된 저장본"), "".join(flats))
+        current = [i for i, text in enumerate(flats) if CURRENT_MARK in text]
+        comparison = [i for i, text in enumerate(flats) if COMPARISON_MARK in text]
+        self.assertGreaterEqual(len(current), 2, texts)
+        self.assertGreaterEqual(len(comparison), 2, texts)
+        self.assertEqual(set(current) & set(comparison), set())
+        for index in current:
+            self.assertIn(flat("승인된 추가기재 · v3 · RS A"), flats[index])
+            footer = self.footer_text(reader.pages[index])
+            self.assertIn(flat("승인된 추가기재 · v3 · RS A"), footer,
+                          "page %d footer lost the addendum label" % (index + 1))
+            self.assertIn(flat("Current Study Report"), footer)
+            self.assertIn(flat("Study " + UID_A), footer)
+            self.assertNotIn("저장본", footer)
+            self.assertNotIn(UID_B, flats[index])
+        for index in comparison:
+            self.assertIn(flat("미승인 저장본 · v2 · RS W"), flats[index])
+            footer = self.footer_text(reader.pages[index])
+            self.assertIn(flat("미승인 저장본 · v2 · RS W"), footer,
+                          "page %d footer lost the comparison label" % (index + 1))
+            self.assertIn(flat("Study " + UID_B), footer)
+            self.assertNotIn("추가기재", footer)
+            self.assertNotIn(UID_A, flats[index])
+        print("OUTPUT IDENTITY ADDENDUM PDF pages=%d path=%s" % (total, path), flush=True)
+        self.no_writes(page)
+
+    # The response field decides a medico-legal label, so a value of another type
+    # is refused instead of being read as an ordinary saved report. Only a report
+    # this output would print is checked: another study's row is not touched.
+    def test_pages_15_a_non_string_action_refuses_that_report(self):
+        for name, value in [("array", ["addendum"]), ("number", 7), ("object", {"action": "addendum"})]:
+            with self.subTest(action=name):
+                data = self.addendum_data(action=value)
+                page = self.prepared(data)
+                self.assertIn("<main>", self.srcdoc(page) or "")
+                for choice in ("saved", "both"):
+                    self.choose(page, choice)
+                    self.wait_status(page, "출력 판독문 정보를 확인할 수 없습니다.")
+                    self.assertTrue(self.print_disabled(page))
+                    self.assertEqual(self.srcdoc(page), "")
+                page.select_option(SELECT, "prior")
+                page.wait_for_function(SRCDOC, arg='data-report-uid="' + UID_B + '"', timeout=60000)
+                srcdoc = self.srcdoc(page)
+                self.assertIn("미승인 저장본 · v2 · RS W", srcdoc)
+                self.assertNotIn('data-report-uid="' + UID_A + '"', srcdoc)
+                self.assertNotIn("추가기재", srcdoc)
+                self.no_writes(page)
+                page.close()
+        # A missing key is not an error: a response without the field keeps the
+        # ordinary wording, which is what every other case in this file asserts.
+        data = self.data("20260801", "20260901")
+        self.assertNotIn("action", data["previews"][UID_A]["report"])
+        page = self.prepared(data, "saved", 'data-report-uid="' + UID_A + '"')
+        self.assertIn("승인된 저장본 · v1 · RS A", self.srcdoc(page))
+        self.no_writes(page)
+
     def test_parser_01_keeps_font_runs_in_stream_order(self):
         # The exact runs pypdf reported for the summary-page footer of the CI
         # long-identity PDF (validate run 34614012107, Linux fallback fonts):

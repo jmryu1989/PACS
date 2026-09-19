@@ -297,6 +297,13 @@ test('a draft entry keeps the current role and carries the unsaved footer', () =
  * number. ReportVersion has no parent-version column and a discarded row can sit
  * at a lower number, so any lineage number on a page would be invented. */
 
+// Stored actions plus near misses. Only an exact 'addendum' may change the
+// wording: a loose comparison would accept ['addendum'], and neither surface
+// type-checks the value before comparing it.
+const OTHER_ACTIONS = ['approve', 'save', 'reset', 'preliminary', 'defer', 'discarded', '',
+  'Addendum', 'ADDENDUM', 'addendum ', ' addendum', ['addendum'], true, {}, null, undefined];
+const show = value => JSON.stringify(value) ?? String(value);
+
 test('reportLabel names an addendum by its own version and leaves every other action alone', () => {
   assert.equal(identity.reportLabel(addendum), '승인된 추가기재 · v3 · RS A');
   // Exactly one version number appears, and it is this row's own.
@@ -304,10 +311,10 @@ test('reportLabel names an addendum by its own version and leaves every other ac
   assert.ok(!identity.reportLabel(addendum).includes('저장본'));
   // Every other stored action keeps the saved wording byte for byte, including
   // a response that predates the field.
-  for (const action of ['approve', 'save', 'reset', 'preliminary', 'defer', 'discarded', '', null, undefined])
-    assert.equal(identity.reportLabel({ ...approved, action }), '승인된 저장본 · v1 · RS A', String(action));
-  for (const action of ['approve', 'save', 'defer', null, undefined])
-    assert.equal(identity.reportLabel({ ...unapproved, action }), '미승인 저장본 · v2 · RS W', String(action));
+  for (const action of OTHER_ACTIONS) {
+    assert.equal(identity.reportLabel({ ...approved, action }), '승인된 저장본 · v1 · RS A', show(action));
+    assert.equal(identity.reportLabel({ ...unapproved, action }), '미승인 저장본 · v2 · RS W', show(action));
+  }
   // An addendum row that is not the approved state still says addendum, and the
   // version and unsaved rules keep winning over the action.
   assert.equal(identity.reportLabel({ version: 4, rs: 'W', action: 'addendum' }), '미승인 추가기재 · v4 · RS W');
@@ -343,8 +350,8 @@ test('the reading window preview and this dialog agree on every saved label', ()
   assert.equal(typeof reportPreview.savedLabel, 'function');
   for (const version of [0, 1, 3])
     for (const rs of ['A', 'W', 'T', 'P', 'H'])
-      for (const action of ['approve', 'addendum', 'save', 'reset', 'preliminary', 'defer', 'discarded', null, undefined]) {
-        const report = { version, rs, action }, label = identity.reportLabel(report), where = JSON.stringify(report);
+      for (const action of [...OTHER_ACTIONS, 'addendum']) {
+        const report = { version, rs, action }, label = identity.reportLabel(report), where = show(report);
         assert.equal(reportPreview.savedLabel(report, true), label, where);
         // The preview's repeated identity line is the same text without RS.
         assert.equal(reportPreview.savedLabel(report, false), version ? label.replace(` · RS ${rs}`, '') : label, where);
