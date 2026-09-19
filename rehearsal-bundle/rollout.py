@@ -38,15 +38,38 @@ added. Option B delivers SERVICES = (api, orthanc) with the two accepted Compose
 leaves the running kin-proxy untouched: no proxy image build, no proxy recreate, no
 kin-workflow network or host route directory created, deleted or activated.
 
-C4/C5 proxy guard. After checkout the on-disk compose declares a top-level, non-external
-   network kin-workflow that only the proxy references. Whether this installed Compose
-   creates an unreferenced network for an explicit service list is host behaviour and is
-   unexecuted here, so it is guarded, not assumed: `docker inspect --type network
-   kin-workflow` must answer the explicit not-found form, and kin-proxy must carry neither
-   that network nor an /etc/kin-workflow mount. Any other inspect error refuses. A
-   post-apply trip is NEEDS_ATTENTION with lock and record retained and NO automatic
-   rollback, because a rollback cannot restore external network state. This runner never
-   creates or deletes a Docker network.
+C4/C5 ingress guard. After checkout the on-disk compose declares a top-level, non-external
+   network kin-workflow that only the proxy references. The rollout must not create, change or
+   remove it, so it is observed, not assumed. A post-apply trip is NEEDS_ATTENTION with lock and
+   record retained and NO automatic rollback, because a rollback cannot restore external network
+   state. This runner never creates or deletes a Docker network.
+
+v5 corrects the ingress guard itself, which was the only code blocker for the option-B rollout.
+I1 The invariant was always "this deployment does not create or change the workflow ingress",
+   but it was implemented as "the ingress must not exist". The host was never inspected until
+   2026-09-19, when kin-proxy was observed joined to kin-workflow with the declared route mount,
+   exactly as docker-compose.prod.yml has declared since 2026-09-17. The absence rule therefore
+   refused the real production topology. The rule is now PRESERVATION: a coherent observation is
+   taken before any change and every later stage must still match it.
+I2 The detector compared Destination against the host SOURCE /etc/kin-workflow, while the real
+   Destination is /etc/nginx/workflow, so it answered False for the product's own compose. The
+   unit fixtures injected the same wrong value and passed. Mounts are now compared as WHOLE
+   records (type, source, destination, mode, rw, propagation) against the declared route.
+I3 Only two observations are coherent enough to become a baseline: the ingress fully present in
+   its declared shape, or fully absent (the legacy synthetic shape). Half-created, half-removed,
+   read-write, foreign-source and unreadable states refuse BEFORE any mutation. Absence on this
+   product's host is a change, not a new baseline, so the mutate path requires an explicit
+   --acknowledge-absent-ingress-baseline to accept it.
+I4 The separately managed workflow receiver is recorded but never compared. Its restart rotates
+   the network's member list and its endpoint, and that must never keep this runner from
+   restoring the previous API.
+I5 rollback-start records and reports an ingress difference instead of refusing: the rollback
+   restores api and orthanc images and does not touch the ingress at all. Every other guard
+   (database, backup, image, writer, acknowledgement, lock) is unchanged, and rollback-END still
+   ends in NEEDS_ATTENTION with the lock retained when the ingress is not what it was.
+I6 `nginx -t` now runs BEFORE the lock, the writers and the checkout as well as after the
+   update. Only its exit code is read: the proxy configuration includes a route directory owned
+   by the receiver, and this runner never copies configuration or route contents into a record.
 C6 findings rollback. Finding and FindingRevision counts are read behind to_regclass
    guards, so a rollback taken before the migration exists still works, and they need their
    OWN acknowledgement flag: --acknowledge-finding-inaccessibility, never the ViewerJob one.
@@ -121,7 +144,22 @@ CHECKOUT_UMASK = 0o022
 # Option B: the running proxy is never addressed by a delivery command, only inspected.
 PROXY_CONTAINER = "kin-proxy"
 WORKFLOW_NETWORK = "kin-workflow"
-WORKFLOW_MOUNT = "/etc/kin-workflow"
+# I2: the route the running proxy actually carries. docker-compose.prod.yml:23 declares
+# /etc/kin-workflow/nginx:/etc/nginx/workflow:ro and the 2026-09-19 host observation shows exactly
+# that bind. The previous constant was the host SOURCE and was compared against the Destination,
+# so the detector could never be true for the product's own compose.
+WORKFLOW_ROUTE_SOURCE = "/etc/kin-workflow/nginx"
+WORKFLOW_ROUTE_DESTINATION = "/etc/nginx/workflow"
+# The whole mount tuple. A Destination alone cannot tell the declared read-only route apart from
+# a writable mount, or from a different host directory placed at the same path.
+MOUNT_FIELDS = ("Type", "Name", "Source", "Destination", "Mode", "RW", "Propagation")
+# The ingress observation is a durable record schema of its own: a record written by an older
+# runner carries no baseline in this schema, and one is never invented after the fact (I3).
+INGRESS_SCHEMA = 1
+# Only what this rollout could itself influence is compared. The workflow network's member list
+# and the receiver's endpoints are recorded and deliberately NOT compared (I4).
+COMPARED_PROXY_FIELDS = ("id", "running", "started_at", "networks", "mounts")
+COMPARED_NETWORK_FIELDS = ("state", "id", "internal")
 # The explicit typed answers docker gives for an absent network. Anything else refuses (C5).
 # Both forms NAME the network that was asked about, and both are the WHOLE message. The daemon
 # form is what Docker 28.0.4 actually answered on the hosted rehearsal runner; the object form is
@@ -641,30 +679,182 @@ def typed_network_absence(name, message):
     return lines[0].casefold() in accepted
 
 
+def network_state(name):
+    """C5/I3: a typed observation of one Docker network. It never guesses and never raises.
+
+    `state` is "present" with the identity fields, "absent" only for the exact typed not-found
+    answer for exactly this name, or "indeterminate". Indeterminate is a fact about what could
+    not be learned, never an absence, and the callers refuse on it before any mutation.
+    """
+    result = spawn(["docker", "inspect", "--type", "network", name], timeout=60)
+    if result.returncode != 0:
+        message = (result.stderr or b"").decode("utf-8", "replace").strip()
+        if typed_network_absence(name, message):
+            return {"name": name, "state": "absent"}
+        return {"name": name, "state": "indeterminate", "message": message[:300]}
+    try:
+        body = json.loads((result.stdout or b"").decode("utf-8", "replace"))[0]
+        if not isinstance(body, dict):
+            raise ValueError("the inspect entry is not an object")
+    except (ValueError, IndexError, TypeError) as error:
+        return {"name": name, "state": "indeterminate",
+                "message": "docker exited 0 with an unreadable network object: " + type(error).__name__}
+    members = [entry for entry in (body.get("Containers") or {}).values() if isinstance(entry, dict)]
+    return {"name": name, "state": "present", "id": body.get("Id"), "internal": body.get("Internal"),
+            # I4: observational only. The workflow receiver is managed outside this repository, so
+            # its restart rotates this list and its endpoint id; compare_ingress never reads it.
+            "member_names": sorted(str(entry.get("Name")) for entry in members if entry.get("Name"))}
+
+
 def network_absent(name):
     """C5: only the explicit typed not-found answer means absent; any other error refuses."""
-    result = spawn(["docker", "inspect", "--type", "network", name], timeout=60)
-    if result.returncode == 0:
+    state = network_state(name)
+    if state["state"] == "present":
         return False
-    message = (result.stderr or b"").decode("utf-8", "replace").strip()
-    if typed_network_absence(name, message):
+    if state["state"] == "absent":
         return True
     raise Refuse("Could not determine whether network " + name + " exists; refusing rather than "
-                 "guessing. docker said: " + message[:300])
+                 "guessing. docker said: " + str(state.get("message"))[:300])
 
 
-def proxy_guard():
-    """Option B invariants of the running proxy. Inspection only; nothing is created or removed."""
-    raw = json.loads(run(["docker", "inspect", PROXY_CONTAINER]))[0]
-    networks = sorted((raw.get("NetworkSettings") or {}).get("Networks") or {})
-    mounts = sorted(m.get("Destination") for m in raw.get("Mounts") or [] if m.get("Destination"))
-    absent = network_absent(WORKFLOW_NETWORK)
-    joined = WORKFLOW_NETWORK in networks
-    mounted = any(str(dest).startswith(WORKFLOW_MOUNT) for dest in mounts)
-    return {"network_absent": absent, "proxy_joined_workflow_network": joined,
-            "proxy_has_workflow_mount": mounted, "proxy_networks": networks, "proxy_mounts": mounts,
-            "proxy_image": raw.get("Image"), "proxy_started_at": (raw.get("State") or {}).get("StartedAt"),
-            "inert": absent and not joined and not mounted}
+def mount_record(entry):
+    """Pure: one whole mount tuple, with every field this runner compares."""
+    return {field: (entry or {}).get(field) for field in MOUNT_FIELDS}
+
+
+def mount_records(entries):
+    records = [mount_record(entry) for entry in entries or [] if isinstance(entry, dict)]
+    return sorted(records, key=lambda record: json.dumps(record, sort_keys=True))
+
+
+def proxy_state():
+    """I3: a typed observation of the running proxy. It never raises.
+
+    An unreadable answer is recorded as unreadable so the caller refuses on an unknown state
+    rather than on an exception, and so a read-only observation still produces a report. Only the
+    exit code of a failed inspect is kept; the daemon's message is not part of the answer.
+    """
+    result = spawn(["docker", "inspect", PROXY_CONTAINER], timeout=60)
+    if result.returncode != 0:
+        return {"container": PROXY_CONTAINER, "readable": False,
+                "reason": "docker inspect exited " + str(result.returncode)}
+    try:
+        body = json.loads((result.stdout or b"").decode("utf-8", "replace"))[0]
+        if not isinstance(body, dict):
+            raise ValueError("the inspect entry is not an object")
+    except (ValueError, IndexError, TypeError) as error:
+        return {"container": PROXY_CONTAINER, "readable": False,
+                "reason": "docker exited 0 with an unreadable container object: " + type(error).__name__}
+    return {"container": PROXY_CONTAINER, "readable": True, "id": body.get("Id"),
+            "image": body.get("Image"), "running": (body.get("State") or {}).get("Running"),
+            "started_at": (body.get("State") or {}).get("StartedAt"),
+            "networks": sorted((body.get("NetworkSettings") or {}).get("Networks") or {}),
+            "mounts": mount_records(body.get("Mounts"))}
+
+
+def workflow_routes(mounts):
+    """Pure: mounts that claim either end of the workflow route.
+
+    Matching on EITHER end on purpose: a mount that is half right must be FOUND and judged, not
+    missed. Matching Destination alone was the defect that made the old detector always False.
+    """
+    return [record for record in mounts or []
+            if record.get("Destination") == WORKFLOW_ROUTE_DESTINATION
+            or record.get("Source") == WORKFLOW_ROUTE_SOURCE]
+
+
+def route_is_declared_shape(record):
+    """Pure: exactly the declared read-only bind, both ends and the writability."""
+    return (record.get("Type") == "bind" and record.get("Source") == WORKFLOW_ROUTE_SOURCE
+            and record.get("Destination") == WORKFLOW_ROUTE_DESTINATION and record.get("RW") is False)
+
+
+def ingress_shape(proxy, network):
+    """I3: pure classification of one live observation. Two shapes may become a baseline.
+
+    present: the network exists and is internal, the proxy is joined to it, and the proxy carries
+             exactly one workflow route, read-only, between the two declared paths.
+    absent:  the network answers the typed not-found form, the proxy is in no such network and
+             carries no workflow route at all. This is the legacy synthetic shape; the production
+             host was observed as `present` on 2026-09-19.
+    Everything else is `partial` or `indeterminate`: half-created, half-removed, writable, a
+    foreign host directory, or an answer that could not be read. None of those is a baseline.
+    """
+    unknown = []
+    if proxy.get("readable") is not True:
+        unknown.append(PROXY_CONTAINER + " could not be inspected: " + str(proxy.get("reason")))
+    if network.get("state") == "indeterminate":
+        unknown.append("could not determine whether " + WORKFLOW_NETWORK + " exists")
+    if unknown:
+        return "indeterminate", unknown
+    joined = WORKFLOW_NETWORK in (proxy.get("networks") or [])
+    routes = workflow_routes(proxy.get("mounts"))
+    present = network.get("state") == "present"
+    if not present and not joined and not routes:
+        return "absent", []
+    problems = []
+    if not present:
+        problems.append(WORKFLOW_NETWORK + " does not exist, yet " + PROXY_CONTAINER + " still carries "
+                        + ("its membership" if joined else "") + (" and " if joined and routes else "")
+                        + ("a workflow route mount" if routes else ""))
+    elif network.get("internal") is not True:
+        problems.append(WORKFLOW_NETWORK + " exists but is not internal (Internal="
+                        + json.dumps(network.get("internal")) + ")")
+    if present and not joined:
+        problems.append(PROXY_CONTAINER + " is not joined to " + WORKFLOW_NETWORK)
+    if len(routes) != 1:
+        problems.append(PROXY_CONTAINER + " carries " + str(len(routes)) + " mounts claiming the "
+                        "workflow route; exactly one is declared")
+    elif not route_is_declared_shape(routes[0]):
+        problems.append("the workflow route is not the declared read-only bind "
+                        + WORKFLOW_ROUTE_SOURCE + " -> " + WORKFLOW_ROUTE_DESTINATION
+                        + " (observed type " + json.dumps(routes[0].get("Type")) + ", source "
+                        + json.dumps(routes[0].get("Source")) + ", destination "
+                        + json.dumps(routes[0].get("Destination")) + ", RW "
+                        + json.dumps(routes[0].get("RW")) + ")")
+    # Every requirement of the declared shape held, so this is the present ingress; anything that
+    # failed one of them is a half state and may not be adopted as a baseline.
+    return ("partial" if problems else "present"), problems
+
+
+def ingress_observation():
+    """The live ingress as it actually is. Observation only: nothing is created, removed,
+    connected or disconnected here, and no route or configuration file is ever read."""
+    proxy = proxy_state()
+    network = network_state(WORKFLOW_NETWORK)
+    shape, problems = ingress_shape(proxy, network)
+    return {"schema": INGRESS_SCHEMA, "observed_utc": stamp(), "proxy": proxy, "network": network,
+            "shape": shape, "shape_problems": problems}
+
+
+def compare_ingress(baseline, current):
+    """I1/I4: pure. Did the ingress this rollout must preserve move since the baseline?
+
+    Compared: the proxy's own identity, run state, network membership and WHOLE mount table, and
+    the workflow network's existence, id and internal flag. NOT compared: the network's member
+    list and the receiver's endpoints, because that container is managed outside this repository
+    and an unrelated restart of it must never keep the previous API from coming back.
+    """
+    if not isinstance(baseline, dict) or baseline.get("schema") != INGRESS_SCHEMA:
+        return {"comparable": False, "unchanged": False,
+                "differences": ["this record carries no ingress baseline in schema "
+                                + str(INGRESS_SCHEMA) + ", so there is nothing to compare against. "
+                                "It was written before the ingress observation existed, or by a "
+                                "different runner. A baseline is never invented after the fact: "
+                                "decide manually what the ingress should be."]}
+    differences = []
+    was, is_now = baseline.get("proxy") or {}, (current.get("proxy") or {})
+    if was.get("readable") is not True or is_now.get("readable") is not True:
+        differences.append(PROXY_CONTAINER + " was not readable on both sides of the comparison")
+    else:
+        differences += [PROXY_CONTAINER + " " + field + " differs from the recorded baseline"
+                        for field in COMPARED_PROXY_FIELDS if was.get(field) != is_now.get(field)]
+    was, is_now = baseline.get("network") or {}, (current.get("network") or {})
+    differences += [WORKFLOW_NETWORK + " " + field + " differs from the recorded baseline"
+                    for field in COMPARED_NETWORK_FIELDS if was.get(field) != is_now.get(field)]
+    return {"comparable": True, "unchanged": not differences, "differences": differences,
+            "not_compared": ["the workflow network's member list",
+                             "the workflow receiver's identity and endpoints"]}
 
 
 def finding_ack_record(compatibility, acknowledged, manifest, phase):
@@ -690,11 +880,14 @@ def finding_ack_record(compatibility, acknowledged, manifest, phase):
 
 
 GUARD_NEXT_ACTION = (
-    "The proxy or the kin-workflow network is not in the state this rollout requires. A rollback does "
-    "NOT remedy that: this runner never creates or deletes a Docker network, and restoring the previous "
-    "api and orthanc leaves any network or host route directory exactly where it is. The lock and the "
-    "record are retained deliberately. Investigate who changed the proxy or the network, decide the "
-    "remedy outside this runner, and only then re-run the mode that refused.")
+    "The live ingress is no longer the one this rollout observed before it started: the proxy, the "
+    "kin-workflow network or the route mount has moved, and this rollout is required to leave all "
+    "three exactly as it found them. A rollback does NOT remedy that: this runner never creates or "
+    "deletes a Docker network and never recreates the proxy, so restoring the previous api and "
+    "orthanc leaves the network, the receiver and the host route directory exactly where they are. "
+    "The lock and the record are retained deliberately, and the record holds both the baseline "
+    "observation and this one. Compare them, find out who changed the proxy, the network or the "
+    "route mount, decide the remedy outside this runner, and only then re-run the mode that refused.")
 
 
 def clear_terminal_annotations(state):
@@ -707,36 +900,86 @@ def clear_terminal_annotations(state):
     return state
 
 
-def guard_or_needs_attention(record, state, key, stage):
-    """B3: observe and always record. A non-inert guard is NEEDS_ATTENTION with the lock kept."""
-    guard = proxy_guard()
-    state[key] = guard
-    # NB1: the flag describes THIS invocation, so an inert observation clears an earlier trip.
-    state["guard_tripped_this_invocation"] = not guard["inert"]
-    if not guard["inert"]:
+INGRESS_STOP_HERE = (
+    "This runner never creates or deletes a Docker network and never recreates the proxy. Stop "
+    "here: any lock, record and backup are retained. Do NOT run an automatic rollback, which "
+    "cannot restore external network state; decide the next step explicitly.")
+
+
+def ingress_checkpoint(record, state, key, stage, enforce=True):
+    """I1: observe, compare against the baseline taken before the change, and ALWAYS record.
+
+    enforce=False is used at rollback-start and nowhere else: there a difference is recorded and
+    reported, but it may not stop the previous api and orthanc from being restored, because the
+    rollback does not touch the ingress at all. Every other stage fails closed, including a record
+    that carries no baseline in the current schema.
+    """
+    observation = ingress_observation()
+    comparison = compare_ingress(state.get("ingress_baseline"), observation)
+    state[key] = {"stage": stage, "enforced": bool(enforce), "observed": observation,
+                  "comparison": comparison}
+    # NB1: the flag describes THIS invocation, so an unchanged observation clears an earlier trip.
+    state["guard_tripped_this_invocation"] = bool(enforce) and not comparison["unchanged"]
+    if enforce and not comparison["unchanged"]:
         state["status"] = "NEEDS_ATTENTION_LOCK_RETAINED"
         state["failed_action"] = stage
         state["manual_next_action"] = GUARD_NEXT_ACTION
         write_private(record, state)
-        raise Refuse("Proxy guard tripped at " + stage + ": " + json.dumps(
-            {"network_absent": guard["network_absent"], "proxy_networks": guard["proxy_networks"],
-             "proxy_mounts": guard["proxy_mounts"]}) + "\n" + GUARD_NEXT_ACTION)
+        raise Refuse("Ingress preservation failed at " + stage + ":\n  - "
+                     + "\n  - ".join(comparison["differences"])
+                     + "\nBoth observations are in " + str(record) + ".\n" + GUARD_NEXT_ACTION)
     write_private(record, state)
-    return guard
+    if not comparison["unchanged"]:
+        # I5: reported, not fatal. Silence here would hide a real host change behind a rollback.
+        sys.stderr.write("\nNOTE: the live ingress differs from the recorded baseline at " + stage
+                         + ":\n  - " + "\n  - ".join(comparison["differences"])
+                         + "\nThis is recorded in " + str(record) + " and does NOT stop the previous "
+                         "api and orthanc from being restored. It is checked again at rollback-end, "
+                         "which ends in NEEDS_ATTENTION if it is still different.\n")
+    return state[key]
 
 
-def require_proxy_inert(stage):
-    guard = proxy_guard()
-    if not guard["inert"]:
+def require_coherent_ingress(stage, allow_absent=False):
+    """I3: the pre-mutation gate. Only a coherent observation may become the baseline.
+
+    On this product's host the coherent shape is the PRESENT one, observed on 2026-09-19. Absence
+    is therefore a CHANGE to the host rather than a new baseline, and it is accepted only when the
+    operator says so explicitly, which is recorded. Absence remains a first-class shape because the
+    synthetic rehearsal stacks legitimately have no ingress at all.
+    """
+    observation = ingress_observation()
+    shape = observation["shape"]
+    if shape == "present" or (shape == "absent" and allow_absent):
+        return observation
+    if shape == "absent":
         raise Refuse(
-            "Proxy guard tripped at " + stage + ": the workflow receiver path is active or partly created.\n"
-            "  " + WORKFLOW_NETWORK + " absent: " + str(guard["network_absent"]) + "\n"
-            "  kin-proxy networks: " + json.dumps(guard["proxy_networks"]) + "\n"
-            "  kin-proxy mounts: " + json.dumps(guard["proxy_mounts"]) + "\n"
-            "This runner never creates or deletes a Docker network and never recreates the proxy. "
-            "Stop here: the lock, the record and every backup are retained. Do NOT run an automatic "
-            "rollback, which cannot restore external network state; decide the next step explicitly.")
-    return guard
+            "The live ingress is absent at " + stage + ": " + WORKFLOW_NETWORK + " does not exist and "
+            + PROXY_CONTAINER + " carries no " + WORKFLOW_ROUTE_DESTINATION + " route. The production "
+            "proxy was observed carrying both, so this is a change to the host, not a newly "
+            "acceptable baseline, and it is never adopted silently.\n" + INGRESS_STOP_HERE + "\n"
+            "If this host genuinely never had the ingress, re-run naming "
+            "--acknowledge-absent-ingress-baseline so that decision is recorded with the run.")
+    raise Refuse(
+        "The live ingress is not in a state this rollout can take as a baseline at " + stage + ":\n  - "
+        + "\n  - ".join(observation["shape_problems"] or ["no detail was recorded"])
+        + "\nA half-created, half-removed, writable, foreign or unreadable ingress is never read as "
+        "either present or absent.\n" + INGRESS_STOP_HERE)
+
+
+def nginx_config_ok():
+    """I6: `nginx -t` inside the running proxy, EXIT CODE ONLY.
+
+    The proxy configuration includes a route directory written by the separately managed workflow
+    receiver. Its contents are none of this runner's business, so neither stdout nor stderr is
+    read, recorded or printed here; only whether the configuration parses.
+    """
+    return run_rc(["docker", "exec", PROXY_CONTAINER, "nginx", "-t"], timeout=120) == 0
+
+
+def nginx_refusal(when):
+    return Refuse("`nginx -t` fails inside " + PROXY_CONTAINER + " " + when + ". Only the exit code "
+                  "is read: this runner never copies the proxy configuration or any route file into "
+                  "its output. Fix the proxy configuration outside this runner, then re-run.")
 
 
 # ---------------------------------------------------------------- preservation
@@ -1081,8 +1324,14 @@ def stop_writers(repo):
 def start_services(repo):
     run(compose(repo) + ["up", "-d", "--no-deps", "--no-build", "--pull", "never",
                          "--force-recreate"] + list(SERVICES), cwd=repo, timeout=900)
-    run(["docker", "exec", "kin-proxy", "nginx", "-t"])
-    run(["docker", "exec", "kin-proxy", "nginx", "-s", "reload"])
+    # I6: exit codes only, here as well as before the lock. `run()` would put the child's stderr
+    # into the refusal, and that stderr quotes the offending configuration line.
+    if not nginx_config_ok():
+        raise nginx_refusal("after the service update")
+    if run_rc(["docker", "exec", PROXY_CONTAINER, "nginx", "-s", "reload"], timeout=120) != 0:
+        raise Refuse("`nginx -s reload` failed inside " + PROXY_CONTAINER + ". Only the exit code is "
+                     "read; the configuration is never copied into this output. The services are up "
+                     "but the proxy is still serving its previous configuration.")
 
 
 def apply_migration(repo):
@@ -1220,8 +1469,9 @@ def fresh_facts(repo, manifest, with_database, cap=MAX_HASHED_ROWS):
         "locks": {"/home/ubuntu/.kin-ops.lock": pathlib.Path("/home/ubuntu/.kin-ops.lock").exists(),
                   ".kin-ops.lock": lock_path(repo).exists()},
         "disk": {"repository": {"total": total, "free": free}},
-        # C4/C5: the option-B invariant is observed on every pass, never assumed.
-        "proxy_guard": proxy_guard(),
+        # C4/C5/I1: the live ingress is observed on every pass, never assumed. This is an
+        # observation, so an unreadable answer is reported rather than raised.
+        "ingress": ingress_observation(),
     }
     if with_database:
         facts["database"] = database_facts(cap)
@@ -1299,6 +1549,9 @@ def mode_observe(args):
     write_private(out, report)
     ready = bool(report["matches_pinned_baseline"]) and (args.no_database or bool(report["database_ready"]))
     print(json.dumps({"written": str(out), "matches_pinned_baseline": report["matches_pinned_baseline"],
+                      # I3: the one fact a read-only pass can give about whether apply would refuse.
+                      "ingress_shape": facts["ingress"]["shape"],
+                      "ingress_shape_problems": facts["ingress"]["shape_problems"],
                       "capacity_ok": report.get("capacity_ok"), "database_ready": report["database_ready"],
                       "identity_probe_ok": "identity_probe" in report, "mismatch": report["mismatch"],
                       "database_error": report["database_error"],
@@ -1393,9 +1646,16 @@ def mode_apply(args):
     # been stopped or locked. Writers are running, so this is metadata, never a baseline.
     probe = identity_probe(tables, keys, args.max_hashed_rows)
     # Enforced before the lock: derivation alone never authorizes an operation, so the live
-    # bookkeeping must reconcile with the pin, and the proxy must still be inert.
+    # bookkeeping must reconcile with the pin.
     migration_state = verify_observed_migration_state(facts["database"]["migrations"], manifest)
-    pre_guard = require_proxy_inert("pre-apply")
+    # I3: the baseline every later stage is compared against. A shape that cannot be read as
+    # coherently present or coherently absent refuses here, before anything is locked or stopped.
+    pre_ingress = require_coherent_ingress("pre-apply", allow_absent=args.acknowledge_absent_ingress_baseline)
+    # I6: the proxy configuration is proved to parse BEFORE the lock, the writers and the checkout.
+    # It used to run only after api and orthanc had been recreated, so a route file written by the
+    # receiver failed at the worst possible moment.
+    if not nginx_config_ok():
+        raise nginx_refusal("before anything was locked, stopped or checked out")
     backup = verify_backup_components(args.backup, manifest, max_age_seconds=args.max_age)
     if facts["disk"]["repository"]["free"] < args.min_free_bytes:
         raise Refuse("Refusing to mutate with less than the required free space")
@@ -1411,6 +1671,11 @@ def mode_apply(args):
              "hash_cap": args.max_hashed_rows,
              "capacity_pre_stop": facts["database"]["capacity"]["counts"],
              "identity_probe": probe,
+             # I1: written with the record itself, so every later stage - including a rollback from
+             # a failure inside apply - has the observation it must restore the host to.
+             "ingress_baseline": pre_ingress,
+             "absent_ingress_baseline_acknowledged": bool(args.acknowledge_absent_ingress_baseline),
+             "nginx_config_ok_pre_apply": True,
              "started_utc": stamp()}
     record = create_record(args.record, state)
     lock = take_lock(repo, token)
@@ -1426,7 +1691,6 @@ def mode_apply(args):
         write_private(record, state)
 
         state["migration_state"] = migration_state
-        state["proxy_guard_pre_apply"] = pre_guard
         checkout_utc = stamp()
         move_checkout(repo, manifest["target_sha"], manifest["target_tree"])
         state["checkout_utc"] = checkout_utc
@@ -1448,9 +1712,10 @@ def mode_apply(args):
         # C8: the served /worklist/ tree is proved over HTTP above; config/ohif.js is injected by
         # the Orthanc OHIF plugin rather than byte-served, so this is its only real proof.
         state["delivered_on_disk"] = verify_delivered_on_disk(repo, manifest, state["checkout_utc"])
-        # C4: a post-apply trip is NEEDS_ATTENTION with lock and record retained. No automatic
-        # rollback follows: it could not restore external network state.
-        guard_or_needs_attention(record, state, "proxy_guard_post_apply", "post-apply")
+        # C4/I1: the ingress must be exactly what it was before the change. A difference is
+        # NEEDS_ATTENTION with lock and record retained. No automatic rollback follows: it could
+        # not restore external network state.
+        ingress_checkpoint(record, state, "ingress_post_apply", "post-apply")
         if running_image() != build["image_id"]:
             raise Refuse("Running API is not the candidate image")
         state["applied_utc"] = stamp()
@@ -1509,9 +1774,9 @@ def mode_verify(args):
             "not_established": ["MIP orientation clinical correctness", "physician acceptance",
                                 "multi-monitor and accessibility use", "any regulatory judgement"],
         }
-        # B3: hours can pass between apply and verify, so the option-B invariant is observed and
-        # recorded once more. A drifted proxy or network refuses here and keeps the lock.
-        guard_or_needs_attention(record, state, "proxy_guard_verify_end", "verify-end")
+        # B3/I1: hours can pass between apply and verify, so the ingress is observed and compared
+        # once more. A moved proxy, network or route mount refuses here and keeps the lock.
+        ingress_checkpoint(record, state, "ingress_verify_end", "verify-end")
         state["status"] = "DEPLOYED"
         clear_terminal_annotations(state)
         state["finalized_utc"] = stamp()
@@ -1538,8 +1803,13 @@ def mode_rollback(args):
                                    "MIGRATED_ROWS_PRESERVED", "NEEDS_ATTENTION_LOCK_RETAINED"}:
         raise Refuse("Rollback is not valid from the current durable state")
     try:
-        # B3: the proxy/network state is observed and recorded before anything is decided.
-        guard_or_needs_attention(record, state, "proxy_guard_rollback_start", "rollback-start")
+        # I5: the ingress is observed, compared and recorded before anything is decided, but a
+        # difference does NOT refuse here. A rollback restores the previous api and orthanc images
+        # and never touches the network, the receiver or the route mount, so an ingress change -
+        # which is exactly the situation in which someone needs the previous API back - must not
+        # be the reason the previous API cannot come back. Every other gate below is unchanged,
+        # and rollback-end still ends in NEEDS_ATTENTION if the ingress is still different.
+        ingress_checkpoint(record, state, "ingress_rollback_start", "rollback-start", enforce=False)
         compatibility = rollback_compatibility(manifest)
         state["rollback_compatibility"] = compatibility
         # B1: the decision, its counts and its sentence are durable before ANY gate can refuse and
@@ -1612,12 +1882,13 @@ def mode_rollback(args):
                 "compared": False,
                 "reason": "the failure preceded the baseline row snapshot, so no before-state exists; "
                           "service was restored and the database was never written by this runner"}
-        # B3: api and orthanc are restored, but a drifted proxy/network still ends as
-        # NEEDS_ATTENTION with the lock retained; the terminal status is not reached.
+        # B3/I5: api and orthanc are restored first, but an ingress that is not what it was still
+        # ends as NEEDS_ATTENTION with the lock and the evidence retained; the terminal status is
+        # not reached and nothing about the network or the receiver is repaired automatically.
         state["rolled_back_utc"] = stamp()
         state["status"] = "ROLLED_BACK_DATABASE_RETAINED"
         clear_terminal_annotations(state)
-        guard_or_needs_attention(record, state, "proxy_guard_rollback_end", "rollback-end")
+        ingress_checkpoint(record, state, "ingress_rollback_end", "rollback-end")
         write_private(record, state)
     except BaseException as error:
         fail(record, state, error, "rollback",
@@ -1689,6 +1960,12 @@ def build_parser():
     apply_mode.add_argument("--static", choices=("all", "changed"), default="all")
     apply_mode.add_argument("--min-free-bytes", type=int, default=8 * 1024 ** 3)
     apply_mode.add_argument("--max-age", type=int, default=3600)
+    # I3: absence is a legitimate baseline only where the ingress was never built. On the host this
+    # rollout targets it was observed present, so accepting absence there must be a recorded human
+    # decision rather than a silent one.
+    apply_mode.add_argument("--acknowledge-absent-ingress-baseline", action="store_true",
+                            help="record that the kin-workflow ingress is genuinely absent on this "
+                                 "host and that its absence is the state to preserve")
     apply_mode.set_defaults(func=mode_apply)
 
     verify = modes.add_parser("verify", help="validate authenticated read-only evidence and finalize")

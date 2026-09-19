@@ -175,54 +175,250 @@ def test_network_absent_is_typed_only():
     check("it inspects by explicit network type", called and called[0][:4] == ["docker", "inspect", "--type", "network"],
           json.dumps(called[:1]))
 
+    # I3: the same answers as a typed observation, which is what the ingress guard reads.
+    absent_state = with_exec(daemon_form, lambda: rollout.network_state("kin-workflow"))
+    check("the typed not-found answer is state=absent", absent_state["state"] == "absent", json.dumps(absent_state))
+    unknown_state = with_exec(daemon_down, lambda: rollout.network_state("kin-workflow"))
+    check("an unreadable answer is state=indeterminate, never absent",
+          unknown_state["state"] == "indeterminate" and "Cannot connect" in unknown_state["message"],
+          json.dumps(unknown_state))
+    present_state = with_exec(
+        mock_exec([(lambda a: True, Result(0, json.dumps([LIVE_NETWORK]).encode(), b""))]),
+        lambda: rollout.network_state("kin-workflow"))
+    check("a present network carries its id and internal flag",
+          present_state["state"] == "present" and present_state["id"] == LIVE_NETWORK["Id"]
+          and present_state["internal"] is True, json.dumps(present_state))
+    check("the receiver is recorded as a member name, for the record only",
+          present_state["member_names"] == ["kin-proxy", "kin-workflow-receiver"],
+          json.dumps(present_state["member_names"]))
+    unreadable_zero = with_exec(mock_exec([(lambda a: True, Result(0, b"not json", b""))]),
+                                lambda: rollout.network_state("kin-workflow"))
+    check("exit 0 with an unreadable object is indeterminate, not present",
+          unreadable_zero["state"] == "indeterminate", json.dumps(unreadable_zero))
 
-def proxy_mock(networks, mounts, network_present=False):
-    payload = json.dumps([{"Image": "sha256:proxy", "State": {"StartedAt": "2026-09-16T23:00:00Z"},
-                           "NetworkSettings": {"Networks": {name: {} for name in networks}},
-                           "Mounts": [{"Destination": dest} for dest in mounts]}]).encode()
+
+# ---------------------------------------------------------------- I1-I4: the live ingress
+# The mount record docker actually reports for the production proxy: docker-compose.prod.yml:23
+# declares /etc/kin-workflow/nginx:/etc/nginx/workflow:ro and the 2026-09-19 read-only host
+# observation reports exactly this tuple. The OLD fixtures injected the host SOURCE as the
+# Destination - a shape no running container has ever reported - which is why a detector that was
+# dead against the real product passed its own tests.
+LIVE_ROUTE = {"Type": "bind", "Source": "/etc/kin-workflow/nginx", "Destination": "/etc/nginx/workflow",
+              "Mode": "ro", "RW": False, "Propagation": "rprivate"}
+OLD_WRONG_ROUTE = {"Destination": "/etc/kin-workflow/nginx"}
+LETSENCRYPT = {"Type": "bind", "Source": "/etc/letsencrypt", "Destination": "/etc/letsencrypt",
+               "Mode": "ro", "RW": False, "Propagation": "rprivate"}
+LIVE_NETWORK = {"Id": "d90d5f6b997729698edb62cf4493f1b5b0410443d84d7299402f1dfd1dc86776",
+                "Name": "kin-workflow", "Internal": True,
+                "Containers": {"a1": {"Name": "kin-proxy", "EndpointID": "e1"},
+                               "b2": {"Name": "kin-workflow-receiver", "EndpointID": "e2"}}}
+LIVE_NETWORKS = ["kin-workflow", "pacs-starter-kit_default"]
+
+
+def proxy_payload(networks, mounts, container_id="c0ffee", started="2026-09-17T09:00:00Z", running=True):
+    return json.dumps([{"Id": container_id, "Image": "sha256:proxyimage",
+                        "State": {"Running": running, "StartedAt": started},
+                        "NetworkSettings": {"Networks": {name: {} for name in networks}},
+                        "Mounts": list(mounts)}]).encode()
+
+
+def ingress_mock(networks=("pacs-starter-kit_default",), mounts=(LETSENCRYPT,), network=None,
+                 network_stderr=b"Error response from daemon: network kin-workflow not found",
+                 proxy_exit=0, proxy_stdout=None, **proxy_kw):
+    """The two inspects ingress_observation issues. network=None is the typed not-found answer."""
+    payload = proxy_payload(networks, mounts, **proxy_kw) if proxy_stdout is None else proxy_stdout
+    answer = (Result(0, json.dumps([network]).encode(), b"") if network is not None
+              else Result(1, b"", network_stderr))
     return mock_exec([
-        (lambda a: a[:2] == ["docker", "inspect"] and "--type" in a,
-         Result(0, b"[{}]", b"") if network_present else Result(1, b"", b"Error: No such network: kin-workflow")),
-        (lambda a: a[:2] == ["docker", "inspect"], Result(0, payload, b"")),
+        (lambda a: a[:2] == ["docker", "inspect"] and "--type" in a, answer),
+        (lambda a: a[:2] == ["docker", "inspect"], Result(proxy_exit, payload, b"no such object")),
     ])
 
 
-# ---------------------------------------------------------------- C4: proxy guard
-def test_proxy_guard():
-    clean = proxy_mock(["kin_default"], ["/etc/letsencrypt", "/var/www/certbot"])
-    guard = with_exec(clean, rollout.proxy_guard)
-    check("an untouched proxy is inert", guard["inert"] is True and guard["network_absent"] is True)
-    check("guard records networks and mounts for the record",
-          guard["proxy_networks"] == ["kin_default"] and "/etc/letsencrypt" in guard["proxy_mounts"])
-    check("require_proxy_inert passes on an untouched proxy",
-          with_exec(clean, lambda: rollout.require_proxy_inert("pre-apply"))["inert"] is True)
+def observe(**kw):
+    return with_exec(ingress_mock(**kw), rollout.ingress_observation)
 
-    joined = proxy_mock(["kin_default", "kin-workflow"], ["/etc/letsencrypt"], network_present=True)
-    # The recorded evidence must describe what was actually observed, not a fixed answer.
-    joined_guard = with_exec(joined, rollout.proxy_guard)
-    check("the guard reports the observed network state",
-          joined_guard["network_absent"] is False and joined_guard["proxy_joined_workflow_network"] is True
-          and "kin-workflow" in joined_guard["proxy_networks"], json.dumps(joined_guard))
-    mount_guard = with_exec(proxy_mock(["kin_default"], ["/etc/kin-workflow/nginx"]), rollout.proxy_guard)
-    check("the guard reports the observed mount state",
-          mount_guard["proxy_has_workflow_mount"] is True and mount_guard["inert"] is False)
-    check("the guard reports the observed proxy start time, not a fixed value",
-          joined_guard["proxy_started_at"] == "2026-09-16T23:00:00Z", str(joined_guard["proxy_started_at"]))
-    refuses("a proxy joined to kin-workflow trips the guard",
-            lambda: with_exec(joined, lambda: rollout.require_proxy_inert("post-apply")), "Proxy guard tripped at post-apply")
-    mounted = proxy_mock(["kin_default"], ["/etc/letsencrypt", "/etc/kin-workflow/nginx"])
-    refuses("a workflow mount trips the guard",
-            lambda: with_exec(mounted, lambda: rollout.require_proxy_inert("pre-apply")))
-    network_only = proxy_mock(["kin_default"], ["/etc/letsencrypt"], network_present=True)
-    refuses("an unreferenced kin-workflow network still trips the guard",
-            lambda: with_exec(network_only, lambda: rollout.require_proxy_inert("post-apply")))
+
+LIVE = {"networks": LIVE_NETWORKS, "mounts": (LETSENCRYPT, LIVE_ROUTE), "network": LIVE_NETWORK}
+
+
+def test_ingress_shape_against_the_real_topology():
+    live = observe(**LIVE)
+    check("the ACTUAL production ingress is a coherent baseline", live["shape"] == "present",
+          json.dumps(live["shape_problems"]))
+    route = rollout.workflow_routes(live["proxy"]["mounts"])
+    check("the real mount tuple is found by its real Destination",
+          len(route) == 1 and route[0] == rollout.mount_record(LIVE_ROUTE), json.dumps(route))
+    check("the whole tuple is kept, not just the destination",
+          set(live["proxy"]["mounts"][0]) == set(rollout.MOUNT_FIELDS), json.dumps(live["proxy"]["mounts"][0]))
+    check("the proxy identity and start time are recorded for comparison",
+          live["proxy"]["id"] == "c0ffee" and live["proxy"]["started_at"] == "2026-09-17T09:00:00Z")
+    check("the network id and internal flag are recorded",
+          live["network"]["id"] == LIVE_NETWORK["Id"] and live["network"]["internal"] is True)
+    check("require_coherent_ingress accepts the real topology without the absence flag",
+          with_exec(ingress_mock(**LIVE),
+                    lambda: rollout.require_coherent_ingress("pre-apply"))["shape"] == "present")
+
+    # The OLD fixture: the host Source injected as a Destination. It can never be the declared
+    # route, so an observation built from it must not pass as the production shape.
+    old = observe(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, OLD_WRONG_ROUTE), network=LIVE_NETWORK)
+    check("the old Source-as-Destination fixture is NOT the production ingress",
+          old["shape"] == "partial" and any("claiming the workflow route" in p for p in old["shape_problems"]),
+          json.dumps(old["shape_problems"]))
+    refuses("and it refuses instead of being adopted as a baseline",
+            lambda: with_exec(ingress_mock(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, OLD_WRONG_ROUTE),
+                                           network=LIVE_NETWORK),
+                              lambda: rollout.require_coherent_ingress("pre-apply", allow_absent=True)),
+            "not in a state this rollout can take as a baseline")
+
+
+def test_ingress_shape_refuses_every_half_state():
+    absent = observe()
+    check("a stack with no ingress at all is coherent absence", absent["shape"] == "absent",
+          json.dumps(absent["shape_problems"]))
+    check("but absence alone does not pass the production gate",
+          isinstance(refusal_of(lambda: with_exec(ingress_mock(), lambda: rollout.require_coherent_ingress("pre-apply"))), str))
+    check("the absence refusal names the explicit acknowledgement",
+          "--acknowledge-absent-ingress-baseline" in (refusal_of(
+              lambda: with_exec(ingress_mock(), lambda: rollout.require_coherent_ingress("pre-apply"))) or ""))
+    check("an acknowledged absence is accepted, and only then",
+          with_exec(ingress_mock(),
+                    lambda: rollout.require_coherent_ingress("pre-apply", allow_absent=True))["shape"] == "absent")
+
+    writable = dict(LIVE_ROUTE, RW=True, Mode="rw")
+    rw = observe(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, writable), network=LIVE_NETWORK)
+    check("a WRITABLE workflow route is not the declared shape",
+          rw["shape"] == "partial" and any("read-only bind" in p for p in rw["shape_problems"]),
+          json.dumps(rw["shape_problems"]))
+    foreign = dict(LIVE_ROUTE, Source="/srv/somebody-elses/nginx")
+    other = observe(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, foreign), network=LIVE_NETWORK)
+    check("a different host directory at the declared destination is not the declared shape",
+          other["shape"] == "partial" and any("read-only bind" in p for p in other["shape_problems"]),
+          json.dumps(other["shape_problems"]))
+    missing = observe(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT,), network=LIVE_NETWORK)
+    check("network and membership without the route mount is partial",
+          missing["shape"] == "partial" and any("0 mounts" in p for p in missing["shape_problems"]),
+          json.dumps(missing["shape_problems"]))
+    unjoined = observe(networks=["pacs-starter-kit_default"], mounts=(LETSENCRYPT,), network=LIVE_NETWORK)
+    check("a network nobody joined is partial, not absence",
+          unjoined["shape"] == "partial" and any("not joined" in p for p in unjoined["shape_problems"]),
+          json.dumps(unjoined["shape_problems"]))
+    half_removed = observe(networks=["pacs-starter-kit_default"], mounts=(LETSENCRYPT, LIVE_ROUTE))
+    check("a route mount without the network is partial, not absence",
+          half_removed["shape"] == "partial"
+          and any("does not exist" in p for p in half_removed["shape_problems"]),
+          json.dumps(half_removed["shape_problems"]))
+    external = observe(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, LIVE_ROUTE),
+                       network=dict(LIVE_NETWORK, Internal=False))
+    check("a workflow network that is no longer internal is partial",
+          external["shape"] == "partial" and any("not internal" in p for p in external["shape_problems"]),
+          json.dumps(external["shape_problems"]))
+
+    broken = observe(proxy_exit=1, network=LIVE_NETWORK)
+    check("an inspect error makes the ingress indeterminate, never absent",
+          broken["shape"] == "indeterminate" and broken["proxy"]["readable"] is False,
+          json.dumps(broken["shape_problems"]))
+    check("the failed inspect keeps only its exit code, not the daemon's message",
+          broken["proxy"]["reason"] == "docker inspect exited 1" and "no such object" not in json.dumps(broken),
+          json.dumps(broken["proxy"]))
+    garbage = observe(proxy_stdout=b"[]", network=LIVE_NETWORK)
+    check("an empty inspect array is indeterminate, not an empty proxy",
+          garbage["shape"] == "indeterminate" and garbage["proxy"]["readable"] is False)
+    daemon = observe(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, LIVE_ROUTE),
+                     network_stderr=b"Cannot connect to the Docker daemon")
+    check("an undecidable network makes the ingress indeterminate",
+          daemon["shape"] == "indeterminate"
+          and any("could not determine" in p for p in daemon["shape_problems"]),
+          json.dumps(daemon["shape_problems"]))
+    for shape_case in ({"proxy_exit": 1, "network": LIVE_NETWORK},
+                       {"networks": LIVE_NETWORKS, "mounts": (LETSENCRYPT, writable), "network": LIVE_NETWORK}):
+        refuses("an unknown or half ingress refuses even with the absence flag: " + json.dumps(sorted(shape_case)),
+                lambda case=shape_case: with_exec(
+                    ingress_mock(**case),
+                    lambda: rollout.require_coherent_ingress("pre-apply", allow_absent=True)),
+                "not in a state this rollout can take as a baseline")
+    text = refusal_of(lambda: with_exec(ingress_mock(proxy_exit=1, network=LIVE_NETWORK),
+                                        lambda: rollout.require_coherent_ingress("pre-apply"))) or ""
+    check("the refusal forbids an automatic rollback", "Do NOT run an automatic rollback" in text)
+    check("the refusal retains lock, record and backups", "are retained" in text)
+    check("the refusal states the runner never touches networks",
+          "never creates or deletes a Docker network" in text)
+
+
+def test_ingress_comparison_preserves_what_this_rollout_owns():
+    baseline = observe(**LIVE)
+    same = with_exec(ingress_mock(**LIVE), rollout.ingress_observation)
+    check("an unchanged live ingress compares equal",
+          rollout.compare_ingress(baseline, same)["unchanged"] is True,
+          json.dumps(rollout.compare_ingress(baseline, same)["differences"]))
+
+    # I4: the workflow receiver is managed outside this repository. Its restart rotates the
+    # network's member list and its endpoint, and must never block restoring the previous API.
+    rotated = with_exec(ingress_mock(
+        networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, LIVE_ROUTE),
+        network=dict(LIVE_NETWORK, Containers={"a1": {"Name": "kin-proxy", "EndpointID": "e1"},
+                                               "z9": {"Name": "kin-workflow-receiver", "EndpointID": "ROTATED"}})),
+        rollout.ingress_observation)
+    comparison = rollout.compare_ingress(baseline, rotated)
+    check("a receiver restart and endpoint rotation is NOT a preservation failure",
+          comparison["unchanged"] is True, json.dumps(comparison["differences"]))
+    gone = with_exec(ingress_mock(networks=LIVE_NETWORKS, mounts=(LETSENCRYPT, LIVE_ROUTE),
+                                  network=dict(LIVE_NETWORK, Containers={})), rollout.ingress_observation)
+    check("and so is the receiver leaving the network entirely",
+          rollout.compare_ingress(baseline, gone)["unchanged"] is True)
+    check("the record says which facts are deliberately not compared",
+          comparison["not_compared"] == ["the workflow network's member list",
+                                         "the workflow receiver's identity and endpoints"])
+
+    mutations = {
+        "the proxy was recreated": {"container_id": "new-id"},
+        "the proxy restarted": {"started": "2026-09-19T20:00:00Z"},
+        "the proxy stopped": {"running": False},
+        "the proxy left the network": {"networks": ["pacs-starter-kit_default"]},
+        "the route mount was removed": {"mounts": (LETSENCRYPT,)},
+        "the route mount became writable": {"mounts": (LETSENCRYPT, dict(LIVE_ROUTE, RW=True))},
+        "the route source was repointed": {"mounts": (LETSENCRYPT, dict(LIVE_ROUTE, Source="/srv/other"))},
+        "the network was recreated": {"network": dict(LIVE_NETWORK, Id="f" * 64)},
+        "the network was deleted": {"network": None},
+    }
+    for label, override in mutations.items():
+        case = dict(LIVE)
+        case.update(override)
+        moved = with_exec(ingress_mock(**case), rollout.ingress_observation)
+        result = rollout.compare_ingress(baseline, moved)
+        check("preservation fails when " + label,
+              result["unchanged"] is False and bool(result["differences"]), json.dumps(result))
+
+    for label, stale in (("a record from before the ingress baseline existed", {"inert": True}),
+                         ("a baseline in another schema", {"schema": 99}),
+                         ("no baseline at all", None)):
+        result = rollout.compare_ingress(stale, baseline)
+        check("an old record fails CLOSED with a useful message: " + label,
+              result["comparable"] is False and result["unchanged"] is False
+              and "never invented after the fact" in " ".join(result["differences"]), json.dumps(result))
+
+
+def refusal_of(run):
     try:
-        with_exec(joined, lambda: rollout.require_proxy_inert("post-apply"))
+        run()
     except rollout.Refuse as error:
-        text = str(error)
-        check("the trip forbids an automatic rollback", "Do NOT run an automatic rollback" in text)
-        check("the trip retains lock, record and backups", "are retained" in text)
-        check("the trip states the runner never touches networks", "never creates or deletes a Docker network" in text)
+        return str(error)
+    return None
+
+
+# ---------------------------------------------------------------- I6: pre-lock nginx check
+def test_nginx_check_is_exit_code_only():
+    calls = []
+    ok = mock_exec([(lambda a: True, Result(0, b"syntax is ok", b"test is successful"))], calls)
+    check("a configuration that parses answers True", with_exec(ok, rollout.nginx_config_ok) is True)
+    check("it asks the running proxy and nothing else",
+          calls and calls[0] == ["docker", "exec", "kin-proxy", "nginx", "-t"], json.dumps(calls))
+    leaky = b'nginx: [emerg] unexpected "}" in /etc/nginx/workflow/receiver.conf:12'
+    bad = mock_exec([(lambda a: True, Result(1, b"", leaky))])
+    check("a configuration that does not parse answers False", with_exec(bad, rollout.nginx_config_ok) is False)
+    text = str(rollout.nginx_refusal("before anything was locked, stopped or checked out"))
+    check("the refusal carries no configuration or route content, only the fact and the exit code",
+          "receiver.conf" not in text and "emerg" not in text and "exit code" in text, text[:200])
 
 
 # ---------------------------------------------------------------- C6: findings rollback
@@ -400,7 +596,10 @@ def main():
     test_allowlist_keeps_the_accepted_path()
     test_allowlist_new_refusals()
     test_network_absent_is_typed_only()
-    test_proxy_guard()
+    test_ingress_shape_against_the_real_topology()
+    test_ingress_shape_refuses_every_half_state()
+    test_ingress_comparison_preserves_what_this_rollout_owns()
+    test_nginx_check_is_exit_code_only()
     test_finding_rows_and_rollback_clause()
     test_observed_migration_state()
     test_classification_union()

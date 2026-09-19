@@ -45,19 +45,33 @@ NETWORK_NOT_FOUND = "Error response from daemon: network kin-workflow not found\
 INSPECT_PADDING = 9000
 # "leave this field exactly as the model built it", so that None and "" stay usable as values.
 _KEEP = object()
+RECEIVER = "kin-workflow-receiver"
+LETSENCRYPT = {"Type": "bind", "Source": "/etc/letsencrypt", "Destination": "/etc/letsencrypt",
+               "Mode": "ro", "RW": False, "Propagation": "rprivate"}
+
+
+def route_mount(source):
+    """The declared workflow route: a read-only bind of the host route directory."""
+    return {"Type": "bind", "Source": source, "Destination": "/etc/nginx/workflow",
+            "Mode": "ro", "RW": False, "Propagation": "rprivate"}
 
 
 class FakeDocker:
-    """A minimal model: containers with Ids and running state, and one optional network.
+    """A minimal model: containers with Ids, mounts and networks, and one optional network.
 
     It returns what raw() returns, INCLUDING raw()'s stdout bound, so a caller that parses a
-    truncated tail fails here exactly as it failed on the runner.
+    truncated tail fails here exactly as it failed on the runner. A stack brought up from the
+    TARGET file gets the production ingress shape; one from the baseline file does not.
     """
 
     def __init__(self, step_exit=0, up_changes_id=True, stop_stops=True, migrate_exit=7,
-                 malformed_inspect=None, inspect_exit=0, id_value=_KEEP, id_drifts=False):
+                 malformed_inspect=None, inspect_exit=0, id_value=_KEEP, id_drifts=False,
+                 route_source="/etc/kin-workflow/nginx", ingress_drift=None):
         self.containers = {}
         self.network = False
+        self.members = set()
+        self.endpoints = {}
+        self.network_serial = 0
         self.step_exit = step_exit
         self.up_changes_id = up_changes_id
         self.stop_stops = stop_stops
@@ -66,15 +80,41 @@ class FakeDocker:
         self.inspect_exit = inspect_exit
         self.id_value = id_value
         self.id_drifts = id_drifts
+        self.route_source = route_source
+        self.ingress_drift = ingress_drift
         self.serial = 0
         self.reads = 0
         self.calls = []
 
-    def create(self, name):
+    def create(self, name, networks=None, mounts=None):
         self.serial += 1
         self.containers[name] = {"Id": name + "-" + str(self.serial), "running": True,
                                  "StartedAt": "2026-09-18T10:00:0" + str(self.serial) + "Z",
-                                 "networks": ["kin_default"], "mounts": ["/etc/letsencrypt"]}
+                                 "networks": list(networks or ["kin_default"]),
+                                 "mounts": list(mounts or [LETSENCRYPT])}
+
+    def make_proxy_production_shaped(self):
+        proxy = self.containers.get("kin-proxy")
+        if proxy is None:
+            return
+        proxy["networks"] = ["kin-workflow", "kin_default"]
+        proxy["mounts"] = [LETSENCRYPT, route_mount(self.route_source)]
+        self.members.add("kin-proxy")
+
+    def network_object(self):
+        return {"Id": "net-" + str(self.network_serial), "Name": "kin-workflow", "Internal": True,
+                "Containers": {name: {"Name": name, "EndpointID": self.endpoints.get(name, "e-" + name)}
+                               for name in sorted(self.members)}}
+
+    def drift(self):
+        """A host change made by somebody else while the runner's `up` was running."""
+        if self.ingress_drift == "proxy":
+            self.create("kin-proxy")
+            self.make_proxy_production_shaped()
+        elif self.ingress_drift == "route":
+            self.containers.get("kin-proxy", {})["mounts"] = [LETSENCRYPT]
+        elif self.ingress_drift == "network":
+            self.network, self.members = False, set()
 
     def __call__(self, args, check=False, timeout=900, cwd=None, env=None, stdout_limit=4000):
         self.calls.append(list(args))
@@ -84,22 +124,39 @@ class FakeDocker:
             pass
         elif args[:2] == ["docker", "rm"]:
             self.containers.clear()
+            self.members = set()
         elif args[:3] == ["docker", "network", "rm"]:
-            self.network = False
+            self.network, self.members = False, set()
         elif args[:3] == ["docker", "network", "create"]:
-            self.network = True
+            self.network, self.members = True, set()
+            self.network_serial += 1
         elif args[:3] == ["docker", "network", "connect"]:
             self.containers.get("kin-proxy", {}).setdefault("networks", []).append("kin-workflow")
+            self.members.add("kin-proxy")
         elif args[:3] == ["docker", "network", "disconnect"]:
             proxy = self.containers.get("kin-proxy", {})
             proxy["networks"] = [n for n in proxy.get("networks", []) if n != "kin-workflow"]
+            self.members.discard("kin-proxy")
+        elif args[:2] == ["docker", "run"]:
+            # S8's foreign receiver, attached by the harness exactly as the real one is.
+            name = args[args.index("--name") + 1] if "--name" in args else "unnamed"
+            joined = args[args.index("--network") + 1] if "--network" in args else None
+            self.create(name, networks=[joined] if joined else [])
+            if joined == "kin-workflow":
+                self.members.add(name)
+        elif args[:2] == ["docker", "restart"]:
+            name = args[-1]
+            if name in self.containers:
+                self.serial += 1
+                self.containers[name]["StartedAt"] = "2026-09-18T11:00:0" + str(self.serial) + "Z"
+                self.endpoints[name] = "rotated-" + str(self.serial)
         elif args[:2] == ["docker", "version"]:
             out = "27.0.0"
         elif args[:2] == ["docker", "compose"] and "version" in args:
             out = "Docker Compose version v2.29.0"
         elif args[:2] == ["docker", "inspect"] and "--type" in args:
             code, err = (0, "") if self.network else (1, NETWORK_NOT_FOUND)
-            out = "[{}]" if self.network else ""
+            out = json.dumps([self.network_object()]) if self.network else ""
         elif args[:2] == ["docker", "inspect"]:
             name = args[-1]
             body = self.containers.get(name)
@@ -112,7 +169,7 @@ class FakeDocker:
                 entry = {"Id": body["Id"], "State": {"Running": body["running"],
                                                      "StartedAt": body["StartedAt"]},
                          "NetworkSettings": {"Networks": {n: {} for n in body["networks"]}},
-                         "Mounts": [{"Destination": d} for d in body["mounts"]],
+                         "Mounts": [dict(m) for m in body["mounts"]],
                          "Config": {"Labels": {"pad": "x" * INSPECT_PADDING}}}
                 if self.id_drifts:  # a container that really WAS replaced between two reads
                     entry["Id"] = body["Id"] + "-read" + str(self.reads)
@@ -122,11 +179,21 @@ class FakeDocker:
                         entry["Id"] = self.id_value
                 out = json.dumps([entry])
         elif args[:2] == ["docker", "compose"] and "up" in args:
+            target = "target-compose.yml" in text
             code = 0 if "--force-recreate" in args and "proxy" in args else self.step_exit
             if code == 0:
+                # The network is created only when the service that references it is named. That is
+                # what the hosted runner actually did for an explicit `up api orthanc`, and S1 is
+                # the scenario that proves it; a model that created it anyway would make S1 vacuous.
+                if target and "proxy" in args and not self.network:
+                    self.network, self.network_serial = True, self.network_serial + 1
                 for name in ("api", "orthanc", "proxy"):
                     if name in args and ("kin-" + name not in self.containers or self.up_changes_id):
                         self.create("kin-" + name)
+                        if name == "proxy" and target:
+                            self.make_proxy_production_shaped()
+                if "proxy" not in args:
+                    self.drift()
         elif args[:2] == ["docker", "compose"] and "stop" in args:
             code = self.step_exit
             if code == 0 and self.stop_stops:
@@ -160,6 +227,10 @@ def with_fake(module, fake):
 def run_scenario(name, fake_kwargs):
     tmp = tempfile.mkdtemp()
     module = load_harness(tmp)
+    # The bind source Compose would resolve for ./kin-workflow-nginx in this project, which is what
+    # S8 points the runner's expected route source at.
+    fake_kwargs = dict(fake_kwargs)
+    fake_kwargs.setdefault("route_source", str((module.project_dir() / "kin-workflow-nginx").resolve()))
     fake = FakeDocker(**fake_kwargs)
     with_fake(module, fake)
     return module.SCENARIOS[name](), fake, module
@@ -261,6 +332,58 @@ def test_hb5():
           all(v["runner_network_commands"] == [] for v in receipt["variants"])
           and any(c[:3] == ["docker", "network", "create"] for c in fake.calls))
     check("HB5 both variants trip the guard", receipt["passed"] is True, json.dumps(receipt["problems"]))
+
+
+# ---------------------------------------------------------------- I1: S8, the production shape
+def test_i1_live_shape_scenario():
+    """S1-S7 all start from a stack with no ingress at all. S8 starts from the shape the host was
+    actually observed in, so it is the only scenario that can prove preservation."""
+    receipt, fake, module = run_scenario("live-shape", {})
+    check("S8 the observed production shape passes the runner's real sequence",
+          receipt["passed"] is True, json.dumps(receipt.get("problems"))[:300])
+    check("S8 the baseline is the PRESENT ingress, which the old guard refused",
+          receipt["baseline"]["shape"] == "present", json.dumps(receipt["baseline"]["shape_problems"]))
+    check("S8 the foreign receiver really is attached to the network",
+          RECEIVER in (receipt["baseline"]["network"]["member_names"] or []),
+          json.dumps(receipt["baseline"]["network"].get("member_names")))
+    check("S8 every step compared the ingress and found it unchanged",
+          len(receipt["steps"]) == 3
+          and all(step["comparison"]["unchanged"] is True for step in receipt["steps"])
+          and all(step["shape"] == "present" for step in receipt["steps"]),
+          json.dumps([step["step"] for step in receipt["steps"]]))
+    check("S8 api and orthanc were recreated",
+          receipt["before"]["api"]["Id"] != receipt["after"]["api"]["Id"]
+          and receipt["before"]["orthanc"]["Id"] != receipt["after"]["orthanc"]["Id"])
+    check("S8 the proxy was not",
+          receipt["before"]["proxy"]["Id"] == receipt["after"]["proxy"]["Id"]
+          and isinstance(receipt["after"]["proxy"]["Id"], str))
+    check("S8 an independent receiver restart is observational only",
+          receipt["after_receiver_restart"]["unchanged"] is True,
+          json.dumps(receipt["after_receiver_restart"])[:200])
+    check("S8 the runner issued no docker network command",
+          receipt["runner_network_commands"] == []
+          and any(c[:3] == ["docker", "run", "-d"] for c in fake.calls))
+    check("S8 the route-source substitution is disclosed rather than hidden",
+          receipt["route_source_substitution"]["product_value"] == "/etc/kin-workflow/nginx"
+          and receipt["route_source_substitution"]["expected_source_under_test"] != "/etc/kin-workflow/nginx")
+    check("S8 the constant is restored after the scenario",
+          module.rollout.WORKFLOW_ROUTE_SOURCE == "/etc/kin-workflow/nginx")
+
+    for drift, expected in (("proxy", "kin-proxy id"), ("route", "kin-proxy mounts"),
+                            ("network", "kin-workflow state")):
+        receipt, _, _ = run_scenario("live-shape", {"ingress_drift": drift})
+        check("S8 a host change during the sequence fails the scenario: " + drift,
+              receipt["passed"] is False
+              and any("the ingress changed" in p and expected in p for p in receipt["problems"]),
+              json.dumps(receipt["problems"])[:300])
+    receipt, _, _ = run_scenario("live-shape", {"up_changes_id": False})
+    check("S8 an up that recreates nothing still fails",
+          receipt["passed"] is False and any("did not change" in p for p in receipt["problems"]),
+          json.dumps(receipt["problems"])[:240])
+    receipt, _, _ = run_scenario("live-shape", {"inspect_exit": 1})
+    check("S8 unread container facts are never claimed as unchanged identities",
+          receipt["passed"] is False and any("identity is unproven" in p for p in receipt["problems"]),
+          json.dumps(receipt["problems"])[:240])
 
 
 # ---------------------------------------------------------------- HB8 / receipts
@@ -482,7 +605,7 @@ class _Absent:
 
 
 _ABSENT = _Absent()
-ALL_GREEN = {stem: True for stem in ("s1", "s2", "s3", "s4", "s5", "s6", "s7")}
+ALL_GREEN = {stem: True for stem in ("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8")}
 RECORDS = ("record-s3-ab12cd34.json", "record-s5-ef56ab78.json", "record-s6-0011aabb.json")
 
 
@@ -491,8 +614,8 @@ def test_hb10_gate():
     check("HB10 the old crash is gone: all-green receipts beside state records pass",
           green["exit"] == 0 and "Traceback" not in green["stderr"], green["stderr"][-200:])
     summary = json.loads(green["stdout"].strip().splitlines()[-1])
-    check("HB10 the gate consumes exactly the seven expected names",
-          summary["expected"] == ["s1", "s2", "s3", "s4", "s5", "s6", "s7"]
+    check("HB10 the gate consumes exactly the eight expected names",
+          summary["expected"] == ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]
           and summary["missing"] == [] and summary["failed"] == [] and summary["malformed"] == [])
     check("HB10 the state records are preserved and reported separately",
           sorted(summary["state_records_kept_separately"]) == sorted(RECORDS),
@@ -612,6 +735,7 @@ def main():
     test_hb3()
     test_hb4()
     test_hb5()
+    test_i1_live_shape_scenario()
     test_b1_s6_requires_an_observed_identity()
     test_hb11_inspect_output()
     test_hb12_unhandled_failure_still_writes_a_receipt()
