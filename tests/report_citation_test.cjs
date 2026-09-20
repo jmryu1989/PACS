@@ -558,10 +558,22 @@ test('the historical read runs the report gates and the access re-check inside o
   const hidden = fixture({ state: { ...STATE, rs: 'P', preDoc: 'other@synthetic', preReviewer: 'boss@synthetic' },
     versions: new Map([[2, preserved([carried('a')])]]) });
   await refusal(historyRead(hidden, '2'), 403);
-  const absent = fixture({ state: null });
+  /**
+   * Both of these MUST hold a preserved row. With no row the missing-row 404 answers for the
+   * gate, and deleting the study gate would still look like a refusal - while a real study in
+   * that state would answer 200. That is the v0.6.3 regression `versions()` records, and with
+   * orphan rows outliving a deleted study (no FK) it would expose another author's discarded
+   * testimony to a re-created uid.
+   */
+  const absent = fixture({ state: null, versions: new Map([[2, preserved([carried('a')])]]) });
   await refusal(historyRead(absent, '2'), 404);
-  const foreign = fixture({ state: { ...STATE, institutionId: 'other-hospital' } });
+  assert.deepEqual(absent.calls.filter(c => c.call === 'reportVersion.findUnique'), [],
+    'a study with no state row must answer before any preserved row is read');
+  const foreign = fixture({ state: { ...STATE, institutionId: 'other-hospital' },
+    versions: new Map([[2, preserved([carried('a')])]]) });
   await refusal(historyRead(foreign, '2'), 404);
+  assert.deepEqual(foreign.calls.filter(c => c.call === 'reportVersion.findUnique'), [],
+    "another institution's study must answer before any preserved row is read");
 
   // The revocation this surface exists to honour: readability withdrawn between two viewings.
   const revoked = fixture({ versions: new Map([[2, preserved([carried('a')])]]), refuseTxRequire: true });
@@ -664,18 +676,30 @@ test('a preserved discarded row answers its own testimony and no one else\'s dra
 });
 
 test('presence is counted against that row\'s own body, over the whole row, and never invented', async () => {
-  const entry = { ...carried('a'), findingId: FINDING, insertedText: LINE };
-  const rows = () => new Map([[2, preserved([entry], LINE)], [7, preserved([entry], '다른 본문')]]);
+  // The body/phrase pairs come from the shared vector oracle, not from literals invented here:
+  // one block that is a whole line of one row's body and only a negated fragment of the other's.
+  const present = vectors.occurrence.find(c => c.name === 'single line present');
+  const gone = vectors.occurrence.find(c => c.name === 'negation prefix on the same line');
+  assert.ok(present && gone && present.block === gone.block && present.k === 1 && gone.k === 0,
+    'the two occurrence vectors must share one block and disagree about the field');
+  const entry = { ...carried('a'), findingId: FINDING, insertedText: present.block };
+  const rows = () => new Map([[2, preserved([entry], present.body)], [7, preserved([entry], gone.body)]]);
   assert.equal((await historyRead(fixture({ versions: rows() }), '2')).entries[0].presence, 'present');
   // The same entry in a later row whose body no longer holds the line: 'absent' is a fact ABOUT
   // THAT ROW. Counting it against the head is the misread this whole unit exists to prevent.
   assert.equal((await historyRead(fixture({ versions: rows() }), '7')).entries[0].presence, 'absent');
 
   // A reduced twin still competes for the same occurrence, or one occurrence would make two
-  // citations both claim the sentence is there.
-  const twin = { ...carried('b'), findingId: '00000000-0000-4000-8000-00000000beef', insertedText: LINE };
-  const twins = fixture({ versions: new Map([[2, preserved([entry, twin])]]) });
-  assert.equal((await historyRead(twins, '2')).entries[0].presence, 'ambiguous');
+  // citations both claim the sentence is there. The oracle for that is the equivalence vector.
+  const equivalence = vectors.equivalence.find(c => c.entries.length === 2 && c.states[0] === 'ambiguous');
+  assert.ok(equivalence && equivalence.counts[0] === 2, 'the equivalence oracle must carry a shared count');
+  const mine = { ...carried('a'), findingId: FINDING, insertedText: equivalence.entries[0].insertedText };
+  const twin = { ...carried('b'), findingId: '00000000-0000-4000-8000-00000000beef',
+    insertedText: equivalence.entries[1].insertedText };
+  const twins = fixture({ versions: new Map([[2, preserved([mine, twin], equivalence.body)]]) });
+  const twinAnswer = await historyRead(twins, '2');
+  assert.equal(twinAnswer.entries[0].presence, equivalence.states[0]);
+  assert.equal(twinAnswer.entries[1].state, 'source-unavailable');
 
   // What cannot be counted is not 'absent'. lineBlockOccurrences coerces a non-string to '' and
   // would otherwise report 0 occurrences, i.e. invent "the sentence is gone" about a row nobody

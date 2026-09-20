@@ -352,6 +352,11 @@ class ReportVersionCitationDOM(unittest.TestCase):
                          "each block must speak the server presence for its own version")
 
     def test_06_every_shape_the_answer_can_fail_is_unknown_and_never_empty(self):
+        # C2 names three shapes for a readable entry the server could not count; all three have
+        # to fail closed, because the formatter would otherwise print a line with no state claim
+        # under a success heading.
+        no_presence_key = readable()
+        del no_presence_key["presence"]
         arms = [
             # 1. an answer that belongs to another version
             ({"body": answer(9, [readable()])},
@@ -371,9 +376,13 @@ class ReportVersionCitationDOM(unittest.TestCase):
             # 6. no server actor: the attribution line would name nobody
             ({"body": answer(3, [readable()], actor="")},
              "an answer without a server actor must make the whole answer unknown"),
-            # 7. a readable entry the server could not count (presence null / absent / unknown word)
+            # 7. a readable entry the server could not count, in all three of its shapes
             ({"body": answer(3, [readable(presence=None)])},
              "an entry without a server presence must make the whole answer unknown"),
+            ({"body": answer(3, [no_presence_key])},
+             "an entry whose presence key is absent must make the whole answer unknown"),
+            ({"body": answer(3, [readable(presence="maybe")])},
+             "an entry with an out-of-vocabulary presence must make the whole answer unknown"),
         ]
         self.start({citation_path(3): [reply for reply, _ in arms]})
         self.open_history()
@@ -404,7 +413,11 @@ class ReportVersionCitationDOM(unittest.TestCase):
         # The later request answers first.
         self.page.evaluate("settle(1, %s)" % json.dumps({"body": answer(7, [readable(revision=77)])}))
         self.page.evaluate("settle(0, %s)" % json.dumps({"body": answer(3, [readable(revision=31)])}))
-        self.page.wait_for_selector('.vcite-host[data-version="3"] h5')
+        # Wait on a signal that does NOT depend on where the answers land: the product re-enables
+        # each button just before it writes. Waiting for v3's heading instead would turn a block
+        # that writes into the wrong host into a harness timeout - an ERROR carrying a crash
+        # marker - and the assertion below, which is what this case is about, would never run.
+        self.page.wait_for_function("() => document.querySelectorAll('.vcite-btn:disabled').length === 0")
         self.assertIn("소견 r31", self.text(3), "each version block must show its own answer")
         self.assertIn("소견 r77", self.text(7), "each version block must show its own answer")
         self.assertNotIn("소견 r77", self.text(3), "each version block must show its own answer")
@@ -430,24 +443,44 @@ class ReportVersionCitationDOM(unittest.TestCase):
                          "a late citation answer must not write into a closed history")
         self.assertNotIn("소견 r77", self.page.evaluate("$('#hist-body').textContent"),
                          "a late citation answer must not write into a closed history")
-        # Both write sites of a superseded LIST read: the success and the failure.
-        self.page.evaluate("apiQueue[%s] = [{defer: true}, {body: %s}]"
+        # BOTH write sites of a superseded LIST read - the success and the failure - have their
+        # own arm: one guard could be deleted while the other kept every case green. Two stale
+        # reads are opened (pending[1], pending[2]; pending[0] is the citation read above) and the
+        # third answers the current opening.
+        self.page.evaluate("apiQueue[%s] = [{defer: true}, {defer: true}, {body: %s}]"
                            % (json.dumps(LIST_PATH), json.dumps(VERSIONS)))
         self.page.click("#b-history")
-        self.page.wait_for_function("() => pending.length === 2")
+        self.page.click("#b-history")
+        self.page.wait_for_function("() => pending.length === 3")
         self.open_history()
         self.page.wait_for_selector(".ver")
-        self.page.evaluate("settle(1, %s)" % json.dumps({"status": 500, "message": "옛 목록 실패"}))
+        # A stale SUCCESS carrying a list this history never asked for.
+        self.page.evaluate("settle(1, %s)" % json.dumps({"body": [version_row(99)]}))
+        self.assertEqual(0, self.page.evaluate("document.querySelectorAll('.ver[data-version=\"99\"]').length"),
+                         "a superseded list success must not overwrite the current history")
+        self.assertEqual(3, self.page.evaluate("document.querySelectorAll('.ver').length"),
+                         "a superseded list success must not overwrite the current history")
+        # A stale FAILURE, on the other write site.
+        self.page.evaluate("settle(2, %s)" % json.dumps({"status": 500, "message": "옛 목록 실패"}))
         self.assertNotIn("옛 목록 실패", self.page.evaluate("$('#hist-body').textContent"),
                          "a superseded list failure must not overwrite the current history")
         self.assertEqual(3, self.page.evaluate("document.querySelectorAll('.ver').length"),
                          "a superseded list failure must not overwrite the current history")
 
     def test_10_no_identifier_or_sentence_reaches_the_history_markup(self):
-        leak = {"insertedText": "SENTINEL-TEXT", "cid": "SENTINEL-CID", "findingId": "SENTINEL-FID",
-                "sourceRef": {"kind": "job", "jobId": "SENTINEL-JOB", "markId": "SENTINEL-MARK"},
-                "headRevisionAtInsert": 918273}
-        self.start({citation_path(3): [{"body": answer(3, [readable(by='<b id="kin-x">주치의</b>', **leak)])}]})
+        # Both sourceRef shapes the server can store, plus the identifiers a citation never
+        # carries to a screen. None of them is read by the renderer; this pins that.
+        job_leak = {"insertedText": "SENTINEL-TEXT", "cid": "SENTINEL-CID", "findingId": "SENTINEL-FID",
+                    "sourceRef": {"kind": "job", "jobId": "SENTINEL-JOB", "markId": "SENTINEL-MARK",
+                                  "sourceRevision": 918273},
+                    "headRevisionAtInsert": 918273, "studyUid": "SENTINEL-STUDY-UID",
+                    "seriesUid": "SENTINEL-SERIES-UID", "sopUid": "SENTINEL-SOP-UID"}
+        item_leak = {"insertedText": "SENTINEL-TEXT-2", "cid": "SENTINEL-CID-2",
+                     "findingId": "SENTINEL-FID-2",
+                     "sourceRef": {"kind": "item", "itemId": "SENTINEL-ITEM", "sourceRevision": 918274}}
+        self.start({citation_path(3): [{"body": answer(3, [
+            readable(by='<b id="kin-x">주치의</b>', **job_leak),
+            readable(revision=32, index=1, **item_leak)])}]})
         self.open_history()
         self.press(3)
         self.assertIn("소견 r31", self.text(3))
@@ -456,8 +489,10 @@ class ReportVersionCitationDOM(unittest.TestCase):
                          "an author name must reach the screen as text, never as markup")
         self.assertIn('<b id="kin-x">주치의</b>', self.text(3))
         markup = self.page.evaluate("$('#histmodal').innerHTML")
-        for sentinel in ["SENTINEL-TEXT", "SENTINEL-CID", "SENTINEL-FID", "SENTINEL-JOB",
-                         "SENTINEL-MARK", "918273"]:
+        for sentinel in ["SENTINEL-TEXT", "SENTINEL-TEXT-2", "SENTINEL-CID", "SENTINEL-CID-2",
+                         "SENTINEL-FID", "SENTINEL-FID-2", "SENTINEL-JOB", "SENTINEL-MARK",
+                         "SENTINEL-ITEM", "SENTINEL-STUDY-UID", "SENTINEL-SERIES-UID",
+                         "SENTINEL-SOP-UID", "918273", "918274"]:
             self.assertNotIn(sentinel, markup, sentinel + " must never reach the history markup")
         # The rows the history already drew are untouched by the citation block.
         self.assertEqual(3, self.page.evaluate("document.querySelectorAll('.ver pre').length"))
