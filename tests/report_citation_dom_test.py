@@ -106,6 +106,9 @@ BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function repo
 REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
 # The shipped periodic-save and beforeunload block, so the closing-tab branch is the real one.
 UNLOAD_BLOCK = slice_between(MAIN, "    const AUTOSAVE_MS = 20000;", "    // ② 로그아웃")
+# The shipped logout handler: its draft write is non-keepalive, so it has to stand aside for an
+# insertion rather than tear the session down around it.
+LOGOUT_BLOCK = slice_between(MAIN, "    // ② 로그아웃", "    // 다른 사람이 잡거나 놓은 걸")
 # The real study move. It is what calls stashReport() on the way out, leaves a busy pane open and
 # redraws the editor on arrival; a harness that only bumped the counter could not see any of that.
 SELECT_BLOCK = slice_between(MAIN, "    function select(uid, {", "    function renderClinical()")
@@ -123,6 +126,7 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <textarea id="findings"></textarea><textarea id="conclusion"></textarea><textarea id="recommendation"></textarea>
 <button id="b-approve"></button><button id="b-save"></button><button id="b-transcribe"></button>
 <button id="b-addendum"></button><button id="b-unread"></button><button id="b-prelim"></button><button id="b-defer"></button>
+<button id="logout"></button>
 PANEHTML
 CITEHTML
 <script>
@@ -143,8 +147,11 @@ let studies = [{uid: "UIDVALUE", name: "HONG GILDONG", id: "P-1", date: "2026-09
                 rs: "T", ss: "Verified", em: "N"}];
 let calls = [], citeCalls = [], replies = [], citeReplies = [], toasts = [], confirms = [], confirmAnswer = false, clipboard = [];
 const studyPriority = { get: () => false };
-const KinAuth = { has: () => true, logout: async () => {} };
+let logouts = 0;
+const KinAuth = { has: () => true, logout: async () => { logouts += 1; } };
 const reportPreview = { close() {} };
+function closeSR() {}
+function endPatientCopy() {}
 const displayActor = value => String(value ?? "").split("@")[0];
 function cur() { return studies.find(s => s.uid === selectedUid); }
 function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
@@ -216,6 +223,7 @@ const timers = [];
 const realSetInterval = window.setInterval;
 window.setInterval = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
 UNLOADBLOCK
+LOGOUTBLOCK
 window.setInterval = realSetInterval;
 window.autosaveDelays = () => timers.map(t => t.ms);
 window.autosaveTick = () => { for (const t of timers) t.fn(); return timers.length; };
@@ -232,9 +240,13 @@ window.releaseNewest = () => { const fn = heldAnswers.pop(); if (fn) fn(); retur
 window.outstanding = () => heldAnswers.length;
 window.text = () => RFIELDS.map(k => $("#" + k).value);
 window.type = values => { RFIELDS.forEach((k, i) => { $("#" + k).value = values[i]; }); };
-// The shipped study move, not a stand-in for its counter: it writes the draft on the way out and
-// redraws the editor on arrival, which is where the defects this file must see actually live.
-window.select = uid => select(uid);
+/* The shipped study move is already the global `select`: the sliced block above is a top-level
+   function declaration in this classic script, so the cases call the product function by that
+   name. There is deliberately NO `window.select = ...` helper - a top-level declaration is a
+   writable property of the global object, so such a wrapper would replace the very binding its
+   own body resolves and every move would throw RangeError before stashReport() ever ran. */
+// One line of the real 30 s poll, so the cases merge a server projection the way the product does.
+window.applyPoll = (uid, st) => { appState[uid] = mergePolledState(uid, st); };
 window.closeTab = () => window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
 window.escapePane = () => $("#cite-preview").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 window.backdrop = () => $("#cite-preview").click();
@@ -257,6 +269,7 @@ window.snapshot = () => ({
   bar: { shown: $("#citebar").style.display !== "none", message: $("#citemsg").textContent,
          list: $("#citelist").hidden ? null : $("#citelist").textContent },
   converge: [...reportConverge], dirty: reportDirty(), needsWrite: reportNeedsWrite(),
+  confirms: structuredClone(confirms), logouts,
 });
 </script></body></html>"""
 
@@ -274,6 +287,7 @@ def harness(state):
             .replace("REPORTBLOCK", REPORT_BLOCK)
             .replace("SELECTBLOCK", SELECT_BLOCK)
             .replace("UNLOADBLOCK", UNLOAD_BLOCK)
+            .replace("LOGOUTBLOCK", LOGOUT_BLOCK)
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID)
             .replace("OTHERVALUE", OTHER))
@@ -632,6 +646,76 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual(typed, self.page.evaluate("snapshot().calls")[1]["body"]["findings"],
                          "the converging write carries the typing, never older text")
 
+    def test_a_poll_on_the_other_study_cannot_overwrite_the_typing_a_refused_insertion_left_behind(self):
+        # The capture from the study move lives in appState[uid].draft, and that is exactly the
+        # object the 30 s poll replaces for a NON-selected study. Without the converge guard one
+        # poll between the refusal and the return loses the typing everywhere: the editor redraws
+        # the server's older text and the converging write pushes it back to the server.
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        typed = EXISTING + "\n폴링보다 먼저 친 줄"
+        self.page.evaluate(type_js([typed, "", ""]))
+        self.open_pane()
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply({status: 409, body: {code: 'REPORT_CITATION_STALE', message: '소견이 바뀌었습니다'}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>outstanding()===1")
+        self.page.evaluate("()=>select('%s')" % OTHER)
+        self.assertEqual(typed, self.page.evaluate("snapshot().stored")[UID]["draft"]["findings"])
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>$('#cite-preview-status').textContent.includes('인용하지 못했습니다')")
+        self.assertIn(UID, self.page.evaluate("snapshot().converge"))
+        # The server never received the typing, so its projection is the older draft.
+        self.page.evaluate("applyPoll(%s, %s)" % (json.dumps(UID), json.dumps(
+            {"rs": "T", "version": 1, "findings": "SERVER HEAD", "conclusion": "", "recommendation": "",
+             "draft": {"findings": EXISTING, "conclusion": "", "recommendation": "",
+                       "baseVersion": 1, "at": "2026-09-20T01:00"}}, ensure_ascii=False)))
+        self.assertEqual(typed, self.page.evaluate("snapshot().stored")[UID]["draft"]["findings"],
+                         "a pending convergence protects the local draft of a non-selected study too")
+        self.assertEqual("T", self.page.evaluate("snapshot().stored")[UID]["rs"], "every other field still merges")
+        self.page.evaluate("()=>select('%s')" % UID)
+        self.assertEqual([typed, "", ""], self.page.evaluate("snapshot().text"))
+        self.page.evaluate("()=>stash()")
+        self.page.wait_for_function("()=>calls.length===2 && reportConverge.size===0")
+        self.assertEqual(typed, self.page.evaluate("snapshot().calls")[1]["body"]["findings"],
+                         "the converging write carries the typing, not the projection")
+        # Once the convergence is done the study takes the server projection again as usual.
+        self.page.evaluate("()=>select('%s')" % OTHER)
+        self.page.evaluate("applyPoll(%s, %s)" % (json.dumps(UID), json.dumps(
+            {"rs": "T", "version": 1, "findings": "SERVER HEAD", "conclusion": "", "recommendation": "",
+             "draft": {"findings": "서버가 가진 글", "conclusion": "", "recommendation": "",
+                       "baseVersion": 1, "at": "2026-09-20T03:00"}}, ensure_ascii=False)))
+        self.assertEqual("서버가 가진 글", self.page.evaluate("snapshot().stored")[UID]["draft"]["findings"],
+                         "the guard lifts with the flag; it is not a permanent freeze")
+
+    def test_logout_stands_aside_while_an_insertion_is_out(self):
+        # The logout's own draft write is non-keepalive, so B1 defers it; KinAuth.logout() then
+        # destroys the session before navigation, which means the closing-tab keepalive would leave
+        # after the session is gone. Standing aside for the few seconds the answer takes is the
+        # honest behaviour, and it is what commitReport already does.
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        self.page.evaluate(type_js([EXISTING + "\n로그아웃 직전에 친 줄", "", ""]))
+        self.open_pane()
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c1', field: 'findings',"
+                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>outstanding()===1")
+        self.page.evaluate("()=>{ confirmAnswer = true; }")
+        # The busy pane covers the screen, so a person cannot reach the button with a pointer;
+        # dispatching the click runs the same shipped handler, which is what is under test.
+        self.page.evaluate("()=>$('#logout').click()")
+        value = self.page.evaluate("snapshot()")
+        self.assertEqual(0, value["logouts"], "the session must not be torn down around an insertion")
+        self.assertEqual([], value["confirms"], "the refusal comes before the confirmation dialog")
+        self.assertEqual(1, len(value["calls"]), "and nothing was sent")
+        self.assertIn("인용을 기록하는 중입니다", value["toasts"][-1]["message"])
+        # Once the answer is in, the ordinary logout proceeds.
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>!$('#cite-preview').classList.contains('show')")
+        self.page.click("#logout")
+        self.page.wait_for_function("()=>logouts===1")
+        self.assertEqual(1, len(self.page.evaluate("snapshot().confirms")))
+
     def test_a_late_200_leaves_the_keep_list_unknown_and_the_head_choice_intact(self):
         # The row may now hold the sentence and its attestation; this screen never saw the cid. A
         # keep list built from the pre-insertion read would remove exactly that attestation.
@@ -653,24 +737,41 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertFalse(info["known"], "the draft side is unknown again")
         self.assertEqual("OMITTED", info["keep"])
         self.assertEqual(["h1"], info["remove"], "an explicit head-removal choice is not collateral damage")
-        # A 30 s poll for a non-selected study projects the server draft back into appState.
-        self.page.evaluate("()=>{ appState['%s'] = {...appState['%s'], draft: {findings: %s,"
-                           " conclusion: '', recommendation: '', baseVersion: 1, at: '2026-09-20T02:00'} }; }"
-                           % (UID, UID, json.dumps(EXISTING + "\n" + BLOCK, ensure_ascii=False)))
+        # A 30 s poll for a non-selected study, through the SHIPPED merge: the row it projects does
+        # carry the sentence, but this screen is still waiting to converge, so the local capture
+        # wins and the projection may not replace it.
+        self.page.evaluate("applyPoll(%s, %s)" % (json.dumps(UID), json.dumps(
+            {"rs": "T", "version": 2, "findings": "승인본 인용", "conclusion": "", "recommendation": "",
+             "draft": {"findings": EXISTING + "\n" + BLOCK, "conclusion": "", "recommendation": "",
+                       "baseVersion": 1, "at": "2026-09-20T02:00"}}, ensure_ascii=False)))
         self.page.evaluate("()=>select('%s')" % UID)
-        self.assertEqual(EXISTING + "\n" + BLOCK, self.page.evaluate("snapshot().text")[0])
+        self.assertEqual([EXISTING, "", ""], self.page.evaluate("snapshot().text"),
+                         "the screen keeps what this person wrote; the poll may not overwrite it")
         self.page.evaluate("()=>stash()")
         self.page.wait_for_function("()=>calls.length>=2")
+        converging = self.page.evaluate("snapshot().calls")[-1]
+        self.assertEqual(EXISTING, converging["body"]["findings"], "the row converges to the screen")
         for put in self.page.evaluate("snapshot().calls")[1:]:
             if "citationIds" in put["keys"]:
                 self.assertIn("late", put["body"]["citationIds"],
                               "a keep list may never be sent without the citation just written")
-        # The commit path is bound by the same rule.
-        self.page.evaluate("reply({status: 200, body: {rs: 'T', version: 3}})")
+        # The commit path is bound by the same rule, and it still carries the head choice.
+        self.page.evaluate("reply({status: 200, body: {rs: 'T', version: 3, findings: %s,"
+                           " conclusion: '', recommendation: ''}})" % json.dumps(EXISTING, ensure_ascii=False))
         self.page.evaluate("commit('save')")
         post = [c for c in self.page.evaluate("snapshot().calls") if c["method"] == "POST"][0]
         self.assertNotIn("citationIds", post["keys"], "an unknown draft side omits the key on the commit too")
         self.assertEqual(["h1"], post["body"]["removeCitationIds"], "the head choice still travels")
+        # The sentence never made it into the signed text, so the attestation the server kept must
+        # read 'absent' - retained and honest, never silently deleted (contract 3).
+        self.page.evaluate("citeReply(%s)" % json.dumps(
+            {"version": 3, "head": [entry("late", text=BLOCK)], "draft": []}, ensure_ascii=False))
+        self.page.click("#b-cite-reload")
+        self.page.wait_for_function("()=>citeInfo('%s').known===true" % UID)
+        self.page.click("#b-cite-list")
+        shown = self.page.evaluate("snapshot().bar.list")
+        self.assertIn("넣은 문자열이 이 칸에 더는 없습니다", shown)
+        self.assertNotIn("넣은 문자열이 이 칸에 그대로 있습니다", shown)
 
     def test_the_insertion_waits_for_every_write_of_that_study_not_only_the_newest(self):
         self.open(citations={"version": 1, "head": [], "draft": []})

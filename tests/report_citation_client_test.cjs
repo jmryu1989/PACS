@@ -506,6 +506,41 @@ test('TEST-S3-U2b-WIRING: the keep list is carried only while the state is confi
   assert.match(discard, /citations\.forget\(uid\);/);
 });
 
+test('TEST-S3-U2b-WIRING: the poll cannot overwrite a draft that is still waiting to be written', () => {
+  // The deferred capture lives in appState[uid].draft, which is exactly the object the 30 s poll
+  // replaces for a study that is not selected. One rule, used by all three merge sites.
+  const keep = extractFunction(html, 'preservedLocal');
+  assert.match(keep, /if \(uid === selectedUid\) local\.version = mine\?\.version \?\? 0;/);
+  assert.match(keep, /if \(uid === selectedUid \|\| reportConverge\.has\(uid\)\) local\.draft = mine\?\.draft \?\? null;/);
+  const merge = extractFunction(html, 'mergePolledState');
+  assert.match(merge, /\{ \.\.\.mine, \.\.\.st, \.\.\.preservedLocal\(uid, mine\) \}/,
+    'the server projection still merges; only the protected keys win');
+  // Both per-study branches of the poll go through it, and the list rebuild restores the same keys
+  // for every study that is waiting, not only for the selected one.
+  const poll = html.slice(html.indexOf('for (const s of r.studies) {'), html.indexOf('if (arrivalNotice) toast('));
+  assert.equal(poll.split('appState[uid] = mergePolledState(uid, st);').length - 1, 2,
+    'the selected and the non-selected branch must both use it');
+  assert.doesNotMatch(poll, /appState\[uid\] = \{ \.\.\.appState\[uid\], \.\.\.st \}/, 'no raw merge may remain');
+  const rebuild = html.slice(html.indexOf('if (fresh.length || r.studies.length !== studies.length) {'),
+                             html.indexOf('// 썸네일 등 오른쪽 전체를'));
+  assert.match(rebuild, /for \(const uid of \[selectedUid, \.\.\.reportConverge\]\)/);
+  assert.match(rebuild, /\.\.\.preservedLocal\(uid, prior\)/);
+});
+
+test('TEST-S3-U2b-WIRING: logout stands aside for an insertion instead of tearing the session down', () => {
+  // Its draft write is non-keepalive, so B1 defers it; KinAuth.logout() then destroys the session
+  // before navigation, so the closing-tab keepalive would leave after the session is gone.
+  const logout = html.slice(html.indexOf('$("#logout").addEventListener("click"'),
+                            html.indexOf('// 다른 사람이 잡거나 놓은 걸'));
+  const guard = logout.indexOf('if (insertInFlight) {');
+  assert.ok(guard > 0, 'the logout must check for an insertion in flight');
+  assert.ok(guard < logout.indexOf('confirm("로그아웃하시겠습니까?")'), 'before it asks anything');
+  assert.ok(guard < logout.indexOf('loggingOut = true;'));
+  assert.ok(guard < logout.indexOf('await stashReport();'));
+  assert.ok(guard < logout.indexOf('await KinAuth.logout();'));
+  assert.match(logout.slice(guard, logout.indexOf('if (!confirm')), /toast\(/, 'and it says why');
+});
+
 test('TEST-S3-U2b-WIRING: the citation path reuses the one editor gate, it does not grow a second', () => {
   const gate = extractFunction(html, 'reportEditorBlock');
   assert.match(gate, /reportWriteBlock\(\)/);
@@ -558,6 +593,96 @@ test('TEST-S3-U2b-WIRING: the pane is modal while busy and the read is the only 
   assert.match(html, /for \(const k of RFIELDS\) \$\("#" \+ k\)\.addEventListener\("input", scheduleCitationRefresh\);/);
   // The payload the polling list returns is untouched by this unit.
   assert.doesNotMatch(html, /citationCount/);
+});
+
+/**
+ * The DOM harness assembles product text and helper text into one classic script. Parsing it
+ * proves nothing about whether the helpers reach the product: a top-level `function select` is a
+ * writable property of the global object, so `window.select = uid => select(uid)` replaced the very
+ * binding its own body resolved and every study move threw RangeError before stashReport() ran.
+ * These two tests execute the assembled pieces instead of reading them.
+ */
+const domTest = readFileSync(join(ROOT, 'tests/report_citation_dom_test.py'), 'utf8').replace(/\r\n/g, '\n');
+const slice = (source, from, to) => {
+  const start = source.indexOf(from);
+  const end = source.indexOf(to, start + from.length);
+  assert.ok(start >= 0 && end > start, `the region ${from.trim()} moved; re-pin the harness`);
+  return source.slice(start, end);
+};
+/** The markers come out of the harness itself, so the smoke can never slice a different region. */
+const harnessMarkers = name => {
+  const line = domTest.split('\n').find(text => text.startsWith(`${name} = slice_between(MAIN, `));
+  assert.ok(line, `${name} is gone from the DOM harness`);
+  const found = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m => JSON.parse(`"${m[1]}"`));
+  assert.equal(found.length, 2, `${name} markers`);
+  return found;
+};
+/** Only what select()/refreshRight() touch; the two that matter record that they ran. */
+const SELECT_STUBS = `
+  var window = this, trace = [];
+  var selectedUid = "1.2.3", selectionSeq = 0, citeBusy = false, reasonResolve = null, heldUid = null, warnedFor = null;
+  var relatedUid = null, relatedReportSeq = 0, relatedModality = "", relatedBodyPart = "", relatedIncludeCurrent = false;
+  var mode = "Reading", templateEditor = null;
+  var reportPreview = { close() {} }, relatedParts = { reset() {} };
+  var readingWorkspace = { active: () => false, selectionChanged() {} }, readingFindings = { sync() {} };
+  var imageOpening = { snapshot: () => ({ autoLoad: false }) };
+  function closeTemplateEditor() {} function closeTemplatePreview() {} function closeCitePreview() {}
+  function releaseHold() {} function clearRelatedReport() {} function loadRelatedReport() {}
+  function renderClinical() {} function renderRelated() {} function renderThumbs() {} function renderTemplates() {}
+  function renderOrders() {} function openFilmbox() {} function render() {} function updateReportButtons() {}
+  function markSelectionChanged(uid) { selectedUid = uid; selectionSeq += 1; }
+  function stashReport() { trace.push("stashReport:" + selectedUid); }
+  function loadReport(o) { trace.push("loadReport:" + selectedUid + ":" + !!(o && o.force)); }
+`;
+const runSelect = (extra, call) => {
+  const [from, to] = harnessMarkers('SELECT_BLOCK');
+  const context = vm.createContext({});
+  vm.runInContext(SELECT_STUBS + '\n' + slice(html.replace(/\r\n/g, '\n'), from, to) + '\n' + extra,
+    context, { filename: 'harness-inline.js' });
+  let threw = null;
+  try { vm.runInContext(call, context); } catch (e) { threw = e.constructor.name; }
+  // Through JSON: an array built inside the vm realm carries that realm's Array.prototype and
+  // would fail deepStrictEqual for a reason that has nothing to do with the harness.
+  return { threw, selectedUid: vm.runInContext('selectedUid', context),
+    selectionSeq: vm.runInContext('selectionSeq', context),
+    trace: JSON.parse(vm.runInContext('JSON.stringify(trace)', context)) };
+};
+
+test('TEST-S3-U2b-HARNESS: the sliced study move really runs, and the wrapper that broke it cannot come back', () => {
+  // Executed, not matched: the shipped select() writes the draft on the way out, counts the
+  // selection change and redraws the arriving study with force.
+  const ran = runSelect('', 'select("1.2.4")');
+  assert.equal(ran.threw, null, 'the shipped study move must execute');
+  assert.equal(ran.selectedUid, '1.2.4');
+  assert.equal(ran.selectionSeq, 1);
+  assert.deepEqual(ran.trace, ['stashReport:1.2.3', 'loadReport:1.2.4:true'],
+    'the draft write happens before the move and the arrival redraws with force');
+  // Negative control: the exact line that was removed, so this smoke can be seen to fail.
+  const broken = runSelect('window.select = uid => select(uid);', 'select("1.2.4")');
+  assert.equal(broken.threw, 'RangeError', 'a same-named helper makes the move call itself');
+  assert.deepEqual(broken.trace, [], 'and nothing of the product runs');
+  assert.equal(broken.selectedUid, '1.2.3');
+  // No helper in the harness may shadow a top-level function of any block it slices.
+  const sliced = ['BASE_BLOCK', 'REPORT_BLOCK', 'SELECT_BLOCK', 'UNLOAD_BLOCK', 'LOGOUT_BLOCK']
+    .map(name => { const [from, to] = harnessMarkers(name); return slice(html.replace(/\r\n/g, '\n'), from, to); })
+    .join('\n');
+  const helpers = [...domTest.matchAll(/^window\.([A-Za-z_$][\w$]*) = /gm)].map(m => m[1]);
+  assert.ok(helpers.length > 15, 'the helper list was not found');
+  const shadowing = helpers.filter(name =>
+    new RegExp(`^ {4}(?:async )?function ${name.replace(/\$/g, '\\$')}\\(`, 'm').test(sliced));
+  assert.deepEqual(shadowing, [], 'a window.X helper named after a sliced top-level function shadows it');
+  // Each placeholder must occur exactly twice: the spot it fills and its own replace() call.
+  // A third mention - even inside a comment - makes replace() inject product text into prose,
+  // which is how one sentence about SELECTBLOCK stopped the whole harness from compiling.
+  for (const token of ['MODALCSS', 'PANEHTML', 'CITEHTML', 'CITATIONJS', 'APIFN', 'WRITEBLOCKFN',
+                       'EDITORBLOCKFN', 'BASEBLOCK', 'REPORTBLOCK', 'SELECTBLOCK', 'UNLOADBLOCK',
+                       'LOGOUTBLOCK', 'INITIALSTATE'])
+    assert.equal(domTest.split(token).length - 1, 2,
+      `${token} must appear exactly twice: where it is substituted and in its replace() call`);
+  // UIDVALUE/OTHERVALUE are value placeholders with several intended substitution sites, so they
+  // are only required to stay out of prose that a block replacement could corrupt.
+  for (const token of ['UIDVALUE', 'OTHERVALUE'])
+    assert.ok(domTest.split(token).length - 1 >= 2, token);
 });
 
 test('TEST-S3-U2b-HARNESS: the product region the DOM tests slice actually compiles', () => {

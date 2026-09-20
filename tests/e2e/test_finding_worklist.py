@@ -78,14 +78,23 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
                          [([20.0], 'kin-native-manual-v1'), (None, None)] + ([(ELLIPSE_VALUES, 'kin-native-manual-v1')] if ellipse else []))
         return shown, hidden
 
-    def owned_rows(self, *fixtures):
+    def owned_rows(self, *fixtures, drop=None):
+        """Every owned row of the seven tables, byte for byte.
+
+        `drop` names one column to exclude for one table. It exists for a comparison that spans a
+        window in which the PRODUCT may legitimately write that column - S3-U2b's refused insertion
+        raises the convergence flag by contract 4-5 item 6, and the page's own 20 s autosave then
+        rewrites ReportDraft.updatedAt with the text unchanged. Content, baseVersion and citations
+        stay in the comparison; the other six tables are never reduced."""
+        drop = drop or {}
         result = {}
         for f in fixtures:
             uid = literal(f.uid)
             where = {'Finding': f'"studyUid"={uid}', 'FindingRevision': f'"findingId" IN (SELECT id FROM "Finding" WHERE "studyUid"={uid})',
                      'ViewerItem': f'"studyUid"={uid}', 'ViewerRevision': f'"itemId" IN (SELECT id FROM "ViewerItem" WHERE "studyUid"={uid})',
                      'Report': f'uid={uid}', 'ReportDraft': f'uid={uid}', 'ReportVersion': f'uid={uid}'}
-            result[f.uid] = {t: base.psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE {where[t]} ORDER BY to_jsonb(t)::text COLLATE "C"') for t in OWNED_TABLES}
+            shape = lambda t: 'to_jsonb(t)' + (f' - {literal(drop[t])}' if t in drop else '')
+            result[f.uid] = {t: base.psql(f'SELECT ({shape(t)})::text FROM "{t}" t WHERE {where[t]} ORDER BY ({shape(t)})::text COLLATE "C"') for t in OWNED_TABLES}
         return result
 
     # ---- worklist and viewer helpers --------------------------------------------------------
@@ -525,6 +534,13 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         # R5's one template: the finding's own title and text, in that order, nothing added.
         block = shown['item']['title'] + '\n' + shown['item']['text']
         w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
+        # Every draft write this page makes, so a press that must send nothing can be shown to.
+        puts = []
+
+        def note_put(request):
+            if request.method == 'PUT' and request.url.endswith('/studies/'+f.uid+'/report'):
+                puts.append(request.url)
+        w.on('request', note_put)
         self.select(w, f)
         expect(w.locator('#findings')).to_have_value(f.secret)
         panel = self.open_findings(w, f)
@@ -568,17 +584,32 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
                                      dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', reason='',
                                           item=dict(schemaVersion=1, title='바뀐 제목', text='바뀐 본문', primary=0, sources=pairs)))
         self.assertEqual(revised.status, 200, revised.text)
-        before_text, before_rows, before_read = w.locator('#findings').input_value(), self.owned_rows(f), self.citations(f)
+        # ReportDraft carries @updatedAt, and the 409 below legitimately raises the convergence flag
+        # (contract 4-5 item 6), so the page's own 20 s autosave may rewrite that one column while
+        # these rows are read. Drop it for this table only; content, baseVersion and citations stay
+        # byte-exact, and the other six tables are compared whole.
+        stable = dict(ReportDraft='updatedAt')
+        before_text = w.locator('#findings').input_value()
+        before_rows, before_read = self.owned_rows(f, drop=stable), self.citations(f)
+        # The same source into the same field is the product's warn-once duplicate: the first press
+        # must send nothing at all, and the person is told why.
+        sent = len(puts)
         source.get_by_role('button', name='Insert into Report', exact=True).click()
         expect(pane).to_be_visible()
+        w.locator('#cite-preview-insert').click()
+        expect(w.locator('#cite-preview-status')).to_contain_text('이미 인용')
+        self.assertEqual(sent, len(puts), 'a duplicate warning is not a request')
+        # Pressing again is the explicit confirmation, and now the server judges the revision it
+        # reads NOW: the panel still holds r1, so the insertion is refused.
         with w.expect_response(lambda r: r.request.method == 'PUT'
                                and r.url.endswith('/studies/'+f.uid+'/report')) as refused:
             w.locator('#cite-preview-insert').click()
         self.assertEqual(refused.value.status, 409)
         self.assertEqual(refused.value.json()['code'], 'REPORT_CITATION_STALE')
+        self.assertEqual(sent + 1, len(puts), 'exactly one request, and only after the second press')
         expect(w.locator('#cite-preview-status')).to_contain_text('판독문은 그대로입니다')
         self.assertEqual(w.locator('#findings').input_value(), before_text, 'a refusal changes no byte on screen')
-        self.assertEqual(self.owned_rows(f), before_rows, 'and no row on the server')
+        self.assertEqual(self.owned_rows(f, drop=stable), before_rows, 'and no row on the server')
         self.assertEqual(self.citations(f), before_read)
         w.locator('#cite-preview-close').click(); expect(pane).to_be_hidden()
         # Signing carries the attestation into the version the head now points at.

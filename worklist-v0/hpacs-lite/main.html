@@ -3394,6 +3394,29 @@
       return reportDirty() || (!!selectedUid && reportConverge.has(selectedUid));
     }
 
+    /**
+     * 폴링이 한 검사의 상태를 합칠 때 **화면 것을 지켜야 하는 칸**. 규칙은 여기 하나뿐이고
+     * 폴링의 세 자리가 모두 이것을 쓴다 — 세 곳이 각자 판단하면 언젠가 한 곳만 고쳐진다.
+     *
+     *   version — 지금 고른 검사의 판 번호는 **화면이 본 판**이어야 한다. 폴링이 몰래 올리면
+     *     다음 저장의 낙관적 락이 본 적 없는 승인본을 조용히 통과한다.
+     *   draft  — 아직 서버에 보내지 못한 글. 삽입이 나가 있는 동안 검사를 옮기면 그 타건은
+     *     **여기에만** 담겨 있고(쓰기는 미뤘다), 폴링이 서버 투영으로 갈아끼우면 사람이 친
+     *     글이 어디에도 남지 않는다. 그래서 수렴 표시가 있는 검사는 고르지 않았어도 지킨다.
+     *     수렴이 끝나 표시가 내려간 뒤에는 평소처럼 서버 투영을 받는다.
+     */
+    function preservedLocal(uid, mine) {
+      const local = {};
+      if (uid === selectedUid) local.version = mine?.version ?? 0;
+      if (uid === selectedUid || reportConverge.has(uid)) local.draft = mine?.draft ?? null;
+      return local;
+    }
+    /** 폴링 응답 한 건을 그 검사의 화면 상태에 합친다. 가려진 예비 판독은 서버가 본문을 안 준다. */
+    function mergePolledState(uid, st) {
+      const mine = appState[uid] ?? {};
+      return { ...mine, ...st, ...preservedLocal(uid, mine) };
+    }
+
     /** 삽입이 나가 있는 동안의 비-keepalive 초안 저장을 **전부** 비켜세운다(B1). */
     let insertInFlight = false;
     /**
@@ -4422,6 +4445,18 @@
     let loggingOut = false;
     $("#logout").addEventListener("click", async () => {
       if (loggingOut) return;
+      /**
+       * **삽입이 나가 있는 동안에는 나가지 않는다.**
+       *
+       * 여기서 부르는 초안 저장은 비-keepalive라 B1대로 쓰기를 미룬다 — 글자는 화면에만
+       * 담긴다. 그 뒤 `KinAuth.logout()`이 세션을 먼저 없애고 그 다음에 페이지를 옮기므로,
+       * 이탈 시점의 keepalive 저장은 이미 로그아웃된 세션으로 나간다. 확정이 그러듯
+       * 잠깐 비켜서는 편이 정확하다 — 응답은 몇 초면 온다.
+       */
+      if (insertInFlight) {
+        toast("인용을 기록하는 중입니다 — 끝난 뒤 다시 로그아웃하세요.", "err");
+        return;
+      }
       if (!confirm("로그아웃하시겠습니까?")) return;
       reportPreview.close();
       loggingOut = true;
@@ -4480,14 +4515,16 @@
 
           // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
           if (fresh.length || r.studies.length !== studies.length) {
-            const editing = selectedUid ? { ...appState[selectedUid] } : null;
+            // 편집 중인 검사와 **아직 보내지 못한 글을 담고 있는 검사**를 함께 붙잡아 둔다.
+            // 지키는 칸은 아래 `preservedLocal` 한 곳이 정한다(폴링의 다른 두 자리와 같은 규칙).
+            const editing = new Map();
+            for (const uid of [selectedUid, ...reportConverge])
+              if (uid && appState[uid] && !editing.has(uid)) editing.set(uid, { ...appState[uid] });
             studies = r.studies.map(fromApi);
-            // 편집 중인 검사는 아래와 같은 이유로 되돌려 놓는다
-            if (editing && appState[selectedUid]) {
-              appState[selectedUid] = { ...appState[selectedUid],
-                version: editing.version ?? 0,
-                draft: editing.draft ?? null };
-              syncStudy(selectedUid);
+            for (const [uid, prior] of editing) {
+              if (!appState[uid]) continue;
+              appState[uid] = { ...appState[uid], ...preservedLocal(uid, prior) };
+              syncStudy(uid);
             }
             // 썸네일 등 오른쪽 전체를 다시 그릴 필요는 없지만, 판독문 잠금은 반영해야 한다.
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
@@ -4514,10 +4551,7 @@
               //     되돌아간다. 확정본(findings 등)은 갱신해도 된다 — 초안이 있는 동안
               //     화면은 초안을 그리고, 확정본은 "그 사이 남이 v5를 확정했다" 안내에만 쓰인다.
               // 나머지(rs·ss·holder 등)도 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
-              const mine = appState[uid] ?? {};
-              appState[uid] = { ...mine, ...st,
-                version: mine.version ?? 0,
-                draft: mine.draft ?? null };
+              appState[uid] = mergePolledState(uid, st);
               /**
                * 판독문 값은 loadReport가 스스로 지키므로, 호출자는 항상 상태를 반영한다.
                * 예전엔 폴링이 `prelimHidden`만 반영하고 판독문 패널은 그대로 뒀다 —
@@ -4525,7 +4559,13 @@
                * 버튼도 활성인 채라, Save를 눌러야 403을 만났다. (남은버그 3-1)
                */
             } else {
-              appState[uid] = { ...appState[uid], ...st };
+              /**
+               * 고르지 않은 검사도 **수렴을 기다리는 초안**은 덮지 않는다. 삽입이 나가 있는
+               * 동안 검사를 옮기면 그때 담아 둔 타건이 이 칸에만 있고, 그 삽입이 거절되면
+               * 서버 어디에도 없다. 폴링 한 번이 그것을 서버 투영으로 갈아끼우면 돌아온
+               * 화면은 옛 글을 그리고, 수렴 저장이 그 옛 글을 서버에 밀어 넣는다.
+               */
+              appState[uid] = mergePolledState(uid, st);
             }
             syncStudy(uid);
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
