@@ -943,13 +943,19 @@ test('Save MIP Job beside a MIP Batch preview sends one version 13 body; Saved a
 const PRINT_FILES={
  'viewer-job-print.js':s=>{s.kinViewerJobPrint=()=>({open:(...args)=>s.printOpened.push(args),openCurrent(){},close(){},destroy(){}});},
  'viewer-editor-link.js':s=>{s.kinViewerEditorLink=()=>({});},
+ // S3-U5: the report page's citation evidence. report-citation.js assigns a window global and has no
+ // module.exports, so its readiness members are defined here the way the editor link's are; report-preview.js
+ // does export, so the real module is loaded and this test also proves the published pure record.
+ 'report-citation.js':s=>{s.KinReportCitation={presenceOf(){},isReduced(){}};},
+ 'report-preview.js':s=>{s.KinReportPaper=require('../worklist-v0/hpacs-lite/report-preview.js');},
  'viewer-volume-job-print.js':s=>{s.kinRenderVolumeJobPrint=async()=>({});},
  'volume-mip.js':s=>{s.KinVolumeMip=Object.freeze({...require('../worklist-v0/hpacs-lite/volume-mip.js')});},
  'volume-mip-job.js':s=>{s.KinVolumeMipJob=require('../worklist-v0/hpacs-lite/volume-mip-job.js');},
  'volume-mip-batch.js':s=>{s.KinVolumeMipBatch=require('../worklist-v0/hpacs-lite/volume-mip-batch.js');},
  'volume-mip-output.js':s=>{s.KinVolumeMipOutput=require('../worklist-v0/hpacs-lite/volume-mip-output.js');},
  'viewer-volume-mip-print.js':s=>{s.kinRenderVolumeMipPrint=async()=>({});}};
-const PRINT_BASE=['viewer-job-print.js','viewer-editor-link.js'],PRINT_MIP=['viewer-volume-job-print.js','volume-mip.js','volume-mip-job.js','volume-mip-output.js','viewer-volume-mip-print.js'];
+// The two citation files sit immediately after the base pair in viewer-jobs.js, so this order is the request order.
+const PRINT_BASE=['viewer-job-print.js','viewer-editor-link.js','report-citation.js','report-preview.js'],PRINT_MIP=['viewer-volume-job-print.js','volume-mip.js','volume-mip-job.js','volume-mip-output.js','viewer-volume-mip-print.js'];
 const LOAD_FAILED='출력 화면을 불러오지 못했습니다. 다시 누르세요.';
 async function printWorld({versions,present={},answer=(file,s)=>PRINT_FILES[file](s),capture=null,transport=null}){
  const real=context.window.kinCreateVolumeJob;let parts=null;
@@ -1088,7 +1094,10 @@ test('P2 (c) B1: present MIP models are frozen objects, ready by their members; 
 });
 
 test('P2 (d): a loaded script whose global fails its predicate, or an aborted load, fails print only; the retry requests only that file',async()=>{
- for(const [file,broken] of [['volume-mip-output.js',s=>{s.KinVolumeMipOutput=Object.freeze({plan(){},verifyClip(){},verifyDisplay(){},caption(){},supports(){}});}],['viewer-volume-mip-print.js',()=>'error']]){
+ // S3-U5: the two citation files are base assets, so a broken predicate or an aborted load in either must close
+ // print only - exactly as a reconstructed-output asset does - and must not cost the panel its save or restore.
+ for(const [file,broken] of [['volume-mip-output.js',s=>{s.KinVolumeMipOutput=Object.freeze({plan(){},verifyClip(){},verifyDisplay(){},caption(){},supports(){}});}],['viewer-volume-mip-print.js',()=>'error'],
+   ['report-citation.js',s=>{s.KinReportCitation={presenceOf(){}};}],['report-preview.js',()=>'error']]){
   let failing=true;
   const w=await printWorld({versions:[12,13],answer:(name,s)=>name===file&&failing?broken(s):PRINT_FILES[name](s)});
   try{

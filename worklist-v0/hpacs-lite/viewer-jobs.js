@@ -78,7 +78,13 @@ window.kinViewerJobs = function (services, model) {
           ['volume-mip-job.js',members('KinVolumeMipJob',['validate','validateFor','restoreRequest','intersects'])],
           ['volume-mip-output.js',members('KinVolumeMipOutput',['plan','verifyClip','verifyDisplay','caption','supports','timer','saved','frames','bind','displayCaption','bytes'])],
           ['viewer-volume-mip-print.js',fn('kinRenderVolumeMipPrint')]];
+        // S3-U5: the citation evidence on a report page is written by the same pure
+        // functions the worklist preview uses, and this document has neither file.
+        // They sit right after the base pair so the version-specific assets keep
+        // their place in the request order.
         const assets=[['viewer-job-print.js',fn('kinViewerJobPrint')],['viewer-editor-link.js',fn('kinViewerEditorLink')],
+          ['report-citation.js',members('KinReportCitation',['presenceOf','isReduced'])],
+          ['report-preview.js',members('KinReportPaper',['citationSection','citationAnswerOk'])],
           ...([4,5,6].includes(shape)?[volumePrint]:[12,14].includes(shape)?mipPrint:[13,15].includes(shape)?[...mipPrint,['volume-mip-batch.js',members('KinVolumeMipBatch',['validate','plan','verifyCamera','budget'])]]:[])].filter(([,ready])=>!ready());
         if (assets.length) {
           // A print-only asset failure must leave saving/restoring available.

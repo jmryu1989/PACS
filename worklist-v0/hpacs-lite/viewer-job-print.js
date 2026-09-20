@@ -77,6 +77,35 @@
       entries.map((entry, index) => `.report[data-print-page="${pageName(index)}"]{page:${pageName(index)}}`).join('') +
       (entries.length ? `.intro{page:${pageName(0)}}` : '');
   }
+  // S3-U5: which report pages need citation evidence, and what a failed read
+  // means for one of them. Both are pure so plain Node can read them: the
+  // browser factory below cannot be loaded there, and these two decisions are
+  // where this unit goes silently wrong - a signed page printed with no
+  // evidence, or a refusal printed as an empty list.
+  //
+  // The report choice is deliberately NOT an input. state() has already
+  // resolved it into the entry list; asking it again here would be a second
+  // mapping that can disagree with the one that actually ran.
+  function citationTargets(entries) {
+    return (entries || []).map(entry => ({
+      uid: entry ? entry.uid : undefined,
+      mode: entry && entry.draft === true ? 'editor'
+        : entry && entry.report && Number.isInteger(entry.report.version) && entry.report.version >= 1 ? 'read'
+        : 'none',
+    }));
+  }
+  // Fixed order, and the last branch is a catch-all: anything short of a known
+  // refusal is `unknown`, never an empty citation list. An abort or a dead
+  // panel belongs to the whole output rather than to one page - by the time a
+  // 401 is seen the session has already been torn down - so neither may be
+  // swallowed. The error's own `name` is not consulted: api() runs its own
+  // timer per call, so an AbortError can be that timer rather than this unit's,
+  // and only the caller's signal tells the two apart.
+  function citationTerminal({ aborted, live, status } = {}) {
+    if (aborted || live === false) return 'rethrow';
+    if (status === 403) return 'refused';
+    return 'unknown';
+  }
   // The one source read of every saved-image output: the frame cells here and the version 4-6, 12 and 13 volume loader. A read that
   // fetch() rejects before any response is sent once more on the same signal. Hosted diagnostic run 35022850312 (NetLog
   // URL_REQUEST 18100): Chromium 148 had bound the read to an HTTP/2 connection whose GOAWAY (nginx keepalive_requests) arrived
@@ -103,7 +132,8 @@
     return new Uint8Array(await new Blob(chunks).arrayBuffer());
   }
   const api = { normalizeStudyDate, dateText, dateRelation, relationText, reportTitle, reportLabel, optionLabel,
-    reportEntry, studyLine, dateLine, summaryText, pageIdentity, pageName, cssContent, pageRules, sourceBytes };
+    reportEntry, studyLine, dateLine, summaryText, pageIdentity, pageName, cssContent, pageRules, sourceBytes,
+    citationTargets, citationTerminal };
   if (typeof module === 'object' && module.exports) module.exports = api; else root.kinViewerJobPrintIdentity = api;
 })(globalThis);
 globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
@@ -119,6 +149,16 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   const mipBatchPage = version => version === 13 || version === 15;
   const MIP_NOTE = '저장한 조건과 전체 CT 원본으로 다시 계산한 출력입니다 · 화면 미리보기가 아닙니다 · 실제 크기 아님 · 조작성 평가 가능·진단 품질 미검증';
   const mipModel = () => { const model = window.KinVolumeMipOutput; if (typeof model?.timer !== 'function' || typeof model?.saved !== 'function') throw new Error('MIP 출력 도구를 불러오지 못했습니다. 다시 확인하세요.'); return model; };
+  // S3-U5. Refusing is the only honest answer when the citation wording itself
+  // is missing: every other outcome is phrased inside that library, so printing
+  // "unknown" without it would need a second copy of the wording here, and
+  // printing nothing would make a signed report look exactly like one that has
+  // nothing to cite.
+  const CITATION_MISSING = '인용 출력 구성 요소를 불러오지 못했습니다. 다시 확인을 누르세요.';
+  // This page names people by their raw actor everywhere else (작성자, 승인
+  // 판독의, annotation legends) and the viewer holds no name map, so the
+  // citation lines say what the lines above them say.
+  const rawActor = value => (value === null || value === undefined ? '' : String(value));
   const entries = new Map();
   const scheme = 'kinjobprint';
   // Only run-owned, freshly fetched pixels enter this loader. Never evict or
@@ -253,10 +293,18 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
     const reportUids = ['none', 'editor'].includes(reportChoice) ? [] : reportChoice === 'saved' ? [item.uid] :
       ['prior', 'editor-prior'].includes(reportChoice) ? [studies[1]] : studies;
     let currentPreview = null;
+    // S3-U5: whose read permission each study's answer was produced under. The
+    // citation section says so on the page, and a reduced line ('this reader
+    // could not see that source') has no referent without it. It is taken from
+    // that study's OWN answer in this same call - never from another study's
+    // and never from the session - so the sentence is about the read that
+    // actually happened.
+    const previewActors = new Map();
     for (const uid of job.snapshot.studies) {
       const data = await api('/studies/' + uid + '/report-preview', { signal });
       if (data.study?.uid !== uid) throw new Error('출력 검사 정보를 확인할 수 없습니다.');
       identities.push(data.study);
+      previewActors.set(uid, typeof data.actor === 'string' ? data.actor : null);
       if (uid === item.uid) currentPreview = data;
       // Selection is bound to the verified comparison, never to the active
       // image cell or the worklist's independent report editor.
@@ -296,6 +344,48 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
         author: typeof currentPreview.actor === 'string' ? currentPreview.actor : null };
       const entry = identity.reportEntry(item.uid, report, identities, item.uid);
       entry.draft = true; entries.unshift(entry);
+    }
+    // ── S3-U5: the citation evidence of each printed report page ──
+    //
+    // One dedicated read per printed study, under THAT study's own gate: the
+    // preview gate is institution-wide while this endpoint re-applies finding
+    // readability, so reading it once for the current study would put sources
+    // on a comparison page that this reader may not see. `foreign: true`
+    // because a read that only looks for evidence must never be the thing that
+    // ends a viewer session.
+    //
+    // The result is attached to the entry, so the two equal() comparisons that
+    // already exist - prepare()'s re-read and print()'s - carry it with no new
+    // comparison and no new refusal wording. The answer's `draft` array is read
+    // and dropped: it cannot reach this paper, and comparing it would refuse
+    // prints for a change the page could never show.
+    const targets = identity.citationTargets(entries);
+    if (targets.some(target => target.mode !== 'none')) {
+      const citation = globalThis.KinReportCitation, paper = globalThis.KinReportPaper;
+      if (!['presenceOf', 'isReduced'].every(key => typeof citation?.[key] === 'function') ||
+          !['citationSection', 'citationAnswerOk'].every(key => typeof paper?.[key] === 'function'))
+        throw new Error(CITATION_MISSING);
+      for (const [index, target] of targets.entries()) {
+        if (target.mode === 'none') continue;
+        // An unsaved body carries no server version to speak for, so the page
+        // says so in one line instead of drawing a citation state that would
+        // read as 'this draft cites nothing'.
+        if (target.mode === 'editor') { entries[index].citations = { state: 'editor' }; continue; }
+        const actor = previewActors.get(target.uid) ?? null;
+        let answer;
+        try {
+          answer = await api('/studies/' + target.uid + '/report/citations', { signal, foreign: true });
+        } catch (error) {
+          const terminal = identity.citationTerminal({ aborted: signal.aborted, live: live(), status: error?.status });
+          // Caught per entry: one page's failure must not blank the images, the
+          // summary and the other study's page along with it.
+          if (terminal === 'rethrow') throw error;
+          entries[index].citations = { state: terminal, entries: [], actor };
+          continue;
+        }
+        entries[index].citations = paper.citationAnswerOk(answer, entries[index].report.version)
+          ? { state: 'ok', entries: answer.head, actor } : { state: 'unknown', entries: [], actor };
+      }
     }
     await authenticate(signal);
     const latest = await readJob(); validCurrent(item);
@@ -484,6 +574,11 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
   function html(data, images, outputEdits, batchOutput) {
     const { job, identities } = data, main = el('main'), legends = [], mipPage = batchOutput?.mip || null;
     const { reportLabel, dateLine, pageName, pageRules, summaryText } = identity;
+    // Read here rather than at module load: this file is required with no DOM
+    // by tests/viewer_job_print_identity_test.cjs, so a bare global at load
+    // time would break it. state() has already refused the output if a page
+    // needs these and they are absent.
+    const paper = globalThis.KinReportPaper, citation = globalThis.KinReportCitation;
     // The title block shares the first report's named page, so no forced break.
     const intro = node => { node.className = 'intro'; return node; };
     const basis = job.transient ? '처음 선택한 화면' : '저장 화면';
@@ -513,6 +608,18 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       }
       for (const [key, label] of [['findings', '소견'], ['conclusion', '결론'], ['recommendation', '권고']]) {
         el('h3', label, section); el('p', report[key] || '(내용 없음)', section).dataset.reportField = key;
+      }
+      // S3-U5: this study's evidence inside this study's own section, so it
+      // inherits the named @page footer that already binds every continuation
+      // page to the right study. Presence is counted against the raw body, not
+      // the '(내용 없음)' substitute printed above it, and every line is written
+      // with el(tag, text): insertedBy comes from the server and a name is user
+      // input, and this page is a record.
+      if (entry.citations) {
+        const part = paper.citationSection({ ...entry.citations, texts: report, actorName: rawActor, citation });
+        const box = el('section', undefined, section); box.className = 'citations';
+        el('h3', part.heading, box);
+        for (const line of part.lines) el('p', line, box).className = 'citation';
       }
     }
     if(batchOutput?.scout){
@@ -584,6 +691,7 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       'body{margin:0;color:#18212b;background:white;font:13px/1.5 "Malgun Gothic",sans-serif}main{padding:12px}h1{font-size:21px}h2{font-size:16px}p{white-space:pre-wrap;overflow-wrap:anywhere}.grid{display:grid;gap:12px}.cell{min-width:0;break-inside:avoid;border-top:1px solid #aaa;padding-top:10px}.cell img{display:block;max-width:100%;max-height:145mm;width:auto;height:auto;margin:8px auto}.reference{font-size:9px}' + cssPages + '@media print{main{padding:0}}' +
       '.annotations{margin-top:18px}.annotations>h2,.annotations>p{break-after:avoid;break-inside:avoid}.annotations>div{break-inside:avoid;border-top:1px solid #ccc;padding:8px 0;overflow-wrap:anywhere}.annotations strong{white-space:pre-wrap;overflow-wrap:anywhere}' +
       '.report h2,.report h3{break-after:avoid}.report-source{font-weight:bold}.report+.grid,.report+.report,.report+.batch-reference{break-before:page}.report p{orphans:3;widows:3}.batch-reference{break-inside:avoid}' +
+      '.citations{margin-top:14px}.citation{break-inside:avoid;margin:3px 0}' +
       '</style></head><body>' + main.outerHTML + '</body></html>';
   }
   function supportsIdentity() {
