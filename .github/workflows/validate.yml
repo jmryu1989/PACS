@@ -114,7 +114,15 @@ jobs:
       - name: Saved comparison print page identity and pagination
         timeout-minutes: 4
         run: |
-          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/job-print-pages/evidence" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-pages --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file tests/viewer_job_print_pages_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_pages_test.py
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/job-print-pages/evidence" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-pages --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/report-preview.js --file tests/viewer_job_print_pages_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_pages_test.py
+      - name: S3-U5 job print citation evidence DOM
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-citation-dom --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file tests/viewer_job_print_citation_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_citation_dom_test.py
+      - name: S3-U5 job print citation evidence browser mutants
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-citation-mutants --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/viewer_job_print_citation_dom_test.py --file tests/viewer_job_print_citation_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_citation_mutants.py --out tmp/workspace-ui-ci/job-print-citation-mutants/mutants.json
       - name: Workspace window transition and identity DOM regressions
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/window-manager --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/viewer-windows.js --file tests/viewer_window_manager_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_window_manager_dom_test.py
@@ -710,6 +718,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-citation-client --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_citation_vectors.json --file tests/report_citation_client_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_citation_client_test.cjs
       - name: S3-U4 printed citation evidence wording, terminal states and answer validity
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-preview-citation --cwd . --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_citation_vectors.json --file tests/report_preview_citation_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_preview_citation_test.cjs
+      - name: S3-U5 job print citation targets, failure mapping and the shared pure record
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-citation --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file tests/viewer_job_print_citation_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_citation_test.cjs
       - name: Editor link model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/editor-link --cwd . --file worklist-v0/hpacs-lite/viewer-editor-link.js --file tests/viewer_editor_link_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_editor_link_test.cjs
       - name: Three-D cursor geometry model
@@ -846,6 +856,7 @@ jobs:
           name: synthetic-runtime-print-identity
           path: |
             tmp/runtime-ci/job-print-identity/
+            tmp/runtime-ci/job-print-citation/
             tmp/runtime-ci/report-preview-citation/
             tmp/runtime-ci/report-rebase-model/
             tmp/runtime-ci/report-citation-client/

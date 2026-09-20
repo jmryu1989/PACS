@@ -523,5 +523,13 @@
   };
   // The factory still reaches the page as the same global name; only the pure
   // record wording above is exported for the node tests.
-  if (typeof module === 'object' && module.exports) module.exports = { savedLabel, citationSection, citationAnswerOk };
+  //
+  // S3-U5: the job print dialog lives in the viewer document, which never loads
+  // this file's factory. It needs the same wording - a second implementation is
+  // how two papers start disagreeing about one citation - so the pure record is
+  // published under its own global too. The object is the same one the node
+  // tests already receive, so its contents do not change.
+  const paper = { savedLabel, citationSection, citationAnswerOk };
+  globalThis.KinReportPaper = paper;
+  if (typeof module === 'object' && module.exports) module.exports = paper;
 })();
