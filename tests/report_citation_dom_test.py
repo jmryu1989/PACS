@@ -196,10 +196,14 @@ window.fetch = async (url, options = {}) => {
                    keys: options.body ? Object.keys(JSON.parse(options.body)) : [] };
   if (path.endsWith("/report/citations")) {
     citeCalls.push(record);
-    // No queued answer means the dedicated read fails: that is the "unconfirmed" state, and it
-    // must be visibly different from "there are no citations".
-    const reply = citeReplies.shift() ?? { status: 500, body: { message: "인용을 확인할 수 없습니다" } };
-    return { ok: reply.status < 400, status: reply.status, json: async () => reply.body };
+    /* A queued citations answer IS the 200 body - `{version, head, draft}` as the endpoint returns
+       it - not a {status, body} envelope like the write queue above. The failure case needs no
+       queueing at all: nothing queued means the dedicated read fails, which is the "unconfirmed"
+       state, and it must stay visibly different from "there are no citations". */
+    const body = citeReplies.shift();
+    if (body === undefined)
+      return { ok: false, status: 500, json: async () => ({ message: "인용을 확인할 수 없습니다" }) };
+    return { ok: true, status: 200, json: async () => body };
   }
   calls.push(record);
   const reply = replies.shift() ?? { status: 200, body: {} };
@@ -344,6 +348,12 @@ class ReportCitationDOMTest(unittest.TestCase):
                         "recommendation": "", "draft": None}}
         base[UID].update(state)
         self.page = self.browser.new_page()
+        # Every wait in this file is satisfied in milliseconds; the slowest legitimate one is the
+        # 400 ms citation-list debounce. Playwright's 30 s default meant a handful of unmet waits
+        # could spend the whole 3-minute step budget and take the unittest summary - and therefore
+        # every traceback - down with it. Ten seconds is 25x the largest real wait and keeps a
+        # failing suite readable inside the unchanged budget.
+        self.page.set_default_timeout(10000)
         # A script that fails to compile defines nothing, and every later call then reports a
         # ReferenceError for whatever it happened to touch first. Say so here instead.
         errors = []
@@ -524,10 +534,16 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual(1, len(self.page.evaluate("snapshot().calls")), "pin B1: every non-keepalive write skips")
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>!$('#cite-preview').classList.contains('show')")
-        # Once the answer is in, writing works again and carries what is on the screen.
+        # Once the answer is in, writing works again and carries what is on the screen. Two requests
+        # in total: the insertion and this write - the two skipped ones sent nothing, which is the
+        # whole point of the assertion above.
         self.page.evaluate("()=>stash()")
-        self.page.wait_for_function("()=>calls.length===3")
-        self.assertEqual("PUT", self.page.evaluate("snapshot().calls")[2]["method"])
+        self.page.wait_for_function("()=>calls.length===2")
+        put = self.page.evaluate("snapshot().calls")[1]
+        self.assertEqual("PUT", put["method"])
+        self.assertNotIn("insert", put["keys"], "the deferred write is an ordinary draft write")
+        self.assertEqual(EXISTING + "\n더 친 글\n" + BLOCK, put["body"]["findings"],
+                         "and it carries the typing plus the sentence the 200 appended")
 
     def test_the_closing_tab_still_sends_what_it_has_while_an_insertion_is_out(self):
         # The documented residual: keepalive cannot wait for an answer, so it sends T0. Neither
