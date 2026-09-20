@@ -3858,6 +3858,19 @@
             insertedText: pane.block, insertedAt: answer.inserted.insertedAt, insertedBy: null,
             mine: true, sameTextCount: 1 });
         if (!extended) invalidateCitations(pane.uid);
+        /**
+         * 인용을 건넨 목록은 판독문 **위에** 떠 있다 — 관련 영역이 가진 고정 패널이라 열어도
+         * 목록·판독문·영상의 배치를 바꾸지 않는 대신, 화면의 그 자리를 덮는다. 서버가 받아
+         * 준 뒤에도 그대로 열려 있으면 방금 들어간 문장도, 그 문장을 세는 인용 표시줄도 그
+         * 패널 뒤에 가려 사람은 자기가 한 일을 읽지 못하고 그 줄의 단추를 누르지도 못한다.
+         * 그래서 **서버가 받아들인 삽입에서만** 그 패널이 물러나고, 초점은 글이 들어간 칸으로
+         * 간다. 거절·중복 경고·늦은 응답에서는 그대로 둔다 — 그때 다음 누름은 그 목록에서
+         * 나오기 때문이다.
+         */
+        if (typeof pane.inserted === "function") {
+          try { pane.inserted(); } catch (_) { /* 패널이 없어도 판독문 쪽은 이미 끝났다 */ }
+          citeReturn = el;
+        }
         closeCitePreview();
         renderDraftBar();
         toast("판독문에 넣었습니다 — 같은 저장에 출처 증언이 함께 기록됐습니다", "ok");

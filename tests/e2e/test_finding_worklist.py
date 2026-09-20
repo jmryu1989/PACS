@@ -581,12 +581,24 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertEqual(stored['sourceRef']['itemId'], shown['item']['sources'][0]['itemId'])
         for forged in ('calculator', 'values', 'studyUid', 'seriesUid', 'sopUid', 'frame'):
             self.assertNotIn(forged, stored['sourceRef'], forged)
+        # The list that handed this citation over is a panel fixed over the report column - it never
+        # moves the report, it covers it - so an accepted insertion stands it down and focus follows
+        # the text into the field that received it. The press below is therefore a real click on a
+        # control nothing overlays, at this profile's own viewport, with no force and no script.
+        expect(panel).to_be_hidden()
+        expect(w.locator('#reading-findings-open')).to_have_attribute('aria-expanded', 'false')
+        expect(w.locator('#findings')).to_be_focused()
         # The screen says the sentence is still there, in the neutral wording contract 3 fixes.
         w.locator('#b-cite-list').click()
         expect(w.locator('#citelist')).to_contain_text('넣은 문자열이 이 칸에 그대로 있습니다')
         expect(w.locator('#citelist')).to_contain_text('주변 문장에 대해서는 아무것도 말하지 않습니다')
         expect(w.locator('#citemsg')).to_contain_text('저장된 초안 1건')
         self.assertNotIn(stored['cid'], w.locator('#citelist').inner_text(), 'no internal identifier is rendered')
+        # The list is opened again for the presses below, and it comes back holding the revision it
+        # had already read: reopening a loaded panel does not re-read. That is what makes the
+        # refusal further down a real stale insertion instead of a fresh look at the newer revision.
+        panel = self.open_findings(w, f)
+        expect(self.row(w, shown['id']).locator('.reading-findings-meta')).to_contain_text(' · r1 · ')
         # The finding moves to r2 behind the panel's back: the server refuses on the revision it
         # reads now, and nothing the person wrote changes (contract 15, client half).
         revised = self.stack.request('POST', '/studies/'+f.uid+'/findings/'+shown['id']+'/revisions', 'doctor',
@@ -621,6 +633,12 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertEqual(self.owned_rows(f, drop=stable), before_rows, 'and no row on the server')
         self.assertEqual(self.citations(f), before_read)
         w.locator('#cite-preview-close').click(); expect(pane).to_be_hidden()
+        # The list is finished with, and it is a panel fixed over the report column, so the person
+        # closes it before working in the report - the panel's own control, the way S2-B built it.
+        # (Which of the report's own controls stay uncovered while it is open is that panel's
+        # accepted geometry and is not asserted here.)
+        self.close_findings(w)
+        expect(w.locator('#reading-findings-open')).to_have_attribute('aria-expanded', 'false')
         # Signing carries the attestation into the version the head now points at.
         self.commit(w, f, '#b-save', 'T')
         signed = self.citations(f)

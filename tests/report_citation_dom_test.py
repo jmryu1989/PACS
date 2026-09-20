@@ -235,6 +235,13 @@ window.load = options => loadReport(options);
 window.stash = () => stashReport();
 window.commit = (action, reason) => { window.pending = commitReport(action, reason); return window.pending; };
 window.cite = request => openCitePreview(request, null);
+/* reading-findings.js hands the preview a callback so an ACCEPTED insertion can stand its own
+   floating panel down - that panel is fixed over the report column, so the citation bar the
+   insertion fills, and that bar's buttons, are underneath it. The panel is not in this harness;
+   this counter is exactly what the product calls, so a case can hold it to "success only". */
+window.stoodDown = 0;
+window.citeStanding = request =>
+  openCitePreview({ ...request, inserted: () => { window.stoodDown += 1; } }, null);
 window.reply = value => { replies.push(value); };
 window.citeReply = value => { citeReplies.push(value); };
 window.hold = (n = 1) => { holdCount += n; };
@@ -374,6 +381,12 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertTrue(self.page.evaluate("cite(%s)" % json.dumps(request(**overrides), ensure_ascii=False)))
         expect(self.page.locator("#cite-preview")).to_be_visible()
 
+    def open_pane_standing(self, **overrides):
+        """The same entry, opened the way reading-findings.js opens it: with the callback that lets
+        an accepted insertion stand that panel down."""
+        self.assertTrue(self.page.evaluate("citeStanding(%s)" % json.dumps(request(**overrides), ensure_ascii=False)))
+        expect(self.page.locator("#cite-preview")).to_be_visible()
+
     def press_insert(self):
         self.page.click("#cite-preview-insert")
 
@@ -467,6 +480,41 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertEqual(["c-old", "c-new"], info["keep"], "both citations stay; the count tells the truth")
         # Two citations now claim the one occurrence, so neither may read 'present'.
         self.assertEqual([2, 2], [item["sameTextCount"] for item in info["draft"]])
+
+    def test_only_an_accepted_insertion_stands_the_list_that_raised_it_down(self):
+        """The Image Findings panel is fixed over the report column: it never moves the report, it
+        covers it, and the citation bar an insertion fills - with its Show Citations button - sits
+        underneath. So a 200 stands that panel down and hands the screen back; the warn-once
+        duplicate and a refusal leave it open, because the next press is made from that same list."""
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        self.open_pane_standing()
+        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c-new', field: 'findings',"
+                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>!$('#cite-preview').classList.contains('show')")
+        self.assertEqual(1, self.page.evaluate("stoodDown"), "the accepted insertion hands the screen back")
+        self.assertEqual(EXISTING + "\n" + BLOCK, self.page.evaluate("text()")[0], "and the text it hands back is there")
+        # Focus follows the text into the field that received it - never onto the button that has
+        # just been hidden with the panel, which would drop the caret on the document body.
+        self.assertEqual("findings", self.page.evaluate("()=>document.activeElement.id"))
+        # The same source again warns once. Nothing was sent, so there is nothing to hand back.
+        self.open_pane_standing()
+        self.press_insert()
+        self.page.wait_for_function("()=>$('#cite-preview-status').textContent.includes('이미 인용')")
+        self.assertEqual(1, self.page.evaluate("stoodDown"), "a warning is not an accepted insertion")
+        self.assertTrue(self.page.evaluate("snapshot().shown"))
+        # And the refusal that follows the confirmation is the same: the report did not change, the
+        # next press comes from that same list, so the list stays where the person left it.
+        self.page.evaluate("reply({status: 409, body: {code: 'REPORT_CITATION_STALE',"
+                           " message: '소견이 그 사이 바뀌었습니다'}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>$('#cite-preview-status').textContent.includes('판독문은 그대로입니다')")
+        self.assertEqual(1, self.page.evaluate("stoodDown"), "a refusal may not stand the list down")
+        value = self.page.evaluate("snapshot()")
+        self.assertTrue(value["shown"], "and it stays open to be read")
+        self.assertEqual(EXISTING + "\n" + BLOCK, value["text"][0], "the refusal changed no byte on screen")
+        sent = [call for call in value["calls"] if isinstance(call["body"], dict) and "insert" in call["body"]]
+        self.assertEqual(2, len(sent), "the warning sent nothing; the 200 and the refusal are the two")
 
     # ── Contract 15: a refusal changes nothing ──
 

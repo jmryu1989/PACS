@@ -412,6 +412,43 @@ test('TEST-S3-U2b-WIRING: the shipped screen sends the server first and only a 2
   assert.match(invalidate, /ensureCitations\(uid, \{ force: true \}\)/, 'one new read must be forced');
 });
 
+/**
+ * The Image Findings panel is `position: fixed` over the report column (reading-workspace.css): it
+ * never moves the report, it covers it - the citation bar an insertion fills, and that bar's own
+ * buttons, are underneath it at every supported viewport. So the insertion that filled the bar is
+ * what hands the screen back, and only when the server actually recorded it.
+ */
+test('TEST-S3-U2b-WIRING: only an accepted insertion stands the list that raised it down', () => {
+  const insert = extractFunction(html, 'insertCitation');
+  const put = insert.indexOf('await api("PUT"');
+  const write = insert.indexOf('el.value += (el.value ? "\\n" : "") + pane.block;');
+  const stand = insert.indexOf('pane.inserted();');
+  const close = insert.indexOf('closeCitePreview();');
+  assert.ok(stand > write, 'the list may only stand down once the answer has moved the editor');
+  assert.ok(close > stand, 'and it stands down before the preview closes, so focus lands on the field');
+  assert.match(insert.slice(stand - 120, stand), /if \(typeof pane\.inserted === "function"\) \{/);
+  assert.match(insert.slice(stand, close), /citeReturn = el;/,
+    'focus follows the text into the field that received it, never onto a button being hidden');
+  assert.equal(insert.split('pane.inserted').length - 1, 2, 'one guarded call, and nowhere else');
+  // Every other exit leaves the list exactly where the person left it: the next press is made
+  // from that same list, on the revision it is still showing.
+  const failure = insert.slice(insert.indexOf('} catch (e) {'), insert.indexOf('} finally { insertInFlight'));
+  assert.doesNotMatch(failure, /inserted\b/, 'a refusal must not stand the list down');
+  const discarded = insert.slice(insert.indexOf('epoch.uid !== selectedUid'), write);
+  assert.doesNotMatch(discarded, /inserted\(/, 'nor may an answer that came back to another selection');
+  assert.ok(insert.indexOf('pane.warned = true;') < put && stand > put,
+    'the warn-once duplicate sends nothing, so it has nothing to hand back');
+  // The panel's half. Standing down goes through its own close path - that is what keeps the
+  // toggle's aria-expanded true to what is on screen - and the callback is a function, so it can
+  // never reach the request body (which the pin above holds to its seven keys).
+  const findings = readFileSync(join(ROOT, 'worklist-v0/hpacs-lite/reading-findings.js'), 'utf8');
+  const cite = extractFunction(findings, 'cite');
+  assert.match(cite, /inserted: \(\) => \{ show\(false\); \}/, 'the request carries the stand-down callback');
+  assert.match(extractFunction(findings, 'show'),
+    /toggle\.setAttribute\('aria-expanded', String\(!!open\)\)/);
+  assert.match(extractFunction(findings, 'show'), /panel\.hidden = !open;/);
+});
+
 test('TEST-S3-U2b-WIRING: the insertion waits for EVERY draft write of that study, not just the newest', () => {
   const settle = extractFunction(html, 'settleStash');
   assert.match(settle, /Promise\.allSettled\(\[\.\.\.pending\]\)/, 'all in-flight writes, not one');

@@ -242,7 +242,14 @@ window.KinReadingFindings = function (app) {
     if (refusal) { setResult(refusal, 'refused', false); return; }
     const opened = app.cite({ uid: st.uid, findingId: row.id, findingRevision: row.revision,
       sourceIndex: index, sourceLabel: source.description, linkState: source.linkState,
-      headRevision: source.headRevision === undefined ? null : source.headRevision, block },
+      headRevision: source.headRevision === undefined ? null : source.headRevision, block,
+      // This panel is fixed over the report column: it never moves the report, it covers it. Once
+      // the server has recorded one insertion, everything the person must read next - the changed
+      // field and the citation bar that now counts it - is underneath, and so are that bar's
+      // buttons. So an ACCEPTED insertion stands this panel down through its own close path, which
+      // is what keeps aria-expanded and the toggle honest. A refusal or the duplicate warning does
+      // not: the next press comes from this same list, on the revision it is still showing.
+      inserted: () => { show(false); } },
       origin || null);
     if (opened) setResult('판독문에 넣을 내용을 미리보기에서 확인하세요.', 'cite-preview', false);
   }
