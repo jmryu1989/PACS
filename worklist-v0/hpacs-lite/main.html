@@ -323,6 +323,17 @@
     .modal .tplbody textarea { background: #14181f; border: 1px solid #3a4356; color: #cdd3dc;
                                padding: 4px 6px; font: inherit; resize: vertical; width: 100%; }
     .modal .note { grid-column: 1 / -1; color: #7f8899; font-size: 11px; padding-top: 4px; }
+    /* 승인본과 쓰던 내용을 나란히 — 무엇을 비교하는지 눈으로 보여야 고를 수 있다 */
+    #stalemodal .box { display: flex; flex-direction: column; max-height: 90vh; }
+    #stale-msg, #stale-status { margin: 0; padding: 8px 12px; font-size: 11px; color: #cdd3dc; line-height: 1.6; }
+    #stale-status { color: #d8b24a; }
+    .stalecols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 12px; overflow-y: auto; }
+    .stalecols section { min-width: 0; border: 1px solid #3a4356; padding: 8px; }
+    .stalecols h4 { margin: 0 0 6px; font-size: 11px; color: #dfe5ee; }
+    .stalecols h5 { margin: 6px 0 2px; font-size: 10px; color: #8892a4; font-weight: normal; }
+    .stalecols pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;
+                     font-size: 11px; color: #cdd3dc; background: #14181f; border: 1px solid #333c4d;
+                     padding: 4px 6px; min-height: 14px; }
 
     /* ══ 클릭 피드백 ══
        눌리는 느낌이 없으면 사용자는 "먹었나?" 하고 한 번 더 누른다.
@@ -865,6 +876,41 @@
     </div>
   </div>
 
+  <!--
+    낡은 초안 재기준 (Addendum)
+
+    추가기재를 쓰는 동안 다른 사람이 새 판을 승인하면, 서버가 확정을 거절하면서
+    **그 승인본을 함께** 보낸다. 여기 보이는 글자는 그 거절 본문 그대로다 —
+    화면이 들고 있던 사본이 아니다. 그 사본이 낡아서 거절당한 것이기 때문이다.
+    자동 병합도, 본문 교체도 없다. 사람이 읽고 고른 뒤에만 기준이 바뀐다.
+  -->
+  <div class="modal" id="stalemodal" role="dialog" aria-modal="true" aria-labelledby="stale-title">
+    <div class="box" style="width:900px;max-width:94vw">
+      <h3 id="stale-title">Approved Report Changed</h3>
+      <p id="stale-msg"></p>
+      <div class="stalecols">
+        <section>
+          <h4 id="stale-head-title">승인본</h4>
+          <h5>Findings</h5><pre id="stale-head-findings"></pre>
+          <h5>Conclusion</h5><pre id="stale-head-conclusion"></pre>
+          <h5>Recommendation</h5><pre id="stale-head-recommendation"></pre>
+        </section>
+        <section>
+          <h4>지금 쓰던 내용 (저장되지 않음)</h4>
+          <h5>Findings</h5><pre id="stale-draft-findings"></pre>
+          <h5>Conclusion</h5><pre id="stale-draft-conclusion"></pre>
+          <h5>Recommendation</h5><pre id="stale-draft-recommendation"></pre>
+        </section>
+      </div>
+      <p id="stale-status" role="status"></p>
+      <div class="foot">
+        <button id="stale-close" type="button">Close</button>
+        <button id="stale-discard" type="button">Discard Draft</button>
+        <button class="ok" id="stale-rebase" type="button">Rebase</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 미배정 검사 (관리자) -->
   <div class="modal" id="unmodal">
     <div class="box" style="width:720px;max-width:94vw">
@@ -1120,7 +1166,10 @@
             toast(`${displayActor(j.holder)} 님이 판독 중입니다 — 저장되지 않았습니다`, "err");
           }
         }
-        throw Object.assign(new Error(j.message ?? `HTTP ${res.status}`), { code: j.code, status: res.status });
+        // 본문을 버리지 않는다. 거절이 "무엇을 확인해야 하는가"를 함께 보낼 때
+        // (승인본 판 번호와 그 본문 같은 것) 메시지 한 줄만 남기면 화면은 사용자에게
+        // 자기 캐시를 대신 보여주게 된다 — 그 캐시가 낡아서 거절당한 것인데도.
+        throw Object.assign(new Error(j.message ?? `HTTP ${res.status}`), { code: j.code, status: res.status, body: j });
       }
       return res.json();
     }
@@ -2935,6 +2984,62 @@
     }
 
     /**
+     * ── 기준 판(baseVersion)의 출처 ──
+     *
+     * `baseVersion`은 "내가 **화면에서 본** 판"이어야 한다. 그런데 `appState[uid].version`은
+     * 본문을 다시 그리지 않고도 올라간다 — PATCH 응답 한 번이면 충분하다(`:1175`).
+     * 그 값을 확정에 실어 보내면 서버의 낙관적 락은 통과하고, 내가 읽은 적 없는
+     * 승인본이 내 초안으로 대체된다. 그래서 **textarea에 값을 실제로 넣은 순간의**
+     * 판 번호만 여기에 남기고, 초안 저장·확정은 그 값을 쓴다.
+     *
+     * 초안을 그렸다면 기준은 그 초안이 딛고 선 판이다. 화면에 있는 글자의 출처가
+     * 확정본이 아니라 초안이기 때문이다.
+     */
+    const reportOrigin = new Map();
+    function recordReportOrigin(uid, version) {
+      if (!uid) return;
+      reportOrigin.set(uid, Number.isSafeInteger(version) && version >= 0 ? version : 0);
+    }
+    function reportBaseVersion(uid, fallback) {
+      return reportOrigin.has(uid) ? reportOrigin.get(uid) : fallback;
+    }
+    function renderedOrigin(r) {
+      if (!r) return 0;
+      const d = r.prelimHidden ? null : r.draft;
+      return (d ? d.baseVersion ?? r.version ?? 0 : r.version ?? 0);
+    }
+
+    /**
+     * 확정 실패를 어떻게 다룰 것인가.
+     *
+     * 예전엔 메시지의 부분 문자열(`저장했습니다`) 하나로 갈랐다. 그 분기는 서버 판독문을
+     * 다시 불러와 화면을 덮으므로, 같은 문구를 쓰는 새 거절이 생기면 저장 안 된 입력이
+     * 사라진다. **코드를 먼저 본다** — 문구는 안내문이고 코드가 계약이다.
+     */
+    function commitFailureRoute(e) {
+      if (e?.code === "REPORT_HELD") return "held";
+      if (e?.code === "REPORT_DRAFT_STALE") return "stale";
+      if (String(e?.message ?? "").includes("저장했습니다")) return "reload";
+      return "toast";
+    }
+
+    /**
+     * 거절 본문에 실려 온 승인본. **서버가 잠근 행에서 그대로 온 다섯 칸만** 믿는다.
+     * `appState`의 본문은 폴링이 판 번호만 올려둔 낡은 사본일 수 있고, 사람이 확인해야
+     * 하는 것은 바로 그 낡음의 반대편이다. 모양이 아니면 아무것도 보여주지 않는다 —
+     * 잘못 만든 문자열을 "승인된 판독문"이라고 보여주는 것이 제일 나쁘다.
+     */
+    function staleHeadOf(e) {
+      const h = e?.body?.head;
+      if (!h || typeof h !== "object") return null;
+      if (!Number.isSafeInteger(h.version) || h.version <= 0) return null;
+      const text = v => (typeof v === "string" ? v : "");
+      return { version: h.version, updatedBy: typeof h.updatedBy === "string" ? h.updatedBy : "",
+        findings: text(h.findings), conclusion: text(h.conclusion), recommendation: text(h.recommendation),
+        draftBaseVersion: Number.isSafeInteger(e?.body?.draftBaseVersion) ? e.body.draftBaseVersion : null };
+    }
+
+    /**
      * 지금 화면에 있어야 할 판독문의 출처.
      *
      * 초안이 있으면 초안, 없으면 확정본. **초안은 내 것뿐이다** — 서버가 남의 초안을
@@ -2965,6 +3070,9 @@
       const preserveValue = !force && (reportDirty() || (locked && !!r.draft));
       reportRefreshPendingFor = preserveValue ? selectedUid : null;
       const src = locked ? {} : reportSource();
+      // 값을 실제로 넣는 이 호출만이 기준 판을 바꾼다. 입력을 보존하는 호출(폴링·잠금
+      // 전환)은 화면의 글자를 그대로 두므로 그 글자가 딛고 선 판도 그대로다.
+      if (!preserveValue) recordReportOrigin(selectedUid, renderedOrigin(r));
       const ph = locked
         ? `${displayActor(r.preReviewer) || "지정된 판독의"} 님이 최종 판독 중입니다 (RS: P) — 내용은 지정된 판독의만 볼 수 있습니다`
         : "";
@@ -3035,6 +3143,92 @@
       loadReport({ force: true });
       updateReportButtons();
     });
+
+    /**
+     * ── 낡은 초안 재기준 ──
+     *
+     * 서버가 추가기재를 거절하면서 승인본을 함께 보냈다. 여기서 할 일은 **보여주는 것뿐**이다.
+     * 쓰던 글은 한 글자도 건드리지 않고, 다시 불러오기도 하지 않는다. 사람이 승인본을 읽고
+     * ① 그 판을 기준으로 다시 잡거나 ② 초안을 버리거나 ③ 닫고 더 고친 뒤 다시 누른다.
+     * 병합은 하지 않는다 — 두 판독문을 기계가 섞으면 누구의 진술도 아닌 글이 남는다.
+     */
+    let staleSeq = 0, stalePane = null, staleBusy = false;
+    function openStaleRebase(uid, e) {
+      const head = staleHeadOf(e);
+      // 모양이 아니면 아무것도 "승인본"이라고 보여주지 않는다. 그때는 일반 실패로 끝낸다.
+      if (!head) { toast("저장 실패: " + e.message, "err"); return; }
+      stalePane = { uid, seq: ++staleSeq, head };
+      $("#stale-msg").textContent =
+        `이 초안은 v${head.draftBaseVersion ?? "?"}을 기준으로 씁니다. 그 뒤 v${head.version}이 승인됐습니다 — ` +
+        `아래 승인본을 확인한 뒤 정하세요. 쓰던 내용은 그대로 두었습니다.`;
+      $("#stale-head-title").textContent =
+        `승인본 v${head.version}` + (head.updatedBy ? ` · ${displayActor(head.updatedBy)}` : "");
+      for (const k of RFIELDS) {
+        $("#stale-head-" + k).textContent = head[k];
+        $("#stale-draft-" + k).textContent = $("#" + k).value;
+      }
+      $("#stale-rebase").textContent = `v${head.version} 기준으로 다시 잡기`;
+      $("#stale-rebase").disabled = false;
+      $("#stale-status").textContent = "";
+      $("#stalemodal").classList.add("show");
+      toast(`승인본이 v${head.version}으로 바뀌어 추가기재를 붙이지 못했습니다 — 승인본을 확인하세요`, "err");
+    }
+    function closeStaleRebase() { stalePane = null; $("#stalemodal").classList.remove("show"); }
+
+    async function rebaseDraft() {
+      const pane = stalePane;
+      if (!pane || staleBusy) return;
+      // 화면에 쓰기 직전에 UID와 순번을 함께 확인한다. 안내가 열린 사이에 검사를 옮겼다면
+      // 지금 textarea에 있는 글은 **다른 검사의 글**이다 (교훈: A→B→A).
+      if (pane.uid !== selectedUid || pane.seq !== staleSeq) {
+        $("#stale-status").textContent = "검사가 바뀌었습니다 — 이 안내를 닫고 다시 확인하세요.";
+        $("#stale-rebase").disabled = true;
+        return;
+      }
+      const why = reportWriteBlock();
+      if (why) { $("#stale-status").textContent = why; return; }
+      const next = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
+      // 빈 초안은 행을 지운다(서버 규칙). 기준을 잡을 대상이 없다.
+      if (RFIELDS.every(k => !next[k])) {
+        $("#stale-status").textContent = "내용이 비어 있어 기준을 잡을 수 없습니다.";
+        return;
+      }
+      staleBusy = true;
+      $("#stale-rebase").disabled = true;
+      $("#stale-status").textContent = "기준을 다시 잡는 중…";
+      try {
+        /**
+         * **화면에 보인 그 판 번호 그대로** 보낸다. 그 사이 승인본이 또 올라갔더라도
+         * 여기서 따라 올리지 않는다 — 사람이 본 적 없는 판을 기준으로 삼는 것이
+         * 애초에 이 단위가 막는 일이다. 다음 추가기재가 새 승인본을 다시 보여준다.
+         */
+        await api("PUT", `/studies/${encodeURIComponent(pane.uid)}/report`,
+          { ...next, baseVersion: pane.head.version });
+      } catch (err) {
+        staleBusy = false;
+        $("#stale-status").textContent = "기준을 다시 잡지 못했습니다: " + err.message;
+        $("#stale-rebase").disabled = false;
+        return;
+      }
+      staleBusy = false;
+      // 서버에 남은 것은 이 검사의 초안이다. 화면 갱신은 지금 그 검사·그 안내일 때만 한다.
+      const a = appState[pane.uid] ?? {};
+      appState[pane.uid] = { ...a, draft: { ...next, baseVersion: pane.head.version, at: new Date().toISOString() } };
+      recordReportOrigin(pane.uid, pane.head.version);
+      if (pane.seq !== staleSeq) return;
+      closeStaleRebase();
+      if (selectedUid === pane.uid) renderDraftBar();
+      toast(`v${pane.head.version} 기준으로 다시 잡았습니다 — 내용을 확인하고 Addendum을 누르세요`, "ok");
+    }
+    $("#stale-close").addEventListener("click", closeStaleRebase);
+    $("#stale-rebase").addEventListener("click", rebaseDraft);
+    $("#stale-discard").addEventListener("click", async () => {
+      // 기존 출구 그대로다. 버리는 것은 여전히 사람이 명시로 고르는 일이고 확인창도 그대로다.
+      const uid = stalePane?.uid;
+      if (!uid || uid !== selectedUid) { closeStaleRebase(); return; }
+      await discardDraft();
+      if (!appState[uid]?.draft) closeStaleRebase();
+    });
     /** 지금 textarea 내용이 마지막으로 저장된 것(초안이 있으면 초안)과 다른가 */
     function reportDirty() {
       if (!selectedUid) return false;
@@ -3084,7 +3278,9 @@
       if (offline) return;
 
       const empty = RFIELDS.every(k => !next[k]);
-      const baseVersion = a.draft?.baseVersion ?? a.version ?? 0;
+      // 화면에 그려진 판이 기준이다. 초안이 아직 없을 때도 마찬가지다 —
+      // 첫 자동 저장이 남의 판 번호를 기준으로 박아두면 그 뒤 모든 판단이 그 위에 선다.
+      const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
       // 비운 초안은 초안이 없는 것과 같다 — 안 그러면 빈 초안이 확정본을 가린다.
       const draft = empty ? null : { ...next, baseVersion, at: new Date().toISOString() };
       appState[uid] = { ...a, draft };
@@ -3152,9 +3348,15 @@
         // 눌리는데 아무 일도 안 일어나는 버튼은 "먹통"으로 읽혀 또 누르게 만든다.
         for (const id of ["#b-approve", "#b-save", "#b-transcribe", "#b-addendum", "#b-unread", "#b-prelim", "#b-defer"])
           if ($(id)) $(id).disabled = true;
+        // 내 글을 확정하는 중이라면(초안이 있거나 편집기가 dirty) 기준은 **화면에 그려진 판**이다.
+        // `appState.version`은 본문을 다시 그리지 않고도 올라가므로, 그대로 보내면
+        // 못 본 승인본 위에 낙관적 락이 조용히 통과한다.
+        const mine = !!appState[uid]?.draft || reportDirty();
+        const baseVersion = mine ? reportBaseVersion(uid, appState[uid]?.version ?? 0)
+                                 : (appState[uid]?.version ?? 0);
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
-            { action, reason, reviewer, baseVersion: appState[uid]?.version ?? 0, ...content });
+            { action, reason, reviewer, baseVersion, ...content });
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
           appState[uid] = { ...appState[uid], ...st };
           syncStudy(uid);
@@ -3163,8 +3365,15 @@
         } catch (e) {
           // 낙관적 락에 걸린 경우 — 그 사이 남이 저장했다.
           // 내가 쓴 내용을 지우지 않는다. 서버 것을 보여주고 사용자가 판단하게 한다.
-          if (e.code === "REPORT_HELD") return;
-          if (e.message.includes("저장했습니다")) {
+          const route = commitFailureRoute(e);
+          if (route === "held") return;
+          /**
+           * 낡은 초안으로 추가기재를 시도했다. 여기서 아무것도 덮지 않는다 —
+           * textarea도, 초안 행도 그대로 두고 **서버가 보낸 승인본**을 옆에 펼쳐
+           * 사람이 읽고 정하게 한다. 다시 불러오기(force)는 하지 않는다.
+           */
+          if (route === "stale") { openStaleRebase(uid, e); return; }
+          if (route === "reload") {
             toast(e.message, "err");
             if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
               navigator.clipboard?.writeText(
