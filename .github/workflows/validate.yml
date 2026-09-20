@@ -66,7 +66,7 @@ jobs:
       - name: Stale addendum refusal, approved-report pane and non-destructive rebase
         timeout-minutes: 3
         run: |
-          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-rebase --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/report_rebase_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_rebase_dom_test.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-rebase --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_rebase_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_rebase_dom_test.py
       - name: S3-U2b citation insertion ordering, late answers, modal busy and convergence
         timeout-minutes: 3
         run: |

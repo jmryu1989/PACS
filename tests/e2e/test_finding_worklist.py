@@ -431,6 +431,12 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertEqual(self.owned_rows(f, prior), rows); self.assertEqual(self.hashes(), original)
 
     # ---- S2-L2b saved locations from the worklist -----------------------------------------------------
+    # ---- S3-U2b: the one real-stack pass from the panel through the server into the report -----
+    def citations(self, f, actor='doctor'):
+        r = self.stack.request('GET', '/studies/'+f.uid+'/report/citations', actor)
+        self.assertEqual(r.status, 200, r.text)
+        return r.body
+
     def stack_job(self, f, ds, title):
         """A version 1 saved view of one slice of `f`, through the product Job API."""
         z = float(ds.ImagePositionPatient[2])
@@ -507,6 +513,84 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertEqual(self.owned_rows(f), rows); self.assertEqual(self.hashes(), original)
         self.assertEqual(base.psql(f'SELECT count(*) FROM "ViewerJobRevision" WHERE "jobId"={literal(job["id"])}::uuid'), ['3'])
 
+    def test_worklist_06_insert_into_report_attests_on_the_server_and_a_stale_finding_changes_nothing(self):
+        """S3-U2b: the seams only a real stack executes - the panel's row bytes against the server's
+        line-block validator, expectedLinkState/expectedHeadRevision against the server's own
+        recomputation, the `inserted` and dedicated-read shapes, the route and the CSRF header.
+        The late-answer and ordering races stay on the stubbed DOM harness, which can hold a reply;
+        a real stack cannot."""
+        f = self.specimen(slices=3); self.seed_report(f)
+        shown, _ = self.seed(f)
+        pairs = [dict(itemId=s['itemId'], revision=s['revision']) for s in shown['item']['sources']]
+        # R5's one template: the finding's own title and text, in that order, nothing added.
+        block = shown['item']['title'] + '\n' + shown['item']['text']
+        w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
+        self.select(w, f)
+        expect(w.locator('#findings')).to_have_value(f.secret)
+        panel = self.open_findings(w, f)
+        source = self.row(w, shown['id']).locator('[data-kin-sources] > li').nth(0)
+        source.get_by_role('button', name='Insert into Report', exact=True).click()
+        pane = w.locator('#cite-preview')
+        expect(pane).to_be_visible()
+        # What the person reads is what will be requested, appended and attested.
+        expect(w.locator('#cite-preview-block')).to_have_text(block)
+        expect(w.locator('#cite-preview-field')).to_have_value('findings')
+        with w.expect_response(lambda r: r.request.method == 'PUT'
+                               and r.url.endswith('/studies/'+f.uid+'/report')) as reply:
+            w.locator('#cite-preview-insert').click()
+        self.assertEqual(reply.value.status, 200, reply.value.text())
+        expect(pane).to_be_hidden()
+        expect(w.locator('#findings')).to_have_value(f.secret + '\n' + block)
+        answered = reply.value.json()
+        self.assertEqual(answered['inserted']['field'], 'findings')
+        self.assertNotIn('findings', answered, 'the answer never carries the report body back')
+        # The server wrote the attestation: one draft entry, its own cid, the exact bytes.
+        read = self.citations(f)
+        self.assertEqual([], read['head'])
+        self.assertEqual(1, len(read['draft']))
+        stored = read['draft'][0]
+        self.assertEqual(answered['inserted']['cid'], stored['cid'])
+        self.assertEqual((stored['field'], stored['insertedText'], stored['sameTextCount']), ('findings', block, 1))
+        self.assertEqual((stored['findingId'], stored['findingRevision'], stored['sourceIndex']), (shown['id'], 1, 0))
+        self.assertEqual(stored['linkStateAtInsert'], 'current')
+        self.assertEqual(stored['sourceRef']['itemId'], shown['item']['sources'][0]['itemId'])
+        for forged in ('calculator', 'values', 'studyUid', 'seriesUid', 'sopUid', 'frame'):
+            self.assertNotIn(forged, stored['sourceRef'], forged)
+        # The screen says the sentence is still there, in the neutral wording contract 3 fixes.
+        w.locator('#b-cite-list').click()
+        expect(w.locator('#citelist')).to_contain_text('넣은 문자열이 이 칸에 그대로 있습니다')
+        expect(w.locator('#citelist')).to_contain_text('주변 문장에 대해서는 아무것도 말하지 않습니다')
+        expect(w.locator('#citemsg')).to_contain_text('저장된 초안 1건')
+        self.assertNotIn(stored['cid'], w.locator('#citelist').inner_text(), 'no internal identifier is rendered')
+        # The finding moves to r2 behind the panel's back: the server refuses on the revision it
+        # reads now, and nothing the person wrote changes (contract 15, client half).
+        revised = self.stack.request('POST', '/studies/'+f.uid+'/findings/'+shown['id']+'/revisions', 'doctor',
+                                     dict(requestId=str(uuid.uuid4()), expectedRevision=1, action='edit', reason='',
+                                          item=dict(schemaVersion=1, title='바뀐 제목', text='바뀐 본문', primary=0, sources=pairs)))
+        self.assertEqual(revised.status, 200, revised.text)
+        before_text, before_rows, before_read = w.locator('#findings').input_value(), self.owned_rows(f), self.citations(f)
+        source.get_by_role('button', name='Insert into Report', exact=True).click()
+        expect(pane).to_be_visible()
+        with w.expect_response(lambda r: r.request.method == 'PUT'
+                               and r.url.endswith('/studies/'+f.uid+'/report')) as refused:
+            w.locator('#cite-preview-insert').click()
+        self.assertEqual(refused.value.status, 409)
+        self.assertEqual(refused.value.json()['code'], 'REPORT_CITATION_STALE')
+        expect(w.locator('#cite-preview-status')).to_contain_text('판독문은 그대로입니다')
+        self.assertEqual(w.locator('#findings').input_value(), before_text, 'a refusal changes no byte on screen')
+        self.assertEqual(self.owned_rows(f), before_rows, 'and no row on the server')
+        self.assertEqual(self.citations(f), before_read)
+        w.locator('#cite-preview-close').click(); expect(pane).to_be_hidden()
+        # Signing carries the attestation into the version the head now points at.
+        self.commit(w, f, '#b-save', 'T')
+        signed = self.citations(f)
+        self.assertEqual([], signed['draft'], 'the draft row was consumed by the commit')
+        self.assertEqual(1, len(signed['head']))
+        self.assertEqual(signed['head'][0]['cid'], stored['cid'])
+        self.assertEqual(signed['head'][0]['insertedText'], block)
+        self.assertEqual(signed['head'][0]['insertedBy'], stored['insertedBy'])
+        self.assertEqual(signed['head'][0]['insertedAt'], stored['insertedAt'], 'carried byte for byte')
+        self.assertEqual(self.versions(f)[-1]['findings'], before_text)
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')

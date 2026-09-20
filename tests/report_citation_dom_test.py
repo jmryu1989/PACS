@@ -1,19 +1,21 @@
 # coding: utf-8
 """TEST-S3-U2b-CITATION-DOM: the real main.html insertion path against a stubbed fetch.
 
-Pure Playwright: the shipped api(), loadReport(), stashReport(), commitReport(), the citation
-state, the dedicated read, the insertion pane and the real autosave/beforeunload block run on a
-blank page with a synthetic fetch. No LiveStack, no Orthanc, no database, no original DICOM.
+Pure Playwright: the shipped api(), loadReport(), stashReport(), commitReport(), select(), the
+citation state, the dedicated read, the insertion pane and the real autosave/beforeunload block run
+on a blank page with a synthetic fetch. No LiveStack, no Orthanc, no database, no original DICOM.
 
 Contract 15 (a refused insertion changes nothing), 16 (a late answer never overwrites typed work),
-pin B1 (the insertion leaves after a draft write already in flight, and every non-keepalive draft
-write stands aside while it is out), pin B2 (a 200 extends only a confirmed state) and pin B3
-(busy suppresses Escape and the backdrop; convergence is an explicit flag) are executed here
-against the shipped handlers, not restated.
+pin B1 (the insertion leaves after EVERY draft write already in flight, and every non-keepalive
+draft write stands aside while it is out - the write, never the local capture), pin B2 (a 200
+extends only a confirmed state), pin B3 (busy suppresses Escape and the backdrop; convergence is an
+explicit flag honoured at the stash, the timer and beforeunload) and contract 6's stale-draft
+refusal are executed here against the shipped handlers, not restated.
 
-The autosave *timer* is the one wiring this file cannot drive in a bounded run - its 20 s interval
-is real. Its source is pinned in tests/report_citation_client_test.cjs, and the function that
-timer calls, reportNeedsWrite(), is executed here for real.
+Two things the harness controls rather than fakes: it uses the real select() with inert stubs for
+the collaborators that have nothing to do with the report, and it captures window.setInterval so
+the shipped 20 s autosave callback runs on demand with its own declared delay asserted. Neither
+replaces a product function.
 """
 import json
 import os
@@ -104,6 +106,9 @@ BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function repo
 REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
 # The shipped periodic-save and beforeunload block, so the closing-tab branch is the real one.
 UNLOAD_BLOCK = slice_between(MAIN, "    const AUTOSAVE_MS = 20000;", "    // ② 로그아웃")
+# The real study move. It is what calls stashReport() on the way out, leaves a busy pane open and
+# redraws the editor on arrival; a harness that only bumped the counter could not see any of that.
+SELECT_BLOCK = slice_between(MAIN, "    function select(uid, {", "    function renderClinical()")
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 # The one gate the template path and the citation path share, taken from the product.
@@ -151,6 +156,24 @@ function render() {}
 function renderRelated() {}
 function updateReportButtons() {}
 function updateReportTemplateButton() {}
+// The collaborators the real select()/refreshRight() reach for. Every one of them is inert here:
+// this file is about what the study move does to the report, its draft write and its citations.
+let templateEditor = null, reasonResolve = null, relatedUid = null, relatedReportSeq = 0;
+let relatedModality = "", relatedBodyPart = "", relatedIncludeCurrent = false, mode = "Reading";
+function closeTemplateEditor() {}
+function closeTemplatePreview() {}
+function releaseHold() {}
+function clearRelatedReport() {}
+function loadRelatedReport() {}
+function renderClinical() {}
+function renderThumbs() {}
+function renderTemplates() {}
+function renderOrders() {}
+function openFilmbox() {}
+const relatedParts = { reset() {} };
+const readingWorkspace = { active: () => false, selectionChanged() {} };
+const readingFindings = { sync() {} };
+const imageOpening = { snapshot: () => ({ autoLoad: false }) };
 window.confirm = message => { confirms.push(message); return confirmAnswer; };
 Object.defineProperty(navigator, "clipboard", {
   configurable: true, value: { writeText: value => { clipboard.push(value); } },
@@ -184,7 +207,18 @@ WRITEBLOCKFN
 EDITORBLOCKFN
 BASEBLOCK
 REPORTBLOCK
+SELECTBLOCK
+/* The product arms a real 20 s interval. Capturing the SCHEDULER (never the callback) keeps the
+   shipped autosave function exactly as it ships, removes a real timer from every case - a latent
+   flake wherever calls.length is asserted on a slow runner - and lets the autosave cases run the
+   real callback on demand with its own declared delay asserted. */
+const timers = [];
+const realSetInterval = window.setInterval;
+window.setInterval = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
 UNLOADBLOCK
+window.setInterval = realSetInterval;
+window.autosaveDelays = () => timers.map(t => t.ms);
+window.autosaveTick = () => { for (const t of timers) t.fn(); return timers.length; };
 window.load = options => loadReport(options);
 window.stash = () => stashReport();
 window.commit = (action, reason) => { window.pending = commitReport(action, reason); return window.pending; };
@@ -193,10 +227,14 @@ window.reply = value => { replies.push(value); };
 window.citeReply = value => { citeReplies.push(value); };
 window.hold = (n = 1) => { holdCount += n; };
 window.release = () => { const fn = heldAnswers.shift(); if (fn) fn(); return !!fn; };
+// Releasing the NEWEST answer first is how one write can settle while an older one is still out.
+window.releaseNewest = () => { const fn = heldAnswers.pop(); if (fn) fn(); return !!fn; };
 window.outstanding = () => heldAnswers.length;
 window.text = () => RFIELDS.map(k => $("#" + k).value);
 window.type = values => { RFIELDS.forEach((k, i) => { $("#" + k).value = values[i]; }); };
-window.select = uid => { markSelectionChanged(uid); };
+// The shipped study move, not a stand-in for its counter: it writes the draft on the way out and
+// redraws the editor on arrival, which is where the defects this file must see actually live.
+window.select = uid => select(uid);
 window.closeTab = () => window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
 window.escapePane = () => $("#cite-preview").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
 window.backdrop = () => $("#cite-preview").click();
@@ -234,6 +272,7 @@ def harness(state):
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
             .replace("BASEBLOCK", BASE_BLOCK)
             .replace("REPORTBLOCK", REPORT_BLOCK)
+            .replace("SELECTBLOCK", SELECT_BLOCK)
             .replace("UNLOADBLOCK", UNLOAD_BLOCK)
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
             .replace("UIDVALUE", UID)
@@ -463,8 +502,8 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.press_insert()
         self.page.wait_for_function("()=>outstanding()===1")
         self.assertEqual(1, len(self.page.evaluate("snapshot().calls")))
-        # Every non-keepalive path, not only the timer: the explicit stash, the one a study move
-        # makes and the one logout makes all go through this function and must stand aside.
+        # The explicit write path. The study move and the shipped timer are exercised through the
+        # real select() and the real interval callback in their own cases below.
         self.page.evaluate(type_js([EXISTING + "\n더 친 글", "", ""]))
         self.page.evaluate("()=>stash()")
         self.page.evaluate("()=>stash()")
@@ -552,7 +591,7 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.evaluate("()=>{ select('%s'); }" % OTHER)
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
-        self.page.evaluate("()=>{ select('%s'); load({force: true}); }" % UID)
+        self.page.evaluate("()=>select('%s')" % UID)
         value = self.page.evaluate("snapshot()")
         self.assertFalse(value["dirty"], "the editor matches the stored draft, so the comparison is clean")
         self.assertTrue(value["needsWrite"], "pin B3: the explicit flag outlives the comparison")
@@ -561,7 +600,162 @@ class ReportCitationDOMTest(unittest.TestCase):
         put = self.page.evaluate("snapshot().calls")[1]
         self.assertEqual(EXISTING, put["body"]["findings"], "the row converges to what the screen shows")
         self.assertNotIn("insert", put["keys"])
+        # The screen no longer knows what the row holds, so it must not send a keep list at all: a
+        # list without the new cid would delete the attestation the server may just have written.
+        self.assertNotIn("citationIds", put["keys"], "a discarded insertion must leave the keep list unknown")
         self.assertEqual([], self.page.evaluate("snapshot()")["converge"], "a completed write lowers the flag")
+
+    def test_a_real_study_move_during_an_insertion_keeps_the_unsaved_typing(self):
+        # Pin B1 skips the WRITE while an insertion is out. Skipping the capture as well loses the
+        # typing: the real select() redraws the editor from the stored draft on the way back.
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        typed = EXISTING + "\n아직 저장 안 된 줄"
+        self.page.evaluate(type_js([typed, "", ""]))
+        self.open_pane()
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply({status: 409, body: {code: 'REPORT_CITATION_STALE', message: '소견이 바뀌었습니다'}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>outstanding()===1")
+        self.page.evaluate("()=>select('%s')" % OTHER)
+        value = self.page.evaluate("snapshot()")
+        self.assertEqual(1, len(value["calls"]), "pin B1: the move must not send a write past the insertion")
+        self.assertEqual(typed, value["stored"][UID]["draft"]["findings"], "the move still captured the typing")
+        self.assertIn(UID, value["converge"], "the deferred write is recorded, not forgotten")
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>$('#cite-preview-status').textContent.includes('인용하지 못했습니다')")
+        self.page.evaluate("()=>select('%s')" % UID)
+        value = self.page.evaluate("snapshot()")
+        self.assertEqual([typed, "", ""], value["text"], "coming back shows the typing, not the older draft")
+        self.assertTrue(value["needsWrite"])
+        self.page.evaluate("()=>stash()")
+        self.page.wait_for_function("()=>calls.length===2")
+        self.assertEqual(typed, self.page.evaluate("snapshot().calls")[1]["body"]["findings"],
+                         "the converging write carries the typing, never older text")
+
+    def test_a_late_200_leaves_the_keep_list_unknown_and_the_head_choice_intact(self):
+        # The row may now hold the sentence and its attestation; this screen never saw the cid. A
+        # keep list built from the pre-insertion read would remove exactly that attestation.
+        self.open(citations={"version": 2, "head": [entry("h1", text="승인본 인용")], "draft": [entry("d1")]},
+                  findings="승인본 인용")
+        self.page.click("#b-cite-list")
+        self.page.check("[data-cite-remove='h1']")
+        self.assertEqual(["h1"], self.page.evaluate("citeInfo('%s')" % UID)["remove"])
+        self.open_pane()
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'late', field: 'findings',"
+                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>outstanding()===1")
+        self.page.evaluate("()=>select('%s')" % OTHER)
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
+        info = self.page.evaluate("citeInfo('%s')" % UID)
+        self.assertFalse(info["known"], "the draft side is unknown again")
+        self.assertEqual("OMITTED", info["keep"])
+        self.assertEqual(["h1"], info["remove"], "an explicit head-removal choice is not collateral damage")
+        # A 30 s poll for a non-selected study projects the server draft back into appState.
+        self.page.evaluate("()=>{ appState['%s'] = {...appState['%s'], draft: {findings: %s,"
+                           " conclusion: '', recommendation: '', baseVersion: 1, at: '2026-09-20T02:00'} }; }"
+                           % (UID, UID, json.dumps(EXISTING + "\n" + BLOCK, ensure_ascii=False)))
+        self.page.evaluate("()=>select('%s')" % UID)
+        self.assertEqual(EXISTING + "\n" + BLOCK, self.page.evaluate("snapshot().text")[0])
+        self.page.evaluate("()=>stash()")
+        self.page.wait_for_function("()=>calls.length>=2")
+        for put in self.page.evaluate("snapshot().calls")[1:]:
+            if "citationIds" in put["keys"]:
+                self.assertIn("late", put["body"]["citationIds"],
+                              "a keep list may never be sent without the citation just written")
+        # The commit path is bound by the same rule.
+        self.page.evaluate("reply({status: 200, body: {rs: 'T', version: 3}})")
+        self.page.evaluate("commit('save')")
+        post = [c for c in self.page.evaluate("snapshot().calls") if c["method"] == "POST"][0]
+        self.assertNotIn("citationIds", post["keys"], "an unknown draft side omits the key on the commit too")
+        self.assertEqual(["h1"], post["body"]["removeCitationIds"], "the head choice still travels")
+
+    def test_the_insertion_waits_for_every_write_of_that_study_not_only_the_newest(self):
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        self.page.evaluate("hold(2)")
+        self.page.evaluate(type_js([EXISTING + "\n첫 번째", "", ""]))
+        self.page.evaluate("()=>{ window.a = stash(); }")
+        self.page.wait_for_function("()=>outstanding()===1")
+        self.page.evaluate(type_js([EXISTING + "\n두 번째", "", ""]))
+        self.page.evaluate("()=>{ window.b = stash(); }")
+        self.page.wait_for_function("()=>outstanding()===2")
+        self.assertEqual(2, len(self.page.evaluate("snapshot().calls")))
+        self.open_pane()
+        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c1', field: 'findings',"
+                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>$('#cite-preview-insert').disabled===true")
+        # Only the NEWER write settles. Waiting for one promise per study would let the insertion
+        # leave here, and the older body (older text, keep list without the new cid) would land
+        # after it - the row would lose the sentence and its attestation together.
+        self.page.evaluate("releaseNewest()")
+        self.page.wait_for_function("()=>outstanding()===1")
+        self.assertEqual(2, len(self.page.evaluate("snapshot().calls")), "pin B1 means ANY in-flight write")
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>calls.length===3")
+        put = self.page.evaluate("snapshot().calls")[2]
+        self.assertIn("insert", put["keys"])
+        self.assertEqual(EXISTING + "\n두 번째\n" + BLOCK, put["body"]["findings"])
+
+    def test_a_draft_standing_on_an_older_approved_report_refuses_the_insertion(self):
+        # Contract 6, last bullet: the non-destructive exit S3-U3 built must come first, otherwise
+        # the sentence is stacked onto a version the person has never read.
+        self.open(citations={"version": 1, "head": [], "draft": []}, version=4, draft=draft(base=2))
+        self.assertFalse(self.page.evaluate("cite(%s)" % json.dumps(request(), ensure_ascii=False)))
+        value = self.page.evaluate("snapshot()")
+        self.assertFalse(value["shown"])
+        self.assertIn("Addendum", value["toasts"][-1]["message"])
+        self.assertIn("기준을 다시 잡은 뒤", value["toasts"][-1]["message"])
+        self.assertEqual(0, len(value["calls"]))
+        # Rebasing the draft onto the version on screen clears the refusal (no other change).
+        self.page.evaluate("()=>{ appState['%s'].draft.baseVersion = 4; }" % UID)
+        self.assertTrue(self.page.evaluate("cite(%s)" % json.dumps(request(), ensure_ascii=False)))
+
+    def test_the_shipped_autosave_timer_converges_a_discarded_insertion_and_stands_aside_for_a_live_one(self):
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        # The harness captured the scheduler, never the callback: this is the shipped 20 s autosave.
+        self.assertEqual([20000], self.page.evaluate("autosaveDelays()"))
+        self.open_pane()
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply({status: 200, body: {inserted: {cid: 'c1', field: 'findings',"
+                           " insertedAt: '2026-09-20T02:00:00.000Z'}}})")
+        self.press_insert()
+        self.page.wait_for_function("()=>outstanding()===1")
+        # (b) the shipped timer's own guard: nothing leaves while the insertion is out.
+        self.page.evaluate(type_js([EXISTING + "\n타이머 중", "", ""]))
+        self.page.evaluate("autosaveTick()")
+        self.assertEqual(1, len(self.page.evaluate("snapshot().calls")), "the timer stands aside for an insertion")
+        self.page.evaluate("()=>select('%s')" % OTHER)
+        self.page.evaluate("release()")
+        self.page.wait_for_function("()=>toasts.some(t=>t.message.includes('늦게 도착'))")
+        self.page.evaluate("()=>select('%s')" % UID)
+        value = self.page.evaluate("snapshot()")
+        self.assertFalse(value["dirty"], "after the move's capture the comparison is clean again")
+        self.assertTrue(value["needsWrite"])
+        # (a) one ordinary 20 s tick, with the flag as the only reason, converges the row.
+        before = len(value["calls"])
+        self.page.evaluate("autosaveTick()")
+        self.page.wait_for_function("()=>reportConverge.size===0")
+        calls = self.page.evaluate("snapshot().calls")
+        self.assertEqual(before + 1, len(calls), "exactly one write, and nobody called stash()")
+        self.assertEqual(EXISTING + "\n타이머 중", calls[-1]["body"]["findings"])
+        self.assertFalse(calls[-1]["keepalive"])
+        self.page.evaluate("autosaveTick()")
+        self.assertEqual(before + 1, len(self.page.evaluate("snapshot().calls")), "a clean editor writes nothing")
+
+    def test_the_closing_tab_writes_when_the_flag_is_the_only_reason(self):
+        self.open(citations={"version": 1, "head": [], "draft": []})
+        self.page.evaluate("()=>{ reportConverge.add('%s'); }" % UID)
+        value = self.page.evaluate("snapshot()")
+        self.assertFalse(value["dirty"], "the editor matches the stored draft")
+        self.assertTrue(value["needsWrite"])
+        self.page.evaluate("closeTab()")
+        self.page.wait_for_function("()=>calls.length===1")
+        put = self.page.evaluate("snapshot().calls")[0]
+        self.assertTrue(put["keepalive"], "pin B3 names beforeunload as one of the three sites")
+        self.assertEqual(EXISTING, put["body"]["findings"])
 
     # ── Pin B3: the pane is modal while busy ──
 
@@ -575,11 +769,18 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.wait_for_function("()=>outstanding()===1")
         value = self.page.evaluate("snapshot()")
         self.assertEqual({"insert": True, "close": True, "field": True}, value["busy"])
+        # A real key press, not a synthetic dispatch on the pane: with all three controls disabled
+        # the event starts wherever focus actually is, which is what a person would produce.
+        self.page.keyboard.press("Escape")
+        self.page.keyboard.press("Tab")
+        self.page.keyboard.press("Escape")
         self.page.evaluate("escapePane()")
         self.page.evaluate("backdrop()")
         value = self.page.evaluate("snapshot()")
         self.assertTrue(value["shown"], "pin B3: neither Escape nor the backdrop may close it while busy")
         self.assertIn("서버에 기록하는 중", value["pane"]["status"])
+        self.assertEqual(1, len(value["calls"]), "no key may start another request")
+        self.assertEqual([EXISTING, "", ""], value["text"], "a key press must not reach the editor either")
         self.page.evaluate("release()")
         self.page.wait_for_function("()=>!$('#cite-preview').classList.contains('show')")
         self.assertEqual([EXISTING + "\n" + BLOCK, "", ""], self.page.evaluate("snapshot().text"))

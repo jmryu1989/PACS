@@ -3204,10 +3204,27 @@
       const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
       // 내가 이 초안을 쓰기 시작한 뒤 남이 확정을 했다면, 그걸 지금 말해야 한다.
       // 확정 버튼을 누른 다음에야 알게 되면 이미 늦다.
-      const behind = (r.version ?? 0) > (d.baseVersion ?? 0);
-      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ${esc(at)}에 자동 저장됨` +
+      const behind = reportDraftBehind(r);
+      /**
+       * 서버로 보내기를 미룬 글은 **저장된 것이 아니다.** 인용이 나가 있는 동안 검사를
+       * 옮기면 글자는 여기 담기지만 요청은 그 뒤에 나간다. 그 사이에 "자동 저장됨"이라고
+       * 쓰면 저장 안 됐다는 사실을 알려주는 자리가 저장됐다고 말하는 셈이다.
+       */
+      const deferred = !!selectedUid && reportConverge.has(selectedUid);
+      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ` +
+        (deferred ? `${esc(at)}에 이 화면에 담아 두었습니다 · 곧 서버에 저장합니다`
+                  : `${esc(at)}에 자동 저장됨`) +
         (behind ? ` · <b>주의</b> 이 초안을 쓰는 동안 다른 사람이 v${esc(r.version)}을 확정했습니다`
                 : ` · 확정하려면 Save 또는 Approve`);
+    }
+
+    /**
+     * 이 초안이 딛고 선 판보다 승인본이 앞서 있는가. 표시줄의 경고와 §6의 인용 거절이
+     * **같은 식 하나**를 쓴다 — 둘이 각자 계산하면 언젠가 한쪽만 고쳐진다.
+     */
+    function reportDraftBehind(r) {
+      const d = r?.prelimHidden ? null : r?.draft;
+      return !!d && (r.version ?? 0) > (d.baseVersion ?? 0);
     }
 
     /** 초안 버리기 — 확정본으로 돌아간다 */
@@ -3379,11 +3396,25 @@
 
     /** 삽입이 나가 있는 동안의 비-keepalive 초안 저장을 **전부** 비켜세운다(B1). */
     let insertInFlight = false;
-    /** uid별로 지금 나가 있는 비-keepalive 초안 저장. 삽입은 그것이 끝난 뒤에 나간다. */
+    /**
+     * uid별로 지금 나가 있는 비-keepalive 초안 저장 **전부**. 하나만 기억하면 20초 자동
+     * 저장과 검사 이동이 겹쳐 두 건이 동시에 나가 있을 때 더 새것만 기다리게 되고,
+     * **더 오래된 본문**(삽입 전 글 + 새 `cid`가 없는 유지 목록)이 삽입 뒤에 도착해
+     * 방금 확인한 문장과 그 증언을 함께 되돌린다.
+     */
     const stashInFlight = new Map();
+    const SETTLE_ROUNDS = 8;
     async function settleStash(uid) {
+      for (let round = 0; round < SETTLE_ROUNDS; round++) {
+        const pending = stashInFlight.get(uid);
+        if (!pending || !pending.size) return true;
+        // 안에서 실패를 잡으므로 거부되지 않는다. 기다리는 쪽이 남의 실패를 떠안지 않는다.
+        await Promise.allSettled([...pending]);
+      }
+      // 여기까지 오면 저장이 계속 새로 나가고 있다는 뜻이다. 경합을 무릅쓰고 보내느니
+      // 사람에게 다시 누르라고 말한다 — 아무것도 잃지 않는 출구다.
       const pending = stashInFlight.get(uid);
-      if (pending) { try { await pending; } catch (e) {} }
+      return !pending || !pending.size;
     }
 
     /**
@@ -3417,6 +3448,26 @@
       }
     }
 
+    /**
+     * **삽입 뒤 서버 행을 모르게 됐을 때 초안 쪽 상태를 되돌린다.**
+     *
+     * 거절·늦은 응답·확인 전 200 — 어느 쪽이든 그 뒤 행에 무엇이 들어 있는지 화면은 모른다.
+     * 그런데도 "확인됨"으로 남겨 두면 다음 저장이 **새 `cid`가 빠진 유지 목록**을 싣고, 서버의
+     * 교집합이 그 증언만 지운다. 문장은 본문에 남고 증언만 사라지는 것이 이 단위가 막아야 할
+     * 바로 그 상태다. 머리 판의 제거 선택은 사람이 고른 것이므로 함께 지우지 않는다.
+     *
+     * 나가 있던 전용 읽기의 표도 함께 버린다 — 삽입 **전에** 떠난 답이 삽입 **뒤의** 목록으로
+     * 굳으면 같은 구멍이 다시 열린다.
+     */
+    function invalidateCitations(uid) {
+      if (!uid) return false;
+      const changed = citations.unconfirm(uid);
+      citationReads.delete(uid);
+      citationNotes.delete(uid);
+      if (uid === selectedUid) { renderCitationBar(); ensureCitations(uid, { force: true }); }
+      return changed;
+    }
+
     /** 이 건이 딛고 볼 본문 — 머리 건은 승인본, 초안 건은 지금 편집 중인 textarea. */
     function citationBody(scope, field) {
       if (!RFIELDS.includes(field)) return "";
@@ -3446,8 +3497,11 @@
       const row = uid ? citations.get(uid) : null;
       const note = uid ? citationNotes.get(uid) : null;
       const hidden = !!appState[uid]?.prelimHidden;
+      // 초안 쪽을 모르는 상태로 되돌린 뒤에는 `draft`가 비어 있지만 그것은 **0건이 아니라
+      // 모름**이다. 0건이라고 쓰면 그 자체가 거짓말이므로 건수를 말하지 않는다.
+      const unknownDraft = !!row && !citations.known(uid);
       const count = row ? row.head.length + row.draft.length : 0;
-      if (!uid || hidden || (!count && !note)) {
+      if (!uid || hidden || (!count && !note && !unknownDraft)) {
         bar.style.display = "none"; list.hidden = true; list.replaceChildren();
         $("#b-cite-list").setAttribute("aria-expanded", "false");
         return;
@@ -3455,7 +3509,9 @@
       bar.style.display = "flex";
       $("#b-cite-list").style.display = row ? "" : "none";
       $("#citemsg").textContent = row
-        ? `● 인용 ${count}건 — 승인본 ${row.head.length}건 · 저장된 초안 ${row.draft.length}건` +
+        ? (unknownDraft
+            ? `● 승인본 ${row.head.length}건 · 저장된 초안의 인용은 다시 확인하는 중입니다` + (note ? ` (${note})` : "")
+            : `● 인용 ${count}건 — 승인본 ${row.head.length}건 · 저장된 초안 ${row.draft.length}건`) +
           (reportConverge.has(uid) ? " · 마지막 인용이 화면에 반영되지 않아 다음 자동 저장이 서버 내용을 화면에 맞춥니다" : "")
         : `● ${note}`;
       if (!row || !citationListOpen) {
@@ -3493,9 +3549,14 @@
         line.append(document.createTextNode(citationEntryText(entry, "head") + " · "), label);
         nodes.push(line);
       }
-      add("h5", `저장된 초안의 인용 ${row.draft.length}건`);
-      if (!row.draft.length) add("p", "없습니다", "cite-note");
-      for (const entry of row.draft) add("p", citationEntryText(entry, "draft"), "cite-entry");
+      if (unknownDraft) {
+        add("h5", "저장된 초안의 인용");
+        add("p", "다시 확인하는 중입니다 — 확인될 때까지 이 화면은 초안의 인용을 지우지도, 건수를 말하지도 않습니다.", "cite-note");
+      } else {
+        add("h5", `저장된 초안의 인용 ${row.draft.length}건`);
+        if (!row.draft.length) add("p", "없습니다", "cite-note");
+        for (const entry of row.draft) add("p", citationEntryText(entry, "draft"), "cite-entry");
+      }
       add("p", KinReportCitation.PRESENT_CAVEAT, "cite-note");
       add("p", "승인본의 인용은 다음 확정에서 제거를 골랐을 때만 빠집니다. 초안의 인용은 그 초안을 버릴 때 함께 없어집니다.", "cite-note");
       list.replaceChildren(...nodes);
@@ -3543,6 +3604,15 @@
       if (!serverMode || demoMode) return "서버에 연결돼 있을 때만 인용할 수 있습니다";
       if (offline) return "서버 연결이 끊겨 인용할 수 없습니다 — 연결된 뒤 다시 시도하세요";
       if (commitInFlight) return "판독문 확정이 끝난 뒤 다시 시도하세요";
+      /**
+       * **낡은 초안(behind)에서는 인용하지 않는다** (§6 마지막 항목).
+       *
+       * 이 초안이 딛고 선 판보다 승인본이 앞서 있으면, 지금 넣는 문장은 사람이 읽은 적 없는
+       * 판 위에 쌓인다. 출구는 U3가 만든 비파괴 경로뿐이다 — Addendum을 눌러 승인본을
+       * 나란히 보고 그 판 번호로 기준을 다시 잡은 뒤에 인용한다.
+       */
+      if (reportDraftBehind(appState[selectedUid] ?? {}))
+        return "이 초안은 더 낡은 승인본을 기준으로 씁니다 — Addendum을 눌러 승인본을 확인하고 기준을 다시 잡은 뒤 인용하세요";
       return null;
     }
 
@@ -3671,7 +3741,13 @@
       pane.status = "서버에 기록하는 중…";
       renderCitePreview();
       try {
-        await settleStash(pane.uid);
+        if (!await settleStash(pane.uid)) {
+          // 저장이 계속 새로 나가고 있다. 그 위로 보내면 순서 보장이 깨지므로 보내지 않는다 —
+          // 아무것도 바뀌지 않았고 다시 누르면 된다.
+          pane.status = "초안 저장이 끝나기를 기다리는 중입니다 — 잠시 뒤 다시 누르세요.";
+          renderCitePreview();
+          return;
+        }
         // 아직 아무것도 보내지 않았다 — 서버 행은 앞선 저장이 남긴 그대로이므로 수렴 표시는
         // 필요 없다. 창만 닫고 넣지 않았다는 사실을 말한다.
         if (void_()) {
@@ -3690,6 +3766,11 @@
         const epoch = { uid: pane.uid, selSeq: selectionSeq, seq: pane.seq };
         let answer;
         insertInFlight = true;
+        /**
+         * 나가 있는 전용 읽기의 표를 **보내기 직전에** 버린다. 그 답은 이 삽입 **전의** 행을
+         * 말하므로, 뒤늦게 도착해 확인됨으로 굳으면 새 `cid`가 빠진 유지 목록이 만들어진다.
+         */
+        citationReads.delete(pane.uid);
         try {
           answer = await api("PUT", `/studies/${encodeURIComponent(pane.uid)}/report`, {
             ...content, baseVersion,
@@ -3700,8 +3781,10 @@
           });
         } catch (e) {
           // 판독문은 한 글자도 바뀌지 않았다. 다만 이 요청이 서버에 닿았는지는 알 수 없으므로
-          // 다음 자동 저장이 서버 행을 화면에 맞추도록 표시한다.
+          // 다음 자동 저장이 서버 행을 화면에 맞추도록 표시하고, 인용 상태는 **모르는 것**으로
+          // 되돌린다 — 아는 척하는 유지 목록이 그 사이 기록된 증언을 지울 수 있다.
           markConverge(epoch.uid);
+          invalidateCitations(epoch.uid);
           pane.status = "인용하지 못했습니다: " + e.message + " — 판독문은 그대로입니다.";
           renderCitePreview();
           if (e.code === "REPORT_CITATION_STALE" || e.code === "REPORT_CITATION_SOURCE")
@@ -3710,6 +3793,9 @@
         } finally { insertInFlight = false; }
         if (epoch.uid !== selectedUid || epoch.selSeq !== selectionSeq || epoch.seq !== citeSeq) {
           markConverge(epoch.uid);
+          // 서버는 문장과 증언을 기록했을 수 있는데 화면은 그 `cid`를 쓰지 못했다.
+          // 확인됨으로 남겨 두면 다음 저장의 유지 목록이 바로 그 증언을 지운다.
+          invalidateCitations(epoch.uid);
           // 이 창은 떠난 검사의 것이다. 지금 화면에 남겨두면 다음 확인이 **다른 환자의**
           // 판독문에 그 문장을 넣는다. 거절과 달리 여기서는 읽을 이유도 없다.
           closeCitePreview(false);
@@ -3725,13 +3811,20 @@
         appState[pane.uid] = { ...appState[pane.uid],
           draft: { ...content, baseVersion, at: new Date().toISOString() } };
         reportConverge.delete(pane.uid);
-        // B2: 확인된 상태만 넓힌다. 확인 전이었다면 아무것도 만들지 않고 키도 생기지 않는다.
-        if (answer?.inserted?.cid)
+        /**
+         * B2: **확인된 상태만** 넓힌다. 확인 전이었다면 한 건짜리 목록을 지어내지 않는다 —
+         * 그 목록을 실어 보내면 화면이 본 적 없는 나머지 증언이 전부 지워진다.
+         * 그리고 넓히지 못했다면 이 행에 무엇이 들어 있는지 여전히 모르므로, 아는 척하는
+         * 유지 목록이 방금 기록된 증언을 지우지 않도록 초안 쪽을 모르는 상태로 되돌린다.
+         * 다음 전용 읽기 한 번이 서버의 바이트로 그것을 채운다.
+         */
+        const extended = !!answer?.inserted?.cid &&
           citations.extend(pane.uid, { v: KinReportCitation.SCHEMA, cid: answer.inserted.cid, field,
             findingId: pane.findingId, findingRevision: pane.findingRevision, sourceIndex: pane.sourceIndex,
             linkStateAtInsert: pane.linkState, headRevisionAtInsert: pane.headRevision,
             insertedText: pane.block, insertedAt: answer.inserted.insertedAt, insertedBy: null,
             mine: true, sameTextCount: 1 });
+        if (!extended) invalidateCitations(pane.uid);
         closeCitePreview();
         renderDraftBar();
         toast("판독문에 넣었습니다 — 같은 저장에 출처 증언이 함께 기록됐습니다", "ok");
@@ -3758,16 +3851,6 @@
      */
     async function stashReport({ keepalive = false } = {}) {
       if (!selectedUid || heldByOther(cur())) return;
-      /**
-       * **삽입이 나가 있는 동안에는 비켜선다 (B1).**
-       *
-       * 타이머만 막는 것으로는 부족하다. 검사 이동·로그아웃도 같은 함수를 부르고,
-       * 그 요청은 화면의 글자(T0)만 싣는다. 삽입 요청은 T0 + 문장을 싣고 나가 있으므로
-       * 나중에 도착한 T0가 방금 사람이 확인한 문장을 지운다. `keepalive`는 예외다 —
-       * 탭이 닫히는 중에는 보내는 것 자체가 마지막 기회이고, 그 경우의 두 결과는
-       * 어느 쪽도 글을 잃지 않는다(어느 쪽인지는 인용 목록이 정직하게 말한다).
-       */
-      if (insertInFlight && !keepalive) return;
       const uid = selectedUid;
       const a = appState[uid] ?? {};
       const next = {
@@ -3801,8 +3884,23 @@
       const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
       // 비운 초안은 초안이 없는 것과 같다 — 안 그러면 빈 초안이 확정본을 가린다.
       const draft = empty ? null : { ...next, baseVersion, at: new Date().toISOString() };
+      /**
+       * **삽입이 나가 있는 동안 비켜서는 것은 쓰기뿐이다 (B1).**
+       *
+       * 타이머만 막는 것으로는 부족하다 — 검사 이동·로그아웃도 이 함수를 부른다. 그러나
+       * 이 함수보다 먼저 빠져나가면 **화면의 글자를 담아 두는 일까지** 건너뛴다. 그러면
+       * 검사가 바뀌는 순간 `loadReport({force:true})`가 textarea를 옛 초안으로 덮고,
+       * 아직 저장되지 않은 타건은 어디에도 남지 않는다. 담아 두는 일은 하고, 네트워크
+       * 요청만 미룬다. 미룬 사실은 수렴 표시로 남아 다음 저장이 서버를 화면에 맞춘다.
+       *
+       * `keepalive`는 예외다 — 탭이 닫히는 중에는 보내는 것 자체가 마지막 기회이고,
+       * 그 경우의 두 결과는 어느 쪽도 글을 잃지 않는다(§4-5 잔여).
+       */
+      const deferWrite = insertInFlight && !keepalive;
       appState[uid] = { ...a, draft };
+      if (deferWrite) reportConverge.add(uid);
       if (selectedUid === uid) renderDraftBar();
+      if (deferWrite) return;
       if (!serverMode) { saveApp(); return; }
 
       /**
@@ -3836,11 +3934,14 @@
           reportConverge.delete(uid);
           // 비운 초안은 서버에서 행이 지워진다 — 그 행의 인용도 함께 없어진 것이 사실이다.
           if (empty) citations.emptied(uid);
-          if (uid === selectedUid) renderCitationBar();
+          if (uid === selectedUid) { renderDraftBar(); }
         } catch (e) { if (e.code !== "REPORT_HELD") apiFail(e); }
       })();
-      stashInFlight.set(uid, settled);
-      try { await settled; } finally { if (stashInFlight.get(uid) === settled) stashInFlight.delete(uid); }
+      let pending = stashInFlight.get(uid);
+      if (!pending) { pending = new Set(); stashInFlight.set(uid, pending); }
+      pending.add(settled);
+      try { await settled; }
+      finally { pending.delete(settled); if (!pending.size && stashInFlight.get(uid) === pending) stashInFlight.delete(uid); }
     }
     /**
      * 판독문 확정. action: save | approve | addendum | reset

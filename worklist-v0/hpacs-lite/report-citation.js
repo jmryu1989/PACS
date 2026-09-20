@@ -162,6 +162,22 @@ window.KinReportCitation = (function () {
 
   const cidOf = entry => String((entry && entry.cid) || '');
   const asArray = value => (Array.isArray(value) ? value : []);
+  /**
+   * 같은 칸·같은 글인지 가리는 키. 축약된 건은 대조할 글이 없으므로 **키가 없다** —
+   * 그래서 아래 어떤 계산도 축약된 건을 건드리지 못한다.
+   *
+   * 구분자로 제어 문자를 쓰지 않는다. 기록을 다루는 파일에 보이지 않는 바이트를 남기면
+   * 이후의 모든 diff와 검토가 그만큼 불투명해진다. `JSON.stringify`는 두 문자열을
+   * 충돌 없이 하나로 묶는 일을 이미 정확히 한다.
+   */
+  function entryKey(entry) {
+    if (isReduced(entry)) return null;
+    return JSON.stringify([String(entry.field === undefined || entry.field === null ? '' : entry.field),
+                           comparisonKey(entry.insertedText)]);
+  }
+  /** 서버가 말한 `n`. 없거나 모양이 아니면 자기 자신 1건으로 본다(올림만 허용). */
+  const serverCount = entry =>
+    (Number.isSafeInteger(entry && entry.sameTextCount) && entry.sameTextCount > 0 ? entry.sameTextCount : 1);
 
   /**
    * **`appState[uid].draft` 바깥의 uid별 인용 상태** (D8).
@@ -175,8 +191,11 @@ window.KinReportCitation = (function () {
     const rows = new Map();
 
     const state = {
-      /** 이 검사의 인용을 전용 읽기로 **확인한 적이 있는가.** 없으면 어떤 키도 만들지 않는다. */
-      known(uid) { return rows.has(uid); },
+      /**
+       * 이 검사의 **초안 쪽** 인용을 전용 읽기로 확인한 상태인가. 아니면 어떤 유지 목록도
+       * 만들지 않는다. 머리 판의 제거 선택은 이것과 별개로 산다 — 사람이 고른 것이기 때문이다.
+       */
+      known(uid) { const row = rows.get(uid); return !!row && row.confirmed; },
       get(uid) { return rows.get(uid) || null; },
 
       /** 전용 읽기의 답. 이것만이 "확인됨"을 만든다. */
@@ -188,7 +207,27 @@ window.KinReportCitation = (function () {
         // 더는 머리에 없는 `cid`는 의미가 없으므로 함께 사라진다.
         const alive = new Set(head.map(cidOf));
         const remove = new Set([...((previous && previous.remove) || [])].filter(cid => alive.has(cid)));
-        rows.set(uid, { version: Number.isSafeInteger(answer.version) ? answer.version : 0, head, draft, remove });
+        rows.set(uid, { confirmed: true, version: Number.isSafeInteger(answer.version) ? answer.version : 0,
+                        head, draft, remove });
+        return true;
+      },
+
+      /**
+       * 초안 쪽을 **모르는 상태로 되돌린다.**
+       *
+       * 삽입이 거절됐거나 늦게 도착해 버려졌으면, 그 뒤 서버 행에 무엇이 들어 있는지 화면은
+       * 모른다. 그런데도 "확인됨"으로 남아 있으면 다음 저장이 **새 `cid`가 빠진 유지 목록**을
+       * 실어 보내고, 서버의 교집합이 그 증언만 지운다 — 문장은 본문에 남은 채로. 증언 없는
+       * 문장을 만들지 않는 것이 이 단위의 존재 이유이므로, 모르면 키를 만들지 않는다.
+       *
+       * `forget()`을 쓰지 않는 이유: 그것은 머리 판의 **제거 선택**까지 지운다. 사람이 고른
+       * 것은 삽입의 성패와 아무 상관이 없다.
+       */
+      unconfirm(uid) {
+        const row = rows.get(uid);
+        if (!row || !row.confirmed) return false;
+        row.confirmed = false;
+        row.draft = [];
         return true;
       },
 
@@ -199,19 +238,32 @@ window.KinReportCitation = (function () {
        */
       extend(uid, entry) {
         const row = rows.get(uid);
-        if (!row || !entry || !cidOf(entry)) return false;
+        if (!row || !row.confirmed || !entry || !cidOf(entry)) return false;
         if (row.draft.some(item => cidOf(item) === cidOf(entry))) return false;
-        row.draft = [...row.draft, entry];
-        // 같은 글을 가진 건이 늘면 `n`도 함께 는다. 서버가 다음 읽기에서 다시 세지만,
-        // 그때까지 화면이 `present`라고 말하면 실제로는 `ambiguous`인 것을 감춘다.
-        recount(row.draft);
+        /**
+         * **`n`은 절대 내리지 않는다.**
+         *
+         * `sameTextCount`는 서버가 그 행 **전체**(축약되어 글이 오지 않은 건까지)에서 센 값이다.
+         * 화면이 자기가 받은 건들로 다시 세면 축약된 짝이 빠져 `n`이 내려가고, `ambiguous`여야
+         * 할 것이 `present`로 보인다 — 화면이 본문 대조에 대해 실제보다 강한 말을 하게 된다.
+         * 그래서 **같은 글의 기존 건이 말한 `n` 중 가장 큰 값 + 이번 1건**을 그 글의 건들에만
+         * 적용한다. 다른 글과 축약된 건은 손대지 않는다(축약된 건은 키 자체가 없다).
+         */
+        const key = entryKey(entry);
+        let n = 0;
+        if (key !== null)
+          for (const item of row.draft) if (entryKey(item) === key) n = Math.max(n, serverCount(item));
+        const next = n + 1;
+        row.draft = row.draft.map(item =>
+          (key !== null && entryKey(item) === key) ? { ...item, sameTextCount: next } : item);
+        row.draft.push({ ...entry, sameTextCount: next });
         return true;
       },
 
       /** 비운 초안은 서버에서 행이 지워진다 — 그 행의 인용도 함께 없어진 것이 사실이다. */
       emptied(uid) {
         const row = rows.get(uid);
-        if (!row) return false;
+        if (!row || !row.confirmed) return false;
         row.draft = [];
         return true;
       },
@@ -219,7 +271,7 @@ window.KinReportCitation = (function () {
       /** 내 초안 건에 대한 **유지 목록**. 모르면 `undefined`(키 부재 = 변경 없음). */
       keepIds(uid) {
         const row = rows.get(uid);
-        if (!row) return undefined;
+        if (!row || !row.confirmed) return undefined;
         // 존재 상태가 `absent`·`ambiguous`거나 소견을 읽을 수 없다고 해서 빼지 않는다.
         // 조용한 삭제는 증언을 지우는 일이고, 명시적 제거만이 출구다.
         return row.draft.map(cidOf).filter(Boolean);
@@ -251,7 +303,7 @@ window.KinReportCitation = (function () {
        */
       duplicate(uid, field, request) {
         const row = rows.get(uid);
-        if (!row || !request) return false;
+        if (!row || !row.confirmed || !request) return false;
         return row.draft.some(entry => !isReduced(entry) && entry.field === field &&
           entry.findingId === request.findingId && entry.findingRevision === request.findingRevision &&
           entry.sourceIndex === request.sourceIndex);
@@ -264,26 +316,11 @@ window.KinReportCitation = (function () {
     return state;
   }
 
-  /** 삽입으로 늘어난 건을 반영해 `sameTextCount`를 그 행 안에서 다시 센다. */
-  function recount(entries) {
-    const tally = new Map();
-    const keys = entries.map(entry => {
-      if (isReduced(entry)) return null;
-      const key = String(entry.field || '') + ' ' + comparisonKey(entry.insertedText);
-      tally.set(key, (tally.get(key) || 0) + 1);
-      return key;
-    });
-    entries.forEach((entry, i) => {
-      if (keys[i] === null) return;
-      entry.sameTextCount = tally.get(keys[i]);
-    });
-  }
-
   return Object.freeze({
     SCHEMA, FIELDS, FIELD_LABEL, INSERTED_TEXT_BYTES, SOURCE_UNAVAILABLE,
     STATE_TEXT, UNAVAILABLE_TEXT, PRESENT_CAVEAT,
     normalizeForCompare, toLf, blockLines, blockIsBlank, lineBlockOccurrences, comparisonKey,
-    presenceState, presenceOf, isReduced, assembleBlock, appendBlock, utf8Bytes, refuseBlock,
+    presenceState, presenceOf, isReduced, entryKey, assembleBlock, appendBlock, utf8Bytes, refuseBlock,
     createState,
   });
 })();
