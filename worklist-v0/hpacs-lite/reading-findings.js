@@ -1,14 +1,20 @@
-/* Image Findings in the worklist and Reading Workspace (S2-B1). Read-only: create/edit/hide stay in
- * the viewer's Findings section and nothing here writes a report. All decisions live in
- * finding-command.js; this file reads the worklist session and the target documents (every
- * cross-window read guarded) and renders with textContent. Control names English, messages Korean. */
+/* Image Findings in the worklist and Reading Workspace (S2-B1). The findings themselves stay
+ * read-only here: create/edit/hide remain in the viewer's Findings section. S3-U2b adds one write
+ * path and it is not a write to a finding - `Insert into Report` hands the assembled block to the
+ * worklist, which asks the server to record the sentence and its attestation in one write and only
+ * then changes the report editor. All decisions live in finding-command.js; this file reads the
+ * worklist session and the target documents (every cross-window read guarded) and renders with
+ * textContent. Control names English, messages Korean. */
 window.KinReadingFindings = function (app) {
   'use strict';
-  const command = window.kinFindingCommand, links = window.kinFindingLinkModel;
+  const command = window.kinFindingCommand, links = window.kinFindingLinkModel, citation = window.KinReportCitation;
   const header = document.querySelector('#reltabs'), region = document.querySelector('.related-p');
-  if (!command || !links || !header || !region) throw new Error('Image Findings unavailable');
+  if (!command || !links || !citation || !header || !region) throw new Error('Image Findings unavailable');
   // S2-L: this panel, its command module and the link model must be the same record-format version.
-  if (links.SCHEMA !== 2 || command.SCHEMA !== 2) throw new Error(links.MODULE_MISMATCH_TEXT || '화면 구성 요소 판이 다릅니다. 새로고침하세요.');
+  // S3-U2b: the citation module joins that check, so a half-updated tab cannot build a block the
+  // server would refuse - or, worse, one it would accept under a different rule.
+  if (links.SCHEMA !== 2 || command.SCHEMA !== 2 || citation.SCHEMA !== 2)
+    throw new Error(links.MODULE_MISMATCH_TEXT || '화면 구성 요소 판이 다릅니다. 새로고침하세요.');
   const node = (tag, value, parent) => { const el = document.createElement(tag); if (value) el.textContent = value; if (parent) parent.append(el); return el; };
   const button = (label, run, parent) => { const b = node('button', label, parent); b.type = 'button'; b.addEventListener('click', run); return b; };
   const toggle = button('Image Findings', () => show(panel.hidden), null);
@@ -21,7 +27,8 @@ window.KinReadingFindings = function (app) {
   panel.setAttribute('aria-labelledby', 'reading-findings-title');
   const title = node('strong', 'Image Findings', panel); title.id = 'reading-findings-title';
   const close = button('Close Image Findings', () => { show(false); toggle.focus(); }, panel); close.id = 'reading-findings-close';
-  node('p', '선택한 판독 대상 검사에 저장된 소견입니다(읽기 전용). 작성·수정·숨김은 영상 화면의 Findings에서 하며 판독문에는 기록되지 않습니다. ' +
+  node('p', '선택한 판독 대상 검사에 저장된 소견입니다. 작성·수정·숨김은 영상 화면의 Findings에서 하며 여기서는 소견을 바꿀 수 없습니다. ' +
+    'Insert into Report를 누르면 그 소견의 글을 판독문 초안에 넣을 수 있고, 어느 소견의 어느 출처에서 왔는지가 판독문과 함께 기록됩니다. ' +
     '같은 환자의 비교 검사 하나의 표식을 함께 연결한 소견은 그 비교 검사를 볼 수 있을 때만 표시됩니다.', panel);
   const status = node('p', '', panel); status.id = 'reading-findings-status'; status.setAttribute('role', 'status');
   const controls = node('p', '', panel);
@@ -204,6 +211,41 @@ window.KinReadingFindings = function (app) {
       },
     });
   }
+  /* S3-U2b: hand one source's assembled block to the worklist.
+   *
+   * Nothing is written here and no report field is touched. The worklist shows the exact bytes,
+   * asks the server to record the sentence and its attestation in one write, and only a 200 moves
+   * the editor. The refusals below are the ones this panel can answer from what it is already
+   * showing; the server checks all of them again at insert time, on the revision it reads then. */
+  function cite(id, index, origin) {
+    sync();
+    const st = store.state(), row = st.rows.find(r => r.id === id);
+    const source = row && Array.isArray(row.sources) ? row.sources[index] : null;
+    if (!live() || !st.uid || st.uid !== current() || !source) {
+      setResult('소견 목록이 그 사이 바뀌었습니다. Reload Findings로 다시 확인한 뒤 인용하세요.', 'list-changed', false);
+      render();
+      return;
+    }
+    if (typeof app.cite !== 'function') {
+      setResult('이 화면에서는 판독문에 넣을 수 없습니다.', 'unsupported', false);
+      return;
+    }
+    if (row.hidden) { setResult('숨긴 소견은 판독문에 인용할 수 없습니다.', 'refused', false); return; }
+    // Current/Revised/Metadata-changed may be quoted after the person has seen the state; a hidden or
+    // missing mark may not. The judgement that counts is the server's, recomputed at insert time.
+    if (source.linkState === 'hidden' || source.linkState === 'missing') {
+      setResult('숨겨졌거나 사라진 출처는 판독문에 인용할 수 없습니다.', 'refused', false);
+      return;
+    }
+    const block = citation.assembleBlock(row);
+    const refusal = citation.refuseBlock(block);
+    if (refusal) { setResult(refusal, 'refused', false); return; }
+    const opened = app.cite({ uid: st.uid, findingId: row.id, findingRevision: row.revision,
+      sourceIndex: index, sourceLabel: source.description, linkState: source.linkState,
+      headRevision: source.headRevision === undefined ? null : source.headRevision, block },
+      origin || null);
+    if (opened) setResult('판독문에 넣을 내용을 미리보기에서 확인하세요.', 'cite-preview', false);
+  }
   // Only the existing open/re-attach paths; the user presses Go to Image again afterwards.
   function openViewer() {
     sync();
@@ -261,6 +303,13 @@ window.KinReadingFindings = function (app) {
         const target = button(job ? (s.mark ? 'Go to 3D Point' : 'Open Saved View') : 'Go to Image', () => go(row.id, i), item);
         target.dataset.focusKey = row.id + ':' + i; target.setAttribute('aria-describedby', heading.id + ' ' + label.id);
         if (target.dataset.focusKey === key) refocus = target;
+        // One button per source: the block is the finding's own words, and the attestation records
+        // which source of which revision the reader was looking at when they pressed it.
+        const insert = button('Insert into Report', () => cite(row.id, i, insert), item);
+        insert.dataset.focusKey = row.id + ':' + i + ':cite';
+        insert.title = '이 소견의 제목·본문·특성을 판독문 초안에 넣습니다. 미리보기에서 확인한 뒤 서버가 기록합니다.';
+        insert.setAttribute('aria-describedby', heading.id + ' ' + label.id);
+        if (insert.dataset.focusKey === key) refocus = insert;
       });
       const primary = button('Go to Primary Image', () => go(row.id, row.primary), article);
       primary.dataset.focusKey = row.id + ':primary'; primary.setAttribute('aria-describedby', heading.id);

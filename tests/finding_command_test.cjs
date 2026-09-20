@@ -575,8 +575,12 @@ function worklist() {
   vm.runInContext('this.window = this;', ctx);
   const region = document.createElement('div'); region.className = 'panel related-p';
   const tabs = document.createElement('div'); tabs.id = 'reltabs'; region.append(tabs); document.body.append(region);
-  for (const name of ['finding-link-model.js', 'viewer-windows.js', 'finding-command.js', 'reading-findings.js']) vm.runInContext(shipped(name), ctx, { filename: name });
+  // S3-U2b: the panel now refuses to mount without the citation module, because a half-updated tab
+  // would otherwise assemble a block under a rule the server does not share.
+  for (const name of ['finding-link-model.js', 'viewer-windows.js', 'finding-command.js', 'report-citation.js', 'reading-findings.js']) vm.runInContext(shipped(name), ctx, { filename: name });
   const s = { selected: X, allowed: true, owner: OWNER, sub: SUB, target: null, rows: () => [], api: [], popups: [], opened: [], fetched: [], schema: '2',
+    // S3-U2b: what the worklist was handed, and whether it opened its preview for it.
+    cited: [], citeAccepts: true,
     respond: p => Promise.resolve(p.includes(encodeURIComponent(X)) ? page([finding()]) : page([])) };
   // S2-L R5: the panel reads its list itself with the schema request header (the host api has no header option). This transport
   // answers those reads from s.respond as the current API (with its schema response header, unless s.schema is changed) and
@@ -593,17 +597,19 @@ function worklist() {
     api: (method, p) => { s.api.push([method, p]); return s.respond(p); },
     workspace: { viewerTarget: () => typeof s.target === 'function' ? s.target() : s.target },
     windows: () => s.rows(), popup: (...args) => { s.popups.push(args); }, open: uid => { s.opened.push(uid); },
+    cite: (request, origin) => { s.cited.push({ request: plain(request), origin: origin ? origin.textContent : null }); return s.citeAccepts; },
   };
   const ui = sandbox.KinReadingFindings(app);
   const all = () => document.body.all();
   const byId = id => all().find(e => e.id === id);
   const named = (scope, name) => scope.all().filter(e => e.tagName === 'button' && e.textContent === name);
   const h = {
-    s, ui, document, sandbox, channels, byId, named,
+    s, ui, app, document, sandbox, channels, byId, named,
     panel: () => byId('reading-findings'),
     articles: () => byId('reading-findings-list').children,
     result: () => byId('reading-findings-nav'),
     source: (id, index) => { const a = h.articles().find(e => e.dataset.findingId === id); const b = named(a.children.find(e => e.tagName === 'ul').children[index], 'Go to Image'); assert.equal(b.length, 1); return b[0]; },
+    insert: (id, index) => { const a = h.articles().find(e => e.dataset.findingId === id); const b = named(a.children.find(e => e.tagName === 'ul').children[index], 'Insert into Report'); assert.equal(b.length, 1); return b[0]; },
     primary: id => named(h.articles().find(e => e.dataset.findingId === id), 'Go to Primary Image')[0],
     async open() { byId('reading-findings-open').click(); await flush(); },
     async click(el) { el.click(); await flush(); },
@@ -1335,10 +1341,85 @@ test('adapter comparison: a document replaced, an account change or a withdrawn 
   for (const secret of ['비교 키', P_SOP, P_SERIES, ITEM2]) assert.equal(h.panel().textContent.includes(secret), false, secret);
 });
 
+test('adapter: Insert into Report hands the assembled block and the source identity over, and writes nothing itself', async () => {
+  const h = worklist();
+  await h.open();
+  const article = h.articles()[0];
+  assert.equal(h.named(article, 'Insert into Report').length, 2, 'one button per source');
+  assert.ok(h.insert(ID1, 0).getAttribute('aria-describedby').split(' ').every(id => h.byId(id)));
+  await h.click(h.insert(ID1, 1));
+  assert.equal(h.s.cited.length, 1);
+  const handed = h.s.cited[0];
+  assert.deepEqual(handed.request, {
+    uid: X, findingId: ID1, findingRevision: 1, sourceIndex: 1,
+    sourceLabel: 'Key Image · 키 영상 · 프레임 1 · r2', linkState: 'current', headRevision: 2,
+    // R5: the finding's own title and text, in that order, nothing added. schemaVersion 1 has no
+    // characteristics field, so there is no third block.
+    block: '결절 <img src=x onerror=alert(1)>\n본문\n둘째 줄',
+  });
+  assert.equal(handed.origin, 'Insert into Report', 'the pressed button is where focus returns');
+  assert.ok(h.s.api.every(([method]) => method === 'GET'), 'the panel still only reads');
+  assert.ok(h.result().textContent.includes('미리보기'));
+
+  // Version 2 adds the labelled characteristics block, with exactly one space after the colon.
+  h.s.respond = () => Promise.resolve(page([v2Finding()]));
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  await h.click(h.insert(ID1, 0));
+  assert.equal(h.s.cited[1].request.block, '결절 <img src=x onerror=alert(1)>\n본문\n둘째 줄\n특성: 경계 불명확');
+});
+
+test('adapter: a hidden or missing source, a hidden finding, a changed list and an older worklist all refuse to cite', async () => {
+  const h = worklist();
+  const gone = v2Finding();
+  gone.links[1] = { jobId: WJ, markId: WM, linkState: 'missing', headRevision: null, headHidden: false };
+  gone.links[2] = { jobId: WV, markId: null, linkState: 'hidden', headRevision: 4, headHidden: true };
+  h.s.respond = () => Promise.resolve(page([gone]));
+  await h.open();
+  for (const index of [1, 2]) {
+    await h.click(h.insert(ID1, index));
+    assert.equal(h.s.cited.length, 0, 'a hidden or missing mark may not be quoted');
+    assert.ok(h.result().textContent.includes('숨겨졌거나 사라진 출처'));
+    assert.equal(h.result().dataset.result, 'refused');
+  }
+  // A revised source is a different matter: the person has seen the state, and the server decides
+  // again at insert time on the revision it reads then.
+  const revised = v2Finding();
+  revised.links[0] = { itemId: ITEM1, linkState: 'revised', headRevision: 3, headHidden: false };
+  h.s.respond = () => Promise.resolve(page([revised]));
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  await h.click(h.insert(ID1, 0));
+  assert.deepEqual([h.s.cited.length, h.s.cited[0].request.linkState, h.s.cited[0].request.headRevision], [1, 'revised', 3]);
+
+  // A hidden finding is shown only under Show Hidden and may not be quoted at all.
+  h.s.respond = () => Promise.resolve(page([v2Finding({ id: ID2, hidden: true })]));
+  const hidden = h.byId('reading-findings-hidden');
+  hidden.checked = true; hidden.dispatchEvent(new Event('change')); await flush();
+  await h.click(h.insert(ID2, 0));
+  assert.equal(h.s.cited.length, 1, 'still only the revised one');
+  assert.ok(h.result().textContent.includes('숨긴 소견'));
+
+  // The button of a row that the next read no longer returns refuses before anything is handed over.
+  const button = h.insert(ID2, 0);
+  h.s.respond = () => Promise.resolve(page([]));
+  await h.click(h.named(h.panel(), 'Reload Findings')[0]);
+  await h.click(button);
+  assert.equal(h.s.cited.length, 1);
+  assert.ok(h.result().textContent.includes('소견 목록이 그 사이 바뀌었습니다'));
+
+  // An older worklist without the entry point says so instead of throwing.
+  const older = worklist();
+  delete older.app.cite;
+  await older.open();
+  await older.click(older.insert(ID1, 0));
+  assert.equal(older.s.cited.length, 0);
+  assert.equal(older.result().dataset.result, 'unsupported');
+});
+
 /* ---------- shipped wiring ---------- */
 test('wiring: the worklist loads the modules in order, mounts once, follows selection and keeps the boundary', () => {
   const html = shipped('main.html'), rw = shipped('reading-workspace.js'), ui = shipped('reading-findings.js'), pure = shipped('finding-command.js');
-  const order = ['reading-workspace.js', 'finding-link-model.js', 'finding-command.js', 'reading-findings.js'].map(name => html.indexOf('<script src="' + name + '"></script>'));
+  const order = ['reading-workspace.js', 'finding-link-model.js', 'finding-command.js', 'report-citation.js',
+                 'reading-findings.js'].map(name => html.indexOf('<script src="' + name + '"></script>'));
   assert.ok(order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])), 'script order');
   assert.equal(html.split('KinReadingFindings({').length - 1, 1);
   assert.equal(html.split('readingFindings?.sync();').length - 1, 1);

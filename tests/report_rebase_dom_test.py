@@ -15,6 +15,10 @@ from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = Path(os.environ.get("KIN_REBASE_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
+# S3-U2b put the citation state, the dedicated read and the insertion pane inside the same
+# contiguous product region this harness slices, so the real module has to be here too. The
+# citation behaviour itself is asserted in report_citation_dom_test.py.
+CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 
 UID = "1.2.3"
 OTHER = "1.2.4"
@@ -84,6 +88,7 @@ def extract_function(source, name):
 # The real modal markup and the real modal styling: the pane must be visible by
 # the rules the product ships, not by a rule this test invents.
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
+CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
 BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
 # One contiguous region: report source, loadReport, the draft bar, the rebase pane,
@@ -91,6 +96,9 @@ BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function repo
 REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
 API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
+# S3-U2b moved the shared "may a script write into the editor" check into one function that the
+# sliced region now calls; without it the harness defines nothing.
+EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
 
 HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <div class="draftbar" id="draftbar" style="display:none"><span id="draftmsg"></span>
@@ -98,7 +106,14 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <textarea id="findings"></textarea><textarea id="conclusion"></textarea><textarea id="recommendation"></textarea>
 <button id="b-approve"></button><button id="b-save"></button><button id="b-transcribe"></button>
 <button id="b-addendum"></button><button id="b-unread"></button><button id="b-prelim"></button><button id="b-defer"></button>
+<div class="draftbar" id="citebar" style="display:none"><span id="citemsg"></span>
+<button id="b-cite-list"></button><button id="b-cite-reload"></button></div>
+<div id="citelist" hidden></div>
 PANEHTML
+CITEHTML
+<script>
+CITATIONJS
+</script>
 <script>
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -114,6 +129,7 @@ const KinAuth = { has: () => true, logout: async () => {} };
 const reportPreview = { close() {} };
 const displayActor = value => String(value ?? "").split("@")[0];
 function cur() { return studies.find(s => s.uid === selectedUid); }
+function shownStudyDesc(s) { return s?.desc ?? ""; }
 function heldByOther(s) { return s?.holder && s.holder !== user ? s.holder : null; }
 function today() { return "2026-09-20"; }
 function saveApp() {}
@@ -131,6 +147,10 @@ Object.defineProperty(navigator, "clipboard", {
 let holdNext = false, releaseHeld = null;
 window.fetch = async (url, options = {}) => {
   const path = String(url).slice(API.length);
+  // The citation read is a different surface with its own DOM test. Answer it inertly and keep it
+  // out of `calls` so these rebase cases still count exactly the writes they are about.
+  if (path.endsWith("/report/citations"))
+    return { ok: true, status: 200, json: async () => ({ version: 0, head: [], draft: [] }) };
   calls.push({ method: options.method ?? "GET", path, body: options.body ? JSON.parse(options.body) : null });
   const reply = replies.shift() ?? { status: 200, body: {} };
   const answer = () => ({ ok: reply.status < 400, status: reply.status, json: async () => reply.body });
@@ -142,6 +162,7 @@ function toast(message, kind) { toasts.push({ message, kind }); }
 function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
 APIFN
 WRITEBLOCKFN
+EDITORBLOCKFN
 BASEBLOCK
 REPORTBLOCK
 window.load = options => loadReport(options);
@@ -172,8 +193,11 @@ def harness(state):
     return (HARNESS
             .replace("MODALCSS", MODAL_CSS)
             .replace("PANEHTML", PANE_HTML)
+            .replace("CITEHTML", CITE_HTML)
+            .replace("CITATIONJS", CITATION_JS)
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
+            .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)
             .replace("BASEBLOCK", BASE_BLOCK)
             .replace("REPORTBLOCK", REPORT_BLOCK)
             .replace("INITIALSTATE", json.dumps(state, ensure_ascii=False))
