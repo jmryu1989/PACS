@@ -75,6 +75,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-preview-citation-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_preview_citation_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_preview_citation_dom_test.py
+      - name: S3-U4 printed citation browser mutants killed through the shipped-file override
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-preview-citation-mutants --cwd . --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/main.html --file tests/report_preview_citation_dom_test.py --file tests/report_preview_citation_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_preview_citation_mutants.py --out tmp/workspace-ui-ci/report-preview-citation-mutants/mutants.json
       - name: Selected CT display controls and session loader boundaries
         timeout-minutes: 3
         run: |

@@ -10,10 +10,14 @@ extracted api() matters - the 403 and 401 branches then travel the real {message
 body} shape the product throws, not one this test invented. No LiveStack, no Orthanc, no database,
 no original DICOM, no server.
 
+17 cases. The four browser mutants of this unit mutate report-preview.js, so the file takes a
+KIN_PREVIEW_JS override and tests/report_preview_citation_mutants.py drives the kills through it.
+
 What this file cannot see, and says so rather than pretending: real pagination (a headless DOM
 cannot observe page breaks) and the ordering of the citation section against a rendered key-image
 section (that needs the DICOM lookup/digest/tag stubs and a decodable frame, which is a separate
-cost). Structure is asserted on the serialized paper instead.
+cost). Structure is asserted on the serialized paper instead. The AbortError/15 s budget rethrow is
+reviewed statically only - a timer-driven case is not worth its cost.
 """
 import json
 import os
@@ -24,10 +28,17 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = Path(os.environ.get("KIN_PREVIEW_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
-PREVIEW_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-preview.js").read_text(encoding="utf-8")
+# KIN_PREVIEW_JS is the override the mutant runner needs: every browser mutant of this unit mutates
+# report-preview.js, so a main.html-only hook could not serve any of them. The default is always the
+# shipped file, and the runner only ever points this at a temporary COPY - never at the tree.
+PREVIEW_JS = Path(os.environ.get("KIN_PREVIEW_JS", ROOT / "worklist-v0" / "hpacs-lite" / "report-preview.js")).read_text(encoding="utf-8")
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
 
 UID = "1.2.3"
+OTHER = "1.2.4"
+OTHER_PATIENT = "KIM CHULSOO"
+EXPIRED = "세션이 만료되었습니다"
+RECHECKING = "출력 직전 상태를 다시 확인하고 있습니다…"
 BODY_LINE = "우상엽 결절"
 HEADING = "인용된 소견"
 ATTRIBUTION = "인용 증적 확인: doctor의 열람 권한 기준"
@@ -145,6 +156,25 @@ window.fetch = async (url, options = {}) => {
 };
 APIFN
 
+/* The popup the product prints into. The repo already stubs a popup's print this way (19 `.print =`
+   stubs across the existing popup tests, e.g. tests/e2e/test_report_preview.py:102); a headless
+   print dialog is not what these cases are about. The write capture is what turns "the printed
+   document is the previewed document" into a whole-string equality instead of a substring, because
+   the popup's re-serialization can never be compared with the srcdoc string itself.
+   Document.prototype is taken from the POPUP's realm - the parent's would be a foreign prototype -
+   and the capture is reinstalled after document.open(), which may drop own properties. */
+let printCalls = 0; const written = [];
+const realOpen = window.open;
+window.open = (...args) => {
+  const w = realOpen(...args);
+  if (!w) return w;
+  const capture = () => { w.document.write = text => { written.push(String(text)); w.Document.prototype.write.call(w.document, text); }; };
+  w.print = () => { printCalls += 1; };
+  capture();
+  w.document.open = (...rest) => { const value = w.Document.prototype.open.apply(w.document, rest); capture(); return value; };
+  return w;
+};
+
 let online = true;
 let editorText = { findings: "편집 중인 글", conclusion: "", recommendation: "" };
 const preview = KinReportPreview({ api, actorName: displayActor, toast,
@@ -154,6 +184,7 @@ const dialog = () => document.querySelector("#report-preview");
 const button = label => [...dialog().querySelectorAll("button")].find(b => b.textContent === label);
 window.ui = {
   open: () => preview.open(),
+  close: () => button("닫기").click(),
   srcdoc: () => dialog().querySelector("iframe").srcdoc,
   status: () => dialog().querySelector("[role=status]").textContent,
   printDisabled: () => button("인쇄 / PDF").disabled,
@@ -164,6 +195,9 @@ window.ui = {
   counts: () => ({ preview: previewCalls.length, cite: citeCalls.length }),
   queueCite: reply => { citeQueue.push(reply); },
   setPreview: answer => { previewAnswer = answer; },
+  setUid: value => { selectedUid = value; },
+  printCalls: () => printCalls,
+  written: () => written.slice(),
   hold: (n = 1) => { holdCite += n; },
   release: () => { const fn = heldCite.shift(); if (fn) fn(); return !!fn; },
   outstanding: () => heldCite.length,
@@ -176,8 +210,8 @@ window.ui = {
 </script></body></html>"""
 
 
-def preview_answer(version=3, action="approve", findings=BODY_LINE):
-    return {"study": {"uid": UID, "id": "P-1", "name": "HONG GILDONG", "birth": "1970-01-01", "sex": "M",
+def preview_answer(version=3, action="approve", findings=BODY_LINE, uid=UID, name="HONG GILDONG"):
+    return {"study": {"uid": uid, "id": "P-1", "name": name, "birth": "1970-01-01", "sex": "M",
                       "date": "2026-09-20", "acc": "A1", "desc": "Chest CT", "modality": "CT"},
             "actor": "doctor@kin", "canPreviewEditor": True,
             "report": {"version": version, "rs": "A", "action": action, "author": "doctor2@kin",
@@ -194,6 +228,12 @@ def entry(**overrides):
              "insertedAt": "2026-09-19T05:00:00.000Z", "insertedBy": "doctor2@kin", "sameTextCount": 1}
     value.update(overrides)
     return value
+
+
+def reduced(cid=CID + "5", field="conclusion"):
+    """The server's reduced projection, exactly its five keys (report-citation.ts:261-265)."""
+    return {"cid": cid, "field": field, "insertedAt": "2026-09-19T06:30:00.000Z",
+            "insertedBy": "doctor3@kin", "state": "source-unavailable"}
 
 
 def ok(head, version=3):
@@ -217,7 +257,7 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.assertEqual([], getattr(self, "errors", []), "the page reported an uncaught error")
         self.page.close()
 
-    def open(self, cite=None, answer=None):
+    def open(self, cite=None, answer=None, render=True):
         self.page = self.browser.new_page()
         self.page.set_default_timeout(10000)
         errors = []
@@ -238,7 +278,11 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
             self.page.evaluate("ui.queueCite(%s)" % json.dumps(cite, ensure_ascii=False))
         self.errors = errors
         self.page.evaluate("ui.open()")
-        self.wait_render()
+        if render:
+            self.wait_render()
+        else:
+            # A render that ends in a blank paper is still settled once the read has answered.
+            self.page.wait_for_function("() => ui.counts().cite >= 1")
 
     def wait_render(self, previous=None):
         if previous is None:
@@ -256,6 +300,21 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.assertFalse(self.page.evaluate("ui.printDisabled()"),
                          "print is disabled: this Chromium does not support @page margin boxes, "
                          "which is the product's own precondition for printing")
+
+    def print_document(self):
+        """Press print and return every string the product wrote into its popup.
+
+        Waiting on the product's own print() call - not on the document landing - is what proves the
+        path ran to its end: document.write happens before the last guards.
+        """
+        with self.page.expect_popup() as popup:
+            self.page.evaluate("ui.print()")
+        window = popup.value
+        self.page.wait_for_function("() => ui.printCalls() === 1")
+        written = self.page.evaluate("ui.written()")
+        if not window.is_closed():
+            window.close()
+        return written
 
     # ── D1 · a saved head with citations prints them ──
 
@@ -335,15 +394,13 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         for text in (NONE, UNKNOWN, "소견 r"):
             self.assertNotIn(text, section)
         self.assertEqual(1, self.page.evaluate("ui.counts().cite"), "no dedicated read in editor mode")
-        # C7: printing the unconfirmed paper must not ask for citations either.
+        # C7: printing the unconfirmed paper must not ask for citations either, and what is printed
+        # is the previewed document itself.
         self.require_print()
-        with self.page.expect_popup() as popup:
-            self.page.evaluate("ui.print()")
-        window = popup.value
-        window.wait_for_function("() => document.querySelector('section.citations') !== null")
-        self.assertIn(EDITOR_NOTICE, window.content())
+        printed = self.print_document()
+        self.assertEqual([self.page.evaluate("ui.srcdoc()")], printed, "the printed string is the previewed string")
+        self.assertIn(EDITOR_NOTICE, printed[0])
         self.assertEqual(1, self.page.evaluate("ui.counts().cite"), "no dedicated read at print time")
-        window.close()
 
     # ── D8 · switching back and forth redraws under each mode's own rule ──
 
@@ -405,8 +462,15 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         with self.page.expect_popup() as popup:
             self.page.evaluate("ui.print()")
         window = popup.value
-        self.page.wait_for_function("changed => ui.status() === changed", arg=CHANGED)
-        self.assertTrue(window.is_closed(), "a refused print closes the window it opened")
+        # Wait for the refusal itself, not for the window: under a mutant that skips the re-read the
+        # recorded failure must be this assertion with both strings, not a 10 s timeout.
+        self.page.wait_for_function("rechecking => ui.status() !== rechecking", arg=RECHECKING)
+        self.assertEqual(CHANGED, self.page.evaluate("ui.status()"))
+        self.assertEqual(0, self.page.evaluate("ui.printCalls()"), "a refused print never reaches print()")
+        self.assertEqual([], self.page.evaluate("ui.written()"), "and writes nothing into the window it opened")
+        if not window.is_closed():
+            # The close reaches Playwright on a different path than the polling evaluate above.
+            window.wait_for_event("close")
         self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "the refused paper is withdrawn")
 
     # ── D12 · an unchanged re-read prints exactly what was previewed ──
@@ -414,24 +478,25 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
     def test_print_writes_the_same_evidence_the_preview_showed(self):
         self.open(cite=ok([entry()]))
         self.require_print()
+        previewed = self.page.evaluate("ui.srcdoc()")
         section = self.section()
-        with self.page.expect_popup() as popup:
-            self.page.evaluate("ui.print()")
-        window = popup.value
-        window.wait_for_function("() => document.querySelector('section.citations') !== null")
-        printed = window.content()
-        self.assertIn(section, printed, "the printed document carries the previewed section verbatim")
-        self.assertIn(BODY_LINE, printed)
-        self.assertFalse(window.is_closed())
+        printed = self.print_document()
+        # Whole-document equality: the product prints the very string it previewed, so a path that
+        # rebuilt the paper from the print-time re-read could not pass by coincidence.
+        self.assertEqual([previewed], printed)
+        self.assertIn(section, printed[0])
+        self.assertEqual(previewed, self.page.evaluate("ui.srcdoc()"), "printing does not redraw the preview")
         self.assertEqual({"preview": 3, "cite": 2}, self.page.evaluate("ui.counts()"),
                          "print re-reads the evidence beside the existing re-snapshot")
-        window.close()
 
     # ── D13 · no identifier reaches the record ──
 
     def test_no_identifier_and_no_inserted_text_reach_the_printed_evidence(self):
-        self.open(cite=ok([entry(), entry(cid=CID + "9", field="conclusion",
-                                          state="source-unavailable", insertedText=None)]))
+        # Two reduced shapes on purpose: the server's exact five keys, and a deliberate superset
+        # that still carries every identifier, so the suppression is asserted against the harder one.
+        self.open(cite=ok([entry(), reduced(),
+                           entry(cid=CID + "9", field="recommendation",
+                                 state="source-unavailable", insertedText=None)]))
         srcdoc = self.page.evaluate("ui.srcdoc()")
         for sentinel in SENTINELS:
             self.assertNotIn(sentinel, srcdoc, "the record must not carry " + sentinel)
@@ -440,6 +505,59 @@ class ReportPreviewCitationDOMTest(unittest.TestCase):
         self.assertIn(BODY_LINE, srcdoc)
         self.assertNotIn(BODY_LINE, section)
         self.assertIn("이 인용의 소견을 지금 확인할 수 없습니다", section, "a reduced entry keeps its place")
+
+    # ── D15 · a late answer after 닫기 has no paper to paint ──
+
+    def test_a_late_citation_answer_after_close_paints_nothing(self):
+        """close() does not bump selectionEpoch, so check(s) is the only statement that stops the
+        continuation of a read that was still out when the dialog closed."""
+        self.open(cite=ok([entry(findingRevision=7)]))
+        self.page.evaluate("ui.hold(1)")
+        self.page.evaluate("ui.queueCite(%s)" % json.dumps(ok([entry(findingRevision=11)]), ensure_ascii=False))
+        self.page.evaluate("ui.refresh()")
+        self.page.wait_for_function("() => ui.outstanding() === 1")
+        self.page.evaluate("ui.close()")
+        self.assertTrue(self.page.evaluate("ui.release()"), "the held answer was released")
+        self.page.wait_for_function("() => ui.outstanding() === 0")
+        self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "a closed dialog has no paper")
+        self.assertTrue(self.page.evaluate("ui.printDisabled()"), "and nothing to print")
+        self.assertEqual("", self.page.evaluate("ui.status()"))
+
+    # ── D16 · and it can never paint another patient's paper ──
+
+    def test_a_late_citation_answer_cannot_paint_another_patients_paper(self):
+        """close → open on a different study is the dangerous shape: without check(s) the first
+        study's paper would be drawn into the second study's dialog behind an enabled print button,
+        and print()'s own comparison only compares the second study with itself."""
+        self.open(cite=ok([entry(findingRevision=11)]))
+        self.page.evaluate("ui.hold(1)")
+        self.page.evaluate("ui.queueCite(%s)" % json.dumps(ok([entry(findingRevision=11)]), ensure_ascii=False))
+        self.page.evaluate("ui.refresh()")
+        self.page.wait_for_function("() => ui.outstanding() === 1")
+        self.page.evaluate("ui.close()")
+        self.page.evaluate("ui.setPreview(%s)" % json.dumps(
+            preview_answer(uid=OTHER, name=OTHER_PATIENT, findings="다른 환자의 본문"), ensure_ascii=False))
+        self.page.evaluate("ui.setUid(%s)" % json.dumps(OTHER))
+        self.page.evaluate("ui.queueCite(%s)" % json.dumps(ok([entry(findingRevision=22)]), ensure_ascii=False))
+        self.page.evaluate("ui.open()")
+        self.page.wait_for_function("() => ui.srcdoc().includes('소견 r22')")
+        self.assertTrue(self.page.evaluate("ui.release()"), "the first study's answer arrives now")
+        self.page.wait_for_function("() => ui.outstanding() === 0")
+        srcdoc = self.page.evaluate("ui.srcdoc()")
+        self.assertIn(OTHER_PATIENT, srcdoc)
+        self.assertIn("소견 r22", srcdoc)
+        self.assertNotIn("소견 r11", srcdoc, "the first study's evidence must not reach this paper")
+        self.assertNotIn("HONG GILDONG", srcdoc, "and neither must the first patient")
+
+    # ── D17 · a session that ended takes the paper with it ──
+
+    def test_an_expired_session_blanks_the_paper_instead_of_drawing_unknown(self):
+        self.open(cite={"status": 401, "body": {}}, render=False)
+        self.page.wait_for_function("expired => ui.status() === expired", arg=EXPIRED)
+        self.assertEqual("", self.page.evaluate("ui.srcdoc()"), "nothing is drawn on a logged-out screen")
+        self.assertEqual(EXPIRED, self.page.evaluate("ui.status()"))
+        self.assertEqual(1, self.page.evaluate("ui.logouts()"), "the shipped api() ended the session")
+        self.assertTrue(self.page.evaluate("ui.printDisabled()"))
 
     # ── D14 · a head that was never saved has nothing to attest ──
 
