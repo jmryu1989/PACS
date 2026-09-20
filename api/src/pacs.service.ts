@@ -8,8 +8,8 @@ import { KeycloakService } from './keycloak.service';
 import { FindingService } from './finding.service';
 import { canonical } from './viewer-input';
 import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationInsertInput, citationSourceRef,
-  citationUnion, CitationInputError, lineBlockOccurrences, projectCitation, sameTextCounts,
-  REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA } from './report-citation';
+  citationUnion, CitationInputError, lineBlockOccurrences, presenceState, projectCitation, sameTextCounts,
+  REPORT_CITATION_FIELDS, REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA, SOURCE_UNAVAILABLE } from './report-citation';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
@@ -2313,6 +2313,77 @@ export class PacsService implements OnModuleInit {
         return entries.map((entry, i) => projectCitation(entry, readable.has(String(entry?.findingId ?? '')), counts[i]));
       };
       return { version: report?.version ?? 0, head: project(head), draft: project(mine) };
+    }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+  }
+
+  /**
+   * 과거 판의 인용 — **보존된 한 행**의 증언.
+   *
+   * 머리 읽기(위)는 지금 열려 있는 판독문의 것이고, 이력에 쌓인 판의 증언은 `versions()`가
+   * 칸을 명시해 빼고 있어 **어떤 표면도 읽지 않았다.** 그 행은 확정과 같은 트랜잭션에서 쓰이고
+   * 다시 바뀌지 않으므로 본문과 증언이 어긋날 수 없다.
+   *
+   * 나가는 것은 **메타데이터뿐**이다. 머리 읽기가 `insertedText`·`cid`를 싣는 이유는 편집 화면이
+   * 제거를 고르고 **살아 있는** 본문과 대조해야 하기 때문인데, 과거 판에는 지울 것도 바뀔 본문도
+   * 없다. 그래서 존재 상태는 **여기서, 그 행 자신의 본문에 대해** 계산해 한 낱말로 보내고 문구와
+   * 식별자는 서버를 떠나지 않는다. 화면이 본문을 갖지 않으므로 **틀린 본문으로 셀 방법이 없다.**
+   */
+  async reportVersionCitations(uid: string, version: string, c: Caller) {
+    /**
+     * 표준 십진 · `Int` 범위만 받는다. 어떤 DB 읽기보다 **먼저** 거절한다 — `prepare()`도
+     * 정책 읽기다. 관용 변환(`Number()`)을 쓰면 `'1e2'`·`'0x10'`·`' 1'`·`'01'`·`'+1'`이 실제
+     * 판의 별칭이 되고, 2^31 이상은 `Int` 컬럼에 닿아 400도 404도 아닌 실패가 된다.
+     */
+    if (!/^[1-9][0-9]{0,9}$/.test(version) || Number(version) > 2147483647)
+      throw new BadRequestException('판 번호를 확인하세요');
+    const want = Number(version);
+    /**
+     * uid 목록 **없이** 준비한다. 이 메서드에는 트랜잭션 밖 `gate()`가 없어 밖에서 도는
+     * `require`도 없으므로, 아래 트랜잭션 안의 재검사는 이 호출이 채운 캐시에만 기댈 수 있다.
+     */
+    await this.studyAccess.prepare(c);
+    return this.prisma.$transaction(async tx => {
+      /**
+       * 관문과 판 읽기가 **한 스냅샷** 안에 있다. 밖에서 읽으면 그 사이에 예비 판독이 끼어들어
+       * RS=P가 된 판을 그 관문을 거치지 않은 채 답할 수 있다.
+       */
+      const prev = await this.gate(uid, c, tx);
+      if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+      if (!canReadPrelim(prev, c.actor))
+        throw new ForbiddenException(
+          `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+      const row = await tx.reportVersion.findUnique({
+        where: { uid_version: { uid, version: want } },
+        // 네 칸뿐이다. `action`·`author`·`at`·`reason`은 이력 응답의 것이고, 여기서 다시 나가면
+        // 관문을 하나도 새로 만들지 않은 채 노출면만 넓어진다.
+        select: { citations: true, findings: true, conclusion: true, recommendation: true },
+      });
+      // 없는 판을 「인용 없음」으로 답하면 그 자체가 거짓말이다.
+      if (!row) throw new NotFoundException('그 판을 찾을 수 없습니다');
+      const entries = citationArray(row.citations);
+      // `n`은 **행 전체**에서 센다. 축약된 건이 빠지면 `ambiguous`여야 할 것이 `present`가 된다.
+      const counts = sameTextCounts(entries);
+      const ids = [...new Set(entries.map(entry => String(entry?.findingId ?? '')).filter(Boolean))];
+      const readable = new Set<string>();
+      for (const found of await this.findings.readableFindings(tx, c, uid, ids)) readable.add(String(found.id));
+      return { version: want, actor: c.actor, entries: entries.map((entry, index) => {
+        if (!readable.has(String(entry?.findingId ?? '')))
+          return { field: entry?.field ?? null, insertedAt: entry?.insertedAt ?? null,
+            insertedBy: entry?.insertedBy ?? null, state: SOURCE_UNAVAILABLE };
+        /**
+         * 셀 수 없는 건은 **모른다고 말한다.** `lineBlockOccurrences`는 문자열이 아닌 값을
+         * `''`로 바꾸므로 그대로 세면 0회 → `absent`가 되어, 확인하지 못한 것을 「더는
+         * 없습니다」로 지어내게 된다. 화면은 이 `null`을 보고 그 판 전체를 미확인으로 만든다.
+         */
+        const countable = REPORT_CITATION_FIELDS.includes(entry?.field)
+          && typeof entry?.insertedText === 'string';
+        return { field: entry?.field ?? null, findingRevision: entry?.findingRevision ?? null,
+          sourceIndex: entry?.sourceIndex ?? null, linkStateAtInsert: entry?.linkStateAtInsert ?? null,
+          insertedAt: entry?.insertedAt ?? null, insertedBy: entry?.insertedBy ?? null,
+          presence: countable
+            ? presenceState(lineBlockOccurrences(String((row as any)[entry.field] ?? ''), entry.insertedText), counts[index])
+            : null };
+      }) };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 

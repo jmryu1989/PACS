@@ -123,6 +123,14 @@ jobs:
         timeout-minutes: 5
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/job-print-citation-mutants --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/viewer_job_print_citation_dom_test.py --file tests/viewer_job_print_citation_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_job_print_citation_mutants.py --out tmp/workspace-ui-ci/job-print-citation-mutants/mutants.json
+      - name: S3-U5b report history citation DOM
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-version-citation-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_version_citation_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_version_citation_dom_test.py
+      - name: S3-U5b report history citation browser mutants
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-version-citation-mutants --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_version_citation_dom_test.py --file tests/report_version_citation_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_version_citation_mutants.py --out tmp/workspace-ui-ci/report-version-citation-mutants/mutants.json
       - name: Workspace window transition and identity DOM regressions
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/window-manager --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/viewer-windows.js --file tests/viewer_window_manager_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_window_manager_dom_test.py

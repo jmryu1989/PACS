@@ -35,8 +35,14 @@ const carried = (cid, at = '2026-09-01T00:00:00.000Z', by = 'other@synthetic') =
   sourceRef: { kind: 'item', itemId: 'i-0', sourceRevision: 1 }, linkStateAtInsert: 'current',
   headRevisionAtInsert: 1, insertedText: '이전 줄', insertedAt: at, insertedBy: by });
 
+// The additive recording below (studyState / transaction / reportVersion.findUnique / draft reads
+// and the tx-boundness of require) exists so the historical read has an oracle for the boundaries
+// it names: which client read StudyState, whether the access re-check was the transaction-bound
+// one, and whether any draft was touched. Every existing case filters `calls` by name, so the new
+// entries change nothing for them, and the defaults are unchanged for every existing caller.
 function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@synthetic', findings: 'HEAD', conclusion: '', recommendation: '' },
-  versions = new Map(), draft = null, readable = READABLE, readableAll = false, bytes = null, fail = null } = {}) {
+  versions = new Map(), draft = null, readable = READABLE, readableAll = false, bytes = null, fail = null,
+  refuseTxRequire = false } = {}) {
   const writes = [], audits = [], raw = [], calls = [], created = [];
   const tx = {
     $executeRaw: async () => 0,
@@ -45,24 +51,28 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
       raw.push(sql);
       if (sql.includes('FROM "StudyState"')) return [{ uid: UID }];
       if (sql.includes('FROM "Report" WHERE')) return report ? [report] : [];
-      if (sql.includes('FROM "ReportDraft"')) return draft ? [{ citations: draft.citations ?? null }] : [];
+      if (sql.includes('FROM "ReportDraft"')) { calls.push({ call: 'reportDraft.raw' }); return draft ? [{ citations: draft.citations ?? null }] : []; }
       if (sql.includes('octet_length')) return [{ bytes: bytes ?? Buffer.byteLength(String(values[0] ?? ''), 'utf8') }];
       throw new Error('unexpected raw query: ' + sql);
     },
-    studyState: { findUnique: async () => state, update: async () => { writes.push('studyState.update'); return state; } },
+    studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: true }); return state; },
+      update: async () => { writes.push('studyState.update'); return state; } },
     report: {
       findUnique: async () => (report ? { version: report.version } : null),
       upsert: async a => writes.push('report.upsert:v' + a.create.version),
     },
     reportDraft: {
-      findUnique: async () => draft,
+      findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: true }); return draft; },
       upsert: async a => { writes.push('reportDraft.upsert'); created.push({ call: 'draft', data: a.update });
         return { uid: UID, author: CALLER.actor, baseVersion: a.update.baseVersion, updatedAt: 'now', ...a.update }; },
       deleteMany: async () => { writes.push('reportDraft.deleteMany'); return { count: draft ? 1 : 0 }; },
     },
     reportVersion: {
       findFirst: async () => { const all = [...versions.keys()]; return all.length ? { version: Math.max(...all) } : null; },
-      findUnique: async a => versions.get(a.where.uid_version.version) ?? null,
+      // The uid was ignored before, so a read bound to the wrong study would have passed unnoticed.
+      // Every existing caller passes this uid (the service always keys on its own argument).
+      findUnique: async a => { calls.push({ call: 'reportVersion.findUnique', args: a });
+        return (a.where.uid_version.uid === UID ? versions.get(a.where.uid_version.version) : null) ?? null; },
       create: async a => { if (fail === 'create') throw fail_error();
         writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); },
       createMany: async a => { if (fail === 'createMany') throw fail_error();
@@ -71,14 +81,21 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
   const prisma = {
-    $transaction: async work => { if (fail === 'upsert') throw fail_error(); return work(tx); },
-    studyState: { findUnique: async () => state },
+    $transaction: async (work, options) => { calls.push({ call: 'transaction', options });
+      if (fail === 'upsert') throw fail_error(); return work(tx); },
+    studyState: { findUnique: async () => { calls.push({ call: 'studyState', tx: false }); return state; } },
     report: { findUnique: async () => report },
-    reportDraft: { findUnique: async () => draft },
+    reportDraft: { findUnique: async () => { calls.push({ call: 'reportDraft.findUnique', tx: false }); return draft; } },
     reportVersion: { findMany: async a => { calls.push({ call: 'versions', args: a }); return []; } },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
-  const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }), require: async () => calls.push({ call: 'require' }),
+  const studyAccess = { prepare: async () => calls.push({ call: 'prepare' }),
+    // The third argument is the transaction client. Recording it is what tells a re-check that
+    // runs inside the snapshot from one that ran outside it - the two were indistinguishable.
+    // `refuseTxRequire` refuses ONLY the tx-bound call, which is the revocation the new read
+    // has to answer with 404 before it reads any version row.
+    require: async (_c, _uids, transaction) => { calls.push({ call: 'require', tx: transaction !== undefined });
+      if (refuseTxRequire && transaction !== undefined) throw access_revoked(); },
     allowed: async () => new Set() };
   const findings = { readableFindings: async (_tx, _c, uid, ids) => {
     calls.push({ call: 'readableFindings', uid, ids });
@@ -95,6 +112,13 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
 // The shape PostgreSQL's driver gives us is unproven until the hosted run; the one thing the
 // service may rely on is the constraint name it wrote itself.
 const fail_error = () => Object.assign(new Error('null value violates check constraint "ReportVersion_citations_check"'), { code: 'P2010' });
+
+// What StudyAccessService.require() gives the caller when the policy no longer allows the study.
+// The class itself is not reachable from this file's module path, so the SHAPE the service and
+// `refusal()` see is what is reproduced here: this asserts propagation and ordering, never Nest's
+// own mapping (that belongs to the live suite).
+const access_revoked = () => Object.assign(new Error('검사를 찾을 수 없습니다'),
+  { getStatus: () => 404, getResponse: () => '검사를 찾을 수 없습니다' });
 
 const refusal = async (promise, status) => {
   const e = await promise.then(() => null, error => error);
@@ -506,4 +530,183 @@ test('no audit line carries a source pointer or clinical text', async () => {
   assert.equal(draftDetail.cits.n, 1);
   assert.equal(draftDetail.cits.add[0].field, 'findings');
   assert.match(draftDetail.cits.add[0].cid, UUID);
+});
+
+// ── S3-U5b: the historical row read ───────────────────────────────────────────────────────────
+// REQ-S3-U5b-HISTORY-CITATION -> RISK-S3-U5b-WRONG-BODY / FALSE-EMPTY / DRAFT-LEAK /
+// REVOKED-LINEAGE / ALIASED-VERSION -> TEST-S3-U5b-VERSION-CITATIONS.
+const preserved = (citations, findings = LINE) =>
+  ({ citations, findings, conclusion: '', recommendation: '' });
+const historyRead = (f, version, caller = CALLER) => f.svc.reportVersionCitations(UID, version, caller);
+
+test('the historical read runs the report gates and the access re-check inside one snapshot', async () => {
+  const f = fixture({ versions: new Map([[2, preserved([{ ...carried('a'), findingId: FINDING, insertedText: LINE }])]]) });
+  const answer = await historyRead(f, '2');
+  assert.equal(answer.version, 2);
+  // The order IS the security contract: nothing is read before the policy is prepared, the gate
+  // and the row come from the same transaction, and the access re-check is the tx-bound one.
+  assert.deepEqual(f.calls.map(c => c.call),
+    ['prepare', 'transaction', 'studyState', 'require', 'reportVersion.findUnique', 'readableFindings']);
+  assert.equal(f.calls.find(c => c.call === 'transaction').options.isolationLevel, 'RepeatableRead');
+  assert.equal(f.calls.find(c => c.call === 'studyState').tx, true);
+  assert.equal(f.calls.find(c => c.call === 'require').tx, true);
+  assert.deepEqual(f.calls.filter(c => c.call === 'studyState' && !c.tx), [],
+    'a StudyState read outside the transaction reopens the RS->P window this method closes');
+  assert.deepEqual(f.calls.filter(c => c.call === 'require' && !c.tx), [],
+    'there is no outer gate on this method, so no untransacted require may appear');
+
+  const hidden = fixture({ state: { ...STATE, rs: 'P', preDoc: 'other@synthetic', preReviewer: 'boss@synthetic' },
+    versions: new Map([[2, preserved([carried('a')])]]) });
+  await refusal(historyRead(hidden, '2'), 403);
+  /**
+   * Both of these MUST hold a preserved row. With no row the missing-row 404 answers for the
+   * gate, and deleting the study gate would still look like a refusal - while a real study in
+   * that state would answer 200. That is the v0.6.3 regression `versions()` records, and with
+   * orphan rows outliving a deleted study (no FK) it would expose another author's discarded
+   * testimony to a re-created uid.
+   */
+  const absent = fixture({ state: null, versions: new Map([[2, preserved([carried('a')])]]) });
+  await refusal(historyRead(absent, '2'), 404);
+  assert.deepEqual(absent.calls.filter(c => c.call === 'reportVersion.findUnique'), [],
+    'a study with no state row must answer before any preserved row is read');
+  const foreign = fixture({ state: { ...STATE, institutionId: 'other-hospital' },
+    versions: new Map([[2, preserved([carried('a')])]]) });
+  await refusal(historyRead(foreign, '2'), 404);
+  assert.deepEqual(foreign.calls.filter(c => c.call === 'reportVersion.findUnique'), [],
+    "another institution's study must answer before any preserved row is read");
+
+  // The revocation this surface exists to honour: readability withdrawn between two viewings.
+  const revoked = fixture({ versions: new Map([[2, preserved([carried('a')])]]), refuseTxRequire: true });
+  await refusal(historyRead(revoked, '2'), 404);
+  assert.deepEqual(revoked.calls.filter(c => c.call === 'reportVersion.findUnique'), [],
+    'a refused access re-check must answer before any version row is read');
+});
+
+test('the historical read answers one preserved row, and a version with no row is not an empty one', async () => {
+  const mine = { ...carried('a', '2026-09-02T00:00:00.000Z', 'v2-author@synthetic'), findingId: FINDING, insertedText: LINE };
+  const head = { ...carried('z', '2026-09-03T00:00:00.000Z', 'v4-author@synthetic'), findingId: FINDING, insertedText: LINE };
+  const f = fixture({ versions: new Map([[2, preserved([mine])], [4, preserved([head])]]) });
+  const answer = await historyRead(f, '2');
+  const call = f.calls.find(c => c.call === 'reportVersion.findUnique');
+  assert.deepEqual(call.args.where, { uid_version: { uid: UID, version: 2 } });
+  assert.deepEqual(Object.keys(call.args.select).sort(), ['citations', 'conclusion', 'findings', 'recommendation'],
+    'action/author/at/reason belong to the history response and must not leave the DB layer here');
+  assert.equal(answer.entries.length, 1);
+  assert.equal(answer.entries[0].insertedBy, 'v2-author@synthetic', 'the head row is not the answer');
+
+  // A version that has no row is 404. Saying "no citations" about a version that does not exist
+  // is the same lie as saying it about one this reader may not see.
+  const missing = fixture({ versions: new Map([[4, preserved([head])]]) });
+  await refusal(historyRead(missing, '9'), 404);
+  // A row that never carried citations is a TRUE zero, and that is a different answer from 404.
+  const empty = fixture({ versions: new Map([[2, preserved(null, '')]]) });
+  assert.deepEqual((await historyRead(empty, '2')).entries, []);
+});
+
+test('the historical answer is metadata only, reads no draft on any path and writes nothing', async () => {
+  const readableEntry = { ...carried('a'), findingId: FINDING, insertedText: LINE };
+  const hiddenLineage = { ...carried('b'), findingId: '00000000-0000-4000-8000-00000000beef', insertedText: LINE };
+  const f = fixture({ versions: new Map([[2, preserved([readableEntry, hiddenLineage])]]),
+    draft: { baseVersion: 4, citations: [{ ...readableEntry, cid: 'draft-cid' }] } });
+  const answer = await historyRead(f, '2');
+  assert.deepEqual(Object.keys(answer).sort(), ['actor', 'entries', 'version']);
+  assert.equal(answer.actor, CALLER.actor);
+  assert.deepEqual(Object.keys(answer.entries[0]).sort(),
+    ['field', 'findingRevision', 'insertedAt', 'insertedBy', 'linkStateAtInsert', 'presence', 'sourceIndex']);
+  assert.deepEqual(Object.keys(answer.entries[1]).sort(), ['field', 'insertedAt', 'insertedBy', 'state']);
+  for (const entry of answer.entries)
+    for (const key of ['insertedText', 'cid', 'findingId', 'sourceRef', 'sameTextCount', 'headRevisionAtInsert'])
+      assert.equal(entry[key], undefined, key + ' must not be on the wire for a past version');
+  assert.equal(JSON.stringify(answer).includes(LINE), false, 'no sentence leaves the server for a past version');
+  // Someone else's draft is not a version, and my own is the head read's business.
+  assert.deepEqual(f.calls.filter(c => String(c.call).startsWith('reportDraft')), []);
+  assert.deepEqual(f.raw.filter(sql => sql.includes('ReportDraft')), []);
+  assert.deepEqual(f.writes, [], 'a read writes nothing');
+});
+
+test('a historical row is reduced entry by entry and asked about on its own', async () => {
+  const readableEntry = { ...carried('a'), findingId: FINDING, insertedText: LINE };
+  const hiddenLineage = { ...carried('b'), findingId: '00000000-0000-4000-8000-00000000beef', insertedText: LINE };
+  const f = fixture({ versions: new Map([[2, preserved([readableEntry, hiddenLineage])],
+    [4, preserved([{ ...carried('z'), findingId: FINDING, insertedText: LINE }])]]) });
+  const answer = await historyRead(f, '2');
+  assert.equal(answer.entries.length, 2, 'an unreadable lineage is reduced, never dropped');
+  assert.equal(answer.entries[1].state, 'source-unavailable');
+  assert.equal(answer.entries[1].presence, undefined, 'a reduced entry claims nothing about the body');
+  const asked = f.calls.filter(c => c.call === 'readableFindings');
+  assert.equal(asked.length, 1, 'one row, one question');
+  assert.deepEqual(asked[0].ids, [FINDING, '00000000-0000-4000-8000-00000000beef'],
+    'only the ids of the row that was asked for');
+});
+
+test('the historical read refuses a version number that is not a canonical INT4, before any read', async () => {
+  // Number() would alias real versions ('01', '+1', ' 1', '1e2', '0x10') and let 2^31..2^53 reach
+  // an Int column, where the answer is neither 400 nor 404.
+  for (const bad of ['0', '-1', '1.5', '3x', '', '01', '+1', ' 1', '1e2', '0x10', '2147483648', '9007199254740992']) {
+    const f = fixture({ versions: new Map([[2, preserved([carried('a')])]]) });
+    await refusal(historyRead(f, bad), 400);
+    assert.deepEqual(f.calls, [], 'refused before prepare, the transaction and any StudyState read: ' + JSON.stringify(bad));
+    assert.deepEqual(f.raw, [], JSON.stringify(bad));
+  }
+  const edge = fixture({ versions: new Map() });
+  await refusal(historyRead(edge, '2147483647'), 404);
+  assert.deepEqual(edge.calls.map(c => c.call),
+    ['prepare', 'transaction', 'studyState', 'require', 'reportVersion.findUnique'],
+    'the largest Int is a shape the gates may run for');
+});
+
+test('a preserved discarded row answers its own testimony and no one else\'s draft', async () => {
+  // The admin force-discard keeps each author's own draft as a version row (its body is already
+  // in the history response); this read adds its metadata and nothing more.
+  const theirs = { ...carried('x', '2026-09-02T00:00:00.000Z', 'author-x@synthetic'), findingId: FINDING, insertedText: LINE };
+  const unreadable = { ...carried('y', '2026-09-02T00:00:00.000Z', 'author-x@synthetic'),
+    findingId: '00000000-0000-4000-8000-00000000beef', insertedText: LINE };
+  const f = fixture({ versions: new Map([[5, preserved([theirs, unreadable])],
+    [6, preserved([{ ...carried('z'), findingId: FINDING, insertedText: LINE }])]]),
+    draft: { baseVersion: 4, citations: [{ ...theirs, cid: 'live-draft' }] } });
+  const reader = { ...CALLER, actor: 'reader-y@synthetic' };
+  const answer = await historyRead(f, '5', reader);
+  assert.equal(answer.actor, 'reader-y@synthetic', 'the attribution names who the server saw');
+  assert.equal(answer.entries.length, 2);
+  assert.equal(answer.entries[0].insertedBy, 'author-x@synthetic', 'the historical author is a fact of the row');
+  assert.equal(answer.entries[1].state, 'source-unavailable');
+  assert.deepEqual(f.calls.filter(c => String(c.call).startsWith('reportDraft')), [],
+    'a live draft row is never read by this surface, not even the caller\'s own');
+  assert.equal(JSON.stringify(answer).includes(LINE), false);
+});
+
+test('presence is counted against that row\'s own body, over the whole row, and never invented', async () => {
+  // The body/phrase pairs come from the shared vector oracle, not from literals invented here:
+  // one block that is a whole line of one row's body and only a negated fragment of the other's.
+  const present = vectors.occurrence.find(c => c.name === 'single line present');
+  const gone = vectors.occurrence.find(c => c.name === 'negation prefix on the same line');
+  assert.ok(present && gone && present.block === gone.block && present.k === 1 && gone.k === 0,
+    'the two occurrence vectors must share one block and disagree about the field');
+  const entry = { ...carried('a'), findingId: FINDING, insertedText: present.block };
+  const rows = () => new Map([[2, preserved([entry], present.body)], [7, preserved([entry], gone.body)]]);
+  assert.equal((await historyRead(fixture({ versions: rows() }), '2')).entries[0].presence, 'present');
+  // The same entry in a later row whose body no longer holds the line: 'absent' is a fact ABOUT
+  // THAT ROW. Counting it against the head is the misread this whole unit exists to prevent.
+  assert.equal((await historyRead(fixture({ versions: rows() }), '7')).entries[0].presence, 'absent');
+
+  // A reduced twin still competes for the same occurrence, or one occurrence would make two
+  // citations both claim the sentence is there. The oracle for that is the equivalence vector.
+  const equivalence = vectors.equivalence.find(c => c.entries.length === 2 && c.states[0] === 'ambiguous');
+  assert.ok(equivalence && equivalence.counts[0] === 2, 'the equivalence oracle must carry a shared count');
+  const mine = { ...carried('a'), findingId: FINDING, insertedText: equivalence.entries[0].insertedText };
+  const twin = { ...carried('b'), findingId: '00000000-0000-4000-8000-00000000beef',
+    insertedText: equivalence.entries[1].insertedText };
+  const twins = fixture({ versions: new Map([[2, preserved([mine, twin], equivalence.body)]]) });
+  const twinAnswer = await historyRead(twins, '2');
+  assert.equal(twinAnswer.entries[0].presence, equivalence.states[0]);
+  assert.equal(twinAnswer.entries[1].state, 'source-unavailable');
+
+  // What cannot be counted is not 'absent'. lineBlockOccurrences coerces a non-string to '' and
+  // would otherwise report 0 occurrences, i.e. invent "the sentence is gone" about a row nobody
+  // could check. The screen turns this null into "확인하지 못했습니다" for the whole version.
+  const legacy = fixture({ versions: new Map([[2, preserved([{ ...carried('c'), findingId: FINDING, insertedText: null }])]]) });
+  assert.equal((await historyRead(legacy, '2')).entries[0].presence, null);
+  const strangeField = fixture({ versions: new Map([[2, preserved([{ ...carried('d'), findingId: FINDING, field: 'citations', insertedText: LINE }])]]) });
+  assert.equal((await historyRead(strangeField, '2')).entries[0].presence, null,
+    'an unknown field must not index some other column of the row');
 });

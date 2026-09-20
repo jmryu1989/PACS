@@ -273,6 +273,12 @@ export class PacsController {
     return this.svc.reportCitations(uid, caller(req));
   }
 
+  /** 과거 판의 인용 — 보존된 그 한 행의 증언만. 머리 읽기의 의미를 넓히지 않는다 */
+  @Get('studies/:uid/report/versions/:version/citations')
+  versionCitations(@Param('uid') uid: string, @Param('version') version: string, @Req() req: any) {
+    return this.svc.reportVersionCitations(uid, version, caller(req));
+  }
+
   /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
   @Post('studies/:uid/hold')
   hold(@Param('uid') uid: string, @Req() req: any) {
