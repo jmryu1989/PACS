@@ -545,6 +545,32 @@ test('TEST-S3-U2b-WIRING: every place a server projection replaces a study goes 
   assert.equal(html.split('preservedLocal(').length - 1, 2, 'preservedLocal is called only by mergePolledState');
 });
 
+test('TEST-S3-U2b-HARNESS: a harness that slices the poll must supply what the poll now calls', () => {
+  /**
+   * Centralising the rule added a collaborator to startPolling, and tests/worklist_arrivals_dom_test.py
+   * slices that function with its own stubs. The missing name threw inside the poll's own catch, so
+   * the browser reported no page error - only a row that had not been redrawn. This check is
+   * structural: whatever top-level product function the sliced body calls, the harness must supply.
+   */
+  const plain = html.replace(/\r\n/g, '\n');
+  const topLevel = new Set([...plain.matchAll(/^ {4}(?:async )?function ([A-Za-z_$][\w$]*)\(/gm)].map(m => m[1]));
+  assert.ok(topLevel.has('mergePolledState') && topLevel.has('startPolling'));
+  const slicers = ['tests/worklist_arrivals_dom_test.py'].filter(file =>
+    readFileSync(join(ROOT, file), 'utf8').includes('extract_function(MAIN, "startPolling")'));
+  assert.deepEqual(slicers, ['tests/worklist_arrivals_dom_test.py'], 'the poll-slicing harness moved');
+  const body = extractFunction(html, 'startPolling');
+  assert.match(body, /mergePolledState\(uid, st\)/, 'the slice is the one that carries the rule');
+  for (const file of slicers) {
+    const text = readFileSync(join(ROOT, file), 'utf8');
+    const missing = [...new Set([...body.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)].map(m => m[1]))]
+      .filter(name => topLevel.has(name) && name !== 'startPolling' && !text.includes(name));
+    assert.deepEqual(missing, [], `${file} does not supply ${missing.join(', ')}`);
+    // And it supplies them by slicing the product, not by re-describing the rule.
+    assert.match(text, /PRESERVE = extract_function\(MAIN, "preservedLocal"\)/);
+    assert.match(text, /MERGE = extract_function\(MAIN, "mergePolledState"\)/);
+  }
+});
+
 test('TEST-S3-U2b-WIRING: the shipped fromApi line really keeps a draft that is waiting to converge', () => {
   // Executed, not matched. The shipped assignment plus the shipped merge, against a study that is
   // NOT selected and has a deferred capture - the exact state a refused insertion leaves behind.
