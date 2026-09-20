@@ -2108,7 +2108,7 @@ export class PacsService implements OnModuleInit {
          * 삽입은 내 초안 하나뿐이다. 모두 같은 방향이라 순환이 없다.
          */
         const [mine] = await tx.$queryRaw<any[]>`
-          SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+          SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor}`;
         const { kept, ignored } = applyKeepList(citationArray(mine?.citations), keepIds);
         const union = citationUnion(headCitations, removeIds, kept);
         // 세 칸이 빈 확정과 reset은 본문이 없으니 증언할 것도 없다.
