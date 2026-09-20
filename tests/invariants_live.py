@@ -178,6 +178,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/report/commit"): Route(Kind.REPORT, "commit"),
     ("GET", "studies/:uid/report/versions"): Route(Kind.REPORT, "versions"),
     ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
+    ("GET", "studies/:uid/report/versions/:version/citations"): Route(Kind.REPORT, "version-citations"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
     ("POST", "studies/:uid/release"): Route(Kind.REPORT, "release"),
     ("POST", "studies/:uid/release/force"): Route(Kind.REPORT, "release-force"),
@@ -2889,6 +2890,11 @@ class LiveInvariantTests(unittest.TestCase):
             return self.stack.request("GET", f"/studies/{uid}/report/versions", user)
         if operation == "citations":
             return self.stack.request("GET", f"/studies/{uid}/report/citations", user)
+        if operation == "version-citations":
+            # A version that really exists in every fixture: base_version is the head, and 1 is the
+            # first row a study ever gets, so the route is exercised on a row rather than on a 404.
+            return self.stack.request(
+                "GET", f"/studies/{uid}/report/versions/{max(base_version, 1)}/citations", user)
         if operation == "hold":
             return self.stack.request("POST", f"/studies/{uid}/hold", user)
         if operation == "release":
