@@ -666,12 +666,13 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.assertIn(UID, self.page.evaluate("snapshot().converge"))
         # The server never received the typing, so its projection is the older draft.
         self.page.evaluate("applyPoll(%s, %s)" % (json.dumps(UID), json.dumps(
-            {"rs": "T", "version": 1, "findings": "SERVER HEAD", "conclusion": "", "recommendation": "",
+            {"rs": "T", "em": "E", "version": 1, "findings": "SERVER HEAD", "conclusion": "", "recommendation": "",
              "draft": {"findings": EXISTING, "conclusion": "", "recommendation": "",
                        "baseVersion": 1, "at": "2026-09-20T01:00"}}, ensure_ascii=False)))
         self.assertEqual(typed, self.page.evaluate("snapshot().stored")[UID]["draft"]["findings"],
                          "a pending convergence protects the local draft of a non-selected study too")
-        self.assertEqual("T", self.page.evaluate("snapshot().stored")[UID]["rs"], "every other field still merges")
+        # A field the base state does NOT hold, so this can tell a merge from no merge at all.
+        self.assertEqual("E", self.page.evaluate("snapshot().stored")[UID]["em"], "every other field still merges")
         self.page.evaluate("()=>select('%s')" % UID)
         self.assertEqual([typed, "", ""], self.page.evaluate("snapshot().text"))
         self.page.evaluate("()=>stash()")
@@ -767,8 +768,11 @@ class ReportCitationDOMTest(unittest.TestCase):
         self.page.evaluate("citeReply(%s)" % json.dumps(
             {"version": 3, "head": [entry("late", text=BLOCK)], "draft": []}, ensure_ascii=False))
         self.page.click("#b-cite-reload")
-        self.page.wait_for_function("()=>citeInfo('%s').known===true" % UID)
-        self.page.click("#b-cite-list")
+        self.page.wait_for_function("()=>citeInfo('%s').known===true && !$('#citelist').hidden" % UID)
+        # The list has been open since the head-removal box was ticked, and the control is a bare
+        # toggle on one page: pressing it again here would CLOSE the list and the read below would
+        # be None. State the precondition instead of pressing.
+        self.assertEqual("true", self.page.get_attribute("#b-cite-list", "aria-expanded"))
         shown = self.page.evaluate("snapshot().bar.list")
         self.assertIn("넣은 문자열이 이 칸에 더는 없습니다", shown)
         self.assertNotIn("넣은 문자열이 이 칸에 그대로 있습니다", shown)

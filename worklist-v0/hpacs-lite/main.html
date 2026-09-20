@@ -1275,14 +1275,17 @@
        * 보이는 미판독 검사가 만들어졌다. 화면이 서버보다 앞서 나가면, 사용자는
        * 자기가 한 일이 저장됐다고 믿는다. 그게 조용히 갈라지는 시작이다.
        */
+      // 한 검사의 서버 투영이 화면 상태를 대신하는 자리도 목록과 같은 규칙을 지난다 —
+      // 이 응답에도 그 검사의 초안이 실려 오므로(`toClient`), 고른 검사가 아닌데 아직
+      // 보내지 못한 글을 담고 있으면 그대로 덮여 사라진다.
       api("PATCH", `/studies/${encodeURIComponent(uid)}`, body)
-        .then(st => { appState[uid] = { ...appState[uid], ...st }; syncStudy(uid); render(); })
+        .then(st => { appState[uid] = mergePolledState(uid, st); syncStudy(uid); render(); })
         .catch(async e => {
           apiFail(e);
           try {
             const r = await api("GET", "/studies");
             const fresh = r.studies.find(x => x.uid === uid);
-            if (fresh) { appState[uid] = { ...appState[uid], ...fresh.state }; syncStudy(uid); }
+            if (fresh) { appState[uid] = mergePolledState(uid, fresh.state); syncStudy(uid); }
           } catch (e2) {}
           render(); refreshRight();
         });
@@ -1891,7 +1894,16 @@
     function fromApi(s) {
       updateReaderAssignment(s.uid,s.readerAssignment);
       updateNoteSummary(s.uid, s.techNote);
-      appState[s.uid] = { ...appState[s.uid], ...s.state };
+      /**
+       * **서버 상태가 화면 상태를 대신하는 자리는 전부 같은 규칙을 지난다**(`mergePolledState`).
+       *
+       * 여기가 목록 한 줄의 상태를 실제로 갈아끼우는 곳이고, 폴링만이 아니라 **Refresh 단추**가
+       * 부르는 `load()`도 이 함수를 지난다(Auto Refresh를 Manual로 두면 그게 유일한 갱신이다).
+       * 규칙을 부르는 쪽마다 따로 두면 그중 하나가 빠지고, 실제로 그렇게 빠져 있었다 —
+       * 아직 서버에 보내지 못한 글을 담은 검사가 고른 검사가 아니면 그 글이 사라졌다.
+       * 바로 아래 `applyState`가 `appState`를 읽으므로 목록 행의 판 번호도 여기서 맞는다.
+       */
+      appState[s.uid] = mergePolledState(s.uid, s.state);
       return applyState({
         uid: s.uid, pf: "·", assignedReader:readerAssignments.get(s.uid)?.reader?[readerAssignments.get(s.uid).reader.name,readerAssignments.get(s.uid).reader.actor].filter(Boolean).join(" · "):"",
         count: s.count, series: s.series, acc: s.acc,
@@ -1973,13 +1985,11 @@
          * 그걸 "목록 실패"로 처리하고 `studies = []`로 **성공한 데이터를 버렸다.**
          * 화면 그리기 버그가 데이터 없음으로 둔갑하면, 원인을 서버에서 찾게 된다.
          */
-        const editing = selectedUid ? { ...appState[selectedUid] } : null;
+        // 편집 중인 검사의 판 번호·초안을 되돌려 놓던 블록은 없앴다 — `fromApi`가 그 규칙을
+        // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
         studies = r.studies.map(fromApi);
         studyPriority.observed(r.studies.map(s=>s.uid));
         worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
-        if (editing && appState[selectedUid]) {
-          appState[selectedUid] = { ...appState[selectedUid], version:editing.version ?? 0, draft:editing.draft ?? null }; syncStudy(selectedUid);
-        }
         $('#err').textContent = '';
         try {
           const st = await (await fetch("/statistics")).json();
@@ -4515,17 +4525,9 @@
 
           // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
           if (fresh.length || r.studies.length !== studies.length) {
-            // 편집 중인 검사와 **아직 보내지 못한 글을 담고 있는 검사**를 함께 붙잡아 둔다.
-            // 지키는 칸은 아래 `preservedLocal` 한 곳이 정한다(폴링의 다른 두 자리와 같은 규칙).
-            const editing = new Map();
-            for (const uid of [selectedUid, ...reportConverge])
-              if (uid && appState[uid] && !editing.has(uid)) editing.set(uid, { ...appState[uid] });
+            // 지키는 칸은 `fromApi`가 지나는 `mergePolledState` 한 곳이 정한다 — 목록을 통째로
+            // 다시 그리는 이 길도 결국 그 함수를 지나므로 여기서 따로 되돌릴 것이 없다.
             studies = r.studies.map(fromApi);
-            for (const [uid, prior] of editing) {
-              if (!appState[uid]) continue;
-              appState[uid] = { ...appState[uid], ...preservedLocal(uid, prior) };
-              syncStudy(uid);
-            }
             // 썸네일 등 오른쪽 전체를 다시 그릴 필요는 없지만, 판독문 잠금은 반영해야 한다.
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
             render();
@@ -5912,7 +5914,9 @@
         try {
           const st = await api("PATCH", `/studies/${encodeURIComponent(uid)}`,
             teleTo ? { ts, teleTo } : { ts });
-          appState[uid] = { ...appState[uid], ...st };
+          // 같은 이유로 같은 규칙을 지난다. 이 타이머는 요청된 uid로 돌아오므로 그 검사가
+          // 지금 고른 검사가 아닐 수 있다.
+          appState[uid] = mergePolledState(uid, st);
           syncStudy(uid); render();
         } catch (e) { toast("원격판독 상태 변경 실패: " + e.message, "err"); }
         return;

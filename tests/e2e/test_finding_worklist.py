@@ -534,11 +534,20 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         # R5's one template: the finding's own title and text, in that order, nothing added.
         block = shown['item']['title'] + '\n' + shown['item']['text']
         w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
-        # Every draft write this page makes, so a press that must send nothing can be shown to.
+        # Every INSERTION this page sends, so a press that must send nothing can be shown to. Only
+        # requests whose body carries `insert` are counted: the convergence autosave the 409 enables
+        # writes to the same route with the same method, and counting it would make these two
+        # assertions a phase lottery against the 20 s timer.
         puts = []
 
         def note_put(request):
-            if request.method == 'PUT' and request.url.endswith('/studies/'+f.uid+'/report'):
+            if request.method != 'PUT' or not request.url.endswith('/studies/'+f.uid+'/report'):
+                return
+            try:
+                body = request.post_data_json
+            except Exception:
+                return
+            if isinstance(body, dict) and 'insert' in body:
                 puts.append(request.url)
         w.on('request', note_put)
         self.select(w, f)

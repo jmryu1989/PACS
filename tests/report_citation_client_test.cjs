@@ -506,25 +506,77 @@ test('TEST-S3-U2b-WIRING: the keep list is carried only while the state is confi
   assert.match(discard, /citations\.forget\(uid\);/);
 });
 
-test('TEST-S3-U2b-WIRING: the poll cannot overwrite a draft that is still waiting to be written', () => {
-  // The deferred capture lives in appState[uid].draft, which is exactly the object the 30 s poll
-  // replaces for a study that is not selected. One rule, used by all three merge sites.
+test('TEST-S3-U2b-WIRING: every place a server projection replaces a study goes through the one merge', () => {
+  // The capture from a deferred write lives in appState[uid].draft. Whoever replaces that object
+  // has to honour the rule, and the rule must exist once: the poll was taught it first and the
+  // Refresh button - which is the ONLY refresh when Auto Refresh is Manual - still bypassed it,
+  // because the replacement is done by fromApi(), not by the poll.
   const keep = extractFunction(html, 'preservedLocal');
   assert.match(keep, /if \(uid === selectedUid\) local\.version = mine\?\.version \?\? 0;/);
   assert.match(keep, /if \(uid === selectedUid \|\| reportConverge\.has\(uid\)\) local\.draft = mine\?\.draft \?\? null;/);
   const merge = extractFunction(html, 'mergePolledState');
   assert.match(merge, /\{ \.\.\.mine, \.\.\.st, \.\.\.preservedLocal\(uid, mine\) \}/,
     'the server projection still merges; only the protected keys win');
-  // Both per-study branches of the poll go through it, and the list rebuild restores the same keys
-  // for every study that is waiting, not only for the selected one.
-  const poll = html.slice(html.indexOf('for (const s of r.studies) {'), html.indexOf('if (arrivalNotice) toast('));
-  assert.equal(poll.split('appState[uid] = mergePolledState(uid, st);').length - 1, 2,
-    'the selected and the non-selected branch must both use it');
-  assert.doesNotMatch(poll, /appState\[uid\] = \{ \.\.\.appState\[uid\], \.\.\.st \}/, 'no raw merge may remain');
-  const rebuild = html.slice(html.indexOf('if (fresh.length || r.studies.length !== studies.length) {'),
-                             html.indexOf('// 썸네일 등 오른쪽 전체를'));
-  assert.match(rebuild, /for \(const uid of \[selectedUid, \.\.\.reportConverge\]\)/);
-  assert.match(rebuild, /\.\.\.preservedLocal\(uid, prior\)/);
+  // fromApi is the one assignment behind the whole worklist: load() (Refresh) and the poll's
+  // list rebuild both map through it, and applyState reads appState right after, so the row's
+  // version comes out right without a second pass.
+  const fromApi = extractFunction(html, 'fromApi');
+  assert.match(fromApi, /appState\[s\.uid\] = mergePolledState\(s\.uid, s\.state\);/);
+  assert.ok(fromApi.indexOf('mergePolledState') < fromApi.indexOf('return applyState('),
+    'the merge must happen before the row is built from appState');
+  // Every remaining assignment of a server projection over a study, in the whole page.
+  const projections = [...html.matchAll(/appState\[[^\]]+\] = \{ \.\.\.appState\[[^\]]+\], \.\.\.(?:st|s\.state|fresh\.state)\b/g)]
+    .map(m => m[0]);
+  assert.equal(projections.length, 1, `only the commit answer may merge raw, found ${projections.length}`);
+  const commit = extractFunction(html, 'commitReport');
+  assert.ok(commit.includes(projections[0]),
+    'the one raw merge is the commit answering the action this screen just took, not a projection of someone else');
+  // The same family: a single-study answer that also carries that study's draft. saveApp() is the
+  // PATCH path (success and its re-read recovery); setTs() is the tele-state one, whose timers come
+  // back on whatever uid was requested - which need not be the selected study.
+  assert.equal(extractFunction(html, 'saveApp').split('appState[uid] = mergePolledState(uid, ').length - 1, 2,
+    'both the PATCH success and its recovery re-read');
+  assert.match(extractFunction(html, 'setTs'), /appState\[uid\] = mergePolledState\(uid, st\);/);
+  assert.equal(html.split('mergePolledState(').length - 1, 7,
+    'definition + fromApi + two poll branches + patch success + patch recovery + setTs');
+  // The rule exists once: the two blocks that used to restore one study after fromApi are gone.
+  assert.doesNotMatch(html, /version:editing\.version \?\? 0, draft:editing\.draft \?\? null/);
+  assert.doesNotMatch(html, /for \(const uid of \[selectedUid, \.\.\.reportConverge\]\)/);
+  assert.equal(html.split('preservedLocal(').length - 1, 2, 'preservedLocal is called only by mergePolledState');
+});
+
+test('TEST-S3-U2b-WIRING: the shipped fromApi line really keeps a draft that is waiting to converge', () => {
+  // Executed, not matched. The shipped assignment plus the shipped merge, against a study that is
+  // NOT selected and has a deferred capture - the exact state a refused insertion leaves behind.
+  const region = slice(html.replace(/\r\n/g, '\n'), '    function preservedLocal(uid, mine) {',
+                       '    /** 삽입이 나가 있는 동안의');
+  const line = extractFunction(html, 'fromApi').split('\n').find(text => text.includes('appState[s.uid] ='));
+  assert.ok(line, 'fromApi no longer assigns appState');
+  const run = assignment => {
+    const context = vm.createContext({});
+    vm.runInContext(`
+      var selectedUid = "B";
+      var reportConverge = new Set(["A"]);
+      var appState = { A: { rs: "T", version: 1, draft: { findings: "T0 typed, never sent", baseVersion: 1 } },
+                       B: { rs: "T", version: 4, draft: null } };
+      var answers = [{ uid: "A", state: { rs: "H", version: 2, draft: { findings: "server: pre-T0", baseVersion: 1 } } },
+                     { uid: "B", state: { rs: "T", version: 9, draft: { findings: "server B", baseVersion: 9 } } }];
+      ${region}
+      for (const s of answers) { ${assignment} }
+    `, context, { filename: 'fromApi-line.js' });
+    return JSON.parse(vm.runInContext('JSON.stringify(appState)', context));
+  };
+  const shipped = run(line.trim());
+  assert.equal(shipped.A.draft.findings, 'T0 typed, never sent',
+    'a study waiting to converge keeps the typing even though it is not selected');
+  assert.equal(shipped.A.rs, 'H', 'every other field still comes from the server');
+  assert.equal(shipped.A.version, 2, 'and so does the version of a study that is not selected');
+  assert.equal(shipped.B.draft, null, 'the selected study keeps its own local draft');
+  assert.equal(shipped.B.version, 4, 'and the version the screen actually drew');
+  // Negative control: the line as it was before this correction.
+  const raw = run('appState[s.uid] = { ...appState[s.uid], ...s.state };');
+  assert.equal(raw.A.draft.findings, 'server: pre-T0', 'the old line loses the typing - this smoke can fail');
+  assert.equal(raw.B.version, 9, 'and adopted a version the screen never drew');
 });
 
 test('TEST-S3-U2b-WIRING: logout stands aside for an insertion instead of tearing the session down', () => {
@@ -683,6 +735,17 @@ test('TEST-S3-U2b-HARNESS: the sliced study move really runs, and the wrapper th
   // are only required to stay out of prose that a block replacement could corrupt.
   for (const token of ['UIDVALUE', 'OTHERVALUE'])
     assert.ok(domTest.split(token).length - 1 >= 2, token);
+  // Show Citations is a bare toggle and the product assigns citationListOpen nowhere else, so a
+  // case that presses it twice CLOSES the list and then reads null. The late-200 case reads the
+  // list at its end: it must press once and state the precondition instead of pressing again.
+  assert.equal(html.split(/citationListOpen\s*=[^=]/).length - 1, 2,
+    'citationListOpen is the declaration plus the toggle; a third assignment changes this rule');
+  const late200 = slice(domTest, '    def test_a_late_200_leaves_the_keep_list_unknown_and_the_head_choice_intact(self):',
+                        '    def test_the_insertion_waits_for_every_write');
+  assert.equal(late200.split('self.page.click("#b-cite-list")').length - 1, 1,
+    'one press per case on a bare toggle, or the list is shut when it is read');
+  assert.match(late200, /aria-expanded/, 'and the open state is asserted, not assumed');
+  assert.match(late200, /더는 없습니다/, 'the absent reading is still what it checks');
 });
 
 test('TEST-S3-U2b-HARNESS: the product region the DOM tests slice actually compiles', () => {
