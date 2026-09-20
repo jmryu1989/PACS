@@ -224,6 +224,24 @@ class LeakBoundaryTests(SourceCase):
         self.assertNotIn("normalizeForCompare(", counts)
         self.assertIn("blockLines(text).join(", body_of(self.pure, "export function comparisonKey("))
 
+    def test_the_runtime_harness_cannot_lose_its_own_failure(self) -> None:
+        """The first hosted run of that case reported only 'docker run failed (exit 1)': the script
+        set process.exitCode and ops.run raised before anything was printed, so the one fact pin A1
+        asks for - what the driver actually raised - was lost in exactly the failing case."""
+        whole = (ROOT / "tests" / "viewer_migration_test.py").read_text(encoding="utf-8")
+        # Only the citation harness; the older fixed-image case in the same file keeps its own tail.
+        harness = whole[whole.index("CITATION_PRELUDE = "):whole.index("def test_workspace_shortcuts")]
+        self.assertIn("console.log('SCRIPT-FAILED '", harness, "a failing script must say why on stdout")
+        self.assertNotIn("process.exitCode", harness, "a non-zero exit makes ops.run swallow the output")
+        self.assertEqual(harness.count("report(async()=>{"), 2, "both scripts must go through the reporting tail")
+        for receipt in ("first", "second"):
+            printed = harness.index("print(%s)" % receipt)
+            self.assertLess(printed, harness.index("self.assertNotIn('SCRIPT-FAILED', %s" % receipt),
+                            "print the output, then refuse the marker, then look for the sentinels")
+        # The lock proof must rest on the signed cid set, not on a rejection or on elapsed time.
+        self.assertIn("signed=2 entries", harness)
+        self.assertNotIn("assert.ok(blocked", harness, "an arbitrary rejection proves nothing about the lock")
+
     def test_the_insertion_prepares_access_outside_the_transaction(self) -> None:
         put = body_of(self.service, "async putReport(")
         prepare = put.index("studyAccess.prepare(c)")

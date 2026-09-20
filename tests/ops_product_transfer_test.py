@@ -197,7 +197,10 @@ class Pure(unittest.TestCase):
             with self.assertRaises(ValueError): transfer.expected_rows(uid)
         rows = body['product']['rows']
         # S2-A added Finding (1 row) and FindingRevision (2 rows) to the 35-table, 46-row ledger.
-        self.assertEqual(len(transfer.MIGRATIONS), 24)
+        # S3-U2a added the report-citations migration: 25 files, the same 37 tables and the same rows,
+        # because it only adds two nullable columns. Counted against the working tree, not guessed -
+        # test_current_git_migrations_are_covered separately pins the list against git.
+        self.assertEqual(len(transfer.MIGRATIONS), 25)
         self.assertEqual(len(transfer.TABLES), 37)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))

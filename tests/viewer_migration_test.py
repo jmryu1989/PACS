@@ -128,8 +128,13 @@ SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding"
 
     def test_report_citations_additive_nullable_bounded_and_named(self):
         """TEST-S3-U2a-CITATION-MIGRATION-LIVE: two additive JSONB columns, the NULL that keeps the old
-        behaviour, the canonical byte bound, and above all the constraint NAME - the service maps a CHECK
-        violation to a named 409 by that name, so if PostgreSQL does not report it the mapping is a 500."""
+        behaviour, the canonical byte bound, the constraint NAME as PostgreSQL reports it, and catalog
+        equality across dump/restore.
+
+        This case does NOT prove what the application does with a violation: `refuses()` reads
+        CONSTRAINT_NAME from PL/pgSQL diagnostics inside psql, which never crosses the Prisma engine.
+        The translation into the named 409 is proved only by
+        test_report_citations_runtime_check_translation_and_draft_lock."""
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260920120000_report_citations' in p)
         self.create('citations_before')
         for source in self.sources[:index]:self.sql('citations_before',source)
@@ -182,15 +187,27 @@ SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding"
         self.sql('citations_before','UPDATE "ReportDraft" SET citations=NULL')
         # A restored database must refuse the same writes: a CHECK that deparses differently would be a
         # different rule on the machine the data actually lands on.
-        query='''SELECT c.relname||' '||pg_get_constraintdef(k.oid,true) FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid WHERE k.conname LIKE '%citations_check' ORDER BY c.relname'''
-        definitions=self.sql('citations_before',query).splitlines()
-        self.assertEqual(len(definitions),2)
+        #
+        # Count records, not lines. `pg_get_constraintdef(oid, true)` pretty-prints, and a CASE
+        # expression wraps over five lines - the first version of this case read 10 text lines and
+        # called it 10 constraints. One aggregated JSON row is one line whatever the definition
+        # contains, and the names come back with it so a genuinely extra constraint still fails.
+        query=('''SELECT COALESCE(jsonb_agg(jsonb_build_object('table',c.relname,'name',k.conname,'type',k.contype,'def','''
+               '''pg_get_constraintdef(k.oid)) ORDER BY c.relname),'[]'::jsonb)::text FROM pg_constraint k '''
+               '''JOIN pg_class c ON c.oid=k.conrelid WHERE k.conname LIKE '%citations_check' ''')
+        definitions=json.loads(self.sql('citations_before',query))
+        self.assertEqual([(d['table'],d['name'],d['type']) for d in definitions],
+                         [('ReportDraft','ReportDraft_citations_check','c'),('ReportVersion','ReportVersion_citations_check','c')])
+        for entry in definitions:
+            self.assertIn('IS NULL', entry['def'], 'the NULL that keeps the old behaviour must survive into the catalog')
+            self.assertIn('65536', entry['def'])
         self.create('citations_restored')
         with tempfile.TemporaryDirectory(prefix='kin-citations-') as folder:
             path=Path(folder)/'citations.dump'
             with path.open('wb') as out:subprocess.run(['docker','exec',self.db,'pg_dump','-U','postgres','-Fc','citations_before'],stdout=out,check=True,timeout=60)
             with path.open('rb') as incoming:subprocess.run(['docker','exec','-i',self.db,'pg_restore','-U','postgres','-d','citations_restored','--no-owner','--no-privileges','--exit-on-error'],stdin=incoming,check=True,timeout=60)
-        self.assertEqual(self.sql('citations_restored',query).splitlines(),definitions)
+        self.assertEqual(json.loads(self.sql('citations_restored',query)),definitions,
+                         'the restored catalog must carry the same two constraints, byte for byte')
         self.refuses('citations_restored','''UPDATE "ReportVersion" SET citations='{}'::jsonb''','ReportVersion_citations_check')
         self.sql('citations_restored','''UPDATE "ReportVersion" SET citations='[]'::jsonb''')
 
@@ -225,10 +242,19 @@ const refused=async(fn,code)=>{const e=await fn().then(()=>null,x=>x);
  assert.ok(!/저장했습니다/.test(String(body&&body.message)),'an old tab would take the destructive branch');
  return body;};
 const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',recommendation:'',baseVersion:1},extra||{});
+/**
+ * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code
+ * without echoing the child, so print() never ran and the DRIVER line - the one fact pin A1 asks for -
+ * was lost in exactly the case it was written for. So the script always exits 0 and says what happened
+ * on stdout; the Python side refuses the marker before it looks for the success sentinels.
+ * The data here is synthetic, so printing a stack costs nothing.
+ */
+const report=work=>work().then(()=>p.$disconnect(),
+ async e=>{console.log('SCRIPT-FAILED '+((e&&e.stack)||e));await p.$disconnect();});
 """
 
     CITATION_WRITE_PATHS = CITATION_PRELUDE + """
-(async()=>{
+report(async()=>{
  // 1. What does the driver actually raise? This is the fact the service's narrow mapping depends on.
  const raw=await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(65)}}).then(()=>null,e=>e);
  assert.ok(raw,'the database accepted 65 entries');
@@ -252,11 +278,11 @@ const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',reco
  assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions,'a refused commit writes no version');
  assert.equal((await draft()).citations.length,30,'and leaves the draft and its citations in place');
  console.log('PUT and COMMIT translated a real CHECK violation into REPORT_CITATION_LIMIT');
-})().then(()=>p.$disconnect(),e=>{console.error(e);process.exitCode=1;return p.$disconnect();});
+});
 """
 
     CITATION_FORCE_AND_CONTROL = CITATION_PRELUDE + """
-(async()=>{
+report(async()=>{
  svc.citationBudget=async()=>{};
  // 5. forceDiscardDrafts - the draft was seeded past the cap with its own CHECK dropped, so the
  //    refusal has to come from the ReportVersion CHECK inside createMany.
@@ -272,32 +298,51 @@ const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',reco
  assert.notEqual(control.getStatus&&control.getStatus(),409);
  assert.ok(!JSON.stringify((control.getResponse&&control.getResponse())||'').includes('REPORT_CITATION_LIMIT'));
  console.log('CONTROL class='+control.constructor.name+' code='+String(control.code)+' stayed unmapped');
- // 7. A commit must wait for the draft row it is about to delete. Without the lock a same-author
- //    insertion landing between the read and the delete is thrown away with the row.
- await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(1),findings:TEXT}});
+ /**
+  * 7. The other tab's insertion must not be thrown away with the draft row.
+  *
+  * The schedule is fixed, not raced. The holder IS the second tab: it takes the same row lock the
+  * insertion takes, writes a second, distinctively prefixed citation, says it is holding, waits a
+  * bounded moment and commits. Only then can the signer's commit read the row.
+  *
+  *   with the lock   the commit blocks on FOR UPDATE, and READ COMMITTED re-reads the row after the
+  *                   holder commits: it signs BOTH cids.
+  *   without it (M7) the unlocked read returns the one committed entry, the delete then blocks on the
+  *                   same row, and the second attestation is signed away - one cid in the version.
+  *
+  * So the assertion that discriminates is the signed cid SET, not the timing and not a rejection:
+  * the commit must RESOLVE either way. Elapsed time is recorded as a secondary signal only.
+  */
+ await p.reportVersion.update({where:{uid_version:{uid:UID,version:1}},data:{citations:[]}});
+ const mine=entry(0,'22222222-0000-4000-8000-'), other=entry(1,'33333333-0000-4000-8000-');
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},
+  data:{citations:[mine],findings:TEXT,baseVersion:1}});
  const holder=new PrismaClient();
- let released=false;
+ try{
+ let holding; const acquired=new Promise(r=>{holding=r;});
  const hold=holder.$transaction(async tx=>{
   await tx.$queryRaw`SELECT citations FROM "ReportDraft" WHERE uid=${UID} AND author=${ACTOR} FOR UPDATE`;
-  await new Promise(r=>setTimeout(r,8000));
-  released=true;
+  await tx.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:[mine,other]}});
+  holding();
+  await new Promise(r=>setTimeout(r,1500));
  },{timeout:20000});
- await new Promise(r=>setTimeout(r,500));
- const blocked=await svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER).then(()=>null,e=>e);
- assert.ok(blocked,'the commit read past a locked draft row');
- assert.equal(released,false,'the commit returned before the holder let go');
- assert.equal((await draft()).citations.length,1,'the attestation survived the blocked commit');
- await hold;
- // Once the row is free the same commit succeeds and carries the attestation into the version.
+ await acquired;
+ const started=Date.now();
  const state=await svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER);
- assert.ok(state);
+ const waited=Date.now()-started;
+ await hold;
+ assert.ok(state,'the commit did not resolve');
  const head=await p.report.findUnique({where:{uid:UID}});
  const signed=await p.reportVersion.findUnique({where:{uid_version:{uid:UID,version:head.version}}});
- assert.equal(signed.citations.length,1,'the citation the other tab wrote is in the signed version');
- assert.equal(await draft(),null,'and the draft row is gone, under the same lock that protected it');
+ assert.deepEqual((signed.citations||[]).map(e=>e.cid).sort(),[mine.cid,other.cid].sort(),
+  'the insertion that landed while the commit waited was signed away');
+ assert.equal(await draft(),null,'the draft row is gone, under the same lock that protected it');
+ console.log('LOCK waited='+waited+'ms signed='+signed.citations.length+' entries');
+ assert.ok(waited>=1000,'the commit did not wait for the row lock: '+waited+'ms');
  console.log('FORCE-DISCARD translated a real CHECK violation; control unmapped; commit serialized on the draft row');
- await holder.$disconnect();
-})().then(()=>p.$disconnect(),e=>{console.error(e);process.exitCode=1;return p.$disconnect();});
+ // A held connection would keep the container alive to the timeout and lose the message with it.
+ } finally { await holder.$disconnect(); }
+});
 """
 
     def test_report_citations_runtime_check_translation_and_draft_lock(self):
@@ -323,9 +368,12 @@ const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',reco
                '-e', 'DATABASE_URL=postgresql://postgres@127.0.0.1:5432/citations_runtime',
                '-e', 'SYNTHETIC_UID='+self.uid, '--entrypoint', 'node', image, '-e']
         first = ops.temporary_run(run+[self.CITATION_WRITE_PATHS], timeout=180)
+        # Print before asserting, then refuse the failure marker before looking for success: the child
+        # exits 0 so ops.run cannot swallow its output, and a broken run must show its own stack.
         print(first)
+        self.assertNotIn('SCRIPT-FAILED', first, first)
         self.assertIn('names_constraint=true', first,
-                      'the service matches this CHECK by constraint name; if the driver does not carry it, say so here')
+                      'the service matches this CHECK by constraint name; if the driver does not carry it, this is where it shows')
         self.assertIn('PUT and COMMIT translated a real CHECK violation', first)
         # The draft's own CHECK has to go before a draft can be seeded past the cap; the ReportVersion
         # CHECK, which is what forceDiscardDrafts must hit, stays. The control constraint proves the
@@ -338,7 +386,11 @@ const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',reco
                  + "'insertedText','SYNTHETIC 인용 줄','insertedBy','SYNTHETIC-reader')) FROM generate_series(1,65) i)")
         second = ops.temporary_run(run+[self.CITATION_FORCE_AND_CONTROL], timeout=180)
         print(second)
+        self.assertNotIn('SCRIPT-FAILED', second, second)
         self.assertIn('stayed unmapped', second)
+        # The lock line carries the data the proof rests on: two signed cids, and how long the commit
+        # waited for the row. Under an unlocked read the signed set would be one cid, not two.
+        self.assertRegex(second, r'LOCK waited=\d+ms signed=2 entries')
         self.assertIn('FORCE-DISCARD translated a real CHECK violation', second)
 
     def test_workspace_shortcuts_additive_and_owner_key(self):

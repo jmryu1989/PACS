@@ -159,9 +159,13 @@ class VectorFileTests(unittest.TestCase):
         self.assertEqual(comparison_key("one\r\ntwo"), comparison_key("one\ntwo"))
         self.assertNotEqual(comparison_key("A line"), comparison_key("\nA line"))
         self.assertNotEqual(comparison_key("A line"), comparison_key("A line\n\n"))
-        # The key never touches the stored bytes: two citations may share n and still be different
-        # records with their own attested text.
-        self.assertNotEqual("A line", "A line\n")
+        # That the key never rewrites the stored entry is asserted where it can actually be executed
+        # against the product: report_citation_test.cjs, 'counting never edits the record'. Comparing
+        # two literals here would only restate the rule.
+        entries = [{"field": "findings", "insertedText": "A line\n"}, {"field": "findings", "insertedText": "A line"}]
+        frozen = [dict(entry) for entry in entries]
+        self.assertEqual(same_text_counts(entries), [2, 2])
+        self.assertEqual(entries, frozen)
 
     def test_assembly_vectors(self) -> None:
         # S3-U2b consumes these; they are pinned now so the client cannot invent a different

@@ -125,6 +125,24 @@ test('the shared vectors decide the compiled rule, not the other way round', () 
   assert.ok(vectors.occurrence.length >= 20 && vectors.equivalence.length >= 5, 'the oracle must not be thinned');
 });
 
+test('counting never edits the record: the stored bytes come back exactly as they were written', async () => {
+  // n and k share one equivalence, so a trailing line break is absorbed when COMPARING. The entry
+  // itself is a medical record and must survive that untouched - including through the read surface.
+  const withLf = { ...carried('a'), insertedText: LINE + '\n' }, without = { ...carried('b'), insertedText: LINE };
+  const entries = [withLf, without];
+  const frozen = JSON.parse(JSON.stringify(entries));
+  assert.deepEqual(citation.sameTextCounts(entries), [2, 2], 'the two forms compete for the same occurrence');
+  assert.deepEqual(entries, frozen, 'counting must not normalise, trim or otherwise rewrite an entry');
+  assert.equal(entries[0].insertedText, LINE + '\n');
+
+  const f = fixture({ versions: new Map([[4, { citations: entries }]]), draft: null });
+  const answer = await f.svc.reportCitations(UID, CALLER);
+  assert.equal(answer.head[0].insertedText, LINE + '\n', 'the read surface returns the attested bytes');
+  assert.equal(answer.head[1].insertedText, LINE);
+  assert.deepEqual(answer.head.map(e => e.sameTextCount), [2, 2]);
+  assert.deepEqual(entries, frozen, 'and the projection did not write back into the row');
+});
+
 test('the keep list is an intersection over my own draft: absent means unchanged, unknown is ignored', () => {
   const rows = [carried('a'), carried('b')];
   assert.deepEqual(citation.applyKeepList(rows, undefined), { kept: rows, ignored: 0 });

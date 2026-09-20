@@ -1275,6 +1275,9 @@ class FindingAPI(unittest.TestCase):
         x = self.item_in(anchor, self.length_item())
         p = self.item_in(prior, self.key_item(0, title='P비교'+uuid.uuid4().hex[:6], slices=prior.slices))
         crossed, _ = self.create([x, p], user='xauthor', title='비교 인용')
+        # 14a hides `crossed`; a hidden finding is refused for a NEW citation (pacs.service.ts
+        # REPORT_CITATION_STALE), so 20 needs a finding that is still current when it gets there.
+        spare, _ = self.create([x], user='xauthor', title='두 번째 소견')
         text = '우상엽 결절 소견'
         report = '/studies/'+self.uid+'/report'
 
@@ -1288,15 +1291,35 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual({t: psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE uid={literal(self.uid)}') for t in ('Report', 'ReportVersion')}, frozen)
 
         # 19 - the thirty-second poll and the bootstrap payload are not widened by any of this.
+        # The two payloads are shaped differently: /studies answers {studies:[...], serverTime} with the
+        # state nested per study, /bootstrap answers {states:{uid:state}}. Reading 'states' from both
+        # compared {} with {} and proved nothing about the polling list, which is the payload the
+        # contract actually names.
         listed_after = self.stack.request('GET', '/studies', 'xauthor')
         boot_after = self.stack.request('GET', '/bootstrap', 'xauthor')
-        for before, after in ((listed_before, listed_after), (boot_before, boot_after)):
+
+        def listed_state(response):
+            found = [s for s in response.body['studies'] if s['uid'] == self.uid]
+            self.assertEqual(len(found), 1, 'this run-owned study must be in the polling list')
+            return found[0]
+
+        def boot_state(response):
+            state = (response.body.get('states') or {}).get(self.uid)
+            self.assertTrue(state, 'bootstrap must carry this study')
+            return state
+
+        for before, after, pick in ((listed_before, listed_after, listed_state), (boot_before, boot_after, boot_state)):
             self.assertNotIn('citation', after.text)
-            state = lambda response: {k: v for k, v in (response.body.get('states', {}) or {}).get(self.uid, {}).items() if k != 'draft'}
-            self.assertEqual(state(after), state(before))
-            draft = (after.body.get('states', {}) or {}).get(self.uid, {}).get('draft')
-            if draft is not None:
-                self.assertEqual(sorted(draft), ['at', 'baseVersion', 'conclusion', 'findings', 'recommendation'])
+            new, old = pick(after), pick(before)
+            drafts = []
+            for entry in (new, old):
+                state = entry.get('state', entry)
+                drafts.append(state.pop('draft', None) if isinstance(state, dict) else None)
+            self.assertEqual(new, old, 'nothing but the draft may move when a citation is written')
+            self.assertTrue(any(drafts), 'the draft that carries the citation must be in at least one payload')
+            for draft in drafts:
+                if draft is not None:
+                    self.assertEqual(sorted(draft), ['at', 'baseVersion', 'conclusion', 'findings', 'recommendation'])
 
         # 15 server half - a stale link state is refused and the draft row stays byte-identical.
         rows = self.draft_row()
@@ -1337,23 +1360,44 @@ class FindingAPI(unittest.TestCase):
         self.assertEqual(signed['draft'], [])
 
         # 18 - a reader restricted to the anchor gets the attestation reduced everywhere, and no
-        # surface hands them a comparison identifier or a finding id.
+        # surface hands them the comparison study or anything copied from it. The signed report text
+        # is NOT a secret here: this reader may read the report, and the history legitimately carries
+        # the approved body.
         self.access('xreader', [self.uid])
         theirs = self.citations('xreader')
         self.assertEqual(theirs['head'][0]['state'], 'source-unavailable')
+        their_versions = self.call(method='GET', path=report+'/versions', user='xreader')
         audit = self.call(method='GET', path='/audit?uid='+self.uid, user='xreader')
-        surfaces = json.dumps([theirs, versions, audit], ensure_ascii=False) + self.stack.request('GET', '/studies', 'xreader').text
-        for secret in (prior.uid, crossed['id'], p['id'], text, 'sourceIndex', 'findingId', 'insertedText'):
-            self.assertNotIn(secret, surfaces, secret)
+        whole = json.dumps([theirs, their_versions, audit], ensure_ascii=False) + self.stack.request('GET', '/studies', 'xreader').text
+        for secret in (prior.uid, p['id'], str(prior.slices[0].SeriesInstanceUID)):
+            self.assertNotIn(secret, whole, secret)
+        # D6 governs what this unit writes: no source pointer may enter a report.* audit line.
+        reported = [row for row in audit if str(row['action']).startswith('report.')]
+        self.assertTrue(reported, 'the citation writes must be audited at all')
+        for row in reported:
+            for key in ('findingId', 'sourceIndex', 'insertedText', crossed['id'], spare['id']):
+                self.assertNotIn(key, str(row['detail']), row['action'])
+        for key in ('findingId', 'sourceIndex', 'insertedText', crossed['id']):
+            self.assertNotIn(key, json.dumps([theirs, their_versions], ensure_ascii=False), key)
+        # O-1, recorded and NOT resolved by this unit: S2's own finding.create / finding.hide rows at
+        # target=uid carry findingId, and GET /audit has no lineage gate, so this restricted reader
+        # can still learn the id of a finding they cannot list. That is main's behaviour, independent
+        # of citations, and it stays open as an S2 audit/lineage residual - this is not a clean pass.
+        self.assertTrue([row for row in audit if str(row['action']).startswith('finding.')],
+                        'if those rows ever stop appearing here, O-1 changed and must be re-judged')
         self.access('xreader')
 
         # 20 - two readers, one report: the loser keeps the draft and the attestation, the winner's
         # text is in the history, and nothing had to be retyped.
-        self.cite(crossed, 0, '두 번째 줄', base=1, revision=hidden['revision'])
+        self.cite(spare, 0, '두 번째 줄', base=1)
         held = self.citations()['draft']
         self.assertEqual(len(held), 1)
         self.call(path=report+'/commit', body=dict(action='approve', baseVersion=1, findings='다른 판독의의 승인본', conclusion='', recommendation=''), user='doctor', status=201)
-        self.call(path=report+'/commit', body=dict(action='save', baseVersion=1, findings='두 번째 줄', conclusion='', recommendation=''), user='xauthor', status=409)
+        # The approved report is v2 now while this draft still stands on v1. Addendum is the only way
+        # out of A, and U3's gate names the refusal before the optimistic lock can answer with the
+        # wording that sends an old tab down the destructive reload path.
+        refusal = self.call(path=report+'/commit', body=dict(action='addendum', baseVersion=1, findings='두 번째 줄', conclusion='', recommendation=''), user='xauthor', status=409)
+        self.assertEqual(refusal['code'], 'REPORT_DRAFT_STALE')
         self.assertEqual(self.citations()['draft'], held, 'the refused signer keeps every byte of their attestation')
         self.assertEqual(self.call(method='GET', path=report+'/versions', user='xauthor')[0]['findings'], '다른 판독의의 승인본')
 
