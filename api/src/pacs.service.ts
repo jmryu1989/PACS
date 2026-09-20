@@ -1545,15 +1545,43 @@ export class PacsService implements OnModuleInit {
       return { uid, author: c.actor, cleared: true };
     }
 
+    /**
+     * **기준 판은 화면이 실제로 본 판이어야 한다.**
+     *
+     * 판 번호는 커지기만 하므로(`:1821`·`:1834`) 정직한 화면은 아직 없는 판을 기준으로
+     * 삼을 수 없다. 여기 걸린다면 `baseVersion`의 출처가 틀린 것이고, 그대로 저장하면
+     * 확정 때 낙관적 락이 **아무도 본 적 없는 판**을 통과시킨다.
+     * 비우는 PUT(위)은 판 번호를 저장하지 않으므로 이 검사 앞에서 끝난다 —
+     * 자동 저장을 거절하지 않는다는 규칙은 그대로다.
+     */
+    const baseVersion = body.baseVersion ?? 0;
+    if (!Number.isSafeInteger(baseVersion) || baseVersion < 0)
+      throw new BadRequestException('baseVersion은 0 이상의 정수여야 합니다 (화면이 마지막으로 본 판 번호)');
+    // 잠그지 않는다. 초안은 내 행에만 쓰므로 여기서 Report를 잠그면 20초 자동 저장이
+    // 남의 확정과 겹쳐 서로를 기다린다 — 이 파일이 한 번 겪은 실패다(:1501-1515).
+    const head = await tx.report.findUnique({ where: { uid }, select: { version: true } });
+    if (baseVersion > (head?.version ?? 0))
+      throw new BadRequestException(
+        `아직 없는 판(v${baseVersion})을 기준으로 초안을 저장할 수 없습니다 (현재 v${head?.version ?? 0})`);
+
+    // 기존 초안의 기준이 올라가는 PUT은 자동 저장이 아니라 **사람이 승인본을 확인하고
+    // 다시 잡은 것**이다. 어느 판을 딛고 쓴 글인지는 나중에 되짚을 근거가 이것뿐이라
+    // 자동 저장과 구분해 남긴다.
+    const prior = await tx.reportDraft.findUnique({
+      where: { uid_author: { uid, author: c.actor } }, select: { baseVersion: true },
+    });
+
     const saved = await tx.reportDraft.upsert({
       where: { uid_author: { uid, author: c.actor } },
-      create: { uid, author: c.actor, ...content, baseVersion: body.baseVersion ?? 0 },
-      update: { ...content, baseVersion: body.baseVersion ?? 0 },
+      create: { uid, author: c.actor, ...content, baseVersion },
+      update: { ...content, baseVersion },
     });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
     });
+    if (prior && baseVersion > prior.baseVersion)
+      await audit(c.actor, 'report.draft.rebase', uid, { from: prior.baseVersion, to: baseVersion });
     return saved;
     });
   }
@@ -1810,6 +1838,41 @@ export class PacsService implements OnModuleInit {
 
         if (body.baseVersion === undefined)
           throw new BadRequestException('baseVersion이 필요합니다 (화면이 마지막으로 본 판 번호)');
+
+        /**
+         * **낡은 초안은 승인본에 덧붙지 못한다.**
+         *
+         * 화면이 보내는 `baseVersion`은 본문을 다시 그리지 않고도 올라간다 —
+         * PATCH 응답 한 번이면 `appState`의 판 번호가 최신이 된다(`main.html:1175`).
+         * 그러면 아래 낙관적 락은 통과하고, 며칠 전 초안이 그 사이 승인된 판독문을
+         * 통째로 대체한다(원장 IF-A24 「승인본 자동 덮어쓰기 금지」).
+         * 그래서 화면이 말하는 판이 아니라 **초안 행에 적힌 판**을 본다.
+         *
+         * 아래 낙관적 락보다 **먼저** 본다. 락이 먼저 걸리면 사람은 "다시 불러오라"는
+         * 옛 안내를 받고, 그 경로는 쓰던 글을 서버 내용으로 덮는다 — 정확히 이 단위가
+         * 막으려는 손실이다. 거절 본문은 이미 잠가서 읽은 `cur` 행 그대로이므로
+         * 추가 조회가 없고, 여기까지 온 호출자는 예비 판독·기관·역할 관문을 모두 지났다.
+         *
+         * 심층 방어다. 초안이 없는 확정은 구조적으로 이 관문을 지나가고,
+         * `baseVersion`의 출처가 틀린 화면은 조용히 통과한다.
+         */
+        if (action === 'addendum') {
+          const draft = await tx.reportDraft.findUnique({
+            where: { uid_author: { uid, author: c.actor } }, select: { baseVersion: true },
+          });
+          if (draft && draft.baseVersion < (cur?.version ?? 0))
+            throw new ConflictException({
+              code: 'REPORT_DRAFT_STALE',
+              message: `이 초안은 v${draft.baseVersion}을 기준으로 씁니다. 지금 승인본은 ` +
+                `v${cur.version}입니다 — 승인본을 확인한 뒤 기준을 다시 잡아 주세요.`,
+              head: {
+                version: cur.version, updatedBy: cur.updatedBy ?? null,
+                findings: cur.findings, conclusion: cur.conclusion, recommendation: cur.recommendation,
+              },
+              draftBaseVersion: draft.baseVersion,
+            });
+        }
+
         if ((cur?.version ?? 0) !== body.baseVersion)
           throw new ConflictException(
             `그 사이 ${cur?.updatedBy ?? '다른 사용자'}가 v${cur?.version}을 저장했습니다. ` +

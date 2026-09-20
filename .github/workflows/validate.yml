@@ -59,6 +59,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/worklist_arrivals_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_arrivals_dom_test.py
+      - name: Stale addendum refusal, approved-report pane and non-destructive rebase
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-rebase --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/report_rebase_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_rebase_dom_test.py
       - name: Selected CT display controls and session loader boundaries
         timeout-minutes: 3
         run: |
@@ -620,7 +624,7 @@ jobs:
           "$RUNNER_TEMP/hp-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
       - name: Confirm exact declared invariants, worklist and hanging protocol selection
-        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file worklist-v0/hpacs-lite/main.html --file api/src/pacs.service.ts --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared invariants, worklist and hanging protocol tests
         timeout-minutes: 28
         run: |
@@ -684,6 +688,8 @@ jobs:
           persist-credentials: false
       - name: Saved comparison print identity model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/job-print-identity --cwd . --file worklist-v0/hpacs-lite/viewer-job-print.js --file worklist-v0/hpacs-lite/report-preview.js --file tests/viewer_job_print_identity_test.cjs --file tests/report_preview_label_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_job_print_identity_test.cjs tests/report_preview_label_test.cjs
+      - name: Report base-version origin, commit failure routing and refused-head model
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-rebase-model --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/report_rebase_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_rebase_model_test.cjs
       - name: Editor link model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/editor-link --cwd . --file worklist-v0/hpacs-lite/viewer-editor-link.js --file tests/viewer_editor_link_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_editor_link_test.cjs
       - name: Three-D cursor geometry model
@@ -787,6 +793,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_source_test.cjs
       - name: Study access policy, fail-closed storage and stale response boundaries
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_access_policy_test.cjs /tests/study_access_service_test.cjs
+      - name: Compiled stale-draft addendum guard and draft base-version boundaries
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
       - name: Compiled volume job command and volume mark boundary models
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs
       - name: Observe an isolated real restart loop
@@ -812,6 +820,8 @@ jobs:
           name: synthetic-runtime-print-identity
           path: |
             tmp/runtime-ci/job-print-identity/
+            tmp/runtime-ci/report-rebase-model/
+            tmp/runtime-ci/report-stale-draft/
             tmp/runtime-ci/hanging-protocols/
             tmp/runtime-ci/three-d-cursor-model/
             tmp/runtime-ci/three-d-cursor-loader/

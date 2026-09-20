@@ -123,7 +123,7 @@ class MeasurementCiTests(unittest.TestCase):
         # Measured on run 34703534031: 60.6s setup and 12.8s cleanup through this
         # same main() path. The reserve left over is 3.8x that.
         self.assertGreaterEqual(25*60 - worst_case, 4*74)
-        # The required order is 69 -> 14 -> API -> e2e, so the new flow runs last;
+        # The required order is 69 -> 15 -> API -> e2e, so the new flow runs last;
         # even if everything ahead of it burns its whole budget and the stack takes
         # four times its measured time, the trailing suite keeps its full slice.
         ahead = sum(budgets[unit] + 35 for unit in units[:-1])
