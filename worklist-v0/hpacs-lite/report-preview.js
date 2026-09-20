@@ -10,6 +10,7 @@
     .key-row{display:flex;gap:6mm;break-inside:avoid}.key-row .key{flex:0 0 calc((100% - 6mm)/2);min-width:0}
     .key-row .key img{max-height:80mm}.key strong{overflow-wrap:anywhere}
     .reference{font-size:10px;color:#526171;overflow-wrap:anywhere}.note{font-size:12px;color:#526171}
+    .citations{margin-top:18px}.citation{break-inside:avoid;margin:3px 0}
     @page{size:A4;margin:12mm 12mm 22mm}
     .identity-example{border:1px solid #b4bdc5;padding:8px;margin-top:12px;font-size:12px}
     @media print{main{max-width:none;padding:0}h2{break-after:avoid}header{break-inside:avoid}.identity-example{display:none}}`;
@@ -23,6 +24,85 @@
     if (!report.version) return '저장된 판독문 없음';
     return `${report.rs === 'A' ? '승인된' : '미승인'} ${report.action === 'addendum' ? '추가기재' : '저장본'} · v${report.version}` +
       (withRs ? ` · RS ${report.rs}` : '');
+  }
+  // ── S3-U4: the citation section on the paper ──
+  //
+  // What the paper carries is the server's attestation ABOUT an insertion, never
+  // the inserted sentence and never an identifier: the body above already holds
+  // the sentence, and reprinting it for an 'absent' entry would resurrect text
+  // the radiologist removed from a signed record. The cost of that choice is
+  // that a line cannot be mapped to one sentence, so the section says so.
+  const CITATION_HEADING = '인용된 소견';
+  const CITATION_WORDING = Object.freeze({
+    unknown: '인용 증적을 확인하지 못했습니다',
+    refused: '인용 증적을 확인하지 못했습니다 — 접근 권한 밖',
+    empty: '인용된 소견 없음',
+    editor: '현재 편집문 · 미확정 — 인용 증적은 이 출력에 싣지 않습니다. 서버 저장본 출력에서 확인하세요.',
+    limitation: '이 목록은 판독문 문장과 1:1로 대응하지 않습니다.',
+  });
+  // The five states the server can store (finding.service.ts SOURCE_LINKS: the
+  // job branch says metadata-changed, the item branch says revised). An unknown
+  // value prints a neutral phrase and is never echoed - that string is written
+  // by the server and this is a record, not a console.
+  const LINK_STATE_TEXT = Object.freeze({
+    current: '현재 판과 일치', revised: '이후 개정됨', 'metadata-changed': '메타데이터 변경됨',
+    hidden: '숨김 처리됨', missing: '찾을 수 없음',
+  });
+  const LINK_STATE_UNKNOWN = '연결 상태 미확인';
+  /**
+   * Is this dedicated-read answer one the paper may speak for? Array-ness alone
+   * is not enough: a null entry or an unknown field would vanish when the lines
+   * are grouped by field, and the paper would then print fewer citations than
+   * the row holds while claiming to be the row. Anything short of a complete
+   * answer for THIS head version is 'unknown', never an empty list.
+   */
+  function citationAnswerOk(answer, version) {
+    if (!answer || typeof answer !== 'object') return false;
+    if (!Number.isSafeInteger(answer.version) || answer.version !== version) return false;
+    if (!Array.isArray(answer.head) || !Array.isArray(answer.draft)) return false;
+    for (const list of [answer.head, answer.draft])
+      for (const entry of list)
+        if (!entry || typeof entry !== 'object' || !fields.includes(entry.field)) return false;
+    return true;
+  }
+  function citationLine(entry, texts, name, citation) {
+    const label = citation.FIELD_LABEL[entry.field] ?? '알 수 없는 칸';
+    // insertedAt is the server's UTC instant; the paper says so the way the
+    // header already does. A client clock is never printed as a witness.
+    const when = entry.insertedAt ? `${String(entry.insertedAt).replace('T', ' ').slice(0, 16)}(UTC)` : '시각 미확인';
+    const who = name(entry.insertedBy);
+    if (citation.isReduced(entry)) return `${label} · ${who} · ${when} — ${citation.UNAVAILABLE_TEXT}`;
+    const link = LINK_STATE_TEXT[entry.linkStateAtInsert] ?? LINK_STATE_UNKNOWN;
+    return `${label} · 소견 r${entry.findingRevision} · 출처 ${Number(entry.sourceIndex) + 1}번 · ` +
+      `인용 당시 연결 ${link} · ${who} · ${when} — ` +
+      `${citation.STATE_TEXT[citation.presenceOf(entry, texts[entry.field] ?? '')] ?? ''}`;
+  }
+  /**
+   * Plain strings only, and the same vocabulary the editing drawer uses, so the
+   * paper and the screen can never disagree about one entry. Presence is counted
+   * against the text that is actually being printed, at print-preparation time.
+   */
+  function citationSection({ state, entries, texts, actorName, actor, citation }) {
+    const shown = value => (typeof actorName === 'function' ? actorName(value) : '') || '';
+    const name = value => shown(value) || '작성자 미확인';
+    if (state === 'editor') return { heading: CITATION_HEADING, lines: [CITATION_WORDING.editor] };
+    // Whose permissions produced this section. A reduced line means 'this reader
+    // could not see that source', which has no referent without this line.
+    const lines = [`인용 증적 확인: ${shown(actor) || '확인자 미확인'}의 열람 권한 기준`];
+    if (state === 'refused') return { heading: CITATION_HEADING, lines: [...lines, CITATION_WORDING.refused] };
+    if (state !== 'ok') return { heading: CITATION_HEADING, lines: [...lines, CITATION_WORDING.unknown] };
+    const rows = [];
+    for (const field of fields) for (const entry of entries || []) if (entry && entry.field === field) rows.push(entry);
+    if (!rows.length) return { heading: CITATION_HEADING, lines: [...lines, CITATION_WORDING.empty] };
+    lines.push(CITATION_WORDING.limitation);
+    let present = false;
+    for (const entry of rows) {
+      if (!citation.isReduced(entry) && citation.presenceOf(entry, texts[entry.field] ?? '') === 'present') present = true;
+      lines.push(citationLine(entry, texts, name, citation));
+    }
+    // The caveat qualifies '그대로 있습니다'; with no such line it would qualify nothing.
+    if (present) lines.push(citation.PRESENT_CAVEAT);
+    return { heading: CITATION_HEADING, lines };
   }
   function supportsPageIdentity() {
     try {
@@ -111,8 +191,32 @@
       if (data.study?.uid !== s.uid || !data.report || !Array.isArray(data.keys)) throw new Error('검사 정보를 확인할 수 없습니다');
       return data;
     }
+    /**
+     * The citation evidence for the head version being printed.
+     *
+     * It is read through the dedicated endpoint and not through the preview
+     * answer, because that endpoint is the only surface that re-applies finding
+     * readability; the preview gate is institution-wide and would carry sources
+     * this reader may not see. It runs inside the caller's bounded unit and
+     * signal - a second bounded() would abort the caller's own work - and its
+     * failures are caught HERE so a citation problem can never blank the paper.
+     * An abort belongs to the whole unit, and a 401 arrives only after the
+     * session has already been torn down, so those two are rethrown.
+     */
+    async function readCitations(s, signal) {
+      if (source.value === 'editor') return { state: 'editor' };
+      if (!(s.data.report.version >= 1)) return null;
+      let answer;
+      try {
+        answer = await api('GET', '/studies/' + encodeURIComponent(s.uid) + '/report/citations', undefined, signal);
+      } catch (error) {
+        if (error.name === 'AbortError' || error.status === 401) throw error;
+        return { state: error.status === 403 ? 'refused' : 'unknown', entries: [] };
+      }
+      return citationAnswerOk(answer, s.data.report.version) ? { state: 'ok', entries: answer.head } : { state: 'unknown', entries: [] };
+    }
     const selectedKeys = () => Array.from(choices.querySelectorAll('input:checked')).map(input => session.data.keys.find(k => k.id === input.value));
-    function documentBody(s, images, windowing) {
+    function documentBody(s, images, windowing, citations) {
       const root = el('main'), head = el('header', undefined, root), d = s.data, st = d.study;
       el('h1', 'KIN PACS 판독문', head);
       el('p', `환자: ${st.name} (${st.id}) · ${st.sex} · 생년월일 ${st.birth || '미확인'}`, head);
@@ -123,6 +227,15 @@
       const identity = `환자 ${st.name} (${st.id}) · 검사 ${st.date || '-'} · Acc ${st.acc || '-'}\n${editing ? '현재 편집문 · 미확정' : savedLabel(d.report, false)}`;
       el('p', '모든 출력 페이지에 반복되는 식별정보\n' + identity, root).className = 'identity-example';
       for (const [index, name] of fields.entries()) { el('h2', ['Findings', 'Conclusion', 'Recommendation'][index], root); el('pre', report[name] || '(내용 없음)', root); }
+      // Only ever built from the terminal state captured with this render, and
+      // only ever written as text: insertedBy comes from the server and a name
+      // is user input, so el(tag, text) - never innerHTML - is what may touch it.
+      if (citations) {
+        const part = citationSection({ ...citations, texts: report, actorName, actor: d.actor, citation: globalThis.KinReportCitation });
+        const section = el('section', undefined, root); section.className = 'citations';
+        el('h2', part.heading, section);
+        for (const line of part.lines) el('p', line, section).className = 'citation';
+      }
       if (images.length) {
         const keys = el('section', undefined, root); keys.className = 'keys';
         el('h2', `저장한 키 이미지 · ${images.length}장`, keys);
@@ -300,9 +413,12 @@
           }));
           const current = await snapshot(s, signal);
           if (!same(current, s.data)) throw new Error('저장본 또는 키 이미지가 변경되었습니다. 다시 확인을 누르세요.');
+          // Last await of the render path, so the guards below stay the final
+          // word before anything is drawn.
+          const citations = await readCitations(s, signal);
           check(s); if (selectionEpoch !== s.selectionEpoch) return;
           if (source.value === 'editor' && !same(context().editor, s.editor)) throw new Error('편집문이 바뀌었습니다. 다시 확인을 누르세요.');
-          rendered = { html: html(documentBody(s, images, windowing)), images, selection, source: source.value, selectionEpoch };
+          rendered = { html: html(documentBody(s, images, windowing, citations)), images, selection, source: source.value, selectionEpoch, citations };
           paper.srcdoc = rendered.html; printButton.disabled = !supportsPageIdentity();
           status.textContent = printButton.disabled ? '이 브라우저는 페이지별 식별정보 출력을 지원하지 않습니다. 최신 Chrome 또는 Edge에서 여세요.' :
             '미리보기 내용을 확인하세요. A4 · 기본 여백으로 출력하며, 인쇄 대화상자에서 페이지 나눔과 식별정보를 확인하세요.';
@@ -344,7 +460,13 @@
               if (await digest(image.prefix, signal) !== image.digest) throw new Error('키 이미지 원본이 변경되었습니다. 다시 확인을 누르세요.'); }
           }));
           const latest = await snapshot(s, signal);
-          if (ready !== rendered || !same(latest, s.data) || (ready.source === 'editor' && !same(check(s).editor, s.editor)))
+          // The same re-check the saved text gets: a citation could have been
+          // removed, or its source's readability revoked, since the render.
+          // Only paper-relevant evidence is compared - the draft never reaches
+          // this page, so a draft change must not refuse a print.
+          const latestCitations = await readCitations(s, signal);
+          if (ready !== rendered || !same(latest, s.data) || !same(latestCitations, ready.citations) ||
+              (ready.source === 'editor' && !same(check(s).editor, s.editor)))
             throw new Error('출력 내용이 변경되었습니다. 다시 확인을 누르세요.');
           if (target.closed) throw new Error('인쇄 창이 닫혔습니다. 다시 인쇄를 누르세요.');
           target.document.open(); target.document.write(ready.html); target.document.close();
@@ -399,7 +521,7 @@
       dialog.showModal(); void reload();
     } };
   };
-  // The factory still reaches the page as the same global name; only the label
-  // above is pure, so only it is exported for the node test.
-  if (typeof module === 'object' && module.exports) module.exports = { savedLabel };
+  // The factory still reaches the page as the same global name; only the pure
+  // record wording above is exported for the node tests.
+  if (typeof module === 'object' && module.exports) module.exports = { savedLabel, citationSection, citationAnswerOk };
 })();
