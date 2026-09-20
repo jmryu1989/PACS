@@ -15,13 +15,22 @@
     @media print{main{max-width:none;padding:0}h2{break-after:avoid}header{break-inside:avoid}.identity-example{display:none}}`;
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const el = (tag, text, parent) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; parent?.append(node); return node; };
+  // An addendum is a saved version of its own, so the output names it and numbers
+  // it by that same row. The history records no parent version — a discarded row
+  // can hold a lower number — so a lineage number here would be invented.
+  // Every other action keeps the saved wording byte for byte.
+  function savedLabel(report, withRs) {
+    if (!report.version) return '저장된 판독문 없음';
+    return `${report.rs === 'A' ? '승인된' : '미승인'} ${report.action === 'addendum' ? '추가기재' : '저장본'} · v${report.version}` +
+      (withRs ? ` · RS ${report.rs}` : '');
+  }
   function supportsPageIdentity() {
     try {
       const sheet = new CSSStyleSheet(); sheet.replaceSync('@page{@bottom-left{content:"identity"}}');
       return sheet.cssRules[0]?.cssRules[0]?.name === 'bottom-left';
     } catch { return false; }
   }
-  window.KinReportPreview = function ({ api, context, actorName, toast }) {
+  globalThis.KinReportPreview = function ({ api, context, actorName, toast }) {
     const dialog = el('dialog'); dialog.id = 'report-preview'; dialog.setAttribute('aria-labelledby', 'report-preview-title');
     dialog.style.cssText = 'width:min(1150px,94vw);height:90vh;padding:0;border:1px solid #61748c;border-radius:8px;background:#18212b;color:#edf2f8';
     const top = el('div', undefined, dialog); top.style.cssText = 'display:flex;gap:12px;padding:12px;align-items:center;flex-wrap:wrap';
@@ -109,10 +118,9 @@
       el('p', `환자: ${st.name} (${st.id}) · ${st.sex} · 생년월일 ${st.birth || '미확인'}`, head);
       el('p', `검사: ${st.desc || st.modality || '(설명 없음)'} · ${st.date || '날짜 미확인'} · Acc: ${st.acc || '-'}`, head);
       const editing = source.value === 'editor', report = editing ? s.editor : d.report;
-      el('p', editing ? '현재 편집문 · 미확정 (출력으로 저장되거나 승인되지 않음)' : !d.report.version ? '저장된 판독문 없음' :
-        `${d.report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${d.report.version} · RS ${d.report.rs}`, head).className = 'source';
+      el('p', editing ? '현재 편집문 · 미확정 (출력으로 저장되거나 승인되지 않음)' : savedLabel(d.report, true), head).className = 'source';
       el('p', `작성자: ${actorName(editing ? d.actor : d.report.author) || '-'} · 승인 판독의: ${editing ? '-' : actorName(d.report.repDoc) || '-'} · 승인일(UTC): ${editing ? '-' : d.report.confirm || '-'}`, head);
-      const identity = `환자 ${st.name} (${st.id}) · 검사 ${st.date || '-'} · Acc ${st.acc || '-'}\n${editing ? '현재 편집문 · 미확정' : !d.report.version ? '저장된 판독문 없음' : (d.report.rs === 'A' ? '승인된 저장본' : '미승인 저장본') + ' · v' + d.report.version}`;
+      const identity = `환자 ${st.name} (${st.id}) · 검사 ${st.date || '-'} · Acc ${st.acc || '-'}\n${editing ? '현재 편집문 · 미확정' : savedLabel(d.report, false)}`;
       el('p', '모든 출력 페이지에 반복되는 식별정보\n' + identity, root).className = 'identity-example';
       for (const [index, name] of fields.entries()) { el('h2', ['Findings', 'Conclusion', 'Recommendation'][index], root); el('pre', report[name] || '(내용 없음)', root); }
       if (images.length) {
@@ -391,4 +399,7 @@
       dialog.showModal(); void reload();
     } };
   };
+  // The factory still reaches the page as the same global name; only the label
+  // above is pure, so only it is exported for the node test.
+  if (typeof module === 'object' && module.exports) module.exports = { savedLabel };
 })();

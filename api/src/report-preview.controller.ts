@@ -43,7 +43,10 @@ export class ReportPreviewController {
       for (const key of ['id', 'name', 'birth', 'sex', 'date', 'acc', 'desc', 'modality'])
         if (typeof overlay?.[key] === 'string') study[key] = overlay[key];
       return { study, actor: caller.actor, canPreviewEditor: ['radiologist', 'admin'].some(role => caller.roles?.includes(role)),
-        report: { version: report?.version ?? 0, rs: state.rs, author: version?.author ?? null,
+        // The head version's own action: output must name an addendum instead of
+        // reading as an ordinary approved save. It comes from the row already
+        // read above, so this adds no query, no gate and no history field.
+        report: { version: report?.version ?? 0, rs: state.rs, action: version?.action ?? null, author: version?.author ?? null,
           repDoc: state.repDoc ?? null, confirm: state.confirm ?? null,
           findings: report?.findings ?? '', conclusion: report?.conclusion ?? '', recommendation: report?.recommendation ?? '' },
         keys: heads.map(head => ({ id: head.id, revision: head.revision, author: head.authorActor, item: head.snapshot })) };

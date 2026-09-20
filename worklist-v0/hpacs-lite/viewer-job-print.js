@@ -28,11 +28,14 @@
   function relationText(relation) { return relations[relation] || relations.unknown; }
   function reportTitle(role) { return role === 'current' ? 'Current Study Report' : 'Comparison Study Report'; }
   // An unsaved editor body carries no server version and no approval state; it
-  // must never borrow the saved report's v/RS wording on any page.
+  // must never borrow the saved report's v/RS wording on any page. An addendum
+  // is a saved version of its own, so it is named and numbered by that same row:
+  // the append-only history records no parent version, and a discarded row can
+  // hold a lower number, so a lineage number here would be invented.
   function reportLabel(report) {
     if (report.unsaved) return '미확정 편집문 · 저장·승인되지 않음';
-    return !report.version ? '저장된 판독문 없음' :
-      `${report.rs === 'A' ? '승인된 저장본' : '미승인 저장본'} · v${report.version} · RS ${report.rs}`;
+    if (!report.version) return '저장된 판독문 없음';
+    return `${report.rs === 'A' ? '승인된' : '미승인'} ${report.action === 'addendum' ? '추가기재' : '저장본'} · v${report.version} · RS ${report.rs}`;
   }
   const comparisonLabel = comparison => `${dateText(comparison)} · ${comparison.desc || comparison.modality} · Acc ${comparison.acc || '-'}`;
   function optionLabel(value, comparison) {
@@ -259,8 +262,13 @@ globalThis.kinViewerJobPrint = function ({ api, authenticate, live, editor }) {
       // image cell or the worklist's independent report editor.
       if (reportUids.includes(uid)) {
         const report = data.report;
+        // action decides whether this page says addendum, so a value of another
+        // type is refused rather than silently read as an ordinary saved report.
+        // A missing key stays the ordinary label: an API that predates the field
+        // has no addendum wording to lose.
         if (!report || !Number.isInteger(report.version) || report.version < 0 ||
-            !['findings', 'conclusion', 'recommendation', 'rs'].every(k => typeof report[k] === 'string'))
+            !['findings', 'conclusion', 'recommendation', 'rs'].every(k => typeof report[k] === 'string') ||
+            (report.action != null && typeof report.action !== 'string'))
           throw new Error('출력 판독문 정보를 확인할 수 없습니다.');
         reports.push({ uid, report });
       }
