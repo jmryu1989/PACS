@@ -252,6 +252,15 @@
     .draftbar button { background: #232936; border: 1px solid #5c5124; color: #d8b24a;
                        padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .draftbar b { color: #f0c95a; }
+    /* 인용 목록 — 안내줄과 같은 등급이며 판독문 편집 영역의 크기를 바꾸지 않는다. */
+    #citelist { flex: none; max-height: 30vh; overflow: auto; padding: 4px 10px 6px;
+                background: #20242e; border-top: 1px solid #3a4356; color: #c3cad6; font-size: 11px; }
+    #citelist h5 { margin: 6px 0 2px; font-size: 11px; color: #dfe5ee; font-weight: normal; }
+    #citelist p { margin: 2px 0; line-height: 1.5; }
+    #citelist .cite-entry { padding: 3px 0; border-bottom: 1px solid #2a3040; }
+    #citelist .cite-note { color: #8892a4; }
+    #citelist label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+    .citefield { display: flex; align-items: center; gap: 8px; padding: 0 12px; }
     #err { color: #ff8080; padding: 2px 10px; flex: none; }
 
     /* 패널 경계는 세션 안에서만 움직인다. 판독 PC마다 화면 구성이 달라 계정 설정으로
@@ -316,7 +325,10 @@
     .modal .foot button { background: #232936; border: 1px solid #3a4356; color: #aab2c0; padding: 4px 14px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .modal .foot .ok { background: #3b6ea5; color: #fff; border-color: #3b6ea5; }
     /* 상용구는 여러 줄인 것이 정상이다 — 입력칸도 여러 줄이어야 한다 */
-    #tplmodal .box, #tpl-preview .box { display: flex; flex-direction: column; max-height: 90vh; }
+    #tplmodal .box, #tpl-preview .box, #cite-preview .box { display: flex; flex-direction: column; max-height: 90vh; }
+    #cite-preview-target, #cite-preview-source, #cite-preview-status { margin: 0; padding: 6px 12px; font-size: 11px;
+                                                                       color: #cdd3dc; line-height: 1.6; white-space: pre-wrap; }
+    #cite-preview-status { color: #d8b24a; }
     #tpl-source { flex: none; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: 6px 12px; border-bottom: 1px solid #333c4d; }
     .modal .tplbody { align-items: start; overflow-y: auto; }
     .modal .tplbody label { padding-top: 5px; }
@@ -816,6 +828,16 @@
         </div>
         <div class="draftbar" id="holdbar" style="display:none"><span id="holdmsg"></span></div>
         <div class="draftbar" id="deferbar" style="display:none"><span id="defermsg"></span></div>
+        <!-- 인용(Image Findings에서 넣은 문장)의 건수와 본문 존재 상태. 건수·출처·상태는
+             전용 읽기가 성공했을 때만 보인다 — 목록 조회 응답에는 인용이 실리지 않는다. -->
+        <div class="draftbar" id="citebar" style="display:none">
+          <span id="citemsg"></span>
+          <span class="spacer"></span>
+          <button id="b-cite-list" aria-expanded="false" aria-controls="citelist"
+                  title="이 판독문에 남은 인용과 본문 존재 상태를 봅니다">Show Citations</button>
+          <button id="b-cite-reload" title="서버에서 인용 건수와 상태를 다시 확인합니다">Reload Citations</button>
+        </div>
+        <div id="citelist" hidden aria-label="Report Citations"></div>
         <div class="redit">
           <h4>Findings</h4>
           <textarea id="findings" placeholder="Please enter findings"></textarea>
@@ -973,6 +995,38 @@
     </div>
   </div>
 
+  <!--
+    소견 인용 미리보기 (S3-U2b)
+
+    여기 보이는 글자가 판독문에 들어갈 **바로 그 바이트**다. 확인을 누르면 먼저 서버가
+    그 문장과 증언을 한 번에 기록하고, **200을 받은 뒤에만** 아래 판독문 칸이 바뀐다.
+    서버가 거절하면 판독문은 한 글자도 움직이지 않는다 — 증언 없는 문장을 만들지 않기 위해서다.
+    응답을 기다리는 동안 이 창은 닫히지 않는다(Escape·바깥 클릭도 마찬가지).
+  -->
+  <div class="modal" id="cite-preview" role="dialog" aria-modal="true" aria-labelledby="cite-preview-title">
+    <div class="box" style="width:640px;max-width:94vw">
+      <h3 id="cite-preview-title">Insert into Report</h3>
+      <p id="cite-preview-target"></p>
+      <p id="cite-preview-source"></p>
+      <p class="citefield">
+        <label for="cite-preview-field">삽입할 칸</label>
+        <select id="cite-preview-field">
+          <option value="findings">Findings</option>
+          <option value="conclusion">Conclusion</option>
+          <option value="recommendation">Recommendation</option>
+        </select>
+      </p>
+      <div class="tpl-preview-body" tabindex="0" role="region" aria-label="판독문에 들어갈 내용">
+        <pre id="cite-preview-block"></pre>
+      </div>
+      <p id="cite-preview-status" role="status"></p>
+      <div class="foot">
+        <button id="cite-preview-close" type="button">Close</button>
+        <button id="cite-preview-insert" class="ok" type="button">Insert into Report</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modify Exam 모달 (8.1.2.1.5) -->
   <div class="modal" id="modal">
     <div class="box">
@@ -1039,6 +1093,7 @@
   <script src="reading-workspace.js"></script>
   <script src="finding-link-model.js"></script>
   <script src="finding-command.js"></script>
+  <script src="report-citation.js"></script>
   <script src="reading-findings.js"></script>
   <link rel="stylesheet" href="tech-note.css">
   <script src="tech-note.js"></script>
@@ -1220,14 +1275,17 @@
        * 보이는 미판독 검사가 만들어졌다. 화면이 서버보다 앞서 나가면, 사용자는
        * 자기가 한 일이 저장됐다고 믿는다. 그게 조용히 갈라지는 시작이다.
        */
+      // 한 검사의 서버 투영이 화면 상태를 대신하는 자리도 목록과 같은 규칙을 지난다 —
+      // 이 응답에도 그 검사의 초안이 실려 오므로(`toClient`), 고른 검사가 아닌데 아직
+      // 보내지 못한 글을 담고 있으면 그대로 덮여 사라진다.
       api("PATCH", `/studies/${encodeURIComponent(uid)}`, body)
-        .then(st => { appState[uid] = { ...appState[uid], ...st }; syncStudy(uid); render(); })
+        .then(st => { appState[uid] = mergePolledState(uid, st); syncStudy(uid); render(); })
         .catch(async e => {
           apiFail(e);
           try {
             const r = await api("GET", "/studies");
             const fresh = r.studies.find(x => x.uid === uid);
-            if (fresh) { appState[uid] = { ...appState[uid], ...fresh.state }; syncStudy(uid); }
+            if (fresh) { appState[uid] = mergePolledState(uid, fresh.state); syncStudy(uid); }
           } catch (e2) {}
           render(); refreshRight();
         });
@@ -1310,11 +1368,20 @@
         </tr>`).join("") || `<tr><td class="empty" colspan="4">${templates.length ? "조건에 맞는 상용구가 없습니다" : "상용구 없음 — 우클릭해서 추가하세요"}</td></tr>`;
       updateTemplatePreview();
     }
-    function templateInsertionBlock(t, emptyMessage = "삽입할 내용이 없습니다") {
+    /**
+     * 스크립트가 판독문 칸에 글을 넣어도 되는가. 상용구 삽입과 소견 인용이 **같은 관문
+     * 하나**를 쓴다 — 둘이 각자 검사를 들고 있으면 언젠가 한쪽만 고쳐진다.
+     */
+    function reportEditorBlock() {
       const why = reportWriteBlock();
       if (why) return why;
       // value 대입은 촬영 중/타인 점유의 readOnly도 우회한다. 타이핑과 같은 관문을 거친다.
       if (RFIELDS.some(k => $("#" + k).readOnly)) return "현재 판독문은 편집할 수 없습니다";
+      return null;
+    }
+    function templateInsertionBlock(t, emptyMessage = "삽입할 내용이 없습니다") {
+      const why = reportEditorBlock();
+      if (why) return why;
       if (!t || RFIELDS.every(k => !t[k])) return emptyMessage;
       return null;
     }
@@ -1827,7 +1894,16 @@
     function fromApi(s) {
       updateReaderAssignment(s.uid,s.readerAssignment);
       updateNoteSummary(s.uid, s.techNote);
-      appState[s.uid] = { ...appState[s.uid], ...s.state };
+      /**
+       * **서버 상태가 화면 상태를 대신하는 자리는 전부 같은 규칙을 지난다**(`mergePolledState`).
+       *
+       * 여기가 목록 한 줄의 상태를 실제로 갈아끼우는 곳이고, 폴링만이 아니라 **Refresh 단추**가
+       * 부르는 `load()`도 이 함수를 지난다(Auto Refresh를 Manual로 두면 그게 유일한 갱신이다).
+       * 규칙을 부르는 쪽마다 따로 두면 그중 하나가 빠지고, 실제로 그렇게 빠져 있었다 —
+       * 아직 서버에 보내지 못한 글을 담은 검사가 고른 검사가 아니면 그 글이 사라졌다.
+       * 바로 아래 `applyState`가 `appState`를 읽으므로 목록 행의 판 번호도 여기서 맞는다.
+       */
+      appState[s.uid] = mergePolledState(s.uid, s.state);
       return applyState({
         uid: s.uid, pf: "·", assignedReader:readerAssignments.get(s.uid)?.reader?[readerAssignments.get(s.uid).reader.name,readerAssignments.get(s.uid).reader.actor].filter(Boolean).join(" · "):"",
         count: s.count, series: s.series, acc: s.acc,
@@ -1909,13 +1985,11 @@
          * 그걸 "목록 실패"로 처리하고 `studies = []`로 **성공한 데이터를 버렸다.**
          * 화면 그리기 버그가 데이터 없음으로 둔갑하면, 원인을 서버에서 찾게 된다.
          */
-        const editing = selectedUid ? { ...appState[selectedUid] } : null;
+        // 편집 중인 검사의 판 번호·초안을 되돌려 놓던 블록은 없앴다 — `fromApi`가 그 규칙을
+        // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
         studies = r.studies.map(fromApi);
         studyPriority.observed(r.studies.map(s=>s.uid));
         worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
-        if (editing && appState[selectedUid]) {
-          appState[selectedUid] = { ...appState[selectedUid], version:editing.version ?? 0, draft:editing.draft ?? null }; syncStudy(selectedUid);
-        }
         $('#err').textContent = '';
         try {
           const st = await (await fetch("/statistics")).json();
@@ -2399,6 +2473,9 @@
       if (templateEditor?.source) closeTemplateEditor(false);
       // A→B→A로 돌아와도 이전 검사에서 읽던 미리보기의 삽입 버튼은 재사용하지 않는다.
       closeTemplatePreview(false);
+      // 인용 미리보기도 같다. 응답을 기다리는 중이면 창은 그대로 두고, 늦게 온 응답은
+      // 요청이 떠날 때의 선택과 대조해 화면에 쓰지 않는다.
+      if (!citeBusy) closeCitePreview(false);
       // 사유를 고르는 동안 A→B→A로 이동해도 이전 모달의 결정을 새 선택에 적용하지 않는다.
       if (reasonResolve) reasonResolve(null);
       stashReport();
@@ -3101,6 +3178,9 @@
       }
       renderDraftBar();
       updateReportTemplateButton();
+      // 인용 건수·출처·존재 상태는 **관문을 다시 거는 전용 읽기**에서만 온다. 목록·상태
+      // 페이로드에는 인용이 실리지 않으므로 여기서 한 번 물어보지 않으면 알 길이 없다.
+      ensureCitations(selectedUid);
     }
 
     /**
@@ -3111,6 +3191,9 @@
      * "조용히 갈라지는" 실패가 여기서 다시 생긴다.
      */
     function renderDraftBar() {
+      // 인용 줄은 초안과 별개다 — 초안이 없어도 승인본에 이월된 인용은 남아 있다.
+      // 아래 분기들이 일찍 빠져나가므로 여기서 먼저 그린다.
+      renderCitationBar();
       const bar = $("#draftbar");
       const r = appState[selectedUid] ?? {};
       const d = r.prelimHidden ? null : r.draft;
@@ -3131,10 +3214,27 @@
       const at = d.at ? String(d.at).replace("T", " ").slice(0, 16) : "";
       // 내가 이 초안을 쓰기 시작한 뒤 남이 확정을 했다면, 그걸 지금 말해야 한다.
       // 확정 버튼을 누른 다음에야 알게 되면 이미 늦다.
-      const behind = (r.version ?? 0) > (d.baseVersion ?? 0);
-      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ${esc(at)}에 자동 저장됨` +
+      const behind = reportDraftBehind(r);
+      /**
+       * 서버로 보내기를 미룬 글은 **저장된 것이 아니다.** 인용이 나가 있는 동안 검사를
+       * 옮기면 글자는 여기 담기지만 요청은 그 뒤에 나간다. 그 사이에 "자동 저장됨"이라고
+       * 쓰면 저장 안 됐다는 사실을 알려주는 자리가 저장됐다고 말하는 셈이다.
+       */
+      const deferred = !!selectedUid && reportConverge.has(selectedUid);
+      $("#draftmsg").innerHTML = `<b>● 저장 안 된 초안</b> — ` +
+        (deferred ? `${esc(at)}에 이 화면에 담아 두었습니다 · 곧 서버에 저장합니다`
+                  : `${esc(at)}에 자동 저장됨`) +
         (behind ? ` · <b>주의</b> 이 초안을 쓰는 동안 다른 사람이 v${esc(r.version)}을 확정했습니다`
                 : ` · 확정하려면 Save 또는 Approve`);
+    }
+
+    /**
+     * 이 초안이 딛고 선 판보다 승인본이 앞서 있는가. 표시줄의 경고와 §6의 인용 거절이
+     * **같은 식 하나**를 쓴다 — 둘이 각자 계산하면 언젠가 한쪽만 고쳐진다.
+     */
+    function reportDraftBehind(r) {
+      const d = r?.prelimHidden ? null : r?.draft;
+      return !!d && (r.version ?? 0) > (d.baseVersion ?? 0);
     }
 
     /** 초안 버리기 — 확정본으로 돌아간다 */
@@ -3147,6 +3247,11 @@
         catch (e) { apiFail(e); return; }
       }
       appState[uid] = { ...appState[uid], draft: null };
+      // 초안 행이 사라지면 그 행의 인용도 함께 사라진다. 머리 판의 인용은 그대로이므로
+      // 모르는 상태로 되돌리고 `loadReport`의 전용 읽기가 남은 것을 다시 가져온다.
+      citations.forget(uid);
+      citationNotes.delete(uid);
+      reportConverge.delete(uid);
       if (!serverMode) saveApp();
       if (selectedUid === uid) { loadReport({ force: true }); updateReportButtons(); }
       toast("초안을 버렸습니다", "info");
@@ -3265,6 +3370,518 @@
     }
 
     /**
+     * ── 소견 인용 (S3-U2b) ──
+     *
+     * Image Findings의 한 출처를 판독문에 넣는다. 순서가 계약이다: **서버가 먼저**
+     * 문장과 증언을 한 쓰기로 기록하고, 200을 받은 **뒤에야** 화면의 글자가 바뀐다.
+     * 거절·오프라인·비서버 모드에서는 판독문을 한 글자도 건드리지 않는다 — 증언 없는
+     * 문장을 만들지 않기 위해서다.
+     *
+     * 인용 집합은 `appState[uid].draft` **바깥**에 산다. 초안 객체는 저장할 때마다
+     * 새로 만들어지고 서버 투영이 통째로 갈아끼우므로, 그 안에 두면 조용히 사라진다.
+     * 그리고 **사라진 것과 아직 모르는 것은 다르다** — 모르면 `citationIds` 키를 아예
+     * 보내지 않는다. `[]`는 "내 초안의 인용을 전부 지워라"라는 뜻이기 때문이다.
+     */
+    const citations = KinReportCitation.createState();
+    /** 이 검사의 전용 읽기를 실제로 시도했는가 / 그 결과 안내 문구. */
+    const citationReads = new Map(), citationNotes = new Map();
+    let citationListOpen = false;
+
+    /**
+     * **수렴 표시**(B3). 삽입이 버려졌거나 실패했거나 응답을 못 본 뒤에는 서버 행과
+     * 화면이 갈라져 있을 수 있는데, 그 직전에 자동 저장이 한 번 돌았다면 `reportDirty()`는
+     * "같다"고 답한다(초안 사본과 화면이 같으므로). 그 상태로 두면 다음 자동 저장이
+     * 건너뛰고 갈라짐이 그대로 남는다. 그래서 dirty 비교와 **별개의 명시 표시**를 둔다.
+     */
+    const reportConverge = new Set();
+    function markConverge(uid) {
+      if (!uid) return;
+      reportConverge.add(uid);
+      if (uid === selectedUid) renderDraftBar();
+    }
+    /** 저장해야 하는가 — 글자가 달라졌거나, 수렴이 필요하다고 표시돼 있거나. */
+    function reportNeedsWrite() {
+      return reportDirty() || (!!selectedUid && reportConverge.has(selectedUid));
+    }
+
+    /**
+     * 폴링이 한 검사의 상태를 합칠 때 **화면 것을 지켜야 하는 칸**. 규칙은 여기 하나뿐이고
+     * 폴링의 세 자리가 모두 이것을 쓴다 — 세 곳이 각자 판단하면 언젠가 한 곳만 고쳐진다.
+     *
+     *   version — 지금 고른 검사의 판 번호는 **화면이 본 판**이어야 한다. 폴링이 몰래 올리면
+     *     다음 저장의 낙관적 락이 본 적 없는 승인본을 조용히 통과한다.
+     *   draft  — 아직 서버에 보내지 못한 글. 삽입이 나가 있는 동안 검사를 옮기면 그 타건은
+     *     **여기에만** 담겨 있고(쓰기는 미뤘다), 폴링이 서버 투영으로 갈아끼우면 사람이 친
+     *     글이 어디에도 남지 않는다. 그래서 수렴 표시가 있는 검사는 고르지 않았어도 지킨다.
+     *     수렴이 끝나 표시가 내려간 뒤에는 평소처럼 서버 투영을 받는다.
+     */
+    function preservedLocal(uid, mine) {
+      const local = {};
+      if (uid === selectedUid) local.version = mine?.version ?? 0;
+      if (uid === selectedUid || reportConverge.has(uid)) local.draft = mine?.draft ?? null;
+      return local;
+    }
+    /** 폴링 응답 한 건을 그 검사의 화면 상태에 합친다. 가려진 예비 판독은 서버가 본문을 안 준다. */
+    function mergePolledState(uid, st) {
+      const mine = appState[uid] ?? {};
+      return { ...mine, ...st, ...preservedLocal(uid, mine) };
+    }
+
+    /** 삽입이 나가 있는 동안의 비-keepalive 초안 저장을 **전부** 비켜세운다(B1). */
+    let insertInFlight = false;
+    /**
+     * uid별로 지금 나가 있는 비-keepalive 초안 저장 **전부**. 하나만 기억하면 20초 자동
+     * 저장과 검사 이동이 겹쳐 두 건이 동시에 나가 있을 때 더 새것만 기다리게 되고,
+     * **더 오래된 본문**(삽입 전 글 + 새 `cid`가 없는 유지 목록)이 삽입 뒤에 도착해
+     * 방금 확인한 문장과 그 증언을 함께 되돌린다.
+     */
+    const stashInFlight = new Map();
+    const SETTLE_ROUNDS = 8;
+    async function settleStash(uid) {
+      for (let round = 0; round < SETTLE_ROUNDS; round++) {
+        const pending = stashInFlight.get(uid);
+        if (!pending || !pending.size) return true;
+        // 안에서 실패를 잡으므로 거부되지 않는다. 기다리는 쪽이 남의 실패를 떠안지 않는다.
+        await Promise.allSettled([...pending]);
+      }
+      // 여기까지 오면 저장이 계속 새로 나가고 있다는 뜻이다. 경합을 무릅쓰고 보내느니
+      // 사람에게 다시 누르라고 말한다 — 아무것도 잃지 않는 출구다.
+      const pending = stashInFlight.get(uid);
+      return !pending || !pending.size;
+    }
+
+    /**
+     * 인용 전용 읽기. 판독문 관문(기관·예비 판독)에 더해 **소견 가독을 다시 거는**
+     * 유일한 표면이고, 축약된 건과 `sameTextCount`도 여기서만 온다.
+     * 같은 검사를 한 번 확인했으면 다시 묻지 않는다 — 다시 묻는 것은 사람이 고르는 일이다.
+     */
+    async function ensureCitations(uid, { force = false } = {}) {
+      if (!uid || !serverMode || offline || demoMode) return false;
+      if (!KinAuth.has("radiologist") || appState[uid]?.prelimHidden) return false;
+      if (citationReads.has(uid)) return false;
+      if (!force && (citations.known(uid) || citationNotes.has(uid))) return false;
+      const ticket = {};
+      citationReads.set(uid, ticket);
+      try {
+        const answer = await api("GET", `/studies/${encodeURIComponent(uid)}/report/citations`);
+        // 늦게 온 답이 더 새 답을 덮지 않는다. 상태는 uid로 키가 잡혀 있으므로
+        // 다른 검사의 답이 이 검사에 들어올 길은 없다.
+        if (citationReads.get(uid) !== ticket) return false;
+        citations.confirm(uid, answer);
+        citationNotes.delete(uid);
+        return true;
+      } catch (e) {
+        if (citationReads.get(uid) !== ticket) return false;
+        // 확인하지 못한 것과 인용이 없는 것은 다르다. 모른다고 말하고, 키는 만들지 않는다.
+        citationNotes.set(uid, "인용 건수를 확인하지 못했습니다: " + e.message);
+        return false;
+      } finally {
+        if (citationReads.get(uid) === ticket) citationReads.delete(uid);
+        if (uid === selectedUid) renderCitationBar();
+      }
+    }
+
+    /**
+     * **삽입 뒤 서버 행을 모르게 됐을 때 초안 쪽 상태를 되돌린다.**
+     *
+     * 거절·늦은 응답·확인 전 200 — 어느 쪽이든 그 뒤 행에 무엇이 들어 있는지 화면은 모른다.
+     * 그런데도 "확인됨"으로 남겨 두면 다음 저장이 **새 `cid`가 빠진 유지 목록**을 싣고, 서버의
+     * 교집합이 그 증언만 지운다. 문장은 본문에 남고 증언만 사라지는 것이 이 단위가 막아야 할
+     * 바로 그 상태다. 머리 판의 제거 선택은 사람이 고른 것이므로 함께 지우지 않는다.
+     *
+     * 나가 있던 전용 읽기의 표도 함께 버린다 — 삽입 **전에** 떠난 답이 삽입 **뒤의** 목록으로
+     * 굳으면 같은 구멍이 다시 열린다.
+     */
+    function invalidateCitations(uid) {
+      if (!uid) return false;
+      const changed = citations.unconfirm(uid);
+      citationReads.delete(uid);
+      citationNotes.delete(uid);
+      if (uid === selectedUid) { renderCitationBar(); ensureCitations(uid, { force: true }); }
+      return changed;
+    }
+
+    /** 이 건이 딛고 볼 본문 — 머리 건은 승인본, 초안 건은 지금 편집 중인 textarea. */
+    function citationBody(scope, field) {
+      if (!RFIELDS.includes(field)) return "";
+      return scope === "head" ? String(appState[selectedUid]?.[field] ?? "") : $("#" + field).value;
+    }
+    function citationEntryText(entry, scope) {
+      const C = KinReportCitation;
+      const when = entry?.insertedAt ? String(entry.insertedAt).replace("T", " ").slice(0, 16) : "시각 미확인";
+      // 작성자는 서버가 쓰는 값이고 삽입 응답에는 실려 오지 않는다. 화면이 그 자리를
+      // 추측한 문자열로 채우면 증언이 아닌 것이 증언처럼 보인다 — 방금 넣은 건은
+      // 그렇게 말하고, 다음 전용 읽기가 서버의 바이트로 바꾼다.
+      const who = entry?.mine ? "방금 이 화면에서 넣음" : (displayActor(entry?.insertedBy) || "작성자 미확인");
+      const field = C.FIELD_LABEL[entry?.field] ?? "알 수 없는 칸";
+      if (C.isReduced(entry)) return `${field} · ${who} · ${when} — ${C.UNAVAILABLE_TEXT}`;
+      const state = C.presenceOf(entry, citationBody(scope, entry.field));
+      const source = `소견 r${entry.findingRevision} · 출처 ${Number(entry.sourceIndex) + 1}번` +
+        (entry.linkStateAtInsert ? ` · 인용 당시 연결 ${entry.linkStateAtInsert}` : "");
+      return `${field} · ${source} · ${who} · ${when} — ${C.STATE_TEXT[state] ?? ""}`;
+    }
+
+    /**
+     * 인용 줄과 목록. **전용 읽기가 성공했을 때만** 건수·출처·상태를 말한다 —
+     * 확인하지 못했는데 "0건"이라고 쓰면 그것이 곧 거짓말이다.
+     */
+    function renderCitationBar() {
+      const bar = $("#citebar"), list = $("#citelist"), uid = selectedUid;
+      const row = uid ? citations.get(uid) : null;
+      const note = uid ? citationNotes.get(uid) : null;
+      const hidden = !!appState[uid]?.prelimHidden;
+      // 초안 쪽을 모르는 상태로 되돌린 뒤에는 `draft`가 비어 있지만 그것은 **0건이 아니라
+      // 모름**이다. 0건이라고 쓰면 그 자체가 거짓말이므로 건수를 말하지 않는다.
+      const unknownDraft = !!row && !citations.known(uid);
+      const count = row ? row.head.length + row.draft.length : 0;
+      if (!uid || hidden || (!count && !note && !unknownDraft)) {
+        bar.style.display = "none"; list.hidden = true; list.replaceChildren();
+        $("#b-cite-list").setAttribute("aria-expanded", "false");
+        return;
+      }
+      bar.style.display = "flex";
+      $("#b-cite-list").style.display = row ? "" : "none";
+      $("#citemsg").textContent = row
+        ? (unknownDraft
+            ? `● 승인본 ${row.head.length}건 · 저장된 초안의 인용은 다시 확인하는 중입니다` + (note ? ` (${note})` : "")
+            : `● 인용 ${count}건 — 승인본 ${row.head.length}건 · 저장된 초안 ${row.draft.length}건`) +
+          (reportConverge.has(uid) ? " · 마지막 인용이 화면에 반영되지 않아 다음 자동 저장이 서버 내용을 화면에 맞춥니다" : "")
+        : `● ${note}`;
+      if (!row || !citationListOpen) {
+        list.hidden = true; list.replaceChildren();
+        $("#b-cite-list").setAttribute("aria-expanded", "false");
+        return;
+      }
+      $("#b-cite-list").setAttribute("aria-expanded", "true");
+      list.hidden = false;
+      // 30초 폴링도 이 목록을 다시 만든다. 사람이 제거를 고르는 중에 체크상자가 통째로
+      // 갈리면 포커스가 사라지므로, 같은 건의 상자로 되돌려 놓는다(소견 패널과 같은 규칙).
+      const active = document.activeElement;
+      const focused = active && list.contains(active) ? active.dataset.citeRemove : null;
+      const nodes = [];
+      const add = (tag, text, className) => {
+        const el = document.createElement(tag);
+        el.textContent = text;
+        if (className) el.className = className;
+        nodes.push(el);
+        return el;
+      };
+      add("h5", `승인본 v${row.version}에 남은 인용 ${row.head.length}건`);
+      if (!row.head.length) add("p", "없습니다", "cite-note");
+      for (const entry of row.head) {
+        const line = document.createElement("p");
+        line.className = "cite-entry";
+        line.dataset.citeScope = "head";
+        const label = document.createElement("label");
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.dataset.citeRemove = String(entry?.cid ?? "");
+        box.checked = citations.marked(uid, entry?.cid);
+        box.disabled = !!reportWriteBlock();
+        label.append(box, document.createTextNode(" 다음 확정에서 제거"));
+        line.append(document.createTextNode(citationEntryText(entry, "head") + " · "), label);
+        nodes.push(line);
+      }
+      if (unknownDraft) {
+        add("h5", "저장된 초안의 인용");
+        add("p", "다시 확인하는 중입니다 — 확인될 때까지 이 화면은 초안의 인용을 지우지도, 건수를 말하지도 않습니다.", "cite-note");
+      } else {
+        add("h5", `저장된 초안의 인용 ${row.draft.length}건`);
+        if (!row.draft.length) add("p", "없습니다", "cite-note");
+        for (const entry of row.draft) add("p", citationEntryText(entry, "draft"), "cite-entry");
+      }
+      add("p", KinReportCitation.PRESENT_CAVEAT, "cite-note");
+      add("p", "승인본의 인용은 다음 확정에서 제거를 골랐을 때만 빠집니다. 초안의 인용은 그 초안을 버릴 때 함께 없어집니다.", "cite-note");
+      list.replaceChildren(...nodes);
+      if (focused) list.querySelector(`[data-cite-remove="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+    }
+    /**
+     * 본문이 바뀌면 존재 상태도 바뀐다. 다만 글자마다 목록을 다시 만들면 타이핑이 무거워지고
+     * 포커스가 흔들리므로, 목록이 열려 있을 때 **잠깐 멈춘 뒤** 한 번 다시 센다.
+     * `n`은 인용 집합의 성질이라 편집 중에 변하지 않는다 — 여기서 변하는 것은 `k`뿐이다.
+     */
+    let citationRefreshTimer = null;
+    function scheduleCitationRefresh() {
+      if (!citationListOpen) return;
+      clearTimeout(citationRefreshTimer);
+      citationRefreshTimer = setTimeout(() => { citationRefreshTimer = null; renderCitationBar(); }, 400);
+    }
+    for (const k of RFIELDS) $("#" + k).addEventListener("input", scheduleCitationRefresh);
+    $("#b-cite-list").addEventListener("click", () => {
+      citationListOpen = !citationListOpen;
+      renderCitationBar();
+    });
+    $("#b-cite-reload").addEventListener("click", () => {
+      if (!selectedUid) return;
+      citationNotes.delete(selectedUid);
+      ensureCitations(selectedUid, { force: true });
+    });
+    $("#citelist").addEventListener("change", e => {
+      const box = e.target.closest("[data-cite-remove]");
+      if (!box || !selectedUid) return;
+      // 제거는 **확정에서만** 일어난다. 여기서 고르는 것은 의사표시이고, 서명 전까지
+      // 승인본의 어떤 행도 바뀌지 않는다.
+      const why = reportWriteBlock();
+      if (why) { box.checked = false; toast(why, "err"); return; }
+      citations.mark(selectedUid, box.dataset.citeRemove, box.checked);
+    });
+
+    /**
+     * 삽입을 막는 이유. 권한·점유·촬영 중·예비 판독은 **상용구 삽입과 같은 관문 함수**가
+     * 같은 문자열로 답한다. 여기서 더하는 것은 §6이 인용에만 요구하는 것들뿐이다 —
+     * 인용은 서버 증언이 있어야 성립하므로 오프라인·비서버 모드에서는 아예 못 한다.
+     */
+    function citationInsertBlock() {
+      const why = reportEditorBlock();
+      if (why) return why;
+      if (!serverMode || demoMode) return "서버에 연결돼 있을 때만 인용할 수 있습니다";
+      if (offline) return "서버 연결이 끊겨 인용할 수 없습니다 — 연결된 뒤 다시 시도하세요";
+      if (commitInFlight) return "판독문 확정이 끝난 뒤 다시 시도하세요";
+      /**
+       * **낡은 초안(behind)에서는 인용하지 않는다** (§6 마지막 항목).
+       *
+       * 이 초안이 딛고 선 판보다 승인본이 앞서 있으면, 지금 넣는 문장은 사람이 읽은 적 없는
+       * 판 위에 쌓인다. 출구는 U3가 만든 비파괴 경로뿐이다 — Addendum을 눌러 승인본을
+       * 나란히 보고 그 판 번호로 기준을 다시 잡은 뒤에 인용한다.
+       */
+      if (reportDraftBehind(appState[selectedUid] ?? {}))
+        return "이 초안은 더 낡은 승인본을 기준으로 씁니다 — Addendum을 눌러 승인본을 확인하고 기준을 다시 잡은 뒤 인용하세요";
+      return null;
+    }
+
+    /**
+     * 인용 미리보기. 여기 보이는 바이트가 그대로 요청이 되고, 그대로 판독문에 들어가며,
+     * 그대로 증언에 남는다. 사이에서 다듬거나 자르거나 고쳐 쓰지 않는다.
+     */
+    let citePane = null, citeSeq = 0, citeBusy = false, citeReturn = null;
+    function closeCitePreview(returnFocus = true) {
+      if (!citePane) return;
+      // 순번을 올린다. 닫힌 창에 묶여 있던 응답은 더는 이 화면에 쓸 수 없다.
+      citePane = null; citeSeq += 1;
+      $("#cite-preview").classList.remove("show");
+      for (const id of ["target", "source", "status"]) $("#cite-preview-" + id).textContent = "";
+      $("#cite-preview-block").textContent = "";
+      if (returnFocus) (citeReturn?.isConnected ? citeReturn : $("#findings")).focus();
+      citeReturn = null;
+    }
+    function setCiteBusy(busy) {
+      citeBusy = busy;
+      $("#cite-preview-insert").disabled = busy;
+      $("#cite-preview-close").disabled = busy;
+      $("#cite-preview-field").disabled = busy;
+    }
+    function renderCitePreview() {
+      if (!citePane) return;
+      const s = cur();
+      const why = citationInsertBlock();
+      $("#cite-preview-target").textContent = s
+        ? `삽입 대상: ${s.name} (${s.id})\n${s.date} · ${shownStudyDesc(s)} · AccNo: ${s.acc || "없음"}`
+        : "삽입 대상: 검사 미선택";
+      $("#cite-preview-source").textContent =
+        `출처: ${citePane.sourceLabel} · 소견 r${citePane.findingRevision} · 인용 당시 연결 ${citePane.linkState}`;
+      // 미리보기는 **조립된 그 유니코드 문자열 그대로**를 보인다. 공백도 줄바꿈도 보존된다.
+      $("#cite-preview-block").textContent = citePane.block;
+      $("#cite-preview-status").textContent = why ?? citePane.status ??
+        (`확인을 누르면 서버가 이 문장과 증언을 함께 기록한 뒤 ${KinReportCitation.FIELD_LABEL[$("#cite-preview-field").value]} 칸에 붙입니다.` +
+         " 기존 내용은 그대로 두고 아래에 이어 붙입니다.");
+      $("#cite-preview-insert").disabled = !!why || citeBusy;
+    }
+    /**
+     * `reading-findings.js`가 부르는 유일한 입구. 요청은 그 패널이 **지금 읽고 있는**
+     * 행에서 만든 것이고, 여기서는 그것이 지금 선택된 검사의 것인지만 다시 본다.
+     */
+    function openCitePreview(request, origin) {
+      if (!request || !request.uid || request.uid !== selectedUid) {
+        toast("선택한 검사의 소견만 판독문에 인용할 수 있습니다", "err");
+        return false;
+      }
+      const refusal = KinReportCitation.refuseBlock(request.block);
+      if (refusal) { toast(refusal, "err"); return false; }
+      const why = citationInsertBlock();
+      if (why) { toast(why, "err"); return false; }
+      citeSeq += 1;
+      citePane = { ...request, seq: citeSeq, selSeq: selectionSeq, warned: false, status: null };
+      citeReturn = origin?.isConnected ? origin : null;
+      // 대상 칸은 언제나 명시적이고, 기본은 Findings다.
+      $("#cite-preview-field").value = "findings";
+      setCiteBusy(false);
+      renderCitePreview();
+      $("#cite-preview").classList.add("show");
+      $("#cite-preview-close").focus();
+      return true;
+    }
+    $("#cite-preview-field").addEventListener("change", () => {
+      if (!citePane || citeBusy) return;
+      // 대상을 바꾸면 앞서 읽고 누른 확인은 이 대상에 대한 것이 아니다.
+      // 중복 경고도 새 칸 기준으로 다시 받는다.
+      citePane.warned = false; citePane.status = null;
+      renderCitePreview();
+    });
+    $("#cite-preview-close").addEventListener("click", () => { if (!citeBusy) closeCitePreview(); });
+    $("#cite-preview").addEventListener("click", e => {
+      // 응답을 기다리는 동안에는 바깥 클릭으로 닫히지 않는다(B3) — 무엇이 기록됐는지
+      // 모르는 채로 창만 사라지면 사용자는 다시 누르고, 같은 문장이 두 번 남는다.
+      if (e.target.id === "cite-preview" && !citeBusy) closeCitePreview();
+    });
+    $("#cite-preview").addEventListener("keydown", e => {
+      if (e.key === "Escape") {
+        e.preventDefault(); e.stopPropagation();
+        if (!citeBusy) closeCitePreview();
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const controls = [$("#cite-preview-field"), $("#cite-preview .tpl-preview-body"),
+                          $("#cite-preview-close"), $("#cite-preview-insert")].filter(b => !b.disabled);
+        if (!controls.length) return;
+        const index = controls.indexOf(document.activeElement);
+        controls[(index + (e.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+      }
+    });
+    window.addEventListener("pagehide", () => { if (!citeBusy) closeCitePreview(false); });
+
+    /**
+     * 확인 → **서버 먼저**.
+     *
+     * ① 같은 검사의 비-keepalive 초안 저장이 나가 있으면 그것이 끝난 뒤에 보낸다(B1).
+     *    먼저 보내면 T0만 실은 그 저장이 나중에 도착해 방금 확인한 문장을 지운다.
+     * ② 요청 본문은 세 칸 + 삽입될 문장이 이미 붙은 값이다. textarea는 아직 그대로다.
+     * ③ 응답의 본문을 화면에 대입하지 않는다(서버도 본문을 돌려보내지 않는다).
+     * ④ 200을 받고 **그 요청이 떠날 때의 선택·창일 때만** 글자를 붙인다(A→B→A 포함).
+     * ⑤ 그 밖의 모든 출구에서는 수렴 표시를 남긴다 — 무엇이 기록됐는지 모르기 때문이다.
+     */
+    async function insertCitation() {
+      const pane = citePane;
+      if (!pane || citeBusy) return;
+      const void_ = () => pane.uid !== selectedUid || pane.seq !== citeSeq || pane.selSeq !== selectionSeq;
+      if (void_()) {
+        $("#cite-preview-status").textContent = "검사가 바뀌었습니다 — 이 창을 닫고 다시 확인하세요.";
+        $("#cite-preview-insert").disabled = true;
+        return;
+      }
+      const why = citationInsertBlock();
+      if (why) { pane.status = why; renderCitePreview(); return; }
+      const field = $("#cite-preview-field").value;
+      if (!RFIELDS.includes(field)) return;
+      // 같은 칸에 같은 출처를 또 넣는 것은 거절이 아니라 **한 번의 경고**다.
+      if (!pane.warned && citations.duplicate(pane.uid, field, pane)) {
+        pane.warned = true;
+        pane.status = "이 칸에 같은 출처를 이미 인용했습니다. 그래도 넣으려면 한 번 더 누르세요.";
+        renderCitePreview();
+        return;
+      }
+      setCiteBusy(true);
+      pane.status = "서버에 기록하는 중…";
+      renderCitePreview();
+      try {
+        if (!await settleStash(pane.uid)) {
+          // 저장이 계속 새로 나가고 있다. 그 위로 보내면 순서 보장이 깨지므로 보내지 않는다 —
+          // 아무것도 바뀌지 않았고 다시 누르면 된다.
+          pane.status = "초안 저장이 끝나기를 기다리는 중입니다 — 잠시 뒤 다시 누르세요.";
+          renderCitePreview();
+          return;
+        }
+        // 아직 아무것도 보내지 않았다 — 서버 행은 앞선 저장이 남긴 그대로이므로 수렴 표시는
+        // 필요 없다. 창만 닫고 넣지 않았다는 사실을 말한다.
+        if (void_()) {
+          closeCitePreview(false);
+          toast("검사가 바뀌어 인용을 넣지 않았습니다 — 그 검사로 돌아가 다시 확인하세요.", "err");
+          return;
+        }
+        const why2 = citationInsertBlock();
+        if (why2) { pane.status = why2; renderCitePreview(); return; }
+        const content = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
+        // 구분자(LF 하나)는 `insertedText` 바깥이다. 증언이 가리키는 것은 그 블록뿐이다.
+        content[field] = KinReportCitation.appendBlock(content[field], pane.block);
+        const a = appState[pane.uid] ?? {};
+        const baseVersion = reportBaseVersion(pane.uid, a.draft?.baseVersion ?? a.version ?? 0);
+        const keep = citations.keepIds(pane.uid);
+        const epoch = { uid: pane.uid, selSeq: selectionSeq, seq: pane.seq };
+        let answer;
+        insertInFlight = true;
+        /**
+         * 나가 있는 전용 읽기의 표를 **보내기 직전에** 버린다. 그 답은 이 삽입 **전의** 행을
+         * 말하므로, 뒤늦게 도착해 확인됨으로 굳으면 새 `cid`가 빠진 유지 목록이 만들어진다.
+         */
+        citationReads.delete(pane.uid);
+        try {
+          answer = await api("PUT", `/studies/${encodeURIComponent(pane.uid)}/report`, {
+            ...content, baseVersion,
+            ...(keep ? { citationIds: keep } : {}),
+            insert: { field, findingId: pane.findingId, findingRevision: pane.findingRevision,
+                      sourceIndex: pane.sourceIndex, insertedText: pane.block,
+                      expectedLinkState: pane.linkState, expectedHeadRevision: pane.headRevision },
+          });
+        } catch (e) {
+          // 판독문은 한 글자도 바뀌지 않았다. 다만 이 요청이 서버에 닿았는지는 알 수 없으므로
+          // 다음 자동 저장이 서버 행을 화면에 맞추도록 표시하고, 인용 상태는 **모르는 것**으로
+          // 되돌린다 — 아는 척하는 유지 목록이 그 사이 기록된 증언을 지울 수 있다.
+          markConverge(epoch.uid);
+          invalidateCitations(epoch.uid);
+          pane.status = "인용하지 못했습니다: " + e.message + " — 판독문은 그대로입니다.";
+          renderCitePreview();
+          if (e.code === "REPORT_CITATION_STALE" || e.code === "REPORT_CITATION_SOURCE")
+            toast("소견이 그 사이 바뀌었습니다 — Image Findings에서 Reload Findings를 누른 뒤 다시 인용하세요", "err");
+          return;
+        } finally { insertInFlight = false; }
+        if (epoch.uid !== selectedUid || epoch.selSeq !== selectionSeq || epoch.seq !== citeSeq) {
+          markConverge(epoch.uid);
+          // 서버는 문장과 증언을 기록했을 수 있는데 화면은 그 `cid`를 쓰지 못했다.
+          // 확인됨으로 남겨 두면 다음 저장의 유지 목록이 바로 그 증언을 지운다.
+          invalidateCitations(epoch.uid);
+          // 이 창은 떠난 검사의 것이다. 지금 화면에 남겨두면 다음 확인이 **다른 환자의**
+          // 판독문에 그 문장을 넣는다. 거절과 달리 여기서는 읽을 이유도 없다.
+          closeCitePreview(false);
+          toast("다른 검사로 옮기기 전에 누른 인용의 응답이 늦게 도착해 화면에 반영하지 않았습니다. " +
+                "그 검사를 다시 열어 인용 목록에서 확인하세요.", "err");
+          return;
+        }
+        // 기존 삽입 기전 그대로다 — 목록 삽입도 타이핑처럼 점유를 시작해야 한다.
+        const el = $("#" + field);
+        el.value += (el.value ? "\n" : "") + pane.block;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        // 서버 행은 방금 우리가 보낸 세 칸이다. 초안 표시가 그 사실을 말하게 한다.
+        appState[pane.uid] = { ...appState[pane.uid],
+          draft: { ...content, baseVersion, at: new Date().toISOString() } };
+        reportConverge.delete(pane.uid);
+        /**
+         * B2: **확인된 상태만** 넓힌다. 확인 전이었다면 한 건짜리 목록을 지어내지 않는다 —
+         * 그 목록을 실어 보내면 화면이 본 적 없는 나머지 증언이 전부 지워진다.
+         * 그리고 넓히지 못했다면 이 행에 무엇이 들어 있는지 여전히 모르므로, 아는 척하는
+         * 유지 목록이 방금 기록된 증언을 지우지 않도록 초안 쪽을 모르는 상태로 되돌린다.
+         * 다음 전용 읽기 한 번이 서버의 바이트로 그것을 채운다.
+         */
+        const extended = !!answer?.inserted?.cid &&
+          citations.extend(pane.uid, { v: KinReportCitation.SCHEMA, cid: answer.inserted.cid, field,
+            findingId: pane.findingId, findingRevision: pane.findingRevision, sourceIndex: pane.sourceIndex,
+            linkStateAtInsert: pane.linkState, headRevisionAtInsert: pane.headRevision,
+            insertedText: pane.block, insertedAt: answer.inserted.insertedAt, insertedBy: null,
+            mine: true, sameTextCount: 1 });
+        if (!extended) invalidateCitations(pane.uid);
+        /**
+         * 인용을 건넨 목록은 판독문 **위에** 떠 있다 — 관련 영역이 가진 고정 패널이라 열어도
+         * 목록·판독문·영상의 배치를 바꾸지 않는 대신, 화면의 그 자리를 덮는다. 서버가 받아
+         * 준 뒤에도 그대로 열려 있으면 방금 들어간 문장도, 그 문장을 세는 인용 표시줄도 그
+         * 패널 뒤에 가려 사람은 자기가 한 일을 읽지 못하고 그 줄의 단추를 누르지도 못한다.
+         * 그래서 **서버가 받아들인 삽입에서만** 그 패널이 물러나고, 초점은 글이 들어간 칸으로
+         * 간다. 거절·중복 경고·늦은 응답에서는 그대로 둔다 — 그때 다음 누름은 그 목록에서
+         * 나오기 때문이다.
+         */
+        if (typeof pane.inserted === "function") {
+          try { pane.inserted(); } catch (_) { /* 패널이 없어도 판독문 쪽은 이미 끝났다 */ }
+          citeReturn = el;
+        }
+        closeCitePreview();
+        renderDraftBar();
+        toast("판독문에 넣었습니다 — 같은 저장에 출처 증언이 함께 기록됐습니다", "ok");
+      } finally {
+        setCiteBusy(false);
+        if (citePane) renderCitePreview();
+      }
+    }
+    $("#cite-preview-insert").addEventListener("click", insertCitation);
+
+    /**
      * 판독문 초안 저장. 사용자가 누르지 않아도 나가는 요청이다 —
      * 검사 이동·인쇄·자동 저장·로그아웃·탭 닫기.
      *
@@ -3287,8 +3904,10 @@
         conclusion: $("#conclusion").value,
         recommendation: $("#recommendation").value,
       };
-      // 검사를 옮겨다닐 때마다 호출되므로, 바뀐 게 없으면 서버를 부르지 않는다
-      if (!reportDirty()) return;
+      // 검사를 옮겨다닐 때마다 호출되므로, 바뀐 게 없으면 서버를 부르지 않는다.
+      // 다만 버려진 삽입 뒤에는 글자가 같아 보여도 서버 행이 다를 수 있다(B3) —
+      // 그때는 명시 표시가 이 비교를 이긴다. 그러지 않으면 갈라짐이 영영 남는다.
+      if (!reportNeedsWrite()) return;
 
       /**
        * **가려진 판독문은 저장하지 않는다.**
@@ -3311,11 +3930,33 @@
       const baseVersion = reportBaseVersion(uid, a.draft?.baseVersion ?? a.version ?? 0);
       // 비운 초안은 초안이 없는 것과 같다 — 안 그러면 빈 초안이 확정본을 가린다.
       const draft = empty ? null : { ...next, baseVersion, at: new Date().toISOString() };
+      /**
+       * **삽입이 나가 있는 동안 비켜서는 것은 쓰기뿐이다 (B1).**
+       *
+       * 타이머만 막는 것으로는 부족하다 — 검사 이동·로그아웃도 이 함수를 부른다. 그러나
+       * 이 함수보다 먼저 빠져나가면 **화면의 글자를 담아 두는 일까지** 건너뛴다. 그러면
+       * 검사가 바뀌는 순간 `loadReport({force:true})`가 textarea를 옛 초안으로 덮고,
+       * 아직 저장되지 않은 타건은 어디에도 남지 않는다. 담아 두는 일은 하고, 네트워크
+       * 요청만 미룬다. 미룬 사실은 수렴 표시로 남아 다음 저장이 서버를 화면에 맞춘다.
+       *
+       * `keepalive`는 예외다 — 탭이 닫히는 중에는 보내는 것 자체가 마지막 기회이고,
+       * 그 경우의 두 결과는 어느 쪽도 글을 잃지 않는다(§4-5 잔여).
+       */
+      const deferWrite = insertInFlight && !keepalive;
       appState[uid] = { ...a, draft };
+      if (deferWrite) reportConverge.add(uid);
       if (selectedUid === uid) renderDraftBar();
+      if (deferWrite) return;
       if (!serverMode) { saveApp(); return; }
 
-      const body = { ...next, baseVersion };
+      /**
+       * 인용 유지 목록은 **이 편집 세션에서 서버로 확인된 동안에만** 싣는다 (D8).
+       * 모르면 키를 생략한다 — `[]`는 "내 초안의 인용을 전부 지워라"라는 뜻이라서,
+       * 한 번도 본 적 없는 증언을 자동 저장이 조용히 없애게 된다. 두 경로(일반·keepalive)가
+       * 같은 본문을 쓰므로 탭이 닫히는 중에도 같은 규칙이 간다.
+       */
+      const keep = citations.keepIds(uid);
+      const body = { ...next, baseVersion, ...(keep ? { citationIds: keep } : {}) };
       const path = `/studies/${encodeURIComponent(uid)}/report`;
       if (keepalive) {
         // 탭이 닫히는 중이라 응답을 볼 수 없다. 보내는 것까지가 우리 몫이다.
@@ -3328,7 +3969,25 @@
         } catch (e) {}
         return;
       }
-      try { await api("PUT", path, body); } catch (e) { if (e.code !== "REPORT_HELD") apiFail(e); }
+      /**
+       * 이 약속이 끝나야 삽입이 나갈 수 있다(B1). 안에서 잡으므로 **거절되지 않는다** —
+       * 기다리는 쪽이 남의 실패를 처리되지 않은 거부로 떠안지 않게 하기 위해서다.
+       */
+      const settled = (async () => {
+        try {
+          await api("PUT", path, body);
+          // 서버 행이 방금 보낸 글자와 같아졌다. 수렴 표시를 여기서만 내린다.
+          reportConverge.delete(uid);
+          // 비운 초안은 서버에서 행이 지워진다 — 그 행의 인용도 함께 없어진 것이 사실이다.
+          if (empty) citations.emptied(uid);
+          if (uid === selectedUid) { renderDraftBar(); }
+        } catch (e) { if (e.code !== "REPORT_HELD") apiFail(e); }
+      })();
+      let pending = stashInFlight.get(uid);
+      if (!pending) { pending = new Set(); stashInFlight.set(uid, pending); }
+      pending.add(settled);
+      try { await settled; }
+      finally { pending.delete(settled); if (!pending.size && stashInFlight.get(uid) === pending) stashInFlight.delete(uid); }
     }
     /**
      * 판독문 확정. action: save | approve | addendum | reset
@@ -3356,7 +4015,9 @@
     async function commitReport(action, reason, reviewer) {
       if (!selectedUid) return;
       // 확정은 겹쳐 부르지 않는다. 더블클릭이 만든 판 하나가 더 쌓이는 걸 여기서 막는다.
-      if (commitInFlight) return;
+      // 삽입이 나가 있는 동안도 같다 — 그 응답 전에 서명하면 사람이 확인한 문장이
+      // 이번 판에 들어갈지 다음 판에 들어갈지가 도착 순서로 정해진다.
+      if (commitInFlight || insertInFlight) return;
       if(studyPriority?.get(selectedUid)){toast('응급 상태를 확인한 뒤 판독을 저장하세요. 저장 결과 미확인은 Technician 메뉴의 Refresh Status로 확인할 수 있습니다.','err');return;}
       // 서버가 죽었는데 로컬에 확정을 쌓으면, 그건 확정이 아니라 이 브라우저의 메모다.
       if (offline) {
@@ -3384,12 +4045,29 @@
                                  : (appState[uid]?.version ?? 0);
         // 응답이 돌아왔을 때 "그때 그 선택인가"를 판단할 기준. 요청이 떠나기 전에 잡는다.
         const seq = selectionSeq;
+        /**
+         * `citationIds`는 **내 초안 건에 대한 유지 목록**, `removeCitationIds`는 사람이
+         * 목록에서 명시로 고른 **머리 판 건의 제거 의사**다. 둘 다 확인된 상태에서만
+         * 실린다 — 모르면 키가 없고, 키가 없으면 서버는 아무것도 바꾸지 않는다.
+         * 그래서 낡은 화면은 제거에 실패할 수는 있어도 보지 못한 건을 지울 수는 없다.
+         */
+        const keepIds = citations.keepIds(uid), removeCitationIds = citations.removeIds(uid);
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
-            { action, reason, reviewer, baseVersion, ...content });
+            { action, reason, reviewer, baseVersion, ...content,
+              ...(keepIds ? { citationIds: keepIds } : {}),
+              ...(removeCitationIds ? { removeCitationIds } : {}) });
           heldUid = null; clearInterval(heartbeat); heartbeat = null;   // 확정하면 서버가 점유를 푼다
           appState[uid] = { ...appState[uid], ...st };
           syncStudy(uid);
+          /**
+           * 확정은 머리 판과 초안 행을 **함께** 움직였다. 화면이 들고 있던 인용 집합은
+           * 그 순간 옛 것이므로 "모르는 상태"로 되돌리고, 아래 `loadReport`가 부르는
+           * 전용 읽기가 새 머리 판의 증언을 다시 가져온다.
+           */
+          citations.forget(uid);
+          citationNotes.delete(uid);
+          reportConverge.delete(uid);
           // 확정 응답은 내가 방금 선택한 서버 상태다. 여기서는 입력 보호보다 그 결과가 우선한다.
           loadReport({ force: true });
         } catch (e) {
@@ -3761,15 +4439,18 @@
 
     // ③ 주기적 자동 저장. 20초면 사고로 잃는 양이 "방금 친 문장"을 넘지 않는다.
     setInterval(() => {
-      if (!serverMode || !selectedUid || commitInFlight) return;
+      // 삽입이 나가 있는 동안은 확정과 똑같이 비켜선다(B1). `stashReport`에도 같은 검사가
+      // 있지만, 다른 경로가 늘어도 여기 한 줄이 빠지지 않게 둘 다 둔다.
+      if (!serverMode || !selectedUid || commitInFlight || insertInFlight) return;
       if (heldByOther(cur())) return;
-      if (!reportDirty()) return;
+      // 글자가 같아 보여도 버려진 삽입 뒤에는 서버 행이 다를 수 있다(B3).
+      if (!reportNeedsWrite()) return;
       stashReport();
     }, AUTOSAVE_MS);
 
     // ① 탭·브라우저를 닫거나 새로고침
     window.addEventListener("beforeunload", e => {
-      if (!reportDirty()) return;
+      if (!reportNeedsWrite()) return;
       // keepalive 요청은 문서가 사라진 뒤에도 끝까지 간다. 다만 보장은 아니라서,
       // 경고도 함께 띄운다 — 판독문은 잃어버리면 안 되는 유일한 것이다.
       if (!heldByOther(cur())) stashReport({ keepalive: true });
@@ -3787,6 +4468,18 @@
     let loggingOut = false;
     $("#logout").addEventListener("click", async () => {
       if (loggingOut) return;
+      /**
+       * **삽입이 나가 있는 동안에는 나가지 않는다.**
+       *
+       * 여기서 부르는 초안 저장은 비-keepalive라 B1대로 쓰기를 미룬다 — 글자는 화면에만
+       * 담긴다. 그 뒤 `KinAuth.logout()`이 세션을 먼저 없애고 그 다음에 페이지를 옮기므로,
+       * 이탈 시점의 keepalive 저장은 이미 로그아웃된 세션으로 나간다. 확정이 그러듯
+       * 잠깐 비켜서는 편이 정확하다 — 응답은 몇 초면 온다.
+       */
+      if (insertInFlight) {
+        toast("인용을 기록하는 중입니다 — 끝난 뒤 다시 로그아웃하세요.", "err");
+        return;
+      }
       if (!confirm("로그아웃하시겠습니까?")) return;
       reportPreview.close();
       loggingOut = true;
@@ -3845,15 +4538,9 @@
 
           // 목록이 달라졌으면(도착·삭제) 통째로 다시 그린다.
           if (fresh.length || r.studies.length !== studies.length) {
-            const editing = selectedUid ? { ...appState[selectedUid] } : null;
+            // 지키는 칸은 `fromApi`가 지나는 `mergePolledState` 한 곳이 정한다 — 목록을 통째로
+            // 다시 그리는 이 길도 결국 그 함수를 지나므로 여기서 따로 되돌릴 것이 없다.
             studies = r.studies.map(fromApi);
-            // 편집 중인 검사는 아래와 같은 이유로 되돌려 놓는다
-            if (editing && appState[selectedUid]) {
-              appState[selectedUid] = { ...appState[selectedUid],
-                version: editing.version ?? 0,
-                draft: editing.draft ?? null };
-              syncStudy(selectedUid);
-            }
             // 썸네일 등 오른쪽 전체를 다시 그릴 필요는 없지만, 판독문 잠금은 반영해야 한다.
             // loadReport가 값만 보호하므로 새 검사 도착과 Prelim 전환이 겹쳐도 입력은 유지된다.
             render();
@@ -3879,10 +4566,7 @@
               //     되돌아간다. 확정본(findings 등)은 갱신해도 된다 — 초안이 있는 동안
               //     화면은 초안을 그리고, 확정본은 "그 사이 남이 v5를 확정했다" 안내에만 쓰인다.
               // 나머지(rs·ss·holder 등)도 갱신한다. 남이 승인한 게 화면에 보여야 하니까.
-              const mine = appState[uid] ?? {};
-              appState[uid] = { ...mine, ...st,
-                version: mine.version ?? 0,
-                draft: mine.draft ?? null };
+              appState[uid] = mergePolledState(uid, st);
               /**
                * 판독문 값은 loadReport가 스스로 지키므로, 호출자는 항상 상태를 반영한다.
                * 예전엔 폴링이 `prelimHidden`만 반영하고 판독문 패널은 그대로 뒀다 —
@@ -3890,7 +4574,13 @@
                * 버튼도 활성인 채라, Save를 눌러야 403을 만났다. (남은버그 3-1)
                */
             } else {
-              appState[uid] = { ...appState[uid], ...st };
+              /**
+               * 고르지 않은 검사도 **수렴을 기다리는 초안**은 덮지 않는다. 삽입이 나가 있는
+               * 동안 검사를 옮기면 그때 담아 둔 타건이 이 칸에만 있고, 그 삽입이 거절되면
+               * 서버 어디에도 없다. 폴링 한 번이 그것을 서버 투영으로 갈아끼우면 돌아온
+               * 화면은 옛 글을 그리고, 수렴 저장이 그 옛 글을 서버에 밀어 넣는다.
+               */
+              appState[uid] = mergePolledState(uid, st);
             }
             syncStudy(uid);
             if (selectedUid === uid) { loadReport(); updateReportButtons(); }
@@ -4728,6 +5418,9 @@
         sub: () => KinAuth.session()?.sub || null,
         workspace: readingWorkspace, windows: () => viewerWindows?.available() ? viewerWindows.rows() : [],
         popup: openOhifWindow, open: uid => openFilmbox(uid),
+        // 판독문 쪽 관문·미리보기·서버 요청은 전부 이쪽에 있다. 소견 패널은 자기가 지금
+        // 읽고 있는 행에서 요청을 만들어 건네기만 하고 판독문을 직접 쓰지 않는다.
+        cite: (request, origin) => openCitePreview(request, origin),
       });
     } catch (_) { toast('영상 소견 목록을 불러오지 못했습니다. 영상 화면의 Findings를 사용하세요.', 'err'); }
 
@@ -5234,7 +5927,9 @@
         try {
           const st = await api("PATCH", `/studies/${encodeURIComponent(uid)}`,
             teleTo ? { ts, teleTo } : { ts });
-          appState[uid] = { ...appState[uid], ...st };
+          // 같은 이유로 같은 규칙을 지난다. 이 타이머는 요청된 uid로 돌아오므로 그 검사가
+          // 지금 고른 검사가 아닐 수 있다.
+          appState[uid] = mergePolledState(uid, st);
           syncStudy(uid); render();
         } catch (e) { toast("원격판독 상태 변경 실패: " + e.message, "err"); }
         return;

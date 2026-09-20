@@ -38,6 +38,12 @@ def extract_function(source, name):
 
 
 START_POLLING = extract_function(MAIN, "startPolling")
+# The poll merges a study's server projection through one shipped rule (it is also what load() and
+# the single-study PATCH answers use). Slice the real functions rather than stubbing them: this
+# harness asserts that the selected study keeps its drawn version and its local draft, and that
+# claim is only worth anything if the product's own rule is what produced it.
+PRESERVE = extract_function(MAIN, "preservedLocal")
+MERGE = extract_function(MAIN, "mergePolledState")
 CURRENT = {
     "uid": "1.2.3", "count": 5, "series": 2, "acc": "ACC-1", "id": "PID-1", "name": "Patient",
     "sourcePatientKey": "hospital|patient", "birth": "19800101", "date": "20260912", "sex": "O",
@@ -58,7 +64,13 @@ const studyPageClient={busy:false,paused:false,clear(){},read:async options=>{re
 const assertStudyOwner=()=>{},KinAuth={logout:async()=>{}},goOffline=()=>{};
 function applyState(value){return value}function fmtD(value){return value}
 function updateNoteSummary(){}function updateReaderAssignment(){}
-function fromApi(s){appState[s.uid]={...appState[s.uid],...s.state};return {...s}}
+// Nothing is waiting to converge in these cases; the non-empty set is exercised by
+// tests/report_citation_dom_test.py, which drives the same two functions through applyPoll.
+const reportConverge=new Set();
+PRESERVELOCAL
+MERGESTATE
+// The shipped fromApi assigns through the same rule, so the rebuild path keeps it too.
+function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s}}
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
 function render(){renders++;rows.innerHTML=studies.map(s=>`<tr data-uid="${s.uid}"><td data-count>${s.count}</td><td data-series>${s.series}</td></tr>`).join('')}
 function loadReport(){loadReports++}function updateReportButtons(){buttonUpdates++}function toast(message,type){toasts.push({message,type})}
@@ -67,7 +79,8 @@ window.runPoll=()=>pollCallback();window.start=startPolling;window.setReply=valu
 window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(appState['1.2.3']),toasts:structuredClone(toasts),heldUid,
  report:[findings.value,conclusion.value,recommendation.value],row:rows.textContent,renders,loadReports,buttonUpdates,pollGeneration,commitEpoch});
 render();startPolling();
-</script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)).replace("START", START_POLLING)
+</script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
+   .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING)
 
 
 def reply(*rows):
