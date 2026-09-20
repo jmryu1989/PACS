@@ -509,6 +509,77 @@ class WorklistE2E(unittest.TestCase):
             expect(page.locator("#findings")).to_have_value(fixture.secret)
         self.assertEqual(len(self.versions(fixture)), 1)
 
+    def test_12_stale_draft_addendum_rebase_keeps_both_versions(self):
+        """E2E-B2-12 (REQ-S3-U3, contract test 21): a draft written against v1 cannot
+        replace the v2 somebody else approved. The refusal carries that approved text,
+        the pane shows those same bytes, an explicit rebase keeps every typed byte, and
+        both addenda survive in the history."""
+        fixture = self.fixture()
+        self.seed_report(fixture, action="approve")                       # v1 by doctor
+        # Seed the draft through the API: the row must exist with baseVersion 1 and a
+        # draft-less addendum would legitimately meet the old optimistic lock instead.
+        draft_text = f"{fixture.secret} addendum draft"
+        put = self.stack.request("PUT", f"/studies/{fixture.uid}/report", "doctor", {
+            "findings": draft_text, "conclusion": "", "recommendation": "", "baseVersion": 1,
+        })
+        self.assertEqual(put.status, 200)
+        head_text = "SECOND READER LINE 1\nSECOND READER LINE 2"
+        other = self.stack.request("POST", f"/studies/{fixture.uid}/report/commit", "doctor2", {
+            "action": "addendum", "baseVersion": 1,
+            "findings": head_text, "conclusion": "", "recommendation": "",
+        })
+        self.assertEqual(other.status, 201)
+        self.assertEqual(other.body["version"], 2)
+
+        page = self.login()
+        self.select(page, fixture)
+        expect(page.locator("#findings")).to_have_value(draft_text)
+        with page.expect_response(lambda r: r.request.method == "POST"
+                                  and r.url.endswith(f"/studies/{fixture.uid}/report/commit")) as reply:
+            page.locator("#b-addendum").click()
+        self.assertEqual(reply.value.status, 409)
+        body = reply.value.json()
+        self.assertEqual(body["code"], "REPORT_DRAFT_STALE")
+        self.assertEqual((body["draftBaseVersion"], body["head"]["version"]), (1, 2))
+        self.assertEqual(body["head"]["findings"], head_text)
+        # An old tab routes on this substring and then overwrites its editor.
+        self.assertNotIn("저장했습니다", body["message"])
+        expect(page.locator("#stalemodal")).to_be_visible()
+        # The pane shows the server's own bytes, not the client's cached report.
+        self.assertEqual(page.locator("#stale-head-findings").text_content(), body["head"]["findings"])
+        expect(page.locator("#stale-head-title")).to_contain_text("v2")
+        expect(page.locator("#stale-draft-findings")).to_have_text(draft_text)
+        # Nothing was rewritten while the reader reads.
+        expect(page.locator("#findings")).to_have_value(draft_text)
+        self.assertEqual(self.state(fixture)["draft"]["baseVersion"], 1)
+        self.assertEqual([row["version"] for row in self.versions(fixture)], [1, 2])
+
+        with page.expect_response(lambda r: r.request.method == "PUT"
+                                  and r.url.endswith(f"/studies/{fixture.uid}/report")) as rebase:
+            page.locator("#stale-rebase").click()
+        self.assertEqual(rebase.value.status, 200)
+        sent = rebase.value.request.post_data_json
+        self.assertEqual((sent["baseVersion"], sent["findings"]), (2, draft_text))
+        expect(page.locator("#stalemodal")).to_be_hidden()
+        expect(page.locator("#findings")).to_have_value(draft_text)
+        self.wait_state(page, fixture, lambda s: (s.get("draft") or {}).get("baseVersion") == 2)
+        audit = self.stack.request("GET", f"/audit?uid={fixture.uid}", "jmryu")
+        self.assertEqual(audit.status, 200)
+        rebases = [json.loads(row["detail"]) for row in audit.body if row["action"] == "report.draft.rebase"]
+        self.assertEqual(rebases, [{"from": 1, "to": 2}])
+
+        final_text = f"{draft_text} — written after reading v2"
+        page.locator("#findings").fill(final_text)
+        self.commit(page, fixture, "#b-addendum", "A")
+        rows = self.versions(fixture)
+        self.assertEqual([row["action"] for row in rows], ["approve", "addendum", "addendum"])
+        self.assertEqual([row["version"] for row in rows], [1, 2, 3])
+        self.assertEqual(rows[1]["findings"], head_text)
+        self.assertEqual(rows[2]["findings"], final_text)
+        state = self.state(fixture)
+        self.assertEqual(state["findings"], final_text)
+        self.assertIsNone(state.get("draft"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -600,8 +600,8 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
 
-    def test_candidate_contract_remains_69_then_14(self):
-        for filename, count in [('tests/invariants_live.py', 69), ('tests/e2e/test_worklist.py', 14)]:
+    def test_candidate_contract_remains_69_then_15(self):
+        for filename, count in [('tests/invariants_live.py', 69), ('tests/e2e/test_worklist.py', 15)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
 
@@ -619,7 +619,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
             self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
-            if index<2:self.assertEqual(len(plan['tests']),[69,14][index])
+            if index<2:self.assertEqual(len(plan['tests']),[69,15][index])
             if class_name:
                 self.assertTrue(all(row['case'].startswith(class_name+'.')
                                     for row in plan['tests']))

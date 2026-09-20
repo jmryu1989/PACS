@@ -624,7 +624,7 @@ jobs:
           "$RUNNER_TEMP/hp-python/bin/python" -m pip install -r tests/e2e/requirements.txt -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
       - name: Confirm exact declared invariants, worklist and hanging protocol selection
-        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file worklist-v0/hpacs-lite/main.html --file api/src/pacs.service.ts --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared invariants, worklist and hanging protocol tests
         timeout-minutes: 28
         run: |

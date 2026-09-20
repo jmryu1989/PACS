@@ -80,7 +80,7 @@ def extract_function(source, name):
 # the rules the product ships, not by a rule this test invents.
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
-BASE_BLOCK = slice_between(MAIN, "    const reportOrigin = new Map();", "    function reportSource()")
+BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
 # One contiguous region: report source, loadReport, the draft bar, the rebase pane,
 # stashReport and commitReport, exactly as they sit in the file.
 REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
@@ -119,11 +119,15 @@ function updateReportButtons() {}
 function updateReportTemplateButton() {}
 window.confirm = message => { confirms.push(message); return confirmAnswer; };
 window.navigator.clipboard = { writeText: value => { clipboard.push(value); } };
+let holdNext = false, releaseHeld = null;
 window.fetch = async (url, options = {}) => {
   const path = String(url).slice(API.length);
   calls.push({ method: options.method ?? "GET", path, body: options.body ? JSON.parse(options.body) : null });
   const reply = replies.shift() ?? { status: 200, body: {} };
-  return { ok: reply.status < 400, status: reply.status, json: async () => reply.body };
+  const answer = () => ({ ok: reply.status < 400, status: reply.status, json: async () => reply.body });
+  // A held reply lets a test move the selection while the request is still in flight.
+  if (holdNext) { holdNext = false; return new Promise(resolve => { releaseHeld = () => resolve(answer()); }); }
+  return answer();
 };
 function toast(message, kind) { toasts.push({ message, kind }); }
 function apiFail(e) { toast("서버 저장 실패: " + e.message, "err"); }
@@ -133,16 +137,19 @@ BASEBLOCK
 REPORTBLOCK
 window.load = options => loadReport(options);
 window.stash = () => stashReport();
-window.commit = (action, reason) => commitReport(action, reason);
-window.openPane = (uid, error) => openStaleRebase(uid, error);
+window.commit = (action, reason) => { window.pending = commitReport(action, reason); return window.pending; };
+window.openPane = (uid, seq, error) => openStaleRebase(uid, seq, error);
 window.reply = value => { replies.push(value); };
+window.hold = () => { holdNext = true; };
+window.release = () => { const resolve = releaseHeld; releaseHeld = null; resolve(); };
 window.text = () => RFIELDS.map(k => $("#" + k).value);
 window.type = values => { RFIELDS.forEach((k, i) => { $("#" + k).value = values[i]; }); };
-window.select = uid => { selectedUid = uid; };
+// The real counter: select() does exactly this before it redraws the right pane.
+window.select = uid => { markSelectionChanged(uid); };
 window.snapshot = () => ({
   calls: structuredClone(calls), toasts: structuredClone(toasts), confirms: structuredClone(confirms),
   clipboard: structuredClone(clipboard), text: window.text(), state: structuredClone(appState[selectedUid] ?? null),
-  stored: structuredClone(appState), base: reportBaseVersion(selectedUid, -1),
+  stored: structuredClone(appState), base: reportBaseVersion(selectedUid, -1), seq: selectionSeq,
   shown: $("#stalemodal").classList.contains("show"),
   pane: { head: RFIELDS.map(k => $("#stale-head-" + k).textContent), draft: RFIELDS.map(k => $("#stale-draft-" + k).textContent),
           title: $("#stale-head-title").textContent, message: $("#stale-msg").textContent,
@@ -198,7 +205,11 @@ class ReportRebaseDOMTest(unittest.TestCase):
         base[UID].update(state)
         self.page = self.browser.new_page()
         self.page.set_content(harness(base))
-        self.page.evaluate("load()")
+        # select() -> refreshRight({forceReport: true}): choosing a study is the one
+        # call that is allowed to replace the editor, and it is how a reader arrives
+        # here. A non-forced load would find the empty harness fields "dirty" and
+        # preserve them, so nothing would be drawn and no origin recorded.
+        self.page.evaluate("load({force: true})")
         return base
 
     def test_a_version_that_arrived_without_a_redraw_never_becomes_the_commit_base(self):
@@ -308,6 +319,75 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertEqual(before, len(value["calls"]), "a moved selection must not write the other study's text")
         self.assertIn("검사가 바뀌었습니다", value["pane"]["status"])
         self.assertTrue(value["pane"]["disabled"])
+
+    def test_a_refusal_that_lands_after_the_selection_moved_draws_nothing(self):
+        self.open(draft={"findings": "MY ADDENDUM", "conclusion": "", "recommendation": "", "baseVersion": 2, "at": "2026-09-20T01:00"})
+        self.page.evaluate("type(['MY ADDENDUM+', '', ''])")
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply(%s)" % json.dumps(stale_body()))
+        # Start the commit without awaiting it: the reply is held in flight.
+        self.page.evaluate("()=>{commit('addendum');}")
+        self.page.wait_for_function("()=>typeof releaseHeld==='function'")
+        # The reader moves to another study; the editor now holds that study's report.
+        self.page.evaluate("()=>{select('%s'); type(['OTHER PATIENT TEXT', '', '']);}" % OTHER)
+        self.page.evaluate("release()")
+        self.page.evaluate("()=>window.pending")
+        value = self.page.evaluate("snapshot()")
+        self.assertFalse(value["shown"], "two studies must never be shown as one comparison")
+        self.assertEqual(["", "", ""], value["pane"]["head"], "nothing may be drawn into the pane at all")
+        self.assertEqual(["", "", ""], value["pane"]["draft"])
+        self.assertEqual(["OTHER PATIENT TEXT", "", ""], value["text"], "the other study's editor is untouched")
+        self.assertEqual(1, len(value["calls"]))
+        message = value["toasts"][-1]["message"]
+        self.assertIn("다른 검사로 옮기기 전에", message)
+        self.assertNotIn(HEAD_FINDINGS.strip(), message)
+        self.assertNotIn("저장했습니다", message)
+        # The refused study keeps its draft bytes and its base.
+        self.assertEqual(2, value["stored"][UID]["draft"]["baseVersion"])
+        self.assertEqual("MY ADDENDUM", value["stored"][UID]["draft"]["findings"])
+
+    def test_a_surviving_draft_is_never_reported_as_the_loaded_server_report(self):
+        for rs, exit_words in [("T", "Discard Draft를 누르면"), ("A", "Addendum을 눌러")]:
+            with self.subTest(rs=rs):
+                self.open(rs=rs, version=1, findings="SERVER V1",
+                          draft={"findings": "MY DRAFT", "conclusion": "", "recommendation": "", "baseVersion": 1, "at": "2026-09-20T01:00"})
+                self.assertEqual(["MY DRAFT", "", ""], self.page.evaluate("snapshot().text"))
+                self.page.evaluate("()=>{confirmAnswer = true;}")
+                self.page.evaluate("reply({status: 409, body: {message: '그 사이 doctor2가 v2를 저장했습니다. 내용을 다시 불러온 뒤 작성해 주세요.'}})")
+                # The bootstrap answer carries the newer head and the reader's own draft row.
+                self.page.evaluate("reply(%s)" % json.dumps({"status": 200, "body": {"states": {UID: {
+                    "rs": rs, "version": 2, "findings": "SERVER V2", "conclusion": "", "recommendation": "",
+                    "draft": {"findings": "MY DRAFT", "conclusion": "", "recommendation": "", "baseVersion": 1, "at": "2026-09-20T01:00"}}}}}))
+                self.page.evaluate("commit('%s')" % ("save" if rs == "T" else "addendum"))
+                value = self.page.evaluate("snapshot()")
+                self.assertEqual(2, len(value["calls"]), "the bootstrap reload still happens")
+                self.assertEqual(["MY DRAFT"], value["clipboard"], "the typed text is still copied out")
+                # loadReport({force:true}) redraws reportSource(), which prefers the draft.
+                self.assertEqual(["MY DRAFT", "", ""], value["text"], "the screen still shows the draft")
+                self.assertEqual(2, value["state"]["version"], "the newer head was merged into the state")
+                message = value["toasts"][-1]["message"]
+                self.assertNotIn("서버 판독문을 불러왔습니다", message, "the screen does not show the server report")
+                self.assertIn("화면에 보이는 것은 초안입니다", message)
+                self.assertIn(exit_words, message)
+                self.assertNotIn("저장했습니다", message)
+                # Known limitation, asserted so it cannot change silently: the base returns
+                # to the draft's version, so pressing the same button again repeats the 409.
+                self.assertEqual(1, value["base"])
+                self.page.close()
+
+    def test_a_discarded_draft_still_reports_the_server_report_honestly(self):
+        self.open(rs="T", version=1, findings="SERVER V1",
+                  draft={"findings": "MY DRAFT", "conclusion": "", "recommendation": "", "baseVersion": 1, "at": "2026-09-20T01:00"})
+        self.page.evaluate("()=>{confirmAnswer = true;}")
+        self.page.evaluate("reply({status: 409, body: {message: '그 사이 doctor2가 v2를 저장했습니다. 내용을 다시 불러온 뒤 작성해 주세요.'}})")
+        # This time the server no longer holds a draft for this reader.
+        self.page.evaluate("reply(%s)" % json.dumps({"status": 200, "body": {"states": {UID: {
+            "rs": "T", "version": 2, "findings": "SERVER V2", "conclusion": "", "recommendation": "", "draft": None}}}}))
+        self.page.evaluate("commit('save')")
+        value = self.page.evaluate("snapshot()")
+        self.assertEqual(["SERVER V2", "", ""], value["text"])
+        self.assertIn("서버 판독문을 불러왔습니다", value["toasts"][-1]["message"])
+        self.assertEqual(2, value["base"], "the screen now stands on the version it drew")
 
     def test_the_old_optimistic_lock_branch_keeps_its_own_route(self):
         self.open(draft={"findings": "MY ADDENDUM", "conclusion": "", "recommendation": "", "baseVersion": 2, "at": "2026-09-20T01:00"})

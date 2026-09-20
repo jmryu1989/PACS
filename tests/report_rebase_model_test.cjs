@@ -45,7 +45,7 @@ function extractFunction(source, name) {
   throw new Error(`unbalanced ${name}`);
 }
 
-const blockStart = html.indexOf('    const reportOrigin = new Map();');
+const blockStart = html.indexOf('    let selectionSeq = 0;');
 const blockEnd = html.indexOf('    function reportSource()', blockStart);
 assert.ok(blockStart >= 0 && blockEnd > blockStart, 'The base-version block moved; re-pin the test');
 const sandbox = vm.createContext({});
@@ -77,6 +77,21 @@ test('TEST-S3-U3-ORIGIN: the rendered origin is the version the visible text sta
     'a hidden preliminary draft is not on the screen');
   assert.equal(call('renderedOrigin(__input)', {}), 0);
   assert.equal(call('renderedOrigin(__input)', null), 0);
+});
+
+test('TEST-S3-U3-SELECTION: every selection change is countable, so A→B→A is not the same selection', () => {
+  const start = call('selectionSeq');
+  call('markSelectionChanged("1.2.3")');
+  assert.equal(call('selectedUid'), '1.2.3');
+  assert.equal(call('selectionSeq'), start + 1);
+  call('markSelectionChanged("1.2.4")');
+  call('markSelectionChanged("1.2.3")');
+  assert.equal(call('selectedUid'), '1.2.3', 'the study is the same one again');
+  assert.equal(call('selectionSeq'), start + 3, 'but the screen was redrawn twice, so the sequence must differ');
+  // A deleted study clears the selection and that is a selection change too.
+  call('markSelectionChanged(null)');
+  assert.equal(call('selectedUid'), null);
+  assert.equal(call('selectionSeq'), start + 4);
 });
 
 test('TEST-S3-U3-ROUTE: the error code is read before the message, so a stale refusal never reloads', () => {
@@ -139,10 +154,31 @@ test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the prese
   assert.match(commit, /reportBaseVersion\(uid, appState\[uid\]\?\.version \?\? 0\)/);
   assert.doesNotMatch(commit, /baseVersion: appState\[uid\]\?\.version \?\? 0/,
     'a commit that carries the polled version defeats the optimistic lock');
+  const captured = commit.indexOf('const seq = selectionSeq;'), sent = commit.indexOf('await api("POST"');
+  assert.ok(captured >= 0 && sent > captured, 'the selection sequence must be captured before the request leaves');
   const routed = commit.indexOf('commitFailureRoute(e)'), substring = commit.indexOf('저장했습니다');
   assert.ok(routed >= 0 && substring > routed, 'the code branch must be decided before the substring branch');
   const stale = commit.slice(commit.indexOf('route === "stale"'), commit.indexOf('route === "reload"'));
   assert.doesNotMatch(stale, /loadReport|\.value/, 'a stale refusal must not redraw or rewrite the editor');
+  assert.match(stale, /openStaleRebase\(uid, seq, e\)/, 'the pane must be told which selection asked for it');
+
+  // The old optimistic-lock branch redraws; it must not redraw another study and it
+  // must not claim the server text was loaded while the screen still shows a draft.
+  const reload = commit.slice(commit.indexOf('route === "reload"'), commit.indexOf('toast("저장 실패: "'));
+  const guard = reload.indexOf('uid !== selectedUid || seq !== selectionSeq'), draw = reload.indexOf('loadReport({ force: true })');
+  assert.ok(guard >= 0 && draw > guard, 'the redraw must be behind the selection check');
+  // The statement, not the comment that quotes it.
+  const claim = reload.indexOf('toast("서버 판독문을 불러왔습니다'), kept = reload.indexOf('if (appState[uid]?.draft)');
+  assert.ok(kept >= 0 && claim > kept, 'the surviving draft decides which message is true');
+  assert.match(reload, /화면에 보이는 것은 초안입니다/);
+  assert.match(reload, /Discard Draft/);
+
+  const open = extractFunction(html, 'openStaleRebase');
+  const bound = open.indexOf('uid !== selectedUid || seq !== selectionSeq');
+  assert.ok(bound >= 0 && bound < open.indexOf('staleHeadOf(e)'),
+    'a refusal that outlived its selection must be refused before anything is drawn');
+  assert.ok(bound < open.indexOf('$("#stale-'), 'nothing may be written to the pane before that check');
+  assert.match(open, /selSeq: selectionSeq/, 'the pane records the selection it belongs to');
 
   const load = extractFunction(html, 'loadReport');
   assert.match(load, /if \(!preserveValue\) recordReportOrigin\(selectedUid, renderedOrigin\(r\)\);/,
@@ -154,5 +190,10 @@ test('TEST-S3-U3-WIRING: the shipped callers use the rendered base and the prese
   assert.match(rebase, /baseVersion: pane\.head\.version/, 'the rebase must carry exactly the displayed version');
   assert.doesNotMatch(rebase, /appState\[pane\.uid\]\?\.version|loadReport/,
     'the rebase must not adopt an unseen version nor redraw the editor');
-  assert.match(rebase, /pane\.uid !== selectedUid \|\| pane\.seq !== staleSeq/, 'the pane is bound to one study and one sequence');
+  assert.match(rebase, /pane\.uid !== selectedUid \|\| pane\.seq !== staleSeq \|\| pane\.selSeq !== selectionSeq/,
+    'the pane is bound to one study, one refusal and one selection');
+
+  const select = extractFunction(html, 'select');
+  assert.match(select, /markSelectionChanged\(uid\)/, 'the product, not the test harness, counts selection changes');
+  assert.doesNotMatch(select, /\n\s+selectedUid = uid;/, 'no selection change may bypass the counter');
 });

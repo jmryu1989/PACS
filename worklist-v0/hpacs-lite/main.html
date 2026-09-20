@@ -2407,7 +2407,7 @@
       relatedUid = null;
       relatedReportSeq += 1;
       clearRelatedReport();
-      selectedUid = uid;
+      markSelectionChanged(uid);
       relatedModality = ""; relatedBodyPart = ""; relatedIncludeCurrent = false;
       relatedParts.reset(uid);
       render(uid); refreshRight({ forceReport: true, deferViewer });
@@ -2886,7 +2886,7 @@
       studies = studies.filter(x => x.uid !== uid);
       delete appState[uid];
       if (selectedUid === uid) {
-        selectedUid = null;
+        markSelectionChanged(null);
         relatedUid = null;
         relatedReportSeq += 1;
         clearRelatedReport();
@@ -2995,6 +2995,21 @@
      * 초안을 그렸다면 기준은 그 초안이 딛고 선 판이다. 화면에 있는 글자의 출처가
      * 확정본이 아니라 초안이기 때문이다.
      */
+    /**
+     * 선택이 바뀐 횟수.
+     *
+     * 비동기 응답은 화면에 쓰기 직전에 **UID와 순번을 함께** 확인해야 한다. UID만 보면
+     * A→B→A로 돌아온 화면이 "같은 검사"로 보이지만, 그 사이 화면은 다시 그려졌고
+     * 지금 textarea에 있는 글은 그 요청이 떠날 때의 글이 아니다. `loadRelatedReport`가
+     * `relatedReportSeq`로 하는 것과 같은 검사이며, 여기서 틀리면 **다른 환자의 판독문**이
+     * 한 화면에 나란히 놓인다.
+     */
+    let selectionSeq = 0;
+    function markSelectionChanged(uid) {
+      selectedUid = uid;
+      selectionSeq += 1;
+    }
+
     const reportOrigin = new Map();
     function recordReportOrigin(uid, version) {
       if (!uid) return;
@@ -3153,11 +3168,24 @@
      * 병합은 하지 않는다 — 두 판독문을 기계가 섞으면 누구의 진술도 아닌 글이 남는다.
      */
     let staleSeq = 0, stalePane = null, staleBusy = false;
-    function openStaleRebase(uid, e) {
+    function openStaleRebase(uid, seq, e) {
+      /**
+       * **그리기 전에** UID와 선택 순번을 함께 확인한다.
+       *
+       * 확정 요청이 나가 있는 동안 다른 검사를 고르면 textarea에는 이미 **그 검사의**
+       * 판독문이 들어 있다. 거기에 A의 승인본을 나란히 그리면 두 환자의 판독문이
+       * 한 비교 화면이 된다 — 아무것도 쓰지 않더라도 그 자체가 오독의 원인이다.
+       * A→B→A도 같은 선택이 아니다: 그 사이 화면이 다시 그려졌다.
+       */
+      if (uid !== selectedUid || seq !== selectionSeq) {
+        toast("다른 검사로 옮기기 전에 누른 추가기재가 거절됐습니다 — 승인본이 바뀌었습니다. " +
+              "그 검사로 돌아가 다시 확인하세요. 쓰던 내용은 그대로 있습니다.", "err");
+        return;
+      }
       const head = staleHeadOf(e);
       // 모양이 아니면 아무것도 "승인본"이라고 보여주지 않는다. 그때는 일반 실패로 끝낸다.
       if (!head) { toast("저장 실패: " + e.message, "err"); return; }
-      stalePane = { uid, seq: ++staleSeq, head };
+      stalePane = { uid, seq: ++staleSeq, selSeq: selectionSeq, head };
       $("#stale-msg").textContent =
         `이 초안은 v${head.draftBaseVersion ?? "?"}을 기준으로 씁니다. 그 뒤 v${head.version}이 승인됐습니다 — ` +
         `아래 승인본을 확인한 뒤 정하세요. 쓰던 내용은 그대로 두었습니다.`;
@@ -3179,8 +3207,8 @@
       const pane = stalePane;
       if (!pane || staleBusy) return;
       // 화면에 쓰기 직전에 UID와 순번을 함께 확인한다. 안내가 열린 사이에 검사를 옮겼다면
-      // 지금 textarea에 있는 글은 **다른 검사의 글**이다 (교훈: A→B→A).
-      if (pane.uid !== selectedUid || pane.seq !== staleSeq) {
+      // 지금 textarea에 있는 글은 **다른 검사의 글**이다 (교훈: A→B→A — 돌아와도 같은 선택이 아니다).
+      if (pane.uid !== selectedUid || pane.seq !== staleSeq || pane.selSeq !== selectionSeq) {
         $("#stale-status").textContent = "검사가 바뀌었습니다 — 이 안내를 닫고 다시 확인하세요.";
         $("#stale-rebase").disabled = true;
         return;
@@ -3225,7 +3253,7 @@
     $("#stale-discard").addEventListener("click", async () => {
       // 기존 출구 그대로다. 버리는 것은 여전히 사람이 명시로 고르는 일이고 확인창도 그대로다.
       const uid = stalePane?.uid;
-      if (!uid || uid !== selectedUid) { closeStaleRebase(); return; }
+      if (!uid || uid !== selectedUid || stalePane.selSeq !== selectionSeq) { closeStaleRebase(); return; }
       await discardDraft();
       if (!appState[uid]?.draft) closeStaleRebase();
     });
@@ -3354,6 +3382,8 @@
         const mine = !!appState[uid]?.draft || reportDirty();
         const baseVersion = mine ? reportBaseVersion(uid, appState[uid]?.version ?? 0)
                                  : (appState[uid]?.version ?? 0);
+        // 응답이 돌아왔을 때 "그때 그 선택인가"를 판단할 기준. 요청이 떠나기 전에 잡는다.
+        const seq = selectionSeq;
         try {
           const st = await api("POST", `/studies/${encodeURIComponent(uid)}/report/commit`,
             { action, reason, reviewer, baseVersion, ...content });
@@ -3372,7 +3402,7 @@
            * textarea도, 초안 행도 그대로 두고 **서버가 보낸 승인본**을 옆에 펼쳐
            * 사람이 읽고 정하게 한다. 다시 불러오기(force)는 하지 않는다.
            */
-          if (route === "stale") { openStaleRebase(uid, e); return; }
+          if (route === "stale") { openStaleRebase(uid, seq, e); return; }
           if (route === "reload") {
             toast(e.message, "err");
             if (confirm(e.message + "\n\n서버의 최신 판독문을 불러올까요?\n(지금 쓰던 내용은 클립보드로 복사됩니다)")) {
@@ -3381,8 +3411,27 @@
               const b = await api("GET", "/bootstrap");
               appState[uid] = { ...appState[uid], ...b.states[uid] };
               syncStudy(uid);
+              // 확인창과 응답을 기다리는 사이에 다른 검사로 갔다면 그 화면을 덮지 않는다.
+              // 받아온 상태는 남기되(자료다), 그리는 것은 그때 그 선택일 때만 한다.
+              if (uid !== selectedUid || seq !== selectionSeq) { render(); return; }
               loadReport({ force: true }); render(); renderRelated(); updateReportButtons();
-              toast("서버 판독문을 불러왔습니다. 쓰던 내용은 클립보드에 있습니다.", "info");
+              /**
+               * **화면에 있는 것을 그대로 말한다.**
+               *
+               * 초안이 남아 있으면 방금 force로 다시 그린 것도 **여전히 내 초안**이다
+               * (`reportSource()`가 초안을 먼저 고른다). 그런데 "서버 판독문을 불러왔습니다"라고
+               * 말하면 사용자는 최신 승인본을 보고 있다고 믿고 같은 확정을 다시 누른다 —
+               * 기준 판이 초안의 것으로 돌아가므로 같은 409가 그대로 반복된다.
+               * 나가는 길을 이름으로 말해주는 편이 정확하다.
+               */
+              if (appState[uid]?.draft)
+                toast("쓰던 초안을 그대로 두었습니다 — 화면에 보이는 것은 초안입니다. " +
+                      (appState[uid]?.rs === "A"
+                        ? "Discard Draft로 서버 내용을 보거나, Addendum을 눌러 승인본을 확인하고 기준을 다시 잡으세요."
+                        : "Discard Draft를 누르면 서버 내용으로 돌아갑니다.") +
+                      " 쓰던 내용은 클립보드에 있습니다.", "info");
+              else
+                toast("서버 판독문을 불러왔습니다. 쓰던 내용은 클립보드에 있습니다.", "info");
             }
             return;
           }
