@@ -267,7 +267,7 @@ export class FindingService {
       AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
     // The same snapshot names every comparison study these findings reach and decides which of them
     // this caller may read; the row statement then drops findings whose lineage leaves that set.
-    const foreign = comparisonStudies(uid, (await tx.$queryRaw<any[]>`SELECT DISTINCT l.uid
+    const foreign = comparisonStudies(uid, (await tx.$queryRaw`SELECT DISTINCT l.uid
       FROM "Finding" f CROSS JOIN LATERAL (${LINEAGE}) l
       WHERE f."studyUid" = ${uid} AND f.id IN (${keys})`).map((row: any) => row.uid));
     const studies = [uid];
@@ -277,7 +277,7 @@ export class FindingService {
       const { readable } = comparable(rows.find((row: any) => row.uid === uid), rows, allowed, c);
       studies.push(...foreign.filter(study => readable.has(study)));
     }
-    const [row] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})
+    const [row] = await tx.$queryRaw`WITH parent AS (${parent})
       SELECT COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
         SELECT f.id, f.revision, f.hidden, f.snapshot->'sources' AS sources, ${SOURCE_LINKS} AS links
         FROM "Finding" f JOIN parent p ON p.uid = f."studyUid"

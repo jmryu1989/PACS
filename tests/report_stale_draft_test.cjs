@@ -23,6 +23,8 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
       if (sql.includes('FROM "StudyState"')) return [{ uid: UID }];
+      // Order matters: the draft table name also starts with "Report".
+      if (sql.includes('FROM "ReportDraft"')) return draft ? [{ citations: null }] : [];
       if (sql.includes('FROM "Report"')) return head ? [head] : [];
       throw new Error('unexpected raw query: ' + sql);
     },
@@ -99,7 +101,12 @@ test('callers without a draft, and drafts standing on the head, keep the existin
     await f.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER);
     assert.deepEqual(f.writes, ['studyState.update', 'report.upsert:v5', 'reportVersion.create:v5:addendum', 'reportDraft.deleteMany'],
       `draft ${JSON.stringify(draft)}`);
-    assert.equal(f.raw.length, 2);
+    // Was a bare count of 2. A commit now also locks the draft row it is about to delete, so that a
+    // same-author insertion from another tab cannot be read past and then deleted; name the three
+    // locks instead of counting them, in the order that keeps them cycle-free.
+    assert.deepEqual(f.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'Report', 'ReportDraft'],
+      `draft ${JSON.stringify(draft)}`);
+    assert.equal(f.raw.filter(sql => sql.includes('FOR UPDATE')).length, 3);
   }
 });
 

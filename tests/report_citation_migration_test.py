@@ -191,6 +191,39 @@ class LeakBoundaryTests(SourceCase):
         self.assertIn("studyAccess.prepare(c)", read,
                       "lineage authorization has to be prepared before the transaction")
 
+    def test_the_read_asks_one_row_at_a_time(self) -> None:
+        # head + draft can name 128 distinct findings while each row is individually legal. Asking
+        # for all of them at once trips the 64 cap of the very query that lists the cids, so the
+        # signer told to "remove some" cannot see what to remove.
+        read = body_of(self.service, "async reportCitations(")
+        self.assertNotIn("entries * 2", read, "one call for both rows can ask for 128 ids and trip the 64 cap")
+        self.assertIn("for (const ids of [findingIds(head), findingIds(mine)])", read)
+
+    def test_the_commit_locks_the_draft_row_it_deletes(self) -> None:
+        # Reading the draft's citations unlocked and deleting the row later loses a same-author
+        # insertion that lands in between - the user's own confirmed work.
+        commit = body_of(self.service, "async commitReport(")
+        statement = 'FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE'
+        # assertIn first: a missing lock has to read as this failure, not as a ValueError from index().
+        self.assertIn(statement, commit, "the commit must take the row lock the insertion also takes")
+        lock = commit.index(statement)
+        self.assertLess(lock, commit.index("reportDraft.deleteMany"))
+        self.assertLess(commit.index('FROM "Report" WHERE uid = ${uid} FOR UPDATE'), lock,
+                        "one lock order for every path: StudyState, Report, then my draft")
+
+    def test_the_forced_release_retry_is_inside_the_same_mapping(self) -> None:
+        force = body_of(self.service, "async forceDiscardDrafts(")
+        self.assertIn("this.citationChecked(", force)
+        self.assertIn("if (e?.code !== 'P2002')", force)
+        self.assertLess(force.index("this.citationChecked("), force.index("if (e?.code !== 'P2002')"),
+                        "a CHECK raised by the retry would otherwise surface as a 500")
+
+    def test_both_counts_use_one_equivalence(self) -> None:
+        counts = body_of(self.pure, "export function sameTextCounts(")
+        self.assertIn("comparisonKey(", counts)
+        self.assertNotIn("normalizeForCompare(", counts)
+        self.assertIn("blockLines(text).join(", body_of(self.pure, "export function comparisonKey("))
+
     def test_the_insertion_prepares_access_outside_the_transaction(self) -> None:
         put = body_of(self.service, "async putReport(")
         prepare = put.index("studyAccess.prepare(c)")

@@ -36,7 +36,7 @@ const carried = (cid, at = '2026-09-01T00:00:00.000Z', by = 'other@synthetic') =
   headRevisionAtInsert: 1, insertedText: '이전 줄', insertedAt: at, insertedBy: by });
 
 function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@synthetic', findings: 'HEAD', conclusion: '', recommendation: '' },
-  versions = new Map(), draft = null, readable = READABLE, bytes = null, fail = null } = {}) {
+  versions = new Map(), draft = null, readable = READABLE, readableAll = false, bytes = null, fail = null } = {}) {
   const writes = [], audits = [], raw = [], calls = [], created = [];
   const tx = {
     $executeRaw: async () => 0,
@@ -82,6 +82,10 @@ function fixture({ state = STATE, report = { version: 4, updatedBy: 'doctor2@syn
     allowed: async () => new Set() };
   const findings = { readableFindings: async (_tx, _c, uid, ids) => {
     calls.push({ call: 'readableFindings', uid, ids });
+    // The real method refuses more than one report's worth of ids (contract 5-12 "at most 64").
+    // A stub that accepted any length is what let the dedicated read ask for 128 unnoticed.
+    if (ids.length > 64) throw Object.assign(new Error('readableFindings asked for ' + ids.length + ' ids'), { cap: true });
+    if (readableAll) return ids.map(id => ({ id, revision: 1, hidden: false, sources: [], links: [] }));
     return readable.filter(row => uid === UID && ids.includes(row.id));
   } };
   const keycloak = { usersInGroupWithRole: async () => [] };
@@ -110,7 +114,15 @@ test('the shared vectors decide the compiled rule, not the other way round', () 
   for (const c of vectors.blank) assert.equal(citation.blockIsBlank(c.block), c.refused, c.name);
   for (const c of vectors.sameText) assert.deepEqual(citation.sameTextCounts(c.entries), c.counts, c.name);
   for (const c of vectors.state) assert.equal(citation.presenceState(c.k, c.n), c.state, c.name);
-  assert.ok(vectors.occurrence.length >= 20, 'the oracle must not be thinned');
+  // n and k must come from one equivalence, or two citations over a single occurrence both claim
+  // the text is still there.
+  for (const c of vectors.equivalence) {
+    assert.deepEqual(c.entries.map(e => citation.lineBlockOccurrences(c.body, e.insertedText)), c.k, c.name);
+    const counts = citation.sameTextCounts(c.entries);
+    assert.deepEqual(counts, c.counts, c.name);
+    assert.deepEqual(counts.map((n, i) => citation.presenceState(c.k[i], n)), c.states, c.name);
+  }
+  assert.ok(vectors.occurrence.length >= 20 && vectors.equivalence.length >= 5, 'the oracle must not be thinned');
 });
 
 test('the keep list is an intersection over my own draft: absent means unchanged, unknown is ignored', () => {
@@ -145,6 +157,18 @@ test('the insert shape refuses what it cannot bound and silently drops what the 
     headRevisionAtInsert: 99, v: 9 });
   assert.deepEqual(Object.keys(forged).sort(),
     ['expectedHeadRevision', 'expectedLinkState', 'field', 'findingId', 'findingRevision', 'insertedText', 'sourceIndex']);
+});
+
+test('text the database cannot store is a request error, not a 500 from the byte query', () => {
+  // jsonb refuses NUL and unpaired surrogates. Without this the insertion would die inside the
+  // measuring query and the author would be told the server broke, with nothing to fix.
+  const nul = String.fromCharCode(0), lone = String.fromCharCode(0xd800);
+  for (const bad of [LINE + nul, nul + LINE, LINE + lone])
+    assert.throws(() => citation.citationInsertInput({ ...INSERT, insertedText: bad }), citation.CitationInputError,
+      'code points ' + [...bad].map(ch => ch.codePointAt(0)).join(','));
+  // A real astral character is a single code point and stays perfectly storable.
+  const astral = String.fromCodePoint(0x1f600) + ' 결절';
+  assert.equal(citation.citationInsertInput({ ...INSERT, insertedText: astral }).insertedText, astral);
 });
 
 test('a validated insertion is attested by the server alone, in the same write as the sentence', async () => {
@@ -313,6 +337,35 @@ test('the only new refusal at signing is the named limit, and it never routes an
   assert.deepEqual(f.writes, [], 'the draft and its citations survive the refusal');
 });
 
+test('an insertion is refused before the union can exceed the cap, and a keep list is the way back', async () => {
+  // The preventive check at insertion time: head + my draft + 1. It is not authoritative (the head
+  // is read unlocked) but it is what keeps an ordinary insertion from building a draft that can
+  // never be signed.
+  const head = Array.from({ length: 40 }, (_, i) => carried('h' + i));
+  const mine = Array.from({ length: 24 }, (_, i) => carried('m' + i, '2026-09-03T00:00:00.000Z', 'me@synthetic'));
+  const versions = new Map([[4, { citations: head }]]);
+  const f = fixture({ versions, draft: { baseVersion: 4, citations: mine } });
+  const body = await refusal(put(f, { insert: INSERT }), 409);
+  assert.equal(body.code, 'REPORT_CITATION_LIMIT');
+  assert.deepEqual(f.writes, [], 'nothing is written, so the draft the user is typing survives');
+
+  // An autosave that only shrinks the list is never limit-refused - that is the exit.
+  const recovering = fixture({ versions, draft: { baseVersion: 4, citations: mine } });
+  await put(recovering, { citationIds: mine.slice(0, 10).map(e => e.cid) });
+  assert.equal(stored(recovering).length, 10);
+  assert.deepEqual(recovering.raw.filter(sql => sql.includes('octet_length')), [],
+    'a keep-list-only PUT does not even measure: it cannot grow');
+});
+
+test('emptying the report deletes the draft row and the attestation of text that is gone', async () => {
+  const f = fixture({ draft: { baseVersion: 4, citations: [carried('a')] } });
+  const answer = await f.svc.putReport(UID, { findings: '', conclusion: '', recommendation: '', baseVersion: 4 }, CALLER);
+  assert.equal(answer.cleared, true);
+  assert.deepEqual(f.writes, ['reportDraft.deleteMany']);
+  // No text, no attestation: the row carries both or neither.
+  assert.deepEqual(f.audits.map(a => a.action), ['report.draft.clear']);
+});
+
 test('the byte bound is whatever the database measured, not a shorter local guess', async () => {
   const f = fixture({ versions: new Map([[4, { citations: [carried('a')] }]]), draft: { baseVersion: 4 }, bytes: 65537 });
   const body = await refusal(commit(f, { action: 'approve' }), 409);
@@ -346,6 +399,23 @@ test('a citation CHECK becomes the same named 409 on all three write paths, and 
   assert.notEqual(e.getStatus?.(), 409);
 });
 
+test('a version-number collision retries, and a CHECK on the retry leg is the same named 409', async () => {
+  const f = fixture({ draft: { baseVersion: 4 } });
+  f.tx.$queryRaw = async strings => (strings.join('?').includes('StudyState') ? [{ uid: UID }]
+    : [{ uid: UID, author: 'a@synthetic', findings: 'A', conclusion: '', recommendation: '', baseVersion: 1, citations: [carried('mine')], updatedAt: 'now' }]);
+  let attempt = 0;
+  f.tx.reportVersion.createMany = async () => {
+    attempt += 1;
+    // First a real number collision with a concurrent commit, then the CHECK on the second try.
+    if (attempt === 1) throw Object.assign(new Error('unique constraint'), { code: 'P2002' });
+    throw fail_error();
+  };
+  const body = await refusal(f.svc.forceDiscardDrafts(UID, { ...CALLER, roles: ['admin'] }), 409);
+  assert.equal(attempt, 2, 'the collision really did retry');
+  assert.equal(body.code, 'REPORT_CITATION_LIMIT',
+    'mapping only the first attempt would let the same request answer two different ways');
+});
+
 test('the history response names its columns and the new one is not among them', async () => {
   const f = fixture();
   await f.svc.versions(UID, CALLER);
@@ -372,15 +442,32 @@ test('the dedicated read re-gates finding readability and reduces what it cannot
   assert.equal(answer.draft[0].sameTextCount, 1, 'the draft row is counted on its own');
 });
 
+test('the over-limit state the signer has to escape from is exactly the one the read must answer', async () => {
+  // head 40 + draft 30 is the contract's own named case: each row is legal on its own, the union is
+  // not, and commit says "remove some". Asking for all 70 ids at once would trip the 64 cap of the
+  // very query that lists the cids, leaving the signer told to remove something they cannot see.
+  const head = Array.from({ length: 40 }, (_, i) => ({ ...carried('h' + i), findingId: 'head-finding-' + i }));
+  const mine = Array.from({ length: 30 }, (_, i) => ({ ...carried('m' + i), findingId: 'draft-finding-' + i }));
+  const f = fixture({ versions: new Map([[4, { citations: head }]]), draft: { baseVersion: 4, citations: mine }, readableAll: true });
+  const answer = await f.svc.reportCitations(UID, CALLER);
+  assert.equal(answer.head.length, 40);
+  assert.equal(answer.draft.length, 30);
+  assert.equal(answer.head.every(e => e.state === undefined), true, 'every entry stayed readable');
+  const asked = f.calls.filter(c => c.call === 'readableFindings').map(c => c.ids.length);
+  assert.deepEqual(asked, [40, 30], 'one call per row, each inside the 64 cap');
+});
+
 test('the citation read answers the report gates first', async () => {
   const hidden = fixture({ state: { ...STATE, rs: 'P', preDoc: 'other@synthetic', preReviewer: 'boss@synthetic' } });
   await refusal(hidden.svc.reportCitations(UID, CALLER), 403);
   const absent = fixture({ state: null });
   await refusal(absent.svc.reportCitations(UID, CALLER), 404);
-  const technician = fixture();
-  // A technician may read the study but never the attestation of a report they cannot write.
+  // The gate is the one versions() uses (contract 5-12): institution, study, preliminary - not role.
+  // A technician therefore reads the head attestation, and only ever their own draft, which is none.
+  const technician = fixture({ versions: new Map([[4, { citations: [carried('a')] }]]) });
   const answer = await technician.svc.reportCitations(UID, { ...CALLER, roles: ['technician'] });
-  assert.deepEqual(answer.draft, [], 'no draft of theirs, and no one else\'s');
+  assert.equal(answer.head.length, 1, 'the head attestation follows the same gate as the history');
+  assert.deepEqual(answer.draft, [], 'a draft belongs to its author; no one else\'s is ever returned');
 });
 
 test('no audit line carries a source pointer or clinical text', async () => {

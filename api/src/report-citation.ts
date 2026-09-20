@@ -114,11 +114,24 @@ export function citationArray(value: any): any[] {
 export function sameTextCounts(entries: any[]): number[] {
   const tally = new Map<string, number>();
   const keys = entries.map(entry => {
-    const key = String(entry?.field ?? '') + '\u0000' + normalizeForCompare(entry?.insertedText ?? '');
+    const key = String(entry?.field ?? '') + '\u0000' + comparisonKey(entry?.insertedText ?? '');
     tally.set(key, (tally.get(key) ?? 0) + 1);
     return key;
   });
   return keys.map(key => tally.get(key) ?? 0);
+}
+
+/**
+ * `n`과 `k`는 **같은 등식**을 써야 한다.
+ *
+ * `k`는 줄 블록으로 세므로 블록 끝의 LF를 마지막 줄의 종결자로 흡수한다. `n`이 그 규칙 없이
+ * 세면 `"A line"`과 끝에 LF가 붙은 같은 글은 본문의 **같은 한 줄**을 두고 경쟁하면서도 서로
+ * 다른 글로 세어져, 출현이 하나뿐인데 두 건 모두 `present`가 된다. 정직한 답은 `ambiguous`다.
+ *
+ * 저장된 `insertedText` 바이트는 건드리지 않는다. 이것은 **비교용 키**일 뿐이다.
+ */
+export function comparisonKey(text: string): string {
+  return blockLines(text).join('\n');
 }
 
 /**
@@ -182,6 +195,20 @@ export function citationSourceRef(source: any) {
 const isPlainString = (value: any) => typeof value === 'string';
 const isIndex = (value: any) => Number.isSafeInteger(value) && value >= 0;
 
+/**
+ * `jsonb`는 NUL도 짝 없는 서러게이트도 담지 못한다. 걸러내지 않으면 그 글자가 든 삽입은
+ * 한도를 재는 질의에서 데이터베이스 오류로 터져 **500**이 되고, 사용자는 무엇이 잘못됐는지
+ * 들을 수 없다. 같은 이유로 같은 두 글자를 거절하는 선례가 `saveTechNote`에 있다.
+ * (`for...of`는 코드 포인트 단위라 정상적인 서러게이트 쌍은 하나의 큰 코드 포인트로 나온다.)
+ */
+function storable(text: string): boolean {
+  for (const ch of text) {
+    const code = ch.codePointAt(0) as number;
+    if (code === 0 || (code >= 0xd800 && code <= 0xdfff)) return false;
+  }
+  return true;
+}
+
 /** 클라이언트가 보낸 cid 목록. 모양이 아니면 거절한다 — 모르는 **값**만 무시 대상이다. */
 export function citationIdList(value: any, what: string): string[] | undefined {
   if (value === undefined) return undefined;
@@ -214,6 +241,8 @@ export function citationInsertInput(value: any): ReportCitationInsert {
     throw new CitationInputError(`삽입 문구가 ${REPORT_CITATION_LIMITS.insertedText}바이트를 넘습니다`);
   if (blockIsBlank(value.insertedText))
     throw new CitationInputError('공백만 있는 문구는 인용할 수 없습니다');
+  if (!storable(value.insertedText))
+    throw new CitationInputError('잘못된 문자 인코딩입니다');
   if (!isPlainString(value.expectedLinkState) || !value.expectedLinkState)
     throw new CitationInputError('insert.expectedLinkState가 필요합니다');
   if (value.expectedHeadRevision !== null && !isIndex(value.expectedHeadRevision))

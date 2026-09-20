@@ -57,8 +57,15 @@ def occurrences(body: str, block: str) -> int:
     return count
 
 
+def comparison_key(text: str) -> str:
+    """n and k must use one equivalence. k counts whole-line blocks, so the block's final LF is a
+    terminator there; if n ignored that, two citations competing for one occurrence would both read
+    'present' while only one line exists."""
+    return "\n".join(block_lines(text))
+
+
 def same_text_counts(entries: list[dict]) -> list[int]:
-    keys = [(entry["field"], normalize(entry["insertedText"])) for entry in entries]
+    keys = [(entry["field"], comparison_key(entry["insertedText"])) for entry in entries]
     return [keys.count(key) for key in keys]
 
 
@@ -134,6 +141,28 @@ class VectorFileTests(unittest.TestCase):
             with self.subTest(case["name"]):
                 self.assertEqual(presence(case["k"], case["n"]), case["state"])
 
+    def test_equivalence_vectors_tie_k_and_n_to_one_rule(self) -> None:
+        """The defect this section exists for: if n keys on raw normalized text while k absorbs the
+        block's final LF, two citations competing for a single occurrence both report 'present'."""
+        for case in self.data["equivalence"]:
+            with self.subTest(case["name"]):
+                texts = [entry["insertedText"] for entry in case["entries"]]
+                self.assertEqual([occurrences(case["body"], text) for text in texts], case["k"])
+                counts = same_text_counts(case["entries"])
+                self.assertEqual(counts, case["counts"], case.get("why", ""))
+                self.assertEqual([presence(k, n) for k, n in zip(case["k"], counts)], case["states"])
+
+    def test_one_equivalence_is_used_for_both_counts(self) -> None:
+        # A regression guard on the rule itself, independent of the vector list.
+        self.assertEqual(comparison_key("A line"), comparison_key("A line\n"))
+        self.assertEqual(comparison_key("A line"), comparison_key("A line\r"))
+        self.assertEqual(comparison_key("one\r\ntwo"), comparison_key("one\ntwo"))
+        self.assertNotEqual(comparison_key("A line"), comparison_key("\nA line"))
+        self.assertNotEqual(comparison_key("A line"), comparison_key("A line\n\n"))
+        # The key never touches the stored bytes: two citations may share n and still be different
+        # records with their own attested text.
+        self.assertNotEqual("A line", "A line\n")
+
     def test_assembly_vectors(self) -> None:
         # S3-U2b consumes these; they are pinned now so the client cannot invent a different
         # template later. No U2a product code reads them.
@@ -157,6 +186,9 @@ class VectorFileTests(unittest.TestCase):
         self.assertTrue(any("whitespace" in name or "space" in name for name in names))
         self.assertIn("A3(iv)", text)
         self.assertGreaterEqual(len(self.data["occurrence"]), 20)
+        # N-C3: the section that binds n to k must not be dropped.
+        self.assertGreaterEqual(len(self.data["equivalence"]), 5)
+        self.assertTrue(any(case["states"] == ["ambiguous", "ambiguous"] for case in self.data["equivalence"]))
 
     def test_assembled_blocks_are_findable_in_a_report_field(self) -> None:
         """The two halves meet here: what R5 assembles must satisfy the block rule it will be

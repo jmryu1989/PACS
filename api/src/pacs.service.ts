@@ -1667,7 +1667,7 @@ export class PacsService implements OnModuleInit {
     if (keep === undefined && !wantsInsert) return null;
     // 내 행을 먼저 잠근다. 두 탭의 PUT이 본문과 인용을 결정적으로 짝짓게 하는 유일한 방법이다.
     // 남과 경합하지 않는다 — 초안 행의 키는 (uid, author)다.
-    const [locked] = await tx.$queryRaw<any[]>`
+    const [locked] = await tx.$queryRaw`
       SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
     const { kept, ignored } = applyKeepList(citationArray(locked?.citations), keep);
     let inserted: { cid: string; field: string; insertedAt: string } | null = null;
@@ -1749,7 +1749,7 @@ export class PacsService implements OnModuleInit {
   private async citationBudget(tx: any, entries: any[]) {
     if (entries.length > REPORT_CITATION_LIMITS.entries) citationLimit();
     if (!entries.length) return;
-    const [row] = await tx.$queryRaw<any[]>`
+    const [row] = await tx.$queryRaw`
       SELECT octet_length(convert_to(${canonical(entries)}::jsonb::text, 'UTF8')) AS bytes`;
     if (Number(row.bytes) > REPORT_CITATION_LIMITS.bytes) citationLimit();
   }
@@ -1868,14 +1868,17 @@ export class PacsService implements OnModuleInit {
       return { ok: true, count: drafts.length, drafts: summary, versions };
     });
 
-    try {
-      return await run();
-    } catch (e: any) {
-      if (isCitationCheck(e)) citationLimit();
-      // 다른 판독 확정이 같은 (uid, version)을 먼저 썼다면, 새 번호로 전체 작업을 한 번만 다시 한다.
-      if (e?.code !== 'P2002') throw e;
-      return run();
-    }
+    // 재시도 다리까지 **같은 매핑 안에 둔다.** 첫 시도만 감싸면 번호 충돌로 다시 돈 실행에서
+    // 나온 CHECK 위반이 500으로 새어 나가고, 같은 요청이 두 가지 답을 갖게 된다.
+    return this.citationChecked(async () => {
+      try {
+        return await run();
+      } catch (e: any) {
+        // 다른 판독 확정이 같은 (uid, version)을 먼저 썼다면, 새 번호로 전체 작업을 한 번만 다시 한다.
+        if (e?.code !== 'P2002') throw e;
+        return run();
+      }
+    });
   }
 
   /**
@@ -2092,8 +2095,20 @@ export class PacsService implements OnModuleInit {
          * 낙관적 락 **뒤**에 읽는다. 거절되는 확정은 아무것도 더 읽지 않아야 한다.
          */
         const headCitations = await this.versionCitations(tx, uid, cur?.version ?? 0);
-        const mine = await tx.reportDraft.findUnique({
-          where: { uid_author: { uid, author: c.actor } }, select: { citations: true } });
+        /**
+         * 내 초안 행을 **잠그고** 읽는다.
+         *
+         * 잠그지 않으면 다른 탭의 삽입이 이 읽기와 아래의 초안 삭제 사이에 끼어들 수 있고,
+         * 그러면 사용자가 미리보기에서 확인까지 마친 문장의 증언이 행과 함께 사라진다 —
+         * 잃는 것이 남의 것이 아니라 **본인이 방금 한 일**이다. 삽입도 같은 행을 같은 방식으로
+         * 잠그므로 둘은 순서대로 선다: 삽입이 먼저면 여기서 함께 읽히고, 확정이 먼저면 삽입은
+         * 행이 사라진 뒤에 자기 행을 새로 만든다. 어느 쪽도 조용히 없어지지 않는다.
+         *
+         * 잠금 순서는 StudyState → Report → 내 초안이고, 강제 해제는 StudyState → 초안들,
+         * 삽입은 내 초안 하나뿐이다. 모두 같은 방향이라 순환이 없다.
+         */
+        const [mine] = await tx.$queryRaw<any[]>`
+          SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
         const { kept, ignored } = applyKeepList(citationArray(mine?.citations), keepIds);
         const union = citationUnion(headCitations, removeIds, kept);
         // 세 칸이 빈 확정과 reset은 본문이 없으니 증언할 것도 없다.
@@ -2276,10 +2291,18 @@ export class PacsService implements OnModuleInit {
       const draft = await tx.reportDraft.findUnique({
         where: { uid_author: { uid, author: c.actor } }, select: { citations: true } });
       const mine = citationArray(draft?.citations);
-      const ids = [...new Set([...head, ...mine].map(entry => String(entry?.findingId ?? '')).filter(Boolean))];
-      // 한 판독문의 한도가 그대로 이 질의의 한도다(머리 + 초안이라 두 배까지).
-      const readable = new Set((await this.findings.readableFindings(tx, c, uid, ids.slice(0, REPORT_CITATION_LIMITS.entries * 2)))
-        .map((row: any) => String(row.id)));
+      /**
+       * **행마다 따로 묻는다.** 한 행은 CHECK가 64건으로 묶지만 머리 + 초안은 128건까지 갈 수
+       * 있고, 바로 그 상태(머리 40 + 초안 30)가 확정이 `REPORT_CITATION_LIMIT`으로 거절하는
+       * 경우다. 한 번에 물으면 그 질의가 64 한도에 먼저 걸려 409가 되고, **어떤 `cid`를 지워야
+       * 하는지 알려주는 유일한 표면**이 닫힌다 — "제거하면 서명할 수 있다"고 말해놓고 제거할
+       * 대상을 못 보여주는 셈이다.
+       */
+      const findingIds = (entries: any[]) =>
+        [...new Set(entries.map(entry => String(entry?.findingId ?? '')).filter(Boolean))];
+      const readable = new Set<string>();
+      for (const ids of [findingIds(head), findingIds(mine)])
+        for (const row of await this.findings.readableFindings(tx, c, uid, ids)) readable.add(String(row.id));
       /**
        * `sameTextCount`는 **그 행 전체**(축약된 건 포함)에서 센다. 화면이 자기가 받은
        * 건수로 세면 축약된 건이 빠져, `ambiguous`여야 할 것이 `present`로 보인다.

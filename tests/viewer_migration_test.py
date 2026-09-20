@@ -194,6 +194,153 @@ SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding"
         self.refuses('citations_restored','''UPDATE "ReportVersion" SET citations='{}'::jsonb''','ReportVersion_citations_check')
         self.sql('citations_restored','''UPDATE "ReportVersion" SET citations='[]'::jsonb''')
 
+    # The application half of the citation CHECK: the same PacsService the product runs, over a real
+    # PrismaClient, against a real migrated database. Everything else in this file reads the
+    # constraint name through PL/pgSQL, which proves the database refuses but says nothing about what
+    # the driver hands the service - and the named 409 is decided by exactly that.
+    CITATION_PRELUDE = """
+const assert=require('node:assert/strict'),{PrismaClient}=require('@prisma/client');
+const {PacsService}=require('./dist/pacs.service.js');
+const UID=process.env.SYNTHETIC_UID, ITEM='00000000-0000-4000-8000-0000000000e1';
+const FINDING='00000000-0000-4000-8000-0000000000f1', ACTOR='SYNTHETIC-reader';
+const CALLER={kind:'member',sub:'SYNTHETIC-sub',actor:ACTOR,roles:['radiologist','admin'],institution:'SYNTHETIC-hospital'};
+const TEXT='SYNTHETIC 인용 줄';
+const p=new PrismaClient();
+const entry=(n,prefix)=>({v:2,cid:prefix+String(n).padStart(12,'0'),field:'findings',findingId:FINDING,
+ findingRevision:1,sourceIndex:0,sourceRef:{kind:'item',itemId:ITEM,sourceRevision:1},
+ linkStateAtInsert:'current',headRevisionAtInsert:1,insertedText:TEXT,
+ insertedAt:'2026-09-20T00:00:00.000Z',insertedBy:ACTOR});
+const many=(n,prefix)=>Array.from({length:n},(_,i)=>entry(i,prefix||'00000000-0000-4000-8000-'));
+const studyAccess={prepare:async()=>{},require:async()=>{},allowed:async()=>new Set()};
+const findings={readableFindings:async(_t,_c,uid,ids)=>ids.map(id=>({id,revision:1,hidden:false,
+ sources:[{kind:'item',itemId:ITEM,revision:1,studyUid:uid}],
+ links:[{itemId:ITEM,linkState:'current',headRevision:1,headHidden:false}]}))};
+const svc=new PacsService(p,{},{usersInGroupWithRole:async()=>[]},studyAccess,findings);
+const draft=()=>p.reportDraft.findUnique({where:{uid_author:{uid:UID,author:ACTOR}}});
+const refused=async(fn,code)=>{const e=await fn().then(()=>null,x=>x);
+ assert.ok(e,'the write was accepted');
+ assert.equal(e.getStatus&&e.getStatus(),409,String(e.message)+' | '+e.constructor.name);
+ const body=e.getResponse&&e.getResponse();
+ assert.equal(body&&body.code,code,JSON.stringify(body));
+ assert.ok(!/저장했습니다/.test(String(body&&body.message)),'an old tab would take the destructive branch');
+ return body;};
+const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',recommendation:'',baseVersion:1},extra||{});
+"""
+
+    CITATION_WRITE_PATHS = CITATION_PRELUDE + """
+(async()=>{
+ // 1. What does the driver actually raise? This is the fact the service's narrow mapping depends on.
+ const raw=await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(65)}}).then(()=>null,e=>e);
+ assert.ok(raw,'the database accepted 65 entries');
+ console.log('DRIVER class='+raw.constructor.name+' code='+String(raw.code)+
+  ' names_constraint='+String(raw.message).includes('ReportDraft_citations_check'));
+ // 2. TEST INSTRUMENTATION, this instance only: the product refuses over-limit writes before they
+ //    reach the database, so the backstop is unreachable while that check is in place. The product
+ //    keeps it; removing it here is what makes the CHECK the thing under test.
+ svc.citationBudget=async()=>{};
+ // 3. putReport - an insertion onto a draft that is already at the cap.
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(64),findings:TEXT}});
+ const insert={field:'findings',findingId:FINDING,findingRevision:1,sourceIndex:0,
+  insertedText:TEXT,expectedLinkState:'current',expectedHeadRevision:1};
+ await refused(()=>svc.putReport(UID,body(TEXT,{insert:insert}),CALLER),'REPORT_CITATION_LIMIT');
+ assert.equal((await draft()).citations.length,64,'the refused insertion must leave the draft alone');
+ // 4. commitReport - head 40 + draft 30, the contract's own named over-limit union.
+ await p.reportVersion.update({where:{uid_version:{uid:UID,version:1}},data:{citations:many(40)}});
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(30,'11111111-0000-4000-8000-')}});
+ const versions=await p.reportVersion.count({where:{uid:UID}});
+ await refused(()=>svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER),'REPORT_CITATION_LIMIT');
+ assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions,'a refused commit writes no version');
+ assert.equal((await draft()).citations.length,30,'and leaves the draft and its citations in place');
+ console.log('PUT and COMMIT translated a real CHECK violation into REPORT_CITATION_LIMIT');
+})().then(()=>p.$disconnect(),e=>{console.error(e);process.exitCode=1;return p.$disconnect();});
+"""
+
+    CITATION_FORCE_AND_CONTROL = CITATION_PRELUDE + """
+(async()=>{
+ svc.citationBudget=async()=>{};
+ // 5. forceDiscardDrafts - the draft was seeded past the cap with its own CHECK dropped, so the
+ //    refusal has to come from the ReportVersion CHECK inside createMany.
+ assert.equal((await draft()).citations.length,65);
+ const versions=await p.reportVersion.count({where:{uid:UID}});
+ await refused(()=>svc.forceDiscardDrafts(UID,CALLER),'REPORT_CITATION_LIMIT');
+ assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions);
+ assert.equal((await draft()).citations.length,65,'a refused forced release discards nothing');
+ // 6. Negative control: a real CHECK violation that is NOT ours must stay what it is. Swallowing it
+ //    would disguise a genuine fault as "remove a citation".
+ const control=await svc.putReport(UID,body('SYNTHETIC-CONTROL'),CALLER).then(()=>null,e=>e);
+ assert.ok(control,'the control write was accepted');
+ assert.notEqual(control.getStatus&&control.getStatus(),409);
+ assert.ok(!JSON.stringify((control.getResponse&&control.getResponse())||'').includes('REPORT_CITATION_LIMIT'));
+ console.log('CONTROL class='+control.constructor.name+' code='+String(control.code)+' stayed unmapped');
+ // 7. A commit must wait for the draft row it is about to delete. Without the lock a same-author
+ //    insertion landing between the read and the delete is thrown away with the row.
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(1),findings:TEXT}});
+ const holder=new PrismaClient();
+ let released=false;
+ const hold=holder.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT citations FROM "ReportDraft" WHERE uid=${UID} AND author=${ACTOR} FOR UPDATE`;
+  await new Promise(r=>setTimeout(r,8000));
+  released=true;
+ },{timeout:20000});
+ await new Promise(r=>setTimeout(r,500));
+ const blocked=await svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER).then(()=>null,e=>e);
+ assert.ok(blocked,'the commit read past a locked draft row');
+ assert.equal(released,false,'the commit returned before the holder let go');
+ assert.equal((await draft()).citations.length,1,'the attestation survived the blocked commit');
+ await hold;
+ // Once the row is free the same commit succeeds and carries the attestation into the version.
+ const state=await svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER);
+ assert.ok(state);
+ const head=await p.report.findUnique({where:{uid:UID}});
+ const signed=await p.reportVersion.findUnique({where:{uid_version:{uid:UID,version:head.version}}});
+ assert.equal(signed.citations.length,1,'the citation the other tab wrote is in the signed version');
+ assert.equal(await draft(),null,'and the draft row is gone, under the same lock that protected it');
+ console.log('FORCE-DISCARD translated a real CHECK violation; control unmapped; commit serialized on the draft row');
+ await holder.$disconnect();
+})().then(()=>p.$disconnect(),e=>{console.error(e);process.exitCode=1;return p.$disconnect();});
+"""
+
+    def test_report_citations_runtime_check_translation_and_draft_lock(self):
+        """TEST-S3-U2a-CITATION-RUNTIME (pin A1 / anchor P1): the compiled PacsService, a real
+        PrismaClient and a real migrated database turn an actual CHECK violation into the named 409
+        on putReport, commitReport and forceDiscardDrafts; an unrelated real CHECK stays unmapped;
+        and a commit waits for the draft row it deletes."""
+        image = os.environ.get('KIN_TEST_API_IMAGE')
+        if not image:
+            self.skipTest('The built API image is supplied by hosted CI (KIN_TEST_API_IMAGE)')
+        self.create('citations_runtime')
+        for source in self.sources: self.sql('citations_runtime', source)
+        self.sql('citations_runtime',
+                 'INSERT INTO "StudyState" (uid,"institutionId",rs,ss,em,"updatedAt") VALUES '
+                 + f"('{self.uid}','SYNTHETIC-hospital','T','Verified','N','2026-09-20'); "
+                 + 'INSERT INTO "Report" (uid,findings,conclusion,recommendation,version,"updatedBy","updatedAt") VALUES '
+                 + f"('{self.uid}','SYNTHETIC 인용 줄','','',1,'SYNTHETIC-reader','2026-09-20'); "
+                 + 'INSERT INTO "ReportVersion" (uid,version,action,findings,conclusion,recommendation,author) VALUES '
+                 + f"('{self.uid}',1,'save','SYNTHETIC 인용 줄','','','SYNTHETIC-reader'); "
+                 + 'INSERT INTO "ReportDraft" (uid,author,findings,conclusion,recommendation,"baseVersion","updatedAt") VALUES '
+                 + f"('{self.uid}','SYNTHETIC-reader','SYNTHETIC 인용 줄','','',1,'2026-09-20')")
+        run = ['--network', 'container:'+self.db,
+               '-e', 'DATABASE_URL=postgresql://postgres@127.0.0.1:5432/citations_runtime',
+               '-e', 'SYNTHETIC_UID='+self.uid, '--entrypoint', 'node', image, '-e']
+        first = ops.temporary_run(run+[self.CITATION_WRITE_PATHS], timeout=180)
+        print(first)
+        self.assertIn('names_constraint=true', first,
+                      'the service matches this CHECK by constraint name; if the driver does not carry it, say so here')
+        self.assertIn('PUT and COMMIT translated a real CHECK violation', first)
+        # The draft's own CHECK has to go before a draft can be seeded past the cap; the ReportVersion
+        # CHECK, which is what forceDiscardDrafts must hit, stays. The control constraint proves the
+        # mapping stays narrow against a different real violation.
+        self.sql('citations_runtime', 'ALTER TABLE "ReportDraft" DROP CONSTRAINT "ReportDraft_citations_check"; '
+                 + 'ALTER TABLE "ReportDraft" ADD CONSTRAINT "ReportDraft_synthetic_probe_check" '
+                 + "CHECK (findings <> 'SYNTHETIC-CONTROL'); "
+                 + 'UPDATE "ReportDraft" SET citations=(SELECT jsonb_agg(jsonb_build_object('
+                 + "'v',2,'cid','00000000-0000-4000-8000-'||lpad(i::text,12,'0'),'field','findings',"
+                 + "'insertedText','SYNTHETIC 인용 줄','insertedBy','SYNTHETIC-reader')) FROM generate_series(1,65) i)")
+        second = ops.temporary_run(run+[self.CITATION_FORCE_AND_CONTROL], timeout=180)
+        print(second)
+        self.assertIn('stayed unmapped', second)
+        self.assertIn('FORCE-DISCARD translated a real CHECK violation', second)
+
     def test_workspace_shortcuts_additive_and_owner_key(self):
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910044500_workspace_shortcuts' in p)
         self.create('shortcuts_before')
