@@ -31,6 +31,11 @@ def slice_between(source, start_marker, end_marker):
 def extract_function(source, name):
     """The shipped function, brace matched past a destructured parameter list."""
     start = source.index("function %s(" % name)
+    # Keep the modifier. Slicing from "function api(" dropped the `async` in front
+    # of it, so the generated script held `await` inside a plain function: the whole
+    # harness failed to compile and every case died before its first assertion.
+    if source[max(0, start - 6):start] == "async ":
+        start -= 6
     depth, quote, escaped, open_brace = 0, None, False, -1
     index = source.index("(", start)
     while index < len(source):
@@ -118,7 +123,11 @@ function renderRelated() {}
 function updateReportButtons() {}
 function updateReportTemplateButton() {}
 window.confirm = message => { confirms.push(message); return confirmAnswer; };
-window.navigator.clipboard = { writeText: value => { clipboard.push(value); } };
+// A plain assignment is a silent no-op wherever Navigator.prototype owns the
+// read-only clipboard getter, and the surviving-draft case asserts what was copied.
+Object.defineProperty(navigator, "clipboard", {
+  configurable: true, value: { writeText: value => { clipboard.push(value); } },
+});
 let holdNext = false, releaseHeld = null;
 window.fetch = async (url, options = {}) => {
   const path = String(url).slice(API.length);
@@ -204,7 +213,15 @@ class ReportRebaseDOMTest(unittest.TestCase):
                         "recommendation": "", "draft": None}}
         base[UID].update(state)
         self.page = self.browser.new_page()
+        # A script that fails to compile defines nothing, and every later call then
+        # reports a ReferenceError for whatever it happened to touch first. Collect
+        # the page's own error and say so here, at the line that caused it.
+        errors = []
+        self.page.on("pageerror", lambda error: errors.append(str(error)))
         self.page.set_content(harness(base))
+        self.assertEqual([], errors, "the generated harness did not start")
+        self.assertEqual("function", self.page.evaluate("typeof loadReport"),
+                         "the sliced product code did not define loadReport")
         # select() -> refreshRight({forceReport: true}): choosing a study is the one
         # call that is allowed to replace the editor, and it is how a reader arrives
         # here. A non-forced load would find the empty harness fields "dirty" and
@@ -343,6 +360,33 @@ class ReportRebaseDOMTest(unittest.TestCase):
         self.assertNotIn(HEAD_FINDINGS.strip(), message)
         self.assertNotIn("저장했습니다", message)
         # The refused study keeps its draft bytes and its base.
+        self.assertEqual(2, value["stored"][UID]["draft"]["baseVersion"])
+        self.assertEqual("MY ADDENDUM", value["stored"][UID]["draft"]["findings"])
+
+    def test_a_refusal_that_returns_after_a_round_trip_is_still_not_the_same_selection(self):
+        # A -> B -> A. The uid matches again, so a uid-only guard would draw the pane,
+        # but the screen was redrawn twice and the editor no longer holds what the
+        # request left with. Only the selection sequence can see that.
+        self.open(draft={"findings": "MY ADDENDUM", "conclusion": "", "recommendation": "", "baseVersion": 2, "at": "2026-09-20T01:00"})
+        self.page.evaluate("type(['MY ADDENDUM+', '', ''])")
+        started = self.page.evaluate("snapshot().seq")
+        self.page.evaluate("hold()")
+        self.page.evaluate("reply(%s)" % json.dumps(stale_body()))
+        self.page.evaluate("()=>{commit('addendum');}")
+        self.page.wait_for_function("()=>typeof releaseHeld==='function'")
+        self.page.evaluate("()=>{select('%s'); select('%s'); load({force: true});}" % (OTHER, UID))
+        self.assertEqual(UID, self.page.evaluate("selectedUid"), "the reader is back on the same study")
+        self.assertEqual(started + 2, self.page.evaluate("snapshot().seq"))
+        self.page.evaluate("release()")
+        self.page.evaluate("()=>window.pending")
+        value = self.page.evaluate("snapshot()")
+        self.assertFalse(value["shown"], "a returning selection is a new selection")
+        self.assertEqual(["", "", ""], value["pane"]["head"], "nothing may be drawn into the pane at all")
+        self.assertEqual(["", "", ""], value["pane"]["draft"])
+        self.assertEqual(1, len(value["calls"]))
+        self.assertIn("다른 검사로 옮기기 전에", value["toasts"][-1]["message"])
+        # Coming back redrew the stored draft, and nothing the server holds changed.
+        self.assertEqual(["MY ADDENDUM", "", ""], value["text"])
         self.assertEqual(2, value["stored"][UID]["draft"]["baseVersion"])
         self.assertEqual("MY ADDENDUM", value["stored"][UID]["draft"]["findings"])
 
