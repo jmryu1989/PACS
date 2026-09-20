@@ -1,5 +1,7 @@
 """TEST-S2-API-01..12 (REQ-S2-RECORD/PROVENANCE/FRESHNESS/BOUNDARY/IDEMPOTENT/PRESERVE, S2-B2 comparison source,
-S2-L1 saved locations: 11 version 2 records, schema handshake, version rule and exact copies; 12 malformed job copies and races).
+S2-L1 saved locations: 11 version 2 records, schema handshake, version rule and exact copies; 12 malformed job copies and races)
+and TEST-S3-U2a-CITATION-LIVE (13: contract section 9 items 14, 15 server half, 17, 18, 19, 20 and 22 - the report citation
+backend needs this stack's real lineage, revocation and polling payload, and no part of it needs the screen).
 
 Real Nest/Prisma, Keycloak and Orthanc with owned synthetic CTs. Direct SQL touches only this
 run's study identities, run-owned readers' SYNTHETIC access policies and lock, fault and limit
@@ -1246,6 +1248,158 @@ class FindingAPI(unittest.TestCase):
         finally: self.restore_boundary(prior.uid, saved)
         self.assertEqual((revoked.status, revoked.body), (unknown[0], unknown[2]))
         self.assertEqual((self.state(), self.state(prior.uid)), before)
+
+    # ---- TEST-S3-U2a-CITATION-LIVE (contract section 9 items 14, 15 server half, 17, 18, 19, 20, 22) ----
+    def links_of(self, finding, user='xauthor'):
+        listed = self.call(method='GET', user=user, path=self.path+'?includeHidden=true&limit=100')['items']
+        return next(item for item in listed if item['id'] == finding['id'])['links']
+
+    def cite(self, finding, index, text, user='xauthor', status=200, base=0, link=None, revision=None):
+        """One PUT that carries the sentence and asks the server to attest it."""
+        head = link or self.links_of(finding, user)[index]
+        return self.call('PUT', dict(findings=text, conclusion='', recommendation='', baseVersion=base,
+            insert=dict(field='findings', findingId=finding['id'], findingRevision=revision or finding['revision'],
+                        sourceIndex=index, insertedText=text, expectedLinkState=head['linkState'],
+                        expectedHeadRevision=head['headRevision'])), user, '/studies/'+self.uid+'/report', status)
+
+    def citations(self, user='xauthor', status=200):
+        return self.call(method='GET', user=user, path='/studies/'+self.uid+'/report/citations', status=status)
+
+    def draft_row(self):
+        return psql(f'SELECT to_jsonb(t)::text FROM "ReportDraft" t WHERE uid={literal(self.uid)} ORDER BY author')
+
+    def test_13_citation_attestation_boundaries_and_payload_stability(self):
+        """Contract 9 backend gates. The insertion surface is the PUT body, so none of this needs the
+        screen: what it needs is a real lineage, a real revocation and the real polling payload."""
+        prior, anchor = self.comparison(), self.study(self.uid, self.slices)
+        x = self.item_in(anchor, self.length_item())
+        p = self.item_in(prior, self.key_item(0, title='P비교'+uuid.uuid4().hex[:6], slices=prior.slices))
+        crossed, _ = self.create([x, p], user='xauthor', title='비교 인용')
+        # 14a hides `crossed`; a hidden finding is refused for a NEW citation (pacs.service.ts
+        # REPORT_CITATION_STALE), so 20 needs a finding that is still current when it gets there.
+        spare, _ = self.create([x], user='xauthor', title='두 번째 소견')
+        text = '우상엽 결절 소견'
+        report = '/studies/'+self.uid+'/report'
+
+        # 22 - an insertion touches the draft row and nothing else that holds the record.
+        frozen = {t: psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE uid={literal(self.uid)}') for t in ('Report', 'ReportVersion')}
+        listed_before = self.stack.request('GET', '/studies', 'xauthor')
+        boot_before = self.stack.request('GET', '/bootstrap', 'xauthor')
+        answer = self.cite(crossed, 1, text)
+        self.assertEqual(sorted(answer['inserted']), ['cid', 'field', 'insertedAt'])
+        self.assertNotIn('findings', answer, 'the PUT answer never carries the report body back')
+        self.assertEqual({t: psql(f'SELECT to_jsonb(t)::text FROM "{t}" t WHERE uid={literal(self.uid)}') for t in ('Report', 'ReportVersion')}, frozen)
+
+        # 19 - the thirty-second poll and the bootstrap payload are not widened by any of this.
+        # The two payloads are shaped differently: /studies answers {studies:[...], serverTime} with the
+        # state nested per study, /bootstrap answers {states:{uid:state}}. Reading 'states' from both
+        # compared {} with {} and proved nothing about the polling list, which is the payload the
+        # contract actually names.
+        listed_after = self.stack.request('GET', '/studies', 'xauthor')
+        boot_after = self.stack.request('GET', '/bootstrap', 'xauthor')
+
+        def listed_state(response):
+            found = [s for s in response.body['studies'] if s['uid'] == self.uid]
+            self.assertEqual(len(found), 1, 'this run-owned study must be in the polling list')
+            return found[0]
+
+        def boot_state(response):
+            state = (response.body.get('states') or {}).get(self.uid)
+            self.assertTrue(state, 'bootstrap must carry this study')
+            return state
+
+        for before, after, pick in ((listed_before, listed_after, listed_state), (boot_before, boot_after, boot_state)):
+            self.assertNotIn('citation', after.text)
+            new, old = pick(after), pick(before)
+            drafts = []
+            for entry in (new, old):
+                state = entry.get('state', entry)
+                drafts.append(state.pop('draft', None) if isinstance(state, dict) else None)
+            self.assertEqual(new, old, 'nothing but the draft may move when a citation is written')
+            self.assertTrue(any(drafts), 'the draft that carries the citation must be in at least one payload')
+            for draft in drafts:
+                if draft is not None:
+                    self.assertEqual(sorted(draft), ['at', 'baseVersion', 'conclusion', 'findings', 'recommendation'])
+
+        # 15 server half - a stale link state is refused and the draft row stays byte-identical.
+        rows = self.draft_row()
+        stale = dict(self.links_of(crossed, 'xauthor')[1], headRevision=99)
+        self.cite(crossed, 1, text, link=stale, status=409)
+        self.cite(crossed, 1, text, revision=crossed['revision']+1, status=409)
+        self.assertEqual(self.draft_row(), rows)
+
+        # 17 - an old client that knows nothing about citations neither clears nor duplicates them.
+        self.call('PUT', dict(findings=text, conclusion='', recommendation='', baseVersion=0), 'xauthor', report)
+        mine = self.citations()
+        self.assertEqual(len(mine['draft']), 1)
+        self.assertEqual(mine['draft'][0]['insertedText'], text)
+        self.assertEqual(mine['draft'][0]['sameTextCount'], 1)
+
+        # 14a - hiding the finding does not take the attestation with it; a hidden finding stays
+        # readable to its citation (contract 5-12), so the entry is still whole.
+        hidden = self.call(body=self.hide_body(crossed, '숨김'), path=self.path+'/'+crossed['id']+'/revisions', user='xauthor')
+        self.assertTrue(hidden['hidden'])
+        self.assertEqual(self.citations()['draft'][0]['insertedText'], text)
+
+        # 14b - losing access to the comparison study reduces the entry to one neutral state, and the
+        # text of a study this reader may no longer see does not come back through this door.
+        self.access('xauthor', [self.uid])
+        reduced = self.citations()['draft'][0]
+        self.assertEqual(sorted(reduced), ['cid', 'field', 'insertedAt', 'insertedBy', 'state'])
+        self.assertEqual(reduced['state'], 'source-unavailable')
+        self.access('xauthor')
+        self.assertEqual(self.citations()['draft'][0]['insertedText'], text)
+
+        # 14c - and the signature is not blocked by any of it: the record can always be finished.
+        self.call(path=report+'/commit', body=dict(action='save', baseVersion=0, findings=text, conclusion='', recommendation=''), user='xauthor', status=201)
+        versions = self.call(method='GET', path=report+'/versions', user='xauthor')
+        self.assertNotIn('citations', json.dumps(versions), 'the history surface is not a citation surface')
+        signed = self.citations()
+        self.assertEqual(len(signed['head']), 1)
+        self.assertEqual(signed['head'][0]['insertedBy'], self.stack.actor('xauthor'))
+        self.assertEqual(signed['draft'], [])
+
+        # 18 - a reader restricted to the anchor gets the attestation reduced everywhere, and no
+        # surface hands them the comparison study or anything copied from it. The signed report text
+        # is NOT a secret here: this reader may read the report, and the history legitimately carries
+        # the approved body.
+        self.access('xreader', [self.uid])
+        theirs = self.citations('xreader')
+        self.assertEqual(theirs['head'][0]['state'], 'source-unavailable')
+        their_versions = self.call(method='GET', path=report+'/versions', user='xreader')
+        audit = self.call(method='GET', path='/audit?uid='+self.uid, user='xreader')
+        whole = json.dumps([theirs, their_versions, audit], ensure_ascii=False) + self.stack.request('GET', '/studies', 'xreader').text
+        for secret in (prior.uid, p['id'], str(prior.slices[0].SeriesInstanceUID)):
+            self.assertNotIn(secret, whole, secret)
+        # D6 governs what this unit writes: no source pointer may enter a report.* audit line.
+        reported = [row for row in audit if str(row['action']).startswith('report.')]
+        self.assertTrue(reported, 'the citation writes must be audited at all')
+        for row in reported:
+            for key in ('findingId', 'sourceIndex', 'insertedText', crossed['id'], spare['id']):
+                self.assertNotIn(key, str(row['detail']), row['action'])
+        for key in ('findingId', 'sourceIndex', 'insertedText', crossed['id']):
+            self.assertNotIn(key, json.dumps([theirs, their_versions], ensure_ascii=False), key)
+        # O-1, recorded and NOT resolved by this unit: S2's own finding.create / finding.hide rows at
+        # target=uid carry findingId, and GET /audit has no lineage gate, so this restricted reader
+        # can still learn the id of a finding they cannot list. That is main's behaviour, independent
+        # of citations, and it stays open as an S2 audit/lineage residual - this is not a clean pass.
+        self.assertTrue([row for row in audit if str(row['action']).startswith('finding.')],
+                        'if those rows ever stop appearing here, O-1 changed and must be re-judged')
+        self.access('xreader')
+
+        # 20 - two readers, one report: the loser keeps the draft and the attestation, the winner's
+        # text is in the history, and nothing had to be retyped.
+        self.cite(spare, 0, '두 번째 줄', base=1)
+        held = self.citations()['draft']
+        self.assertEqual(len(held), 1)
+        self.call(path=report+'/commit', body=dict(action='approve', baseVersion=1, findings='다른 판독의의 승인본', conclusion='', recommendation=''), user='doctor', status=201)
+        # The approved report is v2 now while this draft still stands on v1. Addendum is the only way
+        # out of A, and U3's gate names the refusal before the optimistic lock can answer with the
+        # wording that sends an old tab down the destructive reload path.
+        refusal = self.call(path=report+'/commit', body=dict(action='addendum', baseVersion=1, findings='두 번째 줄', conclusion='', recommendation=''), user='xauthor', status=409)
+        self.assertEqual(refusal['code'], 'REPORT_DRAFT_STALE')
+        self.assertEqual(self.citations()['draft'], held, 'the refused signer keeps every byte of their attestation')
+        self.assertEqual(self.call(method='GET', path=report+'/versions', user='xauthor')[0]['findings'], '다른 판독의의 승인본')
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')

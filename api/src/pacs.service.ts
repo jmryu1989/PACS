@@ -1,9 +1,15 @@
 import { StudyAccessService } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
 import { KeycloakService } from './keycloak.service';
+import { FindingService } from './finding.service';
+import { canonical } from './viewer-input';
+import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationInsertInput, citationSourceRef,
+  citationUnion, CitationInputError, lineBlockOccurrences, projectCitation, sameTextCounts,
+  REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA } from './report-citation';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
@@ -155,6 +161,42 @@ function toClient(s: any, r: any, actor = '', d: any = null) {
 }
 
 /**
+ * **서명 순간에 새로 생기는 유일한 거절이다.**
+ *
+ * 삽입 시점의 한도 검사는 머리 판을 잠그지 않고 읽으므로 예방적일 뿐이다 — 그 뒤 머리가
+ * 움직였거나 옛 탭이 유지 목록을 보내지 않았으면 확정에서 합집합이 한도를 넘을 수 있다.
+ * 그때 트랜잭션을 되돌린다: 초안과 인용은 그대로 남고, 출구는 **제거**다. 그래서 문구가
+ * 그 출구를 분명히 말해야 한다.
+ *
+ * 문구에 `저장했습니다`를 넣지 않는다. 옛 탭은 그 부분 문자열로 분기해 서버 내용을
+ * 편집기에 덮어쓰는 복구 경로로 들어간다 — 쓰던 글을 잃는다(R2와 같은 규칙).
+ */
+const citationLimit = () => {
+  throw new ConflictException({ code: 'REPORT_CITATION_LIMIT',
+    message: `인용이 한도(${REPORT_CITATION_LIMITS.entries}건 · ${REPORT_CITATION_LIMITS.bytes}바이트)를 넘습니다 — ` +
+      '인용을 일부 제거한 뒤 다시 확정해 주세요' });
+};
+
+/** 마이그레이션이 두 칸에 건 이름. 이 이름이 보일 때만 우리 CHECK다. */
+const CITATION_CHECKS = ['ReportDraft_citations_check', 'ReportVersion_citations_check'];
+
+/**
+ * DB CHECK는 fail-closed 백스톱이지 서버 고장이 아니다. 500으로 내보내면 사용자는
+ * "다시 해보세요" 말고 할 수 있는 게 없고, 실제로 필요한 행동(제거)을 못 듣는다.
+ *
+ * **좁게 본다.** 드라이버가 이 위반을 어떤 클래스로 올리는지는 실제 PostgreSQL에서만
+ * 확인되므로(선례 `finding.service.ts:124`는 원시 질의의 `P2010`/`23514`를 보지만, 여기 세
+ * 경로는 Prisma Client 호출이다) 코드 모양이 아니라 **우리가 지은 제약 이름**으로 가른다.
+ * 이름이 없으면 우리 것이라고 단정하지 않고 그대로 올려보낸다 — 다른 DB 오류를 삼키면
+ * 진짜 고장이 "인용을 제거하세요"로 위장된다.
+ */
+function isCitationCheck(error: any): boolean {
+  const meta: any = error?.meta ?? {};
+  const text = [meta.constraint, meta.message, meta.detail, error?.message].filter(Boolean).join(' ');
+  return CITATION_CHECKS.some(name => text.includes(name));
+}
+
+/**
  * PATCH로 바꿀 수 있는 필드.
  *
  * **`rs`·`repDoc`·`confirm`이 여기 없는 것이 핵심이다.**
@@ -188,7 +230,10 @@ export class PacsService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private orthanc: OrthancService,
-    private keycloak: KeycloakService, private studyAccess:StudyAccessService) {}
+    private keycloak: KeycloakService, private studyAccess:StudyAccessService,
+    // 인용이 가리키는 소견의 가독은 소견 쪽 관문이 판정한다. 판독문 관문(기관·예비판독)은
+    // 그보다 넓어서, 그것만으로 통과시키면 읽을 수 없는 비교 검사가 인용을 통해 새어 나온다.
+    private findings: FindingService) {}
 
   /** 기관 목록 캐시. 몇 개 안 되고 거의 안 바뀌므로 메모리에 둔다. */
   private institutions: any[] = [];
@@ -1514,7 +1559,16 @@ export class PacsService implements OnModuleInit {
    * 물어볼 수 있는 자리다. 낙관적 락은 `commitReport` 한 곳에만 있으면 된다.
    */
   async putReport(uid: string, body: any, c: Caller) {
-    return this.scopeWrite(uid,c,async(tx,audit)=>{
+    /**
+     * 소견 계보의 접근 정책은 **트랜잭션 밖에서** 준비되어야 한다.
+     *
+     * `scopeWrite`가 미리 부르는 `prepare(c,[uid])`는 검사 하나만 요청하므로 전체 준비를
+     * 켜지 않는다(`study-access.service.ts`). 그러면 트랜잭션 안에서 비교 검사를 묻는 순간
+     * `allowed`는 준비를 못 하고 캐시가 없어 409를 던진다 — 비교 검사를 가진 소견의 인용이
+     * 권한 문제도 아닌데 조용히 실패한다. 소견 목록이 같은 이유로 같은 형태를 쓴다.
+     */
+    if (body?.insert !== undefined) await this.studyAccess.prepare(c);
+    return this.citationChecked(() => this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'radiologist', '판독문 저장');
     const prev = await this.gate(uid,c,tx);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
@@ -1540,6 +1594,11 @@ export class PacsService implements OnModuleInit {
      * "초안이 없다"와 "초안이 비어 있다"는 화면에서 같은 뜻이어야 한다.
      */
     if (empty) {
+      // 비우는 PUT에 삽입을 함께 보낼 수는 없다 — 넣었다고 말하는 문장이 본문에 없다.
+      // 조용히 무시하면 화면은 200을 받고도 무엇이 기록되었는지 알 수 없다.
+      if (body.insert !== undefined)
+        throw new ConflictException({ code: 'REPORT_CITATION_TEXT',
+          message: '삽입한 문구가 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
       await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
       await audit(c.actor, 'report.draft.clear', uid, {});
       return { uid, author: c.actor, cleared: true };
@@ -1570,20 +1629,148 @@ export class PacsService implements OnModuleInit {
     const prior = await tx.reportDraft.findUnique({
       where: { uid_author: { uid, author: c.actor } }, select: { baseVersion: true },
     });
+    // 인용 키가 하나도 없으면 `null`이고, 그러면 칸을 아예 쓰지 않는다 — 옛 탭의 자동 저장이
+    // 자기가 모르는 증언을 지우는 일은 없어야 한다. 키 부재는 `[]`가 아니라 **변경 없음**이다.
+    const cited = await this.draftCitations(tx, uid, body, content, c, head?.version ?? 0);
 
     const saved = await tx.reportDraft.upsert({
       where: { uid_author: { uid, author: c.actor } },
-      create: { uid, author: c.actor, ...content, baseVersion },
-      update: { ...content, baseVersion },
+      create: { uid, author: c.actor, ...content, baseVersion, ...(cited ? { citations: cited.entries } : {}) },
+      update: { ...content, baseVersion, ...(cited ? { citations: cited.entries } : {}) },
     });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
+      // 인용 감사는 `cid`·칸·수만 남긴다. `findingId`·`sourceIndex`·삽입 문구를 남기면
+      // 역할·예비 판독 관문이 없는 감사 통로(`audits()`)로 판독문↔소견 연결이 통째로 새어 나간다.
+      ...(cited?.detail ? { cits: cited.detail } : {}),
     });
     if (prior && baseVersion > prior.baseVersion)
       await audit(c.actor, 'report.draft.rebase', uid, { from: prior.baseVersion, to: baseVersion });
-    return saved;
-    });
+    /**
+     * 원시 행을 돌려주지 않는다. 본문을 되돌려 보내면 늦은 응답이 사용자가 그 사이 친 글자를
+     * 덮을 수 있고, 새로 생긴 인용 칸이 이 통로로 함께 나간다. 화면이 알아야 하는 것은
+     * **무엇이 기록되었는가**뿐이다.
+     */
+    return { uid, author: c.actor, baseVersion: saved.baseVersion, updatedAt: saved.updatedAt,
+      ...(cited?.inserted ? { inserted: cited.inserted } : {}) };
+    }));
+  }
+
+  /**
+   * PUT 한 번에 들어온 인용 변경을 본문과 **같은 쓰기**로 풀어낸다.
+   * 인용 키가 하나도 없으면 `null` — 칸을 건드리지 않는다.
+   */
+  private async draftCitations(tx: any, uid: string, body: any, content: any, c: Caller, headVersion: number) {
+    const keep = this.citationKeys(body.citationIds, 'citationIds');
+    const wantsInsert = body.insert !== undefined;
+    if (keep === undefined && !wantsInsert) return null;
+    // 내 행을 먼저 잠근다. 두 탭의 PUT이 본문과 인용을 결정적으로 짝짓게 하는 유일한 방법이다.
+    // 남과 경합하지 않는다 — 초안 행의 키는 (uid, author)다.
+    const [locked] = await tx.$queryRaw`
+      SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+    const { kept, ignored } = applyKeepList(citationArray(locked?.citations), keep);
+    let inserted: { cid: string; field: string; insertedAt: string } | null = null;
+    if (wantsInsert) {
+      const entry = await this.verifiedInsertion(tx, uid, body.insert, content, c);
+      kept.push(entry);
+      inserted = { cid: entry.cid, field: entry.field, insertedAt: entry.insertedAt };
+      /**
+       * 예방적 검사다. 머리 판을 **잠그지 않고** 읽으므로 두 방향 모두 틀릴 수 있다 —
+       * 넘치는데 통과하거나, 여유가 있는데 거절할 수 있다. 실제 상한은 확정 시의
+       * `REPORT_CITATION_LIMIT`과 DB CHECK가 잡는다. 유지 목록만 온 PUT은 줄어들기만
+       * 하므로 여기 오지 않는다 — 자동 저장을 한도로 거절하지 않는다.
+       */
+      await this.citationBudget(tx, [...await this.versionCitations(tx, uid, headVersion), ...kept]);
+    }
+    const detail = (kept.length || ignored) ? { n: kept.length,
+      ...(inserted ? { add: [{ cid: inserted.cid, field: inserted.field }] } : {}),
+      ...(ignored ? { ignored } : {}) } : null;
+    return { entries: kept, inserted, detail };
+  }
+
+  /**
+   * 검사 순서가 곧 계약이다: 모양 → 같은 검사 → 소견 가독 → 소견 판·숨김 →
+   * 링크 상태 재계산 → 본문에 줄 블록으로 실재.
+   *
+   * 증언 값은 전부 **여기서 서버가** 쓴다 — `cid`(난수), 사람, 시각, 링크 상태, 머리 판.
+   * 클라이언트가 보낸 같은 이름의 칸은 `citationInsertInput`이 읽지 않아 그대로 사라진다.
+   */
+  private async verifiedInsertion(tx: any, uid: string, raw: any, content: any, c: Caller) {
+    const insert = this.citationInput(raw);
+    // `Finding.studyUid === uid`는 이 메서드가 uid로 묻는 것 자체가 보장한다 —
+    // 다른 검사의 소견은 애초에 답에 들어오지 않는다.
+    const [row] = await this.findings.readableFindings(tx, c, uid, [insert.findingId]);
+    // 읽을 수 없는 소견과 없는 소견은 **같은 답**이다. 어느 쪽인지 말하면 그 자체가 정보다.
+    if (!row) throw new ConflictException({ code: 'REPORT_CITATION_SOURCE',
+      message: '그 소견을 인용할 수 없습니다 — 소견 목록을 다시 불러오세요' });
+    if (row.revision !== insert.findingRevision || row.hidden)
+      throw new ConflictException({ code: 'REPORT_CITATION_STALE',
+        message: '소견이 그 사이 바뀌었습니다 — 소견 패널을 다시 불러온 뒤 인용하세요' });
+    const source = citationArray(row.sources)[insert.sourceIndex];
+    const link = citationArray(row.links)[insert.sourceIndex];
+    if (!source || !link) throw new ConflictException({ code: 'REPORT_CITATION_SOURCE',
+      message: '그 출처를 찾을 수 없습니다 — 소견 목록을 다시 불러오세요' });
+    // 판정은 핀이 아니라 **삽입 시점에 서버가 다시 계산한** 링크 상태로 한다.
+    if (link.linkState === 'hidden' || link.linkState === 'missing')
+      throw new ConflictException({ code: 'REPORT_CITATION_SOURCE',
+        message: '숨겨졌거나 사라진 출처는 인용할 수 없습니다' });
+    if (link.linkState !== insert.expectedLinkState || (link.headRevision ?? null) !== insert.expectedHeadRevision)
+      throw new ConflictException({ code: 'REPORT_CITATION_STALE',
+        message: '출처 상태가 그 사이 바뀌었습니다 — 확인한 뒤 다시 인용하세요' });
+    /**
+     * 서버가 확인하는 것은 이 글이 **이 요청의 본문에 줄 블록으로 실재하는지**뿐이다.
+     * `insertedText`는 출처의 사본이 아니라 작성자가 자기 판독문에 넣은 글 그 자체이며,
+     * 그것이 출처를 재현한다고는 어떤 표면도 말하지 않는다.
+     */
+    if (blockIsBlank(insert.insertedText) || !lineBlockOccurrences(content[insert.field], insert.insertedText))
+      throw new ConflictException({ code: 'REPORT_CITATION_TEXT',
+        message: '삽입한 문구가 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
+    return { v: REPORT_CITATION_SCHEMA, cid: randomUUID(), field: insert.field,
+      findingId: insert.findingId, findingRevision: insert.findingRevision, sourceIndex: insert.sourceIndex,
+      sourceRef: citationSourceRef(source), linkStateAtInsert: link.linkState,
+      headRevisionAtInsert: link.headRevision ?? null, insertedText: insert.insertedText,
+      insertedAt: new Date().toISOString(), insertedBy: c.actor };
+  }
+
+  /** 머리 판은 오직 `ReportVersion(uid, Report.version)` 한 행이다. 없으면 빈 배열이다. */
+  private async versionCitations(tx: any, uid: string, version: number) {
+    if (!version) return [] as any[];
+    const row = await tx.reportVersion.findUnique({
+      where: { uid_version: { uid, version } }, select: { citations: true } });
+    return citationArray(row?.citations);
+  }
+
+  /**
+   * 한도는 **데이터베이스가 센다.** canonical `jsonb::text`의 UTF-8 바이트가 CHECK와 같은
+   * 자이며, JS의 더 짧은 직렬화로 재면 서버가 통과시킨 것을 CHECK가 거절해 500이 된다.
+   * 선례는 소견 스냅샷의 같은 측정이다(`finding.service.ts`).
+   */
+  private async citationBudget(tx: any, entries: any[]) {
+    if (entries.length > REPORT_CITATION_LIMITS.entries) citationLimit();
+    if (!entries.length) return;
+    const [row] = await tx.$queryRaw`
+      SELECT octet_length(convert_to(${canonical(entries)}::jsonb::text, 'UTF8')) AS bytes`;
+    if (Number(row.bytes) > REPORT_CITATION_LIMITS.bytes) citationLimit();
+  }
+
+  /** 모양이 틀린 입력만 400으로 옮긴다. 다른 실패는 그대로 올려보낸다. */
+  private citationKeys(value: any, what: string) {
+    try { return citationIdList(value, what); }
+    catch (e: any) { if (e instanceof CitationInputError) throw new BadRequestException(e.message); throw e; }
+  }
+  private citationInput(value: any) {
+    try { return citationInsertInput(value); }
+    catch (e: any) { if (e instanceof CitationInputError) throw new BadRequestException(e.message); throw e; }
+  }
+
+  /**
+   * DB CHECK를 **이름으로** 알아보고 같은 409로 옮긴다. 우리 제약이 아니면 손대지 않는다 —
+   * 다른 데이터베이스 오류를 삼키면 진짜 고장이 "인용을 제거하세요"로 위장된다.
+   */
+  private async citationChecked<T>(work: () => Promise<T>): Promise<T> {
+    try { return await work(); }
+    catch (error: any) { if (isCitationCheck(error)) citationLimit(); throw error; }
   }
 
   /**
@@ -1626,7 +1813,7 @@ export class PacsService implements OnModuleInit {
       await tx.$queryRaw`
         SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const drafts = await tx.$queryRaw<any[]>`
-        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", "updatedAt"
+        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, "updatedAt"
         FROM "ReportDraft"
         WHERE uid = ${uid}
         ORDER BY author
@@ -1657,6 +1844,11 @@ export class PacsService implements OnModuleInit {
         data: drafts.map((d, i) => ({
           uid, version: versions[i], action: 'discarded',
           findings: d.findings, conclusion: d.conclusion, recommendation: d.recommendation,
+          // 본문을 판으로 보존하면서 그 본문의 증언만 버리면, 남은 글이 어디서 왔는지 아무도
+          // 되짚을 수 없다. 이 판에는 **그 작성자가 넣은 건만** 들어간다.
+          // 되읽은 NULL을 그대로 쓰면 Prisma가 거절하므로 칸을 아예 생략한다 —
+          // 그러지 않으면 인용이 없던 옛 초안의 강제 해제가 전부 실패한다.
+          ...(d.citations === null || d.citations === undefined ? {} : { citations: d.citations }),
           reason: `관리자 강제 초안 해제 (해제자: ${c.actor})`,
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
         })),
@@ -1676,13 +1868,17 @@ export class PacsService implements OnModuleInit {
       return { ok: true, count: drafts.length, drafts: summary, versions };
     });
 
-    try {
-      return await run();
-    } catch (e: any) {
-      // 다른 판독 확정이 같은 (uid, version)을 먼저 썼다면, 새 번호로 전체 작업을 한 번만 다시 한다.
-      if (e?.code !== 'P2002') throw e;
-      return run();
-    }
+    // 재시도 다리까지 **같은 매핑 안에 둔다.** 첫 시도만 감싸면 번호 충돌로 다시 돈 실행에서
+    // 나온 CHECK 위반이 500으로 새어 나가고, 같은 요청이 두 가지 답을 갖게 된다.
+    return this.citationChecked(async () => {
+      try {
+        return await run();
+      } catch (e: any) {
+        // 다른 판독 확정이 같은 (uid, version)을 먼저 썼다면, 새 번호로 전체 작업을 한 번만 다시 한다.
+        if (e?.code !== 'P2002') throw e;
+        return run();
+      }
+    });
   }
 
   /**
@@ -1698,6 +1894,13 @@ export class PacsService implements OnModuleInit {
     const action = body.action;
     if (!['save', 'approve', 'addendum', 'reset', 'preliminary', 'defer'].includes(action))
       throw new BadRequestException(`알 수 없는 action: ${action}`);
+    /**
+     * `citationIds`는 **내 초안 건에 대한 유지 목록**, `removeCitationIds`는 **머리 판 건에 대한
+     * 명시적 제거 의사**다. 모양만 여기서 본다 — 모르는 값은 거절 사유가 아니라 무동작이다.
+     * 그래서 낡은 화면은 제거에 실패할 수는 있어도 **보지 못한 건을 지울 수는 없다.**
+     */
+    const keepIds = this.citationKeys(body.citationIds, 'citationIds');
+    const removeIds = this.citationKeys(body.removeCitationIds, 'removeCitationIds');
 
     const prev = await this.gate(uid, c);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
@@ -1823,6 +2026,9 @@ export class PacsService implements OnModuleInit {
     }
 
     let results: [any, number];
+    // 감사는 트랜잭션 밖에서 남는다. 되돌아간 확정에는 감사도 남지 않으므로 이 값은
+    // 성공한 경로에서만 읽힌다.
+    let citationAudit: any = null;
     try {
       results = await this.prisma.$transaction(async tx => {
       await this.studyAccess.require(c,[uid],tx);
@@ -1878,6 +2084,46 @@ export class PacsService implements OnModuleInit {
             `그 사이 ${cur?.updatedBy ?? '다른 사용자'}가 v${cur?.version}을 저장했습니다. ` +
             `내용을 다시 불러온 뒤 작성해 주세요.`);
 
+        /**
+         * **이월은 머리 판에서만 온다.**
+         *
+         * 바로 아래 `last`는 머리 판이 아니다 — reset과 관리자 강제 해제가 만든 `discarded`
+         * 행이 더 큰 번호를 갖고도 `Report.version`을 움직이지 않기 때문이다. 그것을 머리로
+         * 쓰면 **남의 확정되지 않은 초안 인용이 내 서명 판에 「이월됨」으로 들어간다.**
+         * 머리 판은 오직 `ReportVersion(uid, Report.version)` 한 행이고, 그 행은 불변이다.
+         *
+         * 낙관적 락 **뒤**에 읽는다. 거절되는 확정은 아무것도 더 읽지 않아야 한다.
+         */
+        const headCitations = await this.versionCitations(tx, uid, cur?.version ?? 0);
+        /**
+         * 내 초안 행을 **잠그고** 읽는다.
+         *
+         * 잠그지 않으면 다른 탭의 삽입이 이 읽기와 아래의 초안 삭제 사이에 끼어들 수 있고,
+         * 그러면 사용자가 미리보기에서 확인까지 마친 문장의 증언이 행과 함께 사라진다 —
+         * 잃는 것이 남의 것이 아니라 **본인이 방금 한 일**이다. 삽입도 같은 행을 같은 방식으로
+         * 잠그므로 둘은 순서대로 선다: 삽입이 먼저면 여기서 함께 읽히고, 확정이 먼저면 삽입은
+         * 행이 사라진 뒤에 자기 행을 새로 만든다. 어느 쪽도 조용히 없어지지 않는다.
+         *
+         * 잠금 순서는 StudyState → Report → 내 초안이고, 강제 해제는 StudyState → 초안들,
+         * 삽입은 내 초안 하나뿐이다. 모두 같은 방향이라 순환이 없다.
+         */
+        const [mine] = await tx.$queryRaw<any[]>`
+          SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+        const { kept, ignored } = applyKeepList(citationArray(mine?.citations), keepIds);
+        const union = citationUnion(headCitations, removeIds, kept);
+        // 세 칸이 빈 확정과 reset은 본문이 없으니 증언할 것도 없다.
+        const blank = !(content.findings || content.conclusion || content.recommendation);
+        const citations = (action === 'reset' || blank) ? [] : union.entries;
+        /**
+         * 확정 시 **소견 검증은 하지 않는다.** 삽입 뒤 소견이 숨겨지거나 비교 검사 접근이
+         * 회수되어도 서명은 막히지 않는다 — 기록을 남기지 못하게 하는 쪽이 더 나쁘다.
+         * 한도 초과만이 새 거절이다.
+         */
+        await this.citationBudget(tx, citations);
+        citationAudit = (citations.length || union.removed.length || ignored)
+          ? { n: citations.length, ...(union.removed.length ? { dropped: union.removed } : {}),
+              ...(ignored ? { ignored } : {}) } : null;
+
         const last = await tx.reportVersion.findFirst({
           where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
         });
@@ -1891,6 +2137,9 @@ export class PacsService implements OnModuleInit {
             uid, version, action: 'discarded',
             findings: cur.findings, conclusion: cur.conclusion,
             recommendation: cur.recommendation,
+            // 비우기 직전의 본문을 판으로 남기면서 그 증언만 버리면, 보존된 글이 어디서
+            // 왔는지 되짚을 수 없다. 같은 머리 판 행에서 읽은 그대로 함께 보존한다.
+            citations: headCitations,
             reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
             author: cur.updatedBy ?? c.actor,
           }});
@@ -1901,13 +2150,17 @@ export class PacsService implements OnModuleInit {
         await tx.report.upsert({ where: { uid },
           create: { uid, ...content, version, updatedBy: c.actor },
           update: { ...content, version, updatedBy: c.actor } });
+        // 인용은 **`ReportVersion` 행에만** 쓴다. `Report`에는 칸이 없다 — 거울을 두면
+        // 같은 사실이 두 곳에서 엇갈릴 수 있고, 그 순간 어느 쪽이 기록인지 말할 수 없다.
         await tx.reportVersion.create({ data: {
-          uid, version, action, ...content, reason: body.reason ?? null, author: c.actor } });
+          uid, version, action, ...content, citations, reason: body.reason ?? null, author: c.actor } });
         // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 지운다.
         await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
         return [state, version] as [any, number];
       });
     } catch (e: any) {
+      // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
+      if (isCitationCheck(e)) citationLimit();
       // @@unique(uid, version)은 최종 방어선이다. 불변조건이 깨져 충돌하더라도
       // 서버 고장으로 노출하지 않도록 C-1의 409 변환은 그대로 유지한다.
       if (e?.code === 'P2002')
@@ -1922,6 +2175,9 @@ export class PacsService implements OnModuleInit {
       len: [content.findings.length, content.conclusion.length, content.recommendation.length],
       reason: body.reason ?? undefined,
       reviewer,   // 누구에게 맡겼는가. 책임이 옮겨간 기록이므로 감사로그에 남아야 한다.
+      // 몇 건이 남았고 무엇이 **지워졌는가**. 지워진 증언은 되짚을 자리가 여기뿐이라
+      // `cid`는 남기지만, `findingId`·`sourceIndex`·문구는 남기지 않는다.
+      ...(citationAudit ? { cits: citationAudit } : {}),
     });
 
     const r = await this.prisma.report.findUnique({ where: { uid } });
@@ -1999,7 +2255,65 @@ export class PacsService implements OnModuleInit {
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
-    return this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' } });
+    /**
+     * 칸을 **명시해서** 고른다. 행 전체를 돌려주면 새로 생긴 인용 칸이 이력 응답으로
+     * 그대로 나간다 — 관문을 하나도 새로 만들지 않았는데 노출면만 넓어지는 것이다.
+     * 인용은 전용 읽기 하나에서만, 소견 가독을 다시 건 뒤에 나간다.
+     */
+    return this.prisma.reportVersion.findMany({ where: { uid }, orderBy: { version: 'desc' },
+      select: { id: true, uid: true, version: true, action: true, findings: true, conclusion: true,
+        recommendation: true, reason: true, author: true, at: true } });
+  }
+
+  /**
+   * 인용 전용 읽기 — **소견 가독을 다시 거는 유일한 표면**이다.
+   *
+   * 판독문 관문(기관·예비 판독)은 소견 관문보다 넓다. 소견은 계보에 읽을 수 없는 검사가
+   * 하나라도 있으면 목록·이력·재생에서 통째로 빠지는데, 인용을 판독문 관문만으로 내보내면
+   * 그 좁은 관문이 이 통로로 우회된다. 그래서 여기서 한 번 더 건다.
+   *
+   * 한 `RepeatableRead` 트랜잭션 안에서 머리 판과 내 초안을 함께 읽는다 — 두 번 읽으면
+   * 그 사이 확정이 끼어들어 "머리에는 없고 초안에는 있는" 없는 상태를 그릴 수 있다.
+   */
+  async reportCitations(uid: string, c: Caller) {
+    const prev = await this.gate(uid, c);
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+    // 본문을 가려놓고 그 증언이 읽히면 가린 게 아니다. `versions()`와 같은 규칙을 건다.
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException(
+        `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+    // 소견 계보의 접근 정책은 트랜잭션 밖에서 준비한다(`putReport`와 같은 이유).
+    await this.studyAccess.prepare(c);
+    return this.prisma.$transaction(async tx => {
+      await this.studyAccess.require(c,[uid],tx);
+      const report = await tx.report.findUnique({ where: { uid }, select: { version: true } });
+      const head = await this.versionCitations(tx, uid, report?.version ?? 0);
+      const draft = await tx.reportDraft.findUnique({
+        where: { uid_author: { uid, author: c.actor } }, select: { citations: true } });
+      const mine = citationArray(draft?.citations);
+      /**
+       * **행마다 따로 묻는다.** 한 행은 CHECK가 64건으로 묶지만 머리 + 초안은 128건까지 갈 수
+       * 있고, 바로 그 상태(머리 40 + 초안 30)가 확정이 `REPORT_CITATION_LIMIT`으로 거절하는
+       * 경우다. 한 번에 물으면 그 질의가 64 한도에 먼저 걸려 409가 되고, **어떤 `cid`를 지워야
+       * 하는지 알려주는 유일한 표면**이 닫힌다 — "제거하면 서명할 수 있다"고 말해놓고 제거할
+       * 대상을 못 보여주는 셈이다.
+       */
+      const findingIds = (entries: any[]) =>
+        [...new Set(entries.map(entry => String(entry?.findingId ?? '')).filter(Boolean))];
+      const readable = new Set<string>();
+      for (const ids of [findingIds(head), findingIds(mine)])
+        for (const row of await this.findings.readableFindings(tx, c, uid, ids)) readable.add(String(row.id));
+      /**
+       * `sameTextCount`는 **그 행 전체**(축약된 건 포함)에서 센다. 화면이 자기가 받은
+       * 건수로 세면 축약된 건이 빠져, `ambiguous`여야 할 것이 `present`로 보인다.
+       * 머리 판과 초안은 서로 다른 본문을 가진 다른 행이므로 따로 센다.
+       */
+      const project = (entries: any[]) => {
+        const counts = sameTextCounts(entries);
+        return entries.map((entry, i) => projectCitation(entry, readable.has(String(entry?.findingId ?? '')), counts[i]));
+      };
+      return { version: report?.version ?? 0, head: project(head), draft: project(mine) };
+    }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 
   /**

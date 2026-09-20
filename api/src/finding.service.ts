@@ -4,7 +4,10 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
-import { Caller } from './pacs.service';
+// Type-only: the report service now imports this one for the citation gate, and a value import
+// back to it would close a runtime cycle around the Nest decorators.
+import type { Caller } from './pacs.service';
+import { REPORT_CITATION_LIMITS } from './report-citation';
 import { canonical, viewerUid, viewerUuid } from './viewer-input';
 import { comparisonStudies, copyJob, copySource, findingCommand, findingFingerprint, findingPage, FindingCommand, FindingJobSource, FindingSource,
   FindingSourceRef, FINDING_LIMITS, isJobRef, jobAbsent, jobFrame, jobLocation, jobMark, jobStudies, refKey, sourceRef, sourceStudies } from './finding-input';
@@ -58,6 +61,22 @@ const LINEAGE = Prisma.sql`SELECT c.uid AS uid FROM jsonb_array_elements(f.snaps
 // ORDER BY/LIMIT, so pages stay full and a cursor never names a finding the caller cannot read.
 const readableLineage = (studies: string[]) => Prisma.sql`NOT EXISTS (SELECT 1 FROM (${LINEAGE}) l
   WHERE COALESCE(l.uid, '') NOT IN (${Prisma.join(studies)}))`;
+// One vocabulary, one statement. The report citation check recomputes a source's link state with the
+// very SQL the findings list renders from, so the same source can never read 'current' on one surface
+// and 'revised' on the other - a difference the user would have to resolve with no way to see it.
+const SOURCE_LINKS = Prisma.sql`(SELECT COALESCE(jsonb_agg(CASE WHEN s.value->>'kind' = 'job' THEN jsonb_build_object('jobId', s.value->>'jobId',
+    'markId', s.value->'mark'->>'id',
+    'linkState', CASE WHEN j.id IS NULL THEN 'missing' WHEN j.hidden THEN 'hidden'
+      WHEN j.revision <> (s.value->>'revision')::int THEN 'metadata-changed' ELSE 'current' END,
+    'headRevision', j.revision, 'headHidden', j.hidden)
+  ELSE jsonb_build_object('itemId', s.value->>'itemId',
+    'linkState', CASE WHEN i.id IS NULL THEN 'missing' WHEN i.hidden THEN 'hidden'
+      WHEN i.revision <> (s.value->>'revision')::int THEN 'revised' ELSE 'current' END,
+    'headRevision', i.revision, 'headHidden', i.hidden) END ORDER BY s.ordinality), '[]'::jsonb)
+  FROM jsonb_array_elements(f.snapshot->'sources') WITH ORDINALITY s
+  LEFT JOIN "ViewerItem" i ON s.value->>'kind' IS DISTINCT FROM 'job' AND i.id = (s.value->>'itemId')::uuid AND i."studyUid" = s.value->>'studyUid'
+  LEFT JOIN "ViewerJob" j ON s.value->>'kind' = 'job' AND j."studyUid" = f."studyUid" AND j.id = (CASE
+    WHEN s.value->>'jobId' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (s.value->>'jobId')::uuid END))`;
 
 // Identical boundary to viewer items: institution or tele institution, RS=P designated only,
 // radiologist writes, author-only revisions, admin gets no extra path.
@@ -205,19 +224,7 @@ export class FindingService {
       const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})
         SELECT EXISTS(SELECT 1 FROM parent) AS allowed,
           COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
-            SELECT f.*, (SELECT COALESCE(jsonb_agg(CASE WHEN s.value->>'kind' = 'job' THEN jsonb_build_object('jobId', s.value->>'jobId',
-                'markId', s.value->'mark'->>'id',
-                'linkState', CASE WHEN j.id IS NULL THEN 'missing' WHEN j.hidden THEN 'hidden'
-                  WHEN j.revision <> (s.value->>'revision')::int THEN 'metadata-changed' ELSE 'current' END,
-                'headRevision', j.revision, 'headHidden', j.hidden)
-              ELSE jsonb_build_object('itemId', s.value->>'itemId',
-                'linkState', CASE WHEN i.id IS NULL THEN 'missing' WHEN i.hidden THEN 'hidden'
-                  WHEN i.revision <> (s.value->>'revision')::int THEN 'revised' ELSE 'current' END,
-                'headRevision', i.revision, 'headHidden', i.hidden) END ORDER BY s.ordinality), '[]'::jsonb)
-              FROM jsonb_array_elements(f.snapshot->'sources') WITH ORDINALITY s
-              LEFT JOIN "ViewerItem" i ON s.value->>'kind' IS DISTINCT FROM 'job' AND i.id = (s.value->>'itemId')::uuid AND i."studyUid" = s.value->>'studyUid'
-              LEFT JOIN "ViewerJob" j ON s.value->>'kind' = 'job' AND j."studyUid" = f."studyUid" AND j.id = (CASE
-                WHEN s.value->>'jobId' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (s.value->>'jobId')::uuid END)) AS links
+            SELECT f.*, ${SOURCE_LINKS} AS links
             FROM "Finding" f JOIN parent p ON p.uid = f."studyUid"
             WHERE (${page.includeHidden} OR NOT f.hidden)
               AND (${page.cursor}::uuid IS NULL OR f.id > ${page.cursor}::uuid)
@@ -229,6 +236,53 @@ export class FindingService {
       if (schema !== '2' && !legacyOnly(items.map(i => i.item))) clientOutdated();
       return { items, nextCursor: rows.length > page.limit ? items[items.length - 1].id : null };
     }, true);
+  }
+
+  /**
+   * 판독문 인용이 가리키는 소견을 이 호출자가 **지금** 읽을 수 있는가 — 그것만 답한다.
+   *
+   * 목록 경로는 답이 될 수 없다. 기본 50·최대 100건에 커서로 자르고 숨김을 빼므로,
+   * 64건을 한 번에 물을 수 없고 **숨겨진 소견을 인용한 판독문이 조용히 「출처 없음」이 된다.**
+   * 그래서 여기서는 숨김을 포함하고 페이지를 나누지 않는다. 판정 기준은 목록과 똑같이
+   * `readableLineage` 하나뿐이며, 삽입 검사는 이 메서드를 한 건으로 쓴다.
+   *
+   * 호출자의 트랜잭션 안에서 돈다 — 인용 읽기와 삽입 검사는 같은 스냅샷에서 판정해야 한다.
+   * 그래서 접근 정책 준비(`prepare`)는 트랜잭션 **밖에서** 끝나 있어야 한다:
+   * 트랜잭션 안의 `allowed`는 준비를 하지 않고, 캐시가 없으면 409다.
+   *
+   * 돌려주는 것은 읽을 수 있는 건의 **부분집합**이다. 링크 상태와 출처 목록은 삽입 검사가
+   * 한 건에 대해서만 쓰고, 전용 읽기는 id 집합만 본다 — 둘 다 응답으로 나가지 않는다.
+   * 인용을 원본으로 되짚는 우회 해결기는 만들지 않는다.
+   */
+  async readableFindings(tx: any, c: Caller, uid: string, ids: string[]) {
+    member(c); viewerUid(uid);
+    const unique = [...new Set(ids)];
+    if (!unique.length) return [] as any[];
+    // 한 판독문의 한도가 그대로 이 질의의 한도다. 넘으면 조용히 자르지 않고 막는다.
+    if (unique.length > REPORT_CITATION_LIMITS.entries) conflict();
+    for (const id of unique) viewerUuid(id);
+    const keys = Prisma.join(unique.map(id => Prisma.sql`${id}::uuid`));
+    const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
+      AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
+      AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
+    // The same snapshot names every comparison study these findings reach and decides which of them
+    // this caller may read; the row statement then drops findings whose lineage leaves that set.
+    const foreign = comparisonStudies(uid, (await tx.$queryRaw`SELECT DISTINCT l.uid
+      FROM "Finding" f CROSS JOIN LATERAL (${LINEAGE}) l
+      WHERE f."studyUid" = ${uid} AND f.id IN (${keys})`).map((row: any) => row.uid));
+    const studies = [uid];
+    if (foreign.length) {
+      const allowed = await this.studyAccess.allowed(c, foreign, tx);
+      const rows = await tx.studyState.findMany({ where: { uid: { in: [uid, ...foreign] } } });
+      const { readable } = comparable(rows.find((row: any) => row.uid === uid), rows, allowed, c);
+      studies.push(...foreign.filter(study => readable.has(study)));
+    }
+    const [row] = await tx.$queryRaw`WITH parent AS (${parent})
+      SELECT COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
+        SELECT f.id, f.revision, f.hidden, f.snapshot->'sources' AS sources, ${SOURCE_LINKS} AS links
+        FROM "Finding" f JOIN parent p ON p.uid = f."studyUid"
+        WHERE f.id IN (${keys}) AND ${readableLineage(studies)}) page), '[]'::jsonb)::text AS rows`;
+    return (parsed(row.rows) ?? []) as any[];
   }
 
   // Resolves, without any lock, every study this command can touch, so access metadata and the

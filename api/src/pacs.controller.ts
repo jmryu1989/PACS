@@ -267,6 +267,12 @@ export class PacsController {
     return this.svc.versions(uid, caller(req));
   }
 
+  /** 인용 — 머리 판과 내 초안의 증언. 소견 가독을 여기서 다시 건다 */
+  @Get('studies/:uid/report/citations')
+  citations(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.reportCitations(uid, caller(req));
+  }
+
   /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
   @Post('studies/:uid/hold')
   hold(@Param('uid') uid: string, @Req() req: any) {

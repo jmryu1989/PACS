@@ -23,6 +23,8 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
       const sql = strings.join('?').replace(/\s+/g, ' ').trim();
       raw.push(sql);
       if (sql.includes('FROM "StudyState"')) return [{ uid: UID }];
+      // Order matters: the draft table name also starts with "Report".
+      if (sql.includes('FROM "ReportDraft"')) return draft ? [{ citations: null }] : [];
       if (sql.includes('FROM "Report"')) return head ? [head] : [];
       throw new Error('unexpected raw query: ' + sql);
     },
@@ -38,6 +40,9 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     },
     reportVersion: {
       findFirst: async () => (head ? { version: head.version } : null),
+      // The commit path now reads the head version row for its citations. The shape grows; every
+      // assertion below is unchanged, and a null row still means "no citations".
+      findUnique: async () => { reads.push('reportVersion.findUnique'); return null; },
       create: async a => record(writes, `reportVersion.create:v${a.data.version}:${a.data.action}`),
     },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
@@ -51,7 +56,10 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   };
   const studyAccess = { prepare: async () => {}, require: async () => {} };
   const keycloak = { usersInGroupWithRole: async () => [] };
-  return { svc: new PacsService(prisma, {}, keycloak, studyAccess), writes, audits, raw, reads, tx };
+  // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
+  // readable set is the honest stub — reaching it at all would be the defect.
+  const findings = { readableFindings: async () => { throw new Error('the stale-draft paths must not ask about findings'); } };
+  return { svc: new PacsService(prisma, {}, keycloak, studyAccess, findings), writes, audits, raw, reads, tx };
 }
 
 const refusal = async (promise, status) => {
@@ -93,7 +101,12 @@ test('callers without a draft, and drafts standing on the head, keep the existin
     await f.svc.commitReport(UID, { action: 'addendum', baseVersion: 4, ...BODY }, CALLER);
     assert.deepEqual(f.writes, ['studyState.update', 'report.upsert:v5', 'reportVersion.create:v5:addendum', 'reportDraft.deleteMany'],
       `draft ${JSON.stringify(draft)}`);
-    assert.equal(f.raw.length, 2);
+    // Was a bare count of 2. A commit now also locks the draft row it is about to delete, so that a
+    // same-author insertion from another tab cannot be read past and then deleted; name the three
+    // locks instead of counting them, in the order that keeps them cycle-free.
+    assert.deepEqual(f.raw.map(sql => sql.match(/FROM "(\w+)"/)[1]), ['StudyState', 'Report', 'ReportDraft'],
+      `draft ${JSON.stringify(draft)}`);
+    assert.equal(f.raw.filter(sql => sql.includes('FOR UPDATE')).length, 3);
   }
 });
 

@@ -177,6 +177,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("DELETE", "studies/:uid/draft/force"): Route(Kind.REPORT, "draft-force"),
     ("POST", "studies/:uid/report/commit"): Route(Kind.REPORT, "commit"),
     ("GET", "studies/:uid/report/versions"): Route(Kind.REPORT, "versions"),
+    ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
     ("POST", "studies/:uid/release"): Route(Kind.REPORT, "release"),
     ("POST", "studies/:uid/release/force"): Route(Kind.REPORT, "release-force"),
@@ -2886,6 +2887,8 @@ class LiveInvariantTests(unittest.TestCase):
             )
         if operation == "versions":
             return self.stack.request("GET", f"/studies/{uid}/report/versions", user)
+        if operation == "citations":
+            return self.stack.request("GET", f"/studies/{uid}/report/citations", user)
         if operation == "hold":
             return self.stack.request("POST", f"/studies/{uid}/hold", user)
         if operation == "release":

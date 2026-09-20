@@ -126,6 +126,273 @@ SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding"
         for value,ok in [('create',True),('delete',False)]:
             self.sql('check_probe_restored',f'''INSERT INTO "ProbeCurrent" VALUES ('{value}')''',success=ok)
 
+    def test_report_citations_additive_nullable_bounded_and_named(self):
+        """TEST-S3-U2a-CITATION-MIGRATION-LIVE: two additive JSONB columns, the NULL that keeps the old
+        behaviour, the canonical byte bound, the constraint NAME as PostgreSQL reports it, and catalog
+        equality across dump/restore.
+
+        This case does NOT prove what the application does with a violation: `refuses()` reads
+        CONSTRAINT_NAME from PL/pgSQL diagnostics inside psql, which never crosses the Prisma engine.
+        The translation into the named 409 is proved only by
+        test_report_citations_runtime_check_translation_and_draft_lock."""
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260920120000_report_citations' in p)
+        self.create('citations_before')
+        for source in self.sources[:index]:self.sql('citations_before',source)
+        self.sql('citations_before','INSERT INTO "StudyState" (uid,"institutionId","updatedAt") VALUES '+
+                 f"('{self.uid}','SYNTHETIC-hospital','2026-09-20')")
+        self.sql('citations_before','INSERT INTO "Report" (uid,findings,conclusion,recommendation,version,"updatedBy","updatedAt") VALUES '+
+                 f"('{self.uid}','SYNTHETIC findings','','',1,'SYNTHETIC-reader','2026-09-20')")
+        self.sql('citations_before','INSERT INTO "ReportVersion" (uid,version,action,findings,conclusion,recommendation,author) VALUES '+
+                 f"('{self.uid}',1,'approve','SYNTHETIC findings','','','SYNTHETIC-reader')")
+        self.sql('citations_before','INSERT INTO "ReportDraft" (uid,author,findings,conclusion,recommendation,"baseVersion","updatedAt") VALUES '+
+                 f"('{self.uid}','SYNTHETIC-reader','SYNTHETIC draft','','',1,'2026-09-20')")
+        tables=self.sql('citations_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def old():return {name:self.sql('citations_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=old()
+        columns="SELECT count(*) FROM information_schema.columns WHERE table_name IN ('ReportDraft','ReportVersion') AND column_name='citations'"
+        # A failed statement inside the additive transaction must leave no half-added column behind.
+        broken=self.sources[index].decode().replace('COMMIT;','SELECT * FROM s3_nonexistent_relation; COMMIT;')
+        self.sql('citations_before',broken,success=False)
+        self.assertEqual(self.sql('citations_before',columns),'0')
+        self.assertEqual(old(),before)
+        self.sql('citations_before',self.sources[index])
+        self.assertEqual(self.sql('citations_before',columns),'2')
+        self.assertEqual(self.sql('citations_before',"SELECT count(*) FROM information_schema.columns WHERE table_name IN ('ReportDraft','ReportVersion') AND column_name='citations' AND is_nullable='YES' AND data_type='jsonb'"),'2')
+        self.sql('citations_before',self.sources[index],success=False)
+        # Rows written before the column existed keep NULL, and NULL is what "no citations" means.
+        self.assertEqual(self.sql('citations_before','SELECT count(*) FROM "ReportDraft" WHERE citations IS NULL'),'1')
+        self.assertEqual(self.sql('citations_before','SELECT count(*) FROM "ReportVersion" WHERE citations IS NULL'),'1')
+        for table in ('ReportDraft','ReportVersion'):
+            with self.subTest(table):
+                self.sql('citations_before',f'UPDATE "{table}" SET citations=NULL')
+                self.sql('citations_before',f'''UPDATE "{table}" SET citations='[]'::jsonb''')
+                self.sql('citations_before',f'''UPDATE "{table}" SET citations=(SELECT jsonb_agg(jsonb_build_object('cid',i)) FROM generate_series(1,64) i)''')
+                self.assertEqual(self.sql('citations_before',f'SELECT jsonb_array_length(citations) FROM "{table}"'),'64')
+                # 65 entries, a non-array and an oversized array each fail closed, and each names the
+                # constraint the service looks for. `refuses` fails the case if anything else refuses.
+                self.refuses('citations_before',f'''UPDATE "{table}" SET citations=(SELECT jsonb_agg(jsonb_build_object('cid',i)) FROM generate_series(1,65) i)''',f'{table}_citations_check')
+                self.refuses('citations_before',f'''UPDATE "{table}" SET citations=jsonb_build_array(jsonb_build_object('t',repeat('a',70000)))''',f'{table}_citations_check')
+                for value in ("'{}'","'\"text\"'","'1'","'null'","'true'"):
+                    self.refuses('citations_before',f'''UPDATE "{table}" SET citations={value}::jsonb''',f'{table}_citations_check')
+                self.sql('citations_before',f'UPDATE "{table}" SET citations=NULL')
+        # The bound is the canonical jsonb text form in UTF-8 bytes. Multi-byte text has to be measured
+        # as bytes, not characters, or the service's identical measure would disagree with this CHECK.
+        korean=self.sql('citations_before',"SELECT octet_length(convert_to(jsonb_build_array(jsonb_build_object('t',repeat('가',30000)))::text,'UTF8'))")
+        self.assertGreater(int(korean),65536)
+        self.refuses('citations_before','''UPDATE "ReportDraft" SET citations=jsonb_build_array(jsonb_build_object('t',repeat('가',30000)))''','ReportDraft_citations_check')
+        # The service asks the database for exactly this number before it writes.
+        fits=self.sql('citations_before',"SELECT octet_length(convert_to(jsonb_build_array(jsonb_build_object('t',repeat('가',10000)))::text,'UTF8'))")
+        self.assertLess(int(fits),65536)
+        self.sql('citations_before','''UPDATE "ReportDraft" SET citations=jsonb_build_array(jsonb_build_object('t',repeat('가',10000)))''')
+        self.sql('citations_before','UPDATE "ReportDraft" SET citations=NULL')
+        # A restored database must refuse the same writes: a CHECK that deparses differently would be a
+        # different rule on the machine the data actually lands on.
+        #
+        # Count records, not lines. `pg_get_constraintdef(oid, true)` pretty-prints, and a CASE
+        # expression wraps over five lines - the first version of this case read 10 text lines and
+        # called it 10 constraints. One aggregated JSON row is one line whatever the definition
+        # contains, and the names come back with it so a genuinely extra constraint still fails.
+        query=('''SELECT COALESCE(jsonb_agg(jsonb_build_object('table',c.relname,'name',k.conname,'type',k.contype,'def','''
+               '''pg_get_constraintdef(k.oid)) ORDER BY c.relname),'[]'::jsonb)::text FROM pg_constraint k '''
+               '''JOIN pg_class c ON c.oid=k.conrelid WHERE k.conname LIKE '%citations_check' ''')
+        definitions=json.loads(self.sql('citations_before',query))
+        self.assertEqual([(d['table'],d['name'],d['type']) for d in definitions],
+                         [('ReportDraft','ReportDraft_citations_check','c'),('ReportVersion','ReportVersion_citations_check','c')])
+        for entry in definitions:
+            self.assertIn('IS NULL', entry['def'], 'the NULL that keeps the old behaviour must survive into the catalog')
+            self.assertIn('65536', entry['def'])
+        self.create('citations_restored')
+        with tempfile.TemporaryDirectory(prefix='kin-citations-') as folder:
+            path=Path(folder)/'citations.dump'
+            with path.open('wb') as out:subprocess.run(['docker','exec',self.db,'pg_dump','-U','postgres','-Fc','citations_before'],stdout=out,check=True,timeout=60)
+            with path.open('rb') as incoming:subprocess.run(['docker','exec','-i',self.db,'pg_restore','-U','postgres','-d','citations_restored','--no-owner','--no-privileges','--exit-on-error'],stdin=incoming,check=True,timeout=60)
+        self.assertEqual(json.loads(self.sql('citations_restored',query)),definitions,
+                         'the restored catalog must carry the same two constraints, byte for byte')
+        self.refuses('citations_restored','''UPDATE "ReportVersion" SET citations='{}'::jsonb''','ReportVersion_citations_check')
+        self.sql('citations_restored','''UPDATE "ReportVersion" SET citations='[]'::jsonb''')
+
+    # The application half of the citation CHECK: the same PacsService the product runs, over a real
+    # PrismaClient, against a real migrated database. Everything else in this file reads the
+    # constraint name through PL/pgSQL, which proves the database refuses but says nothing about what
+    # the driver hands the service - and the named 409 is decided by exactly that.
+    CITATION_PRELUDE = """
+const assert=require('node:assert/strict'),{PrismaClient}=require('@prisma/client');
+const {PacsService}=require('./dist/pacs.service.js');
+const UID=process.env.SYNTHETIC_UID, ITEM='00000000-0000-4000-8000-0000000000e1';
+const FINDING='00000000-0000-4000-8000-0000000000f1', ACTOR='SYNTHETIC-reader';
+const CALLER={kind:'member',sub:'SYNTHETIC-sub',actor:ACTOR,roles:['radiologist','admin'],institution:'SYNTHETIC-hospital'};
+const TEXT='SYNTHETIC 인용 줄';
+const p=new PrismaClient();
+const entry=(n,prefix)=>({v:2,cid:prefix+String(n).padStart(12,'0'),field:'findings',findingId:FINDING,
+ findingRevision:1,sourceIndex:0,sourceRef:{kind:'item',itemId:ITEM,sourceRevision:1},
+ linkStateAtInsert:'current',headRevisionAtInsert:1,insertedText:TEXT,
+ insertedAt:'2026-09-20T00:00:00.000Z',insertedBy:ACTOR});
+const many=(n,prefix)=>Array.from({length:n},(_,i)=>entry(i,prefix||'00000000-0000-4000-8000-'));
+const studyAccess={prepare:async()=>{},require:async()=>{},allowed:async()=>new Set()};
+const findings={readableFindings:async(_t,_c,uid,ids)=>ids.map(id=>({id,revision:1,hidden:false,
+ sources:[{kind:'item',itemId:ITEM,revision:1,studyUid:uid}],
+ links:[{itemId:ITEM,linkState:'current',headRevision:1,headHidden:false}]}))};
+const svc=new PacsService(p,{},{usersInGroupWithRole:async()=>[]},studyAccess,findings);
+const draft=()=>p.reportDraft.findUnique({where:{uid_author:{uid:UID,author:ACTOR}}});
+const refused=async(fn,code)=>{const e=await fn().then(()=>null,x=>x);
+ assert.ok(e,'the write was accepted');
+ assert.equal(e.getStatus&&e.getStatus(),409,String(e.message)+' | '+e.constructor.name);
+ const body=e.getResponse&&e.getResponse();
+ assert.equal(body&&body.code,code,JSON.stringify(body));
+ assert.ok(!/저장했습니다/.test(String(body&&body.message)),'an old tab would take the destructive branch');
+ return body;};
+const body=(findings,extra)=>Object.assign({findings:findings,conclusion:'',recommendation:'',baseVersion:1},extra||{});
+/**
+ * A failing assertion in here used to leave exit 1 and nothing else: ops.run raises on the exit code
+ * without echoing the child, so print() never ran and the DRIVER line - the one fact pin A1 asks for -
+ * was lost in exactly the case it was written for. So the script always exits 0 and says what happened
+ * on stdout; the Python side refuses the marker before it looks for the success sentinels.
+ * The data here is synthetic, so printing a stack costs nothing.
+ */
+const report=work=>work().then(()=>p.$disconnect(),
+ async e=>{console.log('SCRIPT-FAILED '+((e&&e.stack)||e));await p.$disconnect();});
+"""
+
+    CITATION_WRITE_PATHS = CITATION_PRELUDE + """
+report(async()=>{
+ // 1. What does the driver actually raise? This is the fact the service's narrow mapping depends on.
+ const raw=await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(65)}}).then(()=>null,e=>e);
+ assert.ok(raw,'the database accepted 65 entries');
+ console.log('DRIVER class='+raw.constructor.name+' code='+String(raw.code)+
+  ' names_constraint='+String(raw.message).includes('ReportDraft_citations_check'));
+ // 2. TEST INSTRUMENTATION, this instance only: the product refuses over-limit writes before they
+ //    reach the database, so the backstop is unreachable while that check is in place. The product
+ //    keeps it; removing it here is what makes the CHECK the thing under test.
+ svc.citationBudget=async()=>{};
+ // 3. putReport - an insertion onto a draft that is already at the cap.
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(64),findings:TEXT}});
+ const insert={field:'findings',findingId:FINDING,findingRevision:1,sourceIndex:0,
+  insertedText:TEXT,expectedLinkState:'current',expectedHeadRevision:1};
+ await refused(()=>svc.putReport(UID,body(TEXT,{insert:insert}),CALLER),'REPORT_CITATION_LIMIT');
+ assert.equal((await draft()).citations.length,64,'the refused insertion must leave the draft alone');
+ // 4. commitReport - head 40 + draft 30, the contract's own named over-limit union.
+ await p.reportVersion.update({where:{uid_version:{uid:UID,version:1}},data:{citations:many(40)}});
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:many(30,'11111111-0000-4000-8000-')}});
+ const versions=await p.reportVersion.count({where:{uid:UID}});
+ await refused(()=>svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER),'REPORT_CITATION_LIMIT');
+ assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions,'a refused commit writes no version');
+ assert.equal((await draft()).citations.length,30,'and leaves the draft and its citations in place');
+ console.log('PUT and COMMIT translated a real CHECK violation into REPORT_CITATION_LIMIT');
+});
+"""
+
+    CITATION_FORCE_AND_CONTROL = CITATION_PRELUDE + """
+report(async()=>{
+ svc.citationBudget=async()=>{};
+ // 5. forceDiscardDrafts - the draft was seeded past the cap with its own CHECK dropped, so the
+ //    refusal has to come from the ReportVersion CHECK inside createMany.
+ assert.equal((await draft()).citations.length,65);
+ const versions=await p.reportVersion.count({where:{uid:UID}});
+ await refused(()=>svc.forceDiscardDrafts(UID,CALLER),'REPORT_CITATION_LIMIT');
+ assert.equal(await p.reportVersion.count({where:{uid:UID}}),versions);
+ assert.equal((await draft()).citations.length,65,'a refused forced release discards nothing');
+ // 6. Negative control: a real CHECK violation that is NOT ours must stay what it is. Swallowing it
+ //    would disguise a genuine fault as "remove a citation".
+ const control=await svc.putReport(UID,body('SYNTHETIC-CONTROL'),CALLER).then(()=>null,e=>e);
+ assert.ok(control,'the control write was accepted');
+ assert.notEqual(control.getStatus&&control.getStatus(),409);
+ assert.ok(!JSON.stringify((control.getResponse&&control.getResponse())||'').includes('REPORT_CITATION_LIMIT'));
+ console.log('CONTROL class='+control.constructor.name+' code='+String(control.code)+' stayed unmapped');
+ /**
+  * 7. The other tab's insertion must not be thrown away with the draft row.
+  *
+  * The schedule is fixed, not raced. The holder IS the second tab: it takes the same row lock the
+  * insertion takes, writes a second, distinctively prefixed citation, says it is holding, waits a
+  * bounded moment and commits. Only then can the signer's commit read the row.
+  *
+  *   with the lock   the commit blocks on FOR UPDATE, and READ COMMITTED re-reads the row after the
+  *                   holder commits: it signs BOTH cids.
+  *   without it (M7) the unlocked read returns the one committed entry, the delete then blocks on the
+  *                   same row, and the second attestation is signed away - one cid in the version.
+  *
+  * So the assertion that discriminates is the signed cid SET, not the timing and not a rejection:
+  * the commit must RESOLVE either way. Elapsed time is recorded as a secondary signal only.
+  */
+ await p.reportVersion.update({where:{uid_version:{uid:UID,version:1}},data:{citations:[]}});
+ const mine=entry(0,'22222222-0000-4000-8000-'), other=entry(1,'33333333-0000-4000-8000-');
+ await p.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},
+  data:{citations:[mine],findings:TEXT,baseVersion:1}});
+ const holder=new PrismaClient();
+ try{
+ let holding; const acquired=new Promise(r=>{holding=r;});
+ const hold=holder.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT citations FROM "ReportDraft" WHERE uid=${UID} AND author=${ACTOR} FOR UPDATE`;
+  await tx.reportDraft.update({where:{uid_author:{uid:UID,author:ACTOR}},data:{citations:[mine,other]}});
+  holding();
+  await new Promise(r=>setTimeout(r,1500));
+ },{timeout:20000});
+ await acquired;
+ const started=Date.now();
+ const state=await svc.commitReport(UID,body(TEXT,{action:'save'}),CALLER);
+ const waited=Date.now()-started;
+ await hold;
+ assert.ok(state,'the commit did not resolve');
+ const head=await p.report.findUnique({where:{uid:UID}});
+ const signed=await p.reportVersion.findUnique({where:{uid_version:{uid:UID,version:head.version}}});
+ assert.deepEqual((signed.citations||[]).map(e=>e.cid).sort(),[mine.cid,other.cid].sort(),
+  'the insertion that landed while the commit waited was signed away');
+ assert.equal(await draft(),null,'the draft row is gone, under the same lock that protected it');
+ console.log('LOCK waited='+waited+'ms signed='+signed.citations.length+' entries');
+ assert.ok(waited>=1000,'the commit did not wait for the row lock: '+waited+'ms');
+ console.log('FORCE-DISCARD translated a real CHECK violation; control unmapped; commit serialized on the draft row');
+ // A held connection would keep the container alive to the timeout and lose the message with it.
+ } finally { await holder.$disconnect(); }
+});
+"""
+
+    def test_report_citations_runtime_check_translation_and_draft_lock(self):
+        """TEST-S3-U2a-CITATION-RUNTIME (pin A1 / anchor P1): the compiled PacsService, a real
+        PrismaClient and a real migrated database turn an actual CHECK violation into the named 409
+        on putReport, commitReport and forceDiscardDrafts; an unrelated real CHECK stays unmapped;
+        and a commit waits for the draft row it deletes."""
+        image = os.environ.get('KIN_TEST_API_IMAGE')
+        if not image:
+            self.skipTest('The built API image is supplied by hosted CI (KIN_TEST_API_IMAGE)')
+        self.create('citations_runtime')
+        for source in self.sources: self.sql('citations_runtime', source)
+        self.sql('citations_runtime',
+                 'INSERT INTO "StudyState" (uid,"institutionId",rs,ss,em,"updatedAt") VALUES '
+                 + f"('{self.uid}','SYNTHETIC-hospital','T','Verified','N','2026-09-20'); "
+                 + 'INSERT INTO "Report" (uid,findings,conclusion,recommendation,version,"updatedBy","updatedAt") VALUES '
+                 + f"('{self.uid}','SYNTHETIC 인용 줄','','',1,'SYNTHETIC-reader','2026-09-20'); "
+                 + 'INSERT INTO "ReportVersion" (uid,version,action,findings,conclusion,recommendation,author) VALUES '
+                 + f"('{self.uid}',1,'save','SYNTHETIC 인용 줄','','','SYNTHETIC-reader'); "
+                 + 'INSERT INTO "ReportDraft" (uid,author,findings,conclusion,recommendation,"baseVersion","updatedAt") VALUES '
+                 + f"('{self.uid}','SYNTHETIC-reader','SYNTHETIC 인용 줄','','',1,'2026-09-20')")
+        run = ['--network', 'container:'+self.db,
+               '-e', 'DATABASE_URL=postgresql://postgres@127.0.0.1:5432/citations_runtime',
+               '-e', 'SYNTHETIC_UID='+self.uid, '--entrypoint', 'node', image, '-e']
+        first = ops.temporary_run(run+[self.CITATION_WRITE_PATHS], timeout=180)
+        # Print before asserting, then refuse the failure marker before looking for success: the child
+        # exits 0 so ops.run cannot swallow its output, and a broken run must show its own stack.
+        print(first)
+        self.assertNotIn('SCRIPT-FAILED', first, first)
+        self.assertIn('names_constraint=true', first,
+                      'the service matches this CHECK by constraint name; if the driver does not carry it, this is where it shows')
+        self.assertIn('PUT and COMMIT translated a real CHECK violation', first)
+        # The draft's own CHECK has to go before a draft can be seeded past the cap; the ReportVersion
+        # CHECK, which is what forceDiscardDrafts must hit, stays. The control constraint proves the
+        # mapping stays narrow against a different real violation.
+        self.sql('citations_runtime', 'ALTER TABLE "ReportDraft" DROP CONSTRAINT "ReportDraft_citations_check"; '
+                 + 'ALTER TABLE "ReportDraft" ADD CONSTRAINT "ReportDraft_synthetic_probe_check" '
+                 + "CHECK (findings <> 'SYNTHETIC-CONTROL'); "
+                 + 'UPDATE "ReportDraft" SET citations=(SELECT jsonb_agg(jsonb_build_object('
+                 + "'v',2,'cid','00000000-0000-4000-8000-'||lpad(i::text,12,'0'),'field','findings',"
+                 + "'insertedText','SYNTHETIC 인용 줄','insertedBy','SYNTHETIC-reader')) FROM generate_series(1,65) i)")
+        second = ops.temporary_run(run+[self.CITATION_FORCE_AND_CONTROL], timeout=180)
+        print(second)
+        self.assertNotIn('SCRIPT-FAILED', second, second)
+        self.assertIn('stayed unmapped', second)
+        # The lock line carries the data the proof rests on: two signed cids, and how long the commit
+        # waited for the row. Under an unlocked read the signed set would be one cid, not two.
+        self.assertRegex(second, r'LOCK waited=\d+ms signed=2 entries')
+        self.assertIn('FORCE-DISCARD translated a real CHECK violation', second)
+
     def test_workspace_shortcuts_additive_and_owner_key(self):
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910044500_workspace_shortcuts' in p)
         self.create('shortcuts_before')

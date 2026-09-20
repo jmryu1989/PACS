@@ -45,7 +45,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910130000_study_access/migration.sql',
               'api/prisma/migrations/20260910133000_study_access_subject/migration.sql',
               'api/prisma/migrations/20260912100000_hanging_protocol_preferences/migration.sql',
-              'api/prisma/migrations/20260917120000_findings/migration.sql']
+              'api/prisma/migrations/20260917120000_findings/migration.sql',
+              'api/prisma/migrations/20260920120000_report_citations/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -115,12 +116,19 @@ def expected_rows(uid):
         ov=None, orig=None, orderOid=None, holder=None, heldAt=None, updatedAt=STAMP, createdAt=STAMP)]
     rows['Report'] = [dict(uid=uid, findings='SYNTHETIC findings\n합성', conclusion='SYNTHETIC conclusion',
         recommendation='', version=2, updatedBy='SYNTHETIC-reader', updatedAt=STAMP)]
+    # 한 행은 인용을 들고, 한 행은 NULL이다. 둘 다 실제로 왕복해야 "추가 전용"이 말이 된다 —
+    # NULL만 있으면 JSONB 칸이 dump/restore를 건너뛰어도 아무도 모른다.
+    citation = [dict(v=2, cid='00000000-0000-4000-8000-0000000000c1', field='findings',
+        findingId='00000000-0000-4000-8000-0000000000f1', findingRevision=1, sourceIndex=0,
+        sourceRef=dict(kind='item', itemId='00000000-0000-4000-8000-0000000000e1', sourceRevision=1),
+        linkStateAtInsert='current', headRevisionAtInsert=1, insertedText='SYNTHETIC 인용 줄',
+        insertedAt='2026-09-06T00:00:00.123Z', insertedBy='SYNTHETIC-reader')]
     rows['ReportVersion'] = [dict(id=number, uid=uid, version=number, action='Save',
         findings='SYNTHETIC history '+str(number), conclusion='', recommendation='', reason=None,
-        author='SYNTHETIC-reader', at=STAMP) for number in (1, 2)]
+        author='SYNTHETIC-reader', citations=citation if number == 2 else None, at=STAMP) for number in (1, 2)]
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
-        updatedAt=STAMP) for number in (1, 2)]
+        citations=citation if number == 1 else None, updatedAt=STAMP) for number in (1, 2)]
     rows['UserFilter'] = [dict(id=1, owner='SYNTHETIC-reader', name='SYNTHETIC saved search',
         mode='Radiology', isDefault=True, quick='SYNTHETIC', days=-1, cols='{}', sortKey='date',
         sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]
