@@ -126,6 +126,74 @@ SELECT (SELECT count(*) FROM "ViewerItem")||','||(SELECT count(*) FROM "Finding"
         for value,ok in [('create',True),('delete',False)]:
             self.sql('check_probe_restored',f'''INSERT INTO "ProbeCurrent" VALUES ('{value}')''',success=ok)
 
+    def test_report_citations_additive_nullable_bounded_and_named(self):
+        """TEST-S3-U2a-CITATION-MIGRATION-LIVE: two additive JSONB columns, the NULL that keeps the old
+        behaviour, the canonical byte bound, and above all the constraint NAME - the service maps a CHECK
+        violation to a named 409 by that name, so if PostgreSQL does not report it the mapping is a 500."""
+        index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260920120000_report_citations' in p)
+        self.create('citations_before')
+        for source in self.sources[:index]:self.sql('citations_before',source)
+        self.sql('citations_before','INSERT INTO "StudyState" (uid,"institutionId","updatedAt") VALUES '+
+                 f"('{self.uid}','SYNTHETIC-hospital','2026-09-20')")
+        self.sql('citations_before','INSERT INTO "Report" (uid,findings,conclusion,recommendation,version,"updatedBy","updatedAt") VALUES '+
+                 f"('{self.uid}','SYNTHETIC findings','','',1,'SYNTHETIC-reader','2026-09-20')")
+        self.sql('citations_before','INSERT INTO "ReportVersion" (uid,version,action,findings,conclusion,recommendation,author) VALUES '+
+                 f"('{self.uid}',1,'approve','SYNTHETIC findings','','','SYNTHETIC-reader')")
+        self.sql('citations_before','INSERT INTO "ReportDraft" (uid,author,findings,conclusion,recommendation,"baseVersion","updatedAt") VALUES '+
+                 f"('{self.uid}','SYNTHETIC-reader','SYNTHETIC draft','','',1,'2026-09-20')")
+        tables=self.sql('citations_before',"SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").splitlines()
+        def old():return {name:self.sql('citations_before',f'SELECT to_jsonb(t)::text FROM "{name}" t ORDER BY to_jsonb(t)::text COLLATE "C"') for name in tables}
+        before=old()
+        columns="SELECT count(*) FROM information_schema.columns WHERE table_name IN ('ReportDraft','ReportVersion') AND column_name='citations'"
+        # A failed statement inside the additive transaction must leave no half-added column behind.
+        broken=self.sources[index].decode().replace('COMMIT;','SELECT * FROM s3_nonexistent_relation; COMMIT;')
+        self.sql('citations_before',broken,success=False)
+        self.assertEqual(self.sql('citations_before',columns),'0')
+        self.assertEqual(old(),before)
+        self.sql('citations_before',self.sources[index])
+        self.assertEqual(self.sql('citations_before',columns),'2')
+        self.assertEqual(self.sql('citations_before',"SELECT count(*) FROM information_schema.columns WHERE table_name IN ('ReportDraft','ReportVersion') AND column_name='citations' AND is_nullable='YES' AND data_type='jsonb'"),'2')
+        self.sql('citations_before',self.sources[index],success=False)
+        # Rows written before the column existed keep NULL, and NULL is what "no citations" means.
+        self.assertEqual(self.sql('citations_before','SELECT count(*) FROM "ReportDraft" WHERE citations IS NULL'),'1')
+        self.assertEqual(self.sql('citations_before','SELECT count(*) FROM "ReportVersion" WHERE citations IS NULL'),'1')
+        for table in ('ReportDraft','ReportVersion'):
+            with self.subTest(table):
+                self.sql('citations_before',f'UPDATE "{table}" SET citations=NULL')
+                self.sql('citations_before',f'''UPDATE "{table}" SET citations='[]'::jsonb''')
+                self.sql('citations_before',f'''UPDATE "{table}" SET citations=(SELECT jsonb_agg(jsonb_build_object('cid',i)) FROM generate_series(1,64) i)''')
+                self.assertEqual(self.sql('citations_before',f'SELECT jsonb_array_length(citations) FROM "{table}"'),'64')
+                # 65 entries, a non-array and an oversized array each fail closed, and each names the
+                # constraint the service looks for. `refuses` fails the case if anything else refuses.
+                self.refuses('citations_before',f'''UPDATE "{table}" SET citations=(SELECT jsonb_agg(jsonb_build_object('cid',i)) FROM generate_series(1,65) i)''',f'{table}_citations_check')
+                self.refuses('citations_before',f'''UPDATE "{table}" SET citations=jsonb_build_array(jsonb_build_object('t',repeat('a',70000)))''',f'{table}_citations_check')
+                for value in ("'{}'","'\"text\"'","'1'","'null'","'true'"):
+                    self.refuses('citations_before',f'''UPDATE "{table}" SET citations={value}::jsonb''',f'{table}_citations_check')
+                self.sql('citations_before',f'UPDATE "{table}" SET citations=NULL')
+        # The bound is the canonical jsonb text form in UTF-8 bytes. Multi-byte text has to be measured
+        # as bytes, not characters, or the service's identical measure would disagree with this CHECK.
+        korean=self.sql('citations_before',"SELECT octet_length(convert_to(jsonb_build_array(jsonb_build_object('t',repeat('가',30000)))::text,'UTF8'))")
+        self.assertGreater(int(korean),65536)
+        self.refuses('citations_before','''UPDATE "ReportDraft" SET citations=jsonb_build_array(jsonb_build_object('t',repeat('가',30000)))''','ReportDraft_citations_check')
+        # The service asks the database for exactly this number before it writes.
+        fits=self.sql('citations_before',"SELECT octet_length(convert_to(jsonb_build_array(jsonb_build_object('t',repeat('가',10000)))::text,'UTF8'))")
+        self.assertLess(int(fits),65536)
+        self.sql('citations_before','''UPDATE "ReportDraft" SET citations=jsonb_build_array(jsonb_build_object('t',repeat('가',10000)))''')
+        self.sql('citations_before','UPDATE "ReportDraft" SET citations=NULL')
+        # A restored database must refuse the same writes: a CHECK that deparses differently would be a
+        # different rule on the machine the data actually lands on.
+        query='''SELECT c.relname||' '||pg_get_constraintdef(k.oid,true) FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid WHERE k.conname LIKE '%citations_check' ORDER BY c.relname'''
+        definitions=self.sql('citations_before',query).splitlines()
+        self.assertEqual(len(definitions),2)
+        self.create('citations_restored')
+        with tempfile.TemporaryDirectory(prefix='kin-citations-') as folder:
+            path=Path(folder)/'citations.dump'
+            with path.open('wb') as out:subprocess.run(['docker','exec',self.db,'pg_dump','-U','postgres','-Fc','citations_before'],stdout=out,check=True,timeout=60)
+            with path.open('rb') as incoming:subprocess.run(['docker','exec','-i',self.db,'pg_restore','-U','postgres','-d','citations_restored','--no-owner','--no-privileges','--exit-on-error'],stdin=incoming,check=True,timeout=60)
+        self.assertEqual(self.sql('citations_restored',query).splitlines(),definitions)
+        self.refuses('citations_restored','''UPDATE "ReportVersion" SET citations='{}'::jsonb''','ReportVersion_citations_check')
+        self.sql('citations_restored','''UPDATE "ReportVersion" SET citations='[]'::jsonb''')
+
     def test_workspace_shortcuts_additive_and_owner_key(self):
         index=next(i for i,p in enumerate(transfer.MIGRATIONS) if '20260910044500_workspace_shortcuts' in p)
         self.create('shortcuts_before')

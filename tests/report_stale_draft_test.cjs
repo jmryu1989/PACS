@@ -38,6 +38,9 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
     },
     reportVersion: {
       findFirst: async () => (head ? { version: head.version } : null),
+      // The commit path now reads the head version row for its citations. The shape grows; every
+      // assertion below is unchanged, and a null row still means "no citations".
+      findUnique: async () => { reads.push('reportVersion.findUnique'); return null; },
       create: async a => record(writes, `reportVersion.create:v${a.data.version}:${a.data.action}`),
     },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
@@ -51,7 +54,10 @@ function fixture({ state = STATE, head = HEAD, draft = null } = {}) {
   };
   const studyAccess = { prepare: async () => {}, require: async () => {} };
   const keycloak = { usersInGroupWithRole: async () => [] };
-  return { svc: new PacsService(prisma, {}, keycloak, studyAccess), writes, audits, raw, reads, tx };
+  // The citation gate is a fifth collaborator; no test in this file cites anything, so an empty
+  // readable set is the honest stub — reaching it at all would be the defect.
+  const findings = { readableFindings: async () => { throw new Error('the stale-draft paths must not ask about findings'); } };
+  return { svc: new PacsService(prisma, {}, keycloak, studyAccess, findings), writes, audits, raw, reads, tx };
 }
 
 const refusal = async (promise, status) => {

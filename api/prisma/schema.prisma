@@ -222,6 +222,9 @@ model Report {
 ///
 /// baseVersion: 이 초안을 쓰기 시작할 때 화면에 있던 확정 판.
 /// 나중에 돌아왔을 때 "그 사이 남이 v5를 저장했다"를 말해줄 수 있어야 한다.
+/// citations: 이 초안의 문장들이 어느 소견·어느 판·어느 출처에서 왔는지에 대한 **서버 증언**.
+/// 본문과 같은 행이라 한 번의 쓰기로 함께 움직인다 — 문장만 남고 근거가 사라지는 창이 없다.
+/// 없거나(NULL) 배열이 아니면 "인용 없음"이고, 그것이 이 칸이 생기기 전의 동작이다.
 model ReportDraft {
   uid            String
   author         String
@@ -229,6 +232,7 @@ model ReportDraft {
   conclusion     String   @default("")
   recommendation String   @default("")
   baseVersion    Int      @default(0)
+  citations      Json?
   updatedAt      DateTime @updatedAt
 
   @@id([uid, author])
@@ -256,6 +260,9 @@ model ReportVersion {
   recommendation String   @default("")
   reason         String?
   author         String
+  /// 확정 시 1회 기록되고 이후 불변이다. 머리 판에서 이월된 건은 원래 작성자·시각을
+  /// 바이트 그대로 유지한다 — 이월은 새 증언이 아니라 같은 증언의 계속이기 때문이다.
+  citations      Json?
   at             DateTime @default(now())
 
   @@unique([uid, version])
