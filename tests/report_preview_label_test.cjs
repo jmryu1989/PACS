@@ -19,7 +19,9 @@ const ACTIONS = ['approve', 'save', 'reset', 'preliminary', 'defer', 'discarded'
 const show = value => JSON.stringify(value) ?? String(value);
 
 test('only the pure label is exported and the browser factory still exists', () => {
-  assert.deepEqual(Object.keys(preview), ['savedLabel']);
+  // S3-U4 adds the citation section's pure record wording beside the label; the
+  // list stays exact so a DOM-touching helper cannot slip into the node surface.
+  assert.deepEqual(Object.keys(preview), ['savedLabel', 'citationSection', 'citationAnswerOk']);
   assert.equal(typeof preview.savedLabel, 'function');
   assert.equal(typeof globalThis.KinReportPreview, 'function');
 });
