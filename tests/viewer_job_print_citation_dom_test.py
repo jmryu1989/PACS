@@ -56,6 +56,8 @@ JOB_REF = "SENTINELJOBCCCC"
 MARK_REF = "SENTINELMARKDDDD"
 ITEM_REF = "SENTINELITEMEEEE"
 SECRET_TEXT = "SENTINELINSERTEDTEXTFFFF"
+# The server's refusal sentence must stay on the server, not on a medical record.
+PRELIM_SENTINEL = "SENTINELPRELIMDOCGGGG"
 IDENTIFIER_SENTINELS = (CID, FINDING, JOB_REF, MARK_REF, ITEM_REF, "918273", "827364")
 
 CORNERSTONE = """() => {
@@ -178,8 +180,13 @@ def answer(version, head):
     return dict(status=200, body=dict(version=version, head=head, draft=[]))
 
 
-def failure(status):
-    return dict(status=status)
+def failure(status, message=None):
+    """A refusal. `message` is what the server would have said; the stub puts it on the
+    Error exactly as viewer-jobs.js does, so a case can prove the paper never repeats it."""
+    reply = dict(status=status)
+    if message is not None:
+        reply["message"] = message
+    return reply
 
 
 class ViewerJobPrintCitationDOM(unittest.TestCase):
@@ -351,7 +358,10 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
         data = self.pair()
         page = self.open_page(data, {
             UID_A: [answer(1, [entry("findings", 11, 0)])],
-            UID_B: [failure(403)],
+            # The server's 403 names the reviewer who may read it. That sentence is a
+            # sentinel here so 'the paper says no more than 접근 권한 밖' is a real assertion
+            # rather than a vacuous one against a message the stub never offered.
+            UID_B: [failure(403, "예비 판독(RS: P) 중입니다. " + PRELIM_SENTINEL + "만 볼 수 있습니다.")],
         })
         page.wait_for_function(READY, timeout=60000)
         self.choose_settled(page, "both")
@@ -368,6 +378,8 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
                          ["인용 증적 확인: doctor2의 열람 권한 기준", REFUSED])
         self.assertTrue(page.evaluate("() => document.querySelector('#kin-job-print').open"))
         self.assertFalse(page.eval_on_selector("#kin-job-print button:text-is('다시 확인')", "b => b.disabled"))
+        # The reason stays on the server: the paper says '접근 권한 밖' and nothing else.
+        self.assertNotIn(PRELIM_SENTINEL, self.srcdoc(page))
         self.assertNotIn("예비 판독", self.srcdoc(page))
         self.assert_no_writes(page)
 
@@ -448,19 +460,24 @@ class ViewerJobPrintCitationDOM(unittest.TestCase):
         # D-U5-4: with a page that DOES need evidence and no library to write it,
         # the only honest answer is to refuse. Printing 'unconfirmed' would need a
         # second copy of that wording here; printing nothing would make a signed
-        # report look exactly like one with nothing to cite.
-        data = self.pair()
-        page = self.prepared(data, {UID_A: [answer(1, [entry("findings", 11, 0)])]})
-        page.evaluate("() => { delete globalThis.KinReportPaper; }")
-        page.select_option(SELECT, "saved")
-        page.wait_for_function("t => document.querySelector('#kin-job-print [role=status]').textContent === t",
-                               arg=MISSING, timeout=60000)
-        self.assertEqual(self.srcdoc(page), "")
-        self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')", "b => b.disabled"))
-        # 'none' is unaffected: it needs no evidence, so it still prepares.
-        self.choose(page, "none")
-        self.assertIn("빈 셀", self.srcdoc(page))
-        self.assert_no_writes(page)
+        # report look exactly like one with nothing to cite. Both arms are checked:
+        # either library alone missing must refuse.
+        for missing in ("KinReportPaper", "KinReportCitation"):
+            with self.subTest(missing=missing):
+                page = self.prepared(self.pair(), {UID_A: [answer(1, [entry("findings", 11, 0)])]})
+                page.evaluate("name => { delete globalThis[name]; }", missing)
+                self.assertEqual(page.evaluate("name => typeof globalThis[name]", missing), "undefined")
+                page.select_option(SELECT, "saved")
+                page.wait_for_function("t => document.querySelector('#kin-job-print [role=status]').textContent === t",
+                                       arg=MISSING, timeout=60000)
+                self.assertEqual(self.srcdoc(page), "")
+                self.assertTrue(page.eval_on_selector("#kin-job-print button:text-is('인쇄 / PDF')",
+                                                      "b => b.disabled"))
+                # 'none' is unaffected: it needs no evidence, so it still prepares.
+                self.choose(page, "none")
+                self.assertIn("빈 셀", self.srcdoc(page))
+                self.assert_no_writes(page)
+                page.close()
 
     def test_10_an_answer_for_another_version_is_unknown(self):
         data = self.pair()

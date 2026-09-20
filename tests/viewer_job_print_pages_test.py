@@ -27,6 +27,11 @@ MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-job-print.js"
 # them, so every page built here loads them exactly as viewer-jobs.js does.
 CITATION_MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js"
 PAPER_MODULE = ROOT / "worklist-v0" / "hpacs-lite" / "report-preview.js"
+# The shared U4 wording an editor page now carries, pinned here on purpose: if the preview
+# surface ever reworded it, the two output paths would stop saying the same thing and this
+# file would say so. It ends in '서버 저장본 출력에서 확인하세요.', which is why the draft
+# page's saved-label assertions below are counted rather than absent (S3-U5 erratum).
+EDITOR_NOTICE = "현재 편집문 · 미확정 — 인용 증적은 이 출력에 싣지 않습니다. 서버 저장본 출력에서 확인하세요."
 SELECT = '[aria-label="함께 출력할 판독문"]'
 UID_A = ("1.2.826.0.1.3680043.8.498." + "1" * 64)[:64]
 UID_B = ("1.2.826.0.1.3680043.8.498." + "2" * 64)[:64]
@@ -322,6 +327,15 @@ class ViewerJobPrintPages(unittest.TestCase):
 
     def no_writes(self, page):
         self.assertEqual(page.evaluate("() => window.__writes"), [])
+
+    def citation_blocks(self, page):
+        """Each report section's citation block text, parsed from the srcdoc."""
+        return page.evaluate("""() => {
+          const doc = new DOMParser().parseFromString(
+            document.querySelector('#kin-job-print iframe').getAttribute('srcdoc') || '', 'text/html');
+          return [...doc.querySelectorAll('section.report')].map(section =>
+            (section.querySelector('section.citations') || {}).textContent || '');
+        }""")
 
     def test_pages_00_equal_x_fragments_keep_pdf_extraction_order(self):
         rows = [
@@ -624,7 +638,20 @@ class ViewerJobPrintPages(unittest.TestCase):
         self.assertIn("출력 시점의 판독 화면 편집문입니다. 서버에 저장·승인되지 않았습니다.", srcdoc)
         self.assertIn("작성자(편집 중): doctor", srcdoc)
         self.assertNotIn("승인 판독의", srcdoc)
-        self.assertNotIn("저장본", srcdoc)
+        # S3-U5 erratum to contract 7-3/8-7 (Astra, option A). The draft page now carries the
+        # shared citation notice, whose last sentence is '서버 저장본 출력에서 확인하세요.', so a
+        # bare absence of '저장본' can no longer express what this line protects. The property -
+        # a draft page must never wear a saved-report label - is kept at GREATER strength:
+        # exactly one occurrence in the whole paper, and that one belongs to the citation block.
+        # Any saved label ('승인된 저장본 · v1', '미승인 저장본 · v2') makes it two and still fails,
+        # and a label that replaced the notice would leave the block without it. The shared
+        # wording, U4 and the product are untouched.
+        self.assertEqual(srcdoc.count("저장본"), 1, "only the citation notice may say 저장본 on a draft page")
+        blocks = self.citation_blocks(page)
+        self.assertEqual(len(blocks), 1)
+        self.assertIn(EDITOR_NOTICE, blocks[0])
+        self.assertEqual(sum(block.count("저장본") for block in blocks), 1,
+                         "the single 저장본 must be the citation notice's, not a saved label")
         self.assertNotIn("RS A", srcdoc)
         self.assertIn("검사일 20260801 · 현재 검사", srcdoc)
         # The saved server body of the same study must not be substituted.
@@ -644,7 +671,14 @@ class ViewerJobPrintPages(unittest.TestCase):
             self.assertIn(flat("미확정 편집문 · 저장·승인되지 않음"), flats[index])
             self.assertIn(PATIENT_ID, flats[index])
             self.assertNotIn(UID_B, flats[index])
-            self.assertNotIn(flat("저장본"), flats[index])
+            # Same erratum on paper: at most one 저장본 per draft page, and if it is there it
+            # is the notice's. The version/RS stamps below stay absent unconditionally, so a
+            # saved label still cannot reach a draft page through this relaxation.
+            self.assertLessEqual(flats[index].count(flat("저장본")), 1,
+                                 "page %d says 저장본 more than the citation notice does" % (index + 1))
+            if flat("저장본") in flats[index]:
+                self.assertIn(flat("서버 저장본 출력에서 확인하세요"), flats[index],
+                              "page %d says 저장본 outside the citation notice" % (index + 1))
             for stamp in ("RSA", "RSW", "·v1·", "·v2·"):
                 self.assertNotIn(stamp, flats[index], stamp)
         for index in range(total):
@@ -991,9 +1025,12 @@ class ViewerJobPrintPages(unittest.TestCase):
         flats = [flat(sheet.extract_text()) for sheet in reader.pages]
         # Each study's line is unmistakable by its own finding revision and
         # source number, so a line printed under the wrong report is visible.
-        # The locator stays inside one script: a Latin/Korean boundary can be
-        # re-ordered by the font fallback this file documents at line_order().
-        # Exact wording is asserted on the serialized page by the DOM test.
+        # The locator is kept short rather than the whole line: it still crosses a
+        # Korean/Latin boundary, which the font fallback documented at line_order()
+        # can re-order, so it is the same risk class as the whole-page assertions
+        # this file already passes hosted (e.g. flat("승인된 저장본 · v1 · RS A")).
+        # If this reports "appears on 0 pages", suspect extraction order before the
+        # product. Exact wording is asserted on the serialized page by the DOM test.
         for uid, line, other in ((UID_A, "소견 r11 · 출처 1번", UID_B),
                                  (UID_B, "소견 r22 · 출처 7번", UID_A)):
             found = [i for i, text in enumerate(flats) if flat(line) in text]

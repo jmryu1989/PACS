@@ -21,11 +21,13 @@ Rules this runner holds itself to, and how it differs from the U4 runner it is m
   * the source tree is never mutated - every mutant is a COPY in a temp dir, reached through
     the test's KIN_JOB_PRINT_JS override;
   * each anchor must occur exactly once, or the mutant is a failure, not a survivor;
-  * a kill needs a non-zero child exit AND the target case named FAIL/ERROR AND an
+  * a kill needs a non-zero child exit AND the target case named **FAIL** (never ERROR) AND an
     AssertionError AND **the mutant's own `expect` text inside that failure** AND no
     harness-start failure. The U4 rule accepted ANY AssertionError, so a mutant that broke
     the case for an unrelated reason still counted (D-N1); here it does not. A crash or a
     tearDown error is never a kill;
+  * the crash markers stay narrow (see CRASH_MARKERS): a marker that also appears in an
+    ordinary failing run turns every real kill into a survivor;
   * the unmutated copy must first pass through the same override, so a broken override
     cannot manufacture seven kills;
   * `expect` is an assertion MESSAGE, never a serialized document: a long HTML dump is
@@ -52,8 +54,16 @@ SOURCE = ROOT / "worklist-v0" / "hpacs-lite" / "viewer-job-print.js"
 DOM_TEST = ROOT / "tests" / "viewer_job_print_citation_dom_test.py"
 CASE = "ViewerJobPrintCitationDOM"
 
+# Harness-start failures only. A bare "Traceback (most recent call last)" MUST NOT be here:
+# unittest prints that line for every ordinary assertion failure, so it would mark each genuine
+# kill as a crash and report all seven mutants as survivors. The U4 runner this is modelled on
+# used harness-start strings only, which is why it passed hosted; the U5 tightening over-reached
+# and the fixed-code review reproduced the consequence host-pure.
+#
+# Narrow on purpose: a marker that can appear in a normal failing run silently disables every
+# kill. A Playwright timeout or browser crash still carries playwright._impl._errors, so
+# timeouts remain non-kills, and a missing dependency still carries ModuleNotFoundError.
 CRASH_MARKERS = (
-    "Traceback (most recent call last)",
     "playwright._impl._errors",
     "ModuleNotFoundError",
 )
@@ -146,8 +156,11 @@ def failure_block(output, case):
     line; reading the whole block rather than one line keeps a multi-line diff readable and
     lets the message be found wherever the reporter placed it.
     """
+    # FAIL only. An ERROR names an exception, not the assertion the mutant is about, and that
+    # is the U4 tearDown hole: a case that raises after its assertions would otherwise be
+    # adjudicated on whatever AssertionError happened to be in the output.
     named = [line.strip() for line in output.splitlines()
-             if case in line and ("FAIL" in line or "ERROR" in line)]
+             if case in line and "FAIL" in line and "ERROR" not in line]
     blocks = re.split(r"^={10,}$", output, flags=re.MULTILINE)
     mine = [block for block in blocks if case in block and "AssertionError" in block]
     assertion = [line.strip() for line in output.splitlines() if "AssertionError" in line]
