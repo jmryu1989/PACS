@@ -72,6 +72,26 @@ window.KinReportCitation = (function () {
     return count;
   }
 
+  /**
+   * 그 줄 블록이 차지하는 **줄 구간**들(S3-U6). 세는 규칙은 `lineBlockOccurrences`와 **같은 것
+   * 하나**여야 한다 — 한쪽은 "있다"고 하고 다른 쪽은 자리를 못 찾으면, 커서 삽입이 남의 인용
+   * 한가운데에 줄을 끼워 아무것도 지우지 않고 그 증언을 `absent`로 만든다. 그래서 같은 정규화·
+   * 같은 왼쪽 우선 비겹침 진행을 쓰고 구간 수는 언제나 그 함수의 답과 같다.
+   */
+  function blockSpans(body, block) {
+    const spans = [];
+    if (blockIsBlank(block)) return spans;
+    const want = blockLines(block);
+    if (!want.length) return spans;
+    const lines = normalizeForCompare(body).split('\n');
+    for (let i = 0; i + want.length <= lines.length;) {
+      let hit = true;
+      for (let j = 0; j < want.length; j++) if (lines[i + j] !== want[j]) { hit = false; break; }
+      if (hit) { spans.push([i, i + want.length]); i += want.length; } else i += 1;
+    }
+    return spans;
+  }
+
   /** `n`과 `k`는 같은 등식을 써야 한다. 저장된 바이트는 건드리지 않는 **비교용 키**일 뿐이다. */
   function comparisonKey(text) {
     return blockLines(text).join('\n');
@@ -140,6 +160,76 @@ window.KinReportCitation = (function () {
   function appendBlock(current, block) {
     const text = current === null || current === undefined ? '' : String(current);
     return text ? text + '\n' + block : String(block);
+  }
+
+  const countLf = text => text.split('\n').length - 1;
+
+  /**
+   * 사람이 둔 커서 자리에 블록을 **줄 단위로** 넣는다 (S3-U6 · IF-A29 「cursor 위치 삽입」).
+   *
+   * 셋을 동시에 지킨다. ① 기존 글자는 한 자도 지우거나 고치지 않는다 — 들어가는 것은 블록과
+   * 필요한 LF 구분자뿐이고, 선택 영역도 지우지 않는다(보이지도 않는 선택을 삽입 한 번으로
+   * 없애는 것이 원문이 금지한 「예기치 않은 덮어쓰기」다). ② 블록은 **완전한 줄들**을 차지한다.
+   * 줄 한가운데 끼우면 방금 넣은 인용이 그 자리에서 `absent`로 읽힌다. ③ 이미 인용된 블록의
+   * 줄들 사이로는 들어가지 않는다 — 아무것도 지우지 않았는데 남의 증언이 사라지기 때문이다.
+   *
+   * `at`이 없으면(그 칸에서 확인된 커서 자리가 없으면) 결과는 `appendBlock`과 **바이트가 같다.**
+   * 위치를 말한 적 없는 삽입의 답을 이 단위가 바꾸지 않기 위해서다.
+   *
+   * 입력 전제는 LF만 있는 텍스트다(textarea의 API 값이 그렇다). 홀로 있는 CR이 섞여도 던지지
+   * 않고 글자도 잃지 않지만, 그때는 보호 구간을 적용하지 않는다 — 두 셈법의 줄 번호가 달라지므로
+   * 엉뚱한 자리를 "보호했다"고 말하지 않는 편이 정직하다.
+   */
+  function placeBlock(text, block, at, guards) {
+    const value = text === null || text === undefined ? '' : String(text);
+    const body = String(block === null || block === undefined ? '' : block);
+    // 정수가 아닌 자리는 자리가 아니다. 그때는 오늘과 같은 답(칸 끝)을 준다.
+    if (!at || !Number.isInteger(at.start) || !Number.isInteger(at.end)) {
+      const appended = appendBlock(value, body);
+      const start = appended.length - body.length;
+      return { text: appended, start, end: appended.length, anchor: value.length,
+               line: countLf(appended.slice(0, start)) + 1, mode: 'end', snapped: null };
+    }
+    const len = value.length;
+    const mode = at.start === at.end ? 'caret' : 'selection';
+    let q = Math.max(at.start, at.end);
+    q = q < 0 ? 0 : q > len ? len : q;
+    let snapped = null;
+    // 줄 한가운데면 그 줄 끝으로 맞춘다. 앞뒤 어느 쪽도 사람이 쓴 줄을 쪼개지 않는다.
+    if (q > 0 && q < len && value[q - 1] !== '\n' && value[q] !== '\n') {
+      const next = value.indexOf('\n', q);
+      q = next < 0 ? len : next;
+      snapped = 'line-end';
+    }
+    // 이 블록 앞에 놓일 **완전한 줄**의 수. 줄 머리면 그 줄 앞, 줄 끝이면 그 줄 다음이다.
+    let pos = countLf(value.slice(0, q));
+    if (!(q === 0 || value[q - 1] === '\n')) pos += 1;
+    if (Array.isArray(guards) && guards.length && countLf(value) === countLf(normalizeForCompare(value))) {
+      const starts = [0];
+      for (let i = 0; i < len; i++) if (value[i] === '\n') starts.push(i + 1);
+      for (let moved = true; moved;) {
+        moved = false;
+        for (const guard of guards)
+          for (const [from, to] of blockSpans(value, guard))
+            if (from < pos && pos < to) { pos = to; moved = true; snapped = 'past-citation'; }
+      }
+      q = pos < starts.length ? starts[pos] : len;
+    }
+    /**
+     * 구분자는 **딱 필요한 만큼**이되, 규칙은 하나다: 넣은 뒤에도 **기존의 모든 줄이 그대로
+     * 남고** 줄 수는 블록의 줄 수만큼만 는다. 그래서 이미 있던 줄의 종결자를 빼앗지 않는다 —
+     * 빼앗으면 아무 글자도 지우지 않고 그 줄(예: 사람이 둔 빈 줄, 인용 블록의 마지막 빈 줄)이
+     * 사라져 그 인용이 `absent`가 된다. 앞선 줄이 끝나 있지 않으면 먼저 끝내고(prefix),
+     * 뒤따르는 줄이 자기 종결자를 이미 우리에게 넘겨준 경우에만 suffix를 생략한다.
+     */
+    const rest = value.slice(q);
+    const prefix = q > 0 && value[q - 1] !== '\n' ? '\n' : '';
+    const suffix = rest === ''
+      ? (prefix === '' && len > 0 ? '\n' : '')
+      : (prefix === '\n' && rest[0] === '\n' ? '' : '\n');
+    const start = q + prefix.length;
+    return { text: value.slice(0, q) + prefix + body + suffix + rest,
+             start, end: start + body.length, anchor: q, line: pos + 1, mode, snapped };
   }
 
   /** UTF-8 바이트. 한도는 서버가 재는 것과 같은 자여야 한다. */
@@ -319,8 +409,8 @@ window.KinReportCitation = (function () {
   return Object.freeze({
     SCHEMA, FIELDS, FIELD_LABEL, INSERTED_TEXT_BYTES, SOURCE_UNAVAILABLE,
     STATE_TEXT, UNAVAILABLE_TEXT, PRESENT_CAVEAT,
-    normalizeForCompare, toLf, blockLines, blockIsBlank, lineBlockOccurrences, comparisonKey,
-    presenceState, presenceOf, isReduced, entryKey, assembleBlock, appendBlock, utf8Bytes, refuseBlock,
+    normalizeForCompare, toLf, blockLines, blockIsBlank, lineBlockOccurrences, blockSpans, comparisonKey,
+    presenceState, presenceOf, isReduced, entryKey, assembleBlock, appendBlock, placeBlock, utf8Bytes, refuseBlock,
     createState,
   });
 })();

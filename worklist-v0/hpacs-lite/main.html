@@ -987,6 +987,10 @@
     <div class="box" style="width:640px;max-width:94vw">
       <h3 id="tpl-preview-title">Template Preview</h3>
       <p id="tpl-preview-target"></p>
+      <!-- S3-U6: 상용구는 칸마다 자기 커서 자리로 들어간다. 이 문장은 고정이다 — 이 창은
+           칸마다 다른 자리를 계속 다시 계산해 보여주는 자리가 아니고(더블클릭 삽입에는 이
+           창이 아예 없다), 한 번 보여준 숫자가 낡아 거짓이 되는 편이 더 나쁘다. -->
+      <p id="tpl-preview-place">각 칸의 커서 자리에 줄 단위로 넣습니다(커서가 줄 중간이면 그 줄 다음). 커서 자리가 확인되지 않은 칸은 맨 끝에 붙입니다. 기존 내용은 지우지 않습니다.</p>
       <div class="tpl-preview-body" tabindex="0" role="region" aria-label="상용구 내용">
         <p id="tpl-preview-meta"></p>
         <h4>Findings</h4><pre id="tpl-preview-findings"></pre>
@@ -1022,6 +1026,9 @@
           <option value="recommendation">Recommendation</option>
         </select>
       </p>
+      <!-- S3-U6: 어느 칸 몇 번째 줄부터 들어가는지. 소견 패널이 판독문 칸을 덮고 있어
+           사람이 삽입 자리를 눈으로 확인할 수 없으므로, 이 줄이 유일한 고지다. -->
+      <p id="cite-preview-place"></p>
       <div class="tpl-preview-body" tabindex="0" role="region" aria-label="판독문에 들어갈 내용">
         <pre id="cite-preview-block"></pre>
       </div>
@@ -1397,7 +1404,12 @@
       for (const k of RFIELDS) {
         if (!t[k]) continue;
         const el = $("#" + k);
-        el.value += (el.value ? "\n" : "") + t[k];
+        // S3-U6: 상용구도 사람이 둔 커서 자리에 줄 단위로 들어간다. 저장된 상용구에는 CR이
+        // 섞일 수 있어 줄 끝을 먼저 모은다 — 아니면 넣은 뒤 커서가 CR 수만큼 어긋난다.
+        const plan = KinReportCitation.placeBlock(el.value, KinReportCitation.toLf(t[k]),
+                                                  caretAt(k), citationGuards(k));
+        el.value = plan.text;
+        el.setSelectionRange(plan.end, plan.end);
         // 목록 삽입도 타이핑/Tab처럼 점유를 시작해야 다른 판독의에게 편집 중임이 보인다.
         el.dispatchEvent(new Event("input", { bubbles: true }));
       }
@@ -3088,9 +3100,31 @@
      * 한 화면에 나란히 놓인다.
      */
     let selectionSeq = 0;
+    /**
+     * S3-U6: **사람이 커서를 둔 적이 있는 칸**의 이름들.
+     *
+     * 커서 자리 자체는 브라우저가 이미 들고 있다 — textarea는 초점을 잃어도 자기
+     * `selectionStart/selectionEnd`를 유지하므로 화면이 사본을 두면 그 사본만 낡는다.
+     * 화면이 기억할 것은 하나뿐이다: **그 칸을 짚은 적이 있는가.** 한 번도 초점을 받지 않은
+     * 칸도 `0`을 답하는데, 그 `0`은 "맨 앞을 가리킨다"가 아니라 "자리가 없다"이기 때문이다.
+     * 그 둘을 구별하지 못하면 커서를 둔 적 없는 칸의 **맨 위**에 문장이 들어간다.
+     *
+     * 잊는 자리는 둘뿐이다 — 검사 선택이 바뀔 때(아래)와 `loadReport`가 그 칸의 값을 실제로
+     * 갈아끼울 때. 그 밖에는 잊지 않는다: 같은 값 재대입은 캐럿을 옮기지 않는다.
+     */
+    const caretFields = new Set();
+    function noteCaret(field) { caretFields.add(field); }
+    function forgetCaret(field) { caretFields.delete(field); }
+    function caretAt(field) {
+      if (!caretFields.has(field)) return null;
+      const el = $("#" + field);
+      return el ? { start: el.selectionStart, end: el.selectionEnd } : null;
+    }
     function markSelectionChanged(uid) {
       selectedUid = uid;
       selectionSeq += 1;
+      // 커서 자리는 그 검사의 그 글에 대한 것이다. A→B→A도 같은 화면이 아니다.
+      caretFields.clear();
     }
 
     const reportOrigin = new Map();
@@ -3178,7 +3212,15 @@
                                  ["#conclusion", "Please enter conclusion"],
                                  ["#recommendation", "Please enter recommendation"]]) {
         const el = $(sel);
-        if (!preserveValue) el.value = locked ? "" : (src[sel.slice(1)] ?? "");
+        // S3-U6: 값이 **실제로** 달라졌을 때만 그 칸의 커서 자리를 잊는다. 폴링이 같은 글을
+        // 다시 대입하는 것은 화면에서 아무 일도 아니고(명세상 캐럿도 그대로다), 그때까지
+        // 잊으면 사람이 짚어둔 자리가 30초마다 사라진다. 비교는 대입 전후의 API 값으로 한다 —
+        // 원문과 API 값이 줄 끝에서 다를 수 있으므로 문자열 예측이 아니라 결과를 본다.
+        if (!preserveValue) {
+          const was = el.value;
+          el.value = locked ? "" : (src[sel.slice(1)] ?? "");
+          if (el.value !== was) forgetCaret(sel.slice(1));
+        }
         el.placeholder = locked ? (sel === "#findings" ? ph : "") : base;
         el.readOnly = !!heldByOther(cur()) || locked || (cur()?.ss === "Unverified" && cur()?.em !== "E") || !KinAuth.has("radiologist");
       }
@@ -3613,6 +3655,8 @@
       citationRefreshTimer = setTimeout(() => { citationRefreshTimer = null; renderCitationBar(); }, 400);
     }
     for (const k of RFIELDS) $("#" + k).addEventListener("input", scheduleCitationRefresh);
+    // S3-U6: 커서 자리 자체는 그 칸이 들고 있다. 화면은 "이 칸을 짚은 적이 있다"만 표시해 둔다.
+    for (const k of RFIELDS) $("#" + k).addEventListener("focus", () => noteCaret(k));
     $("#b-cite-list").addEventListener("click", () => {
       citationListOpen = !citationListOpen;
       renderCitationBar();
@@ -3631,6 +3675,48 @@
       if (why) { box.checked = false; toast(why, "err"); return; }
       citations.mark(selectedUid, box.dataset.citeRemove, box.checked);
     });
+
+    /**
+     * S3-U6: 이 칸에서 **쪼개면 안 되는 줄 블록**들 — 알려진 인용이 가리키는 그 글이다.
+     *
+     * 머리 판 건은 행이 있는 한 언제나 싣는다(초안 쪽을 모르는 상태로 되돌려도 머리는 남는다).
+     * 초안 건은 **확인된 동안에만** 싣는다 — 모르는 상태의 빈 목록을 "보호할 것이 없다"로 읽으면
+     * 보호하지 않고도 보호했다고 말하게 된다. 축약된 건은 대조할 글 자체가 오지 않아 보호할 수 없다.
+     */
+    function citationGuards(field) {
+      const uid = selectedUid, row = uid ? citations.get(uid) : null;
+      if (!row) return [];
+      const entries = citations.known(uid) ? [...row.head, ...row.draft] : [...row.head];
+      return entries.filter(e => e && e.field === field && !KinReportCitation.isReduced(e))
+                    .map(e => e.insertedText);
+    }
+    /** 지금 이 칸에 넣는다면 어디에 들어가는가. 화면은 이 답 하나를 보여주고 이 답 하나를 보낸다. */
+    function citationPlan(field, block) {
+      return KinReportCitation.placeBlock($("#" + field).value, block, caretAt(field), citationGuards(field));
+    }
+    /**
+     * 삽입 자리를 사람이 읽는 한 줄로. 숫자는 **줄바꿈 기준** 줄 번호다 — 화면에서 접혀 보이는
+     * 줄이 아니라 저장되는 글의 줄이다. 소견 패널이 판독문 칸을 덮고 있어 사람은 자리를 눈으로
+     * 확인할 수 없으므로, 이 줄이 유일한 고지이며 낡으면 안 된다.
+     */
+    function placementLine(field, plan) {
+      if (!plan) return "";
+      const label = KinReportCitation.FIELD_LABEL[field] ?? field;
+      if (plan.mode === "end")
+        return `삽입 위치: ${label} 칸 맨 끝 — 이 칸에서 확인된 커서 자리가 없어 끝에 붙입니다`;
+      return `삽입 위치: ${label} 칸 ${plan.line}번째 줄(줄바꿈 기준)부터` +
+        (plan.snapped === "line-end" ? " · 커서가 줄 중간이라 그 줄 다음으로 맞췄습니다" : "") +
+        (plan.snapped === "past-citation" ? " · 이미 인용된 문장을 쪼개지 않도록 그 뒤로 옮겼습니다" : "") +
+        (plan.mode === "selection" ? " · 선택한 글은 지우지 않고 그 뒤에 넣습니다" : "");
+    }
+    /**
+     * 200을 받은 뒤 **화면에** 놓을 계획(P-10). 보낸 문자열이 딛고 선 값이 아직 그대로면 그
+     * 문자열을 그대로 쓴다. 그 사이 이 칸이 프로그램으로 갈렸다면 그 글을 덮지 않고 지금 값 위에
+     * 같은 규칙으로 다시 놓는다 — 어느 쪽이든 사람이 쓴 글자를 잃지 않는다.
+     */
+    function screenPlan(field, block, before, plan) {
+      return $("#" + field).value === before ? plan : citationPlan(field, block);
+    }
 
     /**
      * 삽입을 막는 이유. 권한·점유·촬영 중·예비 판독은 **상용구 삽입과 같은 관문 함수**가
@@ -3665,7 +3751,7 @@
       // 순번을 올린다. 닫힌 창에 묶여 있던 응답은 더는 이 화면에 쓸 수 없다.
       citePane = null; citeSeq += 1;
       $("#cite-preview").classList.remove("show");
-      for (const id of ["target", "source", "status"]) $("#cite-preview-" + id).textContent = "";
+      for (const id of ["target", "source", "place", "status"]) $("#cite-preview-" + id).textContent = "";
       $("#cite-preview-block").textContent = "";
       if (returnFocus) (citeReturn?.isConnected ? citeReturn : $("#findings")).focus();
       citeReturn = null;
@@ -3687,9 +3773,12 @@
         `출처: ${citePane.sourceLabel} · 소견 r${citePane.findingRevision} · 인용 당시 연결 ${citePane.linkState}`;
       // 미리보기는 **조립된 그 유니코드 문자열 그대로**를 보인다. 공백도 줄바꿈도 보존된다.
       $("#cite-preview-block").textContent = citePane.block;
+      // 여기서 계획을 **다시 세우지 않는다.** 이 함수는 누름 자체에서도 여러 번 불리므로,
+      // 여기서 갱신하면 열고 나서 바뀐 것을 조용히 흡수해 "확인한 자리"가 사라진다.
+      $("#cite-preview-place").textContent = placementLine($("#cite-preview-field").value, citePane.plan);
       $("#cite-preview-status").textContent = why ?? citePane.status ??
         (`확인을 누르면 서버가 이 문장과 증언을 함께 기록한 뒤 ${KinReportCitation.FIELD_LABEL[$("#cite-preview-field").value]} 칸에 붙입니다.` +
-         " 기존 내용은 그대로 두고 아래에 이어 붙입니다.");
+         " 기존 내용은 한 글자도 지우지 않고 위 위치에 줄 단위로 넣습니다.");
       $("#cite-preview-insert").disabled = !!why || citeBusy;
     }
     /**
@@ -3708,8 +3797,9 @@
       citeSeq += 1;
       citePane = { ...request, seq: citeSeq, selSeq: selectionSeq, warned: false, status: null };
       citeReturn = origin?.isConnected ? origin : null;
-      // 대상 칸은 언제나 명시적이고, 기본은 Findings다.
+      // 대상 칸은 언제나 명시적이고, 기본은 Findings다. 커서는 **자리**만 정하고 **칸**은 이 선택이 정한다.
       $("#cite-preview-field").value = "findings";
+      citePane.plan = citationPlan("findings", citePane.block);
       setCiteBusy(false);
       renderCitePreview();
       $("#cite-preview").classList.add("show");
@@ -3719,8 +3809,9 @@
     $("#cite-preview-field").addEventListener("change", () => {
       if (!citePane || citeBusy) return;
       // 대상을 바꾸면 앞서 읽고 누른 확인은 이 대상에 대한 것이 아니다.
-      // 중복 경고도 새 칸 기준으로 다시 받는다.
+      // 중복 경고도 새 칸 기준으로 다시 받고, 삽입 자리도 그 칸의 커서로 다시 잡는다.
       citePane.warned = false; citePane.status = null;
+      citePane.plan = citationPlan($("#cite-preview-field").value, citePane.block);
       renderCitePreview();
     });
     $("#cite-preview-close").addEventListener("click", () => { if (!citeBusy) closeCitePreview(); });
@@ -3796,9 +3887,23 @@
         }
         const why2 = citationInsertBlock();
         if (why2) { pane.status = why2; renderCitePreview(); return; }
+        /**
+         * **보여준 자리로만 보낸다**(D-9). 미리보기를 연 뒤 이 칸이 갈렸거나 보호할 인용이
+         * 달라졌으면 지금 넣을 자리는 사람이 읽은 그 자리가 아니다. 그때는 **아무것도 보내지 않고**
+         * 새 자리를 보여준 뒤 한 번 더 누르게 한다 — 판독문은 한 글자도 움직이지 않는다.
+         */
+        const plan2 = citationPlan(field, pane.block);
+        if (!pane.plan || plan2.text !== pane.plan.text) {
+          pane.plan = plan2;
+          pane.status = "판독문이나 삽입 위치가 그 사이 바뀌었습니다 — 위의 삽입 위치를 다시 확인하고 한 번 더 누르세요.";
+          renderCitePreview();
+          return;
+        }
         const content = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
-        // 구분자(LF 하나)는 `insertedText` 바깥이다. 증언이 가리키는 것은 그 블록뿐이다.
-        content[field] = KinReportCitation.appendBlock(content[field], pane.block);
+        // 구분자(LF)는 `insertedText` 바깥이다. 증언이 가리키는 것은 그 블록뿐이고,
+        // 보내는 문자열과 화면에 들어갈 문자열은 **이 계획 하나**에서 나온다.
+        const before = content[field];
+        content[field] = plan2.text;
         const a = appState[pane.uid] ?? {};
         const baseVersion = reportBaseVersion(pane.uid, a.draft?.baseVersion ?? a.version ?? 0);
         const keep = citations.keepIds(pane.uid);
@@ -3843,8 +3948,12 @@
           return;
         }
         // 기존 삽입 기전 그대로다 — 목록 삽입도 타이핑처럼 점유를 시작해야 한다.
+        // 달라진 것은 자리뿐이고, 들어가는 문자열은 방금 서버에 보낸 그 문자열이다.
         const el = $("#" + field);
-        el.value += (el.value ? "\n" : "") + pane.block;
+        const shown = screenPlan(field, pane.block, before, plan2);
+        el.value = shown.text;
+        // 커서는 넣은 글 끝에 선다. 가운데에 넣고 화면 끝으로 튀면 사람이 자기 글을 다시 찾아야 한다.
+        el.setSelectionRange(shown.end, shown.end);
         el.dispatchEvent(new Event("input", { bubbles: true }));
         // 서버 행은 방금 우리가 보낸 세 칸이다. 초안 표시가 그 사실을 말하게 한다.
         appState[pane.uid] = { ...appState[pane.uid],
