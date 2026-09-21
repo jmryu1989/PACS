@@ -13,6 +13,7 @@
 // that canonical jsonb bytes are what the real database measures. Both are real-database facts; the
 // mapping is pinned here on a synthesized error so a rename or a broadened catch is caught early.
 const test = require('node:test'), assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const { PacsService } = require('/app/dist/pacs.service');
 const structure = require('/app/dist/report-structure');
 const { Prisma } = require('/app/node_modules/@prisma/client');
@@ -254,15 +255,118 @@ test('a malformed stored entry is recognised, and counts use the citation equati
     stored({ sid: 'c', renderedText: NUMBER_LINE })]), [2, 2, 1]);
 });
 
-test('validateCatalog accepts the synthetic catalog and refuses ambiguity', () => {
-  structure.validateCatalog(CATALOG);
-  structure.validateCatalog(structure.STRUCTURE_CATALOG);
-  const clone = extra => [{ ...TEMPLATE, items: [...TEMPLATE.items, extra] }];
-  assert.throws(() => structure.validateCatalog(clone({ ...item('SYN-CHOICE') })), /code가 중복/);
-  assert.throws(() => structure.validateCatalog(clone({ ...item('SYN-TEXT'), code: 'SYN-X' })), /골격이 중복/);
-  assert.throws(() => structure.validateCatalog(clone({ ...item('SYN-CHOICE'), code: 'SYN-X' })), /같은 문장을 만듭니다/);
-  assert.throws(() => structure.validateCatalog(clone({ ...item('SYN-TEXT'), code: 'SYN-X', template: 'no slot' })),
-    /정확히 한 번/);
+/* ── P12: the catalog rules, as compiled ─────────────────────────────────────────────────── */
+
+const catalogRule = catalog => {
+  try { structure.validateCatalog(catalog); return 'ACCEPT'; }
+  catch (e) {
+    // A rule-bearing error, or nothing. "Something threw" is not the assertion.
+    assert.ok(e instanceof structure.StructureCatalogError, `not a catalog error: ${e && e.message}`);
+    assert.ok(e.message.startsWith(e.rule + ': '), 'the message must name its own rule');
+    return e.rule;
+  }
+};
+
+test('every shared catalog vector gets exactly the rule it names', () => {
+  // B6: the vectors are the subject. Asserting the RULE and not merely a throw means a validator
+  // that refused everything, or refused the right catalogs for the wrong reason, fails here.
+  assert.ok(vectors.catalogVectors.length >= 30, 'the shared catalog vectors are missing');
+  for (const vector of vectors.catalogVectors)
+    assert.equal(catalogRule(vector.catalog), vector.rule, `${vector.name} - ${vector.why}`);
+  // and the two catalogs this repository actually ships with are both legal.
+  assert.equal(catalogRule(CATALOG), 'ACCEPT');
+  assert.equal(catalogRule(structure.STRUCTURE_CATALOG), 'ACCEPT');
+});
+
+test('a sparse array hole is refused with a rule, not with a TypeError', () => {
+  /**
+   * A JSON file cannot express `[a, , b]`, so this witness cannot live in the shared vector table.
+   * A hand-written catalog can grow one from a single stray comma, and reading a hole gives
+   * `undefined`. The browser test carries the same three shapes against its own validator - the two
+   * must answer alike, because a catalog that boots the API but kills the page is worse than one
+   * that boots neither.
+   */
+  const item = (code, template) => ({ code, field: 'findings', valueType: 'text', template, label: code });
+  const tpl = (items, templateId = 'SYN-H') => ({ templateId, revision: 1, title: 'SYNTHETIC', items });
+  const choiceItem = choices => ({ code: 'A', field: 'findings', valueType: 'choice',
+    template: 'M: {value}', label: 'A', choices });
+
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}')], 'SYN-H1'), ,
+                            tpl([item('B', 'Beta: {value}')], 'SYN-H2')]), 'R-D', 'a hole between templates');
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}'), , item('B', 'Beta: {value}')])]),
+    'R-D', 'a hole between items');
+  assert.equal(catalogRule([tpl([choiceItem([{ code: 'c0', text: 'alpha' }, ,
+                                             { code: 'c1', text: 'beta' }])])]), 'R-D', 'a hole between choices');
+  // Remove the hole and each one is legal, so the case is about the hole and nothing else.
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}')], 'SYN-H1'),
+                            tpl([item('B', 'Beta: {value}')], 'SYN-H2')]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}'), item('B', 'Beta: {value}')])]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([choiceItem([{ code: 'c0', text: 'alpha' },
+                                             { code: 'c1', text: 'beta' }])])]), 'ACCEPT');
+});
+
+test('every shared entry vector is decided at apply time, after the sentence already matched', () => {
+  /**
+   * A free-text value is not in the catalog, so the load-time pass can never see it. These go
+   * through the real `structureApplyInput`, whose byte-equality check runs FIRST - so a refusal
+   * here is the boundary rule and not "that is not the sentence this template makes". The message
+   * is matched for that reason.
+   */
+  assert.ok(vectors.entryVectors.length >= 10, 'the shared entry vectors are missing');
+  for (const vector of vectors.entryVectors) {
+    const template = vector.catalog.find(t => t.templateId === vector.templateId);
+    const entryItem = template.items.find(i => i.code === vector.itemCode);
+    const send = { op: 'apply', field: entryItem.field, templateId: vector.templateId,
+      templateRevision: template.revision, itemCode: vector.itemCode, valueType: entryItem.valueType,
+      value: vector.value, renderedText: structure.renderItem(entryItem, vector.value) };
+    if (vector.expect === 'ACCEPT') {
+      const read = structure.structureApplyInput(send, vector.catalog);
+      assert.equal(read.value, vector.value, `${vector.name}: the value is stored exactly as typed`);
+      assert.equal(read.renderedText, send.renderedText, `${vector.name}: and so is the sentence`);
+    } else {
+      assert.throws(() => structure.structureApplyInput(send, vector.catalog),
+        /값이 문장의 경계에서 합쳐져/, `${vector.name} - ${vector.why}`);
+    }
+  }
+});
+
+test('the injection seam validates BEFORE it replaces, so a refused catalog changes nothing', () => {
+  // B4/P7. The seam stays the only way in, and now it is a gate. A setter that assigned first and
+  // validated after would leave the service holding a catalog nobody checked.
+  const { svc } = fixture();
+  assert.deepEqual([...svc.structureCatalog], [...CATALOG]);
+  const bad = vectors.catalogVectors.find(v => v.rule === 'R-B');
+  assert.throws(() => { svc.structureCatalog = bad.catalog; }, structure.StructureCatalogError);
+  assert.deepEqual([...svc.structureCatalog], [...CATALOG], 'the previous valid catalog still stands');
+  const good = vectors.catalogVectors.find(v => v.rule === 'ACCEPT'
+    && v.catalog.length === 1 && v.catalog[0].templateId !== TEMPLATE.templateId);
+  svc.structureCatalog = good.catalog;
+  assert.deepEqual([...svc.structureCatalog], [...good.catalog], 'a valid catalog does replace it');
+  // and the product instance, untouched, is still the empty constant.
+  const untouched = new PacsService({}, {}, { usersInGroupWithRole: async () => [] },
+    { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() },
+    { readableFindings: async () => [] });
+  assert.deepEqual([...untouched.structureCatalog], []);
+});
+
+test('the compiled product catalog is byte-for-byte the pinned canonical JSON', () => {
+  /**
+   * B8. The browser test pins the SAME sha for its own constant, and neither test can read the
+   * other's file - this one runs inside the image against `/app/dist`. Comparing the VALUE (through
+   * canonical JSON) rather than the source text means a catalog that differed only in key order or
+   * whitespace would still be caught, and a real catalog cannot ship on one side alone.
+   */
+  const canonical = value => {
+    if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+    if (value && typeof value === 'object')
+      return '{' + Object.keys(value).sort()
+        .map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
+    return JSON.stringify(value);
+  };
+  const sha = crypto.createHash('sha256')
+    .update(canonical([...structure.STRUCTURE_CATALOG]), 'utf8').digest('hex');
+  assert.equal(sha, vectors.productCatalogSha256, 'STRUCTURE_CATALOG is not the pinned catalog');
+  assert.equal(canonical([]), '[]', 'and the canonical form of "empty" is what it looks like');
 });
 
 /* ── the draft write ─────────────────────────────────────────────────────────────────────── */

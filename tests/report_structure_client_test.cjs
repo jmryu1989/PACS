@@ -9,7 +9,7 @@
 // What this file does NOT prove: that the page runs this code. The string assertions at the end are
 // coordinates, not behaviour; D1-D15 in the hosted DOM test are what execute it.
 const test = require('node:test'), assert = require('node:assert/strict');
-const fs = require('node:fs'), path = require('node:path');
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 
 const ROOT = path.resolve(__dirname, '..');
 const LITE = path.join(ROOT, 'worklist-v0', 'hpacs-lite');
@@ -53,6 +53,177 @@ test('validateValue refuses every shared invalid vector and accepts every valid 
     assert.notEqual(form.validateValue(item(vector.itemCode), vector.value), null, vector.why);
   for (const vector of VECTORS.render)
     assert.equal(form.validateValue(item(vector.itemCode), vector.value), null);
+});
+
+/* ── P12: the same catalog rules, on this side ───────────────────────────────────────────── */
+
+const catalogRule = catalog => {
+  try { S.validateCatalog(C, catalog); return 'ACCEPT'; }
+  catch (e) {
+    assert.ok(e instanceof S.CatalogError, `not a catalog error: ${e && e.message}`);
+    assert.ok(e.message.startsWith(e.rule + ': '), 'the message must name its own rule');
+    return e.rule;
+  }
+};
+
+test('every shared catalog vector gets exactly the rule it names, on this side too', () => {
+  // B6. The server test asserts the same table against the compiled module; the vectors are what
+  // bind the two implementations, so a rule that drifted on one side fails on that side alone.
+  assert.ok(VECTORS.catalogVectors.length >= 30, 'the shared catalog vectors are missing');
+  for (const vector of VECTORS.catalogVectors)
+    assert.equal(catalogRule(vector.catalog), vector.rule, `${vector.name} - ${vector.why}`);
+  assert.equal(catalogRule(CATALOG), 'ACCEPT');
+  assert.equal(catalogRule(S.PRODUCT_CATALOG), 'ACCEPT');
+});
+
+test('every shared entry vector is decided by validateValue, before anything is sent', () => {
+  // The screen has to refuse a value that composes across the sentence boundary, and has to say so
+  // in words - the server would refuse it anyway, but only after the reader pressed Apply.
+  assert.ok(VECTORS.entryVectors.length >= 10, 'the shared entry vectors are missing');
+  for (const vector of VECTORS.entryVectors) {
+    const entryForm = S.create(C, vector.catalog);
+    assert.equal(entryForm.invalid, undefined, `${vector.name}: the case catalog itself must be legal`);
+    const entryItem = entryForm.findItem(vector.templateId, vector.itemCode);
+    const message = entryForm.validateValue(entryItem, vector.value);
+    if (vector.expect === 'ACCEPT')
+      assert.equal(message, null, `${vector.name} - ${vector.why}`);
+    else
+      assert.equal(message, S.MESSAGES.boundary, `${vector.name} - ${vector.why}`);
+  }
+});
+
+test('an illegal catalog closes the form instead of throwing, and says which rule', () => {
+  /**
+   * B3/F4. `main.html` loads this module in one `<script>` with the rest of the worklist. An
+   * exception here would take the whole page down - no list, no report, no autosave - because one
+   * template was wrong. So `create()` returns the SAME inert object an empty catalog gives, plus a
+   * diagnostic. The loud failure is the server refusing to boot, where it costs nothing.
+   */
+  const seen = [];
+  const real = console.error;
+  console.error = (...args) => seen.push(args.join(' '));
+  let closed;
+  try { closed = S.create(C, VECTORS.catalogVectors.find(v => v.rule === 'R-B').catalog); }
+  finally { console.error = real; }
+  assert.equal(closed.empty, true);
+  assert.deepEqual(closed.catalog, []);
+  assert.equal(typeof closed.invalid, 'string');
+  assert.ok(closed.invalid.startsWith('R-B: '), closed.invalid);
+  assert.equal(seen.length, 1, 'said once, not once per item');
+  assert.match(seen[0], /report-structure/);
+  // The inert form still answers every question main.html asks of it, so nothing downstream throws.
+  assert.deepEqual(closed.templates(), []);
+  assert.equal(closed.findTemplate('SYN-T1'), null);
+  assert.equal(closed.unknownRevision(entry()), true);
+});
+
+test('a valid EMPTY catalog is silent, and is not the same thing as a refused one', () => {
+  // The distinction matters: empty is the shipped, normal, deliberate state (P6). If both looked
+  // alike, a broken catalog would ship as "no structured entry yet" and nobody would hear it.
+  const seen = [];
+  const real = console.error;
+  console.error = (...args) => seen.push(args.join(' '));
+  let empty;
+  try { empty = S.create(C, S.PRODUCT_CATALOG); }
+  finally { console.error = real; }
+  assert.equal(empty.empty, true);
+  assert.equal(empty.invalid, undefined, 'nothing was refused');
+  assert.deepEqual(seen, [], 'and nothing was reported');
+  assert.equal(form.invalid, undefined, 'a legal non-empty catalog is silent too');
+});
+
+test('programming errors are not swallowed by the fail-closed path', () => {
+  // The catch is typed on purpose. A missing citation library is a wiring mistake, not a catalog
+  // that broke a rule, and hiding it would leave a page that silently does nothing.
+  assert.throws(() => S.create(null, CATALOG), /citation library/);
+  assert.throws(() => S.validateCatalog(null, CATALOG), e => !(e instanceof S.CatalogError));
+  /**
+   * The one that matters: an error raised INSIDE create()'s try. The two assertions above both
+   * throw before it, so a catch that swallowed everything would still pass them - the only thing
+   * left standing would be a source-text pin in T3, and source text is not behaviour. Here the
+   * citation library is present but broken, so validateCatalog itself raises a TypeError while the
+   * catch block is live, and the catch has to let it past.
+   */
+  const brokenLib = {
+    comparisonKey() { throw new TypeError('wiring defect: comparisonKey is not wired'); },
+    blockIsBlank: C.blockIsBlank, placeBlock: C.placeBlock, blockSpans: C.blockSpans,
+    lineBlockOccurrences: C.lineBlockOccurrences,
+  };
+  const thrown = (() => { try { S.create(brokenLib, CATALOG); return null; } catch (e) { return e; } })();
+  assert.ok(thrown instanceof TypeError, 'the error raised inside the try must come back out');
+  assert.equal(thrown instanceof S.CatalogError, false, 'a wiring defect is not a catalog rule');
+  assert.match(thrown.message, /wiring defect/);
+  // and the same broken library does NOT silently produce a usable-looking empty form
+  assert.throws(() => S.validateCatalog(brokenLib, CATALOG), e => !(e instanceof S.CatalogError));
+  // The two legitimate outcomes are unaffected by any of this.
+  const seen = [];
+  const real = console.error;
+  console.error = (...args) => seen.push(args.join(' '));
+  let closed, empty;
+  try {
+    closed = S.create(C, VECTORS.catalogVectors.find(v => v.rule === 'R-D').catalog);
+    empty = S.create(C, S.PRODUCT_CATALOG);
+  } finally { console.error = real; }
+  assert.ok(closed.invalid.startsWith('R-D: '), closed.invalid);
+  assert.equal(closed.empty, true);
+  assert.deepEqual(closed.catalog, []);
+  assert.equal(empty.invalid, undefined);
+  assert.equal(seen.length, 1, 'the refused catalog spoke once; the valid empty one said nothing');
+});
+
+test('a sparse array hole is refused with a rule, not with a TypeError', () => {
+  /**
+   * A JSON file cannot express `[a, , b]`, so this witness cannot live in the shared vector table -
+   * but a hand-written catalog in a source file can grow one from a single stray comma, and reading
+   * a hole gives `undefined`. Before the guards, every one of these raised an untyped TypeError,
+   * which `create()` correctly rethrows - and `main.html` loads this module in one script with the
+   * rest of the worklist, so that TypeError would take the list, the report and autosave with it.
+   *
+   * The catalog shapes below are otherwise legal: remove the hole and each one is ACCEPTed.
+   */
+  const item = (code, template) => ({ code, field: 'findings', valueType: 'text', template, label: code });
+  const tpl = (items, templateId = 'SYN-H') => ({ templateId, revision: 1, title: 'SYNTHETIC', items });
+  const choiceItem = choices => ({ code: 'A', field: 'findings', valueType: 'choice',
+    template: 'M: {value}', label: 'A', choices });
+
+  const holes = [
+    ['a hole between templates', [tpl([item('A', 'Alpha: {value}')], 'SYN-H1'), ,
+                                  tpl([item('B', 'Beta: {value}')], 'SYN-H2')]],
+    ['a hole between items', [tpl([item('A', 'Alpha: {value}'), , item('B', 'Beta: {value}')])]],
+    ['a hole between choices', [tpl([choiceItem([{ code: 'c0', text: 'alpha' }, ,
+                                                 { code: 'c1', text: 'beta' }])])]],
+  ];
+  for (const [what, catalog] of holes) {
+    assert.equal(catalogRule(catalog), 'R-D', what);
+    const seen = [];
+    const real = console.error;
+    console.error = (...args) => seen.push(args.join(' '));
+    let form;
+    try { form = S.create(C, catalog); } finally { console.error = real; }
+    assert.equal(form.empty, true, `${what}: the form closes instead of the page dying`);
+    assert.ok(form.invalid.startsWith('R-D: '), `${what}: ${form.invalid}`);
+    assert.equal(seen.length, 1, what);
+  }
+  // and the same catalogs without the hole are legal, so the case is about the hole and nothing else
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}')], 'SYN-H1'),
+                            tpl([item('B', 'Beta: {value}')], 'SYN-H2')]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}'), item('B', 'Beta: {value}')])]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([choiceItem([{ code: 'c0', text: 'alpha' },
+                                             { code: 'c1', text: 'beta' }])])]), 'ACCEPT');
+});
+
+test('the PRODUCT catalog is byte-for-byte the pinned canonical JSON', () => {
+  // B8, the other half. The compiled server test pins the same string for STRUCTURE_CATALOG, and
+  // the two constants are compared as VALUES - neither test reads the other's file.
+  const canonical = value => {
+    if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+    if (value && typeof value === 'object')
+      return '{' + Object.keys(value).sort()
+        .map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
+    return JSON.stringify(value);
+  };
+  const sha = crypto.createHash('sha256').update(canonical([...S.PRODUCT_CATALOG]), 'utf8').digest('hex');
+  assert.equal(sha, VECTORS.productCatalogSha256, 'PRODUCT_CATALOG is not the pinned catalog');
 });
 
 test('a value that is too long or not one line is refused before anything is sent', () => {

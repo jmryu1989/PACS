@@ -14,8 +14,14 @@
           "template": "SYNTHETIC-ITEM choice = {value}",
           "required": true,
           "choices": [
-            { "code": "c1", "text": "alpha" },
-            { "code": "c2", "text": "beta" }
+            {
+              "code": "c1",
+              "text": "alpha"
+            },
+            {
+              "code": "c2",
+              "text": "beta"
+            }
           ]
         },
         {
@@ -49,32 +55,1657 @@
     }
   ],
   "render": [
-    { "itemCode": "SYN-CHOICE", "value": "c1", "rendered": "SYNTHETIC-ITEM choice = alpha" },
-    { "itemCode": "SYN-CHOICE", "value": "c2", "rendered": "SYNTHETIC-ITEM choice = beta" },
-    { "itemCode": "SYN-NUMBER", "value": 12, "rendered": "SYNTHETIC-ITEM number = 12.0 unit-x" },
-    { "itemCode": "SYN-NUMBER", "value": 12.5, "rendered": "SYNTHETIC-ITEM number = 12.5 unit-x" },
-    { "itemCode": "SYN-NUMBER", "value": 0, "rendered": "SYNTHETIC-ITEM number = 0.0 unit-x" },
-    { "itemCode": "SYN-NUMBER", "value": 100, "rendered": "SYNTHETIC-ITEM number = 100.0 unit-x" },
-    { "itemCode": "SYN-BOOL", "value": true, "rendered": "SYNTHETIC-ITEM boolean = yes" },
-    { "itemCode": "SYN-BOOL", "value": false, "rendered": "SYNTHETIC-ITEM boolean = no" },
-    { "itemCode": "SYN-TEXT", "value": "free note", "rendered": "SYNTHETIC-ITEM text = free note" },
-    { "itemCode": "SYN-TEXT", "value": "a$$b", "rendered": "SYNTHETIC-ITEM text = a$$b" },
-    { "itemCode": "SYN-TEXT", "value": "a$b", "rendered": "SYNTHETIC-ITEM text = a$b" },
-    { "itemCode": "SYN-TEXT", "value": "x $& y", "rendered": "SYNTHETIC-ITEM text = x $& y" },
-    { "itemCode": "SYN-TEXT", "value": "p $` q", "rendered": "SYNTHETIC-ITEM text = p $` q" },
-    { "itemCode": "SYN-TEXT", "value": "r $' s", "rendered": "SYNTHETIC-ITEM text = r $' s" },
-    { "itemCode": "SYN-TEXT", "value": "{value}", "rendered": "SYNTHETIC-ITEM text = {value}" }
+    {
+      "itemCode": "SYN-CHOICE",
+      "value": "c1",
+      "rendered": "SYNTHETIC-ITEM choice = alpha"
+    },
+    {
+      "itemCode": "SYN-CHOICE",
+      "value": "c2",
+      "rendered": "SYNTHETIC-ITEM choice = beta"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": 12,
+      "rendered": "SYNTHETIC-ITEM number = 12.0 unit-x"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": 12.5,
+      "rendered": "SYNTHETIC-ITEM number = 12.5 unit-x"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": 0,
+      "rendered": "SYNTHETIC-ITEM number = 0.0 unit-x"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": 100,
+      "rendered": "SYNTHETIC-ITEM number = 100.0 unit-x"
+    },
+    {
+      "itemCode": "SYN-BOOL",
+      "value": true,
+      "rendered": "SYNTHETIC-ITEM boolean = yes"
+    },
+    {
+      "itemCode": "SYN-BOOL",
+      "value": false,
+      "rendered": "SYNTHETIC-ITEM boolean = no"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "free note",
+      "rendered": "SYNTHETIC-ITEM text = free note"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "a$$b",
+      "rendered": "SYNTHETIC-ITEM text = a$$b"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "a$b",
+      "rendered": "SYNTHETIC-ITEM text = a$b"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "x $& y",
+      "rendered": "SYNTHETIC-ITEM text = x $& y"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "p $` q",
+      "rendered": "SYNTHETIC-ITEM text = p $` q"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "r $' s",
+      "rendered": "SYNTHETIC-ITEM text = r $' s"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "{value}",
+      "rendered": "SYNTHETIC-ITEM text = {value}"
+    }
   ],
   "invalid": [
-    { "itemCode": "SYN-CHOICE", "value": "c9", "why": "not one of the catalog choices" },
-    { "itemCode": "SYN-NUMBER", "value": 12.34, "why": "more decimals than the catalog fixes" },
-    { "itemCode": "SYN-NUMBER", "value": 101, "why": "above the catalog maximum" },
-    { "itemCode": "SYN-NUMBER", "value": -1, "why": "below the catalog minimum" },
-    { "itemCode": "SYN-NUMBER", "value": "12", "why": "a string is not a number" },
-    { "itemCode": "SYN-BOOL", "value": "yes", "why": "a string is not a boolean" },
-    { "itemCode": "SYN-TEXT", "value": "", "why": "empty" },
-    { "itemCode": "SYN-TEXT", "value": "   ", "why": "blank" },
-    { "itemCode": "SYN-TEXT", "value": "two\nlines", "why": "v1 renders exactly one line" },
-    { "itemCode": "SYN-TEXT", "value": "tab\there", "why": "no control characters" }
-  ]
+    {
+      "itemCode": "SYN-CHOICE",
+      "value": "c9",
+      "why": "not one of the catalog choices"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": 12.34,
+      "why": "more decimals than the catalog fixes"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": 101,
+      "why": "above the catalog maximum"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": -1,
+      "why": "below the catalog minimum"
+    },
+    {
+      "itemCode": "SYN-NUMBER",
+      "value": "12",
+      "why": "a string is not a number"
+    },
+    {
+      "itemCode": "SYN-BOOL",
+      "value": "yes",
+      "why": "a string is not a boolean"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "",
+      "why": "empty"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "   ",
+      "why": "blank"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "two\nlines",
+      "why": "v1 renders exactly one line"
+    },
+    {
+      "itemCode": "SYN-TEXT",
+      "value": "tab\there",
+      "why": "no control characters"
+    }
+  ],
+  "productCatalogSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "_productCatalogSha256_why": "sha256 of the canonical JSON (sorted keys, separators ',' and ':') of the PRODUCT catalog. T1 asserts it for the compiled STRUCTURE_CATALOG, T2 for PRODUCT_CATALOG - the two constants are compared as VALUES, neither reads the other's source, and neither test can see the other's file. It changes the day a real catalog ships, and that is the point: the change has to be made here, deliberately, in the same commit.",
+  "catalogVectors": [
+    {
+      "name": "accept: the shipped synthetic catalog",
+      "rule": "ACCEPT",
+      "why": "the SYN-T1 fixture every other suite already uses must stay legal",
+      "catalog": [
+        {
+          "templateId": "SYN-T1",
+          "revision": 2,
+          "title": "SYNTHETIC TEMPLATE 1",
+          "items": [
+            {
+              "code": "SYN-CHOICE",
+              "field": "findings",
+              "valueType": "choice",
+              "label": "SYNTHETIC choice",
+              "template": "SYNTHETIC-ITEM choice = {value}",
+              "required": true,
+              "choices": [
+                {
+                  "code": "c1",
+                  "text": "alpha"
+                },
+                {
+                  "code": "c2",
+                  "text": "beta"
+                }
+              ]
+            },
+            {
+              "code": "SYN-NUMBER",
+              "field": "findings",
+              "valueType": "number",
+              "label": "SYNTHETIC number",
+              "template": "SYNTHETIC-ITEM number = {value} unit-x",
+              "min": 0,
+              "max": 100,
+              "decimals": 1,
+              "unit": "unit-x"
+            },
+            {
+              "code": "SYN-BOOL",
+              "field": "conclusion",
+              "valueType": "boolean",
+              "label": "SYNTHETIC boolean",
+              "template": "SYNTHETIC-ITEM boolean = {value}",
+              "trueText": "yes",
+              "falseText": "no"
+            },
+            {
+              "code": "SYN-TEXT",
+              "field": "recommendation",
+              "valueType": "text",
+              "label": "SYNTHETIC text",
+              "template": "SYNTHETIC-ITEM text = {value}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: empty",
+      "rule": "ACCEPT",
+      "why": "the product default; normal operation, no diagnostic, no console output",
+      "catalog": []
+    },
+    {
+      "name": "accept: distinct prefixes",
+      "rule": "ACCEPT",
+      "why": "R-B separates on the opening literal",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "K",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Location: {value}",
+              "label": "K"
+            },
+            {
+              "code": "L",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Laterality: {value}",
+              "label": "L"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: same prefix, distinct suffixes",
+      "rule": "ACCEPT",
+      "why": "R-B separates on the closing literal: a line ending in ' mm' is never one ending in ' cm'",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "M",
+              "field": "findings",
+              "valueType": "number",
+              "template": "Size: {value} mm",
+              "label": "M",
+              "min": 0,
+              "max": 99,
+              "decimals": 1
+            },
+            {
+              "code": "N",
+              "field": "findings",
+              "valueType": "number",
+              "template": "Size: {value} cm",
+              "label": "N",
+              "min": 0,
+              "max": 99,
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: same frame, disjoint vocabularies",
+      "rule": "ACCEPT",
+      "why": "R-A: both value spaces are finite and fully listed, so the sets are compared exhaustively",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "Q",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "Finding: {value}",
+              "label": "Q",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "mass"
+                }
+              ]
+            },
+            {
+              "code": "R",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "Finding: {value}",
+              "label": "R",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "cyst"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: empty prefix separated by a distinct suffix",
+      "rule": "ACCEPT",
+      "why": "an empty prefix is a prefix of everything, so this pair may only separate by suffix - and it does",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "W",
+              "field": "findings",
+              "valueType": "text",
+              "template": "{value} mm",
+              "label": "W"
+            },
+            {
+              "code": "X",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value} cm",
+              "label": "X"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: different fields never meet",
+      "rule": "ACCEPT",
+      "why": "presence is counted per field, so the same sentence in two fields is not a collision",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "U",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "U"
+            },
+            {
+              "code": "V",
+              "field": "conclusion",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "V"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: cross-template, distinct prefixes",
+      "rule": "ACCEPT",
+      "why": "the pairwise check reaches across templates, and separated items stay legal there too",
+      "catalog": [
+        {
+          "templateId": "SYN-T1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "I",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "I"
+            }
+          ]
+        },
+        {
+          "templateId": "SYN-T2",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "J",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Depth: {value}",
+              "label": "J"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: ordinary precomposed Hangul literals",
+      "rule": "ACCEPT",
+      "why": "R-S refuses composition ACROSS the boundary, not Hangul; precomposed syllables are ordinary text",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "H1",
+              "field": "findings",
+              "valueType": "text",
+              "template": "가: {value}",
+              "label": "H1"
+            },
+            {
+              "code": "H2",
+              "field": "findings",
+              "valueType": "text",
+              "template": "각: {value}",
+              "label": "H2"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: R-S stable partner of the Hangul witness",
+      "rule": "ACCEPT",
+      "why": "the same shape as the first R-S witness, but a space stands between the two jamo",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "ᄀ {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "X"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-S: Hangul L+V across the prefix boundary",
+      "rule": "R-S",
+      "why": "U+1100 + U+1161 compose to U+AC00 under NFC; BOTH have canonical combining class 0, so a ccc rule misses it",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "ᄀ{value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "ᅡX"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-S: Hangul LV+T across the prefix boundary",
+      "rule": "R-S",
+      "why": "U+AC00 + U+11A8 compose to U+AC01; ccc 0 again",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "가{value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "ᆨX"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-S: across the suffix boundary",
+      "rule": "R-S",
+      "why": "the composition happens at the closing boundary instead",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "Q {value}ᅡ",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "Xᄀ"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-S: Indic vowel sign across the prefix boundary",
+      "rule": "R-S",
+      "why": "U+09C7 + U+09BE compose to U+09CB; a third script, same ccc-0 shape - the rule is not Hangul-specific",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "ে{value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "াX"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-S: a non-zero ccc mark carried by a choice text",
+      "rule": "R-S",
+      "why": "the combining ring composes with the literal A; one rule covers both families",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "A{value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "̊X"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-C: two choice texts render one line",
+      "rule": "R-C",
+      "why": "the stored code could not be recovered from the sentence",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "E",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "E",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "present"
+                },
+                {
+                  "code": "c1",
+                  "text": "present"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-C: two choice texts that differ only in normalisation",
+      "rule": "R-C",
+      "why": "the presence equation NFCs the line, so these two ARE one line - byte inequality proves nothing",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "E",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "E",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "Å"
+                },
+                {
+                  "code": "c1",
+                  "text": "Å"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-C: boolean words are equal",
+      "rule": "R-C",
+      "why": "true and false would be indistinguishable in the record",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "F",
+              "field": "findings",
+              "valueType": "boolean",
+              "template": "N: {value}",
+              "label": "F",
+              "trueText": "yes",
+              "falseText": "yes"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-A: same frame, overlapping vocabularies",
+      "rule": "R-A",
+      "why": "the exhaustive comparison finds the shared line",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "S",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "Finding: {value}",
+              "label": "S",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "mass"
+                }
+              ]
+            },
+            {
+              "code": "T",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "Finding: {value}",
+              "label": "T",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "mass"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-B: same skeleton, choice vs free text",
+      "rule": "R-B",
+      "why": "before this unit these landed in two buckets that never met, so both passed",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "Size: {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "small"
+                }
+              ]
+            },
+            {
+              "code": "B",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "B"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-B: distinct skeletons that still collide",
+      "rule": "R-B",
+      "why": "values 'x tail' and 'A: x' both render 'A: x tail': skeleton uniqueness was never sufficient",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "C",
+              "field": "findings",
+              "valueType": "text",
+              "template": "A: {value}",
+              "label": "C"
+            },
+            {
+              "code": "D",
+              "field": "findings",
+              "valueType": "text",
+              "template": "{value} tail",
+              "label": "D"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-B: cross-template, same field",
+      "rule": "R-B",
+      "why": "collisions cross template boundaries; the shipped rule only looked within one template",
+      "catalog": [
+        {
+          "templateId": "SYN-T1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "I",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "I"
+            }
+          ]
+        },
+        {
+          "templateId": "SYN-T2",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "J",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "J"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-B: one suffix is a suffix of the other",
+      "rule": "R-B",
+      "why": "'Size: 5 mm' is reachable from both",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "O",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "O"
+            },
+            {
+              "code": "P",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value} mm",
+              "label": "P"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-B: empty prefix with an empty-suffix partner",
+      "rule": "R-B",
+      "why": "empty literals are prefixes and suffixes of everything, so neither side separates",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "W",
+              "field": "findings",
+              "valueType": "text",
+              "template": "{value} mm",
+              "label": "W"
+            },
+            {
+              "code": "X",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Size: {value}",
+              "label": "X"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: NFD literal",
+      "rule": "R-D",
+      "why": "R-B compares the literals as written, so they must already be NFC",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "G",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Å: {value}",
+              "label": "G"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: lone surrogate in a literal",
+      "rule": "R-D",
+      "why": "the shipped validator accepted this before this unit; the line would reach jsonb as a 500",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "x\ud800: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: lone surrogate in a choice text",
+      "rule": "R-D",
+      "why": "the same hole reached through the choice vocabulary",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "x: {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "y\udc00"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: no slot",
+      "rule": "R-D",
+      "why": "nowhere to put the value",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "no slot",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: two slots",
+      "rule": "R-D",
+      "why": "the rule needs exactly one",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "{value}{value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a literal spanning two lines",
+      "rule": "R-D",
+      "why": "P10: one entry is one line, or the citation guards would have to grow a structured union",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "a\n{value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: literals fill the byte budget",
+      "rule": "R-D",
+      "why": "no value could ever fit",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx{value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: an enumerable value renders a blank line",
+      "rule": "R-D",
+      "why": "a blank line cannot be found in a report body, so its presence could never be judged",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": " {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": " "
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: an enumerable value renders past the byte limit",
+      "rule": "R-D",
+      "why": "the literals fit on their own, but this value can never be stored",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx{value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: revision below 1",
+      "rule": "R-D",
+      "why": "revisions start at 1",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 0,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "a: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: duplicate templateId",
+      "rule": "R-D",
+      "why": "two templates answering to one id: the second would shadow the first in every lookup",
+      "catalog": [
+        {
+          "templateId": "SYN-T1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Alpha: {value}",
+              "label": "A"
+            }
+          ]
+        },
+        {
+          "templateId": "SYN-T1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "B",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Beta: {value}",
+              "label": "B"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: duplicate item code in one template",
+      "rule": "R-D",
+      "why": "without this check the pair is legal (R-B separates them) and a stored itemCode names two items",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Alpha: {value}",
+              "label": "A"
+            },
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Beta: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: duplicate choice code",
+      "rule": "R-D",
+      "why": "a stored value could not be resolved to one choice; deleting the check turns this into R-C, not ACCEPT",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "alpha"
+                },
+                {
+                  "code": "c0",
+                  "text": "beta"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a field that is not a report field",
+      "rule": "R-D",
+      "why": "presence is counted per field, so an unknown field has nowhere to be counted",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "nope",
+              "valueType": "text",
+              "template": "a: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a valueType the schema does not have",
+      "rule": "R-D",
+      "why": "the stored entry would fail isStructureEntry and make the whole read unknown",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "nope",
+              "template": "a: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: missing label",
+      "rule": "R-D",
+      "why": "the screen has nothing to name the control with",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "a: {value}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a null template element",
+      "rule": "R-D",
+      "why": "the server answers R-D through template?.templateId; the browser must not raise an untyped TypeError here, because create() rethrows it and that kills the whole page script",
+      "catalog": [
+        null
+      ]
+    },
+    {
+      "name": "R-D: a null item element",
+      "rule": "R-D",
+      "why": "same shape one level down (item?.code)",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a null choice element",
+      "rule": "R-D",
+      "why": "same shape two levels down (choice?.code)",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": [
+                null
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: number min/max are null",
+      "rule": "R-D",
+      "why": "a coercing isFinite() says null is finite; Number.isFinite does not",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "number",
+              "template": "N: {value}",
+              "label": "A",
+              "min": null,
+              "max": null,
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: number min/max are numeric strings",
+      "rule": "R-D",
+      "why": "the same coercion hole, reached through a string",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "number",
+              "template": "N: {value}",
+              "label": "A",
+              "min": "0",
+              "max": "99",
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: number min/max are booleans",
+      "rule": "R-D",
+      "why": "Number.isFinite(true) is false; a Python oracle using isinstance(x, int) would accept it, because bool is a subclass of int",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "number",
+              "template": "N: {value}",
+              "label": "A",
+              "min": true,
+              "max": true,
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "_catalogVectors_why": "One catalog per case with the rule it must trip; ACCEPT means the whole catalog is legal. Check order is R-D, R-S, R-C, then pairs R-A before R-B, so a case names the FIRST rule it violates. Every rejection case has an accepted partner of the same shape, so a validator that simply refused everything would fail here. The Unicode cases carry literal code points (U+1100, U+1161, U+AC00, U+11A8, U+09C7, U+09BE, U+030A, U+00C5 and lone surrogates) rather than escapes, so every consumer sees the same string without re-decoding. The shape cases (null template, null item, null choice) and the bounds cases exist because a malformed catalog must be refused with a RULE on both sides: an untyped throw in the browser escapes create() and takes the whole page script down with it. A JSON file cannot express a sparse array hole, so that witness is built in the JS tests instead. Synthetic only: no clinical item, label, unit, range, vocabulary or sentence is authored here.",
+  "entryVectors": [
+    {
+      "name": "R-S entry: Hangul L+V at the prefix boundary",
+      "expect": "R-S",
+      "why": "a free-text value is not in the catalog, so the catalog check cannot see it - only the entry check can",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "ᄀ{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "ᅡX"
+    },
+    {
+      "name": "accept entry: the same item with a value that does not compose",
+      "expect": "ACCEPT",
+      "why": "the partner: the same item and the same boundary, refused only because of the value",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "ᄀ{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "X"
+    },
+    {
+      "name": "R-S entry: Hangul LV+T at the prefix boundary",
+      "expect": "R-S",
+      "why": "U+AC00 + U+11A8 -> U+AC01",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "가{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "ᆨX"
+    },
+    {
+      "name": "accept entry: LV prefix with an ordinary value",
+      "expect": "ACCEPT",
+      "why": "its partner",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "가{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "X"
+    },
+    {
+      "name": "R-S entry: at the suffix boundary",
+      "expect": "R-S",
+      "why": "the value's last character composes with the first character of the closing literal",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Q {value}ᅡ",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "Xᄀ"
+    },
+    {
+      "name": "accept entry: the same suffix with an ordinary value",
+      "expect": "ACCEPT",
+      "why": "its partner",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Q {value}ᅡ",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "XY"
+    },
+    {
+      "name": "R-S entry: a combining ring after a literal A",
+      "expect": "R-S",
+      "why": "U+030A has a non-zero combining class; this is the family a ccc rule would have caught, kept as a case",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "A{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "̊mass"
+    },
+    {
+      "name": "accept entry: the same item with a value that starts with a letter",
+      "expect": "ACCEPT",
+      "why": "its partner",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "A{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "mass"
+    },
+    {
+      "name": "R-S entry: an Indic vowel sign at the prefix boundary",
+      "expect": "R-S",
+      "why": "U+09C7 + U+09BE -> U+09CB, both ccc 0",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "ে{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "াX"
+    },
+    {
+      "name": "accept entry: the same Indic prefix with an ordinary value",
+      "expect": "ACCEPT",
+      "why": "its partner",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "ে{value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "X"
+    },
+    {
+      "name": "accept entry: a decomposed Hangul value after '= '",
+      "expect": "ACCEPT",
+      "why": "the value composes WITHIN itself, which the presence equation already normalises; nothing crosses the boundary, so it is accepted and stored exactly as typed - R-E would have refused this",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "M = {value}",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "가"
+    },
+    {
+      "name": "accept entry: a value ending in a combining mark before ' u'",
+      "expect": "ACCEPT",
+      "why": "the closing literal starts with a space, so the mark has nothing to compose with - R-E refused every such value for no safety gain",
+      "catalog": [
+        {
+          "templateId": "SYN-E1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "SYN-E",
+              "field": "findings",
+              "valueType": "text",
+              "template": "N {value} u",
+              "label": "SYN-E"
+            }
+          ]
+        }
+      ],
+      "templateId": "SYN-E1",
+      "itemCode": "SYN-E",
+      "value": "Å"
+    }
+  ],
+  "_entryVectors_why": "Free text and numbers are not in the catalog, so the load-time check cannot see their values; the entry check is where R-S reaches them. Each catalog here is a single legal item, so the only thing a case can trip is the entry rule. The server drives these through structureApplyInput (after its byte-equality check), the browser through validateValue. The last two are the over-restriction cases: they must be ACCEPTED, and they are exactly the values a combining-class rule would have refused."
 }
