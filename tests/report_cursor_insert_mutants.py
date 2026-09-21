@@ -70,7 +70,7 @@ MUTANTS = [
         "title": "the block no longer terminates the line it lands on, so it is spliced mid-line",
         "case": "test_d01_caret_in_the_middle_of_the_field_places_whole_lines_and_the_caret",
         "expect": "S3-U6 M1: the block must occupy whole lines after the caret's own line",
-        "old": "    const prefix = q > 0 && value[q - 1] !== '\\n' ? '\\n' : '';",
+        "old": "    const prefix = q > 0 && (past || value[q - 1] !== '\\n') ? '\\n' : '';",
         "new": "    const prefix = '';",
     },
     {

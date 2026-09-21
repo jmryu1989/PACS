@@ -172,13 +172,43 @@ test('TEST-S3-U6-GUARD: an insertion never splits a citation that is already in 
   }
   const body = '머리 인용\n두 줄\n\n사람이 쓴 글\n초안 인용';
   const guards = ['머리 인용\n두 줄', '초안 인용'];
+  // The line the pane names must be the line the block is actually on: that sentence is the only
+  // disclosure the person gets (the findings drawer covers the field), so it is asserted on every
+  // case, not described.
+  const namedLine = plan => plan.text.slice(0, plan.start).split('\n').length;
   for (let q = 0; q <= body.length; q++) {
     const plan = C.placeBlock(body, '새 문장', at(q), guards);
     for (const guard of guards)
       assert.ok(C.lineBlockOccurrences(plan.text, guard) >= C.lineBlockOccurrences(body, guard),
         `@${q}: ${guard.split('\n')[0]} must not lose an occurrence`);
     assert.ok(C.lineBlockOccurrences(plan.text, '새 문장') >= 1, `@${q}: and the new sentence must be there`);
+    assert.equal(plan.line, namedLine(plan), `@${q}: the line the pane names is the line the block is on`);
   }
+  /**
+   * The class that a whole-file sweep found and the cases above did not: a field ENDING IN LF whose
+   * guard block ends with a BLANK LINE. Stepping past that guard lands past the field's final empty
+   * line, and there the character before the anchor ('\n') cannot tell "before the last line" from
+   * "after it" - only the line number can. Getting it wrong split the very citation being protected
+   * (occurrences 1 -> 0, nothing deleted) and named a line one too high.
+   */
+  for (const [value, guard] of [['abc\n', 'abc\n\n'], ['prev\nabc\n', 'abc\n\n'], ['a\n', 'a\n\n'],
+                                ['x\na\n\n', 'a\n\n'], ['머리\n인용\n', '인용\n\n']]) {
+    for (let q = 0; q <= value.length; q++) {
+      const plan = C.placeBlock(value, 'X', at(q), [guard]);
+      assert.ok(C.lineBlockOccurrences(plan.text, guard) >= C.lineBlockOccurrences(value, guard),
+        `${JSON.stringify(value)}@${q}: a guard ending in a blank line must not be split`);
+      assert.equal(plan.line, namedLine(plan),
+        `${JSON.stringify(value)}@${q}: and the line it reports must be where the block really is`);
+      assert.ok(C.lineBlockOccurrences(plan.text, 'X') >= 1, 'the new block is still whole-line');
+    }
+  }
+  // The exact vector the sweep reported: past the final empty line, with a separator of its own.
+  const past = C.placeBlock('abc\n', 'X', at(4), ['abc\n\n']);
+  assert.equal(past.text, 'abc\n\nX');
+  assert.equal(past.line, 3);
+  assert.equal(past.snapped, 'past-citation');
+  // Without that guard the same caret keeps the D-3 answer: no blank line, trailing newline kept.
+  assert.equal(C.placeBlock('abc\n', 'X', at(4)).text, 'abc\nX\n');
   // Inside the first guard the anchor moves past it and says so; outside it does not move.
   const inside = C.placeBlock(body, '새 문장', at(body.indexOf('두 줄')), guards);
   assert.equal(inside.snapped, 'past-citation');
@@ -340,4 +370,29 @@ test('TEST-S3-U6-WIRING: the screen asks the rule once, shows that answer, and s
   }
   assert.doesNotThrow(() => new vm.Script(harness, { filename: 'cursor-dom-harness.js' }),
     'the sliced browser harness must compile');
+
+  /**
+   * Compiling is not running. The sliced region also EXECUTES top-level statements, and every one
+   * of them that reaches for an element by id needs that element to exist or the whole script dies
+   * on a TypeError - after which nothing later is defined and every case fails for a reason that has
+   * nothing to do with the product. So the markup the harness puts on the page must cover every id
+   * the region names. The modal markup is sliced from main.html, so it counts as coverage.
+   */
+  let markup = domTest;
+  for (const [name, from, to] of [['CITE_HTML', '<div class="modal" id="cite-preview"', '\n  </div>'],
+                                  ['PANE_HTML', '<div class="modal" id="stalemodal"', '\n  </div>']]) {
+    assert.ok(domTest.includes(`${name} = slice_between(MAIN, '${from}', "${to.replace('\n', '\\n')}")`),
+      `${name} must be sliced from the product`);
+    const a = html.indexOf(from), b = html.indexOf(to, a);
+    assert.ok(a >= 0 && b > a, `${name} markers are gone from main.html`);
+    markup += html.slice(a, b);
+  }
+  const wanted = new Set();
+  for (const [, from, to] of [[0, '    let selectionSeq = 0;', '    function reportSource()'],
+                              [0, '    function reportSource() {', '    function heldByOther(s)']])
+    for (const line of html.slice(html.indexOf(from), html.indexOf(to, html.indexOf(from))).split('\n'))
+      for (const hit of line.matchAll(/\$\("#([A-Za-z0-9_-]+)"\)/g)) wanted.add(hit[1]);
+  assert.ok(wanted.size >= 20, 'the id scan found suspiciously little; re-pin it');
+  const missing = [...wanted].filter(id => !markup.includes(`id="${id}"`));
+  assert.deepEqual(missing, [], 'every element the sliced product region asks for must be on the page');
 });

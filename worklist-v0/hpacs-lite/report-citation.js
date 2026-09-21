@@ -223,7 +223,14 @@ window.KinReportCitation = (function () {
      * 뒤따르는 줄이 자기 종결자를 이미 우리에게 넘겨준 경우에만 suffix를 생략한다.
      */
     const rest = value.slice(q);
-    const prefix = q > 0 && value[q - 1] !== '\n' ? '\n' : '';
+    /**
+     * 보호 구간을 지나 **마지막 빈 줄 뒤로** 물러났을 때, `q`는 그냥 텍스트 끝이고 그 앞 글자는
+     * `'\n'`이다 — 그 둘만 보면 "마지막 빈 줄 **앞**"과 구별할 수 없어 구분자를 빼먹고, 블록이
+     * 그 빈 줄 앞에 들어가 방금 지키려던 인용을 쪼갠다(그 인용의 마지막 줄이 빈 줄인 경우).
+     * 어느 쪽인지 아는 것은 줄 번호뿐이다.
+     */
+    const past = pos > countLf(value);
+    const prefix = q > 0 && (past || value[q - 1] !== '\n') ? '\n' : '';
     const suffix = rest === ''
       ? (prefix === '' && len > 0 ? '\n' : '')
       : (prefix === '\n' && rest[0] === '\n' ? '' : '\n');

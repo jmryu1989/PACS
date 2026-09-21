@@ -18,6 +18,7 @@ break the product on purpose without ever touching the source tree.
 """
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 
@@ -93,6 +94,10 @@ def extract_function(source, name):
 
 
 CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </div>") + "\n  </div>"
+# The sliced report block registers listeners on the stale-rebase pane at its TOP LEVEL
+# (main.html:3404-3406). Without that markup `$` returns null, the script throws while loading and
+# nothing after it is ever defined - the same reason both proven harnesses inject this modal.
+PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
 BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
 REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
@@ -113,6 +118,7 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <button id="b-approve"></button><button id="b-save"></button><button id="b-transcribe"></button>
 <button id="b-addendum"></button><button id="b-unread"></button><button id="b-prelim"></button><button id="b-defer"></button>
 <button id="raiser">Insert into Report</button>
+PANEHTML
 CITEHTML
 <script>
 CITATIONJS
@@ -176,14 +182,13 @@ TEMPLATEGATEFN
 BASEBLOCK
 REPORTBLOCK
 TEMPLATEFN
-/* The product arms a real 20 s interval; capture the scheduler only, never the callback. */
-const timers = [];
-const realSetInterval = window.setInterval;
-window.setInterval = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
-window.setInterval = realSetInterval;
 window.load = options => loadReport(options);
 window.stash = () => stashReport();
-window.cite = () => openCitePreview(REQUESTVALUE, $("#raiser"));
+/* The real caller: reading-findings.js hands the pane an `inserted` callback so an ACCEPTED
+   insertion can stand its own drawer down, and the product only redirects focus into the field on
+   that path. A request without it would leave focus on the button that raised the pane. */
+window.stoodDown = 0;
+window.cite = () => openCitePreview({ ...REQUESTVALUE, inserted: () => { window.stoodDown += 1; } }, $("#raiser"));
 window.reply = value => { replies.push(value); };
 window.citeReply = value => { citeReplies.push(value); };
 window.hold = (n = 1) => { holdCount += n; };
@@ -206,6 +211,7 @@ window.snapshot = () => ({
   caret: Object.fromEntries(RFIELDS.map(k => [k, window.caretOf(k)])),
   marked: Object.fromEntries(RFIELDS.map(k => [k, caretFields.has(k)])),
   focused: document.activeElement ? document.activeElement.id : null,
+  stoodDown: window.stoodDown,
 });
 </script></body></html>"""
 
@@ -213,6 +219,7 @@ window.snapshot = () => ({
 def harness(state, request):
     return (HARNESS
             .replace("MODALCSS", MODAL_CSS)
+            .replace("PANEHTML", PANE_HTML)
             .replace("CITEHTML", CITE_HTML)
             .replace("CITATIONJS", CITATION_JS)
             .replace("APIFN", API_FN)
@@ -252,7 +259,9 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
 
     def tearDown(self):
         # A harness that never started reports whatever it touched first; say so loudly instead.
-        started = self.page.evaluate("()=>typeof loadReport === 'function' && typeof placementLine === 'function'")
+        # The probe must be something assigned at the END of the script: function declarations hoist,
+        # so a `typeof loadReport` probe stays true even when the script died half way through.
+        started = self.page.evaluate("()=>typeof window.snapshot === 'function'")
         self.page.close()
         self.assertTrue(started, "HARNESS DID NOT START: %s" % self.errors[:2])
         self.assertEqual([], self.errors, "the product region raised in the browser")
@@ -311,20 +320,27 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
         start = expected.index(BLOCK)
         self.assertEqual([start + len(BLOCK), start + len(BLOCK)], value["caret"]["findings"],
                          "S3-U6 M6: the caret must end on the inserted block, not at the end of the field")
+        self.assertEqual(1, value["stoodDown"], "the accepted insertion stood the raising list down, once")
         self.assertEqual("findings", value["focused"], "focus follows the text into the field")
 
     # ── D2 ─────────────────────────────────────────────────────────────────────────────────
     def test_d02_an_untouched_field_appends_exactly_as_before(self):
-        self.open(citations={"version": 1, "head": [], "draft": []})
+        # The field ends in a newline on purpose: a script-assigned value leaves the browser caret at
+        # the end, so a field WITHOUT a final newline would make "read the caret anyway" produce the
+        # legacy bytes by accident and hide the defect this case exists for.
+        ending = EXISTING + "\n"
+        self.open(fields=(ending, "", ""), citations={"version": 1, "head": [], "draft": []})
         self.open_pane()
+        place = self.snap()["pane"]["place"]
         self.page.evaluate("reply(%s)" % json.dumps(ACCEPTED))
         self.press()
         self.page.wait_for_function("()=>calls.some(c=>c.method==='PUT')")
-        expected = EXISTING + "\n" + BLOCK
+        expected = ending + "\n" + BLOCK          # appendBlock: one LF separator, nothing else
         self.assertEqual(expected, self.snap()["text"][0],
                          "S3-U6 M2: a field nobody put a caret in still appends at the end")
         self.assertEqual(expected, self.last_put()["body"]["findings"])
-        self.assertIn("맨 끝", self.snap()["pane"]["place"] if self.snap()["shown"] else "맨 끝")
+        self.assertEqual("삽입 위치: Findings 칸 맨 끝 — 이 칸에서 확인된 커서 자리가 없어 끝에 붙입니다", place,
+                         "and the pane says so in the sentence the contract pinned")
 
     # ── D3 ─────────────────────────────────────────────────────────────────────────────────
     def test_d03_the_caret_at_the_very_start_puts_the_block_first(self):
@@ -398,12 +414,19 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
                          "S3-U6 M3: a position the person did not read may not be sent")
         self.assertIn("판독문이나 삽입 위치가 그 사이 바뀌었습니다", self.snap()["pane"]["status"])
         self.assertEqual("새로 들어온 초안\n둘째 줄", self.snap()["text"][0], "and nothing moved on screen")
-        # The second press carries the position that is now on display.
+        # Read the new position while the pane is still open: after the second press it is closed.
+        offered = self.snap()["pane"]["place"]
+        self.assertNotEqual(shown, offered, "the pane showed the new position before it was used")
+        line = int(re.search(r"칸 (\d+)번째 줄", offered).group(1))
+        # The second press carries exactly the position that was on display.
         self.press()
         self.page.wait_for_function("()=>calls.some(c=>c.method==='PUT')")
-        self.assertNotEqual(shown, self.snap()["pane"]["place"] if self.snap()["shown"] else "",
-                            "the pane showed the new position before it was used")
-        self.assertEqual("새로 들어온 초안\n둘째 줄\n" + BLOCK, self.last_put()["body"]["findings"])
+        body = self.last_put()["body"]["findings"]
+        self.assertIn("새로 들어온 초안\n둘째 줄", body, "the draft that arrived is still whole")
+        self.assertEqual(1, self.page.evaluate("()=>KinReportCitation.lineBlockOccurrences(text()[0], %s)"
+                                               % json.dumps(BLOCK)))
+        self.assertEqual(line, body[:body.index(BLOCK)].count("\n") + 1,
+                         "the line the pane named is the line the block went to")
 
     # ── D8 ─────────────────────────────────────────────────────────────────────────────────
     def test_d08_a_refused_insertion_changes_no_byte_and_no_caret(self):
@@ -440,22 +463,27 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
 
     # ── D10 ────────────────────────────────────────────────────────────────────────────────
     def test_d10_an_anchor_inside_an_existing_citation_moves_past_it(self):
-        cited = "인용 제목\n인용 본문"
+        # Deliberately NOT the block this case inserts: if the two were the same text, the count
+        # below would be 2 after a correct insertion and the assertion would say nothing.
+        cited = "먼저 넣은 제목\n먼저 넣은 본문"
         field = cited + "\n사람이 쓴 줄"
         entry = {"v": 2, "cid": "c0", "field": "findings", "findingId": "f0", "findingRevision": 1,
                  "sourceIndex": 0, "linkStateAtInsert": "current", "headRevisionAtInsert": 1,
                  "insertedText": cited, "insertedAt": "2026-09-21T01:00:00.000Z", "insertedBy": "doctor@kin",
                  "sameTextCount": 1}
         self.open(fields=(field, "", ""), citations={"version": 1, "head": [], "draft": [entry]})
-        self.caret("findings", len("인용 제목") + 1)     # between the two lines of the existing citation
+        self.caret("findings", len("먼저 넣은 제목") + 1)   # between the two lines of the existing citation
         self.open_pane()
-        self.assertIn("이미 인용된 문장을 쪼개지 않도록", self.snap()["pane"]["place"])
+        # Read the disclosure now and judge it AFTER M5's own assertion: an unlabelled check here
+        # would fail first under M5 and the runner would (correctly) refuse to count the kill.
+        place = self.snap()["pane"]["place"]
         self.page.evaluate("reply(%s)" % json.dumps(ACCEPTED))
         self.press()
         self.page.wait_for_function("()=>calls.some(c=>c.method==='PUT')")
         value = self.snap()["text"][0]
         self.assertEqual(cited + "\n" + BLOCK + "\n사람이 쓴 줄", value,
                          "S3-U6 M5: the new sentence must land past the citation, never inside it")
+        self.assertIn("이미 인용된 문장을 쪼개지 않도록", place, "and the pane said why it moved")
         self.assertEqual(1, self.page.evaluate("()=>KinReportCitation.lineBlockOccurrences(text()[0], %s)"
                                                % json.dumps(cited)),
                          "S3-U6 M5: the citation that was already there must still be present")
@@ -489,8 +517,12 @@ class ReportCursorInsertDOMTest(unittest.TestCase):
         self.page.evaluate("load()")
         self.assertEqual([3, 3], self.snap()["caret"]["findings"], "an identical assignment must not move the caret")
         self.assertTrue(self.snap()["marked"]["findings"], "and must not forget the position either")
-        # (c) a real change does forget it, and the next insertion is the legacy append
-        self.page.evaluate("()=>{ appState[%s].draft.findings = '서버가 보낸 다른 초안'; load(); }" % json.dumps(UID))
+        # (c) a real change does forget it, and the next insertion is the legacy append. The forced
+        # load is the path that actually replaces a value: a non-force one finds the screen dirty
+        # against the changed source and preserves what is on it, so it can never assign a different
+        # string - which is why (b) above is the real non-force case and this one is not.
+        self.page.evaluate("()=>{ appState[%s].draft.findings = '서버가 보낸 다른 초안'; load({force:true}); }"
+                           % json.dumps(UID))
         self.assertFalse(self.snap()["marked"]["findings"], "a changed value drops the remembered position")
         self.page.evaluate("citeReply(%s)" % json.dumps({"version": 1, "head": [], "draft": []}))
         self.open_pane()
