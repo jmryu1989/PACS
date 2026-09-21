@@ -761,6 +761,15 @@ const SELECT_STUBS = `
   function markSelectionChanged(uid) { selectedUid = uid; selectionSeq += 1; }
   function stashReport() { trace.push("stashReport:" + selectedUid); }
   function loadReport(o) { trace.push("loadReport:" + selectedUid + ":" + !!(o && o.force)); }
+  /* S3-structured-report closes the structured-entry form on the way out, the same way this block
+     already closes the cite preview. The stubs have to declare both names or the sliced product
+     throws ReferenceError before a single line of the move runs. closeStructure deliberately does
+     NOT push to trace: the two entries this smoke asserts are the draft write and the redraw, and
+     adding a third here would silently rewrite what the smoke is about. structClosed records it
+     instead, so the close can be observed without touching the trace.
+     (No backticks in here - this whole block is itself a template literal.) */
+  var structPane = null, structClosed = 0;
+  function closeStructure() { structClosed += 1; }
 `;
 const runSelect = (extra, call) => {
   const [from, to] = harnessMarkers('SELECT_BLOCK');
@@ -773,6 +782,7 @@ const runSelect = (extra, call) => {
   // would fail deepStrictEqual for a reason that has nothing to do with the harness.
   return { threw, selectedUid: vm.runInContext('selectedUid', context),
     selectionSeq: vm.runInContext('selectionSeq', context),
+    structClosed: vm.runInContext('structClosed', context),
     trace: JSON.parse(vm.runInContext('JSON.stringify(trace)', context)) };
 };
 
@@ -785,6 +795,17 @@ test('TEST-S3-U2b-HARNESS: the sliced study move really runs, and the wrapper th
   assert.equal(ran.selectionSeq, 1);
   assert.deepEqual(ran.trace, ['stashReport:1.2.3', 'loadReport:1.2.4:true'],
     'the draft write happens before the move and the arrival redraws with force');
+  // S3-structured-report: an idle structured-entry form is closed on the way out, exactly like the
+  // cite preview - leaving it open would let the next press write the departed study's entry.
+  assert.equal(ran.structClosed, 1, 'an idle structured-entry form is closed by the move');
+  // ...and a form with a request in flight is left alone, for the same reason citeBusy leaves the
+  // cite preview alone: its late answer still has to find the pane it belongs to.
+  const busy = runSelect('structPane = { busy: true };', 'select("1.2.4")');
+  assert.equal(busy.threw, null, 'the move still runs with a busy form');
+  assert.equal(busy.structClosed, 0, 'a form waiting for its answer must not be closed underneath it');
+  assert.deepEqual(busy.trace, ['stashReport:1.2.3', 'loadReport:1.2.4:true'],
+    'and the rest of the move is unchanged');
+  assert.equal(busy.selectedUid, '1.2.4');
   // Negative control: the exact line that was removed, so this smoke can be seen to fail.
   const broken = runSelect('window.select = uid => select(uid);', 'select("1.2.4")');
   assert.equal(broken.threw, 'RangeError', 'a same-named helper makes the move call itself');

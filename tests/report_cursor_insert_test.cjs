@@ -313,7 +313,28 @@ test('TEST-S3-U6-WIRING: the screen asks the rule once, shows that answer, and s
   // P-3: exactly three places decide the plan - open, destination change (both on the live pane)
   // and the refusal (on the pane the press captured). A fourth would absorb what it should refuse.
   assert.equal(html.split('citePane.plan = ').length - 1, 2, 'open and destination change, and no more');
-  assert.equal(html.split('pane.plan = ').length - 1, 1, 'plus the refusal, and no fourth site');
+  /**
+   * S3-structured-report put a second form in this file, and its pane is also called `pane`, so a
+   * whole-file count of `pane.plan = ` now mixes two units' sites together. Renaming the product
+   * variable would move the M2/M3c mutant anchors and invalidate every recomputed mutant hash, so
+   * the two regions are counted separately instead. Neither number is relaxed: the citation side
+   * keeps its "one refusal site and no fourth", and the structure side gets its own exact two.
+   *
+   * The delimiters are asserted unique AND the slice asserted substantial, so a marker that moved
+   * (leaving an empty or collapsed region) fails here instead of quietly passing both counts.
+   */
+  const STRUCT_FROM = '    /* ── 구조화 판독 본문 (S3-structured-report)';
+  const STRUCT_TO = '    function citationBody(scope, field) {';
+  assert.equal(html.split(STRUCT_FROM).length - 1, 1, 'the structure block opening marker is unique');
+  assert.equal(html.split(STRUCT_TO).length - 1, 1, 'the structure block closing marker is unique');
+  const structFrom = html.indexOf(STRUCT_FROM), structTo = html.indexOf(STRUCT_TO, structFrom);
+  assert.ok(structFrom >= 0 && structTo > structFrom, 'the structure block is where its markers say');
+  const structBlock = html.slice(structFrom, structTo);
+  assert.ok(structBlock.length > 5000, 'an empty or collapsed slice must not be able to satisfy either count');
+  assert.equal((html.slice(0, structFrom) + html.slice(structTo)).split('pane.plan = ').length - 1, 1,
+    'plus the refusal, and no fourth site');
+  assert.equal(structBlock.split('pane.plan = ').length - 1, 2,
+    'the structured-entry form decides its plan in exactly two places: the render and the stale refusal');
   assert.ok(extractFunction(html, 'insertCitation').indexOf('pane.plan = plan2;') >= 0,
     'the refusal is the only place the press itself may move the plan');
   const render = extractFunction(html, 'renderCitePreview');
@@ -379,8 +400,13 @@ test('TEST-S3-U6-WIRING: the screen asks the rule once, shows that answer, and s
    * the region names. The modal markup is sliced from main.html, so it counts as coverage.
    */
   let markup = domTest;
+  // S3-structured-report added a third modal inside the same sliced region, and the U6 harness
+  // slices it for the same reason it slices the other two: the region registers listeners on it at
+  // the top level, so without the markup the page dies while loading. Counting it here is what this
+  // pin already says - markup sliced from main.html counts as coverage - not a relaxation of it.
   for (const [name, from, to] of [['CITE_HTML', '<div class="modal" id="cite-preview"', '\n  </div>'],
-                                  ['PANE_HTML', '<div class="modal" id="stalemodal"', '\n  </div>']]) {
+                                  ['PANE_HTML', '<div class="modal" id="stalemodal"', '\n  </div>'],
+                                  ['STRUCT_HTML', '<div class="modal" id="structmodal"', '\n  </div>']]) {
     assert.ok(domTest.includes(`${name} = slice_between(MAIN, '${from}', "${to.replace('\n', '\\n')}")`),
       `${name} must be sliced from the product`);
     const a = html.indexOf(from), b = html.indexOf(to, a);
@@ -393,6 +419,21 @@ test('TEST-S3-U6-WIRING: the screen asks the rule once, shows that answer, and s
     for (const line of html.slice(html.indexOf(from), html.indexOf(to, html.indexOf(from))).split('\n'))
       for (const hit of line.matchAll(/\$\("#([A-Za-z0-9_-]+)"\)/g)) wanted.add(hit[1]);
   assert.ok(wanted.size >= 20, 'the id scan found suspiciously little; re-pin it');
-  const missing = [...wanted].filter(id => !markup.includes(`id="${id}"`));
+  /**
+   * One id in the region is reached only from inside `if (!structureForm.empty) { ... }`: the
+   * structured-entry button is CREATED there and inserted before `#b-print`. The product catalog
+   * ships empty, so that branch never runs and no page can die on it - but the scan above is
+   * textual and cannot see a guard, so the exemption is written out and tied to the two facts that
+   * make it true. Fill the catalog and this fails, which is exactly right: the U6 harness would
+   * then need that button on its page.
+   */
+  const guardAt = structBlock.indexOf('if (!structureForm.empty) {');
+  assert.ok(guardAt >= 0, 'the structured button is created behind the empty-catalog guard');
+  assert.ok(structBlock.slice(guardAt).includes('$("#b-print").before(button);'),
+    '#b-print is reached only from inside that guard');
+  assert.match(readFileSync(join(ROOT, 'worklist-v0/hpacs-lite/report-structure.js'), 'utf8'),
+    /PRODUCT_CATALOG = Object\.freeze\(\[\]\)/, 'the shipped catalog is empty, so that branch is dead');
+  const deadBranchOnly = new Set(['b-print']);
+  const missing = [...wanted].filter(id => !markup.includes(`id="${id}"`) && !deadBranchOnly.has(id));
   assert.deepEqual(missing, [], 'every element the sliced product region asks for must be on the page');
 });

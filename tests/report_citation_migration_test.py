@@ -212,10 +212,14 @@ class LeakBoundaryTests(SourceCase):
                         "one lock order for every path: StudyState, Report, then my draft")
 
     def test_the_forced_release_retry_is_inside_the_same_mapping(self) -> None:
+        # S3-structured-report renamed this wrapper to `reportLimitChecked` because it now maps two
+        # CHECK families, not one. The assertion is the same one: the retry leg must sit INSIDE the
+        # mapping, or a CHECK raised by the second attempt escapes as a 500.
         force = body_of(self.service, "async forceDiscardDrafts(")
-        self.assertIn("this.citationChecked(", force)
+        self.assertIn("this.reportLimitChecked(", force)
+        self.assertNotIn("this.citationChecked(", force, "the old name must not survive anywhere")
         self.assertIn("if (e?.code !== 'P2002')", force)
-        self.assertLess(force.index("this.citationChecked("), force.index("if (e?.code !== 'P2002')"),
+        self.assertLess(force.index("this.reportLimitChecked("), force.index("if (e?.code !== 'P2002')"),
                         "a CHECK raised by the retry would otherwise surface as a 500")
 
     def test_both_counts_use_one_equivalence(self) -> None:

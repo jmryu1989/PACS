@@ -27,6 +27,11 @@ from playwright.sync_api import expect, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = Path(os.environ.get("KIN_CITATION_MAIN", ROOT / "worklist-v0" / "hpacs-lite" / "main.html")).read_text(encoding="utf-8")
 CITATION_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js").read_text(encoding="utf-8")
+# S3-structured-report added a block inside REPORT_BLOCK that builds its form object and registers
+# its listeners at the top level. The module and its markup must be here or the sliced script throws
+# while loading and every case dies before its assertion (the U3 lesson). The product catalog is
+# empty, so nothing in this file's scenarios changes: no button is created and no request is made.
+STRUCTURE_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js").read_text(encoding="utf-8")
 VECTORS = json.loads((ROOT / "tests" / "report_citation_vectors.json").read_text(encoding="utf-8"))
 
 UID = "1.2.3"
@@ -99,6 +104,7 @@ def extract_function(source, name):
 # product ships, not by a rule this test invents.
 CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </div>") + "\n  </div>"
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
+STRUCT_HTML = slice_between(MAIN, '<div class="modal" id="structmodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
 BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
 # One contiguous region: report source, loadReport, the draft bar, the rebase pane, the citation
@@ -129,8 +135,12 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <button id="logout"></button>
 PANEHTML
 CITEHTML
+STRUCTHTML
 <script>
 CITATIONJS
+</script>
+<script>
+STRUCTUREJS
 </script>
 <script>
 const $ = s => document.querySelector(s);
@@ -290,7 +300,9 @@ def harness(state):
             .replace("MODALCSS", MODAL_CSS)
             .replace("PANEHTML", PANE_HTML)
             .replace("CITEHTML", CITE_HTML)
+            .replace("STRUCTHTML", STRUCT_HTML)
             .replace("CITATIONJS", CITATION_JS)
+            .replace("STRUCTUREJS", STRUCTURE_JS)
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)

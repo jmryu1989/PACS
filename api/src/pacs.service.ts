@@ -10,6 +10,10 @@ import { canonical } from './viewer-input';
 import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationInsertInput, citationSourceRef,
   citationUnion, CitationInputError, lineBlockOccurrences, presenceState, projectCitation, sameTextCounts,
   REPORT_CITATION_FIELDS, REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA, SOURCE_UNAVAILABLE } from './report-citation';
+import { applyStructureKeepList, commitStructureSelection, isStructureEntry, projectStructure, structureApplyInput,
+  structureArray, structureIdList, structureItemKey, structureSameTextCounts, structureUnion,
+  StructureInputError, STRUCTURE_CATALOG, REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from './report-structure';
+import type { StructureTemplate } from './report-structure';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
@@ -181,6 +185,25 @@ const citationLimit = () => {
 const CITATION_CHECKS = ['ReportDraft_citations_check', 'ReportVersion_citations_check'];
 
 /**
+ * 구조화 칸의 CHECK도 같은 백스톱이다. 이름을 따로 두는 이유는 **어느 한도를 넘었는지**
+ * 사용자에게 말해야 하기 때문이다 — 구조화 항목을 지우라는 안내와 인용을 지우라는 안내는
+ * 서로 할 수 있는 일이 다르다.
+ */
+const STRUCTURE_CHECKS = ['ReportDraft_structured_check', 'ReportVersion_structured_check'];
+
+const structureLimit = () => {
+  throw new ConflictException({ code: 'REPORT_STRUCTURE_LIMIT',
+    message: `구조화 항목이 한도(${REPORT_STRUCTURE_LIMITS.entries}건 · ${REPORT_STRUCTURE_LIMITS.bytes}바이트)를 넘습니다 — ` +
+      '항목을 일부 제거한 뒤 다시 시도해 주세요' });
+};
+
+function isStructureCheck(error: any): boolean {
+  const meta: any = error?.meta ?? {};
+  const text = [meta.constraint, meta.message, meta.detail, error?.message].filter(Boolean).join(' ');
+  return STRUCTURE_CHECKS.some(name => text.includes(name));
+}
+
+/**
  * DB CHECK는 fail-closed 백스톱이지 서버 고장이 아니다. 500으로 내보내면 사용자는
  * "다시 해보세요" 말고 할 수 있는 게 없고, 실제로 필요한 행동(제거)을 못 듣는다.
  *
@@ -237,6 +260,15 @@ export class PacsService implements OnModuleInit {
 
   /** 기관 목록 캐시. 몇 개 안 되고 거의 안 바뀌므로 메모리에 둔다. */
   private institutions: any[] = [];
+
+  /**
+   * 구조화 서식 목록 (P7의 주입 이음매).
+   *
+   * 제품에서는 언제나 `STRUCTURE_CATALOG`이고 그것은 **비어 있다**(P6). 시험만이 자기
+   * 인스턴스의 이 칸을 합성 목록으로 덮는다 — 환경변수도, 헤더도, 라우트도 아니다.
+   * 제품 코드나 HTTP로 합성 항목에 닿을 방법이 없어야 지어낸 임상 내용이 새지 않는다.
+   */
+  protected structureCatalog: readonly StructureTemplate[] = STRUCTURE_CATALOG;
 
   async onModuleInit() {
     // 기관 시드 — upsert라 이미 있으면 이름·별칭만 갱신된다
@@ -1568,7 +1600,7 @@ export class PacsService implements OnModuleInit {
      * 권한 문제도 아닌데 조용히 실패한다. 소견 목록이 같은 이유로 같은 형태를 쓴다.
      */
     if (body?.insert !== undefined) await this.studyAccess.prepare(c);
-    return this.citationChecked(() => this.scopeWrite(uid,c,async(tx,audit)=>{
+    return this.reportLimitChecked(() => this.scopeWrite(uid,c,async(tx,audit)=>{
     need(c.roles, 'radiologist', '판독문 저장');
     const prev = await this.gate(uid,c,tx);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
@@ -1599,6 +1631,10 @@ export class PacsService implements OnModuleInit {
       if (body.insert !== undefined)
         throw new ConflictException({ code: 'REPORT_CITATION_TEXT',
           message: '삽입한 문구가 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
+      // 같은 이유로 구조화 적용도 함께 올 수 없다 — 넣었다고 말하는 문장이 본문에 없다.
+      if (body.structure !== undefined)
+        throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
+          message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
       await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
       await audit(c.actor, 'report.draft.clear', uid, {});
       return { uid, author: c.actor, cleared: true };
@@ -1632,11 +1668,32 @@ export class PacsService implements OnModuleInit {
     // 인용 키가 하나도 없으면 `null`이고, 그러면 칸을 아예 쓰지 않는다 — 옛 탭의 자동 저장이
     // 자기가 모르는 증언을 지우는 일은 없어야 한다. 키 부재는 `[]`가 아니라 **변경 없음**이다.
     const cited = await this.draftCitations(tx, uid, body, content, c, head?.version ?? 0);
+    const structure = await this.draftStructure(tx, uid, body, content, c, head?.version ?? 0);
+
+    /**
+     * ── 비어 있음을 쓰는 세 가지 (A1) ──
+     *
+     * 요청이 구조화를 **건드리지 않았으면** 칸을 아예 빼야 한다. UPDATE에서 키를 빼는 것은
+     * "그대로 두라"는 뜻이고, 구조화를 모르는 옛 탭의 자동 저장이 남의 증언을 지우지 않는
+     * 유일한 방법이다.
+     *
+     * 요청이 구조화를 **명시적으로 비웠으면**(`structureIds: []`) 칸을 빼서는 안 된다 —
+     * 빼면 이전 배열이 그대로 남아 "지웠다"고 답해놓고 아무것도 지우지 않은 것이 된다.
+     * 그 경우에만 `Prisma.DbNull`로 **SQL NULL**을 쓴다. `Prisma.JsonNull`은 JSON 값 `null`이라
+     * 배열도 NULL도 아닌 세 번째 모양을 만들고, 읽는 쪽의 "배열이 아니면 없음"을 통과하면서
+     * CHECK의 `IS NULL`은 통과하지 못한다.
+     *
+     * CREATE에는 지울 이전 값이 없으므로 빈 결과는 그냥 생략한다(P13 — `[]`는 저장하지 않는다).
+     */
+    const structuredCreate = structure && structure.entries.length ? { structured: structure.entries } : {};
+    const structuredUpdate = !structure ? {}
+      : structure.entries.length ? { structured: structure.entries } : { structured: Prisma.DbNull };
 
     const saved = await tx.reportDraft.upsert({
       where: { uid_author: { uid, author: c.actor } },
-      create: { uid, author: c.actor, ...content, baseVersion, ...(cited ? { citations: cited.entries } : {}) },
-      update: { ...content, baseVersion, ...(cited ? { citations: cited.entries } : {}) },
+      create: { uid, author: c.actor, ...content, baseVersion,
+        ...(cited ? { citations: cited.entries } : {}), ...structuredCreate },
+      update: { ...content, baseVersion, ...(cited ? { citations: cited.entries } : {}), ...structuredUpdate },
     });
     // 판독문 전문을 감사로그에 통째로 넣지 않는다 — 길이와 개인정보 때문. 길이만 남긴다.
     await audit(c.actor, 'report.draft', uid, {
@@ -1644,6 +1701,9 @@ export class PacsService implements OnModuleInit {
       // 인용 감사는 `cid`·칸·수만 남긴다. `findingId`·`sourceIndex`·삽입 문구를 남기면
       // 역할·예비 판독 관문이 없는 감사 통로(`audits()`)로 판독문↔소견 연결이 통째로 새어 나간다.
       ...(cited?.detail ? { cits: cited.detail } : {}),
+      // 구조화 감사도 **건수와 `sid`만** 남긴다(P16). 고른 값·본문에 들어간 문장·항목 코드를
+      // 남기면 역할 관문이 없는 감사 통로로 판독 내용이 새어 나간다.
+      ...(structure?.detail ? { strs: structure.detail } : {}),
     });
     if (prior && baseVersion > prior.baseVersion)
       await audit(c.actor, 'report.draft.rebase', uid, { from: prior.baseVersion, to: baseVersion });
@@ -1653,7 +1713,11 @@ export class PacsService implements OnModuleInit {
      * **무엇이 기록되었는가**뿐이다.
      */
     return { uid, author: c.actor, baseVersion: saved.baseVersion, updatedAt: saved.updatedAt,
-      ...(cited?.inserted ? { inserted: cited.inserted } : {}) };
+      ...(cited?.inserted ? { inserted: cited.inserted } : {}),
+      // 요청이 `structure`를 실어 보냈을 때만 이 칸이 있다(P9). 화면은 이 `sid` 하나로 유지
+      // 목록을 넓힌다 — 없으면 지어내지 않고 모르는 상태로 남긴다. 이 응답은 appState에
+      // 통째로 병합되지 않으므로 키가 없는 것이 옛 값을 남기지 않는다.
+      ...(structure?.applied ? { structured: structure.applied } : {}) };
     }));
   }
 
@@ -1687,6 +1751,122 @@ export class PacsService implements OnModuleInit {
       ...(inserted ? { add: [{ cid: inserted.cid, field: inserted.field }] } : {}),
       ...(ignored ? { ignored } : {}) } : null;
     return { entries: kept, inserted, detail };
+  }
+
+  /**
+   * PUT 한 번에 들어온 구조화 변경을 본문과 **같은 쓰기**로 풀어낸다.
+   * 구조화 키가 하나도 없으면 `null` — 칸을 건드리지 않는다(A1의 "변경 없음").
+   *
+   * `studyAccess.prepare(c)`를 부르지 않는다(P14). 구조화 항목은 소견 계보를 가리키지 않으므로
+   * 비교 검사 정책을 준비할 이유가 없고, 준비하면 이 경로가 넓은 정책 읽기를 끌고 들어온다.
+   */
+  private async draftStructure(tx: any, uid: string, body: any, content: any, c: Caller, headVersion: number) {
+    const keep = this.structureKeys(body.structureIds, 'structureIds');
+    const wantsApply = body.structure !== undefined;
+    if (keep === undefined && !wantsApply) return null;
+    // 내 행을 먼저 잠근다. 인용과 같은 행·같은 방향이라 두 잠금은 순서대로 선다.
+    const [locked] = await tx.$queryRaw`
+      SELECT structured FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+    const { kept, ignored } = applyStructureKeepList(structureArray(locked?.structured), keep);
+    let applied: { sid: string; field: string; enteredAt: string } | null = null;
+    if (wantsApply) {
+      const input = this.structureInput(body.structure);
+      const head = await this.versionStructured(tx, uid, headVersion);
+      /**
+       * **살아 있음의 규칙은 확정의 규칙과 같다** (P1/B3).
+       *
+       * 머리 건은 그 문장이 **이 요청의 본문에 있을 때만** 살아 있다. 한 번 Save한 뒤 값을
+       * 고치면 머리 건의 문장은 본문을 떠나지만 행 자체는 불변이라 그대로 남는데, 그것을
+       * 살아 있다고 세면 같은 항목을 **두 번째로** 고치려는 사람에게 "이미 입력한 항목입니다"를
+       * 돌려주게 된다 — 고치라고 안내해놓고 고치지 못하게 하는 답이다.
+       *
+       * 대상 찾기(`all`)는 좁히지 않는다. `replace`는 옛 문장이 본문에 **없을 것**을 요구하므로,
+       * 바꿀 머리 건은 정의상 `live`에 없기 때문이다.
+       */
+      const all = structureUnion(head, kept);
+      const headLive = head.filter(entry => lineBlockOccurrences(
+        String(content[String(entry?.field ?? '')] ?? ''), String(entry?.renderedText ?? '')) >= 1);
+      let live = structureUnion(headLive, kept);
+      if (input.op === 'replace') {
+        /**
+         * 바꿀 건은 내 초안에도, **머리 판에도** 있을 수 있다 (P3/B3).
+         * 확정은 매번 초안 행을 지우므로(`:2158`) 한 번 저장한 뒤의 모든 건은 머리 건이고,
+         * 머리를 못 가리키면 값을 고치는 일이 첫 저장 이후로 영영 불가능해진다.
+         * 머리 행은 불변이므로 여기서 **고치지 않는다** — 그 건은 문장이 본문을 떠난 사실로
+         * 확정 때 P1이 떨어뜨린다.
+         */
+        const target = all.find(entry => String(entry?.sid ?? '') === input.replacesSid);
+        if (!target)
+          throw new ConflictException({ code: 'REPORT_STRUCTURE_REPLACE',
+            message: '바꿀 항목을 찾을 수 없습니다 — 화면을 다시 불러오세요' });
+        if (String(target.field) !== input.field || String(target.templateId) !== input.templateId
+            || String(target.itemCode) !== input.itemCode)
+          throw new ConflictException({ code: 'REPORT_STRUCTURE_REPLACE',
+            message: '같은 서식의 같은 항목만 바꿀 수 있습니다' });
+        // 옛 문장이 아직 본문에 있으면 두 값이 동시에 적힌 판독문이 된다.
+        if (lineBlockOccurrences(content[String(target.field)], String(target.renderedText ?? '')))
+          throw new ConflictException({ code: 'REPORT_STRUCTURE_REPLACE',
+            message: '이전 값의 문장이 아직 본문에 남아 있습니다 — 화면을 다시 불러오세요' });
+        const at = kept.findIndex(entry => String(entry?.sid ?? '') === input.replacesSid);
+        if (at >= 0) kept.splice(at, 1);
+        live = live.filter(entry => String(entry?.sid ?? '') !== input.replacesSid);
+      }
+      // 같은 항목은 한 번만 산다(P3). 되풀이되는 항목(결절 여러 개)은 v1의 범위 밖이다.
+      const wanted = structureItemKey({ templateId: input.templateId, itemCode: input.itemCode });
+      if (live.some(entry => structureItemKey(entry) === wanted))
+        throw new ConflictException({ code: 'REPORT_STRUCTURE_EXISTS',
+          message: '이미 입력한 항목입니다 — 값을 바꾸려면 수정을 사용하세요' });
+      /**
+       * 서버가 확인하는 것은 이 글이 **이 요청의 본문에 줄 블록으로 실재하는지**뿐이다.
+       * 본문을 쓰는 것은 화면이고, 서버는 화면이 넣었다고 말한 것을 대조만 한다 —
+       * 인용과 같은 구조적 방어다.
+       */
+      if (!lineBlockOccurrences(content[input.field], input.renderedText))
+        throw new ConflictException({ code: 'REPORT_STRUCTURE_TEXT',
+          message: '구조화 항목의 문장이 그 칸의 본문에 줄 단위로 그대로 있지 않습니다' });
+      const template = this.structureCatalog.find(t => t.templateId === input.templateId);
+      const item = template?.items.find(i => i.code === input.itemCode);
+      const entry = { v: REPORT_STRUCTURE_SCHEMA, sid: randomUUID(), field: input.field,
+        templateId: input.templateId, templateRevision: input.templateRevision, itemCode: input.itemCode,
+        valueType: input.valueType, value: input.value, unit: item?.unit ?? null,
+        renderedText: input.renderedText, enteredAt: new Date().toISOString(), enteredBy: c.actor };
+      kept.push(entry);
+      applied = { sid: entry.sid, field: entry.field, enteredAt: entry.enteredAt };
+      // 예방적 검사다. 머리 판을 잠그지 않고 읽으므로 양방향 모두 틀릴 수 있고, 실제 상한은
+      // 확정 시의 검사와 DB CHECK가 잡는다. 유지 목록만 온 PUT은 줄어들기만 하므로 오지 않는다.
+      await this.structureBudget(tx, [...head, ...kept]);
+    }
+    const detail = (kept.length || ignored) ? { n: kept.length,
+      ...(applied ? { add: [applied.sid] } : {}),
+      ...(ignored ? { ignored } : {}) } : null;
+    return { entries: kept, applied, detail };
+  }
+
+  /** 머리 판의 구조화 증언. 인용과 같은 규칙 — 머리는 `ReportVersion(uid, Report.version)` 한 행이다. */
+  private async versionStructured(tx: any, uid: string, version: number) {
+    if (!version) return [] as any[];
+    const row = await tx.reportVersion.findUnique({
+      where: { uid_version: { uid, version } }, select: { structured: true } });
+    return structureArray(row?.structured);
+  }
+
+  /** 한도는 데이터베이스가 센다. CHECK와 같은 자(canonical `jsonb::text`의 UTF-8 바이트)를 쓴다. */
+  private async structureBudget(tx: any, entries: any[]) {
+    if (entries.length > REPORT_STRUCTURE_LIMITS.entries) structureLimit();
+    if (!entries.length) return;
+    const [row] = await tx.$queryRaw`
+      SELECT octet_length(convert_to(${canonical(entries)}::jsonb::text, 'UTF8')) AS bytes`;
+    if (Number(row.bytes) > REPORT_STRUCTURE_LIMITS.bytes) structureLimit();
+  }
+
+  /** 모양이 틀린 입력만 400으로 옮긴다. 다른 실패는 그대로 올려보낸다. */
+  private structureKeys(value: any, what: string) {
+    try { return structureIdList(value, what); }
+    catch (e: any) { if (e instanceof StructureInputError) throw new BadRequestException(e.message); throw e; }
+  }
+  private structureInput(value: any) {
+    try { return structureApplyInput(value, this.structureCatalog); }
+    catch (e: any) { if (e instanceof StructureInputError) throw new BadRequestException(e.message); throw e; }
   }
 
   /**
@@ -1768,9 +1948,13 @@ export class PacsService implements OnModuleInit {
    * DB CHECK를 **이름으로** 알아보고 같은 409로 옮긴다. 우리 제약이 아니면 손대지 않는다 —
    * 다른 데이터베이스 오류를 삼키면 진짜 고장이 "인용을 제거하세요"로 위장된다.
    */
-  private async citationChecked<T>(work: () => Promise<T>): Promise<T> {
+  private async reportLimitChecked<T>(work: () => Promise<T>): Promise<T> {
     try { return await work(); }
-    catch (error: any) { if (isCitationCheck(error)) citationLimit(); throw error; }
+    catch (error: any) {
+      if (isCitationCheck(error)) citationLimit();
+      if (isStructureCheck(error)) structureLimit();
+      throw error;
+    }
   }
 
   /**
@@ -1813,7 +1997,7 @@ export class PacsService implements OnModuleInit {
       await tx.$queryRaw`
         SELECT uid FROM "StudyState" WHERE uid = ${uid} FOR UPDATE`;
       const drafts = await tx.$queryRaw<any[]>`
-        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, "updatedAt"
+        SELECT uid, author, findings, conclusion, recommendation, "baseVersion", citations, structured, "updatedAt"
         FROM "ReportDraft"
         WHERE uid = ${uid}
         ORDER BY author
@@ -1849,6 +2033,10 @@ export class PacsService implements OnModuleInit {
           // 되읽은 NULL을 그대로 쓰면 Prisma가 거절하므로 칸을 아예 생략한다 —
           // 그러지 않으면 인용이 없던 옛 초안의 강제 해제가 전부 실패한다.
           ...(d.citations === null || d.citations === undefined ? {} : { citations: d.citations }),
+          // 구조화도 같은 규칙으로 함께 보존한다. 본문만 판으로 남기고 타입 있는 값을 버리면
+          // 보존된 문장이 무엇을 뜻했는지 되짚을 자리가 없어진다 — 강제 해제는 사용자의
+          // 실수가 아니라 관리자 조치이므로 더더욱 통째로 남아야 한다.
+          ...(d.structured === null || d.structured === undefined ? {} : { structured: d.structured }),
           reason: `관리자 강제 초안 해제 (해제자: ${c.actor})`,
           author: d.author,   // 지운 관리자가 아니라 실제로 **쓴 사람**이 저자다
         })),
@@ -1870,7 +2058,7 @@ export class PacsService implements OnModuleInit {
 
     // 재시도 다리까지 **같은 매핑 안에 둔다.** 첫 시도만 감싸면 번호 충돌로 다시 돈 실행에서
     // 나온 CHECK 위반이 500으로 새어 나가고, 같은 요청이 두 가지 답을 갖게 된다.
-    return this.citationChecked(async () => {
+    return this.reportLimitChecked(async () => {
       try {
         return await run();
       } catch (e: any) {
@@ -1901,6 +2089,9 @@ export class PacsService implements OnModuleInit {
      */
     const keepIds = this.citationKeys(body.citationIds, 'citationIds');
     const removeIds = this.citationKeys(body.removeCitationIds, 'removeCitationIds');
+    // 구조화에는 `removeStructureIds`가 없다(P1). 머리 건이 빠지는 길은 **그 문장이 본문을
+    // 떠나는 것** 하나뿐이고, 그래야 지운 적 없는 증언이 목록 하나로 사라지지 않는다.
+    const structureKeepIds = this.structureKeys(body.structureIds, 'structureIds');
 
     const prev = await this.gate(uid, c);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
@@ -2029,6 +2220,8 @@ export class PacsService implements OnModuleInit {
     // 감사는 트랜잭션 밖에서 남는다. 되돌아간 확정에는 감사도 남지 않으므로 이 값은
     // 성공한 경로에서만 읽힌다.
     let citationAudit: any = null;
+    let structureAudit: any = null;
+    let structured: any[] = [];
     try {
       results = await this.prisma.$transaction(async tx => {
       await this.studyAccess.require(c,[uid],tx);
@@ -2107,10 +2300,12 @@ export class PacsService implements OnModuleInit {
          * 잠금 순서는 StudyState → Report → 내 초안이고, 강제 해제는 StudyState → 초안들,
          * 삽입은 내 초안 하나뿐이다. 모두 같은 방향이라 순환이 없다.
          */
+        const headStructured = await this.versionStructured(tx, uid, cur?.version ?? 0);
         const [mine] = await tx.$queryRaw<any[]>`
-          SELECT citations FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
+          SELECT citations, structured FROM "ReportDraft" WHERE uid = ${uid} AND author = ${c.actor} FOR UPDATE`;
         const { kept, ignored } = applyKeepList(citationArray(mine?.citations), keepIds);
         const union = citationUnion(headCitations, removeIds, kept);
+        const mineStructured = applyStructureKeepList(structureArray(mine?.structured), structureKeepIds);
         // 세 칸이 빈 확정과 reset은 본문이 없으니 증언할 것도 없다.
         const blank = !(content.findings || content.conclusion || content.recommendation);
         const citations = (action === 'reset' || blank) ? [] : union.entries;
@@ -2123,6 +2318,19 @@ export class PacsService implements OnModuleInit {
         citationAudit = (citations.length || union.removed.length || ignored)
           ? { n: citations.length, ...(union.removed.length ? { dropped: union.removed } : {}),
               ...(ignored ? { ignored } : {}) } : null;
+
+        /**
+         * 구조화는 **한 가지 규칙**으로 고른다 (P1): 머리에서 왔든 초안에서 왔든, 그 문장이
+         * 확정될 본문에 있을 때만 실린다. 인용과 달리 출처를 다시 묻지 않는다 — 구조화 건은
+         * 자기 문장 말고 아무것도 가리키지 않기 때문이다.
+         */
+        const selection = commitStructureSelection(
+          structureUnion(headStructured, mineStructured.kept), content, blank, action === 'reset');
+        structured = selection.entries;
+        await this.structureBudget(tx, structured);
+        structureAudit = (structured.length || selection.dropped.length || mineStructured.ignored)
+          ? { n: structured.length, ...(selection.dropped.length ? { dropped: selection.dropped } : {}),
+              ...(mineStructured.ignored ? { ignored: mineStructured.ignored } : {}) } : null;
 
         const last = await tx.reportVersion.findFirst({
           where: { uid }, orderBy: { version: 'desc' }, select: { version: true },
@@ -2140,6 +2348,9 @@ export class PacsService implements OnModuleInit {
             // 비우기 직전의 본문을 판으로 남기면서 그 증언만 버리면, 보존된 글이 어디서
             // 왔는지 되짚을 수 없다. 같은 머리 판 행에서 읽은 그대로 함께 보존한다.
             citations: headCitations,
+            // 구조화도 같은 이유로 함께 보존한다. 다만 빈 배열은 저장하지 않는다(P13) —
+            // "없음"의 모양은 NULL 하나여야 읽는 쪽이 두 가지를 구분할 일이 없다.
+            ...(headStructured.length ? { structured: headStructured } : {}),
             reason: `판독 취소로 폐기 (취소자: ${c.actor})`,
             author: cur.updatedBy ?? c.actor,
           }});
@@ -2153,7 +2364,9 @@ export class PacsService implements OnModuleInit {
         // 인용은 **`ReportVersion` 행에만** 쓴다. `Report`에는 칸이 없다 — 거울을 두면
         // 같은 사실이 두 곳에서 엇갈릴 수 있고, 그 순간 어느 쪽이 기록인지 말할 수 없다.
         await tx.reportVersion.create({ data: {
-          uid, version, action, ...content, citations, reason: body.reason ?? null, author: c.actor } });
+          uid, version, action, ...content, citations,
+          ...(structured.length ? { structured } : {}),
+          reason: body.reason ?? null, author: c.actor } });
         // 확정에 실패하면 초안도 남아야 하므로 같은 트랜잭션에서 지운다.
         await tx.reportDraft.deleteMany({ where: { uid, author: c.actor } });
         return [state, version] as [any, number];
@@ -2161,6 +2374,7 @@ export class PacsService implements OnModuleInit {
     } catch (e: any) {
       // CHECK 백스톱도 서버 고장이 아니라 명명된 409다. 우리 제약 이름일 때만 옮긴다.
       if (isCitationCheck(e)) citationLimit();
+      if (isStructureCheck(e)) structureLimit();
       // @@unique(uid, version)은 최종 방어선이다. 불변조건이 깨져 충돌하더라도
       // 서버 고장으로 노출하지 않도록 C-1의 409 변환은 그대로 유지한다.
       if (e?.code === 'P2002')
@@ -2178,6 +2392,8 @@ export class PacsService implements OnModuleInit {
       // 몇 건이 남았고 무엇이 **지워졌는가**. 지워진 증언은 되짚을 자리가 여기뿐이라
       // `cid`는 남기지만, `findingId`·`sourceIndex`·문구는 남기지 않는다.
       ...(citationAudit ? { cits: citationAudit } : {}),
+      // 구조화도 같은 규칙이다 — 건수와 `sid`만. 값·문장·항목 코드는 남기지 않는다(P16).
+      ...(structureAudit ? { strs: structureAudit } : {}),
     });
 
     const r = await this.prisma.report.findUnique({ where: { uid } });
@@ -2313,6 +2529,51 @@ export class PacsService implements OnModuleInit {
         return entries.map((entry, i) => projectCitation(entry, readable.has(String(entry?.findingId ?? '')), counts[i]));
       };
       return { version: report?.version ?? 0, head: project(head), draft: project(mine) };
+    }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+  }
+
+  /**
+   * 구조화 전용 읽기 — 머리 판과 내 초안의 타입 있는 값.
+   *
+   * 관문은 `versions()`와 **같은 것**이다(기관 + 예비 판독). 인용 읽기가 소견 가독을 한 번 더
+   * 거는 이유는 인용이 소견 계보를 가리키기 때문인데, 구조화 건은 자기 문장 말고 아무것도
+   * 가리키지 않는다. 그래서 그 좁은 관문을 여기에 옮겨 붙이지 않고(가짜 안전), 인용 읽기의
+   * 의미를 넓히지도 않는다. 나가는 내용은 이미 `versions()`가 내보내는 본문의 부분집합이다.
+   *
+   * 확정은 매번 초안 행을 지우므로(`:2353`) 한 번 저장한 뒤의 값은 전부 머리 판에 있다.
+   * 그래서 이 읽기가 없으면 Save 한 번에 화면의 구조화 상태가 통째로 사라진다.
+   *
+   * 한 `RepeatableRead` 트랜잭션 안에서 머리와 초안을 함께 읽는다 — 두 번 읽으면 그 사이
+   * 확정이 끼어들어 "머리에는 없고 초안에는 있는" 없는 상태를 그릴 수 있다.
+   */
+  async reportStructure(uid: string, c: Caller) {
+    const prev = await this.gate(uid, c);
+    if (!prev) throw new NotFoundException('검사를 찾을 수 없습니다');
+    if (!canReadPrelim(prev, c.actor))
+      throw new ForbiddenException(
+        `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 볼 수 있습니다.`);
+    return this.prisma.$transaction(async tx => {
+      const report = await tx.report.findUnique({ where: { uid },
+        select: { version: true, findings: true, conclusion: true, recommendation: true } });
+      const head = await this.versionStructured(tx, uid, report?.version ?? 0);
+      const draftRow = await tx.reportDraft.findUnique({
+        where: { uid_author: { uid, author: c.actor } },
+        select: { findings: true, conclusion: true, recommendation: true, structured: true } });
+      const mine = structureArray(draftRow?.structured);
+      /**
+       * 한 건이라도 모양이 틀리면 **답 전체가 모른다**가 된다. 틀린 건만 빼고 나머지를
+       * 정상처럼 돌려주면, 화면은 자기가 본 것이 전부라고 믿고 유지 목록을 만들어 보낸다 —
+       * 그 순간 읽지 못한 건이 조용히 지워진다.
+       */
+      if (!head.every(isStructureEntry) || !mine.every(isStructureEntry))
+        return { version: report?.version ?? 0, unknown: true, head: null, draft: null };
+      const project = (entries: any[], body: any) => {
+        const counts = structureSameTextCounts(entries);
+        return entries.map((entry, i) =>
+          projectStructure(entry, String(body?.[String(entry.field)] ?? ''), counts[i]));
+      };
+      return { version: report?.version ?? 0, unknown: false,
+        head: project(head, report), draft: project(mine, draftRow) };
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
   }
 

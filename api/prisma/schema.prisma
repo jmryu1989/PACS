@@ -225,6 +225,8 @@ model Report {
 /// citations: 이 초안의 문장들이 어느 소견·어느 판·어느 출처에서 왔는지에 대한 **서버 증언**.
 /// 본문과 같은 행이라 한 번의 쓰기로 함께 움직인다 — 문장만 남고 근거가 사라지는 창이 없다.
 /// 없거나(NULL) 배열이 아니면 "인용 없음"이고, 그것이 이 칸이 생기기 전의 동작이다.
+/// structured: 구조화 서식으로 **고른 값**과 그래서 본문에 들어간 **그 한 줄**. 같은 이유로
+/// 같은 행에 있다. 기록의 본체는 여전히 자유문 세 칸이고 이 칸은 그 옆에 서는 증언이다.
 model ReportDraft {
   uid            String
   author         String
@@ -233,6 +235,7 @@ model ReportDraft {
   recommendation String   @default("")
   baseVersion    Int      @default(0)
   citations      Json?
+  structured     Json?
   updatedAt      DateTime @updatedAt
 
   @@id([uid, author])
@@ -263,6 +266,9 @@ model ReportVersion {
   /// 확정 시 1회 기록되고 이후 불변이다. 머리 판에서 이월된 건은 원래 작성자·시각을
   /// 바이트 그대로 유지한다 — 이월은 새 증언이 아니라 같은 증언의 계속이기 때문이다.
   citations      Json?
+  /// 구조화 항목의 증언. 이월 규칙은 하나다 — **그 문장이 확정될 본문에 있을 때만** 실린다.
+  /// 손으로 고쳐진 문장의 옛 값이 서명된 판에 남으면 기계가 읽는 값이 의무기록과 어긋난다.
+  structured     Json?
   at             DateTime @default(now())
 
   @@unique([uid, version])

@@ -46,7 +46,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260910133000_study_access_subject/migration.sql',
               'api/prisma/migrations/20260912100000_hanging_protocol_preferences/migration.sql',
               'api/prisma/migrations/20260917120000_findings/migration.sql',
-              'api/prisma/migrations/20260920120000_report_citations/migration.sql']
+              'api/prisma/migrations/20260920120000_report_citations/migration.sql',
+              'api/prisma/migrations/20260921120000_report_structure/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -123,12 +124,20 @@ def expected_rows(uid):
         sourceRef=dict(kind='item', itemId='00000000-0000-4000-8000-0000000000e1', sourceRevision=1),
         linkStateAtInsert='current', headRevisionAtInsert=1, insertedText='SYNTHETIC 인용 줄',
         insertedAt='2026-09-06T00:00:00.123Z', insertedBy='SYNTHETIC-reader')]
+    # 구조화 칸도 같은 이유로 한 행은 값을 들고 한 행은 NULL이다. 제품 서식 목록은 비어 있으므로
+    # 이 값은 **오직 여기서만** 존재하는 합성 자료다(P5/P6).
+    structured = [dict(v=1, sid='00000000-0000-4000-8000-0000000000a1',
+        field='findings', templateId='SYN-T1', templateRevision=2, itemCode='SYN-CHOICE',
+        valueType='choice', value='c1', unit=None, renderedText='SYNTHETIC-ITEM choice = alpha',
+        enteredAt='2026-09-06T00:00:00.123Z', enteredBy='SYNTHETIC-reader')]
     rows['ReportVersion'] = [dict(id=number, uid=uid, version=number, action='Save',
         findings='SYNTHETIC history '+str(number), conclusion='', recommendation='', reason=None,
-        author='SYNTHETIC-reader', citations=citation if number == 2 else None, at=STAMP) for number in (1, 2)]
+        author='SYNTHETIC-reader', citations=citation if number == 2 else None,
+        structured=structured if number == 2 else None, at=STAMP) for number in (1, 2)]
     rows['ReportDraft'] = [dict(uid=uid, author='SYNTHETIC-reader'+str(number),
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
-        citations=citation if number == 1 else None, updatedAt=STAMP) for number in (1, 2)]
+        citations=citation if number == 1 else None,
+        structured=structured if number == 1 else None, updatedAt=STAMP) for number in (1, 2)]
     rows['UserFilter'] = [dict(id=1, owner='SYNTHETIC-reader', name='SYNTHETIC saved search',
         mode='Radiology', isDefault=True, quick='SYNTHETIC', days=-1, cols='{}', sortKey='date',
         sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]

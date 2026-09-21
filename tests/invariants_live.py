@@ -179,6 +179,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/report/versions"): Route(Kind.REPORT, "versions"),
     ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
     ("GET", "studies/:uid/report/versions/:version/citations"): Route(Kind.REPORT, "version-citations"),
+    ("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
     ("POST", "studies/:uid/release"): Route(Kind.REPORT, "release"),
     ("POST", "studies/:uid/release/force"): Route(Kind.REPORT, "release-force"),
@@ -2895,6 +2896,12 @@ class LiveInvariantTests(unittest.TestCase):
             # first row a study ever gets, so the route is exercised on a row rather than on a 404.
             return self.stack.request(
                 "GET", f"/studies/{uid}/report/versions/{max(base_version, 1)}/citations", user)
+        if operation == "structure":
+            # 구조화 항목 전용 읽기. 관문은 `versions()`와 같아서(기관 + 예비 판독) 세 시험이
+            # 그대로 의미를 갖는다 — 기사에게는 손상이 없어야 하고, 예비 판독의 제3자에게는
+            # 본문이 새지 않아야 하며, 타 기관 admin에게는 404여야 한다. 실제로 호출한다:
+            # 건너뛰거나 목록에서 빼면 새 라우트만 이 세 관문 밖에 남는다.
+            return self.stack.request("GET", f"/studies/{uid}/report/structure", user)
         if operation == "hold":
             return self.stack.request("POST", f"/studies/{uid}/hold", user)
         if operation == "release":
