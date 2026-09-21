@@ -1139,9 +1139,284 @@
           ]
         }
       ]
+    },
+    {
+      "name": "R-D: duplicate templateId",
+      "rule": "R-D",
+      "why": "two templates answering to one id: the second would shadow the first in every lookup",
+      "catalog": [
+        {
+          "templateId": "SYN-T1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Alpha: {value}",
+              "label": "A"
+            }
+          ]
+        },
+        {
+          "templateId": "SYN-T1",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "B",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Beta: {value}",
+              "label": "B"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: duplicate item code in one template",
+      "rule": "R-D",
+      "why": "without this check the pair is legal (R-B separates them) and a stored itemCode names two items",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Alpha: {value}",
+              "label": "A"
+            },
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "Beta: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: duplicate choice code",
+      "rule": "R-D",
+      "why": "a stored value could not be resolved to one choice; deleting the check turns this into R-C, not ACCEPT",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "alpha"
+                },
+                {
+                  "code": "c0",
+                  "text": "beta"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a field that is not a report field",
+      "rule": "R-D",
+      "why": "presence is counted per field, so an unknown field has nowhere to be counted",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "nope",
+              "valueType": "text",
+              "template": "a: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a valueType the schema does not have",
+      "rule": "R-D",
+      "why": "the stored entry would fail isStructureEntry and make the whole read unknown",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "nope",
+              "template": "a: {value}",
+              "label": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: missing label",
+      "rule": "R-D",
+      "why": "the screen has nothing to name the control with",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "text",
+              "template": "a: {value}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a null template element",
+      "rule": "R-D",
+      "why": "the server answers R-D through template?.templateId; the browser must not raise an untyped TypeError here, because create() rethrows it and that kills the whole page script",
+      "catalog": [
+        null
+      ]
+    },
+    {
+      "name": "R-D: a null item element",
+      "rule": "R-D",
+      "why": "same shape one level down (item?.code)",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: a null choice element",
+      "rule": "R-D",
+      "why": "same shape two levels down (choice?.code)",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": [
+                null
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: number min/max are null",
+      "rule": "R-D",
+      "why": "a coercing isFinite() says null is finite; Number.isFinite does not",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "number",
+              "template": "N: {value}",
+              "label": "A",
+              "min": null,
+              "max": null,
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: number min/max are numeric strings",
+      "rule": "R-D",
+      "why": "the same coercion hole, reached through a string",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "number",
+              "template": "N: {value}",
+              "label": "A",
+              "min": "0",
+              "max": "99",
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "R-D: number min/max are booleans",
+      "rule": "R-D",
+      "why": "Number.isFinite(true) is false; a Python oracle using isinstance(x, int) would accept it, because bool is a subclass of int",
+      "catalog": [
+        {
+          "templateId": "SYN-T",
+          "revision": 1,
+          "title": "SYNTHETIC",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "number",
+              "template": "N: {value}",
+              "label": "A",
+              "min": true,
+              "max": true,
+              "decimals": 1
+            }
+          ]
+        }
+      ]
     }
   ],
-  "_catalogVectors_why": "One catalog per case with the rule it must trip; ACCEPT means the whole catalog is legal. Check order is R-D, R-S, R-C, then pairs R-A before R-B, so a case names the FIRST rule it violates. Every rejection case has an accepted partner of the same shape, so a validator that simply refused everything would fail here. The Unicode cases carry literal code points (U+1100, U+1161, U+AC00, U+11A8, U+09C7, U+09BE, U+030A, U+00C5 and lone surrogates) rather than escapes, so every consumer sees the same string without re-decoding. Synthetic only: no clinical item, label, unit, range, vocabulary or sentence is authored here.",
+  "_catalogVectors_why": "One catalog per case with the rule it must trip; ACCEPT means the whole catalog is legal. Check order is R-D, R-S, R-C, then pairs R-A before R-B, so a case names the FIRST rule it violates. Every rejection case has an accepted partner of the same shape, so a validator that simply refused everything would fail here. The Unicode cases carry literal code points (U+1100, U+1161, U+AC00, U+11A8, U+09C7, U+09BE, U+030A, U+00C5 and lone surrogates) rather than escapes, so every consumer sees the same string without re-decoding. The shape cases (null template, null item, null choice) and the bounds cases exist because a malformed catalog must be refused with a RULE on both sides: an untyped throw in the browser escapes create() and takes the whole page script down with it. A JSON file cannot express a sparse array hole, so that witness is built in the JS tests instead. Synthetic only: no clinical item, label, unit, range, vocabulary or sentence is authored here.",
   "entryVectors": [
     {
       "name": "R-S entry: Hangul L+V at the prefix boundary",

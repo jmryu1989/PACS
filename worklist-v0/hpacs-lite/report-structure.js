@@ -140,7 +140,13 @@
     var list = catalog || [];
     for (var t = 0; t < list.length; t++) {
       var template = list[t];
-      if (typeof template.templateId !== 'string' || !template.templateId)
+      /**
+       * 서버는 `template?.templateId`라서 `null`·구멍(`[a, , b]`)·원시값에 **타입 있는 R-D**를 준다.
+       * 여기서 그냥 파고들면 `TypeError`가 나고, 그것은 `CatalogError`가 아니라서 `create()`가
+       * 다시 던진다 — 그러면 서식 목록 하나 때문에 `main.html`의 스크립트 전체가 죽는다(B3/F4가
+       * 막으려는 바로 그 모양이다). 거울이 되려면 여기서도 **규칙 이름을 들고** 거절해야 한다.
+       */
+      if (!template || typeof template.templateId !== 'string' || !template.templateId)
         throw new CatalogError('R-D', 'templateId가 필요합니다');
       if (templateIds[template.templateId])
         throw new CatalogError('R-D', 'templateId가 중복입니다: ' + template.templateId);
@@ -156,7 +162,8 @@
         var item = items[n];
         var where = template.templateId + '/' + ((item && item.code) || '(code 없음)');
 
-        if (typeof item.code !== 'string' || !item.code)
+        // 서버 `item?.code`와 같은 자리, 같은 규칙. `null` 항목도 배열의 구멍도 여기서 걸린다.
+        if (!item || typeof item.code !== 'string' || !item.code)
           throw new CatalogError('R-D', '항목 code가 필요합니다: ' + template.templateId);
         if (codes[item.code]) throw new CatalogError('R-D', '항목 code가 중복입니다: ' + where);
         codes[item.code] = true;
@@ -185,7 +192,8 @@
           var seenCode = Object.create(null);
           for (var c = 0; c < choices.length; c++) {
             var choice = choices[c];
-            if (typeof choice.code !== 'string' || !choice.code
+            // 서버 `choice?.code` / `choice?.text`와 같다.
+            if (!choice || typeof choice.code !== 'string' || !choice.code
                 || typeof choice.text !== 'string' || !choice.text)
               throw new CatalogError('R-D', '선택지 code·text가 필요합니다: ' + where);
             if (!wellFormedUtf16(choice.text))
@@ -202,7 +210,12 @@
             throw new CatalogError('R-D', 'boolean 낱말이 온전한 UTF-16이 아닙니다: ' + where);
           values = [true, false];
         } else if (item.valueType === 'number') {
-          if (!isFinite(item.min) || !isFinite(item.max) || item.min > item.max)
+          /**
+           * 전역 `isFinite`는 **값을 숫자로 바꿔 보고** 판단한다 — `null`도 `'12'`도 통과시킨다.
+           * 서버는 `Number.isFinite`라 둘 다 R-D다. 범위가 충돌 안전에 쓰이지는 않지만 두 벌이
+           * 갈라지면 화면이 받은 서식을 서버가 거절하는 일이 생기므로 같은 질문을 쓴다.
+           */
+          if (!Number.isFinite(item.min) || !Number.isFinite(item.max) || item.min > item.max)
             throw new CatalogError('R-D', 'number 항목에는 min <= max가 필요합니다: ' + where);
           if (!Number.isSafeInteger(item.decimals) || item.decimals < 0 || item.decimals > 6)
             throw new CatalogError('R-D', 'number 항목의 decimals는 0..6이어야 합니다: ' + where);

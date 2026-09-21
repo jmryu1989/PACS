@@ -278,6 +278,33 @@ test('every shared catalog vector gets exactly the rule it names', () => {
   assert.equal(catalogRule(structure.STRUCTURE_CATALOG), 'ACCEPT');
 });
 
+test('a sparse array hole is refused with a rule, not with a TypeError', () => {
+  /**
+   * A JSON file cannot express `[a, , b]`, so this witness cannot live in the shared vector table.
+   * A hand-written catalog can grow one from a single stray comma, and reading a hole gives
+   * `undefined`. The browser test carries the same three shapes against its own validator - the two
+   * must answer alike, because a catalog that boots the API but kills the page is worse than one
+   * that boots neither.
+   */
+  const item = (code, template) => ({ code, field: 'findings', valueType: 'text', template, label: code });
+  const tpl = (items, templateId = 'SYN-H') => ({ templateId, revision: 1, title: 'SYNTHETIC', items });
+  const choiceItem = choices => ({ code: 'A', field: 'findings', valueType: 'choice',
+    template: 'M: {value}', label: 'A', choices });
+
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}')], 'SYN-H1'), ,
+                            tpl([item('B', 'Beta: {value}')], 'SYN-H2')]), 'R-D', 'a hole between templates');
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}'), , item('B', 'Beta: {value}')])]),
+    'R-D', 'a hole between items');
+  assert.equal(catalogRule([tpl([choiceItem([{ code: 'c0', text: 'alpha' }, ,
+                                             { code: 'c1', text: 'beta' }])])]), 'R-D', 'a hole between choices');
+  // Remove the hole and each one is legal, so the case is about the hole and nothing else.
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}')], 'SYN-H1'),
+                            tpl([item('B', 'Beta: {value}')], 'SYN-H2')]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}'), item('B', 'Beta: {value}')])]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([choiceItem([{ code: 'c0', text: 'alpha' },
+                                             { code: 'c1', text: 'beta' }])])]), 'ACCEPT');
+});
+
 test('every shared entry vector is decided at apply time, after the sentence already matched', () => {
   /**
    * A free-text value is not in the catalog, so the load-time pass can never see it. These go

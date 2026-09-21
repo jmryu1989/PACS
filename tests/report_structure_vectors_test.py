@@ -168,6 +168,10 @@ def independent_catalog_rule(catalog):
     seen_templates = set()
     flat = []
     for template in catalog:
+        # A catalog element that is not a mapping at all (null, a bare string) is a shape error, not
+        # a crash: both shipped validators answer R-D for it, so this one has to as well.
+        if not isinstance(template, dict):
+            return "R-D"
         tid = template.get("templateId")
         if not isinstance(tid, str) or not tid or tid in seen_templates:
             return "R-D"
@@ -179,6 +183,8 @@ def independent_catalog_rule(catalog):
             return "R-D"
         codes = set()
         for item in template.get("items", []):
+            if not isinstance(item, dict):
+                return "R-D"
             code = item.get("code")
             if not isinstance(code, str) or not code or code in codes:
                 return "R-D"
@@ -207,6 +213,8 @@ def independent_catalog_rule(catalog):
                     return "R-D"
                 choice_codes = set()
                 for choice in choices:
+                    if not isinstance(choice, dict):
+                        return "R-D"
                     if not isinstance(choice.get("code"), str) or not choice["code"]:
                         return "R-D"
                     if not isinstance(choice.get("text"), str) or not choice["text"]:
@@ -226,6 +234,11 @@ def independent_catalog_rule(catalog):
                 values = [True, False]
             elif kind == "number":
                 low, high = item.get("min"), item.get("max")
+                # `bool` is a subclass of `int` in Python, so isinstance(True, int) is True - but the
+                # rule is Number.isFinite, and Number.isFinite(true) is false. Say so out loud, or
+                # this oracle quietly accepts a bound both shipped validators refuse.
+                if isinstance(low, bool) or isinstance(high, bool):
+                    return "R-D"
                 if not isinstance(low, (int, float)) or not isinstance(high, (int, float)) or low > high:
                     return "R-D"
                 decimals = item.get("decimals")

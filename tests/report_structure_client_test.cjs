@@ -137,6 +137,79 @@ test('programming errors are not swallowed by the fail-closed path', () => {
   // that broke a rule, and hiding it would leave a page that silently does nothing.
   assert.throws(() => S.create(null, CATALOG), /citation library/);
   assert.throws(() => S.validateCatalog(null, CATALOG), e => !(e instanceof S.CatalogError));
+  /**
+   * The one that matters: an error raised INSIDE create()'s try. The two assertions above both
+   * throw before it, so a catch that swallowed everything would still pass them - the only thing
+   * left standing would be a source-text pin in T3, and source text is not behaviour. Here the
+   * citation library is present but broken, so validateCatalog itself raises a TypeError while the
+   * catch block is live, and the catch has to let it past.
+   */
+  const brokenLib = {
+    comparisonKey() { throw new TypeError('wiring defect: comparisonKey is not wired'); },
+    blockIsBlank: C.blockIsBlank, placeBlock: C.placeBlock, blockSpans: C.blockSpans,
+    lineBlockOccurrences: C.lineBlockOccurrences,
+  };
+  const thrown = (() => { try { S.create(brokenLib, CATALOG); return null; } catch (e) { return e; } })();
+  assert.ok(thrown instanceof TypeError, 'the error raised inside the try must come back out');
+  assert.equal(thrown instanceof S.CatalogError, false, 'a wiring defect is not a catalog rule');
+  assert.match(thrown.message, /wiring defect/);
+  // and the same broken library does NOT silently produce a usable-looking empty form
+  assert.throws(() => S.validateCatalog(brokenLib, CATALOG), e => !(e instanceof S.CatalogError));
+  // The two legitimate outcomes are unaffected by any of this.
+  const seen = [];
+  const real = console.error;
+  console.error = (...args) => seen.push(args.join(' '));
+  let closed, empty;
+  try {
+    closed = S.create(C, VECTORS.catalogVectors.find(v => v.rule === 'R-D').catalog);
+    empty = S.create(C, S.PRODUCT_CATALOG);
+  } finally { console.error = real; }
+  assert.ok(closed.invalid.startsWith('R-D: '), closed.invalid);
+  assert.equal(closed.empty, true);
+  assert.deepEqual(closed.catalog, []);
+  assert.equal(empty.invalid, undefined);
+  assert.equal(seen.length, 1, 'the refused catalog spoke once; the valid empty one said nothing');
+});
+
+test('a sparse array hole is refused with a rule, not with a TypeError', () => {
+  /**
+   * A JSON file cannot express `[a, , b]`, so this witness cannot live in the shared vector table -
+   * but a hand-written catalog in a source file can grow one from a single stray comma, and reading
+   * a hole gives `undefined`. Before the guards, every one of these raised an untyped TypeError,
+   * which `create()` correctly rethrows - and `main.html` loads this module in one script with the
+   * rest of the worklist, so that TypeError would take the list, the report and autosave with it.
+   *
+   * The catalog shapes below are otherwise legal: remove the hole and each one is ACCEPTed.
+   */
+  const item = (code, template) => ({ code, field: 'findings', valueType: 'text', template, label: code });
+  const tpl = (items, templateId = 'SYN-H') => ({ templateId, revision: 1, title: 'SYNTHETIC', items });
+  const choiceItem = choices => ({ code: 'A', field: 'findings', valueType: 'choice',
+    template: 'M: {value}', label: 'A', choices });
+
+  const holes = [
+    ['a hole between templates', [tpl([item('A', 'Alpha: {value}')], 'SYN-H1'), ,
+                                  tpl([item('B', 'Beta: {value}')], 'SYN-H2')]],
+    ['a hole between items', [tpl([item('A', 'Alpha: {value}'), , item('B', 'Beta: {value}')])]],
+    ['a hole between choices', [tpl([choiceItem([{ code: 'c0', text: 'alpha' }, ,
+                                                 { code: 'c1', text: 'beta' }])])]],
+  ];
+  for (const [what, catalog] of holes) {
+    assert.equal(catalogRule(catalog), 'R-D', what);
+    const seen = [];
+    const real = console.error;
+    console.error = (...args) => seen.push(args.join(' '));
+    let form;
+    try { form = S.create(C, catalog); } finally { console.error = real; }
+    assert.equal(form.empty, true, `${what}: the form closes instead of the page dying`);
+    assert.ok(form.invalid.startsWith('R-D: '), `${what}: ${form.invalid}`);
+    assert.equal(seen.length, 1, what);
+  }
+  // and the same catalogs without the hole are legal, so the case is about the hole and nothing else
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}')], 'SYN-H1'),
+                            tpl([item('B', 'Beta: {value}')], 'SYN-H2')]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([item('A', 'Alpha: {value}'), item('B', 'Beta: {value}')])]), 'ACCEPT');
+  assert.equal(catalogRule([tpl([choiceItem([{ code: 'c0', text: 'alpha' },
+                                             { code: 'c1', text: 'beta' }])])]), 'ACCEPT');
 });
 
 test('the PRODUCT catalog is byte-for-byte the pinned canonical JSON', () => {
