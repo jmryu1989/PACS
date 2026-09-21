@@ -217,9 +217,15 @@ test('B6 a draft entry whose sentence the reader edited away is dropped by save 
     assert.equal('structured' in version.data, false,
       `${action}: the edited-away entry must not reach the signed row`);
     const audit = audits.find(a => String(a.action).startsWith('report.' + action));
-    const detail = JSON.parse(JSON.stringify(audit.detail));
+    // `AuditLog.detail` is `String?` and the service writes `dump()` = JSON.stringify, so the
+    // stored value IS a JSON string. Parse it once, exactly as report_citation_test.cjs:295 does.
+    const detail = JSON.parse(audit.detail);
     assert.deepEqual(detail.strs.dropped, ['s-mine'], `${action}: the dropped sid must be named`);
     assert.equal(detail.strs.n, 0);
+    // The raw string is what a reader of /audit would see: no value, no sentence, no item code.
+    const raw = String(audit.detail ?? '');
+    assert.doesNotMatch(raw, /renderedText|itemCode|SYN-/, `${action}: only counts and sids`);
+    assert.equal(raw.includes(NUMBER_LINE), false, `${action}: the sentence must not reach the audit`);
   }
 });
 
@@ -375,11 +381,24 @@ test('the draft audit carries counts and sids only', async () => {
   const { svc, audits } = fixture();
   await svc.putReport(UID, { ...body(), structure: apply() }, CALLER);
   const entry = audits.find(a => a.action === 'report.draft');
-  const detail = JSON.stringify(entry.detail);
-  assert.match(detail, /"strs"/);
-  assert.equal(detail.includes(CHOICE_LINE), false, 'the sentence must not reach the audit trail');
-  assert.equal(detail.includes('SYN-CHOICE'), false, 'nor the item code');
-  assert.equal(detail.includes('"c1"'), false, 'nor the value');
+  /**
+   * `AuditLog.detail` is `String?` (schema.prisma) and the service writes it through
+   * `dump()` = JSON.stringify, so what is stored is a JSON STRING. The two halves of this
+   * assertion need different views of it, and the citation test set the precedent for both:
+   * parse it to check what IS recorded (:295, :529), and read the raw string to check what is
+   * NOT (:522-527). Stringifying it again would hide every inner quote and make the positive
+   * half vacuous.
+   */
+  const detail = JSON.parse(entry.detail);
+  assert.equal(detail.strs.n, 1, 'one live entry is recorded');
+  assert.equal(detail.strs.add.length, 1);
+  assert.match(detail.strs.add[0], UUID, 'and it is named by its server-generated sid, nothing else');
+  assert.deepEqual(Object.keys(detail.strs).sort(), ['add', 'n'], 'counts and sids only');
+  const raw = String(entry.detail ?? '');
+  assert.equal(raw.includes(CHOICE_LINE), false, 'the sentence must not reach the audit trail');
+  assert.equal(raw.includes('SYN-CHOICE'), false, 'nor the item code');
+  assert.equal(raw.includes('"c1"'), false, 'nor the value');
+  assert.doesNotMatch(raw, /renderedText|valueType|templateId/, 'nor any of their field names');
 });
 
 /* ── commit, reset and force discard ─────────────────────────────────────────────────────── */
@@ -393,10 +412,14 @@ test('commit keeps only the entries whose sentence is in the signed body, and na
   const version = created.find(c => c.call === 'version');
   assert.deepEqual(version.data.structured.map(e => e.sid), ['s-mine']);
   const audit = audits.find(a => String(a.action).startsWith('report.save'));
-  const detail = JSON.parse(JSON.stringify(audit.detail));
+  // Parsed for what IS recorded, raw for what is NOT - `detail` is a JSON string on the real row.
+  const detail = JSON.parse(audit.detail);
   assert.deepEqual(detail.strs.dropped, ['s-head']);
   assert.equal(detail.strs.n, 1);
-  assert.equal(JSON.stringify(detail).includes(NUMBER_LINE), false);
+  const raw = String(audit.detail ?? '');
+  assert.equal(raw.includes(NUMBER_LINE), false, 'the surviving sentence must not reach the audit');
+  assert.equal(raw.includes(CHOICE_LINE), false, 'nor the dropped one');
+  assert.doesNotMatch(raw, /renderedText|itemCode/, 'the dropped entry is named by sid alone');
 });
 
 test('commit never writes an empty array - it omits the column', async () => {
