@@ -12,7 +12,8 @@ import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationIns
   REPORT_CITATION_FIELDS, REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA, SOURCE_UNAVAILABLE } from './report-citation';
 import { applyStructureKeepList, commitStructureSelection, isStructureEntry, projectStructure, structureApplyInput,
   structureArray, structureIdList, structureItemKey, structureSameTextCounts, structureUnion,
-  StructureInputError, STRUCTURE_CATALOG, REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA } from './report-structure';
+  StructureInputError, STRUCTURE_CATALOG, REPORT_STRUCTURE_LIMITS, REPORT_STRUCTURE_SCHEMA,
+  validateCatalog } from './report-structure';
 import type { StructureTemplate } from './report-structure';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
@@ -268,7 +269,19 @@ export class PacsService implements OnModuleInit {
    * 인스턴스의 이 칸을 합성 목록으로 덮는다 — 환경변수도, 헤더도, 라우트도 아니다.
    * 제품 코드나 HTTP로 합성 항목에 닿을 방법이 없어야 지어낸 임상 내용이 새지 않는다.
    */
-  protected structureCatalog: readonly StructureTemplate[] = STRUCTURE_CATALOG;
+  private structureCatalogValue: readonly StructureTemplate[] = STRUCTURE_CATALOG;
+  protected get structureCatalog(): readonly StructureTemplate[] { return this.structureCatalogValue; }
+  /**
+   * 목록을 갈아끼우는 **유일한 길**이고, 그 길에는 관문이 있다 (P12).
+   *
+   * 검사는 갈아끼우기 **전에** 한다. 규칙을 어긴 목록은 던지면서 지나가고, 그때 이미 서 있던
+   * 유효한 목록은 그대로 남는다 — 잘못된 배정이 멀쩡한 목록을 치우고 그 자리를 비워두는 일은
+   * 없다. 제품 인스턴스는 언제나 비어 있는 `STRUCTURE_CATALOG`으로 시작한다.
+   */
+  protected set structureCatalog(next: readonly StructureTemplate[]) {
+    validateCatalog(next);
+    this.structureCatalogValue = next;
+  }
 
   async onModuleInit() {
     // 기관 시드 — upsert라 이미 있으면 이름·별칭만 갱신된다

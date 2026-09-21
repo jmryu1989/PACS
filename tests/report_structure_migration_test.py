@@ -173,9 +173,13 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 26)", transfer_test)
 
     def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
-        # P6/P7. The seam is an instance field a test overwrites; anything else (env var, header,
-        # route) would make invented clinical content reachable from the product.
-        self.assertIn("protected structureCatalog", SERVICE)
+        # P6/P7. The seam is one instance property a test overwrites on its own instance; anything
+        # else (env var, header, route) would make invented clinical content reachable from the
+        # product. P12 made it a validated property pair - still one seam, now with a gate on it.
+        self.assertIn("protected get structureCatalog()", SERVICE)
+        self.assertIn("protected set structureCatalog(", SERVICE)
+        self.assertIn("validateCatalog(next);", SERVICE,
+                      "the setter is the gate; an unchecked catalog must not be installable")
         self.assertEqual(SERVICE.count("SYN-"), 0, "no synthetic item may be named in the service")
         self.assertEqual(PURE.count("SYN-"), 0, "nor in the pure module")
         self.assertEqual(PURE.count("process.env"), 0, "no environment-variable seam")

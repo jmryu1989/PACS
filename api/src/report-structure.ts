@@ -66,8 +66,21 @@ export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([])
 
 /** 모양이 틀린 요청. 호출자가 400으로 옮긴다. */
 export class StructureInputError extends Error {}
-/** 서식 목록 자체가 규칙을 어겼다. 적재 시점에 터지는 것이 맞다 — 조용히 쓰면 기록이 모호해진다. */
-export class StructureCatalogError extends Error {}
+
+/** 목록 검사의 규칙 이름. 거절은 언제나 **어느 규칙**인지 말한다. */
+export type StructureRule = 'R-D' | 'R-S' | 'R-C' | 'R-A' | 'R-B';
+
+/**
+ * 서식 목록 자체가 규칙을 어겼다. 적재 시점에 터지는 것이 맞다 — 조용히 쓰면 기록이 모호해진다.
+ * 규칙 이름을 들고 다니므로 시험이 "무언가 던졌다"가 아니라 **무엇을 어겼는지**를 단언한다.
+ */
+export class StructureCatalogError extends Error {
+  readonly rule: StructureRule;
+  constructor(rule: StructureRule, message: string) {
+    super(`${rule}: ${message}`);
+    this.rule = rule;
+  }
+}
 
 export interface ReportStructureApply {
   op: 'apply' | 'replace';
@@ -114,6 +127,48 @@ export function isSingleLine(text: string): boolean {
 
 export function utf8Bytes(text: string): number {
   return Buffer.byteLength(String(text ?? ''), 'utf8');
+}
+
+/**
+ * 짝 없는 서러게이트가 하나라도 있으면 그 문자열은 UTF-16으로 온전하지 않다 (R-D).
+ *
+ * `storable()`은 **값**을 코드포인트로 훑어 이미 막지만, 서식의 고정 문자열(문장 앞뒤, 선택지
+ * 문면, boolean 낱말)은 그 길을 지나지 않는다. 온전하지 않은 문자열은 정규화·저장·비교가
+ * 저마다 다르게 굴 수 있으므로 목록을 받는 자리에서 막는다.
+ */
+export function wellFormedUtf16(text: string): boolean {
+  const value = String(text ?? '');
+  for (let i = 0; i < value.length; i++) {
+    const unit = value.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+const nfc = (text: string) => String(text ?? '').normalize('NFC');
+
+/**
+ * **경계 안정성** (R-S). 충돌 방지의 모든 증명이 이 하나에 기댄다.
+ *
+ * 존재 판정이 쓰는 등식은 `comparisonKey`(CR/CRLF→LF, NFC, 끝 LF 하나 제거)다. 그런데 정규화는
+ * **경계를 넘어 합성할 수 있다.** 앞머리가 `ᄀ`(U+1100)로 끝나고 값이 `ᅡ`(U+1161)로 시작하면
+ * NFC는 둘을 `가`(U+AC00) 하나로 합친다 — 둘 다 결합 등급이 0이라 "결합 문자 금지" 같은 규칙으로는
+ * 잡히지 않는다. 그러면 서로 다른 (항목, 값)이 같은 키를 갖고, 앞뒤 문자열로 항목을 가른다는
+ * R-B의 논증이 통째로 무너진다.
+ *
+ * 그래서 표를 들추는 대신 **실제 정규화기에게 직접 묻는다**: 이 문장의 키가 앞머리·값·꼬리의
+ * 키를 이어 붙인 것과 같은가. 같으면 경계에서 아무 일도 일어나지 않았다는 뜻이고, 다르면
+ * 거절한다. 유니코드 판이 올라가도 이 질문의 뜻은 변하지 않는다.
+ *
+ * 고치지 않는다 — 사람이 친 글자도, 이미 기록된 바이트도 다시 쓰지 않는다. 거절만 한다.
+ */
+export function boundaryStable(prefix: string, valueText: string, suffix: string): boolean {
+  return comparisonKey(String(prefix) + String(valueText) + String(suffix))
+    === nfc(prefix) + comparisonKey(String(valueText)) + nfc(suffix);
 }
 
 /** 저장된 값이 배열이 아니면(없음·손상·옛 행) 빈 배열이다. 조용히 고치지 않는다. */
@@ -185,104 +240,171 @@ export function renderItem(item: StructureItem, value: any): string {
    */
   const template = String(item.template);
   const at = template.indexOf(STRUCTURE_VALUE_SLOT);
-  if (at < 0) throw new StructureCatalogError(`서식 문장에 ${STRUCTURE_VALUE_SLOT}가 없습니다: ${item.code}`);
+  if (at < 0) throw new StructureCatalogError('R-D', `서식 문장에 ${STRUCTURE_VALUE_SLOT}가 없습니다: ${item.code}`);
   return template.slice(0, at) + valueText(item, value) + template.slice(at + STRUCTURE_VALUE_SLOT.length);
 }
 
 /**
- * 서식 목록이 지켜야 하는 것. **적재 시점에** 확인한다.
+ * 서식 목록이 지켜야 하는 것. **적재 시점에** 확인한다 — 이 모듈의 마지막 문장이 제품 목록을
+ * 들고 스스로를 부르고, 시험이 갈아 끼우는 자리(`pacs.service.ts`의 setter)도 같은 검사를 지난다.
  *
- * 마지막 규칙(충돌 없음)이 핵심이다: 한 서식 안에서 서로 다른 (항목, 값)이 **같은 한 줄**을
- * 만들면, 그 줄이 본문에서 누구의 것인지 셀 수 없어 존재 상태가 조용히 `ambiguous`가 된다.
- * 열거 가능한 값(choice·boolean)은 전부 펼쳐서 실제로 대조하고, 열거할 수 없는 값(number·text)은
- * **자리 앞뒤의 고정 문자열 쌍**이 서식 안에서 유일할 것을 요구한다. 후자는 필요조건이지
- * 충분조건이 아니다 — 자유 입력 값이 다른 항목의 문장을 통째로 흉내 내는 경우까지는 막지 못하며,
- * 그 경우의 답은 `presenceState`의 `ambiguous`다(거짓이 아니라 모른다고 말한다).
+ * 막으려는 것은 하나다: 한 칸(`findings`·`conclusion`·`recommendation`) 안에서 서로 다른
+ * (항목, 값)이 **같은 한 줄**을 만드는 것. 그러면 본문의 그 줄이 누구의 것인지 셀 수 없어
+ * 존재 판정이 조용히 틀린다(P12).
  *
- * **그래서 단사성(P12)은 부분이고, 완료가 아니다.** 제품 목록이 비어 있는 동안 이 구멍은 도달할
- * 수 없다. 비어 있지 않은 제품 서식을 켜기 전에 (1) 항목 간 충돌을 충분히 막는 규칙, (2) 서버와
- * 화면 **양쪽의 적재 시점 검증**, (3) 목록 전체에 대한 시험이 모두 선행해야 한다.
- * 이 함수를 적재 시점에 부르는 곳은 아직 없다 — 목록이 비어 있어 부를 것이 없기 때문이고,
- * 목록이 채워지는 변경이 그 호출을 함께 들여와야 한다.
+ * 다섯 규칙이고, 전부 **표본 없이** 결정된다 — 값을 하나도 지어내지 않는다:
+ *   R-D 모양. 슬롯이 정확히 한 번, 한 줄, 온전한 UTF-16, 고정 문자열은 이미 NFC, 바이트 여유.
+ *   R-S 경계 안정성(`boundaryStable`). 정규화가 앞뒤 경계를 넘어 합치지 않을 것.
+ *   R-C 한 항목 안의 단사성. 한 항목의 두 값이 같은 줄을 만들지 않을 것.
+ *   R-A 열거 가능한 두 항목은 값 공간이 유한하고 전부 적혀 있으므로 **전수로** 대조한다.
+ *   R-B 그 밖의 모든 쌍은 앞머리만으로, 또는 꼬리만으로 갈린다. 이 논증(아래)은 값 공간을
+ *       한 번도 말하지 않으므로 자유 입력·숫자·나중에 늘어날 형식에도 그대로 선다.
+ *
+ * R-S와 R-B가 함께 서면 같은 칸의 두 항목은 어떤 값을 넣어도 같은 줄을 만들 수 없다. 즉 이 함수를
+ * 통과한 목록에서 **항목 간** 충돌은 도달 불가능하다. 남는 것은 한 항목이 같은 값을 두 번 살게 할
+ * 때인데 그것은 P3가 막는다. 자유 입력이 **자기 항목의** 다른 값을 흉내 내는 경우는 여전히
+ * `presenceState`의 `ambiguous`가 답이다 — 거짓이 아니라 모른다고 말한다.
+ *
+ * 이 검사는 문면을 **고치지 않는다**. 사람이 친 글자도, 이미 기록된 바이트도 다시 쓰지 않고
+ * 거절만 한다. 제품 목록은 여전히 비어 있고, 이 단위가 여는 것은 내용이 아니라 **안전장치**다.
  */
 export function validateCatalog(catalog: readonly StructureTemplate[]): void {
   const templateIds = new Set<string>();
+  /** 한 칸 안의 모든 항목을 **목록 전체에서** 모은다. 충돌은 서식 경계를 넘어 일어난다. */
+  const flat: {
+    id: string; field: string; prefix: string; suffix: string;
+    enumerable: boolean; lines: Set<string>;
+  }[] = [];
+
   for (const template of catalog ?? []) {
     if (!isPlainString(template?.templateId) || !template.templateId)
-      throw new StructureCatalogError('templateId가 필요합니다');
+      throw new StructureCatalogError('R-D', 'templateId가 필요합니다');
     if (templateIds.has(template.templateId))
-      throw new StructureCatalogError(`templateId가 중복입니다: ${template.templateId}`);
+      throw new StructureCatalogError('R-D', `templateId가 중복입니다: ${template.templateId}`);
     templateIds.add(template.templateId);
     if (!Number.isSafeInteger(template.revision) || template.revision < 1)
-      throw new StructureCatalogError(`revision은 1 이상의 정수여야 합니다: ${template.templateId}`);
+      throw new StructureCatalogError('R-D', `revision은 1 이상의 정수여야 합니다: ${template.templateId}`);
     if (!isPlainString(template?.title) || !template.title)
-      throw new StructureCatalogError(`title이 필요합니다: ${template.templateId}`);
+      throw new StructureCatalogError('R-D', `title이 필요합니다: ${template.templateId}`);
 
     const codes = new Set<string>();
-    const literals = new Set<string>();
-    const rendered = new Map<string, string>();
     for (const item of template.items ?? []) {
+      const where = `${template.templateId}/${item?.code ?? '(code 없음)'}`;
+
+      /* ── R-D: 모양 ─────────────────────────────────────────────────────────────── */
       if (!isPlainString(item?.code) || !item.code)
-        throw new StructureCatalogError(`항목 code가 필요합니다: ${template.templateId}`);
+        throw new StructureCatalogError('R-D', `항목 code가 필요합니다: ${template.templateId}`);
       if (codes.has(item.code))
-        throw new StructureCatalogError(`항목 code가 중복입니다: ${template.templateId}/${item.code}`);
+        throw new StructureCatalogError('R-D', `항목 code가 중복입니다: ${where}`);
       codes.add(item.code);
       if (!REPORT_STRUCTURE_FIELDS.includes(item.field as any))
-        throw new StructureCatalogError(`항목 field가 잘못됐습니다: ${template.templateId}/${item.code}`);
+        throw new StructureCatalogError('R-D', `항목 field가 잘못됐습니다: ${where}`);
       if (!REPORT_STRUCTURE_VALUE_TYPES.includes(item.valueType as any))
-        throw new StructureCatalogError(`항목 valueType이 잘못됐습니다: ${template.templateId}/${item.code}`);
+        throw new StructureCatalogError('R-D', `항목 valueType이 잘못됐습니다: ${where}`);
       if (!isPlainString(item?.label) || !item.label)
-        throw new StructureCatalogError(`항목 label이 필요합니다: ${template.templateId}/${item.code}`);
+        throw new StructureCatalogError('R-D', `항목 label이 필요합니다: ${where}`);
       if (!isPlainString(item?.template) || item.template.split(STRUCTURE_VALUE_SLOT).length !== 2)
-        throw new StructureCatalogError(
-          `항목 template에는 ${STRUCTURE_VALUE_SLOT}가 정확히 한 번 있어야 합니다: ${template.templateId}/${item.code}`);
-      if (!isSingleLine(item.template.split(STRUCTURE_VALUE_SLOT).join('')))
-        throw new StructureCatalogError(`항목 template은 한 줄이어야 합니다: ${template.templateId}/${item.code}`);
-
+        throw new StructureCatalogError('R-D',
+          `항목 template에는 ${STRUCTURE_VALUE_SLOT}가 정확히 한 번 있어야 합니다: ${where}`);
       const [prefix, suffix] = item.template.split(STRUCTURE_VALUE_SLOT);
+      if (!isSingleLine(prefix + suffix))
+        throw new StructureCatalogError('R-D', `항목 template은 한 줄이어야 합니다: ${where}`);
+      // 온전하지 않은 UTF-16은 정규화도 저장도 비교도 저마다 다르게 군다.
+      if (!wellFormedUtf16(prefix) || !wellFormedUtf16(suffix))
+        throw new StructureCatalogError('R-D', `항목 template이 온전한 UTF-16이 아닙니다: ${where}`);
+      // 앞뒤 고정 문자열은 이미 NFC여야 한다 — R-B가 바로 그 바이트로 항목을 가른다.
+      if (nfc(prefix) !== prefix || nfc(suffix) !== suffix)
+        throw new StructureCatalogError('R-D', `항목 template의 고정 문자열이 NFC가 아닙니다: ${where}`);
+      // 앞뒤만으로 한도를 다 쓰면 어떤 값도 들어갈 자리가 없다.
+      if (utf8Bytes(prefix + suffix) >= REPORT_STRUCTURE_LIMITS.renderedText)
+        throw new StructureCatalogError('R-D',
+          `앞뒤 고정 문자열이 ${REPORT_STRUCTURE_LIMITS.renderedText}바이트를 채워 값이 들어갈 자리가 없습니다: ${where}`);
+
       if (item.valueType === 'choice') {
         const list = item.choices ?? [];
-        if (!list.length) throw new StructureCatalogError(`choice 항목에 선택지가 없습니다: ${item.code}`);
-        const seen = new Set<string>();
+        if (!list.length) throw new StructureCatalogError('R-D', `choice 항목에 선택지가 없습니다: ${where}`);
+        const seenCode = new Set<string>();
         for (const choice of list) {
           if (!isPlainString(choice?.code) || !choice.code || !isPlainString(choice?.text) || !choice.text)
-            throw new StructureCatalogError(`선택지 code·text가 필요합니다: ${item.code}`);
-          if (seen.has(choice.code)) throw new StructureCatalogError(`선택지 code가 중복입니다: ${item.code}`);
-          seen.add(choice.code);
+            throw new StructureCatalogError('R-D', `선택지 code·text가 필요합니다: ${where}`);
+          if (!wellFormedUtf16(choice.text))
+            throw new StructureCatalogError('R-D', `선택지 text가 온전한 UTF-16이 아닙니다: ${where}`);
+          if (seenCode.has(choice.code))
+            throw new StructureCatalogError('R-D', `선택지 code가 중복입니다: ${where}`);
+          seenCode.add(choice.code);
         }
       } else if (item.valueType === 'boolean') {
         if (!isPlainString(item.trueText) || !item.trueText || !isPlainString(item.falseText) || !item.falseText)
-          throw new StructureCatalogError(`boolean 항목에는 trueText·falseText가 필요합니다: ${item.code}`);
+          throw new StructureCatalogError('R-D', `boolean 항목에는 trueText·falseText가 필요합니다: ${where}`);
+        if (!wellFormedUtf16(item.trueText) || !wellFormedUtf16(item.falseText))
+          throw new StructureCatalogError('R-D', `boolean 낱말이 온전한 UTF-16이 아닙니다: ${where}`);
       } else if (item.valueType === 'number') {
-        if (!Number.isFinite(item.min as number) || !Number.isFinite(item.max as number) || (item.min as number) > (item.max as number))
-          throw new StructureCatalogError(`number 항목에는 min <= max가 필요합니다: ${item.code}`);
+        if (!Number.isFinite(item.min as number) || !Number.isFinite(item.max as number)
+            || (item.min as number) > (item.max as number))
+          throw new StructureCatalogError('R-D', `number 항목에는 min <= max가 필요합니다: ${where}`);
         if (!isIndex(item.decimals) || (item.decimals as number) > 6)
-          throw new StructureCatalogError(`number 항목의 decimals는 0..6이어야 합니다: ${item.code}`);
+          throw new StructureCatalogError('R-D', `number 항목의 decimals는 0..6이어야 합니다: ${where}`);
       }
 
-      if (item.valueType === 'choice' || item.valueType === 'boolean') {
-        const values: any[] = item.valueType === 'choice'
-          ? (item.choices ?? []).map(choice => choice.code) : [true, false];
-        for (const value of values) {
-          const line = renderItem(item, value);
-          if (!isSingleLine(line) || blockIsBlank(line))
-            throw new StructureCatalogError(`서식 문장이 한 줄의 글이 아닙니다: ${item.code}`);
-          if (utf8Bytes(line) > REPORT_STRUCTURE_LIMITS.renderedText)
-            throw new StructureCatalogError(`서식 문장이 ${REPORT_STRUCTURE_LIMITS.renderedText}바이트를 넘습니다: ${item.code}`);
-          const key = comparisonKey(line);
-          const owner = rendered.get(key);
-          if (owner && owner !== item.code)
-            throw new StructureCatalogError(`서로 다른 항목이 같은 문장을 만듭니다: ${owner} / ${item.code}`);
-          rendered.set(key, item.code);
-        }
-      } else {
-        const key = prefix + '\u0000' + suffix;
-        if (literals.has(key))
-          throw new StructureCatalogError(`자유 입력 항목의 문장 골격이 중복입니다: ${item.code}`);
-        literals.add(key);
+      const enumerable = item.valueType === 'choice' || item.valueType === 'boolean';
+      const values: any[] = item.valueType === 'choice'
+        ? (item.choices ?? []).map(choice => choice.code)
+        : item.valueType === 'boolean' ? [true, false] : [];
+
+      /* ── R-S: 경계 안정성 — 열거 가능한 값 전부 ────────────────────────────────── */
+      for (const value of values)
+        if (!boundaryStable(prefix, valueText(item, value), suffix))
+          throw new StructureCatalogError('R-S',
+            `정규화가 문장의 경계를 넘어 합쳐집니다 — 그 값의 문면을 바꾸세요: ${where}`);
+
+      /* ── R-C: 한 항목 안의 단사성 ──────────────────────────────────────────────── */
+      const lines = new Set<string>();
+      for (const value of values) {
+        const line = renderItem(item, value);
+        if (!isSingleLine(line) || blockIsBlank(line))
+          throw new StructureCatalogError('R-D', `서식 문장이 한 줄의 글이 아닙니다: ${where}`);
+        if (utf8Bytes(line) > REPORT_STRUCTURE_LIMITS.renderedText)
+          throw new StructureCatalogError('R-D',
+            `서식 문장이 ${REPORT_STRUCTURE_LIMITS.renderedText}바이트를 넘습니다: ${where}`);
+        const key = comparisonKey(line);
+        if (lines.has(key))
+          throw new StructureCatalogError('R-C',
+            `한 항목의 두 값이 같은 문장을 만듭니다 — 기록된 값을 문장에서 되짚을 수 없습니다: ${where}`);
+        lines.add(key);
       }
+
+      flat.push({ id: where, field: String(item.field), prefix, suffix, enumerable, lines });
     }
   }
+
+  /* ── 쌍 검사: 같은 칸의 모든 항목 쌍에 R-A → R-B ─────────────────────────────────
+   *
+   * 다른 칸의 문장은 서로 만나지 않는다 — 존재 판정이 칸별로 센다.
+   * R-A: 둘 다 열거 가능하면 값 공간이 유한하고 **전부** 적혀 있으므로 실제로 대조한다.
+   *      표본이 아니라 전수다.
+   * R-B: 그 밖의 모든 쌍은 값이 무엇이든 앞머리만으로, 또는 꼬리만으로 갈려야 한다.
+   *      한 문자열의 서로 다른 길이의 앞머리는 서로 포개지므로, 두 앞머리가 서로의 앞머리가
+   *      아니면 두 문장은 같을 수 없다. 이 논증은 값 공간을 한 번도 말하지 않는다 —
+   *      그래서 자유 입력에도, 숫자에도, 나중에 늘어날 형식에도 그대로 선다.
+   *      빈 문자열은 모든 문자열의 앞머리이자 꼬리다: 앞머리가 빈 항목은 꼬리로만 갈린다.
+   */
+  for (let i = 0; i < flat.length; i++)
+    for (let j = i + 1; j < flat.length; j++) {
+      const a = flat[i], b = flat[j];
+      if (a.field !== b.field) continue;
+      if (a.enumerable && b.enumerable) {
+        for (const line of a.lines)
+          if (b.lines.has(line))
+            throw new StructureCatalogError('R-A',
+              `서로 다른 항목이 같은 문장을 만듭니다: ${a.id} / ${b.id}`);
+        continue;
+      }
+      const prefixSeparates = !a.prefix.startsWith(b.prefix) && !b.prefix.startsWith(a.prefix);
+      const suffixSeparates = !a.suffix.endsWith(b.suffix) && !b.suffix.endsWith(a.suffix);
+      if (!prefixSeparates && !suffixSeparates)
+        throw new StructureCatalogError('R-B',
+          `두 항목의 문장을 앞머리로도 꼬리로도 가를 수 없습니다 — 한쪽 문면을 바꾸세요: ${a.id} / ${b.id}`);
+    }
 }
 
 /**
@@ -351,6 +473,16 @@ export function structureApplyInput(value: any, catalog: readonly StructureTempl
     throw new StructureInputError('structure.renderedText가 서식이 만드는 문장과 다릅니다');
   if (utf8Bytes(value.renderedText) > REPORT_STRUCTURE_LIMITS.renderedText)
     throw new StructureInputError(`문장이 ${REPORT_STRUCTURE_LIMITS.renderedText}바이트를 넘습니다`);
+  /**
+   * R-S는 목록만으로 끝나지 않는다. 자유 입력 값은 목록이 쓰일 때가 아니라 **이 요청에서** 처음
+   * 나타나므로, 경계에서 합쳐지는 값은 여기서 막아야 한다. 바이트 동일성 검사 **뒤**에 둔다 —
+   * 먼저 "이 문장이 서식이 만드는 그 문장인가"를 묻고, 그다음 "그 문장의 키가 조각의 키를 이어
+   * 붙인 것과 같은가"를 묻는다. 값을 고치지 않는다: 거절만 한다.
+   */
+  const [applyPrefix, applySuffix] = item.template.split(STRUCTURE_VALUE_SLOT);
+  if (!boundaryStable(applyPrefix, valueText(item, checked), applySuffix))
+    throw new StructureInputError(
+      '값이 문장의 경계에서 합쳐져 다른 항목의 문장과 구분되지 않습니다 — 다른 표현을 쓰세요');
   if (op === 'replace' && (!isPlainString(value.replacesSid) || !value.replacesSid))
     throw new StructureInputError('structure.replacesSid가 필요합니다');
   if (op === 'apply' && value.replacesSid !== undefined)
@@ -425,3 +557,12 @@ export function structureUnion(head: any[], draft: any[]): any[] {
   }
   return entries;
 }
+
+/**
+ * **적재 시점 검사** (P12).
+ *
+ * 이 파일의 마지막 문장이다. 목록이 규칙을 어기면 모듈이 적재되지 않고, 그러면 API도 뜨지
+ * 않는다 — 모호한 목록으로 판독문을 받는 것보다 서지 않는 편이 낫다. 지금 제품 목록은 비어
+ * 있어 이 호출은 아무것도 하지 않지만, 목록을 채우는 변경은 이 관문을 반드시 지나간다.
+ */
+validateCatalog(STRUCTURE_CATALOG);

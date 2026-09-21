@@ -38,6 +38,7 @@
     number: '숫자를 입력하세요',
     oneLine: '값은 한 줄이어야 합니다',
     tooLong: '값이 ' + LIMITS.renderedText + '바이트를 넘습니다',
+    boundary: '이 값은 문장의 경계에서 앞뒤 글자와 합쳐져 다른 항목의 문장과 구분되지 않습니다 — 다른 표현을 쓰세요',
   });
 
   function utf8Bytes(text) {
@@ -81,9 +82,202 @@
 
   var countLf = function (text) { return String(text).split('\n').length - 1; };
 
+  /** 목록 검사가 어긴 규칙의 이름. 서버 `StructureRule`과 같은 다섯이다. */
+  function CatalogError(rule, message) {
+    this.name = 'KinStructureCatalogError';
+    this.rule = rule;
+    this.message = rule + ': ' + message;
+  }
+  CatalogError.prototype = Object.create(Error.prototype);
+  CatalogError.prototype.constructor = CatalogError;
+
+  function nfc(text) { return String(text === null || text === undefined ? '' : text).normalize('NFC'); }
+
+  /** 짝 없는 서러게이트가 하나라도 있으면 온전한 UTF-16이 아니다 (R-D). 서버와 같은 규칙이다. */
+  function wellFormedUtf16(text) {
+    var value = String(text === null || text === undefined ? '' : text);
+    for (var i = 0; i < value.length; i++) {
+      var unit = value.charCodeAt(i);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        var next = value.charCodeAt(i + 1);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+        i += 1;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    }
+    return true;
+  }
+
+  /**
+   * **경계 안정성** (R-S). 서버 `boundaryStable`과 같은 질문을 **같은 정규화기**에게 한다.
+   *
+   * 정규화는 경계를 넘어 합성한다 — 앞머리가 `ᄀ`(U+1100)로 끝나고 값이 `ᅡ`(U+1161)로 시작하면
+   * NFC는 `가`(U+AC00) 하나를 만든다. 둘 다 결합 등급 0이라 문자 표로는 잡히지 않는다. 표를
+   * 들추는 대신 실제 답을 대조한다: 이 문장의 키가 조각들의 키를 이어 붙인 것과 같은가.
+   */
+  function boundaryStable(citationLib, prefix, valueText, suffix) {
+    return citationLib.comparisonKey(String(prefix) + String(valueText) + String(suffix))
+      === nfc(prefix) + citationLib.comparisonKey(String(valueText)) + nfc(suffix);
+  }
+
+  function itemValueText(item, value) {
+    if (item.valueType === 'choice') {
+      var choices = item.choices || [];
+      for (var i = 0; i < choices.length; i++) if (choices[i].code === value) return choices[i].text;
+      return null;
+    }
+    if (item.valueType === 'boolean') return value ? String(item.trueText) : String(item.falseText);
+    if (item.valueType === 'number') return Number(value).toFixed(item.decimals || 0);
+    return String(value);
+  }
+
+  /**
+   * 서버 `validateCatalog`의 거울. 같은 다섯 규칙을 **같은 순서**(R-D → R-S → R-C → 쌍 R-A → R-B)로
+   * 보고, 어긴 규칙의 이름을 들고 던진다. 두 벌이 갈라지지 않게 묶는 것은 공용 벡터 파일이다.
+   */
+  function validateCatalog(citationLib, catalog) {
+    var templateIds = Object.create(null);
+    var flat = [];
+    var list = catalog || [];
+    for (var t = 0; t < list.length; t++) {
+      var template = list[t];
+      if (typeof template.templateId !== 'string' || !template.templateId)
+        throw new CatalogError('R-D', 'templateId가 필요합니다');
+      if (templateIds[template.templateId])
+        throw new CatalogError('R-D', 'templateId가 중복입니다: ' + template.templateId);
+      templateIds[template.templateId] = true;
+      if (!Number.isSafeInteger(template.revision) || template.revision < 1)
+        throw new CatalogError('R-D', 'revision은 1 이상의 정수여야 합니다: ' + template.templateId);
+      if (typeof template.title !== 'string' || !template.title)
+        throw new CatalogError('R-D', 'title이 필요합니다: ' + template.templateId);
+
+      var codes = Object.create(null);
+      var items = template.items || [];
+      for (var n = 0; n < items.length; n++) {
+        var item = items[n];
+        var where = template.templateId + '/' + ((item && item.code) || '(code 없음)');
+
+        if (typeof item.code !== 'string' || !item.code)
+          throw new CatalogError('R-D', '항목 code가 필요합니다: ' + template.templateId);
+        if (codes[item.code]) throw new CatalogError('R-D', '항목 code가 중복입니다: ' + where);
+        codes[item.code] = true;
+        if (FIELDS.indexOf(item.field) < 0) throw new CatalogError('R-D', '항목 field가 잘못됐습니다: ' + where);
+        if (VALUE_TYPES.indexOf(item.valueType) < 0)
+          throw new CatalogError('R-D', '항목 valueType이 잘못됐습니다: ' + where);
+        if (typeof item.label !== 'string' || !item.label)
+          throw new CatalogError('R-D', '항목 label이 필요합니다: ' + where);
+        if (typeof item.template !== 'string' || item.template.split(VALUE_SLOT).length !== 2)
+          throw new CatalogError('R-D', '항목 template에는 ' + VALUE_SLOT + '가 정확히 한 번 있어야 합니다: ' + where);
+        var split = item.template.split(VALUE_SLOT), prefix = split[0], suffix = split[1];
+        if (!isSingleLine(prefix + suffix))
+          throw new CatalogError('R-D', '항목 template은 한 줄이어야 합니다: ' + where);
+        if (!wellFormedUtf16(prefix) || !wellFormedUtf16(suffix))
+          throw new CatalogError('R-D', '항목 template이 온전한 UTF-16이 아닙니다: ' + where);
+        if (nfc(prefix) !== prefix || nfc(suffix) !== suffix)
+          throw new CatalogError('R-D', '항목 template의 고정 문자열이 NFC가 아닙니다: ' + where);
+        if (utf8Bytes(prefix + suffix) >= LIMITS.renderedText)
+          throw new CatalogError('R-D',
+            '앞뒤 고정 문자열이 ' + LIMITS.renderedText + '바이트를 채워 값이 들어갈 자리가 없습니다: ' + where);
+
+        var values = [];
+        if (item.valueType === 'choice') {
+          var choices = item.choices || [];
+          if (!choices.length) throw new CatalogError('R-D', 'choice 항목에 선택지가 없습니다: ' + where);
+          var seenCode = Object.create(null);
+          for (var c = 0; c < choices.length; c++) {
+            var choice = choices[c];
+            if (typeof choice.code !== 'string' || !choice.code
+                || typeof choice.text !== 'string' || !choice.text)
+              throw new CatalogError('R-D', '선택지 code·text가 필요합니다: ' + where);
+            if (!wellFormedUtf16(choice.text))
+              throw new CatalogError('R-D', '선택지 text가 온전한 UTF-16이 아닙니다: ' + where);
+            if (seenCode[choice.code]) throw new CatalogError('R-D', '선택지 code가 중복입니다: ' + where);
+            seenCode[choice.code] = true;
+            values.push(choice.code);
+          }
+        } else if (item.valueType === 'boolean') {
+          if (typeof item.trueText !== 'string' || !item.trueText
+              || typeof item.falseText !== 'string' || !item.falseText)
+            throw new CatalogError('R-D', 'boolean 항목에는 trueText·falseText가 필요합니다: ' + where);
+          if (!wellFormedUtf16(item.trueText) || !wellFormedUtf16(item.falseText))
+            throw new CatalogError('R-D', 'boolean 낱말이 온전한 UTF-16이 아닙니다: ' + where);
+          values = [true, false];
+        } else if (item.valueType === 'number') {
+          if (!isFinite(item.min) || !isFinite(item.max) || item.min > item.max)
+            throw new CatalogError('R-D', 'number 항목에는 min <= max가 필요합니다: ' + where);
+          if (!Number.isSafeInteger(item.decimals) || item.decimals < 0 || item.decimals > 6)
+            throw new CatalogError('R-D', 'number 항목의 decimals는 0..6이어야 합니다: ' + where);
+        }
+
+        for (var v = 0; v < values.length; v++)
+          if (!boundaryStable(citationLib, prefix, itemValueText(item, values[v]), suffix))
+            throw new CatalogError('R-S', '정규화가 문장의 경계를 넘어 합쳐집니다 — 그 값의 문면을 바꾸세요: ' + where);
+
+        var lines = Object.create(null), lineList = [];
+        for (var w = 0; w < values.length; w++) {
+          var line = prefix + itemValueText(item, values[w]) + suffix;
+          if (!isSingleLine(line) || citationLib.blockIsBlank(line))
+            throw new CatalogError('R-D', '서식 문장이 한 줄의 글이 아닙니다: ' + where);
+          if (utf8Bytes(line) > LIMITS.renderedText)
+            throw new CatalogError('R-D', '서식 문장이 ' + LIMITS.renderedText + '바이트를 넘습니다: ' + where);
+          var key = citationLib.comparisonKey(line);
+          if (lines[key])
+            throw new CatalogError('R-C',
+              '한 항목의 두 값이 같은 문장을 만듭니다 — 기록된 값을 문장에서 되짚을 수 없습니다: ' + where);
+          lines[key] = true;
+          lineList.push(key);
+        }
+
+        flat.push({ id: where, field: item.field, prefix: prefix, suffix: suffix,
+                    enumerable: values.length > 0 && item.valueType !== 'number' && item.valueType !== 'text',
+                    lines: lines, lineList: lineList });
+      }
+    }
+
+    for (var i = 0; i < flat.length; i++)
+      for (var j = i + 1; j < flat.length; j++) {
+        var a = flat[i], b = flat[j];
+        if (a.field !== b.field) continue;
+        if (a.enumerable && b.enumerable) {
+          for (var k = 0; k < a.lineList.length; k++)
+            if (b.lines[a.lineList[k]])
+              throw new CatalogError('R-A', '서로 다른 항목이 같은 문장을 만듭니다: ' + a.id + ' / ' + b.id);
+          continue;
+        }
+        var prefixSeparates = a.prefix.indexOf(b.prefix) !== 0 && b.prefix.indexOf(a.prefix) !== 0;
+        var suffixSeparates = !endsWith(a.suffix, b.suffix) && !endsWith(b.suffix, a.suffix);
+        if (!prefixSeparates && !suffixSeparates)
+          throw new CatalogError('R-B',
+            '두 항목의 문장을 앞머리로도 꼬리로도 가를 수 없습니다 — 한쪽 문면을 바꾸세요: ' + a.id + ' / ' + b.id);
+      }
+  }
+
+  function endsWith(text, tail) {
+    return tail.length <= text.length && text.slice(text.length - tail.length) === tail;
+  }
+
+  /**
+   * 목록이 규칙을 어기면 **닫힌 형태**로 돌아간다 — 예외를 밖으로 내보내지 않는다 (B3).
+   *
+   * 이 파일은 `main.html`의 한 스크립트 안에서 최상위로 불린다. 여기서 던지면 그 스크립트 전체가
+   * 적재되다 말고, 구조화와 아무 상관 없는 자동 저장·워크리스트까지 함께 죽는다. 그래서 목록
+   * 검사 실패만 잡아 **빈 목록과 같은 무력한 형태**를 돌려주고(그러면 단추가 아예 그려지지 않는다)
+   * `invalid`에 어긴 규칙을 적어 남긴다. 프로그래밍 오류는 잡지 않는다 — 그것은 드러나야 한다.
+   * 정상적인 빈 목록은 아무 말도 하지 않는다.
+   */
   function create(citationLib, catalog) {
     if (!citationLib) throw new Error('report-structure: citation library is required');
-    var list = Object.freeze((catalog || []).slice());
+    var wanted = (catalog || []).slice();
+    var invalid = null;
+    try {
+      validateCatalog(citationLib, wanted);
+    } catch (e) {
+      if (!(e instanceof CatalogError)) throw e;
+      invalid = e.message;
+      wanted = [];
+      if (typeof console !== 'undefined' && console.error)
+        console.error('report-structure: 구조화 서식 목록을 쓰지 않습니다 — ' + e.message);
+    }
+    var list = Object.freeze(wanted);
 
     function findTemplate(templateId) {
       for (var i = 0; i < list.length; i++) if (list[i].templateId === templateId) return list[i];
@@ -125,8 +319,7 @@
       return template.slice(0, at) + text + template.slice(at + VALUE_SLOT.length);
     }
 
-    /** 값의 타입 검사. 통과하면 `null`, 아니면 사용자에게 보일 한국어 한 줄. */
-    function validateValue(item, value) {
+    function typeMessage(item, value) {
       if (!item) return MSG.empty;
       if (item.valueType === 'choice') {
         var choices = item.choices || [];
@@ -145,6 +338,22 @@
       if (citationLib.blockIsBlank(value)) return MSG.empty;
       if (!isSingleLine(value)) return MSG.oneLine;
       if (utf8Bytes(value) > LIMITS.renderedText) return MSG.tooLong;
+      return null;
+    }
+
+    /**
+     * 값의 검사. 통과하면 `null`, 아니면 사용자에게 보일 한국어 한 줄.
+     *
+     * 마지막이 **경계 안정성**(R-S)이다. 자유 입력 값은 목록이 검사될 때가 아니라 사람이 치는
+     * 순간 처음 나타나므로, 경계에서 합쳐지는 값은 여기서 막는다 — 값을 고쳐 주지 않는다.
+     * 계획(`placePlan`/`replacePlan`)이 아니라 값 검사에 둔다: 자리가 아니라 값의 성질이다.
+     */
+    function validateValue(item, value) {
+      var message = typeMessage(item, value);
+      if (message) return message;
+      var split = String(item.template).split(VALUE_SLOT);
+      if (split.length !== 2) return MSG.empty;
+      if (!boundaryStable(citationLib, split[0], itemValueText(item, value), split[1])) return MSG.boundary;
       return null;
     }
 
@@ -214,6 +423,8 @@
     return {
       catalog: list,
       empty: list.length === 0,
+      // 유효한 빈 목록과 거절된 목록은 다르다: 전자는 `undefined`, 후자는 '<규칙>: <사유>'.
+      invalid: invalid === null ? undefined : invalid,
       templates: function () { return list.slice(); },
       findTemplate: findTemplate,
       findItem: findItem,
@@ -282,6 +493,10 @@
   var api = {
     create: create,
     createState: createState,
+    validateCatalog: validateCatalog,
+    CatalogError: CatalogError,
+    wellFormedUtf16: wellFormedUtf16,
+    boundaryStable: boundaryStable,
     PRODUCT_CATALOG: PRODUCT_CATALOG,
     VALUE_SLOT: VALUE_SLOT,
     LIMITS: LIMITS,
