@@ -200,7 +200,10 @@ class Pure(unittest.TestCase):
         # S3-U2a added the report-citations migration: 25 files, the same 37 tables and the same rows,
         # because it only adds two nullable columns. Counted against the working tree, not guessed -
         # test_current_git_migrations_are_covered separately pins the list against git.
-        self.assertEqual(len(transfer.MIGRATIONS), 25)
+        # S3-structured-report added report-structure the same way: 26 files, still 37 tables and the
+        # same rows, and again one row per JSONB column carries a real value so a dump that skipped
+        # the column cannot pass on NULLs alone.
+        self.assertEqual(len(transfer.MIGRATIONS), 26)
         self.assertEqual(len(transfer.TABLES), 37)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))

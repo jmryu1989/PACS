@@ -1,0 +1,74 @@
+{
+  "_why": "One synthetic catalog and one set of render vectors, shared by the server-pure, client-pure, DOM and mutant tests so the two independent implementations of the render rule cannot drift. Pure ASCII and visibly synthetic: the product catalog ships EMPTY until the evaluating radiologist supplies the first exam and its fields (P6/D2), and nothing in here may ever be reachable from product code or HTTP (P7).",
+  "catalog": [
+    {
+      "templateId": "SYN-T1",
+      "revision": 2,
+      "title": "SYNTHETIC TEMPLATE 1",
+      "items": [
+        {
+          "code": "SYN-CHOICE",
+          "field": "findings",
+          "valueType": "choice",
+          "label": "SYNTHETIC choice",
+          "template": "SYNTHETIC-ITEM choice = {value}",
+          "required": true,
+          "choices": [
+            { "code": "c1", "text": "alpha" },
+            { "code": "c2", "text": "beta" }
+          ]
+        },
+        {
+          "code": "SYN-NUMBER",
+          "field": "findings",
+          "valueType": "number",
+          "label": "SYNTHETIC number",
+          "template": "SYNTHETIC-ITEM number = {value} unit-x",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "unit": "unit-x"
+        },
+        {
+          "code": "SYN-BOOL",
+          "field": "conclusion",
+          "valueType": "boolean",
+          "label": "SYNTHETIC boolean",
+          "template": "SYNTHETIC-ITEM boolean = {value}",
+          "trueText": "yes",
+          "falseText": "no"
+        },
+        {
+          "code": "SYN-TEXT",
+          "field": "recommendation",
+          "valueType": "text",
+          "label": "SYNTHETIC text",
+          "template": "SYNTHETIC-ITEM text = {value}"
+        }
+      ]
+    }
+  ],
+  "render": [
+    { "itemCode": "SYN-CHOICE", "value": "c1", "rendered": "SYNTHETIC-ITEM choice = alpha" },
+    { "itemCode": "SYN-CHOICE", "value": "c2", "rendered": "SYNTHETIC-ITEM choice = beta" },
+    { "itemCode": "SYN-NUMBER", "value": 12, "rendered": "SYNTHETIC-ITEM number = 12.0 unit-x" },
+    { "itemCode": "SYN-NUMBER", "value": 12.5, "rendered": "SYNTHETIC-ITEM number = 12.5 unit-x" },
+    { "itemCode": "SYN-NUMBER", "value": 0, "rendered": "SYNTHETIC-ITEM number = 0.0 unit-x" },
+    { "itemCode": "SYN-NUMBER", "value": 100, "rendered": "SYNTHETIC-ITEM number = 100.0 unit-x" },
+    { "itemCode": "SYN-BOOL", "value": true, "rendered": "SYNTHETIC-ITEM boolean = yes" },
+    { "itemCode": "SYN-BOOL", "value": false, "rendered": "SYNTHETIC-ITEM boolean = no" },
+    { "itemCode": "SYN-TEXT", "value": "free note", "rendered": "SYNTHETIC-ITEM text = free note" }
+  ],
+  "invalid": [
+    { "itemCode": "SYN-CHOICE", "value": "c9", "why": "not one of the catalog choices" },
+    { "itemCode": "SYN-NUMBER", "value": 12.34, "why": "more decimals than the catalog fixes" },
+    { "itemCode": "SYN-NUMBER", "value": 101, "why": "above the catalog maximum" },
+    { "itemCode": "SYN-NUMBER", "value": -1, "why": "below the catalog minimum" },
+    { "itemCode": "SYN-NUMBER", "value": "12", "why": "a string is not a number" },
+    { "itemCode": "SYN-BOOL", "value": "yes", "why": "a string is not a boolean" },
+    { "itemCode": "SYN-TEXT", "value": "", "why": "empty" },
+    { "itemCode": "SYN-TEXT", "value": "   ", "why": "blank" },
+    { "itemCode": "SYN-TEXT", "value": "two\nlines", "why": "v1 renders exactly one line" },
+    { "itemCode": "SYN-TEXT", "value": "tab\there", "why": "no control characters" }
+  ]
+}

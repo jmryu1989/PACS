@@ -179,6 +179,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "studies/:uid/report/versions"): Route(Kind.REPORT, "versions"),
     ("GET", "studies/:uid/report/citations"): Route(Kind.REPORT, "citations"),
     ("GET", "studies/:uid/report/versions/:version/citations"): Route(Kind.REPORT, "version-citations"),
+    ("GET", "studies/:uid/report/structure"): Route(Kind.REPORT, "structure"),
     ("POST", "studies/:uid/hold"): Route(Kind.REPORT, "hold"),
     ("POST", "studies/:uid/release"): Route(Kind.REPORT, "release"),
     ("POST", "studies/:uid/release/force"): Route(Kind.REPORT, "release-force"),

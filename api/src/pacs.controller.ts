@@ -279,6 +279,12 @@ export class PacsController {
     return this.svc.reportVersionCitations(uid, version, caller(req));
   }
 
+  /** 구조화 항목 — 머리 판과 내 초안의 타입 있는 값. 관문은 `versions()`와 같다 */
+  @Get('studies/:uid/report/structure')
+  structure(@Param('uid') uid: string, @Req() req: any) {
+    return this.svc.reportStructure(uid, caller(req));
+  }
+
   /** 점유 선언 / 하트비트 — 판독문을 쓰기 시작했을 때 */
   @Post('studies/:uid/hold')
   hold(@Param('uid') uid: string, @Req() req: any) {

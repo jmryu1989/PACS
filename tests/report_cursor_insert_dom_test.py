@@ -29,6 +29,10 @@ MAIN_PATH = Path(os.environ.get("KIN_CURSOR_MAIN", ROOT / "worklist-v0" / "hpacs
 CITATION_PATH = Path(os.environ.get("KIN_CURSOR_CITATION_JS", ROOT / "worklist-v0" / "hpacs-lite" / "report-citation.js"))
 MAIN = MAIN_PATH.read_text(encoding="utf-8")
 CITATION_JS = CITATION_PATH.read_text(encoding="utf-8")
+# S3-structured-report put its block inside REPORT_BLOCK, and that block builds its form object and
+# registers its listeners at the top level. Without this module and its markup the sliced script
+# throws while loading and every case below dies before its assertion (the U3 lesson).
+STRUCTURE_JS = (ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js").read_text(encoding="utf-8")
 
 UID = "1.2.3"
 OTHER = "1.2.4"
@@ -98,6 +102,7 @@ CITE_HTML = slice_between(MAIN, '<div class="modal" id="cite-preview"', "\n  </d
 # (main.html:3404-3406). Without that markup `$` returns null, the script throws while loading and
 # nothing after it is ever defined - the same reason both proven harnesses inject this modal.
 PANE_HTML = slice_between(MAIN, '<div class="modal" id="stalemodal"', "\n  </div>") + "\n  </div>"
+STRUCT_HTML = slice_between(MAIN, '<div class="modal" id="structmodal"', "\n  </div>") + "\n  </div>"
 MODAL_CSS = slice_between(MAIN, ".modal { display: none;", "/* ══ 클릭 피드백")
 BASE_BLOCK = slice_between(MAIN, "    let selectionSeq = 0;", "    function reportSource()")
 REPORT_BLOCK = slice_between(MAIN, "    function reportSource() {", "    function heldByOther(s)")
@@ -120,8 +125,12 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <button id="raiser">Insert into Report</button>
 PANEHTML
 CITEHTML
+STRUCTHTML
 <script>
 CITATIONJS
+</script>
+<script>
+STRUCTUREJS
 </script>
 <script>
 const $ = s => document.querySelector(s);
@@ -221,7 +230,9 @@ def harness(state, request):
             .replace("MODALCSS", MODAL_CSS)
             .replace("PANEHTML", PANE_HTML)
             .replace("CITEHTML", CITE_HTML)
+            .replace("STRUCTHTML", STRUCT_HTML)
             .replace("CITATIONJS", CITATION_JS)
+            .replace("STRUCTUREJS", STRUCTURE_JS)
             .replace("APIFN", API_FN)
             .replace("WRITEBLOCKFN", WRITE_BLOCK_FN)
             .replace("EDITORBLOCKFN", EDITOR_BLOCK_FN)

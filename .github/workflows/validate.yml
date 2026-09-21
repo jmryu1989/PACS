@@ -33,6 +33,10 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/citation-vectors --cwd . --file tests/report_citation_vectors.json --file tests/report_citation_vectors_test.py -- python3 -B tests/report_citation_vectors_test.py
       - name: S3-U2a additive citation migration, canonical bounds and leak boundary
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/citation-migration --cwd . --file api/prisma/migrations/20260920120000_report_citations/migration.sql --file api/prisma/schema.prisma --file api/src/pacs.service.ts --file api/src/report-citation.ts --file tests/report_citation_migration_test.py -- python3 -B tests/report_citation_migration_test.py
+      - name: S3-structured-report shared render vectors against an independent rule and the empty product catalog
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/structure-vectors --cwd . --file api/src/report-structure.ts --file worklist-v0/hpacs-lite/report-structure.js --file tests/report_structure_vectors.json --file tests/report_structure_vectors_test.py -- python3 -B tests/report_structure_vectors_test.py
+      - name: S3-structured-report additive migration, NULL-writing rules and leak boundary
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/structure-migration --cwd . --file api/prisma/migrations/20260921120000_report_structure/migration.sql --file api/prisma/schema.prisma --file api/src/pacs.service.ts --file api/src/report-structure.ts --file tests/report_structure_migration_test.py -- python3 -B tests/report_structure_migration_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
@@ -79,6 +83,14 @@ jobs:
         timeout-minutes: 5
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-cursor-insert-mutants --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_cursor_insert_dom_test.py --file tests/report_cursor_insert_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_cursor_insert_mutants.py --out tmp/workspace-ui-ci/report-cursor-insert-mutants/mutants.json
+      - name: S3-structured-report entry lifecycle, replace, guards, stale plan and empty catalog DOM
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-structure-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-structure.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_structure_vectors.json --file tests/report_structure_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_structure_dom_test.py
+      - name: S3-structured-report client mutants killed through the shipped-file overrides
+        timeout-minutes: 5
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-structure-mutants --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-structure.js --file tests/report_structure_dom_test.py --file tests/report_structure_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_structure_mutants.py --out tmp/workspace-ui-ci/report-structure-mutants/mutants.json
       - name: S3-U4 printed citation section lifecycle, terminal states and print re-read
         timeout-minutes: 3
         run: |
@@ -734,6 +746,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-citation-client --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_citation_vectors.json --file tests/report_citation_client_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_citation_client_test.cjs
       - name: S3-U6 cursor placement rule, guard spans and the insertion wiring
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-cursor-insert --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_citation_vectors.json --file tests/report_cursor_insert_test.cjs --file tests/report_cursor_insert_dom_test.py -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_cursor_insert_test.cjs
+      - name: S3-structured-report client rules, keep-list state and the wiring coordinates
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-structure-client --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-structure.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_structure_vectors.json --file tests/report_structure_client_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_structure_client_test.cjs
       - name: S3-U4 printed citation evidence wording, terminal states and answer validity
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-preview-citation --cwd . --file worklist-v0/hpacs-lite/report-preview.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_citation_vectors.json --file tests/report_preview_citation_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/report_preview_citation_test.cjs
       - name: S3-U5 job print citation targets, failure mapping and the shared pure record
@@ -849,6 +863,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-citations --cwd . --file api/src/pacs.service.ts --file api/src/report-citation.ts --file api/src/finding.service.ts --file tests/report_citation_vectors.json --file tests/report_citation_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_citation_test.cjs
+      - name: Compiled structured-entry rules, the three write paths, the explicit clear and the read
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-structure --cwd . --file api/src/pacs.service.ts --file api/src/report-structure.ts --file tests/report_structure_vectors.json --file tests/report_structure_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_structure_test.cjs
       - name: Compiled volume job command and volume mark boundary models
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs
       - name: Observe an isolated real restart loop
@@ -881,6 +897,8 @@ jobs:
             tmp/runtime-ci/report-cursor-insert/
             tmp/runtime-ci/report-stale-draft/
             tmp/runtime-ci/report-citations/
+            tmp/runtime-ci/report-structure/
+            tmp/runtime-ci/report-structure-client/
             tmp/runtime-ci/hanging-protocols/
             tmp/runtime-ci/three-d-cursor-model/
             tmp/runtime-ci/three-d-cursor-loader/
