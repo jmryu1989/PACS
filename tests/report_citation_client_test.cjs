@@ -373,9 +373,21 @@ test('TEST-S3-U2b-WIRING: the shipped screen sends the server first and only a 2
   const settle = insert.indexOf('await settleStash(pane.uid)'), put = insert.indexOf('await api("PUT"');
   assert.ok(settle >= 0 && put > settle, 'the insertion PUT must leave after the held stash settles');
   // The request body carries the sentence; the editor is still untouched at that point.
-  assert.ok(insert.indexOf('KinReportCitation.appendBlock(content[field], pane.block)') < put);
-  const write = insert.indexOf('el.value += (el.value ? "\\n" : "") + pane.block;');
-  assert.ok(write > put, 'the editor may only change after the answer');
+  // S3-U6: body and screen come from ONE plan, and that plan is re-derived after the held stash
+  // settles - a position the person never read may not be sent. These are coordinates only; the
+  // behaviour itself is proved by the DOM cases and their mutants (D11/M4, D7/M3, D1/M1+M6).
+  const plan = insert.indexOf('const plan2 = citationPlan(field, pane.block);');
+  const compare = insert.indexOf('plan2.text !== pane.plan.text');
+  const carried = insert.indexOf('content[field] = plan2.text;');
+  assert.ok(plan >= 0 && plan > settle && plan < put, 'the plan is derived after the settle and before the PUT');
+  assert.ok(compare >= 0 && compare > plan && compare < put, 'what was shown is compared before anything is sent');
+  assert.ok(carried >= 0 && carried < put, 'the request body carries exactly that plan');
+  assert.doesNotMatch(insert, /el\.value \+=/, 'S3-U6: no second concatenation may reach the editor');
+  assert.doesNotMatch(insert, /appendBlock\(/, 'the position-free append is not this path any more');
+  const write = insert.indexOf('el.value = shown.text;');
+  assert.ok(write >= 0 && write > put, 'the editor may only change after the answer');
+  const caret = insert.indexOf('el.setSelectionRange(shown.end, shown.end);');
+  assert.ok(caret >= 0 && caret > write, 'the caret lands on the inserted block once the text is in');
   const guard = insert.indexOf('epoch.uid !== selectedUid || epoch.selSeq !== selectionSeq || epoch.seq !== citeSeq');
   assert.ok(guard >= 0 && guard < write, 'a late answer must be checked against uid AND selection AND pane');
   assert.doesNotMatch(insert.slice(put, write), /\.value\s*=/, 'nothing may be written while the answer is being judged');
@@ -421,7 +433,8 @@ test('TEST-S3-U2b-WIRING: the shipped screen sends the server first and only a 2
 test('TEST-S3-U2b-WIRING: only an accepted insertion stands the list that raised it down', () => {
   const insert = extractFunction(html, 'insertCitation');
   const put = insert.indexOf('await api("PUT"');
-  const write = insert.indexOf('el.value += (el.value ? "\\n" : "") + pane.block;');
+  const write = insert.indexOf('el.value = shown.text;');
+  assert.ok(write >= 0, 'the editor write is the plan the server was told about');
   const stand = insert.indexOf('pane.inserted();');
   const close = insert.indexOf('closeCitePreview();');
   assert.ok(stand > write, 'the list may only stand down once the answer has moved the editor');
