@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 import numpy as np
 from pypdf import PdfReader
-from playwright.sync_api import expect,Error as PlaywrightError
+from playwright.sync_api import expect
 import test_prior_selection as ct
 from test_volume_mip import VOI_STUDIES,VOI_CASES,VOI_DELTA,VOI_DISCRIMINATION,SOURCE_PLANES,BLENDS,SPACING,COUNTS,mm_text,rodrigues,voi_plan,voi_planes,voi_record
 from test_volume_mip_job import CAPTURE,LAYOUT,SESSION_END
@@ -486,44 +486,53 @@ class VolumeMipOutputE2E(VolumeMipBatchE2E):
   self.open_output(v,a,V12);v.evaluate(TAKE)
   # A source MD5 that changes between the reads before and after one frame body refuses in the loader.
   #
-  # Serving an intercepted read races with the page giving that read up. A refusal ends the print and
-  # `bounded()` aborts every source read still in flight (watch_transport relies on exactly that), which
-  # resolves the intercepted route; a handler whose own fetch was still running then fulfills a route that
-  # is already handled. Hosted run 35581063805 lost this row to it: three mid_read invocations finished
-  # after the refusal had been asserted and after unroute, each raising `Route is already handled`, and in
-  # the sync API that exception escapes the handler on the event loop - the four following `changed`
-  # invocations and finally Locator.text_content all re-raised mid_read's message with one more apiName
-  # prefix each, so the digest row never ran its own assertions. The refusal itself was correct.
-  # So the abandonment is recorded and asserted, never ignored: only this exact condition is caught, only
-  # for a read this handler was serving, and any other failure still raises.
-  served,abandoned=[],[]
-  def serve(route,url,response,value):
-   served.append(url)
-   try:route.fulfill(response=response,json=value)
-   except PlaywrightError as e:
-    if 'Route is already handled' not in str(e):raise
-    abandoned.append(url)
-  seen=[]
+  # The phase boundary is `unroute_all(behavior='wait')`, not the default `unroute(url,handler)`.
+  # `_unroute_internal(...,'default')` drops the pattern from `_routes` and goes straight to
+  # `_update_interception_patterns` without awaiting anything (_page.py:699-725), and the driver's
+  # interceptor removal then force-continues every route still in flight
+  # (removeRequestInterceptor -> notifyRoutesInFlightAboutRemovedHandler -> Route.removeHandler ->
+  # continue({isFallback:true})). A handler still inside its own `route.fetch()` then fulfills a route
+  # the driver has already handled. `behavior='wait'` instead runs `RouteHandler.stop('wait')`, which
+  # awaits every active invocation BEFORE the patterns are updated (_helper.py:472-484), so nothing is
+  # force-continued and no invocation survives into the next phase. These are the only page routes on
+  # `v` at both boundaries, so removing all of them removes exactly this one.
+  #
+  # The print loader runs four workers, so when one read refuses up to three are still in flight - which
+  # is why this row, and not the others, met the window. Hosted run 35581063805 is symptom evidence only:
+  # three originating `Route is already handled` from mid_read, then four `changed` invocations and
+  # `Locator.text_content` replaying that one stored error with one more apiName prefix each, so the
+  # digest phase never ran its own assertions. A `Route is already handled` here is now a genuine
+  # anomaly and fails the row.
+  #
+  # Delivered is not attempted: a URL is appended only after `route.fulfill` RETURNS, so the page has
+  # the bytes. The injected value is tracked separately and each phase must have delivered one.
+  seen,mid_attempted,mid_delivered,mid_faults=[],[],[],[]
+  def mid_rearm():
+   # A transport re-attempt discards the attempt before it, so its deliveries are not this row's evidence.
+   for record in (seen,mid_attempted,mid_delivered,mid_faults):record.clear()
   def mid_read(route):
-   response=route.fetch();value=response.json();url=route.request.url;seen.append(url)
-   if url==seen[0] and seen.count(url)==2:value['UncompressedMD5']='0'*32
-   serve(route,url,response,value)
-  v.route('**/attachments/dicom/info',mid_read);self.open_output(v,a,V12,MESSAGES['mid_read'],rearm=seen.clear);self.refused(v,MESSAGES['mid_read'])
-  # The injected fault is the second read of the first source: prove it was served, not merely that the
-  # page refused for some other reason.
+   response=route.fetch();value=response.json();url=route.request.url;seen.append(url);mid_attempted.append(url)
+   fault=url==seen[0] and seen.count(url)==2
+   if fault:value['UncompressedMD5']='0'*32
+   route.fulfill(response=response,json=value);mid_delivered.append(url)
+   if fault:mid_faults.append(url)
+  v.route('**/attachments/dicom/info',mid_read);self.open_output(v,a,V12,MESSAGES['mid_read'],rearm=mid_rearm);self.refused(v,MESSAGES['mid_read'])
   self.assertTrue(seen,'the mid-read row needs at least one intercepted source read')
-  self.assertGreaterEqual(seen.count(seen[0]),2,'the mid-read fault fires on the second read of the first source')
-  v.unroute('**/attachments/dicom/info',mid_read)
+  self.assertGreaterEqual(seen.count(seen[0]),2,'the first source was read twice: the read pair this row injects between existed')
+  self.assertTrue(mid_faults,'the mid-read MD5 change was delivered to the page, not merely prepared')
+  print('MIP_OUTPUT_SOURCE_INFO_READS',json.dumps({'phase':'mid_read','attempted':len(mid_attempted),'delivered':len(mid_delivered),'faults':len(mid_faults)}),flush=True)
+  v.unroute_all(behavior='wait')
   # MO9: a whole source whose instances all read consistently but differ from the saved sourceDigest is refused for version 13 too.
+  digest_attempted,digest_delivered,digest_faults=[],[],[]
   def changed(route):
-   response=route.fetch();value=response.json();value['UncompressedMD5']='0'*32;serve(route,route.request.url,response,value)
-  v.route('**/attachments/dicom/info',changed);self.open_output(v,a,V13,MESSAGES['digest']);self.refused(v,MESSAGES['digest']);v.unroute('**/attachments/dicom/info',changed)
-  print('MIP_OUTPUT_SOURCE_INFO_READS',json.dumps({'served':len(served),'abandoned':len(abandoned)}),flush=True)
-  # Tolerating the race must not become tolerating a row that served nothing: both refusals above needed a
-  # served read to carry the injected value, so a row where every intercepted read was abandoned proves
-  # nothing and fails here.
-  self.assertLess(len(abandoned),len(served),'every intercepted source read was abandoned: the injected value never reached the page')
-  self.assertTrue(all(urlsplit(url).path.endswith('/attachments/dicom/info') for url in abandoned),'only the intercepted source-info read may be abandoned')
+   response=route.fetch();value=response.json();url=route.request.url;digest_attempted.append(url)
+   value['UncompressedMD5']='0'*32
+   # Every read this phase delivers carries the changed digest, so a delivery is a fault delivery here.
+   route.fulfill(response=response,json=value);digest_delivered.append(url);digest_faults.append(url)
+  v.route('**/attachments/dicom/info',changed);self.open_output(v,a,V13,MESSAGES['digest']);self.refused(v,MESSAGES['digest'])
+  self.assertTrue(digest_faults,'the changed source digest was delivered to the page, not merely prepared')
+  print('MIP_OUTPUT_SOURCE_INFO_READS',json.dumps({'phase':'digest','attempted':len(digest_attempted),'delivered':len(digest_delivered),'faults':len(digest_faults)}),flush=True)
+  v.unroute_all(behavior='wait')
   self.refresh_output(v);v.evaluate(TAKE)
   # Transport fix (hosted diagnostic run 35022850312): Chromium failed one source read with net::ERR_FAILED, before any response and
   # without resending it, when its HTTP/2 connection received nginx's GOAWAY. That page-visible rejection is injected on a direct
