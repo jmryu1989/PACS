@@ -3677,7 +3677,7 @@
         for (const item of template.items) out.push({ template, item });
       return out;
     }
-    const structureItemKey = pair => pair.template.templateId + " " + pair.item.code;
+    const structureItemKey = pair => pair.template.templateId + "\u0000" + pair.item.code;
 
     function closeStructure() {
       structPane = null;

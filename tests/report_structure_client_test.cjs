@@ -58,7 +58,10 @@ test('validateValue refuses every shared invalid vector and accepts every valid 
 test('a value that is too long or not one line is refused before anything is sent', () => {
   assert.equal(form.validateValue(item('SYN-TEXT'), 'x'.repeat(512)), null);
   assert.equal(form.validateValue(item('SYN-TEXT'), 'x'.repeat(513)), S.MESSAGES.tooLong);
-  assert.equal(form.validateValue(item('SYN-TEXT'), 'a b'), S.MESSAGES.oneLine);
+  // Built from the code point on purpose: U+2028 is invisible in a source file, and a reviewer has
+  // to be able to see which character this case is about.
+  assert.equal(form.validateValue(item('SYN-TEXT'), 'a' + String.fromCharCode(0x2028) + 'b'),
+    S.MESSAGES.oneLine);
   assert.equal(S.isSingleLine('plain'), true);
   assert.equal(S.isSingleLine('a\tb'), false);
 });
@@ -172,7 +175,7 @@ test('liveEntries is head union my draft, and the immutable head wins on a sid c
   const live = S.liveEntries(head, draft);
   assert.deepEqual(live.map(e => e.sid), ['x', 'y']);
   assert.equal(live[0].value, 'c1');
-  assert.equal(S.itemKey(entry()), 'SYN-T1 SYN-CHOICE');
+  assert.equal(S.itemKey(entry()), 'SYN-T1\u0000SYN-CHOICE');
 });
 
 test('main.html clears the structure state everywhere it clears the citation state', () => {
