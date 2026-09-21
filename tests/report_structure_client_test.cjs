@@ -230,6 +230,48 @@ test('paper and history never fetch the structure route and never label anything
   assert.equal(history.includes('report/structure'), false);
 });
 
+test('the form is bound to the study it opened on, and the binding is checked first', () => {
+  // B4. The order is the whole point: if the study check ran AFTER the plan refresh, the first
+  // press would only re-plan on the other patient's textarea and the second press would find that
+  // plan consistent and write patient A's entry into patient B's report.
+  const apply = MAIN.slice(MAIN.indexOf('async function applyStructure()'));
+  const body = apply.slice(0, apply.indexOf('\n    }\n'));
+  assert.match(body, /pane\.uid !== selectedUid \|\| pane\.selSeq !== selectionSeq/);
+  assert.ok(body.indexOf('pane.uid !== selectedUid') < body.indexOf('structurePlan(pane)'),
+    'the study check must come before the plan is recomputed');
+  assert.ok(body.indexOf('pane.uid !== selectedUid') < body.indexOf('api("PUT"'),
+    'and before anything is sent');
+  assert.match(body, /const uid = pane\.uid;/, 'the request uses the pinned study, not the selection');
+  // opened-on binding and the sibling-modal close, the same coordinate the cite preview has
+  assert.match(MAIN, /structPane = \{ uid: selectedUid, selSeq: selectionSeq \};/);
+  assert.match(MAIN, /if \(!structPane\?\.busy\) closeStructure\(\);/);
+  assert.ok(MAIN.indexOf('if (!citeBusy) closeCitePreview(false);')
+    < MAIN.indexOf('if (!structPane?.busy) closeStructure();'),
+    'both live in select(), next to each other');
+});
+
+test('the value shown for an item is my draft entry, not a superseded head entry', () => {
+  // B3: after one Save the first value is a head entry; once it is replaced its sentence has left
+  // the body, and offering it again would show the old value and plan to delete a line that is no
+  // longer there.
+  const fn = MAIN.slice(MAIN.indexOf('function structurePrevious('));
+  const body = fn.slice(0, fn.indexOf('\n    }\n'));
+  assert.ok(body.indexOf('row.draft.find(same)') < body.indexOf('row.head.find(same)'),
+    'my draft entry is consulted first');
+  assert.match(body, /structureState\.known\(uid\)/, 'an unconfirmed row has no draft answer to give');
+  assert.match(MAIN, /const previous = structurePrevious\(/);
+});
+
+test('replace mode previews the sentence that will be removed as well as the new one', () => {
+  // B7/P3: this modal covers the report column, and replace is the only path here that deletes
+  // body text. A line number alone cannot be checked by the person pressing the button.
+  assert.match(MAIN, /\$\("#struct-removed"\)\.textContent = removing;/);
+  assert.match(MAIN, /pane\.previous\.renderedText/);
+  assert.match(MAIN, /id="struct-removed"/);
+  // textContent only - the removed sentence carries a user-typed value just like the new one
+  assert.equal(MAIN.includes('#struct-removed").innerHTML'), false);
+});
+
 test('every element the structure block reaches for exists in the markup', () => {
   // U3's lesson: a top-level `$("#id")` for an element that is not there throws while the page
   // loads, and then every DOM case dies before its assertion.

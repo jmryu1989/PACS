@@ -1772,7 +1772,21 @@ export class PacsService implements OnModuleInit {
     if (wantsApply) {
       const input = this.structureInput(body.structure);
       const head = await this.versionStructured(tx, uid, headVersion);
-      let live = structureUnion(head, kept);
+      /**
+       * **살아 있음의 규칙은 확정의 규칙과 같다** (P1/B3).
+       *
+       * 머리 건은 그 문장이 **이 요청의 본문에 있을 때만** 살아 있다. 한 번 Save한 뒤 값을
+       * 고치면 머리 건의 문장은 본문을 떠나지만 행 자체는 불변이라 그대로 남는데, 그것을
+       * 살아 있다고 세면 같은 항목을 **두 번째로** 고치려는 사람에게 "이미 입력한 항목입니다"를
+       * 돌려주게 된다 — 고치라고 안내해놓고 고치지 못하게 하는 답이다.
+       *
+       * 대상 찾기(`all`)는 좁히지 않는다. `replace`는 옛 문장이 본문에 **없을 것**을 요구하므로,
+       * 바꿀 머리 건은 정의상 `live`에 없기 때문이다.
+       */
+      const all = structureUnion(head, kept);
+      const headLive = head.filter(entry => lineBlockOccurrences(
+        String(content[String(entry?.field ?? '')] ?? ''), String(entry?.renderedText ?? '')) >= 1);
+      let live = structureUnion(headLive, kept);
       if (input.op === 'replace') {
         /**
          * 바꿀 건은 내 초안에도, **머리 판에도** 있을 수 있다 (P3/B3).
@@ -1781,7 +1795,7 @@ export class PacsService implements OnModuleInit {
          * 머리 행은 불변이므로 여기서 **고치지 않는다** — 그 건은 문장이 본문을 떠난 사실로
          * 확정 때 P1이 떨어뜨린다.
          */
-        const target = live.find(entry => String(entry?.sid ?? '') === input.replacesSid);
+        const target = all.find(entry => String(entry?.sid ?? '') === input.replacesSid);
         if (!target)
           throw new ConflictException({ code: 'REPORT_STRUCTURE_REPLACE',
             message: '바꿀 항목을 찾을 수 없습니다 — 화면을 다시 불러오세요' });
@@ -2044,7 +2058,7 @@ export class PacsService implements OnModuleInit {
 
     // 재시도 다리까지 **같은 매핑 안에 둔다.** 첫 시도만 감싸면 번호 충돌로 다시 돈 실행에서
     // 나온 CHECK 위반이 500으로 새어 나가고, 같은 요청이 두 가지 답을 갖게 된다.
-    return this.citationChecked(async () => {
+    return this.reportLimitChecked(async () => {
       try {
         return await run();
       } catch (e: any) {

@@ -76,7 +76,37 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertEqual(SERVICE.count("isStructureCheck(error)") + SERVICE.count("isStructureCheck(e)"), 2)
         self.assertIn("structureLimit()", SERVICE)
         self.assertIn("REPORT_STRUCTURE_LIMIT", SERVICE)
-        self.assertIn("private async reportLimitChecked", SERVICE)
+
+    def test_every_limit_wrapper_call_names_a_method_that_exists(self) -> None:
+        # B1: the candidate renamed the wrapper at its definition and at one of two call sites, so
+        # `this.citationChecked` survived in forceDiscardDrafts and the API stopped compiling
+        # (TS2339) - the image build fails before any compiled test runs, and an emitted build would
+        # throw TypeError on every admin force-discard. A name check is cheap; tsc is not local.
+        defined = set(re.findall(r"private async (\w+Checked)<", SERVICE))
+        called = set(re.findall(r"this\.(\w+Checked)\(", SERVICE))
+        self.assertEqual(defined, {"reportLimitChecked"})
+        self.assertEqual(called - defined, set(), "a call to a wrapper that does not exist")
+        self.assertEqual(SERVICE.count("this.reportLimitChecked("), 2,
+                         "both writers of a version row - putReport and forceDiscardDrafts")
+        self.assertEqual(SERVICE.count("citationChecked"), 0, "the old name must not survive")
+        for owner in ("async putReport(", "async forceDiscardDrafts("):
+            start = SERVICE.index(owner)
+            end = SERVICE.index("\n  async ", start + len(owner))
+            self.assertIn("this.reportLimitChecked(", SERVICE[start:end], owner)
+
+    def test_the_rendered_sentence_is_cut_and_joined_never_pattern_replaced(self) -> None:
+        # B2: `String.replace(needle, replacement)` expands `$$`, `$&`, '$`' and "$'" inside the
+        # REPLACEMENT, so a value containing a dollar came out as something the reader never typed -
+        # the stored `value` and the stored `renderedText` then say different things.
+        client = (ROOT / "worklist-v0" / "hpacs-lite" / "report-structure.js").read_text(encoding="utf-8")
+        for name, text, slot in (("report-structure.ts", PURE, "STRUCTURE_VALUE_SLOT"),
+                                 ("report-structure.js", client, "VALUE_SLOT")):
+            with self.subTest(file=name):
+                render = text[text.index("function renderItem("):]
+                render = render[:render.index("\n}") + 2] if name.endswith(".ts") else render[:render.index("\n    }") + 6]
+                self.assertNotIn(".replace(", render, "a string replacement re-reads $ in the value")
+                self.assertIn("indexOf(" + slot + ")", render)
+                self.assertIn("slice(", render)
 
     def test_an_empty_list_is_cleared_with_DbNull_and_never_by_omission(self) -> None:
         # A1. `Prisma.JsonNull` would store the JSON value null - neither an array nor SQL NULL - and

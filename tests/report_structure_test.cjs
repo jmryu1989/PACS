@@ -31,6 +31,8 @@ const item = code => TEMPLATE.items.find(i => i.code === code);
 const CHOICE_LINE = 'SYNTHETIC-ITEM choice = alpha';
 const CHOICE_LINE2 = 'SYNTHETIC-ITEM choice = beta';
 const NUMBER_LINE = 'SYNTHETIC-ITEM number = 12.0 unit-x';
+const NUMBER_15 = 'SYNTHETIC-ITEM number = 15.0 unit-x';
+const NUMBER_18 = 'SYNTHETIC-ITEM number = 18.0 unit-x';
 
 const apply = (over = {}) => ({ op: 'apply', field: 'findings', templateId: 'SYN-T1', templateRevision: 2,
   itemCode: 'SYN-CHOICE', valueType: 'choice', value: 'c1', renderedText: CHOICE_LINE, ...over });
@@ -43,8 +45,12 @@ const body = (over = {}) => ({ findings: CHOICE_LINE, conclusion: '', recommenda
 
 function fixture({ state = STATE,
   report = { version: 4, updatedBy: 'doctor2@synthetic', findings: CHOICE_LINE, conclusion: '', recommendation: '' },
-  versions = new Map(), draft = null, drafts = null, bytes = null, failWith = null, catalog = CATALOG } = {}) {
+  versions = new Map(), draft = null, drafts = null, bytes = null, failWith = null, catalog = CATALOG,
+  createManyFails = [] } = {}) {
   const writes = [], audits = [], raw = [], created = [];
+  // Successive answers for reportVersion.createMany, so the forced-release RETRY leg can be driven:
+  // [P2002, CHECK] makes the first attempt lose the version race and the second raise our CHECK.
+  const manyFails = createManyFails.slice();
   const draftRaw = () => (draft ? [{ citations: draft.citations ?? null, structured: draft.structured ?? null }] : []);
   const tx = {
     $executeRaw: async () => 0,
@@ -78,7 +84,8 @@ function fixture({ state = STATE,
       findUnique: async a => (a.where.uid_version.uid === UID ? versions.get(a.where.uid_version.version) : null) ?? null,
       create: async a => { if (failWith) throw failWith;
         writes.push(`reportVersion.create:v${a.data.version}:${a.data.action}`); created.push({ call: 'version', data: a.data }); },
-      createMany: async a => { writes.push('reportVersion.createMany'); created.push({ call: 'many', data: a.data }); },
+      createMany: async a => { const boom = manyFails.shift(); if (boom) throw boom;
+        writes.push('reportVersion.createMany'); created.push({ call: 'many', data: a.data }); },
     },
     auditLog: { create: async a => { audits.push(a.data); return a.data; } },
   };
@@ -186,6 +193,34 @@ test('commit selection applies ONE presence rule to head and draft alike', () =>
     { findings: CHOICE_LINE + '\n' + NUMBER_LINE, conclusion: '', recommendation: '' }, false, false);
   assert.deepEqual(both.entries.map(e => e.sid), ['s-head', 's-mine']);
   assert.deepEqual(both.dropped, []);
+  /**
+   * B6: the MIRROR case, and the only one that can tell this rule from the original head-only
+   * filter. Here the head sentence is present and MY OWN draft sentence is the one the reader
+   * edited away. A filter that trusted draft entries would sign `12.0` onto a report that says
+   * `15.0` - the machine-readable value contradicting the record.
+   */
+  const mineGone = structure.commitStructureSelection([head, mine],
+    { findings: CHOICE_LINE, conclusion: '', recommendation: '' }, false, false);
+  assert.deepEqual(mineGone.entries.map(e => e.sid), ['s-head']);
+  assert.deepEqual(mineGone.dropped, ['s-mine']);
+});
+
+test('B6 a draft entry whose sentence the reader edited away is dropped by save AND by approve', async () => {
+  // Compiled, through the real commitReport, for both actions that write a version row.
+  const EDITED = 'SYNTHETIC-ITEM number = 15.0 unit-x';
+  for (const action of ['save', 'approve']) {
+    const { svc, created, audits } = fixture({
+      draft: { structured: [stored({ sid: 's-mine', itemCode: 'SYN-NUMBER', renderedText: NUMBER_LINE })] } });
+    await svc.commitReport(UID, { action, baseVersion: 4, findings: EDITED,
+      conclusion: '', recommendation: '', structureIds: ['s-mine'] }, CALLER);
+    const version = created.find(c => c.call === 'version');
+    assert.equal('structured' in version.data, false,
+      `${action}: the edited-away entry must not reach the signed row`);
+    const audit = audits.find(a => String(a.action).startsWith('report.' + action));
+    const detail = JSON.parse(JSON.stringify(audit.detail));
+    assert.deepEqual(detail.strs.dropped, ['s-mine'], `${action}: the dropped sid must be named`);
+    assert.equal(detail.strs.n, 0);
+  }
 });
 
 test('a blank body and a reset carry nothing and say so', () => {
@@ -403,6 +438,64 @@ test('force discard preserves the typed evidence with the body, and omits it whe
 });
 
 /* ── limits and the read ─────────────────────────────────────────────────────────────────── */
+
+test('B1 the forced release maps our CHECK on the first leg and on the P2002 retry leg', async () => {
+  /**
+   * This is the path the candidate could not even compile: forceDiscardDrafts wraps BOTH its first
+   * attempt and its version-race retry in the same limit mapping. A CHECK raised by the retry would
+   * otherwise leave as a 500, and the same request would have two different answers.
+   */
+  const drafts = [{ uid: UID, author: 'a@synthetic', findings: CHOICE_LINE, conclusion: '', recommendation: '',
+    baseVersion: 4, citations: null, structured: [stored({ sid: 's-a' })], updatedAt: 'now' }];
+  const legs = {
+    'first leg': [checkError('ReportVersion_structured_check')],
+    'P2002 retry leg': [Object.assign(new Error('unique'), { code: 'P2002' }),
+                        checkError('ReportVersion_structured_check')],
+  };
+  for (const [name, fails] of Object.entries(legs)) {
+    const { svc } = fixture({ drafts, createManyFails: fails });
+    const answer = await refusal(svc.forceDiscardDrafts(UID, ADMIN), 409);
+    assert.equal(answer.code, 'REPORT_STRUCTURE_LIMIT', name);
+  }
+  // A version race with no CHECK behind it still succeeds on the retry, unchanged.
+  const { svc, created } = fixture({ drafts,
+    createManyFails: [Object.assign(new Error('unique'), { code: 'P2002' })] });
+  const ok = await svc.forceDiscardDrafts(UID, ADMIN);
+  assert.equal(ok.count, 1);
+  assert.deepEqual(created.find(c => c.call === 'many').data[0].structured.map(e => e.sid), ['s-a']);
+});
+
+test('B3 a superseded head entry is not live, so the same item can be changed again', async () => {
+  /**
+   * Save (sid1) -> replace to sid2 -> change again BEFORE the next commit. sid1 is still on the
+   * immutable head row, but its sentence left the body when sid2 replaced it. Counting it as live
+   * answered "이미 입력한 항목입니다 - 값을 바꾸려면 수정을 사용하세요" to a reader who was doing
+   * exactly that, and only a commit could get out of it.
+   */
+  const num = over => stored({ itemCode: 'SYN-NUMBER', valueType: 'number', ...over });
+  const versions = new Map([[4, { structured: [num({ sid: 's1', value: 12, renderedText: NUMBER_LINE })] }]]);
+  const { svc, created } = fixture({ versions,
+    report: { version: 4, findings: NUMBER_15, conclusion: '', recommendation: '' },
+    draft: { structured: [num({ sid: 's2', value: 15, renderedText: NUMBER_15 })] } });
+  await svc.putReport(UID, { ...body({ findings: NUMBER_18 }), structureIds: ['s2'],
+    structure: { op: 'replace', replacesSid: 's2', field: 'findings', templateId: 'SYN-T1',
+      templateRevision: 2, itemCode: 'SYN-NUMBER', valueType: 'number', value: 18,
+      renderedText: NUMBER_18 } }, CALLER);
+  const written = created.find(c => c.call === 'draft').update.structured;
+  assert.equal(written.length, 1, 's2 is gone and exactly the new entry remains');
+  assert.equal(written[0].value, 18);
+  assert.equal(written.some(e => e.sid === 's1' || e.sid === 's2'), false);
+});
+
+test('B3 a head entry whose sentence IS in the body still blocks a second apply', async () => {
+  // The narrowing must not become a licence to enter the same item twice.
+  const versions = new Map([[4, { structured: [stored({ sid: 's1', renderedText: CHOICE_LINE })] }]]);
+  const { svc, writes } = fixture({ versions });
+  const answer = await refusal(svc.putReport(UID, { ...body({ findings: CHOICE_LINE }), structure: apply() },
+    CALLER), 409);
+  assert.equal(answer.code, 'REPORT_STRUCTURE_EXISTS');
+  assert.deepEqual(writes, []);
+});
 
 test('our CHECK name becomes a named 409 on the draft path and on commit', async () => {
   for (const [name, run] of [

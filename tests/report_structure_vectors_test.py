@@ -65,6 +65,43 @@ def independent_render(item, value):
     return prefix + text + suffix
 
 
+def js_string_replace_render(item, value):
+    """What `template.replace('{value}', valueText)` does in JavaScript.
+
+    This is NOT the contract; it is the defect the `$` vectors exist to catch. ECMAScript expands
+    `$$`, `$&`, '$`' and "$'" inside the REPLACEMENT string, so a value the reader typed comes out
+    as something else. Python's own str.replace does not do this, so it has to be written out.
+    """
+    template = item["template"]
+    at = template.index(SLOT)
+    before, after = template[:at], template[at + len(SLOT):]
+    text = independent_value_text(item, value)
+    out = []
+    i = 0
+    while i < len(text):
+        if text[i] == "$" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "$":
+                out.append("$")
+                i += 2
+                continue
+            if nxt == "&":
+                out.append(SLOT)
+                i += 2
+                continue
+            if nxt == "`":
+                out.append(before)
+                i += 2
+                continue
+            if nxt == "'":
+                out.append(after)
+                i += 2
+                continue
+        out.append(text[i])
+        i += 1
+    return before + "".join(out) + after
+
+
 def independent_valid(item, value):
     kind = item["valueType"]
     if kind == "choice":
@@ -90,6 +127,27 @@ class ReportStructureVectors(unittest.TestCase):
         for case in VECTORS["render"]:
             with self.subTest(item=case["itemCode"], value=case["value"]):
                 self.assertEqual(independent_render(item_of(case["itemCode"]), case["value"]),
+                                 case["rendered"])
+
+    def test_the_dollar_vectors_actually_discriminate_the_defect_they_name(self) -> None:
+        # A vector that both the right rule and the wrong one answer the same way tests nothing.
+        # `str.replace(needle, replacement)` expands `$$`, `$&`, '$`' and "$'" INSIDE the
+        # replacement, so the sentence stops being the value the reader typed. These vectors exist
+        # to fail against that implementation, so at least one must disagree with it.
+        differing = []
+        for case in VECTORS["render"]:
+            item = item_of(case["itemCode"])
+            if js_string_replace_render(item, case["value"]) != case["rendered"]:
+                differing.append(case)
+        self.assertGreaterEqual(len(differing), 4,
+                                "the $-pattern vectors must be the ones a string replacement gets wrong")
+        for case in differing:
+            self.assertIn("$", str(case["value"]), "only $-bearing values may differ")
+        # and every value WITHOUT a dollar must be answered identically by both, so the vectors
+        # isolate exactly this defect and nothing else.
+        for case in VECTORS["render"]:
+            if "$" not in str(case["value"]):
+                self.assertEqual(js_string_replace_render(item_of(case["itemCode"]), case["value"]),
                                  case["rendered"])
 
     def test_every_rendered_vector_is_exactly_one_line(self) -> None:
@@ -146,6 +204,29 @@ class ReportStructureVectors(unittest.TestCase):
         self.assertEqual(json.loads(client.group(1)), [])
         self.assertEqual(json.dumps(json.loads(server.group(1)), sort_keys=True, separators=(",", ":")),
                          json.dumps(json.loads(client.group(1)), sort_keys=True, separators=(",", ":")))
+
+    def test_a_nonempty_product_catalog_would_need_the_load_time_gate_closed_first(self) -> None:
+        """P12 is PARTIAL (Astra D1), and this is the tripwire that keeps it honest.
+
+        Cross-item render collisions are prevented exactly for enumerable values; free-input items
+        are only held to distinct sentence skeletons, and the CLIENT has no validateCatalog at all.
+        Today the product catalog is empty, so none of that is reachable. The day it stops being
+        empty this test fails, and the gate - sufficient cross-item collision prevention plus
+        load-time validation on BOTH sides, checked over the whole catalog by T1/T2/T3 - has to be
+        closed before the content ships.
+        """
+        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
+                           SERVER)
+        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
+        empty = json.loads(server.group(1)) == [] and json.loads(client.group(1)) == []
+        if empty:
+            self.assertNotIn("function validateCatalog", CLIENT,
+                             "if the client ever grows one, say so here and close the gate")
+            return
+        self.assertIn("function validateCatalog", CLIENT,
+                      "a non-empty catalog needs the same load-time validation on the client")
+        self.assertRegex(SERVER, r"validateCatalog\(STRUCTURE_CATALOG\)",
+                         "and the server must validate its own catalog at load time")
 
     def test_no_synthetic_fixture_is_reachable_from_product_code(self) -> None:
         # The synthetic items exist only in this repository's tests. If "SYN-" ever appears in a

@@ -215,7 +215,8 @@ window.openStruct = () => openStructure();
 window.pickStruct = key => selectStructureItem(key);
 window.applyStruct = () => applyStructure();
 window.closeStruct = () => closeStructure();
-window.pane = () => (structPane ? { field: structPane.field, line: structPane.line, status: structPane.status,
+window.pane = () => (structPane ? { uid: structPane.uid, selSeq: structPane.selSeq,
+                                    field: structPane.field, line: structPane.line, status: structPane.status,
                                     busy: structPane.busy, previous: structPane.previous ? structPane.previous.sid : null,
                                     plan: structPane.plan ? { mode2: structPane.plan.mode2, text: structPane.plan.text,
                                                               line: structPane.plan.line,
@@ -361,6 +362,13 @@ class ReportStructureDOMTest(unittest.TestCase):
         page.evaluate("() => { $('#struct-value-choice').value = 'c2';"
                       "$('#struct-value-choice').dispatchEvent(new Event('change', {bubbles: true})); }")
         self.assertEqual(page.evaluate("() => pane().plan.mode2"), "replace")
+        # P3/B7: replace is the only path in this unit that deletes body text, and this modal covers
+        # the report column. The preview has to name the sentence that will go, not only its number.
+        markup = page.evaluate("() => $('#structmodal').innerText")
+        self.assertIn(CHOICE_LINE, markup, "the sentence that will be removed must be shown")
+        self.assertIn(CHOICE_LINE2, markup, "the sentence that will be written must be shown")
+        self.assertEqual(page.evaluate("() => $('#struct-removed').textContent"), CHOICE_LINE)
+        self.assertEqual(page.evaluate("() => $('#struct-line').textContent"), CHOICE_LINE2)
         page.evaluate("() => applyStruct()")
         page.wait_for_function("() => calls.length === 1")
         self.assertEqual(page.evaluate("() => $('#findings').value"), CHOICE_LINE2)
@@ -434,12 +442,18 @@ class ReportStructureDOMTest(unittest.TestCase):
         page.wait_for_function("() => structKnown()")
         self.assertEqual(page.evaluate("() => structKeep()"), ["s-draft"])
         page.evaluate("() => commit('save')")
-        page.wait_for_function("() => structCalls.length === 2")
-        self.assertEqual(page.evaluate("() => calls[0].body.structureIds"), ["s-draft"])
-        page.wait_for_function("() => structKnown()")
-        self.assertEqual(page.evaluate("() => structKeep()"), [],
+        # BOUNDED, and the same wait for the correct code and for M5c. `commit()` resolves once its
+        # own POST is done; the dedicated re-read is fire-and-forget from loadReport, so give it a
+        # bounded moment and then ASSERT. An unbounded wait_for_function here would raise a
+        # Playwright TimeoutError under M5c - an ERROR carrying no AssertionError and matching a
+        # crash marker - and the mutant would be scored a survivor for a harness reason (B5).
+        page.wait_for_timeout(400)
+        self.assertEqual(page.evaluate("() => structCalls.length"), 2,
                          "S3-STRUCT M5c: after a commit the state must be re-read, not kept")
-        self.assertEqual(page.evaluate("() => structCalls.length"), 2)
+        self.assertEqual(page.evaluate("() => calls[0].body.structureIds"), ["s-draft"])
+        self.assertTrue(page.evaluate("() => structKnown()"))
+        self.assertEqual(page.evaluate("() => structKeep()"), [],
+                         "the re-read replaced the keep list with the server's own answer")
 
     # D9 ───────────────────────────────────────────────────────────────────────────────────────
     def test_d09_a_late_answer_is_not_applied_to_the_study_that_is_open_now(self):
@@ -556,6 +570,62 @@ class ReportStructureDOMTest(unittest.TestCase):
         self.assertIsNone(page.evaluate("() => pane()"), "a successful apply closes the form")
         self.assertEqual(shown, 2, "the position first shown was the line after the caret's own line")
         self.assertEqual(page.evaluate("() => calls[0].body.structure.field"), "findings")
+
+    # D16 ──────────────────────────────────────────────────────────────────────────────────────
+    def test_d16_a_form_opened_on_one_study_never_writes_into_another(self):
+        # B4: the decisive case. Without the uid/selSeq binding the first press only re-plans (the
+        # other study's textarea differs) and the SECOND press finds its own fresh plan consistent
+        # and writes patient A's entry into patient B's report.
+        page = self.open(state(),
+                         struct_replies=[{"version": 4, "unknown": False, "head": [], "draft": []},
+                                         {"version": 1, "unknown": False, "head": [], "draft": []}],
+                         replies=[{"status": 200, "body": {"structured": {"sid": SID, "field": "findings",
+                                                                          "enteredAt": "now"}}}])
+        page.evaluate("() => { const el = $('#findings'); el.value = %s; el.focus();"
+                      "el.setSelectionRange(10, 10); }" % json.dumps(EXISTING))
+        self.pick(page)
+        self.assertEqual(page.evaluate("() => pane().uid"), UID, "the form pins the study it opened on")
+        # the reader moves to another patient; the form is still on screen
+        page.evaluate("() => { selectedUid = %s; selectionSeq += 1; $('#findings').value = 'B report'; }"
+                      % json.dumps(OTHER))
+        page.evaluate("() => applyStruct()")
+        page.evaluate("() => applyStruct()")
+        self.assertEqual(page.evaluate("() => calls.length"), 0,
+                         "S3-STRUCT B4: an entry chosen on one study may never be written to another")
+        self.assertEqual(page.evaluate("() => $('#findings').value"), "B report",
+                         "the other patient's report must not have been touched")
+        self.assertIsNone(page.evaluate("() => pane()"), "the form closes rather than waiting to be pressed again")
+        self.assertFalse(page.evaluate("() => $('#structmodal').classList.contains('on')"))
+
+    # D17 ──────────────────────────────────────────────────────────────────────────────────────
+    def test_d17_a_second_change_before_the_commit_uses_the_draft_entry_not_the_superseded_head(self):
+        # B3: after one Save the first value is a head entry; changing it writes a draft entry and
+        # the head sentence leaves the body. A second change must pick the DRAFT entry - otherwise
+        # the form shows the old value and plans to remove a line that is no longer there.
+        head = entry(sid="s-head", value="c1", renderedText=CHOICE_LINE)
+        draft = entry(sid="s-draft", value="c2", renderedText=CHOICE_LINE2)
+        page = self.open(state(findings=CHOICE_LINE2),
+                         struct_replies=[{"version": 4, "unknown": False, "head": [head], "draft": [draft]}],
+                         replies=[{"status": 200, "body": {"structured": {"sid": "s-third", "field": "findings",
+                                                                          "enteredAt": "now"}}}])
+        page.evaluate("() => { $('#findings').value = %s; }" % json.dumps(CHOICE_LINE2))
+        page.wait_for_function("() => structKnown()")
+        self.pick(page)
+        self.assertEqual(page.evaluate("() => pane().previous"), "s-draft",
+                         "S3-STRUCT B3: the live value is my draft entry, not the superseded head")
+        self.assertEqual(page.evaluate("() => $('#struct-value-choice').value"), "c2",
+                         "the form opens on the value that is actually in the report")
+        self.assertEqual(page.evaluate("() => $('#struct-removed').textContent"), CHOICE_LINE2)
+        page.evaluate("() => { $('#struct-value-choice').value = 'c1';"
+                      "$('#struct-value-choice').dispatchEvent(new Event('change', {bubbles: true})); }")
+        self.assertEqual(page.evaluate("() => pane().plan.mode2"), "replace")
+        page.evaluate("() => applyStruct()")
+        page.wait_for_function("() => calls.length === 1")
+        sent = page.evaluate("() => calls[0].body")
+        self.assertEqual(sent["structure"]["replacesSid"], "s-draft")
+        self.assertEqual(sent["structure"]["value"], "c1")
+        self.assertEqual(sent["findings"], CHOICE_LINE)
+        self.assertEqual(page.evaluate("() => $('#findings').value"), CHOICE_LINE)
 
 
 if __name__ == "__main__":

@@ -1030,6 +1030,8 @@
           <input id="struct-value-bool" type="checkbox"> <span id="struct-value-bool-text"></span>
         </label>
       </div>
+      <p id="struct-removed-label" style="display:none">지워질 문장</p>
+      <p id="struct-removed" aria-label="판독문에서 지워질 문장"></p>
       <p id="struct-line" aria-label="판독문에 들어갈 문장"></p>
       <p id="struct-place"></p>
       <p id="struct-status" role="status"></p>
@@ -2530,6 +2532,10 @@
       // 인용 미리보기도 같다. 응답을 기다리는 중이면 창은 그대로 두고, 늦게 온 응답은
       // 요청이 떠날 때의 선택과 대조해 화면에 쓰지 않는다.
       if (!citeBusy) closeCitePreview(false);
+      // 구조화 입력도 같은 규칙이다(B4). 나가 있는 요청이 없으면 창을 닫는다 — 열린 채로 두면
+      // 다음 누름이 **떠난 검사의 항목**을 지금 검사에 적으려 한다. 진행 중이면 창을 두고,
+      // 늦게 온 응답은 요청이 떠날 때의 선택과 대조해 화면에 쓰지 않는다.
+      if (!structPane?.busy) closeStructure();
       // 사유를 고르는 동안 A→B→A로 이동해도 이전 모달의 결정을 새 선택에 적용하지 않는다.
       if (reasonResolve) reasonResolve(null);
       stashReport();
@@ -3646,11 +3652,19 @@
       return changed;
     }
 
-    /** 이 칸에서 지금 살아 있는 구조화 건(머리 ∪ 확인된 내 초안). */
-    function structureLive(uid) {
+    /**
+     * 이 항목의 **지금 값**을 들고 있는 건 (B3).
+     *
+     * 내 초안 건이 먼저다 — 그 문장이 지금 화면의 칸에 있는 건이고, 같은 항목의 머리 건은
+     * 한 번 고친 뒤라면 이미 바꿔치워져 본문에 없다. 머리를 먼저 고르면 사람이 방금 넣은 값
+     * 대신 **옛 값**을 보여주고, 그 옛 문장을 지우려는 계획을 세운다.
+     */
+    function structurePrevious(uid, templateId, itemCode) {
       const row = uid ? structureState.get(uid) : null;
-      if (!row) return [];
-      return structureState.known(uid) ? KinReportStructure.liveEntries(row.head, row.draft) : row.head.slice();
+      if (!row) return null;
+      const same = e => e && e.templateId === templateId && e.itemCode === itemCode;
+      if (structureState.known(uid)) { const mine = row.draft.find(same); if (mine) return mine; }
+      return row.head.find(same) ?? null;
     }
 
     /**
@@ -3700,12 +3714,22 @@
       pane.line = why ? null : structureForm.renderItem(item, pane.value);
       const plan = why ? null : structurePlan(pane);
       pane.plan = plan && plan.mode2 !== "refuse" ? plan : null;
-      // 문장은 `textContent`로만 쓴다. 자유 입력 값이 들어가는 자리이고 지면은 기록이다.
+      /**
+       * 문장은 `textContent`로만 쓴다 — 자유 입력 값이 들어가는 자리이고 지면은 기록이다.
+       *
+       * 바꾸기일 때는 **지워질 문장도 함께** 보인다(P3). 이 창은 판독문 칸을 덮고 있어서 사람은
+       * 무엇이 사라지는지 눈으로 볼 수 없는데, 이 단위에서 본문 글자를 지우는 경로는 여기 하나뿐이다.
+       * 줄 번호만 말하면 "몇 번째 줄"이 맞는지 확인할 방법이 없다.
+       */
       $("#struct-line").textContent = pane.line ?? "";
+      const removing = pane.plan && pane.plan.mode2 === "replace" && pane.previous
+        ? String(pane.previous.renderedText ?? "") : "";
+      $("#struct-removed").textContent = removing;
+      $("#struct-removed-label").style.display = removing ? "" : "none";
       const label = KinReportCitation.FIELD_LABEL[pane.field] ?? pane.field;
       $("#struct-place").textContent = !pane.plan ? ""
         : (pane.plan.mode2 === "replace"
-            ? `${label} ${pane.plan.removedLine}번째 줄을 이 문장으로 바꿉니다.`
+            ? `${label} ${pane.plan.removedLine}번째 줄의 위 문장을 지우고 이 문장으로 바꿉니다.`
             : `${label} ${pane.plan.line}번째 줄부터 넣습니다. 기존 내용은 지우지 않습니다.`);
       $("#struct-status").textContent = pane.status || why || (plan && plan.message) || "";
       // 다른 판의 서식으로 적힌 값은 보여주기만 한다. 지금 서식으로 다시 렌더해 보내면 서명된
@@ -3718,13 +3742,13 @@
       const pair = pairs.find(p => structureItemKey(p) === key) ?? pairs[0];
       if (!pair) return;
       const template = pair.template, item = pair.item;
-      const previous = structureLive(selectedUid)
-        .find(e => e && e.templateId === template.templateId && e.itemCode === item.code) ?? null;
+      const previous = structurePrevious(structPane?.uid ?? selectedUid, template.templateId, item.code);
       const value = previous && !structureForm.unknownRevision(previous) ? previous.value
         : item.valueType === "boolean" ? false
         : item.valueType === "choice" ? (item.choices[0] ?? {}).code
         : item.valueType === "number" ? item.min : "";
-      structPane = { template, item, field: item.field, value, previous, status: "", busy: false, line: null, plan: null };
+      structPane = { uid: structPane?.uid ?? selectedUid, selSeq: structPane?.selSeq ?? selectionSeq,
+        template, item, field: item.field, value, previous, status: "", busy: false, line: null, plan: null };
       if (previous && structureForm.unknownRevision(previous)) {
         structPane.status = KinReportStructure.MESSAGES.unknownRevision;
         structPane.readOnly = true;
@@ -3748,6 +3772,14 @@
       $("#struct-item").replaceChildren(
         ...pairs.map(pair => new Option(pair.item.label, structureItemKey(pair))));
       $("#structmodal").classList.add("on");
+      /**
+       * **이 창은 열린 그 검사의 것이다** (B4).
+       *
+       * 창을 연 검사와 선택 세대를 여기서 못 박는다. 못 박지 않으면 창이 떠 있는 동안 사람이
+       * 다른 환자로 옮겼을 때 누르는 순간의 `selectedUid`로 계획이 다시 서고, 두 번째 누름에서
+       * 계획이 일치해 **A 환자의 항목이 B 환자의 판독문에 적힌다.**
+       */
+      structPane = { uid: selectedUid, selSeq: selectionSeq };
       selectStructureItem(structureItemKey(pairs[0]));
     }
 
@@ -3762,6 +3794,19 @@
     async function applyStructure() {
       const pane = structPane;
       if (!pane || pane.busy) return;
+      /**
+       * **다른 검사로 옮겼으면 여기서 끝난다** (B4).
+       *
+       * 계획을 다시 세우기 **전에**, 요청을 만들기 **전에** 묻는다. 뒤에서 물으면 계획이 이미
+       * 새 검사의 칸으로 다시 서고, 두 번째 누름에서는 그 계획이 자기 자신과 일치해
+       * **A 환자의 항목이 B 환자의 판독문에 적힌다.** 진행 중이 아니면 창도 닫는다 —
+       * 남겨두면 같은 손가락이 한 번 더 눌러 같은 일을 한다.
+       */
+      if (pane.uid !== selectedUid || pane.selSeq !== selectionSeq) {
+        closeStructure();
+        toast("다른 검사로 옮겨서 구조화 입력을 닫았습니다 — 판독문은 그대로입니다.", "err");
+        return;
+      }
       if (pane.readOnly) { pane.status = KinReportStructure.MESSAGES.unknownRevision; renderStructure(); return; }
       const why = reportEditorBlock();
       if (why) { pane.status = why; renderStructure(); return; }
@@ -3775,7 +3820,8 @@
         renderStructure();
         return;
       }
-      const uid = selectedUid;
+      // 위에서 확인한 그 검사다. 누르는 순간의 선택이 아니라 **창이 열린 검사**를 쓴다.
+      const uid = pane.uid;
       const content = Object.fromEntries(RFIELDS.map(k => [k, $("#" + k).value]));
       content[pane.field] = fresh.text;
       const a = appState[uid] ?? {};
@@ -3806,15 +3852,17 @@
         invalidateStructure(epoch.uid);
         pane.busy = false;
         pane.status = "적용하지 못했습니다: " + e.message + " — 판독문은 그대로입니다.";
-        renderStructure();
+        // 그 사이 이 창이 닫히고 다른 창이 열렸다면 남의 창에 이 실패를 그리지 않는다.
+        if (structPane === pane) renderStructure();
         return;
       } finally { insertInFlight = false; }
       if (epoch.uid !== selectedUid || epoch.selSeq !== selectionSeq || epoch.seq !== structSeq) {
         // 서버는 기록했을 수 있는데 화면은 그 `sid`를 쓰지 못했다. 떠난 검사의 창을 남겨두면
-        // 다음 확인이 **다른 환자의** 판독문에 그 문장을 넣는다.
+        // 다음 확인이 **다른 환자의** 판독문에 그 문장을 넣는다. 그 사이 새로 열린 창은
+        // 이 요청의 것이 아니므로 건드리지 않는다.
         markConverge(epoch.uid);
         invalidateStructure(epoch.uid);
-        closeStructure();
+        if (structPane === pane) closeStructure();
         toast("다른 검사로 옮기기 전에 누른 구조화 적용의 응답이 늦게 도착해 화면에 반영하지 않았습니다.", "err");
         return;
       }
@@ -3826,7 +3874,7 @@
       reportConverge.delete(uid);
       // 새 `sid`를 지어내지 않는다 — 서버가 무엇을 기록했는지는 전용 읽기 하나가 말한다.
       invalidateStructure(uid);
-      closeStructure();
+      if (structPane === pane) closeStructure();
     }
 
     $("#struct-item").addEventListener("change", e => selectStructureItem(e.target.value));

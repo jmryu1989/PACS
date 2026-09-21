@@ -57,7 +57,13 @@
     { "itemCode": "SYN-NUMBER", "value": 100, "rendered": "SYNTHETIC-ITEM number = 100.0 unit-x" },
     { "itemCode": "SYN-BOOL", "value": true, "rendered": "SYNTHETIC-ITEM boolean = yes" },
     { "itemCode": "SYN-BOOL", "value": false, "rendered": "SYNTHETIC-ITEM boolean = no" },
-    { "itemCode": "SYN-TEXT", "value": "free note", "rendered": "SYNTHETIC-ITEM text = free note" }
+    { "itemCode": "SYN-TEXT", "value": "free note", "rendered": "SYNTHETIC-ITEM text = free note" },
+    { "itemCode": "SYN-TEXT", "value": "a$$b", "rendered": "SYNTHETIC-ITEM text = a$$b" },
+    { "itemCode": "SYN-TEXT", "value": "a$b", "rendered": "SYNTHETIC-ITEM text = a$b" },
+    { "itemCode": "SYN-TEXT", "value": "x $& y", "rendered": "SYNTHETIC-ITEM text = x $& y" },
+    { "itemCode": "SYN-TEXT", "value": "p $` q", "rendered": "SYNTHETIC-ITEM text = p $` q" },
+    { "itemCode": "SYN-TEXT", "value": "r $' s", "rendered": "SYNTHETIC-ITEM text = r $' s" },
+    { "itemCode": "SYN-TEXT", "value": "{value}", "rendered": "SYNTHETIC-ITEM text = {value}" }
   ],
   "invalid": [
     { "itemCode": "SYN-CHOICE", "value": "c9", "why": "not one of the catalog choices" },

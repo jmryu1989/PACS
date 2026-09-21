@@ -116,7 +116,13 @@
     function renderItem(item, value) {
       var text = valueText(item, value);
       if (text === null) return null;
-      return String(item.template).replace(VALUE_SLOT, text);
+      // 서버 `renderItem`과 같은 이유로 `String.replace`의 문자열 치환을 쓰지 않는다:
+      // 치환 문자열의 `$$`·`$&`·`` $` ``·`$'`가 패턴으로 해석되어, 사람이 친 글자와 본문에
+      // 들어가는 글자가 달라진다. 자리를 직접 잘라 붙이면 그 해석이 아예 없다.
+      var template = String(item.template);
+      var at = template.indexOf(VALUE_SLOT);
+      if (at < 0) return null;
+      return template.slice(0, at) + text + template.slice(at + VALUE_SLOT.length);
     }
 
     /** 값의 타입 검사. 통과하면 `null`, 아니면 사용자에게 보일 한국어 한 줄. */

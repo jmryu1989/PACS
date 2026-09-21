@@ -177,7 +177,16 @@ export function valueText(item: StructureItem, value: any): string {
  * 클라이언트의 몫이 아니다.
  */
 export function renderItem(item: StructureItem, value: any): string {
-  return String(item.template).replace(STRUCTURE_VALUE_SLOT, valueText(item, value));
+  /**
+   * **`String.replace`의 문자열 치환을 쓰지 않는다.** 그 함수는 치환 문자열 안의 `$$`·`$&`·
+   * `` $` ``·`$'`를 패턴으로 해석해서, 사람이 친 `a$$b`가 본문에는 `a$b`로 들어간다. 그러면
+   * 저장된 `value`와 `renderedText`가 서로 다른 말을 하고(값-문장 어긋남), 같은 서식이 서로 다른
+   * 값에서 같은 줄을 만들어 단사성도 깨진다. 자리를 직접 잘라 붙이면 그 해석이 아예 없다.
+   */
+  const template = String(item.template);
+  const at = template.indexOf(STRUCTURE_VALUE_SLOT);
+  if (at < 0) throw new StructureCatalogError(`서식 문장에 ${STRUCTURE_VALUE_SLOT}가 없습니다: ${item.code}`);
+  return template.slice(0, at) + valueText(item, value) + template.slice(at + STRUCTURE_VALUE_SLOT.length);
 }
 
 /**
@@ -189,6 +198,12 @@ export function renderItem(item: StructureItem, value: any): string {
  * **자리 앞뒤의 고정 문자열 쌍**이 서식 안에서 유일할 것을 요구한다. 후자는 필요조건이지
  * 충분조건이 아니다 — 자유 입력 값이 다른 항목의 문장을 통째로 흉내 내는 경우까지는 막지 못하며,
  * 그 경우의 답은 `presenceState`의 `ambiguous`다(거짓이 아니라 모른다고 말한다).
+ *
+ * **그래서 단사성(P12)은 부분이고, 완료가 아니다.** 제품 목록이 비어 있는 동안 이 구멍은 도달할
+ * 수 없다. 비어 있지 않은 제품 서식을 켜기 전에 (1) 항목 간 충돌을 충분히 막는 규칙, (2) 서버와
+ * 화면 **양쪽의 적재 시점 검증**, (3) 목록 전체에 대한 시험이 모두 선행해야 한다.
+ * 이 함수를 적재 시점에 부르는 곳은 아직 없다 — 목록이 비어 있어 부를 것이 없기 때문이고,
+ * 목록이 채워지는 변경이 그 호출을 함께 들여와야 한다.
  */
 export function validateCatalog(catalog: readonly StructureTemplate[]): void {
   const templateIds = new Set<string>();
