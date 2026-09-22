@@ -83,6 +83,10 @@ jobs:
         timeout-minutes: 5
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-cursor-insert-mutants --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_cursor_insert_dom_test.py --file tests/report_cursor_insert_mutants.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_cursor_insert_mutants.py --out tmp/workspace-ui-ci/report-cursor-insert-mutants/mutants.json
+      - name: S3-R14 recogniser-shaped text input parity, occupancy and structured refusals DOM
+        timeout-minutes: 3
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-dictation-input-dom --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-structure.js --file worklist-v0/hpacs-lite/report-citation.js --file tests/report_dictation_input_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_dictation_input_dom_test.py
       - name: S3-structured-report entry lifecycle, replace, guards, stale plan and empty catalog DOM
         timeout-minutes: 3
         run: |
