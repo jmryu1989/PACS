@@ -60,8 +60,16 @@ HOLD_STEPS = ["ㄱ", "가", "가ㄴ", "가나"]
 HOLD_COMMIT = "가나"
 STRUCT_VALUE = "경계가 뚜렷함"
 DICTATE_TITLE = "음성 인식기가 연결되지 않았습니다."
+# The shipped rule that finally displays the structured entry dialog. `openStructure()` has always
+# added the class `on` (main.html:3774) while the only display rule was `.modal.show`, so the window
+# never appeared. It is scoped to this one dialog: every other modal keeps the `show` convention.
+STRUCT_MODAL_RULE = "#structmodal.modal.on { display: flex; }"
 # report-structure.js:111-112 - the shipped refusal wording, not a paraphrase.
 MSG_ONE_LINE = "값은 한 줄이어야 합니다"
+# U+2028 LINE SEPARATOR, written as a code point so nobody has to see it to know it is there. An
+# <input type="text"> sanitises only CR and LF, so this one reaches the value and the shipped
+# `isSingleLine` (report-structure.js:121-129) is what has to refuse it.
+TWO_LINE_VALUE = "정상" + chr(0x2028) + "소견"
 MSG_TOO_LONG = "값이 512바이트를 넘습니다"
 # 170 Hangul = 510 UTF-8 bytes (accepted), 171 = 513 (refused). The limit is bytes, not UTF-16 units.
 ACCEPT_VALUE = "가" * 170
@@ -272,7 +280,8 @@ window.snapshot = () => ({
   draftbar: { shown: $("#draftbar").style.display !== "none", message: $("#draftmsg").textContent },
   struct: { line: $("#struct-line").textContent, status: $("#struct-status").textContent,
             place: $("#struct-place").textContent, disabled: $("#struct-apply").disabled,
-            shown: $("#structmodal").classList.contains("on") },
+            shown: $("#structmodal").classList.contains("on"),
+            display: getComputedStyle($("#structmodal")).display },
 });
 </script></body></html>"""
 
@@ -315,6 +324,32 @@ def markup_ids():
     return set(re.findall(r"""\sid=["']([A-Za-z0-9_-]+)["']""", page))
 
 
+def gate_complete():
+    """The gate is only satisfied when the composition coverage actually ran.
+
+    A skip is success to unittest, so without this the step would be green with nine composition
+    cases unexecuted - the exact silent pass this unit exists to prevent. The printed lines stay
+    what they were; this only makes the exit code agree with them."""
+    return SUMMARY["composition_source"] == "cdp" and not SUMMARY["skipped"]
+
+
+def gate_self_check():
+    """Exercise the fail-closed gate itself, with no browser. `gate_complete()` is the only thing
+    standing between a missing CDP transport and a green step, so it is checked, not assumed."""
+    saved = (SUMMARY["composition_source"], list(SUMMARY["skipped"]))
+    table = [("cdp", [], True), ("cdp", ["DI-01"], False), ("none", [], False), ("none", ["DI-01"], False),
+             ("unknown", [], False)]
+    problems = []
+    try:
+        for source, skipped, expected in table:
+            SUMMARY["composition_source"], SUMMARY["skipped"] = source, list(skipped)
+            if gate_complete() is not expected:
+                problems.append("gate_complete(%s, skipped=%s) must be %s" % (source, skipped, expected))
+    finally:
+        SUMMARY["composition_source"], SUMMARY["skipped"] = saved
+    return problems
+
+
 def static_report():
     """The pure half of DI-00 plus the pins that need no browser."""
     problems = []
@@ -336,6 +371,18 @@ def static_report():
         problems.append("the Dictate tooltip is not the disposed string")
     if 'id="b-dictate"' not in MAIN:
         problems.append("the Dictate button has no id")
+    # The rule that makes the structured entry dialog visible must be the PRODUCT's, and it must be
+    # inside the slice the harness lifts. A harness that injected it would pass a dialog the product
+    # cannot show - the false pass this whole file exists to avoid.
+    if MAIN.count(STRUCT_MODAL_RULE) != 1:
+        problems.append("the shipped %r rule is missing or duplicated" % STRUCT_MODAL_RULE)
+    if STRUCT_MODAL_RULE not in MODAL_CSS:
+        problems.append("the structured dialog rule is outside the MODAL_CSS slice the harness lifts")
+    if HARNESS.count(".modal.on") or HARNESS.count("display: flex"):
+        problems.append("the harness template must not carry a display rule of its own")
+    if harness({}).count(STRUCT_MODAL_RULE) != 1:
+        problems.append("the assembled page must carry exactly one copy of the shipped rule")
+    problems.extend(gate_self_check())
     source = Path(__file__).read_text(encoding="utf-8")
     # Split so this check does not match itself.
     if ("Composition" + "Event(") in source or ("new " + "CompositionEvent") in source:
@@ -397,6 +444,11 @@ class ReportDictationInputDOMTest(unittest.TestCase):
     def setUp(self):
         self.page = self.browser.new_page()
         self._cdp = None
+        # Not every case loads the harness: DI-00 is pure, and a skipped composition case stops
+        # before `open()`. `tearDown` still runs for both, so the start probe has to know whether
+        # there was ever anything to start - otherwise about:blank reports "HARNESS DID NOT START"
+        # and the suite can never go green even when the product is right.
+        self.opened = False
         self.errors = []
         self.page.on("pageerror", lambda e: self.errors.append(str(e)))
 
@@ -404,9 +456,11 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         # A harness that never started reports whatever it touched first; say so loudly instead.
         # The probe must be something assigned at the END of the script: function declarations
         # hoist, so a `typeof loadReport` probe stays true even if the script died half way.
-        started = self.page.evaluate("()=>typeof window.snapshot === 'function'")
+        started = self.opened and self.page.evaluate("()=>typeof window.snapshot === 'function'")
         self.page.close()
-        self.assertTrue(started, "HARNESS DID NOT START: %s" % self.errors[:2])
+        if self.opened:
+            self.assertTrue(started, "HARNESS DID NOT START: %s" % self.errors[:2])
+        # Unconditional: a page that was never loaded cannot raise, and one that was must not.
         self.assertEqual([], self.errors, "the product region raised in the browser")
 
     # ── helpers ────────────────────────────────────────────────────────────────────────────
@@ -441,6 +495,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
             row.update(body)
         state = {UID: row, OTHER: {"version": 0, "rs": "T"}}
         self.page.set_content(harness(state))
+        self.opened = True
         self.page.evaluate("citeReply(%s)" % json.dumps(citations or {"version": 1, "head": [], "draft": []}))
         self.page.evaluate("load({force:true})")
         self.page.wait_for_function("()=>citeCalls.length>=1")
@@ -462,9 +517,22 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         return [c for c in self.snap()["calls"] if c["method"] == "PUT"]
 
     def open_struct_finding(self):
-        self.page.evaluate("openStruct()")
-        self.page.wait_for_function("()=>$('#structmodal').classList.contains('on')")
+        """The real entry: the `Structured` button the product itself creates when the catalog is
+        not empty (main.html:3900-3908), then a dialog that is actually RENDERED.
+
+        A class is not a dialog. `openStructure()` adds `on`, and until this unit's CSS rule that
+        name had no display rule at all, so the window never appeared - a reader pressing
+        `Structured` saw nothing. Every step below therefore goes through a control Playwright has
+        to find visible and actionable; nothing here reaches into the page to bypass that."""
+        self.page.click("#b-structured")
+        self.page.wait_for_function(
+            "()=>{const m=$('#structmodal');"
+            "return m.classList.contains('on') && getComputedStyle(m).display === 'flex';}")
+        box = self.page.locator("#structmodal .box").bounding_box()
+        self.assertTrue(box and box["width"] > 0 and box["height"] > 0,
+                        "the structured entry dialog must occupy real space on screen")
         self.page.select_option("#struct-item", FINDING_KEY)
+        self.page.click("#struct-value-text")     # visible + editable, and it takes the focus
 
     # ── DI-00 ──────────────────────────────────────────────────────────────────────────────
     def test_di00_the_slices_the_call_sites_and_the_routing_this_file_stands_on(self):
@@ -483,6 +551,11 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.assertIn("HOLD_MIN_CHARS", HOLD_BLOCK)
         # N-B: refreshRight() is a non-force caller by default, so the poll is not the only one.
         self.assertIn("loadReport({ force: forceReport })", MAIN)
+        # The dialog is shown by the product's own rule, carried into the page by the CSS slice.
+        self.assertIn(STRUCT_MODAL_RULE, MODAL_CSS)
+        self.assertNotIn(".modal.on", HARNESS, "the harness may not invent a display rule")
+        self.assertIn('classList.add("on")', REPORT_BLOCK,
+                      "the rule has to name the class the shipped code actually adds")
 
     # ── DI-01 ──────────────────────────────────────────────────────────────────────────────
     def test_di01_a_committed_composition_lands_at_the_caret(self):
@@ -497,10 +570,14 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.assertTrue(value["marked"]["findings"], "the field was focused, so its position is known")
 
     # ── DI-02 ──────────────────────────────────────────────────────────────────────────────
-    def test_di02_key_events_a_composition_and_a_direct_commit_are_the_same_text(self):
-        """The three ways text reaches a field. `keyboard.insert_text` IS `Input.insertText`, so the
-        third way is the commit half without the composition - which is the point: the composition
-        path must end where the other two end."""
+    def test_di02_typed_without_an_ime_composed_and_directly_committed_are_the_same_text(self):
+        """Three ways text reaches a field, with the honest names.
+
+        `keyboard.type` of Hangul has no key definitions to send, so Playwright falls back to
+        per-character `Input.insertText`: path 1 is 'typed without an IME', not 'key events'.
+        `keyboard.insert_text` is the same CDP call in one chunk. So what this case really measures
+        is the **composition** path against direct insertion - which is the comparison that matters:
+        a composition must end exactly where plain insertion ends."""
         self.need_composition("DI-02")
         self.open(fields=("", "", ""))
         self.place("findings", 0)
@@ -655,6 +732,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         self.open_struct_finding()
         self.compose("#struct-value-text", ["ㄱ", "겨"], STRUCT_VALUE)
         pane = self.snap()["struct"]
+        self.assertEqual("flex", pane["display"], "the dialog the reader acts on must be rendered")
         self.assertEqual("Finding: " + STRUCT_VALUE, pane["line"])
         self.assertIn("2번째 줄부터 넣습니다", pane["place"],
                       "the caret sat inside line 1, so the line belongs on line 2")
@@ -687,8 +765,8 @@ class ReportDictationInputDOMTest(unittest.TestCase):
     def test_di11_a_value_that_is_not_one_line_is_refused(self):
         self.open()
         self.open_struct_finding()
-        self.page.fill("#struct-value-text", "정상 소견")
-        self.assertEqual("정상 소견", self.page.evaluate("()=>$('#struct-value-text').value"),
+        self.page.fill("#struct-value-text", TWO_LINE_VALUE)
+        self.assertEqual(TWO_LINE_VALUE, self.page.evaluate("()=>$('#struct-value-text').value"),
                          "the line separator has to reach the value for the rule to be tested")
         pane = self.snap()["struct"]
         self.assertEqual(MSG_ONE_LINE, pane["status"])
@@ -735,8 +813,15 @@ class ReportDictationInputDOMTest(unittest.TestCase):
 
 if __name__ == "__main__":
     if "--static-only" in sys.argv:
+        # A true static command: no browser, no summary, no gate - only the pure checks.
         problems, cases = static_report()
         print(json.dumps({"static_only": True, "cases": len(cases), "problems": problems,
                           "main": str(MAIN_PATH)}, ensure_ascii=False, indent=2))
         sys.exit(1 if problems else 0)
-    unittest.main(verbosity=2)
+    program = unittest.main(verbosity=2, exit=False)
+    passed = program.result.wasSuccessful()
+    complete = passed and gate_complete()
+    if not complete:
+        print("R14-GATE FAIL passed=%s composition_source=%s skipped=%s"
+              % (passed, SUMMARY["composition_source"], ",".join(SUMMARY["skipped"]) or "none"))
+    sys.exit(0 if complete else 1)
