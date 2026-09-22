@@ -1,5 +1,5 @@
 {
-  "_why": "One synthetic catalog and one set of render vectors, shared by the server-pure, client-pure, DOM and mutant tests so the two independent implementations of the render rule cannot drift. Pure ASCII and visibly synthetic: the product catalog ships EMPTY until the evaluating radiologist supplies the first exam and its fields (P6/D2), and nothing in here may ever be reachable from product code or HTTP (P7).",
+  "_why": "One synthetic catalog and one set of render vectors, shared by the server-pure, client-pure, DOM and mutant tests so the two independent implementations of the render rule cannot drift. Pure ASCII and visibly synthetic: the SYN- fixtures in this file are test-only and nothing in here may ever be reachable from product code or HTTP (P7). The product catalog is a different thing entirely - it is GEN-1, it lives in the two shipped modules, and it is pinned here only by the sha of its canonical JSON.",
   "catalog": [
     {
       "templateId": "SYN-T1",
@@ -183,8 +183,8 @@
       "why": "no control characters"
     }
   ],
-  "productCatalogSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-  "_productCatalogSha256_why": "sha256 of the canonical JSON (sorted keys, separators ',' and ':') of the PRODUCT catalog. T1 asserts it for the compiled STRUCTURE_CATALOG, T2 for PRODUCT_CATALOG - the two constants are compared as VALUES, neither reads the other's source, and neither test can see the other's file. It changes the day a real catalog ships, and that is the point: the change has to be made here, deliberately, in the same commit.",
+  "productCatalogSha256": "c787f0327da54b87edaf9d44e4e1f33242edc1e57a122073adfc93599a54195d",
+  "_productCatalogSha256_why": "sha256 of the canonical JSON (sorted keys, separators ',' and ':') of the PRODUCT catalog. T1 asserts it for the compiled STRUCTURE_CATALOG, T2 for PRODUCT_CATALOG - the two constants are compared as VALUES, neither reads the other's source, and neither test can see the other's file. It changed the day the first real catalog shipped (GEN-1 revision 1), and that is the point: the change has to be made here, deliberately, in the same commit. Both literals are read with a brace-matching scanner and parsed as strict JSON, so key order and indentation may differ between the two files and the VALUE may not.",
   "catalogVectors": [
     {
       "name": "accept: the shipped synthetic catalog",
@@ -1414,9 +1414,118 @@
           ]
         }
       ]
+    },
+    {
+      "name": "shape: the catalog itself is not an array",
+      "rule": "R-D",
+      "why": "`x ?? []` only turns null/undefined into an empty list. An object walked by for..of raised an untyped TypeError on the server and was silently skipped by the browser's index loop, so a malformed catalog looked legal on one side and killed the page script on the other.",
+      "catalog": {}
+    },
+    {
+      "name": "shape: items is not an array",
+      "rule": "R-D",
+      "why": "items: {} skipped the browser loop and left a LIVE form holding a template with no reachable item, while the server raised a TypeError with no rule name.",
+      "catalog": [
+        {
+          "templateId": "SYN-SHAPE-I",
+          "revision": 1,
+          "title": "SYNTHETIC SHAPE",
+          "items": {}
+        }
+      ]
+    },
+    {
+      "name": "shape: choices is an array-like object, not an array",
+      "rule": "R-D",
+      "why": "{length: 1, \"0\": {...}} is the shape that split the two implementations: for..of raised on the server, the browser's index loop walked it and accepted. Neither answer is a rule.",
+      "catalog": [
+        {
+          "templateId": "SYN-SHAPE-C",
+          "revision": 1,
+          "title": "SYNTHETIC SHAPE",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": {
+                "length": 1,
+                "0": {
+                  "code": "c0",
+                  "text": "alpha"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "accept: the same template with an empty items array",
+      "rule": "ACCEPT",
+      "why": "the partner of the items case: an ARRAY with nothing in it is legal, so the refusal above is about the container and not about emptiness.",
+      "catalog": [
+        {
+          "templateId": "SYN-SHAPE-I",
+          "revision": 1,
+          "title": "SYNTHETIC SHAPE",
+          "items": []
+        }
+      ]
+    },
+    {
+      "name": "accept: the same choice item with a real array",
+      "rule": "ACCEPT",
+      "why": "the partner of the choices case: identical item, identical single choice, carried in a real array.",
+      "catalog": [
+        {
+          "templateId": "SYN-SHAPE-C",
+          "revision": 1,
+          "title": "SYNTHETIC SHAPE",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": [
+                {
+                  "code": "c0",
+                  "text": "alpha"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "shape: choices is a bare number",
+      "rule": "R-D",
+      "why": "the partner shape that separates the THIRD rule from the other two: the browser and the server both reach R-D through `.length` being undefined, but the Python oracle without an isinstance check walks straight into a TypeError - an oracle that crashes cannot judge, and a judge that cannot judge is not a third opinion.",
+      "catalog": [
+        {
+          "templateId": "SYN-SHAPE-N",
+          "revision": 1,
+          "title": "SYNTHETIC SHAPE",
+          "items": [
+            {
+              "code": "A",
+              "field": "findings",
+              "valueType": "choice",
+              "template": "M: {value}",
+              "label": "A",
+              "choices": 5
+            }
+          ]
+        }
+      ]
     }
   ],
-  "_catalogVectors_why": "One catalog per case with the rule it must trip; ACCEPT means the whole catalog is legal. Check order is R-D, R-S, R-C, then pairs R-A before R-B, so a case names the FIRST rule it violates. Every rejection case has an accepted partner of the same shape, so a validator that simply refused everything would fail here. The Unicode cases carry literal code points (U+1100, U+1161, U+AC00, U+11A8, U+09C7, U+09BE, U+030A, U+00C5 and lone surrogates) rather than escapes, so every consumer sees the same string without re-decoding. The shape cases (null template, null item, null choice) and the bounds cases exist because a malformed catalog must be refused with a RULE on both sides: an untyped throw in the browser escapes create() and takes the whole page script down with it. A JSON file cannot express a sparse array hole, so that witness is built in the JS tests instead. Synthetic only: no clinical item, label, unit, range, vocabulary or sentence is authored here.",
+  "_catalogVectors_why": "One catalog per case with the rule it must trip; ACCEPT means the whole catalog is legal. Check order is R-D, R-S, R-C, then pairs R-A before R-B, so a case names the FIRST rule it violates. Every rejection case has an accepted partner of the same shape, so a validator that simply refused everything would fail here. The Unicode cases carry literal code points (U+1100, U+1161, U+AC00, U+11A8, U+09C7, U+09BE, U+030A, U+00C5 and lone surrogates) rather than escapes, so every consumer sees the same string without re-decoding. The shape cases (null template, null item, null choice) and the bounds cases exist because a malformed catalog must be refused with a RULE on both sides: an untyped throw in the browser escapes create() and takes the whole page script down with it. A JSON file cannot express a sparse array hole, so that witness is built in the JS tests instead. The container-shape cases (catalog, items and choices that are not arrays, including an array-LIKE object) each carry an accepted partner of the same shape, so they pin the container and not emptiness. Synthetic only: no clinical item, label, unit, range, vocabulary or sentence is authored here.",
   "entryVectors": [
     {
       "name": "R-S entry: Hangul L+V at the prefix boundary",

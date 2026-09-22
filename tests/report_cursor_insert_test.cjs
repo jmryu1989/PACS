@@ -420,20 +420,16 @@ test('TEST-S3-U6-WIRING: the screen asks the rule once, shows that answer, and s
       for (const hit of line.matchAll(/\$\("#([A-Za-z0-9_-]+)"\)/g)) wanted.add(hit[1]);
   assert.ok(wanted.size >= 20, 'the id scan found suspiciously little; re-pin it');
   /**
-   * One id in the region is reached only from inside `if (!structureForm.empty) { ... }`: the
-   * structured-entry button is CREATED there and inserted before `#b-print`. The product catalog
-   * ships empty, so that branch never runs and no page can die on it - but the scan above is
-   * textual and cannot see a guard, so the exemption is written out and tied to the two facts that
-   * make it true. Fill the catalog and this fails, which is exactly right: the U6 harness would
-   * then need that button on its page.
+   * `#b-print` used to be exempt from this scan: the structured-entry button is created inside
+   * `if (!structureForm.empty) { ... }` and inserted before it, and while the product catalog was
+   * empty that branch never ran. GEN-1 ships, so the branch RUNS - the exemption is gone and the
+   * harness page carries the element, which is what this scan is for. The guard itself stays
+   * asserted: an empty or refused catalog must still draw no control at all (P6).
    */
   const guardAt = structBlock.indexOf('if (!structureForm.empty) {');
-  assert.ok(guardAt >= 0, 'the structured button is created behind the empty-catalog guard');
+  assert.ok(guardAt >= 0, 'the structured button is still created behind the empty-catalog guard');
   assert.ok(structBlock.slice(guardAt).includes('$("#b-print").before(button);'),
     '#b-print is reached only from inside that guard');
-  assert.match(readFileSync(join(ROOT, 'worklist-v0/hpacs-lite/report-structure.js'), 'utf8'),
-    /PRODUCT_CATALOG = Object\.freeze\(\[\]\)/, 'the shipped catalog is empty, so that branch is dead');
-  const deadBranchOnly = new Set(['b-print']);
-  const missing = [...wanted].filter(id => !markup.includes(`id="${id}"`) && !deadBranchOnly.has(id));
+  const missing = [...wanted].filter(id => !markup.includes(`id="${id}"`));
   assert.deepEqual(missing, [], 'every element the sliced product region asks for must be on the page');
 });

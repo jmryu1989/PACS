@@ -167,7 +167,14 @@ def independent_catalog_rule(catalog):
     (R-A before R-B). Returns the first rule the catalog breaks, or ACCEPT."""
     seen_templates = set()
     flat = []
-    for template in catalog:
+    # The CONTAINER is part of the shape. Both shipped validators ask `x ?? []`, so only null and
+    # undefined mean "empty"; anything else that is not an array is R-D. Iterating a dict here would
+    # quietly walk its keys and call a malformed catalog legal, which is the one answer this third
+    # rule exists to make impossible.
+    templates = [] if catalog is None else catalog
+    if not isinstance(templates, list):
+        return "R-D"
+    for template in templates:
         # A catalog element that is not a mapping at all (null, a bare string) is a shape error, not
         # a crash: both shipped validators answer R-D for it, so this one has to as well.
         if not isinstance(template, dict):
@@ -182,7 +189,11 @@ def independent_catalog_rule(catalog):
         if not isinstance(template.get("title"), str) or not template["title"]:
             return "R-D"
         codes = set()
-        for item in template.get("items", []):
+        items = template.get("items")
+        items = [] if items is None else items
+        if not isinstance(items, list):
+            return "R-D"
+        for item in items:
             if not isinstance(item, dict):
                 return "R-D"
             code = item.get("code")
@@ -208,7 +219,13 @@ def independent_catalog_rule(catalog):
 
             kind = item["valueType"]
             if kind == "choice":
-                choices = item.get("choices") or []
+                choices = item.get("choices")
+                choices = [] if choices is None else choices
+                # An array-LIKE container ({"length": 1, "0": {...}}) is the shape that used to split
+                # the two implementations: the server's `for..of` raised, the browser's index loop
+                # walked it happily. Neither is a rule, so neither is right.
+                if not isinstance(choices, list):
+                    return "R-D"
                 if not choices:
                     return "R-D"
                 choice_codes = set()
@@ -282,6 +299,52 @@ def independent_catalog_rule(catalog):
             if not by_prefix and not by_suffix:
                 return "R-B"
     return "ACCEPT"
+
+
+SERVER_CATALOG_ANCHOR = "STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze("
+CLIENT_CATALOG_ANCHOR = "PRODUCT_CATALOG = Object.freeze("
+
+
+def literal_after(source, anchor):
+    """The array literal that follows `anchor`, brace-matched with string contents skipped.
+
+    A regex cannot do this once the catalog is not empty. `\\[[^\\]]*\\]` stops at the FIRST `]`, so a
+    nested `choices` array truncates the literal; and a depth count that does not skip string
+    contents goes wrong on the shipped templates, every one of which contains `{value}`. Escapes
+    matter too: `"\\""` closes nothing and `"\\\\"` does.
+
+    Returns the text only. The caller parses it with `json.loads`, which is why both shipped
+    literals have to be written in strict JSON: unquoted keys, a trailing comma or a comment fail
+    loudly here instead of being silently tolerated by one reader and not the other.
+    """
+    at = source.index(anchor)
+    start = source.index("[", at + len(anchor))
+    depth = 0
+    quote = False
+    escaped = False
+    for i in range(start, len(source)):
+        ch = source[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quote = False
+            continue
+        if ch == '"':
+            quote = True
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError("the literal after %r is never closed" % anchor)
+
+
+def shipped_catalog(source, anchor):
+    return json.loads(literal_after(source, anchor))
 
 
 def canonical_json(value):
@@ -359,18 +422,48 @@ class ReportStructureVectors(unittest.TestCase):
                 self.assertNotIn(key, skeletons)
                 skeletons.add(key)
 
-    def test_product_catalogs_are_empty_on_both_sides(self) -> None:
-        # P6: the product catalog ships EMPTY. This is the assertion that fails the day someone
-        # invents a clinical item to make a test runnable.
-        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
-                           SERVER)
-        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
-        self.assertIsNotNone(server, "server product catalog literal not found")
-        self.assertIsNotNone(client, "client product catalog literal not found")
-        self.assertEqual(json.loads(server.group(1)), [])
-        self.assertEqual(json.loads(client.group(1)), [])
-        self.assertEqual(json.dumps(json.loads(server.group(1)), sort_keys=True, separators=(",", ":")),
-                         json.dumps(json.loads(client.group(1)), sort_keys=True, separators=(",", ":")))
+    def test_the_two_shipped_catalogs_are_the_same_value(self) -> None:
+        """Both sides ship ONE catalog, compared as a VALUE and not as source text.
+
+        Key order, whitespace and indentation may differ between a TypeScript file and a browser
+        script; the catalog may not. This is the assertion that fails the day one side ships a
+        template the other has never heard of - including the day someone edits only one file.
+        """
+        server = shipped_catalog(SERVER, SERVER_CATALOG_ANCHOR)
+        client = shipped_catalog(CLIENT, CLIENT_CATALOG_ANCHOR)
+        self.assertIsInstance(server, list)
+        self.assertEqual(canonical_json(server), canonical_json(client))
+
+    def test_the_scanner_survives_the_shapes_a_regex_gets_wrong(self) -> None:
+        """The extractor is load bearing, so its decision points are exercised on purpose.
+
+        Every case below is one a naive reader answers differently: the first `]` heuristic, a depth
+        count that does not skip strings, and the two escape shapes. If the scanner ever loses one
+        of these, the tests above would silently compare a TRUNCATED catalog and pass.
+        """
+        cases = [
+            ("nested arrays", 'X = Object.freeze([{"a":[1,2]},{"b":[]}]);', [{"a": [1, 2]}, {"b": []}]),
+            ("a brace inside a string", 'X = Object.freeze([{"t":"Technique: {value}"}]);',
+             [{"t": "Technique: {value}"}]),
+            ("a bracket inside a string", 'X = Object.freeze([{"t":"a]b[c"}]);', [{"t": "a]b[c"}]),
+            ("an escaped quote", 'X = Object.freeze([{"t":"say \\" then ]"}]);', [{"t": 'say " then ]'}]),
+            ("a trailing escaped backslash", 'X = Object.freeze([{"t":"c:\\\\"},{"u":"]"}]);',
+             [{"t": "c:\\"}, {"u": "]"}]),
+            ("the empty catalog", 'X = Object.freeze([]);', []),
+            ("text after the literal", 'X = Object.freeze([{"a":1}]);\nlet later = [9, "]"];', [{"a": 1}]),
+        ]
+        for name, source, expected in cases:
+            with self.subTest(case=name):
+                self.assertEqual(json.loads(literal_after(source, "X = Object.freeze(")), expected)
+        # A literal that never closes must fail loudly rather than return a plausible prefix.
+        with self.assertRaises(AssertionError):
+            literal_after('X = Object.freeze([{"a":1}', "X = Object.freeze(")
+        # And strict JSON is the contract: the shapes a looser reader would tolerate are refused.
+        for bad in ('X = Object.freeze([{a:1}]);', 'X = Object.freeze([{"a":1},]);',
+                    'X = Object.freeze([{"a":1} /* note */]);'):
+            with self.subTest(case=bad):
+                with self.assertRaises(json.JSONDecodeError):
+                    json.loads(literal_after(bad, "X = Object.freeze("))
 
     def test_catalog_vectors_get_the_same_rule_from_an_independent_implementation(self) -> None:
         """The third rule over the whole catalog table.
@@ -445,32 +538,91 @@ class ReportStructureVectors(unittest.TestCase):
         this unit decides that. While `revision === 1` holds, the question is vacuous: there is no
         earlier revision for anything to collide with.
 
-        This is an INCOMPLETE tripwire and it is not a proof: it does not see an item-code rename or
-        an item removal inside revision 1, and those raise the same question. It fails on the first
-        revision bump, which is the moment the decision has to be made.
+        The revision number alone was an INCOMPLETE tripwire and said so: it cannot see an item-code
+        rename or an item removal INSIDE revision 1, and both retire a sentence exactly the way a
+        bump does. So the identities and the enumerable sentences are pinned here as well. Change
+        any of them and this fails, which is the moment the retired-revision decision has to be made.
         """
-        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
-                           SERVER)
-        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
-        for name, group in (("server", server), ("client", client)):
-            for template in json.loads(group.group(1)):
+        for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
+                                     ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
+            catalog = shipped_catalog(source, anchor)
+            for template in catalog:
                 with self.subTest(side=name, template=template.get("templateId")):
                     self.assertEqual(template.get("revision"), 1,
                                      "a revision bump needs an explicit disposition for the retired one first")
+            with self.subTest(side=name, what="identities"):
+                self.assertEqual(
+                    sorted((t["templateId"], i["code"]) for t in catalog for i in t["items"]),
+                    [("GEN-1", "COMPARISON"), ("GEN-1", "COMPARISON-STUDY"), ("GEN-1", "CONCLUSION"),
+                     ("GEN-1", "CONTRAST"), ("GEN-1", "FINDING"), ("GEN-1", "RECOMMENDATION"),
+                     ("GEN-1", "TECHNIQUE")],
+                    "renaming or removing an item retires its sentences just as a revision bump does")
+            with self.subTest(side=name, what="enumerable sentences"):
+                sentences = sorted(independent_render(item, value)
+                                   for template in catalog for item in template["items"]
+                                   for value in ([c["code"] for c in item.get("choices", [])]
+                                                 if item["valueType"] == "choice"
+                                                 else [True, False] if item["valueType"] == "boolean" else []))
+                self.assertEqual(sentences, [
+                    "Comparison: no prior study available",
+                    "Comparison: prior study reviewed",
+                    "Contrast: administered",
+                    "Contrast: not administered",
+                ], "an entry already signed under this wording can no longer be traced if the wording moves")
+
+    def test_the_shipped_catalog_is_legal_under_the_independent_rule(self) -> None:
+        """The judge that did not write either implementation, asked about the SHIPPED catalog.
+
+        Until GEN-1 this file could only judge synthetic vectors. Now the thing that actually boots
+        the API and draws the form is put in front of the third rule, on both sides.
+        """
+        for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
+                                     ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
+            with self.subTest(side=name):
+                self.assertEqual(independent_catalog_rule(shipped_catalog(source, anchor)), "ACCEPT")
+
+    def test_the_shipped_catalog_separates_its_items_by_prefix_inside_every_field(self) -> None:
+        """The whole cross-item argument for GEN-1, asserted as data.
+
+        Every template ends its literal prefix in `": "` and carries an EMPTY suffix, and the empty
+        string is a suffix of everything - so R-B has nothing to work with on the suffix side and
+        prefix disjointness is the entire proof. R-S (checked at load for enumerable values and per
+        request for typed ones) gives `key(line) = prefix + key(value)`; if two items of one field
+        ever produced the same key, one ASCII prefix would be a prefix of the other. So this
+        assertion IS the reason two different items cannot make the same sentence, for any value.
+
+        The bare-template rule is recorded with it: a template that is only `{value}` has an empty
+        prefix, the empty string is a prefix of everything, and such an item could only ever be the
+        SOLE item of its field - closing that field to every later item. GEN-1 uses none.
+        """
+        catalog = shipped_catalog(SERVER, SERVER_CATALOG_ANCHOR)
+        by_field = {}
+        for template in catalog:
+            for item in template["items"]:
+                prefix, suffix = item["template"].split(SLOT)
+                self.assertNotEqual(prefix, "", f"{item['code']} has a bare template; see the docstring")
+                self.assertEqual(suffix, "", f"{item['code']} grew a suffix; the argument below assumes none")
+                by_field.setdefault(item["field"], []).append((item["code"], prefix))
+        self.assertEqual(sorted(by_field), ["conclusion", "findings", "recommendation"],
+                         "every body field carries at least one item")
+        for field, items in by_field.items():
+            for i, (code_a, prefix_a) in enumerate(items):
+                for code_b, prefix_b in items[i + 1:]:
+                    with self.subTest(field=field, pair=(code_a, code_b)):
+                        self.assertFalse(prefix_a.startswith(prefix_b) or prefix_b.startswith(prefix_a),
+                                         f"{code_a} and {code_b} could make the same sentence in {field}")
 
     def test_the_pinned_product_sha_is_the_sha_of_both_shipped_literals(self) -> None:
         # B8. T1 asserts this hash against the compiled STRUCTURE_CATALOG and T2 against the browser
         # PRODUCT_CATALOG; neither can see the other. Here both literals are read from source, so
         # this file is what fails if one side ships a catalog and the other does not.
-        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
-                           SERVER)
-        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
         pinned = VECTORS["productCatalogSha256"]
         self.assertRegex(pinned, r"^[0-9a-f]{64}$")
-        for name, group in (("server", server), ("client", client)):
+        for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
+                                     ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
             with self.subTest(side=name):
                 digest = hashlib.sha256(
-                    canonical_json(json.loads(group.group(1))).encode("utf-8")).hexdigest()
+                    canonical_json(shipped_catalog(source, anchor)).encode("utf-8")).hexdigest()
                 self.assertEqual(digest, pinned, f"the {name} product catalog is not the pinned one")
 
     def test_no_synthetic_fixture_is_reachable_from_product_code(self) -> None:

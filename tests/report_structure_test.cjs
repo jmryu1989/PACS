@@ -117,15 +117,154 @@ const refusal = async (promise, status) => {
   return (answer && typeof answer === 'object') ? answer : { message: e.message };
 };
 
-/* ── the pure rules, as compiled ─────────────────────────────────────────────────────────── */
+/* ── the SHIPPED catalog, through the compiled server ────────────────────────────────────── */
 
-test('the shipped product catalog is empty and refuses every apply', async () => {
-  assert.deepEqual([...structure.STRUCTURE_CATALOG], []);
-  const { svc, writes } = fixture({ catalog: structure.STRUCTURE_CATALOG });
-  const answer = await refusal(svc.putReport(UID, { ...body(), structure: apply() }, CALLER), 400);
-  assert.match(String(answer.message), /서식을 찾을 수 없습니다/);
-  assert.deepEqual(writes, []);
+const SHIPPED = structure.STRUCTURE_CATALOG;
+const shippedItem = code => SHIPPED[0].items.find(i => i.code === code);
+const shippedApply = (code, value, over = {}) => {
+  const it = shippedItem(code);
+  return { op: 'apply', field: it.field, templateId: 'GEN-1', templateRevision: 1, itemCode: code,
+    valueType: it.valueType, value, renderedText: structure.renderItem(it, value), ...over };
+};
+
+test('the shipped catalog is GEN-1 revision 1 and every item renders its own sentence', () => {
+  /**
+   * First use. Until GEN-1 this constant was `[]`, so every apply was a 400 and none of the paths
+   * below had ever been reachable in the product. The sentences are written out rather than derived
+   * from the catalog - deriving them would only restate `renderItem`, and a wording change has to
+   * be read by a human, because a wording change retires every sentence already signed under it.
+   */
+  assert.equal(SHIPPED.length, 1);
+  assert.equal(SHIPPED[0].templateId, 'GEN-1');
+  assert.equal(SHIPPED[0].revision, 1);
+  assert.deepEqual(SHIPPED[0].items.map(i => [i.code, i.field, i.valueType]), [
+    ['TECHNIQUE', 'findings', 'text'],
+    ['CONTRAST', 'findings', 'boolean'],
+    ['COMPARISON', 'findings', 'choice'],
+    ['COMPARISON-STUDY', 'findings', 'text'],
+    ['FINDING', 'findings', 'text'],
+    ['CONCLUSION', 'conclusion', 'text'],
+    ['RECOMMENDATION', 'recommendation', 'text'],
+  ]);
+  assert.equal(structure.renderItem(shippedItem('CONTRAST'), true), 'Contrast: administered');
+  assert.equal(structure.renderItem(shippedItem('CONTRAST'), false), 'Contrast: not administered');
+  assert.equal(structure.renderItem(shippedItem('COMPARISON'), 'none'), 'Comparison: no prior study available');
+  assert.equal(structure.renderItem(shippedItem('COMPARISON'), 'prior'), 'Comparison: prior study reviewed');
+  assert.equal(structure.renderItem(shippedItem('FINDING'), 'a line'), 'Finding: a line');
+  assert.equal(structure.renderItem(shippedItem('CONCLUSION'), 'a line'), 'Conclusion: a line');
+  assert.equal(structure.renderItem(shippedItem('RECOMMENDATION'), 'a line'), 'Recommendation: a line');
+  // The catalog proposes no value of its own for the free-text items: every word is the reader's.
+  for (const it of SHIPPED[0].items)
+    if (it.valueType === 'text')
+      assert.equal(it.choices === undefined && it.trueText === undefined, true, `${it.code} carries wording`);
 });
+
+test('every shipped item is accepted by the reader, in its own field', async () => {
+  // Including conclusion and recommendation: the server is field-generic (`content[input.field]`),
+  // and R15's first-use workflow needs a coded line in all three body fields, not only findings.
+  const cases = [['TECHNIQUE', 'axial CT'], ['CONTRAST', true], ['CONTRAST', false],
+    ['COMPARISON', 'none'], ['COMPARISON', 'prior'], ['COMPARISON-STUDY', 'CT 2025-03-11'],
+    ['FINDING', 'a line the reader typed'], ['CONCLUSION', 'a line the reader typed'],
+    ['RECOMMENDATION', 'a line the reader typed']];
+  for (const [code, value] of cases) {
+    const send = shippedApply(code, value);
+    const read = structure.structureApplyInput(send, SHIPPED);
+    assert.equal(read.value, value, `${code}: the value is stored exactly as given`);
+    assert.equal(read.renderedText, send.renderedText, `${code}: and so is the sentence`);
+    assert.equal(read.field, shippedItem(code).field);
+    // and it reaches the draft write, in its own field, through the real service
+    const content = { findings: '', conclusion: '', recommendation: '', baseVersion: 4 };
+    content[read.field] = send.renderedText;
+    const { svc, created } = fixture({ catalog: SHIPPED });
+    await svc.putReport(UID, { ...content, structure: send }, CALLER);
+    const [entry] = created.find(c => c.call === 'draft').update.structured;
+    assert.equal(entry.itemCode, code);
+    assert.equal(entry.templateId, 'GEN-1');
+    assert.equal(entry.value, value);
+    assert.equal(entry.renderedText, send.renderedText);
+    assert.match(entry.sid, UUID);
+  }
+});
+
+test('the shipped catalog refuses a stale revision, an unknown item, a wrong field and a re-worded sentence', () => {
+  const cases = [
+    [shippedApply('FINDING', 'x', { templateRevision: 2 }), /서식이 그 사이 바뀌었습니다/],
+    [shippedApply('FINDING', 'x', { templateId: 'GEN-2' }), /서식을 찾을 수 없습니다/],
+    [shippedApply('FINDING', 'x', { itemCode: 'IMPRESSION' }), /항목을 찾을 수 없습니다/],
+    [shippedApply('FINDING', 'x', { field: 'conclusion' }), /들어갈 칸이 아닙니다/],
+    [shippedApply('CONTRAST', true, { valueType: 'text' }), /valueType이 서식과 다릅니다/],
+    [shippedApply('FINDING', 'x', { renderedText: 'Finding: x (edited)' }), /서식이 만드는 문장과 다릅니다/],
+    // Built from a legal apply with the value swapped: rendering 'invented' would throw while the
+    // case table was being built, before assert.throws could see it.
+    [{ ...shippedApply('COMPARISON', 'none'), value: 'invented' }, /choice 값이 서식의 선택지에 없습니다/],
+  ];
+  for (const [send, pattern] of cases)
+    assert.throws(() => structure.structureApplyInput(send, SHIPPED), pattern, JSON.stringify(send.itemCode));
+});
+
+test('the shipped limits refuse at the byte: the sentence, NUL and a lone surrogate', () => {
+  /**
+   * The three shapes the page does not stop, pinned where they ARE stopped.
+   *
+   * The browser measures the VALUE; the server measures the value and the rendered LINE. So a
+   * 512-byte value under a 9-byte prefix is legal on the page and refused here - the named narrow
+   * band of this unit, which is not closed by loosening either side. NUL never leaves the page
+   * (it is below U+0020), but a lone surrogate does, and `storable()` is the only thing that stops
+   * it before `jsonb` turns it into a 500.
+   */
+  const finding = shippedItem('FINDING');
+  assert.equal(structure.utf8Bytes(structure.renderItem(finding, 'x'.repeat(512))), 521);
+  assert.throws(() => structure.structureApplyInput(shippedApply('FINDING', 'x'.repeat(512)), SHIPPED),
+    /문장이 512바이트를 넘습니다/, 'the value fits and the sentence does not');
+  assert.equal(structure.validateValue(finding, 'x'.repeat(503)), 'x'.repeat(503));
+  assert.throws(() => structure.validateValue(finding, '가'.repeat(171)), /512바이트를 넘습니다/);
+  // From the code point: a raw NUL is invisible in a source file and turns it binary to git.
+  assert.throws(() => structure.validateValue(finding, 'a' + String.fromCharCode(0) + 'b'),
+    /한 줄이어야 합니다/);
+  assert.throws(() => structure.validateValue(finding, 'a' + String.fromCharCode(0xd800) + 'b'),
+    /잘못된 문자 인코딩입니다/, 'the page lets this through; this is where it stops');
+});
+
+test('a shipped sentence moved by hand into another field is dropped at commit', async () => {
+  /**
+   * Cross-field. `commitStructureSelection` judges `content[entry.field]` and nothing else, so a
+   * line the reader cut out of Findings and pasted into Conclusion is NOT the entry's sentence any
+   * more - the entry goes, the words stay. The mirror case matters as much: the same sentence
+   * typed independently in another field does not make the entry ambiguous, because the presence
+   * count is keyed by field.
+   */
+  const line = 'Finding: a line the reader typed';
+  const entry = stored({ sid: 's-cross', templateId: 'GEN-1', templateRevision: 1, itemCode: 'FINDING',
+    valueType: 'text', value: 'a line the reader typed', renderedText: line });
+  const moved = structure.commitStructureSelection([entry],
+    { findings: '', conclusion: line, recommendation: '' }, false, false);
+  assert.deepEqual(moved.entries, []);
+  assert.deepEqual(moved.dropped, ['s-cross']);
+  const kept = structure.commitStructureSelection([entry],
+    { findings: line, conclusion: line, recommendation: '' }, false, false);
+  assert.deepEqual(kept.entries.map(e => e.sid), ['s-cross']);
+  assert.deepEqual(structure.structureSameTextCounts([entry,
+    { ...entry, sid: 's-other', field: 'conclusion' }]), [1, 1],
+    'the same words in another field are another field, not a second candidate');
+});
+
+test('the shipped catalog survives a full save: the value reaches the signed row, the audit names no words', async () => {
+  const line = 'Conclusion: a line the reader typed';
+  const entry = stored({ sid: 's-conc', templateId: 'GEN-1', templateRevision: 1, itemCode: 'CONCLUSION',
+    field: 'conclusion', valueType: 'text', value: 'a line the reader typed', renderedText: line });
+  const { svc, created, audits } = fixture({ catalog: SHIPPED, draft: { structured: [entry] } });
+  await svc.commitReport(UID, { action: 'save', baseVersion: 4, findings: '', conclusion: line,
+    recommendation: '', structureIds: ['s-conc'] }, CALLER);
+  const version = created.find(c => c.call === 'version');
+  assert.deepEqual(version.data.structured.map(e => [e.itemCode, e.value]),
+    [['CONCLUSION', 'a line the reader typed']], 'the typed value is on the signed row');
+  const detail = JSON.parse(audits.find(a => String(a.action).startsWith('report.save')).detail);
+  assert.equal(detail.strs.n, 1);
+  assert.equal(String(audits.find(a => String(a.action).startsWith('report.save')).detail).includes(line), false,
+    'the audit carries counts and sids, never the sentence');
+});
+
+/* ── the pure rules, as compiled ─────────────────────────────────────────────────────────── */
 
 test('renderItem reproduces every shared vector byte for byte', () => {
   for (const vector of vectors.render)
@@ -342,11 +481,22 @@ test('the injection seam validates BEFORE it replaces, so a refused catalog chan
     && v.catalog.length === 1 && v.catalog[0].templateId !== TEMPLATE.templateId);
   svc.structureCatalog = good.catalog;
   assert.deepEqual([...svc.structureCatalog], [...good.catalog], 'a valid catalog does replace it');
-  // and the product instance, untouched, is still the empty constant.
+  /**
+   * And a fresh product instance still holds the catalog the MODULE ships - not the synthetic one
+   * this test injected into `svc`. That is the half of "a valid catalog does replace it" that says
+   * *only that instance*: if the setter wrote to anything shared, `good.catalog` would show up
+   * here and this comparison would fail.
+   *
+   * Compared against `structure.STRUCTURE_CATALOG` itself rather than against a literal. A literal
+   * went stale the day GEN-1 shipped and would go stale again at every revision; and a mere
+   * "non-empty" check would pass even while an injected catalog leaked across instances. What the
+   * shipped constant actually IS stays pinned independently, by canonical hash, in the next test.
+   */
   const untouched = new PacsService({}, {}, { usersInGroupWithRole: async () => [] },
     { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() },
     { readableFindings: async () => [] });
-  assert.deepEqual([...untouched.structureCatalog], []);
+  assert.deepEqual([...untouched.structureCatalog], [...structure.STRUCTURE_CATALOG],
+    'an untouched instance must still hold the shipped catalog, not an injected one');
 });
 
 test('the compiled product catalog is byte-for-byte the pinned canonical JSON', () => {
@@ -366,7 +516,9 @@ test('the compiled product catalog is byte-for-byte the pinned canonical JSON', 
   const sha = crypto.createHash('sha256')
     .update(canonical([...structure.STRUCTURE_CATALOG]), 'utf8').digest('hex');
   assert.equal(sha, vectors.productCatalogSha256, 'STRUCTURE_CATALOG is not the pinned catalog');
-  assert.equal(canonical([]), '[]', 'and the canonical form of "empty" is what it looks like');
+  // Key order and indentation may differ between the TypeScript file and the browser script; the
+  // canonical form is what both sides are compared as, so it may not depend on either.
+  assert.equal(canonical([{ b: 1, a: [2, {}] }]), '[{"a":[2,{}],"b":1}]');
 });
 
 /* ── the draft write ─────────────────────────────────────────────────────────────────────── */

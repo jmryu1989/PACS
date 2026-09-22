@@ -3093,6 +3093,217 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertIn('for (const id of ["#b-save", "#b-transcribe", "#b-approve"])', page)
             self.assertIn("승인된 판독문은 추가기재(Addendum) 또는 판독 취소(Reset)로만 바꿀 수 있습니다", page)
 
+    # ── R15 구조화 판독 본문: 실스택 첫 사용 ────────────────────────────────────────────────
+    #
+    # GEN-1 revision 1이 출하되기 전까지 제품 서식 목록은 빈 배열이었고 `structureApplyInput`은
+    # 모든 적용을 400으로 거절했다. 그래서 초안 쓰기·두 CHECK·확정 이월·전용 읽기는 **제품에서
+    # 한 번도 닿을 수 없었다.** 나머지는 전부 가짜 DB 위에서 단언한다
+    # (`tests/report_structure_test.cjs`); 실제 PostgreSQL과 실제 트랜잭션과 실제 jsonb 칸이
+    # 답하는 자리는 아래 두 건뿐이다.
+    #
+    # 관찰 지점은 `GET /studies/:uid/report/structure`다. `report/versions`는 칸을 명시해
+    # `structured`를 빼고 있고(P15) 이 단위는 그 응답 스키마를 넓히지 않는다.
+
+    STRUCT_TEMPLATE = "GEN-1"
+    STRUCT_REVISION = 1
+
+    def apply_structure(self, fixture: Fixture, user: str, content: dict[str, str],
+                        item: str, field: str, value_type: str, value: Any, rendered: str,
+                        base_version: int = 0, keep: list[str] | None = None) -> str:
+        """구조화 한 건을 적용하는 PUT 하나. 돌려주는 것은 서버가 만든 `sid`다.
+
+        화면이 보내는 것과 같은 모양이다: 본문 세 칸을 통째로 싣고, 그 칸에 문장이 줄 블록으로
+        이미 들어 있는 상태에서 `structure`를 함께 보낸다. 서버는 본문을 쓰지 않고 대조만 한다.
+        """
+        body: dict[str, Any] = {
+            "findings": content.get("findings", ""),
+            "conclusion": content.get("conclusion", ""),
+            "recommendation": content.get("recommendation", ""),
+            "baseVersion": base_version,
+            "structure": {
+                "op": "apply", "field": field,
+                "templateId": self.STRUCT_TEMPLATE, "templateRevision": self.STRUCT_REVISION,
+                "itemCode": item, "valueType": value_type, "value": value, "renderedText": rendered,
+            },
+        }
+        if keep is not None:
+            body["structureIds"] = keep
+        result = self.stack.request("PUT", f"/studies/{quote(fixture.uid)}/report", user, body)
+        self.assert_status(result, 200)
+        applied = result.body.get("structured")
+        self.assertIsInstance(applied, dict, "적용 응답에 sid가 없습니다: " + result.text)
+        self.assertEqual(applied["field"], field)
+        self.assertRegex(applied["sid"], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        return applied["sid"]
+
+    def structure_read(self, fixture: Fixture, user: str) -> dict[str, Any]:
+        result = self.stack.request("GET", f"/studies/{quote(fixture.uid)}/report/structure", user)
+        self.assert_status(result, 200)
+        self.assertFalse(result.body["unknown"], "저장된 건의 모양이 깨졌습니다: " + result.text)
+        return result.body
+
+    def test_shipped_structured_entries_survive_a_save_on_the_real_stack(self) -> None:
+        """L-1. 행정 항목과 판독의가 직접 친 항목이 함께 초안→저장→재열람을 지난다.
+
+        세 항목을 쓴다. `CONTRAST`는 이 서식에서 **기계가 읽을 수 있는 값**을 가진 유일한 종류
+        (boolean)이고, `TECHNIQUE`는 같은 행정 계열의 자유 입력이며, `CONCLUSION`은 판독의가
+        자기 문장을 직접 치는 칸이다. 세 항목이 두 개의 본문 칸에 걸쳐 있어, 칸별로 도는 존재
+        판정과 확정 이월이 한 칸에서만 맞는 것이 아님을 함께 본다.
+        """
+        contrast_line = "Contrast: administered"
+        technique_line = "Technique: synthetic acquisition, axial"
+        conclusion_value = "synthetic conclusion line typed by the reader"
+        conclusion_line = "Conclusion: " + conclusion_value
+        findings_body = contrast_line + "\n" + technique_line
+        with self.stack.fixture() as fixture:
+            path = f"/studies/{quote(fixture.uid)}"
+            # ① 타입 있는 행정 항목. boolean 값은 문자열이 아니라 true로 저장돼야 한다.
+            contrast_sid = self.apply_structure(
+                fixture, "doctor", {"findings": contrast_line},
+                "CONTRAST", "findings", "boolean", True, contrast_line)
+            # ② 같은 칸의 두 번째 행정 항목. 유지 목록을 실어 보내 ①이 살아남는지 함께 본다.
+            technique_sid = self.apply_structure(
+                fixture, "doctor", {"findings": findings_body},
+                "TECHNIQUE", "findings", "text", "synthetic acquisition, axial", technique_line,
+                keep=[contrast_sid])
+            # ③ 판독의가 직접 친 항목. 다른 칸이다.
+            conclusion_sid = self.apply_structure(
+                fixture, "doctor", {"findings": findings_body, "conclusion": conclusion_line},
+                "CONCLUSION", "conclusion", "text", conclusion_value, conclusion_line,
+                keep=[contrast_sid, technique_sid])
+            self.assertEqual(len({contrast_sid, technique_sid, conclusion_sid}), 3, "sid가 겹쳤습니다")
+
+            # 초안 자동 저장: 본문은 초안 행에 그대로 남아 있고, 세 건도 함께 남아 있다.
+            drafted = self.state(fixture, "doctor")
+            self.assertIsNotNone(drafted)
+            self.assertEqual(drafted["draft"]["findings"], findings_body)
+            self.assertEqual(drafted["draft"]["conclusion"], conclusion_line)
+            mine = self.structure_read(fixture, "doctor")
+            self.assertEqual([row["sid"] for row in mine["draft"]],
+                             [contrast_sid, technique_sid, conclusion_sid])
+            self.assertEqual(mine["head"], [], "저장 전에는 머리 판에 아무것도 없다")
+            for row in mine["draft"]:
+                self.assertEqual(row["state"], "present", row["itemCode"])
+
+            # 소유 경계: 같은 기관의 다른 판독의는 **내 초안 건을 보지 못한다**(키는 uid+author).
+            other = self.structure_read(fixture, "doctor2")
+            self.assertEqual(other["draft"], [], "남의 초안 구조화 건이 응답에 실렸습니다")
+            self.assertEqual(other["head"], [])
+            self.assertFalse(self.stack.request("GET", path + "/report/structure", "doctor2")
+                             .contains(conclusion_value), "남의 초안 값이 새어 나갔습니다")
+            # 기관 경계: 다른 기관에는 검사 자체가 없다.
+            self.assert_status(self.stack.request("GET", path + "/report/structure", "kdoctor"), 404)
+
+            # ④ 저장. 세 문장이 모두 확정될 본문에 있으므로 P1이 세 건을 그대로 싣는다.
+            saved = self.commit(fixture, "doctor", "save", 0,
+                                findings=findings_body, conclusion=conclusion_line, recommendation="",
+                                structureIds=[contrast_sid, technique_sid, conclusion_sid])
+            self.assert_status(saved, 201)
+            self.assertEqual(saved.body["version"], 1)
+
+            # ⑤ 재열람. 확정은 내 초안 행을 지우므로, 이 읽기가 없으면 화면은 값을 잃는다.
+            reopened = self.structure_read(fixture, "doctor")
+            self.assertEqual(reopened["version"], 1)
+            self.assertEqual(reopened["draft"], [], "확정은 내 초안 행을 지운다")
+            by_code = {row["itemCode"]: row for row in reopened["head"]}
+            self.assertEqual(sorted(by_code), ["CONCLUSION", "CONTRAST", "TECHNIQUE"])
+            expected = {
+                "CONTRAST": ("findings", True, contrast_line),
+                "TECHNIQUE": ("findings", "synthetic acquisition, axial", technique_line),
+                "CONCLUSION": ("conclusion", conclusion_value, conclusion_line),
+            }
+            for code, (field, value, rendered) in expected.items():
+                row = by_code[code]
+                with self.subTest(item=code):
+                    self.assertEqual(row["templateId"], self.STRUCT_TEMPLATE)
+                    self.assertEqual(row["templateRevision"], self.STRUCT_REVISION)
+                    self.assertEqual(row["field"], field)
+                    # 값은 받은 그대로다 — boolean은 문자열 "True"가 아니라 true여야 한다.
+                    self.assertIs(type(row["value"]), type(value), code)
+                    self.assertEqual(row["value"], value)
+                    # 읽히는 글자는 그 값이 만든 그 문장이다.
+                    self.assertEqual(row["renderedText"], rendered)
+                    self.assertEqual(row["state"], "present")
+                    self.assertEqual(row["sameTextCount"], 1)
+            self.assertEqual({by_code[code]["sid"] for code in by_code},
+                             {contrast_sid, technique_sid, conclusion_sid})
+            # 확정본 본문도 그대로다.
+            signed = self.report_state(fixture, "doctor")
+            self.assertEqual((signed["findings"], signed["conclusion"]), (findings_body, conclusion_line))
+
+            # ⑥ 초안 비우기는 **서명된 증언을 건드리지 않는다**. 새 초안을 하나 만들고 지운다.
+            self.assert_status(self.stack.request("PUT", path + "/report", "doctor", {
+                "findings": findings_body + "\nhand typed free text that no item owns",
+                "conclusion": conclusion_line, "recommendation": "", "baseVersion": 1}), 200)
+            self.assertIsNotNone(self.state(fixture, "doctor")["draft"])
+            cleared = self.stack.request("PUT", path + "/report", "doctor", {})
+            self.assert_status(cleared, 200)
+            self.assertTrue(cleared.body.get("cleared"))
+            self.assertIsNone(self.state(fixture, "doctor")["draft"], "초안 행이 남았습니다")
+            after_clear = self.structure_read(fixture, "doctor")
+            self.assertEqual({row["sid"] for row in after_clear["head"]},
+                             {contrast_sid, technique_sid, conclusion_sid},
+                             "초안을 비웠더니 서명된 구조화 증언까지 사라졌습니다")
+            self.assertEqual(after_clear["draft"], [])
+
+    def test_a_structured_sentence_edited_away_is_dropped_and_named_only_by_sid(self) -> None:
+        """L-2. 기계가 읽는 값은 그 값을 쓴 글자보다 오래 살지 못한다 (P1).
+
+        두 건을 저장한 뒤 한 건의 문장만 손으로 지우고 다시 저장한다. 떨어진 건은 감사에
+        **sid로만** 남아야 하고, 남은 건과 사람이 직접 친 자유문은 그대로 살아 있어야 한다.
+        """
+        finding_value = "synthetic finding line typed by the reader"
+        finding_line = "Finding: " + finding_value
+        conclusion_value = "synthetic conclusion line typed by the reader"
+        conclusion_line = "Conclusion: " + conclusion_value
+        free_text = "hand typed free text that no item owns"
+        with self.stack.fixture() as fixture:
+            finding_sid = self.apply_structure(
+                fixture, "doctor", {"findings": finding_line},
+                "FINDING", "findings", "text", finding_value, finding_line)
+            conclusion_sid = self.apply_structure(
+                fixture, "doctor",
+                {"findings": finding_line + "\n" + free_text, "conclusion": conclusion_line},
+                "CONCLUSION", "conclusion", "text", conclusion_value, conclusion_line,
+                keep=[finding_sid])
+            first = self.commit(fixture, "doctor", "save", 0,
+                                findings=finding_line + "\n" + free_text, conclusion=conclusion_line,
+                                recommendation="", structureIds=[finding_sid, conclusion_sid])
+            self.assert_status(first, 201)
+            self.assertEqual({row["sid"] for row in self.structure_read(fixture, "doctor")["head"]},
+                             {finding_sid, conclusion_sid})
+
+            # 손으로 `Finding:` 줄만 지운다. 자유문과 Conclusion 칸은 그대로 둔다.
+            second = self.commit(fixture, "doctor", "save", first.body["version"],
+                                 findings=free_text, conclusion=conclusion_line, recommendation="")
+            self.assert_status(second, 201)
+            after = self.structure_read(fixture, "doctor")
+            self.assertEqual([row["sid"] for row in after["head"]], [conclusion_sid],
+                             "본문을 떠난 문장의 값이 서명된 판에 남았습니다")
+            kept = after["head"][0]
+            self.assertEqual((kept["itemCode"], kept["value"], kept["renderedText"], kept["state"]),
+                             ("CONCLUSION", conclusion_value, conclusion_line, "present"))
+            self.assertEqual(after["draft"], [])
+            # 사람이 친 자유문은 한 글자도 다치지 않는다.
+            body = self.report_state(fixture, "doctor")
+            self.assertEqual((body["findings"], body["conclusion"]), (free_text, conclusion_line))
+
+            # 감사: 떨어진 sid는 이름이 남고, 값도 문장도 항목 코드도 남지 않는다.
+            rows = self.audit_rows(fixture)
+            saves = [json.loads(row["detail"]) for row in rows if row["action"] == "report.save"]
+            self.assertEqual(len(saves), 2, "저장 감사 두 건이 있어야 합니다")
+            dropped = [detail for detail in saves if detail.get("strs", {}).get("dropped")]
+            self.assertEqual(len(dropped), 1, "떨어진 건을 말한 감사가 정확히 하나여야 합니다")
+            self.assertEqual(dropped[0]["strs"]["dropped"], [finding_sid])
+            self.assertEqual(dropped[0]["strs"]["n"], 1, "남은 건 수도 함께 적힌다")
+            carried = [detail for detail in saves if detail is not dropped[0]][0]
+            self.assertEqual(carried["strs"]["n"], 2)
+            self.assertNotIn("dropped", carried["strs"], "떨어진 것이 없으면 그 칸은 없다")
+            dump = json.dumps(rows, ensure_ascii=False)
+            for leaked in (finding_value, finding_line, conclusion_value, conclusion_line,
+                           free_text, "FINDING", "CONCLUSION"):
+                self.assertNotIn(leaked, dump, "감사로그에 판독문 내용이 들어갔습니다: " + leaked)
+
     def test_uid_routes_404_without_study_state_row(self) -> None:
         doctor_id = self.stack.user_ids["doctor"]
         with self.stack.fixture() as fixture:

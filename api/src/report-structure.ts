@@ -55,14 +55,91 @@ export interface StructureTemplate {
 }
 
 /**
- * **제품 서식 목록은 비어 있다** (P6·D2).
+ * 제품 서식 목록 — 검사에 매이지 않는 첫 서식 `GEN-1` (R15).
  *
- * 어느 검사의 어떤 항목을 구조화할지는 사용자(평가 판독의)만 답할 수 있다. 구현자가 임상
- * 항목·라벨·단위·범위·문장을 지어내면 그것은 요구를 충족한 것이 아니라 **지어낸 임상 내용**이다.
- * 그래서 이 단위는 기반만 만들고 목록은 빈 채로 나간다. 목록이 비면 화면은 단추를 **아예 그리지
- * 않고**(비활성이 아니라) 서버는 모든 적용을 400으로 거절한다. 답이 오면 이 상수만 채운다.
+ * **지어낸 임상 내용이 아니다.** 여기에는 소견도, 정상 문구도, 질환 어휘도, 기준값도 없다.
+ * 네 항목은 검사를 **어떻게 찍었고 무엇과 비교했는가**라는 절차적 사실이고, 나머지 세 항목은
+ * 판독의가 **자기 문장을 직접 치는 빈 칸**이다 — 서식이 주는 것은 글자가 아니라 앞머리와
+ * 항목의 신원뿐이다. 제품이 판단을 만들거나 미리 정해둔 진단 어휘를 고르게 하는 일은 없다
+ * (AGENTS §1-A.7이 막는 것이 바로 그것이다).
+ *
+ * 리터럴은 **strict JSON**으로 쓴다. 따옴표 없는 키·꼬리 쉼표·주석은 목록을 값으로 꺼내 두 벌을
+ * 대조하는 시험(`report_structure_vectors_test.py`)에서 소리내어 실패해야 한다.
+ *
+ * 한 글자라도 바꾸면 `revision`이 올라가고, 그 순간 **은퇴한 판과의 충돌 안전**이라는 이름 붙은
+ * 보류가 살아난다. 첫 채움은 그 질문이 공허해서(빈 목록으로는 어떤 건도 기록될 수 없었다)
+ * 지나갈 수 있지만, 두 번째 변경은 그 처분이 먼저다.
  */
-export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([]);
+export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([
+  {
+    "templateId": "GEN-1",
+    "revision": 1,
+    "title": "General Report",
+    "items": [
+      {
+        "code": "TECHNIQUE",
+        "field": "findings",
+        "valueType": "text",
+        "label": "Technique",
+        "template": "Technique: {value}"
+      },
+      {
+        "code": "CONTRAST",
+        "field": "findings",
+        "valueType": "boolean",
+        "label": "Contrast",
+        "template": "Contrast: {value}",
+        "trueText": "administered",
+        "falseText": "not administered"
+      },
+      {
+        "code": "COMPARISON",
+        "field": "findings",
+        "valueType": "choice",
+        "label": "Comparison",
+        "template": "Comparison: {value}",
+        "choices": [
+          {
+            "code": "none",
+            "text": "no prior study available"
+          },
+          {
+            "code": "prior",
+            "text": "prior study reviewed"
+          }
+        ]
+      },
+      {
+        "code": "COMPARISON-STUDY",
+        "field": "findings",
+        "valueType": "text",
+        "label": "Comparison study",
+        "template": "Comparison study: {value}"
+      },
+      {
+        "code": "FINDING",
+        "field": "findings",
+        "valueType": "text",
+        "label": "Finding",
+        "template": "Finding: {value}"
+      },
+      {
+        "code": "CONCLUSION",
+        "field": "conclusion",
+        "valueType": "text",
+        "label": "Conclusion",
+        "template": "Conclusion: {value}"
+      },
+      {
+        "code": "RECOMMENDATION",
+        "field": "recommendation",
+        "valueType": "text",
+        "label": "Recommendation",
+        "template": "Recommendation: {value}"
+      }
+    ]
+  }
+]);
 
 /** 모양이 틀린 요청. 호출자가 400으로 옮긴다. */
 export class StructureInputError extends Error {}
@@ -96,6 +173,21 @@ export interface ReportStructureApply {
 
 const isPlainString = (value: any) => typeof value === 'string';
 const isIndex = (value: any) => Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * 담는 그릇도 규칙으로 거절한다 (P12 D1).
+ *
+ * `x ?? []`는 `null`·`undefined`만 빈 배열로 바꾼다. `items: {}`처럼 **배열이 아닌 그릇**은 그대로
+ * `for..of`에 들어가 규칙 이름 없는 `TypeError`가 되는데, 그러면 시험은 "무언가 던졌다"만 알고
+ * **무엇을 어겼는지** 말할 수 없다. 더 나쁜 것은 거울 쪽이다: 같은 모양이 화면에서는
+ * `CatalogError`가 아니라서 `create()`를 뚫고 나가고, 이 모듈은 `main.html`의 한 `<script>` 안에
+ * 있으므로 서식 목록 하나 때문에 워크리스트도 판독문도 자동 저장도 함께 죽는다.
+ */
+function catalogArray(value: any, message: string): any[] {
+  const list = value ?? [];
+  if (!Array.isArray(list)) throw new StructureCatalogError('R-D', message);
+  return list;
+}
 
 /**
  * `jsonb`는 NUL도 짝 없는 서러게이트도 담지 못한다. 걸러내지 않으면 한도를 재는 질의에서
@@ -276,7 +368,7 @@ export function validateCatalog(catalog: readonly StructureTemplate[]): void {
     enumerable: boolean; lines: Set<string>;
   }[] = [];
 
-  for (const template of catalog ?? []) {
+  for (const template of catalogArray(catalog, '서식 목록은 배열이어야 합니다')) {
     if (!isPlainString(template?.templateId) || !template.templateId)
       throw new StructureCatalogError('R-D', 'templateId가 필요합니다');
     if (templateIds.has(template.templateId))
@@ -288,7 +380,7 @@ export function validateCatalog(catalog: readonly StructureTemplate[]): void {
       throw new StructureCatalogError('R-D', `title이 필요합니다: ${template.templateId}`);
 
     const codes = new Set<string>();
-    for (const item of template.items ?? []) {
+    for (const item of catalogArray(template.items, `서식의 items는 배열이어야 합니다: ${template.templateId}`)) {
       const where = `${template.templateId}/${item?.code ?? '(code 없음)'}`;
 
       /* ── R-D: 모양 ─────────────────────────────────────────────────────────────── */
@@ -321,7 +413,7 @@ export function validateCatalog(catalog: readonly StructureTemplate[]): void {
           `앞뒤 고정 문자열이 ${REPORT_STRUCTURE_LIMITS.renderedText}바이트를 채워 값이 들어갈 자리가 없습니다: ${where}`);
 
       if (item.valueType === 'choice') {
-        const list = item.choices ?? [];
+        const list = catalogArray(item.choices, `choice 항목의 선택지는 배열이어야 합니다: ${where}`);
         if (!list.length) throw new StructureCatalogError('R-D', `choice 항목에 선택지가 없습니다: ${where}`);
         const seenCode = new Set<string>();
         for (const choice of list) {

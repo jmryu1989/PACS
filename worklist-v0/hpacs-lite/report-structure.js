@@ -19,13 +19,85 @@
   var SCHEMA = 1;
 
   /**
-   * **제품 서식 목록은 비어 있다** (P6 · D2).
+   * 제품 서식 목록 — 서버 `STRUCTURE_CATALOG`과 **같은 값**이어야 한다 (R15).
    *
-   * 어느 검사의 어떤 항목을 구조화할지는 사용자(평가 판독의)만 답할 수 있다. 구현자가
-   * 임상 항목·라벨·단위·범위·문장을 지어내면 그것은 요구 충족이 아니라 지어낸 임상 내용이다.
-   * 목록이 비어 있는 동안 Structured 단추는 **그려지지 않는다**(비활성이 아니다).
+   * 두 리터럴을 묶는 것은 공용 벡터 파일의 `productCatalogSha256`다: 양쪽을 **값으로** 꺼내
+   * canonical JSON의 sha를 대조하므로, 한쪽만 고치면 그 자리에서 깨진다. 키 순서나 들여쓰기는
+   * 달라도 되고 값은 달라선 안 된다.
+   *
+   * 네 항목은 절차적 사실(어떻게 찍었는가·무엇과 비교했는가)이고 세 항목은 판독의가 자기 문장을
+   * 직접 치는 빈 칸이다. 소견·정상 문구·질환 어휘·기준값은 여기에 없다.
    */
-  var PRODUCT_CATALOG = Object.freeze([]);
+  var PRODUCT_CATALOG = Object.freeze([
+    {
+      "templateId": "GEN-1",
+      "revision": 1,
+      "title": "General Report",
+      "items": [
+        {
+          "code": "TECHNIQUE",
+          "field": "findings",
+          "valueType": "text",
+          "label": "Technique",
+          "template": "Technique: {value}"
+        },
+        {
+          "code": "CONTRAST",
+          "field": "findings",
+          "valueType": "boolean",
+          "label": "Contrast",
+          "template": "Contrast: {value}",
+          "trueText": "administered",
+          "falseText": "not administered"
+        },
+        {
+          "code": "COMPARISON",
+          "field": "findings",
+          "valueType": "choice",
+          "label": "Comparison",
+          "template": "Comparison: {value}",
+          "choices": [
+            {
+              "code": "none",
+              "text": "no prior study available"
+            },
+            {
+              "code": "prior",
+              "text": "prior study reviewed"
+            }
+          ]
+        },
+        {
+          "code": "COMPARISON-STUDY",
+          "field": "findings",
+          "valueType": "text",
+          "label": "Comparison study",
+          "template": "Comparison study: {value}"
+        },
+        {
+          "code": "FINDING",
+          "field": "findings",
+          "valueType": "text",
+          "label": "Finding",
+          "template": "Finding: {value}"
+        },
+        {
+          "code": "CONCLUSION",
+          "field": "conclusion",
+          "valueType": "text",
+          "label": "Conclusion",
+          "template": "Conclusion: {value}"
+        },
+        {
+          "code": "RECOMMENDATION",
+          "field": "recommendation",
+          "valueType": "text",
+          "label": "Recommendation",
+          "template": "Recommendation: {value}"
+        }
+      ]
+    }
+  ]);
 
   var MSG = Object.freeze({
     ambiguous: '같은 문장이 본문에 여러 번 있어 어느 것을 바꿔야 할지 알 수 없습니다 — 본문에서 직접 고쳐 주세요',
@@ -91,6 +163,21 @@
   CatalogError.prototype = Object.create(Error.prototype);
   CatalogError.prototype.constructor = CatalogError;
 
+  /**
+   * 담는 그릇도 규칙으로 거절한다 (P12 D1). 서버 `catalogArray`의 거울이다.
+   *
+   * `||`를 쓰면 `0`·`''`·`false`가 빈 배열로 둔갑해 **서버가 R-D를 주는 자리에서 화면만 통과한다.**
+   * 서버는 `x ?? []`라서 null·undefined만 빈 배열이므로, 여기서도 같은 질문을 쓴다. 배열이 아닌
+   * 그릇은 타입 있는 R-D다 — 그러지 않으면 `items: {}`가 `.length === undefined`로 조용히 건너뛰어
+   * **닿을 수 없는 항목을 가진 목록이 살아 있는 형태로** 나가고, 배열이 아닌 목록은 `create()`의
+   * `try` 밖에서 터져 이 스크립트 전체(워크리스트·판독문·자동 저장)를 함께 죽인다.
+   */
+  function catalogArray(value, message) {
+    var list = value === null || value === undefined ? [] : value;
+    if (!Array.isArray(list)) throw new CatalogError('R-D', message);
+    return list;
+  }
+
   function nfc(text) { return String(text === null || text === undefined ? '' : text).normalize('NFC'); }
 
   /** 짝 없는 서러게이트가 하나라도 있으면 온전한 UTF-16이 아니다 (R-D). 서버와 같은 규칙이다. */
@@ -137,7 +224,7 @@
   function validateCatalog(citationLib, catalog) {
     var templateIds = Object.create(null);
     var flat = [];
-    var list = catalog || [];
+    var list = catalogArray(catalog, '서식 목록은 배열이어야 합니다');
     for (var t = 0; t < list.length; t++) {
       var template = list[t];
       /**
@@ -157,7 +244,7 @@
         throw new CatalogError('R-D', 'title이 필요합니다: ' + template.templateId);
 
       var codes = Object.create(null);
-      var items = template.items || [];
+      var items = catalogArray(template.items, '서식의 items는 배열이어야 합니다: ' + template.templateId);
       for (var n = 0; n < items.length; n++) {
         var item = items[n];
         var where = template.templateId + '/' + ((item && item.code) || '(code 없음)');
@@ -187,7 +274,7 @@
 
         var values = [];
         if (item.valueType === 'choice') {
-          var choices = item.choices || [];
+          var choices = catalogArray(item.choices, 'choice 항목의 선택지는 배열이어야 합니다: ' + where);
           if (!choices.length) throw new CatalogError('R-D', 'choice 항목에 선택지가 없습니다: ' + where);
           var seenCode = Object.create(null);
           for (var c = 0; c < choices.length; c++) {
@@ -279,10 +366,16 @@
    */
   function create(citationLib, catalog) {
     if (!citationLib) throw new Error('report-structure: citation library is required');
-    var wanted = (catalog || []).slice();
+    /**
+     * 복사는 **검사를 통과한 뒤에** 한다. `(catalog || []).slice()`를 `try` 앞에 두면 배열이 아닌
+     * 목록에서 `slice`가 없어 `TypeError`가 나고, 그것은 `CatalogError`가 아니므로 아래 catch가
+     * 다시 던진다 — 닫힌 형태로 물러서려고 만든 길이 바로 그 자리에서 페이지를 죽인다.
+     */
+    var wanted = catalog === null || catalog === undefined ? [] : catalog;
     var invalid = null;
     try {
       validateCatalog(citationLib, wanted);
+      wanted = wanted.slice();
     } catch (e) {
       if (!(e instanceof CatalogError)) throw e;
       invalid = e.message;
