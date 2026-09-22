@@ -481,11 +481,22 @@ test('the injection seam validates BEFORE it replaces, so a refused catalog chan
     && v.catalog.length === 1 && v.catalog[0].templateId !== TEMPLATE.templateId);
   svc.structureCatalog = good.catalog;
   assert.deepEqual([...svc.structureCatalog], [...good.catalog], 'a valid catalog does replace it');
-  // and the product instance, untouched, is still the empty constant.
+  /**
+   * And a fresh product instance still holds the catalog the MODULE ships - not the synthetic one
+   * this test injected into `svc`. That is the half of "a valid catalog does replace it" that says
+   * *only that instance*: if the setter wrote to anything shared, `good.catalog` would show up
+   * here and this comparison would fail.
+   *
+   * Compared against `structure.STRUCTURE_CATALOG` itself rather than against a literal. A literal
+   * went stale the day GEN-1 shipped and would go stale again at every revision; and a mere
+   * "non-empty" check would pass even while an injected catalog leaked across instances. What the
+   * shipped constant actually IS stays pinned independently, by canonical hash, in the next test.
+   */
   const untouched = new PacsService({}, {}, { usersInGroupWithRole: async () => [] },
     { prepare: async () => {}, require: async () => {}, allowed: async () => new Set() },
     { readableFindings: async () => [] });
-  assert.deepEqual([...untouched.structureCatalog], []);
+  assert.deepEqual([...untouched.structureCatalog], [...structure.STRUCTURE_CATALOG],
+    'an untouched instance must still hold the shipped catalog, not an injected one');
 });
 
 test('the compiled product catalog is byte-for-byte the pinned canonical JSON', () => {
