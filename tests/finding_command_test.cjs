@@ -520,6 +520,13 @@ class FakeElement extends EventTarget {
   constructor(tag, doc) {
     super(); this.tagName = tag; this.ownerDocument = doc; this.children = []; this.parent = null; this.dataset = {}; this.attributes = {};
     this.hidden = false; this.disabled = false; this.id = ''; this.className = ''; this.ownText = '';
+    // Every element carries a style map. The panel's height bound writes through this one when the
+    // report's field region has a measurable top; this realm has no layout, so what the test can
+    // assert is that it writes nothing at all rather than a number it cannot know.
+    this.style = { props: new Map(),
+      setProperty(name, value) { this.props.set(name, String(value)); },
+      removeProperty(name) { this.props.delete(name); },
+      getPropertyValue(name) { return this.props.has(name) ? this.props.get(name) : ''; } };
   }
   get textContent() { return this.children.length ? this.children.map(c => c.textContent).join('') : this.ownText; }
   set textContent(value) { for (const c of this.children) c.parent = null; this.children = []; this.ownText = String(value); }
@@ -536,6 +543,28 @@ class FakeElement extends EventTarget {
 }
 function makeDocument() {
   const doc = {};
+  /**
+   * A document listens. The shipped panel registers a capture `scroll` listener on the document
+   * while it is open and drops it again when it closes (`watchLayout` in reading-findings.js), and
+   * a fake without these two methods makes the adapter throw the moment the panel is shown - which
+   * is what it did: `document.addEventListener is not a function`, 17 of 116.
+   *
+   * `live` counts the pair per (type, capture) so a test can see that a listener was registered and
+   * that it was taken back, rather than trusting it. The count is allowed to go negative: an
+   * unmatched removal is a defect too, and hiding it would be the point of a mock.
+   */
+  const events = new EventTarget(), live = new Map();
+  const key = (type, options) => type + (options && options.capture ? ':capture' : '');
+  doc.live = type => live.get(type) || 0;
+  doc.addEventListener = (type, fn, options) => {
+    live.set(key(type, options), doc.live(key(type, options)) + 1);
+    events.addEventListener(type, fn, options);
+  };
+  doc.removeEventListener = (type, fn, options) => {
+    live.set(key(type, options), doc.live(key(type, options)) - 1);
+    events.removeEventListener(type, fn, options);
+  };
+  doc.dispatchEvent = event => events.dispatchEvent(event);
   doc.body = new FakeElement('body', doc); doc.activeElement = doc.body;
   doc.createElement = tag => new FakeElement(tag, doc);
   doc.createTextNode = value => { const n = new FakeElement('#text', doc); n.textContent = value; return n; };
@@ -631,6 +660,35 @@ function worklist() {
   return h;
 }
 const target = (studyUid = X, sopUid = SOP, itemId = ITEM1) => ({ studyUid, seriesUid: SERIES, sopUid, frame: 1, itemId });
+
+test('adapter: the open panel listens on the document and gives that listener back every time', async () => {
+  // The panel keeps its height bound on the report's field region while it is open, and the only
+  // way it can notice a reading-mode column scroll - which moves that region without resizing
+  // anything - is a capture listener on the document. A fake that cannot register one hides a real
+  // crash (it hid one: `document.addEventListener is not a function`, 17 of 116), and a fake that
+  // registers without counting hides a leak. Both are checked here, over repeated open and close.
+  const h = worklist();
+  assert.equal(h.document.live('scroll:capture'), 0, 'nothing listens before the panel is opened');
+  for (let round = 1; round <= 3; round++) {
+    await h.open();
+    assert.equal(h.panel().hidden, false, `open in round ${round}`);
+    assert.equal(h.document.live('scroll:capture'), 1, `exactly one capture listener while open (round ${round})`);
+    await h.click(h.named(h.panel(), 'Close Image Findings')[0]);
+    assert.equal(h.panel().hidden, true, `closed in round ${round}`);
+    assert.equal(h.document.live('scroll:capture'), 0, `taken back on close (round ${round})`);
+  }
+  // There is no layout in this realm, so the field region cannot be found and no bound may be
+  // invented for it: the shipped fallback is to leave the property off entirely.
+  await h.open();
+  assert.equal(h.document.live('scroll:capture'), 1);
+  assert.equal(h.panel().style.getPropertyValue('--reading-findings-top'), '',
+    'without a measurable field region the panel writes no bound at all');
+  // Ending the session drops it too - the panel may still be on screen, but nothing of this module
+  // outlives the session.
+  h.ui.end();
+  assert.equal(h.document.live('scroll:capture'), 0, 'the session ending gives the listener back');
+  assert.equal(h.document.live('scroll'), 0, 'and nothing was ever registered without capture');
+});
 
 test('adapter: the panel lists the selected study read-only with textContent, link states and Show Hidden, and writes nothing', async () => {
   const h = worklist();

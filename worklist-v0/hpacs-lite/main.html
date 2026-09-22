@@ -316,10 +316,16 @@
     /* ── 모달 (Modify Exam) ── */
     .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 30; align-items: center; justify-content: center; }
     .modal.show { display: flex; }
-    /* 구조화 입력 창만 `on`으로 열린다(`:3774`). 그 이름에는 표시 규칙이 없어서 창이 화면에
+    /* 구조화 입력 창만 `on`으로 열린다(`:3781`). 그 이름에는 표시 규칙이 없어서 창이 화면에
        나온 적이 없다 — 판독의는 `Structured`를 눌러도 아무것도 못 봤다. 다른 모달의 `show`
-       관례는 그대로 두고 이 창의 이름만 여기서 보이게 한다. */
-    #structmodal.modal.on { display: flex; }
+       관례는 그대로 두고 이 창의 이름만 여기서 보이게 한다.
+
+       z-index는 **열려 있는 이 창에만** 건다. `.modal`의 30은 소견 서랍의 80
+       (`reading-workspace.css:83`) 아래라서, 창이 떠 있어도 서랍이 그 위에 그려진다 —
+       1366×768에서 `Apply`(922,470,58×22)가 서랍(934,472)에 덮여 누를 수 없었다(측정값).
+       80 바로 위인 81이면 이 창의 배경막과 단추가 서랍 위로 올라오고, 서랍은 그 막 뒤에
+       열린 채로 남는다. 다른 모달의 30과 서랍의 80은 그대로다. */
+    #structmodal.modal.on { display: flex; z-index: 81; }
     .modal .box { background: #1b212c; border: 1px solid #3a4356; min-width: 380px; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
     .modal .box h3 { margin: 0; padding: 8px 12px; background: #232936; font-size: 12px; color: #dfe5ee; font-weight: normal; }
     .modal .body { padding: 10px 12px; display: grid; grid-template-columns: 90px 1fr; gap: 6px 8px; align-items: center; }
@@ -2513,7 +2519,10 @@
       if (e.defaultPrevented || e.repeat || e.isComposing || e.metaKey || e.shiftKey ||
           !e.ctrlKey || !e.altKey || e.code !== 'KeyC' ||
           e.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]') ||
-          document.querySelector('dialog[open],.modal.show') || !patientCopyTarget()) return;
+          // 구조화 입력 창은 `show`가 아니라 `on`으로 열린다(`:3778`). 이 목록에 없으면 그 창이
+          // 떠 있는 동안에도 단축키가 지나가 환자 ID가 클립보드에 적힌다 — 되돌릴 수 없는 쓰기다.
+          // 열려 **있는** 그 창만 적는다: 다섯 모달은 늘 DOM에 있어서 넓은 선택자는 단축키를 영영 막는다.
+          document.querySelector('dialog[open],.modal.show,#structmodal.modal.on') || !patientCopyTarget()) return;
       e.preventDefault(); copyViewedPatientId();
     });
     window.addEventListener('pagehide', endPatientCopy);

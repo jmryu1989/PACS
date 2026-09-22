@@ -74,7 +74,14 @@ body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 /* Image Findings: a fixed panel owned by the related region, so opening it never resizes the lists. */
 #reading-findings-open { flex: none; white-space: nowrap; }
 #reading-findings[hidden], #reading-findings [hidden] { display: none !important; }
-#reading-findings { position: fixed; right: 12px; bottom: 12px; z-index: 80; width: min(420px, calc(100vw - 24px)); max-height: min(62vh, 640px);
+/* The third term is what keeps this panel off the report's own controls. Fixed to the bottom with a
+   12px inset, its top edge is `viewport − 12px − height`, so a short screen pushed it up over the
+   button row and Structured/Print/Approve stopped being clickable (measured at 1366×768). The bound
+   is not a constant: `--reading-findings-top` is where the report's field region actually starts at
+   this width, so a wrapped button row moves it too. With the variable absent the term is
+   `100vh − 12px`, which is larger than both caps — exactly the behaviour that shipped before. */
+#reading-findings { position: fixed; right: 12px; bottom: 12px; z-index: 80; width: min(420px, calc(100vw - 24px));
+  max-height: min(62vh, 640px, calc(100vh - 12px - var(--reading-findings-top, 0px)));
   overflow: auto; padding: 10px 12px; background: #101a2b; color: #e5efff; border: 1px solid #7893b8; border-radius: 6px;
   box-shadow: 0 10px 28px #000a; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 #reading-findings p { margin: 4px 0; }

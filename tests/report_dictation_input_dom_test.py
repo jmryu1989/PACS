@@ -61,9 +61,12 @@ HOLD_COMMIT = "가나"
 STRUCT_VALUE = "경계가 뚜렷함"
 DICTATE_TITLE = "음성 인식기가 연결되지 않았습니다."
 # The shipped rule that finally displays the structured entry dialog. `openStructure()` has always
-# added the class `on` (main.html:3774) while the only display rule was `.modal.show`, so the window
+# added the class `on` (main.html:3781) while the only display rule was `.modal.show`, so the window
 # never appeared. It is scoped to this one dialog: every other modal keeps the `show` convention.
-STRUCT_MODAL_RULE = "#structmodal.modal.on { display: flex; }"
+# The rule also carries the layer the open dialog needs to clear the Image Findings drawer, so the
+# selector is pinned here and the declarations are read out of it rather than spelled again.
+STRUCT_MODAL_SELECTOR = "#structmodal.modal.on"
+STRUCT_MODAL_RULE = STRUCT_MODAL_SELECTOR + " { display: flex;"
 # report-structure.js:111-112 - the shipped refusal wording, not a paraphrase.
 MSG_ONE_LINE = "값은 한 줄이어야 합니다"
 # U+2028 LINE SEPARATOR, written as a code point so nobody has to see it to know it is there. An
