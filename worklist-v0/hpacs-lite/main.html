@@ -316,6 +316,10 @@
     /* ── 모달 (Modify Exam) ── */
     .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 30; align-items: center; justify-content: center; }
     .modal.show { display: flex; }
+    /* 구조화 입력 창만 `on`으로 열린다(`:3774`). 그 이름에는 표시 규칙이 없어서 창이 화면에
+       나온 적이 없다 — 판독의는 `Structured`를 눌러도 아무것도 못 봤다. 다른 모달의 `show`
+       관례는 그대로 두고 이 창의 이름만 여기서 보이게 한다. */
+    #structmodal.modal.on { display: flex; }
     .modal .box { background: #1b212c; border: 1px solid #3a4356; min-width: 380px; box-shadow: 0 8px 30px rgba(0,0,0,.6); }
     .modal .box h3 { margin: 0; padding: 8px 12px; background: #232936; font-size: 12px; color: #dfe5ee; font-weight: normal; }
     .modal .body { padding: 10px 12px; display: grid; grid-template-columns: 90px 1fr; gap: 6px 8px; align-items: center; }
@@ -817,7 +821,7 @@
           <button class="save" id="b-save">Save</button>
           <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
           <button id="b-prelim" title="상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)">Prelim</button>
-          <button disabled>Dictate</button>
+          <button id="b-dictate" disabled title="음성 인식기가 연결되지 않았습니다.">Dictate</button>
           <button id="b-transcribe">Transcribe</button>
           <button disabled>Except</button>
           <button disabled>Mark CVR</button>
