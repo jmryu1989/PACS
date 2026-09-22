@@ -33,18 +33,30 @@ COPY_PROBE = """()=>{window.copyCalls=[];navigator.clipboard.writeText=async tex
   document.querySelector('#copy-patient-status').textContent='';}"""
 # Rectangles and a hit test per control. `elementFromPoint` answers what a finger would reach at this
 # viewport; a bounding box alone would not, because the drawer is a sibling that paints above.
+#
+# A control that is not on screen has a 0x0 rect, and a hit test at (0,0) answers with whatever sits
+# in the page's top-left corner. The first candidate's 1366 line reported `topId: "menubar"` for all
+# three dialog controls for exactly that reason - the dialog had never opened. `present` therefore
+# travels with every entry, so a reader can tell "covered" from "absent" without guessing.
 ENTRY_GEOMETRY = """()=>{
   const q=s=>document.querySelector(s);
   const box=el=>{if(!el)return null;const r=el.getBoundingClientRect();
     return {x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)};};
-  const hit=el=>{if(!el)return {own:false,topId:'missing'};const r=el.getBoundingClientRect();
+  const seen=el=>{if(!el)return {present:false,own:false,topId:'missing'};
+    const r=el.getBoundingClientRect();
+    if(!r.width||!r.height)return {present:false,own:false,topId:'zero-rect'};
     const top=document.elementFromPoint(Math.round(r.x+r.width/2),Math.round(r.y+r.height/2));
-    return {own:!!top&&el.contains(top),topId:top?(top.id||top.className||top.tagName.toLowerCase()):null};};
+    return {present:true,own:!!top&&el.contains(top),
+            topId:top?(top.id||top.className||top.tagName.toLowerCase()):null};};
   const out={viewport:{w:innerWidth,h:innerHeight},box:box(q('#structmodal .box')),
              drawer:box(q('#reading-findings')),drawerShown:!!q('#reading-findings')&&!q('#reading-findings').hidden,
+             relatedRegion:box(q('#reading-related-region')),
+             // The two rows any height bound would have to be sized against: the report's controls
+             // and the field region the drawer is meant to cover instead.
+             reportControls:box(q('.report-p .rbtns')),reportFields:box(q('.report-p .redit')),
              controls:{}};
-  for(const id of ['struct-value-text','struct-apply','struct-cancel'])
-    out.controls[id]=Object.assign({rect:box(q('#'+id))},hit(q('#'+id)));
+  for(const id of ['b-structured','reading-findings-open','struct-value-text','struct-apply','struct-cancel'])
+    out.controls[id]=Object.assign({rect:box(q('#'+id))},seen(q('#'+id)));
   return out;}"""
 # S2-V: the frozen copies read with names and units; the ellipse numbers are API-seeded, never recomputed.
 ELLIPSE_VALUES = [400.26, 45.0, -20.0, 80.0, 1234]
@@ -673,14 +685,23 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
     def entry_pass(self, w, f, width, height):
         """One viewport, and it prints its numbers whatever happens.
 
-        An obstruction has to leave rectangles behind, not just a red step: the geometry line goes
-        out in `finally`, including when the very first click could not reach its control."""
+        An obstruction has to leave rectangles behind, not just a red step. The first candidate
+        proved that the hard way: at 1366x768 the entry button was unreachable, `Locator.click`
+        spent its whole 20 s timeout and the line it printed carried no rectangle for the button or
+        for the panel that was covering it. So the geometry is taken TWICE - once before anything is
+        pressed, and once with the dialog open - and both go out in `finally`."""
         w.set_viewport_size(dict(width=width, height=height))
         w.evaluate(COPY_PROBE)
         expect(w.locator('#reading-findings')).to_be_visible()
         expect(w.locator('#structmodal')).to_be_hidden()
-        measured, reached = None, []
+        initial, measured, reached = w.evaluate(ENTRY_GEOMETRY), None, []
         try:
+            # Reachability of the entry itself, asserted BEFORE the click. The click would find the
+            # same thing, but only after burning 20 s on retries and without naming what covered it.
+            entry = initial['controls']['b-structured']
+            self.assertTrue(entry['own'], 'the Structured entry at %s is covered by %s (drawer %s, '
+                            'report controls %s)' % (entry['rect'], entry['topId'],
+                                                     initial['drawer'], initial['reportControls']))
             w.locator('#b-structured').click(); reached.append('open')
             expect(w.locator('#structmodal')).to_be_visible()
             # If the drawer stood itself down here, the overlap question would be vacuous.
@@ -688,7 +709,11 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
             w.locator('#struct-item').select_option(label='Technique')
             expect(w.locator('#struct-value-text')).to_be_visible()
             measured = w.evaluate(ENTRY_GEOMETRY)
-            for name, seen in sorted(measured['controls'].items()):
+            # Only the dialog's own controls are asserted here. `b-structured` and the drawer toggle
+            # are recorded but NOT asserted once the dialog is open: the modal's backdrop covers the
+            # whole viewport by design, so they are supposed to be unreachable at this moment.
+            for name in ('struct-value-text', 'struct-apply', 'struct-cancel'):
+                seen = measured['controls'][name]
                 self.assertTrue(seen['own'], '%s at %s is covered by %s' % (name, seen['rect'], seen['topId']))
             reached.append('hit-tests')
             # O-2 negative with the dialog open and focus on a BUTTON, so the guard's input clause
@@ -727,31 +752,44 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
                     measured = w.evaluate(ENTRY_GEOMETRY)
                 except Exception as error:
                     measured = dict(error=str(error))
+            # `initial` is the state nothing had touched yet, `measured` the state at the failure or
+            # at the end. Keeping both apart is what tells a later reader whether a control moved.
             print('R15-ENTRY ' + json.dumps(dict(viewport=[width, height], reached=reached,
-                                                 measured=measured), ensure_ascii=False), flush=True)
+                                                 initial=initial, measured=measured),
+                                            ensure_ascii=False), flush=True)
 
     def test_worklist_07_structured_entry_over_the_findings_drawer_and_the_copy_shortcut(self):
         """O-1/O-2 in the real workspace, with the real linked stylesheets - what the isolated DOM
         harness cannot reach, because it carries neither the drawer nor those sheets.
 
-        O-1 is a geometry question and this case MEASURES it instead of asserting a layout. The box
-        carries an inline `width:620px` (main.html:1023) and the drawer is fixed at `right:12px`
-        with `width:min(420px,100vw-24px)` (reading-workspace.css:77), so the horizontal ranges
-        intersect only below about 1484 px: 1680 clears it, 1366 does not. Both viewports print
-        their rectangles and hit tests. **A failure at 1366 is evidence for Astra** - not a licence
-        to raise a z-index, hide the drawer or weaken anything here.
+        O-1 is a geometry question and this case MEASURES it instead of asserting a layout. The
+        first hosted run answered a question nobody had asked yet: at 1680x1100 every stage passed,
+        and at 1366x768 the dialog never opened at all, because the drawer itself was sitting on the
+        report's control row. `#reading-findings` is fixed at `bottom:12px` with
+        `max-height:min(62vh,640px)` (reading-workspace.css:77), so its TOP is `vh - 12 - height`
+        and rises as the viewport gets shorter - 563 at 1100, 280 at 768 - while `.rbtns`
+        (main.html:236) sits at an offset that does not depend on viewport height. Below roughly
+        794 px of height the drawer covers the report's buttons, `Structured` among them.
 
-        O-2 is the shortcut. The dialog opens with `on`, not `show` (main.html:3778), so before this
+        So the two viewports now measure two different things, and both are kept: 1680 exercises the
+        whole scenario, 1366 is the shortest supported height and is where the entry is unreachable.
+        **A failure at either is evidence for Astra** - not a licence to raise a z-index, hide the
+        drawer, force a click or weaken anything here.
+
+        O-2 is the shortcut. The dialog opens with `on`, not `show` (main.html:3781), so before this
         unit's guard it passed straight through an open modal and wrote a patient identifier to the
         OS clipboard. The clipboard is replaced by a counting stub - no permission, no real write -
-        and the positive at the end is what keeps the two negatives from being vacuous."""
+        and the positive at the end is what keeps the two negatives from being vacuous. At 1366 that
+        half is not reached until the entry itself is reachable; the negatives must not be moved to
+        a viewport that can already open the dialog just to make them run."""
         f = self.specimen(slices=2); self.seed_report(f)
         self.seed(f)
         w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
         self.select(w, f)
         expect(w.locator('#findings')).to_have_value(f.secret)
         self.open_findings(w, f)
-        # The button exists only because the shipped catalog is not empty (main.html:3904).
+        # The button exists only because the shipped catalog is not empty (main.html:3907-3914).
+        # Visible is not the same as reachable, which is the whole point of the hit test below.
         expect(w.locator('#b-structured')).to_be_visible()
         for width, height in ((1680, 1100), (1366, 768)):
             self.entry_pass(w, f, width, height)
