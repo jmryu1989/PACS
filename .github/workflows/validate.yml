@@ -873,6 +873,8 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-structure --cwd . --file api/src/pacs.service.ts --file api/src/report-structure.ts --file tests/report_structure_vectors.json --file tests/report_structure_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_structure_test.cjs
       - name: Compiled dictation PCM WAV byte boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-audio --cwd . --file api/src/dictation-audio.ts --file tests/dictation_audio_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dictation_audio_test.cjs
+      - name: Compiled dictation API bounds, engine protocol and disconnect lifecycle
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-api --cwd . --file api/src/asr.service.ts --file api/src/dictation.controller.ts --file api/src/dictation-parser.ts --file api/src/dictation-audio.ts --file api/src/pacs.service.ts --file api/src/main.ts --file api/src/app.module.ts --file tests/dictation_api_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dictation_api_test.cjs
       - name: Compiled volume job command and volume mark boundary models
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/volume-api-models --cwd . --file tests/viewer_volume_job_test.cjs --file tests/viewer_volume_marks_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_volume_job_test.cjs /tests/viewer_volume_marks_test.cjs
       - name: Observe an isolated real restart loop
@@ -908,6 +910,7 @@ jobs:
             tmp/runtime-ci/report-citations/
             tmp/runtime-ci/report-structure/
             tmp/runtime-ci/dictation-audio/
+            tmp/runtime-ci/dictation-api/
             tmp/runtime-ci/report-structure-client/
             tmp/runtime-ci/hanging-protocols/
             tmp/runtime-ci/three-d-cursor-model/

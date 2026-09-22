@@ -1,3 +1,5 @@
+import { AsrService } from './asr.service';
+import { DictationController } from './dictation.controller';
 import { StudyAccessService } from './study-access.service';
 import { StudyAccessController } from './study-access.controller';
 import { StudyAccessInterceptor } from './study-access.interceptor';
@@ -39,9 +41,9 @@ function adminNoStore(_req: any, res: any, next: () => void) {
 }
 
 @Module({
-  controllers: [PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, StudyAccessController],
+  controllers: [DictationController, PacsController, AuthController, AdminController, ViewerController, FindingController, ViewerJobController, ConnectController, ManualSrController, ReportPreviewController, FavoriteController, StudyTagsController, ReaderAssignmentController, ConsultationController, StudyAccessController],
   providers: [
-    StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService,
+    AsrService, StudyAccessService, PrismaService, PacsService, OrthancService, KeycloakService, AuthService, AdminService, ViewerService, FindingService, ViewerJobService, ConnectService, ManualSrService, FavoriteService, StudyTagsService, ReaderAssignmentService, ConsultationService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_INTERCEPTOR, useClass: StudyAccessInterceptor },
   ],

@@ -31,6 +31,9 @@ import type { HangingProtocolLibrary } from './hanging-protocol';
  *  institution 어디 소속인가    (어떤 데이터를 볼 수 있나)  ← 이번 작업에서 추가
  *  kind        사람인가 gateway인가 (허용되는 API 면)
  */
+// ASR capability is optional; no engine URL or credentials leave the server.
+import { asrConfiguration } from './asr.service';
+
 export interface Caller {
   sub: string;
   actor: string;
@@ -790,6 +793,7 @@ export class PacsService implements OnModuleInit {
     const prefs = await this.prefs(c);   // 필터·상용구도 첫 요청에 함께 (왕복을 늘리지 않는다)
     return {
       ...(omitStates ? { statesOmitted:true } : {}),
+      dictation: (() => { const { url, ...capability } = asrConfiguration(); return capability; })(),
       me: { actor: c.actor, roles: c.roles, institution: me, institutionName: this.instName(me) },
       filters: prefs.filters,
       templates: prefs.templates,
@@ -1603,17 +1607,8 @@ export class PacsService implements OnModuleInit {
    * 충돌은 확정할 때만 일어난다 — 사람이 화면 앞에 있고, 스스로 누른 순간이고,
    * 물어볼 수 있는 자리다. 낙관적 락은 `commitReport` 한 곳에만 있으면 된다.
    */
-  async putReport(uid: string, body: any, c: Caller) {
-    /**
-     * 소견 계보의 접근 정책은 **트랜잭션 밖에서** 준비되어야 한다.
-     *
-     * `scopeWrite`가 미리 부르는 `prepare(c,[uid])`는 검사 하나만 요청하므로 전체 준비를
-     * 켜지 않는다(`study-access.service.ts`). 그러면 트랜잭션 안에서 비교 검사를 묻는 순간
-     * `allowed`는 준비를 못 하고 캐시가 없어 409를 던진다 — 비교 검사를 가진 소견의 인용이
-     * 권한 문제도 아닌데 조용히 실패한다. 소견 목록이 같은 이유로 같은 형태를 쓴다.
-     */
-    if (body?.insert !== undefined) await this.studyAccess.prepare(c);
-    return this.reportLimitChecked(() => this.scopeWrite(uid,c,async(tx,audit)=>{
+  // Shared with putReport: dictation cannot create a weaker copy of report refusal rules.
+  private async reportDraftGate(uid: string, c: Caller, tx: any) {
     need(c.roles, 'radiologist', '판독문 저장');
     const prev = await this.gate(uid,c,tx);
     if (prev?.ss === 'Unverified' && prev.em !== 'E')
@@ -1625,6 +1620,29 @@ export class PacsService implements OnModuleInit {
     if (!canReadPrelim(prev, c.actor))
       throw new ForbiddenException(
         `예비 판독(RS: P) 중입니다. ${prev?.preReviewer ?? '지정된 판독의'}만 이어서 판독할 수 있습니다.`);
+    return prev;
+  }
+
+  async dictationGate(uid: string, c: Caller) {
+    return this.scopeWrite(uid, c, async tx => { await this.reportDraftGate(uid, c, tx); });
+  }
+
+  async dictationAudit(uid: string, c: Caller, detail: { bytes: number; seconds: number; ms: number; engine: string; outcome: string }) {
+    await this.audit(c.actor, 'dictation.request', uid, detail);
+  }
+
+  async putReport(uid: string, body: any, c: Caller) {
+    /**
+     * 소견 계보의 접근 정책은 **트랜잭션 밖에서** 준비되어야 한다.
+     *
+     * `scopeWrite`가 미리 부르는 `prepare(c,[uid])`는 검사 하나만 요청하므로 전체 준비를
+     * 켜지 않는다(`study-access.service.ts`). 그러면 트랜잭션 안에서 비교 검사를 묻는 순간
+     * `allowed`는 준비를 못 하고 캐시가 없어 409를 던진다 — 비교 검사를 가진 소견의 인용이
+     * 권한 문제도 아닌데 조용히 실패한다. 소견 목록이 같은 이유로 같은 형태를 쓴다.
+     */
+    if (body?.insert !== undefined) await this.studyAccess.prepare(c);
+    return this.reportLimitChecked(() => this.scopeWrite(uid,c,async(tx,audit)=>{
+    const prev = await this.reportDraftGate(uid, c, tx);
 
     const content = {
       findings: body.findings ?? '',
