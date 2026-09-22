@@ -25,20 +25,28 @@
     if (typeof digest !== 'function') throw new TypeError('hashText must be a function');
     let available = false, state = 'unavailable', seq = 0, pin = null, text = '';
     let needsRepin = false, pending = false, ownsResources = false, error = null;
+    let finishing = false, pinnedValue = null, cleanupFailed = false;
 
     function snapshot() {
-      return Object.freeze({ state, asrSeq: seq, text, needsRepin, pending, error,
+      return Object.freeze({ state, asrSeq: seq, text, needsRepin, pending, error, cleanupFailed,
         pin: pin ? Object.freeze({ ...pin, caret: Object.freeze({ ...pin.caret }) }) : null });
     }
     function reply(ok, reason) { return { ok, reason: reason || null, token: seq, snapshot: snapshot() }; }
     function release(reason) {
       if (!ownsResources) return;
       ownsResources = false; // Clear before the callback, including reentrant cleanup.
+      const alreadyFinishing = finishing;
+      finishing = true;
       try { if (options.cleanup) options.cleanup(reason); }
-      catch (_) { state = 'failed'; error = 'cleanup-failed'; }
+      catch (_) {
+        cleanupFailed = true;
+        // A completed editor write stays completed even if resource cleanup fails.
+        if (state !== 'inserted') state = 'failed';
+        error = error || 'cleanup-failed';
+      } finally { finishing = alreadyFinishing; }
     }
     function end(next, reason) {
-      seq += 1; pending = false; pin = null; text = ''; needsRepin = false;
+      seq += 1; pending = false; pin = null; pinnedValue = null; text = ''; needsRepin = false;
       state = next; error = reason || null; release(reason || next);
       return reply(next === 'inserted' && state === 'inserted', reason);
     }
@@ -75,6 +83,7 @@
     }
     function setAvailable(value) {
       available = value === true;
+      if (finishing) return snapshot(); // Record capability without rewriting this operation's outcome.
       if (!available) {
         if (ACTIVE.has(state)) end('unavailable', 'unavailable');
         else state = 'unavailable';
@@ -82,12 +91,13 @@
       return snapshot();
     }
     async function begin() {
+      if (finishing) return reply(false, 'busy');
       if (!available) return reply(false, 'unavailable');
       if (ACTIVE.has(state)) return reply(false, 'busy');
       const start = context();
       if (!start) return reply(false, 'editor-blocked');
       const token = ++seq;
-      state = 'requesting-permission'; error = null; text = ''; pin = null;
+      state = 'requesting-permission'; error = null; cleanupFailed = false; text = ''; pin = null; pinnedValue = null;
       needsRepin = false; pending = true; ownsResources = true;
       let h;
       try { h = await hashed(start.value); }
@@ -95,7 +105,7 @@
       if (!current(token)) return reply(false, 'stale');
       const live = context(start.field);
       if (!sameScope(live, start) || live.value !== start.value) return end('failed', 'editor-changed');
-      pin = makePin(start, h); pending = false;
+      pin = makePin(start, h); pinnedValue = start.value; pending = false;
       return reply(true);
     }
     function advance(token, from, to) {
@@ -127,7 +137,7 @@
       if (!live) return reply(false, 'editor-changed');
       pending = false;
       if (live.value !== start.value) return reply(false, 'field-changed');
-      pin = makePin(start, h); needsRepin = false; error = null;
+      pin = makePin(start, h); pinnedValue = start.value; needsRepin = false; error = null;
       return reply(true); // Never inserts. A fresh, explicit Insert must follow.
     }
     async function insert(token) {
@@ -144,20 +154,25 @@
       const live = checkScope(token, pin.field);
       if (!live) return reply(false, 'editor-changed');
       pending = false;
-      if (live.value !== start.value || h !== pin.fieldValueHash) {
+      // UTF-8 replaces lone UTF-16 surrogates; keep exact string identity as well as the hash.
+      if (live.value !== start.value || start.value !== pinnedValue || h !== pin.fieldValueHash) {
         needsRepin = true; error = 'field-changed'; return reply(false, 'field-changed');
       }
       const insertion = Object.freeze({ ...pin, caret: Object.freeze({ ...pin.caret }), text,
         expectedValue: start.value });
       // Consume before calling out: duplicate/reentrant Insert cannot use this session.
-      seq += 1; state = 'inserted'; pin = null; text = ''; needsRepin = false; error = null;
+      seq += 1; state = 'inserted'; pin = null; pinnedValue = null; text = ''; needsRepin = false; error = null;
+      finishing = true;
+      let inserted = false;
       try {
         // The host must synchronously recheck its editor gate and perform placeBlock/normal
         // editor update. Async writes are forbidden: they would outlive the checked context.
-        if (options.insert(insertion) !== true) { state = 'failed'; error = 'insert-refused'; }
+        inserted = options.insert(insertion) === true;
+        if (!inserted) { state = 'failed'; error = 'insert-refused'; }
       } catch (_) { state = 'failed'; error = 'insert-failed'; }
       release(state);
-      return reply(state === 'inserted', error);
+      finishing = false;
+      return { ...reply(inserted, error), inserted };
     }
     function cancel(reason) {
       if (!ACTIVE.has(state)) return reply(false, 'inactive');

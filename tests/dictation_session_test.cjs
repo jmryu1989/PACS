@@ -250,3 +250,59 @@ test('snapshots and insert payload cannot mutate the private pin', async () => {
   assert.equal(f.writes[0].caret.start, 0);
   assert.ok(Object.isFrozen(f.writes[0]));
 });
+
+test('insert and cleanup callbacks cannot start another session inside terminal cleanup', async () => {
+  let f; const begins = [], cleanups = [];
+  f = fixture({ insert() { begins.push(f.model.begin()); return true; },
+    cleanup(reason) { cleanups.push(reason); begins.push(f.model.begin()); } });
+  const token = await review(f);
+  assert.equal((await f.model.insert(token)).inserted, true);
+  assert.deepEqual((await Promise.all(begins)).map(r => r.reason), ['busy', 'busy']);
+  assert.deepEqual(cleanups, ['inserted']);
+  f.model.cancel(); assert.equal(cleanups.length, 1);
+  // A later, deliberate user action can begin and owns its own cleanup.
+  const next = await uploading(f); assert.ok(next > token);
+  f.model.cancel(); assert.equal(cleanups.length, 2);
+});
+
+test('cleanup failure after a write reports inserted=true and cannot invite duplicate insertion', async () => {
+  const f = fixture({ cleanup() { throw Error('track cleanup failed'); } });
+  const token = await review(f), result = await f.model.insert(token);
+  assert.equal(result.ok, true);
+  assert.equal(result.inserted, true);
+  assert.equal(result.reason, 'cleanup-failed');
+  assert.equal(result.snapshot.state, 'inserted');
+  assert.equal(result.snapshot.cleanupFailed, true);
+  assert.equal((await f.model.insert(token)).ok, false);
+  assert.equal(f.writes.length, 1);
+});
+
+test('capability changes inside cleanup affect the next begin without erasing a completed insert', async () => {
+  let f; f = fixture({ cleanup() { f.model.setAvailable(false); } });
+  const token = await review(f), result = await f.model.insert(token);
+  assert.equal(result.inserted, true);
+  assert.equal(result.snapshot.state, 'inserted');
+  assert.equal((await f.model.begin()).reason, 'unavailable');
+});
+
+test('distinct lone surrogates cannot pass field identity just because their UTF-8 hashes agree', async () => {
+  const f = fixture(); f.value.value = '\ud800';
+  const token = await review(f); f.value.value = '\ud801';
+  assert.equal(sha('\ud800'), sha('\ud801')); // Independent UTF-8 encoding fact.
+  assert.equal((await f.model.insert(token)).reason, 'field-changed');
+  assert.equal(f.writes.length, 0);
+});
+
+test('create uses its default WebCrypto path when hashText is not supplied', async () => {
+  const f = fixture({ hashText: undefined }), token = await review(f);
+  assert.equal(f.model.snapshot().pin.fieldValueHash, sha(f.value.value));
+  assert.equal((await f.model.insert(token)).ok, true);
+});
+
+test('cleanup failure preserves the primary failure and exposes separate cleanup status', async () => {
+  const f = fixture({ cleanup() { throw Error('cleanup'); } }), token = await uploading(f);
+  f.model.fail(token, 'timeout');
+  assert.equal(f.model.snapshot().error, 'timeout');
+  assert.equal(f.model.snapshot().cleanupFailed, true);
+  assert.equal(f.model.snapshot().state, 'failed');
+});

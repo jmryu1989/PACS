@@ -901,6 +901,7 @@ jobs:
             tmp/runtime-ci/report-rebase-model/
             tmp/runtime-ci/report-citation-client/
             tmp/runtime-ci/report-cursor-insert/
+            tmp/runtime-ci/dictation-session/
             tmp/runtime-ci/report-stale-draft/
             tmp/runtime-ci/report-citations/
             tmp/runtime-ci/report-structure/
