@@ -40,8 +40,12 @@ COPY_PROBE = """()=>{window.copyCalls=[];navigator.clipboard.writeText=async tex
 # travels with every entry, so a reader can tell "covered" from "absent" without guessing.
 ENTRY_GEOMETRY = """()=>{
   const q=s=>document.querySelector(s);
+  // `b` is the bottom edge rounded ONCE, not y+h rounded twice: fractional rows are ordinary here
+  // (11px buttons, line-height normal), and the product rounds that same edge once when it writes
+  // the bound, so comparing sums would fail a correct layout by a pixel.
   const box=el=>{if(!el)return null;const r=el.getBoundingClientRect();
-    return {x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)};};
+    return {x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height),
+            b:Math.round(r.bottom)};};
   const seen=el=>{if(!el)return {present:false,own:false,topId:'missing'};
     const r=el.getBoundingClientRect();
     if(!r.width||!r.height)return {present:false,own:false,topId:'zero-rect'};
@@ -688,13 +692,17 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         Asserted from the rendered rectangles, never from the stylesheet's text: what matters is
         where the panel actually ended up at this width and height, which is the only thing that
         decides whether `Structured` can be pressed. `.redit` is checked too because the bound is
-        taken from its top, so a failure says which of the two moved."""
+        taken from its top, so a failure says which of the two moved.
+
+        Both sides of the comparison are one rounded edge. The row's bottom comes back already
+        rounded (`b`) instead of adding two independently rounded numbers, which would demand a
+        pixel the product never promised."""
         drawer, controls, fields = seen['drawer'], seen['reportControls'], seen['reportFields']
         self.assertTrue(drawer and controls and fields,
                         'geometry missing %s: drawer=%s controls=%s fields=%s'
                         % (when, drawer, controls, fields))
         self.assertGreaterEqual(
-            drawer['y'], controls['y'] + controls['h'],
+            drawer['y'], controls['b'],
             'the Image Findings drawer top %d covers the report control row %s %s (fields top %d) - '
             'the runtime bound did not apply' % (drawer['y'], controls, when, fields['y']))
 
@@ -707,6 +715,11 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         for the panel that was covering it. So the geometry is taken TWICE - once before anything is
         pressed, and once with the dialog open - and both go out in `finally`."""
         w.set_viewport_size(dict(width=width, height=height))
+        # `set_viewport_size` resolves on the CDP acknowledgement of the metrics override and waits
+        # for nothing else, so the page's `resize` event and the ResizeObserver notification - and
+        # therefore the drawer's new bound - are still one rendering update away. Two frames put
+        # every measurement below on the layout this viewport actually produced.
+        w.evaluate('()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))')
         w.evaluate(COPY_PROBE)
         expect(w.locator('#reading-findings')).to_be_visible()
         expect(w.locator('#structmodal')).to_be_hidden()
@@ -792,7 +805,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         `.rbtns` (main.html:236) sits at an offset that does not depend on viewport height.
 
         The product now bounds that top by the report field region's real top
-        (reading-workspace.css:77 plus `bindTop` in reading-findings.js), so this case asserts the
+        (reading-workspace.css:83-84 plus `bindTop` in reading-findings.js), so this case asserts the
         bound from the rendered rectangles at both viewports: 1680 as the height that always worked,
         1366 as the one that did not. The drawer is opened once and never reopened, so the second
         pass also answers whether an already-open drawer follows a resize. **A failure at either is
