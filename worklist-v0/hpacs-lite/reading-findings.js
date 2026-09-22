@@ -67,10 +67,70 @@ window.KinReadingFindings = function (app) {
   const store = command.createListStore({ fetch: listRead, changed: () => render() });
   const commands = command.createNavigator({ timeoutMs: 15000 });
 
+  /* ---------- keeping the panel off the report's controls ---------- */
+  /**
+   * This panel is fixed to the bottom-right corner, so its top edge is `viewport − 12px − height`
+   * and rises as the screen gets shorter. At 1366×768 that put it over the report's button row and
+   * `Structured` could not be pressed at all - measured on a real run, not predicted.
+   *
+   * The upper bound is not a number anyone picked. It is the top of the report's **field region**
+   * at the current width, read back into the panel's own `max-height` (reading-workspace.css:77).
+   * That answer already accounts for the button row wrapping, for the draft and citation bars
+   * appearing, and for both layouts, because `.redit` is `flex: 1` in that column: anything that
+   * appears or wraps above it changes its height. Leaving the property off means `100vh − 12px`,
+   * which is larger than both caps - the behaviour that shipped before this bound existed.
+   *
+   * There is no feedback loop to guard against: the panel is out of flow, so resizing it cannot
+   * move or resize the field region it measures.
+   */
+  const fields = () => document.querySelector('.report-p .redit');
+  let boundTop = '';
+  function bindTop() {
+    if (panel.hidden) return;
+    const box = fields()?.getBoundingClientRect();
+    // Not laid out, or a mode without a report column: fall back to the shipped behaviour rather
+    // than writing a bound nobody measured.
+    const next = box && box.height ? Math.max(0, Math.round(box.top)) + 'px' : '';
+    if (next === boundTop) return;          // the common case: measure, change nothing
+    boundTop = next;
+    if (next) panel.style.setProperty('--reading-findings-top', next);
+    else panel.style.removeProperty('--reading-findings-top');
+  }
+  /**
+   * Three sources, and between them they are complete:
+   *   resize  - the viewport itself, which is what moved the top edge in the first place;
+   *   scroll  - `body.reading` scrolls the report column (`.right { overflow: auto }`), which moves
+   *             the field region **without** resizing anything, so no observer would see it;
+   *   observe - every change inside the column, because `.redit` is `flex: 1` there and a wrapped
+   *             button row or a newly shown bar changes its height.
+   * Nothing observes `.rbtns` or the parent: a position-only change of `.redit` that is not one of
+   * the two above cannot happen in this layout, and guessing at more observers would be
+   * infrastructure without a cause.
+   */
+  const onLayout = () => bindTop();
+  let watching = false, sizeWatch = null;
+  function watchLayout(on) {
+    if (on === watching) return;
+    watching = on;
+    if (on) {
+      window.addEventListener('resize', onLayout);
+      document.addEventListener('scroll', onLayout, { capture: true, passive: true });
+      const el = fields();
+      if (el && window.ResizeObserver) { sizeWatch = new ResizeObserver(onLayout); sizeWatch.observe(el); }
+    } else {
+      window.removeEventListener('resize', onLayout);
+      document.removeEventListener('scroll', onLayout, { capture: true });
+      sizeWatch?.disconnect(); sizeWatch = null;
+    }
+  }
+
   function show(open) {
     if (ended && open) return;
     panel.hidden = !open; toggle.setAttribute('aria-expanded', String(!!open));
-    if (open) { sync(); const st = store.state(); if (st.uid && st.status === 'idle') store.load(); }
+    // The bound is measured only while the panel is on screen and the listeners live exactly as
+    // long as it does, so closing it leaves nothing behind.
+    watchLayout(!!open);
+    if (open) { bindTop(); sync(); const st = store.state(); if (st.uid && st.status === 'idle') store.load(); }
     render();
   }
   // Selection and session follow the worklist; a change drops any in-flight command and its message.
@@ -354,7 +414,10 @@ window.KinReadingFindings = function (app) {
   function end() {
     if (ended) return;
     ended = true; commands.cancel(); store.end(); last = null; clearInterval(timer);
-    window.removeEventListener('focus', onFocus); channel?.close();
+    // Same reason the focus listener goes: nothing of this module may outlive the session. The
+    // bound already written stays on the element and is still right for the layout on screen; a
+    // resize after the session ended is not worth keeping a document-wide scroll listener for.
+    window.removeEventListener('focus', onFocus); watchLayout(false); channel?.close();
     setResult('', '', false); render();
   }
   let channel;

@@ -682,6 +682,22 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertEqual(self.versions(f)[-1]['findings'], before_text)
 
     # ---- O-1 / O-2: the structured entry dialog in the real workspace -------------------------
+    def bound_holds(self, seen, when):
+        """The drawer's top edge must stay clear of the report's control row.
+
+        Asserted from the rendered rectangles, never from the stylesheet's text: what matters is
+        where the panel actually ended up at this width and height, which is the only thing that
+        decides whether `Structured` can be pressed. `.redit` is checked too because the bound is
+        taken from its top, so a failure says which of the two moved."""
+        drawer, controls, fields = seen['drawer'], seen['reportControls'], seen['reportFields']
+        self.assertTrue(drawer and controls and fields,
+                        'geometry missing %s: drawer=%s controls=%s fields=%s'
+                        % (when, drawer, controls, fields))
+        self.assertGreaterEqual(
+            drawer['y'], controls['y'] + controls['h'],
+            'the Image Findings drawer top %d covers the report control row %s %s (fields top %d) - '
+            'the runtime bound did not apply' % (drawer['y'], controls, when, fields['y']))
+
     def entry_pass(self, w, f, width, height):
         """One viewport, and it prints its numbers whatever happens.
 
@@ -694,8 +710,13 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         w.evaluate(COPY_PROBE)
         expect(w.locator('#reading-findings')).to_be_visible()
         expect(w.locator('#structmodal')).to_be_hidden()
-        initial, measured, reached = w.evaluate(ENTRY_GEOMETRY), None, []
+        initial, measured, reached = None, None, []
         try:
+            initial = w.evaluate(ENTRY_GEOMETRY)
+            # The bound, from rendered rectangles rather than from the stylesheet's text. The drawer
+            # is opened once, before the first viewport, so on the second pass this is also the
+            # answer to "does an ALREADY OPEN drawer follow a resize" - nothing reopens it.
+            self.bound_holds(initial, 'before opening at %dx%d' % (width, height))
             # Reachability of the entry itself, asserted BEFORE the click. The click would find the
             # same thing, but only after burning 20 s on retries and without naming what covered it.
             entry = initial['controls']['b-structured']
@@ -712,6 +733,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
             # Only the dialog's own controls are asserted here. `b-structured` and the drawer toggle
             # are recorded but NOT asserted once the dialog is open: the modal's backdrop covers the
             # whole viewport by design, so they are supposed to be unreachable at this moment.
+            self.bound_holds(measured, 'with the dialog open at %dx%d' % (width, height))
             for name in ('struct-value-text', 'struct-apply', 'struct-cancel'):
                 seen = measured['controls'][name]
                 self.assertTrue(seen['own'], '%s at %s is covered by %s' % (name, seen['rect'], seen['topId']))
@@ -765,16 +787,17 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         O-1 is a geometry question and this case MEASURES it instead of asserting a layout. The
         first hosted run answered a question nobody had asked yet: at 1680x1100 every stage passed,
         and at 1366x768 the dialog never opened at all, because the drawer itself was sitting on the
-        report's control row. `#reading-findings` is fixed at `bottom:12px` with
-        `max-height:min(62vh,640px)` (reading-workspace.css:77), so its TOP is `vh - 12 - height`
-        and rises as the viewport gets shorter - 563 at 1100, 280 at 768 - while `.rbtns`
-        (main.html:236) sits at an offset that does not depend on viewport height. Below roughly
-        794 px of height the drawer covers the report's buttons, `Structured` among them.
+        report's control row. `#reading-findings` is fixed at `bottom:12px`, so its TOP is
+        `vh - 12 - height` and rises as the viewport gets shorter - 563 at 1100, 280 at 768 - while
+        `.rbtns` (main.html:236) sits at an offset that does not depend on viewport height.
 
-        So the two viewports now measure two different things, and both are kept: 1680 exercises the
-        whole scenario, 1366 is the shortest supported height and is where the entry is unreachable.
-        **A failure at either is evidence for Astra** - not a licence to raise a z-index, hide the
-        drawer, force a click or weaken anything here.
+        The product now bounds that top by the report field region's real top
+        (reading-workspace.css:77 plus `bindTop` in reading-findings.js), so this case asserts the
+        bound from the rendered rectangles at both viewports: 1680 as the height that always worked,
+        1366 as the one that did not. The drawer is opened once and never reopened, so the second
+        pass also answers whether an already-open drawer follows a resize. **A failure at either is
+        evidence for Astra** - not a licence to raise a z-index, hide the drawer, force a click or
+        weaken anything here.
 
         O-2 is the shortcut. The dialog opens with `on`, not `show` (main.html:3781), so before this
         unit's guard it passed straight through an open modal and wrote a patient identifier to the
