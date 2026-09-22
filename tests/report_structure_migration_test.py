@@ -184,9 +184,40 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertEqual(PURE.count("SYN-"), 0, "nor in the pure module")
         self.assertEqual(PURE.count("process.env"), 0, "no environment-variable seam")
         self.assertEqual(SERVICE.count("svc.structureCatalog"), 0)
-        catalog = re.search(r"STRUCTURE_CATALOG: readonly StructureTemplate\[\] = Object\.freeze\((\[[^\]]*\])\)", PURE)
-        self.assertIsNotNone(catalog)
-        self.assertEqual(json.loads(catalog.group(1)), [])
+        # The literal is brace-matched with string contents skipped, not regex-scraped: `[^\]]*`
+        # stops at the first `]`, and every shipped template contains `{value}`. A truncated
+        # extraction here would turn the leak assertion below into a test of nothing.
+        # (The same scanner, with its own corner-case cases, lives in report_structure_vectors_test.)
+        anchor = "STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze("
+        at = PURE.index(anchor)
+        start = PURE.index("[", at + len(anchor))
+        depth, quote, escaped, end = 0, False, False, -1
+        for i in range(start, len(PURE)):
+            ch = PURE[i]
+            if quote:
+                # `\"` closes nothing and `\\` closes the escape, so the previous character's state
+                # has to be consumed BEFORE this one is judged.
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    quote = False
+                continue
+            if ch == '"':
+                quote = True
+            elif ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        self.assertGreater(end, start, "the shipped catalog literal is never closed")
+        catalog = json.loads(PURE[start:end])
+        self.assertIsInstance(catalog, list, "the shipped catalog must be strict JSON in an array")
+        self.assertEqual(json.dumps(catalog, ensure_ascii=False).count("SYN-"), 0,
+                         "no synthetic fixture may be reachable from the shipped catalog")
 
 
 if __name__ == "__main__":

@@ -301,6 +301,52 @@ def independent_catalog_rule(catalog):
     return "ACCEPT"
 
 
+SERVER_CATALOG_ANCHOR = "STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze("
+CLIENT_CATALOG_ANCHOR = "PRODUCT_CATALOG = Object.freeze("
+
+
+def literal_after(source, anchor):
+    """The array literal that follows `anchor`, brace-matched with string contents skipped.
+
+    A regex cannot do this once the catalog is not empty. `\\[[^\\]]*\\]` stops at the FIRST `]`, so a
+    nested `choices` array truncates the literal; and a depth count that does not skip string
+    contents goes wrong on the shipped templates, every one of which contains `{value}`. Escapes
+    matter too: `"\\""` closes nothing and `"\\\\"` does.
+
+    Returns the text only. The caller parses it with `json.loads`, which is why both shipped
+    literals have to be written in strict JSON: unquoted keys, a trailing comma or a comment fail
+    loudly here instead of being silently tolerated by one reader and not the other.
+    """
+    at = source.index(anchor)
+    start = source.index("[", at + len(anchor))
+    depth = 0
+    quote = False
+    escaped = False
+    for i in range(start, len(source)):
+        ch = source[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                quote = False
+            continue
+        if ch == '"':
+            quote = True
+        elif ch in "[{":
+            depth += 1
+        elif ch in "]}":
+            depth -= 1
+            if depth == 0:
+                return source[start:i + 1]
+    raise AssertionError("the literal after %r is never closed" % anchor)
+
+
+def shipped_catalog(source, anchor):
+    return json.loads(literal_after(source, anchor))
+
+
 def canonical_json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -376,18 +422,48 @@ class ReportStructureVectors(unittest.TestCase):
                 self.assertNotIn(key, skeletons)
                 skeletons.add(key)
 
-    def test_product_catalogs_are_empty_on_both_sides(self) -> None:
-        # P6: the product catalog ships EMPTY. This is the assertion that fails the day someone
-        # invents a clinical item to make a test runnable.
-        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
-                           SERVER)
-        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
-        self.assertIsNotNone(server, "server product catalog literal not found")
-        self.assertIsNotNone(client, "client product catalog literal not found")
-        self.assertEqual(json.loads(server.group(1)), [])
-        self.assertEqual(json.loads(client.group(1)), [])
-        self.assertEqual(json.dumps(json.loads(server.group(1)), sort_keys=True, separators=(",", ":")),
-                         json.dumps(json.loads(client.group(1)), sort_keys=True, separators=(",", ":")))
+    def test_the_two_shipped_catalogs_are_the_same_value(self) -> None:
+        """Both sides ship ONE catalog, compared as a VALUE and not as source text.
+
+        Key order, whitespace and indentation may differ between a TypeScript file and a browser
+        script; the catalog may not. This is the assertion that fails the day one side ships a
+        template the other has never heard of - including the day someone edits only one file.
+        """
+        server = shipped_catalog(SERVER, SERVER_CATALOG_ANCHOR)
+        client = shipped_catalog(CLIENT, CLIENT_CATALOG_ANCHOR)
+        self.assertIsInstance(server, list)
+        self.assertEqual(canonical_json(server), canonical_json(client))
+
+    def test_the_scanner_survives_the_shapes_a_regex_gets_wrong(self) -> None:
+        """The extractor is load bearing, so its decision points are exercised on purpose.
+
+        Every case below is one a naive reader answers differently: the first `]` heuristic, a depth
+        count that does not skip strings, and the two escape shapes. If the scanner ever loses one
+        of these, the tests above would silently compare a TRUNCATED catalog and pass.
+        """
+        cases = [
+            ("nested arrays", 'X = Object.freeze([{"a":[1,2]},{"b":[]}]);', [{"a": [1, 2]}, {"b": []}]),
+            ("a brace inside a string", 'X = Object.freeze([{"t":"Technique: {value}"}]);',
+             [{"t": "Technique: {value}"}]),
+            ("a bracket inside a string", 'X = Object.freeze([{"t":"a]b[c"}]);', [{"t": "a]b[c"}]),
+            ("an escaped quote", 'X = Object.freeze([{"t":"say \\" then ]"}]);', [{"t": 'say " then ]'}]),
+            ("a trailing escaped backslash", 'X = Object.freeze([{"t":"c:\\\\"},{"u":"]"}]);',
+             [{"t": "c:\\"}, {"u": "]"}]),
+            ("the empty catalog", 'X = Object.freeze([]);', []),
+            ("text after the literal", 'X = Object.freeze([{"a":1}]);\nlet later = [9, "]"];', [{"a": 1}]),
+        ]
+        for name, source, expected in cases:
+            with self.subTest(case=name):
+                self.assertEqual(json.loads(literal_after(source, "X = Object.freeze(")), expected)
+        # A literal that never closes must fail loudly rather than return a plausible prefix.
+        with self.assertRaises(AssertionError):
+            literal_after('X = Object.freeze([{"a":1}', "X = Object.freeze(")
+        # And strict JSON is the contract: the shapes a looser reader would tolerate are refused.
+        for bad in ('X = Object.freeze([{a:1}]);', 'X = Object.freeze([{"a":1},]);',
+                    'X = Object.freeze([{"a":1} /* note */]);'):
+            with self.subTest(case=bad):
+                with self.assertRaises(json.JSONDecodeError):
+                    json.loads(literal_after(bad, "X = Object.freeze("))
 
     def test_catalog_vectors_get_the_same_rule_from_an_independent_implementation(self) -> None:
         """The third rule over the whole catalog table.
@@ -466,11 +542,9 @@ class ReportStructureVectors(unittest.TestCase):
         an item removal inside revision 1, and those raise the same question. It fails on the first
         revision bump, which is the moment the decision has to be made.
         """
-        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
-                           SERVER)
-        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
-        for name, group in (("server", server), ("client", client)):
-            for template in json.loads(group.group(1)):
+        for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
+                                     ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
+            for template in shipped_catalog(source, anchor):
                 with self.subTest(side=name, template=template.get("templateId")):
                     self.assertEqual(template.get("revision"), 1,
                                      "a revision bump needs an explicit disposition for the retired one first")
@@ -479,15 +553,13 @@ class ReportStructureVectors(unittest.TestCase):
         # B8. T1 asserts this hash against the compiled STRUCTURE_CATALOG and T2 against the browser
         # PRODUCT_CATALOG; neither can see the other. Here both literals are read from source, so
         # this file is what fails if one side ships a catalog and the other does not.
-        server = re.search(r"STRUCTURE_CATALOG:\s*readonly StructureTemplate\[\]\s*=\s*Object\.freeze\((\[[^\]]*\])\)",
-                           SERVER)
-        client = re.search(r"PRODUCT_CATALOG\s*=\s*Object\.freeze\((\[[^\]]*\])\)", CLIENT)
         pinned = VECTORS["productCatalogSha256"]
         self.assertRegex(pinned, r"^[0-9a-f]{64}$")
-        for name, group in (("server", server), ("client", client)):
+        for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
+                                     ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
             with self.subTest(side=name):
                 digest = hashlib.sha256(
-                    canonical_json(json.loads(group.group(1))).encode("utf-8")).hexdigest()
+                    canonical_json(shipped_catalog(source, anchor)).encode("utf-8")).hexdigest()
                 self.assertEqual(digest, pinned, f"the {name} product catalog is not the pinned one")
 
     def test_no_synthetic_fixture_is_reachable_from_product_code(self) -> None:
