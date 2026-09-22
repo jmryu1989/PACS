@@ -633,7 +633,7 @@ class ReportStructureDOMTest(unittest.TestCase):
         page.wait_for_function("() => structCalls.length >= 1")
         self.assertFalse(page.evaluate("() => structKnown()"),
                          "S3-STRUCT D19: a failed read is not a confirmed empty list")
-        self.assertIsNone(page.evaluate("() => keepIds() ?? null"),
+        self.assertIsNone(page.evaluate("() => structKeep() ?? null"),
                           "S3-STRUCT D19: an unconfirmed read must not produce a keep list")
         page.evaluate("() => { $('#findings').value = 'typed after the failure';"
                       "$('#findings').dispatchEvent(new Event('input', {bubbles: true})); }")
