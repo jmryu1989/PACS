@@ -2513,7 +2513,10 @@
       if (e.defaultPrevented || e.repeat || e.isComposing || e.metaKey || e.shiftKey ||
           !e.ctrlKey || !e.altKey || e.code !== 'KeyC' ||
           e.target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]') ||
-          document.querySelector('dialog[open],.modal.show') || !patientCopyTarget()) return;
+          // 구조화 입력 창은 `show`가 아니라 `on`으로 열린다(`:3778`). 이 목록에 없으면 그 창이
+          // 떠 있는 동안에도 단축키가 지나가 환자 ID가 클립보드에 적힌다 — 되돌릴 수 없는 쓰기다.
+          // 열려 **있는** 그 창만 적는다: 다섯 모달은 늘 DOM에 있어서 넓은 선택자는 단축키를 영영 막는다.
+          document.querySelector('dialog[open],.modal.show,#structmodal.modal.on') || !patientCopyTarget()) return;
       e.preventDefault(); copyViewedPatientId();
     });
     window.addEventListener('pagehide', endPatientCopy);

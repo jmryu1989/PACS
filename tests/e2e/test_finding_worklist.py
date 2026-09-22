@@ -5,7 +5,7 @@ attached separate window, on the real BFF login, pinned OHIF, owned synthetic CT
 API. Arrival is proven from the viewer's active viewport image id, never from the message. A refused or
 superseded command only asserts what holds (no success text, same URL study set, byte-equal rows); the
 viewer display may already have moved. Finding draft guards stay in FindingNavigationE2E 05/06."""
-import io, re, sys, unittest, uuid
+import io, json, re, sys, unittest, uuid
 from urllib.parse import parse_qs, urlsplit
 from pydicom import dcmread
 import test_worklist as base
@@ -27,6 +27,25 @@ READY = "uid=>{const h=window.kinViewerHistoryState?.();return !!h&&(uid===null?
 MODAL = "()=>{const d=document.createElement('dialog');d.id='s2b-modal';d.textContent='S2-B modal';document.body.append(d);d.showModal()}"
 ENDED = "()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}"
 OWNED_TABLES = ('Finding', 'FindingRevision', 'ViewerItem', 'ViewerRevision', 'Report', 'ReportDraft', 'ReportVersion')
+# A counting stub in place of the clipboard: no permission is granted and no OS write happens, so
+# "the shortcut did not fire" becomes observable instead of being inferred from an empty status line.
+COPY_PROBE = """()=>{window.copyCalls=[];navigator.clipboard.writeText=async text=>{window.copyCalls.push(text);};
+  document.querySelector('#copy-patient-status').textContent='';}"""
+# Rectangles and a hit test per control. `elementFromPoint` answers what a finger would reach at this
+# viewport; a bounding box alone would not, because the drawer is a sibling that paints above.
+ENTRY_GEOMETRY = """()=>{
+  const q=s=>document.querySelector(s);
+  const box=el=>{if(!el)return null;const r=el.getBoundingClientRect();
+    return {x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)};};
+  const hit=el=>{if(!el)return {own:false,topId:'missing'};const r=el.getBoundingClientRect();
+    const top=document.elementFromPoint(Math.round(r.x+r.width/2),Math.round(r.y+r.height/2));
+    return {own:!!top&&el.contains(top),topId:top?(top.id||top.className||top.tagName.toLowerCase()):null};};
+  const out={viewport:{w:innerWidth,h:innerHeight},box:box(q('#structmodal .box')),
+             drawer:box(q('#reading-findings')),drawerShown:!!q('#reading-findings')&&!q('#reading-findings').hidden,
+             controls:{}};
+  for(const id of ['struct-value-text','struct-apply','struct-cancel'])
+    out.controls[id]=Object.assign({rect:box(q('#'+id))},hit(q('#'+id)));
+  return out;}"""
 # S2-V: the frozen copies read with names and units; the ellipse numbers are API-seeded, never recomputed.
 ELLIPSE_VALUES = [400.26, 45.0, -20.0, 80.0, 1234]
 LENGTH_TEXT = '★ Length · 길이 · 프레임 1 · r1 · 20.0 mm · Current'
@@ -649,6 +668,94 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.assertEqual(signed['head'][0]['insertedBy'], stored['insertedBy'])
         self.assertEqual(signed['head'][0]['insertedAt'], stored['insertedAt'], 'carried byte for byte')
         self.assertEqual(self.versions(f)[-1]['findings'], before_text)
+
+    # ---- O-1 / O-2: the structured entry dialog in the real workspace -------------------------
+    def entry_pass(self, w, f, width, height):
+        """One viewport, and it prints its numbers whatever happens.
+
+        An obstruction has to leave rectangles behind, not just a red step: the geometry line goes
+        out in `finally`, including when the very first click could not reach its control."""
+        w.set_viewport_size(dict(width=width, height=height))
+        w.evaluate(COPY_PROBE)
+        expect(w.locator('#reading-findings')).to_be_visible()
+        expect(w.locator('#structmodal')).to_be_hidden()
+        measured, reached = None, []
+        try:
+            w.locator('#b-structured').click(); reached.append('open')
+            expect(w.locator('#structmodal')).to_be_visible()
+            # If the drawer stood itself down here, the overlap question would be vacuous.
+            expect(w.locator('#reading-findings')).to_be_visible(); reached.append('both-visible')
+            w.locator('#struct-item').select_option(label='Technique')
+            expect(w.locator('#struct-value-text')).to_be_visible()
+            measured = w.evaluate(ENTRY_GEOMETRY)
+            for name, seen in sorted(measured['controls'].items()):
+                self.assertTrue(seen['own'], '%s at %s is covered by %s' % (name, seen['rect'], seen['topId']))
+            reached.append('hit-tests')
+            # O-2 negative with the dialog open and focus on a BUTTON, so the guard's input clause
+            # cannot be what suppresses the shortcut.
+            w.locator('#struct-cancel').focus()
+            expect(w.locator('#struct-cancel')).to_be_focused()
+            w.keyboard.press('Control+Alt+c')
+            self.assertEqual([], w.evaluate('()=>window.copyCalls'), 'the shortcut fired behind Cancel')
+            expect(w.locator('#copy-patient-status')).to_be_empty(); reached.append('cancel-negative')
+            # Real actions at this viewport: each one waits for actionability, none is scripted.
+            w.locator('#struct-value-text').click()
+            w.locator('#struct-value-text').fill('FINDNAV technique text')
+            expect(w.locator('#struct-line')).to_have_text('Technique: FINDNAV technique text')
+            expect(w.locator('#struct-apply')).to_be_enabled()
+            w.locator('#struct-apply').hover(); reached.append('fill-and-hover')
+            w.locator('#struct-apply').focus()
+            expect(w.locator('#struct-apply')).to_be_focused()
+            w.keyboard.press('Control+Alt+c')
+            self.assertEqual([], w.evaluate('()=>window.copyCalls'), 'the shortcut fired behind Apply')
+            expect(w.locator('#copy-patient-status')).to_be_empty(); reached.append('apply-negative')
+            # Closed by the real Cancel button. Apply is never pressed, so no report byte moves.
+            w.locator('#struct-cancel').click()
+            expect(w.locator('#structmodal')).to_be_hidden()
+            expect(w.locator('#findings')).to_have_value(f.secret); reached.append('cancel-closes')
+            # The positive keeps the two negatives from passing for the wrong reason: same key, same
+            # kind of focus, no dialog open, and a target the screen says is available.
+            expect(w.locator('#copy-patient-id')).to_be_enabled()
+            w.locator('#copy-patient-id').focus()
+            expect(w.locator('#copy-patient-id')).to_be_focused()
+            w.keyboard.press('Control+Alt+c')
+            expect(w.locator('#copy-patient-status')).to_have_text('환자 ID를 복사했습니다.')
+            self.assertEqual([f.patient_id], w.evaluate('()=>window.copyCalls')); reached.append('positive')
+        finally:
+            if measured is None:
+                try:
+                    measured = w.evaluate(ENTRY_GEOMETRY)
+                except Exception as error:
+                    measured = dict(error=str(error))
+            print('R15-ENTRY ' + json.dumps(dict(viewport=[width, height], reached=reached,
+                                                 measured=measured), ensure_ascii=False), flush=True)
+
+    def test_worklist_07_structured_entry_over_the_findings_drawer_and_the_copy_shortcut(self):
+        """O-1/O-2 in the real workspace, with the real linked stylesheets - what the isolated DOM
+        harness cannot reach, because it carries neither the drawer nor those sheets.
+
+        O-1 is a geometry question and this case MEASURES it instead of asserting a layout. The box
+        carries an inline `width:620px` (main.html:1023) and the drawer is fixed at `right:12px`
+        with `width:min(420px,100vw-24px)` (reading-workspace.css:77), so the horizontal ranges
+        intersect only below about 1484 px: 1680 clears it, 1366 does not. Both viewports print
+        their rectangles and hit tests. **A failure at 1366 is evidence for Astra** - not a licence
+        to raise a z-index, hide the drawer or weaken anything here.
+
+        O-2 is the shortcut. The dialog opens with `on`, not `show` (main.html:3778), so before this
+        unit's guard it passed straight through an open modal and wrote a patient identifier to the
+        OS clipboard. The clipboard is replaced by a counting stub - no permission, no real write -
+        and the positive at the end is what keeps the two negatives from being vacuous."""
+        f = self.specimen(slices=2); self.seed_report(f)
+        self.seed(f)
+        w = self.login(); self.observe(w); w.on('dialog', lambda d: d.accept())
+        self.select(w, f)
+        expect(w.locator('#findings')).to_have_value(f.secret)
+        self.open_findings(w, f)
+        # The button exists only because the shipped catalog is not empty (main.html:3904).
+        expect(w.locator('#b-structured')).to_be_visible()
+        for width, height in ((1680, 1100), (1366, 768)):
+            self.entry_pass(w, f, width, height)
+
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
