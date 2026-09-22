@@ -924,3 +924,133 @@ jobs:
             tmp/runtime-ci/finding-link-model/
           if-no-files-found: error
           retention-days: 7
+  asr-engine:
+    # S3-ASR-U3 real-engine evidence. A separate job, not extra steps inside `runtime`: a
+    # whisper.cpp build, an eSpeak NG build, a 465 MiB model fetch and several real CPU
+    # inferences would swallow that job's 20-minute budget on their own.
+    #
+    # Trigger and gate semantics: the same triggers as every other job in this workflow, with no
+    # `if:`, no `needs:` and no `continue-on-error`. Nothing here is conditionally skipped and a
+    # failure fails the workflow. The steps are ordered so that every pin is resolved and
+    # recorded BEFORE the engine container is started; `asr_engine_attest.py` exits non-zero on
+    # any mismatch, so an unattested engine is never reached.
+    #
+    # What a green run means: the pinned engine and model were attested, a pinned synthetic
+    # non-clinical fixture was generated with recorded provenance and accepted by the SHIPPED
+    # compiled validator, and the SHIPPED compiled service returned a real bounded non-empty
+    # transcript over real sockets while the four lifecycle cases, the busy slot and the timeout
+    # behaved as asserted. It does NOT mean recognition accuracy, Korean, clinical suitability,
+    # browser capture (U4b) or the live refusal battery.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Pure fixture canonicalization and attestation refusals
+        run: python3 scripts/record-run.py --run-dir tmp/asr-ci/fixture-pure --cwd . --file scripts/asr_fixture.py --file scripts/asr_engine_attest.py --file tests/asr_fixture_test.py -- python3 -B tests/asr_fixture_test.py
+      - name: Reproduce a private deployment checkout
+        run: chmod -R go-rwx api
+      - name: Build the production target under test
+        env:
+          CODE_SHA: ${{ github.sha }}
+        run: docker build --target production --build-arg "VCS_REF=$CODE_SHA" -t kin-api:ci api
+      - name: Build the pinned generator and the pinned engine from source
+        timeout-minutes: 35
+        run: |
+          docker build --target generator -t kin-asr-fixture:ci tests/fixtures/asr
+          docker build --target engine -t kin-asr-engine:ci tests/fixtures/asr
+      - name: Synthesise the pinned non-clinical sentence
+        run: |
+          mkdir -p tmp/asr-ci/fixture tmp/asr-ci/out
+          chmod 0777 tmp/asr-ci/out
+          python3 scripts/record-run.py --run-dir tmp/asr-ci/generate --cwd . -- docker run --rm --network none -v "$PWD/tmp/asr-ci/fixture:/out" kin-asr-fixture:ci /out
+      - name: Canonicalize the fixture to the dictation wire format
+        run: python3 scripts/record-run.py --run-dir tmp/asr-ci/canonicalize --cwd . --file scripts/asr_fixture.py --file tmp/asr-ci/fixture/espeak-raw.wav -- python3 -B scripts/asr_fixture.py --input tmp/asr-ci/fixture/espeak-raw.wav --output tmp/asr-ci/fixture/dictation.wav --report tmp/asr-ci/fixture/fixture-report.json --generator tmp/asr-ci/fixture/generator.json
+      - name: Accept the fixture with the shipped compiled validator
+        run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/tmp/asr-ci/fixture:/fixture:ro" --entrypoint node kin-api:ci /tests/asr_fixture_validate.cjs /fixture/dictation.wav > tmp/asr-ci/fixture/validator.json
+      - name: Fetch and verify the pinned model before any engine exists
+        timeout-minutes: 15
+        run: |
+          mkdir -p tmp/asr-ci/model
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 2 --max-time 900 \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin" \
+            -o tmp/asr-ci/model/ggml-small.bin
+          echo "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b  tmp/asr-ci/model/ggml-small.bin" | sha256sum --check --strict
+      - name: Record runtime attestation before starting the engine
+        run: python3 scripts/record-run.py --run-dir tmp/asr-ci/attest --cwd . --file tmp/asr-ci/fixture/dictation.wav --file tmp/asr-ci/fixture/fixture-report.json --file tmp/asr-ci/fixture/validator.json -- python3 -B scripts/asr_engine_attest.py --engine-image kin-asr-engine:ci --generator-image kin-asr-fixture:ci --api-image kin-api:ci --model tmp/asr-ci/model/ggml-small.bin --model-source-url "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin" --fixture tmp/asr-ci/fixture/dictation.wav --fixture-report tmp/asr-ci/fixture/fixture-report.json --validator-report tmp/asr-ci/fixture/validator.json --output tmp/asr-ci/fixture/attestation.json
+      - name: Start the attested engine on an isolated internal network
+        run: |
+          docker network create --internal kin-asr-u3
+          docker run -d --name kin-asr-engine-u3 --network kin-asr-u3 --read-only \
+            --tmpfs /tmp:rw,size=16m --user 65534:65534 \
+            -v "$PWD/tmp/asr-ci/model:/models:ro" kin-asr-engine:ci \
+            --host 0.0.0.0 --port 8080 --model /models/ggml-small.bin --threads "$(nproc)"
+          docker inspect kin-asr-engine-u3 --format '{"started_at":"{{.State.StartedAt}}","image":"{{.Image}}","network":"kin-asr-u3"}' > tmp/asr-ci/fixture/engine-start.json
+          cat tmp/asr-ci/fixture/engine-start.json
+          # whisper-server prints usage and exits 0 on an unknown flag. Fail here with its own
+          # output rather than letting the harness wait out its readiness deadline.
+          sleep 5
+          running="$(docker inspect -f '{{.State.Running}}' kin-asr-engine-u3)"
+          if [ "$running" != "true" ]; then docker logs kin-asr-engine-u3; exit 1; fi
+      - name: Drive the shipped compiled service against the real engine
+        timeout-minutes: 25
+        run: python3 scripts/record-run.py --run-dir tmp/asr-ci/runtime --cwd . --file api/src/asr.service.ts --file api/src/dictation.controller.ts --file api/src/dictation-parser.ts --file api/src/dictation-audio.ts --file api/src/pacs.service.ts --file tests/asr_engine_runtime_test.cjs --file tmp/asr-ci/fixture/dictation.wav --file tmp/asr-ci/fixture/attestation.json -- docker run --rm --network kin-asr-u3 --read-only --tmpfs /tmp:rw,size=16m -v "$PWD/tests:/tests:ro" -v "$PWD/tmp/asr-ci/fixture:/fixture:ro" -v "$PWD/tmp/asr-ci/out:/out" -e KIN_ASR_ENGINE_URL=http://kin-asr-engine-u3:8080/inference --entrypoint node kin-api:ci --test /tests/asr_engine_runtime_test.cjs
+      - name: Retain the raw engine output
+        if: always()
+        run: |
+          mkdir -p tmp/asr-ci/out
+          docker logs kin-asr-engine-u3 > tmp/asr-ci/out/engine-stdout.log 2> tmp/asr-ci/out/engine-stderr.log || true
+          docker inspect kin-asr-engine-u3 > tmp/asr-ci/out/engine-inspect.json || true
+      - name: Summarize the attested identity
+        if: always()
+        run: |
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          import json, pathlib
+          root = pathlib.Path('tmp/asr-ci')
+          def load(name):
+              try:
+                  return json.loads((root / name).read_text(encoding='utf-8'))
+              except Exception as error:
+                  return {'unavailable': str(error)}
+          attestation = load('fixture/attestation.json')
+          record = load('out/asr-engine-record.json')
+          print('### S3-ASR-U3 attested identity')
+          print('')
+          print('- status: `{}`'.format(attestation.get('status')))
+          print('- engine commit: `{}`'.format(
+              (attestation.get('engine_provenance') or {}).get('source', {}).get('commit')))
+          print('- model SHA-256: `{}`'.format((attestation.get('model') or {}).get('sha256')))
+          print('- fixture SHA-256: `{}`'.format((attestation.get('fixture') or {}).get('sha256')))
+          print('- attested at `{}`, engine started at `{}`'.format(
+              attestation.get('generated_at_utc'),
+              (load('fixture/engine-start.json') or {}).get('started_at')))
+          transcript = record.get('transcript_observed') or {}
+          print('- transcript UTF-16 length: `{}` (recorded, never graded for accuracy)'.format(
+              transcript.get('utf16_length')))
+          print('')
+          print('Configured ASR_ENGINE_PIN/ASR_MODEL_PIN labels are not attestation. This job '
+                'proves wiring, protocol and lifecycle only: no recognition accuracy, no Korean, '
+                'no clinical suitability, no browser capture, no live refusal battery.')
+          SUMMARY
+      - name: Remove the isolated engine, network and model copy
+        if: always()
+        run: |
+          docker rm -f kin-asr-engine-u3 || true
+          docker network rm kin-asr-u3 || true
+          rm -rf tmp/asr-ci/model
+      - name: Synthetic ASR engine runtime evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-asr-engine-runtime
+          path: |
+            tmp/asr-ci/fixture-pure/
+            tmp/asr-ci/generate/
+            tmp/asr-ci/canonicalize/
+            tmp/asr-ci/attest/
+            tmp/asr-ci/runtime/
+            tmp/asr-ci/fixture/
+            tmp/asr-ci/out/
+          if-no-files-found: error
+          retention-days: 7
