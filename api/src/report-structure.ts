@@ -55,14 +55,91 @@ export interface StructureTemplate {
 }
 
 /**
- * **제품 서식 목록은 비어 있다** (P6·D2).
+ * 제품 서식 목록 — 검사에 매이지 않는 첫 서식 `GEN-1` (R15).
  *
- * 어느 검사의 어떤 항목을 구조화할지는 사용자(평가 판독의)만 답할 수 있다. 구현자가 임상
- * 항목·라벨·단위·범위·문장을 지어내면 그것은 요구를 충족한 것이 아니라 **지어낸 임상 내용**이다.
- * 그래서 이 단위는 기반만 만들고 목록은 빈 채로 나간다. 목록이 비면 화면은 단추를 **아예 그리지
- * 않고**(비활성이 아니라) 서버는 모든 적용을 400으로 거절한다. 답이 오면 이 상수만 채운다.
+ * **지어낸 임상 내용이 아니다.** 여기에는 소견도, 정상 문구도, 질환 어휘도, 기준값도 없다.
+ * 네 항목은 검사를 **어떻게 찍었고 무엇과 비교했는가**라는 절차적 사실이고, 나머지 세 항목은
+ * 판독의가 **자기 문장을 직접 치는 빈 칸**이다 — 서식이 주는 것은 글자가 아니라 앞머리와
+ * 항목의 신원뿐이다. 제품이 판단을 만들거나 미리 정해둔 진단 어휘를 고르게 하는 일은 없다
+ * (AGENTS §1-A.7이 막는 것이 바로 그것이다).
+ *
+ * 리터럴은 **strict JSON**으로 쓴다. 따옴표 없는 키·꼬리 쉼표·주석은 목록을 값으로 꺼내 두 벌을
+ * 대조하는 시험(`report_structure_vectors_test.py`)에서 소리내어 실패해야 한다.
+ *
+ * 한 글자라도 바꾸면 `revision`이 올라가고, 그 순간 **은퇴한 판과의 충돌 안전**이라는 이름 붙은
+ * 보류가 살아난다. 첫 채움은 그 질문이 공허해서(빈 목록으로는 어떤 건도 기록될 수 없었다)
+ * 지나갈 수 있지만, 두 번째 변경은 그 처분이 먼저다.
  */
-export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([]);
+export const STRUCTURE_CATALOG: readonly StructureTemplate[] = Object.freeze([
+  {
+    "templateId": "GEN-1",
+    "revision": 1,
+    "title": "General Report",
+    "items": [
+      {
+        "code": "TECHNIQUE",
+        "field": "findings",
+        "valueType": "text",
+        "label": "Technique",
+        "template": "Technique: {value}"
+      },
+      {
+        "code": "CONTRAST",
+        "field": "findings",
+        "valueType": "boolean",
+        "label": "Contrast",
+        "template": "Contrast: {value}",
+        "trueText": "administered",
+        "falseText": "not administered"
+      },
+      {
+        "code": "COMPARISON",
+        "field": "findings",
+        "valueType": "choice",
+        "label": "Comparison",
+        "template": "Comparison: {value}",
+        "choices": [
+          {
+            "code": "none",
+            "text": "no prior study available"
+          },
+          {
+            "code": "prior",
+            "text": "prior study reviewed"
+          }
+        ]
+      },
+      {
+        "code": "COMPARISON-STUDY",
+        "field": "findings",
+        "valueType": "text",
+        "label": "Comparison study",
+        "template": "Comparison study: {value}"
+      },
+      {
+        "code": "FINDING",
+        "field": "findings",
+        "valueType": "text",
+        "label": "Finding",
+        "template": "Finding: {value}"
+      },
+      {
+        "code": "CONCLUSION",
+        "field": "conclusion",
+        "valueType": "text",
+        "label": "Conclusion",
+        "template": "Conclusion: {value}"
+      },
+      {
+        "code": "RECOMMENDATION",
+        "field": "recommendation",
+        "valueType": "text",
+        "label": "Recommendation",
+        "template": "Recommendation: {value}"
+      }
+    ]
+  }
+]);
 
 /** 모양이 틀린 요청. 호출자가 400으로 옮긴다. */
 export class StructureInputError extends Error {}

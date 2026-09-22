@@ -1,5 +1,5 @@
 {
-  "_why": "One synthetic catalog and one set of render vectors, shared by the server-pure, client-pure, DOM and mutant tests so the two independent implementations of the render rule cannot drift. Pure ASCII and visibly synthetic: the product catalog ships EMPTY until the evaluating radiologist supplies the first exam and its fields (P6/D2), and nothing in here may ever be reachable from product code or HTTP (P7).",
+  "_why": "One synthetic catalog and one set of render vectors, shared by the server-pure, client-pure, DOM and mutant tests so the two independent implementations of the render rule cannot drift. Pure ASCII and visibly synthetic: the SYN- fixtures in this file are test-only and nothing in here may ever be reachable from product code or HTTP (P7). The product catalog is a different thing entirely - it is GEN-1, it lives in the two shipped modules, and it is pinned here only by the sha of its canonical JSON.",
   "catalog": [
     {
       "templateId": "SYN-T1",
@@ -183,8 +183,8 @@
       "why": "no control characters"
     }
   ],
-  "productCatalogSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-  "_productCatalogSha256_why": "sha256 of the canonical JSON (sorted keys, separators ',' and ':') of the PRODUCT catalog. T1 asserts it for the compiled STRUCTURE_CATALOG, T2 for PRODUCT_CATALOG - the two constants are compared as VALUES, neither reads the other's source, and neither test can see the other's file. It changes the day a real catalog ships, and that is the point: the change has to be made here, deliberately, in the same commit.",
+  "productCatalogSha256": "c787f0327da54b87edaf9d44e4e1f33242edc1e57a122073adfc93599a54195d",
+  "_productCatalogSha256_why": "sha256 of the canonical JSON (sorted keys, separators ',' and ':') of the PRODUCT catalog. T1 asserts it for the compiled STRUCTURE_CATALOG, T2 for PRODUCT_CATALOG - the two constants are compared as VALUES, neither reads the other's source, and neither test can see the other's file. It changed the day the first real catalog shipped (GEN-1 revision 1), and that is the point: the change has to be made here, deliberately, in the same commit. Both literals are read with a brace-matching scanner and parsed as strict JSON, so key order and indentation may differ between the two files and the VALUE may not.",
   "catalogVectors": [
     {
       "name": "accept: the shipped synthetic catalog",

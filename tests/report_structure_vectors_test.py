@@ -538,16 +538,79 @@ class ReportStructureVectors(unittest.TestCase):
         this unit decides that. While `revision === 1` holds, the question is vacuous: there is no
         earlier revision for anything to collide with.
 
-        This is an INCOMPLETE tripwire and it is not a proof: it does not see an item-code rename or
-        an item removal inside revision 1, and those raise the same question. It fails on the first
-        revision bump, which is the moment the decision has to be made.
+        The revision number alone was an INCOMPLETE tripwire and said so: it cannot see an item-code
+        rename or an item removal INSIDE revision 1, and both retire a sentence exactly the way a
+        bump does. So the identities and the enumerable sentences are pinned here as well. Change
+        any of them and this fails, which is the moment the retired-revision decision has to be made.
         """
         for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
                                      ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
-            for template in shipped_catalog(source, anchor):
+            catalog = shipped_catalog(source, anchor)
+            for template in catalog:
                 with self.subTest(side=name, template=template.get("templateId")):
                     self.assertEqual(template.get("revision"), 1,
                                      "a revision bump needs an explicit disposition for the retired one first")
+            with self.subTest(side=name, what="identities"):
+                self.assertEqual(
+                    sorted((t["templateId"], i["code"]) for t in catalog for i in t["items"]),
+                    [("GEN-1", "COMPARISON"), ("GEN-1", "COMPARISON-STUDY"), ("GEN-1", "CONCLUSION"),
+                     ("GEN-1", "CONTRAST"), ("GEN-1", "FINDING"), ("GEN-1", "RECOMMENDATION"),
+                     ("GEN-1", "TECHNIQUE")],
+                    "renaming or removing an item retires its sentences just as a revision bump does")
+            with self.subTest(side=name, what="enumerable sentences"):
+                sentences = sorted(independent_render(item, value)
+                                   for template in catalog for item in template["items"]
+                                   for value in ([c["code"] for c in item.get("choices", [])]
+                                                 if item["valueType"] == "choice"
+                                                 else [True, False] if item["valueType"] == "boolean" else []))
+                self.assertEqual(sentences, [
+                    "Comparison: no prior study available",
+                    "Comparison: prior study reviewed",
+                    "Contrast: administered",
+                    "Contrast: not administered",
+                ], "an entry already signed under this wording can no longer be traced if the wording moves")
+
+    def test_the_shipped_catalog_is_legal_under_the_independent_rule(self) -> None:
+        """The judge that did not write either implementation, asked about the SHIPPED catalog.
+
+        Until GEN-1 this file could only judge synthetic vectors. Now the thing that actually boots
+        the API and draws the form is put in front of the third rule, on both sides.
+        """
+        for name, source, anchor in (("server", SERVER, SERVER_CATALOG_ANCHOR),
+                                     ("client", CLIENT, CLIENT_CATALOG_ANCHOR)):
+            with self.subTest(side=name):
+                self.assertEqual(independent_catalog_rule(shipped_catalog(source, anchor)), "ACCEPT")
+
+    def test_the_shipped_catalog_separates_its_items_by_prefix_inside_every_field(self) -> None:
+        """The whole cross-item argument for GEN-1, asserted as data.
+
+        Every template ends its literal prefix in `": "` and carries an EMPTY suffix, and the empty
+        string is a suffix of everything - so R-B has nothing to work with on the suffix side and
+        prefix disjointness is the entire proof. R-S (checked at load for enumerable values and per
+        request for typed ones) gives `key(line) = prefix + key(value)`; if two items of one field
+        ever produced the same key, one ASCII prefix would be a prefix of the other. So this
+        assertion IS the reason two different items cannot make the same sentence, for any value.
+
+        The bare-template rule is recorded with it: a template that is only `{value}` has an empty
+        prefix, the empty string is a prefix of everything, and such an item could only ever be the
+        SOLE item of its field - closing that field to every later item. GEN-1 uses none.
+        """
+        catalog = shipped_catalog(SERVER, SERVER_CATALOG_ANCHOR)
+        by_field = {}
+        for template in catalog:
+            for item in template["items"]:
+                prefix, suffix = item["template"].split(SLOT)
+                self.assertNotEqual(prefix, "", f"{item['code']} has a bare template; see the docstring")
+                self.assertEqual(suffix, "", f"{item['code']} grew a suffix; the argument below assumes none")
+                by_field.setdefault(item["field"], []).append((item["code"], prefix))
+        self.assertEqual(sorted(by_field), ["conclusion", "findings", "recommendation"],
+                         "every body field carries at least one item")
+        for field, items in by_field.items():
+            for i, (code_a, prefix_a) in enumerate(items):
+                for code_b, prefix_b in items[i + 1:]:
+                    with self.subTest(field=field, pair=(code_a, code_b)):
+                        self.assertFalse(prefix_a.startswith(prefix_b) or prefix_b.startswith(prefix_a),
+                                         f"{code_a} and {code_b} could make the same sentence in {field}")
 
     def test_the_pinned_product_sha_is_the_sha_of_both_shipped_literals(self) -> None:
         # B8. T1 asserts this hash against the compiled STRUCTURE_CATALOG and T2 against the browser

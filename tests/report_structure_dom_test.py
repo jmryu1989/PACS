@@ -15,9 +15,11 @@ modal took focus, the value is written only after the server answered, a plan th
 between opening and pressing is not sent, and the state is re-read after a commit instead of being
 guessed.
 
-The PRODUCT catalog is empty (P6), so D14 asserts the shipped default - no button, no request - and
-every other case runs against a SYNTHETIC catalog injected by a shim that exists only in this file
-(P7). No clinical item, label, unit, range or sentence is authored anywhere in this repository.
+The PRODUCT catalog is GEN-1 (R15). D14/D18/D19 pass `catalog=None`, which leaves the shim off and
+runs the catalog the browser really loads; D14b injects an EMPTY one, because empty is still the
+shape a REFUSED catalog falls back to (P6) and it must still draw no control at all. Every other
+case runs against the SYNTHETIC fixture injected by a shim that exists only in this file (P7) - no
+SYN- item is reachable from product code or HTTP.
 
 Two files may be replaced through KIN_STRUCT_MAIN / KIN_STRUCT_STRUCTURE_JS so the mutant runner can
 break the product on purpose without ever touching the source tree.
@@ -138,10 +140,10 @@ CITATIONJS
 STRUCTUREJS
 </script>
 <script>
-/* P7: the ONLY place a synthetic catalog exists. The shipped module keeps its empty constant; this
-   shim hands the sliced product block a catalog so the form has something to drive. Nothing here is
-   reachable from the product or from HTTP. */
-if (CATALOGJSON.length)
+/* P7: the ONLY place a synthetic catalog exists. `null` means "do not shim" - the sliced product
+   block then drives the catalog the module really ships. Any other value, including [], replaces it
+   for that page only. Nothing here is reachable from the product or from HTTP. */
+if (CATALOGJSON !== null)
   window.KinReportStructure = Object.assign({}, window.KinReportStructure, { PRODUCT_CATALOG: CATALOGJSON });
 </script>
 <script>
@@ -279,6 +281,11 @@ class ReportStructureDOMTest(unittest.TestCase):
         cls._play.stop()
 
     def open(self, page_state, catalog=CATALOG, struct_replies=(), cite_replies=(), replies=(), boot=True):
+        """`catalog=None` means: do not shim anything, run the catalog the product SHIPS.
+
+        Every other value is injected over the product constant (P7), including `[]` - which is the
+        empty form D14b is about, and is no longer the same thing as the shipped catalog.
+        """
         page = self._browser.new_page()
         page.set_content(harness(page_state, catalog))
         page.evaluate("data => { structReplies = data.s; citeReplies = data.c; replies = data.r; }",
@@ -288,7 +295,7 @@ class ReportStructureDOMTest(unittest.TestCase):
             # The product only issues the dedicated read from loadReport, so a harness that never
             # loads would be testing a screen nobody opened.
             page.evaluate("() => load({force: true})")
-            if catalog and struct_replies:
+            if struct_replies and catalog != []:
                 page.wait_for_function("() => structCalls.length >= 1")
         return page
 
@@ -537,15 +544,101 @@ class ReportStructureDOMTest(unittest.TestCase):
         self.assertIn(CHOICE_LINE, markup, "the sentence that will be written is exactly what is shown")
 
     # D14 ──────────────────────────────────────────────────────────────────────────────────────
-    def test_d14_the_shipped_empty_catalog_renders_no_button_and_asks_for_nothing(self):
-        # P6: this is the product default today. It must be a disabled-free absence, not a promise.
-        page = self.open(state(), catalog=[])
+    def test_d14_the_shipped_catalog_draws_its_own_control_and_asks_once(self):
+        """The case that changed its purpose the day GEN-1 shipped.
+
+        It used to assert the opposite - no control, no request - because the product catalog was
+        empty. That reading is now D14b below, where an EMPTY catalog is injected rather than
+        shipped. Here the shim is off (`catalog=None` leaves the shipped constant in place, :144), so
+        this is the ONLY case in this file that runs the catalog the browser really loads.
+        """
+        page = self.open(state(), catalog=None, boot=False)
+        page.evaluate("() => load({force: true})")
+        page.wait_for_function("() => structCalls.length >= 1")
+        self.assertTrue(page.evaluate("() => buttonExists()"),
+                        "S3-STRUCT D14: the shipped catalog must draw the Structured control")
+        self.assertEqual(page.evaluate("() => structCalls.length"), 1,
+                         "S3-STRUCT D14: the dedicated read is issued once per selection, not per render")
+        page.evaluate("() => openStruct()")
+        self.assertEqual(
+            page.evaluate("() => [...$('#struct-item').options].map(o => o.textContent)"),
+            ["Technique", "Contrast", "Comparison", "Comparison study", "Finding",
+             "Conclusion", "Recommendation"],
+            "S3-STRUCT D14: the item list is the shipped catalog, in its own order")
+        self.assertEqual(page.evaluate("() => $('#struct-template').textContent"), "General Report")
+
+    # D14b ─────────────────────────────────────────────────────────────────────────────────────
+    def test_d14b_an_injected_empty_catalog_still_draws_nothing_and_asks_for_nothing(self):
+        """P6 is unchanged by GEN-1: empty means no control at all, not a disabled promise.
+
+        This is the shape `create()` also falls back to when a catalog is REFUSED, so it has to stay
+        reachable and asserted - otherwise a broken catalog would present itself as a working screen
+        with nothing in it.
+        """
+        page = self.open(state(), catalog=[], boot=False)
         page.evaluate("() => load({force: true})")
         page.wait_for_timeout(120)
         self.assertFalse(page.evaluate("() => buttonExists()"),
-                         "S3-STRUCT D14: with no catalog there must be no Structured control at all")
+                         "S3-STRUCT D14b: with no catalog there must be no Structured control at all")
         self.assertEqual(page.evaluate("() => structCalls.length"), 0,
-                         "S3-STRUCT D14: with no catalog the dedicated read must never be issued")
+                         "S3-STRUCT D14b: with no catalog the dedicated read must never be issued")
+
+    # D18 ──────────────────────────────────────────────────────────────────────────────────────
+    def test_d18_a_shipped_item_reaches_the_report_with_the_bytes_the_form_showed(self):
+        """First use, end to end, on the catalog that actually ships.
+
+        Every other case drives the synthetic fixture; this one drives GEN-1 through the same
+        product code. What it pins is the one property the whole design rests on: the line the form
+        displayed is the line that reaches the field, and it reaches it only after a 2xx.
+        """
+        line = "Conclusion: a line the reader typed"
+        page = self.open(state(), catalog=None, boot=False)
+        page.evaluate("() => load({force: true})")
+        page.wait_for_function("() => structCalls.length >= 1")
+        page.evaluate("() => { structReplies = [{version: 4, unknown: false, head: [], draft: []}];"
+                      "replies = [{status: 200, body: {structured: {sid: 'x', field: 'conclusion',"
+                      "  enteredAt: 'now'}}}]; }")
+        page.evaluate("() => { openStruct(); pickStruct('GEN-1\\u0000CONCLUSION'); }")
+        page.evaluate("() => { $('#struct-value-text').value = 'a line the reader typed';"
+                      "$('#struct-value-text').dispatchEvent(new Event('input', {bubbles: true})); }")
+        self.assertEqual(page.evaluate("() => $('#struct-line').textContent"), line,
+                         "S3-STRUCT D18: the form must show the exact bytes it will send")
+        before = page.evaluate("() => $('#conclusion').value")
+        page.evaluate("() => { holdCount = 1; applyStruct(); }")
+        page.wait_for_function("() => calls.length === 1")
+        self.assertEqual(page.evaluate("() => $('#conclusion').value"), before,
+                         "S3-STRUCT D18: nothing may be written before the server answered")
+        page.evaluate("() => release()")
+        page.wait_for_function("() => $('#conclusion').value !== ''")
+        self.assertEqual(page.evaluate("() => $('#conclusion').value"), line)
+        sent = page.evaluate("() => calls[0].body")
+        self.assertEqual(sent["structure"]["templateId"], "GEN-1")
+        self.assertEqual(sent["structure"]["templateRevision"], 1)
+        self.assertEqual(sent["structure"]["itemCode"], "CONCLUSION")
+        self.assertEqual(sent["structure"]["value"], "a line the reader typed")
+        self.assertEqual(sent["structure"]["renderedText"], line)
+        self.assertEqual(sent["conclusion"], line)
+
+    # D19 ──────────────────────────────────────────────────────────────────────────────────────
+    def test_d19_a_failed_dedicated_read_says_so_and_does_not_block_typing(self):
+        """The new request this unit introduces, and its failure mode.
+
+        Before GEN-1 the shipped catalog was empty and this GET was never issued at all. Now it goes
+        out once per selection, so the case where it FAILS has to be a named state: the screen must
+        say it does not know, must not invent an empty keep list, and must leave the report usable.
+        """
+        page = self.open(state(), catalog=None, boot=False)
+        page.evaluate("() => { structReplies = []; }")   # nothing queued => the read fails
+        page.evaluate("() => load({force: true})")
+        page.wait_for_function("() => structCalls.length >= 1")
+        self.assertFalse(page.evaluate("() => structKnown()"),
+                         "S3-STRUCT D19: a failed read is not a confirmed empty list")
+        self.assertIsNone(page.evaluate("() => keepIds() ?? null"),
+                          "S3-STRUCT D19: an unconfirmed read must not produce a keep list")
+        page.evaluate("() => { $('#findings').value = 'typed after the failure';"
+                      "$('#findings').dispatchEvent(new Event('input', {bubbles: true})); }")
+        self.assertEqual(page.evaluate("() => $('#findings').value"), "typed after the failure",
+                         "S3-STRUCT D19: the report stays usable when the structure read fails")
 
     # D15 ──────────────────────────────────────────────────────────────────────────────────────
     def test_d15_a_plan_that_went_stale_sends_nothing_and_asks_again(self):

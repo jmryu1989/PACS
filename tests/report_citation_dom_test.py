@@ -130,6 +130,11 @@ HARNESS = """<!doctype html><html><head><style>MODALCSS</style></head><body>
 <button id="b-cite-list"></button><button id="b-cite-reload"></button></div>
 <div id="citelist" hidden></div>
 <textarea id="findings"></textarea><textarea id="conclusion"></textarea><textarea id="recommendation"></textarea>
+<!-- The sliced region now creates the Structured button and inserts it before this one
+     (main.html:3900-3908). The product catalog is no longer empty, so that branch RUNS: without
+     the element the whole sliced script dies at load and every case below fails before its
+     first assertion. -->
+<button id="b-print"></button>
 <button id="b-approve"></button><button id="b-save"></button><button id="b-transcribe"></button>
 <button id="b-addendum"></button><button id="b-unread"></button><button id="b-prelim"></button><button id="b-defer"></button>
 <button id="logout"></button>
@@ -155,7 +160,7 @@ let studies = [{uid: "UIDVALUE", name: "HONG GILDONG", id: "P-1", date: "2026-09
                 rs: "T", ss: "Verified", em: "N"},
                {uid: "OTHERVALUE", name: "KIM CHULSOO", id: "P-2", date: "2026-09-20", acc: "A2", desc: "Brain CT",
                 rs: "T", ss: "Verified", em: "N"}];
-let calls = [], citeCalls = [], replies = [], citeReplies = [], toasts = [], confirms = [], confirmAnswer = false, clipboard = [];
+let calls = [], citeCalls = [], structCalls = [], replies = [], citeReplies = [], toasts = [], confirms = [], confirmAnswer = false, clipboard = [];
 const studyPriority = { get: () => false };
 let logouts = 0;
 const KinAuth = { has: () => true, logout: async () => { logouts += 1; } };
@@ -214,6 +219,14 @@ window.fetch = async (url, options = {}) => {
     if (body === undefined)
       return { ok: false, status: 500, json: async () => ({ message: "인용을 확인할 수 없습니다" }) };
     return { ok: true, status: 200, json: async () => body };
+  }
+  // The structured-entry read is a different surface with its own DOM test. Answer it inertly,
+  // keep it OUT of `calls` and do not let it consume a queued reply: the sliced region asks for
+  // it once per selection now that the product catalog is not empty, and every exact
+  // `calls.length === n` assertion in this file counts the writes it is actually about.
+  if (path.endsWith("/report/structure")) {
+    structCalls.push(record);
+    return { ok: true, status: 200, json: async () => ({ version: 0, unknown: false, head: [], draft: [] }) };
   }
   calls.push(record);
   const reply = replies.shift() ?? { status: 200, body: {} };

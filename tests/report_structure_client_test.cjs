@@ -33,13 +33,63 @@ test('the module loads in plain Node and publishes the same object on window', (
   assert.throws(() => S.create(null, CATALOG), /citation library/);
 });
 
-test('the PRODUCT catalog is empty, so the form reports itself empty', () => {
-  // P6: with an empty catalog main.html never creates the Structured button, and this is the
-  // property it asks for. The day D2 is answered this test keeps passing with a real catalog only
-  // because it asks the product constant directly.
-  assert.deepEqual(S.PRODUCT_CATALOG, []);
-  assert.equal(S.create(C, S.PRODUCT_CATALOG).empty, true);
+test('the SHIPPED catalog is usable: the form is live and every item renders its own sentence', () => {
+  /**
+   * The first-use assertion. Until GEN-1 the product constant was `[]`, `main.html` never created
+   * the Structured button and every apply was a 400 - so nothing below this line had ever run
+   * against the thing that actually ships. It does now: this is the catalog the browser loads.
+   *
+   * The sentences are asserted as literals rather than derived from the catalog, because deriving
+   * them would only restate `renderItem`. A wording change has to be read by a human here.
+   */
+  const shipped = S.create(C, S.PRODUCT_CATALOG);
+  assert.equal(shipped.empty, false, 'a shipped catalog must make the form live');
+  assert.equal(shipped.invalid, undefined, 'and it must be legal, silently');
+  assert.deepEqual(shipped.templates().map(t => [t.templateId, t.revision]), [['GEN-1', 1]]);
+  const items = shipped.templates()[0].items;
+  assert.deepEqual(items.map(i => [i.code, i.field, i.valueType]), [
+    ['TECHNIQUE', 'findings', 'text'],
+    ['CONTRAST', 'findings', 'boolean'],
+    ['COMPARISON', 'findings', 'choice'],
+    ['COMPARISON-STUDY', 'findings', 'text'],
+    ['FINDING', 'findings', 'text'],
+    ['CONCLUSION', 'conclusion', 'text'],
+    ['RECOMMENDATION', 'recommendation', 'text'],
+  ]);
+  const of = code => shipped.findItem('GEN-1', code);
+  assert.equal(shipped.renderItem(of('CONTRAST'), true), 'Contrast: administered');
+  assert.equal(shipped.renderItem(of('CONTRAST'), false), 'Contrast: not administered');
+  assert.equal(shipped.renderItem(of('COMPARISON'), 'none'), 'Comparison: no prior study available');
+  assert.equal(shipped.renderItem(of('COMPARISON'), 'prior'), 'Comparison: prior study reviewed');
+  // The clinician-entered items contribute a prefix and nothing else: every word is the reader's.
+  assert.equal(shipped.renderItem(of('TECHNIQUE'), 'axial CT'), 'Technique: axial CT');
+  assert.equal(shipped.renderItem(of('COMPARISON-STUDY'), 'CT 2025-03-11'), 'Comparison study: CT 2025-03-11');
+  assert.equal(shipped.renderItem(of('FINDING'), 'free line'), 'Finding: free line');
+  assert.equal(shipped.renderItem(of('CONCLUSION'), 'free line'), 'Conclusion: free line');
+  assert.equal(shipped.renderItem(of('RECOMMENDATION'), 'free line'), 'Recommendation: free line');
+  // No item offers a value of its own: nothing is pre-filled and no vocabulary is proposed.
+  for (const item of items)
+    if (item.valueType === 'text')
+      assert.equal('choices' in item || 'trueText' in item, false, `${item.code} must carry no wording`);
   assert.equal(form.empty, false);
+});
+
+test('an item of every body field is reachable, and the two typed items carry machine-readable values', () => {
+  // R15's closure set needs a coded entry in conclusion and recommendation, not only in findings.
+  // The pair loop is per field (report-structure.ts:394), so this is also what makes those two
+  // fields single-item fields whose items cannot collide with anything.
+  const shipped = S.create(C, S.PRODUCT_CATALOG);
+  for (const [field, code] of [['findings', 'FINDING'], ['conclusion', 'CONCLUSION'],
+                               ['recommendation', 'RECOMMENDATION']]) {
+    const item = shipped.findItem('GEN-1', code);
+    assert.equal(item.field, field);
+    assert.equal(shipped.validateValue(item, 'a line the reader typed'), null);
+  }
+  assert.equal(shipped.valueText(shipped.findItem('GEN-1', 'CONTRAST'), false), 'not administered');
+  assert.equal(shipped.valueText(shipped.findItem('GEN-1', 'COMPARISON'), 'prior'), 'prior study reviewed');
+  // and a value outside the enumerated set is refused rather than rendered as itself
+  assert.equal(shipped.valueText(shipped.findItem('GEN-1', 'COMPARISON'), 'invented'), null);
+  assert.equal(shipped.validateValue(shipped.findItem('GEN-1', 'COMPARISON'), 'invented'), S.MESSAGES.choice);
 });
 
 test('renderItem reproduces every shared vector byte for byte', () => {
@@ -118,13 +168,15 @@ test('an illegal catalog closes the form instead of throwing, and says which rul
 });
 
 test('a valid EMPTY catalog is silent, and is not the same thing as a refused one', () => {
-  // The distinction matters: empty is the shipped, normal, deliberate state (P6). If both looked
-  // alike, a broken catalog would ship as "no structured entry yet" and nobody would hear it.
+  // The distinction still matters now that the product ships a catalog: the empty form is the shape
+  // `create()` falls back to when a catalog is REFUSED, so if both looked alike a broken catalog
+  // would present itself as "no structured entry yet" and nobody would hear it. The empty catalog
+  // here is injected, not the product constant - that one is no longer empty.
   const seen = [];
   const real = console.error;
   console.error = (...args) => seen.push(args.join(' '));
   let empty;
-  try { empty = S.create(C, S.PRODUCT_CATALOG); }
+  try { empty = S.create(C, []); }
   finally { console.error = real; }
   assert.equal(empty.empty, true);
   assert.equal(empty.invalid, undefined, 'nothing was refused');
@@ -162,7 +214,7 @@ test('programming errors are not swallowed by the fail-closed path', () => {
   let closed, empty;
   try {
     closed = S.create(C, VECTORS.catalogVectors.find(v => v.rule === 'R-D').catalog);
-    empty = S.create(C, S.PRODUCT_CATALOG);
+    empty = S.create(C, []);
   } finally { console.error = real; }
   assert.ok(closed.invalid.startsWith('R-D: '), closed.invalid);
   assert.equal(closed.empty, true);
@@ -224,6 +276,46 @@ test('the PRODUCT catalog is byte-for-byte the pinned canonical JSON', () => {
   };
   const sha = crypto.createHash('sha256').update(canonical([...S.PRODUCT_CATALOG]), 'utf8').digest('hex');
   assert.equal(sha, VECTORS.productCatalogSha256, 'PRODUCT_CATALOG is not the pinned catalog');
+});
+
+test('the shipped free-text items refuse at the byte, and the page says where the limit really is', () => {
+  /**
+   * The limits of GEN-1, stated rather than smoothed over.
+   *
+   * `#struct-value-text` is `maxlength="512"` and counts UTF-16 units; the rule is 512 UTF-8 BYTES.
+   * Korean is three bytes a character, so the input box lets a reader type roughly three times what
+   * the rule accepts - and the refusal must be a message, never a silent truncation.
+   */
+  const shipped = S.create(C, S.PRODUCT_CATALOG);
+  const finding = shipped.findItem('GEN-1', 'FINDING');
+  const hangul = '가'.repeat(171);            // 171 UTF-16 units, 513 UTF-8 bytes
+  assert.equal(hangul.length, 171, 'maxlength=512 would admit this');
+  assert.equal(S.utf8Bytes(hangul), 513);
+  assert.equal(shipped.validateValue(finding, hangul), S.MESSAGES.tooLong, 'refused here, nothing is sent');
+  assert.equal(shipped.validateValue(finding, '가'.repeat(170)), null, 'and 510 bytes is accepted');
+
+  /**
+   * The narrow band this side does NOT catch, pinned so nobody reports it as caught: the client
+   * measures the VALUE, the server measures the value AND the rendered line. A 512-byte value under
+   * a 9-byte prefix passes here and comes back as a 400 (report-structure.ts:474). Not fixed by
+   * loosening either side - the server is right - and recorded as a named limit of this unit.
+   */
+  const band = 'x'.repeat(512);
+  assert.equal(shipped.validateValue(finding, band), null, 'the value alone is inside the limit');
+  assert.equal(S.utf8Bytes(shipped.renderItem(finding, band)), 521, 'the sentence is not');
+
+  /**
+   * NUL and a lone surrogate are different on purpose, and the difference is the reason the server
+   * check exists. NUL is below U+0020 so the one-line rule stops it here; a lone surrogate is not,
+   * and this side has no mirror of the server's `storable()` - so it passes the page and the server
+   * refuses it with a 400. Either way the body is untouched.
+   */
+  // Built from the code point, like the U+2028 case below: a raw NUL in a source file is
+  // invisible, and it also makes git treat this text file as binary.
+  assert.equal(shipped.validateValue(finding, 'a' + String.fromCharCode(0) + 'b'), S.MESSAGES.oneLine,
+    'NUL never leaves the page');
+  assert.equal(shipped.validateValue(finding, 'a' + String.fromCharCode(0xd800) + 'b'), null,
+    'a lone surrogate is NOT refused here - the server 400 is what stops it');
 });
 
 test('a value that is too long or not one line is refused before anything is sent', () => {
