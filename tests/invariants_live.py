@@ -173,6 +173,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/assign"): Route(Kind.TENANT),
     ("PATCH", "studies/:uid"): Route(Kind.REPORT, "patch"),
     ("PUT", "studies/:uid/report"): Route(Kind.REPORT, "draft-put"),
+    ("POST", "studies/:uid/dictation"): Route(Kind.REPORT, "dictation"),
     ("DELETE", "studies/:uid/draft"): Route(Kind.REPORT, "draft-delete"),
     ("DELETE", "studies/:uid/draft/force"): Route(Kind.REPORT, "draft-force"),
     ("POST", "studies/:uid/report/commit"): Route(Kind.REPORT, "commit"),
@@ -2864,6 +2865,14 @@ class LiveInvariantTests(unittest.TestCase):
     ) -> HttpResult:
         uid = quote(fixture.uid)
         operation = route.operation
+        if operation == "dictation":
+            # Canonical nonclinical byte fixture; no microphone/recorded speech.
+            import struct
+            wave = (b"RIFF" + struct.pack("<I", 38) + b"WAVEfmt " +
+                    struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16) +
+                    b"data" + struct.pack("<Ih", 2, 0))
+            return self.stack.bearer_request("POST", f"/studies/{uid}/dictation",
+                self.stack.token(user), wave, headers={"Content-Type": "audio/wav", "X-KIN-CSRF": "1"})
         if operation == "bootstrap":
             return self.stack.request("GET", "/bootstrap", user)
         if operation == "studies":

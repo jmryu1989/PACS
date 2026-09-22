@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { dictationParser } from './dictation-parser';
 
 async function bootstrap() {
   // 설정 실수는 첫 요청의 500/인증 우회가 아니라 기동 실패로 드러나야 한다.
@@ -19,6 +20,7 @@ async function bootstrap() {
       }
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  app.use(dictationParser());
   // Register before Nest's body parser: malformed JSON can fail before controller
   // middleware, and even display/evidence error responses must not be cached.
   app.use((req: any, res: any, next: () => void) => {
