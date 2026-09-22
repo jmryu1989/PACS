@@ -98,6 +98,21 @@ const isPlainString = (value: any) => typeof value === 'string';
 const isIndex = (value: any) => Number.isSafeInteger(value) && value >= 0;
 
 /**
+ * 담는 그릇도 규칙으로 거절한다 (P12 D1).
+ *
+ * `x ?? []`는 `null`·`undefined`만 빈 배열로 바꾼다. `items: {}`처럼 **배열이 아닌 그릇**은 그대로
+ * `for..of`에 들어가 규칙 이름 없는 `TypeError`가 되는데, 그러면 시험은 "무언가 던졌다"만 알고
+ * **무엇을 어겼는지** 말할 수 없다. 더 나쁜 것은 거울 쪽이다: 같은 모양이 화면에서는
+ * `CatalogError`가 아니라서 `create()`를 뚫고 나가고, 이 모듈은 `main.html`의 한 `<script>` 안에
+ * 있으므로 서식 목록 하나 때문에 워크리스트도 판독문도 자동 저장도 함께 죽는다.
+ */
+function catalogArray(value: any, message: string): any[] {
+  const list = value ?? [];
+  if (!Array.isArray(list)) throw new StructureCatalogError('R-D', message);
+  return list;
+}
+
+/**
  * `jsonb`는 NUL도 짝 없는 서러게이트도 담지 못한다. 걸러내지 않으면 한도를 재는 질의에서
  * 데이터베이스 오류로 터져 **500**이 되고 사용자는 무엇이 잘못됐는지 듣지 못한다
  * (`report-citation.ts:198-210`의 같은 이유·같은 선례).
@@ -276,7 +291,7 @@ export function validateCatalog(catalog: readonly StructureTemplate[]): void {
     enumerable: boolean; lines: Set<string>;
   }[] = [];
 
-  for (const template of catalog ?? []) {
+  for (const template of catalogArray(catalog, '서식 목록은 배열이어야 합니다')) {
     if (!isPlainString(template?.templateId) || !template.templateId)
       throw new StructureCatalogError('R-D', 'templateId가 필요합니다');
     if (templateIds.has(template.templateId))
@@ -288,7 +303,7 @@ export function validateCatalog(catalog: readonly StructureTemplate[]): void {
       throw new StructureCatalogError('R-D', `title이 필요합니다: ${template.templateId}`);
 
     const codes = new Set<string>();
-    for (const item of template.items ?? []) {
+    for (const item of catalogArray(template.items, `서식의 items는 배열이어야 합니다: ${template.templateId}`)) {
       const where = `${template.templateId}/${item?.code ?? '(code 없음)'}`;
 
       /* ── R-D: 모양 ─────────────────────────────────────────────────────────────── */
@@ -321,7 +336,7 @@ export function validateCatalog(catalog: readonly StructureTemplate[]): void {
           `앞뒤 고정 문자열이 ${REPORT_STRUCTURE_LIMITS.renderedText}바이트를 채워 값이 들어갈 자리가 없습니다: ${where}`);
 
       if (item.valueType === 'choice') {
-        const list = item.choices ?? [];
+        const list = catalogArray(item.choices, `choice 항목의 선택지는 배열이어야 합니다: ${where}`);
         if (!list.length) throw new StructureCatalogError('R-D', `choice 항목에 선택지가 없습니다: ${where}`);
         const seenCode = new Set<string>();
         for (const choice of list) {

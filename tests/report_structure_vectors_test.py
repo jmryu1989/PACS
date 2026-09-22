@@ -167,7 +167,14 @@ def independent_catalog_rule(catalog):
     (R-A before R-B). Returns the first rule the catalog breaks, or ACCEPT."""
     seen_templates = set()
     flat = []
-    for template in catalog:
+    # The CONTAINER is part of the shape. Both shipped validators ask `x ?? []`, so only null and
+    # undefined mean "empty"; anything else that is not an array is R-D. Iterating a dict here would
+    # quietly walk its keys and call a malformed catalog legal, which is the one answer this third
+    # rule exists to make impossible.
+    templates = [] if catalog is None else catalog
+    if not isinstance(templates, list):
+        return "R-D"
+    for template in templates:
         # A catalog element that is not a mapping at all (null, a bare string) is a shape error, not
         # a crash: both shipped validators answer R-D for it, so this one has to as well.
         if not isinstance(template, dict):
@@ -182,7 +189,11 @@ def independent_catalog_rule(catalog):
         if not isinstance(template.get("title"), str) or not template["title"]:
             return "R-D"
         codes = set()
-        for item in template.get("items", []):
+        items = template.get("items")
+        items = [] if items is None else items
+        if not isinstance(items, list):
+            return "R-D"
+        for item in items:
             if not isinstance(item, dict):
                 return "R-D"
             code = item.get("code")
@@ -208,7 +219,13 @@ def independent_catalog_rule(catalog):
 
             kind = item["valueType"]
             if kind == "choice":
-                choices = item.get("choices") or []
+                choices = item.get("choices")
+                choices = [] if choices is None else choices
+                # An array-LIKE container ({"length": 1, "0": {...}}) is the shape that used to split
+                # the two implementations: the server's `for..of` raised, the browser's index loop
+                # walked it happily. Neither is a rule, so neither is right.
+                if not isinstance(choices, list):
+                    return "R-D"
                 if not choices:
                     return "R-D"
                 choice_codes = set()
