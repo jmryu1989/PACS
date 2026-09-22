@@ -809,8 +809,11 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         bound from the rendered rectangles at both viewports: 1680 as the height that always worked,
         1366 as the one that did not. The drawer is opened once and never reopened, so the second
         pass also answers whether an already-open drawer follows a resize. **A failure at either is
-        evidence for Astra** - not a licence to raise a z-index, hide the drawer, force a click or
-        weaken anything here.
+        evidence for Astra** - never a licence to hide the drawer, force a click or weaken anything
+        here. The second run proved that: the bound let the dialog open at 1366 and then `Apply`
+        (922,470,58x22) was covered by the drawer (934,472,420x284), because `.modal` is z-30 under
+        the drawer's z-80. That measurement, and a disposition on it, are what the open dialog's own
+        layer (main.html:322) rests on - not a guess made to turn this case green.
 
         O-2 is the shortcut. The dialog opens with `on`, not `show` (main.html:3781), so before this
         unit's guard it passed straight through an open modal and wrote a patient identifier to the

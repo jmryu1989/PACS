@@ -505,6 +505,33 @@ test('the form is bound to the study it opened on, and the binding is checked fi
   assert.ok(body.indexOf('pane.uid !== selectedUid') < body.indexOf('api("PUT"'),
     'and before anything is sent');
   assert.match(body, /const uid = pane\.uid;/, 'the request uses the pinned study, not the selection');
+});
+
+test('the open structured dialog is layered above the Image Findings drawer, and only it is', () => {
+  // Measured, not assumed: at 1366x768 the dialog opened and `Apply` (922,470,58x22) was covered by
+  // the drawer (934,472,420x284), because `.modal` is z-30 and the drawer is z-80. The numbers are
+  // read from the two shipped files rather than written down here, so this fails if either moves.
+  const css = fs.readFileSync(path.join(LITE, 'reading-workspace.css'), 'utf8');
+  const layer = (text, selector) => {
+    const rule = text.slice(text.indexOf(selector + ' {'));
+    const found = /z-index:\s*(-?\d+)/.exec(rule.slice(0, rule.indexOf('}')));
+    return found ? Number(found[1]) : null;
+  };
+  const drawer = layer(css, '#reading-findings');
+  const open = layer(MAIN, '#structmodal.modal.on');
+  const modals = layer(MAIN, '.modal');
+  assert.equal(typeof drawer, 'number', 'the drawer declares a layer');
+  assert.ok(open > drawer, `the open dialog (${open}) must sit above the drawer (${drawer})`);
+  assert.equal(modals, 30, 'every other modal keeps the layer it had');
+  // Scoped to this dialog while it is open: the base `.modal` rule must not carry the raise, or
+  // every dialog would climb over the drawer at once.
+  const base = MAIN.slice(MAIN.indexOf('.modal {'), MAIN.indexOf('.modal .box {'));
+  assert.equal((base.match(/z-index:\s*-?\d+/g) || []).length, 2,
+    'only `.modal` and the open structured dialog declare a layer in this block');
+  assert.match(base, /#structmodal\.modal\.on \{ display: flex; z-index: \d+; \}/,
+    'the raise belongs to the open dialog rule, not to a new selector');
+  // The drawer keeps its own layer, and nothing else was lifted with it.
+  assert.equal(css.split('z-index: ' + drawer).length - 1, 1, 'the drawer still declares one layer');
   // opened-on binding and the sibling-modal close, the same coordinate the cite preview has
   assert.match(MAIN, /structPane = \{ uid: selectedUid, selSeq: selectionSeq \};/);
   assert.match(MAIN, /if \(!structPane\?\.busy\) closeStructure\(\);/);
