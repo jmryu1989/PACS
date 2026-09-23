@@ -16,7 +16,9 @@ routing and no HAR (CAP-00 checks it).
 
 What is instrumentation, named: one init script that only records and delegates (getUserMedia on
 MediaDevices.prototype through Reflect.apply, and construct-only Proxies around AudioContext and
-AudioWorkletNode that return the native instance), plus the test server, which answers the
+AudioWorkletNode that return the native instance); one raw CDP session per case on the page target
+that only enables, listens to and disables the Log domain (Astra runtime amendment D2: the worklet's
+CSP denial reaches the page as a worker-source Log entry that page.console drops); plus the test server, which answers the
 report reads, occupancy and the dictation POST (a declared service stand-in) and keeps the page
 alive with a recorded `200 {}` for any other /api request. A fallback answer never allows a
 request: each case asserts author-written EXPECTED_API/REQUIRED_API literals tied by CAP-00 to
@@ -37,7 +39,12 @@ AudioContext construction, and is not credited to the click alone.
 Every wait polls one evaluate at a time from Python: under the served CSP (no 'unsafe-eval'), a
 page-side polled predicate would run outside the evaluate call.
 
-Output: one `U4B-CAP <id> {json}` line per case, adjudicated before the exit code.
+Browser (amendment D1): the full pinned Chromium 148.0.7778.96 through channel="chromium", headless. The
+first hosted run launched chromium-headless-shell, whose WebContents delegate refuses every media
+request; CAP-01 now asserts the actual launch from Playwright's own `<launching>` line.
+
+Output: one `U4B-CAP <id> {json}` line per case, adjudicated before the exit code; `U4B-LAUNCH-FIRST`
+right after the launch and `U4B-LAUNCH` at teardown.
 `python tests/report_dictation_capture_dom_test.py --static-only` runs CAP-00 with no browser.
 """
 import ast
@@ -627,7 +634,7 @@ def harness_self_check():
 
     def scripted(states, seconds=5):
         case = Case.__new__(Case)
-        case.id, case.checks, case.observed, case.console = "SELF", [], {}, []
+        case.id, case.checks, case.observed, case.console, case.log_entries = "SELF", [], {}, [], []
         case.server, case.page, case.deadline = Server(), Page(), time.monotonic() + seconds
         sequence = iter(states)
 
@@ -692,6 +699,87 @@ def harness_self_check():
             not parsed["flags"]["--use-file-for-fake-audio-capture"] or parsed["flags"]["--use-fake-ui-for-media-stream"] or \
             len(parsed["notable"]) != 1:
         problems.append("parse_launch must name the launched binary, its flags and the browser's error lines")
+    problems += launch_self_check()
+    problems += csp_log_self_check()
+    return problems
+
+
+def launch_self_check():
+    """D1: the launch oracle accepts only the full pinned Chromium without forbidden flags. The samples are
+    literal `<launching>` lines in the form Playwright's launchProcess writes them."""
+    problems = []
+    tail = ("--disable-field-trial-config --headless --mute-audio --use-fake-device-for-media-stream "
+            "--use-file-for-fake-audio-capture=/f.wav --disable-audio-output")
+
+    def launched(executable, extra=""):
+        return parse_launch("2026-09-23T09:08:48.001Z pw:browser <launching> %s %s%s\n"
+                            "2026-09-23T09:08:48.002Z pw:browser <launched> pid=7\n" % (executable, tail, extra))
+
+    full = "/home/runner/.cache/ms-playwright/chromium-1223/chrome-linux64/chrome"
+    shell = "/home/runner/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell"
+    good = launched(full)
+    if launch_problems(good) != {"binary": [], "forbidden": []} or not good["flags"]["--headless"]:
+        problems.append("the full pinned Chromium launch must pass the launch oracle")
+    for label, parsed in (("headless shell", launched(shell)), ("another revision", launched(full.replace("1223", "1222"))),
+                          ("a sibling binary", launched(full + "_sandbox")), ("no launch line", parse_launch("")),
+                          ("no log", {"unavailable": "missing"})):
+        if not launch_problems(parsed)["binary"]:
+            problems.append("the launch oracle must reject %s" % label)
+    for flag in (" --use-fake-ui-for-media-stream", " --auto-accept-camera-and-microphone-capture",
+                 " --autoplay-policy=no-user-gesture-required"):
+        if launch_problems(launched(full, flag))["forbidden"] != [flag.strip().split("=")[0]]:
+            problems.append("the launch oracle must reject%s" % flag)
+    refused = parse_launch("x pw:browser <launching> %s %s\nx pw:browser [pid=7][err] [7:7:0923/090849.000:ERROR:"
+                           "web_contents_delegate.cc(289)] WebContentsDelegate::RequestMediaAccessPermission: "
+                           "Not supported.\n" % (full, tail))
+    if not refused["delegate_not_supported_logged"] or good["delegate_not_supported_logged"]:
+        problems.append("the delegate's refusal line must be recognised on stderr only")
+    return problems
+
+
+def csp_log_self_check():
+    """D2: the Log verdict against literal entries in the form Blink writes them (csp_directive_list.cc:683-687
+    message, :650-652 fallback note, :143-148 blocked suffix; worker source and error level)."""
+    problems = []
+    origin = "http://127.0.0.1:9"
+    worklet = origin + ASSET_DIR + WORKLET
+    directive = "script-src 'unsafe-inline' " + " ".join(origin + ASSET_DIR + name for name in PAGE_SCRIPTS)
+    text = ("Loading the script '" + worklet + "' violates the following Content Security Policy directive: \"" +
+            directive + "\". Note that 'script-src-elem' was not explicitly set, so 'script-src' is used as a fallback."
+            " The action has been blocked.")
+    denial = {"source": "worker", "level": "error", "text": text, "url": "", "timestamp": 1790154490000.0}
+    network = {"source": "network", "level": "error", "text": "Failed to load resource: the server responded with a "
+               "status of 404 (Not Found)", "url": origin + "/favicon.ico", "timestamp": 1790154490001.0}
+    frame = {"source": "security", "level": "error", "text": "Refused to frame '" + origin + "/x' because it violates "
+             "the following Content Security Policy directive: \"frame-ancestors 'self'\".", "timestamp": 2.0}
+    verdict = csp_log_verdict([network, denial], worklet)
+    if verdict["problems"] or verdict["directive"] != directive or verdict["matching"] != 1 or verdict["others"] or \
+            not verdict["fallback_note"] or not verdict["directive_ok"]:
+        problems.append("one worker/error denial naming the worklet must pass NC-11: %r" % verdict["problems"])
+
+    def rejected(label, entries, **expect):
+        result = csp_log_verdict(entries, worklet)
+        if not result["problems"] or any(result[key] != value for key, value in expect.items()):
+            problems.append("NC-11 must reject %s" % label)
+
+    rejected("zero entries", [], matching=0)
+    rejected("only non-CSP entries", [network], matching=0)
+    rejected("a duplicate denial", [denial, dict(denial)], matching=2)
+    rejected("the security source", [dict(denial, source="security")], matching=0, others=1)
+    rejected("the warning level", [dict(denial, level="warning")], matching=0, others=1)
+    rejected("another script URL", [dict(denial, text=text.replace(WORKLET, "dictation.js"))], matching=0, others=1)
+    rejected("an unquoted worklet URL", [dict(denial, text=text.replace("'" + worklet + "'", worklet))], matching=0)
+    rejected("another CSP entry beside the denial", [denial, frame], matching=1, others=1)
+    rejected("a directive without 'unsafe-inline' first",
+             [dict(denial, text=text.replace("script-src 'unsafe-inline'", "script-src 'self' 'unsafe-inline'"))],
+             matching=1, directive_ok=False)
+    rejected("a directive that allows the worklet", [dict(denial, text=text.replace(directive, directive + " " + worklet))],
+             matching=1, directive_ok=False)
+    if csp_log_verdict([network])["problems"] or not csp_log_verdict([network, frame])["problems"] or \
+            not csp_log_verdict([denial])["problems"]:
+        problems.append("every other case must allow non-CSP entries and reject any CSP entry")
+    if log_entry({"entry": dict(denial, args=[{"objectId": "1"}], workerId="w1")}) != dict(denial, workerId="w1"):
+        problems.append("log_entry must keep the raw source/level/text/url/timestamp and drop remote objects")
     return problems
 
 
@@ -762,6 +850,32 @@ def static_report():
             problems.append("page code outside PROBES/OBSERVER: .%s(%s" % (method, first))
     if sum(1 for method, _ in calls if method == "add_init_script") != 1:
         problems.append("exactly one init script, the observer")
+    # D1/D2 pins (Astra runtime amendment 2026-09-23): the launch names the full pinned Chromium's channel;
+    # the one CDP session only enables, listens to and disables the Log domain.
+    parsed_source = ast.parse(source)
+    method_calls = [node for node in ast.walk(parsed_source)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
+    launches = [call for call in method_calls if call.func.attr == "launch"]
+    keywords = {kw.arg: getattr(kw.value, "value", None) for kw in launches[0].keywords} if len(launches) == 1 else {}
+    if len(launches) != 1 or keywords.get("channel") != CHANNEL or keywords.get("headless") is not True:
+        problems.append("the one browser launch must be channel=%r, headless=True" % CHANNEL)
+    setup_text = next(ast.unparse(node) for node in ast.walk(parsed_source)
+                      if isinstance(node, ast.FunctionDef) and node.name == "setUpClass")
+    if setup_text.count("channel='%s'" % CHANNEL) != 1:
+        problems.append("setUpClass must name channel=%r exactly once" % CHANNEL)
+    if len([call for call in method_calls if call.func.attr == "new_cdp_session"]) != 1 or \
+            [call for call in method_calls if call.func.attr == "new_browser_cdp_session"]:
+        problems.append("exactly one page CDP session and no browser CDP session")
+    sends = sorted(getattr(call.args[0], "value", None) if call.args else None
+                   for call in method_calls if call.func.attr == "send")
+    if sends != ["Log.disable", "Log.enable"]:
+        problems.append("the CDP session may only send Log.enable and Log.disable, found %r" % sends)
+    cdp_names = {node.value for node in ast.walk(parsed_source) if isinstance(node, ast.Constant)
+                 and isinstance(node.value, str) and re.fullmatch(r"[A-Z][A-Za-z]+\.[a-z][A-Za-z]+", node.value)}
+    if cdp_names - {"Log.enable", "Log.disable", "Log.entryAdded"}:
+        problems.append("CDP names outside the Log domain: %r" % sorted(cdp_names))
+    if not [call for call in method_calls if call.func.attr == "detach"]:
+        problems.append("the CDP session must be detached on cleanup")
     # The observer only records and delegates.
     for token in OBSERVER_FORBIDDEN:
         if token in OBSERVER:
@@ -1072,6 +1186,7 @@ class Case:
         self.checks, self.observed = [], {}
         self.page_errors, self.console, self.saved_violations = [], [], []
         self.user_activation = self.press_activation = None
+        self.cdp, self.log_entries = None, []
 
     def left_ms(self):
         return max(1, int((self.deadline - time.monotonic()) * 1000))
@@ -1106,7 +1221,8 @@ class Case:
                 "contexts": [{"state": c.get("state"), "sampleRate": c.get("sampleRate"), "states": c.get("states")}
                              for c in media.get("contexts") or []],
                 "nodes": len(media.get("nodes") or []), "worklet_gets": media.get("modules"),
-                "console": self.console[-10:]}
+                # page.console drops worker-source lines (review N-3); the raw Log session keeps them.
+                "console": self.console[-10:], "log_tail": self.log_entries[-10:]}
 
     def stop_waiting(self, what, detail, terminal):
         self.observed["primary"] = self.primary()
@@ -1186,9 +1302,18 @@ def served(entries, name):
     return [e for e in entries if e["method"] == "GET" and e["path"] == ASSET_DIR + name]
 
 
+# D1 (Astra runtime amendment 2026-09-23): the full pinned Chromium, observed from the actual launch.
+# Pinned Playwright 1.60 starts chromium-headless-shell for headless=True without a channel, and that
+# shell's WebContents delegate answers every media request NOT_SUPPORTED (web_contents_delegate.cc:285-294
+# at 148.0.7778.96; first hosted run 35841141421/1). BrowserType.executable_path never proves the launch.
+CHANNEL = "chromium"
+FULL_CHROMIUM_SUFFIX = "/chromium-1223/chrome-linux64/chrome"
+FORBIDDEN_LAUNCH_FLAGS = ("--use-fake-ui-for-media-stream", "--auto-accept-camera-and-microphone-capture",
+                          "--autoplay-policy")
 LAUNCH_FLAGS = ("--headless", "--mute-audio", "--use-fake-device-for-media-stream", "--use-file-for-fake-audio-capture",
-                "--disable-audio-output", "--use-fake-ui-for-media-stream", "--auto-accept-camera-and-microphone-capture")
+                "--disable-audio-output") + FORBIDDEN_LAUNCH_FLAGS
 LAUNCH_NOTABLE = re.compile(r"ERROR|WARNING|[Pp]ermission|MediaStream|media_stream|Not supported|getUserMedia|[Aa]udio")
+DELEGATE_NOT_SUPPORTED = "WebContentsDelegate::RequestMediaAccessPermission: Not supported."
 
 
 def parse_launch(text):
@@ -1199,7 +1324,22 @@ def parse_launch(text):
     return {"lines": len(rows), "launching": launching[:2], "executable": command[0] if command else None,
             "chrome_headless_shell": bool(command) and command[0].endswith("chrome-headless-shell"),
             "flags": {flag: any(arg == flag or arg.startswith(flag + "=") for arg in command[1:]) for flag in LAUNCH_FLAGS},
+            # Recorded only: stderr logging of this line is not guaranteed.
+            "delegate_not_supported_logged": any("[err]" in row and DELEGATE_NOT_SUPPORTED in row for row in rows),
             "notable": [row[:400] for row in rows if "<launching> " not in row and LAUNCH_NOTABLE.search(row)][:60]}
+
+
+def launch_problems(parsed):
+    """The CAP-01 launch oracle: the first actual launch is the full pinned Chromium, without forbidden flags."""
+    problems = {"binary": [], "forbidden": []}
+    executable = (parsed or {}).get("executable") or ""
+    if not executable:
+        problems["binary"].append("no <launching> line was observed")
+    elif not executable.endswith(FULL_CHROMIUM_SUFFIX) or executable.endswith("chrome-headless-shell"):
+        problems["binary"].append("launched %s, not the full pinned Chromium (*%s)" % (executable, FULL_CHROMIUM_SUFFIX))
+    flags = (parsed or {}).get("flags") or {}
+    problems["forbidden"] = [flag for flag in FORBIDDEN_LAUNCH_FLAGS if flags.get(flag)]
+    return problems
 
 
 def launch_record(path):
@@ -1208,6 +1348,56 @@ def launch_record(path):
         return dict(parse_launch(path.read_text(encoding="utf-8", errors="replace")), log=path.name)
     except OSError as error:
         return {"unavailable": str(error)}
+
+
+# D2 (Astra runtime amendment 2026-09-23): the worklet's CSP denial as the browser logs it. Blink sends
+# no securitypolicyviolation event and no report for a worklet (execution_context_csp_delegate.cc:282-284,
+# :172-178); the threaded worklet's console line reaches the page with source "worker"
+# (threaded_messaging_proxy_base.cc:130-143, console_message.cc:32-42), which Playwright's page.console
+# drops. A raw CDP Log session on the page target observes it; it only enables, listens and disables.
+CSP_PHRASE = "Content Security Policy"
+LOG_KEYS = ("source", "level", "text", "url", "timestamp", "lineNumber", "category", "workerId", "networkRequestId")
+
+
+def log_entry(params):
+    entry = (params or {}).get("entry") or {}
+    return {key: entry.get(key) for key in LOG_KEYS if key in entry}
+
+
+def csp_log_verdict(entries, worklet_url=None):
+    """With worklet_url (NC-11): exactly one CSP entry, from the worker source at error level, naming the
+    single-quoted worklet URL and 'Content Security Policy directive' (csp_directive_list.cc:683-687), whose
+    quoted raw directive starts with script-src 'unsafe-inline' and does not allow the worklet, and zero
+    other CSP entries. Without it (every other case): zero CSP entries."""
+    csp = [entry for entry in entries if CSP_PHRASE in (entry.get("text") or "")]
+    verdict = {"csp_entries": csp, "problems": [], "matching": 0, "others": len(csp), "directive": None,
+               "directive_ok": False, "fallback_note": None}
+    if worklet_url is None:
+        if csp:
+            verdict["problems"].append("%d CSP log entries where none may occur" % len(csp))
+        return verdict
+    quoted = "'%s'" % worklet_url
+    matching = [entry for entry in csp if entry.get("source") == "worker" and entry.get("level") == "error"
+                and quoted in (entry.get("text") or "") and CSP_PHRASE + " directive" in (entry.get("text") or "")]
+    verdict["matching"] = len(matching)
+    verdict["others"] = len([entry for entry in csp if not any(entry is match for match in matching)])
+    if verdict["matching"] != 1:
+        verdict["problems"].append("expected exactly one worker/error CSP entry naming %s, found %d"
+                                   % (quoted, verdict["matching"]))
+    if verdict["others"]:
+        verdict["problems"].append("%d other CSP log entries" % verdict["others"])
+    if verdict["matching"] == 1:
+        text = matching[0]["text"]
+        directive = re.search(r'Content Security Policy directive: "([^"]*)"', text)
+        fallback = re.search(r"Note that '[^']+' was not explicitly set, so '[^']+' is used as a fallback\.", text)
+        verdict["directive"] = directive.group(1) if directive else None
+        verdict["fallback_note"] = fallback.group(0) if fallback else None     # recorded, not asserted
+        verdict["directive_ok"] = verdict["directive"] is not None and \
+            verdict["directive"].startswith("script-src 'unsafe-inline'") and worklet_url not in verdict["directive"]
+        if not verdict["directive_ok"]:
+            verdict["problems"].append("the quoted directive must start with script-src 'unsafe-inline' and must "
+                                       "not allow the worklet: %r" % verdict["directive"])
+    return verdict
 
 
 class ReportDictationCaptureDOMTest(unittest.TestCase):
@@ -1228,19 +1418,22 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             from importlib.metadata import version
             from playwright.sync_api import sync_playwright
             # Playwright's own pw:browser log names the binary it starts (`<launching> <command> <args>`)
-            # and carries the browser's stderr. BrowserType.executable_path is only the default path: for
-            # headless=True without a channel, Playwright 1.60 starts chromium-headless-shell instead
-            # (registry getExecutableName). Which binary this suite should use is a pending contract
-            # decision after the first hosted run, so the launch itself is unchanged here.
+            # and carries the browser's stderr; BrowserType.executable_path is only the default path. The
+            # channel selects the full pinned Chromium (D1); CAP-01 asserts it from the actual launch line.
             cls.browser_log = (ARTIFACTS / "browser-debug.log").resolve()
             os.environ["DEBUG"] = "pw:browser"
             os.environ["DEBUG_FILE"] = str(cls.browser_log)
             cls._pw = sync_playwright().start()
             args = launch_args(cls.fixture_path)
-            cls.browser = cls._pw.chromium.launch(headless=True, args=args)
-            cls.browser_info = {"version": cls.browser.version,
+            cls.browser = cls._pw.chromium.launch(channel="chromium", headless=True, args=args)
+            # The first launch record, written now: a step cut later must not lose it (review N-2).
+            cls.launch_first = cls.read_launch(seconds=5)
+            (ARTIFACTS / "launch-first.json").write_text(json.dumps(cls.launch_first, ensure_ascii=False, indent=2) + "\n",
+                                                         encoding="utf-8")
+            emit("U4B-LAUNCH-FIRST", cls.launch_first)
+            cls.browser_info = {"version": cls.browser.version, "channel": CHANNEL,
                                 "browser_type_default_executable_path": cls._pw.chromium.executable_path,
-                                "launched": "see U4B-LAUNCH (from the pw:browser log)",
+                                "launched_executable": cls.launch_first.get("executable"),
                                 "args": args, "headless": True, "playwright": version("playwright"),
                                 "origin": cls.origin, "fixture": {"path": str(cls.fixture_path),
                                                                   "sha256": sha256(fixture), "bytes": len(fixture)}}
@@ -1249,6 +1442,17 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             emit("U4B-SETUP", {"pass": False, "error": traceback.format_exc()[-2000:]})
             cls.close_all()
             raise
+
+    @classmethod
+    def read_launch(cls, seconds=0):
+        """The launch record from the pw:browser log. The driver writes the log asynchronously, so a
+        first read may wait (bounded) for the `<launching>` line; absence is recorded, never invented."""
+        until = time.monotonic() + seconds
+        while True:
+            record = launch_record(cls.browser_log)
+            if record.get("executable") or time.monotonic() >= until:
+                return record
+            time.sleep(0.05)
 
     @classmethod
     def close_all(cls):
@@ -1286,6 +1490,10 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.page.on("pageerror", lambda error: case.page_errors.append(str(error)[:500]))
             case.page.on("console", lambda message: case.console.append(
                 "%s: %s" % (message.type, message.text[:300])) if message.type in ("error", "warning") else None)
+            # D2: observation only. Log.enable, the entryAdded listener and Log.disable are the whole session.
+            case.cdp = context.new_cdp_session(case.page)
+            case.cdp.on("Log.entryAdded", lambda params: case.log_entries.append(log_entry(params)))
+            case.cdp.send("Log.enable")
             scenario(case, capability)
         except CaseStop:
             pass
@@ -1305,6 +1513,15 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
                 except Exception as error:
                     page_side[name] = None
                     case.observed.setdefault("unreadable", []).append("%s: %s" % (name, str(error)[:200]))
+        if case.cdp is not None:
+            # Let entries already posted by the browser arrive, then stop the Log domain and detach.
+            for step in (lambda: case.page.wait_for_timeout(150), lambda: case.cdp.send("Log.disable"),
+                         lambda: case.cdp.detach()):
+                try:
+                    step()
+                except Exception as error:
+                    case.observed.setdefault("log_session_cleanup", []).append(str(error).splitlines()[0][:200]
+                                                                                 if str(error) else type(error).__name__)
         if context is not None:
             try:
                 context.close()
@@ -1337,6 +1554,22 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
         case.check("assets-byte-exact", not drift, drift)
         if case.id != "NC-11":
             case.check("zero-csp-violations", not violations, violations)
+            log_verdict = csp_log_verdict(case.log_entries)
+            case.check("zero-csp-log-entries", not log_verdict["problems"], log_verdict["csp_entries"])
+        else:
+            # D2: the browser's worklet denial replaces the superseded document-event limb, which stays an
+            # observation (Blink sends worklets no events; expected 0).
+            log_verdict = csp_log_verdict(case.log_entries, self.origin + ASSET_DIR + WORKLET)
+            case.observed["dom_violations"] = {"count": len(violations), "events": violations}
+            case.observed["worklet_denial"] = {k: log_verdict[k] for k in ("directive", "fallback_note", "csp_entries")}
+            if log_verdict["directive"] is not None:
+                case.observed["worklet_denial"]["directive_equals_served_script_src"] = \
+                    log_verdict["directive"] == next(d for d in nc11_csp(self.origin).split("; ")
+                                                     if d.startswith("script-src "))
+            case.check("worklet-csp-denial-logged-once", log_verdict["matching"] == 1, log_verdict["problems"])
+            case.check("denial-directive-script-src-unsafe-inline-without-worklet", log_verdict["directive_ok"],
+                       log_verdict["directive"])
+            case.check("zero-other-csp-log-entries", log_verdict["others"] == 0, log_verdict["csp_entries"])
         case.check("no-page-error", not case.page_errors, case.page_errors)
         clicks = page_side.get("clicks") or case.observed.get("clicks_before_exit") or []
         record = {
@@ -1352,6 +1585,8 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             "clicks": [{k: c.get(k) for k in ("id", "t", "trusted", "after")} for c in clicks],
             "observed": case.observed,
             "console": case.console[:40],
+            "log_entries": case.log_entries[:200], "log_entry_count": len(case.log_entries),
+            "csp_log_entries": log_verdict["csp_entries"],
             "elapsed_s": round(time.monotonic() - case.started, 3),
         }
         if case.id == "CAP-01":
@@ -1432,6 +1667,13 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
     # ── cases ─────────────────────────────────────────────────────────────────────────────────
     def test_cap01_environment_pins_the_secure_origin_the_grant_and_untouched_natives(self):
         def scenario(case, capability):
+            # D1: the actual first launch, from Playwright's own <launching> line (BLOCKED class).
+            launch = self.launch_first if self.launch_first.get("executable") else self.read_launch(seconds=2)
+            case.observed["launch"] = {k: launch.get(k) for k in ("executable", "flags", "launching", "unavailable")}
+            case.observed["launch_headless_flag"] = (launch.get("flags") or {}).get("--headless")    # recorded
+            problems = launch_problems(launch)
+            case.check("launched-full-chromium", not problems["binary"], problems["binary"])
+            case.check("launch-forbidden-flags-absent", not problems["forbidden"], problems["forbidden"])
             before = self.open(case, capability)
             env = case.js("environment")
             permission = case.js("permission")
@@ -1465,6 +1707,8 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
                 state = case.read_state()
             case.observed["state_after_worklet"] = state
             case.observed["capture_outcome"] = case.primary()
+            # Recorded only: whether the browser logged the base delegate's refusal (stderr level is not pinned).
+            case.observed["delegate_not_supported_logged"] = self.read_launch().get("delegate_not_supported_logged")
         self.run_case("CAP-01", "environment", scenario)
 
     def test_cap02_real_capture_uploads_16k_mono_pcm16_and_inserts_only_on_insert(self):
@@ -1717,7 +1961,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.unchanged("report-unchanged", value)
         self.run_case("CAP-10", "Cancel while addModule is pending", scenario, hold_worklet=True)
 
-    def test_nc11_a_csp_without_the_worklet_blocks_it_with_one_violation(self):
+    def test_nc11_a_csp_without_the_worklet_blocks_it_and_the_browser_logs_one_denial(self):
         def scenario(case, capability):
             before = self.open(case, capability)
             case.check("inline-glue-ran", case.js("controller") is True)
@@ -1725,14 +1969,14 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             self.press(case)
             case.wait_state("failed", "failed")
             value = case.snap()
-            violations = case.js("violations")
-            case.observed["violations"] = violations
-            case.check("exactly-one-violation", len(violations) == 1, violations)
-            one = violations[0] if violations else {}
-            case.check("blockedURI-is-the-worklet", one.get("blockedURI") == self.origin + ASSET_DIR + WORKLET, one)
-            case.check("seen-on-the-document", "document" in (one.get("seenOn") or []), one)
-            case.observed["directives"] = {"effectiveDirective": one.get("effectiveDirective"),
-                                           "violatedDirective": one.get("violatedDirective")}    # recorded only (N-3)
+            # The worklet's console line crosses threads on its own task; give it a bounded moment to
+            # arrive. Nothing is asserted here: finish() judges every entry the session collected.
+            until = min(case.deadline, time.monotonic() + 3)
+            while time.monotonic() < until and not csp_log_verdict(case.log_entries)["csp_entries"]:
+                case.page.wait_for_timeout(50)
+            case.page.wait_for_timeout(300)
+            # Document/window events stay observations (the superseded limb); expected none for a worklet.
+            case.observed["violations"] = case.js("violations")
             entries = self.server.snapshot()
             case.check("five-page-scripts-200", all(served(entries, n) and all(e["status"] == 200 for e in served(entries, n))
                                                     for n in PAGE_SCRIPTS), [line(e) for e in entries])
