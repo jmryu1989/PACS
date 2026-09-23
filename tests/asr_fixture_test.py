@@ -11,13 +11,19 @@ the model hash and the transcript all come from the hosted `asr-engine` job.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import hashlib
+import io
 import json
 import math
 from pathlib import Path
+import re
 import struct
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import asr_fixture as fixture_module
@@ -241,10 +247,15 @@ def attested_record():
                   "sha256": attest_module.PINS["model_sha256"],
                   "expected_bytes": attest_module.PINS["model_bytes"],
                   "expected_sha256": attest_module.PINS["model_sha256"],
+                  "repo": attest_module.PINS["model_repo"],
+                  "file": attest_module.PINS["model_file"],
                   "revision": attest_module.PINS["model_revision"]},
+        "fixture_file": {"sha256": "d" * 64},
         "fixture": {"sha256": "d" * 64, "frames": 48000},
+        "fixture_source": {"sha256": "a" * 64},
         "generator": {"command": ["espeak-ng", "-v", "en-us", "-s", "150", "-w",
-                                  "espeak-raw.wav", attest_module.PINS["generator_sentence"]]},
+                                  "espeak-raw.wav", attest_module.PINS["generator_sentence"]],
+                      "raw_wav": {"sha256": "a" * 64}},
         "validator": {"sha256": "d" * 64,
                       "result": {"ok": True, "sampleRate": 16000, "channels": 1,
                                  "bitsPerSample": 16, "frames": 48000}},
@@ -272,6 +283,13 @@ class AttestationTests(unittest.TestCase):
             (["fixture", "sha256"], "short", "fixture SHA-256 is missing or malformed"),
             (["images", "engine", "id"], None, "image identity for engine"),
             (["generator", "command"], ["espeak-ng", "-w", "x.wav"], "pinned non-clinical sentence"),
+            (["model", "repo"], "someone/else", "model source repo"),
+            (["model", "file"], "ggml-tiny.bin", "model source file"),
+            (["fixture_file", "sha256"], "e" * 64, "fixture file on disk"),
+            (["fixture_file", "sha256"], None, "fixture file on disk"),
+            (["generator", "raw_wav", "sha256"], "e" * 64, "is not the generator raw WAV"),
+            (["generator", "raw_wav", "sha256"], None, "generator raw WAV SHA-256 is missing"),
+            (["fixture_source", "sha256"], "e" * 64, "is not the generator raw WAV"),
         ]
         for path, value, fragment in cases:
             with self.subTest(path=path):
@@ -315,6 +333,99 @@ class AttestationTests(unittest.TestCase):
         self.assertEqual(attest_module.PINS["generator_sentence"],
                          "The blue square is next to the green circle.")
         self.assertEqual(json.loads(json.dumps(attest_module.PINS)), attest_module.PINS)
+
+    def test_19_the_model_revision_is_read_from_the_declared_url_not_copied_from_the_pins(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
+                    / "validate.yml").read_text(encoding="utf-8")
+        declared = re.findall(r'--model-source-url "([^"]+)"', workflow)
+        self.assertEqual(len(declared), 1, declared)
+        self.assertEqual(attest_module.model_source(declared[0]),
+                         {"repo": attest_module.PINS["model_repo"],
+                          "revision": attest_module.PINS["model_revision"],
+                          "file": attest_module.PINS["model_file"]})
+        base = "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+        cases = [
+            (base + "0" * 40 + "/ggml-small.bin", "model revision"),
+            (base + "main/ggml-small.bin", "model revision"),
+            ("https://huggingface.co/someone/else/resolve/{}/ggml-small.bin".format(
+                attest_module.PINS["model_revision"]), "model source repo"),
+            (base + attest_module.PINS["model_revision"] + "/ggml-tiny.bin", "model source file"),
+            ("http://huggingface.co/ggerganov/whisper.cpp/resolve/{}/ggml-small.bin".format(
+                attest_module.PINS["model_revision"]), "model revision"),
+            ("", "model revision"),
+        ]
+        for url, fragment in cases:
+            with self.subTest(url=url):
+                record = attested_record()
+                record["model"].update(attest_module.model_source(url))
+                problems = attest_module.evaluate(record)
+                self.assertTrue(any(fragment in problem for problem in problems),
+                                "{} did not produce {!r}: {}".format(url, fragment, problems))
+
+    def test_20_main_hashes_the_actual_fixture_and_refuses_each_broken_link(self):
+        fixture = b"RIFF synthetic canonical fixture stand-in"
+        raw = b"RIFF synthetic generator output stand-in"
+        model = b"synthetic model stand-in"
+        digest = lambda data: hashlib.sha256(data).hexdigest()
+        url = "https://huggingface.co/{}/resolve/{}/{}".format(
+            attest_module.PINS["model_repo"], attest_module.PINS["model_revision"],
+            attest_module.PINS["model_file"])
+        provenance = attested_record()
+        pins = dict(attest_module.PINS, model_bytes=len(model), model_sha256=digest(model))
+
+        def attest(root, fixture_bytes=fixture, raw_sha=digest(raw), source_url=url):
+            (root / "dictation.wav").write_bytes(fixture_bytes)
+            (root / "model.bin").write_bytes(model)
+            (root / "fixture-report.json").write_text(json.dumps({
+                "fixture": {"sha256": digest(fixture), "bytes": len(fixture), "frames": 48000},
+                "source": {"sha256": digest(raw), "bytes": len(raw)},
+                "resampler": {"sha256": "r" * 64},
+                "generator": dict(provenance["generator"],
+                                  raw_wav={"sha256": raw_sha, "bytes": len(raw)}),
+            }), encoding="utf-8")
+            (root / "validator.json").write_text(json.dumps(
+                {"sha256": digest(fixture), "result": provenance["validator"]["result"]}),
+                encoding="utf-8")
+            argv = ["--engine-image", "engine", "--generator-image", "generator",
+                    "--api-image", "api", "--model", str(root / "model.bin"),
+                    "--model-source-url", source_url, "--fixture", str(root / "dictation.wav"),
+                    "--fixture-report", str(root / "fixture-report.json"),
+                    "--validator-report", str(root / "validator.json"),
+                    "--output", str(root / "attestation.json")]
+            # Only the two docker lookups are replaced; every hash and check is the real code.
+            image = lambda reference: {"id": "sha256:" + digest(reference.encode())}
+            baked = lambda reference: copy.deepcopy(
+                provenance["engine_provenance"] if reference == "engine"
+                else provenance["generator_provenance"])
+            with mock.patch.object(attest_module, "PINS", pins), \
+                    mock.patch.object(attest_module, "image_identity", image), \
+                    mock.patch.object(attest_module, "baked_provenance", baked), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                code = attest_module.main(argv)
+            return code, json.loads((root / "attestation.json").read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            code, record = attest(Path(directory))
+        self.assertEqual((code, record["status"], record["problems"]), (0, "ATTESTED", []))
+        self.assertEqual(record["fixture_file"]["sha256"], digest(fixture))
+        self.assertEqual(record["model"]["revision"], attest_module.PINS["model_revision"])
+        self.assertIn("not a revision observed", record["model"]["revision_note"])
+        self.assertIn("base-image digests are NOT recorded", record["images_note"])
+
+        broken = [
+            ({"fixture_bytes": fixture + b"!"}, "fixture file on disk"),
+            ({"raw_sha": "e" * 64}, "is not the generator raw WAV"),
+            ({"source_url": url.replace(attest_module.PINS["model_revision"], "0" * 40)},
+             "model revision"),
+        ]
+        for change, fragment in broken:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                code, record = attest(Path(directory), **change)
+                self.assertEqual((code, record["status"]), (3, "UNRESOLVED"))
+                self.assertTrue(any(fragment in problem for problem in record["problems"]),
+                                "{} did not produce {!r}: {}".format(
+                                    change, fragment, record["problems"]))
 
 
 if __name__ == "__main__":

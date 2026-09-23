@@ -11,8 +11,9 @@
  *       an identity stand-in middleware. The global AuthGuard, StudyAccessInterceptor, Prisma and
  *       the real report gate are ABSENT: role/institution/REPORT_HELD/Unverified/preliminary
  *       refusals stay proved by tests/dictation_api_test.cjs and by the live battery, not here.
- *   L-2 one scenario routes through an in-process recording proxy so the exact upstream bytes can
- *       be captured; the others connect directly to the engine container.
+ *   L-2 three scenarios route through an in-process recording proxy so the exact upstream bytes,
+ *       or their absence, can be captured: A-6 protocol capture, A-7 oversize body and A-8
+ *       interrupted upload. Every other scenario connects directly to the engine container.
  *   L-3 a released KIN slot proves only that the KIN fetch settled. Nothing here claims that
  *       AbortController stopped native inference or freed engine memory.
  *   L-4 one CPU engine, one model, one synthetic non-clinical English sentence. No Korean, no
@@ -351,10 +352,14 @@ after(async () => {
       'L-1': 'bounded Nest app: shipped DictationController + shipped AsrService + INJECTED ' +
         'PacsService gate/audit stand-in and identity stand-in; no AuthGuard, no interceptor, ' +
         'no Prisma, no real report gate. Auth/institution/report refusals are not proved here.',
-      'L-2': 'one scenario is proxied for byte capture; the others connect directly',
+      'L-2': 'three scenarios are proxied for byte capture (A-6 p-out-protocol, ' +
+        'A-7 oversize-body, A-8 upload-interrupted); the others connect directly',
       'L-3': 'KIN slot release is not evidence that native inference stopped or memory was freed',
       'L-4': 'one engine, one model, one synthetic non-clinical English sentence; no accuracy, ' +
         'no clinical suitability and no latency bound is asserted',
+      'A-12': 'induced KIN timeout: KIN_ASR_TIMEOUT_MS is lowered below the observed baseline; ' +
+        'the engine itself is never stalled, and no malformed, 5xx or oversize upstream response ' +
+        'is injected against the real engine here (deferred)',
     },
     engine_url: ENGINE_URL, proxy_url: proxyUrl, study_uid: STUDY_UID,
     identity: { ...identity }, forbidden_values_count: FORBIDDEN_VALUES.length,
@@ -365,6 +370,9 @@ after(async () => {
       && attestation.engine_provenance.source && attestation.engine_provenance.source.commit,
     attested_model_sha256: attestation && attestation.model && attestation.model.sha256,
     engine_started_at: engineStart && engineStart.started_at,
+    engine_started_image: engineStart && engineStart.image,
+    attested_engine_image_id: attestation && attestation.images && attestation.images.engine
+      && attestation.images.engine.id,
     fixture: fixtureReport && fixtureReport.fixture,
     validated: audio,
     baseline_ms: baselineMs,
@@ -393,6 +401,9 @@ test('A-1/A-2/A-3/A-4 provenance is attested, complete and consistent before any
     // A-1: the engine container may only have started after the attestation was written.
     assert.ok(Date.parse(engineStart.started_at) >= Date.parse(attestation.generated_at_utc),
       `engine started ${engineStart.started_at} before attestation ${attestation.generated_at_utc}`);
+    // A-1: the container that was started runs exactly the image that was attested.
+    assert.equal(engineStart.image, attestation.images.engine.id,
+      'the started engine container does not run the attested engine image');
     assert.equal(attestation.model.sha256, attestation.model.expected_sha256);
     assert.equal(attestation.model.bytes, attestation.model.expected_bytes);
     assert.ok(attestation.images.engine.id && attestation.images.api.id);
@@ -544,24 +555,27 @@ test('A-6 the upstream request carries exactly the pinned protocol and no identi
   });
 
 // --------------------------------------------------------------------------------- A-7 and A-8
-test('A-7 an oversize body is refused before buffering and never reaches the engine',
+test('A-7 an oversize body is refused on its declared length and never reaches the engine',
   { timeout: 120000 }, async () => {
     const scenario = begin('oversize-body', 'proxy');
     process.env.KIN_ASR_URL = proxyUrl;
-    // The declared length alone must be enough: the refusal has to land before the body is
-    // buffered, so only a first slice is ever written.
-    const answer = await post({
-      bytes: Buffer.alloc(4096), declaredLength: DICTATION_AUDIO_MAX_BYTES + 1,
-      writeThenDestroy: { bytes: 4096, afterMs: 20000 },
-    });
+    // The refusal is decided from the declared content-length before any byte is buffered, but
+    // body-parser 1.20.4 then drains the rest of the request and calls next(error) only once the
+    // request has finished (lib/read.js dump + on-finished). The 413 is therefore observable only
+    // after the whole body was sent, so the complete maxBytes + 1 body is sent here. A client that
+    // stalls mid-body is a different case: see A-8.
+    const answer = await post({ bytes: Buffer.alloc(DICTATION_AUDIO_MAX_BYTES + 1) });
     process.env.KIN_ASR_URL = ENGINE_URL;
     await delay(200);
-    finish(scenario, { answer: { status: answer.status, ms: answer.ms, code: answer.code } });
-    assert.equal(answer.status, 413);
+    finish(scenario, { answer: { status: answer.status, ms: answer.ms, code: answer.code,
+      error: answer.error } });
+    assert.equal(answer.status, 413, answer.text || answer.error);
     assert.equal(answer.code, 'DICTATION_AUDIO_TOO_LARGE');
     assert.equal(scenario.captures.length, 0, 'an oversize body reached the engine');
     assert.equal(scenario.audits.length, 1);
     assert.equal(scenario.audits[0].detail.outcome, 'DICTATION_AUDIO_TOO_LARGE');
+    // On refusal the shipped parser hands the controller an empty body, so the audit says 0.
+    assert.equal(scenario.audits[0].detail.bytes, 0);
   });
 
 test('A-8 an interrupted upload never reaches the engine and frees the slot',
@@ -639,26 +653,32 @@ test('A-9 losing the response channel during inference settles KIN early and fre
   });
 
 // --------------------------------------------------------------------------------------- A-12
-test('A-12 a stalled engine times out, and the next request outcome is recorded as observed',
+test('A-12 an induced KIN timeout refuses; the next request outcome is recorded as observed',
   { timeout: 900000 }, async () => {
     assert.ok(baselineMs > 0, 'the baseline scenario must run first');
-    const stall = Math.min(Math.max(Math.floor(baselineMs / 4), 200), 4000);
-    const scenario = begin('stalled-engine-timeout', 'direct');
-    process.env.KIN_ASR_TIMEOUT_MS = String(stall);
-    const stalled = await post({ bytes: fixture });
+    // Induced KIN timeout: KIN's own ceiling is lowered below the observed inference time. The
+    // engine is working normally, it is never stalled, and no malformed, 5xx or oversize upstream
+    // response is injected against the real engine here.
+    const ceiling = Math.min(Math.max(Math.floor(baselineMs / 4), 200), 4000);
+    const scenario = begin('induced-kin-timeout', 'direct');
+    process.env.KIN_ASR_TIMEOUT_MS = String(ceiling);
+    const timedOut = await post({ bytes: fixture });
     process.env.KIN_ASR_TIMEOUT_MS = String(GENEROUS_TIMEOUT_MS);
-    finish(scenario, { configured_timeout_ms: stall, baseline_ms: baselineMs,
-      answer: { status: stalled.status, code: stalled.code, ms: stalled.ms } });
-    assert.equal(stalled.status, 503, stalled.text);
-    assert.equal(stalled.code, 'DICTATION_TIMEOUT');
-    assert.ok(stalled.ms >= stall, `KIN settled in ${stalled.ms} ms, before its own ${stall} ms ceiling`);
+    finish(scenario, { configured_timeout_ms: ceiling, baseline_ms: baselineMs,
+      timeout_kind: 'induced KIN timeout (lowered KIN_ASR_TIMEOUT_MS); engine not stalled',
+      answer: { status: timedOut.status, code: timedOut.code, ms: timedOut.ms } });
+    assert.equal(timedOut.status, 503, timedOut.text);
+    assert.equal(timedOut.code, 'DICTATION_TIMEOUT');
+    assert.ok(timedOut.ms >= ceiling,
+      `KIN settled in ${timedOut.ms} ms, before its own ${ceiling} ms ceiling`);
 
-    // The engine is still running the abandoned inference. Whatever the next request does is
-    // DATA: no engine cancellation policy is asserted here or anywhere else.
-    const next = begin('second-request-after-timeout', 'direct');
+    // KIN abandoned its request; whether the engine was still working on it is not known here.
+    // Whatever the next request does is DATA: no engine cancellation policy is asserted here or
+    // anywhere else.
+    const next = begin('second-request-after-induced-timeout', 'direct');
     const answer = await post({ bytes: fixture });
     finish(next, { observed: { status: answer.status, code: answer.code || null, ms: answer.ms },
-      note: 'observed outcome of the request that follows a stalled-engine timeout' });
+      note: 'observed outcome of the request that follows an induced KIN timeout' });
     const named = [200, 503].includes(answer.status)
       && (answer.status === 200 || ['DICTATION_TIMEOUT', 'DICTATION_ENGINE_FAILED', 'DICTATION_BUSY']
         .includes(answer.code));

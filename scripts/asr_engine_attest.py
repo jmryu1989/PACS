@@ -3,9 +3,10 @@
 
 `ASR_ENGINE_PIN` / `ASR_MODEL_PIN` in api/src/asr.service.ts are configured attribution
 labels. They are not evidence that a particular engine build or model file did the work.
-This script produces the separate evidence: the actual image identities, the engine source
-commit that was really checked out and built, the generator identity, the model file's
-expected and computed SHA-256 and size, and the fixture's provenance and validator verdict.
+This script produces the separate evidence: the actual built-image identities (not base-image
+digests), the engine source commit that was really checked out and built, the generator
+identity, the model file's expected and computed SHA-256 and size, and the fixture file's own
+SHA-256 cross-checked against its provenance, the generator's raw WAV and the validator verdict.
 
 It exits non-zero on any mismatch, so the workflow never reaches `docker run` for the
 engine with an unresolved pin. No engine process is started here: the only container use is
@@ -55,6 +56,22 @@ ENGINE_SOURCE_FILES = {
 }
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+HF_RESOLVE = re.compile(r"^https://huggingface\.co/(?P<repo>[^/]+/[^/]+)/resolve/"
+                        r"(?P<revision>[^/]+)/(?P<file>[^/?#]+)$")
+
+IMAGES_NOTE = ("built-image IDs from `docker image inspect` (plus any RepoDigests, empty for a "
+               "local build); base-image digests are NOT recorded")
+MODEL_REVISION_NOTE = ("repo, revision and file are parsed from the --model-source-url the "
+                       "workflow declares it fetched; this is not a revision observed from Hugging "
+                       "Face. The model bytes are bound only by the size and SHA-256 comparison")
+
+
+def model_source(url: str) -> dict:
+    """What the declared fetch URL names. Unparseable URLs name nothing, which then fails."""
+    match = HF_RESOLVE.match(url or "")
+    if not match:
+        return {"repo": None, "revision": None, "file": None}
+    return match.groupdict()
 
 
 def source_file_notes(record: dict) -> list:
@@ -149,6 +166,12 @@ def evaluate(record: dict) -> list:
     if model.get("revision") != pins.get("model_revision"):
         problems.append("model revision {!r} != pinned {!r}".format(
             model.get("revision"), pins.get("model_revision")))
+    if model.get("repo") != pins.get("model_repo"):
+        problems.append("model source repo {!r} != pinned {!r}".format(
+            model.get("repo"), pins.get("model_repo")))
+    if model.get("file") != pins.get("model_file"):
+        problems.append("model source file {!r} != pinned {!r}".format(
+            model.get("file"), pins.get("model_file")))
 
     fixture = record.get("fixture") or {}
     validator = record.get("validator") or {}
@@ -157,6 +180,16 @@ def evaluate(record: dict) -> list:
     if fixture.get("sha256") != validator.get("sha256"):
         problems.append("validated bytes {!r} are not the fixture {!r}".format(
             validator.get("sha256"), fixture.get("sha256")))
+    fixture_file = record.get("fixture_file") or {}
+    if fixture_file.get("sha256") != fixture.get("sha256"):
+        problems.append("fixture file on disk {!r} is not the reported fixture {!r}".format(
+            fixture_file.get("sha256"), fixture.get("sha256")))
+    raw_wav = (record.get("generator") or {}).get("raw_wav") or {}
+    if not HEX64.match(str(raw_wav.get("sha256", ""))):
+        problems.append("generator raw WAV SHA-256 is missing or malformed")
+    elif raw_wav.get("sha256") != (record.get("fixture_source") or {}).get("sha256"):
+        problems.append("canonicalized source {!r} is not the generator raw WAV {!r}".format(
+            (record.get("fixture_source") or {}).get("sha256"), raw_wav.get("sha256")))
     verdict = validator.get("result") or {}
     if verdict.get("ok") is not True:
         problems.append("shipped validator rejected the fixture: {!r}".format(verdict))
@@ -195,6 +228,8 @@ def main(argv=None) -> int:
         fixture_report = json.loads(Path(args.fixture_report).read_text(encoding="utf-8"))
         validator_report = json.loads(Path(args.validator_report).read_text(encoding="utf-8"))
         model_path = Path(args.model)
+        fixture_path = Path(args.fixture)
+        source = model_source(args.model_source_url)
         record = {
             "unit": "S3-ASR-U3",
             "generated_at_utc": utc_now(),
@@ -202,6 +237,7 @@ def main(argv=None) -> int:
             "note": ("configured ASR_ENGINE_PIN/ASR_MODEL_PIN labels are not attestation; "
                      "this record is the separate runtime evidence"),
             "pins": dict(PINS),
+            "images_note": IMAGES_NOTE,
             "images": {
                 "engine": image_identity(args.engine_image),
                 "generator": image_identity(args.generator_image),
@@ -211,13 +247,20 @@ def main(argv=None) -> int:
             "generator_provenance": baked_provenance(args.generator_image),
             "model": {
                 "path": str(model_path.resolve()),
-                "file": PINS["model_file"],
-                "revision": PINS["model_revision"],
+                "repo": source["repo"],
+                "file": source["file"],
+                "revision": source["revision"],
+                "revision_note": MODEL_REVISION_NOTE,
                 "source_url": args.model_source_url,
                 "bytes": model_path.stat().st_size,
                 "sha256": sha256_file(model_path),
                 "expected_bytes": PINS["model_bytes"],
                 "expected_sha256": PINS["model_sha256"],
+            },
+            "fixture_file": {
+                "path": str(fixture_path.resolve()),
+                "bytes": fixture_path.stat().st_size,
+                "sha256": sha256_file(fixture_path),
             },
             "fixture": fixture_report.get("fixture", {}),
             "fixture_source": fixture_report.get("source", {}),
