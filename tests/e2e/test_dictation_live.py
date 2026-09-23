@@ -87,7 +87,7 @@ LAYOUTS = ('plain', 'reading')
 GEO_CONTROLS = {'recording': ('dictation-stop', 'dictation-cancel'), 'failed': ('dictation-close',),
                 'review': ('dictation-insert', 'dictation-cancel')}
 GEO_HIT_IDS = ('b-dictate', 'dictation-status', 'dictation-stop', 'dictation-cancel', 'dictation-insert',
-               'dictation-close', 'dictation-repin', 'b-copy', 'm-reading')
+               'dictation-close', 'dictation-repin', 'b-copy', 'm-reading', 'reading-findings-open')
 
 ASR_SOURCE = (ROOT / 'api' / 'src' / 'asr.service.ts').read_text(encoding='utf-8')
 
@@ -124,7 +124,7 @@ GEOMETRY = """() => {
     return { raw, px: Number.isFinite(px) ? px : null }; };
   const whole = el => { if (!el) return false; const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; };
-  const drawer = q('#reading-findings'), pane = q('#dictation-pane'), findings = q('#findings'), right = q('.right');
+  const drawer = q('#reading-findings'), toggle = q('#reading-findings-open'), pane = q('#dictation-pane'), findings = q('#findings'), right = q('.right');
   const fields = {};
   for (const id of ['findings', 'conclusion', 'recommendation']) fields[id] = { box: box(q('#' + id)), min: minHeight(q('#' + id)) };
   let probe = null;
@@ -144,6 +144,7 @@ GEOMETRY = """() => {
     redit: box(q('.report-p .redit')), reditMin: minHeight(q('.report-p .redit')), fields,
     rfoot: box(q('.report-p .rfoot2')), rfootInside: whole(q('.report-p .rfoot2')),
     drawer: box(drawer), drawerShown: !!drawer && !drawer.hidden,
+    drawerExpanded: toggle ? toggle.getAttribute('aria-expanded') : null,
     drawerTop: drawer ? drawer.style.getPropertyValue('--reading-findings-top') : null,
     findingsProbe: probe, status: q('#dictation-status') ? q('#dictation-status').textContent : null, controls };
 }""" % json.dumps(list(GEO_HIT_IDS))
@@ -356,7 +357,15 @@ def geo_problems(state, initial, measured):
     if not own('dictation-status'):
         problems.append('G2 %s: #dictation-status covered or clipped at its centre (top %s)' % (state, top('dictation-status')))
     drawer, pane, rbtns = measured.get('drawer'), measured.get('pane'), measured.get('rbtns')
-    if not measured.get('drawerShown') or not drawer or not pane:
+    if state == 'review':
+        # Astra B2 (2026-09-23): the product stands the drawer down once when a run enters review, so here
+        # G3 is POSITIVE - hidden, its toggle says so, and the toggle is there to reopen it. A drawer still
+        # open over the report column fails, and so does one that is gone without a reachable toggle.
+        if measured.get('drawerShown') is not False or measured.get('drawerExpanded') != 'false' or \
+                not own('reading-findings-open'):
+            problems.append('G3 review: drawer not stood down (drawerShown=%r, aria-expanded=%r, toggle top %s)'
+                            % (measured.get('drawerShown'), measured.get('drawerExpanded'), top('reading-findings-open')))
+    elif not measured.get('drawerShown') or not drawer or not pane:
         problems.append('G3 %s: drawer or pane missing (drawerShown=%r)' % (state, measured.get('drawerShown')))
     elif drawer['y'] < pane['b']:
         problems.append('G3 %s: drawer top %d above pane bottom %d (bound %r)' % (state, drawer['y'], pane['b'], measured.get('drawerTop')))
@@ -403,7 +412,8 @@ def sample_geometry(state_ok=True, **changes):
                 'fields': {name: {'box': {'x': 810, 'y': 400, 'w': 780, 'h': 100, 'b': 500}, 'min': {'raw': '50px', 'px': 50}}
                            for name in RFIELDS},
                 'rfoot': {'x': 800, 'y': 780, 'w': 800, 'h': 26, 'b': 806}, 'rfootInside': True,
-                'drawer': {'x': 1248, 'y': 376, 'w': 420, 'h': 300, 'b': 676}, 'drawerShown': True, 'drawerTop': '376px',
+                'drawer': {'x': 1248, 'y': 376, 'w': 420, 'h': 300, 'b': 676}, 'drawerShown': True, 'drawerExpanded': 'true',
+                'drawerTop': '376px',
                 'findingsProbe': {'x': 818, 'y': 408, 'own': True, 'topId': 'findings'}, 'status': 'x',
                 'controls': {name: control(300) for name in GEO_HIT_IDS}}
     geometry.update(changes)
@@ -511,24 +521,42 @@ def oracle_self_check():
                              initial['controls']['b-dictate'], disabled=True)})))):
         expect_problem(label, geo_entry_problems(value))
     measured = sample_geometry()
+    # Review is measured after the product stood the drawer down (Astra B2), so it has its own consistent sample.
+    stood = sample_geometry(drawerShown=False, drawerExpanded='false', drawer={'x': 0, 'y': 0, 'w': 0, 'h': 0, 'b': 0})
     for state in GEO_CONTROLS:
-        if geo_problems(state, initial, measured):
-            problems.append('a consistent %s layout must pass G1-G6: %r' % (state, geo_problems(state, initial, measured)))
+        sample = stood if state == 'review' else measured
+        if geo_problems(state, initial, sample):
+            problems.append('a consistent %s layout must pass G1-G6: %r' % (state, geo_problems(state, initial, sample)))
 
-    def covered(name):
-        return dict(measured, controls=dict(measured['controls'], **{name: dict(measured['controls'][name], own=False)}))
+    def covered(name, base=None):
+        base = base or measured
+        return dict(base, controls=dict(base['controls'], **{name: dict(base['controls'][name], own=False)}))
+    gone = {'present': False, 'own': False, 'topId': 'missing', 'rect': None, 'hidden': None, 'disabled': None}
     for label, state, value in (
             ('a covered Stop', 'recording', covered('dictation-stop')), ('a covered Close', 'failed', covered('dictation-close')),
-            ('a covered Insert', 'review', covered('dictation-insert')), ('a covered status', 'failed', covered('dictation-status')),
+            ('a covered Insert', 'review', covered('dictation-insert', stood)), ('a covered status', 'failed', covered('dictation-status')),
             ('a drawer over the pane', 'recording', dict(measured, drawer=dict(measured['drawer'], y=300))),
             ('a hidden drawer', 'failed', dict(measured, drawerShown=False)),
             ('a pane above the buttons', 'failed', dict(measured, pane=dict(measured['pane'], y=250))),
             ('a covered Reading Workspace toggle', 'recording', covered('m-reading')),
             ('a squeezed field', 'recording', dict(measured, fields=dict(measured['fields'], conclusion={
                 'box': dict(measured['fields']['conclusion']['box'], h=20), 'min': {'raw': '34px', 'px': 34}}))),
-            ('an unreachable findings field in review', 'review', dict(measured, findingsProbe=dict(measured['findingsProbe'], own=False))),
+            ('an unreachable findings field in review', 'review', dict(stood, findingsProbe=dict(stood['findingsProbe'], own=False))),
             ('a footer pushed out', 'failed', dict(measured, rfootInside=False))):
         expect_problem(label, geo_problems(state, initial, value))
+    # The paired G3 contract, each rejected by G3 itself: phase A must keep the drawer shown and bounded,
+    # review must have it stood down with a reachable toggle that says so.
+    for label, state, value, limb in (
+            ('a hidden drawer while recording (phase A)', 'recording', dict(measured, drawerShown=False, drawerExpanded='false'), 'G3 recording'),
+            ('a review with the drawer still open', 'review', measured, 'G3 review'),
+            ('a review whose drawer is still on screen though its toggle says collapsed', 'review',
+             dict(stood, drawerShown=True, drawer=measured['drawer']), 'G3 review'),
+            ('a review whose toggle still says expanded', 'review', dict(stood, drawerExpanded='true'), 'G3 review'),
+            ('a review stood down with its toggle covered', 'review', covered('reading-findings-open', stood), 'G3 review'),
+            ('a review stood down with its toggle gone', 'review',
+             dict(stood, controls=dict(stood['controls'], **{'reading-findings-open': gone})), 'G3 review')):
+        if not any(problem.startswith(limb) for problem in geo_problems(state, initial, value)):
+            problems.append('%s must reject: %s' % (limb, label))
     # Declared bodies and source-bound pins.
     body = json.loads(REVIEW_BODY)
     if len(body['text'].split('\n')) != 12 or len(body['text']) > 16384 or body['seconds'] != 1.0 or \
@@ -1245,7 +1273,13 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
         failed state; only after it, one declared route answers this study's POST with a fixed 200 review
         body for phase B's review state. Every hit test is taken before the real click it guards; each pass
         prints its own U4L-GEO line, and one failing pass stops the rest only when its cleanup failed. A GEO
-        failure is a UI finding for Astra - never a reason to relax a limb or touch the PATH line."""
+        failure is a UI finding for Astra - never a reason to relax a limb or touch the PATH line.
+
+        Attempt 1 measured the drawer covering the report fields in review. The product now stands it down
+        once per run on entering review (Astra B2, 2026-09-23), so each pass first reopens it through its
+        real toggle when hidden. Recording and failed keep G3 shown-and-bounded; review requires it stood
+        down - hidden, aria-expanded false, its toggle present and reachable - and G1/G5 are measured after
+        that, unchanged."""
         run, f, records = Run('G-LIVE-GEO', ['G7']), None, []
         plan = [(phase, width, height, layout) for phase in ('a', 'b') for width, height in VIEWPORTS for layout in LAYOUTS]
         try:
@@ -1311,6 +1345,22 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
         return {'drawer': value, 'settled': bool(value) and value['state'] not in (None, 'idle', 'loading'),
                 'waited_s': round(time.monotonic() - started, 3)}
 
+    def reopen_drawer(self, run):
+        """Astra B2: a phase-B review stands the drawer down and nothing reopens it, so every pass (both
+        phases) starts by reopening it through its real toggle when it is hidden, then asserts it shown and
+        expanded and waits (bounded) for it to settle. Setup only: G0 still asserts the drawer, the pane and
+        the entry from the rectangles before Dictate."""
+        page, before = run.page, run.js('drawer')
+        reopened = not before or bool(before.get('hidden'))
+        if reopened:
+            page.locator('#reading-findings-open').click(timeout=WAIT_MS)
+        try:
+            expect(page.locator('#reading-findings')).to_be_visible()
+            expect(page.locator('#reading-findings-open')).to_have_attribute('aria-expanded', 'true')
+        except AssertionError as error:
+            raise Stop('drawer reopen', {'reopened': reopened, 'before': before, 'error': short(error)})
+        return {'reopened': reopened, 'before': before, 'settle': self.drawer_settled(run)}
+
     def enter_layout(self, run, layout, rec):
         want = layout == 'reading'
         if run.js('reading') is not want:
@@ -1341,6 +1391,7 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
             # set_viewport_size resolves on the CDP acknowledgement; two frames put the reads on the new layout.
             run.js('frames2')
             self.enter_layout(run, layout, rec)
+            rec['drawer_reopen'] = self.reopen_drawer(run)
             run.js('frames2')
             initial = rec['initial'] = run.js('geometry')
             rec['reached'].append('initial')
