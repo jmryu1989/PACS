@@ -1,7 +1,29 @@
 # coding: utf-8
 """D-MEASURE2 A1/A2/C5: real comparison viewer, drafts and BFF receipts."""
 import sys, unittest, uuid
+from urllib.parse import urlsplit
 from test_held_measurements import HeldMeasurementE2E, expect, base, literal
+from test_viewer_history import synthetic_ct, canvas_ready
+from viewer_precision_support import hook
+
+# S3-U5 CI1 (test_recovery_07..10): the fixed OHIF loader never asks again after a rejected series-metadata GET, which
+# left the current study blank in CI1. Only the current study's one series-metadata GET is routed; the rest is real.
+NOTICES = hook + '''window.__kinNotices=[];window.config.extensions.push({id:'kin.local-recovery-notices',preRegistration({servicesManager}){
+  const s=servicesManager.services.uiNotificationService,show=s.show;
+  s.show=function(n){__kinNotices.push({title:String(n&&n.title),type:String(n&&n.type),message:String(n&&n.message)});return show.apply(this,arguments)};}});'''
+SHOWN = "()=>{const s=__d05c1.services;return [...s.viewportGridService.getState().viewports.keys()].map(id=>s.cornerstoneViewportService.getCornerstoneViewport(id)?.getCurrentImageId?.()||'')}"
+SETS = "uid=>__d05c1.services.displaySetService.getActiveDisplaySets().filter(d=>d.StudyInstanceUID===uid).map(d=>d.SeriesInstanceUID)"
+STATE = "()=>window.kinSeriesMetadataRecoveryState()"
+IMAGE_NOTICES = "()=>__kinNotices.filter(n=>n.title==='Image Loading')"
+RECOVERY = "window.config.extensions.find(e=>e.id==='kin.series-metadata-recovery')"
+# The extension's own registered exit (what ExtensionManager.onModeExit calls) runs in the same turn that first sees
+# the one pending retry, so it always lands inside the 1000 ms wait.
+EXIT_WHILE_WAITING = "()=>{const s=window.kinSeriesMetadataRecoveryState?.();if(!s||s.pending!==1)return false;"+RECOVERY+".onModeExit();return true}"
+
+
+def transient(route, n):
+    if n == 1: route.fulfill(status=500, content_type='text/plain', body='synthetic transient failure')
+    else: route.continue_()
 
 
 class ViewerRecoveryE2E(HeldMeasurementE2E):
@@ -123,6 +145,88 @@ class ViewerRecoveryE2E(HeldMeasurementE2E):
         samples=p.evaluate('()=>recoveryAtCreate');self.assertTrue(samples)
         self.assertEqual(samples[0],{'prevented':True,'dirty':True,'rows':0})
         self.assertEqual(self.saved(f),[])
+
+    # ---- S3-U5 CI1: one bounded retry of the current study's series-metadata GET ----
+    def metadata_studies(self):
+        f=self.specimen();prior=synthetic_ct(self.stack,f.patient_id,'recprior','20260801',[0,0,0],[1,0,0,0,1,0],[.7,1.3],slices=1)
+        found=self.stack._orthanc_request('POST','/tools/lookup',f.uid.encode())
+        study=next(x['ID'] for x in found.body if x['Type']=='Study')
+        [instance]=self.stack._orthanc_request('GET','/studies/'+study+'/instances').body
+        series=self.stack._orthanc_request('GET','/series/'+instance['ParentSeries']).body['MainDicomTags']['SeriesInstanceUID']
+        return f,prior,series,instance['MainDicomTags']['SOPInstanceUID']
+
+    def metadata_viewer(self,f,prior,series,reply):
+        # The worklist's own comparison URL (reading-workspace.js:515), current study first.
+        w=self.login();p=w.context.new_page();p.set_viewport_size(dict(width=1680,height=1000));seen=[]
+        self.addCleanup(w.close);self.addCleanup(p.close)
+        def config(r):
+            a=r.fetch();r.fulfill(response=a,body=a.text()+'\n'+NOTICES)
+        path='/studies/'+f.uid+'/series/'+series+'/metadata'
+        def metadata(route):
+            seen.append(route.request.method);reply(route,len(seen))
+        p.route('**/ohif/app-config.js',config);p.route(lambda url:urlsplit(url).path.endswith(path),metadata)
+        p.goto(self.stack.proxy+'/ohif/viewer?StudyInstanceUIDs='+f.uid+','+prior.uid+'&hangingProtocolId=@ohif/hpCompare')
+        return w,p,seen
+
+    def metadata_failure(self,p,status,f,prior,series,sop):
+        node=p.locator('#kin-viewer-layout #kin-series-metadata-status')
+        expect(node).to_contain_text('1번째 검사의 영상 정보',timeout=60000);expect(node).to_contain_text('HTTP '+str(status))
+        # The dock shows one panel at a time; select Layout the way open_measurement_tools selects History.
+        expect(p.locator('#kin-workspace-dock')).to_have_count(1,timeout=45000)
+        tab=p.locator('#kin-workspace-dock nav button[aria-controls=kin-viewer-layout]')
+        if tab.get_attribute('aria-expanded')!='true':tab.click()
+        expect(node).to_be_visible();text=node.text_content()
+        for value in (f.uid,prior.uid,series,sop,f.patient_id):self.assertNotIn(value,text)
+        self.assertEqual([(n['type'],n['message']) for n in p.evaluate(IMAGE_NOTICES)],[('error',text)])
+        return text
+
+    def assert_no_current_image(self,p,f,prior):
+        self.assertEqual(p.evaluate(SETS,f.uid),[])
+        shown=[i for i in p.evaluate(SHOWN) if i]
+        self.assertEqual([i for i in shown if '/studies/'+f.uid+'/' in i],[],shown)
+        self.assertTrue(all('/studies/'+prior.uid+'/' in i for i in shown),shown)
+
+    def test_recovery_07_transient_series_metadata_500_recovers_the_current_study_once(self):
+        f,prior,series,sop=self.metadata_studies()
+        w,p,seen=self.metadata_viewer(f,prior,series,transient)
+        canvas_ready(p,2)
+        self.assertEqual(seen,['GET','GET'])
+        current=[i for i in p.evaluate(SHOWN) if '/studies/'+f.uid+'/' in i]
+        self.assertEqual(len(current),1,current);self.assertIn('/studies/'+f.uid+'/series/'+series+'/instances/'+sop+'/frames/1',current[0])
+        self.assertEqual(p.evaluate(SETS,f.uid),[series]);self.assertTrue(p.evaluate(SETS,prior.uid))
+        self.assertEqual(p.evaluate(STATE),{'phase':'installed','pending':0,'retries':1,'errors':0})
+        expect(p.locator('#kin-series-metadata-status')).to_have_count(0);self.assertEqual(p.evaluate(IMAGE_NOTICES),[])
+
+    def test_recovery_08_persistent_series_metadata_500_is_retried_once_then_shown(self):
+        f,prior,series,sop=self.metadata_studies()
+        w,p,seen=self.metadata_viewer(f,prior,series,lambda route,n:route.fulfill(status=500,content_type='text/plain',body='synthetic persistent failure'))
+        text=self.metadata_failure(p,500,f,prior,series,sop);self.assertIn('한 번 다시 요청했지만',text)
+        p.wait_for_function('uid=>__d05c1.services.displaySetService.getActiveDisplaySets().some(d=>d.StudyInstanceUID===uid)',arg=prior.uid)
+        p.wait_for_timeout(3000)
+        self.assertEqual(seen,['GET','GET']);self.assert_no_current_image(p,f,prior)
+        self.assertEqual(p.evaluate(STATE),{'phase':'installed','pending':0,'retries':1,'errors':1})
+
+    def test_recovery_09_denied_series_metadata_is_not_retried_and_is_shown(self):
+        f,prior,series,sop=self.metadata_studies()
+        w,p,seen=self.metadata_viewer(f,prior,series,lambda route,n:route.fulfill(status=403,content_type='application/json',body='{}'))
+        text=self.metadata_failure(p,403,f,prior,series,sop);self.assertIn('접근할 수 없습니다',text)
+        p.wait_for_timeout(2500)
+        self.assertEqual(seen,['GET']);self.assert_no_current_image(p,f,prior)
+        self.assertEqual(p.evaluate(STATE),{'phase':'installed','pending':0,'retries':0,'errors':1})
+
+    def test_recovery_10_exit_before_the_retry_sends_and_shows_nothing_late(self):
+        f,prior,series,sop=self.metadata_studies()
+        w,p,seen=self.metadata_viewer(f,prior,series,transient)
+        p.wait_for_function(EXIT_WHILE_WAITING,timeout=60000)
+        self.assertEqual(p.evaluate(STATE),{'phase':'stopped','pending':0,'retries':0,'errors':0})
+        p.wait_for_timeout(2500)
+        self.assertEqual(seen,['GET']);self.assertEqual(p.evaluate(SETS,f.uid),[])
+        expect(p.locator('#kin-series-metadata-status')).to_have_count(0);self.assertEqual(p.evaluate(IMAGE_NOTICES),[])
+        # A new lifecycle is a new ticket, not a way back to the cancelled retry.
+        p.evaluate('()=>'+RECOVERY+'.onModeEnter()');self.assertEqual(p.evaluate(STATE)['phase'],'installed')
+        p.wait_for_timeout(1500)
+        self.assertEqual(seen,['GET']);expect(p.locator('#kin-series-metadata-status')).to_have_count(0)
+        self.assertEqual(p.evaluate(IMAGE_NOTICES),[])
 
 
 if __name__=='__main__':

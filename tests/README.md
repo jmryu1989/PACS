@@ -170,8 +170,9 @@ REQ-S3-ASR-U5-AUTHZ/PARITY/INERT/ORDER/INPUT/SESSION/PROOF → RISK-U5-WEAKER-CO
 
 ## 기능별 시험 카탈로그
 
-D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (18개),
-`python tests/e2e/test_viewer_recovery.py` (6개).
+D-MEASURE2 비교 중 미저장 작업 회복: `node --test tests/viewer_recovery_test.cjs` (24개),
+`python tests/e2e/test_viewer_recovery.py` (10개).
+S3-U5 CI1: 현재 URL 검사의 시리즈 메타데이터 GET이 HTTP 500~599로 거절되면 수명주기·검사·시리즈마다 1000ms 뒤 한 번만 다시 요청한다(0·4xx·동기 예외는 다시 묻지 않음). 끝난 실패는 URL 순서의 검사 번호로만 알린다. 빠른 시험 `U5-CI1 R1`~`R6`과 실스택 `test_recovery_07`~`10`(일시 500 회복·지속 500·403·재요청 전 종료)이 이 경계를 본다.
 REQ-D04-MANUAL-CONTINUE → RISK-D04-LOSS → TEST-D04-HELD-RECOVERY: 실제 주석 생성 이벤트에서 이력 scan 전에도 Job/이탈 가드가 모두 미저장 상태를 감지하는지 검사한다. 기존 삭제·저장·보관 수정 회귀의 경고 해제 조건도 유지한다.
 빠른 시험은 실제 `config/ohif.js` 확장을 VM에서 mount하고 DOM/HTTP 경계만 대체한다.
 A1(원문 §2-5)의 검사 왕복·늦은 응답·동일 UUID, A2(6)의 busy 경합,
