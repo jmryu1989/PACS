@@ -98,6 +98,22 @@ body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 #reading-findings .reading-findings-meta { color: #9fb9dc; }
 #reading-findings ul { margin: 4px 0; padding-left: 16px; }
 #reading-findings li { margin: 3px 0; }
+/* Dictation review in this layout. `body.reading .redit` keeps its 180px minimum, so the review pane at its
+   plain cap pushed .rfoot2 57px below a 1680x1100 column (U4L attempt 1). While the transcript is shown the
+   pane gives way instead: it prefers the plain cap (the same expression as main.html's #dictation-pane
+   max-height), shrinks when the column is short, and never goes below its own rows. That floor is the pane's
+   automatic minimum, which a flex item only has when it is not a scroll container: so the pane stops
+   scrolling here, and the transcript, the only row allowed to shrink, scrolls in its own box as before.
+   The floor holds one whole line of the transcript. A stated line-height makes `1lh` the real line pitch
+   (with `normal` a line also grows with fallback fonts, which `1lh` does not see), and the content box -
+   not the border box - is held to it. That line is paid for inside the pane: meta and the buttons share
+   one row when they fit and wrap back to today's two rows when they do not. The plain layout and every
+   other pane state keep main.html's rules. Kept below the rules above so their cited line numbers stay put. */
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) { flex: 0 1 min(30vh, 168px); overflow: visible; }
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > #dictation-text { flex: 1 1 0; box-sizing: content-box; line-height: 1.5; min-height: 1lh; }
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-foot { display: flex; flex-wrap: wrap; align-items: center; gap: inherit; }
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-foot > #dictation-meta { flex: 1 1 auto; min-width: 0; }
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > .dictation-foot > .dictation-actions { margin-left: auto; }
 @media (max-width: 1250px) {
   body.reading .rbtns button, body.reading .rfoot2 button { padding: 5px 7px; }
 }

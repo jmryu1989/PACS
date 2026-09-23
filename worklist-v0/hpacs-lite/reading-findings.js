@@ -74,11 +74,12 @@ window.KinReadingFindings = function (app) {
    * `Structured` could not be pressed at all - measured on a real run, not predicted.
    *
    * The upper bound is not a number anyone picked. It is the top of the report's **field region**
-   * at the current width, read back into the panel's own `max-height` (reading-workspace.css:77).
-   * That answer already accounts for the button row wrapping, for the draft and citation bars
-   * appearing, and for both layouts, because `.redit` is `flex: 1` in that column: anything that
-   * appears or wraps above it changes its height. Leaving the property off means `100vh − 12px`,
-   * which is larger than both caps - the behaviour that shipped before this bound existed.
+   * at the current width, read back into the panel's own `max-height` (reading-workspace.css:84).
+   * That answer accounts for the button row wrapping and for the bars and the dictation pane
+   * appearing above the fields, in both layouts - provided it is read again whenever one of them
+   * changes, which is what the sources below are for. Leaving the property off means
+   * `100vh − 12px`, which is larger than both caps - the behaviour that shipped before this bound
+   * existed.
    *
    * There is no feedback loop to guard against: the panel is out of flow, so resizing it cannot
    * move or resize the field region it measures.
@@ -97,15 +98,22 @@ window.KinReadingFindings = function (app) {
     else panel.style.removeProperty('--reading-findings-top');
   }
   /**
-   * Three sources, and between them they are complete:
+   * Three sources:
    *   resize  - the viewport itself, which is what moved the top edge in the first place;
    *   scroll  - `body.reading` scrolls the report column (`.right { overflow: auto }`), which moves
    *             the field region **without** resizing anything, so no observer would see it;
-   *   observe - every change inside the column, because `.redit` is `flex: 1` there and a wrapped
-   *             button row or a newly shown bar changes its height.
-   * Nothing observes `.rbtns` or the parent: a position-only change of `.redit` that is not one of
-   * the two above cannot happen in this layout, and guessing at more observers would be
-   * infrastructure without a cause.
+   *   observe - `.redit` and every element above it in `.report-p` (the button row, the draft,
+   *             hold, defer and citation bars, the citation list and the dictation pane). Watching
+   *             `.redit` alone is not enough: in the reading layout it can sit at its 180px minimum
+   *             (reading-workspace.css:69), and then a pane growing above it moves it down without
+   *             resizing it. That is not hypothetical - at 1366x768 the review pane grew from 68 to
+   *             168px, the bound stayed 100px stale, and this panel covered Insert and Cancel. Each
+   *             element above `.redit` changes size when it causes such a move, so observing them
+   *             catches it.
+   * Known limit: in the reading layout, content outside the report column (above `.report-p` in
+   * the scrolling `.right` column) that changes height while `.report-p` sits at its own minimum
+   * moves the field region without any of these firing. It is not observed here; broader layout
+   * observers would be guessing at a cause nothing has measured.
    */
   const onLayout = () => bindTop();
   let watching = false, sizeWatch = null;
@@ -116,7 +124,10 @@ window.KinReadingFindings = function (app) {
       window.addEventListener('resize', onLayout);
       document.addEventListener('scroll', onLayout, { capture: true, passive: true });
       const el = fields();
-      if (el && window.ResizeObserver) { sizeWatch = new ResizeObserver(onLayout); sizeWatch.observe(el); }
+      if (el && window.ResizeObserver) {
+        sizeWatch = new ResizeObserver(onLayout);
+        for (let node = el; node; node = node.previousElementSibling) sizeWatch.observe(node);
+      }
     } else {
       window.removeEventListener('resize', onLayout);
       document.removeEventListener('scroll', onLayout, { capture: true });

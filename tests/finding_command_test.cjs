@@ -540,6 +540,13 @@ class FakeElement extends EventTarget {
   all() { return [this, ...this.children.flatMap(c => c.all())]; }
   focus() { this.ownerDocument.activeElement = this; }
   click() { if (!this.disabled) this.dispatchEvent(new Event('click')); }
+  // The panel walks the report column upward from its field region (`watchLayout`). As in a real
+  // document, the sibling is the previous ELEMENT in the parent's child list; text nodes are skipped.
+  get previousElementSibling() {
+    const siblings = this.parent ? this.parent.children : [];
+    for (let at = siblings.indexOf(this) - 1; at >= 0; at--) if (siblings[at].tagName !== '#text') return siblings[at];
+    return null;
+  }
 }
 function makeDocument() {
   const doc = {};
@@ -568,7 +575,22 @@ function makeDocument() {
   doc.body = new FakeElement('body', doc); doc.activeElement = doc.body;
   doc.createElement = tag => new FakeElement(tag, doc);
   doc.createTextNode = value => { const n = new FakeElement('#text', doc); n.textContent = value; return n; };
-  doc.querySelector = selector => doc.body.all().find(e => selector.startsWith('#') ? e.id === selector.slice(1) : e.className.split(' ').includes(selector.slice(1))) || null;
+  // One simple selector, or a descendant chain of them: '.report-p .redit' is how the panel finds the
+  // report's field region. A single selector matches exactly as it always did.
+  const matches = (e, s) => s.startsWith('#') ? e.id === s.slice(1) : e.className.split(' ').includes(s.slice(1));
+  doc.querySelector = selector => {
+    const parts = selector.trim().split(/\s+/);
+    return doc.body.all().find(e => {
+      if (!matches(e, parts[parts.length - 1])) return false;
+      let x = e.parent;
+      for (let i = parts.length - 2; i >= 0; i--) {
+        while (x && !matches(x, parts[i])) x = x.parent;
+        if (!x) return false;
+        x = x.parent;
+      }
+      return true;
+    }) || null;
+  };
   return doc;
 }
 // A viewer document of its own realm: exports, history state, owner and modal state as in config/ohif.js.
@@ -593,13 +615,23 @@ function viewer(o) {
   `, ctx);
   return ctx;
 }
-function worklist() {
-  const channels = [], intervals = [], events = new EventTarget();
+function worklist(options) {
+  const channels = [], intervals = [], events = new EventTarget(), observers = [];
   class FakeChannel { constructor(name) { this.name = name; this.onmessage = null; channels.push(this); } postMessage() {} close() { this.closed = true; } }
   const document = makeDocument();
   const sandbox = { console, Event, URL, URLSearchParams, document, location: { origin: ORIGIN }, BroadcastChannel: FakeChannel, setTimeout, clearTimeout,
     setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval: id => { intervals[id - 1] = null; },
     addEventListener: (...a) => events.addEventListener(...a), removeEventListener: (...a) => events.removeEventListener(...a), dispatchEvent: e => events.dispatchEvent(e) };
+  // Opt-in: a ResizeObserver that records what it watches, whether it was given back, and fires on
+  // demand. Without it the realm has none, which is the shipped fallback every older case relies on.
+  if (options && options.resizeObserver) {
+    sandbox.ResizeObserver = class {
+      constructor(callback) { this.callback = callback; this.targets = []; this.live = true; observers.push(this); }
+      observe(el) { this.targets.push(el); }
+      disconnect() { this.targets = []; this.live = false; }
+      fire() { this.callback([], this); }
+    };
+  }
   const ctx = vm.createContext(sandbox);
   vm.runInContext('this.window = this;', ctx);
   const region = document.createElement('div'); region.className = 'panel related-p';
@@ -633,7 +665,7 @@ function worklist() {
   const byId = id => all().find(e => e.id === id);
   const named = (scope, name) => scope.all().filter(e => e.tagName === 'button' && e.textContent === name);
   const h = {
-    s, ui, app, document, sandbox, channels, byId, named,
+    s, ui, app, document, sandbox, channels, observers, byId, named,
     panel: () => byId('reading-findings'),
     articles: () => byId('reading-findings-list').children,
     result: () => byId('reading-findings-nav'),
@@ -688,6 +720,54 @@ test('adapter: the open panel listens on the document and gives that listener ba
   h.ui.end();
   assert.equal(h.document.live('scroll:capture'), 0, 'the session ending gives the listener back');
   assert.equal(h.document.live('scroll'), 0, 'and nothing was ever registered without capture');
+});
+
+test('adapter: the open panel observes the field region and every element above it, rebinds when one resizes, and gives them back', async () => {
+  // U4L attempt 1, reading layout at 1366x768: `.redit` sat at its 180px minimum, so the dictation
+  // pane growing above it (68 -> 168px) moved it down WITHOUT resizing it. With only `.redit`
+  // observed the bound stayed 100px stale and the panel covered Insert and Cancel. Every element
+  // above `.redit` in `.report-p` is observed as well, so that move reaches the panel through the
+  // element that grew. This realm has no layout: the field region's top is set by hand.
+  const h = worklist({ resizeObserver: true });
+  const doc = h.document;
+  const make = (className, id) => { const el = doc.createElement('div'); el.className = className || ''; el.id = id || ''; return el; };
+  const report = make('panel report-p'), rbtns = make('rbtns'), draftbar = make('draftbar', 'draftbar'), citelist = make('', 'citelist');
+  const pane = make('', 'dictation-pane'), redit = make('redit'), rfoot = make('rfoot2');
+  report.append(rbtns, draftbar, doc.createTextNode(' '), citelist, pane, redit, rfoot);
+  doc.body.append(report);
+  const above = new Set([redit, pane, citelist, draftbar, rbtns]);
+  let top = 576;
+  redit.getBoundingClientRect = () => ({ top, height: 180 });
+  await h.open();
+  assert.equal(h.observers.length, 1, 'one observer while the panel is open');
+  const [first] = h.observers;
+  assert.deepEqual(new Set(first.targets), above, 'the field region and every element above it');
+  assert.equal(first.targets.length, above.size, 'each observed once');
+  assert.ok(!first.targets.includes(rfoot) && !first.targets.includes(report), 'nothing below it and not the column itself');
+  const bound = () => h.panel().style.getPropertyValue('--reading-findings-top');
+  assert.equal(bound(), '576px');
+  // The pane grows above the pinned field region: `.redit` moves 100px down at the same height, and
+  // the only thing that reports it is the pane's own resize.
+  top = 676;
+  first.fire();
+  assert.equal(bound(), '676px', 'the bound follows the moved field region');
+  first.fire();
+  assert.equal(bound(), '676px', 'a callback with nothing moved changes nothing');
+  // Closing gives the observer back; reopening observes the same elements afresh and measures again.
+  await h.click(h.named(h.panel(), 'Close Image Findings')[0]);
+  assert.equal(first.live, false, 'closed with the panel');
+  assert.deepEqual(first.targets, []);
+  top = 640;
+  await h.open();
+  assert.equal(h.observers.length, 2, 'a fresh observer on reopen, never the closed one again');
+  const second = h.observers[1];
+  assert.deepEqual(new Set(second.targets), above);
+  assert.equal(bound(), '640px', 'reopening measures the field region where it is now');
+  // Ending the session gives it back too, with the scroll listener.
+  h.ui.end();
+  assert.equal(second.live, false);
+  assert.deepEqual(second.targets, []);
+  assert.equal(h.document.live('scroll:capture'), 0);
 });
 
 test('adapter: the panel lists the selected study read-only with textContent, link states and Show Hidden, and writes nothing', async () => {
@@ -1495,6 +1575,60 @@ test('wiring: the worklist loads the modules in order, mounts once, follows sele
   assert.equal(ui.split("app.api('GET', path)").length - 1, 1, 'the only request is the list read');
   assert.ok(ui.includes('const navigate = w.kinViewerHistoryNavigate;'), 'navigate is read at call time');
   assert.equal(ui.split('kinViewerHistoryNavigate').length - 1, 2);
+});
+
+test('wiring: review stands the Image Findings drawer down once per dictation run, and the reading review pane gives way down to its own rows', () => {
+  // U4L attempt 1 (Astra B2/B3). Text pins only; what the rendered layout does is the hosted GEO proof.
+  const html = shipped('main.html'), css = shipped('reading-workspace.css');
+  // B2: one named host function inside the dictation block (the region the host DOM harness slices).
+  const block = html.slice(html.indexOf('    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════'),
+                           html.indexOf('    $("#t-mod").addEventListener("change", renderTemplates);'));
+  const at = block.indexOf('    function standDownFindingsForDictationReview() {');
+  assert.ok(at > 0, 'a named function inside the dictation block');
+  const fn = block.slice(at, block.indexOf('\n    }\n', at));
+  assert.match(fn, /if \(s\.state !== "review" \|\| s\.asrSeq === dictationDrawerSeq\) return;/, 'review only, once per run');
+  assert.match(fn, /dictationDrawerSeq = s\.asrSeq;\r?\n\s+readingFindings\?\.close\(\);/, 'remembers the run, then closes');
+  assert.ok(!/\.open\(|\.sync\(|show\(|\.end\(/.test(fn), 'it never reopens, re-syncs or ends the drawer');
+  assert.equal(html.split('dictation.subscribe(standDownFindingsForDictationReview);').length - 1, 1, 'subscribed exactly once');
+  assert.ok(block.includes('dictation.subscribe(standDownFindingsForDictationReview);'));
+  assert.equal(html.split('readingFindings?.close()').length - 1, 1, 'nothing else in the page closes the drawer');
+  assert.equal(html.split('dictationDrawerSeq').length - 1, 3, 'declared, compared and set - nowhere else');
+  // B3: the plain pane rule and the transcript's minimum and overflow are untouched...
+  const rule = (text, selector) => { const from = text.indexOf(selector + ' {'); return from < 0 ? '' : text.slice(from, text.indexOf('}', from) + 1); };
+  const plainPane = rule(html, '    #dictation-pane'), plainText = rule(html, '    #dictation-text');
+  assert.match(plainPane, /flex: none;/); assert.match(plainPane, /max-height: min\(30vh, 168px\);/); assert.match(plainPane, /overflow: auto;/);
+  assert.match(plainText, /flex: 0 1 auto; min-height: 1\.6em; overflow: auto;/);
+  // ...and the reading rules are scoped to the reading layout's review (the transcript shown), prefer the
+  // same cap expression rather than a number of their own, and hold one height of their own only: D2's one
+  // whole transcript line, in the transcript's content box at a stated pitch.
+  const reading = css.split(/\r?\n/).filter(line => line.startsWith('body.reading #dictation-'));
+  const review = 'body.reading #dictation-pane:has(> #dictation-text:not([hidden]))';
+  assert.deepEqual(reading, [
+    `${review} { flex: 0 1 min(30vh, 168px); overflow: visible; }`,
+    `${review} > #dictation-text { flex: 1 1 0; box-sizing: content-box; line-height: 1.5; min-height: 1lh; }`,
+    `${review} > .dictation-foot { display: flex; flex-wrap: wrap; align-items: center; gap: inherit; }`,
+    `${review} > .dictation-foot > #dictation-meta { flex: 1 1 auto; min-width: 0; }`,
+    `${review} > .dictation-foot > .dictation-actions { margin-left: auto; }`]);
+  const cap = /max-height: (min\([^)]*\))/.exec(plainPane)[1];
+  assert.equal(cap, /flex: 0 1 (min\([^)]*\))/.exec(reading[0])[1], 'the preferred size is the plain cap');
+  // B-2: the one matched cap expression is the plain rule's; with it set aside no rule carries a px literal,
+  // and the only height, floor or cap of their own is the transcript's `min-height: 1lh`.
+  const bodies = reading.map((line, i) => { const body = line.slice(line.indexOf('{')); return i === 0 ? body.replace(cap, '') : body; });
+  for (const body of bodies) assert.ok(!/\d(\.\d+)?px/.test(body), 'no px literal of its own: ' + body);
+  const heights = bodies.flatMap((body, i) => [...body.matchAll(/(?:^|[^-])((?:min-|max-)?height\s*:[^;}]*;?)/g)].map(m => [i, m[1].trim()]));
+  assert.deepEqual(heights, [[1, 'min-height: 1lh;']], 'one whole transcript line is the only height of its own');
+  assert.equal(reading.join('\n').split('#dictation-').length - 1, 12, 'twelve selector mentions in the five rules');
+  assert.equal(css.split('#dictation-').length - 1, reading.join('\n').split('#dictation-').length - 1 + 1,
+    'no other dictation rule in this sheet (the one extra mention is in its comment)');
+  // CE7: meta and the actions share one role-less wrapper, in their old order, and it is inert outside that
+  // review: one default rule, inside the report CSS the host DOM harness slices.
+  const pane = html.slice(html.indexOf('<div id="dictation-pane"'), html.indexOf('\n        <div class="redit">'));
+  assert.match(pane, /<div id="dictation-place"><\/div>\s*<div class="dictation-foot">\s*<div id="dictation-meta"><\/div>\s*<div class="dictation-actions">/);
+  assert.deepEqual([...pane.matchAll(/ id="([^"]+)"/g)].map(m => m[1]), ['dictation-pane', 'dictation-status', 'dictation-text',
+    'dictation-place', 'dictation-meta', 'dictation-stop', 'dictation-cancel', 'dictation-repin', 'dictation-insert', 'dictation-close']);
+  const reportCss = html.slice(html.indexOf('    /* Report */'), html.indexOf('    .citefield {'));
+  assert.equal(html.split('.dictation-foot {').length - 1, 1, 'one default rule');
+  assert.match(reportCss, /\r?\n    \.dictation-foot \{ display: contents; \}\r?\n/, 'inert by default, inside the sliced report CSS');
 });
 /* ---------- S2-L saved locations and S2-C live facts in the worklist (TEST-S2L-WORKLIST) ----------
  * finding-command.js directly and the shipped panel in the worklist realm; the viewer's kinViewerJobLocation is a double of its own realm. */

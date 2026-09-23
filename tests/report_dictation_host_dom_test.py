@@ -446,6 +446,12 @@ def static_report():
             problems.append("dictation.js must not use %s" % word)
     if "innerHTML" in host:
         problems.append("dictation.js writes text through textContent only")
+    # D2 (HD-16): the pane's foot wrapper renders nothing of its own here only because its default rule is in
+    # the report CSS this harness slices; outside it the wrapper would be a block and shift today's rows.
+    if "\n    .dictation-foot { display: contents; }\n" not in S["REPORT_CSS"]:
+        problems.append("the .dictation-foot default must stay inside the sliced report CSS")
+    if S["DICTATION_HTML"].count('<div class="dictation-foot">') != 1:
+        problems.append("the dictation pane must wrap meta and the actions in one .dictation-foot")
     cases = sorted(n for n in dir(ReportDictationHostDOMTest) if n.startswith("test_hd"))
     if [c[:9] for c in cases] != ["test_hd%02d" % n for n in range(len(cases))]:
         problems.append("HD ids must stay dense and stable")
@@ -541,7 +547,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
     def test_hd00_the_slices_hooks_and_boundaries_this_file_stands_on(self):
         problems, cases = static_report()
         self.assertEqual([], problems)
-        self.assertEqual(15, len(cases))
+        self.assertEqual(17, len(cases))
 
     # ── HD-01 ──────────────────────────────────────────────────────────────────────────────
     def test_hd01_unavailable_by_default_and_when_malformed_says_what_is_true(self):
@@ -887,6 +893,84 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         value = self.snap()
         self.assertEqual((1, 1, 1, 1), (value["media"]["gum"], value["media"]["contexts"],
                                         len(value["media"]["commands"]), len(value["dict"])))
+
+    # ── HD-15 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd15_review_stands_the_findings_drawer_down_once_per_run_and_never_reopens_it(self):
+        """U4L attempt 1 (Astra B2): the page closes Image Findings once when a run enters review
+        (standDownFindingsForDictationReview in the sliced dictation block). The same review emitting
+        again - an edit, a refused Insert, a click re-pin - must not close it again: that is what keeps
+        a drawer the reader reopened during review open. Cancel, the pane's Close and Insert never
+        reopen it; only the next run's review closes it once more. The drawer stub gains its counters
+        here, at runtime, so the harness glue it shares with the capture suite stays byte-identical."""
+        self.open()
+        self.page.evaluate("()=>{ window.drawer = { closes: 0, opens: 0 }; "
+                           "readingFindings.close = () => { drawer.closes += 1; }; "
+                           "readingFindings.open = () => { drawer.opens += 1; }; }")
+
+        def drawer():
+            return self.page.evaluate("()=>({ closes: drawer.closes, opens: drawer.opens })")
+        self.caret("findings", 3)
+        first = self.upload()
+        self.assertEqual({"closes": 0, "opens": 0}, drawer(), "recording and uploading leave the drawer alone")
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)", [first, 200, reply(TRANSCRIPT)])
+        self.wait_state("review")
+        self.assertEqual({"closes": 1, "opens": 0}, drawer(), "entering review stands it down once")
+        run = self.snap()["session"]["asrSeq"]
+        # From here the reader may reopen the drawer with its own toggle (outside this harness). The same
+        # review now emits several times; none of them may close it again.
+        self.caret("findings", len(EXISTING))
+        self.page.keyboard.type("추가")
+        self.page.click("#dictation-insert")
+        self.page.wait_for_function("()=>dictation.snapshot().needsRepin === true")
+        self.page.click("#findings", position={"x": 12, "y": 8})
+        self.page.wait_for_function("()=>dictation.snapshot().needsRepin === false")
+        value = self.snap()
+        self.assertEqual(("review", run), (value["session"]["state"], value["session"]["asrSeq"]),
+                         "still the same run's review")
+        self.assertEqual({"closes": 1, "opens": 0}, drawer(), "an edit, a refused Insert and a re-pin never close again")
+        self.page.click("#dictation-cancel")
+        self.wait_state("cancelled")
+        self.page.click("#dictation-close")
+        self.assertTrue(self.snap()["pane"]["hidden"])
+        self.assertEqual({"closes": 1, "opens": 0}, drawer(), "cancel and the pane's Close reopen nothing")
+        # A new run is a new review: exactly one more stand-down, and Insert reopens nothing.
+        second = self.upload()
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)", [second, 200, reply(TRANSCRIPT)])
+        self.wait_state("review")
+        self.assertNotEqual(run, self.snap()["session"]["asrSeq"])
+        self.assertEqual({"closes": 2, "opens": 0}, drawer(), "the next run's review stands it down once more")
+        self.page.click("#dictation-insert")
+        self.wait_state("inserted")
+        self.assertEqual({"closes": 2, "opens": 0}, drawer(), "Insert reopens nothing")
+
+    # ── HD-16 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd16_the_foot_wrapper_is_inert_outside_the_reading_review(self):
+        """D2 (Astra CE7): meta and the actions sit in one role-less .dictation-foot so that the reading
+        layout's review can put them on one row (reading-workspace.css, not loaded here). Everywhere else -
+        this plain harness's review included - its default `display: contents` must leave today's rows as
+        they were: no box of its own, meta and the actions still the pane's own rows with the pane's gap
+        between them, and the transcript still border-box at the `normal` pitch with its 1.6em minimum."""
+        self.open()
+        self.caret("findings", 3)
+        self.review()
+        value = self.page.evaluate("""() => {
+          const foot = $('.dictation-foot'), meta = $('#dictation-meta'), actions = $('.dictation-actions');
+          const text = getComputedStyle($('#dictation-text')), pane = getComputedStyle($('#dictation-pane'));
+          return { display: getComputedStyle(foot).display, rects: foot.getClientRects().length, role: foot.getAttribute('role'),
+                   children: Array.from(foot.children).map(n => n.id || n.className),
+                   meta: hdBox(meta), actions: hdBox(actions), gap: parseFloat(pane.rowGap),
+                   text: { boxSizing: text.boxSizing, lineHeight: text.lineHeight, minHeight: text.minHeight } };
+        }""")
+        self.assertEqual(("contents", 0, None), (value["display"], value["rects"], value["role"]),
+                         "no box, no client rects and no role of its own")
+        self.assertEqual(["dictation-meta", "dictation-actions"], value["children"], "meta, then the actions")
+        self.assertEqual(3, value["gap"])
+        self.assertAlmostEqual(value["actions"]["top"] - value["meta"]["bottom"], value["gap"], delta=1 / 64,
+                               msg="meta and the actions are still two of the pane's rows, one gap apart")
+        self.assertEqual((value["meta"]["left"], value["meta"]["width"]), (value["actions"]["left"], value["actions"]["width"]),
+                         "both stretch across the pane as before")
+        self.assertEqual({"boxSizing": "border-box", "lineHeight": "normal", "minHeight": "17.6px"}, value["text"],
+                         "the one-line minimum is a reading-review rule; the plain transcript is untouched")
 
 
 if __name__ == "__main__":

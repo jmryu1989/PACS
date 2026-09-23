@@ -293,8 +293,8 @@ class MeasurementCiTests(unittest.TestCase):
         identity = ci.PROFILES['identity-fields']
         self.assertEqual([row[:2] for row in measurements['suites']],
                          list(zip(ci.SUITES, ci.SUITE_CLASSES)))
-        # S2-B1 appends one browser suite to this existing profile (review C5): the exact 19
-        # suites in order, the unchanged per-suite cap and shared deadline, and no new profile.
+        # S2-B1 and then S3-ASR-U4L each append one browser suite to this existing profile (review C5):
+        # the exact 20 suites in order, the unchanged per-suite cap and shared deadline, and no new profile.
         self.assertEqual(list(zip(ci.SUITES, ci.SUITE_CLASSES)), [
             ('viewer_api_test.py', 'ViewerAPI'), ('e2e/test_measurement_readback.py', 'MeasurementReadbackE2E'),
             ('e2e/test_measurement_panel.py', 'MeasurementPanelE2E'), ('e2e/test_held_measurements.py', 'HeldMeasurementE2E'),
@@ -305,10 +305,10 @@ class MeasurementCiTests(unittest.TestCase):
             ('reading_appearance_fields_live.py', 'ReadingAppearanceFieldsLive'), ('e2e/test_viewer_identity_fields.py', 'ViewerIdentityFieldsE2E'),
             ('e2e/test_cine.py', 'CineE2E'), ('e2e/test_volume_cine.py', 'VolumeCineE2E'),
             ('finding_api_test.py', 'FindingAPI'), ('e2e/test_finding_navigation.py', 'FindingNavigationE2E'),
-            ('e2e/test_finding_worklist.py', 'FindingWorklistE2E')])
+            ('e2e/test_finding_worklist.py', 'FindingWorklistE2E'), ('e2e/test_dictation_live.py', 'DictationLiveE2E')])
         self.assertEqual(measurements['suites'][-1],
-                         ('e2e/test_finding_worklist.py', 'FindingWorklistE2E', 'ci-test-finding-worklist'))
-        self.assertEqual(len({row[2] for row in measurements['suites']}), 19)
+                         ('e2e/test_dictation_live.py', 'DictationLiveE2E', 'ci-test-dictation-live'))
+        self.assertEqual(len({row[2] for row in measurements['suites']}), 20)
         self.assertEqual(measurements['suite_timeout'], 540)
         self.assertNotIn('suite_budgets', measurements)
         self.assertIn('deadline = time.monotonic()+25*60',
@@ -654,9 +654,9 @@ class MeasurementCiTests(unittest.TestCase):
         for name, profile in ci.PROFILES.items():
             if name != 'volume-path':
                 self.assertNotIn('ci-finding-location', profile.get('suite_budgets', {}), name)
-        # The measurements profile keeps its 19 suites and its unchanged per-suite cap.
+        # The measurements profile keeps its 20 suites and its unchanged per-suite cap.
         measurements = ci.PROFILES['measurements']
-        self.assertEqual(len(measurements['suites']), 19)
+        self.assertEqual(len(measurements['suites']), 20)
         self.assertEqual(measurements['suite_timeout'], 540)
         self.assertNotIn('suite_budgets', measurements)
         # Its base class belongs to volume-marks, which does not gain the location module or its unit.

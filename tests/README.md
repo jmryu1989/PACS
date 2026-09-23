@@ -312,7 +312,7 @@ schemaVersion 2 요청에서만 받는다. 서버는 작업 판·검사 조합(1
 작업·소견·판독 행 불변을 확인한다. 이 호스트 시험은 로컬에서 실행하지 않았다.
 순수 시험은 `finding_input_test.cjs` 11개 중 6개, `finding_link_model_test.cjs` 70개 중 12개, `finding_command_test.cjs` 45개 중 8개,
 `viewer_volume_job_capture_test.cjs` 51개 중 8개(위치 복원 7, `goTo` 1)와 `measurement_ci_test.py`의 음성 선택 1개다. 브라우저·DB 시험은
-`finding_api_test.py` 11·12, `test_finding_navigation.py` 8, `test_finding_worklist.py` 5(기존 `measurements` 19개 suite·540초 한도 그대로)와
+`finding_api_test.py` 11·12, `test_finding_navigation.py` 8, `test_finding_worklist.py` 5(기존 `measurements` 프로필·540초 한도 그대로 — 현재 20개 suite, 마지막은 S3-ASR-U4L `e2e/test_dictation_live.py`)와
 새 `python tests/e2e/test_finding_locations.py` (3개, `VolumeMarksE2E` 상속, `test_location_`만)이다. 새 모듈은 기존 `volume-path` 프로필의
 세 번째 suite `ci-finding-location`(360초)이며 (420+35)+(300+35)+(360+35)=1185초에 예비 150초를 더해 1335≤1500초다.
 
