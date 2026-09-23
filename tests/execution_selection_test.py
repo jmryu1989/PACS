@@ -646,17 +646,56 @@ class ExecutionSelectionTests(unittest.TestCase):
         # The entry point filters by __dict__, so inherited worklist cases never run (review N-4).
         entry = next(node for node in tree.body if isinstance(node, ast.If) and '__name__' in ast.unparse(node.test))
         self.assertIn(class_name+'.__dict__', ast.unparse(entry))
-        # One launch: the full pinned Chromium with exactly the imported U4b arguments (D1, review N-5).
+        # One launch: the full pinned Chromium with exactly the imported U4b arguments (D1, review N-5), plus the
+        # two accepted NetLog switches and nothing else (Astra decision 2026-09-23 on the P10 instrument).
         launches = named('launch')
         self.assertEqual(len(launches), 1)
         keywords = {keyword.arg: keyword.value for keyword in launches[0].keywords}
         self.assertEqual((launches[0].args, set(keywords)), ([], {'channel', 'headless', 'args'}))
         self.assertEqual(ast.literal_eval(keywords['channel']), 'chromium')
         self.assertIs(ast.literal_eval(keywords['headless']), True)
-        self.assertEqual(ast.unparse(keywords['args'].func) if isinstance(keywords['args'], ast.Call) else None, 'launch_args')
+        self.assertEqual(ast.unparse(keywords['args'].func) if isinstance(keywords['args'], ast.Call) else None, 'u4l_launch_args')
+        from pathlib import PurePosixPath
+        self.assertEqual(module.u4l_launch_args(PurePosixPath('/f.wav'), PurePosixPath('/n/netlog.json')),
+                         module.launch_args(PurePosixPath('/f.wav')) + ['--log-net-log=/n/netlog.json', '--net-log-duration=120'])
+        # F5: the capture window and the completion deadline are the accepted ones and are never shortened.
+        self.assertEqual((module.NETLOG_SECONDS, module.NETLOG_DEADLINE_SECONDS, module.NETLOG_WINDOW_SECONDS), (120, 140, 115))
         self.assertEqual(len(module.FORBIDDEN_LAUNCH_FLAGS), 3)
         for flag in module.FORBIDDEN_LAUNCH_FLAGS:
             self.assertNotIn(flag, source)
+        # F1: one module-level tuple names the three forbidden NetLog switches, and each literal occurs exactly once
+        # in the suite - as that tuple's own constant - so no other code or text can pass one to the browser.
+        netlog_forbidden = ('--net-log-capture-mode', '--net-log-max-size-mb', '--ssl-key-log-file')
+        tuples = [node for node in tree.body if isinstance(node, ast.Assign)
+                  and [ast.unparse(target) for target in node.targets] == ['NETLOG_FORBIDDEN_FLAGS']]
+        self.assertEqual(len(tuples), 1)
+        self.assertEqual(ast.literal_eval(tuples[0].value), netlog_forbidden)
+        self.assertEqual(module.NETLOG_FORBIDDEN_FLAGS, netlog_forbidden)
+        owned = {id(node) for node in ast.walk(tuples[0].value)}
+        for flag in netlog_forbidden:
+            holders = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                       and flag in node.value]
+            self.assertEqual([id(node) in owned for node in holders], [True], flag)
+            self.assertEqual(source.count(flag), 1, flag)
+        # The capture modes that keep credentials or bytes, and the TLS key log variable, are never written whole.
+        for token in ('IncludeSensitive', 'Everything', 'HeavilyRedacted', 'SSLKEYLOGFILE'):
+            self.assertNotIn(token, source)
+        # The raw log: read only in wait_netlog (the other read_bytes hashes ARTIFACTS for the manifest), never
+        # copied or moved, removed only by remove_netlog; judged last in test 01, before its U4L-PATH line.
+        reads = named('read_bytes')
+        self.assertEqual(sorted(name for call in reads for name in ('wait_netlog', 'finalize_artifacts') if inside(name, call)),
+                         ['finalize_artifacts', 'wait_netlog'])
+        self.assertEqual(len(reads), 2)
+        for attr in ('copy', 'copy2', 'copyfile', 'copyfileobj', 'copytree', 'move', 'rename', 'link_to', 'hardlink_to',
+                     'symlink_to'):
+            self.assertEqual(named(attr), [], attr)
+        self.assertEqual([inside('remove_netlog', call) for call in named('rmtree')], [True])
+        steps = named('netlog_p10_step')
+        emits = [node for node in ast.walk(functions['path_finish']) if isinstance(node, ast.Call)
+                 and ast.unparse(node.func) == 'emit']
+        self.assertEqual([inside('path_finish', call) for call in steps], [True])
+        self.assertLess(steps[0].lineno, emits[0].lineno)
+        self.assertEqual(source.count("'p10-netlog.json'"), 1)
         # Two routes: the bootstrap path predicate while every context is prepared, and the review answer
         # inside the geometry case only. Nothing continues, falls back, unroutes, replays or adds page code.
         routes = named('route')

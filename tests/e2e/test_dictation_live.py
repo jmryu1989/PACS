@@ -23,12 +23,16 @@ What is declared instead, each recorded with hashes:
   * in test 02 only, after its real-503 passes, one route on that study's dictation POST answering a fixed
     200 review body, so the review state can be measured. Insert is never pressed;
   * the U4b observer init script (it records and delegates only) and one CDP session per case limited to
-    the Log domain (amendment D2).
+    the Log domain (amendment D2);
+  * two NetLog switches on the capture launch only (Astra decision 2026-09-23): the browser's own network log,
+    written to a private directory outside every uploaded path, read once in memory for P10's worklet limbs,
+    reduced to an allowlisted extract and removed.
 Every page-side read goes through PROBES; every state change is a real click or key press.
 
 Not claimed: CSP enforcement (zero Log entries is not enforcement; U4b NC-11 is the only such proof), a
 header-delivery verdict (G-CSP is Astra's conditional decision on the recorded observation), engine or model
-availability, speech accuracy, physician acceptance, U5 or Stage 3 completion.
+availability, speech accuracy, physician acceptance, U5 or Stage 3 completion, and that full Chromium honours
+the NetLog switches or negotiates HTTP/2 here (review B1/B2: only a hosted run shows it; failing to is a failure).
 """
 import ast
 import copy
@@ -37,11 +41,14 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 import unittest
-from pathlib import Path
+import uuid
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from playwright.sync_api import expect
@@ -88,6 +95,33 @@ GEO_CONTROLS = {'recording': ('dictation-stop', 'dictation-cancel'), 'failed': (
                 'review': ('dictation-insert', 'dictation-cancel')}
 GEO_HIT_IDS = ('b-dictate', 'dictation-status', 'dictation-stop', 'dictation-cancel', 'dictation-insert',
                'dictation-close', 'dictation-repin', 'b-copy', 'm-reading', 'reading-findings-open')
+
+# ── P10 through the browser's own NetLog (Astra decision 2026-09-23, review F1-F5). The proof object is the
+# original one: the worklet response the browser itself received, status 200, COOP same-origin, COEP
+# require-corp. Playwright never reported that response (attempt 1, A-R), so it is read from the network
+# stack's log over HTTP/2; whatever cannot be bound to exactly one exchange is an INSTRUMENTATION failure.
+NETLOG_SECONDS = 120            # --net-log-duration: the network service stops, flushes and closes the log
+NETLOG_DEADLINE_SECONDS = 140   # completion is waited for from the pre-launch clock, never longer
+NETLOG_WINDOW_SECONDS = 115     # test 01's browser traffic ends within this; the logged POST decides (review N1)
+NETLOG_POLL_SECONDS = 0.25
+NETLOG_MAX_BYTES = 64 * 1024 * 1024   # bounds the one strict parse; login plus one capture is far below it
+# F1: the only place these three switches are named. Absent capture mode is Default, absent size limit is one
+# unstitched file, and no TLS key log; the launch oracle requires zero of each on both launch lines.
+NETLOG_FORBIDDEN_FLAGS = ('--net-log-capture-mode', '--net-log-max-size-mb', '--ssl-key-log-file')
+NETLOG_SWITCHES = ('--log-net-log', '--net-log-duration') + NETLOG_FORBIDDEN_FLAGS
+NETLOG_SEND, NETLOG_RECV, NETLOG_SESSION = 'HTTP2_SESSION_SEND_HEADERS', 'HTTP2_SESSION_RECV_HEADERS', 'HTTP2_SESSION'
+# F3: recorded guards, verbatim at the tag (network_service_instance_impl.cc:702-703, 759). A present line fails;
+# an absent one proves nothing, since browser stderr reaching the pw:browser log is not guaranteed. The protection
+# is completeness plus exactly one worklet exchange plus the PATH POST logged after it: a truncating restart
+# cannot leave a complete file that still holds both in order.
+NETLOG_GUARDS = (('NETLOG-OPEN', 'Failed opening NetLog: '),
+                 ('NETLOG-RESTART', 'Network service crashed or was terminated, restarting service.'))
+NETLOG_REQUEST_VALUES = (':method', ':scheme', ':authority', ':path', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site')
+NETLOG_CLASSES = ('NETLOG-INCOMPLETE', 'NETLOG-SCHEMA', 'NETLOG-MODE', 'NETLOG-NOT-H2', 'NETLOG-NO-STREAM',
+                  'NETLOG-AMBIGUOUS', 'NETLOG-NO-RESPONSE', 'NETLOG-ORDER', 'NETLOG-WINDOW', 'NETLOG-OPEN',
+                  'NETLOG-RESTART', 'NETLOG-LEAK', 'NETLOG-ERROR')
+NETLOG_EXTRACT = 'p10-netlog.json'
+HEADER_NAME = re.compile(r':?[a-z0-9][a-z0-9-]*')   # a logged name kept in the extract can carry no value
 
 ASR_SOURCE = (ROOT / 'api' / 'src' / 'asr.service.ts').read_text(encoding='utf-8')
 
@@ -262,12 +296,17 @@ def capability_problems(real):
             if value is None or type(real[key]) is not type(value) or real[key] != value]
 
 
-def launch_verdict(text, fixture_path, capture_version):
+def launch_verdict(text, fixture_path, capture_version, netlog_path):
     """P0 (amendment D1, review N-1): one record per `<launching>` line, so the capture browser is judged on its
     own line and the base browser on its own - never the first line for both. The capture line is the one that
-    carries the fixture argument, not the second one by position."""
+    carries the fixture argument, not the second one by position. The NetLog delta: every token is named up to
+    its first '='; the capture line carries exactly one '--log-net-log=<private path>' and one
+    '--net-log-duration=NETLOG_SECONDS', the base line none of the five NetLog switches, and no line a forbidden
+    one (review F1, F4)."""
     rows = [row for row in (text or '').splitlines() if '<launching> ' in row]
     fixture_arg = '--use-file-for-fake-audio-capture=%s' % fixture_path
+    netlog_args = {'--log-net-log': ['--log-net-log=%s' % netlog_path],
+                   '--net-log-duration': ['--net-log-duration=%d' % NETLOG_SECONDS]}
     records, problems = [], []
     for index, row in enumerate(rows):
         parsed = parse_launch(row)
@@ -276,7 +315,10 @@ def launch_verdict(text, fixture_path, capture_version):
         records.append({'index': index, 'executable': parsed['executable'], 'flags': parsed['flags'],
                         'chrome_headless_shell': parsed['chrome_headless_shell'], 'capture': fixture_arg in command[1:],
                         'binary': judged['binary'], 'forbidden': judged['forbidden'],
-                        'forbidden_text': [flag for flag in FORBIDDEN_LAUNCH_FLAGS if flag in row]})
+                        'forbidden_text': [flag for flag in FORBIDDEN_LAUNCH_FLAGS if flag in row],
+                        'netlog': {name: [arg for arg in command[1:] if arg.split('=', 1)[0] == name]
+                                   for name in NETLOG_SWITCHES},
+                        'netlog_forbidden_text': [flag for flag in NETLOG_FORBIDDEN_FLAGS if flag in row]})
     if len(rows) != 2:
         problems.append('expected exactly 2 <launching> lines (base, capture), found %d' % len(rows))
     captures = [record for record in records if record['capture']]
@@ -287,6 +329,11 @@ def launch_verdict(text, fixture_path, capture_version):
             problems.append('launch %d: %s' % (record['index'], problem))
         if record['forbidden'] or record['forbidden_text']:
             problems.append('launch %d carries %r' % (record['index'], record['forbidden'] or record['forbidden_text']))
+        refused = [arg for name in (NETLOG_FORBIDDEN_FLAGS if record['capture'] else NETLOG_SWITCHES)
+                   for arg in record['netlog'][name]]
+        if refused or record['netlog_forbidden_text']:
+            problems.append('launch %d carries NetLog switches it must not: %r'
+                            % (record['index'], refused or record['netlog_forbidden_text']))
     if len(captures) == 1:
         capture = captures[0]
         for flag in ('--headless', '--use-fake-device-for-media-stream', '--disable-audio-output'):
@@ -294,6 +341,10 @@ def launch_verdict(text, fixture_path, capture_version):
                 problems.append('the capture launch lacks %s' % flag)
         if capture['chrome_headless_shell'] or not (capture['executable'] or '').endswith(FULL_CHROMIUM_SUFFIX):
             problems.append('the capture launch is not the full pinned Chromium: %s' % capture['executable'])
+        for name, expected in netlog_args.items():
+            if capture['netlog'][name] != expected:
+                problems.append('the capture launch NetLog switch %s is %r, not exactly %r'
+                                % (name, capture['netlog'][name], expected))
     if capture_version != BROWSER_VERSION:
         problems.append('capture browser version %r != %r' % (capture_version, BROWSER_VERSION))
     return {'records': records, 'problems': problems}
@@ -353,6 +404,320 @@ def gcsp_input(main, worklet, post):
     if carried(post) - carried(main) or carried(post) - carried(worklet):
         return 'location-override'
     return 'no-trigger'
+
+
+def u4l_launch_args(fixture_path, netlog_path):
+    """The U4b capture flags plus the two accepted NetLog switches and nothing else. The browser opens the path
+    itself (network_service_instance_impl.cc:745-767) and NETLOG_SECONDS later stops, flushes and closes it while
+    it keeps running (network_service.cc:683-709), so completion never waits on Browser.close."""
+    return launch_args(fixture_path) + ['--log-net-log=%s' % netlog_path, '--net-log-duration=%d' % NETLOG_SECONDS]
+
+
+def netlog_root():
+    """R1: the runner's own temporary directory, discarded with the hosted runner and never uploaded (validate.yml
+    uploads tests/e2e/artifacts/measurement-ci/ and tmp/workspace-ui-ci/ only). Read at launch, not at import."""
+    return Path(os.environ.get('RUNNER_TEMP') or tempfile.gettempdir()) / 'u4l-netlog'
+
+
+def netlog_forbidden_roots():
+    """F4: the uploaded artifact directory wherever KIN_U4L_ARTIFACTS put it, the uploaded tree, and tmp."""
+    return ARTIFACTS.resolve(), (ROOT / 'tests/e2e/artifacts').resolve(), (ROOT / 'tmp').resolve()
+
+
+def netlog_path_problems(path, roots):
+    """F4, before launch: the launch oracle splits Playwright's line on spaces and each token at its first '=',
+    so the path carries no whitespace, '=' or quote; and it lies outside every root that is uploaded or kept."""
+    problems = []
+    if re.search(r'[\s=\'"]', str(path)):
+        problems.append('whitespace, "=" or a quote in the NetLog path')
+    if not path.is_absolute():
+        problems.append('the NetLog path is not absolute')
+    return problems + ['the NetLog path is inside %s' % root for root in roots if path == root or root in path.parents]
+
+
+def proxy_authority(proxy):
+    """N2: the ':authority' the browser sends for the configured proxy, from its netloc, default port elided."""
+    split = urlsplit(proxy)
+    netloc, default = split.netloc.lower(), {'https': ':443', 'http': ':80'}.get(split.scheme)
+    return netloc[:-len(default)] if default and netloc.endswith(default) else netloc
+
+
+class NetlogSchema(Exception):
+    """A whole log the strict parser refuses (a duplicate key, NaN or Infinity): complete, but not evidence."""
+
+
+def _netlog_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise NetlogSchema('duplicate key')
+        value[key] = item
+    return value
+
+
+def _netlog_constant(name):
+    raise NetlogSchema('non-finite number')
+
+
+def netlog_load(data, limit=NETLOG_MAX_BYTES):
+    """Strict whole-file JSON: (document, None) or (None, class). Not parseable is NETLOG-INCOMPLETE, because the
+    writer ends every event with ',\\n' and only its Stop writes ']' and '}' (file_net_log_observer.cc:667-668,
+    756-781); parseable only by tolerating a duplicate key or a non-finite number, or over the bound, is
+    NETLOG-SCHEMA."""
+    if data is None:
+        return None, 'NETLOG-INCOMPLETE'
+    if len(data) > limit:
+        return None, 'NETLOG-SCHEMA'
+    try:
+        return json.loads(data.decode('utf-8'), object_pairs_hook=_netlog_object, parse_constant=_netlog_constant), None
+    except (NetlogSchema, RecursionError):
+        return None, 'NETLOG-SCHEMA'
+    except ValueError:     # JSONDecodeError and UnicodeDecodeError: not a whole document (yet)
+        return None, 'NETLOG-INCOMPLETE'
+
+
+def wait_netlog(source, t0, limit=NETLOG_MAX_BYTES, clock=time.monotonic, sleep=time.sleep):
+    """Q3/B4: nothing is read before t0 + NETLOG_SECONDS; then the whole file is read again every
+    NETLOG_POLL_SECONDS until it parses strictly, and never after t0 + NETLOG_DEADLINE_SECONDS. Only the strict
+    parse means complete - the writer flushes in batches (file_net_log_observer.cc:443), so an unchanged size
+    means nothing. The bytes read are the snapshot judged; a later truncating restart cannot change them."""
+    reads, data = 0, None
+    while True:
+        now = clock()
+        if now < t0 + NETLOG_SECONDS:
+            sleep(t0 + NETLOG_SECONDS - now)
+            continue
+        try:
+            data = source.read_bytes()
+        except FileNotFoundError:
+            data = None
+        reads += 1
+        # The closing brace is necessary for a whole object, so a log still being written is never parsed in full.
+        complete = data is not None and data[-64:].rstrip().endswith(b'}')
+        loaded = netlog_load(data, limit) if complete else (None, 'NETLOG-INCOMPLETE')
+        now = clock()
+        if loaded[1] != 'NETLOG-INCOMPLETE' or now >= t0 + NETLOG_DEADLINE_SECONDS:
+            return {'data': data, 'loaded': loaded, 'reads': reads, 'at_s': round(now - t0, 3)}
+        sleep(min(NETLOG_POLL_SECONDS, t0 + NETLOG_DEADLINE_SECONDS - now))
+
+
+def _netlog_headers(lines):
+    """spdy_log_util.cc:27-35: one 'name: value' string per header, duplicates kept. Returns (lowercase name ->
+    values in order, names in order), or None when any line is not of that shape."""
+    if not isinstance(lines, list):
+        return None
+    values, names = {}, []
+    for line in lines:
+        if not isinstance(line, str) or ': ' not in line or line.startswith(': '):
+            return None
+        name, value = line.split(': ', 1)
+        values.setdefault(name.lower(), []).append(value)
+        names.append(name.lower())
+    return values, names
+
+
+def _netlog_mentions(value, needle):
+    if isinstance(value, str):
+        return needle in value
+    if isinstance(value, dict):
+        return any(_netlog_mentions(item, needle) for item in value.values())
+    return isinstance(value, list) and any(_netlog_mentions(item, needle) for item in value)
+
+
+def _netlog_response(values):
+    return {name: values[name] for name in (':status',) + RESPONSE_HEADERS if name in values}
+
+
+def netlog_bind(doc, uid, authority):
+    """Schema, mode and the one worklet exchange (review B3/B5). An exchange is (HTTP2_SESSION source id, stream
+    id): exactly one request block with exactly one each of :method GET, :scheme https, the proxy :authority and
+    the exact worklet :path - any other request block for that path, under any method, query or origin, makes it
+    ambiguous - and exactly one response block on the same key, after it. The PATH POST logged once after it is
+    what shows the log's window covered this capture. Type ids come from the file's own constants."""
+    out = {'classes': [], 'details': {}, 'mode': None, 'events': None, 'counts': {}, 'send': None, 'recv': None,
+           'post': None, 'main': []}
+
+    def fail(name, why):
+        out['classes'].append(name)
+        out['details'][name] = why
+        return out
+    if not isinstance(doc, dict) or set(doc) not in ({'constants', 'events'}, {'constants', 'events', 'polledData'}):
+        return fail('NETLOG-SCHEMA', 'the top-level keys are not constants, events and optionally polledData')
+    constants, events = doc['constants'], doc['events']
+    if not isinstance(constants, dict) or not isinstance(events, list):
+        return fail('NETLOG-SCHEMA', 'constants is not an object or events is not a list')
+    out['events'], mode = len(events), constants.get('logCaptureMode')
+    if not isinstance(mode, str):
+        return fail('NETLOG-SCHEMA', 'constants.logCaptureMode is absent')
+    out['mode'] = mode if re.fullmatch(r'[A-Za-z]{1,32}', mode) else '<not a mode name>'
+    if mode != 'Default':
+        return fail('NETLOG-MODE', 'the log was not captured in Default mode')
+    ids = {}
+    for table, name in (('logEventTypes', NETLOG_SEND), ('logEventTypes', NETLOG_RECV), ('logSourceType', NETLOG_SESSION)):
+        mapping = constants.get(table)
+        value = mapping.get(name) if isinstance(mapping, dict) else None
+        if type(value) is not int or sum(1 for other in mapping.values() if type(other) is int and other == value) != 1:
+            return fail('NETLOG-SCHEMA', 'constants.%s.%s is absent or shares its id' % (table, name))
+        ids[name] = value
+    kinds, sends, recvs = {}, [], []
+    for index, event in enumerate(events):
+        source = event.get('source') if isinstance(event, dict) else None
+        if not isinstance(source, dict) or type(event.get('type')) is not int or type(event.get('phase')) is not int or \
+                type(source.get('id')) is not int or type(source.get('type')) is not int or \
+                not isinstance(event.get('params', {}), dict):
+            return fail('NETLOG-SCHEMA', 'event %d is not {type, phase, source {id, type}, params}' % index)
+        if kinds.setdefault(source['id'], source['type']) != source['type']:
+            return fail('NETLOG-SCHEMA', 'source %d appears under two source types' % source['id'])
+        if event['type'] not in (ids[NETLOG_SEND], ids[NETLOG_RECV]):
+            continue
+        params = event.get('params', {})
+        parsed = _netlog_headers(params.get('headers'))
+        if source['type'] != ids[NETLOG_SESSION] or parsed is None or type(params.get('stream_id')) is not int or \
+                type(params.get('fin')) is not bool:
+            return fail('NETLOG-SCHEMA', 'event %d is not an HTTP/2 header block of an HTTP2_SESSION source' % index)
+        (sends if event['type'] == ids[NETLOG_SEND] else recvs).append(
+            {'index': index, 'key': (source['id'], params['stream_id']), 'values': parsed[0], 'names': parsed[1],
+             'event': event})
+    if len({send['key'] for send in sends}) != len(sends):
+        return fail('NETLOG-SCHEMA', 'two request blocks on one session stream')
+
+    def exact(send, method, path):
+        values = send['values']
+        return values.get(':method') == [method] and values.get(':scheme') == ['https'] and \
+            values.get(':authority') == [authority] and values.get(':path') == [path]
+    for main in [send for send in sends if exact(send, 'GET', MAIN_PATH)]:
+        answers = [recv for recv in recvs if recv['key'] == main['key']]    # recorded calibration only
+        out['main'].append({'stream': main['key'][1], 'response_blocks': len(answers),
+                            'response': _netlog_response(answers[0]['values']) if len(answers) == 1 else None})
+    found = [send for send in sends if exact(send, 'GET', WORKLET_PATH)]
+    near = [send for send in sends if send['index'] not in {one['index'] for one in found} and
+            any(path.startswith(WORKLET_PATH) for path in send['values'].get(':path', []))]
+    out['counts'] = {'request_blocks': len(sends), 'response_blocks': len(recvs), 'worklet_exact_gets': len(found),
+                     'worklet_other_requests': len(near),
+                     'main_with_query': sum(1 for send in sends
+                                            if any(path.startswith(MAIN_PATH + '?') for path in send['values'].get(':path', [])))}
+    if not found:
+        outside = not near and any(_netlog_mentions(event.get('params'), WORKLET_PATH) for event in events
+                                   if event['type'] not in (ids[NETLOG_SEND], ids[NETLOG_RECV]))
+        out['counts']['worklet_path_outside_http2'] = outside
+        if outside:
+            return fail('NETLOG-NOT-H2', 'the worklet path is logged, but in no HTTP/2 request block (B2)')
+        return fail('NETLOG-NO-STREAM', 'no HTTP/2 GET of exactly %s from %s' % (WORKLET_PATH, authority))
+    if len(found) > 1 or near:
+        return fail('NETLOG-AMBIGUOUS', '%d exact worklet GETs and %d other requests for its path' % (len(found), len(near)))
+    send = out['send'] = found[0]
+    answers = [recv for recv in recvs if recv['key'] == send['key']]
+    out['counts']['worklet_response_blocks'] = len(answers)
+    if not answers:
+        return fail('NETLOG-NO-RESPONSE', 'no response block on the worklet stream')
+    if len(answers) > 1:
+        return fail('NETLOG-AMBIGUOUS', '%d response blocks on the worklet stream' % len(answers))
+    if answers[0]['index'] < send['index']:
+        return fail('NETLOG-ORDER', 'the worklet response block precedes its request block')
+    out['recv'] = answers[0]
+    posts = [one for one in sends if isinstance(uid, str) and re.fullmatch(r'[0-9.]+', uid) and
+             exact(one, 'POST', DICTATION_PATH % uid)]
+    out['post'] = {'count': len(posts), 'after_worklet': [one['index'] > send['index'] for one in posts]}
+    if out['post']['after_worklet'] != [True]:
+        fail('NETLOG-WINDOW', 'the PATH POST is not logged exactly once after the worklet exchange')
+    return out
+
+
+def _netlog_time(event):
+    value = event.get('time')
+    return value if isinstance(value, str) and re.fullmatch(r'[0-9]{1,20}', value) else None
+
+
+def _netlog_event_sha256(event):
+    """Lets a later holder of the raw log re-verify the two bound events; the raw log itself is never kept (R1)."""
+    return sha256(json.dumps(event, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8'))
+
+
+def netlog_p10(source, t0, t_end, uid, authority, read_debug, hide, limit=NETLOG_MAX_BYTES,
+               clock=time.monotonic, sleep=time.sleep):
+    """P10's two worklet limbs from the NetLog. The raw bytes and the parsed document never leave this function:
+    it returns the classes, the two verdicts, the allowlisted worklet headers for the recorded G-CSP input, the
+    extract text for ARTIFACTS and a summary of it for the PATH line. Any class fails both limbs; only a bound
+    exchange without one can pass, or fail as P10 on its status or policies. The extract keeps request values of
+    NETLOG_REQUEST_VALUES and response values of RESPONSE_HEADERS only, response header names as a list (F2), and
+    must come through measurement_ci.sanitize unchanged in every form it is written in, or it is withheld."""
+    classes, details = [], {}
+
+    def add(name, why):
+        if name not in classes:
+            classes.append(name)
+            details[name] = why
+    window = round(t_end - t0, 3)
+    if window > NETLOG_WINDOW_SECONDS:
+        add('NETLOG-WINDOW', 'test 01 ended %.1f s after launch, over %d s' % (window, NETLOG_WINDOW_SECONDS))
+    extract = {'instrument': 'Chromium NetLog, Default capture, HTTP/2 header blocks; the raw log is not kept',
+               'netlog_seconds': NETLOG_SECONDS, 'deadline_seconds': NETLOG_DEADLINE_SECONDS,
+               'window_limit_seconds': NETLOG_WINDOW_SECONDS, 'window_s': window, 'reads': 0, 'read_at_s': None,
+               'raw': None, 'guards': None, 'mode': None, 'events': None, 'counts': {}, 'exchange': None,
+               'post': None, 'main_calibration': []}
+    bound = None
+    try:
+        waited = wait_netlog(source, t0, limit, clock, sleep)
+        data, (doc, problem) = waited['data'], waited['loaded']
+        extract.update(reads=waited['reads'], read_at_s=waited['at_s'], raw={
+            'present': data is not None, 'parsed': doc is not None,
+            'bytes': None if data is None else len(data), 'sha256': None if data is None else sha256(data)})
+        if problem:
+            add(problem, 'no strict whole-file parse by the deadline' if problem == 'NETLOG-INCOMPLETE' else
+                'a duplicate key, a non-finite number or more than %d bytes' % limit)
+        try:
+            debug = read_debug()
+        except OSError:
+            debug = None       # recorded as unread: an absent line never proved anything (F3)
+        extract['guards'] = None if debug is None else {name: line in debug for name, line in NETLOG_GUARDS}
+        for name in [name for name, present in (extract['guards'] or {}).items() if present]:
+            add(name, 'its line is in browser-debug.log')
+        if doc is not None:
+            bound = netlog_bind(doc, uid, authority)
+            for name in bound['classes']:
+                add(name, bound['details'][name])
+    except Exception as error:       # the type only: a message could quote the log
+        add('NETLOG-ERROR', type(error).__name__)
+    send, recv = (bound or {}).get('send'), (bound or {}).get('recv')
+    if bound:
+        extract.update(mode=bound['mode'], events=bound['events'], counts=bound['counts'], post=bound['post'],
+                       main_calibration=bound['main'])
+    if send and recv:
+        names = [name for name in recv['names'] if HEADER_NAME.fullmatch(name)]
+        extract['exchange'] = {
+            'session': send['key'][0], 'stream': send['key'][1], 'request_index': send['index'],
+            'response_index': recv['index'], 'request_time': _netlog_time(send['event']),
+            'response_time': _netlog_time(recv['event']),
+            'request': {name: send['values'][name] for name in NETLOG_REQUEST_VALUES if name in send['values']},
+            'response': _netlog_response(recv['values']), 'response_header_names': names,
+            'response_header_names_withheld': len(recv['names']) - len(names),
+            'request_sha256': _netlog_event_sha256(send['event']), 'response_sha256': _netlog_event_sha256(recv['event'])}
+    response = (extract['exchange'] or {}).get('response') or {}
+    status, coop, coep = (response.get(name, []) for name in
+                          (':status', 'cross-origin-opener-policy', 'cross-origin-embedder-policy'))
+    headers = {name: values[0] if len(values) == 1 else values for name, values in response.items()
+               if name != ':status'} if extract['exchange'] else None
+    extract['classes'], extract['details'] = classes, details
+    summary = {'classes': classes, 'details': details, 'raw': extract['raw'], 'mode': extract['mode'],
+               'window_s': window, 'read_at_s': extract['read_at_s'], 'reads': extract['reads'],
+               'exchange': None if not extract['exchange'] else {
+                   'session': extract['exchange']['session'], 'stream': extract['exchange']['stream'],
+                   'status': status, 'coop': coop, 'coep': coep},
+               'post': extract['post']}
+    text = json.dumps(extract, ensure_ascii=False, indent=2) + '\n'
+    leaked = [label for label, form in (('extract', text), ('extract line', json.dumps(extract, ensure_ascii=False)),
+                                        ('summary line', json.dumps(summary, ensure_ascii=False)))
+              if measurement_ci.sanitize(form, hide) != form]
+    if leaked:
+        add('NETLOG-LEAK', 'measurement_ci.sanitize changes the ' + ', '.join(leaked))
+        extract = {'withheld': True, 'classes': classes, 'details': {'NETLOG-LEAK': details['NETLOG-LEAK']},
+                   'raw': extract['raw']}
+        text, summary, headers = json.dumps(extract, ensure_ascii=False, indent=2) + '\n', dict(extract), None
+    summary.update(extract=NETLOG_EXTRACT, extract_sha256=sha256(text.encode('utf-8')))
+    bound_clean = not classes and bool(extract.get('exchange'))
+    return {'classes': classes, 'status_ok': bound_clean and status == ['200'],
+            'policy_ok': bound_clean and coop == ['same-origin'] and coep == ['require-corp'],
+            'headers': headers, 'text': text, 'summary': summary}
 
 
 def geo_entry_problems(initial):
@@ -496,20 +861,22 @@ def oracle_self_check():
     full = '/home/runner/.cache/ms-playwright/chromium-1223/chrome-linux64/chrome'
     shell = '/home/runner/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-linux64/chrome-headless-shell'
     fixture = '/w/tests/e2e/artifacts/measurement-ci/dictation-live/fixture.wav'
+    netlog = '/home/runner/work/_temp/u4l-netlog/0123abcd/netlog.json'
 
     def line(executable, extra):
         return 'T pw:browser <launching> %s --disable-field-trial-config --headless --mute-audio %s' % (executable, extra)
     base = line(full, '--enable-unsafe-swiftshader')
     media = '--use-fake-device-for-media-stream --use-file-for-fake-audio-capture=%s --disable-audio-output' % fixture
-    capture = line(full, media)
+    switches = ' '.join(u4l_launch_args(fixture, netlog)[len(launch_args(fixture)):])
+    capture = line(full, media + ' ' + switches)
     log = lambda *rows: '\n'.join(rows + ('T pw:browser <launched> pid=7',))
-    good = launch_verdict(log(base, capture), fixture, BROWSER_VERSION)
+    good = launch_verdict(log(base, capture), fixture, BROWSER_VERSION, netlog)
     if good['problems'] or [r['capture'] for r in good['records']] != [False, True]:
         problems.append('the pinned two-launch log must pass P0: %r' % good['problems'])
     for label, text, version in (
             ('one launch line', log(capture), BROWSER_VERSION),
             ('three launch lines', log(base, capture, base), BROWSER_VERSION),
-            ('a headless-shell capture', log(base, line(shell, media)), BROWSER_VERSION),
+            ('a headless-shell capture', log(base, line(shell, media + ' ' + switches)), BROWSER_VERSION),
             ('a headless-shell base browser (each process is judged)', log(line(shell, '--x'), capture), BROWSER_VERSION),
             ('a forbidden flag on the base line', log(line(full, FORBIDDEN_LAUNCH_FLAGS[0]), capture), BROWSER_VERSION),
             ('a forbidden flag on the capture line', log(base, capture + ' ' + FORBIDDEN_LAUNCH_FLAGS[2] + '=x'), BROWSER_VERSION),
@@ -518,7 +885,25 @@ def oracle_self_check():
             ('another fixture path', log(base, capture.replace(fixture, fixture + '.x')), BROWSER_VERSION),
             ('another browser version', log(base, capture), '148.0.0.0'),
             ('an empty log', '', BROWSER_VERSION)):
-        expect_problem(label, launch_verdict(text, fixture, version)['problems'])
+        expect_problem(label, launch_verdict(text, fixture, version, netlog)['problems'])
+    # The NetLog delta, each rejected by a NetLog problem; forbidden tokens are built from the one tuple (F1).
+    duration = '--net-log-duration=%d' % NETLOG_SECONDS
+    for label, text in (
+            ('a capture without --log-net-log', log(base, capture.replace(' --log-net-log=' + netlog, ''))),
+            ('a NetLog path other than the private one', log(base, capture.replace(netlog, netlog + '.x'))),
+            ('a second --log-net-log', log(base, capture + ' --log-net-log=' + netlog)),
+            ('a capture without --net-log-duration', log(base, capture.replace(' ' + duration, ''))),
+            ('another NetLog duration', log(base, capture.replace(duration, '--net-log-duration=60'))),
+            ('a second --net-log-duration', log(base, capture + ' ' + duration)),
+            ('a capture mode on the capture line', log(base, capture + ' ' + NETLOG_FORBIDDEN_FLAGS[0] + '=' + 'Include' + 'Sensitive')),
+            ('a size limit on the capture line', log(base, capture + ' ' + NETLOG_FORBIDDEN_FLAGS[1] + '=1')),
+            ('a TLS key log on the capture line', log(base, capture + ' ' + NETLOG_FORBIDDEN_FLAGS[2] + '=/tmp/k')),
+            ('a bare forbidden switch on the capture line', log(base, capture + ' ' + NETLOG_FORBIDDEN_FLAGS[2])),
+            ('the NetLog switches on the base line', log(line(full, '--enable-unsafe-swiftshader ' + switches), capture)),
+            ('a forbidden NetLog switch on the base line',
+             log(line(full, '--enable-unsafe-swiftshader ' + NETLOG_FORBIDDEN_FLAGS[0] + '=Default'), capture))):
+        if not any('NetLog' in problem for problem in launch_verdict(text, fixture, BROWSER_VERSION, netlog)['problems']):
+            problems.append('the NetLog launch oracle must reject: ' + label)
     # P1 predicate, diff and capability.
     for url, matches in (('https://localhost:9443/api/bootstrap?states=omit', True), ('https://localhost:9443/api/bootstrap', True),
                          ('https://localhost:9443/api/bootstrap/x', False), ('https://localhost:9443/api/bootstrapx', False),
@@ -683,6 +1068,308 @@ def oracle_self_check():
         problems.append('the generated secret names must be read from measurement_ci.py')
     if CHANNEL != 'chromium' or MAX_FRAMES != 524266:
         problems.append('the launch channel and node cap pins moved')
+    return problems + netlog_oracle_self_check()
+
+
+def netlog_oracle_self_check():
+    """Pure failure paths of the P10 NetLog instrument. The sample is a log in the writer's own framing
+    (file_net_log_observer.cc:748-781) with the header-block shape observed at the tag ([RP]); every negative is
+    one mutation of it and must fail with its own class alone (a status or policy mutation fails P10 with no
+    class). The wait runs on a fake clock, and the private path and publication boundary are checked on values."""
+    problems = []
+    authority, uid = 'localhost:9443', '1.2.3'
+    types = {'URL_REQUEST_START_JOB': 2, 'HTTP_TRANSACTION_SEND_REQUEST_HEADERS': 160, NETLOG_SEND: 211, NETLOG_RECV: 215}
+    sources = {'NONE': 0, 'URL_REQUEST': 1, NETLOG_SESSION: 9}
+    constants = {'logCaptureMode': 'Default', 'clientInfo': {'name': 'synthetic'}, 'logEventTypes': types,
+                 'logSourceType': sources}
+
+    def block(kind, stream, headers, session=7):
+        return {'type': types[kind], 'source': {'id': session, 'type': sources[NETLOG_SESSION], 'start_time': '1'},
+                'phase': 0, 'params': {'headers': list(headers), 'stream_id': stream, 'fin': kind == NETLOG_SEND}}
+
+    def other(kind, source, params):
+        return {'type': types[kind], 'source': {'id': source, 'type': sources['URL_REQUEST'], 'start_time': '2'},
+                'phase': 1, 'params': params}
+
+    def request(method, path, *more):
+        return [':method: ' + method, ':authority: ' + authority, ':scheme: https', ':path: ' + path] + list(more)
+    worklet_response = [':status: 200', 'content-type: text/javascript', 'cross-origin-opener-policy: same-origin',
+                        'cross-origin-embedder-policy: require-corp', 'x-content-type-options: nosniff',
+                        'set-cookie: [12 bytes were stripped]', 'cookie: [7 bytes were stripped]']
+    events = [block(NETLOG_SEND, 1, request('GET', MAIN_PATH, 'sec-fetch-dest: document', 'cookie: [20 bytes were stripped]')),
+              block(NETLOG_RECV, 1, [':status: 200', 'content-type: text/html', 'cross-origin-opener-policy: same-origin',
+                                     'cross-origin-embedder-policy: require-corp']),
+              block(NETLOG_SEND, 3, request('GET', WORKLET_PATH, 'sec-fetch-dest: audioworklet', 'sec-fetch-mode: cors',
+                                            'sec-fetch-site: same-origin', 'cookie: [20 bytes were stripped]')),
+              block(NETLOG_RECV, 3, worklet_response),
+              block(NETLOG_SEND, 5, request('POST', DICTATION_PATH % uid, 'content-type: audio/wav', 'x-kin-csrf: 1')),
+              block(NETLOG_RECV, 5, [':status: 503', 'content-type: application/json'])]
+
+    def framed(consts, rows, polled=None, complete=True):
+        """The writer's framing: a header, each event followed by ',\\n'; Stop rewinds the last ',\\n' and writes
+        ']', optionally polledData, and '}\\n'."""
+        text = '{"constants":%s,\n"events": [\n' % json.dumps(consts) + ''.join(
+            json.dumps(dict(row, time=str(4000 + n))) + ',\n' for n, row in enumerate(rows))
+        if complete:
+            text = (text[:-2] if rows else text) + ']' + \
+                (',\n"polledData": %s\n' % json.dumps(polled) if polled is not None else '') + '}\n'
+        return text.encode('utf-8')
+
+    def variant(change, polled=None):
+        consts, rows = copy.deepcopy(constants), copy.deepcopy(events)
+        change(consts, rows)
+        return framed(consts, rows, polled)
+
+    def lines(row):
+        return row['params']['headers']
+
+    def swap(row, old, new):
+        lines(row)[lines(row).index(old)] = new       # a vector whose line is gone raises instead of passing silently
+
+    class Clock:
+        now = 1000.0
+
+        def time(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += max(seconds, 0.001)
+
+    class Source:
+        """The file as read from each time on (seconds after launch): None is no file, an exception is raised."""
+
+        def __init__(self, clock, frames):
+            self.clock, self.frames, self.reads = clock, frames, []
+
+        def read_bytes(self):
+            at = round(self.clock.now - 1000.0, 3)
+            self.reads.append(at)
+            value = None
+            for start, frame in self.frames:
+                value = frame if at >= start else value
+            if isinstance(value, Exception):
+                raise value
+            if value is None:
+                raise FileNotFoundError('synthetic')
+            return value
+
+    def judge(data=None, frames=None, uid=uid, window=10.0, debug='', hide=(), limit=NETLOG_MAX_BYTES):
+        clock = Clock()
+        source = Source(clock, frames if frames is not None else
+                        [(NETLOG_SECONDS + 1, framed(constants, events) if data is None else data)])
+        result = netlog_p10(source, 1000.0, 1000.0 + window, uid, authority, lambda: debug, list(hide), limit,
+                            clock.time, clock.sleep)
+        return result, source
+
+    # The sample passes, and its extract is exactly the allowlist: the request's seven values, the response's
+    # allowlisted values, every response header name as a list member - set-cookie and cookie included (F2) -
+    # unchanged by sanitize, and bound to the summary by its hash.
+    good, source = judge()
+    extract = json.loads(good['text'])
+    exchange = extract.get('exchange') or {}
+    if good['classes'] or not good['status_ok'] or not good['policy_ok']:
+        problems.append('the NetLog sample must pass both worklet limbs: %r' % good['classes'])
+    if exchange.get('request') != {':method': ['GET'], ':scheme': ['https'], ':authority': [authority],
+                                   ':path': [WORKLET_PATH], 'sec-fetch-dest': ['audioworklet'],
+                                   'sec-fetch-mode': ['cors'], 'sec-fetch-site': ['same-origin']} or \
+            exchange.get('response') != {':status': ['200'], 'content-type': ['text/javascript'],
+                                         'cross-origin-opener-policy': ['same-origin'],
+                                         'cross-origin-embedder-policy': ['require-corp'],
+                                         'x-content-type-options': ['nosniff']} or \
+            exchange.get('response_header_names') != [':status', 'content-type', 'cross-origin-opener-policy',
+                                                      'cross-origin-embedder-policy', 'x-content-type-options',
+                                                      'set-cookie', 'cookie'] or \
+            (exchange.get('session'), exchange.get('stream')) != (7, 3) or \
+            extract.get('post') != {'count': 1, 'after_worklet': [True]} or len(extract.get('main_calibration')) != 1:
+        problems.append('the NetLog sample extract must hold exactly the allowlisted values and the header names')
+    if set(extract) != {'instrument', 'netlog_seconds', 'deadline_seconds', 'window_limit_seconds', 'window_s', 'reads',
+                        'read_at_s', 'raw', 'guards', 'mode', 'events', 'counts', 'exchange', 'post', 'main_calibration',
+                        'classes', 'details'} or \
+            set(exchange) != {'session', 'stream', 'request_index', 'response_index', 'request_time', 'response_time',
+                              'request', 'response', 'response_header_names', 'response_header_names_withheld',
+                              'request_sha256', 'response_sha256'} or \
+            set(extract['raw']) != {'present', 'parsed', 'bytes', 'sha256'} or \
+            set(good['summary']) != {'classes', 'details', 'raw', 'mode', 'window_s', 'read_at_s', 'reads', 'exchange',
+                                     'post', 'extract', 'extract_sha256'}:
+        problems.append('the NetLog extract and summary must carry exactly their declared fields')
+    if measurement_ci.sanitize(good['text'], []) != good['text'] or \
+            good['summary'].get('extract_sha256') != sha256(good['text'].encode('utf-8')):
+        problems.append('the NetLog extract must be sanitize-stable and bound to the summary by its hash (F2)')
+    if good['headers'] != {'content-type': 'text/javascript', 'cross-origin-opener-policy': 'same-origin',
+                           'cross-origin-embedder-policy': 'require-corp', 'x-content-type-options': 'nosniff'}:
+        problems.append('the recorded worklet headers must be the allowlisted response values')
+    # Q3/B4 on the fake clock: no read before NETLOG_SECONDS; completion is the parse, seen as soon as it holds.
+    if min(source.reads) < NETLOG_SECONDS or extract.get('read_at_s') != NETLOG_SECONDS + 1:
+        problems.append('the NetLog wait must not read before %d s and must stop at completion' % NETLOG_SECONDS)
+    stuck, source = judge(frames=[(0, framed(constants, events, complete=False))])
+    if stuck['classes'] != ['NETLOG-INCOMPLETE'] or min(source.reads) < NETLOG_SECONDS or \
+            max(source.reads) != NETLOG_DEADLINE_SECONDS:
+        problems.append('an unchanging unfinished log must be polled until the deadline and never read after it')
+    # Unrelated credential-bearing traffic around the one exchange: nothing of it reaches any output.
+    canaries = ['KINCANARY%02d' % n for n in range(11)]
+
+    def noisy(consts, rows):
+        consts['clientInfo'] = {'name': canaries[0]}
+        swap(rows[2], 'cookie: [20 bytes were stripped]', 'cookie: kin_session=' + canaries[1])
+        lines(rows[2]).extend(['authorization: Bearer ' + canaries[2], 'x-kin-csrf: ' + canaries[3],
+                               'referer: https://%s/?code=%s' % (authority, canaries[4])])
+        swap(rows[3], 'set-cookie: [12 bytes were stripped]', 'set-cookie: kin_session=' + canaries[5])
+        lines(rows[3]).append('x-kin=%s: 1' % canaries[10])     # a "name" carrying a value
+        rows[0:0] = [block(NETLOG_SEND, 9, request('GET', '/auth/callback?code=%s&state=%s' % (canaries[6], canaries[7]))),
+                     block(NETLOG_RECV, 9, [':status: 302', 'location: https://%s/?code=%s' % (authority, canaries[8])])]
+        rows.append(other('URL_REQUEST_START_JOB', 21, {'url': 'https://%s/api/x?token=%s' % (authority, canaries[9]),
+                                                        'method': 'GET'}))
+    loud, _ = judge(variant(noisy, polled={'contexts': canaries}))
+    if loud['classes'] or not loud['status_ok'] or not loud['policy_ok'] or 'kincanary' in json.dumps(loud).lower() or \
+            measurement_ci.sanitize('set-cookie: kin_session=' + canaries[5], []) == 'set-cookie: kin_session=' + canaries[5]:
+        problems.append('credential-bearing traffic must neither change the verdict nor reach any output: %r' % loud['classes'])
+    with_polled, _ = judge(variant(lambda consts, rows: None, polled={'contexts': []}))
+    if with_polled['classes'] or not with_polled['status_ok']:
+        problems.append('a footer carrying polledData must parse: %r' % with_polled['classes'])
+
+    def rows_changed(change):
+        return {'data': variant(lambda consts, rows: change(rows))}
+
+    def constants_changed(change):
+        return {'data': variant(lambda consts, rows: change(consts))}
+
+    def splice(rows, start, stop, new=()):
+        rows[start:stop] = list(new)
+
+    def http1(rows):
+        splice(rows, 2, 4, [other('URL_REQUEST_START_JOB', 21, {'url': 'https://%s%s' % (authority, WORKLET_PATH),
+                                                                'method': 'GET'}),
+                            other('HTTP_TRANSACTION_SEND_REQUEST_HEADERS', 21,
+                                  {'line': 'GET %s HTTP/1.1\r\n' % WORKLET_PATH, 'headers': ['Host: ' + authority]})])
+    complete = framed(constants, events)
+    unfinished = framed(constants, events, complete=False)
+    path_line, coop_line = ':path: ' + WORKLET_PATH, 'cross-origin-opener-policy: same-origin'
+    coep_line = 'cross-origin-embedder-policy: require-corp'
+    worklet_again = [block(NETLOG_SEND, 9, request('GET', WORKLET_PATH)), block(NETLOG_RECV, 9, worklet_response)]
+    vectors = (
+        # Completeness: only the strict parse of the whole file counts.
+        ('a log whose last event still ends in ",\\n"', {'frames': [(0, unfinished)]}, 'NETLOG-INCOMPLETE'),
+        ('a log with only its header', {'frames': [(0, framed(constants, [], complete=False))]}, 'NETLOG-INCOMPLETE'),
+        ('an empty file', {'data': b''}, 'NETLOG-INCOMPLETE'),
+        ('no file by the deadline', {'frames': []}, 'NETLOG-INCOMPLETE'),
+        ('a footer written only after the deadline',
+         {'frames': [(0, unfinished), (NETLOG_DEADLINE_SECONDS + 1, complete)]}, 'NETLOG-INCOMPLETE'),
+        ('a second document after the footer', {'data': complete + complete}, 'NETLOG-INCOMPLETE'),
+        ('a torn UTF-8 character', {'data': complete.replace(b'text/html', b'text/\xe2\x82html')}, 'NETLOG-INCOMPLETE'),
+        # Schema and source/stream mapping.
+        ('an extra top-level key', {'data': complete[:-2] + b',\n"extra": 1}\n'}, 'NETLOG-SCHEMA'),
+        ('no events list', {'data': b'{"constants":' + json.dumps(constants).encode('utf-8') + b'}\n'}, 'NETLOG-SCHEMA'),
+        ('a duplicate key in an event', {'data': complete.replace(b'"phase": 0', b'"phase": 0, "phase": 0', 1)}, 'NETLOG-SCHEMA'),
+        ('a non-finite number where no field is typed',
+         {'data': complete.replace(b'"name": "synthetic"', b'"name": NaN', 1)}, 'NETLOG-SCHEMA'),
+        ('a log above the parse bound', {'limit': len(complete) - 1}, 'NETLOG-SCHEMA'),
+        ('no capture mode in the constants', constants_changed(lambda consts: consts.pop('logCaptureMode')), 'NETLOG-SCHEMA'),
+        ('the request event type missing from the constants',
+         constants_changed(lambda consts: consts['logEventTypes'].pop(NETLOG_SEND)), 'NETLOG-SCHEMA'),
+        ('a second event name on the response event id',
+         constants_changed(lambda consts: consts['logEventTypes'].update(OTHER_EVENT=types[NETLOG_RECV])), 'NETLOG-SCHEMA'),
+        ('no HTTP2_SESSION source type', constants_changed(lambda consts: consts['logSourceType'].pop(NETLOG_SESSION)), 'NETLOG-SCHEMA'),
+        ('the session source id reused under another source type',
+         rows_changed(lambda rows: rows.append(other('URL_REQUEST_START_JOB', 7, {}))), 'NETLOG-SCHEMA'),
+        ('a header block on a URL_REQUEST source',
+         rows_changed(lambda rows: rows[1]['source'].update(id=11, type=sources['URL_REQUEST'])), 'NETLOG-SCHEMA'),
+        ('a header line that is not "name: value"',
+         rows_changed(lambda rows: swap(rows[0], 'sec-fetch-dest: document', 'sec-fetch-dest document')), 'NETLOG-SCHEMA'),
+        ('a boolean stream id', rows_changed(lambda rows: rows[4]['params'].update(stream_id=True)), 'NETLOG-SCHEMA'),
+        ('an event without a phase', rows_changed(lambda rows: rows[5].pop('phase')), 'NETLOG-SCHEMA'),
+        ('two request blocks on one session stream', rows_changed(lambda rows: rows.append(copy.deepcopy(rows[0]))), 'NETLOG-SCHEMA'),
+        # Mode: the forbidden names are assembled here, never written whole (F1).
+        ('a sensitive-including log', constants_changed(lambda consts: consts.update(logCaptureMode='Include' + 'Sensitive')),
+         'NETLOG-MODE'),
+        ('a log with socket bytes', constants_changed(lambda consts: consts.update(logCaptureMode='Every' + 'thing')), 'NETLOG-MODE'),
+        ('a heavily redacted log', constants_changed(lambda consts: consts.update(logCaptureMode='Heavily' + 'Redacted')),
+         'NETLOG-MODE'),
+        # The one exchange: protocol, full URL and method.
+        ('no worklet exchange', rows_changed(lambda rows: splice(rows, 2, 4)), 'NETLOG-NO-STREAM'),
+        ('the worklet over HTTP/1 only', rows_changed(http1), 'NETLOG-NOT-H2'),
+        ('the worklet from another port',
+         rows_changed(lambda rows: swap(rows[2], ':authority: ' + authority, ':authority: localhost:9444')), 'NETLOG-NO-STREAM'),
+        ('the worklet over :scheme http', rows_changed(lambda rows: swap(rows[2], ':scheme: https', ':scheme: http')), 'NETLOG-NO-STREAM'),
+        ('the only worklet request with a query', rows_changed(lambda rows: swap(rows[2], path_line, path_line + '?v=1')),
+         'NETLOG-NO-STREAM'),
+        ('the worklet requested with POST', rows_changed(lambda rows: swap(rows[2], ':method: GET', ':method: POST')), 'NETLOG-NO-STREAM'),
+        ('a second :method pseudo-header', rows_changed(lambda rows: lines(rows[2]).append(':method: GET')), 'NETLOG-NO-STREAM'),
+        ('no :authority pseudo-header', rows_changed(lambda rows: lines(rows[2]).remove(':authority: ' + authority)), 'NETLOG-NO-STREAM'),
+        # Duplicates, retries, preloads and a second session.
+        ('an added worklet request with a query',
+         rows_changed(lambda rows: rows.insert(4, block(NETLOG_SEND, 9, request('GET', WORKLET_PATH + '?v=1')))), 'NETLOG-AMBIGUOUS'),
+        ('an added HEAD of the worklet', rows_changed(lambda rows: rows.insert(4, block(NETLOG_SEND, 9, request('HEAD', WORKLET_PATH)))),
+         'NETLOG-AMBIGUOUS'),
+        ('a retried worklet GET on a new stream', rows_changed(lambda rows: splice(rows, 4, 4, worklet_again)), 'NETLOG-AMBIGUOUS'),
+        ('the worklet GET on a second session',
+         rows_changed(lambda rows: rows.insert(4, block(NETLOG_SEND, 1, request('GET', WORKLET_PATH), session=8))), 'NETLOG-AMBIGUOUS'),
+        ('an interim response before the 200', rows_changed(lambda rows: rows.insert(3, block(NETLOG_RECV, 3, [':status: 103']))),
+         'NETLOG-AMBIGUOUS'),
+        ('trailers after the 200', rows_changed(lambda rows: rows.insert(4, block(NETLOG_RECV, 3, ['x-trailer: 1']))), 'NETLOG-AMBIGUOUS'),
+        ('the 200 only on another stream', rows_changed(lambda rows: rows[3]['params'].update(stream_id=9)), 'NETLOG-NO-RESPONSE'),
+        ('the worklet stream answered on another session', rows_changed(lambda rows: rows[3]['source'].update(id=8)),
+         'NETLOG-NO-RESPONSE'),
+        ('the response logged before its request', rows_changed(lambda rows: rows.insert(2, rows.pop(3))), 'NETLOG-ORDER'),
+        # The bound exchange itself: P10 fails without an INSTRUMENTATION class.
+        ('a 304 for the worklet', rows_changed(lambda rows: swap(rows[3], ':status: 200', ':status: 304')), 'status'),
+        ('a 302 for the worklet', rows_changed(lambda rows: swap(rows[3], ':status: 200', ':status: 302')), 'status'),
+        ('two :status lines', rows_changed(lambda rows: lines(rows[3]).append(':status: 200')), 'status'),
+        ('no COOP', rows_changed(lambda rows: lines(rows[3]).remove(coop_line)), 'policy'),
+        ('COOP twice', rows_changed(lambda rows: lines(rows[3]).append(coop_line)), 'policy'),
+        ('COOP unsafe-none', rows_changed(lambda rows: swap(rows[3], coop_line, 'cross-origin-opener-policy: unsafe-none')), 'policy'),
+        ('COEP credentialless', rows_changed(lambda rows: swap(rows[3], coep_line, 'cross-origin-embedder-policy: credentialless')),
+         'policy'),
+        ('no COEP', rows_changed(lambda rows: lines(rows[3]).remove(coep_line)), 'policy'),
+        # The window: the PATH POST logged once after the worklet, and the clock.
+        ('no PATH POST', rows_changed(lambda rows: splice(rows, 4, 6)), 'NETLOG-WINDOW'),
+        ('the PATH POST before the worklet', rows_changed(lambda rows: splice(rows, 2, 6, rows[4:6] + rows[2:4])), 'NETLOG-WINDOW'),
+        ('two PATH POSTs', rows_changed(lambda rows: rows.append(block(NETLOG_SEND, 11, request('POST', DICTATION_PATH % uid)))),
+         'NETLOG-WINDOW'),
+        ('the POST of another study', {'uid': '1.2.4'}, 'NETLOG-WINDOW'),
+        ('no study uid', {'uid': None}, 'NETLOG-WINDOW'),
+        ('test 01 ending %d s after launch' % (NETLOG_WINDOW_SECONDS + 1), {'window': NETLOG_WINDOW_SECONDS + 1.0}, 'NETLOG-WINDOW'),
+        # F3: a present line fails.
+        ('the open-failure line', {'debug': '[pid=9][err] [ERROR:x.cc(759)] %s/r/netlog.json' % NETLOG_GUARDS[0][1]}, 'NETLOG-OPEN'),
+        ('the restart line', {'debug': '[pid=9][err] [ERROR:x.cc(702)] %s' % NETLOG_GUARDS[1][1]}, 'NETLOG-RESTART'),
+        # Publication: whatever sanitize would change is withheld and fails.
+        ('a masked value in an allowlisted header', {'hide': ('text/javascript',)}, 'NETLOG-LEAK'),
+        ('a JWT-shaped allowlisted value', rows_changed(lambda rows: swap(
+            rows[3], 'content-type: text/javascript', 'content-type: eyJhbGciOi.eyJzdWIiOi.c2lnbmF0dXJl')), 'NETLOG-LEAK'),
+        ('a bearer-shaped allowlisted value', rows_changed(lambda rows: lines(rows[3]).append('cache-control: bearer abcdef0123')),
+         'NETLOG-LEAK'),
+        ('an unreadable log', {'frames': [(0, PermissionError('synthetic'))]}, 'NETLOG-ERROR'))
+    exercised = set()
+    for label, arguments, expected in vectors:
+        result, _ = judge(**arguments)
+        exercised.add(expected)
+        if expected == 'status':
+            ok = not result['classes'] and not result['status_ok'] and result['policy_ok']
+        elif expected == 'policy':
+            ok = not result['classes'] and result['status_ok'] and not result['policy_ok']
+        else:
+            ok = result['classes'] == [expected] and not result['status_ok'] and not result['policy_ok']
+        if not ok:
+            problems.append('NetLog: %s must fail as %s alone, got %r' % (label, expected, result['classes']))
+        if measurement_ci.sanitize(result['text'], list(arguments.get('hide', ()))) != result['text']:
+            problems.append('NetLog: the written text for %s must be sanitize-stable' % label)
+    if set(NETLOG_CLASSES) - exercised:
+        problems.append('NetLog classes no vector produces: %r' % sorted(set(NETLOG_CLASSES) - exercised))
+    # F4 on values: the one accepted shape, then each refusal.
+    roots = (PurePosixPath('/elsewhere/dictation-live'), PurePosixPath('/w/tests/e2e/artifacts'), PurePosixPath('/w/tmp'))
+    if netlog_path_problems(PurePosixPath('/home/runner/work/_temp/u4l-netlog/0123abcd/netlog.json'), roots):
+        problems.append('a private NetLog path under RUNNER_TEMP must be accepted')
+    for label, path in (('a space', '/home/runner/work/_temp/u4l netlog/netlog.json'), ('a tab', '/r/a\tb/netlog.json'),
+                        ('an "="', '/r/a=b/netlog.json'), ('a single quote', "/r/a'b/netlog.json"),
+                        ('a double quote', '/r/a"b/netlog.json'), ('a relative path', 'u4l-netlog/netlog.json'),
+                        ('the relocated artifact directory', '/elsewhere/dictation-live/u4l-netlog/netlog.json'),
+                        ('the uploaded artifact tree', '/w/tests/e2e/artifacts/u4l-netlog/netlog.json'),
+                        ("the repository's tmp", '/w/tmp/u4l-netlog/netlog.json'), ('a root itself', '/w/tmp')):
+        if not netlog_path_problems(PurePosixPath(path), roots):
+            problems.append('F4 must refuse a NetLog path with ' + label)
+    for proxy, expected in (('https://localhost:9443', 'localhost:9443'), ('https://LocalHost:443', 'localhost'),
+                            ('https://localhost', 'localhost'), ('https://localhost:9443/', 'localhost:9443')):
+        if proxy_authority(proxy) != expected:
+            problems.append('proxy_authority(%s) must be %s' % (proxy, expected))
     return problems
 
 
@@ -863,6 +1550,7 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
     def setUpClass(cls):
         record = {'first_read': True}
         cls.capture_browser = cls.fixture_path = cls.capture_version = None
+        cls.netlog_dir = cls.netlog_path = cls.netlog_t0 = cls.netlog_removed = None
         cls.hide = ()
         try:
             ARTIFACTS.mkdir(parents=True, exist_ok=False)     # a fresh directory inside the uploaded artifact path
@@ -890,7 +1578,19 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
                 raise AssertionError('the fixture does not regenerate to its pin')
             cls.fixture_path = (ARTIFACTS / 'fixture.wav').resolve()
             cls.fixture_path.write_bytes(wav)
-            cls.capture_browser = cls.pw.chromium.launch(channel="chromium", headless=True, args=launch_args(cls.fixture_path))
+            # F4: a fresh private directory outside everything uploaded or kept, refused before launch otherwise.
+            # Its removal is registered before the launch, so it runs after the capture browser has closed.
+            directory = (netlog_root() / uuid.uuid4().hex).resolve()
+            refused = netlog_path_problems(directory / 'netlog.json', netlog_forbidden_roots())
+            if refused:
+                raise AssertionError('NetLog path refused before launch: ' + '; '.join(refused))
+            directory.parent.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(mode=0o700)
+            cls.netlog_dir, cls.netlog_path = directory, directory / 'netlog.json'
+            cls.addClassCleanup(cls.remove_netlog)
+            cls.netlog_t0 = time.monotonic()       # before launch, so the log cannot stop before t0 + NETLOG_SECONDS
+            cls.capture_browser = cls.pw.chromium.launch(channel="chromium", headless=True,
+                                                         args=u4l_launch_args(cls.fixture_path, cls.netlog_path))
             cls.addClassCleanup(cls.capture_browser.close)
             cls.capture_version = cls.capture_browser.version
             first = cls.read_launch(seconds=5)
@@ -898,7 +1598,9 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
             record.update(launch=first, channel=CHANNEL, capture_version=cls.capture_version,
                           base_version=cls.browser.version, playwright=version('playwright'),
                           default_executable_path=cls.pw.chromium.executable_path,
-                          fixture={'path': str(cls.fixture_path), 'sha256': sha256(wav), 'bytes': len(wav)})
+                          fixture={'path': str(cls.fixture_path), 'sha256': sha256(wav), 'bytes': len(wav)},
+                          netlog={'path': str(cls.netlog_path), 'seconds': NETLOG_SECONDS,
+                                  'deadline_seconds': NETLOG_DEADLINE_SECONDS})
         except Exception:
             record['error'] = traceback.format_exc()[-2000:]
             raise
@@ -914,10 +1616,27 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
                 text = cls.browser_log.read_text(encoding='utf-8', errors='replace')
             except OSError:
                 text = ''
-            verdict = launch_verdict(text, cls.fixture_path, cls.capture_version)
+            verdict = launch_verdict(text, cls.fixture_path, cls.capture_version, cls.netlog_path)
             if len(verdict['records']) >= 2 or time.monotonic() >= until:
                 return verdict
             time.sleep(0.05)
+
+    @classmethod
+    def remove_netlog(cls):
+        """The raw log and its private directory go on every path: test 01 removes them right after judging, and
+        this class cleanup, which runs after the capture browser closed, removes whatever is left. Only a kill
+        at the unit deadline skips both; RUNNER_TEMP is then discarded with the hosted runner."""
+        directory = cls.netlog_dir
+        if directory is not None and directory.exists():
+            shutil.rmtree(directory)
+        cls.netlog_removed = directory is None or not directory.exists()
+        if not cls.netlog_removed:
+            raise RuntimeError('the private NetLog directory remains')
+
+    @classmethod
+    def hidden_values(cls):
+        """What measurement_ci.sanitize must mask: the generated values it knows by name, and the test passwords."""
+        return [os.environ[name] for name in generated_secret_names() if len(os.environ.get(name, '')) >= 8] + list(cls.hide)
 
     @classmethod
     def finalize_artifacts(cls):
@@ -933,11 +1652,12 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
             clean = measurement_ci.sanitize(text, values + list(cls.hide))
             if clean != text:
                 cls.browser_log.write_text(clean, encoding='utf-8')
-            launch = launch_verdict(clean, cls.fixture_path, cls.capture_version)
+            launch = launch_verdict(clean, cls.fixture_path, cls.capture_version, cls.netlog_path)
             launch['sanitizer'] = {'generated_names': len(names), 'generated_values_present': len(values),
                                    'test_passwords': len(cls.hide),
                                    'hits': clean.count('[REDACTED') - text.count('[REDACTED')}
             launch['note'] = 'final read after every browser closed; P0 in the U4L-PATH line is the adjudicated limb'
+            launch['netlog_private_removed'] = cls.netlog_removed
         except Exception as error:
             failures.append('browser log: %s' % short(error))
         try:
@@ -1326,6 +2046,8 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
                       capability_problems(entry.get('real_capability')))
             run.check('P1', 'only-dictation.available #%d' % entry['n'],
                       entry.get('differing_paths') == ['dictation.available'], entry.get('differing_paths'))
+        # Last, because the log completes about NETLOG_SECONDS after launch: every other limb keeps its window.
+        self.netlog_p10_step(run)
         limbs = run.limb_verdicts()
         failed = [limb for limb, verdict in limbs.items() if not verdict['pass']]
         if 'P0' in failed:
@@ -1344,7 +2066,9 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
         return record
 
     def delivered_headers(self, run):
-        """P10 from the browser-attributed responses; a direct GET of the worklet is a labelled control only."""
+        """P10's main.html limbs from the browser-attributed document response. The worklet limbs and the recorded
+        G-CSP input are completed from the NetLog at the end of the test (netlog_p10_step); Playwright's worklet
+        response stays recorded with its count, and a direct GET of the worklet is a labelled control only."""
         mains = [e for e in self.net.responses if e['path'] == MAIN_PATH and e['type'] == 'document']
         worklets = [e for e in self.net.responses if e['path'] == WORKLET_PATH]
         seen = {'main': self.response_record(mains[-1]['obj']) if mains else None,
@@ -1353,33 +2077,70 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
         observed = {'counts': {'main': len(mains), 'worklet': len(worklets)}, 'responses': seen,
                     'template_csp': TEMPLATE_CSP[0] if len(TEMPLATE_CSP) == 1 else None}
         run.observed['headers'] = observed
-        main, worklet = seen['main'], seen['worklet']
+        main = seen['main']
         run.check('P10', 'main-200-html', bool(main) and main['status'] == 200 and
                   main['headers'].get('content-type', '').startswith('text/html'), main and main['headers'].get('content-type'))
-        if worklet is None:
-            run.classes.append('INSTRUMENTATION:A-R')
-        run.check('P10', 'worklet-browser-response-200', bool(worklet) and worklet['status'] == 200,
-                  worklet and worklet['status'])
-        for label, value in (('main', main), ('worklet', worklet)):
-            headers = (value or {}).get('headers') or {}
-            run.check('P10', label + '-coop-coep', headers.get('cross-origin-opener-policy') == 'same-origin' and
-                      headers.get('cross-origin-embedder-policy') == 'require-corp',
-                      [headers.get('cross-origin-opener-policy'), headers.get('cross-origin-embedder-policy')])
-        # Recorded only: the G-CSP input, the worklet MIME verbatim and the control GET.
-        observed['recorded'] = {label: {'csp_equals_template': (value or {}).get('headers', {}).get('content-security-policy')
-                                        == observed['template_csp'],
-                                        'present': {name: name in ((value or {}).get('headers') or {})
-                                                    for name in GCSP_HEADERS + ('strict-transport-security',)}}
-                                for label, value in seen.items()}
-        observed['worklet_content_type'] = worklet and worklet['headers'].get('content-type')
-        observed['gcsp_input'] = gcsp_input(*((value or {}).get('headers') if value else None
-                                              for value in (main, worklet, seen['post'])))
+        if seen['worklet'] is None:
+            run.classes.append('INSTRUMENTATION:A-R')      # recorded; the worklet limbs are read from the NetLog
+        headers = (main or {}).get('headers') or {}
+        run.check('P10', 'main-coop-coep', headers.get('cross-origin-opener-policy') == 'same-origin' and
+                  headers.get('cross-origin-embedder-policy') == 'require-corp',
+                  [headers.get('cross-origin-opener-policy'), headers.get('cross-origin-embedder-policy')])
         try:
             control = run.page.context.request.get(self.stack.proxy + WORKLET_PATH, timeout=WAIT_MS)
             observed['control_direct_get'] = {'status': control.status, 'headers': allowlisted(control.headers, RESPONSE_HEADERS),
                                               'label': 'control only; never substituted for the browser-attributed response'}
         except Exception as error:
             observed['control_direct_get'] = {'error': short(error)}
+
+    def netlog_p10_step(self, run):
+        """P10's worklet limbs from the browser's own NetLog, judged in memory by netlog_p10; only its allowlisted
+        extract is written, and the raw log is removed on every path. B5: the logged exchange is the one that
+        delivered the module only together with the worklet having run in this PATH (P4) and the PATH POST logged
+        after it, so all three are required here."""
+        cls, t_end, result, removed = type(self), time.monotonic(), None, None
+        try:
+            if cls.netlog_path is None or cls.netlog_t0 is None:
+                raise RuntimeError('the capture browser was not launched with a NetLog')
+            result = netlog_p10(cls.netlog_path, cls.netlog_t0, t_end, run.observed.get('uid'),
+                                proxy_authority(self.stack.proxy),
+                                lambda: cls.browser_log.read_text(encoding='utf-8', errors='replace'), cls.hidden_values())
+            (ARTIFACTS / NETLOG_EXTRACT).write_bytes(result['text'].encode('utf-8'))
+        except Exception as error:
+            run.check('P10', 'netlog-readable', False, type(error).__name__)
+        finally:
+            try:
+                cls.remove_netlog()
+                removed = True
+            except Exception as error:
+                removed = type(error).__name__
+        classes = result['classes'] if result else ['NETLOG-ERROR']
+        run.observed['netlog'] = dict(result['summary'] if result else {'classes': classes}, raw_removed=removed)
+        run.classes += ['INSTRUMENTATION:' + name for name in classes]
+        exchange = (run.observed['netlog'].get('exchange') or {})
+        run.check('P10', 'worklet-browser-response-200', bool(result) and result['status_ok'],
+                  {'classes': classes, 'status': exchange.get('status'), 'extract': NETLOG_EXTRACT})
+        run.check('P10', 'worklet-coop-coep', bool(result) and result['policy_ok'],
+                  {'classes': classes, 'coop': exchange.get('coop'), 'coep': exchange.get('coep')})
+        ran = {check['name']: check['ok'] for check in run.limbs['P4']}
+        run.check('P10', 'worklet-executed', ran.get('one-node-options') is True and ran.get('recorded-1500ms') is True,
+                  {name: ran.get(name) for name in ('one-node-options', 'recorded-1500ms')})
+        observed = run.observed.get('headers')
+        if observed is None:
+            run.check('P10', 'main-observed', False, 'the browser-attributed main.html response was never read')
+            return
+        # Recorded only, as before: the G-CSP input and the worklet MIME, the worklet side now from the NetLog.
+        responses, worklet = observed['responses'], result['headers'] if result else None
+        inputs = {'main': (responses['main'] or {}).get('headers'), 'worklet': worklet,
+                  'post': (responses['post'] or {}).get('headers')}
+        observed['recorded'] = {label: {'csp_equals_template': (headers or {}).get('content-security-policy')
+                                        == observed['template_csp'],
+                                        'present': {name: name in (headers or {})
+                                                    for name in GCSP_HEADERS + ('strict-transport-security',)}}
+                                for label, headers in inputs.items()}
+        observed['recorded_worklet_from'] = 'netlog' if worklet is not None else 'unobserved'
+        observed['worklet_content_type'] = worklet.get('content-type') if worklet is not None else None
+        observed['gcsp_input'] = gcsp_input(inputs['main'], inputs['worklet'], inputs['post'])
 
     # ── G-LIVE-GEO ──────────────────────────────────────────────────────────────────────────────
     def test_dictation_live_02_geometry_recording_failed_review(self):
