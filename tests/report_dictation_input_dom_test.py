@@ -175,6 +175,33 @@ API_FN = extract_function(MAIN, "api")
 WRITE_BLOCK_FN = extract_function(MAIN, "reportWriteBlock")
 EDITOR_BLOCK_FN = extract_function(MAIN, "reportEditorBlock")
 
+# DI-14 only (asr-binding-contract §10 succession). The shipped dictation wiring and pane, sliced from
+# main.html, and the three shipped modules. Nothing else uses them: every other case, DI-13 included,
+# runs on the page exactly as before.
+LITE = ROOT / "worklist-v0" / "hpacs-lite"
+DICTATION_JS = [(LITE / name).read_text(encoding="utf-8")
+                for name in ("dictation-session.js", "dictation-capture.js", "dictation.js")]
+DICTATION_PANE_HTML = (slice_between(MAIN, '<div id="dictation-pane"', '\n        <div class="redit">')
+                       if '<div id="dictation-pane"' in MAIN else "")
+DICTATION_WIRING = (slice_between(MAIN, "    // ══════════ 받아쓰기 (S3-ASR-U4) ══════════",
+                                  '    $("#t-mod").addEventListener("change", renderTemplates);')
+                    if "받아쓰기 (S3-ASR-U4)" in MAIN else "")
+# Stand-ins for the browser half of the capability only: a secure context and the capture API names.
+# Nothing here is ever asked for audio - DI-14 is about what the control says, not about recording.
+DICTATION_STANDINS = """
+Object.defineProperty(window, "isSecureContext", { configurable: true, get: () => true });
+window.__captureRequests = 0;
+Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: {
+  getUserMedia: async () => { window.__captureRequests += 1; throw new DOMException("no", "NotAllowedError"); } } });
+window.AudioContext = function AudioContext() {};
+window.AudioWorkletNode = function AudioWorkletNode() {};
+"""
+
+
+def succession_script():
+    return DICTATION_STANDINS + DICTATION_WIRING
+
+
 HARNESS = """<!doctype html><html><head><meta charset="utf-8"><style>MODALCSS</style></head><body>
 <div class="panel report-p">
 RBTNSHTML
@@ -391,8 +418,8 @@ def static_report():
     if ("Composition" + "Event(") in source or ("new " + "CompositionEvent") in source:
         problems.append("a script-constructed composition event would prove nothing about an IME")
     cases = sorted(name for name in dir(ReportDictationInputDOMTest) if name.startswith("test_di"))
-    if len(cases) != 14:
-        problems.append("expected 14 DI cases, found %d" % len(cases))
+    if len(cases) != 15:
+        problems.append("expected 15 DI cases, found %d" % len(cases))
     return problems, cases
 
 
@@ -544,7 +571,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         the structured read stay out of `calls`."""
         problems, cases = static_report()
         self.assertEqual([], problems)
-        self.assertEqual(["test_di%02d" % n for n in list(range(0, 14))],
+        self.assertEqual(["test_di%02d" % n for n in list(range(0, 15))],
                          [name[:9] for name in cases], "the DI ids must stay dense and stable")
         self.assertIn('path.endsWith("/hold") || path.endsWith("/release")', HARNESS,
                       "occupancy must not be counted as a report write")
@@ -812,6 +839,47 @@ class ReportDictationInputDOMTest(unittest.TestCase):
                            ("report-structure.js", STRUCTURE_JS)):
             for api in ("SpeechRecognition", "MediaRecorder", "getUserMedia", "mediaDevices"):
                 self.assertNotIn(api, text, "%s must contain no recogniser or capture API" % name)
+
+    # ── DI-14 ──────────────────────────────────────────────────────────────────────────────
+    def test_di14_a_declared_capability_enables_the_control_and_withdrawing_it_restores_di13(self):
+        """asr-binding-contract §10: the ONE available case. DI-13 is unchanged and keeps asserting the
+        unavailable default on this same page. Here the shipped dictation pane and wiring (sliced from
+        main.html) and the three shipped modules join the page; only the browser half of the capability
+        is stood in. `available === true` must enable the button and change its title; withdrawing it
+        must give back DI-13's exact control. Nothing records: no capture request is made."""
+        self.assertTrue(DICTATION_PANE_HTML and DICTATION_WIRING, "the shipped dictation wiring is missing")
+        self.open()
+        read = ("()=>{const b=$('#b-dictate');return {disabled:b.disabled,text:b.textContent.trim(),"
+                "title:b.getAttribute('title'),outer:b.outerHTML};}")
+        before = self.page.evaluate(read)
+        self.page.evaluate("html => $('#citelist').insertAdjacentHTML('afterend', html)", DICTATION_PANE_HTML)
+        for source in DICTATION_JS:
+            self.page.add_script_tag(content=source)
+        self.page.add_script_tag(content=succession_script())
+        capability = {"available": True, "maxBytes": 1048576, "timeoutMs": 120000, "languagePin": "auto",
+                      "enginePin": "whisper.cpp@927cfce34f31707e17f2bff35c349632fb9e2c3a",
+                      "modelPin": "ggml-small@sha256:"
+                                  "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"}
+        self.assertEqual(before, self.page.evaluate(read), "mounting alone must not change the control")
+        self.page.evaluate("c => { dictation.setServerCapability(c); dictation.refresh(); }", capability)
+        available = self.page.evaluate(read)
+        self.assertFalse(available["disabled"], "a declared, capable dictation enables the button")
+        self.assertEqual("Dictate", available["text"])
+        self.assertNotEqual(DICTATE_TITLE, available["title"])
+        self.assertEqual(self.page.evaluate("KinDictation.TITLES.ready"), available["title"])
+        self.page.evaluate("() => { dictation.setServerCapability({ available: false }); dictation.refresh(); }")
+        # DI-13's own three facts, character for character. (outerHTML is not compared here: after a real
+        # enable->disable round trip the browser re-adds `disabled` after `title`, a serialisation order.)
+        withdrawn = self.page.evaluate(read)
+        self.assertEqual({k: before[k] for k in ("disabled", "text", "title")},
+                         {k: withdrawn[k] for k in ("disabled", "text", "title")},
+                         "withdrawn: DI-13's control, character for character")
+        self.assertEqual(DICTATE_TITLE, withdrawn["title"])
+        self.page.evaluate("()=>$('#b-dictate').click()")
+        value = self.snap()
+        self.assertEqual([], value["calls"])
+        self.assertEqual([], value["toasts"])
+        self.assertEqual(0, self.page.evaluate("window.__captureRequests"), "no capture was ever requested")
 
 
 if __name__ == "__main__":
