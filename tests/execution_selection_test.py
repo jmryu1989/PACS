@@ -607,6 +607,107 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
 
+    def test_dictation_live_suite_selection_and_declared_interception(self):
+        # S3-ASR-U4L (readiness §7): one live suite appended last to the measurements profile, exactly its two
+        # own cases, and a static pin on everything it may launch, intercept, inject or send. The runtime facts
+        # (the real 503, the audit row, delivered headers, geometry) stay hosted observations; this pins only
+        # the surface they are observed through.
+        import re
+        suite, class_name, unit = 'e2e/test_dictation_live.py', 'DictationLiveE2E', 'ci-test-dictation-live'
+        cases = ['test_dictation_live_01_path_real_api_not_configured',
+                 'test_dictation_live_02_geometry_recording_failed_review']
+        measurements = ci.PROFILES['measurements']
+        self.assertEqual(measurements['suites'][-1], (suite, class_name, unit))
+        for name, profile in ci.PROFILES.items():
+            rows = profile['suites'][:-1] if name == 'measurements' else profile['suites']
+            self.assertNotIn(suite, [row[0] for row in rows], name)
+            self.assertNotIn(unit, [row[2] for row in rows], name)
+        plan = runner.module_plan('tests/'+suite, unit, 'live', 540, class_name)
+        self.assertEqual([item['case'] for item in plan['tests']], [class_name+'.'+name for name in cases])
+        self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), 2)
+        module = runner.load_module(ROOT/'tests'/suite)
+        cls = getattr(module, class_name)
+        self.assertEqual([(base.__module__, base.__name__) for base in cls.__bases__], [('test_worklist', 'WorklistE2E')])
+        self.assertEqual(cls.browser_channel, 'chromium')
+        self.assertEqual([name for name in vars(cls) if name.startswith('test')], cases)
+        source = (ROOT/'tests'/suite).read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
+        named = lambda attr: [call for call in calls if call.func.attr == attr]
+        inside = lambda function, call: any(node is call for node in ast.walk(functions[function]))
+        # The base is imported under its own name and the class names it that way (review N-8).
+        self.assertEqual([(alias.name, alias.asname) for node in ast.walk(tree) if isinstance(node, ast.Import)
+                          for alias in node.names if alias.name == 'test_worklist'], [('test_worklist', None)])
+        self.assertFalse([node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module == 'test_worklist'])
+        klass = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+        self.assertEqual([ast.unparse(base) for base in klass.bases], ['test_worklist.WorklistE2E'])
+        # The entry point filters by __dict__, so inherited worklist cases never run (review N-4).
+        entry = next(node for node in tree.body if isinstance(node, ast.If) and '__name__' in ast.unparse(node.test))
+        self.assertIn(class_name+'.__dict__', ast.unparse(entry))
+        # One launch: the full pinned Chromium with exactly the imported U4b arguments (D1, review N-5).
+        launches = named('launch')
+        self.assertEqual(len(launches), 1)
+        keywords = {keyword.arg: keyword.value for keyword in launches[0].keywords}
+        self.assertEqual((launches[0].args, set(keywords)), ([], {'channel', 'headless', 'args'}))
+        self.assertEqual(ast.literal_eval(keywords['channel']), 'chromium')
+        self.assertIs(ast.literal_eval(keywords['headless']), True)
+        self.assertEqual(ast.unparse(keywords['args'].func) if isinstance(keywords['args'], ast.Call) else None, 'launch_args')
+        self.assertEqual(len(module.FORBIDDEN_LAUNCH_FLAGS), 3)
+        for flag in module.FORBIDDEN_LAUNCH_FLAGS:
+            self.assertNotIn(flag, source)
+        # Two routes: the bootstrap path predicate while every context is prepared, and the review answer
+        # inside the geometry case only. Nothing continues, falls back, unroutes, replays or adds page code.
+        routes = named('route')
+        prepared = [call for call in routes if inside('prepare_context', call)]
+        review = [call for call in routes if inside(cases[1], call)]
+        self.assertEqual((len(routes), len(prepared), len(review)), (2, 1, 1))
+        self.assertEqual(ast.unparse(prepared[0].args[0]), 'bootstrap_request')
+        compares = [node for node in ast.walk(functions['bootstrap_request']) if isinstance(node, ast.Compare)]
+        self.assertEqual(len(compares), 1)
+        self.assertIsInstance(compares[0].ops[0], ast.Eq)
+        self.assertTrue(ast.unparse(compares[0].left).endswith('.path'))
+        self.assertEqual([ast.literal_eval(node) for node in compares[0].comparators], ['/api/bootstrap'])
+        predicate = review[0].args[0]
+        self.assertIsInstance(predicate, ast.Lambda)
+        self.assertEqual(ast.unparse(predicate.body).split(' == '), ['urlsplit(url).path', 'dictation_path'])
+        for attr in ('route_from_har', 'unroute', 'unroute_all', 'continue_', 'fallback', 'set_extra_http_headers',
+                     'expose_function', 'expose_binding', 'add_script_tag', 'wait_for_function', 'evaluate_handle'):
+            self.assertEqual(named(attr), [], attr)
+        inits = named('add_init_script')
+        self.assertEqual(len(inits), 1)
+        self.assertEqual((inits[0].args, [(keyword.arg, ast.unparse(keyword.value)) for keyword in inits[0].keywords]),
+                         ([], [('script', 'OBSERVER')]))
+        # One CDP session, Log domain only (D2), detached on cleanup.
+        self.assertEqual((len(named('new_cdp_session')), named('new_browser_cdp_session')), (1, []))
+        self.assertEqual(sorted(ast.literal_eval(call.args[0]) for call in named('send')), ['Log.disable', 'Log.enable'])
+        self.assertEqual({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                          and re.fullmatch(r'[A-Z][A-Za-z]+\.[a-z][A-Za-z]+', node.value)},
+                         {'Log.enable', 'Log.disable', 'Log.entryAdded'})
+        self.assertTrue(named('detach'))
+        # Page code: every evaluate is a PROBES entry, and no probe reaches a product mutator.
+        evaluates = named('evaluate')
+        self.assertTrue(evaluates)
+        for call in evaluates:
+            self.assertTrue(isinstance(call.args[0], ast.Subscript) and ast.unparse(call.args[0].value) == 'PROBES',
+                            ast.unparse(call))
+        for name, probe in module.PROBES.items():
+            for token in ('setServerCapability', '.start(', '.stop(', '.insert(', '.cancel(', '.close(', 'refresh(',
+                          'load(', 'stash(', 'put(', 'updateReportButtons', 'appState'):
+                self.assertNotIn(token, probe, name)
+        # Helpers come only from the reviewed U4b list, the version pin included (review N-2).
+        imported = [alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    and node.module == 'report_dictation_capture_dom_test' for alias in node.names]
+        self.assertTrue(imported)
+        self.assertLessEqual(set(imported), {'OBSERVER', 'launch_args', 'parse_launch', 'launch_problems', 'CHANNEL',
+                                             'FULL_CHROMIUM_SUFFIX', 'FORBIDDEN_LAUNCH_FLAGS', 'log_entry',
+                                             'csp_log_verdict', 'UNCHANGED', 'BROWSER_VERSION'})
+        self.assertFalse([alias for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+                          if alias.name == 'report_dictation_capture_dom_test'])
+        # The suite's own oracles reject every failure shape they exist to catch.
+        self.assertEqual(module.oracle_self_check(), [])
+
     def test_hanging_protocol_profile_runs_exact_shared_and_new_cases(self):
         profile=ci.PROFILES['hanging-protocols']
         # The required sequence: the shared invariants and worklist boundaries run
