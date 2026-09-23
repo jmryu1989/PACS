@@ -276,6 +276,9 @@
     .dictation-actions button { background: var(--kin-panel2); border: 1px solid var(--kin-line2); color: var(--kin-text);
                                 padding: 2px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
     .dictation-actions button:disabled { opacity: .35; cursor: default; }
+    /* 판독 화면의 검토 단계에서만 한 줄로 묶인다(reading-workspace.css). 그 밖에는 상자를 만들지 않아
+       메타 줄과 단추 줄이 지금처럼 이 창의 줄로 따로 놓인다. */
+    .dictation-foot { display: contents; }
     .citefield { display: flex; align-items: center; gap: 8px; padding: 0 12px; }
     #err { color: #ff8080; padding: 2px 10px; flex: none; }
 
@@ -875,13 +878,15 @@
           <div class="dictation-head"><b>Dictation</b><span id="dictation-status" role="status" aria-live="polite"></span></div>
           <div id="dictation-text" tabindex="0" aria-label="받아쓴 글 (판독문에는 아직 들어가지 않았습니다)" hidden></div>
           <div id="dictation-place"></div>
-          <div id="dictation-meta"></div>
-          <div class="dictation-actions">
-            <button id="dictation-stop" type="button" title="녹음을 멈추고 인식을 요청합니다" hidden>Stop</button>
-            <button id="dictation-cancel" type="button" title="녹음·요청·받은 글을 버립니다 — 판독문은 그대로입니다" hidden>Cancel</button>
-            <button id="dictation-repin" type="button" title="마지막으로 커서를 둔 판독문 칸의 그 자리로 넣을 위치를 다시 고정합니다" hidden>Pin Caret</button>
-            <button id="dictation-insert" type="button" title="받아쓴 글을 고정한 위치에 넣습니다" hidden>Insert</button>
-            <button id="dictation-close" type="button" title="이 안내를 닫습니다" hidden>Close</button>
+          <div class="dictation-foot">
+            <div id="dictation-meta"></div>
+            <div class="dictation-actions">
+              <button id="dictation-stop" type="button" title="녹음을 멈추고 인식을 요청합니다" hidden>Stop</button>
+              <button id="dictation-cancel" type="button" title="녹음·요청·받은 글을 버립니다 — 판독문은 그대로입니다" hidden>Cancel</button>
+              <button id="dictation-repin" type="button" title="마지막으로 커서를 둔 판독문 칸의 그 자리로 넣을 위치를 다시 고정합니다" hidden>Pin Caret</button>
+              <button id="dictation-insert" type="button" title="받아쓴 글을 고정한 위치에 넣습니다" hidden>Insert</button>
+              <button id="dictation-close" type="button" title="이 안내를 닫습니다" hidden>Close</button>
+            </div>
           </div>
         </div>
         <div class="redit">
