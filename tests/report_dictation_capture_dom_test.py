@@ -78,6 +78,8 @@ UNCHANGED = " — 판독문은 그대로입니다"       # dictation.js:28
 CANCELLED = "취소됨(엔진 상태 미확인)"       # dictation.js:29
 CASE_SECONDS = 20
 HOLD_SECONDS = 25
+# Session states a started run never leaves by itself (dictation-session.js ACTIVE is the complement).
+TERMINAL_STATES = ("failed", "cancelled", "unavailable", "inserted")
 SMALL_CAP = 32044                           # 16000 frames: the CAP-03 worklet cap
 FULL_FRAMES = 524266                        # floor((1048576 - 44) / 2), dictation-worklet.js:8
 WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -457,7 +459,6 @@ PROBES = {
     "capability": "c => { dictation.setServerCapability(c); updateReportButtons(); return true; }",
     "snapshot": "() => snapshot()",
     "state": "() => dictation.snapshot().state",
-    "state_is": "s => dictation.snapshot().state === s",
     "controller": "() => typeof dictation === 'object' && dictation !== null && typeof dictation.snapshot === 'function'",
     "strings": "() => ({ uploading: KinDictation.STATUS.uploading, capped: KinDictation.STATUS.capped,"
                " reasons: KinDictation.REASONS })",
@@ -600,8 +601,103 @@ def call_sites():
     return sites
 
 
+def harness_self_check():
+    """Pure regression for the first hosted run's harness findings (35841141421/1). No browser or page:
+    a stub page scripts the session states the run showed, and each wait must end the way it should."""
+    problems = []
+
+    class Page:
+        def __init__(self):
+            self.waited = 0
+
+        def wait_for_timeout(self, ms):
+            self.waited += 1
+
+    class Server:
+        def snapshot(self):
+            return [{"method": "GET", "path": ASSET_DIR + WORKLET, "query": "", "status": 200, "answered_by": "asset",
+                     "held": False, "body_len": 0, "headers": {"Content-Type": None}}]
+
+    # The CAP-08/CAP-09 record of that run: the refusal as the page registry held it.
+    refused = {"session": {"state": "failed", "error": "DICTATION_CAPTURE_FAILED"}, "pane": {"status": "refused"},
+               "media": {"gumCalls": [{"outcome": "rejected",
+                                       "error": {"name": "NotSupportedError", "message": "Not supported"}}],
+                         "tracks": [], "contexts": [{"state": "closed", "sampleRate": 16000, "states": []}],
+                         "nodes": []}}
+
+    def scripted(states, seconds=5):
+        case = Case.__new__(Case)
+        case.id, case.checks, case.observed, case.console = "SELF", [], {}, []
+        case.server, case.page, case.deadline = Server(), Page(), time.monotonic() + seconds
+        sequence = iter(states)
+
+        def js(name, arg=None):
+            if name == "state":
+                return next(sequence)
+            if name == "snapshot":
+                return json.loads(json.dumps(refused))
+            if name == "recorded_for":
+                return False
+            raise AssertionError(name)
+        case.js = js
+        return case
+
+    def ends(action):
+        try:
+            action()
+        except CaseStop:
+            return "stopped"
+        return "returned"
+
+    case = scripted(["requesting-permission", "requesting-permission", "failed"])
+    stopped = ends(lambda: case.wait_state("recording", "recording"))
+    primary = case.observed.get("primary") or {}
+    first_call = (primary.get("gum_calls") or [{}])[0]
+    if stopped != "stopped" or case.page.waited != 2 or case.checks[-1]["detail"]["ended_by"] != "terminal-state":
+        problems.append("wait_state must stop at another terminal state without waiting out the deadline")
+    if (first_call.get("error") or {}).get("name") != "NotSupportedError" or \
+            primary.get("worklet_gets") != [ASSET_DIR + WORKLET]:
+        problems.append("a stopped wait must record the primary cause (the page's getUserMedia outcome)")
+    case = scripted(["requesting-permission", "recording"])
+    if ends(lambda: case.wait_state("recording", "recording")) != "returned" or case.checks:
+        problems.append("wait_state must return once the target state is reached")
+    case = scripted(["recording", "failed"])
+    if ends(lambda: case.wait_state("failed", "failed")) != "returned" or case.checks:
+        problems.append("a terminal target state is reached, not a failure")
+    case = scripted(["requesting-permission"] * 4, seconds=-1)
+    if ends(lambda: case.wait_state("recording", "recording")) != "stopped" or \
+            case.checks[-1]["detail"]["ended_by"] != "deadline" or "primary" not in case.observed:
+        problems.append("wait_state must still fail at the deadline, with the primary state recorded")
+    case = scripted(["recording", "failed"])
+    if ends(lambda: case.wait_js("recorded_for", 2000, "2.0 s", while_active=True)) != "stopped" or \
+            case.checks[-1]["detail"]["ended_by"] != "terminal-state":
+        problems.append("a timed wait during recording must stop when the capture fails")
+    tree = ast.parse(SELF_PATH.read_text(encoding="utf-8"))
+    functions = {node.name: ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    cap01 = next(text for name, text in functions.items() if name.startswith("test_cap01_"))
+    if "dictation-cancel" in cap01:
+        problems.append("CAP-01 must not click Cancel after a state read (the first run's stale-read race)")
+    setup = functions["setUpClass"]
+    start = setup.find("cls._pw = sync_playwright().start()")
+    if not (0 <= setup.find("os.environ['DEBUG'] = 'pw:browser'") < start and
+            0 <= setup.find("os.environ['DEBUG_FILE'] = ") < start):
+        problems.append("the pw:browser log must be enabled before Playwright starts")
+    sample = ("2026-09-23T09:08:48.001Z pw:browser <launching> /r/chrome-headless-shell-linux64/chrome-headless-shell "
+              "--disable-field-trial-config --headless --mute-audio --use-fake-device-for-media-stream "
+              "--use-file-for-fake-audio-capture=/f.wav --disable-audio-output\n"
+              "2026-09-23T09:08:48.002Z pw:browser <launched> pid=7\n"
+              "2026-09-23T09:08:49.000Z pw:browser [pid=7][err] [7:7:0923/090849.000:ERROR:synthetic.cc(1)] synthetic\n")
+    parsed = parse_launch(sample)
+    if not parsed["chrome_headless_shell"] or not parsed["flags"]["--headless"] or \
+            not parsed["flags"]["--use-file-for-fake-audio-capture"] or parsed["flags"]["--use-fake-ui-for-media-stream"] or \
+            len(parsed["notable"]) != 1:
+        problems.append("parse_launch must name the launched binary, its flags and the browser's error lines")
+    return problems
+
+
 def static_report():
     problems, report = [], {}
+    problems += harness_self_check()
     for key in ("KIN_DICTATION_HOST_MAIN", "KIN_DICTATION_HOST_JS"):
         if os.environ.get(key):
             problems.append("%s is set: the slices would not come from the repository main.html" % key)
@@ -991,9 +1087,49 @@ class Case:
     def js(self, name, arg=None):
         return self.page.evaluate(PROBES[name], arg)
 
-    def wait_js(self, name, arg, what):
+    def read_state(self):
+        try:
+            return self.js("state")
+        except Exception as error:
+            return "unreadable: " + (str(error).splitlines()[0][:200] if str(error) else type(error).__name__)
+
+    def primary(self):
+        """Session, pane and media as the page has them now: the first cause, not the wait that followed."""
+        try:
+            value = self.snap()
+        except Exception as error:
+            return {"unreadable": str(error).splitlines()[0][:300] if str(error) else type(error).__name__}
+        media = value.get("media") or {}
+        return {"session": {"state": value["session"]["state"], "error": value["session"]["error"]},
+                "pane_status": value["pane"]["status"], "gum_calls": media.get("gumCalls"),
+                "tracks": media.get("tracks"),
+                "contexts": [{"state": c.get("state"), "sampleRate": c.get("sampleRate"), "states": c.get("states")}
+                             for c in media.get("contexts") or []],
+                "nodes": len(media.get("nodes") or []), "worklet_gets": media.get("modules"),
+                "console": self.console[-10:]}
+
+    def stop_waiting(self, what, detail, terminal):
+        self.observed["primary"] = self.primary()
+        self.require(what, False, dict(detail, ended_by="terminal-state" if terminal else "deadline",
+                                       primary=self.observed["primary"]))
+
+    def wait_state(self, target, what):
+        """Wait for the session state `target`. Another terminal state ends the wait at once and records
+        what the page says caused it. In the first hosted run (35841141421/1) the capture had already
+        failed while seven cases waited out their 20 s deadline without recording why."""
+        while True:
+            state = self.read_state()
+            if state == target:
+                return
+            terminal = state in TERMINAL_STATES
+            if terminal or time.monotonic() >= self.deadline:
+                self.stop_waiting(what, {"state": state, "target": target}, terminal)
+            self.page.wait_for_timeout(25)
+
+    def wait_js(self, name, arg, what, while_active=False):
         """Polled from Python, one evaluate per step. A page-side polled predicate would run later,
-        outside the evaluate call, under a CSP without 'unsafe-eval'; every wait here stays inside one."""
+        outside the evaluate call, under a CSP without 'unsafe-eval'; every wait here stays inside one.
+        With while_active, a terminal session state ends the wait at once (see wait_state)."""
         last = None
         while True:
             try:
@@ -1001,22 +1137,26 @@ class Case:
                     return
             except Exception as error:
                 last = str(error).splitlines()[0][:300] if str(error) else type(error).__name__
-            if time.monotonic() >= self.deadline:
-                state = None
-                try:
-                    state = self.js("state")
-                except Exception:
-                    pass
-                self.require(what, False, {"last_error": last, "state": state})
+            state = self.read_state() if while_active else None
+            terminal = while_active and state in TERMINAL_STATES
+            if terminal or time.monotonic() >= self.deadline:
+                self.stop_waiting(what, {"last_error": last, "state": state or self.read_state()}, terminal)
             self.page.wait_for_timeout(25)
 
-    def wait_server(self, predicate, what):
+    def wait_server(self, predicate, what, while_active=False):
         while True:
             entries = self.server.snapshot()
             if predicate(entries):
                 return entries
-            if time.monotonic() >= self.deadline:
-                self.require(what, False, {"requests": [line(e) for e in entries]})
+            state = self.read_state() if while_active else None
+            terminal = while_active and state in TERMINAL_STATES
+            if terminal or time.monotonic() >= self.deadline:
+                # The page may reach its terminal state from a response the server has not yet marked
+                # answered; look once more before calling it a failure.
+                entries = self.server.snapshot()
+                if predicate(entries):
+                    return entries
+                self.stop_waiting(what, {"requests": [line(e) for e in entries], "state": state}, terminal)
             self.page.wait_for_timeout(25)
 
     def snap(self):
@@ -1046,6 +1186,30 @@ def served(entries, name):
     return [e for e in entries if e["method"] == "GET" and e["path"] == ASSET_DIR + name]
 
 
+LAUNCH_FLAGS = ("--headless", "--mute-audio", "--use-fake-device-for-media-stream", "--use-file-for-fake-audio-capture",
+                "--disable-audio-output", "--use-fake-ui-for-media-stream", "--auto-accept-camera-and-microphone-capture")
+LAUNCH_NOTABLE = re.compile(r"ERROR|WARNING|[Pp]ermission|MediaStream|media_stream|Not supported|getUserMedia|[Aa]udio")
+
+
+def parse_launch(text):
+    """Playwright's `<launching> <command> <args>` line and the browser's own notable stderr lines."""
+    rows = text.splitlines()
+    launching = [row.split("<launching> ", 1)[1] for row in rows if "<launching> " in row]
+    command = launching[0].split(" ") if launching else []
+    return {"lines": len(rows), "launching": launching[:2], "executable": command[0] if command else None,
+            "chrome_headless_shell": bool(command) and command[0].endswith("chrome-headless-shell"),
+            "flags": {flag: any(arg == flag or arg.startswith(flag + "=") for arg in command[1:]) for flag in LAUNCH_FLAGS},
+            "notable": [row[:400] for row in rows if "<launching> " not in row and LAUNCH_NOTABLE.search(row)][:60]}
+
+
+def launch_record(path):
+    """Recorded, never asserted: which binary actually ran and what it logged."""
+    try:
+        return dict(parse_launch(path.read_text(encoding="utf-8", errors="replace")), log=path.name)
+    except OSError as error:
+        return {"unavailable": str(error)}
+
+
 class ReportDictationCaptureDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1063,10 +1227,20 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             cls.origin = cls.server.origin
             from importlib.metadata import version
             from playwright.sync_api import sync_playwright
+            # Playwright's own pw:browser log names the binary it starts (`<launching> <command> <args>`)
+            # and carries the browser's stderr. BrowserType.executable_path is only the default path: for
+            # headless=True without a channel, Playwright 1.60 starts chromium-headless-shell instead
+            # (registry getExecutableName). Which binary this suite should use is a pending contract
+            # decision after the first hosted run, so the launch itself is unchanged here.
+            cls.browser_log = (ARTIFACTS / "browser-debug.log").resolve()
+            os.environ["DEBUG"] = "pw:browser"
+            os.environ["DEBUG_FILE"] = str(cls.browser_log)
             cls._pw = sync_playwright().start()
             args = launch_args(cls.fixture_path)
             cls.browser = cls._pw.chromium.launch(headless=True, args=args)
-            cls.browser_info = {"version": cls.browser.version, "executable_path": cls._pw.chromium.executable_path,
+            cls.browser_info = {"version": cls.browser.version,
+                                "browser_type_default_executable_path": cls._pw.chromium.executable_path,
+                                "launched": "see U4B-LAUNCH (from the pw:browser log)",
                                 "args": args, "headless": True, "playwright": version("playwright"),
                                 "origin": cls.origin, "fixture": {"path": str(cls.fixture_path),
                                                                   "sha256": sha256(fixture), "bytes": len(fixture)}}
@@ -1087,6 +1261,9 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.close_all()
+        launch = launch_record(cls.browser_log)
+        (ARTIFACTS / "launch.json").write_text(json.dumps(launch, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        emit("U4B-LAUNCH", launch)
         summary = {"cases": {r["case"]: r["pass"] for r in cls.results},
                    "all_pass": bool(cls.results) and all(r["pass"] for r in cls.results)}
         (ARTIFACTS / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -1246,8 +1423,10 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
         return body, verdict, u1_ok, signal_reasons
 
     def post_entry(self, case, held):
-        entries = case.wait_server(lambda es: any(is_dictation_post(e) and (e["held"] if held else e["status"])
-                                                  for e in es), "the dictation POST arrived")
+        # Arrival is enough when unheld: the body is read before any answer, and the caller then waits
+        # for the state the answer produces.
+        entries = case.wait_server(lambda es: any(is_dictation_post(e) and (e["held"] if held else True)
+                                                  for e in es), "the dictation POST arrived", while_active=True)
         return [e for e in entries if is_dictation_post(e)][0]
 
     # ── cases ─────────────────────────────────────────────────────────────────────────────────
@@ -1275,11 +1454,17 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
                                             "sec_fetch_mode": worklet["headers"]["Sec-Fetch-Mode"],
                                             "status": worklet["status"]}
             case.observed["crossOriginIsolated"] = env["crossOriginIsolated"]
-            state = case.js("state")
+            # Recorded, not asserted: where the chain went after the worklet, with its primary cause. No
+            # cleanup click: in the first hosted run a state read here went stale before a Cancel click
+            # (getUserMedia was refused in between), and the click on the now hidden button timed out
+            # after 20 s. Closing the context ends any recording.
+            settle = min(case.deadline, time.monotonic() + 3)
+            state = case.read_state()
+            while state == "requesting-permission" and time.monotonic() < settle:
+                case.page.wait_for_timeout(50)
+                state = case.read_state()
             case.observed["state_after_worklet"] = state
-            if state in ("requesting-permission", "recording"):
-                case.page.click("#dictation-cancel", timeout=case.left_ms())
-                case.wait_js("state_is", "cancelled", "cancelled")
+            case.observed["capture_outcome"] = case.primary()
         self.run_case("CAP-01", "environment", scenario)
 
     def test_cap02_real_capture_uploads_16k_mono_pcm16_and_inserts_only_on_insert(self):
@@ -1291,7 +1476,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             self.press(case)
             case.check("hasBeenActive-at-press", (case.press_activation or {}).get("hasBeenActive") is True,
                        {"in_click_event": case.press_activation, "after_click": case.user_activation})
-            case.wait_js("state_is", "recording", "recording")
+            case.wait_state("recording", "recording")
             media = case.js("media")
             contexts, nodes, gum = media["contexts"], media["nodes"], media["gumCalls"]
             case.observed.update(contexts=contexts, nodes=nodes, gum=gum, tracks=media["tracks"])
@@ -1305,7 +1490,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
                        options["processorOptions"] == {"maxFrames": FULL_FRAMES}, nodes)
             case.check("one-granted-capture", len(gum) == 1 and gum[0]["outcome"] == "resolved" and
                        len(media["tracks"]) >= 1 and all(t["readyState"] == "live" for t in media["tracks"]), gum)
-            case.wait_js("recorded_for", 2000, "2.0 s after the worklet node")
+            case.wait_js("recorded_for", 2000, "2.0 s after the worklet node", while_active=True)
             case.page.click("#dictation-stop", timeout=case.left_ms())
             entry = self.post_entry(case, held=True)
             held = case.snap()
@@ -1331,7 +1516,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             self.server.release("hold_post", (200, {"text": TRANSCRIPT, "enginePin": CAPABILITY["enginePin"],
                                                     "modelPin": CAPABILITY["modelPin"], "languagePin": "auto",
                                                     "seconds": seconds}))
-            case.wait_js("state_is", "review", "review")
+            case.wait_state("review", "review")
             review = case.snap()
             case.check("review-text", review["pane"]["text"] == TRANSCRIPT, review["pane"]["text"])
             case.check("review-seconds", review["pane"]["meta"].startswith(case.js("fixed", seconds) + "초 녹음"),
@@ -1341,7 +1526,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.unchanged("report-unchanged-in-review", review)
             expected = case.js("expected", [EXISTING, TRANSCRIPT, 3, 3])
             case.page.click("#dictation-insert", timeout=case.left_ms())
-            case.wait_js("state_is", "inserted", "inserted")
+            case.wait_state("inserted", "inserted")
             inserted = case.snap()
             case.check("inserted-at-the-pinned-caret", inserted["text"] == [expected, "", ""], inserted["text"])
             case.wait_server(lambda es: any((e["method"], e["path"]) == resolve(HOLD_POST) and e["status"]
@@ -1382,7 +1567,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             self.server.release("hold_post", (200, {"text": TRANSCRIPT, "enginePin": CAPABILITY["enginePin"],
                                                     "modelPin": CAPABILITY["modelPin"], "languagePin": "auto",
                                                     "seconds": (len(body) - 44) / 32000}))
-            case.wait_js("state_is", "review", "review")
+            case.wait_state("review", "review")
             review = case.snap()
             case.check("review-text", review["pane"]["text"] == TRANSCRIPT, review["pane"]["text"])
             case.unchanged("report-unchanged", review)
@@ -1394,14 +1579,14 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             before = self.open(case, capability)
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "recording", "recording")
+            case.wait_state("recording", "recording")
             case.page.click("#dictation-cancel", timeout=case.left_ms())
             clicks = case.js("clicks")
             cancel = [c for c in clicks if c["id"] == "dictation-cancel"]
             after = cancel[0]["after"] if cancel else None
             case.check("tracks-ended-within-the-cancel-click", bool(after) and bool(after["tracks"]) and
                        all(s == "ended" for s in after["tracks"]), after)
-            case.wait_js("state_is", "cancelled", "cancelled")
+            case.wait_state("cancelled", "cancelled")
             self.contexts_closed(case)
             value = case.snap()
             self.tracks_ended(case, "tracks-ended", value)
@@ -1414,9 +1599,9 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             before = self.open(case, capability)
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "recording", "recording")
+            case.wait_state("recording", "recording")
             case.js("read_only", UID)
-            case.wait_js("state_is", "failed", "failed")
+            case.wait_state("failed", "failed")
             value = case.snap()
             case.check("failed-editor-changed", value["session"]["state"] == "failed" and
                        value["session"]["error"] == "editor-changed", value["session"])
@@ -1430,11 +1615,11 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             before = self.open(case, capability)
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "recording", "recording")
-            case.wait_js("recorded_for", 1000, "1.0 s after the worklet node")
+            case.wait_state("recording", "recording")
+            case.wait_js("recorded_for", 1000, "1.0 s after the worklet node", while_active=True)
             case.page.click("#dictation-stop", timeout=case.left_ms())
             entry = self.post_entry(case, held=False)
-            case.wait_js("state_is", "failed", "failed")
+            case.wait_state("failed", "failed")
             value = case.snap()
             self.failed_with(case, value, "DICTATION_ENGINE_FAILED")
             self.tracks_ended(case, "tracks-ended", value)
@@ -1449,7 +1634,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             before = self.open(case, capability)
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "recording", "recording")
+            case.wait_state("recording", "recording")
             case.js("exit_probe")
             case.saved_violations = case.js("violations")
             case.observed["clicks_before_exit"] = case.js("clicks")
@@ -1478,7 +1663,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.observed["permission"] = case.js("permission")
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "failed", "failed")
+            case.wait_state("failed", "failed")
             self.denied(case, case.snap())
         self.run_case("CAP-08", "Permissions-Policy microphone=()", scenario,
                       page_headers={"Permissions-Policy": "microphone=()"})
@@ -1501,7 +1686,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             elif state == "requesting-permission":
                 case.observed["outcome"] = "ii-still-requesting"
                 case.page.click("#dictation-cancel", timeout=case.left_ms())
-                case.wait_js("state_is", "cancelled", "cancelled")
+                case.wait_state("cancelled", "cancelled")
                 case.page.wait_for_timeout(2000)
                 value = case.snap()
                 tracks = value["media"]["tracks"]
@@ -1521,7 +1706,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.wait_server(lambda es: any(e["held"] for e in served(es, WORKLET)), "the worklet GET is held")
             case.check("still-requesting", case.js("state") == "requesting-permission")
             case.page.click("#dictation-cancel", timeout=case.left_ms())
-            case.wait_js("state_is", "cancelled", "cancelled")
+            case.wait_state("cancelled", "cancelled")
             self.server.release("hold_worklet")
             case.wait_server(lambda es: any(e["status"] for e in served(es, WORKLET)), "the worklet GET was answered")
             case.page.wait_for_timeout(1000)
@@ -1538,7 +1723,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             case.check("inline-glue-ran", case.js("controller") is True)
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "failed", "failed")
+            case.wait_state("failed", "failed")
             value = case.snap()
             violations = case.js("violations")
             case.observed["violations"] = violations
@@ -1562,7 +1747,7 @@ class ReportDictationCaptureDOMTest(unittest.TestCase):
             before = self.open(case, capability)
             self.ready(case, before)
             self.press(case)
-            case.wait_js("state_is", "failed", "failed")
+            case.wait_state("failed", "failed")
             value = case.snap()
             entries = self.server.snapshot()
             worklet = served(entries, WORKLET)
