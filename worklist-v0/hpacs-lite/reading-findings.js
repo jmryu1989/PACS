@@ -74,7 +74,7 @@ window.KinReadingFindings = function (app) {
    * `Structured` could not be pressed at all - measured on a real run, not predicted.
    *
    * The upper bound is not a number anyone picked. It is the top of the report's **field region**
-   * at the current width, read back into the panel's own `max-height` (reading-workspace.css:77).
+   * at the current width, read back into the panel's own `max-height` (reading-workspace.css:84).
    * That answer accounts for the button row wrapping and for the bars and the dictation pane
    * appearing above the fields, in both layouts - provided it is read again whenever one of them
    * changes, which is what the sources below are for. Leaving the property off means

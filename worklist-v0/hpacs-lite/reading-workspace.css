@@ -68,16 +68,6 @@ body.reading .report-p { min-width: 0; min-height: 370px; flex: 1; }
 body.reading .rbtns, body.reading .rfoot2 { flex-wrap: wrap; }
 body.reading .redit { min-height: 180px; }
 body.reading .redit textarea { min-height: 65px; }
-/* Dictation review in this layout. `.redit` keeps the 180px minimum above, so the review pane at its plain
-   cap pushed .rfoot2 57px below a 1680x1100 column (U4L attempt 1). While the transcript is shown the pane
-   gives way instead: it prefers the plain cap (the same expression as main.html's #dictation-pane
-   max-height), shrinks when the column is short, and never goes below its own rows - status, place, meta
-   and the Insert/Cancel row, with the transcript at its 1.6em minimum. That floor is the pane's automatic
-   minimum, which a flex item only has when it is not a scroll container: so the pane stops scrolling here,
-   and the transcript, the only row allowed to shrink, scrolls in its own box as before. The plain layout
-   and every other pane state keep main.html's rule untouched. */
-body.reading #dictation-pane:has(> #dictation-text:not([hidden])) { flex: 0 1 min(30vh, 168px); overflow: visible; }
-body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > #dictation-text { flex: 1 1 0; }
 body.reading .menubar { overflow-x: auto; }
 body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 #m-reading { color: #dceaff; background: #244c80; border: 1px solid #668dbd; border-radius: 4px; }
@@ -108,6 +98,17 @@ body.reading .userfilter { max-height: 92px; overflow-y: auto; }
 #reading-findings .reading-findings-meta { color: #9fb9dc; }
 #reading-findings ul { margin: 4px 0; padding-left: 16px; }
 #reading-findings li { margin: 3px 0; }
+/* Dictation review in this layout. `body.reading .redit` keeps its 180px minimum, so the review pane at its
+   plain cap pushed .rfoot2 57px below a 1680x1100 column (U4L attempt 1). While the transcript is shown the
+   pane gives way instead: it prefers the plain cap (the same expression as main.html's #dictation-pane
+   max-height), shrinks when the column is short, and never goes below its own rows - status, place, meta
+   and the Insert/Cancel row, with the transcript at its 1.6em minimum. That floor is the pane's automatic
+   minimum, which a flex item only has when it is not a scroll container: so the pane stops scrolling here,
+   and the transcript, the only row allowed to shrink, scrolls in its own box as before. The plain layout
+   and every other pane state keep main.html's rule untouched. Kept below the rules above so their cited
+   line numbers stay put. */
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) { flex: 0 1 min(30vh, 168px); overflow: visible; }
+body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > #dictation-text { flex: 1 1 0; }
 @media (max-width: 1250px) {
   body.reading .rbtns button, body.reading .rfoot2 button { padding: 5px 7px; }
 }
