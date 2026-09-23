@@ -1586,6 +1586,22 @@
       el.addEventListener("mouseup", () => { dictation.fieldClicked(); });
       el.addEventListener("input", () => dictation.redraw());
     }
+    /**
+     * 검토 단계에서 판독의가 읽고 눌러야 할 것(받아쓴 글, 위치를 다시 고를 판독문 칸, Insert)은 보고서 열
+     * 폭이 약 420px일 때 모두 Image Findings 서랍 아래에 있다. 그래서 검토에 들어서는 순간 서랍을 한 번
+     * 닫는다 — 인용을 넣으면 서랍이 물러나는 것과 같은 이유다(reading-findings.js `inserted`).
+     * 한 번의 받아쓰기(asrSeq)에 한 번뿐이다: 같은 검토 안의 위치 재고정은 다시 닫지 않고, 사용자가 검토 중
+     * 토글로 다시 연 서랍도 그대로 둔다. 취소·실패·삽입·닫기 뒤에도 저절로 다시 열지 않는다.
+     * `readingFindings`는 아래에서 선언되지만 이 함수는 검토에 들어선 뒤에만 그것을 읽는다.
+     */
+    let dictationDrawerSeq = null;
+    function standDownFindingsForDictationReview() {
+      const s = dictation.snapshot();
+      if (s.state !== "review" || s.asrSeq === dictationDrawerSeq) return;
+      dictationDrawerSeq = s.asrSeq;
+      readingFindings?.close();
+    }
+    dictation.subscribe(standDownFindingsForDictationReview);
     // 로그아웃도 페이지를 떠나므로(`KinAuth.logout` → location.replace) 여기서 함께 끝난다.
     window.addEventListener("pagehide", () => dictation.pageExit());
     $("#t-mod").addEventListener("change", renderTemplates);

@@ -541,7 +541,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
     def test_hd00_the_slices_hooks_and_boundaries_this_file_stands_on(self):
         problems, cases = static_report()
         self.assertEqual([], problems)
-        self.assertEqual(15, len(cases))
+        self.assertEqual(16, len(cases))
 
     # ── HD-01 ──────────────────────────────────────────────────────────────────────────────
     def test_hd01_unavailable_by_default_and_when_malformed_says_what_is_true(self):
@@ -887,6 +887,55 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         value = self.snap()
         self.assertEqual((1, 1, 1, 1), (value["media"]["gum"], value["media"]["contexts"],
                                         len(value["media"]["commands"]), len(value["dict"])))
+
+    # ── HD-15 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd15_review_stands_the_findings_drawer_down_once_per_run_and_never_reopens_it(self):
+        """U4L attempt 1 (Astra B2): the page closes Image Findings once when a run enters review
+        (standDownFindingsForDictationReview in the sliced dictation block). The same review emitting
+        again - an edit, a refused Insert, a click re-pin - must not close it again: that is what keeps
+        a drawer the reader reopened during review open. Cancel, the pane's Close and Insert never
+        reopen it; only the next run's review closes it once more. The drawer stub gains its counters
+        here, at runtime, so the harness glue it shares with the capture suite stays byte-identical."""
+        self.open()
+        self.page.evaluate("()=>{ window.drawer = { closes: 0, opens: 0 }; "
+                           "readingFindings.close = () => { drawer.closes += 1; }; "
+                           "readingFindings.open = () => { drawer.opens += 1; }; }")
+
+        def drawer():
+            return self.page.evaluate("()=>({ closes: drawer.closes, opens: drawer.opens })")
+        self.caret("findings", 3)
+        first = self.upload()
+        self.assertEqual({"closes": 0, "opens": 0}, drawer(), "recording and uploading leave the drawer alone")
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)", [first, 200, reply(TRANSCRIPT)])
+        self.wait_state("review")
+        self.assertEqual({"closes": 1, "opens": 0}, drawer(), "entering review stands it down once")
+        run = self.snap()["session"]["asrSeq"]
+        # From here the reader may reopen the drawer with its own toggle (outside this harness). The same
+        # review now emits several times; none of them may close it again.
+        self.caret("findings", len(EXISTING))
+        self.page.keyboard.type("추가")
+        self.page.click("#dictation-insert")
+        self.page.wait_for_function("()=>dictation.snapshot().needsRepin === true")
+        self.page.click("#findings", position={"x": 12, "y": 8})
+        self.page.wait_for_function("()=>dictation.snapshot().needsRepin === false")
+        value = self.snap()
+        self.assertEqual(("review", run), (value["session"]["state"], value["session"]["asrSeq"]),
+                         "still the same run's review")
+        self.assertEqual({"closes": 1, "opens": 0}, drawer(), "an edit, a refused Insert and a re-pin never close again")
+        self.page.click("#dictation-cancel")
+        self.wait_state("cancelled")
+        self.page.click("#dictation-close")
+        self.assertTrue(self.snap()["pane"]["hidden"])
+        self.assertEqual({"closes": 1, "opens": 0}, drawer(), "cancel and the pane's Close reopen nothing")
+        # A new run is a new review: exactly one more stand-down, and Insert reopens nothing.
+        second = self.upload()
+        self.page.evaluate("([i, s, r]) => answer(i, s, r)", [second, 200, reply(TRANSCRIPT)])
+        self.wait_state("review")
+        self.assertNotEqual(run, self.snap()["session"]["asrSeq"])
+        self.assertEqual({"closes": 2, "opens": 0}, drawer(), "the next run's review stands it down once more")
+        self.page.click("#dictation-insert")
+        self.wait_state("inserted")
+        self.assertEqual({"closes": 2, "opens": 0}, drawer(), "Insert reopens nothing")
 
 
 if __name__ == "__main__":
