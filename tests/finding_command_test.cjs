@@ -1599,15 +1599,36 @@ test('wiring: review stands the Image Findings drawer down once per dictation ru
   assert.match(plainPane, /flex: none;/); assert.match(plainPane, /max-height: min\(30vh, 168px\);/); assert.match(plainPane, /overflow: auto;/);
   assert.match(plainText, /flex: 0 1 auto; min-height: 1\.6em; overflow: auto;/);
   // ...and the reading rules are scoped to the reading layout's review (the transcript shown), prefer the
-  // same cap expression rather than a number of their own, and set no height, min or max.
+  // same cap expression rather than a number of their own, and hold one height of their own only: D2's one
+  // whole transcript line, in the transcript's content box at a stated pitch.
   const reading = css.split(/\r?\n/).filter(line => line.startsWith('body.reading #dictation-'));
+  const review = 'body.reading #dictation-pane:has(> #dictation-text:not([hidden]))';
   assert.deepEqual(reading, [
-    'body.reading #dictation-pane:has(> #dictation-text:not([hidden])) { flex: 0 1 min(30vh, 168px); overflow: visible; }',
-    'body.reading #dictation-pane:has(> #dictation-text:not([hidden])) > #dictation-text { flex: 1 1 0; }']);
-  assert.equal(/max-height: (min\([^)]*\))/.exec(plainPane)[1], /flex: 0 1 (min\([^)]*\))/.exec(reading[0])[1], 'the preferred size is the plain cap');
-  for (const line of reading) assert.ok(!/(^|[^-])(min-|max-)?height\s*:/.test(line.slice(line.indexOf('{'))), 'no height, floor or cap of its own');
+    `${review} { flex: 0 1 min(30vh, 168px); overflow: visible; }`,
+    `${review} > #dictation-text { flex: 1 1 0; box-sizing: content-box; line-height: 1.5; min-height: 1lh; }`,
+    `${review} > .dictation-foot { display: flex; flex-wrap: wrap; align-items: center; gap: inherit; }`,
+    `${review} > .dictation-foot > #dictation-meta { flex: 1 1 auto; min-width: 0; }`,
+    `${review} > .dictation-foot > .dictation-actions { margin-left: auto; }`]);
+  const cap = /max-height: (min\([^)]*\))/.exec(plainPane)[1];
+  assert.equal(cap, /flex: 0 1 (min\([^)]*\))/.exec(reading[0])[1], 'the preferred size is the plain cap');
+  // B-2: the one matched cap expression is the plain rule's; with it set aside no rule carries a px literal,
+  // and the only height, floor or cap of their own is the transcript's `min-height: 1lh`.
+  const bodies = reading.map((line, i) => { const body = line.slice(line.indexOf('{')); return i === 0 ? body.replace(cap, '') : body; });
+  for (const body of bodies) assert.ok(!/\d(\.\d+)?px/.test(body), 'no px literal of its own: ' + body);
+  const heights = bodies.flatMap((body, i) => [...body.matchAll(/(?:^|[^-])((?:min-|max-)?height\s*:[^;}]*;?)/g)].map(m => [i, m[1].trim()]));
+  assert.deepEqual(heights, [[1, 'min-height: 1lh;']], 'one whole transcript line is the only height of its own');
+  assert.equal(reading.join('\n').split('#dictation-').length - 1, 12, 'twelve selector mentions in the five rules');
   assert.equal(css.split('#dictation-').length - 1, reading.join('\n').split('#dictation-').length - 1 + 1,
     'no other dictation rule in this sheet (the one extra mention is in its comment)');
+  // CE7: meta and the actions share one role-less wrapper, in their old order, and it is inert outside that
+  // review: one default rule, inside the report CSS the host DOM harness slices.
+  const pane = html.slice(html.indexOf('<div id="dictation-pane"'), html.indexOf('\n        <div class="redit">'));
+  assert.match(pane, /<div id="dictation-place"><\/div>\s*<div class="dictation-foot">\s*<div id="dictation-meta"><\/div>\s*<div class="dictation-actions">/);
+  assert.deepEqual([...pane.matchAll(/ id="([^"]+)"/g)].map(m => m[1]), ['dictation-pane', 'dictation-status', 'dictation-text',
+    'dictation-place', 'dictation-meta', 'dictation-stop', 'dictation-cancel', 'dictation-repin', 'dictation-insert', 'dictation-close']);
+  const reportCss = html.slice(html.indexOf('    /* Report */'), html.indexOf('    .citefield {'));
+  assert.equal(html.split('.dictation-foot {').length - 1, 1, 'one default rule');
+  assert.match(reportCss, /\r?\n    \.dictation-foot \{ display: contents; \}\r?\n/, 'inert by default, inside the sliced report CSS');
 });
 /* ---------- S2-L saved locations and S2-C live facts in the worklist (TEST-S2L-WORKLIST) ----------
  * finding-command.js directly and the shipped panel in the worklist realm; the viewer's kinViewerJobLocation is a double of its own realm. */

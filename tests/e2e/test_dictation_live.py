@@ -138,6 +138,37 @@ GEOMETRY = """() => {
     const el = q('#' + id);
     controls[id] = Object.assign({ rect: box(el), hidden: el ? !!el.hidden : null, disabled: el ? !!el.disabled : null }, seen(el));
   }
+  // G8 (D2): the transcript's own text box, record only, plus the facts G8 asserts - rendered lines lying whole
+  // (vertically) inside what the reader can see of its scrollport, and whether the first of them is uncovered.
+  const t = q('#dictation-text');
+  let transcript = null;
+  if (t && !t.hidden) {
+    const n = v => parseFloat(v) || 0;
+    const inset = (el, cs) => { const r = el.getBoundingClientRect();
+      return { top: r.top + n(cs.borderTopWidth), bottom: r.bottom - n(cs.borderBottomWidth) }; };
+    const cs = getComputedStyle(t), port = inset(t, cs);
+    // B-1: the port as far as the viewport and every clipping ancestor (overflow not visible) let it be seen.
+    const clip = { top: Math.max(port.top, 0), bottom: Math.min(port.bottom, innerHeight) };
+    for (let a = t.parentElement; a; a = a.parentElement) {
+      const as = getComputedStyle(a);
+      if (as.overflowX === 'visible' && as.overflowY === 'visible') continue;
+      const r = inset(a, as);
+      clip.top = Math.max(clip.top, r.top); clip.bottom = Math.min(clip.bottom, r.bottom);
+    }
+    const range = document.createRange(); range.selectNodeContents(t);
+    const lines = Array.from(range.getClientRects()).filter(x => x.width > 0 && x.height > 0);
+    const LU = 1 / 64;  // one Blink layout unit: float noise only, never a fit allowance
+    // Vertical edges only: pre-wrap lets trailing spaces hang past the content edge, so a right edge proves nothing.
+    const readable = lines.filter(x => x.top >= clip.top - LU && x.bottom <= clip.bottom + LU), first = readable[0];
+    const hit = first ? document.elementFromPoint(Math.round(first.left + Math.min(first.width, 8) / 2),
+                                                  Math.round((first.top + first.bottom) / 2)) : null;
+    transcript = { box: box(t), boxSizing: cs.boxSizing, fontSize: cs.fontSize, lineHeight: cs.lineHeight, minHeight: cs.minHeight,
+      padding: [n(cs.paddingTop), n(cs.paddingBottom)], border: [n(cs.borderTopWidth), n(cs.borderBottomWidth)],
+      contentHeight: port.bottom - port.top - n(cs.paddingTop) - n(cs.paddingBottom),
+      clientHeight: t.clientHeight, scrollHeight: t.scrollHeight, scrollTop: t.scrollTop, overflowY: cs.overflowY, tabIndex: t.tabIndex,
+      port, clip, lines: lines.length, readable: readable.length,
+      firstReadable: first ? { top: first.top, bottom: first.bottom } : null, firstReadableOwn: !!hit && t.contains(hit) };
+  }
   return { viewport: { w: innerWidth, h: innerHeight }, reading: document.body.classList.contains('reading'),
     rightScrollTop: right ? right.scrollTop : null, menubar: box(q('.menubar')), rbtns: box(q('.report-p .rbtns')),
     pane: box(pane), paneHidden: pane ? !!pane.hidden : null,
@@ -146,7 +177,7 @@ GEOMETRY = """() => {
     drawer: box(drawer), drawerShown: !!drawer && !drawer.hidden,
     drawerExpanded: toggle ? toggle.getAttribute('aria-expanded') : null,
     drawerTop: drawer ? drawer.style.getPropertyValue('--reading-findings-top') : null,
-    findingsProbe: probe, status: q('#dictation-status') ? q('#dictation-status').textContent : null, controls };
+    findingsProbe: probe, status: q('#dictation-status') ? q('#dictation-status').textContent : null, controls, transcript };
 }""" % json.dumps(list(GEO_HIT_IDS))
 PROBES = {
     'environment': "() => __u4b.environment()",
@@ -340,7 +371,7 @@ def geo_entry_problems(initial):
 
 
 def geo_problems(state, initial, measured):
-    """G1-G6 for one measured state (readiness §5), from rendered rectangles and hit tests only."""
+    """G1-G6 for one measured state (readiness §5), plus G8 in review, from rendered rectangles and hit tests only."""
     if not isinstance(measured, dict) or 'controls' not in measured:
         return ['%s: geometry unreadable' % state]
     problems, controls = [], measured['controls']
@@ -386,6 +417,40 @@ def geo_problems(state, initial, measured):
         problems.append('G5 review: #findings not reachable at its top-left probe (%s)' % measured.get('findingsProbe'))
     if (initial or {}).get('rfootInside') and not measured.get('rfootInside'):
         problems.append('G6 %s: .rfoot2 was fully in the viewport before and is not now (%s)' % (state, measured.get('rfoot')))
+    if state == 'review':
+        problems.extend(transcript_problems(measured.get('transcript')))
+    return problems
+
+
+def transcript_problems(t):
+    """G8 (Astra D2, 2026-09-24), review only: the reader checks the transcript before Insert, so at least one
+    whole rendered line of it is on screen and uncovered, and a transcript longer than its box keeps the
+    capability to scroll by keyboard (overflow auto/scroll and focusable) - capability, not a performed scroll.
+    Fails closed (B-3): a record whose counts are not plain ints or whose flags are not the exact types reads
+    as malformed, never as a pass."""
+    if not isinstance(t, dict):
+        return ['G8 review: transcript missing (%r)' % (t,)]
+
+    def count(name, low=0):
+        value = t.get(name)
+        return isinstance(value, int) and not isinstance(value, bool) and value >= low
+    bad = [name for name in ('lines', 'readable', 'clientHeight', 'scrollHeight') if not count(name)]
+    bad += [] if count('tabIndex', low=-1) else ['tabIndex']
+    bad += [] if isinstance(t.get('overflowY'), str) else ['overflowY']
+    bad += [] if isinstance(t.get('firstReadableOwn'), bool) else ['firstReadableOwn']
+    if not bad and t['readable'] > t['lines']:
+        bad.append('readable>lines')
+    if bad:
+        return ['G8 review: transcript record malformed (%s)' % ', '.join(bad)]
+    problems = []
+    if t['lines'] < 1:
+        problems.append('G8 review: transcript has no rendered line')
+    elif t['readable'] < 1 or t['firstReadableOwn'] is not True:
+        problems.append('G8 review: no whole transcript line readable (lines=%r, readable=%r, own=%r, clip=%r, lineHeight=%r)'
+                        % (t['lines'], t['readable'], t['firstReadableOwn'], t.get('clip'), t.get('lineHeight')))
+    if t['scrollHeight'] > t['clientHeight'] and (t['overflowY'] not in ('auto', 'scroll') or t['tabIndex'] < 0):
+        problems.append('G8 review: transcript overflows its box but is not keyboard-scrollable (overflowY=%r, tabIndex=%r)'
+                        % (t['overflowY'], t['tabIndex']))
     return problems
 
 
@@ -415,7 +480,7 @@ def sample_geometry(state_ok=True, **changes):
                 'drawer': {'x': 1248, 'y': 376, 'w': 420, 'h': 300, 'b': 676}, 'drawerShown': True, 'drawerExpanded': 'true',
                 'drawerTop': '376px',
                 'findingsProbe': {'x': 818, 'y': 408, 'own': True, 'topId': 'findings'}, 'status': 'x',
-                'controls': {name: control(300) for name in GEO_HIT_IDS}}
+                'controls': {name: control(300) for name in GEO_HIT_IDS}, 'transcript': None}
     geometry.update(changes)
     return geometry
 
@@ -521,8 +586,15 @@ def oracle_self_check():
                              initial['controls']['b-dictate'], disabled=True)})))):
         expect_problem(label, geo_entry_problems(value))
     measured = sample_geometry()
-    # Review is measured after the product stood the drawer down (Astra B2), so it has its own consistent sample.
-    stood = sample_geometry(drawerShown=False, drawerExpanded='false', drawer={'x': 0, 'y': 0, 'w': 0, 'h': 0, 'b': 0})
+    # Review is measured after the product stood the drawer down (Astra B2), so it has its own consistent sample,
+    # with the transcript shown (phase A keeps it hidden: `transcript` None there, and G8 never runs).
+    seen_text = {'box': {'x': 810, 'y': 280, 'w': 780, 'h': 43, 'b': 323}, 'boxSizing': 'content-box', 'fontSize': '11px',
+                 'lineHeight': '16.5px', 'minHeight': '16.5px', 'padding': [3, 3], 'border': [1, 1], 'contentHeight': 35.0,
+                 'clientHeight': 41, 'scrollHeight': 240, 'scrollTop': 0, 'overflowY': 'auto', 'tabIndex': 0,
+                 'port': {'top': 281.0, 'bottom': 322.0}, 'clip': {'top': 281.0, 'bottom': 322.0}, 'lines': 12, 'readable': 2,
+                 'firstReadable': {'top': 285.5, 'bottom': 298.5}, 'firstReadableOwn': True}
+    stood = sample_geometry(drawerShown=False, drawerExpanded='false', drawer={'x': 0, 'y': 0, 'w': 0, 'h': 0, 'b': 0},
+                            transcript=seen_text)
     for state in GEO_CONTROLS:
         sample = stood if state == 'review' else measured
         if geo_problems(state, initial, sample):
@@ -557,6 +629,49 @@ def oracle_self_check():
              dict(stood, controls=dict(stood['controls'], **{'reading-findings-open': gone})), 'G3 review')):
         if not any(problem.startswith(limb) for problem in geo_problems(state, initial, value)):
             problems.append('%s must reject: %s' % (limb, label))
+    # G8 (Astra D2): each shape differs from the consistent review only in its transcript, so it must draw exactly
+    # one problem, from the named G8 check - nothing else may fire, and the right G8 message must be the one.
+    unreadable, scroll = 'G8 review: no whole transcript line readable', 'G8 review: transcript overflows its box but is not'
+    malformed = 'G8 review: transcript record malformed'
+    for label, value, prefix in (
+            ('F-1 at 1366: one 15px line in 9.6px of content, clipped', dict(
+                seen_text, contentHeight=9.6, clientHeight=16, port={'top': 281.0, 'bottom': 296.6},
+                clip={'top': 281.0, 'bottom': 296.6}, readable=0, firstReadable=None, firstReadableOwn=False), unreadable),
+            ('a whole line whose centre is covered', dict(seen_text, firstReadableOwn=False), unreadable),
+            ('no readable line beside a stale own flag', dict(seen_text, readable=0, firstReadable=None), unreadable),
+            ('the transcript missing in review', None, 'G8 review: transcript missing'),
+            ('a transcript record that is not an object', [seen_text], 'G8 review: transcript missing'),
+            ('a transcript with no rendered line', dict(seen_text, lines=0, readable=0, firstReadable=None, firstReadableOwn=False),
+             'G8 review: transcript has no rendered line'),
+            ('an overflowing transcript that cannot scroll', dict(seen_text, overflowY='hidden'), scroll),
+            ('an overflowing transcript the keyboard cannot reach', dict(seen_text, tabIndex=-1), scroll),
+            ('scrollHeight None', dict(seen_text, scrollHeight=None), malformed + ' (scrollHeight)'),
+            ('readable 1.0', dict(seen_text, readable=1.0), malformed + ' (readable)'),
+            ('firstReadableOwn "yes"', dict(seen_text, firstReadableOwn='yes'), malformed + ' (firstReadableOwn)'),
+            ('tabIndex True', dict(seen_text, tabIndex=True), malformed + ' (tabIndex)'),
+            ('clientHeight NaN', dict(seen_text, clientHeight=float('nan')), malformed + ' (clientHeight)'),
+            ('lines as text', dict(seen_text, lines='12'), malformed + ' (lines)'),
+            ('overflowY missing', {k: v for k, v in seen_text.items() if k != 'overflowY'}, malformed + ' (overflowY)'),
+            ('more readable lines than lines', dict(seen_text, readable=13), malformed + ' (readable>lines)')):
+        got = geo_problems('review', initial, dict(stood, transcript=value))
+        if len(got) != 1 or not got[0].startswith(prefix):
+            problems.append('G8 must reject %s with exactly %r: %r' % (label, prefix, got))
+    for label, state, value in (
+            ('a short transcript that fits needs no scrolling', 'review',
+             dict(stood, transcript=dict(seen_text, scrollHeight=41, overflowY='visible', tabIndex=-1))),
+            ('a hidden transcript while recording', 'recording', dict(measured, transcript=None)),
+            ('a hidden transcript after a failure', 'failed', dict(measured, transcript=None))):
+        if geo_problems(state, initial, value):
+            problems.append('G8 must stay silent for %s: %r' % (label, geo_problems(state, initial, value)))
+    # B-1 lives in page code that only a browser runs: keep the port intersected with the viewport and every
+    # clipping ancestor, and only lines vertically inside that intersection counted.
+    for pin in ('const clip = { top: Math.max(port.top, 0), bottom: Math.min(port.bottom, innerHeight) };',
+                'for (let a = t.parentElement; a; a = a.parentElement) {',
+                "if (as.overflowX === 'visible' && as.overflowY === 'visible') continue;",
+                'clip.top = Math.max(clip.top, r.top); clip.bottom = Math.min(clip.bottom, r.bottom);',
+                'lines.filter(x => x.top >= clip.top - LU && x.bottom <= clip.bottom + LU)'):
+        if GEOMETRY.count(pin) != 1:
+            problems.append('GEOMETRY must keep the B-1 clip exactly once: %s' % pin)
     # Declared bodies and source-bound pins.
     body = json.loads(REVIEW_BODY)
     if len(body['text'].split('\n')) != 12 or len(body['text']) > 16384 or body['seconds'] != 1.0 or \

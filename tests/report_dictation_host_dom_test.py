@@ -446,6 +446,12 @@ def static_report():
             problems.append("dictation.js must not use %s" % word)
     if "innerHTML" in host:
         problems.append("dictation.js writes text through textContent only")
+    # D2 (HD-16): the pane's foot wrapper renders nothing of its own here only because its default rule is in
+    # the report CSS this harness slices; outside it the wrapper would be a block and shift today's rows.
+    if "\n    .dictation-foot { display: contents; }\n" not in S["REPORT_CSS"]:
+        problems.append("the .dictation-foot default must stay inside the sliced report CSS")
+    if S["DICTATION_HTML"].count('<div class="dictation-foot">') != 1:
+        problems.append("the dictation pane must wrap meta and the actions in one .dictation-foot")
     cases = sorted(n for n in dir(ReportDictationHostDOMTest) if n.startswith("test_hd"))
     if [c[:9] for c in cases] != ["test_hd%02d" % n for n in range(len(cases))]:
         problems.append("HD ids must stay dense and stable")
@@ -541,7 +547,7 @@ class ReportDictationHostDOMTest(unittest.TestCase):
     def test_hd00_the_slices_hooks_and_boundaries_this_file_stands_on(self):
         problems, cases = static_report()
         self.assertEqual([], problems)
-        self.assertEqual(16, len(cases))
+        self.assertEqual(17, len(cases))
 
     # ── HD-01 ──────────────────────────────────────────────────────────────────────────────
     def test_hd01_unavailable_by_default_and_when_malformed_says_what_is_true(self):
@@ -936,6 +942,35 @@ class ReportDictationHostDOMTest(unittest.TestCase):
         self.page.click("#dictation-insert")
         self.wait_state("inserted")
         self.assertEqual({"closes": 2, "opens": 0}, drawer(), "Insert reopens nothing")
+
+    # ── HD-16 ──────────────────────────────────────────────────────────────────────────────
+    def test_hd16_the_foot_wrapper_is_inert_outside_the_reading_review(self):
+        """D2 (Astra CE7): meta and the actions sit in one role-less .dictation-foot so that the reading
+        layout's review can put them on one row (reading-workspace.css, not loaded here). Everywhere else -
+        this plain harness's review included - its default `display: contents` must leave today's rows as
+        they were: no box of its own, meta and the actions still the pane's own rows with the pane's gap
+        between them, and the transcript still border-box at the `normal` pitch with its 1.6em minimum."""
+        self.open()
+        self.caret("findings", 3)
+        self.review()
+        value = self.page.evaluate("""() => {
+          const foot = $('.dictation-foot'), meta = $('#dictation-meta'), actions = $('.dictation-actions');
+          const text = getComputedStyle($('#dictation-text')), pane = getComputedStyle($('#dictation-pane'));
+          return { display: getComputedStyle(foot).display, rects: foot.getClientRects().length, role: foot.getAttribute('role'),
+                   children: Array.from(foot.children).map(n => n.id || n.className),
+                   meta: hdBox(meta), actions: hdBox(actions), gap: parseFloat(pane.rowGap),
+                   text: { boxSizing: text.boxSizing, lineHeight: text.lineHeight, minHeight: text.minHeight } };
+        }""")
+        self.assertEqual(("contents", 0, None), (value["display"], value["rects"], value["role"]),
+                         "no box, no client rects and no role of its own")
+        self.assertEqual(["dictation-meta", "dictation-actions"], value["children"], "meta, then the actions")
+        self.assertEqual(3, value["gap"])
+        self.assertAlmostEqual(value["actions"]["top"] - value["meta"]["bottom"], value["gap"], delta=1 / 64,
+                               msg="meta and the actions are still two of the pane's rows, one gap apart")
+        self.assertEqual((value["meta"]["left"], value["meta"]["width"]), (value["actions"]["left"], value["actions"]["width"]),
+                         "both stretch across the pane as before")
+        self.assertEqual({"boxSizing": "border-box", "lineHeight": "normal", "minHeight": "17.6px"}, value["text"],
+                         "the one-line minimum is a reading-review rule; the plain transcript is untouched")
 
 
 if __name__ == "__main__":
