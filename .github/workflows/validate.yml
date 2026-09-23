@@ -1061,3 +1061,45 @@ jobs:
             tmp/asr-ci/out/
           if-no-files-found: error
           retention-days: 7
+  dictation-capture:
+    # S3-ASR-U4b. A separate job, not steps inside `measurements`: that job's 40-minute cap already
+    # holds a 28-minute live step, and a capture hang must not fail it. Same triggers as every job
+    # here, with no `if:`, no `needs:` and no `continue-on-error`.
+    #
+    # What a green run means: in pinned Chromium, Chromium's own file-backed fake microphone was
+    # captured through the real getUserMedia, AudioContext and the shipped AudioWorklet fetched over
+    # real HTTP from a test-owned loopback origin, under the DECLARED proxy CSP string served by the
+    # test; the uploaded bytes were 16 kHz mono PCM16 by a spectral oracle; tracks and contexts were
+    # released; denial, cancel, page exit and refusals left the report unwritten. It does NOT mean
+    # the CSP production delivers, the real API or its compiled validator, full-application geometry
+    # (S3-ASR-U4L G-LIVE-PATH / G-LIVE-GEO), the live refusal battery (U5) or recognition of speech.
+    # Adjudicate from the raw `U4B-CAP` lines in capture/stdout.log before the exit code.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: |
+          python3 tests/ci_browser_apt_test.py
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/capture-python"
+          "$RUNNER_TEMP/capture-python/bin/python" -m pip install -r tests/e2e/requirements.txt
+          "$RUNNER_TEMP/capture-python/bin/python" -m playwright install --with-deps chromium
+      - name: S3-ASR-U4b fixture pin, producer-layout mirror and spectral oracle controls (pure)
+        run: python3 scripts/record-run.py --run-dir tmp/dictation-capture-ci/signal --cwd . --file scripts/asr_fixture.py --file tests/dictation_capture_signal.py --file tests/dictation_capture_signal_test.py -- python3 -B tests/dictation_capture_signal_test.py
+      - name: S3-ASR-U4b fake-device capture, worklet, upload bytes, release and refusals in pinned Chromium
+        timeout-minutes: 5
+        run: python3 scripts/record-run.py --run-dir tmp/dictation-capture-ci/capture --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/report-citation.js --file worklist-v0/hpacs-lite/report-structure.js --file worklist-v0/hpacs-lite/dictation-session.js --file worklist-v0/hpacs-lite/dictation-capture.js --file worklist-v0/hpacs-lite/dictation.js --file worklist-v0/hpacs-lite/dictation-worklet.js --file proxy/nginx.conf.template --file scripts/asr_fixture.py --file tests/dictation_capture_signal.py --file tests/dictation_capture_signal_test.py --file tests/report_dictation_capture_dom_test.py --file tests/report_dictation_host_dom_test.py -- "$RUNNER_TEMP/capture-python/bin/python" -B tests/report_dictation_capture_dom_test.py
+      - name: Synthetic dictation capture evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-dictation-capture-results
+          path: tmp/dictation-capture-ci/
+          if-no-files-found: error
+          retention-days: 7
