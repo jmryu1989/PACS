@@ -141,7 +141,10 @@ REVIEW_BODY = json.dumps({'text': REVIEW_TEXT, 'seconds': 1.0, 'languagePin': 'a
                           'modelPin': ASR_MODEL_PIN}, ensure_ascii=False)
 
 # ── Page-side reads. Nothing here calls a product mutator or names a media/network API (static pin in
-# execution_selection_test.py); state changes are real clicks and key presses only.
+# execution_selection_test.py); state changes are real clicks and key presses only. One declared exception, and it is
+# not a state change the report or the dictation run can see: TOGGLE_REACH below scrolls the Image Findings toggle
+# into view once per phase-B review, when it is out of view, and puts every scroll offset back before it returns
+# (Astra B2 amendment, 2026-09-24). GEOMETRY itself never scrolls.
 GEOMETRY = """() => {
   const q = s => document.querySelector(s);
   // One rounding of each edge; comparisons use `b`, never y+h rounded twice (R15-ENTRY precedent).
@@ -213,6 +216,66 @@ GEOMETRY = """() => {
     drawerTop: drawer ? drawer.style.getPropertyValue('--reading-findings-top') : null,
     findingsProbe: probe, status: q('#dictation-status') ? q('#dictation-status').textContent : null, controls, transcript };
 }""" % json.dumps(list(GEO_HIT_IDS))
+# Astra B2 amendment (2026-09-24, after CI2): the reopen half of review G3. The toggle must be operable and either
+# whole (both axes, inside the viewport and every border-inset clipping ancestor) and owning its centre where it is,
+# or - when an ancestor has moved it out of view, as the review focus scroll does at 1366x768 reading - the same once
+# brought into view instantly and nearest, with every ancestor/document offset saved first and put back in `finally`
+# (each restore attempted even if another throws) and then verified. Rest is always recorded; the reveal runs only
+# when rest is not whole. An exception becomes `error` in the record, never a lost pass. No focus, click or product
+# call: scrollIntoView does not move focus. Evaluated once per phase-B pass, after the review geometry read (static
+# pins in execution_selection_test.py).
+TOGGLE_REACH = """() => {
+  const tg = document.querySelector('#reading-findings-open');
+  if (!tg) return { missing: true };
+  const name = el => el ? (el.id || String(el.className || '') || el.tagName.toLowerCase()) : null;
+  const n = v => parseFloat(v) || 0, LU = 1 / 64, userScroll = v => v === 'auto' || v === 'scroll';
+  const place = () => {
+    const r = tg.getBoundingClientRect(), by = [];
+    let top = 0, bottom = innerHeight, left = 0, right = innerWidth;
+    for (let a = tg.parentElement; a; a = a.parentElement) {
+      const as = getComputedStyle(a);
+      if (as.overflowX === 'visible' && as.overflowY === 'visible') continue;
+      const b = a.getBoundingClientRect();
+      const t = b.top + n(as.borderTopWidth), u = b.bottom - n(as.borderBottomWidth);
+      const l = b.left + n(as.borderLeftWidth), w = b.right - n(as.borderRightWidth);
+      if (r.top < t - LU || r.bottom > u + LU || r.left < l - LU || r.right > w + LU)
+        by.push({ name: name(a), overflowX: as.overflowX, overflowY: as.overflowY });
+      top = Math.max(top, t); bottom = Math.min(bottom, u); left = Math.max(left, l); right = Math.min(right, w);
+    }
+    const present = r.width > 0 && r.height > 0;
+    const hit = present ? document.elementFromPoint(Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2)) : null;
+    return { rect: { x: r.x, y: r.y, w: r.width, h: r.height }, clip: { top, bottom, left, right }, by, present,
+      whole: present && r.top >= top - LU && r.bottom <= bottom + LU && r.left >= left - LU && r.right <= right + LU,
+      own: !!hit && tg.contains(hit), topId: name(hit) };
+  };
+  const out = { rest: null, disabled: !!tg.disabled, inert: !!tg.closest('[inert]'), tabIndex: tg.tabIndex,
+                revealed: null, moved: null, restored: null, error: null };
+  const saved = [];
+  try {
+    out.rest = place();
+    if (!out.rest.whole) {
+      for (let a = tg.parentElement; a; a = a.parentElement) saved.push([a, a.scrollTop, a.scrollLeft]);
+      const root = document.scrollingElement;
+      if (root && !saved.some(([a]) => a === root)) saved.push([root, root.scrollTop, root.scrollLeft]);
+      tg.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      out.revealed = place();
+      out.moved = saved.filter(([a, y, x]) => a.scrollTop !== y || a.scrollLeft !== x).map(([a, y, x]) => {
+        const as = getComputedStyle(a);
+        return { name: name(a), userScrollable: (a.scrollTop === y || userScroll(as.overflowY)) &&
+                                                (a.scrollLeft === x || userScroll(as.overflowX)) }; });
+    }
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  } finally {
+    const failed = [];
+    for (const [a, y, x] of saved) {
+      try { a.scrollTo({ top: y, left: x, behavior: 'instant' }); } catch (e) { failed.push(name(a) + ': ' + String((e && e.message) || e)); }
+    }
+    if (saved.length) out.restored = !failed.length && saved.every(([a, y, x]) => a.scrollTop === y && a.scrollLeft === x);
+    if (failed.length) out.error = (out.error ? out.error + '; ' : '') + 'restore: ' + failed.join('; ');
+  }
+  return out;
+}"""
 PROBES = {
     'environment': "() => __u4b.environment()",
     'permission': "() => __u4b.permission()",
@@ -243,6 +306,7 @@ PROBES = {
     'drawer': "() => { const d = document.querySelector('#reading-findings'); "
               "return d ? { hidden: !!d.hidden, state: d.dataset.state || null, study: d.dataset.studyUid || null } : null; }",
     'geometry': GEOMETRY,
+    'toggle_reach': TOGGLE_REACH,
     'frames2': "() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
 }
 
@@ -757,10 +821,14 @@ def geo_problems(state, initial, measured):
         # Astra B2 (2026-09-23): the product stands the drawer down once when a run enters review, so here
         # G3 is POSITIVE - hidden, its toggle says so, and the toggle is there to reopen it. A drawer still
         # open over the report column fails, and so does one that is gone without a reachable toggle.
-        if measured.get('drawerShown') is not False or measured.get('drawerExpanded') != 'false' or \
-                not own('reading-findings-open'):
+        # Astra B2 amendment (2026-09-24, after CI2): "reachable" changed meaning. It was "owns its centre at the
+        # measured scroll position"; it is now toggle_reach_problems - operable, and whole+own at rest or whole+own
+        # after a measured reveal through user-scrollable ancestors only, every offset restored. The toggle no longer
+        # has to be in view together with the pane. The stand-down limbs and their message are unchanged.
+        if measured.get('drawerShown') is not False or measured.get('drawerExpanded') != 'false':
             problems.append('G3 review: drawer not stood down (drawerShown=%r, aria-expanded=%r, toggle top %s)'
                             % (measured.get('drawerShown'), measured.get('drawerExpanded'), top('reading-findings-open')))
+        problems.extend(toggle_reach_problems(measured.get('toggleReach')))
     elif not measured.get('drawerShown') or not drawer or not pane:
         problems.append('G3 %s: drawer or pane missing (drawerShown=%r)' % (state, measured.get('drawerShown')))
     elif drawer['y'] < pane['b']:
@@ -817,6 +885,49 @@ def transcript_problems(t):
         problems.append('G8 review: transcript overflows its box but is not keyboard-scrollable (overflowY=%r, tabIndex=%r)'
                         % (t['overflowY'], t['tabIndex']))
     return problems
+
+
+def toggle_reach_problems(t):
+    """Review G3, the reopen half (Astra B2 amendment, 2026-09-24): the reader can reopen Image Findings during review.
+    The TOGGLE_REACH record must show the toggle operable (present, enabled, not inert, in the tab order) and either
+    whole (both axes) and owning its centre where it is, or - out of view at rest - whole and owning its centre once
+    scrolled to, where every ancestor that moved can be scrolled by the user and every offset was restored. It fails
+    closed: a missing, errored or malformed record is a problem. Every message starts 'G3 review: toggle'."""
+    if not isinstance(t, dict):
+        return ['G3 review: toggle reachability record missing (%r)' % (t,)]
+    if t.get('missing') is True:
+        return ['G3 review: toggle gone (no #reading-findings-open in the page)']
+    if t.get('error') is not None:
+        return ['G3 review: toggle probe error (%s; restored=%r)' % (t.get('error'), t.get('restored'))]
+
+    def side(s):
+        return isinstance(s, dict) and all(isinstance(s.get(k), bool) for k in ('present', 'whole', 'own')) and \
+            isinstance(s.get('topId'), (str, type(None))) and isinstance(s.get('by'), list)
+    tab = t.get('tabIndex')
+    bad = [] if side(t.get('rest')) else ['rest']
+    bad += [key for key in ('disabled', 'inert') if not isinstance(t.get(key), bool)]
+    bad += [] if isinstance(tab, int) and not isinstance(tab, bool) else ['tabIndex']
+    if bad:
+        return ['G3 review: toggle record malformed (%s)' % ', '.join(bad)]
+    rest = t['rest']
+    if not rest['present'] or t['disabled'] or t['inert'] or tab < 0:
+        return ['G3 review: toggle not operable (present=%r, disabled=%r, inert=%r, tabIndex=%r)'
+                % (rest['present'], t['disabled'], t['inert'], tab)]
+    revealed, moved, restored = t.get('revealed'), t.get('moved'), t.get('restored')
+    if rest['whole']:
+        if (revealed, moved, restored) != (None, None, None):
+            return ['G3 review: toggle record malformed (a reveal beside a whole toggle)']
+        return [] if rest['own'] else ['G3 review: toggle covered in view (top %s)' % rest['topId']]
+    if not side(revealed) or not isinstance(moved, list) or not isinstance(restored, bool) or \
+            not all(isinstance(m, dict) and isinstance(m.get('userScrollable'), bool) for m in moved):
+        return ['G3 review: toggle reveal record malformed']
+    if not restored:
+        return ['G3 review: toggle reveal did not restore every scroll offset']
+    if not moved or not all(m['userScrollable'] for m in moved):
+        return ['G3 review: toggle out of view and not revealed by user-scrollable ancestors only (%r)' % (moved,)]
+    if not (revealed['whole'] and revealed['own']):
+        return ['G3 review: toggle not whole and own when scrolled to (whole=%r, top %s)' % (revealed['whole'], revealed['topId'])]
+    return []
 
 
 def generated_secret_names():
@@ -978,8 +1089,13 @@ def oracle_self_check():
                  'clientHeight': 41, 'scrollHeight': 240, 'scrollTop': 0, 'overflowY': 'auto', 'tabIndex': 0,
                  'port': {'top': 281.0, 'bottom': 322.0}, 'clip': {'top': 281.0, 'bottom': 322.0}, 'lines': 12, 'readable': 2,
                  'firstReadable': {'top': 285.5, 'bottom': 298.5}, 'firstReadableOwn': True}
+    # The toggle whole and owning its centre where it is (1680 reading and both plain reviews in CI2): no reveal ran.
+    reach_rest = {'rest': {'rect': {'x': 1583.0, 'y': 355.0, 'w': 93.0, 'h': 18.0}, 'by': [], 'present': True,
+                           'clip': {'top': 52.0, 'bottom': 1100.0, 'left': 1261.0, 'right': 1680.0}, 'whole': True, 'own': True,
+                           'topId': 'reading-findings-open'},
+                  'disabled': False, 'inert': False, 'tabIndex': 0, 'revealed': None, 'moved': None, 'restored': None, 'error': None}
     stood = sample_geometry(drawerShown=False, drawerExpanded='false', drawer={'x': 0, 'y': 0, 'w': 0, 'h': 0, 'b': 0},
-                            transcript=seen_text)
+                            transcript=seen_text, toggleReach=reach_rest)
     for state in GEO_CONTROLS:
         sample = stood if state == 'review' else measured
         if geo_problems(state, initial, sample):
@@ -988,7 +1104,6 @@ def oracle_self_check():
     def covered(name, base=None):
         base = base or measured
         return dict(base, controls=dict(base['controls'], **{name: dict(base['controls'][name], own=False)}))
-    gone = {'present': False, 'own': False, 'topId': 'missing', 'rect': None, 'hidden': None, 'disabled': None}
     for label, state, value in (
             ('a covered Stop', 'recording', covered('dictation-stop')), ('a covered Close', 'failed', covered('dictation-close')),
             ('a covered Insert', 'review', covered('dictation-insert', stood)), ('a covered status', 'failed', covered('dictation-status')),
@@ -1009,11 +1124,75 @@ def oracle_self_check():
             ('a review whose drawer is still on screen though its toggle says collapsed', 'review',
              dict(stood, drawerShown=True, drawer=measured['drawer']), 'G3 review'),
             ('a review whose toggle still says expanded', 'review', dict(stood, drawerExpanded='true'), 'G3 review'),
-            ('a review stood down with its toggle covered', 'review', covered('reading-findings-open', stood), 'G3 review'),
-            ('a review stood down with its toggle gone', 'review',
-             dict(stood, controls=dict(stood['controls'], **{'reading-findings-open': gone})), 'G3 review')):
+            # Re-expressed through the TOGGLE_REACH record (Astra B2 amendment): the same two cases, still rejected.
+            ('a review stood down with its toggle covered', 'review',
+             dict(stood, toggleReach=dict(reach_rest, rest=dict(reach_rest['rest'], own=False, topId='x'))), 'G3 review'),
+            ('a review stood down with its toggle gone', 'review', dict(stood, toggleReach={'missing': True}), 'G3 review')):
         if not any(problem.startswith(limb) for problem in geo_problems(state, initial, value)):
             problems.append('%s must reject: %s' % (limb, label))
+    # Astra B2 amendment (2026-09-24, after CI2): the reopen half of review G3, read from TOGGLE_REACH. Each shape
+    # differs from the consistent review only in `toggleReach` (or a stand-down field), so it must draw exactly the one
+    # named problem. The CI2-shaped vector is built from CI2's measured rest facts; its reveal is a declared shape, not
+    # an observation (the reveal first runs on the hosted attempt).
+    out_of_view = {'rest': dict(reach_rest['rest'], rect={'x': 1269.0, 'y': 107.0, 'w': 93.0, 'h': 18.0}, whole=False, own=False,
+                                topId='userfilter', by=[{'name': 'right', 'overflowX': 'auto', 'overflowY': 'auto'}]),
+                   'disabled': False, 'inert': False, 'tabIndex': 0, 'revealed': dict(reach_rest['rest']),
+                   'moved': [{'name': 'right', 'userScrollable': True}], 'restored': True, 'error': None}
+
+    def reach(base, **changes):
+        return dict(stood, toggleReach=dict(base, **changes))
+    down = "G3 review: drawer not stood down (drawerShown=%r, aria-expanded=%r, toggle top x)"
+    hidden_only, mixed = [{'name': 'split', 'userScrollable': False}], \
+        [{'name': 'right', 'userScrollable': True}, {'name': 'html', 'userScrollable': False}]
+    for label, value, expected in (
+            ('whole and own at rest, no reveal', stood, []),
+            ('the CI2 1366 reading shape: out of view in .right, revealed whole and own, restored', reach(out_of_view), []),
+            ('the drawer still shown', dict(stood, drawerShown=True), [down % (True, 'false')]),
+            ('aria-expanded still true', dict(stood, drawerExpanded='true'), [down % (False, 'true')]),
+            ('covered where it is', reach(reach_rest, rest=dict(reach_rest['rest'], own=False, topId='structmodal')),
+             ['G3 review: toggle covered in view (top structmodal)']),
+            ('covered even when scrolled to', reach(out_of_view, revealed=dict(out_of_view['revealed'], own=False, topId='sticky')),
+             ['G3 review: toggle not whole and own when scrolled to (whole=True, top sticky)']),
+            ('not whole even when scrolled to', reach(out_of_view, revealed=dict(out_of_view['revealed'], whole=False)),
+             ['G3 review: toggle not whole and own when scrolled to (whole=False, top reading-findings-open)']),
+            ('revealed only through an overflow:hidden ancestor', reach(out_of_view, moved=hidden_only),
+             ['G3 review: toggle out of view and not revealed by user-scrollable ancestors only (%r)' % (hidden_only,)]),
+            ('revealed through a scrollable and a non-scrollable ancestor', reach(out_of_view, moved=mixed),
+             ['G3 review: toggle out of view and not revealed by user-scrollable ancestors only (%r)' % (mixed,)]),
+            ('out of view yet the reveal moved nothing', reach(out_of_view, moved=[]),
+             ['G3 review: toggle out of view and not revealed by user-scrollable ancestors only ([])']),
+            ('clipped sideways by an overflow:hidden ancestor, nothing scrollable moved', reach(
+                out_of_view, rest=dict(out_of_view['rest'], by=[{'name': 'split', 'overflowX': 'hidden', 'overflowY': 'hidden'}]),
+                revealed=dict(out_of_view['rest']), moved=[]),
+             ['G3 review: toggle out of view and not revealed by user-scrollable ancestors only ([])']),
+            ('scroll offsets not restored', reach(out_of_view, restored=False), ['G3 review: toggle reveal did not restore every scroll offset']),
+            ('a probe error, offsets restored', reach(out_of_view, error='TypeError: x', restored=True),
+             ['G3 review: toggle probe error (TypeError: x; restored=True)']),
+            ('a probe error, offsets not restored', reach(out_of_view, error='restore: right: boom', restored=False),
+             ['G3 review: toggle probe error (restore: right: boom; restored=False)']),
+            ('the evaluate itself failed', dict(stood, toggleReach={'error': 'evaluate: Target closed', 'restored': None}),
+             ['G3 review: toggle probe error (evaluate: Target closed; restored=None)']),
+            ('the toggle gone from the page', dict(stood, toggleReach={'missing': True}),
+             ['G3 review: toggle gone (no #reading-findings-open in the page)']),
+            ('the toggle without a box', reach(reach_rest, rest=dict(reach_rest['rest'], present=False, whole=False, own=False, topId=None)),
+             ['G3 review: toggle not operable (present=False, disabled=False, inert=False, tabIndex=0)']),
+            ('the toggle disabled', reach(reach_rest, disabled=True),
+             ['G3 review: toggle not operable (present=True, disabled=True, inert=False, tabIndex=0)']),
+            ('the toggle inside an inert region', reach(reach_rest, inert=True),
+             ['G3 review: toggle not operable (present=True, disabled=False, inert=True, tabIndex=0)']),
+            ('the toggle out of the tab order', reach(reach_rest, tabIndex=-1),
+             ['G3 review: toggle not operable (present=True, disabled=False, inert=False, tabIndex=-1)']),
+            ('the record missing', dict(stood, toggleReach=None), ['G3 review: toggle reachability record missing (None)']),
+            ('own as a string', reach(reach_rest, rest=dict(reach_rest['rest'], own='yes')), ['G3 review: toggle record malformed (rest)']),
+            ('tabIndex True', reach(reach_rest, tabIndex=True), ['G3 review: toggle record malformed (tabIndex)']),
+            ('restored as 1', reach(out_of_view, restored=1), ['G3 review: toggle reveal record malformed']),
+            ('revealed whole as a string', reach(out_of_view, revealed=dict(out_of_view['revealed'], whole='yes')),
+             ['G3 review: toggle reveal record malformed']),
+            ('a reveal beside a whole toggle', reach(reach_rest, restored=True),
+             ['G3 review: toggle record malformed (a reveal beside a whole toggle)'])):
+        got = geo_problems('review', initial, value)
+        if got != expected:
+            problems.append('G3 toggle must give exactly %r for %s: %r' % (expected, label, got))
     # G8 (Astra D2): each shape differs from the consistent review only in its transcript, so it must draw exactly
     # one problem, from the named G8 check - nothing else may fire, and the right G8 message must be the one.
     unreadable, scroll = 'G8 review: no whole transcript line readable', 'G8 review: transcript overflows its box but is not'
@@ -1823,10 +2002,15 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
                 out['close_error'] = short(error)
         return out
 
-    def press_or_escape(self, run, control):
+    def press_or_escape(self, run, control, scroll=None):
         """A real click when the control is present and own; otherwise Escape inside the pane, which the pane
-        maps to Cancel while active and Close after (dictation.js:464-468). Returns which one happened."""
-        seen = run.js('geometry')['controls'][control]
+        maps to Cancel while active and Close after (dictation.js:464-468). Returns which one happened.
+        `scroll`, passed only by the review Cancel in geo_pass, receives the report column's scrollTop from this
+        same read (record only): the B2 amendment's hosted check that the toggle probe left it where it was."""
+        full = run.js('geometry')
+        if scroll is not None:
+            scroll['rightScrollTop'] = full.get('rightScrollTop')
+        seen = full['controls'][control]
         if seen['present'] and seen['own'] and not seen['disabled']:
             run.page.locator('#' + control).click(timeout=WAIT_MS)
             return 'click'
@@ -2307,9 +2491,16 @@ class DictationLiveE2E(test_worklist.WorklistE2E):
                 run.wait_session('review', since)
                 run.js('frames2')
                 seen = rec['measured']['review'] = run.js('geometry')
+                # Astra B2 amendment: the one transient, restored scroll probe - here, after the observational read,
+                # once per phase-B pass. An evaluate that fails is recorded as an error and fails G3; it is not lost.
+                try:
+                    seen['toggleReach'] = run.js('toggle_reach')
+                except Exception as error:
+                    seen['toggleReach'] = {'error': 'evaluate: ' + short(error), 'restored': None}
                 rec['problems'] += geo_problems('review', initial, seen)
                 rec['reached'].append('review')
-                rec['presses']['cancel'] = self.press_or_escape(run, 'dictation-cancel')
+                rec['after_toggle_probe'] = {}
+                rec['presses']['cancel'] = self.press_or_escape(run, 'dictation-cancel', scroll=rec['after_toggle_probe'])
                 run.wait_session('cancelled', since)
                 rec['reached'].append('cancelled')
             rec['presses']['close'] = self.press_or_escape(run, 'dictation-close')

@@ -11,6 +11,52 @@ spec.loader.exec_module(runner)
 import measurement_ci as ci
 
 
+def dictation_toggle_reach_pins(source, probes):
+    """U4L, Astra B2 amendment (2026-09-24, CI2 G3): the suite's one scrolling probe stays where the decision put it.
+    Returns problems for `source` (tests/e2e/test_dictation_live.py) and its PROBES; the U4L test asserts none."""
+    problems = []
+    moves = ('scrollIntoView(', 'scrollTo(', 'scrollBy(', 'scrollTop =', 'scrollLeft =', 'scrollTop=', 'scrollLeft=')
+    for name, probe in probes.items():
+        if name != 'toggle_reach' and any(token in probe for token in moves):
+            problems.append('%s scrolls; only toggle_reach may' % name)
+    reach = probes.get('toggle_reach', '')
+    pins = ["tg.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });",
+            'out.rest = place();', 'if (!out.rest.whole) {', '} finally {', 'for (const [a, y, x] of saved) {',
+            "try { a.scrollTo({ top: y, left: x, behavior: 'instant' }); } catch (e) {",
+            'out.restored = !failed.length && saved.every(([a, y, x]) => a.scrollTop === y && a.scrollLeft === x);']
+    for pin in pins:
+        if reach.count(pin) != 1:
+            problems.append('toggle_reach must hold exactly once: %s' % pin)
+    if not problems:
+        at = {pin: reach.index(pin) for pin in pins}
+        if not (at['out.rest = place();'] < at['if (!out.rest.whole) {'] < at[pins[0]] < at['} finally {'] <
+                at['for (const [a, y, x] of saved) {'] < at[pins[6]]) or reach.index('saved.push(') > at[pins[0]]:
+            problems.append('toggle_reach order: rest, then the guarded reveal after saving, then restoring in finally')
+        if reach.count('scrollIntoView(') != 1 or reach.count('scrollTo(') != 1:
+            problems.append('toggle_reach scrolls once into view and restores through scrollTo only')
+    for token in ('.focus(', '.click(', 'dispatchEvent', 'blur('):
+        if token in reach:
+            problems.append('toggle_reach must not %s' % token)
+    tree = ast.parse(source)
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    probe_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                   and node.func.attr == 'js' and node.args and isinstance(node.args[0], ast.Constant)]
+    calls = [call for call in probe_calls if call.args[0].value == 'toggle_reach']
+    geo_pass = functions.get('geo_pass')
+    if len(calls) != 1 or geo_pass is None or not any(node is calls[0] for node in ast.walk(geo_pass)):
+        problems.append('toggle_reach must be evaluated exactly once, in geo_pass')
+        return problems
+    reads = [node for node in ast.walk(geo_pass) if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+             and node.value in probe_calls and node.value.args[0].value == 'geometry'
+             and "rec['measured']['review']" in [ast.unparse(target) for target in node.targets]]
+    verdicts = [node for node in ast.walk(geo_pass) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == 'geo_problems' and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == 'review']
+    if len(reads) != 1 or len(verdicts) != 1 or not reads[0].lineno < calls[0].lineno < verdicts[0].lineno:
+        problems.append('toggle_reach must follow the review geometry read and precede the review verdict')
+    return problems
+
+
 class ExecutionSelectionTests(unittest.TestCase):
     def test_image_text_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['image-text']['suites'][0]
@@ -735,6 +781,8 @@ class ExecutionSelectionTests(unittest.TestCase):
             for token in ('setServerCapability', '.start(', '.stop(', '.insert(', '.cancel(', '.close(', 'refresh(',
                           'load(', 'stash(', 'put(', 'updateReportButtons', 'appState'):
                 self.assertNotIn(token, probe, name)
+        # The one scrolling probe (Astra B2 amendment, CI2 G3): confined, restoring, once in review.
+        self.assertEqual(dictation_toggle_reach_pins(source, module.PROBES), [])
         # Helpers come only from the reviewed U4b list, the version pin included (review N-2).
         imported = [alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                     and node.module == 'report_dictation_capture_dom_test' for alias in node.names]
