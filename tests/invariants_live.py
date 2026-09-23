@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
@@ -35,6 +35,7 @@ from urllib.request import (
     HTTPCookieProcessor, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen,
 )
 from live_test_gate import require_live_run
+import dictation_refusal_oracle as u5
 
 
 # 실패 메시지가 핵심 증거인데 Windows CP949가 한글을 깨뜨리면 어떤 불변조건이 무너졌는지
@@ -956,6 +957,101 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+# ── S3-ASR-U5: 받아쓰기 경로의 실스택 거절 배터리 (T1~T8, 26건) ──
+# 판정표·기대 본문·문제 태그는 tests/dictation_refusal_oracle.py(stdlib, .env 미적재)에 있다.
+# 여기서는 호출하고 관측만 한다. 503 NOT_CONFIGURED는 입장 증인일 뿐 거절의 증거가 아니다.
+U5_LINES: list[dict[str, Any]] = []
+U5_PRECONDITIONS: list[dict[str, Any]] = []
+
+
+def u5_snapshot(uid: str, floor: int | None) -> dict[str, Any]:
+    """A1: 스냅숏 하나 = 합성 SELECT 한 번, 사례당 두 번(직전·직후). floor=None이 직전이고, 직후는
+    그 최대 id보다 큰 이 uid의 감사 행을 action과 무관하게 전부 싣는다."""
+    if not re.fullmatch(r"[0-9.]+", uid) or (floor is not None and type(floor) is not int):
+        raise RuntimeError(f"U5 스냅숏을 거부한 비정상 입력: {uid}")
+    audit = "'[]'::jsonb" if floor is None else (
+        "coalesce((SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM \"AuditLog\" a "
+        f"WHERE a.target='{uid}' AND a.id > {floor}), '[]'::jsonb)")
+    rows = psql(
+        "SELECT jsonb_build_object("
+        "'audit_max', (SELECT coalesce(max(id), 0) FROM \"AuditLog\"), "
+        f"'audit_total', (SELECT count(*) FROM \"AuditLog\" WHERE target='{uid}'), "
+        f"'audit', {audit}, "
+        f"'report', (SELECT to_jsonb(r) FROM \"Report\" r WHERE r.uid='{uid}'), "
+        "'drafts', coalesce((SELECT jsonb_agg(to_jsonb(d) ORDER BY d.author) "
+        f"FROM \"ReportDraft\" d WHERE d.uid='{uid}'), '[]'::jsonb), "
+        "'versions', coalesce((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.id) "
+        f"FROM \"ReportVersion\" v WHERE v.uid='{uid}'), '[]'::jsonb), "
+        f"'state', (SELECT to_jsonb(s) FROM \"StudyState\" s WHERE s.uid='{uid}'))::text;"
+    )
+    return json.loads("\n".join(rows))
+
+
+def u5_post(stack: LiveStack, uid: str, body: bytes, headers: dict[str, str], *,
+            opener: Any = None, base: str | None = None) -> tuple[HttpResult, str]:
+    """A5: 원시 바이트를 그대로 보내고 실제로 받은 Cache-Control을 함께 돌려준다.
+    bearer_request·proxy()는 헤더를 버리고 proxy()는 본문을 JSON으로 감싼다."""
+    request = Request((base or stack.api) + f"/studies/{quote(uid)}/dictation", data=body,
+                      headers={"Accept": "application/json", **headers}, method="POST")
+    try:
+        with (opener.open(request, timeout=30) if opener is not None else stack._open(request)) as response:
+            payload, text = _json_or_text(response.read())
+            return HttpResult(response.status, payload, text), ", ".join(response.headers.get_all("Cache-Control") or [])
+    except HTTPError as error:
+        payload, text = _json_or_text(error.read())
+        return HttpResult(error.code, payload, text), ", ".join(error.headers.get_all("Cache-Control") or [])
+
+
+def u5_bearer(stack: LiveStack, uid: str, token: str | None, body: bytes, content_type: str,
+              extra: dict[str, str] | None = None) -> Callable[[], tuple[HttpResult, str]]:
+    # X-KIN-CSRF는 싣지 않는다: bearer 호출은 CSRF 대상이 아니고(A8) 대조가 그것까지 입장으로 증언한다.
+    headers = {"Content-Type": content_type, **(extra or {})}
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
+    return lambda: u5_post(stack, uid, body, headers)
+
+
+def u5_context(stack: LiveStack, fixture: Fixture, pin: str, users: tuple[str, ...]) -> dict[str, Any]:
+    return {"engine_pin": pin, "secret": fixture.secret, "actors": {user: stack.actor(user) for user in users}}
+
+
+def u5_precondition(test: unittest.TestCase, stack: LiveStack, key: str) -> str:
+    """시험마다 한 번: 출하된 진입점이 미설정 엔진과 원본 핀을 말해야 503이 입장 증인이 된다."""
+    boot = stack.request("GET", "/bootstrap", "doctor")
+    capability = boot.body.get("dictation") if boot.status == 200 and isinstance(boot.body, dict) else None
+    pin = u5.source_engine_pin((ROOT / "api" / "src" / "asr.service.ts").read_text(encoding="utf-8"))
+    line = u5.precondition(key, capability, pin, u5.wav())
+    U5_PRECONDITIONS.append(line)
+    print("U5-PRECONDITION " + json.dumps(line, ensure_ascii=True, sort_keys=True), flush=True)
+    test.assertEqual(line["problems"], [], f"U5 {key} 전제 실패: 엔진이 설정됐거나 원본 핀·기준 바이트와 다릅니다")
+    return str(pin)
+
+
+def u5_call(records: list[dict[str, Any]], case_id: str, uid: str,
+            send: Callable[[], tuple[HttpResult, str]]) -> None:
+    """A4: 행 비교는 이 호출 하나의 바로 앞뒤다. 사례 사이의 선언된 준비 단계는 다음 직전 스냅숏에 들어간다."""
+    before = u5_snapshot(uid, None)
+    result, cache_control = send()
+    after = u5_snapshot(uid, before["audit_max"])
+    records.append({"id": case_id, "status": result.status, "body": result.body, "text": result.text,
+                    "cache_control": cache_control, "before": before, "after": after})
+
+
+def u5_emit(key: str, records: list[dict[str, Any]], context: dict[str, Any]) -> list[dict[str, Any]]:
+    # finally에서 부른다: 준비가 중간에 죽어도 이미 부른 사례와 못 부른 사례가 한 줄씩 남는다.
+    lines = u5.evaluate(key, records, context)
+    for line in lines:
+        print("U5-CASE " + json.dumps(line, ensure_ascii=True, sort_keys=True), flush=True)
+    U5_LINES.extend(lines)
+    return lines
+
+
+def u5_assert(test: unittest.TestCase, key: str, lines: list[dict[str, Any]]) -> None:
+    test.assertEqual(sorted(line["id"] for line in lines), sorted(u5.case_ids(key)))
+    failed = {line["id"]: line["problems"] for line in lines if line["problems"]}
+    test.assertEqual(failed, {}, f"U5 {key}: 거절·대조 사례가 판정표와 다릅니다")
+
+
 class BffInvariantTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1131,6 +1227,40 @@ class BffInvariantTests(unittest.TestCase):
             live_clients["kin-bff"].get("attributes", {}).get("pkce.code.challenge.method"),
             "S256",
         )
+
+    def test_dictation_u5_07_cookie_session_csrf(self) -> None:
+        """S3-ASR-U5 T7: 쿠키 호출은 CSRF 헤더와 실제 세션이 있어야 받아쓰기에 들어온다.
+        R-CSRF·R-FORGED는 같은 세션·같은 바이트의 C-SESSION이 입장해야 센다."""
+        pin = u5_precondition(self, self.stack, "T7")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, base, wave = fixture.uid, self.stack.proxy + "/api", u5.wav()
+            context = u5_context(self.stack, fixture, pin, ("doctor",))
+            # 위조 sid의 만료 Set-Cookie가 진짜 세션 병을 비우지 않도록 쿠키 병 없는 opener로 보낸다.
+            raw = build_opener(HTTPSHandler(context=self.context))
+            opener = None
+            logged_out: HttpResult | None = None
+            try:
+                opener, _sid = self.bff_login("doctor", self.stack.passwords["doctor"])
+                me = self.proxy(opener, "GET", "/api/me")
+                self.assertEqual((me.status, me.body.get("actor") if isinstance(me.body, dict) else None),
+                                 (200, self.stack.actor("doctor")), "쿠키 세션의 행위자가 doctor가 아닙니다")
+                u5_call(records, "R-CSRF", uid, lambda: u5_post(
+                    self.stack, uid, wave, {"Content-Type": "audio/wav"}, opener=opener, base=base))
+                u5_call(records, "R-FORGED", uid, lambda: u5_post(
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", "Cookie": "kin_sid=forged", "X-KIN-CSRF": "1"},
+                    opener=raw, base=base))
+                u5_call(records, "C-SESSION", uid, lambda: u5_post(
+                    self.stack, uid, wave, {"Content-Type": "audio/wav", "X-KIN-CSRF": "1"}, opener=opener, base=base))
+            finally:
+                try:
+                    if opener is not None:
+                        logged_out = self.proxy(opener, "POST", "/api/auth/logout", headers={"X-KIN-CSRF": "1"})
+                finally:
+                    lines = u5_emit("T7", records, context)
+            self.assertIsNotNone(logged_out)
+            self.assertEqual(logged_out.status, 204, logged_out.text)
+            u5_assert(self, "T7", lines)
 
     def test_only_four_routes_are_public(self) -> None:
         opener = build_opener(HTTPSHandler(context=self.context), NoRedirect())
@@ -2956,6 +3086,155 @@ class LiveInvariantTests(unittest.TestCase):
                         self.assertEqual(result.status, 404, result.text)
                     self.assert_snapshot_unchanged(fixture, "kdoctor", before)
 
+    # ── S3-ASR-U5: 위 배터리는 <500만 본다. 여기서는 받아쓰기가 초안 저장과 같은 사람을 같은 답으로
+    #    거절하고, 거절이 아무것도 쓰지도 감사하지도 않으며, 같은 사람을 똑같이 들여보내는지 본다. ──
+
+    def test_dictation_u5_01_role_guard_and_parser_order(self) -> None:
+        """T1: 인증·역할 관문이 파서가 미뤄 둔 형식 오류(400/413)보다 먼저 답한다.
+        R-ROLE*·R-UNAUTH·R-GATEWAY는 같은 fixture·같은 바이트로 입장한 C-W 옆에서만 센다."""
+        pin = u5_precondition(self, self.stack, "T1")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, wave, big = fixture.uid, u5.wav(), u5.oversized()
+            context = u5_context(self.stack, fixture, pin, ("doctor", "tech"))
+            doctor, tech = self.stack.token("doctor"), self.stack.token("tech")
+            try:
+                u5_call(records, "C-W", uid, u5_bearer(self.stack, uid, doctor, wave, "audio/wav"))
+                u5_call(records, "R-ROLE", uid, u5_bearer(self.stack, uid, tech, wave, "audio/wav"))
+                u5_call(records, "R-ROLE-CT", uid, u5_bearer(self.stack, uid, tech, wave, "application/json"))
+                u5_call(records, "R-ROLE-BIG", uid, u5_bearer(self.stack, uid, tech, big, "audio/wav"))
+                u5_call(records, "R-UNAUTH", uid, u5_bearer(self.stack, uid, None, wave, "application/json"))
+                # A3: 정확한 경로 거절 본문은 validGateway를 통과한 뒤에만 나온다(무효 신원은 코드가 다르다).
+                u5_call(records, "R-GATEWAY", uid, u5_bearer(
+                    self.stack, uid, self.stack.service_token("gateway"), wave, "audio/wav"))
+                # 기사 토큰 자체는 살아 있다: 위 403은 죽은 자격증명이 아니라 역할 관문이다.
+                self.assert_status(self.stack.request("GET", "/bootstrap", "tech"), 200)
+            finally:
+                lines = u5_emit("T1", records, context)
+            u5_assert(self, "T1", lines)
+
+    def test_dictation_u5_02_input_refusals_after_the_gate(self) -> None:
+        """T2: 관문을 지난 형식 오류는 정확한 코드로 답하고 dictation.request 한 행만 남긴다.
+        파서 거절은 본문을 버리므로 bytes 0, 검증기 거절은 실제 길이 46과 seconds 0이다."""
+        pin = u5_precondition(self, self.stack, "T2")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, wave = fixture.uid, u5.wav()
+            context = u5_context(self.stack, fixture, pin, ("doctor",))
+            doctor = self.stack.token("doctor")
+            try:
+                u5_call(records, "I-CT", uid, u5_bearer(self.stack, uid, doctor, wave, "application/json"))
+                # 압축하지 않은 같은 바이트: 파서는 Content-Encoding만 보고 풀지 않고 거절한다.
+                u5_call(records, "I-ENC", uid, u5_bearer(
+                    self.stack, uid, doctor, wave, "audio/wav", {"Content-Encoding": "gzip"}))
+                u5_call(records, "I-FMT", uid, u5_bearer(self.stack, uid, doctor, u5.wav(44100), "audio/wav"))
+                u5_call(records, "I-BIG", uid, u5_bearer(self.stack, uid, doctor, u5.oversized(), "audio/wav"))
+                u5_call(records, "C-W2", uid, u5_bearer(self.stack, uid, doctor, wave, "audio/wav"))
+            finally:
+                lines = u5_emit("T2", records, context)
+            u5_assert(self, "T2", lines)
+
+    def test_dictation_u5_03_hold_refuses_other_actor_and_is_untouched(self) -> None:
+        """T3: 남의 살아 있는 점유는 REPORT_HELD, 점유자와 만료 점유는 입장. 어떤 호출도 점유를
+        갱신하거나 가져가지 않는다 — StudyState 행은 호출마다 바로 앞뒤로 같다(A4)."""
+        pin = u5_precondition(self, self.stack, "T3")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, wave = fixture.uid, u5.wav()
+            context = u5_context(self.stack, fixture, pin, ("doctor", "doctor2"))
+            context["holder"] = self.stack.actor("doctor")
+            doctor, doctor2 = self.stack.token("doctor"), self.stack.token("doctor2")
+            try:
+                self.assert_status(self.stack.request("POST", f"/studies/{quote(uid)}/hold", "doctor"), 201)
+                u5_call(records, "R-HELD", uid, u5_bearer(self.stack, uid, doctor2, wave, "audio/wav"))
+                u5_call(records, "C-HOLDER", uid, u5_bearer(self.stack, uid, doctor, wave, "audio/wav"))
+                # A4: 두 대조 사이의 선언된 준비 단계다. C-EXPIRED의 직전 스냅숏이 이 쓰기 뒤에 찍히므로
+                # 어느 호출의 공도 탓도 되지 않는다.
+                self.backdate_hold(uid, 6)
+                u5_call(records, "C-EXPIRED", uid, u5_bearer(self.stack, uid, doctor2, wave, "audio/wav"))
+            finally:
+                lines = u5_emit("T3", records, context)
+            u5_assert(self, "T3", lines)
+
+    def test_dictation_u5_04_preliminary_third_party_refused(self) -> None:
+        """T4: RS=P는 작성자와 지정 상급 판독의만 들인다. 제3자의 거절 본문에 예비 판독 내용이 없다."""
+        pin = u5_precondition(self, self.stack, "T4")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, wave = fixture.uid, u5.wav()
+            context = u5_context(self.stack, fixture, pin, ("doctor", "doctor2", "jmryu"))
+            try:
+                self.preliminary(fixture, author="doctor", reviewer="jmryu")
+                state = self.state(fixture, "doctor")
+                context["pre_reviewer"] = state.get("preReviewer") if state else None
+                self.assertEqual(context["pre_reviewer"], self.stack.actor("jmryu"), "지정 상급 판독의가 다릅니다")
+                self.assert_status(self.stack.request("GET", "/bootstrap", "doctor2"), 200)   # 제3자 토큰은 살아 있다
+                u5_call(records, "R-PRELIM", uid, u5_bearer(
+                    self.stack, uid, self.stack.token("doctor2"), wave, "audio/wav"))
+                u5_call(records, "C-P-AUTHOR", uid, u5_bearer(
+                    self.stack, uid, self.stack.token("doctor"), wave, "audio/wav"))
+                u5_call(records, "C-P-REVIEWER", uid, u5_bearer(
+                    self.stack, uid, self.stack.token("jmryu"), wave, "audio/wav"))
+            finally:
+                lines = u5_emit("T4", records, context)
+            u5_assert(self, "T4", lines)
+
+    def test_dictation_u5_05_filming_non_emergency_refused(self) -> None:
+        """T5: 촬영 중(Unverified) 비응급은 409, 같은 검사를 응급(E)으로 바꾸면 입장한다."""
+        pin = u5_precondition(self, self.stack, "T5")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, wave, path = fixture.uid, u5.wav(), f"/studies/{quote(fixture.uid)}"
+            context = u5_context(self.stack, fixture, pin, ("doctor",))
+            doctor = self.stack.token("doctor")
+            try:
+                self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Unverified", "em": "N"}), 200)
+                u5_call(records, "R-UNVERIFIED", uid, u5_bearer(self.stack, uid, doctor, wave, "audio/wav"))
+                self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Verified"}), 200)
+                self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Unverified", "em": "E"}), 200)
+                u5_call(records, "C-EMERGENCY", uid, u5_bearer(self.stack, uid, doctor, wave, "audio/wav"))
+            finally:
+                lines = u5_emit("T5", records, context)
+            u5_assert(self, "T5", lines)
+
+    def test_dictation_u5_06_institution_follows_tele_visibility(self) -> None:
+        """T6: 다른 기관은 404, 원격판독을 받은 기관은 입장. StudyState가 없는 uid는 같은 기관에도
+        404이며 행을 만들지 않는다(R-NOSTATE)."""
+        pin = u5_precondition(self, self.stack, "T6")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid, wave = fixture.uid, u5.wav()
+            probe = "2.25." + str(uuid.uuid4().int)
+            context = u5_context(self.stack, fixture, pin, ("doctor", "kdoctor"))
+            doctor, kdoctor = self.stack.token("doctor"), self.stack.token("kdoctor")
+            try:
+                u5_call(records, "R-TENANT", uid, u5_bearer(self.stack, uid, kdoctor, wave, "audio/wav"))
+                self.assert_status(self.stack.request(
+                    "PATCH", f"/studies/{quote(uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+                u5_call(records, "C-TELE", uid, u5_bearer(self.stack, uid, kdoctor, wave, "audio/wav"))
+                u5_call(records, "R-NOSTATE", probe, u5_bearer(self.stack, probe, doctor, wave, "audio/wav"))
+            finally:
+                try:
+                    self.stack.cleanup_fixture(probe)
+                finally:
+                    lines = u5_emit("T6", records, context)
+            u5_assert(self, "T6", lines)
+
+    def test_dictation_u5_08_approved_report_parity(self) -> None:
+        """T8: 승인(A)에도 초안은 허용되므로 받아쓰기도 입장한다. 승인본·이력은 그대로, 응답에 본문이 없다."""
+        pin = u5_precondition(self, self.stack, "T8")
+        records: list[dict[str, Any]] = []
+        with self.stack.fixture() as fixture:
+            uid = fixture.uid
+            context = u5_context(self.stack, fixture, pin, ("doctor2",))
+            try:
+                self.approve(fixture)
+                u5_call(records, "C-A", uid, u5_bearer(
+                    self.stack, uid, self.stack.token("doctor2"), u5.wav(), "audio/wav"))
+            finally:
+                lines = u5_emit("T8", records, context)
+            u5_assert(self, "T8", lines)
+
     def test_dicom_routes_enforce_tenant_boundary_and_preserve_tele_access(self) -> None:
         with self.stack.fixture() as fixture:
             uid = quote(fixture.uid)
@@ -3391,6 +3670,13 @@ class LiveInvariantTests(unittest.TestCase):
                 "동시 commitReport가 같은 version을 계산해 500을 냈습니다. "
                 f"statuses={statuses}, errors={server_errors}",
             )
+
+
+def tearDownModule() -> None:
+    # U5 사례가 하나라도 돈 실행만 끝에 요약 한 줄을 남긴다. 판정은 각 시험의 단언이 이미 했다.
+    if U5_LINES or U5_PRECONDITIONS:
+        print("U5-SUMMARY " + json.dumps(u5.summary(U5_LINES, U5_PRECONDITIONS), ensure_ascii=True, sort_keys=True),
+              flush=True)
 
 
 if __name__ == "__main__":

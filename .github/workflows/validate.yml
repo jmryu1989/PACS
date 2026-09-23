@@ -685,6 +685,10 @@ jobs:
           "$RUNNER_TEMP/hp-python/bin/python" -m playwright install --with-deps chromium
       - name: Confirm exact declared invariants, worklist and hanging protocol selection
         run: python3 scripts/record-run.py --run-dir tmp/hp-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/invariants_live.py --file tests/e2e/test_worklist.py --file worklist-v0/hpacs-lite/main.html --file api/src/pacs.service.ts --file tests/hanging_protocol_api_live.py --file tests/e2e/test_hanging_protocol.py -- "$RUNNER_TEMP/hp-python/bin/python" -B tests/execution_selection_test.py
+      - name: Dictation refusal oracle vectors and tagged mutants (S3-ASR-U5, stdlib only)
+        # The judge of the live U5 cases, proven before they run; it never imports invariants_live.py (.env).
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/hp-ci/dictation-refusal-oracle --cwd . --file tests/dictation_refusal_oracle.py --file tests/dictation_refusal_oracle_test.py --file tests/invariants_live.py --file api/src/asr.service.ts --file api/src/auth.guard.ts --file api/src/auth.service.ts --file api/src/pacs.service.ts --file api/src/dictation.controller.ts --file api/src/dictation-parser.ts --file api/src/dictation-audio.ts -- python3 -B tests/dictation_refusal_oracle_test.py
       - name: Isolated declared invariants, worklist and hanging protocol tests
         timeout-minutes: 28
         run: |
