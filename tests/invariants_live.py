@@ -2037,6 +2037,13 @@ class LiveInvariantTests(unittest.TestCase):
             with self.subTest(cell="T×addendum"):
                 rejected("doctor", "addendum", v, "승인(RS: A)된")
             v = accepted("doctor", "preliminary", v, "P", reviewer=senior)           # T→P
+            # P×preliminary: 다시 지정이 열려 있으면 지정자가 작성자를 거꾸로 지정해 작성자가 자기
+            # 예비 판독을 승인할 수 있었다. 누가 누구를 부르든 400이고 지정·본문·이력은 그대로다.
+            for user, target in (("doctor", "jmryu"), ("doctor", "doctor2"), ("jmryu", "doctor2"), ("jmryu", "doctor")):
+                with self.subTest(cell=f"P×preliminary({user}→{target})"):
+                    rejected(user, "preliminary", v, "지정을 바꿀 수 없습니다", reviewer=self.stack.actor(target))
+            designation = self.report_state(fixture, "doctor")
+            self.assertEqual((designation["preDoc"], designation["preReviewer"]), (self.stack.actor("doctor"), senior))
             with self.subTest(cell="P×addendum(작성자)"):
                 rejected("doctor", "addendum", v, "승인(RS: A)된")
             with self.subTest(cell="P×defer(지정자)"):
@@ -2059,6 +2066,11 @@ class LiveInvariantTests(unittest.TestCase):
             v = accepted("doctor", "defer", v, "H", reason="재촬영 필요")             # T→H
             v = accepted("doctor2", "preliminary", v, "P", reviewer=self.stack.actor("doctor"))   # H→P
             v = accepted("doctor", "reset", v, "W", reason="표 검증")                  # P→W 지정자의 사유 있는 취소
+            # 지정을 바꾸는 길은 거절 안내대로 사유 있는 취소 뒤 재지정이다. 새 지정이 그대로 서야 한다.
+            v = accepted("doctor2", "preliminary", v, "P", reviewer=senior)           # W→P 취소 뒤 재지정
+            designation = self.report_state(fixture, "doctor2")
+            self.assertEqual((designation["preDoc"], designation["preReviewer"]), (self.stack.actor("doctor2"), senior))
+            v = accepted("jmryu", "reset", v, "W", reason="표 검증")                   # P→W
             v = accepted("doctor", "defer", v, "H", reason="임상정보 부족")           # W→H
             v = accepted("doctor", "approve", v, "A")                                 # H→A
             self.assertEqual([row["version"] for row in self.versions(fixture, "doctor")], list(range(1, v + 1)))
