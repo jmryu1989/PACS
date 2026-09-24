@@ -350,7 +350,8 @@ class AgentPins(unittest.TestCase):
         method = between(INVARIANTS, "    def test_gateway_agent_queue_and_batch_contract(self) -> None:",
                          "    def test_production_gateway_contract_is_declared")
         self.assertEqual(re.findall(r'self\.assertIn\("Ran (\d+) tests"', method), [str(count)])
-        self.assertEqual(count, 18)
+        # 18 -> 25: S4-U4 RetryNowTests (seven cases); tests/gateway_retry_source_test.py pins that class by name.
+        self.assertEqual(count, 25)
 
 
 class ServerPins(unittest.TestCase):
@@ -520,17 +521,20 @@ class MigrationPins(unittest.TestCase):
 
     def test_image_and_restore_bookkeeping_name_the_migration_and_the_table(self):
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
-        self.assertEqual(names[-1], MIGRATION_NAME)
+        # S4-U4's gateway-retry-request migration is the one directly after this one (its FK needs this table);
+        # the order is pinned rather than "last", so a later additive migration moves only the counts.
+        self.assertEqual(names[names.index(MIGRATION_NAME) + 1], "20260924140000_gateway_retry_request")
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         fixture = text("tests", "ops_product_transfer_fixture.py")
-        self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql']", fixture)
+        self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
         self.assertEqual(fixture.count("'GatewayReceipt'"), 3)   # TABLES, the seeding order and the synthetic row
         self.assertIn("rows['GatewayReceipt'] = [", fixture)
         transfer = text("tests", "ops_product_transfer_test.py")
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 28)", transfer)
-        self.assertIn("self.assertEqual(len(transfer.TABLES), 38)", transfer)
+        # 28 -> 29 migrations and 38 -> 39 tables: S4-U4 added GatewayRetryRequest (tests/gateway_retry_source_test.py).
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 29)", transfer)
+        self.assertIn("self.assertEqual(len(transfer.TABLES), 39)", transfer)
         for pinned in ("report_structure_migration_test.py", "order_reconciliation_source_test.py"):
-            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 28)", text("tests", pinned), pinned)
+            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 29)", text("tests", pinned), pinned)
 
 
 class WorkflowPins(unittest.TestCase):

@@ -1,0 +1,82 @@
+{
+  "comment": "S4-U4 Now Retry shared vectors. Read by tests/gateway_retry_source_test.py (an independent stdlib model with named wrong rules, local and hosted) and tests/gateway_retry_server_test.cjs (the compiled api/src/gateway-retry.ts in kin-api:ci). requestBody/pollQuery: `ok` or the refused field. `absent` means no body at all (undefined). decide: the stored receipt the member request would bind. pending: the D2 predicate the poll SQL implements (proved over real rows only by the live route test). apply: the agent-side D4 confirmation plus compare-and-set. nudge: the one row change an applied request makes.",
+  "epoch": "0a1b2c3d-0000-4000-8000-00000000000a",
+  "otherEpoch": "ffffffff-ffff-4fff-bfff-ffffffffffff",
+  "pollLimit": 100,
+  "requestBody": [
+    {"id": "no body at all", "absent": true, "ok": true},
+    {"id": "null body", "body": null, "ok": true},
+    {"id": "empty object", "body": {}, "ok": true},
+    {"id": "client epoch", "body": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a"}, "error": "body"},
+    {"id": "client seq", "body": {"seq": 5}, "error": "body"},
+    {"id": "client reason", "body": {"reason": "please"}, "error": "body"},
+    {"id": "client institution", "body": {"institutionId": "hallym"}, "error": "body"},
+    {"id": "client time", "body": {"requestedAt": "2026-09-24T00:00:00Z"}, "error": "body"},
+    {"id": "empty array", "body": [], "error": "body"},
+    {"id": "array of an empty object", "body": [{}], "error": "body"},
+    {"id": "string", "body": "retry", "error": "body"},
+    {"id": "empty string", "body": "", "error": "body"},
+    {"id": "number", "body": 1, "error": "body"},
+    {"id": "zero", "body": 0, "error": "body"},
+    {"id": "true", "body": true, "error": "body"},
+    {"id": "false", "body": false, "error": "body"},
+    {"id": "prototype key", "body": {"__proto__": {}}, "error": "body"}
+  ],
+  "pollQuery": [
+    {"id": "one lowercase epoch", "query": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a"}, "ok": true},
+    {"id": "another epoch is a valid query", "query": {"epoch": "ffffffff-ffff-4fff-bfff-ffffffffffff"}, "ok": true},
+    {"id": "no query", "query": {}, "error": "query"},
+    {"id": "null query", "query": null, "error": "query"},
+    {"id": "array query", "query": [], "error": "query"},
+    {"id": "extra institution key", "query": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "institution": "hallym"}, "error": "query"},
+    {"id": "extra seq key", "query": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": "5"}, "error": "query"},
+    {"id": "another key only", "query": {"uid": "1.2.3"}, "error": "query"},
+    {"id": "uppercase epoch", "query": {"epoch": "0A1B2C3D-0000-4000-8000-00000000000A"}, "error": "epoch"},
+    {"id": "not a uuid", "query": {"epoch": "not-an-epoch"}, "error": "epoch"},
+    {"id": "braced uuid", "query": {"epoch": "{0a1b2c3d-0000-4000-8000-00000000000a}"}, "error": "epoch"},
+    {"id": "trailing space", "query": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a "}, "error": "epoch"},
+    {"id": "empty epoch", "query": {"epoch": ""}, "error": "epoch"},
+    {"id": "number epoch", "query": {"epoch": 1}, "error": "epoch"},
+    {"id": "R6 a repeated key becomes an array", "query": {"epoch": ["0a1b2c3d-0000-4000-8000-00000000000a", "0a1b2c3d-0000-4000-8000-00000000000a"]}, "error": "epoch"},
+    {"id": "R6 a one-element array", "query": {"epoch": ["0a1b2c3d-0000-4000-8000-00000000000a"]}, "error": "epoch"},
+    {"id": "R6 a bracket key becomes an object", "query": {"epoch": {"x": "0a1b2c3d-0000-4000-8000-00000000000a"}}, "error": "epoch"}
+  ],
+  "decide": [
+    {"id": "no stored receipt", "receipt": null, "expect": "not_retry"},
+    {"id": "pending", "receipt": {"phase": "pending"}, "expect": "not_retry"},
+    {"id": "announcing", "receipt": {"phase": "announcing"}, "expect": "not_retry"},
+    {"id": "sending", "receipt": {"phase": "sending"}, "expect": "not_retry"},
+    {"id": "retry is the only eligible phase", "receipt": {"phase": "retry"}, "expect": "eligible"},
+    {"id": "failed is F-01, never eligible", "receipt": {"phase": "failed"}, "expect": "unsupported_f01"},
+    {"id": "complete", "receipt": {"phase": "complete"}, "expect": "not_retry"}
+  ],
+  "pending": [
+    {"id": "P1 the current binding", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "retry", "institutionId": "hallym"}, "study": "hallym", "expect": true},
+    {"id": "P2 the next receipt (announcing) ends it", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 6, "phase": "announcing", "institutionId": "hallym"}, "study": "hallym", "expect": false},
+    {"id": "P3 a later retry state is not the requested one", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 9, "phase": "retry", "institutionId": "hallym"}, "study": "hallym", "expect": false},
+    {"id": "P4 another stored epoch at the same seq", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "ffffffff-ffff-4fff-bfff-ffffffffffff", "seq": 5, "phase": "retry", "institutionId": "hallym"}, "study": "hallym", "expect": false},
+    {"id": "P5 failed at the same binding", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "failed", "institutionId": "hallym"}, "study": "hallym", "expect": false},
+    {"id": "P6 complete at the same binding", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "complete", "institutionId": "hallym"}, "study": "hallym", "expect": false},
+    {"id": "P7 another institution's receipt", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "retry", "institutionId": "kin-center"}, "study": "hallym", "expect": false},
+    {"id": "P8 another institution's study", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "retry", "institutionId": "hallym"}, "study": "kin-center", "expect": false},
+    {"id": "P9 a recreated queue polls with another epoch", "me": "hallym", "poll": "ffffffff-ffff-4fff-bfff-ffffffffffff", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "retry", "institutionId": "hallym"}, "study": "hallym", "expect": false},
+    {"id": "P10 no stored receipt", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5}, "receipt": null, "study": "hallym", "expect": false},
+    {"id": "P11 the old request of an earlier retry state", "me": "hallym", "poll": "0a1b2c3d-0000-4000-8000-00000000000a", "request": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 3}, "receipt": {"epoch": "0a1b2c3d-0000-4000-8000-00000000000a", "seq": 5, "phase": "retry", "institutionId": "hallym"}, "study": "hallym", "expect": false}
+  ],
+  "apply": [
+    {"id": "A1 an exact duplicate for this study", "local": "waiting", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "duplicate"}}, "expect": true},
+    {"id": "A2 stored: KIN held an older state", "local": "waiting", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "stored"}}, "expect": false},
+    {"id": "A3 stale: this queue went back in time", "local": "waiting", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "stale"}}, "expect": false},
+    {"id": "A4 a duplicate for another study", "local": "waiting", "answer": {"status": 200, "body": {"studyUid": "1.2.4", "result": "duplicate"}}, "expect": false},
+    {"id": "A5 a duplicate with an extra key", "local": "waiting", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "duplicate", "extra": 1}}, "expect": false},
+    {"id": "A6 a duplicate-looking body on a 5xx", "local": "waiting", "answer": {"status": 503, "body": {"studyUid": "1.2.3", "result": "duplicate"}}, "expect": false},
+    {"id": "A7 an epoch refusal", "local": "waiting", "answer": {"status": 409, "body": {"code": "GATEWAY_EPOCH_UNRECOGNISED"}}, "expect": false},
+    {"id": "A8 already eligible: no confirmation is sent", "local": "eligible", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "duplicate"}}, "expect": false},
+    {"id": "A9 the row moved on to announcing", "local": "announcing", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "duplicate"}}, "expect": false},
+    {"id": "A10 unknown or never announced", "local": "absent", "answer": {"status": 200, "body": {"studyUid": "1.2.3", "result": "duplicate"}}, "expect": false}
+  ],
+  "nudge": {
+    "before": {"phase": "retry", "attempt": 3, "next_at": 1790000120.5, "last_error": "STOW HTTP 503", "error_code": "stow_http", "successful_sops": "[\"1.2.3.1\"]", "batch_index": 2, "seq": 11, "reported_seq": 11, "local_count": 4, "success_count": 1, "updated_at": 1790000000.25},
+    "after": {"phase": "retry", "attempt": 3, "next_at": 0, "last_error": "STOW HTTP 503", "error_code": "stow_http", "successful_sops": "[\"1.2.3.1\"]", "batch_index": 2, "seq": 11, "reported_seq": 11, "local_count": 4, "success_count": 1, "updated_at": 1790000000.25}
+  }
+}

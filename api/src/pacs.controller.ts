@@ -77,6 +77,13 @@ export class PacsController {
     return this.svc.gatewayReceipt(body, caller(req));
   }
 
+  /** S4-U4 Gateway 전용: 이 epoch에 대기 중인 Now Retry 요청의 studyUid 목록만. 쿼리는 epoch 하나다. */
+  @Get('gateway/retry-requests')
+  @Header('Cache-Control', 'no-store')
+  gatewayRetryRequests(@Query() query: any, @Req() req: any) {
+    return this.svc.gatewayRetryRequests(query, caller(req));
+  }
+
   @Post('dicom/lookup')
   @HttpCode(200)
   dicomLookup(@Body() body: any, @Req() req: any) {
@@ -222,6 +229,13 @@ export class PacsController {
   @Post('studies/:uid/assign')
   assign(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
     return this.svc.assignInstitution(uid, String(body?.institutionId ?? ''), caller(req));
+  }
+
+  /** S4-U4 Now Retry 요청. 본문은 비어 있어야 하고 묶을 영수증은 서버가 정한다. 200은 "저장됨"이지 "재시도됨"이 아니다. */
+  @Post('studies/:uid/gateway-retry')
+  @HttpCode(200)
+  requestGatewayRetry(@Param('uid') uid: string, @Body() body: any, @Req() req: any) {
+    return this.svc.requestGatewayRetry(uid, body, caller(req));
   }
 
   @Patch('studies/:uid')

@@ -124,6 +124,21 @@ model GatewayReceipt {
   errorCode     String?  @db.VarChar(40)
   receivedAt    DateTime
   study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Cascade, onUpdate: Restrict)
+  retryRequests GatewayRetryRequest[]
+}
+
+/// S4-U4 Now Retry 요청. **추가만 하는 이력이다** — 제품 코드는 고치거나 지우지 않고, 영수증(곧 검사 행)이
+/// 지워질 때만 함께 사라진다. 한 행은 사람이 요청한 순간 저장돼 있던 `retry` 영수증 상태 (epoch, seq) 하나에
+/// 묶인다. Gateway가 더 새 상태를 보고하면 이 행은 더는 전달되지 않는 기록으로 남는다(확인 경로가 따로 없다).
+/// 요청자는 AuditLog에, 기관은 영수증·StudyState에 있으므로 여기 두지 않는다. 시각은 KIN 서버 시각이다.
+model GatewayRetryRequest {
+  studyUid    String
+  epoch       String   @db.Uuid
+  seq         BigInt
+  requestedAt DateTime
+  receipt GatewayReceipt @relation(fields: [studyUid], references: [studyUid], onDelete: Cascade, onUpdate: Restrict)
+
+  @@id([studyUid, epoch, seq])
 }
 
 /// Append-only communication history, separate from report and DICOM content.

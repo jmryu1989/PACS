@@ -51,6 +51,9 @@ OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("applyObservation"
 # reconciliation display. Sliced too; its model stays null here unless a case starts it
 # (tests/order_reconciliation_dom_test.py does), so the cases below run the same code path as before.
 ORDERS = "\n".join(extract_function(MAIN, name) for name in ("applyOrderReconciliation", "renderOrderReconciliation"))
+# S4-U4: renderObservation now draws Now Retry, and the request is the shipped function too. The slice starts at
+# `function`, so its `async` is put back here; api() and KinAuth.has() are the harness's recorded stand-ins.
+RETRY = "async " + extract_function(MAIN, "requestGatewayRetry")
 CURRENT = {
     "uid": "1.2.3", "count": 5, "series": 2, "acc": "ACC-1", "id": "PID-1", "name": "Patient",
     "sourcePatientKey": "hospital|patient", "birth": "19800101", "date": "20260912", "sex": "O",
@@ -60,7 +63,7 @@ CURRENT = {
 
 HARNESS = """<!doctype html><html><body>
 <span id=\"observation-status\" hidden></span><details id=\"not-observed\" hidden><summary id=\"not-observed-summary\"></summary><div id=\"not-observed-list\"></div></details>
-<div id=\"study-receipt\" hidden><span id=\"receipt-assignment\"></span><span id=\"receipt-observation\"></span><span id=\"receipt-gateway\"></span></div>
+<div id=\"study-receipt\" hidden><span id=\"receipt-assignment\"></span><span id=\"receipt-observation\"></span><span id=\"receipt-gateway\"></span><button type=\"button\" id=\"receipt-retry\" hidden>Now Retry</button><span id=\"receipt-retry-note\"></span></div>
 <details id=\"order-reconciliation\" hidden><summary id=\"order-reconciliation-summary\"></summary><div id=\"order-reconciliation-list\"></div></details>
 <table><tbody id=\"rows\"></tbody></table><textarea id=\"findings\">LOCAL FINDINGS</textarea>
 <textarea id=\"conclusion\">LOCAL CONCLUSION</textarea><textarea id=\"recommendation\">LOCAL RECOMMENDATION</textarea>
@@ -71,7 +74,9 @@ let studies=INITIAL,selectedUid='1.2.3',heldUid='1.2.3',appState={'1.2.3':{...IN
 let nextReply=null,readStarted=0,readResolver=null,toasts=[],renders=0,loadReports=0,buttonUpdates=0,observed=[];
 const worklistRefresh={seconds:()=>30},favoriteList={refresh:async()=>{}},studyTagList={refresh:async()=>{}},worklistAlerts={observe:value=>observed.push(value)};
 const studyPageClient={busy:false,paused:false,clear(){},read:async options=>{readStarted++;if(window.readError)throw Object.assign(new Error('synthetic observation failure'),window.readError);if(readResolver)return await new Promise(resolve=>window.releaseRead=value=>resolve(value));return structuredClone(nextReply)}};
-const assertStudyOwner=()=>{},KinAuth={logout:async()=>{}},goOffline=()=>{};
+let grants=[],apiCalls=[],gatewayRetryRequestSeq=0;
+const assertStudyOwner=()=>{},KinAuth={logout:async()=>{},has:role=>grants.includes(role)},goOffline=()=>{};
+function api(method,path,body){apiCalls.push({method,path,body});return new Promise((resolve,reject)=>{window.settleApi=(ok,value)=>ok?resolve(value):reject(value)})}
 function applyState(value){return value}function fmtD(value){return value}
 function updateNoteSummary(){}function updateReaderAssignment(){}
 // Nothing is waiting to converge in these cases; the non-empty set is exercised by
@@ -86,6 +91,8 @@ let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===
 let orderReconciliationModel=null;
 OBSERVESTATE
 ORDERSTATE
+RETRYSTATE
+$('#receipt-retry').addEventListener('click',requestGatewayRetry);
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
 function render(){renders++;rows.innerHTML=studies.map(s=>`<tr data-uid="${s.uid}"><td data-count>${s.count}</td><td data-series>${s.series}</td></tr>`).join('')}
 function loadReport(){loadReports++}function updateReportButtons(){buttonUpdates++}function toast(message,type){toasts.push({message,type})}
@@ -96,7 +103,7 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
    .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
-   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS)
+   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("RETRYSTATE", RETRY)
 
 OWNER = ["hospital", "reader-sub"]
 
@@ -311,6 +318,101 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.poll(reply(self.receipt_row(done, 14), other, at=self.at(6)))
         self.assertEqual([done, None], self.page.evaluate("studies.map(s=>s.gatewayReceipt)"))
         self.assertTrue(self.text("#receipt-gateway").endswith("): 병원 보유 12건 중 12건 전송"))
+
+    # ── S4-U4: Now Retry on the same receipt block, through the same real poll ──
+
+    RETRY_EPOCH = "0a1b2c3d-0000-4000-8000-00000000000a"
+    F01 = "같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)"
+
+    def retry_receipt(self, phase="retry", seq=7, minute=1):
+        code = {"retry": "stow_http", "failed": "instance_exceeds_budget"}.get(phase)
+        return {"phase": phase, "successCount": 3, "localCount": 12, "attempt": 1, "errorCode": code,
+                "serverReceivedAt": self.at(minute), "agentSeq": seq, "epoch": self.RETRY_EPOCH}
+
+    def retry_state(self):
+        return self.page.evaluate("""()=>{const b=$('#receipt-retry'),n=$('#receipt-retry-note');
+          return {hidden:b.hidden,disabled:b.disabled,text:b.textContent,note:n.textContent,noteTitle:n.title,
+            calls:structuredClone(apiCalls),gateway:$('#receipt-gateway').textContent}}""")
+
+    def test_s4u4_now_retry_is_offered_only_for_retry_to_a_technician_online_and_failed_says_f01(self):
+        self.page.evaluate("()=>{grants=['technician']}")
+        self.poll(reply(self.receipt_row(self.retry_receipt(), 12), at=self.at(1)))
+        state = self.retry_state()
+        self.assertEqual((state["hidden"], state["disabled"], state["text"], state["note"]), (False, False, "Now Retry", ""))
+        self.assertTrue(state["gateway"].endswith("): 병원 보유 12건 중 3건 전송"), state["gateway"])
+        # KinAuth.has('technician') is what decides (auth.js has() also answers true for admin); radiologist-only: none.
+        self.page.evaluate("()=>{grants=['radiologist'];renderObservation()}")
+        self.assertTrue(self.retry_state()["hidden"])
+        for mode in ("offline=true", "demoMode=true", "serverMode=false"):
+            with self.subTest(mode=mode):
+                self.page.evaluate("()=>{grants=['technician'];serverMode=true;offline=false;demoMode=false;%s;renderObservation()}" % mode)
+                self.assertTrue(self.retry_state()["hidden"])
+        self.page.evaluate("()=>{serverMode=true;offline=false;demoMode=false;renderObservation()}")
+        self.assertFalse(self.retry_state()["hidden"])
+        # failed: the exact F-01 sentence and never a control; the Gateway label is the same M-of-N text.
+        self.poll(reply(self.receipt_row(self.retry_receipt("failed", 8, 2), 12), at=self.at(2)))
+        state = self.retry_state()
+        self.assertEqual((state["hidden"], state["note"]), (True, self.F01))
+        self.assertTrue(state["gateway"].endswith("): 병원 보유 12건 중 3건 전송"), state["gateway"])
+        # Every other phase, no receipt, an unreadable one and a retry without a bindable key: neither.
+        others = [self.retry_receipt(phase, 9 + index, 3) for index, phase in enumerate(("pending", "announcing", "sending", "complete"))]
+        others += [None, {**self.retry_receipt(), "successCount": 13}, {**self.retry_receipt(), "agentSeq": None},
+                   {**self.retry_receipt(), "epoch": self.RETRY_EPOCH.upper()}]
+        for minute, receipt in enumerate(others, 3):
+            with self.subTest(receipt=json.dumps(receipt)[:80]):
+                self.poll(reply(self.receipt_row(receipt, 12), at=self.at(minute)))
+                state = self.retry_state()
+                self.assertEqual((state["hidden"], state["note"]), (True, ""))
+        self.assertEqual(self.retry_state()["calls"], [])
+
+    def test_s4u4_one_empty_post_nothing_before_the_answer_and_a_stale_answer_is_never_written(self):
+        texts = self.page.evaluate("KinStudyArrivals.RETRY_TEXT")
+        self.page.evaluate("()=>{grants=['technician']}")
+        self.poll(reply(self.receipt_row(self.retry_receipt(seq=7), 12), at=self.at(1)))
+        self.page.click("#receipt-retry")
+        state = self.retry_state()
+        self.assertEqual(state["calls"], [{"method": "POST", "path": "/studies/1.2.3/gateway-retry", "body": {}}])
+        self.assertEqual((state["disabled"], state["note"]), (True, ""), "nothing is claimed before the answer")
+        self.page.evaluate("requestGatewayRetry()")   # a second click while in flight sends nothing
+        # A poll that draws the same receipt again keeps the request; the answer is then written.
+        self.poll(reply(self.receipt_row(self.retry_receipt(seq=7), 12), at=self.at(2)))
+        self.page.evaluate("value=>settleApi(true,value)", {"studyUid": "1.2.3", "result": "requested", "requestedAt": self.at(2)})
+        self.page.wait_for_timeout(0)
+        state = self.retry_state()
+        self.assertEqual(len(state["calls"]), 1)
+        self.assertTrue(state["note"].startswith("Retry Requested (") and state["hidden"], state)
+        self.assertEqual(state["noteTitle"], texts["requestedTitle"])
+        self.assertIn("재시도가 실행됐다는 뜻은 아닙니다", state["noteTitle"])
+        # The receipt advanced while a new request was in flight: its answer is not written over the new state.
+        self.poll(reply(self.receipt_row(self.retry_receipt(seq=9, minute=3), 12), at=self.at(3)))
+        self.assertEqual((self.retry_state()["hidden"], self.retry_state()["note"]), (False, ""))
+        self.page.click("#receipt-retry")
+        self.poll(reply(self.receipt_row(self.retry_receipt(seq=11, minute=4), 12), at=self.at(4)))
+        self.page.evaluate("value=>settleApi(true,value)", {"studyUid": "1.2.3", "result": "requested", "requestedAt": self.at(4)})
+        self.page.wait_for_timeout(0)
+        state = self.retry_state()
+        self.assertEqual((state["hidden"], state["disabled"], state["note"], len(state["calls"])), (False, False, "", 2))
+        # A -> B -> A with the answer in flight: the same key is drawn again, but the answer is still dropped.
+        other = self.receipt_row(None, 2)
+        other.update(uid="1.2.4", id="PID-2", sourcePatientKey="hospital|patient-2")
+        self.poll(reply(self.receipt_row(self.retry_receipt(seq=11, minute=4), 12), other, at=self.at(5)))
+        self.page.click("#receipt-retry")
+        self.page.evaluate("()=>{selectedUid='1.2.4';renderObservation();selectedUid='1.2.3';renderObservation()}")
+        self.page.evaluate("value=>settleApi(true,value)", {"studyUid": "1.2.3", "result": "requested", "requestedAt": self.at(5)})
+        self.page.wait_for_timeout(0)
+        state = self.retry_state()
+        self.assertEqual((state["hidden"], state["disabled"], state["note"], len(state["calls"])), (False, False, "", 3))
+        # Refusals are fixed sentences; the server's own wording never shows.
+        for status, code, expected in ((409, "GATEWAY_RETRY_NOT_RETRY", texts["notRetry"]), (503, "GATEWAY_RETRY_BUSY", texts["busy"]),
+                                       (404, None, texts["notFound"]), (409, "GATEWAY_RETRY_UNSUPPORTED_F01", self.F01),
+                                       (401, None, texts["failed"])):
+            with self.subTest(status=status, code=code):
+                self.page.click("#receipt-retry")
+                self.page.evaluate("([status,code])=>settleApi(false,Object.assign(new Error('SERVER WORDING'),{status,code}))", [status, code])
+                self.page.wait_for_timeout(0)
+                state = self.retry_state()
+                self.assertEqual((state["note"], state["hidden"], state["disabled"]), (expected, False, False))
+        self.assertEqual([call["body"] for call in self.retry_state()["calls"]], [{}] * 8)
 
 
 if __name__ == "__main__":

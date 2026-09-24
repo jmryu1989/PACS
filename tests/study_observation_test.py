@@ -408,6 +408,14 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S4-U4 Now Retry control inside #study-receipt; tests/gateway_retry_source_test.py pins what each one does.
+for _kind, _extra in {
+    "ids": {"receipt-retry": 1, "receipt-retry-note": 1},
+    "functions": {"requestGatewayRetry": 1},
+    "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 2},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 
 
 def inventory(text):

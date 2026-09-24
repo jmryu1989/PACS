@@ -477,5 +477,314 @@ class ReceiptDeliveryTests(unittest.TestCase):
         self.assertEqual(agent.queue.unreported(), [])
 
 
+UID = "1.2.3"
+
+
+def duplicate_or_stored(body):
+    """KIN's answer when it already holds the retry state and stores everything newer."""
+    return FakeResponse(200, {"studyUid": body["studyUid"], "result": "duplicate" if body["phase"] == "retry" else "stored"})
+
+
+class RetryCloud:
+    """The Now Retry poll and the receipt route; queued answers first, then `default`. Records every call."""
+
+    def __init__(self):
+        self.polls, self.confirms, self.default = [], [], duplicate_or_stored
+        self.poll_epochs, self.sent, self.announced, self.stowed, self.stow_error = [], [], [], [], None
+
+    def retry_requests(self, epoch):
+        self.poll_epochs.append(epoch)
+        answer = self.polls.pop(0) if self.polls else FakeResponse(200, {"studyUids": []})
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def receipt(self, body):
+        self.sent.append(dict(body))
+        answer = self.confirms.pop(0) if self.confirms else self.default
+        answer = answer(body) if callable(answer) else answer
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def announce(self, uid, institution_name):
+        self.announced.append(uid)
+
+    def stow(self, uid, body, content_type):
+        self.stowed.append(uid)
+        if self.stow_error:
+            raise self.stow_error()
+        return set()
+
+
+class NoOrthanc:
+    """The Now Retry path must never read the hospital Orthanc; any attribute use is recorded."""
+
+    def __init__(self):
+        self.touched = []
+
+    def __getattr__(self, name):
+        self.touched.append(name)
+        raise AssertionError("the retry path touched Orthanc." + name)
+
+
+class RetryNowTests(unittest.TestCase):
+    """S4-U4 Now Retry, agent side: one exact retry state made eligible now; nothing else moves."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = str(Path(directory.name) / "queue.db")
+        self.events = []
+        logging = patch.object(agent_module, "log", side_effect=lambda event, **fields: self.events.append((event, fields)))
+        logging.start()
+        self.addCleanup(logging.stop)
+
+    def agent(self, cloud: RetryCloud) -> Agent:
+        agent = Agent(config(self.path, backoff_base=60, backoff_max=600))
+        self.addCleanup(agent.queue.close)
+        agent.cloud, agent.orthanc = cloud, NoOrthanc()
+        agent.retry_poll_at = 0.0   # the next call polls; test T5 holds the real schedule
+        return agent
+
+    def queue(self) -> Queue:
+        queue = Queue(self.path)
+        self.addCleanup(queue.close)
+        return queue
+
+    def in_retry(self, queue: Queue, uid: str = UID) -> float:
+        """A study that sent one of its SOPs, failed a batch and is backing off; KIN already holds this state."""
+        queue.record_changes([(uid, "orthanc-id")], 1)
+        queue.phase(uid, "announcing")
+        queue.announced(uid, 4, 1)
+        queue.add_successes(uid, {uid + ".1"}, 1)
+        queue.phase(uid, "sending", 2)
+        _attempt, delay = queue.retry(uid, "STOW HTTP 503 SYNTHETIC^PATIENT free text", 60, 600, "stow_http")
+        queue.reported(uid, queue.receipt(uid)["seq"])
+        return delay
+
+    def row(self, queue: Queue, uid: str = UID):
+        found = queue.db.execute("SELECT * FROM studies WHERE uid=?", (uid,)).fetchone()
+        return dict(found) if found else None
+
+    def rows(self, queue: Queue):
+        return [dict(row) for row in queue.db.execute("SELECT * FROM studies ORDER BY uid")]
+
+    def deliver(self, agent: Agent, *uids: str) -> None:
+        agent.cloud.polls.append(FakeResponse(200, {"studyUids": list(uids)}))
+        agent.retry_poll_at = 0.0
+        agent.retry_requests()
+
+    def test_t1_retry_now_moves_only_next_at_of_the_exact_retry_state(self):
+        queue = self.queue()
+        self.in_retry(queue)
+        before, body, owed = self.row(queue), queue.receipt(UID), queue.unreported()
+        meta = [tuple(row) for row in queue.db.execute("SELECT key, value FROM meta ORDER BY key")]
+        now = time.time()
+        self.assertGreater(before["next_at"], now)
+        self.assertIsNone(queue.due())
+        self.assertTrue(queue.waiting(UID, before["seq"], now))
+        self.assertTrue(queue.retry_now(UID, before["seq"], now))
+        after = self.row(queue)
+        self.assertEqual({key for key in before if before[key] != after[key]}, {"next_at"})
+        self.assertEqual(after["next_at"], 0)
+        # attempt, the free reason, the code, the sent SOPs, the counts, seq and updated_at all stay.
+        self.assertEqual((after["attempt"], after["error_code"], after["successful_sops"], after["batch_index"]),
+                         (1, "stow_http", '["1.2.3.1"]', 2))
+        self.assertIn("SYNTHETIC", after["last_error"])
+        self.assertEqual(queue.receipt(UID), body, "nothing new for KIN: the receipt and its seq did not move")
+        self.assertEqual(queue.unreported(), owed)
+        self.assertEqual([tuple(row) for row in queue.db.execute("SELECT key, value FROM meta ORDER BY key")], meta)
+        self.assertEqual(queue.due()["uid"], UID, "eligible now")
+        self.assertFalse(queue.waiting(UID, before["seq"], now))
+        self.assertFalse(queue.retry_now(UID, before["seq"], now), "a second nudge changes nothing")
+        self.assertEqual(self.row(queue), after)
+
+    def test_t2_every_other_state_seq_or_uid_is_refused_byte_identically(self):
+        queue = self.queue()
+        self.in_retry(queue, "1.2.15")
+        for uid, steps in (
+            ("1.2.10", [lambda u: queue.fail(u, "single DICOM instance exceeds byte budget", "instance_exceeds_budget")]),
+            ("1.2.11", [lambda u: queue.complete(u, 4)]),
+            ("1.2.12", []),
+            ("1.2.13", [lambda u: queue.phase(u, "announcing")]),
+            ("1.2.14", [lambda u: queue.phase(u, "announcing"), lambda u: queue.announced(u, 4, 0),
+                        lambda u: queue.phase(u, "sending", 1)]),
+        ):
+            queue.record_changes([(uid, "orthanc-id")], 1)
+            for step in steps:
+                step(uid)
+        now, before = time.time(), self.rows(queue)
+        expected = {"1.2.10": "failed", "1.2.11": "complete", "1.2.12": "pending", "1.2.13": "announcing",
+                    "1.2.14": "sending", "1.2.15": "retry"}
+        self.assertEqual({row["uid"]: row["phase"] for row in before}, expected)
+        seq = {row["uid"]: row["seq"] for row in before}
+        refused = [(uid, seq[uid], now) for uid in expected if uid != "1.2.15"]
+        refused += [("1.2.15", seq["1.2.15"] - 1, now), ("1.2.15", seq["1.2.15"] + 1, now),
+                    ("1.2.15", seq["1.2.15"], now + 3600),   # the backoff is already over at that time
+                    ("9.9.9", 1, now), ("9.9.9", 0, now)]
+        for uid, value, at in refused:
+            with self.subTest(uid=uid, seq=value, at=at - now):
+                self.assertFalse(queue.waiting(uid, value, at))
+                self.assertFalse(queue.retry_now(uid, value, at))
+                self.assertEqual(self.rows(queue), before, "a refused nudge changed or inserted a row")
+
+    def test_t3_only_an_exact_duplicate_of_the_current_body_applies(self):
+        cloud = RetryCloud()
+        agent = self.agent(cloud)
+        self.in_retry(agent.queue)
+        seq = agent.queue.receipt(UID)["seq"]
+        cases = [
+            (FakeResponse(200, {"studyUid": UID, "result": "stored"}), True),     # KIN held an older state
+            (FakeResponse(200, {"studyUid": UID, "result": "stale"}), True),      # this queue went back in time
+            (FakeResponse(200, {"studyUid": "1.2.4", "result": "duplicate"}), True),
+            (FakeResponse(200, {"studyUid": UID, "result": "duplicate", "extra": 1}), True),
+            (FakeResponse(200, {"result": "duplicate"}), True),
+            (FakeResponse(200, None), True),
+            (FakeResponse(200, ["duplicate"]), True),
+            (FakeResponse(400, {"code": "GATEWAY_RECEIPT_INVALID"}), True),
+            (FakeResponse(404, {"code": "GATEWAY_RECEIPT_STUDY_NOT_FOUND"}), True),
+            (FakeResponse(409, {"code": "GATEWAY_EPOCH_UNRECOGNISED"}), True),
+            (FakeResponse(409, {"code": "GATEWAY_RECEIPT_CONFLICT"}), True),
+            (FakeResponse(401), False),
+            (FakeResponse(503, {"studyUid": UID, "result": "duplicate"}), False),
+            (GatewayError("cloud request ConnectTimeout"), False),
+            (RuntimeError("boom"), False),
+        ]
+        for answer, final in cases:
+            with self.subTest(answer=repr(getattr(answer, "body", answer)), status=getattr(answer, "status_code", None)):
+                with agent.queue.db:
+                    agent.queue.db.execute("UPDATE studies SET reported_seq=0 WHERE uid=?", (UID,))
+                before = self.row(agent.queue)
+                cloud.confirms.append(answer)
+                self.deliver(agent, UID)
+                after = self.row(agent.queue)
+                self.assertEqual(after["next_at"], before["next_at"], "applied without an exact duplicate")
+                # U3's final-answer bookkeeping: a 2xx or 400/404/409 answered this body; anything else stays owed.
+                self.assertEqual({key for key in before if before[key] != after[key]}, {"reported_seq"} if final else set())
+                self.assertEqual(after["reported_seq"], seq if final else 0)
+        self.assertEqual(len(cloud.sent), len(cases))
+        self.assertTrue(all(body == agent.queue.receipt(UID) for body in cloud.sent), "the confirmation is the unchanged U3 body")
+        self.deliver(agent, UID)   # the default answer: KIN holds exactly this retry state
+        self.assertEqual((self.row(agent.queue)["next_at"], self.row(agent.queue)["seq"]), (0, seq))
+        self.assertEqual([fields for event, fields in self.events if event == "study.retry_now"], [{"uid": UID, "attempt": 1}])
+
+    def test_t4_repeat_delivery_and_restart_apply_at_most_once(self):
+        cloud = RetryCloud()
+        self.in_retry(self.queue())
+        # Restart before the nudge: a new process on the same queue (same epoch) applies it once.
+        agent = self.agent(cloud)
+        self.deliver(agent, UID)
+        applied = self.row(agent.queue)
+        self.assertEqual((len(cloud.sent), applied["next_at"]), (1, 0))
+        # A poll answer lost and asked again, or simply delivered twice more: no POST and no change.
+        self.deliver(agent, UID)
+        self.deliver(agent, UID)
+        self.assertEqual(len(cloud.sent), 1)
+        self.assertEqual(self.row(agent.queue), applied)
+        # Restart after the nudge: it is durable, the row is eligible, and another delivery still sends nothing.
+        agent.queue.close()
+        agent = self.agent(cloud)
+        self.assertEqual(self.row(agent.queue), applied)
+        self.assertEqual(agent.queue.due()["uid"], UID)
+        self.deliver(agent, UID)
+        self.assertEqual(len(cloud.sent), 1)
+        self.assertEqual(cloud.poll_epochs, [agent.queue.epoch] * 4)
+        self.assertEqual(len([event for event, _fields in self.events if event == "study.retry_now"]), 1)
+
+    def test_t4_a_failed_manual_attempt_climbs_the_ladder_and_a_stale_redelivery_applies_nothing(self):
+        first_delay = self.in_retry(self.queue())
+        cloud = RetryCloud()
+        agent = self.agent(cloud)
+        first = self.row(agent.queue)
+        agent.orthanc = FakeOrthanc([UID + ".1", UID + ".2"])
+        agent.poll_changes = lambda: None
+
+        def refused_batch():
+            agent.stopping = True
+            return GatewayError("STOW HTTP 503")
+
+        cloud.stow_error = refused_batch
+        cloud.polls.append(FakeResponse(200, {"studyUids": [UID]}))
+        with patch.object(Queue, "pending_now") as pending_now:
+            agent.run()   # flush, Now Retry (applied), then the real process() of the nudged row fails again
+        self.assertFalse(pending_now.called)
+        self.assertEqual(cloud.stowed, [UID])
+        queue = self.queue()
+        second = self.row(queue)
+        self.assertEqual((second["phase"], second["attempt"], second["error_code"], second["successful_sops"]),
+                         ("retry", first["attempt"] + 1, "stow_http", '["1.2.3.1"]'))
+        self.assertGreater(second["seq"], first["seq"])
+        [retried] = [fields for event, fields in self.events if event == "study.retry"]
+        self.assertEqual(retried["attempt"], 2)
+        self.assertGreaterEqual(retried["afterSeconds"], first_delay, "the ladder kept climbing; nothing reset it")
+        self.assertGreater(second["next_at"] - time.time(), first_delay - 1)
+        queue.close()
+        # KIN still (wrongly) delivers the old request: `stored` or `stale` for the current body applies nothing.
+        agent = self.agent(cloud)
+        for answer in (FakeResponse(200, {"studyUid": UID, "result": "stored"}),
+                       FakeResponse(200, {"studyUid": UID, "result": "stale"})):
+            cloud.confirms.append(answer)
+            self.deliver(agent, UID)
+            self.assertEqual(self.row(agent.queue)["next_at"], second["next_at"])
+        self.assertEqual(len([event for event, _fields in self.events if event == "study.retry_now"]), 1)
+
+    def test_t5_fixed_slow_poll_first_after_a_full_period_and_nothing_shortens_it(self):
+        clock = [1000.0]
+        invalid = [FakeResponse(503), FakeResponse(200, None), FakeResponse(200, {"studyUids": UID}),
+                   FakeResponse(200, {"studyUids": [1]}), FakeResponse(200, {"studyUids": [UID], "count": 1}),
+                   FakeResponse(200, {"studyUids": [UID, UID]}), FakeResponse(200, {"studyUids": ["1.2.x"]}),
+                   FakeResponse(200, {"studyUids": ["%d.1" % n for n in range(101)] + [UID]}),
+                   FakeResponse(200, [[UID]]), GatewayError("cloud request ConnectionError"), RuntimeError("boom")]
+        with patch.object(agent_module.time, "monotonic", lambda: clock[0]):
+            cloud = RetryCloud()
+            agent = Agent(config(self.path, backoff_base=60, backoff_max=600))
+            self.addCleanup(agent.queue.close)
+            agent.cloud, agent.orthanc = cloud, NoOrthanc()
+            self.in_retry(agent.queue)   # a lax parser would confirm UID from one of the invalid answers
+            cloud.polls.extend(invalid)
+            polled = []
+            for t in range(0, 301, 2):
+                clock[0] = 1000.0 + t
+                before = len(cloud.poll_epochs)
+                agent.retry_requests()   # never raises
+                if len(cloud.poll_epochs) > before:
+                    polled.append(t)
+            self.assertEqual(polled, list(range(30, 301, 30)), "first poll one period after start, then every 30 s")
+            self.assertEqual(cloud.sent, [], "no invalid answer reached a confirmation")
+            self.assertGreater(self.row(agent.queue)["next_at"], time.time(), "the retry row still waits out its backoff")
+            # Owed receipts backing off (F6): the tick passes without a poll and the cadence is not shortened after.
+            agent.receipts_resume_at = 1000.0 + 365
+            polled = []
+            for t in range(302, 421, 2):
+                clock[0] = 1000.0 + t
+                before = len(cloud.poll_epochs)
+                agent.retry_requests()
+                if len(cloud.poll_epochs) > before:
+                    polled.append(t)
+            self.assertEqual(polled, [390, 420])
+        self.assertEqual(set(cloud.poll_epochs), {agent.queue.epoch}, "the poll carries only this queue's epoch")
+        codes = [event for event, _fields in self.events if event.startswith("retry_request.")]
+        self.assertEqual(len(codes), len(invalid))
+        self.assertFalse(any("SYNTHETIC" in json.dumps(fields) for _event, fields in self.events))
+
+    def test_t6_retry_path_never_announces_stows_or_reads_orthanc_and_ignores_unknown_uids(self):
+        cloud = RetryCloud()
+        agent = self.agent(cloud)
+        self.in_retry(agent.queue, "1.2.3")
+        agent.queue.record_changes([("1.2.5", "orthanc-id")], 2)   # pending, never announced: no receipt
+        self.in_retry(agent.queue, "1.2.6")
+        agent.queue.fail("1.2.6", "single DICOM instance exceeds byte budget", "instance_exceeds_budget")
+        before = self.rows(agent.queue)
+        self.deliver(agent, "9.9.9", "1.2.5", "1.2.6", "1.2.3", "1.2.7")
+        self.assertEqual([body["studyUid"] for body in cloud.sent], ["1.2.3"])
+        self.assertEqual((cloud.announced, cloud.stowed, agent.orthanc.touched), ([], [], []))
+        after = self.rows(agent.queue)
+        self.assertEqual([row["uid"] for row in after], [row["uid"] for row in before], "no row for an unknown UID")
+        changed = [(b["uid"], sorted(k for k in b if b[k] != a[k])) for b, a in zip(before, after) if b != a]
+        self.assertEqual(changed, [("1.2.3", ["next_at"])])
+        self.assertTrue(all(set(fields) <= {"uid", "attempt", "status", "error"} for _event, fields in self.events))
+
+
 if __name__ == "__main__":
     unittest.main()

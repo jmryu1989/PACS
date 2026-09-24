@@ -175,6 +175,44 @@
       title:'Gateway가 보고한 전송 수입니다. 검사 종료나 영상 수신 여부를 뜻하지 않습니다.'+(comparable?'':' KIN 보유 개수를 알 수 없어 비교하지 않았습니다.')},reasons};
   }
 
+  /*
+   * S4-U4 Now Retry. Only a readable `retry` receipt offers the request, keyed by the exact receipt it was
+   * drawn from (epoch|agentSeq), so an answer can never be written over a newer state. `failed` is F-01:
+   * the same bytes cannot succeed, so it gets the sentence and never a control. The Gateway label above is
+   * not touched by any of this. A request is stored, not run: nothing here says the retry happened.
+   */
+  const RETRY_EPOCH=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const RETRY_TEXT=Object.freeze({
+    unsupported:'같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)',
+    unsupportedTitle:'Gateway가 보낼 수 없는 영상(단일 인스턴스가 전송 상한을 넘음)이라 다시 시도해도 같은 결과입니다. 요청할 수 없습니다.',
+    button:'Now Retry',
+    buttonTitle:'KIN에 재시도 요청을 남깁니다. Gateway가 30초 주기로 가져가 대기 중인 재시도를 앞당기며, 진행 중인 전송이 있으면 그 뒤에 반영됩니다.',
+    requestedTitle:'요청이 KIN에 저장됐다는 뜻이며 재시도가 실행됐다는 뜻은 아닙니다. Gateway는 30초 주기로 요청을 가져가고, 진행 중인 전송이 있으면 그 전송이 끝난 뒤에 가져갑니다.',
+    notFound:'검사를 찾을 수 없어 요청하지 않았습니다.',
+    notRetry:'지금은 재시도 대기 상태가 아니어서 요청하지 않았습니다. 목록이 갱신되면 다시 확인하세요.',
+    busy:'요청이 겹쳐 처리하지 못했습니다. 잠시 후 다시 시도하세요.',
+    failed:'재시도 요청을 보내지 못했습니다. 다시 시도하세요.'});
+  const readableReceipt=receipt=>!!receipt&&typeof receipt==='object'&&PHASES.includes(receipt.phase)
+    &&count(receipt.successCount)&&count(receipt.localCount)&&receipt.successCount<=receipt.localCount&&validTime(receipt.serverReceivedAt);
+
+  function gatewayRetryAction(receipt){
+    if(!readableReceipt(receipt))return null;
+    if(receipt.phase==='failed')return {kind:'unsupported_f01',text:RETRY_TEXT.unsupported,title:RETRY_TEXT.unsupportedTitle};
+    if(receipt.phase!=='retry'||!count(receipt.agentSeq)||typeof receipt.epoch!=='string'||!RETRY_EPOCH.test(receipt.epoch))return null;
+    return {kind:'now_retry',key:receipt.epoch+'|'+receipt.agentSeq,text:RETRY_TEXT.button,title:RETRY_TEXT.buttonTitle};
+  }
+
+  // The one POST's answer as fixed text. Server wording is never echoed; only these sentences are shown.
+  function gatewayRetryAnswer(uid,answer,error,format=localTime){
+    if(!error&&answer&&typeof answer==='object'&&answer.studyUid===uid&&(answer.result==='requested'||answer.result==='already_requested')
+      &&validTime(answer.requestedAt))
+      return {requested:true,text:'Retry Requested ('+format(answer.requestedAt)+')',title:RETRY_TEXT.requestedTitle};
+    const status=error?.status,code=error?.code;
+    const text=status===404?RETRY_TEXT.notFound:status===409&&code==='GATEWAY_RETRY_UNSUPPORTED_F01'?RETRY_TEXT.unsupported
+      :status===409&&code==='GATEWAY_RETRY_NOT_RETRY'?RETRY_TEXT.notRetry:status===503?RETRY_TEXT.busy:RETRY_TEXT.failed;
+    return {requested:false,text,title:''};
+  }
+
   // One study's three axes. The axes never feed each other: a Gateway report of M-of-N, whatever
   // its phase, cannot change the observation label, and assignment says nothing about receipt.
   function receiptLabels({assignment,observation,gateway},format=localTime){
@@ -182,7 +220,7 @@
     if(!b||typeof b!=='object')throw new TypeError('observation');
     const a=assignmentLabel(assignment),o=observationLabel(b,format),change=changeLabel(b,format),g=gatewayLabel(gateway,b,format);
     const reasons=[...(b.needsCheck?['decreased_in_session']:[]),...g.reasons];
-    return {assignment:a,observation:o,change,gateway:g.label,needsCheck:reasons.length>0,reasons};
+    return {assignment:a,observation:o,change,gateway:g.label,needsCheck:reasons.length>0,reasons,retry:gatewayRetryAction(gateway)};
   }
 
   // The list-level line. `notObserved` is the last successful answer (or null when absence was never
@@ -205,6 +243,6 @@
   function phrase(kind){if(!Object.prototype.hasOwnProperty.call(PHRASES,kind))throw new TypeError('phrase');return PHRASES[kind];}
 
   const api={diff,observationStart,observationSucceeded,observationFailed,studyObservation,receiptLabels,observationSummary,phrase,formatTime:localTime,
-    PHASES:Object.freeze([...PHASES]),BANNED,PHRASES};root.KinStudyArrivals=api;
+    gatewayRetryAction,gatewayRetryAnswer,RETRY_TEXT,PHASES:Object.freeze([...PHASES]),BANNED,PHRASES};root.KinStudyArrivals=api;
   if(typeof module==='object'&&module.exports)module.exports=api;
 })(typeof globalThis==='object'?globalThis:this);
