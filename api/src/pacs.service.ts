@@ -53,6 +53,20 @@ function need(roles: string[], role: string, what: string) {
     throw new ForbiddenException(`${what}은(는) ${role} 권한이 필요합니다`);
 }
 
+/**
+ * QIDO 개수 태그(00201208 영상 수·00201206 시리즈 수)의 목록 값. 태그가 없거나
+ * 정수가 아니면 `null`(unknown)이다. 예전 `+tag || 0`은 부재를 0으로 만들어 '영상 없음'과
+ * '모름'을 섞었고, 그 뒤 실제 값이 오면 클라이언트가 0→n을 새 영상 도착으로 통지했다.
+ * DICOM IS 형식(선택적 부호·앞뒤 공백)만 받고 음수·소수·지수·비유한값은 unknown이다.
+ */
+export function qidoCount(st: any, key: string): number | null {
+  const raw = st?.[key]?.Value?.[0];
+  const text = typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? raw.trim() : '';
+  if (!/^\+?\d+$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
 /** Gateway 라우트에는 admin 예외가 없다. 신원 종류와 전용 역할이 모두 맞아야 한다. */
 function needExact(c: Caller, role: string, what: string) {
   if (c.kind !== 'gateway' || !c.roles?.includes(role))
@@ -740,8 +754,9 @@ export class PacsService implements OnModuleInit {
         uid,
         techNote: noteByUid.get(uid) ?? { version: 0, present: false },
         readerAssignment: s.institutionId===me ? (()=>{const a=assignmentByUid.get(uid);return {revision:a?.revision??0,reader:a?.readerSub?{sub:a.readerSub,actor:a.readerActor,name:a.readerName}:null};})() : null,
-        count: +OrthancService.tag(st, '00201208') || 0,
-        series: +OrthancService.tag(st, '00201206') || 0,
+        // null은 unknown이다. 0은 QIDO가 실제로 0을 말했을 때만 나간다.
+        count: qidoCount(st, '00201208'),
+        series: qidoCount(st, '00201206'),
         acc: OrthancService.tag(st, '00080050'),
         id: patientId,
         // 화면 오버레이가 PatientID를 바꿔도 Related의 기관 경계는 원본 DICOM 값에 남는다.
