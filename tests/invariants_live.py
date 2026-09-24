@@ -4292,6 +4292,28 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertIsNone(after["orderIdentity"])
             self.assertEqual({key: after[key] for key in tags}, tags)
 
+            # S4-NB1 (T-NB1-2): the client-sent age is coerced, never refused. Anything but a string or a finite number
+            # is stored as '' (10**400 is a valid JSON literal the server parses to Infinity); valid values keep their
+            # JSON type. Each case matches order e and releases it again, so (e) starts from the (d) state.
+            for patient, want in (({"age": {"x": 1}}, ""), ({"age": [1]}, ""), ({"age": True}, ""), ({"age": None}, ""),
+                                  ({}, ""), ({"age": 10**400}, ""), ({"age": "42"}, "42"), ({"age": 42}, 42),
+                                  ({"age": 1.5}, 1.5), ({"age": ""}, "")):
+                with self.subTest(age=repr(patient.get("age", "<missing>"))[:24]):
+                    aged = self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": e, "patient": patient})
+                    self.assert_status(aged, 201)
+                    stored = (aged.body["ov"]["age"], self.state(h, "doctor")["ov"]["age"])
+                    # Released before judging, so one wrong value cannot turn every later case into a refused match.
+                    self.assert_status(self.stack.request("POST", "/unmatch", "tech", {"uid": h.uid}), 201)
+                    for value in stored:
+                        self.assertIs(type(value), type(want))   # True == 1 and 42 == 42.0 in Python: compare the type too
+                        self.assertEqual(value, want)
+            aged_row = self.state(h, "doctor")
+            self.assertIsNone(rows("tech")[h.uid]["orderIdentity"])
+            released = json.loads(psql('SELECT to_jsonb(t)::text FROM "Order" t WHERE oid=' + lit(e))[0])
+            self.assertEqual((released["matched"], released["studyUid"]), ("U", None))
+            self.assertIsNone(aged_row["ov"])
+            self.assertEqual(aged_row["orig"], {"name": "FORGED-ORIG", "id": "FORGED-ORIG-ID"})
+
             # (e) The same study linked to an order whose Patient ID differs; N-1 holds with an orig already stored.
             refused = self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": d, "patient": {"orig": PROBE}})
             self.assert_status(refused, 400)
