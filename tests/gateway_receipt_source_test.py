@@ -444,7 +444,47 @@ class ClientPins(unittest.TestCase):
         self.assertNotIn("gatewayReceipt", js_function(MAIN, "markObservationUnavailable"))
 
 
+LEGACY_PHASE_CHECK = """CHECK ("phase" IN ('pending','announcing','sending','retry','failed','complete'))"""
+LEGACY_ERROR_PHASES = """("phase" IN ('retry','failed'))"""
+
+
+def closed_check_problems(source):
+    """Restore run 35973195956 refused 3955e38: `"phase" IN (...)` on VARCHAR(16) is stored as
+    ARRAY['x'::character varying]::text[] and pg_restore re-reads it as ARRAY['x'::character varying::text],
+    the drift the hosted findings-migration probe prints for its legacy form. The explicit-text form is the
+    one that probe shows unchanged; both closed sets must stay exactly the rule's."""
+    body = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("--"))
+    problems = []
+    if re.search(r'"\w+"\s+IN\s*\(', body):
+        problems.append("IN-list")
+    if "character varying" in body:
+        problems.append("varchar operand")
+    for name, end, members in (("GatewayReceipt_phase_check", 'CONSTRAINT "GatewayReceipt_counts_check"', VECTORS["phases"]),
+                               ("GatewayReceipt_error_check", "\n);", VECTORS["errorPhases"])):
+        check = between(body, 'CONSTRAINT "' + name + '" CHECK (', end)
+        found = re.findall(r'"phase"::text = ANY \(ARRAY\[([^\]]*)\]\)', check)
+        if found != [",".join("'" + member + "'::text" for member in members)]:
+            problems.append(name)
+    return problems
+
+
 class MigrationPins(unittest.TestCase):
+    def test_the_closed_checks_are_the_restore_stable_form_of_the_rule_sets(self):
+        self.assertEqual(closed_check_problems(MIGRATION), [])
+        self.assertEqual(VECTORS["phases"], ["pending", "announcing", "sending", "retry", "failed", "complete"])
+        self.assertEqual(VECTORS["errorPhases"], ["retry", "failed"])
+        phase = """CHECK ("phase"::text = ANY (ARRAY['pending'::text,'announcing'::text,'sending'::text,'retry'::text,'failed'::text,'complete'::text]))"""
+        error = """("phase"::text = ANY (ARRAY['retry'::text,'failed'::text]))"""
+        mutants = {"3955e38 phase IN-list": MIGRATION.replace(phase, LEGACY_PHASE_CHECK),
+                   "3955e38 error IN-list": MIGRATION.replace(error, LEGACY_ERROR_PHASES),
+                   "a phase dropped": MIGRATION.replace(",'complete'::text]", "]"),
+                   "an error phase added": MIGRATION.replace("'failed'::text]))\n", "'failed'::text,'pending'::text]))\n"),
+                   "a varchar operand": MIGRATION.replace("ARRAY['retry'::text,", "ARRAY['retry'::character varying,")}
+        for wrong, source in mutants.items():
+            with self.subTest(wrong=wrong):
+                self.assertNotEqual(source, MIGRATION)
+                self.assertNotEqual(closed_check_problems(source), [])
+
     def test_the_migration_is_one_additive_table(self):
         self.assertTrue(MIGRATION.startswith("--"))
         body = "\n".join(line for line in MIGRATION.splitlines() if not line.startswith("--"))
@@ -457,9 +497,9 @@ class MigrationPins(unittest.TestCase):
                        '"successCount" BIGINT NOT NULL', '"localCount" BIGINT NOT NULL', '"errorCode" VARCHAR(40),',
                        '"receivedAt" TIMESTAMP(3) NOT NULL', 'CONSTRAINT "GatewayReceipt_pkey" PRIMARY KEY ("studyUid")',
                        'CONSTRAINT "GatewayReceipt_studyUid_fkey" FOREIGN KEY ("studyUid") REFERENCES "StudyState"("uid") ON DELETE CASCADE ON UPDATE RESTRICT',
-                       """CHECK ("phase" IN ('pending','announcing','sending','retry','failed','complete'))""",
+                       """CHECK ("phase"::text = ANY (ARRAY['pending'::text,'announcing'::text,'sending'::text,'retry'::text,'failed'::text,'complete'::text]))""",
                        '"successCount" <= "localCount"', "9007199254740991", """("phase" <> 'complete' OR "successCount" = "localCount")""",
-                       """("errorCode" IS NOT NULL) = ("phase" IN ('retry','failed'))"""):
+                       """("errorCode" IS NOT NULL) = ("phase"::text = ANY (ARRAY['retry'::text,'failed'::text]))"""):
             self.assertIn(needle, MIGRATION)
         self.assertIn("BEGIN;", body)
         self.assertIn("COMMIT;", body)
