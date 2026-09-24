@@ -292,6 +292,9 @@ model Order {
   matched   String  @default("U")
   /// 반대편에도 같은 1:1 제약을 둔다. 애플리케이션 검사 사이의 경쟁은 DB만이 끝까지 볼 수 있다.
   studyUid  String? @unique
+  /// S4-U2 오더 측 accession. **nullable이고 기본값이 없다.** 권위 있는 오더 출처가 연결되기 전에는
+  /// 제품 코드가 이 칸을 쓰지 않는다 — 시드 오더는 NULL이고, 값을 지어내면 없는 짝이 생긴다.
+  accession String?
 
   @@index([institutionId])
 }

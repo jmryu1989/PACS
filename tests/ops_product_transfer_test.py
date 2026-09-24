@@ -203,11 +203,15 @@ class Pure(unittest.TestCase):
         # S3-structured-report added report-structure the same way: 26 files, still 37 tables and the
         # same rows, and again one row per JSONB column carries a real value so a dump that skipped
         # the column cannot pass on NULLs alone.
-        self.assertEqual(len(transfer.MIGRATIONS), 26)
+        # S4-U2 added the order-accession migration: 27 files, still 37 tables, and the first synthetic
+        # Order row (one), whose accession is a real value for the same reason.
+        self.assertEqual(len(transfer.MIGRATIONS), 27)
         self.assertEqual(len(transfer.TABLES), 37)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2)
+        self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
+                         [('SYNTHETIC-order-1', 'SYNTHETIC-ACC-1', None)])
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1)
         hp = rows['HangingProtocolPreference']
         self.assertEqual(len(hp), 3)
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)

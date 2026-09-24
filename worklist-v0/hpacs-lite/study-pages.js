@@ -44,6 +44,8 @@
           draft.rows.push(...rows); draft.total = page.total; draft.next = page.next;
           // S4-U1b: only the page that completes the list carries the absence answer and its time.
           if (page.next === null) draft.observation = { observedAt: data.observedAt, notObserved: data.notObserved };
+          // S4-U2: the order answer comes from that same completing page; an absent one stays absent, never [].
+          if (page.next === null && data.orderReconciliation !== undefined) draft.observation.orderReconciliation = data.orderReconciliation;
           state('검사 목록을 나누어 불러오는 중…');
         }
         const me = await get('/me');

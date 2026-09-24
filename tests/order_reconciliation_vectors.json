@@ -1,0 +1,215 @@
+{
+  "about": "S4-U2 order-side reconciliation (engineering only). One file judged by three implementations: the compiled server rule (tests/order_reconciliation_server_test.cjs), the shipped client module (tests/order_reconciliation_test.cjs) and an independent stdlib model (tests/order_reconciliation_source_test.py). Synthetic values only; no seed order carries an accession.",
+  "source": "engineering_only",
+  "marker": "Engineering Only",
+  "phrases": {"orderWithoutImages": "영상 없는 주문", "observationUnavailable": "관측 불가"},
+  "accession": [
+    {"name": "equal", "order": "SYN-ACC-1", "study": "SYN-ACC-1", "expect": "match"},
+    {"name": "padded_equal", "order": " SYN-ACC-1 ", "study": "SYN-ACC-1  ", "expect": "match"},
+    {"name": "different", "order": "SYN-ACC-1", "study": "SYN-ACC-2", "expect": "mismatch"},
+    {"name": "case_differs", "order": "syn-acc-1", "study": "SYN-ACC-1", "expect": "mismatch"},
+    {"name": "both_blank", "order": "", "study": "", "expect": "not_comparable"},
+    {"name": "null_order_blank_study", "order": null, "study": "", "expect": "not_comparable"},
+    {"name": "null_order_value_study", "order": null, "study": "SYN-ACC-1", "expect": "not_comparable"},
+    {"name": "spaces_order", "order": "   ", "study": "SYN-ACC-1", "expect": "not_comparable"},
+    {"name": "value_order_blank_study", "order": "SYN-ACC-1", "study": "", "expect": "not_comparable"},
+    {"name": "non_string_study", "order": "1", "study": 1, "expect": "not_comparable"}
+  ],
+  "reconcile": [
+    {"name": "same_accession_two_institutions_hallym", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-1", "institutionId": "hallym", "accession": "SYN-ACC-X", "matched": "U", "studyUid": null},
+       {"oid": "SYN-K-1", "institutionId": "kin-center", "accession": "SYN-ACC-X", "matched": "U", "studyUid": null}],
+     "links": [
+       {"uid": "2.25.201", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null},
+       {"uid": "2.25.202", "institutionId": "kin-center", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.201": "SYN-ACC-Y", "2.25.202": "SYN-ACC-X"},
+     "expect": [{"oid": "SYN-H-1", "link": "unlinked", "accession": "present", "candidates": []}]},
+    {"name": "same_accession_two_institutions_kin_center", "me": "kin-center", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-1", "institutionId": "hallym", "accession": "SYN-ACC-X", "matched": "U", "studyUid": null},
+       {"oid": "SYN-K-1", "institutionId": "kin-center", "accession": "SYN-ACC-X", "matched": "U", "studyUid": null}],
+     "links": [
+       {"uid": "2.25.201", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null},
+       {"uid": "2.25.202", "institutionId": "kin-center", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.201": "SYN-ACC-Y", "2.25.202": "SYN-ACC-X"},
+     "expect": [{"oid": "SYN-K-1", "link": "unlinked", "accession": "present", "candidates": ["2.25.202"]}]},
+    {"name": "tele_received_study_never_pairs", "me": "kin-center", "restricted": false, "permitted": null,
+     "orders": [{"oid": "SYN-K-2", "institutionId": "kin-center", "accession": "SYN-ACC-T", "matched": "U", "studyUid": null}],
+     "links": [{"uid": "2.25.301", "institutionId": "hallym", "teleInstitutionId": "kin-center", "matched": "U", "orderOid": null}],
+     "observed": {"2.25.301": "SYN-ACC-T"},
+     "expect": [{"oid": "SYN-K-2", "link": "unlinked", "accession": "present", "candidates": []}]},
+    {"name": "restricted_caller_zero_unlinked_orders", "me": "hallym", "restricted": true, "permitted": ["2.25.401", "2.25.403"],
+     "orders": [
+       {"oid": "SYN-H-4U", "institutionId": "hallym", "accession": "SYN-ACC-4", "matched": "U", "studyUid": null},
+       {"oid": "SYN-H-4L", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.401"},
+       {"oid": "SYN-H-4X", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.402"}],
+     "links": [
+       {"uid": "2.25.401", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-4L"},
+       {"uid": "2.25.402", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-4X"},
+       {"uid": "2.25.403", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.401": "SYN-ACC-A", "2.25.402": "SYN-ACC-B", "2.25.403": "SYN-ACC-4"},
+     "expect": [{"oid": "SYN-H-4L", "link": "observed", "studyUid": "2.25.401"}]},
+    {"name": "unrestricted_control_for_the_restricted_case", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-4U", "institutionId": "hallym", "accession": "SYN-ACC-4", "matched": "U", "studyUid": null},
+       {"oid": "SYN-H-4L", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.401"},
+       {"oid": "SYN-H-4X", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.402"}],
+     "links": [
+       {"uid": "2.25.401", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-4L"},
+       {"uid": "2.25.402", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-4X"},
+       {"uid": "2.25.403", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.401": "SYN-ACC-A", "2.25.402": "SYN-ACC-B", "2.25.403": "SYN-ACC-4"},
+     "expect": [
+       {"oid": "SYN-H-4L", "link": "observed", "studyUid": "2.25.401"},
+       {"oid": "SYN-H-4U", "link": "unlinked", "accession": "present", "candidates": ["2.25.403"]},
+       {"oid": "SYN-H-4X", "link": "observed", "studyUid": "2.25.402"}]},
+    {"name": "seed_orders_are_never_comparable", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "O-9001", "institutionId": "hallym", "accession": null, "matched": "U", "studyUid": null},
+       {"oid": "O-9002", "institutionId": "hallym", "accession": "", "matched": "U", "studyUid": null}],
+     "links": [
+       {"uid": "2.25.601", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null},
+       {"uid": "2.25.602", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.601": "", "2.25.602": "CS260924010203"},
+     "expect": [
+       {"oid": "O-9001", "link": "unlinked", "accession": "absent", "candidates": []},
+       {"oid": "O-9002", "link": "unlinked", "accession": "absent", "candidates": []}]},
+    {"name": "linked_orders_observed_and_not_observed", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-7A", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.701"},
+       {"oid": "SYN-H-7B", "institutionId": "hallym", "accession": "SYN-ACC-7", "matched": "M", "studyUid": "2.25.702"}],
+     "links": [
+       {"uid": "2.25.701", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-7A"},
+       {"uid": "2.25.702", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-7B"}],
+     "observed": {"2.25.701": "SYN-ACC-OTHER"},
+     "expect": [
+       {"oid": "SYN-H-7A", "link": "observed", "studyUid": "2.25.701"},
+       {"oid": "SYN-H-7B", "link": "not_observed", "studyUid": "2.25.702"}]},
+    {"name": "inconsistent_links_are_not_pairs", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-8A", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.801"},
+       {"oid": "SYN-H-8B", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.802"},
+       {"oid": "SYN-H-8C", "institutionId": "hallym", "accession": "SYN-ACC-8", "matched": "U", "studyUid": "2.25.803"},
+       {"oid": "SYN-H-8D", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": null},
+       {"oid": "SYN-H-8E", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.899"}],
+     "links": [
+       {"uid": "2.25.801", "institutionId": "kin-center", "teleInstitutionId": "hallym", "matched": "M", "orderOid": "SYN-H-8A"},
+       {"uid": "2.25.802", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-OTHER"},
+       {"uid": "2.25.803", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.801": "", "2.25.802": "", "2.25.803": "SYN-ACC-8"},
+     "expect": []},
+    {"name": "linked_or_unobserved_studies_are_not_candidates", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-9U", "institutionId": "hallym", "accession": "SYN-ACC-9", "matched": "U", "studyUid": null},
+       {"oid": "SYN-H-9L", "institutionId": "hallym", "accession": "SYN-ACC-9", "matched": "M", "studyUid": "2.25.901"}],
+     "links": [
+       {"uid": "2.25.901", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-9L"},
+       {"uid": "2.25.902", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null},
+       {"uid": "2.25.903", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null},
+       {"uid": "2.25.904", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": null}],
+     "observed": {"2.25.901": "SYN-ACC-9", "2.25.903": " SYN-ACC-9 ", "2.25.904": "SYN-ACC-9"},
+     "expect": [
+       {"oid": "SYN-H-9L", "link": "observed", "studyUid": "2.25.901"},
+       {"oid": "SYN-H-9U", "link": "unlinked", "accession": "present", "candidates": ["2.25.903"]}]},
+    {"name": "candidates_sorted_and_shared", "me": "hallym", "restricted": false, "permitted": null,
+     "orders": [
+       {"oid": "SYN-H-10B", "institutionId": "hallym", "accession": "SYN-ACC-10", "matched": "U", "studyUid": null},
+       {"oid": "SYN-H-10A", "institutionId": "hallym", "accession": "SYN-ACC-10", "matched": "U", "studyUid": null}],
+     "links": [
+       {"uid": "2.25.1002", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null},
+       {"uid": "2.25.1001", "institutionId": "hallym", "teleInstitutionId": null, "matched": "U", "orderOid": null}],
+     "observed": {"2.25.1002": "SYN-ACC-10", "2.25.1001": "SYN-ACC-10"},
+     "expect": [
+       {"oid": "SYN-H-10A", "link": "unlinked", "accession": "present", "candidates": ["2.25.1001", "2.25.1002"]},
+       {"oid": "SYN-H-10B", "link": "unlinked", "accession": "present", "candidates": ["2.25.1001", "2.25.1002"]}]},
+    {"name": "restricted_unobserved_link_uses_the_uid_rule", "me": "hallym", "restricted": true, "permitted": ["2.25.1101"],
+     "orders": [
+       {"oid": "SYN-H-11", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.1101"},
+       {"oid": "SYN-H-12", "institutionId": "hallym", "accession": null, "matched": "M", "studyUid": "2.25.1102"}],
+     "links": [
+       {"uid": "2.25.1101", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-11"},
+       {"uid": "2.25.1102", "institutionId": "hallym", "teleInstitutionId": null, "matched": "M", "orderOid": "SYN-H-12"}],
+     "observed": {},
+     "expect": [{"oid": "SYN-H-11", "link": "not_observed", "studyUid": "2.25.1101"}]}
+  ],
+  "read": [
+    {"name": "full", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-L1", "link": "observed", "studyUid": "2.25.1"},
+      {"oid": "SYN-L2", "link": "not_observed", "studyUid": "2.25.2"},
+      {"oid": "O-9001", "link": "unlinked", "accession": "absent", "candidates": []},
+      {"oid": "SYN-U1", "link": "unlinked", "accession": "present", "candidates": []},
+      {"oid": "SYN-U2", "link": "unlinked", "accession": "present", "candidates": ["2.25.3", "2.25.4"]}]}, "expect": "ok"},
+    {"name": "empty", "value": {"source": "engineering_only", "orders": []}, "expect": "ok"},
+    {"name": "null", "value": null, "expect": "unknown"},
+    {"name": "other_source", "value": {"source": "site", "orders": []}, "expect": "error"},
+    {"name": "extra_top_key", "value": {"source": "engineering_only", "orders": [], "x": 1}, "expect": "error"},
+    {"name": "orders_not_array", "value": {"source": "engineering_only", "orders": {}}, "expect": "error"},
+    {"name": "array_value", "value": [], "expect": "error"},
+    {"name": "absent_with_candidates", "value": {"source": "engineering_only", "orders": [
+      {"oid": "O-9001", "link": "unlinked", "accession": "absent", "candidates": ["2.25.3"]}]}, "expect": "error"},
+    {"name": "duplicate_oid", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-L1", "link": "observed", "studyUid": "2.25.1"}, {"oid": "SYN-L1", "link": "not_observed", "studyUid": "2.25.2"}]}, "expect": "error"},
+    {"name": "bad_candidate_uid", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-U2", "link": "unlinked", "accession": "present", "candidates": ["2.25.3", "not-a-uid"]}]}, "expect": "error"},
+    {"name": "duplicate_candidate", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-U2", "link": "unlinked", "accession": "present", "candidates": ["2.25.3", "2.25.3"]}]}, "expect": "error"},
+    {"name": "unknown_link", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-L1", "link": "scheduled", "studyUid": "2.25.1"}]}, "expect": "error"},
+    {"name": "linked_row_with_candidates", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-L1", "link": "observed", "studyUid": "2.25.1", "candidates": []}]}, "expect": "error"},
+    {"name": "unlinked_row_with_patient_field", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-U1", "link": "unlinked", "accession": "present", "candidates": [], "name": "SYNTHETIC"}]}, "expect": "error"},
+    {"name": "control_character_oid", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN\nL1", "link": "observed", "studyUid": "2.25.1"}]}, "expect": "error"},
+    {"name": "bad_accession_state", "value": {"source": "engineering_only", "orders": [
+      {"oid": "SYN-U1", "link": "unlinked", "accession": "match", "candidates": []}]}, "expect": "error"}
+  ],
+  "labels": [
+    {"row": {"oid": "SYN-L1", "link": "observed", "studyUid": "2.25.1"}, "key": "observed", "text": "SYN-L1 · Linked · Observed"},
+    {"row": {"oid": "SYN-L2", "link": "not_observed", "studyUid": "2.25.2"}, "key": "not_observed", "text": "SYN-L2 · Linked · 영상 없는 주문"},
+    {"row": {"oid": "O-9001", "link": "unlinked", "accession": "absent", "candidates": []}, "key": "unlinked_no_accession", "text": "O-9001 · Unlinked · 영상 없는 주문 · No Accession"},
+    {"row": {"oid": "SYN-U1", "link": "unlinked", "accession": "present", "candidates": []}, "key": "unlinked_no_match", "text": "SYN-U1 · Unlinked · 영상 없는 주문 · No Accession Match"},
+    {"row": {"oid": "SYN-U2", "link": "unlinked", "accession": "present", "candidates": ["2.25.3", "2.25.4"]}, "key": "unlinked_match", "text": "SYN-U2 · Unlinked · Accession Match: 2.25.3, 2.25.4"}
+  ],
+  "transitions": [
+    {"name": "cold", "steps": [], "key": "not_attempted", "hidden": true, "text": "", "rows": []},
+    {"name": "observed_full", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:00:00.000Z", "orderReconciliation": "@full"}}}],
+     "key": "observed", "hidden": false,
+     "text": "Order Reconciliation · Engineering Only · Orders 5 · 영상 없는 주문 3 · Observed 2026-09-24T01:00:00.000Z",
+     "rows": ["SYN-L1 · Linked · Observed", "SYN-L2 · Linked · 영상 없는 주문", "O-9001 · Unlinked · 영상 없는 주문 · No Accession",
+              "SYN-U1 · Unlinked · 영상 없는 주문 · No Accession Match", "SYN-U2 · Unlinked · Accession Match: 2.25.3, 2.25.4"]},
+    {"name": "observed_empty", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:00:00.000Z", "orderReconciliation": "@empty"}}}],
+     "key": "observed", "hidden": false, "text": "Order Reconciliation · Engineering Only · Orders 0 · Observed 2026-09-24T01:00:00.000Z", "rows": []},
+    {"name": "answer_absent_is_unknown_not_empty", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:00:00.000Z", "notObserved": []}}}],
+     "key": "unknown", "hidden": false, "text": "Order Reconciliation · Engineering Only · Unknown · Observed 2026-09-24T01:00:00.000Z", "rows": []},
+    {"name": "failure_keeps_the_last_answer", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:00:00.000Z", "orderReconciliation": "@full"}}},
+      {"op": "failed"}],
+     "key": "observation_unavailable", "hidden": false,
+     "text": "Order Reconciliation · Engineering Only · 관측 불가 · 마지막 관측 2026-09-24T01:00:00.000Z 기준",
+     "rows": ["SYN-L1 · Linked · Observed", "SYN-L2 · Linked · 영상 없는 주문", "O-9001 · Unlinked · 영상 없는 주문 · No Accession",
+              "SYN-U1 · Unlinked · 영상 없는 주문 · No Accession Match", "SYN-U2 · Unlinked · Accession Match: 2.25.3, 2.25.4"]},
+    {"name": "malformed_answer_keeps_the_last_answer", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:00:00.000Z", "orderReconciliation": "@empty"}}},
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:01:00.000Z", "orderReconciliation": "@absent_with_candidates"}}}],
+     "key": "observation_unavailable", "hidden": false,
+     "text": "Order Reconciliation · Engineering Only · 관측 불가 · 마지막 관측 2026-09-24T01:00:00.000Z 기준", "rows": []},
+    {"name": "unreadable_observation_time_is_a_failure", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "yesterday", "orderReconciliation": "@full"}}}],
+     "key": "observation_unavailable", "hidden": false, "text": "Order Reconciliation · Engineering Only · 관측 불가", "rows": []},
+    {"name": "missing_owner_is_a_failure", "steps": [
+      {"op": "succeeded", "result": {"observation": {"observedAt": "2026-09-24T01:00:00.000Z", "orderReconciliation": "@full"}}}],
+     "key": "observation_unavailable", "hidden": false, "text": "Order Reconciliation · Engineering Only · 관측 불가", "rows": []},
+    {"name": "cold_failure_invents_nothing", "steps": [{"op": "failed"}],
+     "key": "observation_unavailable", "hidden": false, "text": "Order Reconciliation · Engineering Only · 관측 불가", "rows": []},
+    {"name": "recovery_replaces_the_whole_answer", "steps": [
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:00:00.000Z", "orderReconciliation": "@full"}}},
+      {"op": "failed"},
+      {"op": "succeeded", "result": {"owner": ["hallym", "sub"], "observation": {"observedAt": "2026-09-24T01:02:00.000Z", "orderReconciliation": "@empty"}}}],
+     "key": "observed", "hidden": false, "text": "Order Reconciliation · Engineering Only · Orders 0 · Observed 2026-09-24T01:02:00.000Z", "rows": []}
+  ]
+}

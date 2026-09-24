@@ -398,6 +398,15 @@ ADDED = {
     "selectors": {"#observation-status": 1, "#not-observed": 1, "#not-observed-summary": 1, "#not-observed-list": 1,
                   "#study-receipt": 1, "#receipt-observation": 2, "#receipt-assignment": 2, "#receipt-gateway": 2},
 }
+# S4-U2 order reconciliation surface; tests/order_reconciliation_source_test.py pins what each one does.
+for _kind, _extra in {
+    "ids": {"order-source-status": 1, "order-reconciliation": 1, "order-reconciliation-summary": 1,
+            "order-reconciliation-list": 1},
+    "functions": {"applyOrderReconciliation": 1, "renderOrderReconciliation": 1},
+    "selectors": {"#order-reconciliation": 1, "#order-reconciliation-summary": 2, "#order-reconciliation-list": 1},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 
 
 def inventory(text):

@@ -646,11 +646,12 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
 
-    def test_candidate_contract_remains_79_then_15(self):
+    def test_candidate_contract_remains_80_then_15(self):
         # 69 -> 71: R15 added two live structured-entry cases (L-1, L-2). 71 -> 79: S3-ASR-U5 added
-        # the eight dictation refusal cases T1-T8. The worklist contract is untouched at 15, and
-        # neither number may move without the test that moved it.
-        for filename, count in [('tests/invariants_live.py', 79), ('tests/e2e/test_worklist.py', 15)]:
+        # the eight dictation refusal cases T1-T8. 79 -> 80: S4-U2 added the one live order
+        # reconciliation case below. The worklist contract is untouched at 15, and neither number
+        # may move without the test that moved it.
+        for filename, count in [('tests/invariants_live.py', 80), ('tests/e2e/test_worklist.py', 15)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
         # The eight U5 cases are selected by name, in the classes the pure oracle judges them in.
@@ -824,7 +825,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
             self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
-            if index<2:self.assertEqual(len(plan['tests']),[79,15][index])
+            if index<2:self.assertEqual(len(plan['tests']),[80,15][index])
             if class_name:
                 self.assertTrue(all(row['case'].startswith(class_name+'.')
                                     for row in plan['tests']))

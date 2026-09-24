@@ -3674,6 +3674,142 @@ class LiveInvariantTests(unittest.TestCase):
             self.assert_status(self.stack.request("PATCH", path, "kdoctor", {"ts": "inReading"}), 200)
             self.assert_status(self.stack.request("PATCH", path, "tech", {"ss": "Unverified"}), 200)
 
+    def test_s4u2_order_reconciliation_tenant_tele_restricted_seed_engineering_only(self) -> None:
+        """S4-U2 (stage4 contract §4 U2, P10/P11): the order side of GET /studies is engineering only; an
+        order pairs only with its own institution's unlinked observed study, so the same accession in two
+        institutions never pairs across them; a tele-received study never pairs; a restricted caller gets
+        zero unlinked orders; a seed order has no accession and never pairs. There is no order ingestion,
+        so the synthetic orders go in with psql and come out by exact row."""
+        run = uuid.uuid4().hex[:12]
+        seeds = [f"O-900{n}" for n in range(1, 7)]
+
+        def lit(value: Any) -> str:
+            return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
+
+        # The product never writes an accession: every seed row keeps NULL (Q2 — no invented accession).
+        self.assertEqual(psql('SELECT oid FROM "Order" WHERE oid IN (' + ",".join(map(lit, seeds)) + ") AND accession IS NOT NULL"), [])
+        created: list[str] = []
+
+        def insert(oid: str, institution: str, accession: str | None) -> None:
+            psql('INSERT INTO "Order" (oid,"institutionId","patientId",name,sex,birth,sched,modality,descr,ward,"reqDoc",accession) VALUES ('
+                 + ",".join(lit(v) for v in [oid, institution, "SYNTHETIC-" + run, "SYNTHETIC S4-U2 order", "O", "", "", "CT",
+                                              "SYNTHETIC", "", "", accession]) + ")")
+            created.append(oid)
+
+        def remove_orders() -> None:
+            for oid in created:
+                for raw in psql('SELECT to_jsonb(t)::text FROM "Order" t WHERE oid=' + lit(oid)):
+                    row = json.loads(raw)
+                    self.assertTrue(row["name"] == "SYNTHETIC S4-U2 order" and row["patientId"] == "SYNTHETIC-" + run, raw)
+                    self.assertEqual(psql('DELETE FROM "Order" t WHERE to_jsonb(t)=' + lit(raw) + "::jsonb RETURNING oid"), [oid])
+        self.addCleanup(remove_orders)
+
+        subject = self.stack.user_ids["doctor2"]
+
+        def remove_policy() -> None:
+            for table in ("StudyAccessRevision", "StudyAccessPolicy"):
+                for raw in psql(f'SELECT to_jsonb(t)::text FROM "{table}" t WHERE subject=' + lit(subject)):
+                    self.assertTrue(json.loads(raw)["reason"].startswith("SYNTHETIC S4-U2"), raw)
+                    self.assertEqual(psql(f'DELETE FROM "{table}" t WHERE to_jsonb(t)=' + lit(raw) + "::jsonb RETURNING 1"), ["1"])
+            for raw in psql('SELECT to_jsonb(t)::text FROM "AuditLog" t WHERE target=' + lit(subject) + " AND action='study.access'"):
+                self.assertTrue(json.loads(json.loads(raw)["detail"])["reason"].startswith("SYNTHETIC S4-U2"), raw)
+                self.assertEqual(psql('DELETE FROM "AuditLog" t WHERE to_jsonb(t)=' + lit(raw) + "::jsonb RETURNING 1"), ["1"])
+        self.addCleanup(remove_policy)
+
+        def answer(user: str, paged: bool = False) -> dict[str, Any]:
+            if not paged:
+                listed = self.stack.request("GET", "/studies", user)
+                self.assert_status(listed, 200)
+                return listed.body["orderReconciliation"]
+            path = "/studies?limit=100"
+            for _ in range(100):
+                listed = self.stack.request("GET", path, user)
+                self.assert_status(listed, 200)
+                if listed.body["pagination"]["next"] is None:
+                    return listed.body["orderReconciliation"]
+                self.assertNotIn("orderReconciliation", listed.body)   # only the completing page answers
+                path = "/studies?limit=100&after=" + quote(listed.body["pagination"]["next"])
+            self.fail("페이지 목록이 끝나지 않았습니다")
+
+        # scripts/send_cstore.py stamps AccessionNumber to the second; a pause keeps the three distinct.
+        with self.stack.fixture() as h:
+            time.sleep(1.1)
+            with self.stack.fixture("KIN 판독센터") as k:
+                time.sleep(1.1)
+                with self.stack.fixture() as t:
+                    self.assert_status(self.stack.request(
+                        "PATCH", f"/studies/{quote(t.uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+                    acc: dict[str, str] = {}
+                    for fixture, user in ((h, "jmryu"), (k, "kdoctor"), (t, "jmryu")):
+                        listed = self.stack.request("GET", "/studies", user)
+                        self.assert_status(listed, 200)
+                        acc[fixture.uid] = next(row["acc"] for row in listed.body["studies"] if row["uid"] == fixture.uid)
+                    self.assertTrue(all(acc.values()) and len(set(acc.values())) == 3, acc)
+
+                    h1, h2, h3, k1, k2 = (f"SYNTHETIC-S4U2-{run}-{name}" for name in ("H1", "H2", "H3", "K1", "K2"))
+                    insert(h1, "hallym", acc[k.uid])        # the kin-center study's accession, in hallym
+                    insert(k1, "kin-center", acc[k.uid])    # ... and in kin-center, where that study is its own
+                    insert(h2, "hallym", acc[t.uid])        # hallym owns t
+                    insert(k2, "kin-center", acc[t.uid])    # kin-center only received t for tele-reading
+                    insert(h3, "hallym", None)
+                    self.assert_status(self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": h3, "patient": {}}), 201)
+
+                    for paged in (False, True):
+                        with self.subTest(paged=paged):
+                            hall = answer("tech", paged)
+                            self.assertEqual(set(hall), {"source", "orders"})
+                            self.assertEqual(hall["source"], "engineering_only")
+                            rows = {row["oid"]: row for row in hall["orders"]}
+                            self.assertEqual(rows[h1], {"oid": h1, "link": "unlinked", "accession": "present", "candidates": []})
+                            self.assertEqual(rows[h2], {"oid": h2, "link": "unlinked", "accession": "present", "candidates": [t.uid]})
+                            self.assertEqual(rows[h3], {"oid": h3, "link": "observed", "studyUid": h.uid})
+                            self.assertFalse({k1, k2} & set(rows))
+                            self.assertNotIn(k.uid, json.dumps(hall))
+                            kin = answer("kdoctor", paged)
+                            krows = {row["oid"]: row for row in kin["orders"]}
+                            self.assertEqual(krows[k1], {"oid": k1, "link": "unlinked", "accession": "present", "candidates": [k.uid]})
+                            self.assertEqual(krows[k2], {"oid": k2, "link": "unlinked", "accession": "present", "candidates": []})
+                            self.assertFalse({h1, h2, h3} & set(krows))
+                            self.assertNotIn(t.uid, json.dumps(kin))   # in kin-center's list as tele, never on its order side
+                            for answer_rows in (hall["orders"], kin["orders"]):
+                                for row in answer_rows:
+                                    self.assertLessEqual(set(row), {"oid", "link", "studyUid", "accession", "candidates"})
+                                    if row["oid"] in seeds and row["link"] == "unlinked":
+                                        self.assertEqual((row["accession"], row["candidates"]), ("absent", []), row)
+                            self.assertTrue([oid for oid in rows if oid in seeds], "hallym seed orders are listed")
+                    booted = self.stack.request("GET", "/bootstrap", "tech")
+                    self.assert_status(booted, 200)
+                    self.assertNotIn("accession", next(o for o in booted.body["orders"] if o["oid"] == h1))
+
+                    owner = self.stack.request("GET", "/me", "jmryu").body
+                    policy = {"version": 1, "restricted": True, "startsAt": None, "endsAt": None,
+                              "rules": [{"patientId": None, "modalities": [], "dateFrom": None, "dateTo": None, "studyUids": [h.uid]}]}
+                    wrote = self.stack.request("POST", f"/admin/users/{quote(subject)}/study-access", "jmryu", {
+                        "expectedOwner": [owner["institution"], owner["sub"]], "policy": policy, "revision": 0,
+                        "reason": "SYNTHETIC S4-U2 restricted caller", "requestId": str(uuid.uuid4())})
+                    self.assert_status(wrote, 201)
+                    for paged in (False, True):
+                        with self.subTest(restricted=True, paged=paged):
+                            limited = answer("doctor2", paged)
+                            self.assertEqual(limited["source"], "engineering_only")
+                            self.assertEqual([row for row in limited["orders"] if row["link"] == "unlinked"], [])
+                            self.assertEqual({row["studyUid"] for row in limited["orders"]}, {h.uid})
+                            self.assertIn({"oid": h3, "link": "observed", "studyUid": h.uid}, limited["orders"])
+                    control = answer("doctor")   # same institution, no restriction: the unlinked side is there
+                    self.assertIn({"oid": h2, "link": "unlinked", "accession": "present", "candidates": [t.uid]}, control["orders"])
+
+                    # Images removed from KIN: the linked order becomes an order without observed images.
+                    lookup = self.stack._orthanc_request("POST", "/tools/lookup", h.uid.encode("ascii"))
+                    studies = [item["ID"] for item in lookup.body if item.get("Type") == "Study"]
+                    self.assertEqual(len(studies), 1, lookup.text)
+                    detail = self.stack._orthanc_request("GET", f"/studies/{quote(studies[0])}")
+                    self.assertEqual(detail.body["MainDicomTags"]["StudyInstanceUID"], h.uid)
+                    self.assertIn(self.stack._orthanc_request("DELETE", f"/studies/{quote(studies[0])}").status, (200, 204))
+                    listed = self.stack.request("GET", "/studies", "tech")
+                    self.assert_status(listed, 200)
+                    self.assertIn({"oid": h3, "link": "not_observed", "studyUid": h.uid}, listed.body["orderReconciliation"]["orders"])
+                    self.assertIn(h.uid, [row["uid"] for row in listed.body["notObserved"]])
+
     def test_zzz_known_failure_concurrent_commit_must_not_return_500(self) -> None:
         """다음 배치의 빨간 테스트. @expectedFailure로 숨기지 않는다."""
         with self.stack.fixture() as fixture:

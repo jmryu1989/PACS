@@ -19,6 +19,7 @@ import type { StructureTemplate } from './report-structure';
 import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
+import { reconcileOrders } from './order-reconciliation';
 import { folderAction, folderEntries, folderPath } from './filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
 import { normalizeHangingProtocol } from './hanging-protocol';
@@ -670,7 +671,8 @@ export class PacsService implements OnModuleInit {
     const me = inst(c);
     const access=await this.studyAccess.snapshot(c);
     const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(query, owner);
-    const qido = page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access)) : await this.orthanc.studies();
+    // S4-U2 asks the paged enumeration for the indexed AccessionNumber too; the full QIDO carries it already.
+    const qido = page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access), true) : await this.orthanc.studies();
     // S4-U1b: the server time at which this successful enumeration returned. A failed QIDO throws
     // before this line, so no response ever carries an observation time it did not make.
     const observedAt = new Date().toISOString();
@@ -780,12 +782,17 @@ export class PacsService implements OnModuleInit {
     const current = await this.prisma.studyState.findMany({ where: { uid: { in: pageUids } },
       select: { uid:true, institutionId:true, teleInstitutionId:true, rs:true, preDoc:true, preReviewer:true } });
     if (changedAccess(current)) throw accessConflict();
+    // S4-U2: the order side is read with the page that completes the list and BEFORE the access
+    // re-check below, so a policy change during this request refuses the whole answer.
+    const orderRows = !page || window.pagination?.next === null ? await this.orderSide(me) : null;
     await this.studyAccess.unchanged(c,access);
     // Absence is judged against the whole enumeration, never against this page's window. It is sent
     // once, with the page that completes the list, so a client never merges two absence answers.
     const notObserved = !page || window.pagination?.next === null ? this.notObserved(qido, states, me, access, observedAt) : undefined;
+    const orderReconciliation = orderRows ? this.orderReconciliation(qido, orderRows, me, access) : undefined;
     return { studies: out, serverTime: new Date().toISOString(), observedAt,
-      ...(notObserved === undefined ? {} : { notObserved }), ...(page ? { pagination: window.pagination } : {}) };
+      ...(notObserved === undefined ? {} : { notObserved }),
+      ...(orderReconciliation === undefined ? {} : { orderReconciliation }), ...(page ? { pagination: window.pagination } : {}) };
   }
 
   /**
@@ -813,6 +820,37 @@ export class PacsService implements OnModuleInit {
       out.push({ uid: s.uid, origin: s.origin, createdAt });
     }
     return out.sort((a, b) => a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0);
+  }
+
+  /**
+   * S4-U2 오더 측 대사의 입력. 기관 조건을 조회에 건다 — 남의 기관 오더와 StudyState는 읽지도 않는다.
+   * 필요한 칸만 고른다. 환자 칸은 이 면으로 나가지 않는다.
+   */
+  private orderSide(me: string) {
+    return Promise.all([
+      this.prisma.order.findMany({ where: { institutionId: me },
+        select: { oid: true, institutionId: true, accession: true, matched: true, studyUid: true } }),
+      this.prisma.studyState.findMany({ where: { institutionId: me },
+        select: { uid: true, institutionId: true, matched: true, orderOid: true } }),
+    ]);
+  }
+
+  /**
+   * S4-U2 오더 측 대사 — **엔지니어링 전용**(`order-reconciliation.ts`). notObserved와 같은 성공한 열거로
+   * 판정한다. 열거의 어느 행이라도 UID를 확인할 수 없으면 관측 여부를 말할 수 없으므로 `null`(모름)이다.
+   * 검사 쪽 accession은 서버가 읽은 원본 태그(00080050)뿐이다 — ov/orig는 입력이 아니다.
+   */
+  private orderReconciliation(qido: any, [orders, links]: [any[], any[]], me: string, access: AccessSnapshot) {
+    if (!Array.isArray(qido)) return null;
+    const observed = new Map<string, any>();
+    for (const st of qido) {
+      const uid = OrthancService.tag(st, '0020000D');
+      if (!uid) return null;
+      observed.set(uid, st);
+    }
+    return reconcileOrders({ me, restricted: access.policy.restricted, orders, links, observed,
+      accessionOf: row => OrthancService.tag(row, '00080050'),
+      permitted: (uid, row) => this.studyAccess.matches(access, uid, row) });
   }
 
   /** 프론트가 켜질 때 한 번에 받아가는 묶음 — 전부 내 기관 것만 */
