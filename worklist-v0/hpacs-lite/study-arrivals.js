@@ -2,7 +2,12 @@
 (function(root){
   'use strict';
   const validUid=value=>typeof value==='string'&&value.length<=64&&/^\d+(?:\.\d+)+$/.test(value);
-  const validCount=value=>Number.isSafeInteger(value)&&value>=0;
+  // null is the server's "unknown" (tag absent or non-integer in QIDO). It is neither 0 nor an
+  // error: a snapshot that carries it is still comparable on the axes that are known.
+  const validCount=value=>value===null||(Number.isSafeInteger(value)&&value>=0);
+  // Growth needs two known values. unknown->known is a first observation, not an arrival, and
+  // known->unknown is a lost observation; neither may raise a "new images" notice.
+  const added=(before,after)=>before!==null&&after!==null&&after>before?after-before:0;
   const invalid=(name,reason,index)=>({error:name+':'+reason+(index===undefined?'':':'+index)});
 
   function snapshot(rows,name){
@@ -25,9 +30,11 @@
     const after=snapshot(next,'next');if(after.error)return {ok:false,changes:[],error:after.error};
     const changes=[];
     for(const [uid,current] of after.values){
-      const old=before.values.get(uid);if(!old||(current.count<=old.count&&current.series<=old.series))continue;
+      const old=before.values.get(uid);if(!old)continue;
+      const addedInstances=added(old.count,current.count),addedSeries=added(old.series,current.series);
+      if(!addedInstances&&!addedSeries)continue;
       changes.push({uid,previousCount:old.count,count:current.count,previousSeries:old.series,series:current.series,
-        addedInstances:Math.max(0,current.count-old.count),addedSeries:Math.max(0,current.series-old.series)});
+        addedInstances,addedSeries});
     }
     return {ok:true,changes};
   }
