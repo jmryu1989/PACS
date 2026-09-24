@@ -447,12 +447,13 @@ class MigrationPins(unittest.TestCase):
         fixture = text("tests", "ops_product_transfer_fixture.py")
         transfer = text("tests", "ops_product_transfer_test.py")
         self.assertIn("'" + MIGRATION_NAME + "'", production)
-        self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql']", fixture)
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 27)", transfer)
+        # S4-U3's gateway-receipt migration now follows this one: 28 files, and this one is second to last.
+        self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 28)", transfer)
         self.assertIn("accession='SYNTHETIC-ACC-1'", fixture)
         self.assertIn("'ReportDraft', 'Order', 'UserFilter',", fixture)
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
-        self.assertEqual(MIGRATION_NAME, names[-1])
+        self.assertEqual([MIGRATION_NAME, "20260924130000_gateway_receipt"], names[-2:])
 
 
 class ClientPins(unittest.TestCase):

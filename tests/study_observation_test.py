@@ -382,7 +382,8 @@ class SourcePins(unittest.TestCase):
         render = body(self.main, "    function renderObservation() {", "\n    }\n")
         for banned in ("toast(", "localStorage", "sessionStorage", "api(", "fetch("):
             self.assertNotIn(banned, render)
-        self.assertIn("gateway: null", render)
+        # S4-U3 wired axis C to the row's server receipt; no receipt is still null (No Gateway Report).
+        self.assertIn("gateway: s.gatewayReceipt ?? null", render)
 
 
 # Pre-S4 inventory of main.html at e15c69c (sorted (key, count) JSON, sha256). Only these additions may appear.

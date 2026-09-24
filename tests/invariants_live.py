@@ -100,6 +100,7 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "me"): Route(Kind.NEITHER),
     ("GET", "authz/dicom"): Route(Kind.TENANT),
     ("POST", "gateway/announce"): Route(Kind.TENANT),
+    ("POST", "gateway/receipt"): Route(Kind.TENANT),
     ("POST", "dicom/lookup"): Route(Kind.TENANT),
     ("GET", "colleagues"): Route(Kind.TENANT),
     ("GET", "admin/agreements"): Route(Kind.TENANT),
@@ -2955,13 +2956,155 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(mismatch.status, 409, mismatch.text)
             self.assertIn("00081198", mismatch.text)
 
+    def test_s4u3_gateway_receipt_route_rules(self) -> None:
+        """S4-U3 (stage4 contract §4 U3, P8/P9, H-1 interim) with real Gateway credentials.
+
+        No own StudyState is one 404 whether the UID does not exist or is another institution's, and a
+        receipt before announce gets that same 404. The body is a closed key set: no timestamp, no
+        institution, no free text. (epoch, seq) replay writes nothing, a changed body at the same key is
+        409, a lower seq is ignored. A different epoch is refused with the stored receipt unchanged and one
+        audit per window; the registered epoch then goes on normally. Only the owner's worklist row carries
+        the receipt and bootstrap carries none. psql inserts one synthetic foreign StudyState; every row this
+        test creates is removed through cleanup_fixture (the receipt goes with its StudyState)."""
+        token = self.stack.service_token("gateway")
+        epoch_a, epoch_b = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def lit(value: Any) -> str:
+            return "'" + str(value).replace("'", "''") + "'"
+
+        def body(uid: str, seq: int, epoch: str = epoch_a, **change: Any) -> dict[str, Any]:
+            value = {"studyUid": uid, "phase": "sending", "attempt": 0, "successCount": 3, "localCount": 12,
+                     "errorCode": None, "epoch": epoch, "seq": seq}
+            value.update(change)
+            return value
+
+        def send(value: Any) -> HttpResult:
+            return self.stack.bearer_request("POST", "/gateway/receipt", token, value)
+
+        def stored(uid: str) -> list[str]:
+            return psql('SELECT to_jsonb(t)::text FROM "GatewayReceipt" t WHERE "studyUid"=' + lit(uid))
+
+        def audits(uid: str) -> list[str]:
+            return psql('SELECT action FROM "AuditLog" WHERE target=' + lit(uid)
+                        + " AND action LIKE 'gateway.receipt.%' ORDER BY id")
+
+        def owned(uid: str, institution: str, owner: str) -> None:
+            self.stack.active[uid] = Fixture(uid, "", institution, owner, "")
+            self.addCleanup(self.stack.cleanup_fixture, uid)
+
+        # One 404 for "no such study" and "another institution's study", decided before any order rule.
+        absent_uid, foreign_uid, uid = ("2.25." + str(uuid.uuid4().int) for _ in range(3))
+        owned(foreign_uid, "한림병원", "jmryu")
+        owned(uid, "KIN 판독센터", "kdoctor")
+        psql('INSERT INTO "StudyState" (uid,"institutionId","reqHosp",ss,origin,"updatedAt") VALUES ('
+             + ",".join(map(lit, [foreign_uid, "hallym", "SYNTHETIC S4-U3", "Unverified", "dicom"])) + ",now())")
+        absent, foreign, early = send(body(absent_uid, 1)), send(body(foreign_uid, 1)), send(body(uid, 1))
+        self.assertEqual((absent.status, foreign.status, early.status), (404, 404, 404), absent.text + foreign.text)
+        self.assertEqual(absent.body, foreign.body)
+        self.assertEqual(absent.body, early.body)
+        self.assertEqual(absent.body.get("code"), "GATEWAY_RECEIPT_STUDY_NOT_FOUND", absent.text)
+        self.assertNotIn("hallym", foreign.text)
+        for target in (absent_uid, foreign_uid, uid):
+            self.assertEqual((stored(target), audits(target)), ([], []))
+        self.assertEqual(psql('SELECT count(*) FROM "StudyState" WHERE uid IN (' + lit(absent_uid) + "," + lit(uid) + ")"), ["0"])
+
+        self.assert_status(self.stack.bearer_request("POST", "/gateway/announce", token, {"studyUid": uid}), 200)
+        member = self.stack.request("POST", "/gateway/receipt", "kdoctor", body(uid, 1))
+        self.assertEqual(member.status, 403, member.text)
+
+        # Closed body: each refusal is 400 and writes nothing.
+        refusals = [
+            {**body(uid, 1), "reportedAt": "2026-09-24T00:00:00Z"}, {**body(uid, 1), "sentAt": 1790000000},
+            {**body(uid, 1), "institutionId": "kin-center"}, {**body(uid, 1), "institution": "hallym"},
+            {**body(uid, 1), "reason": "STOW HTTP 503"},
+            {key: value for key, value in body(uid, 1).items() if key != "errorCode"},
+            body(uid, 1, successCount=13), body(uid, 1, phase="complete", successCount=11), body(uid, 1, phase="done"),
+            body(uid, 1, attempt=-1), {**body(uid, 1), "seq": 2 ** 53}, body(uid, 1, localCount=12.5),
+            body(uid, 1, errorCode="stow_http"), body(uid, 1, phase="retry"),
+            body(uid, 1, phase="failed", errorCode="STOW HTTP 503 free text"),
+            body(uid, 1, epoch="not-an-epoch"), body(uid, 1, epoch=epoch_a.upper()), [body(uid, 1)],
+        ]
+        for value in refusals:
+            with self.subTest(refused=json.dumps(value)[:160]):
+                refused = send(value)
+                self.assertEqual(refused.status, 400, refused.text)
+                self.assertEqual(refused.body.get("code"), "GATEWAY_RECEIPT_INVALID", refused.text)
+        self.assertEqual((stored(uid), audits(uid)), ([], []))
+
+        # First epoch: stored once, at the server's own time, audited once.
+        first = send(body(uid, 5))
+        self.assertEqual((first.status, first.body), (200, {"studyUid": uid, "result": "stored"}), first.text)
+        [row] = stored(uid)
+        saved = json.loads(row)
+        self.assertEqual((saved["institutionId"], saved["epoch"], saved["seq"], saved["phase"], saved["successCount"],
+                          saved["localCount"], saved["errorCode"]), ("kin-center", epoch_a, 5, "sending", 3, 12, None))
+        self.assertEqual(audits(uid), ["gateway.receipt.first"])
+
+        replay = send(body(uid, 5))
+        self.assertEqual((replay.status, replay.body.get("result")), (200, "duplicate"), replay.text)
+        conflict = send(body(uid, 5, successCount=4))
+        self.assertEqual((conflict.status, conflict.body.get("code")), (409, "GATEWAY_RECEIPT_CONFLICT"), conflict.text)
+        stale = send(body(uid, 4, phase="complete", successCount=12))
+        self.assertEqual((stale.status, stale.body.get("result")), (200, "stale"), stale.text)
+        self.assertEqual(stored(uid), [row], "replay, conflict and a lower seq wrote nothing")
+        self.assertEqual(audits(uid), ["gateway.receipt.first"])
+
+        # H-1 interim (contract 6a): another epoch never replaces or rolls back A, whatever its seq.
+        for seq in (6, 500):
+            other = send(body(uid, seq, epoch=epoch_b, phase="complete", successCount=12))
+            self.assertEqual((other.status, other.body.get("code")), (409, "GATEWAY_EPOCH_UNRECOGNISED"), other.text)
+            self.assertEqual(stored(uid), [row])
+        self.assertEqual(audits(uid), ["gateway.receipt.first", "gateway.receipt.epoch_unrecognised"])
+
+        # A then follows the ordinary same-epoch rules; the transition into complete is audited once.
+        done = send(body(uid, 6, phase="complete", successCount=12))
+        self.assertEqual((done.status, done.body.get("result")), (200, "stored"), done.text)
+        [after] = stored(uid)
+        advanced = json.loads(after)
+        self.assertEqual((advanced["epoch"], advanced["seq"], advanced["phase"], advanced["successCount"]),
+                         (epoch_a, 6, "complete", 12))
+        self.assertGreaterEqual(advanced["receivedAt"], saved["receivedAt"])
+        self.assertEqual(audits(uid), ["gateway.receipt.first", "gateway.receipt.epoch_unrecognised",
+                                       "gateway.receipt.transition"])
+
+        # The worklist: null before any receipt (normal); origin is no gate (a dicom study is accepted);
+        # only the owner's list carries it; bootstrap carries none.
+        with self.stack.fixture("KIN 판독센터") as existing:
+            def listed_row(user: str) -> dict[str, Any] | None:
+                listed = self.stack.request("GET", "/studies", user)
+                self.assert_status(listed, 200)
+                return next((item for item in listed.body["studies"] if item["uid"] == existing.uid), None)
+
+            self.assertIsNone(listed_row("kdoctor")["gatewayReceipt"])
+            preserved = self.stack.bearer_request("POST", "/gateway/announce", token, {"studyUid": existing.uid})
+            self.assertEqual((preserved.status, preserved.body.get("origin")), (200, "dicom"), preserved.text)
+            report = send(body(existing.uid, 3, successCount=0, localCount=1))
+            self.assertEqual((report.status, report.body.get("result")), (200, "stored"), report.text)
+            receipt = listed_row("kdoctor")["gatewayReceipt"]
+            self.assertEqual(set(receipt), {"phase", "successCount", "localCount", "attempt", "errorCode",
+                                            "serverReceivedAt", "agentSeq", "epoch"})
+            self.assertEqual((receipt["phase"], receipt["successCount"], receipt["localCount"], receipt["attempt"],
+                              receipt["errorCode"], receipt["agentSeq"], receipt["epoch"]),
+                             ("sending", 0, 1, 0, None, 3, epoch_a))
+            self.assertTrue(receipt["serverReceivedAt"].endswith("Z"), receipt)
+            self.assertIsNone(listed_row("doctor"))
+            hallym = self.stack.request("GET", "/studies", "doctor")
+            boot = self.stack.request("GET", "/bootstrap", "kdoctor")
+            self.assert_status(boot, 200)
+            self.assertNotIn(epoch_a, hallym.text)
+            self.assertNotIn("gatewayReceipt", boot.text)
+            self.assertNotIn(epoch_a, boot.text)
+
     def test_gateway_agent_queue_and_batch_contract(self) -> None:
         completed = subprocess.run(
             [sys.executable, str(ROOT / "gateway" / "agent" / "test_agent.py")],
             cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-        self.assertIn("Ran 5 tests", completed.stderr + completed.stdout)
+        # 5 -> 18: S4-U3 added the receipt suites (error-code mapping, queue epoch/seq/body, delivery).
+        # The number is the suite as authored; tests/gateway_receipt_source_test.py pins it to an AST
+        # count of test_agent.py, so neither can move without the other.
+        self.assertIn("Ran 18 tests", completed.stderr + completed.stdout)
 
     def test_production_gateway_contract_is_declared(self) -> None:
         completed = subprocess.run(

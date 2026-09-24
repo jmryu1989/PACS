@@ -53,7 +53,8 @@ class Pure(unittest.TestCase):
         body, _, _, _ = fixture(); expected=body['product']
         for table,field,value in [('FavoriteWorkspace','value','[]'),('FavoriteWorkspace','subject','wrong-owner'),
                 ('StudyTagCatalog','ownerSub','wrong-owner'),('StudyTagCatalog','lastRequest','00000000-0000-4000-8000-000000000999'),
-                ('ReaderAssignment','readerSub',None),('ReaderAssignment','revision',1),('ReaderAssignment','lastFingerprint','0'*64),('StudyConsultation','reply','wrong reply'),('StudyConsultation','recipientSub','wrong recipient'),('StudyConsultation','revision',1)]:
+                ('ReaderAssignment','readerSub',None),('ReaderAssignment','revision',1),('ReaderAssignment','lastFingerprint','0'*64),('StudyConsultation','reply','wrong reply'),('StudyConsultation','recipientSub','wrong recipient'),('StudyConsultation','revision',1),
+                ('GatewayReceipt','seq',6),('GatewayReceipt','epoch','00000000-0000-4000-8000-000000000c02'),('GatewayReceipt','errorCode',None)]:
             actual={key:copy.deepcopy(expected[key]) for key in ('catalog','rows','sequences')}
             actual['rows'][table][0][field]=value
             with self.subTest(table=table,field=field),patch.object(transfer,'observe',return_value=actual),self.assertRaises(transfer.ProductMismatch):
@@ -205,13 +206,17 @@ class Pure(unittest.TestCase):
         # the column cannot pass on NULLs alone.
         # S4-U2 added the order-accession migration: 27 files, still 37 tables, and the first synthetic
         # Order row (one), whose accession is a real value for the same reason.
-        self.assertEqual(len(transfer.MIGRATIONS), 27)
-        self.assertEqual(len(transfer.TABLES), 37)
+        # S4-U3 added the gateway-receipt table: 28 files, 38 tables, and one synthetic receipt whose
+        # BIGINT counts, UUID epoch and non-null errorCode are real values.
+        self.assertEqual(len(transfer.MIGRATIONS), 28)
+        self.assertEqual(len(transfer.TABLES), 38)
         self.assertEqual(set(rows), set(transfer.TABLES))
         self.assertEqual((len(rows['Finding']), len(rows['FindingRevision'])), (1, 2))
         self.assertEqual([(r['oid'], r['accession'], r['studyUid']) for r in rows['Order']],
                          [('SYNTHETIC-order-1', 'SYNTHETIC-ACC-1', None)])
-        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1)
+        self.assertEqual([(r['studyUid'], r['institutionId'], r['seq'], r['phase'], r['successCount'], r['localCount'], r['errorCode'])
+                          for r in rows['GatewayReceipt']], [(UID, 'SYNTHETIC-hospital', 7, 'retry', 3, 12, 'stow_http')])
+        self.assertEqual(sum(len(value) for value in rows.values()), 46 + 1 + 2 + 1 + 1)
         hp = rows['HangingProtocolPreference']
         self.assertEqual(len(hp), 3)
         self.assertEqual(len({(r['institution'], r['subject']) for r in hp}), 3)

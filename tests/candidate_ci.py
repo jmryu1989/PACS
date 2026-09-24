@@ -16,7 +16,7 @@ import sys
 TOOLS_ROOT = Path(__file__).resolve().parents[1]
 SHA = re.compile(r"[0-9a-f]{40}")
 BASE = (
-    ("invariants_live.py", None, "candidate-invariants", 80),
+    ("invariants_live.py", None, "candidate-invariants", 81),
     ("e2e/test_worklist.py", None, "candidate-worklist", 15),
 )
 FLOWS = (
@@ -85,8 +85,8 @@ def exact_selection(target, runner):
         unit = "candidate-flow-" + filename.rsplit("/", 1)[-1].removeprefix("test_").removesuffix(".py").replace("_", "-")
         rows.append((filename, class_name, unit))
         selected.append({"file": "tests/" + filename, "case": class_name + "." + method})
-    require(len(selected) == 102 and len({(x["file"], x["case"]) for x in selected}) == 102,
-            "Candidate selection must contain 102 unique exact cases")
+    require(len(selected) == 103 and len({(x["file"], x["case"]) for x in selected}) == 103,
+            "Candidate selection must contain 103 unique exact cases")
     return rows, selected
 
 

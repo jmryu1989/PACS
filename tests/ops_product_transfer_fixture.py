@@ -48,12 +48,14 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260917120000_findings/migration.sql',
               'api/prisma/migrations/20260920120000_report_citations/migration.sql',
               'api/prisma/migrations/20260921120000_report_structure/migration.sql',
-              'api/prisma/migrations/20260924120000_order_accession/migration.sql']
+              'api/prisma/migrations/20260924120000_order_accession/migration.sql',
+              'api/prisma/migrations/20260924130000_gateway_receipt/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'])
+                 'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
+                 'GatewayReceipt'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
 PRODUCT_FIELDS = {'migrations', 'study_uid', 'catalog', 'rows', 'sequences'}
@@ -144,6 +146,11 @@ def expected_rows(uid):
     rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
         name='SYNTHETIC order', sex='O', birth='', sched='2026-09-06 09:00', modality='CT', descr='SYNTHETIC order',
         ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1')]
+    # S4-U3: one synthetic receipt in a retry state, so BIGINT counts, the UUID epoch and a non-null
+    # errorCode all carry real values through the dump (an empty table would pass on nothing).
+    rows['GatewayReceipt'] = [dict(studyUid=uid, institutionId='SYNTHETIC-hospital',
+        epoch='00000000-0000-4000-8000-000000000c01', seq=7, phase='retry', attempt=2, successCount=3,
+        localCount=12, errorCode='stow_http', receivedAt=STAMP)]
     rows['UserFilter'] = [dict(id=1, owner='SYNTHETIC-reader', name='SYNTHETIC saved search',
         mode='Radiology', isDefault=True, quick='SYNTHETIC', days=-1, cols='{}', sortKey='date',
         sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]
@@ -277,7 +284,8 @@ def create_product(name, db, uid):
     for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
-                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'):
+                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
+                  'GatewayReceipt'):
         rows = data[table]
         for row in rows:
             # SERIAL must actually run; explicit values would hide setval loss.
@@ -510,6 +518,12 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing consultation participants'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET "studyUid"='2.25.0';
         RAISE EXCEPTION 'missing consultation study FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN UPDATE "GatewayReceipt" SET phase='done';
+        RAISE EXCEPTION 'missing gateway receipt phase check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "GatewayReceipt" SET phase='complete', "errorCode"=NULL;
+        RAISE EXCEPTION 'missing gateway receipt completeness check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "GatewayReceipt" SET "errorCode"=NULL;
+        RAISE EXCEPTION 'missing gateway receipt error code check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));

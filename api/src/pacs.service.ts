@@ -20,6 +20,9 @@ import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
 import { reconcileOrders } from './order-reconciliation';
+import { decideGatewayReceipt, GATEWAY_EPOCH_INCIDENT_WINDOW_MS, GatewayReceiptInputError, parseGatewayReceipt,
+  projectGatewayReceipt, storedGatewayReceipt } from './gateway-receipt';
+import type { GatewayReceipt, GatewayReceiptDecision } from './gateway-receipt';
 import { folderAction, folderEntries, folderPath } from './filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
 import { normalizeHangingProtocol } from './hanging-protocol';
@@ -540,6 +543,66 @@ export class PacsService implements OnModuleInit {
     }
   }
 
+  /**
+   * S4-U3 Gateway 전송 영수증(`gateway-receipt.ts`).
+   *
+   * 자기 기관 StudyState가 없는 UID는 없든 남의 것이든 **같은 404 하나**다. 그 판정이 순서·epoch
+   * 비교보다 먼저 온다 — 남의 검사에 409가 나가면 그 검사가 있다는 사실이 샌다. announce의 소유권 409는
+   * 쓰지 않는다. 409는 순서·본문 충돌과 모르는 epoch에만 쓴다.
+   *
+   * 한 검사의 영수증 처리는 advisory lock으로 줄 세운다. 그래서 최초 저장과 epoch 사건 감사의 속도
+   * 제한이 경쟁에서도 한 건이고, 속도 제한 때문에 저장된 영수증 행을 건드리지 않는다.
+   */
+  async gatewayReceipt(body: unknown, c: Caller) {
+    needExact(c, 'gateway', '전송 영수증');
+    const me = inst(c);
+    let receipt: GatewayReceipt;
+    try { receipt = parseGatewayReceipt(body); }
+    catch (error) {
+      if (error instanceof GatewayReceiptInputError)
+        throw new BadRequestException({ code: 'GATEWAY_RECEIPT_INVALID', field: error.message });
+      throw error;
+    }
+    const uid = receipt.studyUid;
+    const outcome: GatewayReceiptDecision | { kind: 'absent' } = await this.prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${'kin.gateway-receipt:' + uid}, 0))`;
+      const study = await tx.studyState.findUnique({ where: { uid }, select: { institutionId: true } });
+      if (!study || study.institutionId !== me) return { kind: 'absent' as const };
+      const row = await tx.gatewayReceipt.findUnique({ where: { studyUid: uid } });
+      // 다른 기관 자격증명이 남긴 행은 이 epoch의 것이 아니다. 덮어쓰지 않는다.
+      const decision: GatewayReceiptDecision = row && row.institutionId !== me ? { kind: 'epoch' }
+        : decideGatewayReceipt(row ? storedGatewayReceipt(row) : null, receipt);
+      const fields = { epoch: receipt.epoch, seq: receipt.seq, phase: receipt.phase, attempt: receipt.attempt,
+        successCount: receipt.successCount, localCount: receipt.localCount, errorCode: receipt.errorCode,
+        receivedAt: new Date() };
+      const audit = (action: string, detail: any) =>
+        tx.auditLog.create({ data: { actor: c.actor || 'unknown', action, target: uid, detail: dump(detail) } });
+      if (decision.kind === 'first') {
+        await tx.gatewayReceipt.create({ data: { studyUid: uid, institutionId: me, ...fields } });
+        await audit('gateway.receipt.first', { epoch: receipt.epoch, seq: receipt.seq, phase: receipt.phase });
+      } else if (decision.kind === 'advance') {
+        await tx.gatewayReceipt.update({ where: { studyUid: uid }, data: fields });
+        if (decision.transition)
+          await audit('gateway.receipt.transition', { epoch: receipt.epoch, seq: receipt.seq, from: row.phase, phase: receipt.phase });
+      } else if (decision.kind === 'epoch') {
+        const since = new Date(Date.now() - GATEWAY_EPOCH_INCIDENT_WINDOW_MS);
+        const recent = await tx.auditLog.findFirst({
+          where: { action: 'gateway.receipt.epoch_unrecognised', target: uid, at: { gte: since } }, select: { id: true } });
+        if (!recent) await audit('gateway.receipt.epoch_unrecognised', { registeredEpoch: row.epoch, offeredEpoch: receipt.epoch });
+      }
+      return decision;
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch((error: any) => {
+      if (error?.code === 'P2028' || error?.code === 'P2010' && ['55P03', '57014'].includes(error?.meta?.code))
+        throw new ServiceUnavailableException({ code: 'GATEWAY_RECEIPT_BUSY' });
+      throw error;
+    });
+    if (outcome.kind === 'absent') throw new NotFoundException({ code: 'GATEWAY_RECEIPT_STUDY_NOT_FOUND' });
+    if (outcome.kind === 'conflict') throw new ConflictException({ code: 'GATEWAY_RECEIPT_CONFLICT' });
+    if (outcome.kind === 'epoch') throw new ConflictException({ code: 'GATEWAY_EPOCH_UNRECOGNISED' });
+    return { studyUid: uid, result: outcome.kind === 'first' || outcome.kind === 'advance' ? 'stored' : outcome.kind };
+  }
+
   /** SOP lookup도 요청 Study의 기관 관문 안에서만 Orthanc ID를 내보낸다. */
   async dicomLookup(studyUid: string, sopUid: string, c: Caller) {
     const me = inst(c);
@@ -746,6 +809,9 @@ export class PacsService implements OnModuleInit {
 
     const assignments = await this.prisma.readerAssignment.findMany({where:{studyUid:{in:pageUids},institutionId:me}});
     const assignmentByUid=new Map(assignments.map(a=>[a.studyUid,a]));
+    // S4-U3 axis C: only receipts this institution's own Gateway credentials wrote, and below only on its own rows.
+    const receipts = await this.prisma.gatewayReceipt.findMany({ where: { studyUid: { in: pageUids }, institutionId: me } });
+    const receiptByUid = new Map(receipts.map(r => [r.studyUid, r]));
     const sourceRows = page ? await this.orthanc.studiesByUid(pageUids) : window.rows;
     const out: any[] = [];
     for (const st of sourceRows) {
@@ -760,6 +826,9 @@ export class PacsService implements OnModuleInit {
         uid,
         techNote: noteByUid.get(uid) ?? { version: 0, present: false },
         readerAssignment: s.institutionId===me ? (()=>{const a=assignmentByUid.get(uid);return {revision:a?.revision??0,reader:a?.readerSub?{sub:a.readerSub,actor:a.readerActor,name:a.readerName}:null};})() : null,
+        // null = no Gateway report: normal (device-direct, older agent, not installed), never failure or offline.
+        // A tele receiver sees null too; the sender's transport is not its business.
+        gatewayReceipt: s.institutionId === me ? projectGatewayReceipt(receiptByUid.get(uid)) : null,
         // null은 unknown이다. 0은 QIDO가 실제로 0을 말했을 때만 나간다.
         count: qidoCount(st, '00201208'),
         series: qidoCount(st, '00201206'),
