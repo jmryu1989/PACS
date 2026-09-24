@@ -312,3 +312,162 @@ test('A4 delta: retained annotation with identical values reports failed source,
   assert.match(h.text(), /원본을 확인하지 못했습니다/); assert.doesNotMatch(h.text(), /재계산 값이 저장 당시와 다릅니다/);
   assert.equal(h.button('Save').disabled, true);
 });
+
+// S3-U5 CI1: the production kin.series-metadata-recovery extension on a fake WADO client whose calls settle when the
+// test says, with fake timers and a DOM stub. Nothing here is a copied state machine.
+const CURRENT = '1.2.840.99.1', PRIOR = '1.2.840.99.2', SERIES = '1.2.840.99.1.1', OTHER = '1.2.840.99.2.1';
+const http = status => Object.assign(new Error('request failed'), { request: {}, response: '', status });
+const ownMethod = client => Object.prototype.hasOwnProperty.call(client, 'retrieveSeriesMetadata');
+function recovery({ search = `?StudyInstanceUIDs=${CURRENT},${PRIOR}`, lazy = true, own = false, accessor = true } = {}) {
+  const document = new EventTarget(); document.body = new Element('body'); document.createElement = tag => new Element(tag);
+  document.querySelector = selector => document.body.all().find(e => e.id && '#' + e.id === selector) || null;
+  const panel = new Element('details'); panel.id = 'kin-viewer-layout'; document.body.append(panel);
+  const window = new EventTarget(), location = { search }, timers = new Map(), calls = [], notices = [];
+  let serial = 0;
+  function Client() {}
+  Client.prototype.retrieveSeriesMetadata = function (options) {
+    if (!('seriesInstanceUID' in options)) throw new Error('Series Instance UID is required for retrieval of series metadata');
+    const call = { self: this, options };
+    call.promise = new Promise((resolve, reject) => { call.resolve = resolve; call.reject = reject; });
+    calls.push(call); return call.promise;
+  };
+  const native = Client.prototype.retrieveSeriesMetadata, client = new Client();
+  if (own) client.retrieveSeriesMetadata = function foreign(options) { return native.call(this, options); };
+  const dataSource = { retrieve: accessor ? { getWadoDicomWebClient: () => client } : {}, getConfig: () => ({ enableStudyLazyLoad: lazy }) };
+  vm.runInNewContext(source, { window, document, location, URLSearchParams, crypto: webcrypto, TextEncoder, console, Event, AbortController,
+    setInterval: () => 0, clearInterval() {}, setTimeout: (fn, ms) => { timers.set(++serial, { fn, ms }); return serial; }, clearTimeout: id => { timers.delete(id); },
+    fetch: async () => { throw new Error('no network in this contract'); } });
+  timers.clear();
+  const extension = window.config.extensions.find(e => e.id === 'kin.series-metadata-recovery');
+  extension.preRegistration({ servicesManager: { services: { uiNotificationService: { show: x => notices.push(x) } } },
+    extensionManager: { getActiveDataSource: () => [dataSource] } });
+  return { location, timers, calls, notices, client, native, Client,
+    enter: () => extension.onModeEnter({}), exit: () => extension.onModeExit({}),
+    state: () => copy(window.kinSeriesMetadataRecoveryState()),
+    text: () => document.querySelector('#kin-series-metadata-status')?.textContent ?? null,
+    delays: () => [...timers.values()].map(t => t.ms),
+    fire: () => { const due = [...timers.values()]; timers.clear(); for (const t of due) t.fn(); },
+    load: (studyInstanceUID = CURRENT, seriesInstanceUID = SERIES) => {
+      const promise = client.retrieveSeriesMetadata({ studyInstanceUID, seriesInstanceUID }), seen = {};
+      promise.then(value => { seen.value = value; }, error => { seen.error = error; });
+      return { promise, seen };
+    },
+  };
+}
+
+test('U5-CI1 R1: one own wrapper on this lifecycle client, restored only while still ours; a mismatched shape is refused visibly and stays native', async () => {
+  const h = recovery(); h.enter();
+  assert.equal(ownMethod(h.client), true); assert.equal(h.Client.prototype.retrieveSeriesMetadata, h.native);
+  assert.deepEqual(h.state(), { phase: 'installed', pending: 0, retries: 0, errors: 0 }); assert.equal(h.text(), null);
+  h.exit();
+  assert.equal(ownMethod(h.client), false); assert.equal(h.client.retrieveSeriesMetadata, h.native); assert.equal(h.state().phase, 'stopped');
+  h.enter(); const foreign = function () {}; h.client.retrieveSeriesMetadata = foreign; h.exit();
+  assert.equal(h.client.retrieveSeriesMetadata, foreign);
+  for (const options of [{ lazy: false }, { own: true }, { accessor: false }, { search: '?hangingProtocolId=@ohif/hpCompare' }]) {
+    const r = recovery(options), before = r.client.retrieveSeriesMetadata; r.enter();
+    assert.equal(r.client.retrieveSeriesMetadata, before); assert.equal(r.state().phase, 'refused');
+    assert.match(r.text(), /재요청 기능을 연결하지 못했습니다/);
+    const { seen } = r.load(), error = http(500); r.calls[0].reject(error); await flush();
+    assert.equal(seen.error, error); assert.deepEqual(r.delays(), []); assert.equal(r.calls.length, 1); assert.equal(r.notices.length, 0);
+    r.exit(); assert.equal(r.text(), null); assert.equal(r.client.retrieveSeriesMetadata, before);
+  }
+});
+
+test('U5-CI1 R2: only a rejected HTTP 500-599 GET waits one fixed 1000 ms retry with the same client and options; 0, 4xx, 429, 600, no request and sync throws do not', async () => {
+  for (const status of [500, 502, 503, 599]) {
+    const h = recovery(); h.enter(); const { seen } = h.load();
+    h.calls[0].reject(http(status)); await flush();
+    assert.deepEqual(h.delays(), [1000]); assert.equal(h.calls.length, 1); assert.equal(seen.error, undefined);
+    h.fire(); assert.equal(h.calls.length, 2);
+    assert.equal(h.calls[1].self, h.client); assert.equal(h.calls[1].options, h.calls[0].options);
+  }
+  const bare = Object.assign(new Error('request failed'), { status: 503 }), text = Object.assign(new Error('request failed'), { request: {}, status: '503' });
+  for (const error of [http(0), http(400), http(401), http(403), http(404), http(409), http(429), http(499), http(600), bare, text, new TypeError('x')]) {
+    const h = recovery(); h.enter(); const { seen } = h.load();
+    h.calls[0].reject(error); await flush();
+    assert.equal(seen.error, error); assert.deepEqual(h.delays(), []); assert.equal(h.calls.length, 1); assert.equal(h.state().retries, 0);
+  }
+  const h = recovery(); h.enter();
+  assert.throws(() => h.client.retrieveSeriesMetadata({ studyInstanceUID: CURRENT }), /Series Instance UID is required/);
+  assert.deepEqual(h.delays(), []); assert.equal(h.calls.length, 0);
+});
+
+test('U5-CI1 R3: a transient 500 fills the one held promise with the retry reply; a persistent one rejects with the final error and names only the study position', async () => {
+  const h = recovery(); h.enter(); const { promise, seen } = h.load();
+  h.calls[0].reject(http(500)); await flush(); h.fire();
+  const reply = [{ '0020000E': { vr: 'UI', Value: [SERIES] } }]; h.calls[1].resolve(reply); await flush();
+  assert.equal(seen.value, reply); assert.equal(await promise, reply);
+  assert.equal(h.calls.length, 2); assert.equal(h.text(), null); assert.equal(h.notices.length, 0);
+  assert.deepEqual(h.state(), { phase: 'installed', pending: 0, retries: 1, errors: 0 });
+  h.fire(); await flush(); assert.equal(h.calls.length, 2);
+  const p = recovery(); p.enter(); const held = p.load(PRIOR, OTHER);
+  p.calls[0].reject(http(500)); await flush(); p.fire();
+  const final = http(503); p.calls[1].reject(final); await flush();
+  assert.equal(held.seen.error, final);
+  assert.match(p.text(), /^2번째 검사의 영상 정보를 한 번 다시 요청했지만 불러오지 못했습니다\(HTTP 503\)/);
+  assert.equal(p.notices.length, 1); assert.equal(p.notices[0].type, 'error'); assert.equal(p.notices[0].title, 'Image Loading');
+  assert.equal(p.notices[0].message, p.text());
+  for (const shown of [p.text(), p.notices[0].message]) assert.doesNotMatch(shown, /1\.2\.840/);
+  assert.deepEqual(p.delays(), []); assert.equal(p.calls.length, 2);
+  assert.deepEqual(p.state(), { phase: 'installed', pending: 0, retries: 1, errors: 1 });
+});
+
+test('U5-CI1 R4: repeated or concurrent calls for one series cannot renew its one retry; another series and a new lifecycle have their own', async () => {
+  const h = recovery(); h.enter();
+  const a = h.load(), b = h.load();
+  h.calls[0].reject(http(500)); h.calls[1].reject(http(502)); await flush();
+  assert.deepEqual(h.delays(), [1000]); assert.equal(a.seen.error, undefined); assert.equal(b.seen.error.status, 502);
+  assert.match(h.text(), /^1번째 검사의 영상 정보를 불러오지 못했습니다\(HTTP 502\)/);
+  const c = h.load(); h.calls[2].reject(http(500)); await flush();
+  assert.equal(c.seen.error.status, 500); assert.deepEqual(h.delays(), [1000]); assert.equal(h.notices.length, 1);
+  h.fire(); assert.equal(h.calls.length, 4);
+  const reply = []; h.calls[3].resolve(reply); await flush();
+  assert.equal(a.seen.value, reply); assert.equal(h.text(), null);
+  const d = h.load(); h.calls[4].reject(http(500)); await flush();
+  assert.equal(d.seen.error.status, 500); assert.deepEqual(h.delays(), []);
+  const e = h.load(CURRENT, '1.2.840.99.1.2'); h.calls[5].reject(http(500)); await flush();
+  assert.deepEqual(h.delays(), [1000]); h.fire(); assert.equal(h.calls.length, 7);
+  assert.equal(h.calls[6].options.seriesInstanceUID, '1.2.840.99.1.2'); assert.equal(e.seen.error, undefined);
+  h.exit(); h.enter(); assert.equal(h.text(), null);
+  h.load(); h.calls[7].reject(http(500)); await flush();
+  assert.deepEqual(h.delays(), [1000]); assert.deepEqual(h.state(), { phase: 'installed', pending: 1, retries: 0, errors: 0 });
+});
+
+test('U5-CI1 R5: exit or a changed URL before the timer ends the wait with the original error, no request and no message; late replies stay silent', async () => {
+  const h = recovery(); h.enter(); const held = h.load(), first = http(500);
+  h.calls[0].reject(first); await flush(); assert.equal(h.state().pending, 1);
+  h.exit(); await flush();
+  assert.equal(held.seen.error, first); assert.deepEqual(h.delays(), []);
+  h.fire(); await flush();
+  assert.equal(h.calls.length, 1); assert.equal(h.text(), null); assert.equal(h.notices.length, 0);
+  assert.equal(h.client.retrieveSeriesMetadata, h.native);
+  h.enter(); const late = h.load(); h.exit();
+  const error = http(500); h.calls[1].reject(error); await flush();
+  assert.equal(late.seen.error, error); assert.deepEqual(h.delays(), []); assert.equal(h.text(), null); assert.equal(h.notices.length, 0);
+  h.enter(); const flying = h.load(); h.calls[2].reject(http(500)); await flush(); h.fire(); h.exit();
+  const reply = []; h.calls[3].resolve(reply); await flush();
+  assert.equal(flying.seen.value, reply); assert.equal(h.calls.length, 4); assert.equal(h.text(), null);
+  const u = recovery(); u.enter(); const moved = u.load(); u.location.search = `?StudyInstanceUIDs=${PRIOR}`;
+  const early = http(500); u.calls[0].reject(early); await flush();
+  assert.equal(moved.seen.error, early); assert.deepEqual(u.delays(), []); assert.equal(u.text(), null);
+  const v = recovery(); v.enter(); const waiting = v.load(), pending = http(500); v.calls[0].reject(pending); await flush();
+  v.location.search = '?StudyInstanceUIDs=1.2.840.99.3'; v.fire(); await flush();
+  assert.equal(waiting.seen.error, pending); assert.equal(v.calls.length, 1); assert.equal(v.text(), null); assert.equal(v.notices.length, 0);
+  const w = recovery(); w.enter(); const outside = w.load('1.2.840.99.9', '1.2.840.99.9.1'), foreign = http(500);
+  w.calls[0].reject(foreign); await flush();
+  assert.equal(outside.seen.error, foreign); assert.deepEqual(w.delays(), []); assert.equal(w.text(), null);
+});
+
+test('U5-CI1 R6: a failure belongs to its own study and series; only a matching success clears it and a new lifecycle starts clean', async () => {
+  const h = recovery(), denied = '1번째 검사의 영상 정보에 접근할 수 없습니다(HTTP 403). 이 검사 영상은 표시하지 않았습니다.'; h.enter();
+  h.load(); h.calls[0].reject(http(403)); await flush();
+  assert.equal(h.text(), denied); assert.deepEqual(h.delays(), []);
+  h.load(PRIOR, OTHER); h.calls[1].reject(http(500)); await flush(); h.fire(); h.calls[2].reject(http(500)); await flush();
+  assert.match(h.text(), /^1번째 .*HTTP 403.* 2번째 .*한 번 다시 요청했지만.*HTTP 500/); assert.equal(h.notices.length, 2);
+  h.load(PRIOR, OTHER); h.calls[3].resolve([]); await flush();
+  assert.equal(h.text(), denied);
+  h.load(PRIOR, '1.2.840.99.2.9'); h.calls[4].resolve([]); await flush();
+  assert.equal(h.text(), denied);
+  h.exit(); assert.equal(h.text(), null); h.enter(); assert.equal(h.text(), null);
+  assert.deepEqual(h.state(), { phase: 'installed', pending: 0, retries: 0, errors: 0 });
+});

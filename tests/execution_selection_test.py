@@ -646,12 +646,27 @@ class ExecutionSelectionTests(unittest.TestCase):
         self.assertEqual(len(plan['tests']),4)
         self.assertEqual(runner.collect(plan).countTestCases(),4)
 
-    def test_candidate_contract_remains_71_then_15(self):
-        # 69 -> 71: R15 added two live structured-entry cases (L-1, L-2). The worklist contract
-        # is untouched at 15, and neither number may move without the test that moved it.
-        for filename, count in [('tests/invariants_live.py', 71), ('tests/e2e/test_worklist.py', 15)]:
+    def test_candidate_contract_remains_79_then_15(self):
+        # 69 -> 71: R15 added two live structured-entry cases (L-1, L-2). 71 -> 79: S3-ASR-U5 added
+        # the eight dictation refusal cases T1-T8. The worklist contract is untouched at 15, and
+        # neither number may move without the test that moved it.
+        for filename, count in [('tests/invariants_live.py', 79), ('tests/e2e/test_worklist.py', 15)]:
             plan = runner.module_plan(filename, 'selection-check', 'live', 600)
             self.assertEqual(runner.collect(plan).countTestCases(), count)
+        # The eight U5 cases are selected by name, in the classes the pure oracle judges them in.
+        import dictation_refusal_oracle as oracle
+        plan = runner.module_plan('tests/invariants_live.py', 'selection-check', 'live', 600)
+        selected = sorted(row['case'] for row in plan['tests'] if '.test_dictation_u5_' in row['case'])
+        self.assertEqual(selected, sorted([
+            'LiveInvariantTests.test_dictation_u5_01_role_guard_and_parser_order',
+            'LiveInvariantTests.test_dictation_u5_02_input_refusals_after_the_gate',
+            'LiveInvariantTests.test_dictation_u5_03_hold_refuses_other_actor_and_is_untouched',
+            'LiveInvariantTests.test_dictation_u5_04_preliminary_third_party_refused',
+            'LiveInvariantTests.test_dictation_u5_05_filming_non_emergency_refused',
+            'LiveInvariantTests.test_dictation_u5_06_institution_follows_tele_visibility',
+            'BffInvariantTests.test_dictation_u5_07_cookie_session_csrf',
+            'LiveInvariantTests.test_dictation_u5_08_approved_report_parity']))
+        self.assertEqual(selected, sorted(cls + '.' + name for cls, name in oracle.TESTS.values()))
 
     def test_dictation_live_suite_selection_and_declared_interception(self):
         # S3-ASR-U4L (readiness §7): one live suite appended last to the measurements profile, exactly its two
@@ -809,7 +824,7 @@ class ExecutionSelectionTests(unittest.TestCase):
             plan=runner.module_plan('tests/'+filename,unit,'live',timeout,class_name)
             self.assertEqual(runner.collect(plan).countTestCases(),len(plan['tests']))
             self.assertTrue(all(item['file']=='tests/'+filename for item in plan['tests']))
-            if index<2:self.assertEqual(len(plan['tests']),[71,15][index])
+            if index<2:self.assertEqual(len(plan['tests']),[79,15][index])
             if class_name:
                 self.assertTrue(all(row['case'].startswith(class_name+'.')
                                     for row in plan['tests']))
