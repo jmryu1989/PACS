@@ -513,7 +513,9 @@ class ClientPins(unittest.TestCase):
         for name in ("applyObservation", "markObservationUnavailable", "renderObservation",
                      "applyOrderReconciliation", "renderOrderReconciliation"):
             called |= {m for m in re.findall(r"\b([A-Za-z_$][\w$]*)\s*\(", js_function(MAIN, name)[len("function " + name):]) if m in top}
-        self.assertEqual({"applyOrderReconciliation", "renderObservation", "renderOrderReconciliation", "viewed"}, called)
+        # S4-U5 hands the same observation to the DICOM Identity panel; the harness must slice that function too.
+        self.assertEqual({"applyOrderReconciliation", "applyStudyIdentity", "renderObservation", "renderOrderReconciliation",
+                          "viewed"}, called)
         for name in called - {"viewed"}:
             self.assertIn('"%s"' % name, HARNESS)
         self.assertIn("function viewed(){", HARNESS)

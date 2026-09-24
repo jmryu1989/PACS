@@ -20,6 +20,7 @@ import { SEED_INSTITUTIONS, SEED_ORDERS, SEED_TEMPLATES } from './seed';
 import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
 import { reconcileOrders } from './order-reconciliation';
+import { ORDER_IDENTITY_SELECT, orderIdentity, overlayShape, OVERLAY_RULE_TEXT } from './study-identity';
 import { decideGatewayReceipt, GATEWAY_EPOCH_INCIDENT_WINDOW_MS, GatewayReceiptInputError, parseGatewayReceipt,
   projectGatewayReceipt, storedGatewayReceipt } from './gateway-receipt';
 import type { GatewayReceipt, GatewayReceiptDecision } from './gateway-receipt';
@@ -892,6 +893,13 @@ export class PacsService implements OnModuleInit {
     // S4-U3 axis C: only receipts this institution's own Gateway credentials wrote, and below only on its own rows.
     const receipts = await this.prisma.gatewayReceipt.findMany({ where: { studyUid: { in: pageUids }, institutionId: me } });
     const receiptByUid = new Map(receipts.map(r => [r.studyUid, r]));
+    // S4-U5: the orders this page's own linked rows point to, one read pinned to the caller's institution and
+    // taken before the access re-check below. study-identity.ts judges each pair; no Order value is sent.
+    const linked = [...new Set(pageUids.map(uid => byUid.get(uid))
+      .filter(s => s?.institutionId === me && s.matched === 'M' && s.orderOid).map(s => s.orderOid))];
+    const identityOrders = linked.length ? await this.prisma.order.findMany({
+      where: { oid: { in: linked }, institutionId: me }, select: ORDER_IDENTITY_SELECT }) : [];
+    const identityByOid = new Map(identityOrders.map(o => [o.oid, o]));
     const sourceRows = page ? await this.orthanc.studiesByUid(pageUids) : window.rows;
     const out: any[] = [];
     for (const st of sourceRows) {
@@ -909,6 +917,9 @@ export class PacsService implements OnModuleInit {
         // null = no Gateway report: normal (device-direct, older agent, not installed), never failure or offline.
         // A tele receiver sees null too; the sender's transport is not its business.
         gatewayReceipt: s.institutionId === me ? projectGatewayReceipt(receiptByUid.get(uid)) : null,
+        // S4-U5: judged on this row's server-read tags only, never on ov/orig. A tele receiver's row is null.
+        orderIdentity: s.institutionId === me
+          ? orderIdentity(me, s, identityByOid.get(s.orderOid), key => OrthancService.tag(st, key)) : null,
         // null은 unknown이다. 0은 QIDO가 실제로 0을 말했을 때만 나간다.
         count: qidoCount(st, '00201208'),
         series: qidoCount(st, '00201206'),
@@ -1820,6 +1831,10 @@ export class PacsService implements OnModuleInit {
       const rs = prev?.rs ?? 'W';
       if (rs !== 'W')
         throw new BadRequestException(`판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: ${rs})`);
+      // S4-U5 (M-1): last, after every existing refusal, so each caller and RS keeps its status and message. The
+      // overlay reaches every institution that sees the row, so only display fields with text values are stored.
+      if (!overlayShape(body.ov))
+        throw new BadRequestException(`환자·검사 정보(ov) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
     }
 
     const saved = await tx.studyState.update({ where: { uid }, data });
@@ -2959,6 +2974,10 @@ export class PacsService implements OnModuleInit {
     // Match도 환자 정보를 덮어쓰는 동작이므로 같은 규칙을 받는다
     if (prev && prev.rs !== 'W')
       throw new BadRequestException(`판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: ${prev.rs})`);
+    // S4-U5 (N-1): the client-claimed original is stored and relayed like the overlay, so it gets the same shape
+    // check, after every existing refusal above. Mismatch or identity never refuses a match.
+    if (!overlayShape(patient?.orig ?? null))
+      throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
 
     const ov = {
       id: order.patientId, name: order.name, sex: order.sex, birth: order.birth,

@@ -51,6 +51,9 @@ OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("applyObservation"
 # reconciliation display. Sliced too; its model stays null here unless a case starts it
 # (tests/order_reconciliation_dom_test.py does), so the cases below run the same code path as before.
 ORDERS = "\n".join(extract_function(MAIN, name) for name in ("applyOrderReconciliation", "renderOrderReconciliation"))
+# S4-U5: they also hand it to the DICOM Identity panel. Sliced the same way; the model stays null and this page has no
+# #study-identity, so both return at once here (tests/study_identity_dom_test.py starts the model and adds the panel).
+IDENTITY = "\n".join(extract_function(MAIN, name) for name in ("applyStudyIdentity", "renderStudyIdentity"))
 # S4-U4: renderObservation now draws Now Retry, and the request is the shipped function too. The slice starts at
 # `function`, so its `async` is put back here; api() and KinAuth.has() are the harness's recorded stand-ins.
 RETRY = "async " + extract_function(MAIN, "requestGatewayRetry")
@@ -89,8 +92,10 @@ function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s
 // Starts null: study-arrivals.js is added after this script, and setUp starts the session model.
 let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
 let orderReconciliationModel=null;
+let studyIdentityModel=null;
 OBSERVESTATE
 ORDERSTATE
+IDENTITYSTATE
 RETRYSTATE
 $('#receipt-retry').addEventListener('click',requestGatewayRetry);
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
@@ -103,7 +108,7 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
    .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
-   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("RETRYSTATE", RETRY)
+   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS).replace("IDENTITYSTATE", IDENTITY).replace("RETRYSTATE", RETRY)
 
 OWNER = ["hospital", "reader-sub"]
 

@@ -416,6 +416,18 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S4-U5 DICOM Identity panel, Modify Exam guidance line and the correction paths; tests/study_identity_source_test.py
+# pins what each one does.
+for _kind, _extra in {
+    "ids": {"study-identity": 1, "study-identity-summary": 1, "study-identity-order": 1, "study-identity-tags": 1,
+            "study-identity-guidance": 1, "m-guidance": 1},
+    "functions": {"applyStudyIdentity": 1, "renderStudyIdentity": 1, "noteIdentityCorrection": 1, "refreshOrders": 1,
+                  "saveModify": 1},
+    "selectors": {"#study-identity": 1, "#study-identity-summary": 2, "#study-identity-order": 1,
+                  "#study-identity-tags": 1, "#study-identity-guidance": 1, "#m-guidance": 3},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 
 
 def inventory(text):
