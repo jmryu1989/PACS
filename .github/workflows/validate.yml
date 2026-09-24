@@ -37,6 +37,16 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/structure-vectors --cwd . --file api/src/report-structure.ts --file worklist-v0/hpacs-lite/report-structure.js --file tests/report_structure_vectors.json --file tests/report_structure_vectors_test.py -- python3 -B tests/report_structure_vectors_test.py
       - name: S3-structured-report additive migration, NULL-writing rules and leak boundary
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/structure-migration --cwd . --file api/prisma/migrations/20260921120000_report_structure/migration.sql --file api/prisma/schema.prisma --file api/src/pacs.service.ts --file api/src/report-structure.ts --file tests/report_structure_migration_test.py -- python3 -B tests/report_structure_migration_test.py
+      # S4-U1b: the shared observation vectors against an independent model, the server/page/main
+      # source pins and the pre-S4 main.html anchor inventory; then the S4-U1a count vectors, which
+      # no job selected before; then every Stage 3 mutant script's own anchor check (no browser).
+      - name: S4-U1b observation vectors, receipt labels, source pins, S4-U1a counts and Stage 3 main.html anchors
+        run: |
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-observation --cwd . --file tests/study_observation_vectors.json --file tests/study_observation_test.py --file worklist-v0/hpacs-lite/study-arrivals.js --file worklist-v0/hpacs-lite/study-pages.js --file worklist-v0/hpacs-lite/main.html --file api/src/pacs.service.ts --file tests/worklist_arrivals_dom_test.py -- python3 -B tests/study_observation_test.py
+          python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/study-arrivals-counts --cwd . --file api/src/pacs.service.ts --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs --file tests/study_arrivals_counts_test.py -- python3 -B tests/study_arrivals_counts_test.py
+          for script in report_cursor_insert_mutants report_structure_mutants report_preview_citation_mutants report_version_citation_mutants viewer_job_print_citation_mutants; do
+            python3 scripts/record-run.py --run-dir "tmp/workspace-ui-ci/s4-anchors-$script" --cwd . --file worklist-v0/hpacs-lite/main.html --file "tests/$script.py" -- python3 -B "tests/$script.py" --anchors-only
+          done
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
@@ -774,7 +784,7 @@ jobs:
           "$RUNNER_TEMP/study-arrivals-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
           "$RUNNER_TEMP/study-arrivals-python/bin/python" -m playwright install --with-deps chromium
       - name: Confirm exact declared study arrivals selection
-        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_study_arrivals.py --file worklist-v0/hpacs-lite/study-arrivals.js --file api/src/pacs.service.ts -- "$RUNNER_TEMP/study-arrivals-python/bin/python" -B tests/execution_selection_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_study_arrivals.py --file worklist-v0/hpacs-lite/study-arrivals.js --file api/src/pacs.service.ts --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-pages.js -- "$RUNNER_TEMP/study-arrivals-python/bin/python" -B tests/execution_selection_test.py
       - name: Isolated declared study arrivals tests
         timeout-minutes: 28
         run: |
@@ -822,7 +832,7 @@ jobs:
       - name: Finding link state, exact-frame navigation and findings store model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/finding-link-model --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-findings.js --file tests/finding_link_model_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/finding_link_model_test.cjs
       - name: Existing study instance and series arrival model
-        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-arrivals --cwd . --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/study_arrivals_test.cjs --file tests/study_observation_vectors.json -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/study_arrivals_test.cjs
       - name: CT display target selection and atomic rollback model
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/display-scope --cwd . --file worklist-v0/hpacs-lite/viewer-display-scope.js --file tests/viewer_display_scope_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src node:22-alpine node --test tests/viewer_display_scope_test.cjs
       - name: Cell merge geometry, restore oracle and refusal model

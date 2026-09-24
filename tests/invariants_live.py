@@ -2875,12 +2875,31 @@ class LiveInvariantTests(unittest.TestCase):
         self.assertEqual(len(announced), 1, audits.text)
         self.assertIn("tagMismatch", json.dumps(announced[0], ensure_ascii=False))
 
+        # S4-U1b: an announce-only study has no QIDO row. It is reported on the separate
+        # not-observed surface with uid/origin/createdAt only, never as a study row, and only
+        # to its own institution.
+        listed = self.stack.request("GET", "/studies", "kdoctor")
+        self.assertEqual(listed.status, 200, listed.text)
+        self.assertIsInstance(listed.body.get("observedAt"), str, listed.text[:500])
+        self.assertNotIn(uid, [row["uid"] for row in listed.body["studies"]])
+        absent = [row for row in listed.body["notObserved"] if row["uid"] == uid]
+        self.assertEqual(len(absent), 1, json.dumps(listed.body["notObserved"])[:2000])
+        self.assertEqual(set(absent[0]), {"uid", "origin", "createdAt"})
+        self.assertEqual(absent[0]["origin"], "gateway")
+        other = self.stack.request("GET", "/studies", "doctor")
+        self.assertEqual(other.status, 200, other.text)
+        self.assertNotIn(uid, [row["uid"] for row in other.body["notObserved"]])
+
         with self.stack.fixture("KIN 판독센터") as existing:
             preserved = self.stack.bearer_request(
                 "POST", "/gateway/announce", token, {"studyUid": existing.uid},
             )
             self.assertEqual(preserved.status, 200, preserved.text)
             self.assertEqual(preserved.body.get("origin"), "dicom")
+            # origin is not a transport gate: the dicom study stays an observed row.
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            self.assertIn(existing.uid, [row["uid"] for row in listed.body["studies"]])
+            self.assertNotIn(existing.uid, [row["uid"] for row in listed.body["notObserved"]])
 
         with self.stack.fixture() as foreign:
             conflict = self.stack.bearer_request(
