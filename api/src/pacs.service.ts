@@ -2979,9 +2979,10 @@ export class PacsService implements OnModuleInit {
     if (!overlayShape(patient?.orig ?? null))
       throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);
 
+    // S4-NB1: age is the client's untrusted ageOf convenience value relayed to every viewer incl. tele: coerce to '', never refuse (PATCH ov keeps its M-1 refusal).
     const ov = {
       id: order.patientId, name: order.name, sex: order.sex, birth: order.birth,
-      age: patient?.age ?? '', desc: order.descr, ward: order.ward,
+      age: overlayShape({ age: patient?.age }) ? patient.age : '', desc: order.descr, ward: order.ward,
     };
     const orig = parse(prev?.orig) ?? patient?.orig ?? null;
 

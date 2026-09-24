@@ -344,6 +344,16 @@ class ServicePins(unittest.TestCase):
             self.assertNotIn(banned, match)
         self.assertIn("export const OVERLAY_RULE_TEXT = `허용 키 ${OVERLAY_KEYS.join(', ')} · 값은 문자열(age는 유한한 숫자도 가능)`;", RULE)
 
+    def test_nb1_match_age_is_coerced_by_the_overlay_rule_without_a_new_refusal(self):
+        """T-NB1-1: pins the text only; the stored value per input is T-NB1-2 on the hosted stack."""
+        match = between(SERVICE, "  async match(uid: string, oid: string, patient: any, c: Caller) {", "\n  }\n")
+        line = "      age: overlayShape({ age: patient?.age }) ? patient.age : '', desc: order.descr, ward: order.ward,\n"
+        self.assertEqual(match.count(line), 1)
+        self.assertNotIn("patient?.age ?? ''", SERVICE)
+        self.assertEqual(match.count("overlayShape("), 2)       # the N-1 orig refusal + this coercion, nothing new
+        refusal = match.index("if (!overlayShape(patient?.orig ?? null))\n      throw new BadRequestException(`원래 정보(orig) 형식이 잘못되었습니다 — ${OVERLAY_RULE_TEXT}`);")
+        self.assertTrue(refusal < match.index(line) < match.index("state = await this.prisma.$transaction(async tx => {"))
+
 
 # ── 3. Client source pins ─────────────────────────────────────────────────────────────────────────────────────
 
