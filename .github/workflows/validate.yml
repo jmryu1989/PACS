@@ -743,6 +743,53 @@ jobs:
             tmp/cell-merge-ci/
           if-no-files-found: error
           retention-days: 7
+  study-arrivals:
+    # S4-U1a wires the existing `study-arrivals` profile (unchanged: one suite, the four
+    # declared StudyArrivalsE2E native cases, 900s cap) into the standing gate. It was only
+    # reachable through the manual dispatch workflow, so the accepted native regression was
+    # never selected by a normal candidate run; the `tests/worklist_arrivals_dom_test.py`
+    # step in `measurements` is a pure DOM harness and is not this evidence. A separate
+    # job, not a second profile call inside `measurements`: that step already lets the
+    # 20-suite profile claim measurement_ci.py's whole 25-minute deadline, so a serial
+    # second invocation could not fit its 28-minute bound. Recorded dispatch history for
+    # this profile (runs 34637295074/34638528855/34639191206): suite 201-207s, stack
+    # setup about 52s, cleanup about 12s, so (900+35)s stays inside the 1500s deadline
+    # with 565s for the stack. Same 40-minute job policy and 28-minute live step as the
+    # existing e2e jobs; cleanup failure still fails the profile and the artifact is
+    # uploaded on every outcome.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Study arrivals profile isolation, bounded budget and artifact policy
+        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/measurement-ci --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py --file .github/workflows/validate.yml -- python3 -B tests/measurement_ci_test.py
+      - name: Keep pinned browser dependencies independent of unused Chrome APT repository
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" python3 scripts/ci_browser_apt.py
+      - name: Install synthetic DICOM and pinned browser test dependencies
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/study-arrivals-python"
+          "$RUNNER_TEMP/study-arrivals-python/bin/python" -m pip install -r tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+          "$RUNNER_TEMP/study-arrivals-python/bin/python" -m playwright install --with-deps chromium
+      - name: Confirm exact declared study arrivals selection
+        run: python3 scripts/record-run.py --run-dir tmp/study-arrivals-ci/execution-selection --cwd . --file tests/measurement_ci.py --file tests/execution_selection_test.py --file tests/e2e/test_study_arrivals.py --file worklist-v0/hpacs-lite/study-arrivals.js --file api/src/pacs.service.ts -- "$RUNNER_TEMP/study-arrivals-python/bin/python" -B tests/execution_selection_test.py
+      - name: Isolated declared study arrivals tests
+        timeout-minutes: 28
+        run: |
+          "$RUNNER_TEMP/study-arrivals-python/bin/python" tests/measurement_ci.py --profile study-arrivals
+      - name: Sanitized synthetic study arrivals evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-study-arrivals-results
+          path: |
+            tests/e2e/artifacts/study-arrivals-ci/
+            tests/e2e/artifacts/STUDY-ARRIVALS-*.png
+            tmp/study-arrivals-ci/
+          if-no-files-found: error
+          retention-days: 7
   runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -933,6 +980,7 @@ jobs:
             tmp/runtime-ci/volume-api-models/
             tmp/runtime-ci/findings-migration/
             tmp/runtime-ci/finding-link-model/
+            tmp/runtime-ci/study-arrivals/
           if-no-files-found: error
           retention-days: 7
   asr-engine:
