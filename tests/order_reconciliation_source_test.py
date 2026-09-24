@@ -447,13 +447,15 @@ class MigrationPins(unittest.TestCase):
         fixture = text("tests", "ops_product_transfer_fixture.py")
         transfer = text("tests", "ops_product_transfer_test.py")
         self.assertIn("'" + MIGRATION_NAME + "'", production)
-        # S4-U3's gateway-receipt migration now follows this one: 28 files, and this one is second to last.
+        # S4-U3's gateway-receipt and then S4-U4's gateway-retry-request migrations follow this one: 29 files.
+        # The order is pinned, not a position from the end, so the next additive migration moves only the count.
         self.assertIn("'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',", fixture)
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 28)", transfer)
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 29)", transfer)
         self.assertIn("accession='SYNTHETIC-ACC-1'", fixture)
         self.assertIn("'ReportDraft', 'Order', 'UserFilter',", fixture)
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
-        self.assertEqual([MIGRATION_NAME, "20260924130000_gateway_receipt"], names[-2:])
+        later = [MIGRATION_NAME, "20260924130000_gateway_receipt", "20260924140000_gateway_retry_request"]
+        self.assertEqual(names[names.index(MIGRATION_NAME):names.index(MIGRATION_NAME) + 3], later)
 
 
 class ClientPins(unittest.TestCase):

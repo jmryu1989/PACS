@@ -23,6 +23,9 @@ import { reconcileOrders } from './order-reconciliation';
 import { decideGatewayReceipt, GATEWAY_EPOCH_INCIDENT_WINDOW_MS, GatewayReceiptInputError, parseGatewayReceipt,
   projectGatewayReceipt, storedGatewayReceipt } from './gateway-receipt';
 import type { GatewayReceipt, GatewayReceiptDecision } from './gateway-receipt';
+import { decideGatewayRetryRequest, GATEWAY_RETRY_BUSY, GATEWAY_RETRY_INVALID, GATEWAY_RETRY_NOT_RETRY,
+  GATEWAY_RETRY_POLL_INVALID, GATEWAY_RETRY_UNSUPPORTED_F01, GatewayRetryInputError, parseGatewayRetryPoll,
+  parseGatewayRetryRequestBody } from './gateway-retry';
 import { folderAction, folderEntries, folderPath } from './filter-folders';
 import { copySearchFolder, mergeCopiedFolders, sharedKeys, sharedLibrary, sharedSearch } from './shared-filters';
 import { normalizeHangingProtocol } from './hanging-protocol';
@@ -601,6 +604,83 @@ export class PacsService implements OnModuleInit {
     if (outcome.kind === 'conflict') throw new ConflictException({ code: 'GATEWAY_RECEIPT_CONFLICT' });
     if (outcome.kind === 'epoch') throw new ConflictException({ code: 'GATEWAY_EPOCH_UNRECOGNISED' });
     return { studyUid: uid, result: outcome.kind === 'first' || outcome.kind === 'advance' ? 'stored' : outcome.kind };
+  }
+
+  /**
+   * S4-U4 Now Retry 요청(`gateway-retry.ts`). 사람은 요청을 남길 뿐이다 — 병원으로 밀지 않고, 재시도가
+   * 돌았다고 말하지 않는다. 응답 `requested`는 "저장됨"이다.
+   *
+   * 없는·남의·원격판독으로 받은·접근 조건 밖 검사는 모두 `gate()`와 같은 404 한 가지다(존재 여부도 정보다).
+   * 요청은 U3 영수증과 **같은 advisory lock** 안에서 지금 저장된 `retry` 영수증의 (epoch, seq)에 묶인다.
+   * 같은 묶음의 두 번째 요청은 쓰기·감사 없이 처음 시각을 돌려준다. 영수증·StudyState·Orthanc는 쓰지 않는다.
+   */
+  async requestGatewayRetry(uid: string, body: unknown, c: Caller) {
+    need(c.roles, 'technician', 'Gateway 재시도 요청');
+    if (c.kind !== 'member') throw new ForbiddenException('회원 전용입니다');
+    const me = inst(c);
+    try { parseGatewayRetryRequestBody(body); }
+    catch (error) {
+      if (error instanceof GatewayRetryInputError) throw new BadRequestException({ code: GATEWAY_RETRY_INVALID });
+      throw error;
+    }
+    const s = await this.gate(uid, c);
+    // gate()는 원격판독을 받은 기관에도 검사를 보여 준다. 요청은 소유(촬영) 기관만 하고, 받은 쪽에는 같은 404다.
+    if (!s || s.institutionId !== me) throw new NotFoundException('검사를 찾을 수 없습니다');
+    await this.studyAccess.prepare(c, [uid]);
+    type Outcome = { kind: 'absent' | 'not_retry' | 'unsupported_f01' }
+      | { kind: 'requested' | 'already_requested'; requestedAt: Date };
+    const outcome: Outcome = await this.prisma.$transaction(async (tx): Promise<Outcome> => {
+      await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
+      // U3 영수증과 같은 키: 한 검사의 요청과 영수증 갱신은 줄을 서므로, 묶은 (epoch, seq)는 커밋 순간의 저장값이다.
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${'kin.gateway-receipt:' + uid}, 0))`;
+      await this.studyAccess.require(c, [uid], tx);
+      const study = await tx.studyState.findUnique({ where: { uid }, select: { institutionId: true } });
+      if (!study || study.institutionId !== me) return { kind: 'absent' };
+      const receipt = await tx.gatewayReceipt.findFirst({ where: { studyUid: uid, institutionId: me } });
+      const decision = decideGatewayRetryRequest(receipt);
+      if (decision !== 'eligible') return { kind: decision };
+      const key = { studyUid: uid, epoch: receipt!.epoch, seq: receipt!.seq };
+      const existing = await tx.gatewayRetryRequest.findUnique({ where: { studyUid_epoch_seq: key } });
+      if (existing) return { kind: 'already_requested', requestedAt: existing.requestedAt };
+      const requestedAt = new Date();
+      await tx.gatewayRetryRequest.create({ data: { ...key, requestedAt } });
+      await tx.auditLog.create({ data: { actor: c.actor || 'unknown', action: 'gateway.retry.request', target: uid,
+        detail: dump({ epoch: key.epoch, seq: Number(key.seq) }) } });
+      return { kind: 'requested', requestedAt };
+    }, { isolationLevel: 'ReadCommitted', maxWait: 4000, timeout: 8000 }).catch((error: any) => {
+      if (error?.code === 'P2028' || error?.code === 'P2010' && ['55P03', '57014'].includes(error?.meta?.code))
+        throw new ServiceUnavailableException({ code: GATEWAY_RETRY_BUSY });
+      throw error;
+    });
+    if (outcome.kind === 'requested' || outcome.kind === 'already_requested')
+      return { studyUid: uid, result: outcome.kind, requestedAt: outcome.requestedAt.toISOString() };
+    if (outcome.kind === 'unsupported_f01') throw new ConflictException({ code: GATEWAY_RETRY_UNSUPPORTED_F01 });
+    if (outcome.kind === 'not_retry') throw new ConflictException({ code: GATEWAY_RETRY_NOT_RETRY });
+    throw new NotFoundException('검사를 찾을 수 없습니다');
+  }
+
+  /**
+   * S4-U4 Gateway가 가져가는 Now Retry 목록. 읽기만 한다 — 쓰기·감사가 없다. 답은 이 자격증명 기관의
+   * studyUid뿐이고 개수·시각·epoch·다른 기관의 것은 싣지 않는다. 대기 판정은 SQL 한 문장에서 LIMIT 전에
+   * 끝난다: 요청의 (epoch, seq)가 지금 저장된 영수증과 같고, 그 영수증이 `retry`이며, 영수증과 StudyState가
+   * 모두 이 기관 것이다. 다른 epoch의 조회는 오류 없이 빈 목록이다(H-1: 여기서는 epoch을 만들거나 바꾸지 않는다).
+   */
+  async gatewayRetryRequests(query: unknown, c: Caller) {
+    needExact(c, 'gateway', 'Gateway 재시도 요청 조회');
+    const me = inst(c);
+    let epoch: string;
+    try { epoch = parseGatewayRetryPoll(query); }
+    catch (error) {
+      if (error instanceof GatewayRetryInputError) throw new BadRequestException({ code: GATEWAY_RETRY_POLL_INVALID });
+      throw error;
+    }
+    // LIMIT은 gateway-retry.ts GATEWAY_RETRY_POLL_LIMIT(100)이다. 검사당 대기 요청은 저장 영수증 하나에 묶여 최대 한 건이다.
+    const rows: { studyUid: string }[] = await this.prisma.$queryRaw`SELECT q."studyUid" FROM "GatewayRetryRequest" q
+      JOIN "GatewayReceipt" r ON r."studyUid" = q."studyUid" AND r.epoch = q.epoch AND r.seq = q.seq
+      JOIN "StudyState" s ON s.uid = q."studyUid"
+      WHERE q.epoch = ${epoch}::uuid AND r.phase = 'retry' AND r."institutionId" = ${me} AND s."institutionId" = ${me}
+      ORDER BY q."requestedAt", q."studyUid" LIMIT 100`;
+    return { studyUids: rows.map(row => row.studyUid) };
   }
 
   /** SOP lookup도 요청 Study의 기관 관문 안에서만 Orthanc ID를 내보낸다. */

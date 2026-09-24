@@ -762,7 +762,7 @@
           <div class="clinical" id="clinical" tabindex="-1" role="region" aria-label="열람 검사 정보">No clinical information provided.</div>
           <!-- S4-U1b: 폴링마다 관측 시각이 바뀌므로 #clinical 밖에 둔다. 열람 검사 정보는 폴링으로 바뀌지 않는다. -->
           <div id="study-receipt" role="group" aria-label="기관 배정·KIN 관측·Gateway 보고" style="flex:none;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
-            <div>Institution: <span id="receipt-assignment"></span></div><div>Observed: <span id="receipt-observation"></span></div><div>Gateway: <span id="receipt-gateway"></span></div>
+            <div>Institution: <span id="receipt-assignment"></span></div><div>Observed: <span id="receipt-observation"></span></div><div>Gateway: <span id="receipt-gateway"></span></div><div><button type="button" id="receipt-retry" class="chip" hidden>Now Retry</button> <span id="receipt-retry-note"></span></div>
           </div>
         </section>
         <section class="s-template">
@@ -1997,6 +1997,8 @@
     let studyObservationModel = window.KinStudyArrivals?.observationStart?.() ?? null;
     // S4-U2 order reconciliation answer (renderOrderReconciliation). Memory only, engineering only.
     let orderReconciliationModel = window.KinOrderReconciliation?.start?.() ?? null;
+    // S4-U4 Now Retry request tokens (requestGatewayRetry). Memory only; the server answers a repeat with the first time.
+    let gatewayRetryRequestSeq = 0;
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
@@ -2812,8 +2814,43 @@
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
       $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");
       $("#receipt-observation").title = labels.observation.title;
+      // S4-U4 Now Retry, drawn only from labels.retry. Another study or a newer receipt drops the in-flight token
+      // and the requested mark, so an answer for what was drawn before is never written over it (A->B->A too).
+      const retry = labels.retry, retryButton = $("#receipt-retry"), retryNote = $("#receipt-retry-note");
+      const retryKey = retry?.kind === "now_retry" ? retry.key : "";
+      if (retryButton.dataset.uid !== s.uid || retryButton.dataset.key !== retryKey) {
+        Object.assign(retryButton.dataset, { uid: s.uid, key: retryKey, request: "", requested: "" });
+        retryNote.textContent = ""; retryNote.title = "";
+      }
+      retryButton.hidden = !retryKey || retryButton.dataset.requested === "1"
+        || !(serverMode && !offline && !demoMode && KinAuth.has("technician"));
+      retryButton.disabled = !!retryButton.dataset.request; retryButton.title = retry?.title ?? "";
+      // Without a bindable retry the note is labels.retry itself: the F-01 sentence for failed, else nothing.
+      if (!retryKey) { retryNote.textContent = retry?.text ?? ""; retryNote.title = retry?.title ?? ""; }
       $("#receipt-gateway").textContent = labels.gateway.text; $("#receipt-gateway").title = labels.gateway.title;
     }
+
+    /**
+     * S4-U4 Now Retry: one POST with an empty body and nothing shown before the answer. The answer is written
+     * only while the same study and receipt are still drawn with this request's token (renderObservation drops
+     * it when either changes). `Retry Requested` means the request is stored at KIN, never that a retry ran.
+     */
+    async function requestGatewayRetry() {
+      const button = $("#receipt-retry"), uid = button.dataset.uid, key = button.dataset.key;
+      if (!uid || !key || button.hidden || button.dataset.request) return;
+      const token = String(++gatewayRetryRequestSeq);
+      button.dataset.request = token; button.disabled = true;
+      let answer = null, error = null;
+      try { answer = await api("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {}); }
+      catch (e) { error = e ?? new Error("request failed"); }
+      if (button.dataset.request !== token || button.dataset.uid !== uid || button.dataset.key !== key) return;
+      const shown = KinStudyArrivals.gatewayRetryAnswer(uid, answer, error);
+      Object.assign(button.dataset, { request: "", requested: shown.requested ? "1" : "" });
+      const note = $("#receipt-retry-note");
+      note.textContent = shown.text; note.title = shown.title;
+      renderObservation();
+    }
+    $("#receipt-retry").addEventListener("click", requestGatewayRetry);
 
     /**
      * S4-U2 오더 측 대사 표시 — **엔지니어링 전용**. 입력은 서버가 목록을 완성한 관측과 함께 준 답뿐이다.

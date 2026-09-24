@@ -142,6 +142,67 @@ test('S4-U1b label table: every assignment x observation x receipt combination, 
   assert.throws(()=>arrivals.receiptLabels({assignment:'Unassigned',observation:V.observations.observed_12,gateway:null},same));
 });
 
+// S4-U4: the Now Retry action over every V.receipts entry x phase. Retry/failed inputs are derived by phase
+// substitution, so V.receipts keeps its nine entries and the 2*13*9 table above does not move.
+test('S4-U4 Now Retry: only a readable retry receipt offers it, failed is the F-01 sentence, the Gateway label never moves',()=>{
+  const banned=new RegExp(V.banned.join('|'),'i'),EPOCH='0a1b2c3d-0000-4000-8000-00000000000a';
+  const bindable=['sending_3_of_12','complete_12_of_12','complete_13_of_13','sending_0_of_0','old_complete_12_of_12'];
+  assert.equal(Object.keys(V.receipts).length,9);
+  let offered=0,refused=0;
+  for(const [name,receipt] of Object.entries(V.receipts))
+    for(const phase of V.phases){
+      const errorCode=phase==='retry'?'stow_http':phase==='failed'?'instance_exceeds_budget':null;
+      const derived=receipt===null?null:{...receipt,phase,errorCode,epoch:EPOCH};
+      const action=arrivals.gatewayRetryAction(derived),id=name+'/'+phase;
+      const labels=arrivals.receiptLabels({assignment:'assigned',observation:V.observations.observed_12,gateway:derived},same);
+      assert.deepEqual(labels.retry,action,id);
+      // The Gateway label reads the same whatever the phase; Now Retry is a separate output.
+      if(derived)assert.deepEqual(labels.gateway,arrivals.receiptLabels({assignment:'assigned',observation:V.observations.observed_12,
+        gateway:{...derived,phase:'sending',errorCode:null}},same).gateway,id);
+      if(phase==='retry'&&bindable.includes(name)){
+        assert.deepEqual(action,{kind:'now_retry',key:EPOCH+'|'+receipt.agentSeq,text:'Now Retry',title:arrivals.RETRY_TEXT.buttonTitle},id);
+        // The V epoch (1) cannot bind a request: no key, no control.
+        assert.equal(arrivals.gatewayRetryAction({...receipt,phase,errorCode}),null,id);
+        assert.equal(arrivals.gatewayRetryAction({...derived,agentSeq:-1}),null,id);
+        assert.equal(arrivals.gatewayRetryAction({...derived,epoch:EPOCH.toUpperCase()}),null,id);
+        offered++;
+      }else if(phase==='failed'&&(bindable.includes(name)||name==='unreadable_phase')){
+        assert.deepEqual(action,{kind:'unsupported_f01',text:'같은 바이트로는 성공할 수 없습니다 — 지원 범위 밖(F-01)',
+          title:arrivals.RETRY_TEXT.unsupportedTitle},id);
+        refused++;
+      }else assert.equal(action,null,id);   // other phases, no receipt, unreadable, or retry without agentSeq
+      if(action)assert.doesNotMatch(action.text+' '+action.title,banned,id);
+    }
+  assert.deepEqual([offered,refused],[5,6]);
+  for(const text of Object.values(arrivals.RETRY_TEXT))assert.doesNotMatch(text,banned,text);
+});
+
+test('S4-U4 Now Retry answer: fixed text only, requested means stored, the server wording never shows',()=>{
+  const at='2026-09-24T01:04:00.000Z',T=arrivals.RETRY_TEXT,requested={requested:true,text:'Retry Requested ('+at+')',title:T.requestedTitle};
+  assert.deepEqual(arrivals.gatewayRetryAnswer('1.2.3',{studyUid:'1.2.3',result:'requested',requestedAt:at},null,same),requested);
+  assert.deepEqual(arrivals.gatewayRetryAnswer('1.2.3',{studyUid:'1.2.3',result:'already_requested',requestedAt:at},null,same),requested);
+  const fail=text=>({requested:false,text,title:''});
+  for(const [answer,error,expected] of [
+    [{studyUid:'1.2.4',result:'requested',requestedAt:at},null,fail(T.failed)],
+    [{studyUid:'1.2.3',result:'retried',requestedAt:at},null,fail(T.failed)],
+    [{studyUid:'1.2.3',result:'requested',requestedAt:'soon'},null,fail(T.failed)],
+    [null,null,fail(T.failed)],
+    [null,{status:404,message:'검사를 찾을 수 없습니다 SERVER'},fail(T.notFound)],
+    [null,{status:409,code:'GATEWAY_RETRY_UNSUPPORTED_F01',message:'SERVER'},fail(T.unsupported)],
+    [null,{status:409,code:'GATEWAY_RETRY_NOT_RETRY',message:'SERVER'},fail(T.notRetry)],
+    [null,{status:409,code:'SOMETHING_ELSE'},fail(T.failed)],
+    [null,{status:503,code:'GATEWAY_RETRY_BUSY'},fail(T.busy)],
+    [null,{status:401,message:'세션이 만료되었습니다'},fail(T.failed)],
+    [{studyUid:'1.2.3',result:'requested',requestedAt:at},{status:500},fail(T.failed)],
+    [null,new Error('network SERVER'),fail(T.failed)],
+  ]){
+    const shown=arrivals.gatewayRetryAnswer('1.2.3',answer,error,same);
+    assert.deepEqual(shown,expected,JSON.stringify([answer,error&&error.status]));
+    assert.ok(!shown.text.includes('SERVER'));
+  }
+  for(const text of [requested.text,requested.title,...Object.values(T)])assert.doesNotMatch(text,/재시도됨|retried|완료|complete/i,text);
+});
+
 test('S4-U1b needs_check reasons for Gateway M-of-N beside KIN K',()=>{
   for(const row of V.reasonCases){
     const labels=arrivals.receiptLabels({assignment:'assigned',observation:V.observations[row.observation],gateway:V.receipts[row.receipt]},same);

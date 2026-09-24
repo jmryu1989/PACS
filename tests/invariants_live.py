@@ -101,6 +101,8 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "authz/dicom"): Route(Kind.TENANT),
     ("POST", "gateway/announce"): Route(Kind.TENANT),
     ("POST", "gateway/receipt"): Route(Kind.TENANT),
+    ("GET", "gateway/retry-requests"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/gateway-retry"): Route(Kind.TENANT),
     ("POST", "dicom/lookup"): Route(Kind.TENANT),
     ("GET", "colleagues"): Route(Kind.TENANT),
     ("GET", "admin/agreements"): Route(Kind.TENANT),
@@ -3095,6 +3097,197 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertNotIn("gatewayReceipt", boot.text)
             self.assertNotIn(epoch_a, boot.text)
 
+    def test_s4u4_gateway_retry_route_rules(self) -> None:
+        """S4-U4 Now Retry (stage4 contract §4 U4/P7, U4 contract §3 and L2-L11) with real member and Gateway tokens.
+
+        Only the owning institution's technician (admin included; the admin-only case is compiled C6) asks, with an
+        empty body. A radiologist-only member, a Gateway credential on the member route and a member (admin too) on
+        the Gateway poll are 403. Absent, another institution's and tele-received studies, and hallym users on a
+        kin-center study, are one byte-identical 404. A request binds the stored retry receipt (epoch, seq): the first
+        is requested with one audit, a second is already_requested at the same time with no write. The poll is one
+        lowercase epoch and lists only this institution's current bindings; the next receipt ends one. failed is F-01;
+        announcing, complete and no receipt are NOT_RETRY. psql inserts only synthetic rows (a foreign pending request,
+        a cross-institution pair, a request bound to a failed receipt); every row goes through cleanup_fixture
+        (StudyState delete cascades receipt -> request; AuditLog by target)."""
+        token = self.stack.service_token("gateway")
+        epoch_a, epoch_b = str(uuid.uuid4()), str(uuid.uuid4())
+
+        def lit(value: Any) -> str:
+            return "'" + str(value).replace("'", "''") + "'"
+
+        def receipt(uid: str, seq: int, phase: str = "retry", **change: Any) -> dict[str, Any]:
+            value = {"studyUid": uid, "phase": phase, "attempt": 1, "successCount": 3, "localCount": 12,
+                     "errorCode": "stow_http" if phase == "retry" else None, "epoch": epoch_a, "seq": seq}
+            value.update(change)
+            return value
+
+        def send(value: dict[str, Any]) -> str:
+            sent = self.stack.bearer_request("POST", "/gateway/receipt", token, value)
+            self.assertEqual(sent.status, 200, sent.text)
+            return sent.body["result"]
+
+        def ask(uid: str, user: str = "ktech", body: Any = None) -> HttpResult:
+            return self.stack.request("POST", f"/studies/{quote(uid)}/gateway-retry", user, body)
+
+        def poll(query: str) -> HttpResult:
+            return self.stack.bearer_request("GET", "/gateway/retry-requests" + query, token)
+
+        def rows(uid: str) -> list[str]:
+            return psql('SELECT epoch || \'/\' || seq FROM "GatewayRetryRequest" WHERE "studyUid"=' + lit(uid) + " ORDER BY seq")
+
+        def requested_at(uid: str) -> list[str]:
+            return psql('SELECT to_char("requestedAt", \'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"\') FROM "GatewayRetryRequest" '
+                        'WHERE "studyUid"=' + lit(uid) + " ORDER BY seq")
+
+        def audits(uid: str) -> list[dict[str, Any]]:
+            return [json.loads(line) for line in psql(
+                'SELECT to_jsonb(t)::text FROM (SELECT action, actor, detail FROM "AuditLog" WHERE target=' + lit(uid)
+                + " AND action LIKE 'gateway.retry.%' ORDER BY id) t")]
+
+        def stored(uid: str) -> list[str]:
+            return psql('SELECT to_jsonb(t)::text FROM "GatewayReceipt" t WHERE "studyUid"=' + lit(uid))
+
+        def owned(uid: str, institution: str, owner: str) -> None:
+            self.stack.active[uid] = Fixture(uid, "", institution, owner, "")
+            self.addCleanup(self.stack.cleanup_fixture, uid)
+
+        def insert_state(uid: str, institution: str, tele: str | None = None) -> None:
+            psql('INSERT INTO "StudyState" (uid,"institutionId","teleInstitutionId","reqHosp",ss,origin,"updatedAt") VALUES ('
+                 + ",".join([lit(uid), lit(institution), lit(tele) if tele else "NULL", lit("SYNTHETIC S4-U4"),
+                             lit("Unverified"), lit("dicom")]) + ",now())")
+
+        def insert_pending(uid: str, institution: str, seq: int, phase: str = "retry", code: str = "stow_http") -> None:
+            psql('INSERT INTO "GatewayReceipt" ("studyUid","institutionId",epoch,seq,phase,attempt,"successCount",'
+                 '"localCount","errorCode","receivedAt") VALUES (' + ",".join(map(lit, [uid, institution, epoch_a]))
+                 + f",{seq},{lit(phase)},1,3,12,{lit(code)},now())")
+            psql('INSERT INTO "GatewayRetryRequest" ("studyUid",epoch,seq,"requestedAt") VALUES ('
+                 + f"{lit(uid)},{lit(epoch_a)},{seq},now())")
+
+        uid, failed_uid, none_uid, absent_uid, tele_uid, foreign_uid, cross_uid = (
+            "2.25." + str(uuid.uuid4().int) for _ in range(7))
+        for kin_uid in (uid, failed_uid, none_uid):
+            owned(kin_uid, "KIN 판독센터", "kdoctor")
+            self.assert_status(self.stack.bearer_request("POST", "/gateway/announce", token, {"studyUid": kin_uid}), 200)
+        for synthetic in (tele_uid, foreign_uid, cross_uid):
+            owned(synthetic, "한림병원", "jmryu")
+        insert_state(tele_uid, "hallym", tele="kin-center")
+        # A hallym Gateway's pending request (same epoch literal) and a pair whose receipt says kin-center but
+        # whose study is hallym's: neither may reach kin-center's poll.
+        insert_state(foreign_uid, "hallym")
+        insert_pending(foreign_uid, "hallym", 5)
+        insert_state(cross_uid, "hallym")
+        insert_pending(cross_uid, "kin-center", 5)
+        self.assertEqual(send(receipt(uid, 5)), "stored")
+        self.assertEqual(send(receipt(failed_uid, 3, phase="failed", errorCode="instance_exceeds_budget")), "stored")
+        receipt_row = stored(uid)
+        self.assertEqual(len(receipt_row), 1)
+
+        # L2: role, credential kind and the Gateway-only poll.
+        self.assertEqual(ask(uid, "kdoctor").status, 403)
+        gateway_on_member = self.stack.bearer_request("POST", f"/studies/{quote(uid)}/gateway-retry", token, {})
+        self.assertEqual(gateway_on_member.status, 403, gateway_on_member.text)
+        for user in ("ktech", "jmryu"):
+            member_poll = self.stack.request("GET", "/gateway/retry-requests?epoch=" + epoch_a, user)
+            self.assertEqual(member_poll.status, 403, member_poll.text)
+        self.assertEqual((rows(uid), audits(uid)), ([], []))
+
+        # L3: the body is empty; nothing a client sends can choose the binding.
+        for value in ({"epoch": epoch_a}, {"seq": 5}, {"reason": "please"}, {"institutionId": "kin-center"},
+                      {"requestedAt": "2026-09-24T00:00:00Z"}, [], [{}]):
+            with self.subTest(body=json.dumps(value)):
+                refused = ask(uid, body=value)
+                self.assertEqual((refused.status, refused.body.get("code") if isinstance(refused.body, dict) else None),
+                                 (400, "GATEWAY_RETRY_INVALID"), refused.text)
+        self.assertEqual((rows(uid), audits(uid)), ([], []))
+
+        # L4: one byte-identical 404 for absent, foreign, tele-received and another institution's users.
+        answers = [ask(absent_uid), ask(foreign_uid), ask(tele_uid), ask(uid, "tech"), ask(uid, "jmryu")]
+        self.assertEqual([answer.status for answer in answers], [404] * 5, [answer.text for answer in answers])
+        self.assertEqual({answer.text for answer in answers}, {answers[0].text})
+        self.assertNotIn("hallym", answers[1].text + answers[2].text)
+        for target in (absent_uid, tele_uid, uid):
+            self.assertEqual((rows(target), audits(target)), ([], []))
+        self.assertEqual((rows(foreign_uid), rows(cross_uid)), ([epoch_a + "/5"], [epoch_a + "/5"]))
+
+        # L5: the first request (a bodyless POST) binds the stored retry receipt, audited once with the requester.
+        first = ask(uid)
+        self.assertEqual(first.status, 200, first.text)
+        self.assertEqual(set(first.body), {"studyUid", "result", "requestedAt"})
+        self.assertEqual((first.body["studyUid"], first.body["result"]), (uid, "requested"))
+        self.assertEqual(rows(uid), [epoch_a + "/5"])
+        self.assertEqual(requested_at(uid), [first.body["requestedAt"]])
+        [audit] = audits(uid)
+        self.assertEqual((audit["action"], audit["actor"], json.loads(audit["detail"])),
+                         ("gateway.retry.request", self.stack.actor("ktech"), {"epoch": epoch_a, "seq": 5}))
+        self.assertEqual(stored(uid), receipt_row, "the request never writes the receipt")
+
+        # L6: again (response lost, second click): same time, no write and no second audit.
+        again = ask(uid, body={})
+        self.assertEqual((again.status, again.body), (200, {**first.body, "result": "already_requested"}), again.text)
+        self.assertEqual((rows(uid), len(audits(uid))), ([epoch_a + "/5"], 1))
+
+        # L7: the Gateway poll - this institution's current bindings for this epoch, UIDs only, read only.
+        before = psql('SELECT count(*) FROM "AuditLog" WHERE target IN (' + ",".join(map(lit, [uid, foreign_uid, cross_uid])) + ")")
+        listed = poll("?epoch=" + epoch_a)
+        self.assertEqual((listed.status, listed.body), (200, {"studyUids": [uid]}), listed.text)
+        other_epoch = poll("?epoch=" + epoch_b)
+        self.assertEqual((other_epoch.status, other_epoch.body), (200, {"studyUids": []}), other_epoch.text)
+        for query in ("", "?epoch=" + epoch_a.upper(), "?epoch=not-an-epoch", f"?epoch={epoch_a}&epoch={epoch_a}",
+                      "?epoch%5Bx%5D=" + epoch_a, f"?epoch={epoch_a}&institution=kin-center", "?uid=" + uid):
+            with self.subTest(query=query):
+                refused = poll(query)
+                self.assertEqual((refused.status, refused.body.get("code") if isinstance(refused.body, dict) else None),
+                                 (400, "GATEWAY_RETRY_POLL_INVALID"), refused.text)
+        self.assertEqual(psql('SELECT count(*) FROM "AuditLog" WHERE target IN (' + ",".join(map(lit, [uid, foreign_uid, cross_uid])) + ")"), before)
+        self.assertEqual(rows(uid), [epoch_a + "/5"])
+
+        # L8: the agent's confirmation is its unchanged receipt: same (epoch, seq, body) -> duplicate.
+        self.assertEqual(send(receipt(uid, 5)), "duplicate")
+
+        # L9: the next receipt ends the request; a later retry state takes a new, separately audited request.
+        self.assertEqual(send(receipt(uid, 6, phase="announcing")), "stored")
+        self.assertEqual(poll("?epoch=" + epoch_a).body, {"studyUids": []})
+        busy = ask(uid)
+        self.assertEqual((busy.status, busy.body.get("code")), (409, "GATEWAY_RETRY_NOT_RETRY"), busy.text)
+        self.assertEqual(send(receipt(uid, 7, attempt=2)), "stored")
+        self.assertEqual(poll("?epoch=" + epoch_a).body, {"studyUids": []}, "a new retry state is not a request")
+        second = ask(uid)
+        self.assertEqual((second.status, second.body.get("result")), (200, "requested"), second.text)
+        self.assertEqual(rows(uid), [epoch_a + "/5", epoch_a + "/7"])
+        self.assertEqual([json.loads(a["detail"]) for a in audits(uid)], [{"epoch": epoch_a, "seq": 5}, {"epoch": epoch_a, "seq": 7}])
+        self.assertEqual(poll("?epoch=" + epoch_a).body, {"studyUids": [uid]})
+
+        # L10: complete ends it too; failed is F-01 and never listed even with a bound row; no receipt is NOT_RETRY.
+        self.assertEqual(send(receipt(uid, 8, phase="complete", successCount=12)), "stored")
+        psql('INSERT INTO "GatewayRetryRequest" ("studyUid",epoch,seq,"requestedAt") VALUES ('
+             + f"{lit(failed_uid)},{lit(epoch_a)},3,now())")
+        self.assertEqual(poll("?epoch=" + epoch_a).body, {"studyUids": []})
+        for target, code in ((uid, "GATEWAY_RETRY_NOT_RETRY"), (failed_uid, "GATEWAY_RETRY_UNSUPPORTED_F01"),
+                             (none_uid, "GATEWAY_RETRY_NOT_RETRY")):
+            refused = ask(target)
+            self.assertEqual((refused.status, refused.body.get("code")), (409, code), refused.text)
+        self.assertEqual((rows(failed_uid), audits(failed_uid), rows(none_uid), audits(none_uid)),
+                         ([epoch_a + "/3"], [], [], []))
+        self.assertEqual(len(audits(uid)), 2)
+
+        # L11: the worklist receipt and bootstrap are the U3 surfaces, unchanged: no request state rides on them.
+        with self.stack.fixture("KIN 판독센터") as existing:
+            self.assert_status(self.stack.bearer_request("POST", "/gateway/announce", token, {"studyUid": existing.uid}), 200)
+            self.assertEqual(send(receipt(existing.uid, 2, successCount=0, localCount=1)), "stored")
+            self.assertEqual(ask(existing.uid).body.get("result"), "requested")
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            self.assert_status(listed, 200)
+            row = next(item for item in listed.body["studies"] if item["uid"] == existing.uid)
+            self.assertEqual(set(row["gatewayReceipt"]), {"phase", "successCount", "localCount", "attempt", "errorCode",
+                                                          "serverReceivedAt", "agentSeq", "epoch"})
+            self.assertEqual(row["gatewayReceipt"]["phase"], "retry")
+            boot = self.stack.request("GET", "/bootstrap", "ktech")
+            self.assert_status(boot, 200)
+            for text in (json.dumps(row), boot.text):
+                self.assertNotIn("requestedAt", text)
+                self.assertNotIn("already_requested", text)
+            self.assertNotIn(epoch_a, boot.text)
+
     def test_gateway_agent_queue_and_batch_contract(self) -> None:
         completed = subprocess.run(
             [sys.executable, str(ROOT / "gateway" / "agent" / "test_agent.py")],
@@ -3102,9 +3295,10 @@ class LiveInvariantTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         # 5 -> 18: S4-U3 added the receipt suites (error-code mapping, queue epoch/seq/body, delivery).
+        # 18 -> 25: S4-U4 added RetryNowTests (T1-T6, seven cases) for Now Retry.
         # The number is the suite as authored; tests/gateway_receipt_source_test.py pins it to an AST
         # count of test_agent.py, so neither can move without the other.
-        self.assertIn("Ran 18 tests", completed.stderr + completed.stdout)
+        self.assertIn("Ran 25 tests", completed.stderr + completed.stdout)
 
     def test_production_gateway_contract_is_declared(self) -> None:
         completed = subprocess.run(

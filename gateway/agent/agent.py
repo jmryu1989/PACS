@@ -98,6 +98,13 @@ RECEIPT_COLUMNS = (
 # else (401/403/5xx, transport) leaves the receipt pending for a later pass.
 RECEIPT_FINAL_REFUSALS = (400, 404, 409)
 RECEIPT_REFUSAL_CODES = ("GATEWAY_EPOCH_UNRECOGNISED", "GATEWAY_RECEIPT_CONFLICT")
+# S4-U4 Now Retry. A person's request waits at KIN and this agent pulls it: nothing listens for KIN. The
+# cadence is fixed and slow, separate from the POLL_SECONDS loop, and deliberately not in Config or the
+# environment: the poll can only move next_at, and nobody should be able to tune it into a retry storm.
+# It shares the main loop, so a transfer in progress delays the next poll until that transfer returns.
+RETRY_POLL_SECONDS = 30.0
+RETRY_POLL_LIMIT = 100
+RETRY_POLL_UID = re.compile(r"[0-9.]+")
 
 
 def log(event: str, *, uid: str | None = None, **fields: Any) -> None:
@@ -349,6 +356,25 @@ class Queue:
         with self.db:
             self.db.execute("UPDATE studies SET reported_seq=? WHERE uid=? AND reported_seq < ?", (seq, uid, seq))
 
+    def waiting(self, uid: str, seq: int, now: float) -> bool:
+        """This exact retry state is still waiting out its backoff (the retry_now condition, read only)."""
+        return self.db.execute(
+            "SELECT 1 FROM studies WHERE uid=? AND phase='retry' AND seq=? AND next_at>?", (uid, seq, now),
+        ).fetchone() is not None
+
+    def retry_now(self, uid: str, seq: int, now: float) -> bool:
+        """S4-U4: make this exact retry state eligible now. True only when this call changed the row.
+
+        next_at is the only column written: attempt, last_error, error_code, successful_sops, batch_index,
+        the counts and updated_at stay, and seq does not move (next_at is not a receipt field). A failed
+        manual attempt therefore climbs the same backoff ladder, and pending_now's reset is never used.
+        """
+        with self.db:
+            cursor = self.db.execute(
+                "UPDATE studies SET next_at=0 WHERE uid=? AND phase='retry' AND seq=? AND next_at>?", (uid, seq, now),
+            )
+        return cursor.rowcount == 1
+
     def summary(self) -> dict[str, Any]:
         counts = {row["phase"]: row["n"] for row in self.db.execute(
             "SELECT phase, count(*) AS n FROM studies GROUP BY phase"
@@ -493,6 +519,10 @@ class Cloud:
     def receipt(self, body: dict[str, Any]) -> requests.Response:
         return self.request("POST", "/api/gateway/receipt", json=body)
 
+    def retry_requests(self, epoch: str) -> requests.Response:
+        # Only this queue's epoch goes out: KIN answers with this institution's UIDs for this epoch and nothing else.
+        return self.request("GET", "/api/gateway/retry-requests", params={"epoch": epoch})
+
     def stow(self, uid: str, body: bytes, content_type: str) -> set[str]:
         response = self.request(
             "POST", f"/dicom-web/studies/{uid}", data=body,
@@ -560,6 +590,24 @@ def multipart(parts: list[tuple[str, bytes]], budget: int) -> tuple[bytes, str]:
     return bytes(body), f'multipart/related; type="application/dicom"; boundary={boundary}'
 
 
+def retry_request_uids(response: requests.Response) -> list[str] | None:
+    """KIN's poll answer is exactly {"studyUids": [...]} with at most RETRY_POLL_LIMIT distinct UIDs; else None."""
+    if not response.ok:
+        return None
+    try:
+        payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"studyUids"}:
+        return None
+    uids = payload["studyUids"]
+    if not isinstance(uids, list) or len(uids) > RETRY_POLL_LIMIT:
+        return None
+    if not all(isinstance(uid, str) and RETRY_POLL_UID.fullmatch(uid) for uid in uids) or len(set(uids)) != len(uids):
+        return None
+    return uids
+
+
 class Agent:
     def __init__(self, config: Config):
         self.config = config
@@ -569,6 +617,8 @@ class Agent:
         self.stopping = False
         self.receipt_failures = 0
         self.receipts_resume_at = 0.0
+        # The first Now Retry poll is one full period after start, so a restart never polls sooner than a running agent.
+        self.retry_poll_at = time.monotonic() + RETRY_POLL_SECONDS
 
     def stop(self, *_args: Any) -> None:
         self.stopping = True
@@ -616,6 +666,58 @@ class Agent:
                 self.receipts_resume_at = time.monotonic() + delay
                 return
         self.receipt_failures = 0
+
+    def retry_requests(self) -> None:
+        """S4-U4: apply KIN's pending Now Retry requests for this epoch. Never raises.
+
+        At most once per RETRY_POLL_SECONDS; a failed poll just waits for the next tick. KIN answers UIDs only,
+        so before touching a row the agent re-sends that row's current receipt through the unchanged U3 route.
+        Only `duplicate` shows KIN holds exactly this (epoch, seq, body), i.e. the delivered request was bound to
+        the retry state about to change; then one compare-and-set moves next_at and nothing else.
+
+        Single-writer assumption: that inference holds only while this process is the only writer of its epoch
+        and nothing writes the confirmed row between the poll and the compare-and-set. The loop is single-threaded
+        and this method uses only receipt/waiting/reported/retry_now of the queue (reported writes reported_seq
+        only). Two hosts running copies of one queue.db share an epoch and could both confirm one state; that is
+        the H-1 family and outside S4-U4. No exactly-once delivery is claimed: the effect is at most one next_at
+        change per request, and the next receipt (announcing, seq+1) is what ends the request at KIN.
+        """
+        now = time.monotonic()
+        if now < self.retry_poll_at:
+            return
+        self.retry_poll_at = now + RETRY_POLL_SECONDS
+        # The confirmations go to the receipt endpoint, so its backoff after owed receipts failed holds here too.
+        if now < self.receipts_resume_at:
+            return
+        try:
+            response = self.cloud.retry_requests(self.queue.epoch)
+            uids = retry_request_uids(response)
+        except Exception as error:
+            log("retry_request.deferred", error=error_code(error))
+            return
+        if uids is None:
+            log("retry_request.invalid", status=response.status_code)
+            return
+        for uid in uids:
+            try:
+                at = time.time()   # the wall clock retry() and due() already use for next_at
+                body = self.queue.receipt(uid)
+                if body is None or body["phase"] != "retry" or not self.queue.waiting(uid, body["seq"], at):
+                    continue      # unknown, already eligible or moved on: no POST and no row
+                confirm = self.cloud.receipt(body)
+                if confirm.ok or confirm.status_code in RECEIPT_FINAL_REFUSALS:
+                    self.queue.reported(uid, body["seq"])   # the same bookkeeping as report()
+                try:
+                    answer = confirm.json() if confirm.ok else None
+                except Exception:
+                    answer = None
+                if answer != {"studyUid": uid, "result": "duplicate"}:
+                    log("retry_request.unconfirmed", uid=uid, status=confirm.status_code)
+                    continue
+                if self.queue.retry_now(uid, body["seq"], at):
+                    log("study.retry_now", uid=uid, attempt=body["attempt"])
+            except Exception as error:
+                log("retry_request.deferred", uid=uid, error=error_code(error))
 
     def poll_changes(self) -> None:
         while not self.stopping:
@@ -696,6 +798,9 @@ class Agent:
         while not self.stopping:
             # Final states (complete/pending/retry/failed) and anything an outage held back go out here.
             self.flush_receipts()
+            # After the flush, so a confirmation compares KIN with a receipt it already had the chance to store;
+            # before due(), so a row made eligible now is taken in this same pass.
+            self.retry_requests()
             try:
                 self.poll_changes()
                 row = self.queue.due()
