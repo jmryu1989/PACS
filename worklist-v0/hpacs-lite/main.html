@@ -764,6 +764,13 @@
           <div id="study-receipt" role="group" aria-label="기관 배정·KIN 관측·Gateway 보고" style="flex:none;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
             <div>Institution: <span id="receipt-assignment"></span></div><div>Observed: <span id="receipt-observation"></span></div><div>Gateway: <span id="receipt-gateway"></span></div><div><button type="button" id="receipt-retry" class="chip" hidden>Now Retry</button> <span id="receipt-retry-note"></span></div>
           </div>
+          <!-- S4-U5: 서버가 이번 관측에서 읽은 검사 태그와 연결 오더의 비교(엔지니어링 전용). 읽기 전용이고 접어 둔다. -->
+          <details id="study-identity" style="flex:none;max-height:60%;overflow:auto;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
+            <summary id="study-identity-summary">DICOM Identity</summary>
+            <div id="study-identity-order"></div>
+            <div id="study-identity-tags" role="list" aria-label="서버가 읽은 검사 수준 DICOM 태그"></div>
+            <div id="study-identity-guidance" role="note"></div>
+          </details>
         </section>
         <section class="s-template">
           <h3>Reading Template</h3>
@@ -1142,7 +1149,8 @@
         <label>BirthDate</label><input id="m-birth" placeholder="YYYY-MM-DD">
         <label>StudyDesc</label><input id="m-desc">
         <label>Ward</label><input id="m-ward">
-        <div class="note">※ 판독 전(RS: W)인 검사만 수정 가능. 수정 내용은 이 앱의 localStorage에만 저장되며 Orthanc 원본 DICOM은 변경되지 않습니다.</div>
+        <div class="note">※ 판독 전(RS: W)인 검사만 수정 가능. 수정 내용은 화면 표시용 덮어쓰기로 서버에 저장되며 Orthanc 원본 DICOM과 오더 비교 결과는 바뀌지 않습니다.</div>
+        <div class="note" id="m-guidance" role="status" hidden></div>
       </div>
       <div class="foot">
         <button id="m-cancel">Cancel</button>
@@ -1185,6 +1193,7 @@
   <script src="worklist-refresh.js"></script>
   <script src="study-arrivals.js"></script>
   <script src="order-reconciliation.js"></script>
+  <script src="study-identity.js"></script>
   <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
@@ -1355,6 +1364,10 @@
     // 판독 생애주기는 commitReport, matched·orig는 /match·/unmatch만 움직인다.
     const STATE_KEYS = ["ss", "em", "ts", "ward", "reqHosp", "ov"];
     // 서버에서 내려오는(=화면이 못 정하는) 읽기 전용 필드. 이건 PATCH로 보내지 않는다.
+    // S4-U5: the display overlay (ov) and a claimed original may only carry these fields, as text (age may be the number
+    // ageOf gives). The server refuses any other shape; older stored values are filtered the same way before use.
+    const OVERLAY_KEYS = ["id", "name", "sex", "birth", "age", "desc", "ward", "date", "acc", "modality"];
+    const overlayValue = (key, value) => typeof value === "string" || (key === "age" && Number.isFinite(value));
 
     /**
      * 상태 저장. 로컬 모드면 통째로 localStorage에, 서버 모드면 **바뀐 필드만** PATCH.
@@ -1366,7 +1379,7 @@
     function saveApp(uid, patch) {
       // 로그인한 계정으로 일하는 중에 서버가 죽었다면, localStorage는 안전한 곳이 아니라
       // **다음 로그인에 조용히 버려질 곳**이다. 쌓지 않고 막는다.
-      if (offline) { toast("서버에 연결돼 있지 않습니다 — 저장되지 않았습니다", "err"); return; }
+      if (offline) { toast("서버에 연결돼 있지 않습니다 — 저장되지 않았습니다", "err"); return false; }
       if (!serverMode) {
         try { localStorage.setItem("kin-app", JSON.stringify(appState)); } catch (e) {}
         return;
@@ -1387,8 +1400,11 @@
       // 한 검사의 서버 투영이 화면 상태를 대신하는 자리도 목록과 같은 규칙을 지난다 —
       // 이 응답에도 그 검사의 초안이 실려 오므로(`toClient`), 고른 검사가 아닌데 아직
       // 보내지 못한 글을 담고 있으면 그대로 덮여 사라진다.
-      api("PATCH", `/studies/${encodeURIComponent(uid)}`, body)
+      // S4-U5: the answer is also returned (true accepted / false refused) so a caller can wait for it before
+      // painting; callers that ignore it behave exactly as before.
+      return api("PATCH", `/studies/${encodeURIComponent(uid)}`, body)
         .then(st => { appState[uid] = mergePolledState(uid, st); syncStudy(uid); render(); })
+        .then(() => true)
         .catch(async e => {
           apiFail(e);
           try {
@@ -1397,6 +1413,7 @@
             if (fresh) { appState[uid] = mergePolledState(uid, fresh.state); syncStudy(uid); }
           } catch (e2) {}
           render(); refreshRight();
+          return false;
         });
     }
 
@@ -1955,9 +1972,10 @@
       techNote: s => `<button type="button" class="chip" data-tech-note="${esc(s.uid)}" aria-label="${esc(s.id)} Tech 메모 ${noteLabel(s.uid)}" ${!serverMode || demoMode || offline ? 'disabled' : ''}>${noteLabel(s.uid)}</button>`,
       em: s => {const phase=studyPriority?.get(s.uid)?.phase;return phase?`<span title="${phase==='saving'?'응급 상태를 저장 중입니다':'저장 결과 미확인 — 문맥 메뉴의 Refresh Status로 확인하세요'}">${phase==='saving'?'Saving':'Unverified'}</span>`:s.em === "E" ? `<span class="em-e">E</span>` : "";},
       rs: s => `<span class="rs ${esc(s.rs)}" title="${esc(s.holdReason ?? "")}">${esc(s.rs)}</span>`,
-      ts: s => `<span class="ts ts-${s.ts}">${s.ts}</span>`,
+      ts: s => `<span class="ts ts-${esc(s.ts)}">${esc(s.ts)}</span>`,
       ss: s => `<span class="ss ${esc(s.ss)}">${esc(s.ss)}</span>`,
-      matched: s => `<span class="mt ${s.matched}">${s.matched}</span>`,
+      // S4-U5: server values too, but escaped like every other cell; a stored value never becomes markup.
+      matched: s => `<span class="mt ${esc(s.matched)}">${esc(s.matched)}</span>`,
       desc: s => esc(shownStudyDesc(s)),
       preDoc: s => esc(displayActor(s.preDoc)),
       preReviewer: s => esc(displayActor(s.preReviewer)),
@@ -1997,6 +2015,10 @@
     let studyObservationModel = window.KinStudyArrivals?.observationStart?.() ?? null;
     // S4-U2 order reconciliation answer (renderOrderReconciliation). Memory only, engineering only.
     let orderReconciliationModel = window.KinOrderReconciliation?.start?.() ?? null;
+    // S4-U5 server-read tags and linked-order relations per row (renderStudyIdentity). Memory only, engineering only.
+    let studyIdentityModel = window.KinStudyIdentity?.start?.() ?? null;
+    // S4-U5 Order List refresh tokens (refreshOrders): only the latest answer may replace the list.
+    let orderRefreshSequence = 0;
     // S4-U4 Now Retry request tokens (requestGatewayRetry). Memory only; the server answers a repeat with the first time.
     let gatewayRetryRequestSeq = 0;
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
@@ -2079,7 +2101,9 @@
       s.prelimHidden = a.prelimHidden;
       s.holder = a.holder;          // 서버가 만료된 점유는 빼고 준다
       s.version = a.version ?? 0;   // 낙관적 락 기준
-      if (a.ov) Object.assign(s, a.ov);
+      // S4-U5: the overlay repaints display fields only. RS, matching, UID, patient key and the rest of the row state
+      // above always stay as the server sent them, whatever a stored overlay carries.
+      for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) s[key] = a.ov[key];
       return s;
     }
 
@@ -2442,6 +2466,9 @@
           `Verified:${n("ss","Verified")} Unverified:${n("ss","Unverified")} · Unmatched:${n("matched","U")} · Total ${list.length}`;
       }
       renderChips();
+      // S4-U5: the poll merges row state after it reports the observation, so the identity panel is redrawn here
+      // too; its stale rule reads that merged state (a correction answer or a newer poll), never an older one.
+      renderStudyIdentity();
     }
 
     // ── 모드 전환 ──
@@ -2758,6 +2785,7 @@
           <tr><td>Ward</td><td>${esc(s.ward) || "-"}</td></tr>
           <tr><td>Study UID</td><td>${esc(s.uid)}</td></tr>
         </table>` : "No clinical information provided.";
+      renderStudyIdentity();
       renderObservation();
     }
 
@@ -2780,12 +2808,15 @@
       }
       // S4-U2: the order answer rides on this same observation and fails with it.
       applyOrderReconciliation(next.ok ? result : null);
+      // S4-U5: so do the server-read tags and the linked-order relations of each row.
+      applyStudyIdentity(next.ok ? result : null);
       renderObservation();
     }
     function markObservationUnavailable() {
       if (!studyObservationModel) return;
       studyObservationModel = KinStudyArrivals.observationFailed(studyObservationModel);
       applyOrderReconciliation(null);
+      applyStudyIdentity(null);
       renderObservation();
     }
     function renderObservation() {
@@ -2875,6 +2906,47 @@
         item.textContent = row.text; item.title = row.title;
         return item;
       }));
+    }
+
+    /**
+     * S4-U5 DICOM Identity panel — read-only, engineering only. The tags are the ones the server read for the list row
+     * (never the row object, which carries the display overlay); the relations are the server's, shown only while this
+     * screen's own row state still names the same linked order. A failed observation keeps the last answer and says so.
+     */
+    function applyStudyIdentity(result) {
+      if (!studyIdentityModel) return;
+      studyIdentityModel = result ? KinStudyIdentity.succeeded(studyIdentityModel, result)
+        : KinStudyIdentity.failed(studyIdentityModel);
+      renderStudyIdentity();
+    }
+    function renderStudyIdentity() {
+      const box = $("#study-identity");
+      if (!box || !studyIdentityModel) return;
+      const s = viewed();
+      const view = s ? KinStudyIdentity.view(studyIdentityModel, s.uid, appState[s.uid] ?? {}) : { hidden: true };
+      const drawn = JSON.stringify(view);
+      if (box.dataset.view === drawn) return;   // unchanged: keep the open panel and any text selection as they are
+      box.dataset.view = drawn;
+      box.hidden = view.hidden;
+      if (view.hidden) return;
+      $("#study-identity-summary").textContent = view.summary.text;
+      $("#study-identity-summary").title = view.summary.title;
+      const order = $("#study-identity-order");
+      order.textContent = view.order?.text ?? ""; order.title = view.order?.title ?? "";
+      $("#study-identity-tags").replaceChildren(...view.rows.map(row => {
+        const line = document.createElement("div"), value = document.createElement("span"), relation = document.createElement("span");
+        line.setAttribute("role", "listitem"); line.dataset.tag = row.key;
+        value.textContent = `${row.tag} ${row.label}: ${row.value}`; value.title = row.valueTitle;
+        relation.textContent = row.relation ? ` · ${row.relation}` : ""; relation.title = row.title;
+        line.append(value, relation);
+        return line;
+      }));
+      $("#study-identity-guidance").textContent = view.guidance;
+    }
+    // A correction answer (Match, Unmatch, Modify Exam) for the panel's next-action line. Memory only.
+    function noteIdentityCorrection(uid, ok) {
+      if (studyIdentityModel) studyIdentityModel = KinStudyIdentity.correction(studyIdentityModel, uid, ok);
+      renderStudyIdentity();
     }
 
     function relatedDateLabel(target) {
@@ -3184,7 +3256,26 @@
       renderOrders();
     });
     $("#o-sync").addEventListener("change", renderOrders);
-    $("#o-refresh").addEventListener("click", renderOrders);
+    /**
+     * S4-U5 Order List refresh. The server list is read through the existing guarded bootstrap read (own institution,
+     * access-filtered); only the latest answer for this account's institution replaces it, and the selected order stays
+     * selected while it is still listed. Without a server this only redraws, as before.
+     */
+    async function refreshOrders() {
+      if (!serverMode) { renderOrders(); return; }
+      const token = ++orderRefreshSequence;
+      let answer = null;
+      try { answer = await api("GET", "/bootstrap?states=omit"); } catch (e) { answer = null; }
+      if (token !== orderRefreshSequence || !serverMode) return;
+      if (!Array.isArray(answer?.orders) || !myInstitution || answer.me?.institution !== myInstitution) {
+        toast("오더 목록을 다시 받지 못했습니다 — 보이는 목록은 이전 것입니다. 잠시 후 Refresh를 다시 누르세요.", "err");
+        return;
+      }
+      orders = answer.orders;
+      if (!orders.some(o => o.oid === selectedOid)) selectedOid = null;
+      renderOrders();
+    }
+    $("#o-refresh").addEventListener("click", refreshOrders);
     $("#o-clear").addEventListener("click", () => {
       Object.keys(ofval).forEach(k => ofval[k] = "");
       document.querySelectorAll(".order-p .filters input").forEach(i => i.value = "");
@@ -3206,12 +3297,25 @@
       if (serverMode) {
         // 검사와 오더를 함께 바꾸는 일이라 서버 트랜잭션에 맡긴다.
         // 한쪽만 바뀌면 M/U가 어긋난 유령 상태가 남는다.
+        // S4-U5: the server stores a claimed original only in the overlay shape, so only those fields are sent
+        // (an age the row could not compute is dropped rather than sent as null).
+        const claimed = {};
+        for (const key of OVERLAY_KEYS) if (overlayValue(key, orig?.[key])) claimed[key] = orig[key];
         try {
-          const st = await api("POST", "/match", { uid: s.uid, oid: o.oid, patient: { age: ov.age, orig } });
+          const st = await api("POST", "/match", { uid: s.uid, oid: o.oid, patient: { age: ov.age, orig: claimed } });
           appState[s.uid] = { ...a, ...st };
           Object.assign(s, st.ov ?? {}, { matched: "M", ward: st.ward });
           o.matched = "M"; o.studyUid = s.uid;
-        } catch (e) { alert("매칭 실패: " + e.message); return; }
+        } catch (e) {
+          alert("매칭 실패: " + e.message);
+          // S4-U5: the refusal keeps the server wording; the panel adds the next step and the Order List is read
+          // again, since the server may have refused because the list on this screen was stale.
+          noteIdentityCorrection(s.uid, false); refreshOrders();
+          return;
+        }
+        // S4-U5: a list answer requested before this match would re-install the unmatched row; drop it and read again.
+        commitEpoch++; listLoadSequence++;
+        noteIdentityCorrection(s.uid, true); load(); refreshOrders();
       } else {
         a.orig ??= orig; a.ov = ov; a.matched = "M"; a.oid = o.oid;
         Object.assign(s, ov, { matched: "M" });
@@ -3231,11 +3335,21 @@
         try {
           const st = await api("POST", "/unmatch", { uid: s.uid });
           appState[s.uid] = { ...a, ...st, ov: undefined };
-          if (st.orig) Object.assign(s, st.orig);
+          // S4-U5: back to what the server last read from the DICOM, never to the client-claimed orig. Without
+          // those tags the fields stay until the list read below repaints them.
+          const read = studyIdentityModel ? KinStudyIdentity.tags(studyIdentityModel, s.uid) : null;
+          if (read) Object.assign(s, { id: read.id, name: read.name, sex: read.sex, birth: fmtD(read.birth),
+            age: ageOf(fmtD(read.birth), s.date), desc: read.desc });
           s.matched = "U";
           const o = orders.find(x => x.studyUid === s.uid);
           if (o) { o.matched = "U"; o.studyUid = null; }
-        } catch (e) { alert("매칭 해제 실패: " + e.message); return; }
+        } catch (e) {
+          alert("매칭 해제 실패: " + e.message);
+          noteIdentityCorrection(s.uid, false);
+          return;
+        }
+        commitEpoch++; listLoadSequence++;
+        noteIdentityCorrection(s.uid, true); load(); refreshOrders();
       } else {
         if (a.orig) Object.assign(s, a.orig);
         delete a.ov; a.matched = "U";
@@ -3280,23 +3394,55 @@
       if (s.rs !== "W") { alert("판독 전(RS: W)인 검사만 수정할 수 있습니다.\n현재 RS: " + s.rs); return; }
       $("#m-id").value = s.id; $("#m-name").value = s.name; $("#m-sex").value = s.sex || "O";
       $("#m-birth").value = s.birth; $("#m-desc").value = s.desc; $("#m-ward").value = s.ward;
+      $("#m-guidance").hidden = true; $("#m-guidance").textContent = "";
       $("#modal").classList.add("show");
     }
     $("#m-cancel").addEventListener("click", () => $("#modal").classList.remove("show"));
-    $("#m-save").addEventListener("click", () => {
+    /**
+     * S4-U5 Modify Exam save. With a server, nothing is painted, stored locally or announced before the PATCH answer:
+     * a refusal leaves the row as it was and the modal open with what was typed, plus the server's own words (toast)
+     * and the next step; an accepted answer repaints the row from the server's overlay through applyState. The local
+     * (no server) path is the previous behavior.
+     */
+    async function saveModify(event) {
       const s = cur(); if (!s) return;
-      const a = appState[s.uid] ??= {};
-      a.orig ??= { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
+      const uid = s.uid, button = event.currentTarget;
+      const a = appState[uid] ??= {};
       const birth = $("#m-birth").value.trim();
-      a.ov = { ...(a.ov ?? {}),
+      const ov = {};
+      for (const key of OVERLAY_KEYS) if (overlayValue(key, a.ov?.[key])) ov[key] = a.ov[key];
+      Object.assign(ov, {
         id: $("#m-id").value.trim(), name: $("#m-name").value.trim(), sex: $("#m-sex").value,
-        birth, age: ageOf(birth, s.date), desc: $("#m-desc").value.trim(), ward: $("#m-ward").value.trim() };
-      Object.assign(s, a.ov);
-      saveApp(s.uid, { ov: a.ov });
+        birth, age: ageOf(birth, s.date), desc: $("#m-desc").value.trim(), ward: $("#m-ward").value.trim() });
+      if (serverMode || offline) {
+        const guidance = $("#m-guidance");
+        guidance.hidden = true; guidance.textContent = "";
+        button.disabled = true;
+        let ok = false;
+        try { ok = await saveApp(uid, { ov }) === true; } finally { button.disabled = false; }
+        if (!ok) {
+          if (!serverMode) return;
+          noteIdentityCorrection(uid, false);
+          guidance.textContent = window.KinStudyIdentity?.guidance(appState[uid]?.rs ?? "W", true, s.tele === true) ?? "";
+          guidance.hidden = !guidance.textContent;
+          return;
+        }
+        const row = studies.find(x => x.uid === uid);
+        if (row) applyState(row);
+        noteIdentityCorrection(uid, true);
+      } else {
+        a.orig ??= { id: s.id, name: s.name, sex: s.sex, birth: s.birth, age: s.age, desc: s.desc, ward: s.ward };
+        a.ov = ov;
+        Object.assign(s, a.ov);
+        saveApp(uid, { ov: a.ov });
+      }
       $("#modal").classList.remove("show");
       render(); renderClinical(); renderRelated(); renderOrders();
       toast("검사 정보를 수정했습니다");
-    });
+      // An older list answer would still carry the previous overlay; drop it and read the list again.
+      if (serverMode) { commitEpoch++; listLoadSequence++; load(); }
+    }
+    $("#m-save").addEventListener("click", saveModify);
     $("#t-modify").addEventListener("click", openModify);
 
     // ── Delete (8.1.2.1.8) ──

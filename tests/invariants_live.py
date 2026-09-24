@@ -4147,6 +4147,227 @@ class LiveInvariantTests(unittest.TestCase):
                     self.assertIn({"oid": h3, "link": "not_observed", "studyUid": h.uid}, listed.body["orderReconciliation"]["orders"])
                     self.assertIn(h.uid, [row["uid"] for row in listed.body["notObserved"]])
 
+    def test_s4u5_order_identity_qido_only_w_gates_and_report_preservation(self) -> None:
+        """S4-U5 (stage4 contract §4 S4-U5; U5 contract with review M-1..M-6, N-1..N-9): an own-institution list row
+        linked both ways to an own-institution order carries orderIdentity, judged only on the server-read QIDO tags (a
+        valid but forged ov and a claimed orig change nothing, full and paged agree) and never on a tele-received row. A
+        malformed ov or claimed orig is refused after every existing refusal (valid and null keep working); the three RS
+        gates keep their exact status and message per caller at T/H/A and P; no refused request moves a Report,
+        ReportVersion, ReportDraft, StudyState or Order byte. The orders go in with psql and come out by exact row."""
+        run = uuid.uuid4().hex[:12]
+        marker = "SYNTHETIC-S4U5-" + run
+        PROBE = {"matched": "<img data-u5-probe>", "rs": "A", "uid": "1.2.3", "sourcePatientKey": "x"}
+        OV_SHAPE, ORIG_SHAPE = "환자·검사 정보(ov) 형식이 잘못되었습니다", "원래 정보(orig) 형식이 잘못되었습니다"
+
+        def ov_rs(rs: str) -> str:
+            return f"판독 전(RS: W)인 검사만 환자·검사 정보를 수정할 수 있습니다 (현재 RS: {rs})"
+
+        def match_rs(rs: str) -> str:
+            return f"판독 전(RS: W)인 검사만 매칭할 수 있습니다 (현재 RS: {rs})"
+
+        def unmatch_rs(rs: str) -> str:
+            return f"판독 전(RS: W)인 검사만 매칭을 풀 수 있습니다 (현재 RS: {rs})"
+
+        def lit(value: Any) -> str:
+            return "NULL" if value is None else "'" + str(value).replace("'", "''") + "'"
+
+        # Q2: the seed orders still carry no accession; U5 invents none and adds no column.
+        seeds = [f"O-900{n}" for n in range(1, 7)]
+        self.assertEqual(psql('SELECT oid FROM "Order" WHERE oid IN (' + ",".join(map(lit, seeds)) + ") AND accession IS NOT NULL"), [])
+        created: list[str] = []
+
+        def insert(name: str, institution: str, patient_id: str, patient_name: str, birth: str, sex: str,
+                   accession: str | None) -> str:
+            oid = f"{marker}-{name}"
+            psql('INSERT INTO "Order" (oid,"institutionId","patientId",name,sex,birth,sched,modality,descr,ward,"reqDoc",accession) VALUES ('
+                 + ",".join(lit(v) for v in [oid, institution, patient_id, patient_name, sex, birth, "", "CT", "SYNTHETIC", "",
+                                              marker, accession]) + ")")
+            created.append(oid)
+            return oid
+
+        def remove_orders() -> None:
+            for oid in created:
+                for raw in psql('SELECT to_jsonb(t)::text FROM "Order" t WHERE oid=' + lit(oid)):
+                    self.assertEqual(json.loads(raw)["reqDoc"], marker, raw)
+                    self.assertEqual(psql('DELETE FROM "Order" t WHERE to_jsonb(t)=' + lit(raw) + "::jsonb RETURNING oid"), [oid])
+        self.addCleanup(remove_orders)
+
+        def rows(user: str, paged: bool = False) -> dict[str, Any]:
+            if not paged:
+                listed = self.stack.request("GET", "/studies", user)
+                self.assert_status(listed, 200)
+                return {row["uid"]: row for row in listed.body["studies"]}
+            found: dict[str, Any] = {}
+            path = "/studies?limit=100"
+            for _ in range(100):
+                listed = self.stack.request("GET", path, user)
+                self.assert_status(listed, 200)
+                found.update({row["uid"]: row for row in listed.body["studies"]})
+                if listed.body["pagination"]["next"] is None:
+                    return found
+                path = "/studies?limit=100&after=" + quote(listed.body["pagination"]["next"])
+            self.fail("페이지 목록이 끝나지 않았습니다")
+
+        def relation(uid: str, user: str = "tech") -> Any:
+            full, paged = rows(user)[uid], rows(user, True)[uid]
+            self.assertIn("orderIdentity", full)
+            self.assertEqual(full["orderIdentity"], paged["orderIdentity"], "the paged and full lists disagree")
+            return full["orderIdentity"]
+
+        def digest(uid: str, oids: list[str]) -> str:
+            # One byte-level fingerprint of everything a refused correction must not move (review (h)).
+            self.assertRegex(uid, r"^[0-9.]+$")
+            return psql(
+                "SELECT md5(jsonb_build_array("
+                f"(SELECT to_jsonb(r) FROM \"Report\" r WHERE r.uid='{uid}'), "
+                f"coalesce((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.version) FROM \"ReportVersion\" v WHERE v.uid='{uid}'), '[]'::jsonb), "
+                f"coalesce((SELECT jsonb_agg(to_jsonb(d) ORDER BY d.author) FROM \"ReportDraft\" d WHERE d.uid='{uid}'), '[]'::jsonb), "
+                "(SELECT jsonb_build_object('ov', s.ov, 'orig', s.orig, 'matched', s.matched, 'orderOid', s.\"orderOid\", "
+                f"'rs', s.rs, 'ward', s.ward) FROM \"StudyState\" s WHERE s.uid='{uid}'), "
+                "coalesce((SELECT jsonb_agg(to_jsonb(o) ORDER BY o.oid) FROM \"Order\" o WHERE o.oid IN ("
+                + ",".join(lit(oid) for oid in oids) + f") OR o.\"studyUid\"='{uid}'), '[]'::jsonb))::text)")[0]
+
+        def iso(birth: str) -> str:
+            self.assertRegex(birth, r"^\d{8}$")
+            return f"{birth[:4]}-{birth[4:6]}-{birth[6:]}"
+
+        with self.stack.fixture() as h:
+            path = f"/studies/{quote(h.uid)}"
+            before = rows("tech")[h.uid]
+            tags = {key: before[key] for key in ("acc", "id", "name", "birth", "sex", "desc")}
+            self.assertIn("orderIdentity", before)
+            self.assertIsNone(before["orderIdentity"], "an unlinked row has no relation")
+            self.assertTrue(tags["acc"] and tags["id"] and tags["name"], tags)
+            self.assertEqual(tags["sex"], "O")   # scripts/send_cstore.py default: not interpreted, so not comparable
+            e = insert("E", "hallym", tags["id"], tags["name"], iso(tags["birth"]), "M", tags["acc"])
+            d = insert("D", "hallym", marker + "-OTHER-ID", tags["name"], iso(tags["birth"]), "M", tags["acc"])
+            expected = {"source": "engineering_only", "oid": e, "accession": "match", "patientId": "match",
+                        "patientName": "match", "birth": "match", "sex": "not_comparable"}
+
+            # N-1: a malformed claimed orig is refused before anything is written; valid and absent ones work.
+            baseline = digest(h.uid, [e, d])
+            for claimed in ("text", PROBE, {"name": None}, ["name"]):
+                refused = self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": e, "patient": {"orig": claimed}})
+                self.assert_status(refused, 400)
+                self.assertTrue(refused.body["message"].startswith(ORIG_SHAPE), refused.text)
+            self.assertEqual(digest(h.uid, [e, d]), baseline)
+            matched = self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": e,
+                                                                   "patient": {"orig": {"name": "FORGED-ORIG", "id": "FORGED-ORIG-ID"}}})
+            self.assert_status(matched, 201)
+            self.assertEqual((matched.body["matched"], matched.body["oid"]), ("M", e))
+            self.assertEqual(relation(h.uid), expected)
+
+            # (c) A valid overlay with forged values is stored and relayed, and changes neither the relation nor the
+            # server-read row values: the rule never reads ov (P12).
+            forged = {"id": "FORGED-ID", "name": "FORGED NAME", "birth": "19990909", "sex": "F", "acc": "FORGED-ACC", "desc": "FORGED-DESC"}
+            patched = self.stack.request("PATCH", path, "tech", {"ov": forged})
+            self.assert_status(patched, 200)
+            self.assertEqual(patched.body["ov"], forged)
+            self.assertEqual(relation(h.uid), expected)
+            self.assertEqual({key: rows("tech")[h.uid][key] for key in tags}, tags)
+
+            # M-1: a malformed overlay at W is the only newly refused request; nothing moves.
+            snapshot = self.snapshot(h, "doctor")
+            baseline = digest(h.uid, [e, d])
+            for body in ({"ov": PROBE}, {"ov": {"name": 1}}, {"ov": ["name"]}, {"ov": "text"}, {"ov": {"age": None}}):
+                with self.subTest(ov=body["ov"]):
+                    refused = self.stack.request("PATCH", path, "tech", body)
+                    self.assert_status(refused, 400)
+                    self.assertTrue(refused.body["message"].startswith(OV_SHAPE), refused.text)
+            self.assertEqual(digest(h.uid, [e, d]), baseline)
+            self.assert_snapshot_unchanged(h, "doctor", snapshot)
+            self.assertEqual(self.state(h, "doctor")["ov"], forged)
+            self.assert_status(self.stack.request("PATCH", path, "tech", {"ov": None}), 200)   # null still clears
+            self.assertIsNone(self.state(h, "doctor")["ov"])
+
+            # (d) Unmatch: ov cleared, the claimed orig kept as stored (never evidence), the order released, and the
+            # row is the server-read DICOM again with no relation.
+            undone = self.stack.request("POST", "/unmatch", "tech", {"uid": h.uid})
+            self.assert_status(undone, 201)
+            self.assertEqual((undone.body["matched"], undone.body["oid"], undone.body["ov"]), ("U", None, None))
+            self.assertEqual(undone.body["orig"], {"name": "FORGED-ORIG", "id": "FORGED-ORIG-ID"})
+            released = json.loads(psql('SELECT to_jsonb(t)::text FROM "Order" t WHERE oid=' + lit(e))[0])
+            self.assertEqual((released["matched"], released["studyUid"]), ("U", None))
+            after = rows("tech")[h.uid]
+            self.assertIsNone(after["orderIdentity"])
+            self.assertEqual({key: after[key] for key in tags}, tags)
+
+            # (e) The same study linked to an order whose Patient ID differs; N-1 holds with an orig already stored.
+            refused = self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": d, "patient": {"orig": PROBE}})
+            self.assert_status(refused, 400)
+            self.assertTrue(refused.body["message"].startswith(ORIG_SHAPE), refused.text)
+            self.assert_status(self.stack.request("POST", "/match", "tech", {"uid": h.uid, "oid": d, "patient": {}}), 201)
+            self.assertEqual(relation(h.uid), {**expected, "oid": d, "patientId": "mismatch"})
+            # The relation carries no Order value (Match itself still writes the order fields into ov, as before).
+            identity = json.dumps(rows("tech")[h.uid]["orderIdentity"])
+            for value in (marker + "-OTHER-ID", tags["name"], tags["acc"], "FORGED-ORIG", "FORGED-ID"):
+                self.assertNotIn(value, identity)
+
+        # (f) Tele: the owner sees its relation, the receiver sees null even with an identical order of its own.
+        with self.stack.fixture() as t:
+            ttags = rows("tech")[t.uid]
+            owned = insert("T", "hallym", ttags["id"], ttags["name"], iso(ttags["birth"]), "M", ttags["acc"])
+            twin = insert("K", "kin-center", ttags["id"], ttags["name"], iso(ttags["birth"]), "M", ttags["acc"])
+            self.assert_status(self.stack.request("POST", "/match", "tech", {"uid": t.uid, "oid": owned, "patient": {}}), 201)
+            self.assert_status(self.stack.request(
+                "PATCH", f"/studies/{quote(t.uid)}", "doctor", {"ts": "wait", "teleTo": "kin-center"}), 200)
+            self.assertEqual(relation(t.uid)["oid"], owned)
+            for paged in (False, True):
+                received = rows("kdoctor", paged)[t.uid]
+                self.assertTrue(received["tele"])
+                self.assertIsNone(received["orderIdentity"], "a tele receiver is never compared")
+            kboot = self.stack.request("GET", "/bootstrap?states=omit", "kdoctor")
+            self.assert_status(kboot, 200)
+            self.assertIn(twin, [order["oid"] for order in kboot.body["orders"]])
+            self.assertNotIn("orderIdentity", kboot.text)
+
+        # (g, h) RS gates per caller, exact status and message, and nothing moves in any refused group (M-5).
+        with self.stack.fixture() as g, self.stack.fixture() as p:
+            gorder = insert("G", "hallym", "SYNTHETIC-G-" + run, "SYNTHETIC G", "", "O", None)
+            porder = insert("P", "hallym", "SYNTHETIC-P-" + run, "SYNTHETIC P", "", "O", None)
+            spare = insert("F", "hallym", "SYNTHETIC-F-" + run, "SYNTHETIC F", "", "O", None)
+            oids = [gorder, porder, spare]
+            for fixture, oid in ((g, gorder), (p, porder)):
+                self.assert_status(self.stack.request("POST", "/match", "tech", {"uid": fixture.uid, "oid": oid, "patient": {}}), 201)
+
+            def refused_group(fixture: Fixture, rs: str, cells: list[tuple[str, str, str, Any, int, str]]) -> None:
+                fingerprint, report = digest(fixture.uid, oids), self.snapshot(fixture, "doctor")
+                for user, method, route, body, status, message in cells:
+                    with self.subTest(rs=rs, user=user, route=route, body=json.dumps(body, ensure_ascii=False)[:80]):
+                        result = self.stack.request(method, route, user, body)
+                        self.assert_status(result, status)
+                        self.assertEqual(result.body["message"], message)
+                self.assertEqual(digest(fixture.uid, oids), fingerprint, f"a refused request at RS {rs} moved a row")
+                self.assert_snapshot_unchanged(fixture, "doctor", report)
+
+            gp = f"/studies/{quote(g.uid)}"
+            movers = (("T", lambda: self.commit(g, "doctor", "save", 0)),
+                      ("H", lambda: self.commit(g, "doctor", "defer", 1, reason="h")),
+                      ("A", lambda: self.commit(g, "doctor", "approve", 2)))
+            for rs, mover in movers:
+                previous = digest(g.uid, oids)
+                self.assert_status(mover(), 201)
+                self.assertNotEqual(digest(g.uid, oids), previous, "control: the fingerprint sees a report change")
+                refused_group(g, rs, [
+                    ("tech", "PATCH", gp, {"ov": {"name": "X"}}, 400, ov_rs(rs)),
+                    ("tech", "PATCH", gp, {"ov": PROBE}, 400, ov_rs(rs)),                       # RS before shape (M-1)
+                    ("tech", "POST", "/match", {"uid": g.uid, "oid": spare, "patient": {}}, 400, match_rs(rs)),
+                    ("tech", "POST", "/match", {"uid": g.uid, "oid": spare, "patient": {"orig": PROBE}}, 400, match_rs(rs)),  # N-1
+                    ("tech", "POST", "/unmatch", {"uid": g.uid}, 400, unmatch_rs(rs)),
+                ])
+
+            self.preliminary(p, author="doctor", reviewer="jmryu")
+            pp = f"/studies/{quote(p.uid)}"
+            prelim = f"예비 판독(RS: P) 중입니다. {self.stack.actor('jmryu')}만 다룰 수 있습니다."
+            refused_group(p, "P", [
+                ("tech", "PATCH", pp, {"ov": {"name": "X"}}, 403, prelim),          # not the designated reviewer
+                ("tech", "PATCH", pp, {"ov": PROBE}, 403, prelim),
+                ("jmryu", "PATCH", pp, {"ov": {"name": "X"}}, 400, ov_rs("P")),     # the designated reviewer reaches the RS gate
+                ("jmryu", "PATCH", pp, {"ov": PROBE}, 400, ov_rs("P")),
+                ("tech", "POST", "/match", {"uid": p.uid, "oid": spare, "patient": {}}, 400, match_rs("P")),   # no prelim check there
+                ("tech", "POST", "/unmatch", {"uid": p.uid}, 400, unmatch_rs("P")),
+            ])
+
     def test_zzz_known_failure_concurrent_commit_must_not_return_500(self) -> None:
         """다음 배치의 빨간 테스트. @expectedFailure로 숨기지 않는다."""
         with self.stack.fixture() as fixture:
