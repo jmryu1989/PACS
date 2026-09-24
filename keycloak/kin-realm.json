@@ -33,6 +33,10 @@
         "description": "관리자"
       },
       {
+        "name": "clinician",
+        "description": "임상의 — 의뢰 검사 열람 전용. 명시 허용 경로 밖은 API가 거절한다"
+      },
+      {
         "name": "gateway",
         "description": "기관 Gateway — 자기 테넌트 DICOM 수신 전용"
       }
