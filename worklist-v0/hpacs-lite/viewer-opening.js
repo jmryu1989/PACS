@@ -83,7 +83,8 @@
     reset.onclick = () => save(defaults());
     button.onclick = () => { render(); if (current()) { dialog.showModal(); target.focus(); } };
     dialog.querySelector('#image-opening-done').onclick = () => dialog.close();
-    dialog.addEventListener('close', () => { if (current()) button.focus(); });
+    // close() has already restored focus and the close event is queued after it, so a later move belongs to the user: only focus left on nothing, the body or the closed dialog goes back to the opener.
+    dialog.addEventListener('close', () => { const active = document.activeElement; if (current() && (!active || active === document.body || dialog.contains(active))) button.focus(); });
     function end() { ended = true; if (dialog.open) dialog.close(); render('로그인이 종료되었습니다.'); }
     root.addEventListener('storage', e => {
       if (e.key === 'kin-session-ended') { end(); return; }

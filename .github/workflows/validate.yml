@@ -191,6 +191,12 @@ jobs:
       - name: Current and prior identity position and legacy display preferences
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/identity-position --cwd . --file worklist-v0/hpacs-lite/viewer-identity.js --file worklist-v0/hpacs-lite/reading-appearance.js --file worklist-v0/hpacs-lite/reading-appearance-account.js --file worklist-v0/hpacs-lite/volume-preferences.js --file tests/viewer_identity_position_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_identity_position_dom_test.py
+      # S4-U3 keyboard: the pre-fix close listener must reproduce the focus steal, the shipped one must keep the
+      # moved focus, and the old listener must FAIL V1 on its own assertion; raw recorder JSON and child logs
+      # land in the run directory, which the workspace DOM artifact below uploads.
+      - name: S4-U3 Image Opening close listener keeps focus moved after Done (old reproduced, stranded fallback, session end, mutant)
+        timeout-minutes: 4
+        run: KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/viewer-opening-focus-dom/evidence" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/viewer-opening-focus-dom --cwd . --file worklist-v0/hpacs-lite/viewer-opening.js --file tests/viewer_opening_dom_test.py --file tests/e2e/test_related_keyboard.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/viewer_opening_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
