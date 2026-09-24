@@ -133,6 +133,13 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         work.evaluate("arrivalNotices=[]")
         self.automatic(work); self.wait_count(work, fixture, before_row["count"] + 1, before_row["series"])
         expect(work.locator("#toast")).to_contain_text("영상 또는 시리즈가 추가됐습니다")
+        # S4-U1b: the same growth, between two known observations of this session, is labelled as a
+        # session-local change; no Gateway report exists and that is shown as normal, not as a failure.
+        expect(work.locator("#receipt-observation")).to_contain_text("이 세션에서 관측한 변화: 증가(")
+        expect(work.locator("#receipt-observation")).to_contain_text(f"KIN 보유 {before_row['count'] + 1}건(")
+        expect(work.locator("#receipt-gateway")).to_have_text("No Gateway Report")
+        expect(work.locator("#receipt-assignment")).to_have_text("Institution Assigned")
+        expect(work.locator("#observation-status")).to_contain_text("Observed ")
         expect(work.locator("#findings")).to_have_value(draft)
         self.assertEqual(holder, self.state(fixture)["holder"]); self.assertEqual(versions, self.versions(fixture)); self.assertEqual(report_rows, self.report_rows(fixture))
         self.assertEqual(before_view, self.stable_view(viewer)); self.assertEqual(1, len(work.evaluate("arrivalNotices"))); self.assertEqual([], work.evaluate("arrivalNotices.filter(x=>x.includes('새 검사'))"))
@@ -176,6 +183,15 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         page.wait_for_function("()=>arrivalNotices.length===1", timeout=5000)
         notices = page.evaluate("arrivalNotices")
         self.assertEqual(1, len(notices)); self.assertIn("새 검사 1건이 도착했습니다", notices[0]); self.assertIn("영상 또는 시리즈가 추가됐습니다", notices[0])
+        # S4-U1b: every list answer carries its observation time and a separate absence surface of
+        # uid/origin/createdAt rows; studies that have images are never on it.
+        listed = self.stack.request("GET", "/studies", "doctor")
+        self.assertEqual(200, listed.status)
+        self.assertIsInstance(listed.body["observedAt"], str)
+        self.assertIsInstance(listed.body["notObserved"], list)
+        absent = {row["uid"] for row in listed.body["notObserved"]}
+        self.assertNotIn(current.uid, absent); self.assertNotIn(new_study.uid, absent)
+        self.assertTrue(all(set(row) == {"uid", "origin", "createdAt"} for row in listed.body["notObserved"]))
         self.shot(page, "combined")
 
     def test_arrivals_03_manual_switch_discards_held_poll_and_explicit_refresh_recovers(self):
@@ -184,6 +200,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         draft = "ARRIVAL HELD RESPONSE DRAFT"; page.locator("#findings").fill(draft)
         before = self.study_row(fixture); self.add_sop(fixture); held = []
         self.watch_notices(page)
+        observed_before = page.evaluate("studyObservationModel.observedAt")
         def hold(route):
             held.append((route, route.fetch()))
         page.route("**/api/studies?*", hold); self.automatic(page)
@@ -197,6 +214,9 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         self.assertEqual(before["count"], page.evaluate("uid=>studies.find(s=>s.uid===uid).count", fixture.uid))
         expect(page.locator("#findings")).to_have_value(draft)
         self.assertEqual([], page.evaluate("arrivalNotices.filter(x=>x.includes('추가됐습니다'))"))
+        # S4-U1b: the discarded answer is not an observation either; the session keeps its last one.
+        self.assertEqual(observed_before, page.evaluate("studyObservationModel.observedAt"))
+        self.assertTrue(page.evaluate("studyObservationModel.available"))
         page.unroute("**/api/studies?*", hold); page.locator("#refresh").click()
         self.wait_count(page, fixture, before["count"] + 1, before["series"])
         expect(page.locator("#findings")).to_have_value(draft)
@@ -216,6 +236,9 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         first = page.evaluate("arrivalNotices.slice()")
         page.wait_for_timeout(35000)
         self.assertEqual(first, page.evaluate("arrivalNotices"))
+        # S4-U1b: an unchanged poll after the growth is reported only as "no observed change" since the growth.
+        expect(page.locator("#receipt-observation")).to_contain_text("이 세션에서 관측한 변화 없음(")
+        self.assertEqual([], page.evaluate("[...studyObservationModel.rows.values()].filter(r=>r.needsCheck)"))
         self.shot(page, "multiframe")
 
 

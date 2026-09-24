@@ -1,4 +1,5 @@
 import { StudyAccessService } from './study-access.service';
+import type { AccessSnapshot } from './study-access.service';
 import { Injectable, BadRequestException, ConflictException, ForbiddenException, NotFoundException, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -670,9 +671,12 @@ export class PacsService implements OnModuleInit {
     const access=await this.studyAccess.snapshot(c);
     const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen)], page = studyPageQuery(query, owner);
     const qido = page ? await this.orthanc.studyIdentities(this.studyAccess.needsMetadata(access)) : await this.orthanc.studies();
+    // S4-U1b: the server time at which this successful enumeration returned. A failed QIDO throws
+    // before this line, so no response ever carries an observation time it did not make.
+    const observedAt = new Date().toISOString();
 
     const states = page ? await this.prisma.studyState.findMany({
-      select: { uid:true, institutionId:true, teleInstitutionId:true },
+      select: { uid:true, institutionId:true, teleInstitutionId:true, origin:true, createdAt:true },
     }) : await this.prisma.studyState.findMany();
     const byUid = new Map(states.map(s => [s.uid, s as any]));
 
@@ -777,7 +781,38 @@ export class PacsService implements OnModuleInit {
       select: { uid:true, institutionId:true, teleInstitutionId:true, rs:true, preDoc:true, preReviewer:true } });
     if (changedAccess(current)) throw accessConflict();
     await this.studyAccess.unchanged(c,access);
-    return { studies: out, serverTime: new Date().toISOString(), ...(page ? { pagination: window.pagination } : {}) };
+    // Absence is judged against the whole enumeration, never against this page's window. It is sent
+    // once, with the page that completes the list, so a client never merges two absence answers.
+    const notObserved = !page || window.pagination?.next === null ? this.notObserved(qido, states, me, access, observedAt) : undefined;
+    return { studies: out, serverTime: new Date().toISOString(), observedAt,
+      ...(notObserved === undefined ? {} : { notObserved }), ...(page ? { pagination: window.pagination } : {}) };
+  }
+
+  /**
+   * S4-U1b 관측되지 않은 자기 기관 검사. **성공한** QIDO 열거 전체에 행이 없는 StudyState만 낸다.
+   * 필드는 uid·origin·createdAt뿐이다 — QIDO 행이 없으니 환자 필드는 존재하지 않고, 지어내지 않는다.
+   * 열거의 어느 행이라도 UID를 확인할 수 없으면 부재를 판정할 수 없으므로 `null`(모름)이다.
+   * 원격판독으로 받은 검사는 자기 기관 행이 아니다. 접근 조건은 UID만으로 판정한다 — 메타데이터
+   * 조건이 걸린 계정에는 원본 태그가 없는 행이 맞을 수 없으므로 보이지 않는다(닫힌 쪽으로 실패).
+   * 열거가 끝난 뒤 생긴 행은 이 열거로 판정할 수 없으므로 다음 관측으로 넘긴다.
+   */
+  private notObserved(qido: any, states: any[], me: string, access: AccessSnapshot, observedAt: string) {
+    if (!Array.isArray(qido)) return null;
+    const present = new Set<string>();
+    for (const st of qido) {
+      const uid = OrthancService.tag(st, '0020000D');
+      if (!uid) return null;
+      present.add(uid);
+    }
+    const out: { uid: string; origin: string; createdAt: string }[] = [];
+    for (const s of states) {
+      if (s.institutionId !== me || present.has(s.uid) || !this.studyAccess.matches(access, s.uid)) continue;
+      if (!(s.createdAt instanceof Date) || typeof s.origin !== 'string') return null;
+      const createdAt = s.createdAt.toISOString();
+      if (createdAt > observedAt) continue;
+      out.push({ uid: s.uid, origin: s.origin, createdAt });
+    }
+    return out.sort((a, b) => a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0);
   }
 
   /** 프론트가 켜질 때 한 번에 받아가는 묶음 — 전부 내 기관 것만 */

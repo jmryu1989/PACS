@@ -44,6 +44,9 @@ START_POLLING = extract_function(MAIN, "startPolling")
 # claim is only worth anything if the product's own rule is what produced it.
 PRESERVE = extract_function(MAIN, "preservedLocal")
 MERGE = extract_function(MAIN, "mergePolledState")
+# S4-U1b: the poll now reports each observation to these; they are sliced, not re-described, so the
+# cases below judge the shipped labels and the shipped failure rule.
+OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("applyObservation", "markObservationUnavailable", "renderObservation"))
 CURRENT = {
     "uid": "1.2.3", "count": 5, "series": 2, "acc": "ACC-1", "id": "PID-1", "name": "Patient",
     "sourcePatientKey": "hospital|patient", "birth": "19800101", "date": "20260912", "sex": "O",
@@ -52,6 +55,8 @@ CURRENT = {
 }
 
 HARNESS = """<!doctype html><html><body>
+<span id=\"observation-status\" hidden></span><details id=\"not-observed\" hidden><summary id=\"not-observed-summary\"></summary><div id=\"not-observed-list\"></div></details>
+<div id=\"study-receipt\" hidden><span id=\"receipt-assignment\"></span><span id=\"receipt-observation\"></span><span id=\"receipt-gateway\"></span></div>
 <table><tbody id=\"rows\"></tbody></table><textarea id=\"findings\">LOCAL FINDINGS</textarea>
 <textarea id=\"conclusion\">LOCAL CONCLUSION</textarea><textarea id=\"recommendation\">LOCAL RECOMMENDATION</textarea>
 <script>
@@ -60,7 +65,7 @@ const $=selector=>document.querySelector(selector);let poll=null,pollGeneration=
 let studies=INITIAL,selectedUid='1.2.3',heldUid='1.2.3',appState={'1.2.3':{...INITIAL[0].state,version:3,draft:'LOCAL DRAFT'}};
 let nextReply=null,readStarted=0,readResolver=null,toasts=[],renders=0,loadReports=0,buttonUpdates=0,observed=[];
 const worklistRefresh={seconds:()=>30},favoriteList={refresh:async()=>{}},studyTagList={refresh:async()=>{}},worklistAlerts={observe:value=>observed.push(value)};
-const studyPageClient={busy:false,paused:false,clear(){},read:async options=>{readStarted++;if(readResolver)return await new Promise(resolve=>window.releaseRead=value=>resolve(value));return structuredClone(nextReply)}};
+const studyPageClient={busy:false,paused:false,clear(){},read:async options=>{readStarted++;if(window.readError)throw Object.assign(new Error('synthetic observation failure'),window.readError);if(readResolver)return await new Promise(resolve=>window.releaseRead=value=>resolve(value));return structuredClone(nextReply)}};
 const assertStudyOwner=()=>{},KinAuth={logout:async()=>{}},goOffline=()=>{};
 function applyState(value){return value}function fmtD(value){return value}
 function updateNoteSummary(){}function updateReaderAssignment(){}
@@ -71,6 +76,9 @@ PRESERVELOCAL
 MERGESTATE
 // The shipped fromApi assigns through the same rule, so the rebuild path keeps it too.
 function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s}}
+// Starts null: study-arrivals.js is added after this script, and setUp starts the session model.
+let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
+OBSERVESTATE
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
 function render(){renders++;rows.innerHTML=studies.map(s=>`<tr data-uid="${s.uid}"><td data-count>${s.count}</td><td data-series>${s.series}</td></tr>`).join('')}
 function loadReport(){loadReports++}function updateReportButtons(){buttonUpdates++}function toast(message,type){toasts.push({message,type})}
@@ -80,11 +88,15 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
  report:[findings.value,conclusion.value,recommendation.value],row:rows.textContent,renders,loadReports,buttonUpdates,pollGeneration,commitEpoch});
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
-   .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING)
+   .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
+   .replace("OBSERVESTATE", OBSERVE)
+
+OWNER = ["hospital", "reader-sub"]
 
 
-def reply(*rows):
-    return {"studies": list(rows)}
+def reply(*rows, at="2026-09-24T01:00:00.000Z", not_observed=None):
+    # The page client's result: the rows, the owner it was read for, and the last page's observation.
+    return {"studies": list(rows), "owner": OWNER, "observation": {"observedAt": at, "notObserved": not_observed}}
 
 
 class WorklistArrivalsDOMTest(unittest.TestCase):
@@ -102,6 +114,7 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.page = self.browser.new_page()
         self.page.set_content(HARNESS)
         self.page.add_script_tag(content=ARRIVALS)
+        self.page.evaluate("()=>{studyObservationModel=KinStudyArrivals.observationStart()}")
 
     def tearDown(self):
         self.page.close()
@@ -160,6 +173,94 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
                 self.page.reload()
                 self.page.set_content(HARNESS)
                 self.page.add_script_tag(content=ARRIVALS)
+                self.page.evaluate("()=>{studyObservationModel=KinStudyArrivals.observationStart()}")
+
+    # ── S4-U1b: the sliced observation functions driven through the real poll ──
+
+    def at(self, minute):
+        return "2026-09-24T01:%02d:00.000Z" % minute
+
+    def fail_next(self):
+        self.page.evaluate("()=>{readStarted=0;window.readError={status:503}}")
+        self.page.evaluate("runPoll()")
+        self.page.wait_for_function("()=>readStarted>0")
+        self.page.wait_for_timeout(0)
+        self.page.evaluate("()=>{window.readError=null;readStarted=0}")
+
+    def text(self, selector):
+        return self.page.locator(selector).text_content()
+
+    def test_s4u1b_session_changes_are_labelled_only_between_two_known_observations(self):
+        self.poll(reply(self.changed(count=5, series=2), at=self.at(1)))
+        self.assertTrue(self.text("#receipt-observation").startswith("KIN 보유 5건("))
+        self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
+        self.assertEqual("Institution Assigned", self.text("#receipt-assignment"))
+        self.assertEqual("No Gateway Report", self.text("#receipt-gateway"))
+        self.poll(reply(self.changed(count=7, series=3), at=self.at(2)))
+        self.assertIn("이 세션에서 관측한 변화: 증가(", self.text("#receipt-observation"))
+        self.poll(reply(self.changed(count=7, series=3), at=self.at(3)))
+        self.assertIn("이 세션에서 관측한 변화 없음(", self.text("#receipt-observation"))
+        # known -> unknown resets: no change label and no zero printed for the unknown count.
+        self.poll(reply(self.changed(count=None, series=3), at=self.at(4)))
+        self.assertTrue(self.text("#receipt-observation").startswith("KIN 보유 개수 모름("))
+        self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
+        self.poll(reply(self.changed(count=0, series=3), at=self.at(5)))
+        self.assertTrue(self.text("#receipt-observation").startswith("KIN 보유 0건("))
+        self.assertNotIn("이 세션에서 관측한 변화", self.text("#receipt-observation"))
+        self.assertIn("Observed ", self.text("#observation-status"))
+        self.assertNotIn("Needs Check", self.text("#observation-status"))
+
+    def test_s4u1b_failed_poll_keeps_list_count_and_time_and_never_produces_not_observed(self):
+        self.poll(reply(self.changed(count=5, series=2), at=self.at(1), not_observed=[]))
+        before = self.page.evaluate("snapshot()")
+        observed = self.text("#receipt-observation")
+        self.fail_next()
+        after = self.page.evaluate("snapshot()")
+        self.assertEqual(before["studies"], after["studies"])
+        self.assertEqual(before["row"], after["row"])
+        status = self.text("#observation-status")
+        self.assertTrue(status.startswith("관측 불가 · 마지막 관측 "), status)
+        self.assertTrue(status.endswith(" 유지"), status)
+        self.assertEqual("관측 불가 · 마지막 " + observed, self.text("#receipt-observation"))
+        self.assertTrue(self.page.locator("#not-observed").is_hidden())
+        self.assertEqual([], self.page.evaluate("studyObservationModel.notObserved"))
+        self.assertEqual(self.at(1), self.page.evaluate("studyObservationModel.observedAt"))
+
+    def test_s4u1b_cold_start_failure_shows_only_unavailable_and_invents_no_snapshot(self):
+        self.fail_next()
+        self.assertEqual("관측 불가", self.text("#observation-status"))
+        self.assertEqual("관측 불가", self.text("#receipt-observation"))
+        self.assertIsNone(self.page.evaluate("studyObservationModel.observedAt"))
+        self.assertIsNone(self.page.evaluate("studyObservationModel.notObserved"))
+        self.assertEqual(0, self.page.evaluate("studyObservationModel.rows.size"))
+        self.assertTrue(self.page.locator("#not-observed").is_hidden())
+
+    def test_s4u1b_leaving_the_list_is_not_a_decrease_but_a_consecutive_drop_needs_check(self):
+        other = self.changed(count=10, series=4)
+        other.update(uid="1.2.4", id="PID-2", sourcePatientKey="hospital|patient-2")
+        self.poll(reply(self.changed(count=5, series=2), other, at=self.at(1)))
+        self.poll(reply(self.changed(count=5, series=2), at=self.at(2)))
+        back = json.loads(json.dumps(other)); back["count"] = 4
+        self.poll(reply(self.changed(count=5, series=2), back, at=self.at(3)))
+        self.assertIsNone(self.page.evaluate("KinStudyArrivals.studyObservation(studyObservationModel,'1.2.4').change"))
+        self.assertNotIn("Needs Check", self.text("#observation-status"))
+        self.poll(reply(self.changed(count=4, series=2), back, at=self.at(4)))
+        self.assertIn("이 세션에서 관측한 변화: 감소(", self.text("#receipt-observation"))
+        self.assertIn("Needs Check", self.text("#receipt-observation"))
+        self.assertIn("Needs Check 1", self.text("#observation-status"))
+
+    def test_s4u1b_not_observed_is_a_separate_surface_and_survives_a_failure_as_the_last_answer(self):
+        absent = [{"uid": "1.2.9", "origin": "gateway", "createdAt": "2026-09-24T00:59:00.000Z"}]
+        self.poll(reply(self.changed(count=5, series=2), at=self.at(1), not_observed=absent))
+        self.assertTrue(self.page.locator("#not-observed").is_visible())
+        self.assertEqual("Not Observed (1)", self.text("#not-observed-summary"))
+        self.assertIn("1.2.9 · gateway · ", self.text("#not-observed-list"))
+        self.assertEqual(["1.2.3"], self.page.evaluate("studies.map(s=>s.uid)"))
+        self.assertEqual(0, self.page.locator('#rows tr[data-uid="1.2.9"]').count())
+        self.assertIn("Not Observed 1", self.text("#observation-status"))
+        self.fail_next()
+        self.assertEqual("Not Observed (1) · 마지막 관측 기준", self.text("#not-observed-summary"))
+        self.assertEqual(absent, self.page.evaluate("studyObservationModel.notObserved"))
 
 
 if __name__ == "__main__":

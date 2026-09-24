@@ -42,12 +42,14 @@
             previous = row.uid;
           }
           draft.rows.push(...rows); draft.total = page.total; draft.next = page.next;
+          // S4-U1b: only the page that completes the list carries the absence answer and its time.
+          if (page.next === null) draft.observation = { observedAt: data.observedAt, notObserved: data.notObserved };
           state('검사 목록을 나누어 불러오는 중…');
         }
         const me = await get('/me');
         if (me?.kind !== 'member' || !same([me.institution,me.sub],owner)) throw Object.assign(new Error('계정이 바뀌어 목록 응답을 적용하지 않았습니다.'),{ownerChanged:true});
         if (!active()) throw Object.assign(new Error('판독 작업이 바뀌어 목록 응답을 적용하지 않았습니다.'),{stale:true});
-        const result = { studies:draft.rows, owner:[...owner] }; pending = null; notice = ''; return result;
+        const result = { studies:draft.rows, owner:[...owner], observation:draft.observation ?? null }; pending = null; notice = ''; return result;
       } catch (error) {
         if (mine !== sequence) { error.stale = true; throw error; }
         if (error.status === 401 || error.status === 403) error.ownerChanged = true;

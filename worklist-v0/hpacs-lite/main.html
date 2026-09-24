@@ -727,8 +727,10 @@
       </nav>
       <div id="worklist-selection" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 10px;font-size:12px"></div>
       <div id="study-fetch" style="padding:4px 10px;font-size:12px" hidden><span id="study-fetch-status" role="status"></span> <button id="study-fetch-resume" type="button">Resume</button> <button id="study-fetch-cancel" type="button">Stop Loading</button></div>
+      <details id="not-observed" style="padding:2px 10px;font-size:12px" hidden><summary id="not-observed-summary"></summary><div id="not-observed-list"></div></details>
       <div class="statusbar">
         <span id="countlist"></span>
+        <span id="observation-status" role="status" hidden></span>
         <span id="filterlist">Filter : -</span>
       </div>
     </div>
@@ -758,6 +760,10 @@
             <div id="copy-patient-status" role="status" aria-live="polite" style="font-size:11px"></div>
           </div>
           <div class="clinical" id="clinical" tabindex="-1" role="region" aria-label="열람 검사 정보">No clinical information provided.</div>
+          <!-- S4-U1b: 폴링마다 관측 시각이 바뀌므로 #clinical 밖에 둔다. 열람 검사 정보는 폴링으로 바뀌지 않는다. -->
+          <div id="study-receipt" role="group" aria-label="기관 배정·KIN 관측·Gateway 보고" style="flex:none;padding:2px 10px 6px;font-size:11px;overflow-wrap:anywhere" hidden>
+            <div>Institution: <span id="receipt-assignment"></span></div><div>Observed: <span id="receipt-observation"></span></div><div>Gateway: <span id="receipt-gateway"></span></div>
+          </div>
         </section>
         <section class="s-template">
           <h3>Reading Template</h3>
@@ -1983,6 +1989,8 @@
 
     // ── 데이터 ──
     let studies = [];
+    // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
+    let studyObservationModel = window.KinStudyArrivals?.observationStart?.() ?? null;
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
@@ -2172,8 +2180,10 @@
        * 고장 경로 하나가 그 커튼마저 걷어버리는 자리였다.
        */
       if (offline) {
-        studies = [];
-        $("#err").textContent = "서버 연결이 끊겨 검사 목록을 불러올 수 없습니다 — 우측 상단에서 재시도할 수 있습니다";
+        // S4-U1b: 관측 실패는 아무것도 비우지 않는다. 마지막 목록과 관측 시각을 두고 `관측 불가`만 더한다.
+        // 차가운 시작에는 둘 목록이 없으므로 빈 스냅숏을 지어내지도 않는다.
+        markObservationUnavailable();
+        $("#err").textContent = "서버 연결이 끊겨 검사 목록을 불러올 수 없습니다 — 보이는 목록은 마지막 관측값입니다. 우측 상단에서 재시도할 수 있습니다";
         render(); refreshRight();
         return;
       }
@@ -2195,6 +2205,7 @@
         // 편집 중인 검사의 판 번호·초안을 되돌려 놓던 블록은 없앴다 — `fromApi`가 그 규칙을
         // 모든 검사에 대해 먼저 적용하므로, 여기서 한 검사만 다시 손보면 규칙이 둘로 갈린다.
         studies = r.studies.map(fromApi);
+        applyObservation(r);
         studyPriority.observed(r.studies.map(s=>s.uid));
         worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
         $('#err').textContent = '';
@@ -2212,6 +2223,8 @@
         // 서버 모드에서 목록이 실패하면 **가짜 데이터로 내려가지 않는다.**
         // Incomplete page batches never replace the last complete list or report input.
         if (serverMode) {
+          // A superseded or changed-list answer is not a failed observation; the last one still stands.
+          if (!e.stale && e.code !== 'STUDY_LIST_CHANGED') markObservationUnavailable();
           $("#err").textContent = "검사 목록을 불러오지 못했습니다. 현재 목록과 입력은 유지했습니다 — " + e.message;
           toast("검사 목록 실패: " + e.message, "err");
           render();
@@ -2736,6 +2749,54 @@
           <tr><td>Ward</td><td>${esc(s.ward) || "-"}</td></tr>
           <tr><td>Study UID</td><td>${esc(s.uid)}</td></tr>
         </table>` : "No clinical information provided.";
+      renderObservation();
+    }
+
+    /**
+     * S4-U1b 수신 표시. 세 축을 한 단어로 접지 않는다 — 기관 배정(A), KIN이 관측한 보유(B),
+     * Gateway가 보고한 전송(C). 관측은 이 탭의 메모리에만 있고 서버에 이력을 남기지 않는다.
+     * 관측 실패는 아무것도 비우지 않고 `관측 불가`만 더한다. 영수증 저장은 S4-U3 몫이라
+     * 지금은 모든 검사가 `No Gateway Report`(정상)다. 상태 `studyObservationModel`은 `studies` 옆에 둔다.
+     */
+    function applyObservation(result) {
+      if (!studyObservationModel) return;
+      const next = KinStudyArrivals.observationSucceeded(studyObservationModel, result);
+      // A response whose observation cannot be read is not an observation; the last one stays.
+      studyObservationModel = next.ok ? next.model : KinStudyArrivals.observationFailed(studyObservationModel);
+      renderObservation();
+    }
+    function markObservationUnavailable() {
+      if (!studyObservationModel) return;
+      studyObservationModel = KinStudyArrivals.observationFailed(studyObservationModel);
+      renderObservation();
+    }
+    function renderObservation() {
+      if (!studyObservationModel) return;
+      const summary = KinStudyArrivals.observationSummary(studyObservationModel), status = $("#observation-status");
+      if (status) { status.hidden = !summary.text; status.textContent = summary.text; status.title = summary.title; }
+      const absent = summary.notObserved ?? [], box = $("#not-observed");
+      if (box) {
+        box.hidden = !absent.length;
+        $("#not-observed-summary").textContent = absent.length
+          ? `Not Observed (${absent.length})` + (summary.key === "observation_unavailable" ? " · 마지막 관측 기준" : "") : "";
+        $("#not-observed-list").replaceChildren(...absent.map(row => {
+          const item = document.createElement("div");
+          item.textContent = `${row.uid} · ${row.origin} · ${KinStudyArrivals.formatTime(row.createdAt)}`;
+          return item;
+        }));
+      }
+      const s = viewed(), receipt = $("#study-receipt");
+      if (!receipt) return;
+      receipt.hidden = !s;
+      if (!s) return;
+      // Every worklist row passed the visible() boundary on the server, so axis A is `assigned` here;
+      // institution-less studies only appear in the admin Unmatched Studies list.
+      const labels = KinStudyArrivals.receiptLabels({ assignment: "assigned",
+        observation: KinStudyArrivals.studyObservation(studyObservationModel, s.uid), gateway: null });
+      $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
+      $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");
+      $("#receipt-observation").title = labels.observation.title;
+      $("#receipt-gateway").textContent = labels.gateway.text; $("#receipt-gateway").title = labels.gateway.title;
     }
 
     function relatedDateLabel(target) {
@@ -5181,6 +5242,7 @@
           if (generation !== pollGeneration || commitInFlight || epoch !== commitEpoch) return;
           pollFails = 0;
           worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
+          applyObservation(r);
           const arrivals = window.KinStudyArrivals?.diff(studies, r.studies);
           const arrivalNotice = arrivals?.ok && arrivals.changes.length
             ? `기존 검사 ${arrivals.changes.length}건에 영상 또는 시리즈가 추가됐습니다. 현재 영상 화면은 자동 교체하지 않습니다.` : '';
@@ -5243,6 +5305,8 @@
           if (generation !== pollGeneration) return;
           if (e.ownerChanged) { studyPageClient.clear(); await KinAuth.logout(); return; }
           if (e.stale || e.code === 'STUDY_LIST_CHANGED') return;
+          // The first failure already says 관측 불가 beside the kept list; going offline waits for two.
+          markObservationUnavailable();
           /**
            * **일하는 도중에 서버가 죽는 경우.**
            *
