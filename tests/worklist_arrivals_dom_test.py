@@ -47,6 +47,10 @@ MERGE = extract_function(MAIN, "mergePolledState")
 # S4-U1b: the poll now reports each observation to these; they are sliced, not re-described, so the
 # cases below judge the shipped labels and the shipped failure rule.
 OBSERVE = "\n".join(extract_function(MAIN, name) for name in ("applyObservation", "markObservationUnavailable", "renderObservation"))
+# S4-U2: applyObservation/markObservationUnavailable now hand the same observation to the order
+# reconciliation display. Sliced too; its model stays null here unless a case starts it
+# (tests/order_reconciliation_dom_test.py does), so the cases below run the same code path as before.
+ORDERS = "\n".join(extract_function(MAIN, name) for name in ("applyOrderReconciliation", "renderOrderReconciliation"))
 CURRENT = {
     "uid": "1.2.3", "count": 5, "series": 2, "acc": "ACC-1", "id": "PID-1", "name": "Patient",
     "sourcePatientKey": "hospital|patient", "birth": "19800101", "date": "20260912", "sex": "O",
@@ -57,6 +61,7 @@ CURRENT = {
 HARNESS = """<!doctype html><html><body>
 <span id=\"observation-status\" hidden></span><details id=\"not-observed\" hidden><summary id=\"not-observed-summary\"></summary><div id=\"not-observed-list\"></div></details>
 <div id=\"study-receipt\" hidden><span id=\"receipt-assignment\"></span><span id=\"receipt-observation\"></span><span id=\"receipt-gateway\"></span></div>
+<details id=\"order-reconciliation\" hidden><summary id=\"order-reconciliation-summary\"></summary><div id=\"order-reconciliation-list\"></div></details>
 <table><tbody id=\"rows\"></tbody></table><textarea id=\"findings\">LOCAL FINDINGS</textarea>
 <textarea id=\"conclusion\">LOCAL CONCLUSION</textarea><textarea id=\"recommendation\">LOCAL RECOMMENDATION</textarea>
 <script>
@@ -78,7 +83,9 @@ MERGESTATE
 function fromApi(s){appState[s.uid]=mergePolledState(s.uid,s.state);return {...s}}
 // Starts null: study-arrivals.js is added after this script, and setUp starts the session model.
 let studyObservationModel=null;function viewed(){return studies.find(s=>s.uid===selectedUid)}
+let orderReconciliationModel=null;
 OBSERVESTATE
+ORDERSTATE
 function syncStudy(uid){const study=studies.find(item=>item.uid===uid),state=appState[uid];if(!study||!state)return;for(const key of ['rs','ss','em','holder','version'])if(state[key]!==undefined)study[key]=state[key]}
 function render(){renders++;rows.innerHTML=studies.map(s=>`<tr data-uid="${s.uid}"><td data-count>${s.count}</td><td data-series>${s.series}</td></tr>`).join('')}
 function loadReport(){loadReports++}function updateReportButtons(){buttonUpdates++}function toast(message,type){toasts.push({message,type})}
@@ -89,7 +96,7 @@ window.snapshot=()=>({studies:structuredClone(studies),state:structuredClone(app
 render();startPolling();
 </script></body></html>""".replace("INITIAL", json.dumps([CURRENT], ensure_ascii=False)) \
    .replace("PRESERVELOCAL", PRESERVE).replace("MERGESTATE", MERGE).replace("START", START_POLLING) \
-   .replace("OBSERVESTATE", OBSERVE)
+   .replace("OBSERVESTATE", OBSERVE).replace("ORDERSTATE", ORDERS)
 
 OWNER = ["hospital", "reader-sub"]
 

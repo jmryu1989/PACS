@@ -170,7 +170,8 @@ class ReportStructureMigration(unittest.TestCase):
         self.assertRegex(fixture, r"structured=structured if number == 1 else None")
         self.assertIn("SYNTHETIC-ITEM choice = alpha", fixture)
         transfer_test = (ROOT / "tests" / "ops_product_transfer_test.py").read_text(encoding="utf-8")
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 26)", transfer_test)
+        # S4-U2's order-accession migration moved the pinned count from 26 to 27 in the same commit.
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 27)", transfer_test)
 
     def test_the_synthetic_catalog_never_reaches_product_code(self) -> None:
         # P6/P7. The seam is one instance property a test overwrites on its own instance; anything

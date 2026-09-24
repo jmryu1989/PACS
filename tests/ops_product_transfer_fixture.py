@@ -47,7 +47,8 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260912100000_hanging_protocol_preferences/migration.sql',
               'api/prisma/migrations/20260917120000_findings/migration.sql',
               'api/prisma/migrations/20260920120000_report_citations/migration.sql',
-              'api/prisma/migrations/20260921120000_report_structure/migration.sql']
+              'api/prisma/migrations/20260921120000_report_structure/migration.sql',
+              'api/prisma/migrations/20260924120000_order_accession/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
@@ -138,6 +139,11 @@ def expected_rows(uid):
         findings='SYNTHETIC private '+str(number), conclusion='', recommendation='', baseVersion=2,
         citations=citation if number == 1 else None,
         structured=structured if number == 1 else None, updatedAt=STAMP) for number in (1, 2)]
+    # S4-U2: the Order table had no synthetic row, so a dump that lost the new accession value would
+    # pass on an empty table. One unlinked synthetic order carries a real (synthetic) accession.
+    rows['Order'] = [dict(oid='SYNTHETIC-order-1', institutionId='SYNTHETIC-hospital', patientId='SYNTHETIC-patient',
+        name='SYNTHETIC order', sex='O', birth='', sched='2026-09-06 09:00', modality='CT', descr='SYNTHETIC order',
+        ward='', reqDoc='', matched='U', studyUid=None, accession='SYNTHETIC-ACC-1')]
     rows['UserFilter'] = [dict(id=1, owner='SYNTHETIC-reader', name='SYNTHETIC saved search',
         mode='Radiology', isDefault=True, quick='SYNTHETIC', days=-1, cols='{}', sortKey='date',
         sortDir=-1, folder='SYNTHETIC/CT', description='SYNTHETIC follow-up', ordinal=7, createdAt=STAMP)]
@@ -268,7 +274,7 @@ def create_product(name, db, uid):
     for raw in migration_sources():
         execute(name, db, raw.decode())
     data = expected_rows(uid)
-    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'UserFilter',
+    for table in ('Institution', 'StudyState', 'Report', 'ReportVersion', 'ReportDraft', 'Order', 'UserFilter',
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision'):

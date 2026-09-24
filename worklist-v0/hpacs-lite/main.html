@@ -920,6 +920,8 @@
       <div class="panel order-p" style="display:none">
         <div class="reltabs">
           <div class="on">Order List (RIS)</div>
+          <!-- S4-U2: 권위 있는 오더 출처가 없는 동안 이 목록과 대사 결과는 엔지니어링 전용이다. -->
+          <span id="order-source-status" class="rel-title" style="color:#ffb454" title="권위 있는 병원 오더 출처(HL7/FHIR)가 연결되지 않았습니다. 이 오더 목록과 대사 결과는 엔지니어링 확인 전용이며 예정 환자 목록으로 쓰면 안 됩니다.">Engineering Only</span>
           <div class="spacer"></div>
           <label><input type="checkbox" id="o-sync"> ID sync with worklist</label>
           <button id="o-refresh">Refresh</button>
@@ -938,6 +940,7 @@
             <tbody id="orderrows"></tbody>
           </table>
         </div>
+        <details id="order-reconciliation" style="flex:none;padding:2px 10px;font-size:12px;overflow-wrap:anywhere" hidden><summary id="order-reconciliation-summary"></summary><div id="order-reconciliation-list"></div></details>
         <div class="statusbar"><span id="orderhint">Study List에서 검사 1건 + Order List에서 오더 1건 선택 → 우클릭 Match</span></div>
       </div>
       </div><!-- /workrow -->
@@ -1181,6 +1184,7 @@
   <style>#worklist-selection[hidden]{display:none!important}#rows tr.multi-selected td:first-child{box-shadow:inset 4px 0 #68baff}#rows tr.multi-selected{outline:1px dashed #68baff;outline-offset:-1px}#multi-selection-dialog td{padding:8px;white-space:normal;overflow-wrap:anywhere}</style>
   <script src="worklist-refresh.js"></script>
   <script src="study-arrivals.js"></script>
+  <script src="order-reconciliation.js"></script>
   <script src="viewer-windows.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="viewer-identity.js"></script>
@@ -1991,6 +1995,8 @@
     let studies = [];
     // S4-U1b session-local KIN observation (renderObservation). Memory only; a page load starts over.
     let studyObservationModel = window.KinStudyArrivals?.observationStart?.() ?? null;
+    // S4-U2 order reconciliation answer (renderOrderReconciliation). Memory only, engineering only.
+    let orderReconciliationModel = window.KinOrderReconciliation?.start?.() ?? null;
     let favoriteList = null, studyTagList = null, studyTagScope = 'personal';
     let demoMode = false;
     let quickDays = -1, sortKey = null, sortDir = 0, selectedUid = null, selectedOid = null;
@@ -2763,11 +2769,14 @@
       const next = KinStudyArrivals.observationSucceeded(studyObservationModel, result);
       // A response whose observation cannot be read is not an observation; the last one stays.
       studyObservationModel = next.ok ? next.model : KinStudyArrivals.observationFailed(studyObservationModel);
+      // S4-U2: the order answer rides on this same observation and fails with it.
+      applyOrderReconciliation(next.ok ? result : null);
       renderObservation();
     }
     function markObservationUnavailable() {
       if (!studyObservationModel) return;
       studyObservationModel = KinStudyArrivals.observationFailed(studyObservationModel);
+      applyOrderReconciliation(null);
       renderObservation();
     }
     function renderObservation() {
@@ -2797,6 +2806,31 @@
       $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");
       $("#receipt-observation").title = labels.observation.title;
       $("#receipt-gateway").textContent = labels.gateway.text; $("#receipt-gateway").title = labels.gateway.title;
+    }
+
+    /**
+     * S4-U2 오더 측 대사 표시 — **엔지니어링 전용**. 입력은 서버가 목록을 완성한 관측과 함께 준 답뿐이다.
+     * 브라우저의 `orders`(오프라인이면 localStorage 시드다)는 이 면에 들어오지 않는다. 관측 실패는
+     * 마지막 답을 지우지 않고 `관측 불가`만 더한다. 환자 칸·예정 시각은 그리지 않는다.
+     */
+    function applyOrderReconciliation(result) {
+      if (!orderReconciliationModel) return;
+      orderReconciliationModel = result ? KinOrderReconciliation.succeeded(orderReconciliationModel, result)
+        : KinOrderReconciliation.failed(orderReconciliationModel);
+      renderOrderReconciliation();
+    }
+    function renderOrderReconciliation() {
+      const box = $("#order-reconciliation");
+      if (!box || !orderReconciliationModel) return;
+      const summary = KinOrderReconciliation.summary(orderReconciliationModel);
+      box.hidden = summary.hidden;
+      $("#order-reconciliation-summary").textContent = summary.text;
+      $("#order-reconciliation-summary").title = summary.title;
+      $("#order-reconciliation-list").replaceChildren(...summary.rows.map(row => {
+        const item = document.createElement("div");
+        item.textContent = row.text; item.title = row.title;
+        return item;
+      }));
     }
 
     function relatedDateLabel(target) {

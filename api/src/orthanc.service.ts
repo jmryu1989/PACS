@@ -197,11 +197,15 @@ export class OrthancService {
     );
   }
 
-  /** Indexed identity/institution only; patient tags and counts belong to the chosen page. */
-  async studyIdentities(accessMetadata = false): Promise<any[]> {
+  /**
+   * Indexed identity/institution only; patient tags and counts belong to the chosen page.
+   * `accession` (S4-U2 order reconciliation) adds the indexed AccessionNumber. An unreadable value is
+   * unknown for pairing, never a failure of the whole list, so it is carried as '' (not comparable).
+   */
+  async studyIdentities(accessMetadata = false, accession = false): Promise<any[]> {
     const rows = await this.get('/tools/find', { Level:'Study', Query:{},
       ResponseContent:['RequestedTags'], RequestedTags:['StudyInstanceUID','InstitutionName',
-        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : [])] });
+        ...(accessMetadata ? ['PatientID','StudyDate','ModalitiesInStudy'] : []), ...(accession ? ['AccessionNumber'] : [])] });
     if (!Array.isArray(rows)) throw new ServiceUnavailableException('원본 검사 목록 형식을 확인할 수 없습니다');
     const seen = new Set<string>();
     return rows.map(row => {
@@ -219,6 +223,10 @@ export class OrthancService {
           if(tags[name]!=null&&typeof tags[name]!=='string')throw new ServiceUnavailableException('원본 접근 조건 태그를 확인할 수 없습니다');
         Object.assign(source,{'00100020':{Value:[tags.PatientID??'']},'00080020':{Value:[tags.StudyDate??'']},
           '00080061':{Value:(tags.ModalitiesInStudy??'').split('\\').map((v:string)=>v.trim().toUpperCase()).filter(Boolean)}});
+      }
+      if (accession) {
+        const value = row.RequestedTags.AccessionNumber;
+        Object.assign(source, { '00080050': { Value:[typeof value === 'string' ? value : ''] } });
       }
       return source;
     });
