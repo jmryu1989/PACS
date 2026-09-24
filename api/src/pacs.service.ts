@@ -2204,6 +2204,18 @@ export class PacsService implements OnModuleInit {
       if (prev?.rs === 'A')
         throw new BadRequestException(
           '승인된 판독문은 예비 판독으로 되돌릴 수 없습니다. 먼저 판독 취소(Reset)를 하세요');
+      /**
+       * 예비 판독(P) 중에는 다시 지정하지 못한다.
+       *
+       * 열어두면 사유 없이 preDoc이 호출자로 덮어써진다. 지정된 상급자가 작성자를 거꾸로
+       * 지정하면 작성자가 preReviewer만 보는 아래 승인 관문을 지나 자기 예비 판독을 스스로
+       * 승인하고, 제3자에게 넘기면 원래의 두 사람이 판독문에서 잠긴다. P에서 나가는 길은
+       * 지정된 상급자의 승인과 사유가 남는 취소 둘뿐이다 — 지정을 바꾸려면 취소 뒤 다시 지정한다.
+       * 화면도 P에서 Prelim을 막지만 화면 잠금이 서버 검사를 대신하지는 않는다.
+       */
+      if (prev?.rs === 'P')
+        throw new BadRequestException(
+          '예비 판독(RS: P) 중에는 지정을 바꿀 수 없습니다 — 사유를 남기는 판독 취소(Reset) 뒤 다시 지정하세요');
       reviewer = String(body.reviewer ?? '').trim();
       if (!reviewer) throw new BadRequestException('상급 판독의를 지정해야 합니다');
       if (reviewer === c.actor) throw new BadRequestException('자기 자신을 상급 판독의로 지정할 수 없습니다');
