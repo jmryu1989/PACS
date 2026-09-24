@@ -2946,6 +2946,9 @@ class LiveInvariantTests(unittest.TestCase):
             self.stack.active[announced_uid] = Fixture(
                 announced_uid, "", "KIN 판독센터", "kdoctor", "",
             )
+            # S4-EG2 stores instances under this UID: release them with the owned cleanup when this test
+            # ends, not at class teardown, so no later test lists a leftover kin-center study.
+            self.addCleanup(self.stack.cleanup_fixture, announced_uid)
             announced = self.stack.bearer_request(
                 "POST", "/gateway/announce", token, {"studyUid": announced_uid},
             )
@@ -2957,6 +2960,127 @@ class LiveInvariantTests(unittest.TestCase):
             )
             self.assertEqual(mismatch.status, 409, mismatch.text)
             self.assertIn("00081198", mismatch.text)
+
+            # S4-EG2: a matching instance is stored once, replayed identical, replayed with one changed
+            # non-identifying element, then joined by a late new SOP. Every expected value is declared here from
+            # the agent and Orthanc contracts, never read back from a response. STOW stores synchronously and
+            # /studies reads QIDO without a cache, so nothing below waits or polls.
+            # E3: the imports stay in this method, so importing this module needs neither pydicom nor requests.
+            # gateway/agent is not a package; the agent's own failed_sops is loaded from its file.
+            import hashlib
+            import importlib.util
+            from io import BytesIO
+            import pydicom
+            spec = importlib.util.spec_from_file_location("eg2_gateway_agent", ROOT / "gateway" / "agent" / "agent.py")
+            agent = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = agent   # @dataclass resolves its module through sys.modules while the body runs
+            try:
+                spec.loader.exec_module(agent)
+            finally:
+                sys.modules.pop(spec.name, None)
+
+            self.assertIn(announced_uid, self.stack.active)
+            expected_state = ["kin-center|gateway"]   # the Gateway credential's institution and the announce's origin
+            window_width = 0x00281051                 # Window Width: presentation only, identifies nothing
+            series_uid, sop_uid, late_uid = ("2.25." + str(uuid.uuid4().int) for _ in range(3))
+
+            def rewrite(sop: str, **changed: Any) -> bytes:
+                ds = pydicom.dcmread(BytesIO(content))
+                ds.StudyInstanceUID, ds.SeriesInstanceUID, ds.SOPInstanceUID = announced_uid, series_uid, sop
+                ds.file_meta.MediaStorageSOPInstanceUID = sop
+                for keyword, value in changed.items():
+                    setattr(ds, keyword, value)
+                out = BytesIO()
+                ds.save_as(out, write_like_original=False)
+                return out.getvalue()
+
+            def stow(dicom: bytes) -> HttpResult:
+                part, part_type = self.multipart_dicom(dicom)
+                return self.stack.bearer_request(
+                    "POST", f"/dicom-web/studies/{announced_uid}", token, part, base=self.stack.proxy,
+                    headers={"Content-Type": part_type, "Accept": "application/dicom+json"},
+                )
+
+            def agent_accepts(result: HttpResult, step: str) -> None:
+                # E1: Cloud.stow's own verdict (agent.py:532-538), requests' Response.ok and then failed_sops on the
+                # JSON. Anything else keeps an already stored SOP in retry forever: a defect to report, not a pass.
+                defect = f"EG-2 defect at {step}: HTTP {result.status} {result.text[:2000]}"
+                self.assertLess(result.status, 400, defect)
+                payload = result.body if result.text else {}
+                self.assertNotIsInstance(payload, str, defect)
+                try:
+                    failed = agent.failed_sops(payload)
+                except agent.GatewayError as error:
+                    self.fail(f"{defect} ({error})")
+                self.assertEqual(failed, set(), defect)
+
+            def stored() -> dict[str, str]:
+                # E4: exactly one Orthanc study carries the announced UID; cleanup_fixture deletes by this lookup.
+                lookup = self.stack._orthanc_request("POST", "/tools/lookup", announced_uid.encode("ascii"))
+                self.assertEqual(lookup.status, 200, lookup.text)
+                studies = [item["ID"] for item in lookup.body if item.get("Type") == "Study"]
+                self.assertEqual(len(studies), 1, lookup.text)
+                study = self.stack._orthanc_request("GET", f"/studies/{quote(studies[0])}")
+                self.assertEqual((study.body.get("MainDicomTags") or {}).get("StudyInstanceUID"), announced_uid,
+                                 study.text[:500])
+                listed = self.stack._orthanc_request("GET", f"/studies/{quote(studies[0])}/instances")
+                self.assertEqual(listed.status, 200, listed.text[:500])
+                sops = {row["MainDicomTags"]["SOPInstanceUID"]: row["ID"] for row in listed.body}
+                self.assertEqual(len(sops), len(listed.body), listed.text[:2000])
+                return sops
+
+            def file_sha256(orthanc_id: str) -> str:
+                return hashlib.sha256(self.stack.orthanc_bytes(f"/instances/{quote(orthanc_id)}/file")).hexdigest()
+
+            def owner_and_origin() -> list[str]:
+                return psql(f"SELECT \"institutionId\" || '|' || origin FROM \"StudyState\" WHERE uid='{announced_uid}';")
+
+            self.assertEqual(owner_and_origin(), expected_state)
+            first_dicom = rewrite(sop_uid)
+            changed_dicom = rewrite(sop_uid, WindowWidth="4321")
+            first_ds, changed_ds = pydicom.dcmread(BytesIO(first_dicom)), pydicom.dcmread(BytesIO(changed_dicom))
+            self.assertEqual((first_ds.StudyInstanceUID, first_ds.SeriesInstanceUID, first_ds.SOPInstanceUID,
+                              first_ds.file_meta.MediaStorageSOPInstanceUID),
+                             (announced_uid, series_uid, sop_uid, sop_uid))
+            # The bytes name the hospital while the credential owns kin-center: the owner must not follow the tag.
+            self.assertEqual(str(first_ds.InstitutionName), source.institution)
+            # E2's payload really differs, in the one non-identifying element and nowhere else.
+            self.assertNotEqual(hashlib.sha256(changed_dicom).digest(), hashlib.sha256(first_dicom).digest())
+            self.assertNotEqual(changed_ds.get(window_width), first_ds.get(window_width))
+            for ds in (first_ds, changed_ds):
+                ds.pop(window_width, None)
+            # Element by element: FileDataset equality also compares reader attributes such as the source buffer.
+            self.assertEqual(sorted(changed_ds.keys()), sorted(first_ds.keys()))
+            for tag in first_ds.keys():
+                self.assertEqual(changed_ds[tag], first_ds[tag], tag)
+            self.assertEqual(changed_ds.file_meta, first_ds.file_meta)
+
+            agent_accepts(stow(first_dicom), "first STOW")
+            original = stored()
+            self.assertEqual(set(original), {sop_uid})
+            original_sha256 = file_sha256(original[sop_uid])
+
+            # E1: the identical replay changes nothing.
+            agent_accepts(stow(first_dicom), "identical replay")
+            self.assertEqual(stored(), original)
+            self.assertEqual(file_sha256(original[sop_uid]), original_sha256)
+
+            # E2: config/orthanc.json sets no OverwriteInstances, so the first stored copy stays.
+            agent_accepts(stow(changed_dicom), "changed-content replay")
+            self.assertEqual(stored(), original)
+            self.assertEqual(file_sha256(original[sop_uid]), original_sha256)
+
+            # A late new SOP joins the study; the owner and origin stay, and so does the first copy.
+            agent_accepts(stow(rewrite(late_uid)), "late SOP")
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            self.assertEqual(listed.status, 200, listed.text[:500])
+            self.assertIn(announced_uid, [row["uid"] for row in listed.body["studies"]])
+            self.assertNotIn(announced_uid, [row["uid"] for row in listed.body["notObserved"]])
+            self.assertEqual(owner_and_origin(), expected_state)
+            arrived = stored()   # E4: still exactly one Orthanc study, checked last before the owned cleanup
+            self.assertEqual(set(arrived), {sop_uid, late_uid})
+            self.assertEqual(arrived[sop_uid], original[sop_uid])
+            self.assertEqual(file_sha256(original[sop_uid]), original_sha256)
 
     def test_s4u3_gateway_receipt_route_rules(self) -> None:
         """S4-U3 (stage4 contract §4 U3, P8/P9, H-1 interim) with real Gateway credentials.
