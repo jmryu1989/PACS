@@ -2137,6 +2137,7 @@
         institutionName: s.institutionName,
         reqHosp: s.tele ? `${s.institutionName} ▸원격` : s.institutionName,
         tele: s.tele,
+        gatewayReceipt: s.gatewayReceipt ?? null,
       });
     }
 
@@ -2761,14 +2762,20 @@
     /**
      * S4-U1b 수신 표시. 세 축을 한 단어로 접지 않는다 — 기관 배정(A), KIN이 관측한 보유(B),
      * Gateway가 보고한 전송(C). 관측은 이 탭의 메모리에만 있고 서버에 이력을 남기지 않는다.
-     * 관측 실패는 아무것도 비우지 않고 `관측 불가`만 더한다. 영수증 저장은 S4-U3 몫이라
-     * 지금은 모든 검사가 `No Gateway Report`(정상)다. 상태 `studyObservationModel`은 `studies` 옆에 둔다.
+     * 관측 실패는 아무것도 비우지 않고 `관측 불가`만 더한다. 상태 `studyObservationModel`은 `studies` 옆에 둔다.
+     * S4-U3: 축 C는 서버가 목록 행에 실어 준 마지막 Gateway 영수증이다. 영수증이 없으면 `No Gateway Report`(정상)다.
      */
     function applyObservation(result) {
       if (!studyObservationModel) return;
       const next = KinStudyArrivals.observationSucceeded(studyObservationModel, result);
       // A response whose observation cannot be read is not an observation; the last one stays.
       studyObservationModel = next.ok ? next.model : KinStudyArrivals.observationFailed(studyObservationModel);
+      // The poll renders before it updates rows in place, so the receipt rides on this same readable answer;
+      // an unreadable one keeps the last receipt, like everything else here.
+      if (next.ok) {
+        const receipts = new Map(result.studies.map(row => [row.uid, row.gatewayReceipt ?? null]));
+        for (const study of studies) if (receipts.has(study.uid)) study.gatewayReceipt = receipts.get(study.uid);
+      }
       // S4-U2: the order answer rides on this same observation and fails with it.
       applyOrderReconciliation(next.ok ? result : null);
       renderObservation();
@@ -2801,7 +2808,7 @@
       // Every worklist row passed the visible() boundary on the server, so axis A is `assigned` here;
       // institution-less studies only appear in the admin Unmatched Studies list.
       const labels = KinStudyArrivals.receiptLabels({ assignment: "assigned",
-        observation: KinStudyArrivals.studyObservation(studyObservationModel, s.uid), gateway: null });
+        observation: KinStudyArrivals.studyObservation(studyObservationModel, s.uid), gateway: s.gatewayReceipt ?? null });
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
       $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");
       $("#receipt-observation").title = labels.observation.title;

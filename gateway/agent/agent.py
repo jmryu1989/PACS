@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -22,6 +23,8 @@ import requests
 
 
 MANAGED_PHASES = ("pending", "announcing", "sending", "retry", "failed", "complete")
+# A receipt carries an errorCode exactly in these phases and null in every other one.
+ERROR_PHASES = ("retry", "failed")
 
 
 class GatewayError(RuntimeError):
@@ -30,6 +33,71 @@ class GatewayError(RuntimeError):
 
 class PermanentGatewayError(GatewayError):
     """A study cannot succeed by retrying the same bytes and needs operator action."""
+
+
+# S4-U3: the receipt's errorCode. The free reason stays in the local queue and log; it never goes to
+# KIN, because no string blacklist can prove a message is free of patient data. Keys are the message
+# templates of every GatewayError constructed in this file ({} marks an f-string field, which never
+# holds a space). test_agent.py enumerates the constructors by AST and fails on a template missing here.
+GATEWAY_ERROR_CODES = {
+    "missing environment: {}": "configuration",
+    "BYTE_BUDGET_MIB must be > 0 and <= 24": "configuration",
+    "local Orthanc {}": "local_orthanc_unreachable",
+    "local Orthanc HTTP {}": "local_orthanc_http",
+    "local study lookup count={}": "local_study_lookup",
+    "local instance metadata incomplete": "local_instance_metadata",
+    "duplicate local SOPInstanceUID": "local_duplicate_sop",
+    "StableStudy missing Orthanc ID": "local_change_invalid",
+    "StableStudy missing StudyInstanceUID": "local_change_invalid",
+    "token request {}": "token_unreachable",
+    "token request HTTP {}": "token_http",
+    "token response invalid": "token_invalid",
+    "cloud request {}": "cloud_unreachable",
+    "cloud authentication failed": "cloud_auth",
+    "announce HTTP {}": "announce_http",
+    "STOW HTTP {}": "stow_http",
+    "STOW response invalid": "stow_response_invalid",
+    "STOW response shape invalid": "stow_response_invalid",
+    "STOW failure sequence invalid": "stow_response_invalid",
+    "STOW failure item missing SOPInstanceUID": "stow_response_invalid",
+    "STOW response named an unknown failed SOP": "stow_response_invalid",
+    "STOW failed SOP count={}": "stow_sop_failed",
+    "successful SOP absent locally count={}": "local_sop_missing",
+    "single DICOM instance exceeds byte budget": "instance_exceeds_budget",
+    "multipart body exceeds byte budget": "batch_exceeds_budget",
+}
+GATEWAY_ERROR_FALLBACK = "other"
+_ERROR_PATTERNS = tuple(
+    (re.compile(r"\S+".join(re.escape(part) for part in template.split("{}"))), code)
+    for template, code in GATEWAY_ERROR_CODES.items()
+)
+
+
+def error_code(error: BaseException) -> str:
+    """Only the message template decides the code; nothing of the message itself is sent."""
+    if isinstance(error, GatewayError):
+        message = str(error)
+        for pattern, code in _ERROR_PATTERNS:
+            if pattern.fullmatch(message):
+                return code
+    return GATEWAY_ERROR_FALLBACK
+
+
+ERROR_CODE_VALUES = frozenset(GATEWAY_ERROR_CODES.values()) | {GATEWAY_ERROR_FALLBACK}
+# seq advances in the same UPDATE as every change to a field the receipt carries (phase, attempt,
+# counts, errorCode), so KIN can order one study's reports without trusting any agent clock.
+RECEIPT_COLUMNS = (
+    ("seq", "seq INTEGER NOT NULL DEFAULT 0"),
+    ("local_count", "local_count INTEGER"),
+    ("success_count", "success_count INTEGER NOT NULL DEFAULT 0"),
+    ("error_code", "error_code TEXT"),
+    ("announced", "announced INTEGER NOT NULL DEFAULT 0"),
+    ("reported_seq", "reported_seq INTEGER NOT NULL DEFAULT 0"),
+)
+# KIN's final answers for one receipt: stored/replayed/stale (2xx) or refused for this body. Anything
+# else (401/403/5xx, transport) leaves the receipt pending for a later pass.
+RECEIPT_FINAL_REFUSALS = (400, 404, 409)
+RECEIPT_REFUSAL_CODES = ("GATEWAY_EPOCH_UNRECOGNISED", "GATEWAY_RECEIPT_CONFLICT")
 
 
 def log(event: str, *, uid: str | None = None, **fields: Any) -> None:
@@ -116,6 +184,21 @@ class Queue:
           );
         """)
         self.db.commit()
+        # S4-U3 receipt state. New and pre-receipt queues take the same path, so an installed queue keeps
+        # every row and phase. The epoch is born with this queue: a recreated queue is a new epoch, and
+        # KIN refuses it for studies an earlier epoch already reported (no automatic rollover, H-1).
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(studies)")}
+        with self.db:
+            for name, ddl in RECEIPT_COLUMNS:
+                if name not in columns:
+                    try:
+                        self.db.execute(f"ALTER TABLE studies ADD COLUMN {ddl}")
+                    except sqlite3.OperationalError as error:
+                        # The HEALTHCHECK `status` process may open the same queue at the same moment.
+                        if "duplicate column name" not in str(error):
+                            raise
+            self.db.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('epoch', ?)", (str(uuid.uuid4()),))
+        self.epoch = str(self.db.execute("SELECT value FROM meta WHERE key='epoch'").fetchone()["value"])
 
     def close(self) -> None:
         self.db.close()
@@ -134,7 +217,7 @@ class Queue:
                   ON CONFLICT(uid) DO UPDATE SET
                     orthanc_id=excluded.orthanc_id,
                     phase='pending', batch_index=0, attempt=0, next_at=0,
-                    last_error=NULL, updated_at=excluded.updated_at
+                    last_error=NULL, error_code=NULL, seq=seq+1, updated_at=excluded.updated_at
                 """, (uid, orthanc_id, now))
             self.db.execute("""
               INSERT INTO meta(key, value) VALUES ('changes_since', ?)
@@ -161,14 +244,30 @@ class Queue:
     def phase(self, uid: str, phase: str, batch_index: int | None = None) -> None:
         if phase not in MANAGED_PHASES:
             raise ValueError(f"unknown phase: {phase}")
+        if phase in ERROR_PHASES:
+            raise ValueError(f"{phase} carries an error code; use retry() or fail()")
         values: list[Any] = [phase, time.time(), uid]
-        sql = "UPDATE studies SET phase=?, updated_at=?"
+        sql = "UPDATE studies SET phase=?, error_code=NULL, seq=seq+1, updated_at=?"
         if batch_index is not None:
             sql += ", batch_index=?"
             values = [phase, time.time(), batch_index, uid]
         sql += " WHERE uid=?"
         with self.db:
             self.db.execute(sql, values)
+
+    def announced(self, uid: str, local_count: int, success_count: int) -> None:
+        """KIN accepted the announce, so this study's state may now be reported."""
+        with self.db:
+            self.db.execute("""
+              UPDATE studies SET announced=1, local_count=?, success_count=?, seq=seq+1, updated_at=?
+              WHERE uid=?
+            """, (local_count, success_count, time.time(), uid))
+
+    def counts(self, uid: str, local_count: int, success_count: int) -> None:
+        with self.db:
+            self.db.execute("""
+              UPDATE studies SET local_count=?, success_count=?, seq=seq+1, updated_at=? WHERE uid=?
+            """, (local_count, success_count, time.time(), uid))
 
     def add_successes(self, uid: str, sops: set[str], batch_index: int) -> None:
         merged = self.successes(uid) | sops
@@ -177,37 +276,78 @@ class Queue:
               UPDATE studies SET successful_sops=?, batch_index=?, updated_at=? WHERE uid=?
             """, (json.dumps(sorted(merged)), batch_index, time.time(), uid))
 
-    def complete(self, uid: str) -> None:
+    def complete(self, uid: str, sops: int) -> None:
+        # complete is exactly "the local SOP set equals the sent set at this check", so M == N here.
         with self.db:
             self.db.execute("""
               UPDATE studies SET phase='complete', attempt=0, next_at=0,
-                last_error=NULL, updated_at=? WHERE uid=?
-            """, (time.time(), uid))
+                last_error=NULL, error_code=NULL, local_count=?, success_count=?, seq=seq+1, updated_at=?
+              WHERE uid=?
+            """, (sops, sops, time.time(), uid))
 
-    def pending_now(self, uid: str) -> None:
+    def pending_now(self, uid: str, local_count: int, success_count: int) -> None:
         with self.db:
             self.db.execute("""
               UPDATE studies SET phase='pending', attempt=0, next_at=0,
-                last_error=NULL, updated_at=? WHERE uid=?
-            """, (time.time(), uid))
+                last_error=NULL, error_code=NULL, local_count=?, success_count=?, seq=seq+1, updated_at=?
+              WHERE uid=?
+            """, (local_count, success_count, time.time(), uid))
 
-    def fail(self, uid: str, reason: str) -> None:
+    def fail(self, uid: str, reason: str, code: str = GATEWAY_ERROR_FALLBACK) -> None:
         with self.db:
             self.db.execute("""
-              UPDATE studies SET phase='failed', next_at=0, last_error=?, updated_at=?
+              UPDATE studies SET phase='failed', next_at=0, last_error=?, error_code=?, seq=seq+1, updated_at=?
               WHERE uid=?
-            """, (reason[:160], time.time(), uid))
+            """, (reason[:160], code if code in ERROR_CODE_VALUES else GATEWAY_ERROR_FALLBACK, time.time(), uid))
 
-    def retry(self, uid: str, reason: str, base: float, maximum: float) -> tuple[int, float]:
+    def retry(
+        self, uid: str, reason: str, base: float, maximum: float, code: str = GATEWAY_ERROR_FALLBACK,
+    ) -> tuple[int, float]:
         row = self.db.execute("SELECT attempt FROM studies WHERE uid=?", (uid,)).fetchone()
         attempt = int(row["attempt"] if row else 0) + 1
         delay = min(maximum, base * (2 ** min(attempt - 1, 16)))
         with self.db:
             self.db.execute("""
-              UPDATE studies SET phase='retry', attempt=?, next_at=?, last_error=?, updated_at=?
+              UPDATE studies SET phase='retry', attempt=?, next_at=?, last_error=?, error_code=?, seq=seq+1,
+                updated_at=?
               WHERE uid=?
-            """, (attempt, time.time() + delay, reason[:160], time.time(), uid))
+            """, (attempt, time.time() + delay, reason[:160],
+                  code if code in ERROR_CODE_VALUES else GATEWAY_ERROR_FALLBACK, time.time(), uid))
         return attempt, delay
+
+    def receipt(self, uid: str) -> dict[str, Any] | None:
+        """The closed receipt body, or None before a successful announce (KIN would answer 404).
+
+        No time, institution or free text: KIN orders by (epoch, seq) and stamps its own reception time,
+        and the institution comes only from the client credentials.
+        """
+        row = self.db.execute("""
+          SELECT phase, attempt, seq, local_count, success_count, error_code, announced FROM studies WHERE uid=?
+        """, (uid,)).fetchone()
+        if not row or not row["announced"] or row["local_count"] is None:
+            return None
+        phase = str(row["phase"])
+        return {
+            "studyUid": uid,
+            "phase": phase,
+            "attempt": int(row["attempt"]),
+            "successCount": int(row["success_count"]),
+            "localCount": int(row["local_count"]),
+            "errorCode": (row["error_code"] or GATEWAY_ERROR_FALLBACK) if phase in ERROR_PHASES else None,
+            "epoch": self.epoch,
+            "seq": int(row["seq"]),
+        }
+
+    def unreported(self, limit: int = 16) -> list[str]:
+        return [str(row["uid"]) for row in self.db.execute("""
+          SELECT uid FROM studies
+          WHERE announced=1 AND local_count IS NOT NULL AND seq > reported_seq
+          ORDER BY updated_at, uid LIMIT ?
+        """, (limit,))]
+
+    def reported(self, uid: str, seq: int) -> None:
+        with self.db:
+            self.db.execute("UPDATE studies SET reported_seq=? WHERE uid=? AND reported_seq < ?", (seq, uid, seq))
 
     def summary(self) -> dict[str, Any]:
         counts = {row["phase"]: row["n"] for row in self.db.execute(
@@ -350,6 +490,9 @@ class Cloud:
         if not response.ok:
             raise GatewayError(f"announce HTTP {response.status_code}")
 
+    def receipt(self, body: dict[str, Any]) -> requests.Response:
+        return self.request("POST", "/api/gateway/receipt", json=body)
+
     def stow(self, uid: str, body: bytes, content_type: str) -> set[str]:
         response = self.request(
             "POST", f"/dicom-web/studies/{uid}", data=body,
@@ -424,9 +567,55 @@ class Agent:
         self.orthanc = Orthanc(config)
         self.cloud = Cloud(config)
         self.stopping = False
+        self.receipt_failures = 0
+        self.receipts_resume_at = 0.0
 
     def stop(self, *_args: Any) -> None:
         self.stopping = True
+
+    def report(self, uid: str) -> bool:
+        """Send this study's current receipt. Never raises: a receipt must not change the transfer.
+
+        True when KIN gave its final answer for this body (stored, replayed, stale or refused), False
+        when the answer is still owed and a later pass should try again.
+        """
+        try:
+            body = self.queue.receipt(uid)
+            if body is None:
+                return True
+            response = self.cloud.receipt(body)
+            if response.ok or response.status_code in RECEIPT_FINAL_REFUSALS:
+                self.queue.reported(uid, body["seq"])
+                if not response.ok:
+                    try:
+                        code = response.json().get("code")
+                    except Exception:
+                        code = None
+                    log("receipt.refused", uid=uid, status=response.status_code,
+                        code=code if code in RECEIPT_REFUSAL_CODES else None)
+                return True
+            log("receipt.deferred", uid=uid, status=response.status_code)
+        except Exception as error:
+            log("receipt.deferred", uid=uid, error=error_code(error))
+        return False
+
+    def flush_receipts(self) -> None:
+        """Deliver receipts still owed (last state before a restart or an outage), backing off on failure."""
+        if time.monotonic() < self.receipts_resume_at:
+            return
+        try:
+            owed = self.queue.unreported()
+        except Exception as error:
+            log("receipt.deferred", error=error_code(error))
+            return
+        for uid in owed:
+            if not self.report(uid):
+                self.receipt_failures += 1
+                delay = min(self.config.backoff_max,
+                            self.config.backoff_base * (2 ** min(self.receipt_failures - 1, 16)))
+                self.receipts_resume_at = time.monotonic() + delay
+                return
+        self.receipt_failures = 0
 
     def poll_changes(self) -> None:
         while not self.stopping:
@@ -461,6 +650,9 @@ class Agent:
 
         local_sops = {item["sop"] for item in instances}
         successful = self.queue.successes(uid)
+        # M counts only SOPs this Gateway still holds, so 0 <= M <= N holds in every receipt.
+        self.queue.announced(uid, len(local_sops), len(successful & local_sops))
+        self.report(uid)
         pending = [item for item in instances if item["sop"] not in successful]
         batches = plan_batches(pending, self.config.byte_budget)
         for batch_index, batch in enumerate(batches, int(row["batch_index"]) + 1):
@@ -473,12 +665,14 @@ class Agent:
             if unknown:
                 raise GatewayError("STOW response named an unknown failed SOP")
             self.queue.add_successes(uid, batch_sops - failures, batch_index)
+            self.queue.counts(uid, len(local_sops), len(self.queue.successes(uid) & local_sops))
             log(
                 "batch.stored", uid=uid, batch=batch_index, sops=len(batch),
                 failed=len(failures), bytes=len(body),
             )
             if failures:
                 raise GatewayError(f"STOW failed SOP count={len(failures)}")
+            self.report(uid)
 
         # 전송 중 새 인스턴스가 도착했을 수 있다. 개수가 아니라 양쪽 SOP 집합이 같아야 끝난다.
         _orthanc_id, _detail, latest = self.orthanc.instances(uid, orthanc_id)
@@ -489,10 +683,10 @@ class Agent:
         if extra:
             raise GatewayError(f"successful SOP absent locally count={len(extra)}")
         if missing:
-            self.queue.pending_now(uid)
+            self.queue.pending_now(uid, len(latest_sops), len(successful & latest_sops))
             log("study.delta", uid=uid, pending=len(missing))
             return
-        self.queue.complete(uid)
+        self.queue.complete(uid, len(successful))
         log("study.complete", uid=uid, sops=len(successful))
 
     def run(self) -> None:
@@ -500,6 +694,8 @@ class Agent:
         signal.signal(signal.SIGINT, self.stop)
         log("agent.started", byteBudget=self.config.byte_budget)
         while not self.stopping:
+            # Final states (complete/pending/retry/failed) and anything an outage held back go out here.
+            self.flush_receipts()
             try:
                 self.poll_changes()
                 row = self.queue.due()
@@ -509,13 +705,13 @@ class Agent:
                         self.process(row)
                     except PermanentGatewayError as error:
                         reason = str(error)
-                        self.queue.fail(uid, reason)
+                        self.queue.fail(uid, reason, error_code(error))
                         log("study.failed", uid=uid, error=reason)
                         continue
                     except Exception as error:
                         reason = str(error) if isinstance(error, GatewayError) else type(error).__name__
                         attempt, delay = self.queue.retry(
-                            uid, reason, self.config.backoff_base, self.config.backoff_max,
+                            uid, reason, self.config.backoff_base, self.config.backoff_max, error_code(error),
                         )
                         log("study.retry", uid=uid, attempt=attempt, afterSeconds=round(delay, 2), error=reason)
                         continue

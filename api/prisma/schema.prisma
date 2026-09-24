@@ -103,9 +103,27 @@ model StudyState {
   findings Finding[]
   transferBases TransferBasis[]
   transfers Transfer[]
+  gatewayReceipt GatewayReceipt?
 
   @@index([institutionId])
   @@index([teleInstitutionId])
+}
+
+/// S4-U3 Gateway가 보고한 전송(축 C). 검사당 **마지막으로 받아들인** 보고 한 행이다 — 이력이 아니다.
+/// 순서는 agent의 (epoch, seq)만, 시각은 KIN이 받은 시각(receivedAt)만 쓴다. 기관은 자격증명의 것이다.
+/// complete·M==N은 보고 시점 agent 큐의 사실일 뿐 영상 수신 완료가 아니다. 검사 행이 지워지면 함께 지운다.
+model GatewayReceipt {
+  studyUid      String   @id
+  institutionId String   @db.VarChar(256)
+  epoch         String   @db.Uuid
+  seq           BigInt
+  phase         String   @db.VarChar(16)
+  attempt       BigInt
+  successCount  BigInt
+  localCount    BigInt
+  errorCode     String?  @db.VarChar(40)
+  receivedAt    DateTime
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Cascade, onUpdate: Restrict)
 }
 
 /// Append-only communication history, separate from report and DICOM content.

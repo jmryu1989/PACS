@@ -70,6 +70,13 @@ export class PacsController {
     return this.svc.announceStudy(body?.studyUid, body?.institutionNameTag, caller(req));
   }
 
+  /** S4-U3 전송 영수증. 본문 전체가 닫힌 키 집합 검사를 받는다 — 기관·시각은 본문에서 받지 않는다. */
+  @Post('gateway/receipt')
+  @HttpCode(200)
+  gatewayReceipt(@Body() body: any, @Req() req: any) {
+    return this.svc.gatewayReceipt(body, caller(req));
+  }
+
   @Post('dicom/lookup')
   @HttpCode(200)
   dicomLookup(@Body() body: any, @Req() req: any) {

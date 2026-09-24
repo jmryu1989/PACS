@@ -48,7 +48,7 @@ function setup({policies=()=>[],qido=QIDO,studies}={}){
       return project(rows,arg?.select);},
       create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
     order:{findMany:async arg=>{seq.push('order');const rows=structuredClone(ORDERS).filter(o=>o.institutionId===arg.where.institutionId);return project(rows,arg.select);}},
-    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},gatewayReceipt:{findMany:async()=>[]},
     auditLog:{create:async()=>{throw new Error('no audit expected');}},
     $queryRaw:async(strings)=>{const sql=strings.join('?');if(sql.includes('StudyAccessPolicy')){seq.push('policy');return policies(++policyReads);}return [];},
   };

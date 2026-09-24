@@ -269,6 +269,49 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
         self.assertEqual("Not Observed (1) · 마지막 관측 기준", self.text("#not-observed-summary"))
         self.assertEqual(absent, self.page.evaluate("studyObservationModel.notObserved"))
 
+    # ── S4-U3: the server receipt on axis C, through the same real poll ──
+
+    def receipt_row(self, receipt, count):
+        row = self.changed(count=count, series=3)
+        row["gatewayReceipt"] = receipt
+        return row
+
+    def test_s4u3_receipt_rides_only_a_readable_poll_and_never_promotes_or_fails(self):
+        def receipt(phase, m, n, minute, seq):
+            return {"phase": phase, "successCount": m, "localCount": n, "attempt": 0, "errorCode": None,
+                    "serverReceivedAt": self.at(minute), "agentSeq": seq, "epoch": "0a1b2c3d-0000-4000-8000-00000000000a"}
+
+        # Contract test 10: no receipt is the normal label, never a failure or offline.
+        self.poll(reply(self.receipt_row(None, 12), at=self.at(1)))
+        self.assertEqual("No Gateway Report", self.text("#receipt-gateway"))
+        # The in-place poll path (same list) updates the receipt before it renders.
+        self.poll(reply(self.receipt_row(receipt("sending", 3, 12, 1, 7), 12), at=self.at(2)))
+        shown = self.text("#receipt-gateway")
+        self.assertTrue(shown.startswith("Gateway 보고(") and shown.endswith("): 병원 보유 12건 중 3건 전송"), shown)
+        # A failed poll and an unreadable observation both keep the last receipt.
+        self.fail_next()
+        self.assertEqual(shown, self.text("#receipt-gateway"))
+        self.poll(reply(self.receipt_row(receipt("complete", 12, 12, 3, 8), 12), at="yesterday"))
+        self.assertEqual(shown, self.text("#receipt-gateway"))
+        self.assertEqual(7, self.page.evaluate("studies[0].gatewayReceipt.agentSeq"))
+        # Contract test 9: complete 12 of 12, then KIN actually holds 14: the session increase marker shows,
+        # the receipt text stays the Gateway's M-of-N, and nothing says complete, received or failed.
+        done = receipt("complete", 12, 12, 4, 9)
+        self.poll(reply(self.receipt_row(done, 12), at=self.at(4)))
+        self.poll(reply(self.receipt_row(done, 14), at=self.at(5)))
+        self.assertIn("이 세션에서 관측한 변화: 증가(", self.text("#receipt-observation"))
+        shown = self.text("#receipt-gateway")
+        self.assertTrue(shown.endswith("): 병원 보유 12건 중 12건 전송"), shown)
+        for banned in ("완료", "complete", "received", "실패", "오프라인", "offline"):
+            self.assertNotIn(banned, shown + self.text("#receipt-observation"))
+        self.assertEqual(done, self.page.evaluate("studies[0].gatewayReceipt"))
+        # The rebuild path (a new study arrives) carries the receipt through fromApi too.
+        other = self.receipt_row(None, 2)
+        other.update(uid="1.2.4", id="PID-2", sourcePatientKey="hospital|patient-2")
+        self.poll(reply(self.receipt_row(done, 14), other, at=self.at(6)))
+        self.assertEqual([done, None], self.page.evaluate("studies.map(s=>s.gatewayReceipt)"))
+        self.assertTrue(self.text("#receipt-gateway").endswith("): 병원 보유 12건 중 12건 전송"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

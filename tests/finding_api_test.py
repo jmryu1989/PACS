@@ -700,15 +700,16 @@ class FindingAPI(unittest.TestCase):
         history = self.call(method='GET', user='xauthor', path=self.path+'/'+f1['id']+'/revisions')
         self.assertEqual(([r['item'] for r in history['revisions']], history['nextCursor']), ([f1['item']], None))
         self.assertNotIn(prior.uid, ' '.join(self.state(tables=('AuditLog',))['AuditLog']))
-        # Cross-study findings interleave by random id with same-study ones: one keeps P only in an older
-        # revision (T08e), one is hidden (restore target for T08g).
+        # Cross-study findings: one keeps P only in an older revision (T08e), one is hidden (restore target for T08g),
+        # and the 2nd, 4th and 6th of seven X-only findings in id order gain the P copy, so one sits between every pair
+        # of same-study findings by construction; random ids alone did not interleave in run 35980665644.
         cross = [f1] + [self.create([x, p], user='xauthor', title='P '+str(i))[0] for i in range(2)]
         f2, edit2 = self.revise(cross[1], user='xauthor', item=self.edit_body([x], title='X만 남김'))
         f3, _ = self.revise(cross[2], 'hide', reason='보류', user='xauthor')
-        own = []
-        while len(own) < 4 or not any(min(o['id'] for o in own) < c['id'] < max(o['id'] for o in own) for c in cross):
-            self.assertLess(len(own), 24, 'random ids never interleaved')
-            own.append(self.create([x], user='xauthor', title='X '+str(len(own)))[0])
+        ordered = sorted((self.create([x], user='xauthor', title='X '+str(i))[0] for i in range(7)), key=lambda f: f['id'])
+        # These edits copy p at revision 1, so they run before p2 below; after it the same edit is a staleSource 409.
+        cross += [self.revise(ordered[i], user='xauthor', item=self.edit_body([x, p]))[0] for i in (1, 3, 5)]
+        own = [ordered[i] for i in (0, 2, 4, 6)]
         visible, hidden = sorted(o['id'] for o in own), sorted(c['id'] for c in cross)
         # T08h preparation: the prior item moves to revision 2 after it was copied.
         p2 = self.revise_item(p, item=self.key_item(0, title=label+' r2', slices=prior.slices), user='xauthor', items_path=prior.items)
@@ -719,6 +720,9 @@ class FindingAPI(unittest.TestCase):
                         rows={c['id']: self.revision_rows(c['id']) for c in cross})
         before = captured()
         self.assertEqual([i['id'] for i in before['listed']['items']], sorted(visible+hidden))
+        # In the server's order the seven alternate same-study and cross-study, so T08c pages across a hidden row.
+        seven = {o['id'] for o in ordered}
+        self.assertEqual([i['id'] in hidden for i in before['listed']['items'] if i['id'] in seven], [False, True, False, True, False, True, False])
         self.assertEqual(next(i for i in before['listed']['items'] if i['id'] == f1['id'])['links'][1],
                          dict(itemId=p['id'], linkState='revised', headRevision=2, headHidden=False))
         absent = self.stack.request('GET', self.path+'/'+str(uuid.uuid4())+'/revisions', 'xreader')
