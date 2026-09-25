@@ -400,6 +400,9 @@ class Orthanc:
         self.auth = (config.orthanc_user, config.orthanc_pass)
         self.timeout = config.http_timeout
         self.session = requests.Session()
+        # Orthanc may close an idle keep-alive socket just as the next read reuses it, and requests does not
+        # retry that, so every local read asks for its own connection. Cloud keeps its pool (S4-EG1 X-2).
+        self.session.headers["Connection"] = "close"
 
     def request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         try:
