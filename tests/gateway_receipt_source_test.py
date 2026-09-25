@@ -351,7 +351,8 @@ class AgentPins(unittest.TestCase):
                          "    def test_production_gateway_contract_is_declared")
         self.assertEqual(re.findall(r'self\.assertIn\("Ran (\d+) tests"', method), [str(count)])
         # 18 -> 25: S4-U4 RetryNowTests (seven cases); tests/gateway_retry_source_test.py pins that class by name.
-        self.assertEqual(count, 25)
+        # 25 -> 26: S4-EG1 OrthancConnectionTests (one case).
+        self.assertEqual(count, 26)
 
 
 class ServerPins(unittest.TestCase):

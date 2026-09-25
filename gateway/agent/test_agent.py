@@ -1,10 +1,13 @@
 import ast
 import dataclasses
+import http.server
 import json
 import re
+import socketserver
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -784,6 +787,75 @@ class RetryNowTests(unittest.TestCase):
         changed = [(b["uid"], sorted(k for k in b if b[k] != a[k])) for b, a in zip(before, after) if b != a]
         self.assertEqual(changed, [("1.2.3", ["next_at"])])
         self.assertTrue(all(set(fields) <= {"uid", "attempt", "status", "error"} for _event, fields in self.events))
+
+
+class OrthancConnectionTests(unittest.TestCase):
+    """S4-EG1 X-2: no local Orthanc read goes out on a pooled connection the server may be closing.
+
+    The first hosted EG1 run logged 76 `local Orthanc ConnectionError` retries while Orthanc stayed up. The
+    suspected close of an idle socket as it is reused is made certain here instead of timed: the server answers
+    only the first request of a connection and drops a connection that brings a second one.
+    """
+
+    def test_consecutive_local_reads_each_take_their_own_connection(self):
+        changes = {"Changes": [], "Done": True, "Last": 0}
+        seen = []   # (connection number, request number on it, path, Connection header), in arrival order
+        connections = []
+
+        class OneAnswerPerConnection(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"   # keep-alive unless the client asks to close, as Orthanc does
+            timeout = 5
+
+            def setup(self):
+                super().setup()
+                connections.append(self.client_address)
+                self.number, self.answered = len(connections), 0
+
+            def do_GET(self):
+                asked = self.headers.get("Connection")
+                seen.append((self.number, self.answered + 1, self.path, asked))
+                if self.answered:
+                    self.close_connection = True   # a reused connection is dropped unanswered
+                    return
+                self.answered = 1
+                body = json.dumps(changes).encode("ascii")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                if (asked or "").lower() == "close":
+                    self.send_header("Connection", "close")   # RFC 9112 9.6: close after this response and say so
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        # One thread serves one connection at a time, so arrival order is the order of the reads. TCPServer, not
+        # HTTPServer: its bind does a reverse lookup of the address.
+        server = socketserver.TCPServer(("127.0.0.1", 0), OneAnswerPerConnection)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def stop():
+            server.shutdown()
+            server.server_close()
+            thread.join(5)
+
+        self.addCleanup(stop)
+        orthanc = agent_module.Orthanc(config(
+            "unused", orthanc_url="http://127.0.0.1:%d" % server.server_address[1], http_timeout=5))
+        # Cleanups run last-in first-out: a socket the client still pools must not hold the server's one thread.
+        self.addCleanup(orthanc.session.close)
+
+        outcomes = []
+        for _ in range(3):
+            try:
+                outcomes.append(orthanc.changes(0))
+            except GatewayError as error:
+                outcomes.append(str(error))   # a reused connection: "local Orthanc ConnectionError", the live text
+        self.assertEqual(outcomes, [changes] * 3)
+        self.assertEqual(seen, [(number, 1, "/changes?since=0&limit=100", "close") for number in (1, 2, 3)])
+        self.assertEqual(len(connections), 3)
 
 
 if __name__ == "__main__":

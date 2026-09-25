@@ -3476,9 +3476,10 @@ class LiveInvariantTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         # 5 -> 18: S4-U3 added the receipt suites (error-code mapping, queue epoch/seq/body, delivery).
         # 18 -> 25: S4-U4 added RetryNowTests (T1-T6, seven cases) for Now Retry.
+        # 25 -> 26: S4-EG1 added OrthancConnectionTests (local reads never reuse a pooled connection).
         # The number is the suite as authored; tests/gateway_receipt_source_test.py pins it to an AST
         # count of test_agent.py, so neither can move without the other.
-        self.assertIn("Ran 25 tests", completed.stderr + completed.stdout)
+        self.assertIn("Ran 26 tests", completed.stderr + completed.stdout)
 
     def test_production_gateway_contract_is_declared(self) -> None:
         completed = subprocess.run(
