@@ -568,7 +568,8 @@ class ServerPins(unittest.TestCase):
     def test_u3_surfaces_are_untouched(self):
         self.assertEqual(sha(between(SERVICE, "  async gatewayReceipt(body: unknown, c: Caller) {", "\n  }\n")), U3_METHOD_SHA256)
         self.assertEqual(sha(RECEIPT_RULE), U3_RULE_SHA256)
-        self.assertEqual(SERVICE.count("projectGatewayReceipt("), 1)
+        # 1 -> 2 at S4-F01V: the unchanged projection also serves an absent own study (F01VPins below).
+        self.assertEqual(SERVICE.count("projectGatewayReceipt("), 2)
         listing = between(SERVICE, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
         bootstrap = between(SERVICE, "  async bootstrap(c: Caller, query?: any) {", "\n  }\n")
         for surface in (listing, bootstrap):
@@ -723,7 +724,8 @@ class ClientPins(unittest.TestCase):
         self.assertIn('<button type="button" id="receipt-retry" class="chip" hidden>Now Retry</button> <span id="receipt-retry-note"></span>', receipt)
         self.assertEqual(MAIN.count('$("#receipt-retry").addEventListener("click", requestGatewayRetry);'), 1)
         # U3 client pins keep: the receipt key count and the observation functions stay free of requests.
-        self.assertEqual(MAIN.count("gatewayReceipt"), 5)
+        # 5 -> 6 at S4-F01V: one `row.gatewayReceipt ?? null` for the Not Observed item (F01VPins below).
+        self.assertEqual(MAIN.count("gatewayReceipt"), 6)
         self.assertIn('$("#receipt-gateway").title = labels.gateway.title;\n    }', js_function(MAIN, "renderObservation") + "\n")
 
     def test_study_observation_inventory_names_exactly_these_additions(self):
@@ -732,11 +734,12 @@ class ClientPins(unittest.TestCase):
             "functions": {"requestGatewayRetry": len(re.findall(r"^ {4}(?:async )?function requestGatewayRetry\(", MAIN, re.M))},
             "selectors": {key: len(re.findall(r"\$\(\s*[\"']" + re.escape(key) + r"[\"']", MAIN)) for key in ("#receipt-retry", "#receipt-retry-note")},
         }
+        # "#receipt-retry-note" 2 -> 1 at S4-F01V: the request writes the note right after the clicked control.
         self.assertEqual(counts, {"ids": {"receipt-retry": 1, "receipt-retry-note": 1}, "functions": {"requestGatewayRetry": 1},
-                                  "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 2}})
+                                  "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 1}})
         observation = text("tests", "study_observation_test.py")
         self.assertIn('    "ids": {"receipt-retry": 1, "receipt-retry-note": 1},\n    "functions": {"requestGatewayRetry": 1},\n'
-                      '    "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 2},', observation)
+                      '    "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 1},', observation)
 
     def test_the_pure_helpers_keep_u1b_and_the_gateway_label(self):
         # R3(c): the U1b needles, BANNED line included, stay byte-identical and exactly once.
@@ -770,6 +773,133 @@ class ClientPins(unittest.TestCase):
         for needle in ("고정 30초 주기(설정·환경 변수 없음, 시작 30초 뒤 첫 조회)", "전송이 진행 중이면 그 전송이 끝날 때까지 밀리고",
                        "재시도가 실행됐다는 뜻이 아니다", "전달은 한 번만이라고 보장하지\n않으며", "`failed`(F-01"):
             self.assertIn(needle, README)
+
+
+# ── S4-F01V: the receipt and Now Retry of an own study with no observed image ──
+
+F01V_READ = ("const absentReceipts = notObserved?.length ? await this.prisma.gatewayReceipt.findMany({ where: { studyUid: "
+             "{ in: notObserved.map(row => row.uid) }, institutionId: me } }) : [];")
+F01V_ATTACH = ("for (const row of notObserved ?? []) { const receipt = absentReceiptByUid.get(row.uid); "
+               "if (receipt) Object.assign(row, { gatewayReceipt: projectGatewayReceipt(receipt) }); }")
+F01V_COPY = ("rows.push({uid:row.uid,origin:row.origin,createdAt:row.createdAt,"
+             "...(row.gatewayReceipt===undefined?{}:{gatewayReceipt:row.gatewayReceipt})});")
+F01V_ARROW = "const drawRetry = (s, retry, retryButton, retryNote) => {"
+F01V_CHANGED = ["api/src/pacs.service.ts", "worklist-v0/hpacs-lite/study-arrivals.js", "worklist-v0/hpacs-lite/main.html",
+                "tests/gateway_retry_source_test.py", "tests/gateway_receipt_source_test.py", "tests/study_identity_source_test.py",
+                "tests/study_observation_test.py", "tests/worklist_arrivals_dom_test.py", "tests/gateway_receipt_server_test.cjs",
+                "tests/invariants_live.py", "tests/README.md"]
+
+
+def f01v_problems(service, main, arrivals):
+    """The absent item's receipt is read pinned to the caller's institution between the absence list and the access
+    re-check, attached only when one exists, copied only when sent, and drawn and requested by the one U4 drawing."""
+    problems = []
+    listing = between(service, "  async listStudies(c: Caller, query?: any) {", "  private notObserved(")
+    order = ["const orderRows = ", "const notObserved = ", F01V_READ, "await this.studyAccess.unchanged(c,access);",
+             "const absentReceiptByUid = new Map(absentReceipts.map(r => [r.studyUid, r]));", F01V_ATTACH,
+             "const orderReconciliation = "]
+    try:
+        positions = [listing.index(needle) for needle in order]
+        if positions != sorted(positions):
+            problems.append("server order")
+        # No origin filter, as for rows: origin is not a transport gate.
+        if "origin" in listing[positions[1] + len(order[1]):positions[-1]]:
+            problems.append("origin filter")
+    except ValueError as error:
+        problems.append("server missing " + str(error)[:60])
+    if listing.count("this.prisma.gatewayReceipt.findMany(") != 2 or listing.count("projectGatewayReceipt(") != 2:
+        problems.append("receipt reads")
+    for banned in ("gatewayReceipt.create", "gatewayReceipt.update", "gatewayReceipt.upsert", "gatewayRetry", "GatewayRetry"):
+        if banned in listing:
+            problems.append(banned)
+    if F01V_COPY not in js_function(arrivals, "readNotObserved"):
+        problems.append("conditional copy")
+    render = js_function(main, "renderObservation")
+    try:
+        arrow = render[render.index(F01V_ARROW):render.index("\n      };\n", render.index(F01V_ARROW))]
+        for needle in ('const retryKey = retry?.kind === "now_retry" ? retry.key : "";',
+                       'if (retryButton.dataset.uid !== s.uid || retryButton.dataset.key !== retryKey) {',
+                       'Object.assign(retryButton.dataset, { uid: s.uid, key: retryKey, request: "", requested: "" });',
+                       '|| !(serverMode && !offline && !demoMode && KinAuth.has("technician"));',
+                       'retryButton.disabled = !!retryButton.dataset.request;',
+                       'if (!retryKey) { retryNote.textContent = retry?.text ?? ""; retryNote.title = retry?.title ?? ""; }'):
+            if needle not in arrow:
+                problems.append("drawRetry " + needle[:40])
+        if render.index(F01V_ARROW) > render.index('$("#not-observed-list")'):
+            problems.append("drawRetry after the list")
+    except ValueError:
+        problems.append("drawRetry")
+    for needle, count in (("drawRetry(row, labels.retry, button, note);", 1),
+                          ('drawRetry(s, labels.retry, $("#receipt-retry"), $("#receipt-retry-note"));', 1),
+                          ("drawRetry(", 2), ('addEventListener("click", requestGatewayRetry);', 1),
+                          ("row.gatewayReceipt ?? null", 1), ('$("#not-observed-list")', 1),
+                          ("let item = kept.get(row.uid);", 1), ("item.dataset.uid = row.uid;", 1),
+                          ('for (const item of kept.values()) item.querySelector("button").dataset.request = "";', 1),
+                          ('item.append(document.createElement("span"), " ", control, " ", document.createElement("span"));', 1),
+                          ("text.textContent = `${row.uid} · ${row.origin} · ${KinStudyArrivals.formatTime(row.createdAt)}`\n"
+                           '            + (gateway === null ? "" : ` · ${labels.gateway.text}`);', 1)):
+        if render.count(needle) != count:
+            problems.append("render %s" % needle[:40])
+    for banned in ("innerHTML", "api(", "fetch(", "id="):
+        if banned in render:
+            problems.append("render " + banned)
+    if main.count('addEventListener("click", requestGatewayRetry);') != 2:
+        problems.append("two listeners")
+    request = js_function(main, "requestGatewayRetry")
+    if "\n    async function requestGatewayRetry(event) {\n" not in main:
+        problems.append("request signature")
+    for needle in ('const button = event?.currentTarget ?? $("#receipt-retry"), uid = button.dataset.uid, key = button.dataset.key;',
+                   "const note = button.nextElementSibling;"):
+        if needle not in request:
+            problems.append("request " + needle[:40])
+    if '$("#receipt-retry-note")' in request:
+        problems.append("request reads the panel note")
+    # nextElementSibling is the note only while the panel markup keeps it right after the button.
+    if '<button type="button" id="receipt-retry" class="chip" hidden>Now Retry</button> <span id="receipt-retry-note"></span>' not in main:
+        problems.append("panel markup")
+    return problems
+
+
+class F01VPins(unittest.TestCase):
+    def test_s4f01v_absent_receipts_are_own_read_before_the_recheck_and_drawn_by_u4_rules(self):
+        self.assertEqual(f01v_problems(SERVICE, MAIN, ARRIVALS), [])
+        read_line, unchanged = "    " + F01V_READ + "\n", "    await this.studyAccess.unchanged(c,access);\n"
+        service_mutants = {
+            "drop institutionId: me": SERVICE.replace("notObserved.map(row => row.uid) }, institutionId: me } })",
+                                                      "notObserved.map(row => row.uid) } } })"),
+            "read after unchanged": SERVICE.replace(read_line + unchanged, unchanged + read_line),
+            "attach unconditionally": SERVICE.replace("if (receipt) Object.assign(row, {", "Object.assign(row, {"),
+        }
+        for wrong, source in service_mutants.items():
+            with self.subTest(wrong=wrong):
+                self.assertNotEqual(source, SERVICE)
+                self.assertNotEqual(f01v_problems(source, MAIN, ARRIVALS), [])
+        with self.subTest(wrong="drop the role gate"):
+            source = MAIN.replace(' && KinAuth.has("technician"));', ');')
+            self.assertNotEqual(source, MAIN)
+            self.assertNotEqual(f01v_problems(SERVICE, source, ARRIVALS), [])
+        # U1b: the absence list itself is unchanged, three fields and nothing more are pushed.
+        self.assertIn("out.push({ uid: s.uid, origin: s.origin, createdAt });", between(SERVICE, "  private notObserved(", "\n  }\n"))
+        # The behaviour is proved hosted: compiled server (T-S), DOM with the A-1 node cases (T-D) and live (T-L).
+        server = text("tests", "gateway_receipt_server_test.cjs")
+        self.assertIn("test('S4-F01V list: ", server)
+        dom = text("tests", "worklist_arrivals_dom_test.py")
+        for name in ("test_s4f01v_an_absent_item_draws_its_own_receipt_by_the_u4_rules_and_failed_says_f01",
+                     "test_s4f01v_absent_now_retry_keeps_its_item_across_polls_and_drops_answers_that_left_the_list"):
+            self.assertIn("    def " + name + "(self):", dom)
+        for needle in ("isSameNode", "one POST total"):
+            self.assertIn(needle, dom)
+        live = between(INVARIANTS, "    def test_gateway_announce_is_idempotent_and_preserves_dicom_origin(self) -> None:",
+                       "    def test_gateway_stow_requires_announce_and_matching_uid")
+        for needle in ("# S4-F01V", '"instance_exceeds_budget"', '"stow_http"', "GATEWAY_RETRY_UNSUPPORTED_F01",
+                       'ask("tech")', "self.addCleanup(self.stack.cleanup_fixture, uid)", "self.stack.cleanup_fixture(uid)"):
+            self.assertIn(needle, live)
+        self.assertEqual(text("tests", "README.md").count("REQ-S4-F01V-ABSENT-RECEIPT"), 1)
+        for path in F01V_CHANGED:
+            with self.subTest(path=path):
+                data = (ROOT / path).read_bytes()
+                self.assertFalse(data.startswith(b"\xef\xbb\xbf"))
+                self.assertNotIn("\r", data.decode("utf-8").replace("\r\n", "\n"))
 
 
 class WorkflowPins(unittest.TestCase):

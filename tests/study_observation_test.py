@@ -335,7 +335,10 @@ class SourcePins(unittest.TestCase):
         self.assertTrue(qido < at < states)
         self.assertIn("select: { uid:true, institutionId:true, teleInstitutionId:true, origin:true, createdAt:true },", listing)
         self.assertIn("const notObserved = !page || window.pagination?.next === null ? this.notObserved(qido, states, me, access, observedAt) : undefined;", listing)
-        self.assertLess(listing.index("await this.studyAccess.unchanged(c,access);"), listing.index("const notObserved = "))
+        # S4-F01V reversed this order: the absence list is pure over the enumeration, and the receipt read for its
+        # own items joins the other tenant reads before the access re-check (tests/gateway_retry_source_test.py).
+        self.assertLess(listing.index("const notObserved = "), listing.index("const absentReceipts = "))
+        self.assertLess(listing.index("const absentReceipts = "), listing.index("await this.studyAccess.unchanged(c,access);"))
         self.assertIn("observedAt,\n      ...(notObserved === undefined ? {} : { notObserved }),", listing)
         absent = body(self.service, "  private notObserved(", "\n  }\n")
         for needle in ("if (!Array.isArray(qido)) return null;", "if (!uid) return null;",
@@ -409,10 +412,11 @@ for _kind, _extra in {
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
 # S4-U4 Now Retry control inside #study-receipt; tests/gateway_retry_source_test.py pins what each one does.
+# S4-F01V: "#receipt-retry-note" 2 -> 1, because the request now reads the note next to the clicked control.
 for _kind, _extra in {
     "ids": {"receipt-retry": 1, "receipt-retry-note": 1},
     "functions": {"requestGatewayRetry": 1},
-    "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 2},
+    "selectors": {"#receipt-retry": 3, "#receipt-retry-note": 1},
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)

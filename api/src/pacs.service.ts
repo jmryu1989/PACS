@@ -945,10 +945,16 @@ export class PacsService implements OnModuleInit {
     // S4-U2: the order side is read with the page that completes the list and BEFORE the access
     // re-check below, so a policy change during this request refuses the whole answer.
     const orderRows = !page || window.pagination?.next === null ? await this.orderSide(me) : null;
-    await this.studyAccess.unchanged(c,access);
     // Absence is judged against the whole enumeration, never against this page's window. It is sent
     // once, with the page that completes the list, so a client never merges two absence answers.
     const notObserved = !page || window.pagination?.next === null ? this.notObserved(qido, states, me, access, observedAt) : undefined;
+    // S4-F01V: an own study with no observed image still has its last Gateway receipt. Only receipts this
+    // institution's own credentials wrote are read, before the access re-check like every other tenant read here.
+    const absentReceipts = notObserved?.length ? await this.prisma.gatewayReceipt.findMany({ where: { studyUid: { in: notObserved.map(row => row.uid) }, institutionId: me } }) : [];
+    await this.studyAccess.unchanged(c,access);
+    // The key is added only when such a receipt exists; without one the item keeps its three fields.
+    const absentReceiptByUid = new Map(absentReceipts.map(r => [r.studyUid, r]));
+    for (const row of notObserved ?? []) { const receipt = absentReceiptByUid.get(row.uid); if (receipt) Object.assign(row, { gatewayReceipt: projectGatewayReceipt(receipt) }); }
     const orderReconciliation = orderRows ? this.orderReconciliation(qido, orderRows, me, access) : undefined;
     return { studies: out, serverTime: new Date().toISOString(), observedAt,
       ...(notObserved === undefined ? {} : { notObserved }),

@@ -2823,16 +2823,54 @@
       if (!studyObservationModel) return;
       const summary = KinStudyArrivals.observationSummary(studyObservationModel), status = $("#observation-status");
       if (status) { status.hidden = !summary.text; status.textContent = summary.text; status.title = summary.title; }
+      // S4-U4 Now Retry, drawn only from labels.retry. Another study or a newer receipt drops the in-flight token
+      // and the requested mark, so an answer for what was drawn before is never written over it (A->B->A too).
+      // S4-F01V: one drawing serves the worklist panel and every Not Observed item, so both keep the same rules.
+      const drawRetry = (s, retry, retryButton, retryNote) => {
+        const retryKey = retry?.kind === "now_retry" ? retry.key : "";
+        if (retryButton.dataset.uid !== s.uid || retryButton.dataset.key !== retryKey) {
+          Object.assign(retryButton.dataset, { uid: s.uid, key: retryKey, request: "", requested: "" });
+          retryNote.textContent = ""; retryNote.title = "";
+        }
+        retryButton.hidden = !retryKey || retryButton.dataset.requested === "1"
+          || !(serverMode && !offline && !demoMode && KinAuth.has("technician"));
+        retryButton.disabled = !!retryButton.dataset.request; retryButton.title = retry?.title ?? "";
+        // Without a bindable retry the note is labels.retry itself: the F-01 sentence for failed, else nothing.
+        if (!retryKey) { retryNote.textContent = retry?.text ?? ""; retryNote.title = retry?.title ?? ""; }
+      };
       const absent = summary.notObserved ?? [], box = $("#not-observed");
       if (box) {
         box.hidden = !absent.length;
         $("#not-observed-summary").textContent = absent.length
           ? `Not Observed (${absent.length})` + (summary.key === "observation_unavailable" ? " · 마지막 관측 기준" : "") : "";
-        $("#not-observed-list").replaceChildren(...absent.map(row => {
-          const item = document.createElement("div");
-          item.textContent = `${row.uid} · ${row.origin} · ${KinStudyArrivals.formatTime(row.createdAt)}`;
+        // S4-F01V: every item is an own study (axis A assigned) and its own receipt adds the Gateway text and Now Retry.
+        // Items are kept per UID so a request in flight survives a redraw. An item that leaves the list drops its
+        // token, so a late answer is never written anywhere, and one that comes back is built new (A->B->A).
+        const list = $("#not-observed-list"), kept = new Map([...list.children].map(item => [item.dataset.uid, item]));
+        const items = absent.map(row => {
+          let item = kept.get(row.uid);
+          kept.delete(row.uid);
+          if (!item) {
+            const control = document.createElement("button");
+            control.type = "button"; control.className = "chip"; control.hidden = true;
+            control.textContent = KinStudyArrivals.RETRY_TEXT.button;
+            control.addEventListener("click", requestGatewayRetry);
+            item = document.createElement("div"); item.dataset.uid = row.uid;
+            item.append(document.createElement("span"), " ", control, " ", document.createElement("span"));
+          }
+          const gateway = row.gatewayReceipt ?? null, [text, button, note] = item.children;
+          const labels = KinStudyArrivals.receiptLabels({ assignment: "assigned",
+            observation: KinStudyArrivals.studyObservation(studyObservationModel, row.uid), gateway });
+          // Without a receipt the text stays the U1b item text; no No Gateway Report is added to this list.
+          text.textContent = `${row.uid} · ${row.origin} · ${KinStudyArrivals.formatTime(row.createdAt)}`
+            + (gateway === null ? "" : ` · ${labels.gateway.text}`);
+          text.title = gateway === null ? "" : labels.gateway.title;
+          drawRetry(row, labels.retry, button, note);
           return item;
-        }));
+        });
+        for (const item of kept.values()) item.querySelector("button").dataset.request = "";
+        // Moving a kept item would drop keyboard focus, so the children are replaced only when the items change.
+        if (items.length !== list.children.length || items.some((item, index) => item !== list.children[index])) list.replaceChildren(...items);
       }
       const s = viewed(), receipt = $("#study-receipt");
       if (!receipt) return;
@@ -2845,19 +2883,7 @@
       $("#receipt-assignment").textContent = labels.assignment.text; $("#receipt-assignment").title = labels.assignment.title;
       $("#receipt-observation").textContent = [labels.observation.text, labels.change?.text].filter(Boolean).join(" · ");
       $("#receipt-observation").title = labels.observation.title;
-      // S4-U4 Now Retry, drawn only from labels.retry. Another study or a newer receipt drops the in-flight token
-      // and the requested mark, so an answer for what was drawn before is never written over it (A->B->A too).
-      const retry = labels.retry, retryButton = $("#receipt-retry"), retryNote = $("#receipt-retry-note");
-      const retryKey = retry?.kind === "now_retry" ? retry.key : "";
-      if (retryButton.dataset.uid !== s.uid || retryButton.dataset.key !== retryKey) {
-        Object.assign(retryButton.dataset, { uid: s.uid, key: retryKey, request: "", requested: "" });
-        retryNote.textContent = ""; retryNote.title = "";
-      }
-      retryButton.hidden = !retryKey || retryButton.dataset.requested === "1"
-        || !(serverMode && !offline && !demoMode && KinAuth.has("technician"));
-      retryButton.disabled = !!retryButton.dataset.request; retryButton.title = retry?.title ?? "";
-      // Without a bindable retry the note is labels.retry itself: the F-01 sentence for failed, else nothing.
-      if (!retryKey) { retryNote.textContent = retry?.text ?? ""; retryNote.title = retry?.title ?? ""; }
+      drawRetry(s, labels.retry, $("#receipt-retry"), $("#receipt-retry-note"));
       $("#receipt-gateway").textContent = labels.gateway.text; $("#receipt-gateway").title = labels.gateway.title;
     }
 
@@ -2865,9 +2891,11 @@
      * S4-U4 Now Retry: one POST with an empty body and nothing shown before the answer. The answer is written
      * only while the same study and receipt are still drawn with this request's token (renderObservation drops
      * it when either changes). `Retry Requested` means the request is stored at KIN, never that a retry ran.
+     * S4-F01V: the clicked control is the one bound (the panel or a Not Observed item), and its note is the element
+     * right after it; a call without an event is the panel.
      */
-    async function requestGatewayRetry() {
-      const button = $("#receipt-retry"), uid = button.dataset.uid, key = button.dataset.key;
+    async function requestGatewayRetry(event) {
+      const button = event?.currentTarget ?? $("#receipt-retry"), uid = button.dataset.uid, key = button.dataset.key;
       if (!uid || !key || button.hidden || button.dataset.request) return;
       const token = String(++gatewayRetryRequestSeq);
       button.dataset.request = token; button.disabled = true;
@@ -2877,7 +2905,7 @@
       if (button.dataset.request !== token || button.dataset.uid !== uid || button.dataset.key !== key) return;
       const shown = KinStudyArrivals.gatewayRetryAnswer(uid, answer, error);
       Object.assign(button.dataset, { request: "", requested: shown.requested ? "1" : "" });
-      const note = $("#receipt-retry-note");
+      const note = button.nextElementSibling;
       note.textContent = shown.text; note.title = shown.title;
       renderObservation();
     }

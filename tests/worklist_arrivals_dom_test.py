@@ -419,6 +419,128 @@ class WorklistArrivalsDOMTest(unittest.TestCase):
                 self.assertEqual((state["note"], state["hidden"], state["disabled"]), (expected, False, False))
         self.assertEqual([call["body"] for call in self.retry_state()["calls"]], [{}] * 8)
 
+    # ── S4-F01V: an own study with no observed image, its own receipt and the same Now Retry, through the real poll ──
+
+    ABSENT_AT = "2026-09-24T00:59:00.000Z"
+    ITEM_BUTTON = '#not-observed-list > [data-uid="1.2.9"] > button'
+
+    def absent_row(self, receipt=None, uid="1.2.9"):
+        # The server adds the key only when an own receipt exists, so None leaves the three U1b fields.
+        row = {"uid": uid, "origin": "gateway", "createdAt": self.ABSENT_AT}
+        if receipt is not None:
+            row["gatewayReceipt"] = receipt
+        return row
+
+    def absent_item(self, uid="1.2.9"):
+        return self.page.evaluate("""uid=>{const item=[...$('#not-observed-list').children].find(e=>e.dataset.uid===uid);
+          if(!item)return null;const [text,button,note]=item.children;
+          return {text:text.textContent,title:text.title,hidden:button.hidden,disabled:button.disabled,button:button.textContent,
+            note:note.textContent,noteTitle:note.title,calls:structuredClone(apiCalls)}}""", uid)
+
+    def test_s4f01v_an_absent_item_draws_its_own_receipt_by_the_u4_rules_and_failed_says_f01(self):
+        self.page.evaluate("()=>{grants=['technician']}")
+        panel_row = self.receipt_row(self.retry_receipt(seq=7), 12)
+        self.poll(reply(panel_row, at=self.at(1)))
+        panel = self.retry_state()
+        self.assertFalse(panel["hidden"])
+        failed = {**self.retry_receipt("failed", 3, 1), "successCount": 0, "localCount": 1}
+        items = [self.absent_row(failed), self.absent_row(uid="1.2.10"),
+                 self.absent_row({**self.retry_receipt(), "successCount": 2, "localCount": 1}, uid="1.2.11"),
+                 self.absent_row(self.retry_receipt(seq=7), uid="1.2.12"),
+                 self.absent_row({**self.retry_receipt(), "agentSeq": None}, uid="1.2.13")]
+        self.poll(reply(panel_row, at=self.at(2), not_observed=items))
+        self.assertEqual(items, self.page.evaluate("studyObservationModel.notObserved"))
+        when = self.page.evaluate("at=>KinStudyArrivals.formatTime(at)", self.ABSENT_AT)
+        # failed: the Gateway M-of-N text and the exact F-01 sentence, never a control.
+        state = self.absent_item()
+        self.assertTrue(state["text"].startswith("1.2.9 · gateway · " + when + " · Gateway 보고("), state)
+        self.assertTrue(state["text"].endswith("): 병원 보유 1건 중 0건 전송"), state)
+        self.assertTrue(state["title"].startswith("Gateway가 보고한 전송 수입니다."), state)
+        self.assertEqual((state["hidden"], state["note"]), (True, self.F01))
+        # No receipt: the U1b text byte for byte and nothing else; unreadable: the fixed sentence and no control.
+        self.assertEqual(self.absent_item("1.2.10")["text"], "1.2.10 · gateway · " + when)
+        self.assertEqual({k: self.absent_item("1.2.10")[k] for k in ("title", "hidden", "note")}, {"title": "", "hidden": True, "note": ""})
+        state = self.absent_item("1.2.11")
+        self.assertEqual((state["text"], state["hidden"], state["note"]),
+                         ("1.2.11 · gateway · " + when + " · Gateway 보고 형식을 확인할 수 없습니다", True, ""))
+        self.assertNotIn("No Gateway Report", self.text("#not-observed-list"))
+        # retry with a bindable key: Now Retry for a technician online only; without the key, M-of-N only.
+        state = self.absent_item("1.2.12")
+        self.assertEqual((state["hidden"], state["disabled"], state["button"], state["note"]), (False, False, "Now Retry", ""))
+        self.assertEqual((self.absent_item("1.2.13")["hidden"], self.absent_item("1.2.13")["note"]), (True, ""))
+        self.page.evaluate("()=>{grants=['radiologist'];renderObservation()}")
+        self.assertTrue(self.absent_item("1.2.12")["hidden"])
+        for mode in ("offline=true", "demoMode=true", "serverMode=false"):
+            with self.subTest(mode=mode):
+                self.page.evaluate("()=>{grants=['technician'];serverMode=true;offline=false;demoMode=false;%s;renderObservation()}" % mode)
+                self.assertTrue(self.absent_item("1.2.12")["hidden"])
+        self.page.evaluate("()=>{serverMode=true;offline=false;demoMode=false;renderObservation()}")
+        self.assertFalse(self.absent_item("1.2.12")["hidden"])
+        # The selected row panel draws exactly what it drew before the list had items.
+        self.assertEqual(panel, self.retry_state())
+        # A failed observation keeps every item and its receipt text as the last answer.
+        before = [self.absent_item(row["uid"]) for row in items]
+        self.fail_next()
+        self.assertEqual("Not Observed (5) · 마지막 관측 기준", self.text("#not-observed-summary"))
+        self.assertEqual(before, [self.absent_item(row["uid"]) for row in items])
+        self.assertEqual(self.retry_state()["calls"], [])
+
+    def test_s4f01v_absent_now_retry_keeps_its_item_across_polls_and_drops_answers_that_left_the_list(self):
+        texts = self.page.evaluate("KinStudyArrivals.RETRY_TEXT")
+        self.page.evaluate("()=>{grants=['technician'];$('#not-observed').open=true}")
+        row = self.changed(count=5, series=2)
+        seq7 = self.absent_row(self.retry_receipt(seq=7))
+        self.poll(reply(row, at=self.at(1), not_observed=[seq7]))
+        node = self.page.evaluate_handle("()=>$('#not-observed-list').children[0]")
+        self.page.click(self.ITEM_BUTTON)
+        state = self.absent_item()
+        self.assertEqual(state["calls"], [{"method": "POST", "path": "/studies/1.2.9/gateway-retry", "body": {}}])
+        self.assertEqual((state["disabled"], state["note"]), (True, ""), "nothing is claimed before the answer")
+        # A second request from the same control while in flight sends nothing.
+        self.page.evaluate("()=>requestGatewayRetry({currentTarget:$('#not-observed-list').children[0].children[1]})")
+        # A-1 (a): the same absent list polled again keeps the very same item node and its request.
+        self.poll(reply(row, at=self.at(2), not_observed=[seq7]))
+        self.assertTrue(self.page.evaluate("node=>node.isSameNode($('#not-observed-list').children[0])", node))
+        self.assertTrue(self.absent_item()["disabled"])
+        self.page.evaluate("value=>settleApi(true,value)", {"studyUid": "1.2.9", "result": "requested", "requestedAt": self.at(2)})
+        self.page.wait_for_timeout(0)
+        state = self.absent_item()
+        self.assertEqual(len(state["calls"]), 1)
+        self.assertTrue(state["note"].startswith("Retry Requested (") and state["hidden"], state)
+        self.assertEqual(state["noteTitle"], texts["requestedTitle"])
+        self.assertEqual(self.retry_state()["note"], "", "the answer is written next to the clicked control only")
+        # The receipt advanced while a new request was in flight: its answer is not written over the new state.
+        self.poll(reply(row, at=self.at(3), not_observed=[self.absent_row(self.retry_receipt(seq=9, minute=3))]))
+        self.assertEqual((self.absent_item()["hidden"], self.absent_item()["note"]), (False, ""))
+        self.page.click(self.ITEM_BUTTON)
+        seq11 = self.absent_row(self.retry_receipt(seq=11, minute=4))
+        self.poll(reply(row, at=self.at(4), not_observed=[seq11]))
+        self.page.evaluate("value=>settleApi(true,value)", {"studyUid": "1.2.9", "result": "requested", "requestedAt": self.at(4)})
+        self.page.wait_for_timeout(0)
+        state = self.absent_item()
+        self.assertEqual((state["hidden"], state["disabled"], state["note"], len(state["calls"])), (False, False, "", 2))
+        # A-1 (b): the UID leaves the list with a request in flight and comes back with the same key. The answer is
+        # dropped: no note on the new item nor on the one that left, and one POST total for this request.
+        self.page.click(self.ITEM_BUTTON)
+        left = self.page.evaluate_handle("()=>$('#not-observed-list').children[0]")
+        self.poll(reply(row, at=self.at(5), not_observed=[]))
+        self.assertEqual(0, self.page.evaluate("$('#not-observed-list').children.length"))
+        self.poll(reply(row, at=self.at(6), not_observed=[seq11]))
+        self.assertFalse(self.page.evaluate("node=>node.isSameNode($('#not-observed-list').children[0])", left))
+        self.page.evaluate("value=>settleApi(true,value)", {"studyUid": "1.2.9", "result": "requested", "requestedAt": self.at(6)})
+        self.page.wait_for_timeout(0)
+        state = self.absent_item()
+        self.assertEqual((state["hidden"], state["disabled"], state["note"], len(state["calls"])), (False, False, "", 3))
+        self.assertEqual("", self.page.evaluate("node=>node.children[2].textContent", left))
+        # One refusal: its fixed sentence, and the control is offered again.
+        self.page.click(self.ITEM_BUTTON)
+        self.page.evaluate("()=>settleApi(false,Object.assign(new Error('SERVER WORDING'),{status:409,code:'GATEWAY_RETRY_NOT_RETRY'}))")
+        self.page.wait_for_timeout(0)
+        state = self.absent_item()
+        self.assertEqual((state["note"], state["hidden"], state["disabled"]), (texts["notRetry"], False, False))
+        self.assertEqual(state["calls"], [{"method": "POST", "path": "/studies/1.2.9/gateway-retry", "body": {}}] * 4)
+        self.assertEqual(self.retry_state()["note"], "")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -2923,6 +2923,62 @@ class LiveInvariantTests(unittest.TestCase):
             self.assertEqual(conflict.status, 409, conflict.text)
             self.assertEqual(conflict.body.get("code"), "STUDY_OWNERSHIP_CONFLICT", conflict.text)
 
+        # S4-F01V: the announce-only study above now gets Gateway receipts with zero instances delivered; the 3-key
+        # assertion above stays the no-receipt control. Only the owner's absent item carries the U3 projection, and
+        # the U4 route answers by its rules. A fresh epoch keeps every later poll (test_s4u4 uses its own) from seeing
+        # this study, and cleanup_fixture removes the study with its receipt and request as soon as this test ends.
+        self.addCleanup(self.stack.cleanup_fixture, uid)
+        epoch = str(uuid.uuid4())
+
+        def receipt(seq: int, phase: str, code: str) -> dict[str, Any]:
+            return {"studyUid": uid, "phase": phase, "attempt": 1, "successCount": 0, "localCount": 1,
+                    "errorCode": code, "epoch": epoch, "seq": seq}
+
+        def send(value: dict[str, Any]) -> str:
+            sent = self.stack.bearer_request("POST", "/gateway/receipt", token, value)
+            self.assertEqual(sent.status, 200, sent.text)
+            return sent.body["result"]
+
+        def ask(user: str) -> HttpResult:
+            return self.stack.request("POST", f"/studies/{quote(uid)}/gateway-retry", user, {})
+
+        def projected(phase: str, seq: int, code: str) -> None:
+            listed = self.stack.request("GET", "/studies", "kdoctor")
+            self.assertEqual(listed.status, 200, listed.text[:500])
+            self.assertNotIn(uid, [row["uid"] for row in listed.body["studies"]])
+            item = next((row for row in listed.body["notObserved"] if row["uid"] == uid), None)
+            self.assertIsNotNone(item, json.dumps(listed.body["notObserved"])[:2000])
+            self.assertEqual(set(item), {"uid", "origin", "createdAt", "gatewayReceipt"})
+            self.assertEqual(item["origin"], "gateway")
+            shown = item["gatewayReceipt"]
+            self.assertEqual(set(shown), {"phase", "successCount", "localCount", "attempt", "errorCode",
+                                          "serverReceivedAt", "agentSeq", "epoch"})
+            self.assertEqual((shown["phase"], shown["successCount"], shown["localCount"], shown["attempt"],
+                              shown["errorCode"], shown["agentSeq"], shown["epoch"]), (phase, 0, 1, 1, code, seq, epoch))
+            self.assertTrue(shown["serverReceivedAt"].endswith("Z"), shown)
+
+        # L1: failed (one instance over the transfer budget), 0 of 1: the exact projection, and the route says F-01.
+        self.assertEqual(send(receipt(1, "failed", "instance_exceeds_budget")), "stored")
+        projected("failed", 1, "instance_exceeds_budget")
+        refused = ask("ktech")
+        self.assertEqual((refused.status, refused.body.get("code")), (409, "GATEWAY_RETRY_UNSUPPORTED_F01"), refused.text)
+        # L2: a later retry receipt is drawn as retry; the owner's technician request is stored, hallym's is 404.
+        self.assertEqual(send(receipt(2, "retry", "stow_http")), "stored")
+        projected("retry", 2, "stow_http")
+        requested = ask("ktech")
+        self.assertEqual((requested.status, requested.body.get("result")), (200, "requested"), requested.text)
+        other_tech = ask("tech")
+        self.assertEqual(other_tech.status, 404, other_tech.text)
+        # L3: hallym's list names neither the UID nor the stored epoch.
+        hallym = self.stack.request("GET", "/studies", "doctor")
+        self.assertEqual(hallym.status, 200, hallym.text[:500])
+        self.assertNotIn(uid, hallym.text)
+        self.assertNotIn(epoch, hallym.text)
+        # L4: cleanup_fixture removes the study, and the receipt and the stored request go with it (FK cascade).
+        self.stack.cleanup_fixture(uid)
+        for table, column in (("StudyState", "uid"), ("GatewayReceipt", "studyUid"), ("GatewayRetryRequest", "studyUid")):
+            self.assertEqual(psql(f'SELECT count(*) FROM "{table}" WHERE "{column}"=' + "'" + uid + "'"), ["0"], table)
+
     def test_gateway_stow_requires_announce_and_matching_uid(self) -> None:
         token = self.stack.service_token("gateway")
         with self.stack.fixture() as source:
