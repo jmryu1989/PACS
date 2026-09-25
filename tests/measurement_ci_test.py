@@ -1,5 +1,5 @@
 """D-MEASURE2 B1: runner refusal and public artifact secret redaction."""
-import os, tempfile, unittest
+import json, os, tempfile, unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import measurement_ci as ci
@@ -286,7 +286,8 @@ class MeasurementCiTests(unittest.TestCase):
         self.assertEqual(set(ci.PROFILES),
                          {'measurements', 'volume-rendering', 'output-integration',
                           'identity-fields', 'vr-resize-probe', 'hanging-protocols', 'dicom-pdf', 'image-thumbnails', 'display-scope', 'study-arrivals', 'images-only', 'image-text',
-                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge'})
+                          'three-d-cursor-accuracy', 'three-d-cursor-wiring', 'volume-mpr', 'volume-slab', 'volume-path', 'volume-batch', 'volume-sync-preferences', 'volume-marks', 'volume-mip-voi', 'volume-mip-job', 'volume-mip-batch', 'volume-mip-output', 'volume-mip-orient', 'cell-merge',
+                          'gateway-e2e'})
         measurements = ci.PROFILES['measurements']
         volume = ci.PROFILES['volume-rendering']
         output = ci.PROFILES['output-integration']
@@ -1950,6 +1951,79 @@ class MeasurementCiTests(unittest.TestCase):
             self.assertEqual(inner,1200)
             self.assertEqual(invocation.kwargs['timeout'],1235)
             self.assertGreaterEqual(invocation.kwargs['timeout'],inner+35)
+
+    def test_gateway_e2e_profile_is_exact_dispatch_only_and_fits_the_shared_deadline(self):
+        profile = ci.PROFILES['gateway-e2e']
+        self.assertEqual(profile['suites'], (('gateway_pipeline_live.py', 'GatewayPipelineLive', 'ci-eg1-gateway'),))
+        self.assertEqual(profile['out'].name, 'gateway-e2e-ci')
+        self.assertEqual(profile['project_prefix'], 'kin-gateway-e2e-ci-')
+        self.assertEqual(profile['suite_timeout'], 1260)
+        self.assertNotIn('suite_budgets', profile)
+        command, outer = ci.guarded_profile_run(profile, *profile['suites'][0], 2000)
+        self.assertEqual(command[command.index('--module')+1], 'tests/gateway_pipeline_live.py')
+        self.assertEqual(command[command.index('--class')+1], 'GatewayPipelineLive')
+        self.assertEqual(command[command.index('--unit')+1], 'ci-eg1-gateway')
+        self.assertEqual(command[command.index('--timeout')+1], '1260')
+        self.assertEqual(outer, 1295)
+        # A1: 1260+35 = 1295 <= 1500-205, and 205s is about 2.5x the recorded hosted stack setup and cleanup.
+        self.assertIn('deadline = time.monotonic()+25*60', (ci.ROOT/'tests/measurement_ci.py').read_text(encoding='utf-8'))
+        self.assertLessEqual(profile['suite_timeout'] + 35, 25*60 - 205)
+        for name, other in ci.PROFILES.items():
+            if name != 'gateway-e2e':
+                self.assertNotEqual(profile['out'], other['out'])
+                self.assertNotEqual(profile['project_prefix'], other['project_prefix'])
+        # Dispatch only, through its own workflow: never on push or PR, not through the focused integration dispatcher.
+        validate = (ci.ROOT/'.github/workflows/validate.yml').read_text(encoding='utf-8')
+        self.assertEqual(validate.count('--profile gateway-e2e'), 0)
+        dispatch = (ci.ROOT/'.github/workflows/gateway-e2e.yml').read_text(encoding='utf-8')
+        self.assertEqual(dispatch.count('--profile gateway-e2e'), 1)
+        self.assertNotIn('gateway-e2e', (ci.ROOT/'.github/workflows/output-integration.yml').read_text(encoding='utf-8'))
+        self.assertEqual(ci.GATEWAY_HANDOFF, 'gateway-project.json')
+        self.assertTrue(ci.GATEWAY_PROJECT.fullmatch('kin-eg1-gw-0123456789ab'))
+        self.assertIsNone(ci.GATEWAY_PROJECT.fullmatch('kin-gateway'))
+
+    def test_gateway_e2e_finally_unpauses_first_and_removes_the_handed_off_project_last(self):
+        # A3: the suite hands its project over and is then killed on its deadline, so its own class cleanup never runs.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profile = {**ci.PROFILES['gateway-e2e'], 'out': root/'artifacts'}
+            project = 'kin-eg1-gw-0123456789ab'
+            label = 'label=com.docker.compose.project='+project
+            listings = {('docker', 'ps', '-q', '--filter', 'status=paused'): b'pausedid\n',
+                        ('docker', 'ps', '-aq', '--filter', label): b'gwcontainer\n',
+                        ('docker', 'network', 'ls', '-q', '--filter', label): b'gwnetwork\n',
+                        ('docker', 'volume', 'ls', '-q', '--filter', label): b'gwvolume\n'}
+            seen = []
+
+            def fake_run(command, **kwargs):
+                seen.append(tuple(map(str, command)))
+                if 'run-tests.py' in ' '.join(seen[-1]):
+                    (profile['out']/ci.GATEWAY_HANDOFF).write_text(json.dumps({'project': project}), encoding='utf-8')
+                    raise ci.subprocess.TimeoutExpired(command, kwargs['timeout'])
+                return MagicMock(returncode=0, stdout=listings.get(seen[-1], b''), stderr=b'')
+
+            response = MagicMock(); response.__enter__.return_value.status = 200
+            with patch.dict(os.environ, {'GITHUB_ACTIONS':'true', 'RUNNER_ENVIRONMENT':'github-hosted'}, clear=True), \
+                 patch.object(ci, 'ROOT', root), \
+                 patch.dict(ci.PROFILES, {'gateway-e2e': profile}), \
+                 patch.object(ci, 'seed_source'), \
+                 patch.object(ci.subprocess, 'check_output', side_effect=[b'', b'', b'unix:///var/run/docker.sock']), \
+                 patch.object(ci.subprocess, 'run', side_effect=fake_run), \
+                 patch.object(ci, 'urlopen', return_value=response):
+                with self.assertRaisesRegex(RuntimeError, 'gateway_pipeline_live failed'):
+                    ci.main('gateway-e2e')
+            logs = next(index for index, command in enumerate(seen) if 'logs' in command and '--timestamps' in command)
+            down = next(index for index, command in enumerate(seen) if 'down' in command and '--remove-orphans' in command)
+            order = [seen.index(('docker', 'ps', '-q', '--filter', 'status=paused')),
+                     seen.index(('docker', 'unpause', 'pausedid')), logs, down,
+                     seen.index(('docker', 'rm', '-f', 'gwcontainer')), seen.index(('docker', 'network', 'rm', 'gwnetwork')),
+                     seen.index(('docker', 'volume', 'rm', 'gwvolume')), seen.index(('docker', 'ps', '-aq')),
+                     seen.index(('docker', 'volume', 'ls', '-q')),
+                     seen.index(('docker', 'network', 'ls', '-q', '--filter', 'type=custom'))]
+            self.assertEqual(order, sorted(order))
+            daemon = json.loads((profile['out']/'daemon-empty.json').read_text(encoding='utf-8'))
+            self.assertEqual(daemon, {'remaining': {'containers': [], 'volumes': [], 'networks': []}, 'problems': []})
+            self.assertTrue((profile['out']/'results.json').exists())
 
     def test_local_and_self_hosted_refused_before_docker(self):
         for env in [{}, {'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'self-hosted'}]:

@@ -1,0 +1,68 @@
+name: Gateway end to end
+
+# S4-EG1 (contract section 7 item 8, A2). GitHub delivers workflow_dispatch only to a workflow file on the default
+# branch, so this tests-only file reaches main through the normal reviewed merge under the existing required gates;
+# every dispatch then needs Astra's authorization and budget (at most three for S4-EG1). A re-run is refused below and
+# never counts as evidence; a cancelled or timed-out run is consumed, never a pass.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-hex commit this dispatch must run (the default branch head)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-e2e
+  cancel-in-progress: false
+
+jobs:
+  gateway-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Exact commit and first attempt only
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          ACTUAL_SHA: ${{ github.sha }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          printf '%s\n' "$EXPECTED_SHA" | grep -Eqx '[0-9a-f]{40}' || { echo "expected_sha must be 40 lowercase hex"; exit 1; }
+          [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] || { echo "expected_sha is not the commit this run checked out"; exit 1; }
+          [ "$RUN_ATTEMPT" = "1" ] || { echo "a re-run is not a new authorized dispatch"; exit 1; }
+      - name: S4-EG1 profile safeguards and dispatch-only pins
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/profile --cwd . --file tests/measurement_ci.py --file tests/measurement_ci_test.py -- python3 -B tests/measurement_ci_test.py
+      - name: S4-EG1 judge adequacy and harness pins
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/contract --cwd . --file tests/gateway_pipeline_vectors.json --file tests/gateway_pipeline_judge.py --file tests/gateway_pipeline_contract_test.py --file tests/gateway_pipeline_live.py --file tests/measurement_ci.py --file .github/workflows/gateway-e2e.yml -- python3 -B tests/gateway_pipeline_contract_test.py
+      - name: Install synthetic DICOM and agent dependencies (no browser)
+        timeout-minutes: 10
+        run: |
+          python3 -m venv "$RUNNER_TEMP/gateway-e2e-python"
+          "$RUNNER_TEMP/gateway-e2e-python/bin/python" -m pip install -r gateway/agent/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
+      - name: S4-EG1 exact five-method selection
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/selection --cwd . --file tests/gateway_pipeline_live.py --file tests/invariants_live.py --file tests/measurement_ci.py --file tests/execution_selection_test.py --file scripts/run-tests.py -- "$RUNNER_TEMP/gateway-e2e-python/bin/python" -B tests/execution_selection_test.py ExecutionSelectionTests.test_gateway_e2e_profile_selects_five_declared_cases
+      - name: S4-EG1 runner environment snapshot
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/environment --cwd . -- sh -c 'df -B1 /; free -b; docker version; docker info; echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"'
+      - name: S4-EG1 real Gateway agent and hospital Orthanc against the KIN stack, five fixed methods
+        timeout-minutes: 28
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/live --cwd . --file gateway/agent/agent.py --file gateway/agent/Dockerfile --file gateway/agent/requirements.txt --file gateway/docker-compose.yml --file gateway/orthanc.json --file scripts/send_cstore.py --file scripts/run-tests.py --file tests/live_test_gate.py --file tests/invariants_live.py --file tests/measurement_ci.py --file tests/gateway_pipeline_live.py --file tests/gateway_pipeline_judge.py --file proxy/nginx.conf.template --file docker-compose.yml --file config/orthanc.json --file api/src/pacs.service.ts --file api/src/pacs.controller.ts --file api/src/gateway-receipt.ts --file api/src/gateway-retry.ts --file api/src/auth.guard.ts --file .github/workflows/gateway-e2e.yml -- "$RUNNER_TEMP/gateway-e2e-python/bin/python" tests/measurement_ci.py --profile gateway-e2e
+      - name: S4-EG1 offline judge of the recorded evidence
+        if: always()
+        run: python3 scripts/record-run.py --run-dir tmp/gateway-e2e-ci/judge --cwd . --file tests/gateway_pipeline_judge.py --file tests/e2e/artifacts/gateway-e2e-ci/scenario-evidence.json --file tests/e2e/artifacts/gateway-e2e-ci/teardown-evidence.json --file tests/e2e/artifacts/gateway-e2e-ci/daemon-empty.json -- python3 -B tests/gateway_pipeline_judge.py --evidence tests/e2e/artifacts/gateway-e2e-ci/scenario-evidence.json --out tmp/gateway-e2e-ci/judge/judge.json
+      - name: Sanitized synthetic Gateway evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-gateway-e2e-results
+          path: |
+            tests/e2e/artifacts/gateway-e2e-ci/
+            tmp/gateway-e2e-ci/
+          if-no-files-found: error
+          retention-days: 7
