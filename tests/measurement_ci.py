@@ -346,7 +346,22 @@ PROFILES = {
              'ci-identity-viewer-fields'),
         ),
     },
+    'gateway-e2e': {
+        'out': ROOT / 'tests/e2e/artifacts/gateway-e2e-ci',
+        'project_prefix': 'kin-gateway-e2e-ci-',
+        # S4-EG1, dispatch only (.github/workflows/gateway-e2e.yml): the real Gateway agent and hospital Orthanc in their
+        # own Compose project against this stack, five fixed methods. The cap is the contract's segment deadlines after A1
+        # (backoff 90/90) plus a teardown margin: (1260+35) = 1295s leaves 205s of the shared 1500s deadline for a stack
+        # whose recorded hosted setup and cleanup took about 80s. A ceiling, not an estimate.
+        'suite_timeout': 1260,
+        'suites': (('gateway_pipeline_live.py', 'GatewayPipelineLive', 'ci-eg1-gateway'),),
+    },
 }
+
+# S4-EG1 A3: the gateway-e2e suite names its own Compose project here before its first compose call, so the project
+# stays findable when the suite is killed on its deadline and run-tests.py never reaches its class cleanup.
+GATEWAY_HANDOFF = 'gateway-project.json'
+GATEWAY_PROJECT = re.compile(r'kin-eg1-gw-[0-9a-f]{12}')
 
 
 def guarded_suite_command(suite, class_name, remaining, unit=None, maximum=540):
@@ -409,6 +424,49 @@ def publish_vr_evidence(stage, out):
     if expected.read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
         raise RuntimeError('VR suite evidence is not a PNG')
     shutil.copyfile(expected, out/expected.name)
+
+
+def gateway_listing(run, out, name, command):
+    # Through run() like every finalizing step, so the exit and output stay in the artifact; None when it failed.
+    if run(name, command, timeout=30, finalizing=True):
+        return None
+    return (out/(name+'.log')).read_text(encoding='utf-8').split()
+
+
+def gateway_unpause(run, out):
+    # A killed suite can leave kin-orthanc paused; it must run again before its logs are read or it is stopped.
+    paused = gateway_listing(run, out, 'gateway-paused', ['docker', 'ps', '-q', '--filter', 'status=paused'])
+    if paused:
+        run('gateway-unpause', ['docker', 'unpause', *paused], timeout=60, finalizing=True)
+
+
+def gateway_remove(run, out):
+    """Remove the handed-off Gateway project after the main stack, then require an empty daemon. True on residue."""
+    problems = []
+    handoff = out/GATEWAY_HANDOFF
+    if handoff.exists():
+        try:
+            project = json.loads(handoff.read_text(encoding='utf-8')).get('project')
+        except (OSError, ValueError, AttributeError):
+            project = None
+        if not isinstance(project, str) or not GATEWAY_PROJECT.fullmatch(project):
+            problems.append('gateway handoff does not name an owned project')
+        else:
+            label = 'label=com.docker.compose.project='+project
+            # Containers first: a network or volume still in use cannot be removed.
+            for kind, listing, removal in (
+                    ('containers', ['docker', 'ps', '-aq', '--filter', label], ['docker', 'rm', '-f']),
+                    ('networks', ['docker', 'network', 'ls', '-q', '--filter', label], ['docker', 'network', 'rm']),
+                    ('volumes', ['docker', 'volume', 'ls', '-q', '--filter', label], ['docker', 'volume', 'rm'])):
+                found = gateway_listing(run, out, 'gateway-'+kind, listing)
+                if found is None or found and run('gateway-remove-'+kind, removal+found, timeout=120, finalizing=True):
+                    problems.append('gateway '+kind+' not removed')
+    remaining = {kind: gateway_listing(run, out, 'daemon-'+kind, command) for kind, command in (
+        ('containers', ['docker', 'ps', '-aq']), ('volumes', ['docker', 'volume', 'ls', '-q']),
+        ('networks', ['docker', 'network', 'ls', '-q', '--filter', 'type=custom']))}
+    (out/'daemon-empty.json').write_text(json.dumps({'remaining': remaining, 'problems': problems}, indent=2),
+                                         encoding='utf-8')
+    return bool(problems) or any(found != [] for found in remaining.values())
 
 
 def seed_source():
@@ -526,10 +584,15 @@ def main(profile_name):
         # Never use this cleanup against a developer or production stack.
         failed = sys.exc_info()[0] is not None
         try:
+            if profile_name == 'gateway-e2e':
+                gateway_unpause(run, out)
             run('services', compose+['logs','--no-color','--timestamps'], timeout=30, finalizing=True)
         finally:
             try:
                 cleanup = run('cleanup', compose+['down','--volumes','--remove-orphans'], timeout=60, finalizing=True)
+                if profile_name == 'gateway-e2e':
+                    # Its own Compose project, never an orphan of this one: removed after the consumer stack.
+                    cleanup = gateway_remove(run, out) or cleanup
                 if cleanup and not failed: raise RuntimeError('CI cleanup failed; see sanitized artifact')
             finally:
                 (out/'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')

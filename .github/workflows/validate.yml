@@ -65,6 +65,10 @@ jobs:
       # the route/SQL/migration/restore/count/client pins (stdlib, no database, no browser).
       - name: S4-U4 gateway retry vectors, wrong-rule adequacy, agent single-writer pins and source pins
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/gateway-retry-source --cwd . --file tests/gateway_retry_vectors.json --file tests/gateway_retry_source_test.py --file gateway/agent/agent.py --file gateway/agent/test_agent.py --file api/src/gateway-retry.ts --file api/src/pacs.service.ts --file api/src/pacs.controller.ts --file api/prisma/schema.prisma --file api/prisma/migrations/20260924140000_gateway_retry_request/migration.sql --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/invariants_live.py --file tests/ops_product_transfer_fixture.py -- python3 -B tests/gateway_retry_source_test.py
+      # S4-EG1 (D-7): the offline judge against one clean and one violating vector per assertion ID, and the harness,
+      # gateway-e2e finally path and dispatch workflow pins read as source (stdlib; no Docker, stack or live profile here).
+      - name: S4-EG1 gateway pipeline judge adequacy and harness pins
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/gateway-pipeline-contract --cwd . --file tests/gateway_pipeline_vectors.json --file tests/gateway_pipeline_judge.py --file tests/gateway_pipeline_contract_test.py --file tests/gateway_pipeline_live.py --file tests/measurement_ci.py --file .github/workflows/gateway-e2e.yml -- python3 -B tests/gateway_pipeline_contract_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py

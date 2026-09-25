@@ -628,6 +628,29 @@ class ExecutionSelectionTests(unittest.TestCase):
                 self.assertNotIn(suite, [row[0] for row in other['suites']], name)
                 self.assertNotIn(unit, [row[2] for row in other['suites']], name)
         print('SELECTION', suite, len(cases), flush=True)
+    def test_gateway_e2e_profile_selects_five_declared_cases(self):
+        # S4-EG1: exactly the five fixed methods of the one local class, in their declared order; no other profile or
+        # unit selects this module. Importing it needs only the stdlib live stack (fixture and agent imports are
+        # method-local), so this case also runs in the dispatch workflow's browser-free interpreter.
+        profile = ci.PROFILES['gateway-e2e']
+        cases = ['test_eg1_1_normal_transfer_and_late_delta', 'test_eg1_2_multibatch_outage_restart_resume',
+                 'test_eg1_3_storage_stall_crash_restart_now_retry', 'test_eg1_4_oversized_f01_boundary_bounded_repeat',
+                 'test_eg1_5_cross_study_convergence_and_negative_controls']
+        self.assertEqual(profile['suites'], (('gateway_pipeline_live.py', 'GatewayPipelineLive', 'ci-eg1-gateway'),))
+        suite, class_name, unit = profile['suites'][0]
+        plan = runner.module_plan('tests/'+suite, unit, 'live', profile['suite_timeout'], class_name)
+        self.assertEqual([item['case'] for item in plan['tests']], [class_name+'.'+name for name in cases])
+        self.assertTrue(all(item['file'] == 'tests/'+suite for item in plan['tests']))
+        self.assertEqual(runner.collect(plan).countTestCases(), 5)
+        cls = getattr(runner.load_module(ROOT/'tests'/suite), class_name)
+        self.assertEqual(cls.__bases__, (unittest.TestCase,))
+        self.assertEqual([name for name in vars(cls) if name.startswith('test')], cases)
+        for name, other in ci.PROFILES.items():
+            if name != 'gateway-e2e':
+                self.assertNotIn(suite, [row[0] for row in other['suites']], name)
+                self.assertNotIn(unit, [row[2] for row in other['suites']], name)
+        print('SELECTION', suite, len(cases), flush=True)
+
     def test_source_pdf_profile_selects_four_declared_native_cases(self):
         filename,class_name,unit=ci.PROFILES['dicom-pdf']['suites'][0]
         plan=runner.module_plan('tests/'+filename,unit,'live',900,class_name)
