@@ -483,7 +483,8 @@ class ClientPins(unittest.TestCase):
         self.assertEqual(MAIN.count('$("#o-refresh")'), 1)
 
     def test_m4_pinned_tokens_do_not_move(self):
-        for token, count in (("gatewayReceipt", 5), ("SEED_ORDERS", 2), ("applyObservation(", 3),
+        # gatewayReceipt 5 -> 6 at S4-F01V: the Not Observed item reads its own receipt (gateway_retry_source_test.py).
+        for token, count in (("gatewayReceipt", 6), ("SEED_ORDERS", 2), ("applyObservation(", 3),
                              ("markObservationUnavailable(", 4), ("applyOrderReconciliation(", 3),
                              ("renderOrderReconciliation(", 2), ("orderReconciliationModel =", 2), ('id="b-print"', 1),
                              ("mergePolledState(", 7)):

@@ -413,7 +413,8 @@ class ServerPins(unittest.TestCase):
         self.assertIn("const receipts = await this.prisma.gatewayReceipt.findMany({ where: { studyUid: { in: pageUids }, institutionId: me } });", listing)
         self.assertIn("gatewayReceipt: s.institutionId === me ? projectGatewayReceipt(receiptByUid.get(uid)) : null,", listing)
         self.assertLess(listing.index("this.prisma.gatewayReceipt.findMany("), listing.index("await this.studyAccess.unchanged(c,access);"))
-        self.assertEqual(SERVICE.count("projectGatewayReceipt("), 1)
+        # 1 -> 2 at S4-F01V: the same projection for an absent own study (tests/gateway_retry_source_test.py pins it).
+        self.assertEqual(SERVICE.count("projectGatewayReceipt("), 2)
         for owner in ("  async bootstrap(c: Caller, query?: any) {", "function toClient("):
             self.assertNotIn("gatewayReceipt", between(SERVICE, owner, "\n  }\n" if owner.startswith("  async") else "\n}\n"))
         project = between(RULE, "export function projectGatewayReceipt(row: any) {", "\n}\n")
@@ -430,7 +431,8 @@ class ServerPins(unittest.TestCase):
 
 class ClientPins(unittest.TestCase):
     def test_main_wires_the_server_receipt_through_the_readable_observation_only(self):
-        self.assertEqual(MAIN.count("gatewayReceipt"), 5)   # fromApi (2), applyObservation (2), renderObservation (1)
+        # fromApi (2), applyObservation (2), renderObservation (2: the row and, since S4-F01V, the Not Observed item)
+        self.assertEqual(MAIN.count("gatewayReceipt"), 6)
         self.assertIn("        gatewayReceipt: s.gatewayReceipt ?? null,\n      });\n    }", MAIN)
         apply = js_function(MAIN, "applyObservation")
         guarded = apply.index("if (next.ok) {")

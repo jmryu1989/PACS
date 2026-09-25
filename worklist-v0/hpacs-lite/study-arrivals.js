@@ -59,6 +59,8 @@
 
   // null/absent means the server could not decide absence (failed or partly unknown enumeration).
   // It stays unknown; turning it into [] would claim every row was checked.
+  // S4-F01V: the own Gateway receipt of an item rides along only when the server sent the key. It is judged later
+  // by the same label and retry rules as the receipt of a row, so an unreadable one never fails the observation.
   function readNotObserved(value,observed){
     if(value===null||value===undefined)return {rows:null};
     if(!Array.isArray(value))return {error:'notObserved:not-array'};
@@ -68,7 +70,7 @@
       if(!row||typeof row!=='object'||Array.isArray(row)||!validUid(row.uid)||seen.has(row.uid)||observed.has(row.uid)
         ||typeof row.origin!=='string'||!row.origin||row.origin.length>32||!validTime(row.createdAt))
         return {error:'notObserved:invalid:'+index};
-      seen.add(row.uid);rows.push({uid:row.uid,origin:row.origin,createdAt:row.createdAt});
+      seen.add(row.uid);rows.push({uid:row.uid,origin:row.origin,createdAt:row.createdAt,...(row.gatewayReceipt===undefined?{}:{gatewayReceipt:row.gatewayReceipt})});
     }
     return {rows};
   }

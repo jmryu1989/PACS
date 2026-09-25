@@ -184,3 +184,81 @@ test('S4-U3 list: only own rows carry the stored receipt; tele, stray and absent
   assert.equal(page.studies.length,1);
   assert.deepEqual(reads.map(x=>[x.where.studyUid.in,x.where.institutionId]),[[[page.studies[0].uid],'hallym']]);
 });
+
+test('S4-F01V list: an absent own study carries only its own receipt, read before the policy re-check; nothing else moves',async()=>{
+  const at=new Date('2020-01-01T00:00:00.000Z'),CREATED=at.toISOString();
+  // 2.25.21/22 have QIDO rows; the rest have no image. 2.25.35 is tele-received by hallym, 2.25.36 is kin-center only.
+  const STATES=[['2.25.21','hallym',null,'gateway'],['2.25.22','hallym',null,'dicom'],['2.25.31','hallym',null,'gateway'],
+    ['2.25.32','hallym',null,'dicom'],['2.25.33','hallym',null,'gateway'],['2.25.34','hallym',null,'gateway'],
+    ['2.25.35','kin-center','hallym','gateway'],['2.25.36','kin-center',null,'gateway']]
+    .map(([uid,institutionId,teleInstitutionId,origin])=>({uid,institutionId,teleInstitutionId,origin,createdAt:at,rs:'W',matched:'U',orderOid:null}));
+  const receipt=(uid,institutionId,epoch,seq,phase,successCount,localCount,errorCode)=>big({studyUid:uid,institutionId,epoch,seq,phase,
+    attempt:1,successCount,localCount,errorCode,receivedAt:new Date('2026-09-24T01:0'+seq+':00.000Z')});
+  // 2.25.34 holds a stray receipt another institution's credentials wrote; 2.25.35/36 hold kin-center's own.
+  const RECEIPTS=[receipt('2.25.21','hallym',V.valid.epoch,4,'retry',3,12,'stow_http'),
+    receipt('2.25.31','hallym',V.valid.epoch,3,'failed',0,1,'instance_exceeds_budget'),
+    receipt('2.25.32','hallym',V.valid.epoch,2,'retry',0,2,'stow_http'),
+    receipt('2.25.34','kin-center',OTHER_EPOCH,5,'failed',0,1,'instance_exceeds_budget'),
+    receipt('2.25.35','kin-center',OTHER_EPOCH,6,'retry',0,1,'stow_http'),
+    receipt('2.25.36','kin-center',OTHER_EPOCH,7,'failed',0,1,'instance_exceeds_budget')];
+  const QIDO=STATES.slice(0,2).map(s=>({'0020000D':{Value:[s.uid]},'00080080':{Value:[s.institutionId]},'00201208':{Value:['3']},
+    '00201206':{Value:['1']},'00100020':{Value:['SYN-'+s.uid]},'00100010':{Value:['SYNTHETIC^PATIENT']}}));
+  const log=[];let qido=QIDO;
+  const pick=(rows,select)=>select?rows.map(r=>Object.fromEntries(Object.keys(select).map(k=>[k,r[k]]))):rows;
+  const prisma={
+    studyState:{findMany:async arg=>{let rows=structuredClone(STATES);const where=arg?.where;
+        if(where?.uid)rows=rows.filter(s=>where.uid.in.includes(s.uid));
+        else if(where?.institutionId)rows=rows.filter(s=>s.institutionId===where.institutionId);
+        else if(where)throw new Error('unexpected where '+JSON.stringify(where));
+        return pick(rows,arg?.select);},
+      create:async()=>{throw new Error('no study should be created');},update:async()=>{throw new Error('no study should be changed');}},
+    gatewayReceipt:{findMany:async arg=>{log.push(['receipt',arg.where.studyUid.in.slice(),arg.where.institutionId,Object.keys(arg.where).sort()]);
+        return structuredClone(RECEIPTS).filter(r=>arg.where.studyUid.in.includes(r.studyUid)&&r.institutionId===arg.where.institutionId);},
+      create:async()=>{throw new Error('the list never writes a receipt');},update:async()=>{throw new Error('the list never writes a receipt');}},
+    order:{findMany:async()=>[]},report:{findMany:async()=>[]},reportDraft:{findMany:async()=>[]},readerAssignment:{findMany:async()=>[]},
+    auditLog:{create:async()=>{throw new Error('no audit expected');}},
+    // The access policy snapshot is the only raw read that names StudyAccessPolicy: the first and the re-check.
+    $queryRaw:async strings=>{if(strings.join('?').includes('"StudyAccessPolicy"'))log.push(['policy']);return [];},
+  };
+  const orthanc={studies:async()=>structuredClone(qido),
+    studyIdentities:async()=>structuredClone(qido).map(r=>({'0020000D':r['0020000D'],'00080080':r['00080080']})),
+    studiesByUid:async uids=>structuredClone(qido).filter(r=>uids.includes(r['0020000D']?.Value?.[0]))};
+  const svc=new PacsService(prisma,orthanc,{},new StudyAccessService(prisma,orthanc,{}));
+  svc.institutions=[{id:'hallym',name:'hallym'},{id:'kin-center',name:'kin-center'}];
+  const caller={institution:'hallym',sub:'synthetic-sub',actor:'synthetic-tech',roles:['technician'],kind:'member'};
+  const projection=(phase,successCount,localCount,errorCode,seq)=>({phase,successCount,localCount,attempt:1,errorCode,
+    serverReceivedAt:'2026-09-24T01:0'+seq+':00.000Z',agentSeq:seq,epoch:V.valid.epoch});
+  const OWN_ABSENT=['2.25.31','2.25.32','2.25.33','2.25.34'];
+  const ABSENT=[{uid:'2.25.31',origin:'gateway',createdAt:CREATED,gatewayReceipt:projection('failed',0,1,'instance_exceeds_budget',3)},
+    {uid:'2.25.32',origin:'dicom',createdAt:CREATED,gatewayReceipt:projection('retry',0,2,'stow_http',2)},
+    {uid:'2.25.33',origin:'gateway',createdAt:CREATED},{uid:'2.25.34',origin:'gateway',createdAt:CREATED}];
+  const receiptRead=uids=>['receipt',uids,'hallym',['institutionId','studyUid']];
+  // The full list and the page that completes it answer the same absence list.
+  for(const query of [undefined,{limit:'100'}]){
+    log.length=0;
+    const r=await svc.listStudies(caller,query);
+    const label=JSON.stringify(query??'full');
+    // failed and retry carry the exact projection (a dicom origin too: origin is no gate); no own receipt keeps 3 keys.
+    assert.deepEqual(r.notObserved,ABSENT,label);
+    assert.deepEqual(r.notObserved.map(x=>Object.keys(x).sort().join()),
+      ['createdAt,gatewayReceipt,origin,uid','createdAt,gatewayReceipt,origin,uid','createdAt,origin,uid','createdAt,origin,uid'],label);
+    // A restored QIDO row carries its receipt as a row, never as absent; tele and foreign studies are not listed.
+    const rows=Object.fromEntries(r.studies.map(s=>[s.uid,s]));
+    assert.deepEqual(Object.keys(rows).sort(),['2.25.21','2.25.22'],label);
+    assert.deepEqual(rows['2.25.21'].gatewayReceipt,projection('retry',3,12,'stow_http',4),label);
+    assert.equal(rows['2.25.22'].gatewayReceipt,null,label);
+    assert.equal(JSON.stringify(r).includes(OTHER_EPOCH),false,label);
+    // One more read, pinned to hallym, holding exactly the absent own UIDs, before the policy re-check.
+    assert.deepEqual(log,[['policy'],receiptRead(['2.25.21','2.25.22']),receiptRead(OWN_ABSENT),['policy']],label);
+  }
+  // Unknown enumeration: absence is null and there is no second receipt read.
+  qido=[...QIDO,{'00080080':{Value:['hallym']}}];log.length=0;
+  const unknown=await svc.listStudies(caller);
+  assert.equal(unknown.notObserved,null);
+  assert.deepEqual(log,[['policy'],receiptRead(['2.25.21','2.25.22']),['policy']]);
+  // A page that does not complete the list: no absence key and no second receipt read.
+  qido=QIDO;log.length=0;
+  const first=await svc.listStudies(caller,{limit:'1'});
+  assert.ok(first.pagination.next);assert.equal('notObserved' in first,false);
+  assert.deepEqual(log,[['policy'],receiptRead([first.studies[0].uid]),['policy']]);
+});
