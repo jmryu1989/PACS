@@ -14,22 +14,33 @@ released out of order) and records every request:
       time) in words; Korean titles on every cell; one GET with the CSRF header and no query.
   03  unknown is never 0: failed, timed-out, missing-source, missing and malformed rows read Unobservable with no digit
       in their value, denominator or time; a zero denominator reads No Studies over a known 0 Studies.
-  04  Query Failed: a first failure shows no table; later failures (500, malformed, 403 restricted and other, 409, 503)
-      keep the last table, dimmed, as the last observation with a fixed sentence and no navigation; server wording never
-      shows; the next good answer restores it.
+  04  Query Failed: a first failure shows no table; later failures (500, malformed, 403 restricted and other, 409 access
+      and 409 scope, 503) keep the last table, dimmed, as the last observation with a fixed sentence and no navigation;
+      server wording never shows; the next good answer restores it.
   05  A->B->A: a late older answer never paints over a newer one; a later request for the older content paints.
       Control: the page without the sequence guard, served through the same route, paints the late answer.
-  06  a 401 empties the section and disables it before the logout request answers; a late answer is not painted; one
-      logout and one navigation.
+  06  a 401 empties the section and disables it before the logout request answers; a late answer is received but never
+      read or painted; one logout and one navigation.
   07  wording and layout: English controls, headings, labels, state words and units with no Hangul; Korean guidance and
       titles; no UXR-SP-34 avoided word; nothing below 12px; no threshold: a tiny and a huge value share every style,
       only the state chip colour follows the state (with its word); keyboard; no browser dialog.
   08  the Gateway Status section is untouched by Refresh Operations (no /api/studies, no study-arrivals.js).
+  09  S5-U6b-F03: with three reads out, the OLDEST read's 401 empties the section at once (Not Loaded, control off) and
+      logs out once; the newer 200 and a second 401 neither repaint nor log out again; one navigation. Control: the 401
+      judged after the sequence check (the order before the fix) keeps the table, never logs out, and paints the newer.
+
+WorklistStorageDOMTest (S5-U6b-F02) slices main.html's shipped #storage element and refreshStorage() into a page with a
+queued fetch: S01 the default names no number; S02 network failure, bad JSON, a missing or malformed TotalDiskSize, 403
+and 500 each read Unobservable with their reason, never 0 or NaN; S03 an observed value and a source-reported 0 carry the
+server-wide scope, the source, the raw bytes and the time; S04 a failure after a success reads Unobservable, the last value
+only in the title with its time; S05 A->B->A with a control (no sequence guard paints the late answer); S06 the same
+units as the Operations row (KinAdminMetrics.formatBytes).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case, as does a page error or a browser dialog.
 """
 from copy import deepcopy
+import json
 from pathlib import Path
 import re
 import sys
@@ -72,6 +83,13 @@ INIT = """(() => {
     const path = new URL(this.url).pathname;
     return json.call(this).finally(() => { window.__jsonDone.push(path); });
   };
+  // Every answer the page receives, read or not: after a session end an answer arrives but its body is never read.
+  window.__fetchDone = [];
+  const fetch = window.fetch;
+  window.fetch = (...args) => fetch(...args).then(response => {
+    window.__fetchDone.push(new URL(response.url).pathname);
+    return response;
+  });
 })();"""
 
 NOW = "2026-09-26T00:00:00.000Z"
@@ -172,19 +190,28 @@ FIXED = {
     "restricted": "검사 접근 범위가 제한된 계정은 기관 운영 지표를 볼 수 없습니다.",
     "forbidden": "이 계정으로는 운영 지표를 조회할 수 없습니다.",
     "changed": "검사 접근 조건이 바뀌었습니다. 다시 조회하세요.",
+    "scope_changed": "집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요.",
     "busy": "서버가 바쁘거나 원천 조회가 지연되었습니다. 잠시 후 다시 조회하세요.",
 }
+# S5-U6b-F03 control: the 401 judged after the sequence check, as before the fix, so an older read's 401 is dropped.
+END_IN_REQUEST = """        if (response.status === 401) {
+          consoleSession.end();
+          throw Object.assign(new Error("session"), { status: 401 });
+        }
+"""
+END_AFTER_SEQUENCE = """        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
+"""
 
 
 def has_hangul(text):
     return any(unicodedata.name(ch, "").startswith("HANGUL") for ch in text)
 
 
-def variant(old):
-    found = ADMIN_HTML.count(old)
+def variant(old, new="", body=ADMIN_HTML, name="admin.html"):
+    found = body.count(old)
     if found != 1:
-        raise AssertionError(f"setup: {old!r} occurs {found} times in admin.html")
-    return ADMIN_HTML.replace(old, "")
+        raise AssertionError(f"setup: {old!r} occurs {found} times in {name}")
+    return body.replace(old, new)
 
 
 class AdminMetricsDOMTest(unittest.TestCase):
@@ -284,6 +311,9 @@ class AdminMetricsDOMTest(unittest.TestCase):
 
     def json_done(self):
         return self.page.evaluate("path => window.__jsonDone.filter(item => item === path).length", METRICS_PATH)
+
+    def fetch_done(self):
+        return self.page.evaluate("path => window.__fetchDone.filter(item => item === path).length", METRICS_PATH)
 
     def open(self, body=None):
         if body is not None:
@@ -398,6 +428,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
                                 ((403, {"code": "ADMIN_METRICS_RESTRICTED", "message": SERVER_WORDING}), FIXED["restricted"]),
                                 ((403, {"message": SERVER_WORDING}), FIXED["forbidden"]),
                                 ((409, {"code": "STUDY_ACCESS_CHANGED", "message": SERVER_WORDING}), FIXED["changed"]),
+                                ((409, {"code": "STUDY_LIST_CHANGED", "message": SERVER_WORDING}), FIXED["scope_changed"]),
                                 ((503, {"message": SERVER_WORDING}), FIXED["busy"])):
             with self.subTest(status=reply[0], sentence=sentence):
                 self.refresh(reply)
@@ -469,11 +500,12 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.assertEqual((0, True, True, False, False),
                          (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["busy"], summary["messageShown"]))
         held.fulfill(json=answer(second=7))
-        self.wait_until(lambda: self.json_done() == 2, "the late answer read")
+        self.wait_until(lambda: self.fetch_done() == 3, "the late answer received")
         self.page.wait_for_timeout(50)
         summary = self.summary()
         self.assertEqual((0, True), (summary["rows"], summary["wrapHidden"]), "nothing is painted after the session ended")
         self.assertNotIn(shown_generated(7), summary["state"])
+        self.assertEqual(1, self.json_done(), "an answer that arrives after the session ended is never read")
         self.held_logouts.pop().fulfill(status=204, body="")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         expect(self.page.locator("#index")).to_have_text("SYN INDEX")
@@ -538,6 +570,268 @@ class AdminMetricsDOMTest(unittest.TestCase):
           document.querySelectorAll('#metrics thead').length,
           [...document.querySelectorAll('#metrics th')].map(th => th.scope)]""")
         self.assertEqual([["아이디", "이름 / 이메일", "기관", "역할", "상태", "작업"], 0, ["col"] * 8], headers)
+
+    def hold_reads(self, n):
+        """n metrics reads in flight, oldest first."""
+        self.replies += ["hold"] * n
+        button = self.page.locator("#metrics-refresh")
+        for index in range(n):
+            button.click()
+            self.wait_until(lambda: len(self.held) == index + 1, f"read {index + 1} in flight")
+        held, self.held = self.held, []
+        return held
+
+    def test_09_an_older_read_401_ends_the_session_at_once(self):
+        self.open()
+        self.refresh((200, answer()))
+        oldest, newer, newest = self.hold_reads(3)
+        self.held_logouts = []
+        oldest.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.logouts == 1, "the logout request")
+        summary = self.summary()
+        self.assertEqual((0, True, True, False, False, "Not Loaded", "mstate not_loaded"),
+                         (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["busy"],
+                          summary["messageShown"], summary["state"], summary["stateClass"]),
+                         "the oldest read's 401 empties the section while two newer reads are still out")
+        newer.fulfill(json=answer(second=8))
+        self.wait_until(lambda: self.fetch_done() == 3, "the newer 200 received")
+        newest.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done() == 4, "the newest 401 received")
+        self.page.wait_for_timeout(50)
+        summary = self.summary()
+        self.assertEqual((0, True, "Not Loaded"), (summary["rows"], summary["wrapHidden"], summary["state"]),
+                         "no answer repaints after the end")
+        self.assertEqual(1, self.json_done(), "no answer after the end is read")
+        self.assertEqual(1, self.logouts, "a second 401 logs out no second time")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
+        self.assertEqual(1, self.logouts)
+        self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
+
+        # Control: the 401 judged after the sequence check (the order before S5-U6b-F03) drops an older read's 401 —
+        # the table stays, nobody logs out, and the newer answer paints.
+        self.logouts, self.held_logouts = 0, None
+        self.open(variant(SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { consoleSession.end(); return; }\n",
+                          body=variant(END_IN_REQUEST, END_AFTER_SEQUENCE)))
+        self.refresh((200, answer()))
+        older, newer = self.hold_reads(2)
+        older.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done() == 2, "the older 401 received")
+        self.page.wait_for_timeout(50)
+        self.assertEqual((11, 0), (self.summary()["rows"], self.logouts), "control: the older 401 was dropped")
+        newer.fulfill(json=answer(second=8))
+        self.wait_until(lambda: self.json_done() == 2, "control: the newer answer read")
+        self.wait_until(lambda: not self.summary()["busy"], "control: the load finished")
+        self.assert_observed(8)
+
+
+# ── S5-U6b-F02: the worklist menubar storage figure (main.html #storage) ──
+
+MAIN_HTML = lf_text(HPACS / "main.html")
+ARRIVALS_JS = lf_text(HPACS / "study-arrivals.js")
+MODEL_OPEN = '<script id="admin-metrics-model">'
+METRICS_MODEL = ADMIN_HTML[ADMIN_HTML.index(MODEL_OPEN) + len(MODEL_OPEN):ADMIN_HTML.index("</script>", ADMIN_HTML.index(MODEL_OPEN))]
+
+
+def extract_function(source, name):
+    """The shipped function text by brace matching (the tests/worklist_arrivals_dom_test.py slicing), with strings and
+    also comments skipped: an apostrophe in a comment must not open a string."""
+    start = source.index(f"function {name}(")
+    depth, quote, escaped, index = 0, None, False, source.index("{", start)
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif source.startswith("//", index):
+            index = source.index("\n", index)
+            continue
+        elif source.startswith("/*", index):
+            index = source.index("*/", index) + 2
+            continue
+        elif char in "'\"`":
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+        index += 1
+    raise ValueError(name)
+
+
+STORAGE_ELEMENT = re.search(r'<div class="mright" id="storage"[^>]*>[^<]*</div>', MAIN_HTML).group(0)
+STORAGE_STATE = "    let storageSeq = 0, storageLast = null;\n"
+STORAGE_GUARD = "      if (seq !== storageSeq) return;\n"
+REFRESH_STORAGE = "async " + extract_function(MAIN_HTML, "refreshStorage")
+# The page's `$`; fetch answers from a queue the case settles, in any order.
+STORAGE_HARNESS = """<!doctype html><html><body><div class="menubar">ELEMENT</div><script>
+const $ = s => document.querySelector(s);
+window.pending = [];
+window.fetch = url => new Promise((resolve, reject) => window.pending.push({ url, resolve, reject }));
+window.settle = (index, status, body) => window.pending[index].resolve(new Response(body, { status }));
+window.fail = index => window.pending[index].reject(new TypeError('SYN network down'));
+window.box = () => { const b = $('#storage'); return { text: b.textContent, title: b.title, state: b.dataset.state }; };
+STATE
+REFRESH
+</script></body></html>"""
+BYTES = 13421772800   # 12.50 GiB
+NO_ZERO = "0으로 두지 않습니다"
+
+
+class WorklistStorageDOMTest(unittest.TestCase):
+    """S01 the shipped default names no number; S02 every first failure is Unobservable with its reason; S03 an
+    observed value and a real 0 carry scope, source and time; S04 a failure after a success does not keep the number as
+    current; S05 A->B->A with a control; S06 the same units as the Operations row. The shipped `#storage` element and
+    refreshStorage() are sliced from main.html; study-arrivals.js and the admin metrics model are loaded as shipped."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def setUp(self):
+        self.errors, self.page = [], None
+        self.load(REFRESH_STORAGE)
+
+    def tearDown(self):
+        self.page.close()
+        self.assertEqual([], self.errors, "page errors")
+
+    def load(self, refresh):
+        """A fresh page for every load: set_content on a used page keeps its top-level const/let, so a second harness
+        would fail on `const $` and the previous refreshStorage would silently stay."""
+        if self.page is not None:
+            self.page.close()
+        self.page = self.browser.new_page()
+        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.page.set_content(STORAGE_HARNESS.replace("ELEMENT", STORAGE_ELEMENT).replace("STATE", STORAGE_STATE)
+                              .replace("REFRESH", refresh))
+        self.page.add_script_tag(content=ARRIVALS_JS)
+        self.page.add_script_tag(content=METRICS_MODEL)
+
+    def read(self, settle):
+        """One refreshStorage(); `settle` answers its request (JS taking the request index `i`)."""
+        return self.page.evaluate(f"""async () => {{ const run = refreshStorage(), i = window.pending.length - 1;
+          {settle}; await run; return box(); }}""")
+
+    def ok(self, body):
+        return self.read(f"settle(i, 200, {json.dumps(json.dumps(body))})")
+
+    def assert_unobservable(self, shown, reason, last=None):
+        self.assertEqual(("Storage Unobservable", "unobservable"), (shown["text"], shown["state"]))
+        self.assertIsNone(re.search(r"\d", shown["text"]), shown["text"])
+        self.assertIn(NO_ZERO, shown["title"])
+        self.assertIn(reason, shown["title"])
+        if last is None:
+            self.assertNotIn("마지막으로 관측한 값", shown["title"])
+        else:
+            self.assertIn(f"마지막으로 관측한 값은 {last}(", shown["title"])
+            self.assertIn("지금 값이 아닐 수 있습니다", shown["title"])
+
+    def assert_observed(self, shown, text, raw):
+        self.assertEqual((text, "observed"), (shown["text"], shown["state"]))
+        for part in ("Orthanc 서버 전체(모든 기관)", "이 기관 몫이 아닙니다", "원천: Orthanc GET /statistics TotalDiskSize",
+                     f"원천 값 {raw}바이트", "이 화면이 답을 받은 시각", "사용률(%)을 보이지 않습니다"):
+            self.assertIn(part, shown["title"])
+        self.assertRegex(shown["title"], r"관측 시각: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\(")
+
+    def test_s01_the_shipped_default_names_no_number(self):
+        shown = self.page.evaluate("() => box()")
+        self.assertEqual(("Storage Unobservable", "not_loaded"), (shown["text"], shown["state"]))
+        self.assertIsNone(re.search(r"\d", shown["text"]))
+        self.assertIn("아직 관측하지 않았습니다", shown["title"])
+        self.assertIn(NO_ZERO, shown["title"])
+        # The old default text and the old write ('0.0GB / -', `+ "GB used"`) are gone; the comment may still name them.
+        self.assertNotIn(">0.0GB / -<", MAIN_HTML)
+        self.assertNotIn('"GB used"', MAIN_HTML)
+        # One writer: every /statistics read and every #storage write is refreshStorage().
+        self.assertEqual(1, MAIN_HTML.count('fetch("/statistics")'))
+        self.assertEqual(1, MAIN_HTML.count('$("#storage")') + MAIN_HTML.count("$('#storage')"))
+        self.assertIn('$("#storage")', REFRESH_STORAGE)
+
+    def test_s02_every_first_failure_is_unobservable_with_its_reason(self):
+        failed, shape = "원천 조회에 실패했습니다.", "응답 형식을 확인할 수 없습니다."
+        cases = [
+            ("fail(i)", failed),
+            ("settle(i, 200, 'SYN not json')", shape),
+            ("settle(i, 200, JSON.stringify({ TotalDiskSizeMB: 12800, CountStudies: 987654 }))", shape),
+            ("settle(i, 200, JSON.stringify({ TotalDiskSize: '-1' }))", shape),
+            ("settle(i, 200, JSON.stringify({ TotalDiskSize: '1.5' }))", shape),
+            ("settle(i, 200, JSON.stringify({ TotalDiskSize: '1e3' }))", shape),
+            ("settle(i, 200, JSON.stringify({ TotalDiskSize: '99999999999999999999' }))", shape),
+            ("settle(i, 200, JSON.stringify({ TotalDiskSize: null }))", shape),
+            ("settle(i, 200, JSON.stringify(['SYN']))", shape),
+            ("settle(i, 200, 'null')", shape),
+            ("settle(i, 403, JSON.stringify({ TotalDiskSizeMB: 1, message: 'SYN' }))", "이 계정으로는 서버 전체 저장량을 볼 수 없습니다."),
+            ("settle(i, 500, JSON.stringify({ TotalDiskSize: '42' }))", "원천이 HTTP 500로 답했습니다."),
+        ]
+        for settle, reason in cases:
+            with self.subTest(settle=settle):
+                self.load(REFRESH_STORAGE)
+                shown = self.read(settle)
+                self.assert_unobservable(shown, reason)
+                self.assertNotIn("NaN", shown["text"] + shown["title"])
+
+    def test_s03_an_observed_value_and_a_real_zero_carry_scope_source_and_time(self):
+        first = self.ok({"TotalDiskSize": str(BYTES), "TotalDiskSizeMB": 1, "CountStudies": 987654})
+        self.assert_observed(first, "Storage 12.50 GiB (Server-wide)", BYTES)
+        self.assertNotIn("987654", first["text"] + first["title"], "only TotalDiskSize is read")
+        # A source that says 0 is a known 0: a number, marked observed, never the Unobservable words.
+        self.assert_observed(self.ok({"TotalDiskSize": "0"}), "Storage 0 B (Server-wide)", 0)
+        self.assert_observed(self.ok({"TotalDiskSize": 42}), "Storage 42 B (Server-wide)", 42)
+        self.assert_observed(self.ok({"TotalDiskSize": " 1536 "}), "Storage 1.50 KiB (Server-wide)", 1536)
+
+    def test_s04_a_failure_after_a_success_does_not_keep_the_number_as_current(self):
+        self.assert_observed(self.ok({"TotalDiskSize": str(BYTES)}), "Storage 12.50 GiB (Server-wide)", BYTES)
+        self.assert_unobservable(self.read("fail(i)"), "원천 조회에 실패했습니다.", last="12.50 GiB")
+        self.assert_unobservable(self.read("settle(i, 200, 'SYN not json')"), "응답 형식을 확인할 수 없습니다.", last="12.50 GiB")
+        self.assert_observed(self.ok({"TotalDiskSize": "0"}), "Storage 0 B (Server-wide)", 0)
+        self.assert_unobservable(self.read("settle(i, 503, '{}')"), "원천이 HTTP 503로 답했습니다.", last="0 B")
+
+    AB = """async () => {
+      const a = refreshStorage(), ia = window.pending.length - 1, b = refreshStorage(), ib = window.pending.length - 1;
+      settle(ib, 200, JSON.stringify({ TotalDiskSize: String(2 ** 30) }));
+      await b;
+      const newer = box();
+      LATE;
+      await a;
+      return [newer, box()];
+    }"""
+
+    def test_s05_a_late_answer_never_paints_over_a_newer_one(self):
+        for late in ("settle(ia, 200, JSON.stringify({ TotalDiskSize: String(2 * 2 ** 30) }))", "fail(ia)"):
+            with self.subTest(late=late):
+                self.load(REFRESH_STORAGE)
+                newer, after = self.page.evaluate(self.AB.replace("LATE", late))
+                self.assertEqual(("Storage 1.00 GiB (Server-wide)", "observed"), (newer["text"], newer["state"]))
+                self.assertEqual(newer, after, "the older answer is dropped")
+        # A->B->A: asking again for the older content is a new request, and it paints.
+        self.assert_observed(self.ok({"TotalDiskSize": str(2 * 2 ** 30)}), "Storage 2.00 GiB (Server-wide)", 2 * 2 ** 30)
+        # Control: without the sequence guard the late older answer paints over the newer one.
+        self.load(variant(STORAGE_GUARD, body=REFRESH_STORAGE, name="refreshStorage"))
+        newer, after = self.page.evaluate(self.AB.replace("LATE", "fail(ia)"))
+        self.assertEqual(("Storage 1.00 GiB (Server-wide)", "Storage Unobservable"), (newer["text"], after["text"]))
+
+    def test_s06_the_same_units_as_the_operations_row(self):
+        values = [0, 1023, 1024, 1536, 2 ** 20, BYTES, 3 * 2 ** 40]
+        shown = [self.ok({"TotalDiskSize": str(value)})["text"] for value in values]
+        expected = self.page.evaluate("values => values.map(v => `Storage ${KinAdminMetrics.formatBytes(v)} (Server-wide)`)", values)
+        self.assertEqual(expected, shown)
+        self.assertEqual(["Storage 0 B (Server-wide)", "Storage 1023 B (Server-wide)", "Storage 1.00 KiB (Server-wide)",
+                          "Storage 1.50 KiB (Server-wide)", "Storage 1.00 MiB (Server-wide)", "Storage 12.50 GiB (Server-wide)",
+                          "Storage 3.00 TiB (Server-wide)"], shown)
 
 
 if __name__ == "__main__":

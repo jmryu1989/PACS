@@ -625,7 +625,7 @@
          title="DICOM 기관명을 알아보지 못해 어느 워크리스트에도 안 뜨는 검사">⚠ Unmatched Studies</div>
     <div class="spacer"></div>
     <div class="mright">Prefetch <input type="checkbox" checked></div>
-    <div class="mright" id="storage">0.0GB / -</div>
+    <div class="mright" id="storage" data-state="not_loaded" title="서버 전체 저장량을 아직 관측하지 않았습니다. 관측 전에는 값을 보이지 않으며 0으로 두지 않습니다.">Storage Unobservable</div>
     <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
     <div class="mright" id="user"></div>
     <div class="mright" id="roles" style="color:#4da3ff" title="Keycloak 렐름 롤"></div>
@@ -2202,6 +2202,57 @@
       if (session?.state !== 'approved' || JSON.stringify(result.owner) !== JSON.stringify([session.institution, session.sub]))
         throw Object.assign(new Error('Study account changed before applying the list.'), {ownerChanged:true});
     }
+    /**
+     * S5-U6b-F02 메뉴바 저장량(`#storage`). Orthanc 서버 전체의 TotalDiskSize(모든 기관의 영상, D11)이고, 운영 지표의
+     * 서버 줄(api/src/pacs.service.ts orthancDiskBytes)과 같은 규칙으로 그 값 하나만 읽는다. 숫자는 범위·원천·이 화면이
+     * 답을 받은 시각과 함께만 보인다. 읽기 전과 실패한 뒤에는 `Storage Unobservable`이다 — 예전 기본값 '0.0GB / -'처럼
+     * 실패가 0으로 읽히지 않고, 앞서 받은 값이 지금 값처럼 남지 않는다(마지막 값은 설명에만 그 시각과 함께 둔다).
+     * 가장 늦게 시작한 읽기만 그린다(A→B→A). 목록 읽기를 실패로 돌리지 않도록 어떤 실패도 밖으로 던지지 않는다.
+     */
+    let storageSeq = 0, storageLast = null;
+    async function refreshStorage() {
+      const seq = ++storageSeq;
+      let bytes = null, reason = "원천 조회에 실패했습니다.";
+      try {
+        const res = await fetch("/statistics");
+        if (res.status === 403) reason = "이 계정으로는 서버 전체 저장량을 볼 수 없습니다.";
+        else if (!res.ok) reason = `원천이 HTTP ${res.status}로 답했습니다.`;
+        else {
+          const raw = await res.json().then(answer => answer?.TotalDiskSize, () => undefined);
+          const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+          if (/^\d+$/.test(text) && Number.isSafeInteger(Number(text))) bytes = Number(text);
+          else reason = "응답 형식을 확인할 수 없습니다.";
+        }
+      } catch (e) {}
+      if (seq !== storageSeq) return;
+      const box = $("#storage");
+      if (!box) return;
+      // The Operations row's units (admin.html KinAdminMetrics.formatBytes): powers of 1024, never rounded to 0.
+      const size = n => {
+        for (const [name, unit] of [["TiB", 2 ** 40], ["GiB", 2 ** 30], ["MiB", 2 ** 20], ["KiB", 2 ** 10]])
+          if (n >= unit) return `${(n / unit).toFixed(2)} ${name}`;
+        return `${n} B`;
+      };
+      let view;
+      try {
+        if (bytes !== null) {
+          const at = new Date().toISOString();
+          view = { state: "observed", text: `Storage ${size(bytes)} (Server-wide)`,
+            title: `Orthanc 서버 전체(모든 기관)의 디스크 사용량입니다. 이 기관 몫이 아닙니다. 원천: Orthanc GET /statistics TotalDiskSize(원천 값 ${bytes}바이트). `
+              + `관측 시각: ${KinStudyArrivals.formatTime(at)}(이 화면이 답을 받은 시각). 전체 용량은 원천이 없어 사용률(%)을 보이지 않습니다.` };
+          storageLast = { bytes, at };
+        } else {
+          view = { state: "unobservable", text: "Storage Unobservable",
+            title: `서버 전체 저장량을 관측하지 못했습니다. 0으로 두지 않습니다. ${reason}` + (storageLast
+              ? ` 마지막으로 관측한 값은 ${size(storageLast.bytes)}(${KinStudyArrivals.formatTime(storageLast.at)})이며 지금 값이 아닐 수 있습니다.` : "") };
+        }
+      } catch (e) {
+        view = { state: "unobservable", text: "Storage Unobservable", title: "서버 전체 저장량을 표시하지 못했습니다. 0으로 두지 않습니다." };
+      }
+      box.dataset.state = view.state;
+      box.textContent = view.text;
+      box.title = view.title;
+    }
     async function load(options = {}) {
       const loadSequence = ++listLoadSequence, epoch = commitEpoch;
       /**
@@ -2242,10 +2293,7 @@
         studyPriority.observed(r.studies.map(s=>s.uid));
         worklistAlerts?.observe(r.studies.map(s=>({uid:s.uid,em:s.state.em})));
         $('#err').textContent = '';
-        try {
-          const st = await (await fetch("/statistics")).json();
-          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB used";
-        } catch (e) {}
+        await refreshStorage();
         // 그리기 실패는 그리기 실패라고 말한다. 데이터는 이미 들어와 있고, 버리지 않는다.
         try { render(); refreshRight(); worklistStartup?.afterList(); }
         catch (e2) { console.error(e2); toast("화면 그리기 오류: " + e2.message, "err"); }
@@ -2285,10 +2333,7 @@
           });
         });
         render(); refreshRight();
-        try {
-          const st = await (await fetch("/statistics")).json();
-          $("#storage").textContent = (st.TotalDiskSizeMB / 1024).toFixed(1) + "GB used";
-        } catch (e) {}
+        await refreshStorage();
       } catch (e) {
         // ── 데모 모드: Orthanc 없이 열람 시 (GitHub Pages 등) 가짜 데이터로 전환 ──
         demoMode = true;

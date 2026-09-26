@@ -997,14 +997,41 @@
   <script>
     /*
      * S5-U6b Operations panel. One GET /api/admin/metrics per "Refresh Operations" and nothing at page boot, so opening
-     * Members stays /api/me plus the member list. Only the newest request paints (A->B->A). A 401 is judged before any
-     * body is read, empties the panel and logs out once. A failed read keeps the last reading, dimmed and marked as the
-     * last observation; the server's own wording is never shown.
+     * Members stays /api/me plus the member list. Only the newest request paints (A->B->A). A 401 from any read in
+     * flight, older ones included, ends the page session before any body is read or any sequence is compared: the panel
+     * empties and the logout happens once. A failed read keeps the last reading, dimmed and marked as the last
+     * observation; the server's own wording is never shown.
      */
     (() => {
       const API = `${location.origin}/api`;
       const $ = selector => document.querySelector(selector);
-      const ops = { seq: 0, ended: false, failed: false, read: null };
+      const ops = { seq: 0, failed: false, read: null };
+
+      /*
+       * The page session's one end. S5-U6a (c274267) gives this page KinConsoleSession: every panel registers a closer
+       * with onEnd(), a 401 on any request calls end() (every closer runs once, then one KinAuth.logout()), and ended()
+       * stops new requests. This panel uses only those three calls. Where the page does not carry KinConsoleSession yet
+       * (this unit's base), the same three calls are served here for this panel alone, so the panel code stays the same
+       * when the two units meet and this fallback can go.
+       */
+      const consoleSession = typeof KinConsoleSession === "object" && KinConsoleSession !== null ? KinConsoleSession : (() => {
+        const closers = [];
+        let ended = false;
+        return {
+          ended: () => ended,
+          onEnd(closer) {
+            if (ended) closer();
+            else closers.push(closer);
+          },
+          end() {
+            if (ended) return;
+            ended = true;
+            // A closer that throws must not leave the panel painted or skip the logout.
+            for (const closer of closers) { try { closer(); } catch (_) {} }
+            KinAuth.logout();
+          },
+        };
+      })();
 
       function setOpsMessage(value) {
         const box = $("#metrics-message");
@@ -1013,8 +1040,16 @@
       }
 
       async function metricsRequest() {
+        if (consoleSession.ended()) throw new Error("session ended");
         const response = await fetch(API + "/admin/metrics", { headers: { "X-KIN-CSRF": "1" } });
-        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
+        // A 401 ends the page session here, before any body is read and before refreshOps compares its sequence: the 401
+        // of an older read is this session's end too (S5-U6b-F03). The end moves ops.seq, so no read of this session paints
+        // after it, whatever order the answers arrive in.
+        if (response.status === 401) {
+          consoleSession.end();
+          throw Object.assign(new Error("session"), { status: 401 });
+        }
+        if (consoleSession.ended()) throw new Error("session ended");
         const payload = await response.json().catch(() => null);
         if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
           { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
@@ -1025,7 +1060,8 @@
       function failureText(error) {
         if (error?.status === 403) return error.code === "ADMIN_METRICS_RESTRICTED"
           ? "검사 접근 범위가 제한된 계정은 기관 운영 지표를 볼 수 없습니다." : "이 계정으로는 운영 지표를 조회할 수 없습니다.";
-        if (error?.status === 409) return "검사 접근 조건이 바뀌었습니다. 다시 조회하세요.";
+        if (error?.status === 409) return error.code === "STUDY_LIST_CHANGED"
+          ? "집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요." : "검사 접근 조건이 바뀌었습니다. 다시 조회하세요.";
         if (error?.status === 503) return "서버가 바쁘거나 원천 조회가 지연되었습니다. 잠시 후 다시 조회하세요.";
         if (error) return "운영 지표를 불러오지 못했습니다.";
         return "조회 응답 형식을 확인할 수 없습니다.";
@@ -1069,31 +1105,30 @@
         state.title = line.title;
       }
 
-      // A 401 ends this page session once: a load in flight is dropped and the panel empties before logout.
-      function endOpsSession() {
-        if (ops.ended) return;
-        ops.ended = true;
+      /*
+       * The page session ended (a 401 on any read of this panel or, with KinConsoleSession, anything else that ends it).
+       * Runs before anything is awaited: moving seq drops every read in flight, and the table, the last reading, the
+       * message and the control go with them; the state line goes back to Not Loaded. The logout is the session end's.
+       */
+      consoleSession.onEnd(() => {
         ops.seq++;
         Object.assign(ops, { read: null, failed: false });
-        $("#metrics-rows").replaceChildren();
-        $("#metrics-wrap").hidden = true;
         $("#metrics-busy").hidden = true;
         $("#metrics-refresh").disabled = true;
         setOpsMessage("");
-        KinAuth.logout();
-      }
+        drawOps();
+      });
 
       async function refreshOps() {
-        if (ops.ended) return;
+        if (consoleSession.ended()) return;
         const seq = ++ops.seq;
         $("#metrics-busy").hidden = false;
         let answer = null, error = null;
         try { answer = await metricsRequest(); }
         catch (e) { error = e ?? new Error("request failed"); }
-        // Only the newest load paints; a session end moves seq too, so a late answer never paints after it.
+        // Only the newest load paints; a session end (a 401 in metricsRequest too) moves seq, so nothing paints after it.
         if (seq !== ops.seq) return;
         $("#metrics-busy").hidden = true;
-        if (error?.status === 401) { endOpsSession(); return; }
         const read = error ? null : window.KinAdminMetrics.readAnswer(answer);
         if (read) {
           Object.assign(ops, { read, failed: false });
@@ -1108,7 +1143,9 @@
 
       $("#metrics-refresh").addEventListener("click", refreshOps);
       // Enabled only for the session the Members console accepts (approved, not demo, admin); init() is shared, not repeated.
+      // A session that ended while /api/me was out keeps the control off: its answer belongs to that session.
       KinAuth.init().then(session => {
+        if (consoleSession.ended()) return;
         if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#metrics-refresh").disabled = false;
       }).catch(() => {});
     })();
