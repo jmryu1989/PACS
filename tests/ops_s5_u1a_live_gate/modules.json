@@ -1,15 +1,13 @@
 [
   {
-    "module": "tests/admin_audit_live.py",
-    "unit": "s5-u5b-admin-audit",
+    "module": "tests/clinician_timeline_live.py",
+    "unit": "s5-u3-clinician-timeline",
     "timeout": 900,
     "cases": [
-      "AdminAuditLive.test_01_refusals_before_any_history",
-      "AdminAuditLive.test_02_member_history_is_attributed_at_write_time",
-      "AdminAuditLive.test_03_a_deleted_member_keeps_its_record_time_history",
-      "AdminAuditLive.test_04_a_study_recreated_under_another_owner_keeps_its_history",
-      "AdminAuditLive.test_05_rows_without_a_record_time_institution_reach_nobody",
-      "AdminAuditLive.test_06_totals_and_paging_count_visible_rows_only"
+      "ClinicianTimelineLive.test_01_same_name_is_not_the_same_patient_and_another_name_does_not_split_one",
+      "ClinicianTimelineLive.test_02_same_patient_id_other_birth_or_sex_is_one_timeline_with_a_conflict_marker",
+      "ClinicianTimelineLive.test_03_tele_referrals_bound_the_receiving_timeline_and_institutions_stay_apart",
+      "ClinicianTimelineLive.test_04_role_gates_shapes_cursors_paging_fields_and_no_audit"
     ],
     "expected": {
       "sweep": null,
