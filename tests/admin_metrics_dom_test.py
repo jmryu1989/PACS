@@ -939,9 +939,11 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.assertNotIn("typeof KinConsoleSession", ADMIN_HTML)
         self.assertNotIn("window.KinConsoleSession", ADMIN_HTML)
         self.open(variant(ATTACH, COUNTING_ATTACH))
-        self.assertEqual(["object", False, 4], self.page.evaluate(
+        # The fifth closer is the S5-U5b Audit / Security closer.
+        self.assertEqual(["object", False, 5], self.page.evaluate(
             "() => [typeof KinConsoleSession, 'KinConsoleSession' in window, window.__registered]"),
-            "a top-level const; Study Access, the members console, Gateway Status and Operations register one closer each")
+            "a top-level const; Study Access, the members console, Gateway Status, Operations and Audit / Security "
+            "register one closer each")
         self.refresh((200, answer()))
         self.held_logouts = []
         self.page.locator("#logout").click()
