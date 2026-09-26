@@ -8,7 +8,7 @@ REQ-S5-U5b-ADMIN-AUDIT / MOVE-PROJECTION / UNCLEAR-HIDDEN / NO-MIGRATION-START
 
 Hosted synthetic stack only, through scripts/run-tests.py:
 
-    python scripts/run-tests.py --module tests/admin_audit_live.py --mode live --unit s5-u5b-admin-audit --timeout 1200
+    python scripts/run-tests.py --module tests/admin_audit_live.py --mode live --unit s5-u5b-admin-audit --timeout 900
 
 One class; the cases run in declaration order and each builds on the history the previous ones wrote (CASES below,
 name and expected seconds on a warm hosted stack):
@@ -97,7 +97,7 @@ class AdminAuditLive(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.stack = LiveStack()
         cls.addClassCleanup(cls.stack.cleanup_test_identities)
-        cls.run = uuid.uuid4().hex[:12]
+        cls.run_id = uuid.uuid4().hex[:12]
         cls.groups: dict[str, tuple[str, str]] = {}
         cls.created_roles: list[str] = []
         cls.gateway_clients: list[str] = []
@@ -125,7 +125,7 @@ class AdminAuditLive(unittest.TestCase):
     # ── owned fixtures ──
     @classmethod
     def create_group(cls, key: str) -> None:
-        name = f"kin-test-{cls.run}-{key.lower()}"
+        name = f"kin-test-{cls.run_id}-{key.lower()}"
         if not GROUP.fullmatch(name):
             raise RuntimeError("invalid synthetic institution name")
         created = cls.stack.kc_admin("POST", "/groups", {"name": name})
@@ -154,7 +154,7 @@ class AdminAuditLive(unittest.TestCase):
     def gateway_token(cls, key: str) -> str:
         """A run-owned gateway credential of institution `key` (azp gw-*, the gateway role only, one group)."""
         role = cls.ensure_role("gateway")
-        client_id = f"gw-kin-test-{cls.run}-u5b-{key.lower()}"
+        client_id = f"gw-kin-test-{cls.run_id}-u5b-{key.lower()}"
         secret = uuid.uuid4().hex + uuid.uuid4().hex
         created = cls.stack.kc_admin("POST", "/clients", {
             "clientId": client_id, "name": f"KIN S5-U5b gateway {key}", "enabled": True, "publicClient": False,
@@ -411,7 +411,7 @@ class AdminAuditLive(unittest.TestCase):
         rows = [
             ("report.draft", uid, {"len": [1, 0, 0], "by": a}),
             ("future.action", uid, {"by": a}),
-            ("agreement.record", "syn-agreement-" + self.run, {"agreementId": "syn-agreement-" + self.run, "from": a, "to": b}),
+            ("agreement.record", "syn-agreement-" + self.run_id, {"agreementId": "syn-agreement-" + self.run_id, "from": a, "to": b}),
             ("admin.user.update", self.member, '{"before":{"id":"' + self.member + '","institution":"' + a + '"'),
             ("study.arrived", uid, {"institutionId": None, "note": a}),
             ("admin.user.list", "admin-users", {"page": 1, "count": 1, "institution": a}),
