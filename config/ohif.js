@@ -37,32 +37,37 @@ function KinViewerBrand({ React }) {
     // S5-UI4: 톱니 메뉴의 About(업스트림 버전·링크 창)은 판독 화면에서 뺀다. 라이선스 표기는 로그인 페이지 하단에 둔다.
     // OHIF 3.9 머리글은 메뉴 항목을 설정으로 끄는 길이 없어 DOM에서 처리한다. React가 소유한 행을 떼어 내면
     // 이후 재조정(언어 변경 등)의 removeChild가 예외를 던져 뷰어가 멈출 수 있으므로, 노드는 제자리에 두고
-    // 표시·클릭·키보드 포커스·보조기술에서 모두 뺀다. Preferences 형제가 있는 메뉴 행만 대상으로 해 영상 문구를 건드리지 않는다.
+    // 표시·클릭·키보드 포커스·보조기술에서 모두 뺀다.
+    // 메뉴 경계는 이 로고(#kin-viewer-brand)를 품은 머리글이다. 아래 CSS가 865f064부터 같은 선택자로 머리글과 그 안의
+    // 오른쪽 드롭다운(.absolute.right-0)을 칠하므로 그 기준을 따른다. 머리글 밖(판독문·검사 설명·영상 주석)의 About은
+    // 주변에 Preferences가 있어도 순회하지 않는다. 머리글을 못 찾으면 아무것도 숨기지 않는다(About이 남는 쪽으로 실패).
     const ABOUT_TITLES = new Set(['About', 'About OHIF Viewer']);
-    const hasLeafText = (element, text) =>
-      [element, ...element.querySelectorAll('*')].some(node => !node.childElementCount && node.textContent?.trim() === text);
-    const dropAboutItem = leaf => {
-      for (let row = leaf; row.parentElement && row.parentElement !== document.body; row = row.parentElement) {
-        const peers = [...row.parentElement.children].filter(peer => peer !== row && peer.localName !== 'svg');
-        if (peers.some(peer => hasLeafText(peer, 'Preferences'))) {
-          row.style.setProperty('display', 'none', 'important');
-          row.setAttribute('inert', '');
-          row.setAttribute('aria-hidden', 'true');
-          row.dataset.kinRemoved = 'about';
-          return true;
-        }
-        if (peers.some(peer => peer.textContent?.trim())) return false;
-      }
-      return false;
+    const menuScope = () => document.getElementById('kin-viewer-brand')?.closest('.bg-secondary-dark.z-20') || null;
+    // 행의 이름은 아이콘 svg(<title> 포함)를 뺀 글자 전체다. 후손 어딘가의 한 글자 조각이 아니라 행 전체가 이름과 같아야 한다.
+    const labelOf = node => node.nodeType === Node.ELEMENT_NODE
+      ? (node.localName === 'svg' ? '' : [...node.childNodes].map(labelOf).join(''))
+      : node.nodeType === 3 ? node.data : '';
+    // 드롭다운은 한 목록에서 같은 태그의 행을 나란히 만든다. 클래스는 마지막 행만 다를 수 있어 비교하지 않는다.
+    const hideAboutRows = scope => {
+      scope.querySelectorAll('*').forEach(row => {
+        if (row.dataset.kinRemoved === 'about' || !ABOUT_TITLES.has(labelOf(row).trim())) return;
+        const peers = [...row.parentElement.children].filter(peer => peer !== row && peer.localName === row.localName);
+        if (!peers.some(peer => labelOf(peer).trim() === 'Preferences')) return;
+        row.style.setProperty('display', 'none', 'important');
+        row.setAttribute('inert', '');
+        row.setAttribute('aria-hidden', 'true');
+        row.dataset.kinRemoved = 'about';
+      });
     };
 
-    // 화면에 노출되는 업스트림 제품명은 중립화한다.
-    const replaceBrandText = root => {
-      root.querySelectorAll?.('*').forEach(element => {
+    // 화면에 노출되는 업스트림 제품명은 중립화한다. 머리글 안의 About 제목은 위 판별이 맡으므로 이름을 바꾸지 않는다
+    // (바꾸면 Preferences가 늦게 붙을 때 더는 About으로 읽히지 않는다).
+    const replaceBrandText = (root, scope) => {
+      [root, ...root.querySelectorAll('*')].forEach(element => {
         if (element.childElementCount) return;
         const text = element.textContent?.trim();
         if (!text) return;
-        if (ABOUT_TITLES.has(text) && dropAboutItem(element)) return;
+        if (ABOUT_TITLES.has(text) && scope?.contains(element)) return;
         if (/OHIF|Open Health Imaging Foundation/i.test(text)) {
           element.textContent = text
             .replace(/Open Health Imaging Foundation/gi, '업스트림 오픈소스 프로젝트')
@@ -70,11 +75,22 @@ function KinViewerBrand({ React }) {
         }
       });
     };
-    replaceBrandText(document.body);
-    const observer = new MutationObserver(records => records.forEach(record =>
-      record.addedNodes.forEach(node => node.nodeType === Node.ELEMENT_NODE && replaceBrandText(node))
-    ));
-    observer.observe(document.body, { childList: true, subtree: true });
+    // 행 이름은 형제 행과 라벨이 모두 붙어야 판별되므로, 머리글 안의 변경(행·라벨 추가, 글자 변경)이 있으면 추가된 노드만이
+    // 아니라 머리글 전체를 다시 본다. 머리글이 새로 붙은 경우도 포함한다.
+    const touchesScope = (scope, record) => {
+      const target = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      return !!target && scope.contains(target) || [...record.addedNodes].some(node => node.contains?.(scope));
+    };
+    const initialScope = menuScope();
+    if (initialScope) hideAboutRows(initialScope);
+    replaceBrandText(document.body, initialScope);
+    const observer = new MutationObserver(records => {
+      const scope = menuScope();
+      if (scope && records.some(record => touchesScope(scope, record))) hideAboutRows(scope);
+      records.forEach(record => record.addedNodes.forEach(node =>
+        node.nodeType === Node.ELEMENT_NODE && replaceBrandText(node, scope)));
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 
     document.title = KIN_VIEWER_DEFAULT_TITLE;
 
