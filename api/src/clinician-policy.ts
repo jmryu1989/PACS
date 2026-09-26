@@ -32,6 +32,8 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
  *  - `GET studies/:uid/viewer-items`: clinician-only에게는 확정본일 때만, 아래 투영으로 좁혀서 준다.
  *  - `GET clinician/studies`: 워크리스트의 기관·원격판독·StudyAccess·페이지 파이프라인에 좁은 행을 얹는다.
  *  - `GET clinician/studies/:uid/report`: 머리 판이 확정본이면 본문과 key image, 아니면 상태만.
+ *  - `GET clinician/studies/:uid/timeline`(S5-U3): 같은 서버 환자 키의 검사 행(목록 행과 같은 칸)과 원본 생년월일·성별의
+ *    관계만. 본문·값은 싣지 않는다(clinicianTimeline).
  *  - S5-U4a 질문 여섯 행(clinician-question.controller.ts): 게이트 통과는 서비스에 닿는다는 뜻일 뿐이고
  *    동작별 역할(view=inbox·답변은 radiologist 등)과 기관·StudyAccess·작성자 경계는 서비스가 판정한다.
  *  - S5-U4c 영상 요청 다섯 행(image-request.controller.ts): 같은 뜻이다. 처리(accept·close·decline)는
@@ -41,7 +43,7 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
  */
 export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'GET authz/dicom', 'POST dicom/lookup', 'GET studies/:uid/viewer-items',
-  'GET clinician/studies', 'GET clinician/studies/:uid/report',
+  'GET clinician/studies', 'GET clinician/studies/:uid/report', 'GET clinician/studies/:uid/timeline',
   // S5-U4a
   'GET questions', 'GET questions/:id', 'GET studies/:uid/questions',
   'POST studies/:uid/questions', 'POST questions/:id/entries', 'POST questions/:id/close',
@@ -351,4 +353,67 @@ export function clinicianListChanged(rows: any[], current: any[]): boolean {
     const state = now.get(row?.uid), seen = row?.state && typeof row.state === 'object' ? row.state : {};
     return !state || CLINICIAN_LIST_PINS.some(key => (state[key] ?? null) !== (seen[key] ?? null));
   });
+}
+
+// ── S5-U3 환자 영상 타임라인 ──
+// REQ-S5-U3-PATIENT-TIMELINE -> RISK-S5-U3-NAME-MERGE / ID-ONLY-IDENTITY / TENANT -> TEST-S5-U3-LIVE / TEST-S5-U3-DOM.
+// 묶는 기준은 서버 환자 키(기관|원본 DICOM PatientID) 하나다. 이름으로 묶으면 다른 사람이 합쳐지고, 화면 덮어쓰기(ov)로
+// 묶으면 기사의 Modify 한 번으로 묶음이 바뀐다. 같은 키인데 원본 생년월일·성별이 다르면 한 사람으로 보이되 관계로 알린다.
+
+/** 두 개 이상의 원본 값 사이의 관계. study-identity.ts IdentityRelation과 같은 세 값이고, 값 자체는 응답에 싣지 않는다. */
+export type ClinicianIdentityRelation = 'match' | 'mismatch' | 'not_comparable';
+
+/** 비교 규칙(study-identity.ts birthKey/sexKey)을 거친 한 검사의 원본 생년월일·성별. 비교할 수 없으면 ''. */
+export interface ClinicianIdentityKeys { birth: string; sex: string }
+
+/** 서버 환자 키. 문자열이 아니거나 비었으면 null이다 — 키가 없는 검사는 누구와도 묶지 않는다. */
+export function clinicianPatientKey(row: any): string | null {
+  return typeof row?.sourcePatientKey === 'string' && row.sourcePatientKey ? row.sourcePatientKey : null;
+}
+
+/**
+ * 타임라인에 드는 목록 행: 기준 검사와 서버 환자 키가 같은 행 전부(기준 검사 포함). 이름·생년월일·덮어쓰기는 읽지 않는다.
+ * 키가 없는 기준 검사는 자기 하나뿐이다. rows는 호출자가 볼 수 있는 목록(listStudies) 그 자체라 기관·원격판독·StudyAccess
+ * 경계가 이미 걸려 있고 여기서 넓히지 않는다 — 다른 기관의 같은 PatientID는 키의 기관 칸이 달라 들어오지 않는다.
+ */
+export function clinicianTimelineMembers(anchor: any, rows: any[]): any[] {
+  const key = clinicianPatientKey(anchor);
+  if (key === null) return [anchor];
+  return (Array.isArray(rows) ? rows : []).filter(row => clinicianPatientKey(row) === key);
+}
+
+/**
+ * 값 여럿의 관계. 비교할 수 있는 값('' 아님)이 둘 이상 다르면 mismatch, 둘 이상이고 모두 비교할 수 있으며 같으면 match,
+ * 그 밖(값 하나, 빈 값이 섞임)은 not_comparable이다. 빈 값을 같다고도 다르다고도 하지 않는다.
+ */
+export function clinicianIdentityRelation(values: readonly string[]): ClinicianIdentityRelation {
+  const list = Array.isArray(values) ? values : [];
+  const known = list.filter(value => typeof value === 'string' && value !== '');
+  if (new Set(known).size > 1) return 'mismatch';
+  return list.length > 1 && known.length === list.length ? 'match' : 'not_comparable';
+}
+
+/**
+ * 타임라인 한 쪽. members는 타임라인 전체(쪽이 아니라), window는 study-page.ts로 자른 그 쪽, snapshots는 그 쪽 행의 판독 상태
+ * 스냅샷(clinicianStudies와 같은 한 SQL 문장)이다. identityOf는 행의 **원본 DICOM** 생년월일·성별을 비교 규칙으로 바꾼다 —
+ * 화면 덮어쓰기 값으로 비교하면 불일치 표식이 Modify 한 번으로 사라진다(S4-U5 P12와 같은 이유).
+ *  - identity: 타임라인 전체의 관계. 쪽마다 같은 값이라 화면은 쪽 사이에서 달라지면 답 전체를 버릴 수 있다.
+ *  - studies[].identity: 그 검사와 기준 검사의 관계. 어느 검사가 다른지 알리되 값은 싣지 않는다.
+ * 행의 나머지 칸은 목록 행(clinicianStudyRow)과 같다 — 본문·초안·작성자 칸은 어느 경우에도 없다.
+ * 환자 키는 응답 본문에만 있고 이어받기 값(주소)에는 없다.
+ */
+export function clinicianTimeline(uid: string, anchor: any, members: any[], window: any, snapshots: any[], serverTime: unknown,
+  identityOf: (row: any) => ClinicianIdentityKeys) {
+  const all = (Array.isArray(members) ? members : []).map(identityOf);
+  const birth = clinicianIdentityRelation(all.map(keys => keys.birth));
+  const sex = clinicianIdentityRelation(all.map(keys => keys.sex));
+  const mine = identityOf(anchor);
+  const byUid = new Map((Array.isArray(snapshots) ? snapshots : []).map(snapshot => [snapshot?.uid, snapshot]));
+  const studies = (Array.isArray(window?.rows) ? window.rows : []).map((row: any) => {
+    const theirs = identityOf(row);
+    return { ...clinicianStudyRow(row, byUid.get(row?.uid)),
+      identity: { birth: clinicianIdentityRelation([mine.birth, theirs.birth]), sex: clinicianIdentityRelation([mine.sex, theirs.sex]) } };
+  });
+  return { uid, patientKey: clinicianPatientKey(anchor), identity: { conflict: birth === 'mismatch' || sex === 'mismatch', birth, sex },
+    studies, serverTime: typeof serverTime === 'string' ? serverTime : null, pagination: clinicianPagination(window?.pagination) ?? null };
 }

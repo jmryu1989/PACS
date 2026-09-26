@@ -380,6 +380,11 @@ class ClinicianPolicyLive(unittest.TestCase):
             self.assertIn(uid, {row["uid"] for row in body["studies"]})
         elif route == "GET clinician/studies/:uid/report":
             self.assertEqual(body, {"uid": uid, "report": {"final": False, "rs": "W"}, "keys": None})
+        elif route == "GET clinician/studies/:uid/timeline":
+            # S5-U3: the anchor study is its own timeline member; the grouping itself is TEST-S5-U3-LIVE's
+            self.assertEqual(sorted(body), sorted(READ["timeline_response_keys"]))
+            self.assertEqual(body["uid"], uid)
+            self.assertIn(uid, {row["uid"] for row in body["studies"]})
         elif route == "GET questions":
             self.assertEqual(sorted(body), ["items", "nextCursor", "owner"])
             self.assertIn(qid, {item["id"] for item in body["items"]})

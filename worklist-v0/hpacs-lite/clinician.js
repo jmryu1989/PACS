@@ -4,6 +4,8 @@
  * (tests/clinician_home_dom_test.py).
  * S5-U2b 뷰어·비교: REQ-S5-U2b-READONLY-VIEWER -> RISK-S5-U2b-WRITE-CONTROL / WRONG-PRIOR -> TEST-S5-U2b-DOM
  * (tests/clinician_viewer_dom_test.py). 영상은 고정 OHIF 창에서 열고, 그 창의 읽기 전용은 config/ohif.js가 서버 /me로 정한다.
+ * S5-U3 환자 타임라인: REQ-S5-U3-PATIENT-TIMELINE -> RISK-S5-U3-NAME-MERGE / ID-ONLY-IDENTITY / TENANT -> TEST-S5-U3-DOM
+ * (tests/clinician_timeline_dom_test.py). 묶음은 서버 GET clinician/studies/:uid/timeline이 정하고, 이 화면은 사용자가 열 때만 읽는다.
  *
  * 그리는 칸은 S5-U1b 두 읽기 응답에 있는 것뿐이다 — GET clinician/studies의 행과 GET clinician/studies/:uid/report.
  * 역할을 보고 컨트롤을 숨기거나 권한을 짐작하지 않는다. 서버가 거절하면(403/404/409) 그 상태 코드·코드·문구를
@@ -58,6 +60,24 @@
   };
   const VIEWER_WINDOW = 'kin-clinician-viewer';
   const STUDY_UID = /^\d+(?:\.\d+)+$/;
+  // S5-U3 타임라인 문구. 상태명·버튼·제목은 영어, 설명·툴팁은 한국어다(AGENTS §4).
+  const TIMELINE = {
+    hint: count => `지금 목록에 같은 환자 키(기관과 원본 DICOM 환자 ID)의 다른 검사가 ${count}건 있습니다. `
+      + 'Show Timeline은 서버가 이 키로 묶은 검사 전부를 출처 기관·검사일과 함께 읽습니다. '
+      + '이름이나 화면에서 고친 환자 ID로는 묶지 않고, 원본 생년월일·성별이 서로 다르면 표시합니다.',
+    loading: '환자 타임라인을 불러오는 중입니다…',
+    failed: '환자 타임라인을 불러오지 못했습니다.',
+    malformed: '타임라인 응답 형식을 확인할 수 없습니다. 새로고침하세요.',
+    ready: count => `같은 환자 키의 검사 ${count}건을 검사일 최신순으로 표시합니다.`,
+    empty: '같은 환자 키의 다른 검사가 없습니다.',
+    noKey: '이 검사에는 서버 환자 키가 없어 다른 검사와 묶지 않습니다.',
+    conflict: fields => `같은 환자 키로 묶인 검사 사이에 원본 DICOM ${fields}이 서로 다릅니다. 같은 사람의 검사인지 확인한 뒤 비교하세요.`,
+    unknown: fields => `일부 검사는 원본 DICOM ${fields}이 없거나 형식이 달라 비교하지 못했습니다.`,
+    birth: '원본 DICOM 생년월일이 선택한 검사와 다릅니다.',
+    sex: '원본 DICOM 성별이 선택한 검사와 다릅니다.',
+    notListed: '이 검사는 지금 목록에 없어 열 수 없습니다. 목록을 새로고침하세요.',
+  };
+  const RELATIONS = ['match', 'mismatch', 'not_comparable'];
 
   const $ = selector => document.querySelector(selector);
   let owner = null;
@@ -71,6 +91,9 @@
   let refocus = null;
   let channel = null;
   let leaving = false;
+  // 사용자가 Show Timeline을 누른 뒤에만 참이다. 그 뒤 고르는 검사는 타임라인을 이어서 읽는다(이 문서 안에서만).
+  let timelineOpen = false;
+  let timelineSeq = 0;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -508,6 +531,7 @@
     $('#viewer-note').textContent = TEXT.viewer;
     const compare = $('#compare');
     if (compare) compare.remove();
+    clearTimeline();
     const empty = $('#detail-empty');
     empty.textContent = note || TEXT.pick;
     empty.hidden = false;
@@ -586,6 +610,7 @@
     const mine = ++reportSeq;
     markSelected(uid);
     paintIdentity(row);
+    paintTimelineShell(row);
     clearReport();
     setReport('loading', TEXT.reportLoading);
     setKeys(TEXT.keysLoading, null);
@@ -605,6 +630,269 @@
       setReport('failed', TEXT.reportFailed, describe(error));
       setKeys(TEXT.keysFailed, null);
     });
+  }
+
+  // ── 환자 타임라인(S5-U3) ──
+  // 묶음은 서버가 정한다. 이 화면은 받은 행이 모두 기준 검사와 같은 서버 환자 키인지 다시 볼 뿐, 이름·생년월일로 묶거나 넓히지 않는다.
+  // 생년월일·성별 표식도 서버가 원본 DICOM 값으로 낸 관계만 쓴다 — 행에 보이는 값은 기사가 고친 값일 수 있어 비교에 쓰지 않는다.
+  // 읽기는 사용자가 Show Timeline을 눌렀을 때만 시작한다. 한 번에 서버가 볼 수 있는 검사 전체를 다시 열거하는 읽기라 검사를
+  // 고를 때마다 자동으로 부르지 않는다.
+
+  /** A->B->A: 요청 번호와 기준 검사를 함께 본다(판독 읽기와 같은 이유). */
+  function timelineFresh(mine, uid) {
+    return !leaving && mine === timelineSeq && selected === uid;
+  }
+
+  /** 선택이 바뀌거나 내려갈 때: 진행 중인 타임라인 읽기의 답을 버리고 칸을 지운다. */
+  function clearTimeline() {
+    timelineSeq++;
+    const old = $('#timeline');
+    if (old) old.remove();
+  }
+
+  function setTimelineState(state, text, detail) {
+    const box = $('#timeline-state');
+    if (!box) return;
+    box.dataset.state = state;
+    box.querySelector('.state-text').textContent = text;
+    box.querySelector('.state-detail').textContent = detail || '';
+    $('#timeline-retry').hidden = state !== 'failed';
+  }
+
+  /** 받은 행·표식을 모두 지운다. 다음 읽기나 닫기 전에 이전 기준 검사의 표식이 남지 않게 한다. */
+  function resetTimelineBody() {
+    $('#timeline-conflict').hidden = true;
+    $('#timeline-conflict').querySelector('.state-detail').textContent = '';
+    $('#timeline-note').hidden = true;
+    $('#timeline-note').textContent = '';
+    $('#timeline-list').replaceChildren();
+    $('#timeline-list').hidden = true;
+    setTimelineState('idle', '');
+  }
+
+  function setTimelineOpen(open) {
+    const toggle = $('#timeline-toggle');
+    toggle.textContent = open ? 'Hide Timeline' : 'Show Timeline';
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    $('#timeline-body').hidden = !open;
+  }
+
+  /**
+   * 고른 검사의 타임라인 자리. 지금 목록에 같은 서버 환자 키의 다른 검사가 있을 때만 만든다(Comparison 후보와 같은 조건) —
+   * 키가 없거나 혼자인 검사에는 묶을 것이 없다. 식별 줄·판독문·키 이미지 다음, 뷰어 줄 앞에 두어 원본 생년월일·성별 표식이
+   * Open Viewer·Compare보다 먼저 보이게 한다.
+   */
+  function paintTimelineShell(row) {
+    clearTimeline();
+    const key = patientKey(row);
+    const peers = key === null ? 0 : studies.filter(other => other.uid !== row.uid && patientKey(other) === key).length;
+    if (!peers) return;
+    const section = node('section');
+    section.id = 'timeline';
+    section.dataset.uid = row.uid;
+    section.setAttribute('aria-labelledby', 'timeline-title');
+    section.style.marginBottom = '14px';
+    const head = node('div', 'panel-head');
+    const title = node('h3', null, 'Patient Timeline');
+    title.id = 'timeline-title';
+    const toggle = node('button');
+    toggle.type = 'button';
+    toggle.id = 'timeline-toggle';
+    toggle.setAttribute('aria-controls', 'timeline-body');
+    toggle.addEventListener('click', () => toggleTimeline());
+    head.append(title, toggle);
+    const body = node('div');
+    body.id = 'timeline-body';
+    const state = node('div', 'state');
+    state.id = 'timeline-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.id = 'timeline-retry';
+    retry.addEventListener('click', () => { if (selected !== null) loadTimeline(selected); });
+    state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    // 원본 생년월일·성별이 다르다는 표식. 색만이 아니라 상태명과 문장으로 알린다(UXR-G-12).
+    const conflict = node('div', 'state');
+    conflict.id = 'timeline-conflict';
+    conflict.dataset.state = 'conflict';
+    conflict.setAttribute('role', 'alert');
+    conflict.style.borderColor = 'var(--danger-line)';
+    conflict.style.background = 'var(--danger-bg)';
+    conflict.style.color = 'var(--danger-text)';
+    conflict.append(node('p', 'state-text', 'Identity Conflict'), node('p', 'state-detail'));
+    conflict.querySelector('.state-text').style.fontWeight = '700';
+    const note = node('p', 'muted');
+    note.id = 'timeline-note';
+    const list = node('ol');
+    list.id = 'timeline-list';
+    list.style.margin = '0';
+    list.style.paddingLeft = '20px';
+    list.style.maxHeight = '360px';
+    list.style.overflow = 'auto';
+    body.append(state, conflict, note, list);
+    section.append(head, node('p', 'muted', TIMELINE.hint(peers)), body);
+    $('#viewer-slot').before(section);
+    resetTimelineBody();
+    setTimelineOpen(timelineOpen);
+    if (timelineOpen) loadTimeline(row.uid);
+  }
+
+  function toggleTimeline() {
+    if (leaving || selected === null || !$('#timeline')) return;
+    timelineOpen = !timelineOpen;
+    setTimelineOpen(timelineOpen);
+    if (timelineOpen) {
+      loadTimeline(selected);
+      return;
+    }
+    // 닫으면 진행 중인 읽기의 답도 버린다. 다시 열면 처음부터 읽는다.
+    timelineSeq++;
+    resetTimelineBody();
+  }
+
+  /**
+   * 한 쪽의 타임라인 칸 검사(쪽 모양 자체는 목록과 같은 checkPage가 본다). 요청한 기준 검사의 답이어야 하고, 환자 키와 전체
+   * 관계는 모든 쪽에서 같아야 하며, 행마다 기준 검사와 같은 서버 환자 키와 관계 표식이 있어야 한다. 하나라도 어긋나면 받은
+   * 쪽까지 모두 버린다 — 서버가 다른 환자의 행을 섞어 보내도 이 화면에서 한 사람으로 그려지지 않는다.
+   */
+  function readTimelinePage(uid, data, head) {
+    const identity = data.identity;
+    const key = data.patientKey;
+    if (data.uid !== uid || !(key === null || (typeof key === 'string' && key))
+        || !identity || typeof identity !== 'object' || typeof identity.conflict !== 'boolean'
+        || !RELATIONS.includes(identity.birth) || !RELATIONS.includes(identity.sex)
+        || identity.conflict !== (identity.birth === 'mismatch' || identity.sex === 'mismatch'))
+      throw new Error(TIMELINE.malformed);
+    const page = { patientKey: key, conflict: identity.conflict, birth: identity.birth, sex: identity.sex };
+    if (head && ['patientKey', 'conflict', 'birth', 'sex'].some(name => head[name] !== page[name])) throw new Error(TIMELINE.malformed);
+    for (const row of data.studies) {
+      const mark = row.identity;
+      if ((key === null ? row.uid !== uid : patientKey(row) !== key)
+          || !mark || typeof mark !== 'object' || !RELATIONS.includes(mark.birth) || !RELATIONS.includes(mark.sex))
+        throw new Error(TIMELINE.malformed);
+    }
+    return page;
+  }
+
+  /**
+   * 기준 검사의 타임라인을 끝까지 읽는다. 목록과 같이 서명된 이어받기 값(pagination.next)을 그대로 after로 넘기고, 중간 쪽이
+   * 실패하면 받은 쪽도 버린다. 기준 검사가 답에 없거나 키 없는 답에 다른 검사가 있으면 형식 오류다.
+   */
+  async function loadTimeline(uid) {
+    if (leaving || selected !== uid || !$('#timeline')) return;
+    const mine = ++timelineSeq;
+    resetTimelineBody();
+    setTimelineState('loading', TIMELINE.loading);
+    const loaded = [];
+    let total = null;
+    let after = null;
+    let head = null;
+    try {
+      do {
+        const data = await request(`/clinician/studies/${encodeURIComponent(uid)}/timeline?limit=${PAGE_LIMIT}`
+          + (after === null ? '' : `&after=${encodeURIComponent(after)}`));
+        if (!timelineFresh(mine, uid)) return;
+        const page = checkPage(data, loaded, total, after);
+        head = readTimelinePage(uid, data, head);
+        loaded.push(...data.studies);
+        total = page.total;
+        after = page.next;
+        if (after !== null) setTimelineState('loading', `${TIMELINE.loading} (${loaded.length} / ${total})`);
+      } while (after !== null);
+      // 검사 하나로는 같다·다르다가 나올 수 없다. 그런 답은 다른 묶음의 관계를 실어 온 것이다.
+      if (!loaded.some(row => row.uid === uid) || (head.patientKey === null && loaded.length !== 1)
+          || (loaded.length < 2 && (head.birth !== 'not_comparable' || head.sex !== 'not_comparable')))
+        throw new Error(TIMELINE.malformed);
+      paintTimeline(uid, head, loaded);
+    } catch (error) {
+      if (!timelineFresh(mine, uid)) return;
+      resetTimelineBody();
+      setTimelineState('failed', TIMELINE.failed, describe(error));
+    }
+  }
+
+  function fieldNames(birth, sex) {
+    return birth && sex ? '생년월일과 성별' : birth ? '생년월일' : '성별';
+  }
+
+  function paintTimeline(uid, head, rows) {
+    if (head.patientKey === null) {
+      setTimelineState('nokey', TIMELINE.noKey);
+      return;
+    }
+    if (head.conflict) {
+      const box = $('#timeline-conflict');
+      box.querySelector('.state-detail').textContent = TIMELINE.conflict(fieldNames(head.birth === 'mismatch', head.sex === 'mismatch'));
+      box.hidden = false;
+    }
+    if (rows.length < 2) {
+      setTimelineState('empty', TIMELINE.empty);
+      return;
+    }
+    const birthUnknown = head.birth === 'not_comparable', sexUnknown = head.sex === 'not_comparable';
+    if (birthUnknown || sexUnknown) {
+      $('#timeline-note').textContent = TIMELINE.unknown(fieldNames(birthUnknown, sexUnknown));
+      $('#timeline-note').hidden = false;
+    }
+    const list = $('#timeline-list');
+    list.replaceChildren(...[...rows].sort(byStudyDate).map(row => timelineItem(row, uid)));
+    list.hidden = false;
+    setTimelineState(head.conflict ? 'conflict' : 'ready', TIMELINE.ready(rows.length));
+  }
+
+  function mismatchTag(label, explanation) {
+    const tag = node('span', 'tag', label);
+    tag.title = explanation;
+    tag.style.borderColor = 'var(--danger-line)';
+    tag.style.color = 'var(--danger-text)';
+    tag.style.marginRight = '6px';
+    return tag;
+  }
+
+  function timelineItem(row, anchor) {
+    const item = node('li');
+    item.dataset.uid = row.uid;
+    item.style.margin = '8px 0';
+    const current = row.uid === anchor;
+    if (current) item.setAttribute('aria-current', 'true');
+    const line = node('p');
+    line.style.margin = '0';
+    line.append(node('strong', null, day(row.date)), ` · ${dash(row.modality)} · ${dash(row.desc)} `, statusBadge(row.report));
+    const where = node('p', 'muted', dash(row.institutionName));
+    if (row.tele === true) where.append(' ', teleTag());
+    const who = node('p', 'muted', `${dash(row.name)} · ${dash(row.id)} · ${day(row.birth)} · ${dash(row.sex)}`);
+    for (const part of [where, who]) part.style.margin = '0';
+    item.append(line, where, who);
+    const tags = [];
+    if (row.identity.birth === 'mismatch') tags.push(mismatchTag('Birth Date Mismatch', TIMELINE.birth));
+    if (row.identity.sex === 'mismatch') tags.push(mismatchTag('Sex Mismatch', TIMELINE.sex));
+    if (tags.length) {
+      const marks = node('p');
+      marks.style.margin = '4px 0 0';
+      marks.append(...tags);
+      item.append(marks);
+    }
+    const view = node('button', null, current ? 'Viewing' : 'View');
+    view.type = 'button';
+    view.dataset.timelineView = '';
+    view.style.marginTop = '4px';
+    if (current) view.disabled = true;
+    else if (!byUid.has(row.uid)) {
+      view.disabled = true;
+      view.title = TIMELINE.notListed;
+    } else view.addEventListener('click', () => viewFromTimeline(row.uid));
+    item.append(view);
+    return item;
+  }
+
+  /** 타임라인의 다른 검사를 현재 검사로 고른다. 목록의 행을 누른 것과 같고, 열려 있던 타임라인은 새 기준 검사로 다시 읽는다. */
+  function viewFromTimeline(uid) {
+    if (leaving || !byUid.has(uid)) return;
+    rove(uid, false);
+    select(uid);
+    const toggle = $('#timeline-toggle');
+    if (toggle) toggle.focus();
   }
 
   // ── 세션 ──

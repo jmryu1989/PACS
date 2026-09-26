@@ -4,10 +4,10 @@
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report",
+  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
-  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report",
+  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report", "GET clinician/studies/:uid/timeline",
     "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
     "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
   "must_stay_denied": [
@@ -78,6 +78,7 @@
     {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items/:id/revisions", "key": "GET studies/:uid/viewer-items/:id/revisions", "allowed": false},
     {"method": 0, "controller": "/", "handler": "clinician/studies", "key": "GET clinician/studies", "allowed": true},
     {"method": 0, "controller": "/", "handler": "/clinician/studies/:uid/report/", "key": "GET clinician/studies/:uid/report", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "clinician/studies/:uid/timeline", "key": "GET clinician/studies/:uid/timeline", "allowed": true},
     {"method": 1, "controller": "/", "handler": "clinician/studies", "key": "POST clinician/studies", "allowed": false},
     {"method": 0, "controller": "/", "handler": "studies", "key": "GET studies", "allowed": false},
     {"method": 0, "controller": "/", "handler": "bootstrap", "key": "GET bootstrap", "allowed": false},
@@ -134,7 +135,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 123, "public": 4, "session": 2, "business": 16, "denied": 101},
+    "counts": {"routes": 124, "public": 4, "session": 2, "business": 17, "denied": 101},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -211,7 +212,8 @@
       "GET studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "requests of one owned study (tele institution 404), the clinician's own only; declared in allowed_additions"},
       "POST studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "external-image or image-transfer request create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); a record, never a transfer; declared in allowed_additions"},
       "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
-      "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"}
+      "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"},
+      "GET clinician/studies/:uid/timeline": {"decision": "business", "unit": "S5-U3", "commit": "156866c", "basis": "patient timeline: the listed studies with the anchor's server patient key (listStudies scope, one-snapshot report status, list row fields) and the source birth/sex relation only, paged with limit required; no bodies or values; declared in allowed_additions"}
     }
   },
   "controller_decorators": {
@@ -507,6 +509,12 @@
         "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
       },
+      "GET clinician/studies/:uid/timeline": {
+        "query": "limit=100",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+      },
       "GET questions": {
         "query": "view=mine",
         "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
@@ -615,6 +623,11 @@
     "list_row_keys": ["uid", "id", "name", "birth", "sex", "date", "acc", "desc", "modality", "count", "series", "sourcePatientKey", "institutionName", "tele", "report"],
     "overlay_display_keys": ["id", "name", "birth", "sex", "date", "acc", "desc", "modality"],
     "pagination_keys": ["next", "total", "offset", "limit"],
+    "timeline_response_keys": ["uid", "patientKey", "identity", "studies", "serverTime", "pagination"],
+    "timeline_identity_keys": ["conflict", "birth", "sex"],
+    "timeline_row_extra_keys": ["identity"],
+    "timeline_row_identity_keys": ["birth", "sex"],
+    "timeline_relations": ["match", "mismatch", "not_comparable"],
     "report_final_keys": ["final", "rs", "action", "version", "repDoc", "confirm"],
     "report_open_keys": ["final", "rs"],
     "report_body_keys": ["findings", "conclusion", "recommendation"],
