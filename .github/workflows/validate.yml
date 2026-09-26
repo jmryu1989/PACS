@@ -69,6 +69,12 @@ jobs:
       # gateway-e2e finally path and dispatch workflow pins read as source (stdlib; no Docker, stack or live profile here).
       - name: S4-EG1 gateway pipeline judge adequacy and harness pins
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/gateway-pipeline-contract --cwd . --file tests/gateway_pipeline_vectors.json --file tests/gateway_pipeline_judge.py --file tests/gateway_pipeline_contract_test.py --file tests/gateway_pipeline_live.py --file tests/measurement_ci.py --file .github/workflows/gateway-e2e.yml -- python3 -B tests/gateway_pipeline_contract_test.py
+      # S5-U1a: the clinician-only token/route fixtures against an independent model of the guard, every controller
+      # route classified (public, allowlisted or denied) and compared with invariants_live ROUTES, and the role-list
+      # pins across guard, member console, Keycloak client and realm (stdlib). The S5-U1a live module runs only
+      # through scripts/run-tests.py on a hosted synthetic stack and is not a step of this job.
+      - name: S5-U1a clinician-only default denial fixtures, route classification and role-list source pins
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py -- python3 -B tests/clinician_policy_test.py
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
