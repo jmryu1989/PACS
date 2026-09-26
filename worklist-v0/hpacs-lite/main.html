@@ -476,6 +476,34 @@
     .menubar .logout { font: inherit; font-size: 12px; background: none; border: 0; border-radius: 4px; padding: 6px 8px; }
     .menubar .logout:hover { background: var(--kin-row-hover); }
     .menubar .logout:focus-visible { outline: 2px solid var(--kin-accent); outline-offset: 1px; }
+    /* G-LIVE-GEO: 판독 레이아웃의 받아쓰기 기하는 1366×768 이상에서 52px 한 줄 헤더를 전제로 한다. 헤더가 두 줄(73px)이
+       되자 보고서 버튼 줄이 21px 내려가 Dictate의 중심을 소견 서랍이 덮었다(CI 측정). 줄바꿈은 좁을 때의 안전장치로만
+       남기고 1366px 이상에서는 내용이 한 줄에 들어가게 한다 — 상태는 두 줄로 쌓고, 사용자·기관 문구는 정한 폭 안에서 줄을
+       바꾸고(말줄임은 기관명을 가린다; 시험의 가장 긴 기관명이 세 줄로 52px 안), 폭이 줄수록 여백을 줄인다. 1680px 미만에서는
+       브랜드 글자와 아직 없는 Config·Help의 이름을 아이콘+툴팁으로 접는다. 접힌 글자도 DOM에 남아 화면낭독기가 읽는다. */
+    .menubar-status { display: grid; grid-template-columns: auto auto; column-gap: 8px; align-content: center; flex: none; margin-left: 10px; }
+    .menubar-status .mright { margin-left: 0; line-height: 1.3; }
+    .menubar-status input { margin: 0 0 0 2px; }
+    /* 폭 0 + 최소 100%: 연결 끊김 문구가 두 열의 폭을 넓히지 않고 그 폭 안에서 줄을 바꾼다. */
+    .menubar-status #dbstat { grid-column: 1 / -1; width: 0; min-width: 100%; white-space: normal; }
+    @media (max-width: 1919px) {
+      .menubar { padding: 0 16px; }
+      .brand { margin-right: 12px; }
+      .menubar .tabs { margin-right: 8px; }
+      .menubar .tabs > div { padding: 0 12px; }
+      .menubar .item { padding: 8px; }
+      .mright, .menubar-status { margin-left: 8px; }
+      .menubar-session #user { max-width: 10em; }
+      .menubar-session #roles { max-width: 15em; }
+    }
+    @media (max-width: 1679px) {
+      .menubar { padding: 0 12px; gap: 0; }
+      .brand { margin-right: 8px; }
+      .menubar .tabs > div { padding: 0 10px; }
+      .menubar .item { padding: 8px 6px; }
+      .brand > span, .menubar .item-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+                                             overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+    }
 
     .userfilter {
       min-height: 59px;
@@ -622,23 +650,25 @@
 <body>
 
   <div class="menubar">
-    <div class="brand"><img src="kin-emblem-j1.svg" alt=""><span>KOREA IMAGING NETWORK</span></div>
+    <div class="brand" title="KOREA IMAGING NETWORK"><img src="kin-emblem-j1.svg" alt=""><span>KOREA IMAGING NETWORK</span></div>
     <div class="tabs">
       <div class="on" data-tab="Radiology">Radiology</div>
       <div data-tab="Technician">Technician</div>
     </div>
     <div class="item" id="m-home">⌂ Home</div>
     <button class="item" id="m-reading" type="button">Reading Workspace</button>
-    <div class="item" title="추후 구현">⚙ Config</div>
-    <div class="item" title="추후 구현">? Help</div>
+    <div class="item" title="Config — 추후 구현">⚙ <span class="item-label">Config</span></div>
+    <div class="item" title="Help — 추후 구현">? <span class="item-label">Help</span></div>
     <div class="item" id="m-filmbox">⇄ Filmbox</div>
     <!-- 기관을 못 알아본 검사. 관리자에게만 보인다 — 평소엔 0건이라 숨어 있다. -->
     <div class="item" id="m-unassigned" style="display:none;color:#d8b24a"
          title="DICOM 기관명을 알아보지 못해 어느 워크리스트에도 안 뜨는 검사">⚠ Unmatched Studies</div>
     <div class="spacer"></div>
-    <div class="mright">Prefetch <input type="checkbox" checked></div>
-    <div class="mright" id="storage">0.0GB / -</div>
-    <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
+    <div class="menubar-status" role="group" aria-label="Status">
+      <div class="mright">Prefetch <input type="checkbox" checked></div>
+      <div class="mright" id="storage">0.0GB / -</div>
+      <div class="mright" id="dbstat" title="앱 상태(판독문·RS·매칭)가 어디에 저장되는지">● 확인 중</div>
+    </div>
     <!-- 세션 묶음은 줄지 않는 한 덩어리다. 헤더가 좁으면 앞 항목이 다음 줄로 내려가도 Log out은 화면 안에 남는다. -->
     <div class="menubar-session" role="group" aria-label="Session">
       <div class="mright" id="user"></div>
