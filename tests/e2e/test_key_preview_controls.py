@@ -11,7 +11,7 @@ def flat(text):return re.sub(r'\s+','',text)
 
 class KeyPreviewControlsE2E(ReportWindowE2E):
     def open_keys(self,p,keys):
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         for key in keys:
             p.locator('#report-preview').get_by_role('checkbox',name=key['item']['title'],exact=True).check();self.ready(p)
         return self.ready(p)

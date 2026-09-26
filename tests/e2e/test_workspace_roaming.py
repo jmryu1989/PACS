@@ -58,6 +58,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         self.action(y,'Load from Account','불러왔습니다');self.assertEqual(self.stored(y),layout);self.same_sizes(y,layout);self.shot(y,'portrait-restored')
         y.set_viewport_size(dict(width=768,height=1024))
         self.open_toolbar_group(y,'#layout-reset')
+        self.open_toolbar_group(y,'#b-history')
         for selector in ['#thumbwrap img','#clinical','#t-mod','#b-history','#layout-reset','#workspace-server-menu summary']:self.reachable(y,selector)
         self.assertEqual(self.stored(y),layout);self.shot(y,'small-clamped')
         for key,value in [('findings','Roam findings'),('conclusion','Roam conclusion'),('recommendation','Roam recommendation')]:expect(y.locator('#'+key)).to_have_value(value)

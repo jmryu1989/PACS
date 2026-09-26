@@ -466,6 +466,7 @@ class WorklistE2E(unittest.TestCase):
         fixture = self.fixture()
         page = self.login()
         self.select(page, fixture)
+        self.open_toolbar_group(page, "#b-defer")
         page.locator("#b-defer").click()
         expect(page.locator("#reasonmodal")).to_be_visible()
         expect(page.locator("#reason-ok")).to_be_disabled()
@@ -474,6 +475,7 @@ class WorklistE2E(unittest.TestCase):
         self.assertEqual(self.state(fixture)["rs"], "W")
         self.assertEqual(self.versions(fixture), [])
         page.locator("#findings").fill(fixture.secret)
+        self.open_toolbar_group(page, "#b-defer")
         page.locator("#b-defer").click()
         page.locator("#reason-choices").get_by_text("기타", exact=True).click()
         expect(page.locator("#reason-ok")).to_be_disabled()
@@ -492,11 +494,13 @@ class WorklistE2E(unittest.TestCase):
         before = self.versions(fixture)
         page = self.login()
         self.select(page, fixture)
+        self.open_toolbar_group(page, "#b-unread")
         page.locator("#b-unread").click()
         expect(page.locator("#reason-ok")).to_be_disabled()
         page.locator("#reason-cancel").click()
         self.assertEqual(self.versions(fixture), before)
         self.assertEqual(self.state(fixture)["rs"], "A")
+        self.open_toolbar_group(page, "#b-unread")
         page.locator("#b-unread").click()
         page.locator("#reason-choices").get_by_text("내용 정정 필요", exact=True).click()
         self.commit(page, fixture, "#reason-ok", "W")
@@ -549,6 +553,7 @@ class WorklistE2E(unittest.TestCase):
         page = self.login()
         self.select(page, fixture)
         expect(page.locator("#findings")).to_have_value(draft_text)
+        self.open_toolbar_group(page, "#b-addendum")
         with page.expect_response(lambda r: r.request.method == "POST"
                                   and r.url.endswith(f"/studies/{fixture.uid}/report/commit")) as reply:
             page.locator("#b-addendum").click()
@@ -585,6 +590,7 @@ class WorklistE2E(unittest.TestCase):
 
         final_text = f"{draft_text} — written after reading v2"
         page.locator("#findings").fill(final_text)
+        self.open_toolbar_group(page, "#b-addendum")
         self.commit(page, fixture, "#b-addendum", "A")
         rows = self.versions(fixture)
         self.assertEqual([row["action"] for row in rows], ["approve", "addendum", "addendum"])

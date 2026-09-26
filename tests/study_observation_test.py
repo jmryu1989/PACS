@@ -462,6 +462,17 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S5-UI3 (UXR-G-08) report button rows: the More menu, its four sections and the ids given to the two base report buttons
+# that had none (Except, Mark CVR); markup only, the page script is unchanged. tests/report_actions_dom_test.py pins how
+# they behave.
+for _kind, _extra in {
+    "ids": {"report-more": 1, "report-more-reading": 1, "report-more-status": 1, "report-more-editor": 1,
+            "report-more-output": 1, "b-except": 1, "b-mark-cvr": 1},
+    "functions": {},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {
