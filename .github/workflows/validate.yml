@@ -107,6 +107,10 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/narrow-image-layout --cwd . --file worklist-v0/hpacs-lite/main.html --file tests/worklist_narrow_layout_dom_test.py --file tests/worklist_image_thumbnails_dom_test.py --file worklist-v0/hpacs-lite/worklist-selection.js -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_narrow_layout_dom_test.py
+      - name: S5-UI1 worklist header keeps Log out on screen and keyboard reachable
+        timeout-minutes: 3
+        run: |
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/worklist-header/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-header --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/worklist_header_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_header_dom_test.py
       - name: Existing study arrivals and preserved reading inputs
         timeout-minutes: 3
         run: |
@@ -241,6 +245,11 @@ jobs:
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-gateway-status-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/admin_gateway_status_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_gateway_status_dom_test.py
+      # S5-U6b: the shipped Members console Operations section against in-test GET /admin/metrics answers (no stack, network
+      # or credentials); unknown never reads as 0, a late answer must not paint, and the guard-less control must.
+      - name: S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-metrics-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file tests/admin_metrics_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_metrics_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
@@ -1013,6 +1022,10 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/gateway-retry-server --cwd . --file api/src/gateway-retry.ts --file api/src/pacs.service.ts --file api/src/study-access.service.ts --file tests/gateway_retry_vectors.json --file tests/gateway_retry_server_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/gateway_retry_server_test.cjs
       - name: S4-U5 compiled study identity rule over every shared vector and the real list path over a fake store
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-identity-server --cwd . --file api/src/study-identity.ts --file api/src/pacs.service.ts --file api/src/orthanc.service.ts --file api/src/study-access.service.ts --file tests/study_identity_vectors.json --file tests/study_identity_server_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_identity_server_test.cjs
+      # S5-U6b: KIN_ADMIN_METRICS_SERVER makes the compiled cases mandatory here (a missing module fails the run); the
+      # page model half reads the shipped admin.html through the second read-only mount.
+      - name: S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/admin-metrics --cwd . --file api/src/pacs.service.ts --file api/src/admin.controller.ts --file worklist-v0/hpacs-lite/admin.html --file tests/admin_metrics_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/worklist-v0:/worklist-v0:ro" -e KIN_ADMIN_METRICS_SERVER=/app/dist/pacs.service --entrypoint node kin-api:ci --test /tests/admin_metrics_test.cjs
       - name: Compiled dictation PCM WAV byte boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-audio --cwd . --file api/src/dictation-audio.ts --file tests/dictation_audio_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dictation_audio_test.cjs
       - name: Compiled dictation API bounds, engine protocol and disconnect lifecycle
