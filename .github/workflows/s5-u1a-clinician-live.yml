@@ -61,7 +61,7 @@ jobs:
         run: |
           mkdir "$GITHUB_WORKSPACE/s5-live"
           [ "$RUN_ATTEMPT" = "1" ] || { echo "a re-run is not a new authorized attempt"; exit 1; }
-          sha="$(python3 -B tools/tests/ops_s5_u1a_live_gate/run_live.py resolve --event-name "$EVENT_NAME" --input-sha "$INPUT_SHA" --input-modules="$INPUT_MODULES"--modules-out "$GITHUB_WORKSPACE/s5-live-modules.json")"
+          sha="$(python3 -B tools/tests/ops_s5_u1a_live_gate/run_live.py resolve --event-name "$EVENT_NAME" --input-sha "$INPUT_SHA" --input-modules="$INPUT_MODULES" --modules-out "$GITHUB_WORKSPACE/s5-live-modules.json")"
           echo "candidate: $sha"
           cat "$GITHUB_WORKSPACE/s5-live-modules.json"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
