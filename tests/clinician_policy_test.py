@@ -6,16 +6,19 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-15
+here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
+route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
 No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more:
   1. tests/clinician_policy_fixtures.json judged by an independent Python model of the guard rules
      (member state, clinician-only detection, gateway identity closure, route key from Nest metadata,
      allowlist decision). The shipped TypeScript is judged against the same fixtures only by the hosted
      live module; a green run here is a spec check, not runtime proof of the TS.
-  2. The current controller decorator inventory (own parser, same decorator shapes as invariants_live)
-     compared with the invariants_live ROUTES table read as text, with the 104-row planning baseline,
-     and with the policy allowlist: every current non-public route is denied for clinician-only unless
-     it is explicitly listed, and nothing listed is missing from the controllers.
+  2. The current controller decorator inventory (own parser: decorator runs, so a @Public() belongs to the handler it
+     decorates, same decorator table as invariants_live) compared with the invariants_live ROUTES table read as text,
+     with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
+     business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
      the gate sits between the membership check and the CSRF rule in the guard.
 """
@@ -24,7 +27,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -37,6 +42,8 @@ ADMIN = API / "admin.service.ts"
 KEYCLOAK = API / "keycloak.service.ts"
 REALM = ROOT / "keycloak" / "kin-realm.json"
 MANIFEST = ROOT / "tests" / "invariants_live.py"
+LIVE_MODULE = ROOT / "tests" / "clinician_policy_live.py"
+LOCKFILE = ROOT / "api" / "package-lock.json"
 FIXTURES = json.loads((ROOT / "tests" / "clinician_policy_fixtures.json").read_text(encoding="utf-8"))
 
 APP_ROLES = set(FIXTURES["app_roles"])
@@ -47,6 +54,11 @@ ALLOWED = set(FIXTURES["session_routes"]) | set(FIXTURES["business_routes"])
 PUBLIC = set(FIXTURES["public_routes"])
 METHOD_ENUM = {int(k): v for k, v in FIXTURES["request_method_enum"].items()}
 BASELINE = set(FIXTURES["baseline_inventory"]["routes"])
+SESSION = set(FIXTURES["session_routes"])
+BUSINESS = set(FIXTURES["business_routes"])
+MATRIX = FIXTURES["route_matrix"]
+DENIED_GROUPS = MATRIX["denied"]
+DENIED_ROUTES = {route for routes in DENIED_GROUPS.values() for route in routes}
 
 
 # ── independent model of the guard ──
@@ -102,45 +114,135 @@ def allowed(key):
 
 HTTP_DECORATORS = {"All": "ALL", "Get": "GET", "Post": "POST", "Put": "PUT", "Delete": "DELETE",
                    "Patch": "PATCH", "Options": "OPTIONS", "Head": "HEAD", "Search": "SEARCH", "Sse": "GET"}
+ROUTE_NAMES = "|".join(map(re.escape, HTTP_DECORATORS))
+ROUTE_TEXT = re.compile(rf"@({ROUTE_NAMES})\(\s*(?:(['\"])(.*?)\2)?\s*\)", re.S)
+DECORATOR_START = re.compile(r"@([A-Za-z_]\w*)\(")
+
+
+def call_end(source, open_paren):
+    """Offset just past the ')' that closes source[open_paren]; parentheses inside string literals do not count."""
+    depth, quote, index = 0, None, open_paren
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "'\"`":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    raise AssertionError(f"unbalanced decorator call at offset {open_paren}")
+
+
+def decorator_runs(source):
+    """Decorators separated only by whitespace are one run: {'kind', 'items': [(name, start, end)]}.
+
+    A run right after '(' or ',' decorates a parameter, one followed by `class` decorates the class, any other
+    decorates a member. Reading runs, not the text between two route decorators, is what attributes a @Public()
+    to the handler it sits on whatever the order (S5-U1c D5).
+    """
+    runs, cursor = [], 0
+    while (first := DECORATOR_START.search(source, cursor)) is not None:
+        items, at = [], first.start()
+        while (match := DECORATOR_START.match(source, at)) is not None:
+            end = call_end(source, match.end() - 1)
+            items.append((match.group(1), match.start(), end))
+            at = end
+            while at < len(source) and source[at].isspace():
+                at += 1
+        before = source[:first.start()].rstrip()
+        after = source[items[-1][2]:].lstrip()
+        if before.endswith(("(", ",")):
+            kind = "parameter"
+        elif re.match(r"(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\b", after):
+            kind = "class"
+        else:
+            kind = "member"
+        runs.append({"kind": kind, "items": items})
+        cursor = items[-1][2]
+    return runs
+
+
+def controller_handlers(path, source):
+    """[(method, child path, public, offset)] per handler; raises on a decorator shape the inventory could misread."""
+    handlers = []
+    for run in decorator_runs(source):
+        names = [name for name, _start, _end in run["items"]]
+        routes = [item for item in run["items"] if item[0] in HTTP_DECORATORS]
+        publics = [index for index, name in enumerate(names) if name == "Public"]
+        if run["kind"] != "member":
+            if routes or publics:
+                raise AssertionError(f"{path.name}: route or @Public() decorator on a {run['kind']}: {names}")
+            continue
+        if not routes:
+            if publics:
+                raise AssertionError(f"{path.name}: @Public() on a member without a route decorator: {names}")
+            continue
+        if len(routes) != 1 or len(publics) > 1:
+            raise AssertionError(f"{path.name}: one handler carries {names}")
+        name, start, end = routes[0]
+        parsed = ROUTE_TEXT.fullmatch(source, start, end)
+        if parsed is None:
+            raise AssertionError(f"{path.name}: unreadable route decorator {source[start:end]!r}")
+        # the order the four public handlers use; Nest would accept either, the pin keeps one reading of the file
+        if publics and publics[0] > names.index(name):
+            raise AssertionError(f"{path.name}: @Public() must sit above its route decorator: {names}")
+        handlers.append((HTTP_DECORATORS[name], (parsed.group(3) or "").strip("/"), bool(publics), start))
+    return handlers
+
+
+def previous_public_attribution(source):
+    """S5-U1a's reading, kept only as the D5 control: a @Public() between two route decorators went to the later one."""
+    out, previous = {}, 0
+    for match in re.finditer(rf"@({ROUTE_NAMES})\(\s*(?:(['\"])(.*?)\2)?\s*\)", source):
+        out[match.group(3) or ""] = "@Public()" in source[previous:match.start()]
+        previous = match.end()
+    return out
 
 
 def controller_inventory():
     """(method, route) -> {'file', 'public'}; raises when a decorator shape cannot be read."""
-    names = "|".join(map(re.escape, HTTP_DECORATORS))
-    decorator = re.compile(rf"@({names})\(\s*(?:(['\"])(.*?)\2)?\s*\)")
-    route_call = re.compile(rf"@({names}|RequestMapping)\s*\(")
+    route_call = re.compile(rf"@({ROUTE_NAMES}|RequestMapping)\s*\(")
     prefix_re = re.compile(r"@Controller\(\s*(?:(['\"])(.*?)\1)?\s*\)")
     found = {}
     for path in sorted(API.rglob("*.controller.ts")):
         source = path.read_text(encoding="utf-8")
-        prefix_match = prefix_re.search(source)
-        if prefix_match is None:
-            raise AssertionError(f"{path.name}: @Controller() not readable")
-        prefix = ((prefix_match.group(2) if prefix_match else "") or "").strip("/")
-        matches = list(decorator.finditer(source))
-        parsed = {m.start() for m in matches}
-        unparsed = [m.group(1) for m in route_call.finditer(source) if m.start() not in parsed]
+        prefixes = list(prefix_re.finditer(source))
+        if len(prefixes) != 1:
+            raise AssertionError(f"{path.name}: expected one readable @Controller(), found {len(prefixes)}")
+        prefix = (prefixes[0].group(2) or "").strip("/")
+        handlers = controller_handlers(path, source)
+        read = {offset for *_rest, offset in handlers}
+        unparsed = [m.group(0) for m in route_call.finditer(source) if m.start() not in read]
         if unparsed:
             raise AssertionError(f"{path.name}: unreadable HTTP decorators {unparsed}")
-        previous_end = prefix_match.end()
-        for match in matches:
-            child = (match.group(3) or "").strip("/")
+        for method, child, public, _offset in handlers:
             route = "/".join(part for part in (prefix, child) if part)
-            block = source[previous_end:match.start()]
-            key = (HTTP_DECORATORS[match.group(1)], route)
+            key = (method, route)
             if key in found:
                 raise AssertionError(f"duplicate route {key}")
-            found[key] = {"file": path.name, "public": "@Public()" in block}
-            previous_end = match.end()
+            found[key] = {"file": path.name, "public": public}
     return found
 
 
-def manifest_routes():
+def manifest_rows():
+    """The invariants_live ROUTES keys in file order; a repeated key would be collapsed silently by the dict."""
     text = MANIFEST.read_text(encoding="utf-8")
     start = text.index("ROUTES: dict[tuple[str, str], Route] = {")
     end = text.index("\n}\n", start)
-    rows = re.findall(r'\("([A-Z]+)", "([^"]+)"\): Route\(', text[start:end])
-    return {(m, p) for m, p in rows}
+    return re.findall(r'\("([A-Z]+)", "([^"]+)"\): Route\(', text[start:end])
+
+
+def manifest_routes():
+    return set(manifest_rows())
 
 
 def ts_array(source, name):
@@ -216,45 +318,61 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual({c["key"] for c in FIXTURES["route_metadata_cases"] if c["allowed"]}, ALLOWED)
         self.assertTrue(any(c["key"] is None for c in FIXTURES["route_metadata_cases"]))
 
-    def test_05_every_current_route_is_classified_and_denied_unless_listed(self):
+    def test_05_every_route_has_exactly_one_matrix_row_and_the_counts_reconcile(self):
+        """REQ-S5-U1c-ROUTE-COMPLETENESS / RISK-S5-U1c-NEW-ROUTE-LEAK: controllers - rows = {} and rows - controllers = {}."""
         inventory = controller_inventory()
         keys = {m + " " + p for m, p in inventory}
         public = {m + " " + p for (m, p), meta in inventory.items() if meta["public"]}
         self.assertEqual(public, PUBLIC, "the public four must stay exactly these")
         self.assertEqual(self.guard.count("SetMetadata('public', true)"), 1)
-        self.assertEqual(manifest_routes(), set(inventory), "controllers and invariants_live ROUTES disagree")
-        self.assertTrue(ALLOWED <= keys, f"allowlisted routes missing from controllers: {sorted(ALLOWED - keys)}")
-        self.assertTrue(ALLOWED.isdisjoint(public), "public routes never appear in the clinician allowlist")
-        decisions = {}
-        for (method, path) in sorted(inventory):
-            key = method + " " + path
-            if key in PUBLIC:
-                continue
-            decisions[key] = allowed(key)
-        self.assertEqual({k for k, v in decisions.items() if v}, ALLOWED)
-        denied = sorted(k for k, v in decisions.items() if not v)
-        # structural, not a magic count: everything that is neither public nor listed is denied,
-        # and the inventory can only have grown since the 104-row planning baseline
-        self.assertEqual(len(denied), len(inventory) - len(PUBLIC) - len(ALLOWED))
-        self.assertGreaterEqual(len(inventory), len(BASELINE))
+        listed = Counter(route for routes in (FIXTURES["public_routes"], FIXTURES["session_routes"],
+                                              FIXTURES["business_routes"], *DENIED_GROUPS.values()) for route in routes)
+        self.assertEqual(sorted(route for route, n in listed.items() if n > 1), [], "a route has more than one matrix row")
+        rows = set(listed)
+        self.assertEqual(sorted(keys - rows), [], "controller routes without a route_matrix row: classify each one "
+                         "(session/business with a live case, or a denied basis); nothing is denied by subtraction")
+        self.assertEqual(sorted(rows - keys), [], "route_matrix rows without a controller route")
+        # D8: the same route set in the controllers, the invariants_live ROUTES table and this matrix, in both directions
+        manifest = {m + " " + p for m, p in manifest_rows()}
+        self.assertEqual(sorted(keys - manifest), [], "controller routes missing from invariants_live ROUTES")
+        self.assertEqual(sorted(manifest - keys), [], "invariants_live ROUTES rows without a controller route")
+        counts = {"routes": len(inventory), "public": len(PUBLIC), "session": len(SESSION), "business": len(BUSINESS),
+                  "denied": len(DENIED_ROUTES)}
+        self.assertEqual(counts, MATRIX["counts"], "route_matrix counts are the reconciled numbers of this head")
+        self.assertEqual(len(manifest_rows()), counts["routes"])
+        self.assertEqual(counts["routes"], counts["public"] + counts["session"] + counts["business"] + counts["denied"])
+        self.assertEqual(set(DENIED_GROUPS), set(MATRIX["basis_legend"]), "every denied row names a basis of the legend")
+        self.assertTrue(all(DENIED_GROUPS.values()))
+        # the model's decision on every row: session and business pass, every denied row is refused
+        self.assertTrue(ALLOWED.isdisjoint(PUBLIC) and ALLOWED.isdisjoint(DENIED_ROUTES))
+        for key in sorted(keys - PUBLIC):
+            self.assertEqual(allowed(key), key in ALLOWED, key)
+        # every route added since the 104-row baseline has its own row with decision, unit, commit and basis
         added = sorted(keys - BASELINE)
         removed = sorted(BASELINE - keys)
         self.assertEqual(removed, [], "a baseline route disappeared; re-check the planning inventory")
-        # A route added since the baseline is allowed only when a unit declared it as its own new read row.
+        post = MATRIX["post_baseline"]
+        self.assertEqual(sorted(post), added, "exactly the routes added since the baseline carry a post_baseline row")
+        where = {**{r: "public" for r in PUBLIC}, **{r: "session" for r in SESSION}, **{r: "business" for r in BUSINESS},
+                 **{r: "denied" for r in DENIED_ROUTES}}
+        for key, row in sorted(post.items()):
+            with self.subTest(post_baseline=key):
+                self.assertEqual(set(row), {"decision", "unit", "commit", "basis"})
+                self.assertEqual(row["decision"], where[key], "the post_baseline decision is the row the route sits in")
+                self.assertRegex(row["commit"], r"^[0-9a-f]{7,40}$")
+                self.assertRegex(row["unit"], r"^S[0-9]-")
+                self.assertGreater(len(row["basis"].strip()), 20)
+                self.assertEqual(allowed(key), row["decision"] in ("session", "business"))
         declared = set(FIXTURES["allowed_additions"])
-        self.assertTrue(declared <= set(added), f"declared additions are not new routes: {sorted(declared - set(added))}")
+        self.assertEqual({k for k, row in post.items() if row["decision"] == "business"}, declared)
         self.assertTrue(declared <= ALLOWED)
-        for key in added:
-            if key in declared:
-                continue
-            self.assertFalse(allowed(key), f"route added since the 104 baseline must not be silently allowed: {key}")
         for key in FIXTURES["must_stay_denied"]:
-            self.assertIn(key, keys, key)
-            self.assertFalse(allowed(key), f"{key} carries drafts, writer fields or non-final bodies")
+            self.assertIn(key, DENIED_ROUTES, f"{key} carries drafts, writer fields or non-final bodies")
         print("CLINICIAN_POLICY_INVENTORY " + json.dumps({
-            "current_routes": len(inventory), "public": sorted(public), "allowed": sorted(ALLOWED),
-            "denied_for_clinician_only": len(denied), "baseline_routes": len(BASELINE),
-            "added_since_baseline": added, "removed_since_baseline": removed,
+            "counts": counts, "public": sorted(public), "allowed": sorted(ALLOWED),
+            "denied_by_basis": {basis: len(routes) for basis, routes in sorted(DENIED_GROUPS.items())},
+            "baseline_routes": len(BASELINE), "removed_since_baseline": removed,
+            "newly_classified": {key: post[key]["decision"] for key in added},
             "allowed_additions": sorted(declared),
         }, ensure_ascii=True, sort_keys=True))
 
@@ -458,6 +576,196 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
         self.assertIn("return this.read(uid, query, c, id, null);", items)
         self.assertIn("return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,", items)
+
+    def test_11_decorator_runs_attribute_public_to_the_handler_it_decorates(self):
+        """S5-U1c D5. The S5-U1a reading gave a @Public() found between two route decorators to the later route."""
+        def read(source):
+            return [handler[:3] for handler in controller_handlers(Path("sample.controller.ts"), source)]
+
+        above = "@Controller('x')\nexport class A {\n  @Public()\n  @Get('a')\n  a() {}\n\n  @Get('b')\n  b() {}\n}\n"
+        self.assertEqual(read(above), [("GET", "a", True), ("GET", "b", False)])
+        one_line = ("@Controller()\nexport class A{constructor(private s: S){}\n"
+                    "  @Get('a') a(@Req() r:any,@Query() q:any){return this.s.a(r, q);}\n"
+                    "  @Post() @HttpCode(200)\n  b(@Body() b:any, @Res({ passthrough: true }) res:any){}\n}\n")
+        self.assertEqual(read(one_line), [("GET", "a", False), ("POST", "", False)])
+        below = "@Controller()\nexport class A {\n  @Get('a')\n  @Public()\n  a() {}\n\n  @Get('b')\n  b() {}\n}\n"
+        # control: the previous reading marks b public and a not — the opposite of what Nest applies
+        self.assertEqual(previous_public_attribution(below), {"a": False, "b": True})
+        refused = {
+            "public below its route": below,
+            "public on the class": "@Public()\n@Controller()\nexport class A {\n  @Get('a')\n  a() {}\n}\n",
+            "public without a route": "@Controller()\nexport class A {\n  @Public()\n  helper() {}\n}\n",
+            "public on a parameter": "@Controller()\nexport class A {\n  @Get('a')\n  a(@Public() x: any) {}\n}\n",
+            "two route decorators": "@Controller()\nexport class A {\n  @Get('a')\n  @Post('a')\n  a() {}\n}\n",
+            "computed path": "@Controller()\nexport class A {\n  @Get(PATH)\n  a() {}\n}\n",
+        }
+        for label, source in refused.items():
+            with self.subTest(refused=label), self.assertRaises(AssertionError):
+                controller_handlers(Path("sample.controller.ts"), source)
+        # the real controllers: each public handler's own run is exactly @Public() directly above its route decorator
+        found = []
+        for path in sorted(API.rglob("*.controller.ts")):
+            for run in decorator_runs(path.read_text(encoding="utf-8")):
+                names = [name for name, _start, _end in run["items"]]
+                if "Public" in names:
+                    self.assertEqual((run["kind"], len(names), names[0]), ("member", 2, "Public"), path.name)
+                    self.assertIn(names[1], HTTP_DECORATORS, path.name)
+                    found.append(path.name)
+        self.assertEqual(sorted(found), ["auth.controller.ts"] * 3 + ["pacs.controller.ts"])
+
+    def test_12_inventory_readers_see_every_route_decorator_and_method(self):
+        """S5-U1c D6 (RequestMethod members, unreadable decorators) and D8 (the invariants_live reader)."""
+        known = set(HTTP_DECORATORS) | set(FIXTURES["controller_decorators"]["non_route"])
+        seen = set()
+        for path in sorted(API.rglob("*.controller.ts")):
+            for run in decorator_runs(path.read_text(encoding="utf-8")):
+                seen |= {name for name, _start, _end in run["items"]}
+        self.assertEqual(sorted(seen - known), [], "a controller decorator the inventory neither reads nor classifies")
+        for path in sorted(API.rglob("*.ts")):
+            if path.name.endswith(".controller.ts"):
+                continue
+            with self.subTest(outside=path.name):
+                self.assertIsNone(re.search(rf"@(Controller|RequestMapping|{ROUTE_NAMES})\s*\(", path.read_text(encoding="utf-8")),
+                                  "a controller or route outside *.controller.ts is invisible to both inventories")
+        # the model knows every method the inventory can produce; a number it does not know fails closed, and the
+        # allowlist names only GET and POST, so a member the model lacks can never match a row in model or product
+        pin = FIXTURES["request_method_pin"]
+        lock = json.loads(LOCKFILE.read_text(encoding="utf-8"))
+        self.assertEqual(lock["packages"]["node_modules/" + pin["package"]]["version"], pin["lock_version"],
+                         "Nest moved: re-read RequestMethod of the new version, then update request_method_enum and this pin")
+        self.assertEqual(sorted(METHOD_ENUM), list(range(len(METHOD_ENUM))))
+        self.assertTrue(set(HTTP_DECORATORS.values()) <= set(METHOD_ENUM.values()))
+        self.assertEqual({key.split(" ", 1)[0] for key in ALLOWED}, {"GET", "POST"})
+        for number in (-1, *range(len(METHOD_ENUM), 64), 2 ** 31):
+            with self.subTest(method=number):
+                self.assertIsNone(route_key(number, "/", "me"))
+                self.assertFalse(allowed(route_key(number, "/", "me")))
+        self.assertIn("RequestMethod[method]", self.policy)
+        # D8: invariants_live reads the same decorator table from the same files, and its ROUTES keys are unique
+        text = MANIFEST.read_text(encoding="utf-8")
+        table = re.search(r"\n    http_decorators = \{\n(.*?)\n    \}\n", text, re.S)
+        self.assertIsNotNone(table)
+        self.assertEqual(dict(re.findall(r'"(\w+)": "([A-Z]+)"', table.group(1))), HTTP_DECORATORS)
+        self.assertIn('CONTROLLER_GLOB = "*.controller.ts"', text)
+        self.assertIn("for path in sorted(controller_dir.rglob(CONTROLLER_GLOB)):", text)
+        rows = manifest_rows()
+        self.assertEqual(len(rows), len(set(rows)), "a repeated ROUTES key is collapsed silently by the dict")
+
+    def test_13_role_composition_neither_downgrades_a_mixed_user_nor_widens_a_clinician(self):
+        """RISK-S5-U1c-MIXED-DOWNGRADE in the model over every route, and the only narrowing sites in the source."""
+        routes = {m + " " + p for m, p in controller_inventory()} - PUBLIC
+        kinds, mixed = Counter(), set()
+        for token in FIXTURES["tokens"]:
+            if token["state"] != "APPROVED":
+                continue
+            app = {role for role in token["roles"] if role in APP_ROLES}
+            only = clinician_only(token["roles"])
+            kind = "clinician-only" if only else "mixed" if CLINICIAN in app else "legacy"
+            kinds[kind] += 1
+            if kind == "mixed":
+                mixed |= app & LEGACY_ROLES
+            with self.subTest(token=token["id"], kind=kind):
+                self.assertEqual(only, app == {CLINICIAN})
+                decisions = {key: ("allowed" if allowed(key) else "denied") if only else "legacy" for key in routes}
+                if only:
+                    self.assertEqual({k for k, d in decisions.items() if d == "allowed"}, ALLOWED)
+                    self.assertEqual({k for k, d in decisions.items() if d == "denied"}, DENIED_ROUTES)
+                else:
+                    self.assertEqual(set(decisions.values()), {"legacy"}, "a legacy role keeps every existing path")
+        self.assertEqual(set(kinds), {"clinician-only", "mixed", "legacy"})
+        self.assertEqual(mixed, LEGACY_ROLES, "each legacy role is fixed alongside clinician")
+        # clinicianOnly() is the one narrowing predicate, at the listed sites; a role-presence test would narrow a mixed user
+        sites = {
+            "auth.guard.ts": "req.clinicianOnly = clinicianOnly(req.roles);",
+            "viewer.controller.ts": "return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);",
+            "report-preview.controller.ts": "if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });",
+            "pacs.service.ts": "if (clinicianOnly(c.roles)) throw new ForbiddenException('전체 검사 통계를 열람할 수 없습니다');",
+        }
+        counted = {}
+        for path in sorted(API.rglob("*.ts")):
+            if path == POLICY:
+                continue
+            source = path.read_text(encoding="utf-8")
+            calls = len(re.findall(r"\bclinicianOnly\(", source))
+            if calls:
+                counted[path.name] = calls
+            self.assertIsNone(re.search(r"includes\(\s*(?:'clinician'|\"clinician\"|CLINICIAN_ROLE)\s*\)", source), path.name)
+        self.assertEqual(counted, FIXTURES["role_composition"]["clinician_only_call_sites"])
+        self.assertEqual(set(sites), set(counted))
+        for name, line in sites.items():
+            self.assertIn(line, (API / name).read_text(encoding="utf-8"), name)
+        # the clinician reads admit a mixed user by role; they never require clinician-only
+        self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", (API / "pacs.service.ts").read_text(encoding="utf-8"))
+        live = LIVE_MODULE.read_text(encoding="utf-8")
+        self.assertIn("def " + FIXTURES["role_composition"]["live_test"] + "(self) -> None:", live)
+        self.assertIn('"' + FIXTURES["role_composition"]["live_marker"] + ' "', live)
+
+    def test_14_live_matrix_gives_every_allow_row_a_positive_a_wrong_role_and_a_wrong_tenant_case(self):
+        """TEST-S5-U1c-LIVE-MATRIX is data here and one loop in clinician_policy_live.py test_05."""
+        matrix = FIXTURES["live_matrix"]
+        rows = matrix["rows"]
+        self.assertEqual(set(rows), ALLOWED, "every allow row, and only the allow rows, has live cases")
+        wanted = {"positive": {"allowed"}, "wrong_role": {"denied"}, "wrong_tenant": {"denied", "absent"}}
+        exceptions = []
+        for route, row in sorted(rows.items()):
+            with self.subTest(route=route):
+                self.assertEqual(set(row) - {"via"}, set(wanted))
+                self.assertEqual(row["positive"]["as"], "clinician", "the positive is the clinician-only member of the study's institution")
+                self.assertNotEqual(row["wrong_role"]["as"], "clinician")
+                self.assertNotIn(row["wrong_tenant"]["as"], ("clinician", "doctor"))
+                for name, expected in wanted.items():
+                    case = row[name]
+                    self.assertTrue({"as", "expect", "status", "code"} <= set(case), name)
+                    self.assertIn(case["as"], matrix["identities"])
+                    self.assertNotEqual(case["code"], FIXTURES["denied_code"], "an allow row is never answered by the clinician gate")
+                    self.assertIn(case["status"], (200, 204) if case["expect"] in ("allowed", "absent") else (403, 404))
+                    if case["expect"] not in expected:
+                        exceptions.append((route, name, case["expect"]))
+                        self.assertTrue(case.get("basis", "").startswith("by design"), f"{route} {name}")
+        self.assertEqual(exceptions, [("POST auth/logout", "wrong_tenant", "allowed")], "the logout exception is the one by-design non-denial")
+        for route in ("GET clinician/studies", "GET clinician/studies/:uid/report"):
+            self.assertEqual(rows[route]["wrong_role"]["as"], "doctor", "need('clinician') meets the same-institution radiologist")
+        # the live module drives these cases from the fixture and creates every identity they name
+        live = LIVE_MODULE.read_text(encoding="utf-8")
+        self.assertIn("def " + matrix["test"] + "(self) -> None:", live)
+        self.assertIn('LIVE_MATRIX = FIXTURES["live_matrix"]', live)
+        self.assertIn('"' + matrix["marker"] + ' "', live)
+        self.assertIn('cls.stack.create_test_identity("kclinician", ["clinician"], "kin-center")', live)
+        self.assertIn('self.create_member("cinvalid", ["clinician"], ["hallym", "kin-center"])', live)
+        self.assertIn('self.stack.service_token("gateway")', live)
+        # test_01 probes every controller route that is neither public nor allowed, then requires exactly the denied rows
+        self.assertIn('DENIED_ROUTES = {route for routes in FIXTURES["route_matrix"]["denied"].values() for route in routes}', live)
+        self.assertIn("self.assertEqual(sorted(swept), sorted(DENIED_ROUTES)", live)
+
+    def test_15_invariants_member_summary_reads_the_policy_role_list(self):
+        """S5-U1c D3: kc_user_summary compares Keycloak's roles with the product APP_ROLES, not a local literal."""
+        text = MANIFEST.read_text(encoding="utf-8")
+        function = re.search(r"\ndef policy_app_roles\(\) -> frozenset\[str\]:\n.*?(?=\n\n\n)", text, re.S)
+        summary = re.search(r"\n    def kc_user_summary\(self, user_id: str\).*?(?=\n\n    def )", text, re.S)
+        self.assertIsNotNone(function)
+        self.assertIsNotNone(summary)
+        self.assertIn("app = policy_app_roles()", summary.group(0))
+        self.assertNotIn("radiologist", summary.group(0), "no local role literal")
+
+        def run(root):
+            namespace = {"ROOT": root, "re": re}
+            exec(compile(function.group(0), str(MANIFEST), "exec"), namespace)
+            return namespace["policy_app_roles"]()
+
+        self.assertEqual(run(ROOT), frozenset(FIXTURES["app_roles"]))
+        # controls on a copy: a changed APP_ROLES shape is refused instead of read as a partial set; a new role arrives
+        with tempfile.TemporaryDirectory() as scratch:
+            copy = Path(scratch) / "api" / "src" / "clinician-policy.ts"
+            copy.parent.mkdir(parents=True)
+            for label, old, new in (
+                    ("clinician dropped from APP_ROLES", "new Set([...LEGACY_APP_ROLES, CLINICIAN_ROLE])", "new Set([...LEGACY_APP_ROLES])"),
+                    ("legacy list not frozen", "Object.freeze(['radiologist', 'technician', 'admin'])", "['radiologist', 'technician', 'admin']")):
+                self.assertIn(old, self.policy, label)
+                copy.write_text(self.policy.replace(old, new), encoding="utf-8")
+                with self.subTest(control=label), self.assertRaises(AssertionError):
+                    run(Path(scratch))
+            copy.write_text(self.policy.replace("'technician', 'admin']", "'technician', 'admin', 'nurse']"), encoding="utf-8")
+            self.assertEqual(run(Path(scratch)), frozenset(FIXTURES["app_roles"]) | {"nurse"})
 
 
 if __name__ == "__main__":

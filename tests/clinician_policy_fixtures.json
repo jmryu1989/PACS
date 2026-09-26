@@ -1,5 +1,5 @@
 {
-  "unit": "S5-U1a+S5-U1b",
+  "unit": "S5-U1a+S5-U1b+S5-U1c",
   "app_roles": ["radiologist", "technician", "admin", "clinician"],
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
@@ -33,6 +33,7 @@
     {"id": "technician-only", "groups": ["hallym"], "roles": ["technician"], "state": "APPROVED", "clinicianOnly": false},
     {"id": "admin-only", "groups": ["hallym"], "roles": ["admin"], "state": "APPROVED", "clinicianOnly": false},
     {"id": "legacy-three", "groups": ["hallym"], "roles": ["radiologist", "technician", "admin"], "state": "APPROVED", "clinicianOnly": false},
+    {"id": "mixed-all-four", "groups": ["hallym"], "roles": ["clinician", "radiologist", "technician", "admin", "default-roles-kin"], "state": "APPROVED", "clinicianOnly": false},
     {"id": "gateway-role-alone-is-not-a-member", "groups": ["kin-center"], "roles": ["gateway"], "state": "INVALID", "clinicianOnly": false}
   ],
   "gateway_identities": [
@@ -113,6 +114,144 @@
       "PUT hanging-protocols", "PUT hanging-protocols/site", "PUT reading-appearance", "PUT reading-preferences",
       "PUT studies/:uid/report", "PUT worklist-columns", "PUT workspace-layout", "PUT workspace-shortcuts"
     ]
+  },
+  "route_matrix": {
+    "unit": "S5-U1c",
+    "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
+    "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
+    "counts": {"routes": 110, "public": 4, "session": 2, "business": 5, "denied": 99},
+    "basis_legend": {
+      "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
+      "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
+      "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, order match/unmatch.",
+      "workspace": "the caller's reading-workspace state, personal or site-shared (prefs, filters, favorites, templates, columns, layout, shortcuts, appearance, reading preferences, hanging protocols, study tags) and the caller's own StudyAccess status. No clinician screen uses them before S5-U2a.",
+      "admin": "member console, study-access administration, audit, unassigned studies and institution assignment (need admin).",
+      "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
+      "connect": "inter-institution Connect agreements, basis and transfers; a far later stage (AGENTS).",
+      "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action."
+    },
+    "denied": {
+      "report": [
+        "GET bootstrap", "GET studies", "DELETE studies/:uid", "PATCH studies/:uid", "DELETE studies/:uid/draft",
+        "DELETE studies/:uid/draft/force", "POST studies/:uid/hold", "POST studies/:uid/release", "POST studies/:uid/release/force",
+        "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
+        "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
+        "GET studies/:uid/report/structure", "GET studies/:uid/report-preview", "POST studies/:uid/dictation"
+      ],
+      "viewer": [
+        "POST studies/:uid/viewer-items", "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items/:id/revisions",
+        "GET studies/:uid/findings", "POST studies/:uid/findings", "GET studies/:uid/findings/:id/revisions",
+        "POST studies/:uid/findings/:id/revisions", "POST studies/:uid/manual-sr", "POST studies/:uid/manual-sr/:id/store",
+        "GET studies/:uid/viewer-jobs", "POST studies/:uid/viewer-jobs", "GET studies/:uid/viewer-jobs/:id",
+        "POST studies/:uid/viewer-jobs/:id/revisions", "POST studies/:uid/viewer-jobs/preview"
+      ],
+      "operations": [
+        "GET studies/:uid/tech-note", "POST studies/:uid/tech-note", "GET studies/:uid/tech-note/history",
+        "GET reader-candidates", "GET studies/:uid/reader-assignment", "POST studies/:uid/reader-assignment",
+        "GET colleagues", "POST match", "POST unmatch"
+      ],
+      "workspace": [
+        "GET prefs", "POST filters", "DELETE filters/:id", "PATCH filters/:id/default", "GET filter-folders", "POST filter-folders",
+        "GET shared-filters", "POST shared-filters", "POST shared-filters/copy", "GET favorite-folders", "POST favorite-folders",
+        "POST templates", "DELETE templates/:id", "GET worklist-columns", "PUT worklist-columns", "DELETE worklist-columns",
+        "GET workspace-layout", "PUT workspace-layout", "DELETE workspace-layout", "GET workspace-shortcuts", "PUT workspace-shortcuts",
+        "GET reading-appearance", "PUT reading-appearance", "GET reading-preferences", "PUT reading-preferences",
+        "GET hanging-protocols", "PUT hanging-protocols", "GET hanging-protocols/site", "PUT hanging-protocols/site",
+        "GET study-tags", "POST study-tags", "GET study-access"
+      ],
+      "admin": [
+        "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
+        "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET unassigned",
+        "POST studies/:uid/assign"
+      ],
+      "consultation": [
+        "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
+        "POST studies/:uid/consultations"
+      ],
+      "connect": [
+        "GET admin/agreements", "POST admin/agreements", "PATCH admin/agreements/:id", "GET studies/:uid/basis",
+        "POST studies/:uid/basis", "POST studies/:uid/basis/:id/revoke", "POST studies/:uid/transfers", "GET transfers",
+        "POST transfers/:id/revoke"
+      ],
+      "gateway": [
+        "POST gateway/announce", "POST gateway/receipt", "GET gateway/retry-requests", "POST studies/:uid/gateway-retry"
+      ]
+    },
+    "post_baseline": {
+      "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
+      "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
+      "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
+      "POST gateway/receipt": {"decision": "denied", "unit": "S4-U3", "commit": "3955e38", "basis": "gateway client-credentials transmission receipt (needExact gateway)"},
+      "GET gateway/retry-requests": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "gateway client-credentials pull of pending Now Retry UIDs (needExact gateway)"},
+      "POST studies/:uid/gateway-retry": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "technician Now Retry request (need technician, owning institution only)"}
+    }
+  },
+  "controller_decorators": {
+    "non_route": ["Body", "Controller", "Header", "HttpCode", "Param", "Public", "Query", "Req", "Res"],
+    "rule": "S5-U1c D6: every @Name( in a controller is either an HTTP route decorator the inventory reads or one of these; any other name (a WebDAV route decorator of a later Nest, @RequestMapping, @Version, a custom route wrapper) fails the pure test until it is classified here or read by the inventory"
+  },
+  "request_method_pin": {
+    "package": "@nestjs/common",
+    "lock_version": "10.4.22",
+    "rule": "S5-U1c D6: request_method_enum is the Python model's table (0-8). A member it does not know answers None (denied) in the model, while the product's RequestMethod reverse map names it; both deny, because every allowlist key's method is GET or POST. The full member list of the locked version was not read in this unit (no installed copy). When lock_version changes, re-read enums/request-method.enum.d.ts of the new version and update request_method_enum and this pin together."
+  },
+  "role_composition": {
+    "unit": "S5-U1c",
+    "rule": "RISK-S5-U1c-MIXED-DOWNGRADE: only clinicianOnly() narrows, and only where listed. A token with any legacy role never meets the clinician gate or a clinician projection; a clinician-only token never passes a denied row. A new narrowing site is a new decision and must be listed here.",
+    "clinician_only_call_sites": {"auth.guard.ts": 1, "pacs.service.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
+    "live_test": "test_04_mixed_and_legacy_roles_keep_their_existing_paths",
+    "live_marker": "CLINICIAN_LIVE_COMPOSITION"
+  },
+  "live_matrix": {
+    "unit": "S5-U1c",
+    "test": "test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case",
+    "marker": "CLINICIAN_LIVE_MATRIX",
+    "study": "one run-owned synthetic hallym study (LiveStack.create_fixture, C-STORE), report left at RS W; the matrix writes no report, item or setting",
+    "identities": {
+      "clinician": "clinician-only member of hallym, the study's institution",
+      "kclinician": "clinician-only member of kin-center",
+      "doctor": "radiologist-only member of hallym (LiveStack)",
+      "gateway": "valid gateway client-credentials identity of kin-center (LiveStack.service_token)",
+      "cinvalid": "clinician-only member with two institution groups, created by the case"
+    },
+    "rows": {
+      "GET me": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_INVALID", "basis": "a session row names no study; its tenant axis is the membership check (exactly one institution group)"}
+      },
+      "POST auth/logout": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 204, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: the pending/invalid logout exception (auth.guard.ts isLogout) ends only the caller's own session and answers no data"}
+      },
+      "GET authz/dicom": {
+        "via": "nginx auth_request of GET /dicom-web/studies/{uid}/metadata, its only caller; nginx answers the refusal with a status only",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null}
+      },
+      "POST dicom/lookup": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null, "message": "열람 권한이 없습니다"}
+      },
+      "GET studies/:uid/viewer-items": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+      },
+      "GET clinician/studies": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "basis": "a collection: the other institution's clinician is answered, without the study"}
+      },
+      "GET clinician/studies/:uid/report": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+      }
+    }
   },
   "live_probe_values": {":uid": "1.2.826.0.1.3680043.8.498.0", ":id": "1", ":version": "1"},
   "read_contract": {
