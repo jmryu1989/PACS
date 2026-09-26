@@ -31,6 +31,14 @@ extra writer-side fields planted in the stubs that the real serializer never sen
       another tab's log out (a channel message and the storage events of a set and a remove) each leave with one
       navigation, counted as document requests while the first is held; the same file without the guard navigates
       again, or logs out again, inside the same window (control).
+  10  Log out and 401 clear the page before POST /auth/logout answers (it is held): nothing but the closing line is
+      left and an earlier report answer does not paint, for the list 401 with a report read pending, Log out with
+      another tab's session-ended while it is pending, a second 401, and a page without BroadcastChannel; then one
+      POST and one navigation. The pre-fix logout() and report guard keep the page and paint the answer (control).
+  11  a list refresh takes the selected study down: while the list is re-read and after a 403 or 409 no identifier,
+      report or key image is left and a pending report answer does not paint; only a successful list and account
+      check read the study again (Retry). The same file without setAside() keeps the final report and paints the
+      pending answer (control).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The service half is tests/clinician_read_live.py (hosted synthetic stack only).
@@ -164,6 +172,9 @@ KEYS_WITHHELD = "확정 전에는 키 이미지를 표시하지 않습니다."
 KEYS_NONE = "이 판독문에 지정된 키 이미지가 없습니다."
 KEYS_FAILED = "판독문을 불러오지 못해 키 이미지도 표시하지 않았습니다."
 CHANGED = "검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요."
+RECHECK = "검사 목록을 다시 확인하는 중입니다. 확인이 끝나면 선택했던 검사의 판독문을 다시 불러옵니다."
+UNVERIFIED = "검사 목록을 다시 확인하지 못해 선택했던 검사를 내렸습니다. 목록을 다시 불러오면 그 검사의 판독문을 새로 읽습니다."
+CLOSING = "세션을 닫았습니다. 로그인 화면으로 이동하는 중입니다…"
 
 # UXR-SP-34 / UXR-G-18 core-screen avoided words (as tests/admin_member_roles_dom_test.py), and UXR-S5-15: nothing on
 # this screen may read as a critical-result delivery or acknowledgement state.
@@ -203,6 +214,14 @@ PAGE_TEXT = """() => { const out = [], walker = document.createTreeWalker(docume
 LABELS = """() => { const texts = selector => [...document.querySelectorAll(selector)].map(e => e.textContent);
   return {buttons: texts('button'), headings: texts('h1, h2, h3, h4'), th: texts('th'), dt: texts('dt'),
     status: texts('.status'), tags: texts('.tag'), title: document.title}; }"""
+# The detail panel: which parts are shown and what they hold, whatever the report state says.
+DETAIL_VIEW = """() => { const q = s => document.querySelector(s), empty = q('#detail-empty');
+  return {uid: q('#detail').dataset.uid ?? null, note: empty.hidden ? null : empty.textContent,
+    shown: ['#identity', '#report', '#keys', '#viewer-slot'].filter(s => !q(s).hidden),
+    identity: q('#identity').textContent, body: q('#report-body').textContent, keys: q('#key-list').textContent,
+    current: [...document.querySelectorAll('#studies tr[aria-current]')].map(tr => tr.dataset.uid)}; }"""
+CLOSED_VIEW = """() => ({children: [...document.body.children].map(e => `${e.tagName}@${e.getAttribute('role')}`),
+  text: document.body.textContent})"""
 
 
 def has_hangul(text):
@@ -219,10 +238,12 @@ def variant(edits):
     return text
 
 
-REPORT_GUARD = "    return mine === reportSeq && selected === uid;\n"
-LIST_GUARD = "    return mine === listSeq;\n"
+REPORT_GUARD = "    return !leaving && mine === reportSeq && selected === uid;\n"
+LIST_GUARD = "    return !leaving && mine === listSeq;\n"
 GO_GUARD = "    if (leaving) return;\n    leaving = true;\n    location.replace(url);\n"
 LOGOUT_GUARD = "    if (leaving) return;\n    leaving = true;\n    KinAuth.logout();\n"
+LOGOUT_CLOSE = "  function logout() {\n    close();\n"
+SET_ASIDE = "    setAside();\n"
 
 # auth.js broadcastEnded() as another tab runs it (pinned in test_09): one channel message, then a localStorage set
 # and remove, each a storage event in every other tab of this origin.
@@ -250,6 +271,11 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             "no-guard": variant([(REPORT_GUARD, "    return true;\n")]),
             "list-no-guard": variant([(LIST_GUARD, "    return true;\n")]),
             "nav-no-guard": variant([(GO_GUARD, "    location.replace(url);\n"), (LOGOUT_GUARD, "    KinAuth.logout();\n")]),
+            # The logout() and report guard of 00d625e: the page is cleared only by the session-ended that follows the
+            # POST, and an answer is dropped only by the request number.
+            "logout-no-close": variant([(LOGOUT_CLOSE, "  function logout() {\n"),
+                                        (REPORT_GUARD, "    return mine === reportSeq && selected === uid;\n")]),
+            "list-keeps-detail": variant([(SET_ASIDE, "")]),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -270,10 +296,13 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.page_patch = None
         self.held_lists = None
         self.held_reports = None
+        self.held_logouts = None
         self.held_documents = None
         self.documents, self.failed_documents, self.signals = [], [], []
         self.cursors = {}
         self.list_requests, self.report_requests, self.logouts, self.booted = [], [], [], []
+        # /api reads in the order they reached the harness: "me", "list", "report <uid>".
+        self.calls = []
         self.me_requests = 0
         self.unexpected, self.errors, self.dialogs, self.finished = [], [], [], []
         self.context = self.browser.new_context(viewport={"width": 1400, "height": 900})
@@ -345,6 +374,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             return
         if method == "GET" and path == "/api/me":
             self.me_requests += 1
+            self.calls.append("me")
             answer = self.me_queue.pop(0) if self.me_queue else self.me
             if isinstance(answer, tuple):
                 route.fulfill(status=answer[0], json=answer[1])
@@ -358,6 +388,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                 route.abort()
                 return
             self.list_requests.append(query)
+            self.calls.append("list")
             if self.held_lists is not None:
                 self.held_lists.append(route)
                 return
@@ -367,6 +398,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         if method == "GET" and found and not url.query:
             target = unquote(found.group(1))
             self.report_requests.append(target)
+            self.calls.append(f"report {target}")
             if self.held_reports is not None:
                 self.held_reports.append((target, route))
                 return
@@ -378,6 +410,9 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             return
         if method == "POST" and path == "/api/auth/logout":
             self.logouts.append(request.headers.get("x-kin-csrf"))
+            if self.held_logouts is not None:
+                self.held_logouts.append(route)
+                return
             route.fulfill(status=204, body="")
             return
         self.unexpected.append(f"{method} {request.url}")
@@ -532,6 +567,44 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             # Controls only: the cancelled navigations may report their abort while this waits.
             self.wait_until(lambda: self.page.url == ORIGIN + BASE + "index.html", "the control landing on index.html")
         expect(self.page.locator("#stand-in")).to_be_visible()
+
+    def detail(self):
+        return self.page.evaluate(DETAIL_VIEW)
+
+    @staticmethod
+    def taken_down(note):
+        return {"uid": None, "note": note, "shown": [], "identity": "", "body": "", "keys": "", "current": []}
+
+    def pending_reports(self, *rows):
+        # Report reads for these rows, held in click order; later reads are answered again.
+        self.held_reports = []
+        for n in rows:
+            self.row(n).click()
+        self.wait_until(lambda: len(self.held_reports) == len(rows), f"report requests for rows {rows}")
+        held, self.held_reports = self.held_reports, None
+        self.assertEqual([uid(n) for n in rows], [target for target, _ in held])
+        return [route for _, route in held]
+
+    def pending_log_out(self):
+        self.wait_until(lambda: self.held_logouts, "POST /auth/logout")
+        return self.held_logouts[0]
+
+    def assert_closed(self, what):
+        # Only the closing line: no identifier, list row, report, key image or user name anywhere in the document.
+        self.assertEqual({"children": ["P@status"], "text": CLOSING}, self.page.evaluate(CLOSED_VIEW), what)
+        self.assertNotIn("SYN", self.page.content(), what)
+
+    def finish_log_out(self, post, echo=True):
+        # POST /auth/logout answers while the navigation is held (hold_documents), so a second location.replace shows
+        # up as a second document request. With a BroadcastChannel the page's own session-ended comes back as well;
+        # without one nothing comes back and the same window is waited out.
+        start = self.hold_documents()
+        post.fulfill(status=204, body="")
+        if echo:
+            return self.navigations_after(start)
+        self.wait_until(lambda: self.held_documents, "the navigation to index.html")
+        self.page.wait_for_timeout(WINDOW_MS)
+        return self.documents[start:]
 
     # ── cases ──
     def test_01_landing_follows_the_guard_rule_and_main_html_hands_clinician_only_over(self):
@@ -999,6 +1072,188 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual([index] * len(seen), seen)
         self.assertGreaterEqual(len(seen), 2, f"nav-no-guard: another tab's signals ({counts}) navigate again")
         self.land()
+
+    def test_10_log_out_and_401_clear_the_page_before_the_log_out_answers(self):
+        # KinAuth.logout() navigates only after POST /auth/logout answers, with no time limit. Every case holds that
+        # POST: the page must already be clear, and stay clear when an earlier report read answers 200.
+        index = ORIGIN + BASE + "index.html"
+        self.index_stand_in = True
+        answer_b = self.reports[uid(2)]
+
+        # The review's order: a report read pending, the list answers 401, the POST held, then the report answers.
+        self.open_home()
+        self.pick(1)
+        self.page.evaluate(WATCH_SIGNALS)
+        logouts = len(self.logouts)
+        (pending,) = self.pending_reports(2)
+        self.held_logouts, self.list_errors = [], [EXPIRED]
+        self.page.locator("#refresh").click()
+        post = self.pending_log_out()
+        self.assert_closed("list 401, log out pending")
+        self.release(pending, answer_b)
+        self.assert_closed("list 401: the earlier report answer after it")
+        self.assertEqual([index], self.finish_log_out(post), "list 401: one navigation")
+        self.assertEqual(1, len(self.logouts) - logouts, "list 401: one POST")
+        self.land()
+
+        # Log out with a report read pending; another tab ends the session while the POST is pending, and nothing
+        # navigates before KinAuth.logout() does.
+        self.open_home()
+        self.pick(1)
+        self.page.evaluate(WATCH_SIGNALS)
+        logouts = len(self.logouts)
+        (pending,) = self.pending_reports(2)
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        post = self.pending_log_out()
+        self.assert_closed("Log out pending")
+        self.release(pending, answer_b)
+        self.assert_closed("Log out pending: the earlier report answer after it")
+        documents, self.signals = len(self.documents), []
+        other = self.context.new_page()
+        other.goto(ORIGIN + BASE + "blank.html")
+        other.evaluate(BROADCAST_ENDED)
+        self.wait_until(lambda: "channel" in self.signals and "storage" in self.signals, "another tab's session-ended")
+        self.page.wait_for_timeout(WINDOW_MS)
+        other.close()
+        self.assertEqual(documents, len(self.documents), "another tab's session-ended: no navigation while the POST is pending")
+        self.assert_closed("another tab's session-ended while Log out is pending")
+        self.assertEqual([index], self.finish_log_out(post), "Log out: one navigation")
+        self.assertEqual(1, len(self.logouts) - logouts, "Log out: one POST")
+        self.land()
+
+        # A report read answers 401 and starts the log out; an earlier read answers 401 while the POST is pending.
+        self.open_home()
+        self.pick(1)
+        self.page.evaluate(WATCH_SIGNALS)
+        logouts = len(self.logouts)
+        earlier, current = self.pending_reports(2, 3)
+        self.held_logouts = []
+        current.fulfill(status=EXPIRED[0], json=EXPIRED[1])
+        post = self.pending_log_out()
+        self.assert_closed("a report 401, log out pending")
+        earlier.fulfill(status=EXPIRED[0], json=EXPIRED[1])
+        self.wait_until(lambda: any(item is earlier.request for item in self.finished), "the second 401 reaching the page")
+        self.settle()
+        self.assertEqual(1, len(self.logouts) - logouts, "the second 401 does not log out again")
+        self.assert_closed("a second 401 while the POST is pending")
+        self.assertEqual([index], self.finish_log_out(post), "two 401s: one navigation")
+        self.land()
+
+        # Control: the pre-fix logout() and report guard keep the list and the study up while the POST is pending and
+        # paint the earlier answer, so the checks above cannot pass on a harness that misses either.
+        self.files["clinician.js"] = self.variants["logout-no-close"]
+        self.open_home()
+        self.pick(1)
+        (pending,) = self.pending_reports(2)
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        post = self.pending_log_out()
+        self.assertEqual((ORDER, "홍길동 SYN", "loading"), (self.listed()["rows"], self.identity()["Name"], self.report()["state"]),
+                         "logout-no-close: the page stays up while the POST is pending")
+        self.release(pending, answer_b)
+        seen = self.report()
+        self.assertEqual(("final", ["Findings", "SYN-B findings"], KEYS_NONE), (seen["state"], seen["sections"][0], seen["keysState"]),
+                         "logout-no-close: the earlier report answer paints while the POST is pending")
+        post.fulfill(status=204, body="")
+        self.page.wait_for_url(index)
+
+        # A page without BroadcastChannel: no session-ended comes back to it, and it is cleared all the same.
+        self.files["clinician.js"] = SHIPPED["clinician.js"]
+        self.page.add_init_script("delete globalThis.BroadcastChannel;")
+        self.open_home()
+        self.assertEqual("undefined", self.page.evaluate("() => typeof BroadcastChannel"))
+        self.pick(1)
+        logouts = len(self.logouts)
+        (pending,) = self.pending_reports(2)
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        post = self.pending_log_out()
+        self.assert_closed("no BroadcastChannel: Log out pending")
+        self.release(pending, answer_b)
+        self.assert_closed("no BroadcastChannel: the earlier report answer after it")
+        self.assertEqual([index], self.finish_log_out(post, echo=False), "no BroadcastChannel: one navigation")
+        self.assertEqual(1, len(self.logouts) - logouts, "no BroadcastChannel: one POST")
+        self.land()
+
+    def test_11_a_list_refresh_takes_the_selected_study_down_until_a_list_succeeds(self):
+        refusals = {"403": (403, {"statusCode": 403, "message": "임상의 조회은(는) clinician 권한이 필요합니다", "error": "Forbidden"}),
+                    "409": (409, {"code": "STUDY_LIST_CHANGED", "message": CHANGED})}
+        # A final report with key images is up and the refresh is refused. Nothing of the study is left; Retry reads
+        # the list, the account and then the report, in that order, and only then is the study back.
+        for label, error in refusals.items():
+            with self.subTest(refusal=label):
+                self.open_home()
+                self.pick(1)
+                self.list_errors = [error]
+                self.page.locator("#refresh").click()
+                expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
+                self.assertEqual(self.taken_down(UNVERIFIED), self.detail())
+                content = self.page.content()
+                for text in ("SYN ALPHA", "SYN-P-001", "SYN-ACC-1", "SYN-A findings", "SYN-A conclusion", "SYN key one"):
+                    self.assertNotIn(text, content)
+                calls = len(self.calls)
+                self.page.locator("#list-retry").click()
+                expect(self.page.locator("#report")).to_be_visible()
+                expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
+                self.assertEqual(["list", "me", f"report {uid(1)}"], self.calls[calls:])
+                seen = self.report()
+                self.assertEqual((uid(1), "SYN ALPHA", "3", ["Findings", "SYN-A findings line 1\nline 2"], "키 이미지 2건", [uid(1)]),
+                                 (seen["reportUid"], self.identity()["Name"], seen["meta"]["Version"], seen["sections"][0],
+                                  seen["keysState"], self.detail()["current"]))
+
+        # A report read pending when the refresh is refused: its answer does not paint afterwards.
+        self.open_home()
+        self.pick(1)
+        (pending,) = self.pending_reports(2)
+        self.list_errors = [refusals["409"]]
+        self.page.locator("#refresh").click()
+        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
+        self.release(pending, self.reports[uid(2)])
+        self.assertEqual(self.taken_down(UNVERIFIED), self.detail())
+        self.assertNotIn("SYN-B findings", self.page.content())
+        calls = len(self.calls)
+        self.page.locator("#list-retry").click()
+        expect(self.page.locator("#report")).to_be_visible()
+        expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
+        self.assertEqual(["list", "me", f"report {uid(2)}"], self.calls[calls:])
+        self.assertEqual(("홍길동 SYN", ["Findings", "SYN-B findings"], [uid(2)]),
+                         (self.identity()["Name"], self.report()["sections"][0], self.detail()["current"]))
+
+        # While the list is re-read the study is down as well; the successful list and account check read it again.
+        self.held_lists = []
+        calls = len(self.calls)
+        self.page.locator("#refresh").click()
+        self.wait_until(lambda: len(self.held_lists) == 1, "the refreshed list request")
+        self.assertEqual(self.taken_down(RECHECK), self.detail())
+        (held,), self.held_lists = self.held_lists, None
+        self.release(held, self.listing(None))
+        expect(self.page.locator("#report")).to_be_visible()
+        expect(self.page.locator("#report-state")).to_have_attribute("data-state", "final")
+        self.assertEqual(["list", "me", f"report {uid(2)}"], self.calls[calls:])
+        self.assertEqual(("홍길동 SYN", [uid(2)]), (self.identity()["Name"], self.detail()["current"]))
+
+        # Control: without setAside() a refused refresh leaves the final report up, and the pending answer paints.
+        self.files["clinician.js"] = self.variants["list-keeps-detail"]
+        self.open_home()
+        self.pick(1)
+        self.list_errors = [refusals["403"]]
+        self.page.locator("#refresh").click()
+        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
+        seen = self.report()
+        self.assertEqual((uid(1), "final", ["Findings", "SYN-A findings line 1\nline 2"], "SYN ALPHA"),
+                         (seen["detailUid"], seen["state"], seen["sections"][0], self.identity()["Name"]),
+                         "list-keeps-detail: the final report stays up after a 403")
+        self.open_home()
+        self.pick(1)
+        (pending,) = self.pending_reports(2)
+        self.list_errors = [refusals["409"]]
+        self.page.locator("#refresh").click()
+        expect(self.page.locator("#list-state")).to_have_attribute("data-state", "failed")
+        self.release(pending, self.reports[uid(2)])
+        seen = self.report()
+        self.assertEqual((uid(2), "final", ["Findings", "SYN-B findings"]), (seen["detailUid"], seen["state"], seen["sections"][0]),
+                         "list-keeps-detail: the pending answer paints after a 409")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@
     listFailed: '검사 목록을 불러오지 못했습니다.',
     pick: '목록에서 검사를 고르면 확정 판독문과 키 이미지를 먼저 표시합니다.',
     gone: '선택했던 검사가 새 목록에 없어 화면에서 내렸습니다.',
+    recheck: '검사 목록을 다시 확인하는 중입니다. 확인이 끝나면 선택했던 검사의 판독문을 다시 불러옵니다.',
+    unverified: '검사 목록을 다시 확인하지 못해 선택했던 검사를 내렸습니다. 목록을 다시 불러오면 그 검사의 판독문을 새로 읽습니다.',
+    closing: '세션을 닫았습니다. 로그인 화면으로 이동하는 중입니다…',
     reportLoading: '판독문을 불러오는 중입니다…',
     reportFailed: '판독문을 불러오지 못했습니다.',
     approved: '승인된 확정 판독문입니다.',
@@ -50,6 +53,8 @@
   let studies = [];
   let byUid = new Map();
   let selected = null;
+  // 목록을 다시 확인하느라 내려 둔 검사. 새 목록과 계정 확인이 끝난 뒤에만 다시 읽는다(setAside/applyList).
+  let resume = null;
   let refocus = null;
   let channel = null;
   let leaving = false;
@@ -163,7 +168,7 @@
   }
 
   function listFresh(mine) {
-    return mine === listSeq;
+    return !leaving && mine === listSeq;
   }
 
   function setListState(state, text, detail) {
@@ -180,11 +185,14 @@
    * 받은 쪽도 버린다 — 반쪽 목록을 "이것이 전부"로 보이지 않기 위해서다. 늦게 온 이전 요청의 답은 listSeq로 버린다.
    */
   async function loadList() {
+    // 세션이 끝난 문서는 새로 읽지 않는다. 이미 나간 읽기의 답은 close()가 넘긴 요청 번호로 버린다.
+    if (leaving) return;
     const mine = ++listSeq;
     const tbody = $('#studies');
     // 행을 비우면 행에 있던 포커스가 body로 떨어진다. 목록이 다시 서면 같은 검사 행으로 돌려준다.
     const focused = tbody.contains(document.activeElement) ? document.activeElement.closest('tr[data-uid]') : null;
     refocus = focused ? focused.dataset.uid : null;
+    setAside();
     studies = [];
     tbody.replaceChildren();
     setListState('loading', TEXT.listLoading);
@@ -212,7 +220,19 @@
     } catch (error) {
       if (!listFresh(mine)) return;
       setListState('failed', TEXT.listFailed, describe(error));
+      if (resume !== null) clearDetail(TEXT.unverified);
     }
+  }
+
+  /**
+   * 목록을 다시 확인하는 동안 선택했던 검사를 내려 둔다 — 식별 줄·판독문·key image를 지우고, clearDetail이 reportSeq를
+   * 넘겨 진행 중인 판독 읽기의 답도 버린다. 이 목록이 거절되면(403/409 등) 보이던 확정본은 서버가 방금 다시 확인해 주지
+   * 않은 것이라, 그대로 두면 목록 오류 옆에서 현재 확정본처럼 읽힌다. 새 목록과 계정 확인이 모두 끝난 뒤에만 applyList가
+   * 같은 검사를 다시 읽는다.
+   */
+  function setAside() {
+    if (selected !== null) resume = selected;
+    clearDetail(resume === null ? TEXT.pick : TEXT.recheck);
   }
 
   function byStudyDate(a, b) {
@@ -227,13 +247,15 @@
     byUid = new Map(studies.map(row => [row.uid, row]));
     const focusUid = refocus;
     refocus = null;
+    const reopen = resume;
+    resume = null;
     $('#studies').replaceChildren(...studies.map(studyRow));
-    rove(focusUid !== null && byUid.has(focusUid) ? focusUid : selected, focusUid !== null);
+    rove(focusUid !== null && byUid.has(focusUid) ? focusUid : reopen, focusUid !== null);
     if (studies.length) setListState('ready', `검사 ${studies.length}건을 표시합니다.`);
     else setListState('empty', TEXT.listEmpty);
-    // 새 목록에 남아 있으면 판독문도 다시 읽어 식별 줄과 판독문이 같은 시점의 것이 되게 한다.
-    if (selected !== null) {
-      if (byUid.has(selected)) select(selected);
+    // 내려 둔 검사가 새 목록에 남아 있으면 판독문도 다시 읽어 식별 줄과 판독문이 같은 시점의 것이 되게 한다.
+    if (reopen !== null) {
+      if (byUid.has(reopen)) select(reopen);
       else clearDetail(TEXT.gone);
     }
   }
@@ -445,10 +467,11 @@
 
   /** A->B->A: 화면에 쓰기 직전 요청 번호와 UID를 함께 본다. UID만 보면 A의 첫 요청 답이 A의 두 번째 요청 자리에 그려진다. */
   function reportFresh(mine, uid) {
-    return mine === reportSeq && selected === uid;
+    return !leaving && mine === reportSeq && selected === uid;
   }
 
   function select(uid) {
+    if (leaving) return;
     const row = byUid.get(uid);
     if (!row) return;
     selected = uid;
@@ -478,13 +501,21 @@
 
   // ── 세션 ──
 
+  /**
+   * 이 계정의 화면을 끝낸다. 두 요청 번호를 넘겨 이미 나간 목록·판독 읽기의 답을 버리고, 검사·판독문·key image·사용자
+   * 이름을 문서에서 지운다. 세션이 끝난 것을 안 그 자리에서 부른다 — 로그아웃 POST나 이동이 끝나기를 기다리면 그동안
+   * 이전 세션의 판독문이 남고 늦게 온 답이 다시 그려진다. 이동이 늦어도 빈 화면이 되지 않게 이유 한 줄만 남긴다.
+   */
   function close() {
     listSeq++;
     reportSeq++;
     selected = null;
+    resume = null;
     studies = [];
     byUid = new Map();
-    document.body.replaceChildren();
+    const note = node('p', 'closing', TEXT.closing);
+    note.setAttribute('role', 'status');
+    document.body.replaceChildren(note);
   }
 
   /**
@@ -498,8 +529,13 @@
     location.replace(url);
   }
 
-  /** 로그아웃을 시작한 뒤의 이동은 KinAuth.logout()이 한다. 그 뒤에 오는 자기 종료 소식·두 번째 401은 화면만 지운다. */
+  /**
+   * Log out과 401. 화면을 먼저 지우고(close) 이동은 KinAuth.logout()이 한다 — 그 이동은 POST /auth/logout이 끝난 뒤라
+   * (제한 시간 없음) 기다리는 동안 이전 세션의 판독문이 남거나 늦은 답이 그려지면 안 된다. 그 뒤에 오는 자기 종료 소식·
+   * 두 번째 401은 화면만 다시 지운다.
+   */
   function logout() {
+    close();
     if (leaving) return;
     leaving = true;
     KinAuth.logout();
