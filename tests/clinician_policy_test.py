@@ -6,7 +6,7 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
-REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-21
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-22
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
@@ -24,8 +24,9 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      RequestMapping, Public or SetMetadata name occurs in code only as its import and as a decorator the runs read, and
      no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way;
      tests/clinician_policy_fixtures.json source_contract is the closed list of forms that reach a loader, an evaluator,
-     a metadata writer or a class prototype, and every other form is refused) compared with the invariants_live ROUTES
-     table read as text,
+     a metadata writer or a class prototype, and every other form is refused; a '/' is a regex or a division by the
+     token before it, a '/' whose reading turns on grammar the lexer does not track refuses the file, and no regex
+     literal spells a checked name, S5-U1c-F07) compared with the invariants_live ROUTES table read as text,
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
@@ -171,6 +172,9 @@ PROCESS_NAME = re.compile(r"process(?![\w$])")
 PROTOTYPE_NAME = re.compile(r"prototype(?![\w$])")
 GET_PROTOTYPE_NAME = re.compile(r"getPrototypeOf(?![\w$])")
 CONSTRUCTOR_NAME = re.compile(r"constructor(?![\w$])")
+# every name the name checks read, which regex_names finds in no regex literal (S5-U1c-F07)
+CHECKED_NAMES = (STRICT_NAME, WRITER_NAME, REFLECT_NAME, LOADER_NAME, SEALED_WORD, OWNER_NAME, PROCESS_NAME,
+                 PROTOTYPE_NAME, GET_PROTOTYPE_NAME, CONSTRUCTOR_NAME)
 RETURN_WORD = re.compile(r"(?<![\w$.])return(?![\w$])")
 CLASS_WORD = re.compile(r"(?<![\w$.])class(?![\w$])")
 EXTENDS_WORD = re.compile(r"(?<![\w$.])extends(?![\w$])")
@@ -208,10 +212,40 @@ NAME_PART = re.compile(r"(?:[\w$]|\\u[0-9A-Fa-f]{4}|\\u\{[0-9A-Fa-f]+\})+")
 NAME_ESCAPE = re.compile(r"\\u(?:([0-9A-Fa-f]{4})|\{([0-9A-Fa-f]+)\})")
 # what can follow a decorator's name: its call, type arguments, the ')' of '@(Name)()', '!', '?.', '[' or a template
 AFTER_NAME = frozenset("(<)!?[`")
-# a '/' after one of these characters or words opens a regex literal, after anything else it divides
-REGEX_AFTER = frozenset("(,=:[!&|?{};+-*%<>~^")
+# words an operand follows where they are keywords: a '[' after one opens an array literal (array_literal)
 REGEX_WORDS = frozenset({"return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "throw", "case", "do",
                          "else", "yield", "await"})
+# S5-U1c-F07: a '/' opens a regex literal or divides by the token before it, read as a token in its expression. The
+# reader before this looked at one character, and '+', '-' and '}' opened a regex, so 'probe++ / (() => { ...
+# Reflect.defineMetadata(...) ... })() / 1' was a regex from the first '/' to the second and the metadata writes between
+# them were blanked before any name or loader check read the code. Each token now says what a '/' right after it is:
+# REGEX, DIVISION, or the reason the lexer refuses the source because TypeScript's reading turns on grammar it does not
+# track. Neither reading is guessed there: a regex read as a division is no safer, since a quote in its body would open
+# a string over the code after it.
+REGEX, DIVISION = "regex", "division"
+# the reserved words an operand follows: a '/' after one opens a regex unless it is a property name ('x.return / 2')
+OPERAND_WORDS = frozenset({"return", "typeof", "instanceof", "in", "new", "delete", "throw", "case", "do", "else"})
+# words after which TypeScript's reading is the grammar's: 'of', 'await' and 'yield' are keywords an operand follows in
+# one statement and names in another, 'void' is the operator or, after 'as' or 'satisfies', a type that divides
+# ('(x as any) satisfies void / 2'), and no '/' follows the others but a statement that ends ('break\n/x/.test(s)')
+UNREAD_WORDS = frozenset({"await", "of", "void", "yield", "break", "catch", "class", "const", "continue", "debugger",
+                          "default", "enum", "export", "extends", "finally", "for", "function", "if", "implements",
+                          "import", "interface", "let", "package", "private", "protected", "public", "static", "switch",
+                          "try", "var", "while", "with"})
+# a statement follows the ')' of these headers, and 'for await (' is one; after any other ')' an expression has ended
+CONTROL_WORDS = frozenset({"if", "while", "for", "with"})
+# the punctuators an operand follows; '=>', '...', '++' and '--' are read whole, and '++', '--' and '!' by whether they
+# are postfix
+OPERAND_PUNCT = frozenset({"(", "[", "{", ",", ";", ":", "?", "=", "+", "-", "*", "%", "&", "|", "^", "~", "<", "=>",
+                           "...", "/", "${"})
+UNREAD_PUNCT = {
+    "}": "'}' ends a block, after which a '/' opens a regex, or an object literal, a type or a class or function "
+         "expression, after which it divides",
+    ">": "'>' compares, after which a '/' opens a regex, or closes type arguments ('f<T> / 2'), after which it divides",
+    ".": "a member name follows '.'",
+}
+# a numeric literal as TypeScript scans it, so '1.' and '.5' are numbers and '1.in x' is not the property 'in'
+NUMBER = re.compile(r"0[xXoObB][0-9A-Fa-f_]+n?|(?:[0-9][0-9_]*(?:\.[0-9_]*)?|\.[0-9][0-9_]*)(?:[eE][+-]?[0-9_]+)?n?")
 IDENTIFIER = re.compile(r"[\w$]+")
 # an import or export keyword of the code; one after '.' is a property (import.meta is read where the keyword is)
 STATEMENT_KEYWORD = re.compile(r"(?<![\w$.])(import|export)(?![\w$])")
@@ -268,19 +302,42 @@ def code_mask(source):
     """source with comments and string, template and regex literals blanked; offsets and line terminators are kept.
 
     What is left is code, so every '@' in it is a decorator candidate (S5-U1c-F01). A literal, comment or bracket that
-    does not close raises: a reader that lost its place would otherwise hide the code after it.
+    does not close raises, and so does a '/' no rule reads as a regex or a division (S5-U1c-F07): a reader that lost
+    its place would otherwise hide the code after it.
     """
     return lexed(source)[0]
 
 
 @functools.lru_cache(maxsize=None)
 def lexed(source):
-    """(code_mask text, strings): strings holds the (start, end) of every '...' or "..." literal and every template
-    without substitutions, which literal_keys reads for the names they spell (S5-U1c-F06)."""
-    out, stack, last, word, index, strings = list(source), [], "", "", 0, []
+    """(code_mask text, strings, regexes): strings holds the (start, end) of every '...' or "..." literal and every
+    template without substitutions, which literal_keys reads for the names they spell (S5-U1c-F06), regexes the (start,
+    end) of every regex literal, whose text regex_names reads (S5-U1c-F07).
+
+    tokens holds (text, slash, end, member) of each token of the code: what a '/' right after it is (REGEX, DIVISION
+    or the reason it is refused), where it ends, and for a name whether it follows '.' or '#'.
+    """
+    out, stack, index, strings, regexes, tokens = list(source), [], 0, [], [], []
 
     def blank(start, end):
         out[start:end] = [char if char in LINE_TERMINATORS else " " for char in source[start:end]]
+
+    def before(start):
+        """(text, slash, line) of the token before source[start]; line is True when a line terminator, in a comment or
+        not, stands between them, which is where TypeScript inserts a semicolon."""
+        if not tokens:
+            return "", REGEX, False
+        text, slash, end, _member = tokens[-1]
+        return text, slash, any(char in LINE_TERMINATORS for char in source[end:start])
+
+    def fixity(start, text):
+        """What a '/' after the '++', '--' or '!' at source[start] is: postfix (the non-null assertion for '!') right
+        after a token an expression ends at, on its line, and a division follows; prefix, and a regex follows; or the
+        token before is one the lexer refuses to read, and so is this one."""
+        previous, slash, line = before(start)
+        if slash in (REGEX, DIVISION):
+            return DIVISION if slash == DIVISION and not line else REGEX
+        return f"{text!r} is postfix or prefix as {previous!r} reads, which is refused: {slash}"
 
     while index < len(source):
         char, start = source[index], index
@@ -296,12 +353,28 @@ def lexed(source):
                 raise AssertionError(f"unterminated comment at offset {start}")
             index += 2
             blank(start, index)
-        elif char in "'\"" or (char == "/" and (word in REGEX_WORDS or (not word and (not last or last in REGEX_AFTER)))):
+        elif char in "'\"":
             index = literal_end(source, start)
             blank(start, index)
-            if char != "/":
-                strings.append((start, index))
-            last, word = "literal", ""
+            strings.append((start, index))
+            tokens.append(("<string>", DIVISION, index, False))
+        elif char == "/":
+            previous, slash, line = before(start)
+            if slash == DIVISION and line:
+                slash = ("it starts a line after a token an expression ends at, so it divides, or opens a regex after a "
+                         "semicolon inserted where a statement or a type annotation ends, as the grammar reads")
+            if slash not in (REGEX, DIVISION):
+                raise AssertionError(f"a '/' the lexer does not read as a regex or a division from the token before it "
+                                     f"({previous!r}) at offset {start}: {slash}: "
+                                     f"{' '.join(source[max(0, start - 40):start + 40].split())!r}")
+            if slash == REGEX:
+                index = literal_end(source, start)
+                blank(start, index)
+                regexes.append((start, index))
+                tokens.append(("<regex>", DIVISION, index, False))
+            else:
+                index += 1
+                tokens.append(("/", REGEX, index, False))
         elif char == "`" or (char == "}" and stack and stack[-1] == "${"):
             if char == "}":
                 stack.pop()
@@ -311,22 +384,50 @@ def lexed(source):
                 stack.append("${")
             elif char == "`":
                 strings.append((start, index))
-            last, word = "literal", ""
+            tokens.append(("${", REGEX, index, False) if opened else ("<template>", DIVISION, index, False))
+        elif char in "0123456789" or char == "." and source[index + 1:index + 2] in tuple("0123456789"):
+            index = NUMBER.match(source, index).end()
+            if index < len(source) and (IDENTIFIER_CHAR.match(source[index]) or source[index] == "\\"):
+                raise AssertionError(f"a name or digit right after the numeric literal at offset {start}: "
+                                     f"{source[start:start + 30]!r}")
+            tokens.append(("<number>", DIVISION, index, False))
         elif char.isalnum() or char in "_$":
-            word = last = IDENTIFIER.match(source, index).group(0)
+            word = IDENTIFIER.match(source, index).group(0)
             index += len(word)
+            member = bool(tokens) and tokens[-1][0] in (".", "#")
+            if member or word not in OPERAND_WORDS | UNREAD_WORDS:
+                slash = DIVISION
+            elif word in OPERAND_WORDS:
+                slash = REGEX
+            else:
+                slash = (f"{word!r} is a keyword or a name as the statement reads, after which a '/' opens a regex or "
+                         f"divides")
+            tokens.append((word, slash, index, member))
         else:
-            if char in "([{":
-                stack.append(char)
-            elif char in ")]}":
+            text = next((mark for mark in ("=>", "...", "++", "--") if source.startswith(mark, index)), char)
+            index += len(text)
+            if text in ("(", "[", "{"):
+                # the '(' of a control header is kept as 'if(', so its ')' says a statement follows
+                if text == "(" and tokens and not tokens[-1][3] and (tokens[-1][0] in CONTROL_WORDS or (
+                        tokens[-1][0] == "await" and len(tokens) > 1 and tokens[-2][0] == "for" and not tokens[-2][3])):
+                    text = "if("
+                stack.append(text)
+                slash = REGEX
+            elif text in (")", "]", "}"):
                 opened = stack.pop() if stack else None
-                if opened != {")": "(", "]": "[", "}": "{"}[char]:
-                    raise AssertionError(f"{char!r} at offset {index} closes {opened!r}")
-            last, word = char, ""
-            index += 1
+                if opened is None or opened[-1] != {")": "(", "]": "[", "}": "{"}[text]:
+                    raise AssertionError(f"{text!r} at offset {start} closes {opened!r}")
+                slash = REGEX if opened == "if(" else UNREAD_PUNCT["}"] if text == "}" else DIVISION
+            elif text in ("++", "--", "!"):
+                slash = fixity(start, text)
+            elif text in OPERAND_PUNCT:
+                slash = REGEX
+            else:
+                slash = UNREAD_PUNCT.get(text, f"no rule reads a '/' after {text!r}")
+            tokens.append((text, slash, index, False))
     if stack:
         raise AssertionError(f"unclosed {stack} at the end of the source")
-    return "".join(out), tuple(strings)
+    return "".join(out), tuple(strings), tuple(regexes)
 
 
 def call_end(code, open_paren):
@@ -781,7 +882,7 @@ def literal_keys(source):
     stands alone between '[' and ']' written in place as '.' and the name it spells ('?.[' as '?.' and the name), the
     keys of that kind holding an escape, and the literals anywhere but in an array literal whose value is a
     STRING_HANDLES name."""
-    code, strings = lexed(source)
+    code, strings, _regexes = lexed(source)
     out, escaped, handles = list(code), [], []
     for match in re.finditer(r"\[", code):
         at = match.start()
@@ -847,6 +948,17 @@ def metadata_writes(path, code, named):
     if found:
         raise AssertionError(f"{path.name}: a metadata writer that attaches route or public metadata without a decorator "
                              f"the inventory reads: {sorted(found)}")
+
+
+def regex_names(path, source):
+    """Raise on a regex literal whose text spells a name the name checks read (S5-U1c-F07). The lexer blanks a regex
+    literal, so a '/' read as one where TypeScript divides hides everything up to the next '/' from those checks, as
+    'probe++ / (() => { ... Reflect.defineMetadata(...) ... })() / 1' did; no regex of api/src spells one."""
+    found = sorted({(line_of(source, start), match.group(0)) for start, end in lexed(source)[2]
+                    for pattern in CHECKED_NAMES for match in words(pattern, source[start:end])})
+    if found:
+        raise AssertionError(f"{path.name}: a regex literal that spells a name the source checks read, which a '/' read "
+                             f"as a regex where TypeScript divides would hide from them: {found}")
 
 
 def module_loads(path, source, code):
@@ -1017,6 +1129,7 @@ def decorator_bindings(path, source, runs):
         gathered(problems, own_import, path, named, statements, name, DECORATOR_MODULE.get(name), offsets)
     present = gathered(problems, undecorated_names, path, source, named, statements, uses)
     gathered(problems, metadata_writes, path, code, named)
+    gathered(problems, regex_names, path, source)
     gathered(problems, module_loads, path, source, named)
     gathered(problems, contract_names, path, named)
     gathered(problems, module_sources, path, statements)
@@ -2565,6 +2678,180 @@ class ClinicianPolicySpec(unittest.TestCase):
         print("CLINICIAN_POLICY_SOURCE_CONTRACT " + json.dumps({
             "f06_refused": f06, "refused": sorted(refused), "accepted": sorted(accepted), "packages": sorted(PACKAGES),
             "loaded_packages": sorted(LOADED_PACKAGES), "sealed_words": sorted(CONTRACT["sealed_words"]),
+            "real_routes": len(baseline), "real_public": len(PUBLIC),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_22_regex_and_division_are_told_apart_by_the_token_before(self):
+        """S5-U1c-F07: code_mask decided a '/' by the one character before it, and '+', '-' and '}' opened a regex.
+
+        After the registered StudyTagsController, 'let probe = 1; probe++ / (() => { const t =
+        StudyTagsController.prototype; Reflect.defineMetadata('path', 'unlisted', t.unlisted); ... return 1; })() / 1;'
+        was a regex from the first '/' to the second, so the metadata writes that make PUT study-tags/unlisted a public
+        route were blank to every check: 110 rows, public 4, test_05/11/12/13 green. 'probe--' and '<any>{}' before the
+        '/' did the same, and so did unlisted-routes.ts registered in AppModule; 'probe++ / require(...) / 1' hid a
+        loader. Each token now says what a '/' after it is, a reading that turns on grammar the lexer does not track
+        refuses the source, and a regex literal spells no checked name; each refusal is matched by its reasons inside
+        one check's message.
+        """
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        counts = MATRIX["counts"]
+        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
+                         (110, 4, 2, 5, 99), "the real inventory is unchanged: 110 = 4 + 2 + 5 + 99")
+        contract = CONTRACT["regex_or_division"]
+        self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
+                          sorted(UNREAD_PUNCT)),
+                         (contract["operand_words"], contract["unread_words"], contract["control_words"],
+                          contract["operand_punct"], contract["unread_punct"]), "the rule tables are the contract's")
+        unread = "a '/' the lexer does not read as a regex or a division from the token before it"
+
+        def reading(source):
+            return " ".join(code_mask(source).split())
+
+        # what code_mask leaves of each source: every '/' of a division stays code, a regex literal is blank
+        divisions = {
+            "after a name, a number and a literal": ("x / 2 / 'a' / `b` / 1. / .5 / 1e3;\n", "x / 2 / / / 1. / .5 / 1e3;"),
+            "after the ')' of a call or a group and after ']'": ("f(x) / (a + b) / xs[0] / [1][0];\n",
+                                                                "f(x) / (a + b) / xs[0] / [1][0];"),
+            "after a postfix '++' and '--'": ("i++ / j-- / 2;\n", "i++ / j-- / 2;"),
+            "after a non-null assertion": ("x! / y.z! / 2;\n", "x! / y.z! / 2;"),
+            "after a keyword that is a property or a private name": ("x.return / x?.delete / this.#in / 2;\n",
+                                                                     "x.return / x?.delete / this.#in / 2;"),
+            "after this, null and true": ("this / null / true / 2;\n", "this / null / true / 2;"),
+            "in a template substitution": ("`${n / 2}`;\n", "n / 2 ;"),
+            "the reviewer's postfix increment": ("probe++ / (() => { return 1; })() / 1;\n",
+                                                 "probe++ / (() => { return 1; })() / 1;"),
+        }
+        regexes = {
+            "at the start and after an operator": ("/a/.test(s) + /b/.test(s) - /c/.test(s);\n",
+                                                   ".test(s) + .test(s) - .test(s);"),
+            "after '(', ',', '[', '?', ':', '=' and '=>'": ("f(/a/, [/b/], c ? /d/ : /e/); g = (s) => /f/;\n",
+                                                            "f( , [ ], c ? : ); g = (s) => ;"),
+            "after a prefix '!'": ("if (!/a/.test(s)) {}\n", "if (! .test(s)) {}"),
+            "after an operand keyword": ("return typeof /a/ in /b/;\n", "return typeof in ;"),
+            "after the ')' of an if, while, for and for await header": (
+                "if (s) /'/.test(s);\nwhile (s) /\"/.test(s);\nfor (;;) /`/.test(s);\nfor await (const x of y) /a/.test(x);\n",
+                "if (s) .test(s); while (s) .test(s); for (;;) .test(s); for await (const x of y) .test(x);"),
+            "after else, do and case": ("if (a) {} else /a/.test(s);\ndo /b/.test(s); while (a);\n"
+                                        "switch (a) { case /c/.source: }\n",
+                                        "if (a) {} else .test(s); do .test(s); while (a); switch (a) { case .source: }"),
+            "after '...' and in a template substitution": ("[.../a/.source, `${/b/.source}`];\n", "[... .source, .source ];"),
+            "after a prefix '++' and after a division": ("++/a/.lastIndex; x = y / /b/.source.length;\n",
+                                                         "++ .lastIndex; x = y / .source.length;"),
+        }
+        refused_readings = {
+            "after the '}' of an object expression": "const probe = <any>{} / 2 / 1;\n",
+            "after the '}' of a block": "{}\n/a/.test(s);\n",
+            "after the '>' of type arguments": "const g = f<string> / 2;\n",
+            "after 'of'": "for (const x of /a/.exec(s)) {}\n",
+            "after 'await'": "async function f(s: string) { return await /a/.test(s); }\n",
+            "after 'yield'": "function* g() { yield /a/; }\n",
+            "after 'void' as a type": "(x as any) satisfies void / 2;\n",
+            "at the start of a line after a type annotation": "let x: Foo\n/'/.test(s);\n",
+            "after a comment that holds a line terminator": "a /* \u2028 */ / 2;\n",
+            "after a '++' that follows '}'": "{}++ / 2;\n",
+            "after '.'": "a./b/;\n",
+            "a hashbang": "#!/usr/bin/env node\n",
+        }
+        for label, (source, expected) in divisions.items():
+            with self.subTest(division=label):
+                self.assertEqual(reading(source), expected)
+                self.assertEqual(lexed(source)[2], ())
+        for label, (source, expected) in regexes.items():
+            with self.subTest(regex=label):
+                self.assertEqual(reading(source), expected)
+                self.assertTrue(lexed(source)[2])
+        for label, source in refused_readings.items():
+            with self.subTest(refused_reading=label), self.assertRaisesRegex(
+                    AssertionError, re.escape(unread) + ".*" + re.escape(contract["readings"]["refused"][label])):
+                code_mask(source)
+        self.assertEqual((sorted(divisions), sorted(regexes), sorted(refused_readings)),
+                         (contract["readings"]["division"], contract["readings"]["regex"],
+                          sorted(contract["readings"]["refused"])), "readings pins exactly these cases")
+
+        def reasons_in(message, reasons, replace):
+            parts = message.split(" | ")
+            for fragments in reasons:
+                fragments = [functools.reduce(lambda text, pair: text.replace(*pair), replace.items(), fragment)
+                             for fragment in fragments]
+                pattern = ".*".join(map(re.escape, fragments))
+                self.assertTrue(any(re.search(pattern, part) for part in parts), f"{fragments} not in {message}")
+
+        def refusal(files):
+            with self.assertRaises(AssertionError) as caught:
+                controller_inventory({**sources, **files})
+            return str(caught.exception)
+
+        tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
+        member, registered = "  @Get() read(", "StudyAccessController],"
+        self.assertEqual(sources[tags].count(member), 1)
+        self.assertEqual(sources[app].count(registered), 1)
+        self.assertNotIn(outside, sources)
+        writes = ("(() => { {class_path}const t = {class}.prototype; Reflect.defineMetadata('path', 'unlisted', t.unlisted); "
+                  "Reflect.defineMetadata('method', 2, t.unlisted); Reflect.defineMetadata('public', true, t.unlisted); "
+                  "return 1; })()")
+        forms = {
+            "postfix ++": "let probe = 1; probe++ / WRITES / 1;\n",
+            "postfix --": "let probe = 1; probe-- / WRITES / 1;\n",
+            "an object expression": "const probe = <any>{} / WRITES / 1;\n",
+            "the loader alone": "let probe = 1; probe++ / require('@nestjs\\x2fcommon') / 1;\n",
+        }
+        self.assertEqual(sorted(forms), sorted(contract["forms"]))
+        # the reviewer's text in the registered controller; in the outside file the class gets its prefix the same way
+        places = {
+            "registered study-tags.controller.ts": (tags, "StudyTagsController", "", lambda text: {
+                tags: sources[tags].replace(member, "  unlisted() { return {}; }\n" + member) + text}),
+            "unlisted-routes.ts registered in AppModule": (
+                outside, "UnlistedController", "Reflect.defineMetadata('path', 'unlisted', UnlistedController); ",
+                lambda text: {outside: "export class UnlistedController {\n  unlisted() { return {}; }\n}\n" + text,
+                              app: "import { UnlistedController } from './unlisted-routes';\n"
+                                   + sources[app].replace(registered, "StudyAccessController, UnlistedController],")}),
+        }
+        self.assertEqual(sorted(places), sorted(contract["places"]))
+        # control: the reader at e33e040 opened a regex after '(,=:[!&|?{};+-*%<>~^', and each form puts '+', '-' or '}'
+        # right before its first '/'
+        previous = frozenset("(,=:[!&|?{};+-*%<>~^")
+        f07 = {}
+        for form, text in forms.items():
+            for place, (path, owner_name, class_path, build) in places.items():
+                source = text.replace("WRITES", writes.replace("{class_path}", class_path).replace("{class}", owner_name))
+                with self.subTest(f07=form, place=place):
+                    self.assertIn(source[:source.index("/")].rstrip()[-1], previous)
+                    message = refusal(build(source))
+                    reasons_in(message, contract["forms"][form], {"{file}": path.name, "{class}": owner_name})
+                    if form != "an object expression":
+                        # the '/' divides, so what stands between the two is code every check reads
+                        self.assertNotIn(unread, message)
+                        self.assertIn("require(" if form == "the loader alone" else "Reflect.defineMetadata",
+                                      code_mask(source))
+                    f07.setdefault(form, []).append(place)
+        inject = "import { Injectable } from '@nestjs/common';\n"
+        helper = inject + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
+        refused = {
+            "a regex literal that spells checked names": {outside: helper + "export const pattern = /Reflect\\.defineMetadata|require/;\n"},
+        }
+        self.assertEqual(sorted(refused), sorted(contract["refused"]))
+        for label, files in refused.items():
+            with self.subTest(refused=label):
+                reasons_in(refusal(files), contract["refused"][label], {"{file}": outside.name})
+        # controls: divisions and regex literals of every supported kind in one file read unchanged, including a regex
+        # after an if header whose quote the reader before this opened as a string
+        accepted = {
+            "divisions after names, calls, indexes, postfix operators and non-null assertions": {outside: helper + (
+                "export const ratio = (a: number, b: number) => a / b / (a + b) / [a][0];\n"
+                "export const next = (n: number) => { let i = n; i++; i--; return i++ / 2 + i-- / n! / 2; };\n")},
+            "regex literals after operators, '!', a control header and in a template": {outside: helper + (
+                "export const slug = (s: string) => s.replace(/[^a-z0-9]+/g, '-').split('/').length / 2;\n"
+                "export const label = (n: number) => `${n / 2}/${/x/.source}`;\n"
+                "export const check = (s: string) => { if (s) /'/.test(s); return !/\"/.test(s) && typeof /`/ === 'object'; };\n")},
+        }
+        self.assertEqual(sorted(accepted), sorted(contract["accepted"]))
+        for label, files in accepted.items():
+            with self.subTest(accepted=label):
+                self.assertEqual(controller_inventory({**sources, **files}), baseline)
+        print("CLINICIAN_POLICY_REGEX_OR_DIVISION " + json.dumps({
+            "f07_refused": f07, "division": sorted(divisions), "regex": sorted(regexes),
+            "refused_readings": sorted(refused_readings), "refused": sorted(refused), "accepted": sorted(accepted),
             "real_routes": len(baseline), "real_public": len(PUBLIC),
         }, ensure_ascii=True, sort_keys=True))
 

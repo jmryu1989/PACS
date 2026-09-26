@@ -205,7 +205,7 @@
   },
   "source_contract": {
     "unit": "S5-U1c",
-    "rule": "S5-U1c-F06: the closed contract of the lexer and loader checks. module_loads read a loader call by its first string or token and let member calls and calls that ':' followed pass, so require('@nest' + 'js/common'), module.require(name), 'true ? require(name) : null' and module['require']('@nestjs/common') loaded Nest's common unread and common['Put'] made a public route both inventories missed. Every api/src .ts file is read in the supported forms below and every other form that reaches a loader, an evaluator, a metadata writer or a class prototype is refused (fail-closed); a new form, package, Reflect or process member is a new decision, listed here only after checking that it neither loads nor evaluates code nor writes route or public metadata. refused pins each refusal regression with the reasons it must be refused for (fragments in order inside one check's message); accepted pins the controls that must still read; f06_loaders pins the reviewer's four loaders.",
+    "rule": "S5-U1c-F06: the closed contract of the lexer and loader checks. module_loads read a loader call by its first string or token and let member calls and calls that ':' followed pass, so require('@nest' + 'js/common'), module.require(name), 'true ? require(name) : null' and module['require']('@nestjs/common') loaded Nest's common unread and common['Put'] made a public route both inventories missed. Every api/src .ts file is read in the supported forms below and every other form that reaches a loader, an evaluator, a metadata writer or a class prototype is refused (fail-closed); a new form, package, Reflect or process member is a new decision, listed here only after checking that it neither loads nor evaluates code nor writes route or public metadata. refused pins each refusal regression with the reasons it must be refused for (fragments in order inside one check's message); accepted pins the controls that must still read; f06_loaders pins the reviewer's four loaders. S5-U1c-F07: every check trusted a code mask whose lexer opened a regex after '+', '-' or '}', so a division hid the metadata writes after it; regex_or_division is the closed rule for a '/' and pins its own cases.",
     "supported": [
       "a decorator '@Name(...)' applied directly, Name bound once by its own-name import from decorator_bindings.modules (S5-U1c-F01-F05)",
       "an ES module statement naming a plain string module: a file under api/src or a package in packages; a decorator name only by its own-name named import; no namespace, default, import = or export * of a project file or a '@nestjs/' package; import 'm' counts as naming m",
@@ -213,7 +213,8 @@
       "a method named require: declared in a class body ('[modifier] require(...) {' or ': T {') and called only as this.require(...) or this.<field>.require(...)",
       "a string literal, or a template without substitutions, alone between '[' and ']' is read as the name it spells: x['require'] is x.require, x?.['require'] is x?.require and common['Put'] is common.Put for every name check; such a key with an escape is refused",
       "a string literal or template without substitutions whose value (escapes decoded) is one of sealed_words or sealed_strings stands only as an element of an array literal: elsewhere a reflective call (Object.getOwnPropertyDescriptor(X, 'prototype')), a quoted key ({ '__proto__': p }) or a quoted member name ('constructor'() { ... }) reads it as that name",
-      "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends"
+      "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends",
+      "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
     ],
     "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "node:crypto", "node:http", "rxjs"],
     "loaded_packages": ["express", "node:crypto"],
@@ -307,7 +308,66 @@
       "one-literal keys that name nothing sealed",
       "process.env and process.exit",
       "this.require and this.<field>.require of a method named require"
-    ]
+    ],
+    "regex_or_division": {
+      "unit": "S5-U1c-F07",
+      "rule": "S5-U1c-F07: code_mask decided a '/' by the one character before it and opened a regex after '+', '-' and '}', so 'probe++ / (() => { ... Reflect.defineMetadata(...) ... })() / 1' after the registered StudyTagsController, '<any>{}' before the '/' and the same in unlisted-routes.ts registered in AppModule blanked the metadata writes between the two '/' and a public route both inventories missed (110 rows, public 4, test_05/11/12/13 green). A '/' outside a comment or literal now opens a regex or divides by the token before it. It divides after a name, a number, a string, template or regex literal, ']', the ')' of a call or group, a postfix '++' or '--', a non-null '!', and a reserved word after '.' or '#', on the same line. It opens a regex at the start of the source and after operand_words, operand_punct, the ')' of a control_words header or of 'for await (', and a prefix '++', '--' or '!' (prefix: no token an expression ends at stands before it on its line). Every other '/' is refused with its reason, because TypeScript's reading turns on grammar the lexer does not track: after unread_words, unread_punct ('}' closes a block or an object literal, type or class or function expression; '>' is a comparison or closes type arguments), '#', '@' or any other character, after a '++', '--' or '!' that follows such a token, and a '/' that starts a line after a token an expression ends at (a division, or a regex after a semicolon inserted where a statement or type annotation ends). Neither reading is guessed: a regex read as a division opens a string at a quote in its body. regex_names also refuses a regex literal whose text spells a name the name checks read, so a division read as a regex could not hide one. readings pins the lexer cases, forms the reviewer's four shapes with the reasons each is refused for in both places ({file} and {class} are the place's), refused and accepted the file-level cases.",
+      "operand_words": ["case", "delete", "do", "else", "in", "instanceof", "new", "return", "throw", "typeof"],
+      "unread_words": ["await", "break", "catch", "class", "const", "continue", "debugger", "default", "enum", "export", "extends", "finally", "for", "function", "if", "implements", "import", "interface", "let", "of", "package", "private", "protected", "public", "static", "switch", "try", "var", "void", "while", "with", "yield"],
+      "control_words": ["for", "if", "while", "with"],
+      "operand_punct": ["${", "%", "&", "(", "*", "+", ",", "-", "...", "/", ":", ";", "<", "=", "=>", "?", "[", "^", "{", "|", "~"],
+      "unread_punct": [".", ">", "}"],
+      "readings": {
+        "division": [
+          "after a keyword that is a property or a private name",
+          "after a name, a number and a literal",
+          "after a non-null assertion",
+          "after a postfix '++' and '--'",
+          "after the ')' of a call or a group and after ']'",
+          "after this, null and true",
+          "in a template substitution",
+          "the reviewer's postfix increment"
+        ],
+        "regex": [
+          "after '(', ',', '[', '?', ':', '=' and '=>'",
+          "after '...' and in a template substitution",
+          "after a prefix '!'",
+          "after a prefix '++' and after a division",
+          "after an operand keyword",
+          "after else, do and case",
+          "after the ')' of an if, while, for and for await header",
+          "at the start and after an operator"
+        ],
+        "refused": {
+          "after the '}' of an object expression": "'}' ends a block, after which a '/' opens a regex, or an object literal",
+          "after the '}' of a block": "'}' ends a block, after which a '/' opens a regex, or an object literal",
+          "after the '>' of type arguments": "'>' compares, after which a '/' opens a regex, or closes type arguments",
+          "after 'of'": "'of' is a keyword or a name as the statement reads",
+          "after 'await'": "'await' is a keyword or a name as the statement reads",
+          "after 'yield'": "'yield' is a keyword or a name as the statement reads",
+          "after 'void' as a type": "'void' is a keyword or a name as the statement reads",
+          "at the start of a line after a type annotation": "('Foo') at offset 11: it starts a line after a token an expression ends at",
+          "after a comment that holds a line terminator": "('a') at offset 10: it starts a line after a token an expression ends at",
+          "after a '++' that follows '}'": "'++' is postfix or prefix as '}' reads, which is refused",
+          "after '.'": "a member name follows '.'",
+          "a hashbang": "'!' is postfix or prefix as '#' reads, which is refused: no rule reads a '/' after '#'"
+        }
+      },
+      "forms": {
+        "postfix ++": [["{file}: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.defineMetadata')"], ["{file}: a sealed name or a form the source contract does not list", "'{class}.prototype')"]],
+        "postfix --": [["{file}: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.defineMetadata')"], ["{file}: a sealed name or a form the source contract does not list", "'{class}.prototype')"]],
+        "an object expression": [["a '/' the lexer does not read as a regex or a division from the token before it ('}')", "'}' ends a block"]],
+        "the loader alone": [["{file}: a module loader the binding check does not follow", "require() of a module computed at run time or written other than as one plain string literal: require('@nestjs"]]
+      },
+      "places": ["registered study-tags.controller.ts", "unlisted-routes.ts registered in AppModule"],
+      "refused": {
+        "a regex literal that spells checked names": [["{file}: a regex literal that spells a name the source checks read", "'Reflect')", "'defineMetadata')", "'require')"]]
+      },
+      "accepted": [
+        "divisions after names, calls, indexes, postfix operators and non-null assertions",
+        "regex literals after operators, '!', a control header and in a template"
+      ]
+    }
   },
   "request_method_pin": {
     "package": "@nestjs/common",
