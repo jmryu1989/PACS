@@ -306,11 +306,28 @@ const ADMIN = { institution: 'hallym', sub: 'SYN-ADMIN-SUB', actor: 'syn-admin',
 const POLICY = restricted => ({ institution: 'hallym', revision: 1, reason: 'SYN', updatedBy: 'syn-admin', updatedAt: new Date(now),
   policy: { version: 1, restricted, startsAt: null, endsAt: null, rules: restricted ? [{ all: true }] : [] } });
 
-function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, dbFail = null, approvalsFail = null } = {}) {
+// A StudyState `where` as PostgreSQL applies it (only the OR-of-equalities shape the metrics reads use).
+const inScope = (row, where) => !where?.OR || where.OR.some(term => Object.entries(term).every(([key, value]) => row[key] === value));
+
+/* One mutable StudyState table: a change made while the service reads (afterStates, or an orthanc stand-in that gets the
+ * table) is what its next read sees. Unfiltered (the default) every row comes back, so the service's own tenant filter is
+ * what keeps other institutions out; `filtered` applies the where clause, so a study that left the scope is absent. */
+function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, dbFail = null, approvalsFail = null,
+  recheckFail = null, filtered = false, afterStates = null } = {}) {
   const calls = [];
-  let policyReads = 0;
+  const db = structuredClone(STATES);
+  let policyReads = 0, stateReads = 0;
   const prisma = {
-    studyState: { findMany: async arg => { calls.push(['states', arg]); if (dbFail) throw dbFail; return structuredClone(STATES); } },
+    studyState: { findMany: async arg => {
+      calls.push(['states', arg]);
+      const read = ++stateReads;
+      if (dbFail) throw dbFail;
+      if (recheckFail && read > 1) throw recheckFail;
+      const rows = structuredClone(db).filter(row => !filtered || inScope(row, arg.where))
+        .map(row => arg.select ? Object.fromEntries(Object.keys(arg.select).map(key => [key, row[key]])) : row);
+      afterStates?.(db, read);
+      return rows;
+    } },
     $queryRaw: async (strings, ...values) => {
       const sql = strings.join('?');
       if (sql.includes('"StudyAccessPolicy"')) { calls.push(['policy']); return structuredClone(policies[Math.min(policyReads++, policies.length - 1)]); }
@@ -319,7 +336,7 @@ function store({ policies = [[], []], statistics = STATISTICS, orthanc = null, d
       return APPROVED.map(([uid, at]) => ({ uid, firstApprovedAt: ago(at) }));
     },
   };
-  const source = { get: orthanc ?? (async path => { calls.push(['orthanc', path]); return structuredClone(statistics); }) };
+  const source = { get: orthanc ? path => orthanc(path, db, calls) : async path => { calls.push(['orthanc', path]); return structuredClone(statistics); } };
   const service = new S.PacsService(prisma, source, {}, new StudyAccessService(prisma, {}, {}), {});
   // The instance clock is the fixture's NOW, so windows and durations are the fixture's to the second.
   service.metricsClock = () => now;
@@ -381,6 +398,11 @@ test('server: an admin reads the own-institution aggregate; filters sit in both 
   assert.deepEqual(values, ['hallym', 'hallym']);
   assert.deepEqual(calls.filter(call => call[0] === 'orthanc'), [['orthanc', '/statistics']]);
   assert.equal(calls.filter(call => call[0] === 'policy').length, 2, 'the access check runs before and after the reads');
+  // S5-U6b-F01: the scope is read again after every source answered, on the same institution condition, then the policy.
+  assert.deepEqual(calls.map(call => call[0]), ['policy', 'orthanc', 'states', 'approvals', 'states', 'policy']);
+  const recheck = calls.filter(call => call[0] === 'states')[1][1];
+  assert.deepEqual(recheck.where, { OR: [{ institutionId: 'hallym' }, { teleInstitutionId: 'hallym' }] });
+  assert.deepEqual(Object.keys(recheck.select).sort(), ['institutionId', 'teleInstitutionId', 'uid']);
   const text = JSON.stringify(answer);
   for (const leak of ['987654', '876543', '765432', '654321', '999999999999', 'Count', '1.2.', '9.9.9', 'kin-center', 'SYN-ADMIN'])
     assert.ok(!text.includes(leak), `the answer carries ${leak}`);
@@ -410,6 +432,56 @@ test('server: a change of the study access policy during the read refuses the ag
   await assert.rejects(service.adminMetrics(ADMIN), e => e.getStatus() === 409 && e.getResponse().code === 'STUDY_ACCESS_CHANGED');
 });
 
+// S5-U6b-F01. 1.2.5 is kin-center's study that hallym receives for tele-reading; closing it sets teleInstitutionId to null.
+const TELE_UID = '1.2.5';
+const closeTele = db => { db.find(s => s.uid === TELE_UID).teleInstitutionId = null; };
+const scopeChanged = e => e.getStatus() === 409 && e.getResponse().code === 'STUDY_LIST_CHANGED';
+
+test('server: a tele-reading closed while the aggregate is read refuses it (409), never an old-scope count', { skip: hosted }, async () => {
+  for (const filtered of [false, true]) {
+    // Between the first StudyState read and the approvals read.
+    const between = store({ filtered, afterStates: (db, read) => { if (read === 1) closeTele(db); } });
+    await assert.rejects(between.service.adminMetrics(ADMIN), scopeChanged, `between the DB reads (filtered ${filtered})`);
+    assert.deepEqual(between.calls.map(call => call[0]), ['policy', 'orthanc', 'states', 'approvals', 'states'],
+      'refused at the scope read; the policy read after it never runs');
+    // After both DB reads, while Orthanc is still out: the scope is read only once every source has answered.
+    const late = store({ filtered, orthanc: async (path, db, calls) => {
+      calls.push(['orthanc', path]);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      closeTele(db);
+      calls.push(['closed']);
+      return structuredClone(STATISTICS);
+    } });
+    await assert.rejects(late.service.adminMetrics(ADMIN), scopeChanged, `during the Orthanc wait (filtered ${filtered})`);
+    assert.deepEqual(late.calls.map(call => call[0]), ['policy', 'orthanc', 'states', 'approvals', 'closed', 'states']);
+  }
+  // An owned study moved out of the scope is a change too (institutionId), as is one that vanished.
+  const moved = store({ afterStates: (db, read) => { if (read === 1) db.find(s => s.uid === '1.2.1').institutionId = 'kin-center'; } });
+  await assert.rejects(moved.service.adminMetrics(ADMIN), scopeChanged, 'an owned study moved away');
+  const gone = store({ filtered: true, afterStates: (db, read) => { if (read === 1) db.splice(db.findIndex(s => s.uid === '1.2.4'), 1); } });
+  await assert.rejects(gone.service.adminMetrics(ADMIN), scopeChanged, 'a counted study vanished');
+});
+
+test('server: a scope that held keeps the aggregate; a study entering during the read is not counted and refuses nothing', { skip: hosted }, async () => {
+  const held = [
+    ['nothing changes', () => {}],
+    // A new own arrival and a tele-reading received during the read: neither was counted, so nothing outside the scope was.
+    ['a new own study arrives', db => db.push(state('1.2.99', 'hallym', 'E', 'W', 0))],
+    ['a tele-reading is received', db => { db.find(s => s.uid === '1.2.9').teleInstitutionId = 'hallym'; }],
+    // Closed and requested again before the answer: the scope at the answer is the scope that was counted.
+    ['closed and re-requested', db => { closeTele(db); db.find(s => s.uid === TELE_UID).teleInstitutionId = 'hallym'; }],
+    // Not a scope field: the aggregate is still the one first read.
+    ['a report state changes', db => { db.find(s => s.uid === '1.2.4').rs = 'A'; }],
+  ];
+  for (const filtered of [false, true]) {
+    for (const [what, change] of held) {
+      const { service } = store({ filtered, afterStates: (db, read) => { if (read === 1) change(db); } });
+      const answer = clone(await service.adminMetrics(ADMIN));
+      assert.deepEqual(answer.metrics, AT_CLOCK(), `${what} (filtered ${filtered})`);
+    }
+  }
+});
+
 test('server: Orthanc down, malformed or late is Unobservable storage; the DB rows still read', { skip: hosted }, async () => {
   const outcomes = [
     ['source_failed', async () => { throw Object.assign(new Error('SYN-ORTHANC-URL http://orthanc:8042 refused'), { status: 503 }); }],
@@ -432,7 +504,8 @@ test('server: a failed DB read is Unobservable on every DB row, never 0, and log
   const warn = console.warn, warned = [];
   console.warn = (...args) => warned.push(args.join(' '));
   try {
-    for (const option of ['dbFail', 'approvalsFail']) {
+    // recheckFail: the first reads answered but the scope could not be read again, so nothing proves the scope held.
+    for (const option of ['dbFail', 'approvalsFail', 'recheckFail']) {
       const { service } = store({ [option]: Object.assign(new Error('SYN-SECRET-DATABASE-URL'), { code: 'P1001' }) });
       const answer = clone(await service.adminMetrics(ADMIN));
       assert.deepEqual([answer.metrics[0].state, answer.metrics[0].value], ['observed', BYTES], option);
@@ -440,6 +513,6 @@ test('server: a failed DB read is Unobservable on every DB row, never 0, and log
         Array(9).fill(['unobservable', 'source_failed', null]), option);
     }
   } finally { console.warn = warn; }
-  assert.equal(warned.length, 2);
+  assert.equal(warned.length, 3);
   assert.ok(warned.every(line => line.includes('P1001') && !line.includes('SYN-SECRET')), warned.join('\n'));
 });

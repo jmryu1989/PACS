@@ -589,7 +589,7 @@ export class PacsService implements OnModuleInit {
   /**
    * S5-U6b 관리자 운영 지표(`GET /api/admin/metrics`). 줄의 모양과 규칙은 `adminMetricRows`에 있다.
    *
-   * 기관 범위는 서버가 정한다: DB 읽기 두 개가 모두 `institutionId = me OR teleInstitutionId = me`로 걸리고
+   * 기관 범위는 서버가 정한다: DB 읽기(범위 재확인 포함)가 모두 `institutionId = me OR teleInstitutionId = me`로 걸리고
    * (워크리스트와 같은 visible 경계), 원천 행은 응답에 나가지 않고 합계만 나간다. Orthanc `/statistics`에서는
    * TotalDiskSize 하나만 읽는다 — 같은 답에 있는 서버 전체 검사·영상 수는 다른 기관 검사를 세는 값이라 싣지 않는다.
    */
@@ -602,7 +602,10 @@ export class PacsService implements OnModuleInit {
     if (access.policy.restricted)
       throw new ForbiddenException({ code: 'ADMIN_METRICS_RESTRICTED',
         message: '검사 접근 범위가 제한된 계정은 기관 운영 지표를 볼 수 없습니다' });
-    const [storage, studies] = await Promise.all([this.metricsStorage(), this.metricsStudies(me)]);
+    const [storage, read] = await Promise.all([this.metricsStorage(), this.metricsStudies(me)]);
+    // 기관 범위 재확인은 모든 원천이 답한 뒤(Orthanc 대기 포함)에 한다. 범위가 바뀐 것은 원천 실패가 아니므로
+    // metricsStudies의 catch 밖에서 409로 던진다 — 관측 불가 줄로 바꿔 내보내지 않는다.
+    const studies = read && await this.metricsScopeHeld(me, read);
     const metrics = adminMetricRows(me, storage, studies);
     // AdminController는 정책 관리 통로를 지키려고 응답 뒤 재확인 interceptor를 건너뛴다. 그 확인을 여기서 한다 —
     // 읽는 동안 접근 조건이 바뀌었으면 그 전 조건으로 센 합계를 내보내지 않는다.
@@ -650,6 +653,33 @@ export class PacsService implements OnModuleInit {
       console.warn(`[KIN API] 운영 지표 DB 읽기 실패: ${e?.code ?? e?.name ?? 'unknown'}`);
       return null;
     }
+  }
+
+  /**
+   * 집계에 쓴 검사가 아직 같은 기관 범위에 있는가(S5-U6b-F01). `studyAccess.unchanged`는 계정의 접근 정책만 비교하므로,
+   * 읽는 동안 원격판독 의뢰가 취소되어(teleInstitutionId → null) 통로가 닫힌 검사를 보지 못한다. 그래서 첫 읽기와 같은
+   * 조건으로 한 번 더 읽어, 쓴 검사마다 institutionId·teleInstitutionId가 그대로인지 본다(워크리스트의 응답 전 재확인과
+   * 같은 두 칸). IN 목록 대신 같은 기관 조건을 다시 걸어 매개변수 개수 한도에 닿지 않는다. 빠지거나 바뀐 검사가 하나라도
+   * 있으면 합계 전체를 409로 거절한다. 읽는 동안 새로 범위에 들어온 검사는 거절 사유가 아니다 — 합계에 들어가지 않았으니
+   * 범위 밖을 센 것이 없다. 재확인 읽기가 실패하면 범위를 확인하지 못한 것이므로 DB 줄 전부를 관측 불가(null)로 돌린다.
+   */
+  private async metricsScopeHeld(me: string, read: AdminMetricStudies): Promise<AdminMetricStudies | null> {
+    let current: { uid: string; institutionId: string | null; teleInstitutionId: string | null }[];
+    try {
+      current = await this.prisma.studyState.findMany({
+        where: { OR: [{ institutionId: me }, { teleInstitutionId: me }] },
+        select: { uid: true, institutionId: true, teleInstitutionId: true },
+      });
+    } catch (e: any) {
+      console.warn(`[KIN API] 운영 지표 범위 재확인 실패: ${e?.code ?? e?.name ?? 'unknown'}`);
+      return null;
+    }
+    const held = new Map(current.map(s => [s.uid, s]));
+    if (read.states.some(s => {
+      const now = held.get(s.uid);
+      return !now || now.institutionId !== s.institutionId || now.teleInstitutionId !== s.teleInstitutionId;
+    })) throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요.' });
+    return read;
   }
 
   /**
