@@ -2,14 +2,19 @@
 """TEST-S5-U1a-CLINICIAN-LIVE: clinician-only default denial on the real Nest guard, Keycloak and member console.
 
 REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE/ROLE-LIST-DRIFT.
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-LIVE-MATRIX: test_01 sweeps
+every controller route that is neither public nor allowed and requires them to be exactly the route_matrix denied rows,
+test_04 fixes the mixed/legacy role composition on a real study, test_05 runs the live_matrix of the fixtures (a positive,
+a wrong-role and a wrong-tenant case for every allow row, one call each).
 Hosted synthetic stack only, through scripts/run-tests.py:
 
-    python scripts/run-tests.py --module tests/clinician_policy_live.py --mode live --unit s5-u1a-clinician-policy --timeout 900
+    python scripts/run-tests.py --module tests/clinician_policy_live.py --mode live --unit s5-u1c-clinician-policy --timeout 900
 
-Owned identities only: run-created Keycloak users (kin-test-*), the run's password-grant client, and the
-realm role `clinician` only when this run had to create it. No study fixture, no Orthanc write, no
-clinical data. Every denial is discriminated by the guard's own code CLINICIAN_ROUTE_DENIED and by the
-absence of audit rows for the clinician actor, so a 403 from a service-layer need() is never counted.
+Owned data only: run-created Keycloak users (kin-test-*), the run's password-grant client, the realm role `clinician`
+only when this run had to create it, the LiveStack gateway service client, and one synthetic C-STORE study shared by
+test_04 and test_05 (report left at RS W; nothing here writes a report, item or setting) removed by the class cleanup.
+Every clinician-gate denial is discriminated by the guard's own code CLINICIAN_ROUTE_DENIED and by the absence of audit
+rows for the clinician actor, so a 403 from a service-layer need() is never counted as one.
 """
 from __future__ import annotations
 
@@ -31,6 +36,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = json.loads((ROOT / "tests" / "clinician_policy_fixtures.json").read_text(encoding="utf-8"))
 ALLOWED = set(FIXTURES["session_routes"]) | set(FIXTURES["business_routes"])
 PUBLIC = set(FIXTURES["public_routes"])
+DENIED_ROUTES = {route for routes in FIXTURES["route_matrix"]["denied"].values() for route in routes}
+COUNTS = FIXTURES["route_matrix"]["counts"]
+LIVE_MATRIX = FIXTURES["live_matrix"]
+APP_ROLES = set(FIXTURES["app_roles"])
+READ = FIXTURES["read_contract"]
 DENIED = FIXTURES["denied_code"]
 PROBE = FIXTURES["live_probe_values"]
 OWNED_USERNAME = re.compile(r"kin-test-[0-9a-f]{12}-[a-z0-9_-]+")
@@ -43,14 +53,25 @@ def probe_path(route: str) -> str:
     return "/" + path
 
 
+def code(result):
+    return result.body.get("code") if isinstance(result.body, dict) else None
+
+
+def message(result) -> str:
+    text = result.body.get("message") if isinstance(result.body, dict) else None
+    return text if isinstance(text, str) else ""
+
+
 class ClinicianPolicyLive(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.stack = LiveStack()
         cls.addClassCleanup(cls.stack.cleanup_test_identities)
+        cls.addClassCleanup(cls.stack.cleanup_all)
         cls.stack.require_stack()
         cls.created_role = False
         cls.owned_users: list[str] = []
+        cls.shared_study = None
         role = cls.stack.kc_admin("GET", "/roles/clinician")
         if role.status == 404:
             created = cls.stack.kc_admin("POST", "/roles", {"name": "clinician", "description": "temporary S5-U1a clinician role"})
@@ -65,6 +86,7 @@ class ClinicianPolicyLive(unittest.TestCase):
         cls.stack.create_test_identity("clinician-radiologist", ["clinician", "radiologist"], "hallym")
         cls.stack.create_test_identity("clinician-technician", ["clinician", "technician"], "hallym")
         cls.stack.create_test_identity("clinician-admin", ["clinician", "admin"], "kin-center")
+        cls.stack.create_test_identity("kclinician", ["clinician"], "kin-center")
 
     @classmethod
     def delete_role_if_created(cls) -> None:
@@ -135,6 +157,13 @@ class ClinicianPolicyLive(unittest.TestCase):
     def bearer(self, method: str, path: str, token: str, body=None):
         return self.stack.bearer_request(method, path, token, body)
 
+    def study(self):
+        """One run-owned hallym study for test_04 and test_05; its report stays at RS W. stack.cleanup_all removes it."""
+        cls = type(self)
+        if cls.shared_study is None:
+            cls.shared_study = cls.stack.create_fixture()
+        return cls.shared_study
+
     def admin_row(self, username: str) -> dict:
         page = 1
         while True:
@@ -159,7 +188,8 @@ class ClinicianPolicyLive(unittest.TestCase):
         routes = controller_routes()
         keys = {m + " " + p for m, p in routes}
         self.assertTrue(ALLOWED <= keys, sorted(ALLOWED - keys))
-        denied = []
+        # the controllers decide what is probed, so a route without a matrix row is probed too; the matrix is compared after
+        swept = []
         for method, path in sorted(routes):
             key = method + " " + path
             if key in PUBLIC or key in ALLOWED:
@@ -168,9 +198,11 @@ class ClinicianPolicyLive(unittest.TestCase):
             result = self.stack.request(method, probe_path(path), "clinician", body)
             with self.subTest(route=key):
                 self.assertEqual(result.status, 403, result.text)
-                self.assertEqual(result.body.get("code") if isinstance(result.body, dict) else None, DENIED, result.text)
-            denied.append(key)
-        self.assertEqual(len(denied), len(routes) - len(PUBLIC) - len(ALLOWED))
+                self.assertEqual(code(result), DENIED, result.text)
+            swept.append(key)
+        self.assertEqual(sorted(swept), sorted(DENIED_ROUTES), "RISK-S5-U1c-NEW-ROUTE-LEAK: the probed routes are not "
+                         "exactly the route_matrix denied rows")
+        self.assertEqual((len(routes), len(swept)), (COUNTS["routes"], COUNTS["denied"]))
         self.assertGreaterEqual(len(routes), len(FIXTURES["baseline_inventory"]["routes"]))
 
         health = self.stack.request("GET", "/health", "clinician")
@@ -180,8 +212,9 @@ class ClinicianPolicyLive(unittest.TestCase):
         # Guard-level denial never reaches a service: the clinician actor has written no audit row.
         actor = self.stack.actor("clinician").replace("'", "''")
         self.assertEqual(psql(f"SELECT count(*) FROM \"AuditLog\" WHERE actor='{actor}'"), ["0"])
-        print("CLINICIAN_LIVE_SWEEP " + json.dumps({"routes": len(routes), "denied": len(denied),
-              "allowed": sorted(ALLOWED), "public": sorted(PUBLIC)}, ensure_ascii=True, sort_keys=True))
+        print("CLINICIAN_LIVE_SWEEP " + json.dumps({"routes": len(routes), "denied": len(swept),
+              "allowed": sorted(ALLOWED), "public": sorted(PUBLIC),
+              "newly_classified": sorted(FIXTURES["route_matrix"]["post_baseline"])}, ensure_ascii=True, sort_keys=True))
 
     def test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout(self) -> None:
         for logical, groups, code in (("cpending", [], "INSTITUTION_PENDING"),
@@ -260,6 +293,108 @@ class ClinicianPolicyLive(unittest.TestCase):
                 self.assertEqual(result.status, status, result.text)
                 if status == 403:
                     self.assertNotEqual(result.body.get("code"), DENIED)
+
+        # S5-U1c RISK-S5-U1c-MIXED-DOWNGRADE on a real study, one call per case: a mixed member keeps the legacy answer
+        # where the clinician gate or projection would narrow, and a clinician-only member inherits none of it
+        study = self.study()
+        uid = quote(study.uid)
+        composition: dict[str, dict] = {}
+        for user, editor in (("clinician-radiologist", True), ("clinician-technician", False)):
+            with self.subTest(mixed=user):
+                listed = self.stack.request("GET", "/studies", user)
+                items = self.stack.request("GET", f"/studies/{uid}/viewer-items", user)
+                preview = self.stack.request("GET", f"/studies/{uid}/report-preview", user)
+                composition[user] = {"studies": listed.status, "viewer-items": [items.status, items.body],
+                                     "report-preview": preview.status}
+                self.assertEqual(listed.status, 200, listed.text[:300])
+                self.assertIn(study.uid, {row["uid"] for row in listed.body["studies"]}, "the legacy worklist is not reduced")
+                self.assertEqual((items.status, items.body), (200, {"items": [], "nextCursor": None}),
+                                 "the legacy item answer, not the clinician projection")
+                self.assertEqual(preview.status, 200, preview.text[:300])
+                self.assertEqual(preview.body["canPreviewEditor"], editor, "the legacy role decides, not clinician")
+        only: dict[str, list] = {}
+        for path in ("/studies", f"/studies/{uid}/report-preview"):
+            result = self.stack.request("GET", path, "clinician")
+            only[path] = [result.status, code(result)]
+            with self.subTest(clinician_only=path):
+                self.assertEqual((result.status, code(result)), (403, DENIED), result.text[:300])
+        narrowed = self.stack.request("GET", f"/studies/{uid}/viewer-items", "clinician")
+        only["viewer-items"] = [narrowed.status, narrowed.body]
+        composition["clinician"] = only
+        self.assertEqual((narrowed.status, narrowed.body),
+                         (200, {"uid": study.uid, "final": False, "items": None, "nextCursor": None}))
+        # admin is no institution exception: the kin-center clinician+admin meets the preview's own institution rule
+        foreign = self.stack.request("GET", f"/studies/{uid}/report-preview", "clinician-admin")
+        composition["clinician-admin"] = {"report-preview": [foreign.status, code(foreign)]}
+        self.assertEqual(foreign.status, 403, foreign.text[:300])
+        self.assertNotEqual(code(foreign), DENIED, "the institution rule decides, not the clinician gate")
+        self.assertIn("판독문 미리보기에 접근할 수 없습니다", message(foreign), foreign.text[:300])
+        print("CLINICIAN_LIVE_COMPOSITION " + json.dumps(composition, ensure_ascii=True, sort_keys=True))
+
+    def assert_positive(self, route: str, result, uid: str, instance: str) -> None:
+        """What the clinician-only member of the study's institution is answered on each allow row (RS W, no items)."""
+        body = result.body
+        if route == "GET me":
+            self.assertEqual((body["kind"], body["institution"]), ("member", "hallym"))
+            self.assertEqual({role for role in body["roles"] if role in APP_ROLES}, {"clinician"})
+        elif route == "POST auth/logout":
+            self.assertEqual(result.text, "")
+        elif route == "GET authz/dicom":
+            self.assertTrue(isinstance(body, list) and body, "no DICOM metadata behind the passed auth_request")
+        elif route == "POST dicom/lookup":
+            self.assertEqual(body, {"id": instance})
+        elif route == "GET studies/:uid/viewer-items":
+            self.assertEqual(body, {"uid": uid, "final": False, "items": None, "nextCursor": None})
+        elif route == "GET clinician/studies":
+            self.assertEqual(sorted(body), sorted(READ["list_response_keys"]))
+            self.assertIn(uid, {row["uid"] for row in body["studies"]})
+        elif route == "GET clinician/studies/:uid/report":
+            self.assertEqual(body, {"uid": uid, "report": {"final": False, "rs": "W"}, "keys": None})
+        else:
+            self.fail("no positive check for " + route)
+
+    def test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case(self) -> None:
+        study = self.study()
+        uid = study.uid
+        instance = self.stack.first_instance_id(uid)
+        tags = self.stack._orthanc_request("GET", f"/instances/{quote(instance)}/tags?simplify")
+        self.assertEqual(tags.status, 200, tags.text)
+        lookup = {"studyUid": uid, "sopUid": tags.body["SOPInstanceUID"]}
+        _user_id, username, password = self.create_member("cinvalid", ["clinician"], ["hallym", "kin-center"])
+        tokens = {"cinvalid": self.grant(username, password), "gateway": self.stack.service_token("gateway")}
+
+        def call(route: str, identity: str):
+            token = tokens[identity] if identity in tokens else self.stack.token(identity)
+            if route == "GET authz/dicom":
+                # its only caller: nginx auth_request in front of the DICOMweb read
+                return self.stack.bearer_request("GET", f"/dicom-web/studies/{quote(uid)}/metadata", token,
+                                                 base=self.stack.proxy, headers={"Accept": "*/*"})
+            method, template = route.split(" ", 1)
+            return self.bearer(method, "/" + template.replace(":uid", quote(uid)), token,
+                               lookup if route == "POST dicom/lookup" else None)
+
+        observed: dict[str, list] = {}
+        # logout last: a Bearer logout ends no session (AuthService.logout(null)); the order keeps that question out of the reading
+        for route in sorted(LIVE_MATRIX["rows"], key=lambda key: (key == "POST auth/logout", key)):
+            row = LIVE_MATRIX["rows"][route]
+            for name in ("positive", "wrong_role", "wrong_tenant"):
+                case = row[name]
+                result = call(route, case["as"])
+                observed[route + " " + name] = [case["as"], result.status, code(result)]
+                with self.subTest(route=route, case=name, identity=case["as"]):
+                    self.assertEqual(result.status, case["status"], result.text[:300])
+                    self.assertEqual(code(result), case["code"], result.text[:300])
+                    if "message" in case:
+                        self.assertIn(case["message"], message(result), result.text[:300])
+                    if name == "positive":
+                        self.assert_positive(route, result, uid, instance)
+                    elif case["expect"] == "absent":
+                        self.assertNotIn(uid, {r["uid"] for r in result.body["studies"]}, "another institution lists the study")
+        self.assertEqual(len(observed), 3 * len(ALLOWED))
+        actor = self.stack.actor("clinician").replace("'", "''")
+        self.assertEqual(psql(f"SELECT count(*) FROM \"AuditLog\" WHERE actor='{actor}'"), ["0"], "the allow rows are reads")
+        print("CLINICIAN_LIVE_MATRIX " + json.dumps({"rows": len(LIVE_MATRIX["rows"]), "cases": len(observed),
+              "observed": observed}, ensure_ascii=True, sort_keys=True))
 
 
 if __name__ == "__main__":

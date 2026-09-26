@@ -259,6 +259,21 @@ def controller_routes() -> set[tuple[str, str]]:
     return found
 
 
+def policy_app_roles() -> frozenset[str]:
+    """회원 앱 역할 전체(api/src/clinician-policy.ts APP_ROLES = legacy 셋 + clinician).
+
+    guard·회원 콘솔·Keycloak 클라이언트가 읽는 목록을 그대로 읽는다. 여기 따로 적은 목록은 역할이
+    늘어날 때 조용히 낡아, Keycloak이 들고 있는 역할을 관리 대상 밖으로 빼고 비교한다(S5-U1c D3).
+    """
+    source = (ROOT / "api" / "src" / "clinician-policy.ts").read_text(encoding="utf-8")
+    legacy = re.search(r"export const LEGACY_APP_ROLES\b[^=]*=\s*Object\.freeze\(\[(.*?)\]\);", source, re.S)
+    clinician = re.search(r"export const CLINICIAN_ROLE = '([a-z]+)';", source)
+    composed = re.search(r"export const APP_ROLES\b[^=]*=\s*new Set\(\[\.\.\.LEGACY_APP_ROLES, CLINICIAN_ROLE\]\);", source)
+    if not (legacy and clinician and composed):
+        raise AssertionError("clinician-policy.ts의 APP_ROLES 형태를 읽지 못했습니다")
+    return frozenset(re.findall(r"'([a-z]+)'", legacy.group(1)) + [clinician.group(1)])
+
+
 @dataclass
 class HttpResult:
     status: int
@@ -1486,7 +1501,7 @@ process.stdout.write(JSON.stringify(value));
         groups = self.admin("GET", f"/users/{quote(user_id)}/groups")
         roles = self.admin("GET", f"/users/{quote(user_id)}/role-mappings/realm")
         self.assertEqual((groups.status, roles.status), (200, 200), groups.text + roles.text)
-        app = {"radiologist", "technician", "admin"}
+        app = policy_app_roles()
         return sorted(g["name"] for g in groups.body), sorted(r["name"] for r in roles.body if r["name"] in app)
 
     def admin_row(self, username: str) -> dict[str, Any]:
