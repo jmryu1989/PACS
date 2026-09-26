@@ -73,11 +73,11 @@ jobs:
           persist-credentials: false
       - name: Pure gate and summary checks
         run: python3 -B tools/tests/ops_s5_u1a_live_gate/live_gate_test.py
-      - name: Install the synthetic seed dependencies (the modules are API-only; no browser)
+      - name: Install the synthetic seed dependencies (same set as candidate.yml; pynetdicom for the C-STORE fixtures; no browser)
         timeout-minutes: 10
         run: |
           python3 -m venv "$RUNNER_TEMP/s5-live-python"
-          "$RUNNER_TEMP/s5-live-python/bin/python" -m pip install numpy==2.0.2 pydicom==2.4.4
+          "$RUNNER_TEMP/s5-live-python/bin/python" -m pip install -r target/tests/e2e/requirements.txt numpy==2.0.2 pydicom==2.4.4 pynetdicom==2.0.2
       - name: Listed live modules, each once, on one disposable synthetic stack of the candidate
         timeout-minutes: 28
         env:
