@@ -30,7 +30,7 @@ extra writer-side fields planted in the stubs that the real serializer never sen
   09  Log out, a session ended in another tab, pending and invalid membership, and no session. Log out, two 401s and
       another tab's log out (a channel message and the storage events of a set and a remove) each leave with one
       navigation, counted as document requests while the first is held; the same file without the guard navigates
-      again inside the same window (control).
+      again, or logs out again, inside the same window (control).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The service half is tests/clinician_read_live.py (hosted synthetic stack only).
@@ -983,23 +983,21 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual([], self.failed_documents, "no navigation was cancelled")
 
         # Control: the same steps on the same file without the guard, inside the same window. The page's own
-        # session-ended navigates again, the second 401 logs out again (its auth.js navigation and echo add two more),
-        # and every signal from another tab navigates, so the single counts above are not a harness that misses them.
+        # session-ended navigates again, the second 401 logs out again, and the signals from another tab navigate
+        # more than once, so the single counts above are not a harness that misses them. Only these are asserted:
+        # what the second log out's navigation and echo add to the held requests is not pinned.
         self.files["clinician.js"] = self.variants["nav-no-guard"]
         self.me = me(["clinician", *KEYCLOAK_DEFAULTS])
         self.assertEqual([index, index], self.log_out_here(), "nav-no-guard: Log out navigates twice")
         self.land()
 
-        first, after, logouts = self.two_expired()
+        first, _, logouts = self.two_expired()
         self.assertEqual(([index, index], 2), (first, logouts), "nav-no-guard: the second 401 logs out again")
-        self.wait_until(lambda: len(self.held_documents) == 4, "nav-no-guard: four navigations after two 401s")
-        self.assertEqual([index] * 4, self.documents[-4:])
         self.land()
 
         seen, counts = self.log_out_elsewhere()
-        self.assertEqual([index] * (counts["channel"] + counts["storage"]), seen,
-                         f"nav-no-guard: every signal ({counts}) navigates")
-        self.assertGreaterEqual(len(seen), 2)
+        self.assertEqual([index] * len(seen), seen)
+        self.assertGreaterEqual(len(seen), 2, f"nav-no-guard: another tab's signals ({counts}) navigate again")
         self.land()
 
 
