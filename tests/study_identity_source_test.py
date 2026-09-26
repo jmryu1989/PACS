@@ -202,7 +202,11 @@ BASE_SHA256 = {
     "u2_rule": "45a916d3d2cfa37b3e4d9dc04d5e7f2ee9dc6a86451249ed799aab40bc300dbd",
     "u2_client": "47abd1d5a00a69d37a8c7977e5f31c9d3a9ce16ca04a43d5fd8830a4369963d3",
     "unmatch": "d38480a356f864fb8084bedfe0f632a4d2541047ccff26cdd5dd57f6a7ed92cb",
-    "removeState": "a5c691d2367cd86ed3d9a607075b028e80753145cf2483618fd392b949cb5e04",
+    # S5-U4a (b4d9989): removeState refuses a study with questions, 409 STUDY_HAS_QUESTIONS under the parent lock
+    # (StudyQuestion/StudyQuestionEntry, migration 20260926120000_study_questions); was a5c691d2...5e04 at b6a317c.
+    # S5-U4c (4749f5f): and a study with image requests, 409 STUDY_HAS_IMAGE_REQUESTS under the same lock
+    # (StudyImageRequest/StudyImageRequestReceipt, migration 20260926130000_study_image_requests); was a7809339...d349.
+    "removeState": "f5cf8d78f9ac8efbcc20cadf40539e3225acf8036005802ae0ac036987eab152",
     "bootstrap": "2c8ae6afa501225b6b9c808f75065daafc5afd5e93013e43909b5bf4f200fbd9",
     "toClient": "7a10e0e6f6cc5e487140f4b55d3a55b4b01214236b886819b2cf7e7ead7682a3",
 }

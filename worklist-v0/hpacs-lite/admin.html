@@ -105,6 +105,45 @@
     .gw-action button { padding: 5px 9px; font-size: 12px; }
     .gw-note { color: var(--muted); font-size: 12px; }
     .gateway-empty { margin: 0; color: var(--muted); padding: 14px 0; }
+    /* S5-U6b Operations: every state is a word as well as a colour; no value is coloured by its size (no sourced threshold). */
+    .ops { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 18px; }
+    .ops-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+    .ops-head h2 { margin: 0; font-size: 17px; }
+    .ops-head .spacer { flex: 1; }
+    .ops-hint, .ops-busy { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+    .ops-busy { margin: 0; }
+    .mstate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
+    .mstate.not_loaded, .mstate.observed { background: var(--panel2); color: #b9c9dc; }
+    .mstate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
+    .mstate.row-observed { background: #1b3552; color: #a9d2fa; }
+    .mstate.row-empty { background: #393d48; color: #d1d5dd; }
+    .mstate.row-unobservable { border-color: #6d6394; background: #2c2940; color: #ddd6f7; }
+    .ops-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    #metrics-table th, #metrics-table td { padding: 9px 10px; font-size: 13px; overflow-wrap: anywhere; vertical-align: top; }
+    #metrics-table th { font-size: 12px; }
+    #metrics-table.stale #metrics-rows { opacity: .72; }
+    #metrics-table .metric-name { font-weight: 650; }
+    /* S5-U5b Audit / Security: every state is a word as well as a colour; nothing below 12px. */
+    .audit { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 18px; }
+    .audit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+    .audit-head h2 { margin: 0; font-size: 17px; }
+    .audit-head .spacer { flex: 1; }
+    .audit-hint, .audit-fixed { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+    .audit-fixed { color: #c9d6e6; }
+    .audit-counts, .audit-busy { color: var(--muted); font-size: 13px; }
+    .astate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
+    .astate.not_loaded, .astate.observed { background: var(--panel2); color: #b9c9dc; }
+    .astate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
+    .audit-table { overflow-x: auto; margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    #audit-table th, #audit-table td { padding: 9px 10px; font-size: 13px; overflow-wrap: anywhere; vertical-align: top; }
+    #audit-table th { font-size: 12px; }
+    #audit-table.stale #audit-rows { opacity: .72; }
+    #audit-table .aline { font-size: 12px; }
+    #audit-table .alabel { color: var(--muted); }
+    #audit-table .aval.not_recorded, #audit-table .aval.none { color: var(--muted); font-style: italic; }
+    #audit-table .aval.withheld { color: #ddd6f7; font-style: italic; }
+    .audit-empty { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+    .audit-pager { display: flex; justify-content: center; margin-top: 12px; }
   </style>
 </head>
 <body>
@@ -161,6 +200,54 @@
       <p class="message" id="gateway-message" role="alert"></p>
       <ol class="gateway-rows" id="gateway-rows"></ol>
       <p class="gateway-empty" id="gateway-empty" hidden></p>
+    </section>
+
+    <section class="ops" id="metrics" aria-labelledby="metrics-title">
+      <div class="ops-head">
+        <h2 id="metrics-title">Operations</h2>
+        <span class="mstate not_loaded" id="metrics-state" role="status" title="아직 조회하지 않았습니다.">Not Loaded</span>
+        <span class="ops-busy" id="metrics-busy" hidden>Loading</span>
+        <div class="spacer"></div>
+        <button type="button" id="metrics-refresh" disabled>Refresh Operations</button>
+      </div>
+      <p class="ops-hint">저장 사용량·검사량·판독 TAT입니다. 값마다 출처·관측 시각·단위·분모·범위를 함께 보이고, 읽지 못한 값은 0이 아니라 Unobservable로 보입니다. 출처 있는 사이트 기준이 없어 기준선·경고 색은 두지 않습니다. 지표는 이 버튼을 누를 때만 읽습니다.</p>
+      <p class="message" id="metrics-message" role="alert"></p>
+      <div class="ops-table" id="metrics-wrap" hidden>
+        <!-- Column headers sit in their own tbody, not a thead: the page's `thead th` stays the member table's headers
+             (pinned by tests/admin_member_roles_dom_test.py); th scope="col" keeps the header semantics. -->
+        <table id="metrics-table">
+          <tbody class="ops-columns">
+            <tr><th scope="col">Metric</th><th scope="col">State</th><th scope="col">Value</th><th scope="col">Unit</th><th scope="col">Denominator</th><th scope="col">Scope</th><th scope="col">Source</th><th scope="col">Observed At</th></tr>
+          </tbody>
+          <tbody id="metrics-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="audit" id="audit" aria-labelledby="audit-title">
+      <div class="audit-head">
+        <h2 id="audit-title">Audit / Security</h2>
+        <span class="astate not_loaded" id="audit-state" role="status" title="아직 조회하지 않았습니다.">Not Loaded</span>
+        <span class="audit-counts" id="audit-counts" title="아직 성공한 조회가 없어 건수를 모릅니다.">Events Unknown</span>
+        <span class="audit-busy" id="audit-busy" hidden>Loading</span>
+        <div class="spacer"></div>
+        <button type="button" id="audit-refresh" disabled>Refresh Audit</button>
+      </div>
+      <p class="audit-hint">회원·역할 변경, 검사 접근 조건, 판독자 배정과 검사 감사 기록 가운데 이 기관에 귀속된 행만 보입니다. 귀속은 행을 기록할 때 함께 남은 기관 값으로만 정하며, 지금 소속 그룹이나 지금 검사 소유 기관으로 다시 정하지 않습니다. 기관을 옮긴 회원의 행은 이 기관 쪽 기록만 보이고 다른 쪽은 기관 이름 없이 withheld: other institution으로 보입니다. 행에 기록되지 않은 값은 not recorded로 보입니다. 감사 기록은 이 버튼을 누를 때만 읽습니다.</p>
+      <p class="audit-fixed" id="audit-unattributed">오래된 행 중 기록 시점 기관이 없는 행은 표시되지 않습니다.</p>
+      <p class="audit-fixed" id="audit-access-history" title="로그인·로그아웃·세션 만료 기록은 수집하지 않습니다. 이 구역은 회원·검사·설정의 변경 이력만 보입니다.">접속 이력: 수집되지 않음</p>
+      <p class="message" id="audit-message" role="alert"></p>
+      <div class="audit-table" id="audit-wrap" hidden>
+        <!-- Column headers sit in their own tbody, not a thead: the page's `thead th` stays the member table's headers. -->
+        <table id="audit-table">
+          <tbody class="audit-columns">
+            <tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Previous Value</th><th scope="col">Reason</th><th scope="col">Recorded Detail</th></tr>
+          </tbody>
+          <tbody id="audit-rows"></tbody>
+        </table>
+      </div>
+      <p class="audit-empty" id="audit-empty" hidden>이 기관에 귀속된 감사 기록이 없습니다.</p>
+      <div class="audit-pager"><button type="button" id="audit-more" hidden disabled>Load More</button></div>
     </section>
   </main>
 
@@ -906,6 +993,610 @@
       KinAuth.init().then(session => {
         if (KinConsoleSession.ended()) return;
         if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#gateway-refresh").disabled = false;
+      }).catch(() => {});
+    })();
+  </script>
+  <script id="admin-metrics-model">
+    /*
+     * S5-U6b Operations model (REQ-S5-U6b-OPS-METRICS). Pure: no DOM and no request, so tests/admin_metrics_test.cjs runs
+     * this block as shipped. The server row (api/src/pacs.service.ts adminMetricRows) carries the value with its state,
+     * source, observation time, unit, denominator and scope; this model checks that shape and turns it into words. A value
+     * the row does not prove is never written as a number: a missing, malformed or failed row reads Unobservable and a
+     * zero denominator reads No Studies, never 0 min. Nothing is coloured or worded by size: no sourced site threshold
+     * exists (C-7), so a long wait looks exactly like a short one.
+     */
+    (function (root) {
+      "use strict";
+      const HOUR = 3600 * 1000;
+      const TAT = "최근 7일 안에 처음 승인된 검사가 KIN 등록부터 첫 승인(ReportVersion approve)까지 걸린 시간입니다. Emergency 표시는 지금 값이며 사람이 입력합니다.";
+      const WAIT = "지금 승인 전(RS W·T·P·H)인 검사가 KIN 등록부터 지금까지 기다린 시간입니다. Emergency 표시는 지금 값이며 사람이 입력합니다.";
+      const REGISTERED = "KIN 등록 시각(StudyState.createdAt) 기준 건수입니다. 촬영 시각이나 영상 수신 시각이 아닙니다.";
+      const METRICS = Object.freeze([
+        ["storage.server", "Storage Used (Server-wide)", "byte", "server", null,
+          "Orthanc 서버 전체가 쓰는 디스크 용량입니다. 모든 기관의 영상이 함께 담긴 값이며 이 기관 몫이 아닙니다."],
+        ["storage.institution", "Storage Used (This Institution)", "byte", "institution", null,
+          "기관별 저장량은 제품에 잴 원천이 없어 관측할 수 없습니다."],
+        ["studies.own", "Studies Owned", "study", "institution", null,
+          "이 기관이 소유한 검사 수입니다. KIN에 등록된 검사만 셉니다 — 워크리스트에 아직 한 번도 나오지 않은 검사는 등록 전입니다."],
+        ["studies.tele", "Studies Received for Tele-reading", "study", "institution", null,
+          "다른 기관이 원격판독을 맡겨 지금 이 기관 범위에 있는 검사 수입니다."],
+        ["studies.flag_unreadable", "Emergency Flag Unreadable", "study", "institution", null,
+          "Emergency 표시가 E·N 어느 쪽도 아니어서 TAT·대기 줄에 넣지 않은 검사 수입니다."],
+        ["studies.registered_24h", "Registered in KIN (Last 24 h)", "study", "institution", 24 * HOUR, REGISTERED],
+        ["studies.registered_7d", "Registered in KIN (Last 7 d)", "study", "institution", 7 * 24 * HOUR, REGISTERED],
+        ["tat.emergency", "Report TAT (Emergency)", "second", "institution", 7 * 24 * HOUR, TAT],
+        ["tat.normal", "Report TAT (Normal)", "second", "institution", 7 * 24 * HOUR, TAT],
+        ["waiting.emergency", "Waiting (Emergency)", "second", "institution", null, WAIT],
+        ["waiting.normal", "Waiting (Normal)", "second", "institution", null, WAIT],
+      ].map(([key, label, unit, scope, span, title]) => Object.freeze({ key, label, unit, scope, span, title })));
+      const ROW_STATES = Object.freeze({
+        observed: Object.freeze({ text: "Observed", title: "원천이 답한 값입니다." }),
+        empty: Object.freeze({ text: "No Studies", title: "원천은 답했지만 해당 검사가 없어 시간 값이 없습니다. 0분이 아닙니다." }),
+        unobservable: Object.freeze({ text: "Unobservable", title: "값을 관측하지 못했습니다. 0으로 두지 않습니다." }),
+      });
+      const REASONS = Object.freeze({
+        source_failed: "원천 조회에 실패했습니다.",
+        invalid_answer: "응답 형식을 확인할 수 없습니다.",
+        timeout: "원천이 제한 시간 안에 답하지 않았습니다.",
+        no_source: "제품에 이 값을 잴 원천이 없습니다.",
+      });
+      const UNITS = Object.freeze({
+        byte: ["Bytes (1 GiB = 1024³ B)", "원천 값은 바이트입니다. 화면은 2의 거듭제곱 단위(KiB·MiB·GiB·TiB)로 줄여 보입니다."],
+        study: ["Studies", "검사 건수입니다."],
+        second: ["Elapsed Time (Median · Max)", "원천 값은 초입니다. 화면은 초·분·시간으로 줄여 보이며 중앙값은 짝수 건이면 가운데 두 값의 평균입니다."],
+      });
+      const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+      const plain = value => !!value && typeof value === "object" && !Array.isArray(value);
+      const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+      const count = value => Number.isSafeInteger(value) && value >= 0;
+      const time = value => typeof value === "string" && TIME.test(value) && Number.isFinite(Date.parse(value));
+      const pad = value => String(value).padStart(2, "0");
+      const localTime = iso => { const d = new Date(iso);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+      const studies = n => `${n} ${n === 1 ? "Study" : "Studies"}`;
+
+      /** One server row against its fixed entry; anything that does not prove its value reads Unobservable (invalid_answer). */
+      function readRow(spec, raw) {
+        const unread = { key: spec.key, state: "unobservable", reason: "invalid_answer", value: null, max: null, source: null,
+          observedAt: null, denominator: null, excluded: null, window: null };
+        if (!plain(raw) || raw.key !== spec.key || raw.unit !== spec.unit || raw.scope !== spec.scope) return unread;
+        const source = typeof raw.source === "string" && raw.source.trim() ? raw.source : null;
+        if (raw.state === "unobservable") {
+          if (typeof raw.reason !== "string" || !owns(REASONS, raw.reason) || raw.value !== null || raw.max !== null) return unread;
+          return { ...unread, reason: raw.reason, source };
+        }
+        if ((raw.state !== "observed" && raw.state !== "empty") || raw.reason !== null || !source || !time(raw.observedAt)) return unread;
+        let window = null;
+        if (spec.span !== null) {
+          const w = raw.window;
+          if (!plain(w) || !time(w.from) || !time(w.to) || Date.parse(w.to) - Date.parse(w.from) !== spec.span) return unread;
+          window = { from: w.from, to: w.to };
+        }
+        const denominator = raw.denominator;
+        if (spec.unit === "second") {
+          if (!plain(denominator) || denominator.unit !== "study" || !count(denominator.value) || !count(raw.excluded)) return unread;
+          const valid = raw.state === "empty"
+            ? denominator.value === 0 && raw.value === null && raw.max === null
+            : denominator.value > 0 && count(raw.value) && count(raw.max) && raw.max >= raw.value;
+          if (!valid) return unread;
+          return { key: spec.key, state: raw.state, reason: null, value: raw.value, max: raw.max, source,
+            observedAt: raw.observedAt, denominator: denominator.value, excluded: raw.excluded, window };
+        }
+        if (raw.state !== "observed" || !count(raw.value) || raw.max !== null) return unread;
+        // Capacity has no product source: a storage row proves a denominator only as unknown, so no percentage is made.
+        if (spec.unit === "byte" ? !plain(denominator) || denominator.unit !== "byte" || denominator.value !== null : denominator !== null) return unread;
+        if (raw.excluded !== null && !count(raw.excluded)) return unread;
+        return { key: spec.key, state: "observed", reason: null, value: raw.value, max: null, source, observedAt: raw.observedAt,
+          denominator: null, excluded: raw.excluded, window };
+      }
+
+      /** The whole answer, or null when it cannot be read at all (then the page keeps its last reading as stale). */
+      function readAnswer(answer) {
+        if (!plain(answer) || typeof answer.institutionId !== "string" || !answer.institutionId.trim() || !time(answer.generatedAt)
+          || !Array.isArray(answer.metrics)) return null;
+        const byKey = new Map();
+        for (const raw of answer.metrics) {
+          const key = plain(raw) && typeof raw.key === "string" ? raw.key : null;
+          if (key === null || byKey.has(key)) return null;
+          byKey.set(key, raw);
+        }
+        return { institutionId: answer.institutionId, generatedAt: answer.generatedAt,
+          rows: METRICS.map(spec => readRow(spec, byKey.get(spec.key))) };
+      }
+
+      function formatBytes(bytes) {
+        for (const [name, size] of [["TiB", 2 ** 40], ["GiB", 2 ** 30], ["MiB", 2 ** 20], ["KiB", 2 ** 10]])
+          if (bytes >= size) return `${(bytes / size).toFixed(2)} ${name}`;
+        return `${bytes} B`;
+      }
+
+      function formatDuration(seconds) {
+        if (seconds < 60) return `${seconds} s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)} min`;
+        return `${Math.floor(seconds / 3600)} h ${pad(Math.floor(seconds % 3600 / 60))} min`;
+      }
+
+      /** Words for one read row. Every cell says what it is even when the value is unknown. */
+      function display(row, institutionId, format = localTime) {
+        const spec = METRICS.find(item => item.key === row.key), state = ROW_STATES[row.state];
+        const reason = row.reason ? REASONS[row.reason] : "";
+        const period = row.window ? ` 기간: ${format(row.window.from)} ~ ${format(row.window.to)}.` : "";
+        let value = state.text, valueTitle = reason ? `${state.title} ${reason}` : state.title;
+        if (row.state === "observed" && spec.unit === "byte") { value = formatBytes(row.value); valueTitle = `원천 값 ${row.value}바이트`; }
+        else if (row.state === "observed" && spec.unit === "second") {
+          value = `Median ${formatDuration(row.value)} · Max ${formatDuration(row.max)}`;
+          valueTitle = `중앙값 ${row.value}초 · 최댓값 ${row.max}초`;
+        } else if (row.state === "observed") { value = String(row.value); valueTitle = `${row.value}건`; }
+        const excluded = row.excluded ? ` · ${row.excluded} Excluded` : "";
+        let denominator, denominatorTitle;
+        if (spec.unit === "second" && row.denominator === null) {
+          denominator = "Unobservable"; denominatorTitle = "분모(시간을 잰 검사 수)를 관측하지 못했습니다.";
+        } else if (spec.unit === "second") {
+          denominator = studies(row.denominator) + excluded;
+          denominatorTitle = "분모는 시간을 잰 검사 수입니다. 제외: 시각을 읽을 수 없거나 순서가 맞지 않거나 상태를 알 수 없는 검사.";
+        } else if (spec.unit === "byte") {
+          denominator = "Capacity Unobservable"; denominatorTitle = "전체 용량의 원천이 없어 사용률(%)을 보이지 않습니다.";
+        } else {
+          denominator = "Not a Ratio" + excluded;
+          denominatorTitle = "건수라 분모가 없습니다." + (row.excluded ? " 제외: 등록 시각을 읽을 수 없는 검사." : "");
+        }
+        return {
+          key: row.key, state: row.state, label: spec.label, labelTitle: spec.title + period,
+          stateText: state.text, stateTitle: reason ? `${state.title} ${reason}` : state.title,
+          value, valueTitle, unit: UNITS[spec.unit][0], unitTitle: UNITS[spec.unit][1], denominator, denominatorTitle,
+          scope: spec.scope === "server" ? "Server-wide" : `Institution ${institutionId}`,
+          scopeTitle: spec.scope === "server" ? "Orthanc 서버 전체(모든 기관)의 값입니다."
+            : "이 기관이 소유한 검사와 원격판독으로 받은 검사(워크리스트와 같은 범위)입니다.",
+          source: row.source ?? (row.reason === "no_source" ? "No Source" : "Unknown"),
+          sourceTitle: !row.source ? reason : row.state === "unobservable" ? `값을 읽으려 한 원천입니다. ${reason}` : "값을 읽은 원천입니다.",
+          observed: row.observedAt ? format(row.observedAt) : "Not Observed",
+          observedTitle: row.observedAt ? `원천이 답한 서버 시각 ${row.observedAt}.${period}` : "관측한 시각이 없습니다.",
+        };
+      }
+
+      /** The panel line: before a read, after a read, and after a failed read (the last reading stays, marked). */
+      function summary(view, format = localTime) {
+        const observedAt = view?.observedAt ?? null;
+        if (view?.failed) return observedAt
+          ? { key: "query_failed", text: `Query Failed · 마지막 관측 기준 ${format(observedAt)}`,
+              title: "마지막으로 성공한 조회 기준의 값을 흐리게 두었습니다. 지금 값이 아닐 수 있습니다." }
+          : { key: "query_failed", text: "Query Failed · 아직 성공한 조회가 없습니다", title: "성공한 조회가 없어 값을 보이지 않습니다." };
+        if (!observedAt) return { key: "not_loaded", text: "Not Loaded", title: "아직 조회하지 않았습니다." };
+        return { key: "observed", text: `Observed ${format(observedAt)}`,
+          title: "서버가 이 응답을 만든 시각입니다. 줄마다 원천이 답한 시각이 따로 있습니다." };
+      }
+
+      root.KinAdminMetrics = Object.freeze({ METRICS, ROW_STATES, REASONS, UNITS, readAnswer, display, summary,
+        formatBytes, formatDuration, formatTime: localTime });
+    })(typeof globalThis === "object" ? globalThis : this);
+  </script>
+  <script>
+    /*
+     * S5-U6b Operations panel. One GET /api/admin/metrics per "Refresh Operations" and nothing at page boot, so opening
+     * Members stays /api/me plus the member list. Only the newest request paints (A->B->A). A 401 from any read in
+     * flight, older ones included, ends the page session before any body is read or any sequence is compared: the panel
+     * empties and the logout happens once. The session end is the page's one KinConsoleSession (defined above every
+     * panel), so Log out and a 401 of the members console or Gateway Status close this panel the same way (S5-U6b-F04).
+     * A failed read keeps the last reading, dimmed and marked as the last observation; the server's own wording is never
+     * shown.
+     */
+    (() => {
+      const API = `${location.origin}/api`;
+      const $ = selector => document.querySelector(selector);
+      const ops = { seq: 0, failed: false, read: null };
+
+      function setOpsMessage(value) {
+        const box = $("#metrics-message");
+        box.textContent = value || "";
+        box.classList.toggle("show", !!value);
+      }
+
+      async function metricsRequest() {
+        if (KinConsoleSession.ended()) throw new Error("session ended");
+        const response = await fetch(API + "/admin/metrics", { headers: { "X-KIN-CSRF": "1" } });
+        // A 401 ends the page session here, before any body is read and before refreshOps compares its sequence: the 401
+        // of an older read is this session's end too (S5-U6b-F03). The end moves ops.seq, so no read of this session paints
+        // after it, whatever order the answers arrive in. The message differs from Gateway Status's on purpose: that block is
+        // a U6a control anchor that must occur once on the page; callers judge only error.status.
+        if (response.status === 401) {
+          KinConsoleSession.end();
+          throw Object.assign(new Error("session ended"), { status: 401 });
+        }
+        if (KinConsoleSession.ended()) throw new Error("session ended");
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        return payload;
+      }
+
+      // Fixed sentences only: server wording is never shown here.
+      function failureText(error) {
+        if (error?.status === 403) return error.code === "ADMIN_METRICS_RESTRICTED"
+          ? "검사 접근 범위가 제한된 계정은 기관 운영 지표를 볼 수 없습니다." : "이 계정으로는 운영 지표를 조회할 수 없습니다.";
+        if (error?.status === 409) return error.code === "STUDY_LIST_CHANGED"
+          ? "집계하는 동안 검사의 기관 범위(원격판독 포함)가 바뀌었습니다. 다시 조회하세요." : "검사 접근 조건이 바뀌었습니다. 다시 조회하세요.";
+        if (error?.status === 503) return "서버가 바쁘거나 원천 조회가 지연되었습니다. 잠시 후 다시 조회하세요.";
+        if (error) return "운영 지표를 불러오지 못했습니다.";
+        return "조회 응답 형식을 확인할 수 없습니다.";
+      }
+
+      function cell(row, text, title, className) {
+        const td = document.createElement("td");
+        td.textContent = text;
+        td.title = title || "";
+        if (className) td.className = className;
+        row.append(td);
+      }
+
+      function drawOps() {
+        const M = window.KinAdminMetrics, read = ops.read;
+        const rows = (read ? read.rows : []).map(row => {
+          const shown = M.display(row, read.institutionId), tr = document.createElement("tr");
+          Object.assign(tr.dataset, { key: shown.key, state: shown.state });
+          cell(tr, shown.label, shown.labelTitle, "metric-name");
+          const stateCell = document.createElement("td"), chip = document.createElement("span");
+          chip.className = `mstate row-${shown.state}`;
+          chip.textContent = shown.stateText;
+          chip.title = shown.stateTitle;
+          stateCell.append(chip);
+          tr.append(stateCell);
+          cell(tr, shown.value, shown.valueTitle, "metric-value");
+          cell(tr, shown.unit, shown.unitTitle);
+          cell(tr, shown.denominator, shown.denominatorTitle);
+          cell(tr, shown.scope, shown.scopeTitle);
+          cell(tr, shown.source, shown.sourceTitle);
+          cell(tr, shown.observed, shown.observedTitle);
+          return tr;
+        });
+        $("#metrics-rows").replaceChildren(...rows);
+        $("#metrics-wrap").hidden = !read;
+        $("#metrics-table").classList.toggle("stale", ops.failed && !!read);
+        const line = M.summary({ observedAt: read ? read.generatedAt : null, failed: ops.failed });
+        const state = $("#metrics-state");
+        state.className = `mstate ${line.key}`;
+        state.textContent = line.text;
+        state.title = line.title;
+      }
+
+      /*
+       * The page session ended (Log out, or a 401 on a request of any panel: this one, the members console, Gateway
+       * Status). Runs before anything is awaited: moving seq drops every read in flight, and the table, the last reading,
+       * the message and the control go with them; the state line goes back to Not Loaded. The logout is the session end's.
+       */
+      KinConsoleSession.onEnd(() => {
+        ops.seq++;
+        Object.assign(ops, { read: null, failed: false });
+        $("#metrics-busy").hidden = true;
+        $("#metrics-refresh").disabled = true;
+        setOpsMessage("");
+        drawOps();
+      });
+
+      async function refreshOps() {
+        if (KinConsoleSession.ended()) return;
+        const seq = ++ops.seq;
+        $("#metrics-busy").hidden = false;
+        let answer = null, error = null;
+        try { answer = await metricsRequest(); }
+        catch (e) { error = e ?? new Error("request failed"); }
+        // Only the newest load paints; a session end (a 401 in metricsRequest too) moves seq, so nothing paints after it.
+        if (seq !== ops.seq) return;
+        $("#metrics-busy").hidden = true;
+        const read = error ? null : window.KinAdminMetrics.readAnswer(answer);
+        if (read) {
+          Object.assign(ops, { read, failed: false });
+          setOpsMessage("");
+        } else {
+          // Nothing is emptied: the last successful reading stays, marked as the last observation.
+          ops.failed = true;
+          setOpsMessage(failureText(error));
+        }
+        drawOps();
+      }
+
+      $("#metrics-refresh").addEventListener("click", refreshOps);
+      // Enabled only for the session the Members console accepts (approved, not demo, admin); init() is shared, not repeated.
+      // A session that ended while /api/me was out keeps the control off: its answer belongs to that session.
+      KinAuth.init().then(session => {
+        if (KinConsoleSession.ended()) return;
+        if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#metrics-refresh").disabled = false;
+      }).catch(() => {});
+    })();
+  </script>
+  <script id="admin-audit-model">
+    /*
+     * S5-U5b Audit / Security model (REQ-S5-U5b-ADMIN-AUDIT / MOVE-PROJECTION). Pure: no DOM and no request. The server
+     * (api/src/admin-audit.ts) decides which rows this institution sees and what of each; this model checks that shape
+     * and turns a row into words. It never fills a value the row did not record: an absent value reads "not recorded",
+     * and the other institution's side of a member move reads "withheld: other institution" with no name. A member
+     * snapshot carrying a field outside the projected set (email included) makes the whole answer unreadable.
+     */
+    (function (root) {
+      "use strict";
+      const NOT_RECORDED = "not recorded";
+      const WITHHELD = "withheld: other institution";
+      const TITLES = Object.freeze({
+        not_recorded: "이 행에 기록되지 않은 값입니다. 다른 값으로 짐작해 채우지 않습니다.",
+        withheld: "다른 기관 쪽 기록이라 내용과 기관 이름을 보이지 않습니다.",
+        none: "기록된 값이 비어 있습니다.",
+      });
+      const SNAPSHOT_FIELDS = Object.freeze(["id", "username", "name", "roles", "enabled", "approvalState", "emailVerified", "institution"]);
+      const EVENT_FIELDS = Object.freeze(["verificationOverride", "mode", "failed"]);
+      const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+      const plain = value => !!value && typeof value === "object" && !Array.isArray(value);
+      const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+      const time = value => typeof value === "string" && TIME.test(value) && Number.isFinite(Date.parse(value));
+      const count = value => Number.isSafeInteger(value) && value >= 0;
+      const text = value => typeof value === "string" && value.length > 0;
+      const pad = value => String(value).padStart(2, "0");
+      const localTime = iso => { const d = new Date(iso);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+
+      /** One side of a member row: null (not recorded), the withheld mark, or a snapshot of projected fields only. */
+      function side(value) {
+        if (value === null) return { kind: "not_recorded" };
+        if (!plain(value)) return null;
+        const keys = Object.keys(value);
+        if (owns(value, "withheld")) return keys.length === 1 && value.withheld === "other_institution" ? { kind: "withheld" } : null;
+        if (keys.some(key => !SNAPSHOT_FIELDS.includes(key)) || !owns(value, "institution") || !owns(value, "approvalState")) return null;
+        return { kind: "snapshot", value };
+      }
+
+      function readRow(raw) {
+        if (!plain(raw) || !time(raw.at) || !text(raw.actor) || !text(raw.action) || typeof raw.target !== "string"
+          || typeof raw.rule !== "string" || !plain(raw.detail)) return null;
+        const base = { at: raw.at, actor: raw.actor, action: raw.action, target: raw.target };
+        if (raw.rule === "member_snapshots") {
+          if (!owns(raw.detail, "before") || !owns(raw.detail, "after")
+            || Object.keys(raw.detail).some(key => key !== "before" && key !== "after" && !EVENT_FIELDS.includes(key))) return null;
+          const before = side(raw.detail.before), after = side(raw.detail.after);
+          if (!before || !after) return null;
+          return { ...base, member: true, before, after,
+            events: EVENT_FIELDS.filter(key => owns(raw.detail, key)).map(key => [key, raw.detail[key]]) };
+        }
+        if (!raw.rule.startsWith("field:")) return null;
+        return { ...base, member: false, detail: raw.detail };
+      }
+
+      /** The whole answer, or null when any part cannot be read (the page then keeps its last reading as stale). */
+      function readAnswer(answer) {
+        if (!plain(answer) || !text(answer.institutionId) || !time(answer.observedAt) || !count(answer.total)
+          || !Array.isArray(answer.rows) || answer.rows.length > answer.total
+          || !(answer.next === null || text(answer.next))) return null;
+        const rows = [];
+        for (const raw of answer.rows) {
+          const row = readRow(raw);
+          if (!row) return null;
+          rows.push(row);
+        }
+        return { institutionId: answer.institutionId, observedAt: answer.observedAt, total: answer.total, rows, next: answer.next };
+      }
+
+      const notRecorded = label => ({ label, text: NOT_RECORDED, state: "not_recorded", title: TITLES.not_recorded });
+
+      /** A recorded value in words. A recorded null or an empty list reads None; it is recorded, so never "not recorded". */
+      function valueLine(label, value) {
+        if (value === null || Array.isArray(value) && !value.length) return { label, text: "None", state: "none", title: TITLES.none };
+        if (Array.isArray(value) && value.every(item => typeof item === "string")) return { label, text: value.join(", "), state: "value", title: "" };
+        return { label, text: typeof value === "string" ? value : JSON.stringify(value), state: "value", title: "" };
+      }
+
+      function sideLines(prefix, value) {
+        if (value.kind === "not_recorded") return [notRecorded(prefix)];
+        if (value.kind === "withheld") return [{ label: prefix, text: WITHHELD, state: "withheld", title: TITLES.withheld }];
+        const label = field => prefix ? `${prefix}.${field}` : field;
+        return SNAPSHOT_FIELDS.map(field => owns(value.value, field) ? valueLine(label(field), value.value[field]) : notRecorded(label(field)));
+      }
+
+      /**
+       * Words for one read row. Previous Value is a member row's before snapshot and otherwise not recorded (no other
+       * writer records a previous value); Reason is the row's own reason string when it recorded one.
+       */
+      function display(row, format = localTime) {
+        const previous = row.member ? sideLines(null, row.before) : [notRecorded(null)];
+        const reason = !row.member && typeof row.detail.reason === "string"
+          ? [{ label: null, text: row.detail.reason, state: "value", title: "" }] : [notRecorded(null)];
+        const detail = row.member
+          ? [...sideLines("after", row.after), ...row.events.map(([key, value]) => valueLine(key, value))]
+          : Object.keys(row.detail).filter(key => key !== "reason").map(key => valueLine(key, row.detail[key]));
+        return { time: format(row.at), timeTitle: `기록한 서버 시각 ${row.at}`, actor: row.actor, action: row.action,
+          target: row.target, previous, reason, detail: detail.length ? detail : [notRecorded(null)] };
+      }
+
+      /** The panel line: before a read, after a read, and after a failed read (the last reading stays, marked). */
+      function summary(view, format = localTime) {
+        const observedAt = view?.observedAt ?? null;
+        if (view?.failed) return observedAt
+          ? { key: "query_failed", text: `Query Failed · 마지막 조회 기준 ${format(observedAt)}`,
+              title: "마지막으로 성공한 조회의 행을 흐리게 두었습니다. 지금 기록이 아닐 수 있습니다." }
+          : { key: "query_failed", text: "Query Failed · 아직 성공한 조회가 없습니다",
+              title: "성공한 조회가 없어 행을 보이지 않습니다. 기록이 없다는 뜻이 아닙니다." };
+        if (!observedAt) return { key: "not_loaded", text: "Not Loaded", title: "아직 조회하지 않았습니다." };
+        return { key: "observed", text: `Loaded ${format(observedAt)}`, title: "서버가 이 기관의 감사 기록을 읽은 시각입니다." };
+      }
+
+      /** Counts of the rows this institution sees; nothing else is counted, so nothing else can be told. */
+      function counts(view) {
+        if (!view) return { text: "Events Unknown", title: "아직 성공한 조회가 없어 건수를 모릅니다." };
+        const events = n => `${n} ${n === 1 ? "Event" : "Events"}`;
+        return { text: `Showing ${view.shown} of ${events(view.total)}`, title: "이 기관에 귀속되어 보이는 행만 셉니다." };
+      }
+
+      root.KinAdminAudit = Object.freeze({ NOT_RECORDED, WITHHELD, TITLES, SNAPSHOT_FIELDS, readAnswer, display, summary, counts,
+        formatTime: localTime });
+    })(typeof globalThis === "object" ? globalThis : this);
+  </script>
+  <script>
+    /*
+     * S5-U5b Audit / Security panel. One GET /api/admin/audit per "Refresh Audit" and one per "Load More" (with the
+     * sealed after of the last answer); nothing at page boot, so opening Members stays /api/me plus the member list.
+     * Only the newest Refresh paints (A->B->A), and a Load More answer is appended only while the list it continues is
+     * still the one on screen. A 401 from any read, older ones included, ends the page session before any body is read
+     * or any sequence is compared; the end is the page's one session object, whose closers empty every panel, this one
+     * included. A failed read is never shown as no events: the last reading stays, dimmed, and the empty sentence goes.
+     */
+    (() => {
+      const API = `${location.origin}/api`;
+      const $ = selector => document.querySelector(selector);
+      const PAGE_SIZE = 25;
+      const audit = { seq: 0, failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false };
+
+      function setAuditMessage(value) {
+        const box = $("#audit-message");
+        box.textContent = value || "";
+        box.classList.toggle("show", !!value);
+      }
+
+      async function auditRequest(query) {
+        if (KinConsoleSession.ended()) throw new Error("audit ended");
+        const response = await fetch(`${API}/admin/audit?${query}`, { headers: { "X-KIN-CSRF": "1" } });
+        // A 401 ends the page session here, before any body is read and before the caller compares its sequence: an
+        // older read's 401 is this session's end too. The end moves audit.seq, so nothing of this session paints after.
+        if (response.status === 401) {
+          KinConsoleSession.end();
+          throw Object.assign(new Error("audit ended"), { status: 401 });
+        }
+        if (KinConsoleSession.ended()) throw new Error("audit ended");
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        return payload;
+      }
+
+      // Fixed sentences only: server wording is never shown here.
+      function failureText(error) {
+        if (error?.status === 403) return error.code === "ADMIN_AUDIT_RESTRICTED"
+          ? "검사 접근 범위가 제한된 계정은 감사 기록을 볼 수 없습니다." : "이 계정으로는 감사 기록을 조회할 수 없습니다.";
+        if (error?.status === 409) return error.code === "ADMIN_AUDIT_CURSOR_EXPIRED"
+          ? "이어받기 유효기간이 지났거나 서버가 다시 시작되었습니다. Refresh Audit로 처음부터 다시 조회하세요."
+          : "검사 접근 조건이 바뀌었습니다. 다시 조회하세요.";
+        if (error?.status === 503) return "서버가 바쁘거나 감사 기록 조회가 지연되었습니다. 잠시 후 다시 조회하세요.";
+        if (error) return "감사 기록을 불러오지 못했습니다.";
+        return "조회 응답 형식을 확인할 수 없습니다.";
+      }
+
+      function lineNodes(lines) {
+        return lines.map(item => {
+          const line = document.createElement("div");
+          line.className = "aline";
+          if (item.label) {
+            const label = document.createElement("span");
+            label.className = "alabel";
+            label.textContent = `${item.label}: `;
+            line.append(label);
+          }
+          const value = document.createElement("span");
+          value.className = `aval ${item.state}`;
+          value.textContent = item.text;
+          if (item.title) value.title = item.title;
+          line.append(value);
+          return line;
+        });
+      }
+
+      function drawRow(row) {
+        const shown = window.KinAdminAudit.display(row), tr = document.createElement("tr");
+        Object.assign(tr.dataset, { action: shown.action, target: shown.target });
+        for (const [value, title] of [[shown.time, shown.timeTitle], [shown.actor], [shown.action], [shown.target]]) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          if (title) cell.title = title;
+          tr.append(cell);
+        }
+        for (const lines of [shown.previous, shown.reason, shown.detail]) {
+          const cell = document.createElement("td");
+          cell.append(...lineNodes(lines));
+          tr.append(cell);
+        }
+        return tr;
+      }
+
+      function drawAudit() {
+        const M = window.KinAdminAudit, read = audit.read;
+        $("#audit-rows").replaceChildren(...(read ? audit.rows.map(drawRow) : []));
+        $("#audit-wrap").hidden = !read || !audit.rows.length;
+        $("#audit-table").classList.toggle("stale", audit.failed && !!read);
+        // No events is said only by a successful read that found none; a failure never reads as an empty list.
+        $("#audit-empty").hidden = !read || audit.failed || audit.rows.length > 0;
+        const line = M.summary({ observedAt: read ? read.observedAt : null, failed: audit.failed });
+        const state = $("#audit-state");
+        state.className = `astate ${line.key}`;
+        state.textContent = line.text;
+        state.title = line.title;
+        const shown = M.counts(read ? { shown: audit.rows.length, total: read.total } : null);
+        Object.assign($("#audit-counts"), { textContent: shown.text, title: shown.title });
+        $("#audit-busy").hidden = !audit.pending && !audit.loadingMore;
+        const more = $("#audit-more");
+        more.hidden = !read || !audit.next;
+        more.disabled = audit.pending || audit.loadingMore || audit.failed || KinConsoleSession.ended();
+      }
+
+      /*
+       * The page session ended (Log out, or a 401 on a request of any panel). Runs before anything is awaited: moving seq
+       * drops every Refresh and Load More in flight, and the rows, the continuation, the message and the controls go with
+       * them; the state line goes back to Not Loaded. The logout is the session end's.
+       */
+      KinConsoleSession.onEnd(() => {
+        audit.seq++;
+        Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false });
+        $("#audit-refresh").disabled = true;
+        setAuditMessage("");
+        drawAudit();
+      });
+
+      async function refreshAudit() {
+        if (KinConsoleSession.ended()) return;
+        const seq = ++audit.seq;
+        Object.assign(audit, { pending: true, loadingMore: false });
+        drawAudit();
+        let answer = null, error = null;
+        try { answer = await auditRequest(`limit=${PAGE_SIZE}`); }
+        catch (e) { error = e ?? new Error("request failed"); }
+        // Only the newest load paints; a session end (a 401 in auditRequest too) moves seq, so nothing paints after it.
+        if (seq !== audit.seq) return;
+        audit.pending = false;
+        const read = error ? null : window.KinAdminAudit.readAnswer(answer);
+        if (read) {
+          Object.assign(audit, { read, rows: read.rows, next: read.next, failed: false });
+          setAuditMessage("");
+        } else {
+          // Nothing is emptied: the last successful reading stays, marked as the last observation.
+          audit.failed = true;
+          setAuditMessage(failureText(error));
+        }
+        drawAudit();
+      }
+
+      async function loadMore() {
+        const cursor = audit.next, seq = audit.seq;
+        if (KinConsoleSession.ended() || !cursor || audit.pending || audit.loadingMore || audit.failed) return;
+        audit.loadingMore = true;
+        drawAudit();
+        let answer = null, error = null;
+        try { answer = await auditRequest(`limit=${PAGE_SIZE}&after=${encodeURIComponent(cursor)}`); }
+        catch (e) { error = e ?? new Error("request failed"); }
+        // A Refresh sent meanwhile or the session end moved seq; a newer list carries another continuation.
+        if (seq !== audit.seq || audit.next !== cursor) return;
+        audit.loadingMore = false;
+        const read = error ? null : window.KinAdminAudit.readAnswer(answer);
+        if (read && read.institutionId === audit.read.institutionId) {
+          Object.assign(audit, { rows: audit.rows.concat(read.rows), next: read.next, read: { ...audit.read, total: read.total } });
+          setAuditMessage("");
+        } else {
+          // The rows already shown stay valid; only the next page failed. An expired continuation cannot be retried.
+          if (error?.code === "ADMIN_AUDIT_CURSOR_EXPIRED") audit.next = null;
+          setAuditMessage(failureText(error));
+        }
+        drawAudit();
+      }
+
+      $("#audit-refresh").addEventListener("click", refreshAudit);
+      $("#audit-more").addEventListener("click", loadMore);
+      // Enabled only for the session the Members console accepts (approved, not demo, admin); init() is shared, not repeated.
+      // A session that ended while /api/me was out keeps the control off: its answer belongs to that session.
+      KinAuth.init().then(session => {
+        if (KinConsoleSession.ended()) return;
+        if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#audit-refresh").disabled = false;
       }).catch(() => {});
     })();
   </script>

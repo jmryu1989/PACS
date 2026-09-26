@@ -1,11 +1,15 @@
 {
-  "unit": "S5-U1a+S5-U1b",
+  "unit": "S5-U1a+S5-U1b+S5-U1c",
   "app_roles": ["radiologist", "technician", "admin", "clinician"],
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report"],
-  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report"],
+  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report",
+    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
+    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
+  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report",
+    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
+    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
   "must_stay_denied": [
     "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
     "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
@@ -33,6 +37,7 @@
     {"id": "technician-only", "groups": ["hallym"], "roles": ["technician"], "state": "APPROVED", "clinicianOnly": false},
     {"id": "admin-only", "groups": ["hallym"], "roles": ["admin"], "state": "APPROVED", "clinicianOnly": false},
     {"id": "legacy-three", "groups": ["hallym"], "roles": ["radiologist", "technician", "admin"], "state": "APPROVED", "clinicianOnly": false},
+    {"id": "mixed-all-four", "groups": ["hallym"], "roles": ["clinician", "radiologist", "technician", "admin", "default-roles-kin"], "state": "APPROVED", "clinicianOnly": false},
     {"id": "gateway-role-alone-is-not-a-member", "groups": ["kin-center"], "roles": ["gateway"], "state": "INVALID", "clinicianOnly": false}
   ],
   "gateway_identities": [
@@ -76,7 +81,18 @@
     {"method": 1, "controller": "/", "handler": "clinician/studies", "key": "POST clinician/studies", "allowed": false},
     {"method": 0, "controller": "/", "handler": "studies", "key": "GET studies", "allowed": false},
     {"method": 0, "controller": "/", "handler": "bootstrap", "key": "GET bootstrap", "allowed": false},
-    {"method": 0, "controller": "/", "handler": "audit", "key": "GET audit", "allowed": false}
+    {"method": 0, "controller": "/", "handler": "audit", "key": "GET audit", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "questions", "key": "GET questions", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "questions/:id", "key": "GET questions/:id", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/questions", "key": "GET studies/:uid/questions", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "studies/:uid/questions", "key": "POST studies/:uid/questions", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "questions/:id/entries", "key": "POST questions/:id/entries", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "questions/:id/close", "key": "POST questions/:id/close", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "image-requests", "key": "GET image-requests", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "image-requests/:id", "key": "GET image-requests/:id", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/image-requests", "key": "GET studies/:uid/image-requests", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "studies/:uid/image-requests", "key": "POST studies/:uid/image-requests", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "image-requests/:id", "key": "POST image-requests/:id", "allowed": true}
   ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
@@ -113,6 +129,478 @@
       "PUT hanging-protocols", "PUT hanging-protocols/site", "PUT reading-appearance", "PUT reading-preferences",
       "PUT studies/:uid/report", "PUT worklist-columns", "PUT workspace-layout", "PUT workspace-shortcuts"
     ]
+  },
+  "route_matrix": {
+    "unit": "S5-U1c",
+    "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
+    "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
+    "counts": {"routes": 123, "public": 4, "session": 2, "business": 16, "denied": 101},
+    "basis_legend": {
+      "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
+      "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
+      "operations": "technologist and reader operations: tech notes, reader assignment and candidates, Preliminary colleagues, order match/unmatch.",
+      "workspace": "the caller's reading-workspace state, personal or site-shared (prefs, filters, favorites, templates, columns, layout, shortcuts, appearance, reading preferences, hanging protocols, study tags) and the caller's own StudyAccess status. No clinician screen uses them before S5-U2a.",
+      "admin": "member console, study-access administration, audit, unassigned studies, institution assignment and operations metrics (need admin).",
+      "consultation": "consultations and consultation candidates; the clinician question contract is S5-U4p/U4a, denied until then.",
+      "connect": "inter-institution Connect agreements, basis and transfers; a far later stage (AGENTS).",
+      "gateway": "the gateway client-credentials surface (needExact gateway) and the technician's Now Retry request (S4-U3/U4); never a clinician action."
+    },
+    "denied": {
+      "report": [
+        "GET bootstrap", "GET studies", "DELETE studies/:uid", "PATCH studies/:uid", "DELETE studies/:uid/draft",
+        "DELETE studies/:uid/draft/force", "POST studies/:uid/hold", "POST studies/:uid/release", "POST studies/:uid/release/force",
+        "PUT studies/:uid/report", "POST studies/:uid/report/commit", "GET studies/:uid/report/versions",
+        "GET studies/:uid/report/citations", "GET studies/:uid/report/versions/:version/citations",
+        "GET studies/:uid/report/structure", "GET studies/:uid/report-preview", "POST studies/:uid/dictation"
+      ],
+      "viewer": [
+        "POST studies/:uid/viewer-items", "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items/:id/revisions",
+        "GET studies/:uid/findings", "POST studies/:uid/findings", "GET studies/:uid/findings/:id/revisions",
+        "POST studies/:uid/findings/:id/revisions", "POST studies/:uid/manual-sr", "POST studies/:uid/manual-sr/:id/store",
+        "GET studies/:uid/viewer-jobs", "POST studies/:uid/viewer-jobs", "GET studies/:uid/viewer-jobs/:id",
+        "POST studies/:uid/viewer-jobs/:id/revisions", "POST studies/:uid/viewer-jobs/preview"
+      ],
+      "operations": [
+        "GET studies/:uid/tech-note", "POST studies/:uid/tech-note", "GET studies/:uid/tech-note/history",
+        "GET reader-candidates", "GET studies/:uid/reader-assignment", "POST studies/:uid/reader-assignment",
+        "GET colleagues", "POST match", "POST unmatch"
+      ],
+      "workspace": [
+        "GET prefs", "POST filters", "DELETE filters/:id", "PATCH filters/:id/default", "GET filter-folders", "POST filter-folders",
+        "GET shared-filters", "POST shared-filters", "POST shared-filters/copy", "GET favorite-folders", "POST favorite-folders",
+        "POST templates", "DELETE templates/:id", "GET worklist-columns", "PUT worklist-columns", "DELETE worklist-columns",
+        "GET workspace-layout", "PUT workspace-layout", "DELETE workspace-layout", "GET workspace-shortcuts", "PUT workspace-shortcuts",
+        "GET reading-appearance", "PUT reading-appearance", "GET reading-preferences", "PUT reading-preferences",
+        "GET hanging-protocols", "PUT hanging-protocols", "GET hanging-protocols/site", "PUT hanging-protocols/site",
+        "GET study-tags", "POST study-tags", "GET study-access"
+      ],
+      "admin": [
+        "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
+        "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET unassigned",
+        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit"
+      ],
+      "consultation": [
+        "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
+        "POST studies/:uid/consultations"
+      ],
+      "connect": [
+        "GET admin/agreements", "POST admin/agreements", "PATCH admin/agreements/:id", "GET studies/:uid/basis",
+        "POST studies/:uid/basis", "POST studies/:uid/basis/:id/revoke", "POST studies/:uid/transfers", "GET transfers",
+        "POST transfers/:id/revoke"
+      ],
+      "gateway": [
+        "POST gateway/announce", "POST gateway/receipt", "GET gateway/retry-requests", "POST studies/:uid/gateway-retry"
+      ]
+    },
+    "post_baseline": {
+      "GET clinician/studies": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "narrow clinician worklist read: listStudies scope, one-snapshot report status, no drafts, bodies or writer fields; declared in allowed_additions"},
+      "GET clinician/studies/:uid/report": {"decision": "business", "unit": "S5-U1b", "commit": "dc270a0", "basis": "the final head's body and key images only at RS A with an approve/addendum head, status otherwise; declared in allowed_additions"},
+      "POST studies/:uid/dictation": {"decision": "denied", "unit": "S3-ASR", "commit": "7bc6ffc", "basis": "report writer path: dictationGate runs the report-draft write refusals and every attempt is audited; a clinician writes no report text"},
+      "POST gateway/receipt": {"decision": "denied", "unit": "S4-U3", "commit": "3955e38", "basis": "gateway client-credentials transmission receipt (needExact gateway)"},
+      "GET gateway/retry-requests": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "gateway client-credentials pull of pending Now Retry UIDs (needExact gateway)"},
+      "POST studies/:uid/gateway-retry": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "technician Now Retry request (need technician, owning institution only)"},
+      "GET questions": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "question list: view=mine is the clinician's own threads, view=inbox needs radiologist or admin (service 403 otherwise); owning institution and StudyAccess only, no count; declared in allowed_additions"},
+      "GET questions/:id": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "one thread: a clinician-only member reads only its own (404 otherwise), radiologist/admin the owning institution's; entries carry rs and version only, never report text; declared in allowed_additions"},
+      "GET studies/:uid/questions": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "thread summaries of one owned study (tele institution 404), the clinician's own only; declared in allowed_additions"},
+      "POST studies/:uid/questions": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "question create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); declared in allowed_additions"},
+      "POST questions/:id/entries": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "author follow-up (clinician) or answer (radiologist, never admin alone), decided by the server; replay returns the stored receipt; declared in allowed_additions"},
+      "POST questions/:id/close": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "close by the author (note optional) or by a radiologist/admin with a note; replay returns the stored receipt; declared in allowed_additions"},
+      "GET admin/metrics": {"decision": "denied", "unit": "S5-U6b", "commit": "9fe2f14", "basis": "admin operations metrics: institution-scoped counts, report TAT and server-wide storage (need admin, restricted study access refused); not a clinician read"},
+      "GET image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "image request list: view=mine is the clinician's own requests, view=queue needs radiologist, technician or admin (service 403 otherwise); owning institution and StudyAccess only, no count; declared in allowed_additions"},
+      "GET image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "one request: a clinician-only member reads only its own (404 otherwise), staff and radiologists the owning institution's; the counterparty institution never reads it; declared in allowed_additions"},
+      "GET studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "requests of one owned study (tele institution 404), the clinician's own only; declared in allowed_additions"},
+      "POST studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "external-image or image-transfer request create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); a record, never a transfer; declared in allowed_additions"},
+      "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
+      "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"}
+    }
+  },
+  "controller_decorators": {
+    "non_route": ["Body", "Controller", "Header", "HttpCode", "Param", "Public", "Query", "Req", "Res"],
+    "rule": "S5-U1c D6: every @Name( in a controller is either an HTTP route decorator the inventory reads or one of these; any other name (a WebDAV route decorator of a later Nest, @RequestMapping, @Version, a custom route wrapper) fails the pure test until it is classified here or read by the inventory"
+  },
+  "outside_decorators": {
+    "classified": ["Injectable", "Module"],
+    "rule": "S5-U1c-F03: every api/src .ts file that is not *.controller.ts is read by the controllers' lexer and decorator runs inside the inventory, so test_05 fails on it. A route decorator, @Controller(), @RequestMapping() or @Public() there is refused (both inventories open *.controller.ts only), as is a shape the runs cannot read, such call text in a comment or literal, and any decorator name not listed here (an alias or a wrapper could declare a route) until it is classified here."
+  },
+  "decorator_bindings": {
+    "modules": {
+      "@nestjs/common": ["All", "Body", "Controller", "Delete", "Get", "Head", "Header", "HttpCode", "Injectable", "Module", "Options", "Param", "Patch", "Post", "Put", "Query", "Req", "Res", "Search", "Sse"],
+      "./auth.guard": ["Public"]
+    },
+    "public_declaration": "export const Public = () => SetMetadata('public', true);",
+    "public_metadata_import": {"name": "SetMetadata", "module": "@nestjs/common"},
+    "rule": "S5-U1c-F04: the inventories classify a decorator by its name, so every name a decorator run carries, in a controller or any other api/src file, must be bound once by 'import { Name } from' the module listed here (a relative module is named from api/src and resolved from the importing file) and occur nowhere else in the code but its decorators and after a '.'. No import or export renames a listed name, a route name, Controller, RequestMapping or Public, from or to another name; no namespace, default, import = or export * takes '@nestjs/common', a part of it or './auth.guard', or binds such a name; no identifier is escaped in code; a statement the reader does not know is refused. The Public binding ends at public_declaration, the one place auth.guard.ts names Public, whose SetMetadata is public_metadata_import. A new decorator module or spelling is a new decision: list it here. S5-U1c-F05: the runs alone named what was checked, so an imported route name or Public applied by a plain call ('Put('x')(target, key, descriptor)') made a public route both inventories missed. In every api/src file a route name, Controller, RequestMapping, Public or SetMetadata occurs in code only as the local name of its own-name import (from the module above; RequestMapping and SetMetadata from '@nestjs/common') and as a decorator the runs read; a call, a reference handed on (variable, array, object, applyDecorators, Reflect.decorate), a property ('x.Get'), a declaration or an export is refused, and Public's module keeps Public and SetMetadata to public_declaration. No metadata writer occurs (defineMetadata, decorate, createDecorator; Reflect only as 'Reflect.<member>' of a member source_contract lists), and loaders follow source_contract (S5-U1c-F06)."
+  },
+  "source_contract": {
+    "unit": "S5-U1c",
+    "rule": "S5-U1c-F06: the closed contract of the lexer and loader checks. module_loads read a loader call by its first string or token and let member calls and calls that ':' followed pass, so require('@nest' + 'js/common'), module.require(name), 'true ? require(name) : null' and module['require']('@nestjs/common') loaded Nest's common unread and common['Put'] made a public route both inventories missed. Every api/src .ts file is read in the supported forms below and every other form that reaches a loader, an evaluator, a metadata writer or a class prototype is refused (fail-closed); a new form, package, Reflect or process member is a new decision, listed here only after checking that it neither loads nor evaluates code nor writes route or public metadata. refused pins each refusal regression with the reasons it must be refused for (fragments in order inside one check's message); accepted pins the controls that must still read; f06_loaders pins the reviewer's four loaders. S5-U1c-F07: every check trusted a code mask whose lexer opened a regex after '+', '-' or '}', so a division hid the metadata writes after it; regex_or_division is the closed rule for a '/' and pins its own cases. S5-U1c-F08: controller_heritage took the first '{' after 'class' for the body, so a generic default's type literal hid the extends after it; class_heading is the closed rule for a class heading and pins its own cases.",
+    "supported": [
+      "a decorator '@Name(...)' applied directly, Name bound once by its own-name import from decorator_bindings.modules (S5-U1c-F01-F05)",
+      "an ES module statement naming a plain string module: a file under api/src or a package in packages; a decorator name only by its own-name named import; no namespace, default, import = or export * of a project file or a '@nestjs/' package; import 'm' counts as naming m",
+      "require('<package>') and import('<package>'): the bare callee and exactly one plain '...' or \"...\" literal without an escape between the parentheses, naming a package in loaded_packages; import x = require('<package>') is such a call",
+      "a method named require: declared in a class body ('[modifier] require(...) {' or ': T {') and called only as this.require(...) or this.<field>.require(...)",
+      "a string literal, or a template without substitutions, alone between '[' and ']' is read as the name it spells: x['require'] is x.require, x?.['require'] is x?.require and common['Put'] is common.Put for every name check; such a key with an escape is refused",
+      "a string literal or template without substitutions whose value (escapes decoded) is one of sealed_words or sealed_strings stands only as an element of an array literal: elsewhere a reflective call (Object.getOwnPropertyDescriptor(X, 'prototype')), a quoted key ({ '__proto__': p }) or a quoted member name ('constructor'() { ... }) reads it as that name",
+      "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
+      "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
+    ],
+    "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "node:crypto", "node:http", "rxjs"],
+    "loaded_packages": ["express", "node:crypto"],
+    "sealed_words": ["Function", "Proxy", "__proto__", "defineProperties", "defineProperty", "eval", "global", "globalThis", "module", "setPrototypeOf"],
+    "sealed_strings": ["Reflect", "constructor", "createDecorator", "decorate", "defineMetadata", "getPrototypeOf", "process", "prototype", "require"],
+    "process_members": ["env", "exit"],
+    "reflect_members": ["ownKeys"],
+    "prototype_owners": ["Array", "Object"],
+    "outside_the_contract": [
+      "a property reached by a key computed at run time or found by enumeration: x[key], x['a' + 'b'], x[('a')], Object.getOwnPropertyDescriptor(X, key), Reflect.ownKeys(X) or Object.values(Object.getOwnPropertyDescriptors(X)) and an index into the result. A lexical check does not follow values, and any value reaches Function through its constructor chain this way. Every named and literal spelling of those handles is refused, so what is left is key text computed on purpose; comparing the routes the running app registered with route_matrix in the live module would close it, and that is not part of this unit",
+      "request handlers that are not controller routes: middleware and HTTP-adapter handlers (main.ts app.use, AppModule.configure consumer.apply) and path rewriting (setGlobalPrefix, RouterModule, versioning). The inventories read controller routes and the clinician gate is a guard on them; neither reads these"
+    ],
+    "f06_loaders": {
+      "concatenated module string": "require() of a module computed at run time or written other than as one plain string literal: require('@nest' + 'js/common')",
+      "module.require of a computed name": "module.require(name): a member require other than this.require(...) or this.<field>.require(...)",
+      "require in a conditional expression": "require() of a module computed at run time or written other than as one plain string literal: require(name)",
+      "module['require'] of Nest's common": "module.require('@nestjs/common'): a member require other than this.require(...) or this.<field>.require(...)"
+    },
+    "refused": {
+      "import() of a Nest package": [["unlisted-routes.ts: a module loader the binding check does not follow", "import('@nestjs/common'): not a package the loaders may take"]],
+      "import() of a concatenated string": [["unlisted-routes.ts: a module loader the binding check does not follow", "import() of a module computed at run time or written other than as one plain string literal: import('@nest' + 'js/common')"]],
+      "require of a template naming a loaded package": [["unlisted-routes.ts: a module loader the binding check does not follow", "require('express') written as a template, not one plain string literal"]],
+      "import() of a template naming a loaded package": [["unlisted-routes.ts: a module loader the binding check does not follow", "import('node:crypto') written as a template, not one plain string literal"]],
+      "require of a spread argument": [["unlisted-routes.ts: a module loader the binding check does not follow", "require() of a module computed at run time", ": require(...['@nestjs/common'])"]],
+      "require with a second argument": [["unlisted-routes.ts: a module loader the binding check does not follow", "require() of a module computed at run time", ": require('express', 'extra')"]],
+      "a require call followed by a block": [["unlisted-routes.ts: a module loader the binding check does not follow", "require() of a module computed at run time", ": require(name)"]],
+      "an object-literal method named require": [["unlisted-routes.ts: a module loader the binding check does not follow", "require() of a module computed at run time", ": require(name: string)"]],
+      "require on another receiver": [["unlisted-routes.ts: a module loader the binding check does not follow", "holder.require('express'): a member require other than this.require(...) or this.<field>.require(...)"]],
+      "require.main": [["unlisted-routes.ts: a module loader the binding check does not follow", "'require not called')"]],
+      "require.call": [["unlisted-routes.ts: a module loader the binding check does not follow", "'require not called')"]],
+      "import.meta": [["unlisted-routes.ts: a module loader the binding check does not follow", "'import.meta')"]],
+      "import as a member": [["unlisted-routes.ts: a module loader the binding check does not follow", "holder.import('express'): a member import other than"]],
+      "import = require of a package that is not loaded": [["unlisted-routes.ts: a module loader the binding check does not follow", "require('jose'): not a package the loaders may take"]],
+      "eval": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'eval')"]],
+      "new Function": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'Function')"]],
+      "Function called": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'Function')"]],
+      "globalThis": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'globalThis')"]],
+      "global": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'global')"]],
+      "module.constructor": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'constructor as a property')"], ["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'module')"]],
+      "process.mainModule": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.mainModule')"]],
+      "process.mainModule by a literal key": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process.mainModule')"]],
+      "process handed on": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'process')"]],
+      "Proxy": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'Proxy')"]],
+      "a constructor as a property": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'constructor as a property')"]],
+      "a constructor by a literal key": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'constructor as a property')"]],
+      "Object rebound": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'Object other than Object.<member>')"]],
+      "createRequire from node:module": [["unlisted-routes.ts: a module the source contract does not list", "'node:module'"]],
+      "runInThisContext from node:vm": [["unlisted-routes.ts: a module the source contract does not list", "'node:vm'"]],
+      "a namespace import of an unlisted package": [["unlisted-routes.ts: a module the source contract does not list", "'node:fs'"]],
+      "a side-effect import of an unlisted package": [["unlisted-routes.ts: a module the source contract does not list", "'reflect-metadata'"]],
+      "a relative import outside api/src": [["unlisted-routes.ts: a module the source contract does not list", "'outside api/src: "]],
+      "a namespace import of a project file": [["unlisted-routes.ts: a whole-module binding of a module that exports decorators", "('namespace', './study-tags.service', 'tags')"]],
+      "export * of a project file": [["unlisted-routes.ts: a whole-module binding of a module that exports decorators", "('star', './study-tags.service', None)"]],
+      "a default import of a Nest package": [["unlisted-routes.ts: a whole-module binding of a module that exports decorators", "('default', '@nestjs/core', 'core')"]],
+      "a named re-export chain to a route decorator": [["route-helpers.ts: Put used where no decorator the inventory reads applies it"], ["unlisted-routes.ts: Put used where no decorator the inventory reads applies it"], ["study-tags.controller.ts: Put is not bound once by import { Put } from '@nestjs/common'"]],
+      "a star re-export chain to Public": [["route-helpers.ts: Public used where no decorator the inventory reads applies it"], ["unlisted-routes.ts: a whole-module binding of a module that exports decorators", "('star', './route-helpers', None)"]],
+      "Object.assign onto a controller prototype": [["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'AuthController.prototype')"], ["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'StudyTagsController.prototype')"]],
+      "Object.assign onto the prototype of this": [["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'getPrototypeOf other than compared by === or !==')"]],
+      "defineProperty onto a controller prototype": [["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'StudyTagsController.prototype')"], ["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'defineProperty')"]],
+      "setPrototypeOf of a controller prototype": [["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'StudyTagsController.prototype')"], ["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'setPrototypeOf')"]],
+      "__proto__ in an object literal": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'__proto__')"]],
+      "a controller that extends another class": [["study-tags.controller.ts: a class in a controller file extends another class", "class StudyTagsController extends AuthController"]],
+      "a class expression that extends in a controller file": [["study-tags.controller.ts: a class in a controller file extends another class", "class extends StudyTagsController"]],
+      "a controller constructor that returns another object": [["study-tags.controller.ts: a sealed name or a form the source contract does not list", "'return in a constructor')"]],
+      "a registered subclass whose constructor returns another object": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'return in a constructor')"]],
+      "Reflect.set": [["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.set')"]],
+      "Reflect.defineProperty": [["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.defineProperty')"]],
+      "Reflect.construct": [["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.construct')"]],
+      "Reflect cast to any": [["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect')"], ["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'defineMetadata')"]],
+      "defineMetadata by a literal key": [["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'defineMetadata')"]],
+      "Reflect by a literal key": [["unlisted-routes.ts: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect')"]],
+      "a route name by a literal key": [["unlisted-routes.ts: Put used where no decorator the inventory reads applies it"]],
+      "a route name by a template key": [["unlisted-routes.ts: Put used where no decorator the inventory reads applies it"]],
+      "an escaped property key": [["unlisted-routes.ts: an escaped property key, which the name checks do not read"]],
+      "require by an optional literal key": [["unlisted-routes.ts: a module loader the binding check does not follow", "<expression>.require('express'): a member require other than"], ["unlisted-routes.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'require')"]],
+      "a quoted __proto__ key": [["unlisted-routes.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'__proto__')"]],
+      "a quoted constructor that returns another object": [["unlisted-routes.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'constructor')"]],
+      "prototype by a string argument": [["study-tags.controller.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'prototype')"]],
+      "a handle spread from an array into a call": [["study-tags.controller.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'prototype')"]],
+      "createDecorator by a string argument": [["unlisted-routes.ts: a string literal that spells a handle source_contract seals, outside an array literal", "'createDecorator')"]],
+      "Object declared as a generic function": [["unlisted-routes.ts: a sealed name or a form the source contract does not list", "'Object other than Object.<member>')"]]
+    },
+    "accepted": [
+      "Array and Object as members, a type and new Array()",
+      "Object.assign on data and a compared prototype",
+      "Reflect.ownKeys and a namespace of a listed package",
+      "a class outside the controllers that extends Error",
+      "a method named require with a return type",
+      "a registered subclass of a controller without a constructor",
+      "handle names as elements of an array literal",
+      "one-literal keys that name nothing sealed",
+      "process.env and process.exit",
+      "this.require and this.<field>.require of a method named require"
+    ],
+    "regex_or_division": {
+      "unit": "S5-U1c-F07",
+      "rule": "S5-U1c-F07: code_mask decided a '/' by the one character before it and opened a regex after '+', '-' and '}', so 'probe++ / (() => { ... Reflect.defineMetadata(...) ... })() / 1' after the registered StudyTagsController, '<any>{}' before the '/' and the same in unlisted-routes.ts registered in AppModule blanked the metadata writes between the two '/' and a public route both inventories missed (110 rows, public 4, test_05/11/12/13 green). A '/' outside a comment or literal now opens a regex or divides by the token before it. It divides after a name, a number, a string, template or regex literal, ']', the ')' of a call or group, a postfix '++' or '--', a non-null '!', and a reserved word after '.' or '#', on the same line. It opens a regex at the start of the source and after operand_words, operand_punct, the ')' of a control_words header or of 'for await (', and a prefix '++', '--' or '!' (prefix: no token an expression ends at stands before it on its line). Every other '/' is refused with its reason, because TypeScript's reading turns on grammar the lexer does not track: after unread_words, unread_punct ('}' closes a block or an object literal, type or class or function expression; '>' is a comparison or closes type arguments), '#', '@' or any other character, after a '++', '--' or '!' that follows such a token, and a '/' that starts a line after a token an expression ends at (a division, or a regex after a semicolon inserted where a statement or type annotation ends). Neither reading is guessed: a regex read as a division opens a string at a quote in its body. regex_names also refuses a regex literal whose text spells a name the name checks read, so a division read as a regex could not hide one. readings pins the lexer cases, forms the reviewer's four shapes with the reasons each is refused for in both places ({file} and {class} are the place's), refused and accepted the file-level cases.",
+      "operand_words": ["case", "delete", "do", "else", "in", "instanceof", "new", "return", "throw", "typeof"],
+      "unread_words": ["await", "break", "catch", "class", "const", "continue", "debugger", "default", "enum", "export", "extends", "finally", "for", "function", "if", "implements", "import", "interface", "let", "of", "package", "private", "protected", "public", "static", "switch", "try", "var", "void", "while", "with", "yield"],
+      "control_words": ["for", "if", "while", "with"],
+      "operand_punct": ["${", "%", "&", "(", "*", "+", ",", "-", "...", "/", ":", ";", "<", "=", "=>", "?", "[", "^", "{", "|", "~"],
+      "unread_punct": [".", ">", "}"],
+      "readings": {
+        "division": [
+          "after a keyword that is a property or a private name",
+          "after a name, a number and a literal",
+          "after a non-null assertion",
+          "after a postfix '++' and '--'",
+          "after the ')' of a call or a group and after ']'",
+          "after this, null and true",
+          "in a template substitution",
+          "the reviewer's postfix increment"
+        ],
+        "regex": [
+          "after '(', ',', '[', '?', ':', '=' and '=>'",
+          "after '...' and in a template substitution",
+          "after a prefix '!'",
+          "after a prefix '++' and after a division",
+          "after an operand keyword",
+          "after else, do and case",
+          "after the ')' of an if, while, for and for await header",
+          "at the start and after an operator"
+        ],
+        "refused": {
+          "after the '}' of an object expression": "'}' ends a block, after which a '/' opens a regex, or an object literal",
+          "after the '}' of a block": "'}' ends a block, after which a '/' opens a regex, or an object literal",
+          "after the '>' of type arguments": "'>' compares, after which a '/' opens a regex, or closes type arguments",
+          "after 'of'": "'of' is a keyword or a name as the statement reads",
+          "after 'await'": "'await' is a keyword or a name as the statement reads",
+          "after 'yield'": "'yield' is a keyword or a name as the statement reads",
+          "after 'void' as a type": "'void' is a keyword or a name as the statement reads",
+          "at the start of a line after a type annotation": "('Foo') at offset 11: it starts a line after a token an expression ends at",
+          "after a comment that holds a line terminator": "('a') at offset 10: it starts a line after a token an expression ends at",
+          "after a '++' that follows '}'": "'++' is postfix or prefix as '}' reads, which is refused",
+          "after '.'": "a member name follows '.'",
+          "a hashbang": "'!' is postfix or prefix as '#' reads, which is refused: no rule reads a '/' after '#'"
+        }
+      },
+      "forms": {
+        "postfix ++": [["{file}: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.defineMetadata')"], ["{file}: a sealed name or a form the source contract does not list", "'{class}.prototype')"]],
+        "postfix --": [["{file}: a metadata writer that attaches route or public metadata without a decorator the inventory reads", "'Reflect.defineMetadata')"], ["{file}: a sealed name or a form the source contract does not list", "'{class}.prototype')"]],
+        "an object expression": [["a '/' the lexer does not read as a regex or a division from the token before it ('}')", "'}' ends a block"]],
+        "the loader alone": [["{file}: a module loader the binding check does not follow", "require() of a module computed at run time or written other than as one plain string literal: require('@nestjs"]]
+      },
+      "places": ["registered study-tags.controller.ts", "unlisted-routes.ts registered in AppModule"],
+      "refused": {
+        "a regex literal that spells checked names": [["{file}: a regex literal that spells a name the source checks read", "'Reflect')", "'defineMetadata')", "'require')"]]
+      },
+      "accepted": [
+        "divisions after names, calls, indexes, postfix operators and non-null assertions",
+        "regex literals after operators, '!', a control header and in a template"
+      ]
+    },
+    "class_heading": {
+      "unit": "S5-U1c-F08",
+      "rule": "S5-U1c-F08: controller_heritage took the first '{' after 'class' for the class body, so the type literal of a generic default ended the heading before its extends: api/src/review-inherited.controller.ts holding '@Controller('unlisted') export class ReviewInheritedController<T = {}> extends PacsController {}', registered in AppModule, inherits GET unlisted/health (PacsController's @Public()) while both inventories read 110 rows and public 4 and test_05/11/12/13/21/22 passed; '<T = { marker: string }>' and '<T = () => { marker: string }>' did the same. class_heading now reads every class keyword's heading to the '{' of its body, in the forms supported lists, and raises on anything else; in a *.controller.ts file an extends that opens a heritage clause is refused, an extends anywhere else in the heading is a form this contract does not list, and a class keyword whose heading it does not read is refused. class_body, which tells a method named require from a loader call, reads the same heading: a '{' opens a class body only as the body of a class keyword class_heading reads. forms pins the reviewer's three with the reasons each is refused for, refused and accepted the rest; test_23 also runs test_05 with each form in place.",
+      "supported": [
+        "'class', a name unless the class is an expression or a default export, optional type parameters, then extends and implements clauses in any order and the '{' of the class body; 'abstract', 'export' and 'export default' before 'class' are not part of the heading",
+        "type parameters and type arguments read to the '>' that closes them: '<' and '>' counted, '(', '[' and '{' skipped whole to the bracket that closes them (a type literal, a function type's parameters, a tuple), '=>' an arrow, and between them only names, numbers and , . = | & ? : -",
+        "a class reference of a heritage clause: a name, then '.' and a name and type arguments; after extends also a parenthesised start, call arguments and an index; implements takes a ',' list",
+        "class after '.', '?.' or '#' is a property name, not a keyword",
+        "in a *.controller.ts file no class heading holds extends, in a heritage clause or anywhere else, and every class keyword's heading is read",
+        "class_body: a '{' opens a class body only as the body of a class keyword whose heading class_heading reads; any other block holds no method declaration, so a require in it is read as a call"
+      ],
+      "forms": {
+        "<T = {}>": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = {}> extends PacsController')"]],
+        "<T = { marker: string }>": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = { marker: string }> extends PacsController')"]],
+        "<T = () => { marker: string }>": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = () => { marker: string }> extends PacsController')"]]
+      },
+      "control": {
+        "the same inheritance without a generic": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController extends PacsController')"]]
+      },
+      "refused": {
+        "an abstract generic class that extends": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = {}> extends PacsController')"]],
+        "a default-exported generic class that extends": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class<T = {}> extends PacsController')"]],
+        "an implements clause with a type literal before extends": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController implements Marker<{ marker: string }> extends PacsController')"]],
+        "a type parameter constraint": [["review-inherited.controller.ts: a class heading in a controller file holds extends outside a heritage clause", "'class ReviewInheritedController<T extends object = {}>')"]],
+        "a '<' that does not close": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "does not close"]],
+        "a token no type holds inside '<' and '>'": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "'!' at offset", "which no type is written with"]],
+        "class as an object key in a controller file": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "':' at offset", "where the class heading goes on or its body opens"]],
+        "a member named class in a controller file": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "'(' at offset", "where the class heading goes on or its body opens"]],
+        "a loader call in a block after 'x. class'": [["unlisted-routes.ts: a module loader the binding check does not follow", "require('../outside'): not a package the loaders may take"]]
+      },
+      "accepted": [
+        "a generic controller without inheritance",
+        "a require method in a class whose generic default holds a type literal",
+        "class as a property name after '.' and '?.' in a controller file"
+      ]
+    }
+  },
+  "request_method_pin": {
+    "package": "@nestjs/common",
+    "lock_version": "10.4.22",
+    "rule": "S5-U1c D6: request_method_enum is the Python model's table (0-8). A member it does not know answers None (denied) in the model, while the product's RequestMethod reverse map names it; both deny, because every allowlist key's method is GET or POST. The full member list of the locked version was not read in this unit (no installed copy). When lock_version changes, re-read enums/request-method.enum.d.ts of the new version and update request_method_enum and this pin together."
+  },
+  "role_composition": {
+    "unit": "S5-U1c",
+    "rule": "RISK-S5-U1c-MIXED-DOWNGRADE: only clinicianOnly() narrows, and only where listed. A token with any legacy role never meets the clinician gate or a clinician projection; a clinician-only token never passes a denied row. A new narrowing site is a new decision and must be listed here.",
+    "clinician_only_call_sites": {"auth.guard.ts": 1, "pacs.service.ts": 1, "report-preview.controller.ts": 1, "viewer.controller.ts": 1},
+    "live_test": "test_04_mixed_and_legacy_roles_keep_their_existing_paths",
+    "live_marker": "CLINICIAN_LIVE_COMPOSITION"
+  },
+  "live_matrix": {
+    "unit": "S5-U1c",
+    "test": "test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case",
+    "marker": "CLINICIAN_LIVE_MATRIX",
+    "study": "one run-owned synthetic hallym study (LiveStack.create_fixture, C-STORE), report left at RS W; the matrix writes no report, item or setting",
+    "write_rule": "S5-U4a: a write allow row is a handler that answers 201 (a POST without @HttpCode). Its write names the method, the request body (placeholders from fill are the run's values), the expected status and the audit rows the positive writes: action (the product constant in source), rows, the actor's identity, target and detail values. Its wrong_role and wrong_tenant are denials, 403 and 404, and write nothing. A read row keeps the read contract: 200/204, no request body but dicom/lookup's, no audit row. Every case of every row is checked against the AuditLog rows it caused.",
+    "fill": {
+      "$request_id": "a new UUID v4 for every call",
+      "$owner": "[institution, sub] of the calling identity from GET /me, the value the question service compares expectedOwner with, so a refusal is the role or tenant rule and never OWNER_CHANGED",
+      "$revision": "the current revision of the row's :id, read just before the call: the :id question from StudyQuestion, the :id image request from StudyImageRequest"
+    },
+    "literals": {
+      "rule": "S5-U4c: a write body value that is neither a fill placeholder, '' nor a SYNTHETIC text is one of these enumerated values, each spelled in the source file that defines the row's audit action (null is the explicit no-counterparty-id value)",
+      "values": {"kind": ["external-image", "image-transfer"], "action": ["cancel"], "counterpartyInstitutionId": [null]}
+    },
+    "question": "one question the clinician asks on the study before the loop with clinician_question_live.ask_question; :id is its id. The create row asks a second one, the entries row follows it up, and the close row, which runs after every other row that names it, closes it. The question rows go before the study cleanup (both foreign keys RESTRICT) through clinician_question_live.drop_study_questions",
+    "image_request": "S5-U4c: one image-transfer request the clinician makes on the study before the loop with clinician_request_live.make_image_request; :id of the image-requests rows is its id. The create row makes an external-image request (another kind, so the active-request rule never meets the prepared one) and the change row, which runs after every other row that names it, cancels the prepared one. The list row asks state=all. The request rows go before the study cleanup (every foreign key RESTRICT) through clinician_request_live.drop_study_image_requests",
+    "identities": {
+      "clinician": "clinician-only member of hallym, the study's institution",
+      "kclinician": "clinician-only member of kin-center",
+      "doctor": "radiologist-only member of hallym (LiveStack)",
+      "tech": "technician-only member of hallym (LiveStack)",
+      "gateway": "valid gateway client-credentials identity of kin-center (LiveStack.service_token)",
+      "cinvalid": "clinician-only member with two institution groups, created by the case"
+    },
+    "rows": {
+      "GET me": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "cinvalid", "expect": "denied", "status": 403, "code": "INSTITUTION_INVALID", "basis": "a session row names no study; its tenant axis is the membership check (exactly one institution group)"}
+      },
+      "POST auth/logout": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 204, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "cinvalid", "expect": "allowed", "status": 204, "code": null, "basis": "by design, not a leak: the pending/invalid logout exception (auth.guard.ts isLogout) ends only the caller's own session and answers no data"}
+      },
+      "GET authz/dicom": {
+        "via": "nginx auth_request of GET /dicom-web/studies/{uid}/metadata, its only caller; nginx answers the refusal with a status only",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null}
+      },
+      "POST dicom/lookup": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 403, "code": null, "message": "열람 권한이 없습니다"}
+      },
+      "GET studies/:uid/viewer-items": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+      },
+      "GET clinician/studies": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "studies", "field": "uid", "value": ":uid"}, "basis": "a collection: the other institution's clinician is answered, without the study"}
+      },
+      "GET clinician/studies/:uid/report": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+      },
+      "GET questions": {
+        "query": "view=mine",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED", "basis": "view=mine is the clinician's own list; a radiologist reads view=inbox"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the question"}
+      },
+      "GET questions/:id": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+      },
+      "GET studies/:uid/questions": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST studies/:uid/questions": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "body": "SYNTHETIC S5-U1c matrix question"},
+          "expected_status": 201,
+          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "question", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST questions/:id/entries": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "body": "SYNTHETIC S5-U1c matrix follow-up"},
+          "expected_status": 201,
+          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "followup", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+      },
+      "POST questions/:id/close": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "note": ""},
+          "expected_status": 201,
+          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "close", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+      },
+      "GET image-requests": {
+        "query": "view=mine&state=all",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "view=mine is the clinician's own list; radiologists and staff read view=queue"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the request"}
+      },
+      "GET image-requests/:id": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다", "basis": "every app role of the owning institution reads a request (OQ-5 a), so the identity without one is the wrong role"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
+      },
+      "GET studies/:uid/image-requests": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다", "basis": "every app role of the owning institution reads a study's requests (OQ-5 a), so the identity without one is the wrong role"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST studies/:uid/image-requests": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "kind": "external-image", "counterparty": "SYNTHETIC S5-U1c matrix hospital",
+                   "counterpartyInstitutionId": null, "reason": "SYNTHETIC S5-U1c matrix request"},
+          "expected_status": 201,
+          "audit": {"action": "study.image-request", "source": ["image-request.service.ts", "IMAGE_REQUEST_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "action": "create", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST image-requests/:id": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "action": "cancel", "note": "SYNTHETIC S5-U1c matrix cancel"},
+          "expected_status": 201,
+          "audit": {"action": "study.image-request", "source": ["image-request.service.ts", "IMAGE_REQUEST_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "action": "cancel", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "a technician handles requests but never cancels one (the requesting clinician or admin does, OQ-5 a)"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
+      }
+    }
   },
   "live_probe_values": {":uid": "1.2.826.0.1.3680043.8.498.0", ":id": "1", ":version": "1"},
   "read_contract": {

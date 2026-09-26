@@ -16,7 +16,14 @@ length still pushed the header past 52px (F1), and body.portrait's 4px+4px paddi
 and the 1px border made 53px (F2). The header now shows that text on one line, ellipsized when long,
 and the whole text is in a Session details popover opened by a button. The page script is stripped,
 so the shipped block that copies the text into that popover is cut out of main.html and run as is.
+
+S5-U6b-X2-F01: the header shares its row with the S5-U6b storage text (#storage), which starts as the markup's
+`not_loaded` "Storage Unobservable" and is then rewritten by refreshStorage(). Writing a fixed '1.0GB used' over it
+measured a text the product never shows. The shipped refreshStorage() is cut out of main.html and run as is against a
+stubbed /statistics answer, so every header here carries a text the page itself produces; the longest one (the largest
+byte count it accepts) is the default, and each state it can draw is measured on its own at the one-row widths.
 """
+import json
 import os
 import re
 import unittest
@@ -63,6 +70,23 @@ LABELS_SHOWN_FROM = 1680
 # The shipped block that copies #user/#roles into the Session details popover and the button's tooltip.
 SESSION_BLOCK_START = '    // 세션 상세(S5-UI1):'
 SESSION_BLOCK_END = '\n    function showMembershipState(state) {'
+# The shipped refreshStorage() and the counter it reads; it draws #storage and needs only $ and KinStudyArrivals.
+STORAGE_BLOCK_START = '    let storageSeq = 0, storageLast = null;'
+STORAGE_BLOCK_END = '\n    async function load(options = {}) {'
+# Every text #storage can show, as (/statistics answers fed to refreshStorage() in order, data-state, text). None is
+# a failed read. not_loaded is the markup before the first read; the failure comes after a good read so the tooltip
+# carries the last value as well. The largest TotalDiskSize it accepts is Number.MAX_SAFE_INTEGER, and that draws
+# the longest text: 8192.00 TiB.
+STORAGE_STATES = {
+    'not_loaded': ((), 'not_loaded', 'Storage Unobservable'),
+    'failed': ((1610612736, None), 'unobservable', 'Storage Unobservable'),
+    'zero': ((0,), 'observed', 'Storage 0 B (Server-wide)'),
+    'ordinary': ((1610612736,), 'observed', 'Storage 1.50 GiB (Server-wide)'),
+    'max': ((9007199254740991,), 'observed', 'Storage 8192.00 TiB (Server-wide)'),
+}
+STORAGE_DEFAULT = 'max'
+STORAGE_WIDTHS = [v for v in VIEWPORTS if v[0] >= ONE_ROW_FROM]
+STORAGE_SESSIONS = ('admin', 'max-offline')
 
 
 def page_html():
@@ -73,19 +97,42 @@ def page_html():
     return re.sub(r'<link\b[^>]*>', '', html)
 
 
-def session_block():
+def cut(start_marker, end_marker):
     html = (ASSETS / 'main.html').read_text(encoding='utf-8')
-    start = html.find(SESSION_BLOCK_START)
-    end = html.find(SESSION_BLOCK_END, start)
+    start = html.find(start_marker)
+    end = html.find(end_marker, start)
     return html[start:end] if start >= 0 and end > start else None
 
+
+def session_block():
+    return cut(SESSION_BLOCK_START, SESSION_BLOCK_END)
+
+
+def storage_block():
+    block = cut(STORAGE_BLOCK_START, STORAGE_BLOCK_END)
+    # Its own scope, like the page script's; only the function is handed out.
+    return block and ('(() => {\n  const $ = s => document.querySelector(s);\n' + block
+                      + '\n  window.kinRefreshStorage = refreshStorage;\n})();')
+
+
+# refreshStorage() reads fetch("/statistics"); each call takes the next answer. None is a network failure.
+STORAGE_FEED = """async (answers)=>{
+  const calls=[];
+  window.fetch=async (url)=>{
+    calls.push(String(url));
+    const n=answers[calls.length-1];
+    if(n===null||n===undefined) throw new TypeError('Failed to fetch');
+    return new Response(JSON.stringify({TotalDiskSize:n}),{status:200,headers:{'Content-Type':'application/json'}});
+  };
+  for(let i=0;i<answers.length;i++) await window.kinRefreshStorage();
+  return calls;
+}"""
 
 FILL = """([user, roles, reading, portrait, dbstat])=>{
   document.body.classList.toggle('reading', reading);
   document.body.classList.toggle('portrait', portrait);
   document.querySelector('#m-unassigned').style.display='';
   document.querySelector('#member-link').style.display='';
-  document.querySelector('#storage').textContent='1.0GB used';
   document.querySelector('#dbstat').innerHTML=dbstat;
   document.querySelector('#user').textContent=user;
   document.querySelector('#roles').textContent=roles;
@@ -109,7 +156,10 @@ MEASURE = """()=>{
           bar:{...box(bar),sw:bar.scrollWidth,cw:bar.clientWidth},items,
           logout:{...box(out),tag:out.tagName,text:out.textContent.trim(),font:parseFloat(getComputedStyle(out).fontSize)},
           who:who&&{...box(who),tag:who.tagName,type:who.type,target:who.getAttribute('popovertarget'),title:who.title},
-          parts:['#user','#roles'].map(part)};
+          parts:['#user','#roles'].map(part),
+          storage:(e=>({...box(e),text:e.textContent,state:e.dataset.state,title:e.title,sw:e.scrollWidth,cw:e.clientWidth,
+                        sh:e.scrollHeight,ch:e.clientHeight,font:parseFloat(getComputedStyle(e).fontSize),
+                        display:getComputedStyle(e).display}))(document.querySelector('#storage'))};
 }"""
 
 # The Session details popover as drawn: open or not, its box, whether it scrolls or clips, what it holds, and
@@ -144,6 +194,9 @@ class WorklistHeaderDOMTest(unittest.TestCase):
     def setUpClass(cls):
         cls.html = page_html()
         cls.session_block = session_block()
+        cls.storage_block = storage_block()
+        cls.arrivals = (ASSETS / 'study-arrivals.js').read_text(encoding='utf-8')
+        cls.storage_seen = []
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
 
@@ -151,6 +204,10 @@ class WorklistHeaderDOMTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.browser.close()
         cls.pw.stop()
+        # What each storage state did to the header: its height and where Log out sat.
+        OUT.mkdir(parents=True, exist_ok=True)
+        (OUT / 'header-storage-states.json').write_text(
+            json.dumps({'header_storage_states': cls.storage_seen}, ensure_ascii=False, indent=1), encoding='utf-8')
 
     def one_row(self, width, bar_height, what):
         if width >= ONE_ROW_FROM:
@@ -189,22 +246,44 @@ class WorklistHeaderDOMTest(unittest.TestCase):
         self.assertTrue(d['own'], 'something covers Session details')
         return d
 
-    def check(self, width, height, session, reading=False, portrait=False):
+    def check(self, width, height, session, reading=False, portrait=False, storage=STORAGE_DEFAULT):
         user, roles, dbstat = SESSIONS[session]
+        answers, storage_state, storage_text = STORAGE_STATES[storage]
+        self.assertIsNotNone(self.storage_block, 'refreshStorage() was not found in main.html')
         page = self.browser.new_page(viewport={'width': width, 'height': height})
         page.set_default_timeout(4000)
         page.route('**/*', lambda route: route.abort())
         page.set_content(self.html)
         if self.session_block:
             page.add_script_tag(content=self.session_block)
+        page.add_script_tag(content=self.arrivals)
+        page.add_script_tag(content=self.storage_block)
         page.evaluate(FILL, [user, roles, reading, portrait, dbstat])
-        tag = f'{width}x{height}-{session}' + ('-reading' if reading else '') + ('-portrait' if portrait else '')
+        # The shipped refreshStorage() writes #storage, as the page does after its list read.
+        self.assertEqual(['/statistics'] * len(answers), page.evaluate(STORAGE_FEED, list(answers)))
+        tag = (f'{width}x{height}-{session}' + ('-reading' if reading else '') + ('-portrait' if portrait else '')
+               + f'-storage-{storage}')
         m = d = None
+        ok = False
         try:
             m = page.evaluate(MEASURE)
             bar = m['bar']
             self.assertEqual(0, bar['y'])
-            self.one_row(width, bar['h'], '')
+            self.one_row(width, bar['h'], f'with {storage} storage "{m["storage"]["text"]}"')
+            # The storage text is the one the page drew, on one line, whole, inside the header and the viewport.
+            st = m['storage']
+            self.assertEqual(storage_state, st['state'])
+            self.assertEqual(storage_text, st['text'])
+            self.assertTrue(st['title'], 'the storage text lost its explanation')
+            self.assertNotEqual('none', st['display'])
+            self.assertGreater(st['w'], 0)
+            self.assertGreaterEqual(st['font'], 12)
+            self.assertLessEqual(st['sw'], st['cw'] + 1, f'#storage clips "{st["text"]}"')
+            self.assertLessEqual(st['sh'], st['ch'] + 1, f'#storage runs onto a second line: "{st["text"]}"')
+            self.assertGreaterEqual(st['x'], -0.5)
+            self.assertLessEqual(st['r'], width + 0.5)
+            self.assertGreaterEqual(st['y'], bar['y'] - 0.5)
+            self.assertLessEqual(st['b'], bar['b'] + 0.5)
             # Folding a name hides its words from the row only: they stay in the DOM and in the tooltip.
             for fold in page.evaluate(FOLD, FOLDED):
                 self.assertTrue(fold['found'], fold['word'])
@@ -294,7 +373,16 @@ class WorklistHeaderDOMTest(unittest.TestCase):
             self.assertFalse(page.evaluate(DETAILS)['open'], 'a second click did not close Session details')
             logout.click()  # Playwright's hit test: nothing covers the button.
             self.assertEqual(2, page.evaluate('logoutClicks'))
+            ok = True
         finally:
+            if m:
+                st, lo = m['storage'], m['logout']
+                self.storage_seen.append({
+                    'test': self._testMethodName, 'width': width, 'height': height, 'session': session,
+                    'reading': reading, 'portrait': portrait, 'storage': storage, 'data_state': st['state'],
+                    'text': st['text'], 'bar_h': m['bar']['h'],
+                    'storage_box': {k: st[k] for k in ('x', 'y', 'r', 'b')},
+                    'logout': {k: lo[k] for k in ('x', 'y', 'r', 'b')}, 'passed': ok})
             OUT.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(OUT / f'header-{tag}.png'), clip={'x': 0, 'y': 0, 'width': width, 'height': 140})
             print(tag, m and {'bar': m['bar'], 'logout': m['logout'], 'who': m['who'], 'docSW': m['docSW']},
@@ -323,6 +411,19 @@ class WorklistHeaderDOMTest(unittest.TestCase):
                 for session in PORTRAIT_SESSIONS:
                     with self.subTest(width=width, reading=reading, session=session):
                         self.check(width, height, session, reading=reading, portrait=True)
+
+    def test_every_storage_state_keeps_the_one_row_header(self):
+        # S5-U6b-X2-F01: each text refreshStorage() can draw, in the real header and CSS, at the widths that must stay
+        # one 52px row, in both layouts and modes, with the shortest and the longest session text.
+        for width, height in STORAGE_WIDTHS:
+            for reading in (False, True):
+                for portrait in (False, True):
+                    for session in STORAGE_SESSIONS:
+                        for storage in STORAGE_STATES:
+                            with self.subTest(width=width, reading=reading, portrait=portrait, session=session,
+                                              storage=storage):
+                                self.check(width, height, session, reading=reading, portrait=portrait,
+                                           storage=storage)
 
 
 if __name__ == '__main__':
