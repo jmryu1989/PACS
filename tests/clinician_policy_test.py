@@ -59,6 +59,7 @@ REALM = ROOT / "keycloak" / "kin-realm.json"
 MANIFEST = ROOT / "tests" / "invariants_live.py"
 LIVE_MODULE = ROOT / "tests" / "clinician_policy_live.py"
 QUESTION_LIVE = ROOT / "tests" / "clinician_question_live.py"
+REQUEST_LIVE = ROOT / "tests" / "clinician_request_live.py"
 LOCKFILE = ROOT / "api" / "package-lock.json"
 FIXTURES = json.loads((ROOT / "tests" / "clinician_policy_fixtures.json").read_text(encoding="utf-8"))
 
@@ -1497,11 +1498,14 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertEqual(ts_array(self.policy, "CLINICIAN_SESSION_ROUTES"), FIXTURES["session_routes"])
         self.assertEqual(ts_array(self.policy, "CLINICIAN_BUSINESS_ROUTES"), FIXTURES["business_routes"])
         # U1a shipped an empty business allowlist; U1b adds read rows only. The non-GET rows are the viewer's SOP lookup
-        # (answers an Orthanc instance id, writes nothing) and the three S5-U4a question writes (decision D33: create,
-        # reply, close; the service decides each action's role); anything else that is not a GET is a new decision.
+        # (answers an Orthanc instance id, writes nothing), the three S5-U4a question writes (decision D33: create,
+        # reply, close; the service decides each action's role) and the two S5-U4c image request writes (create, and
+        # the state change whose accept/close/decline the service keeps to technician/admin and whose cancel to the
+        # requester or admin); anything else that is not a GET is a new decision.
         self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
         self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")],
-                         ["POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"])
+                         ["POST dicom/lookup", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
+                          "POST studies/:uid/image-requests", "POST image-requests/:id"])
         self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
                         "the viewer read pair is allowed together or not at all")
         self.assertTrue(set(FIXTURES["must_stay_denied"]).isdisjoint(ALLOWED))
@@ -1942,9 +1946,16 @@ class ClinicianPolicySpec(unittest.TestCase):
         expected status and the audit rows its positive writes; its wrong_role and wrong_tenant are denials. Every other
         row keeps the read contract (200/204, no audit row). The live loop checks each case against the AuditLog rows it
         caused, and the :id question comes from the helpers TEST-S5-U4a-LIVE runs on.
+        S5-U4c: the image request rows name their own :id, a request the clinician makes through the helpers
+        TEST-S5-U4c-LIVE runs on; a write body value that is no placeholder, '' or SYNTHETIC text is one of the declared
+        literals (the request kind, the cancel action, the explicit null counterparty id), spelled in the source file
+        of the row's audit action.
         """
         matrix = FIXTURES["live_matrix"]
         rows = matrix["rows"]
+        literals = matrix["literals"]["values"]
+        self.assertEqual(set(literals), {"kind", "action", "counterpartyInstitutionId"})
+        self.assertEqual(literals["counterpartyInstitutionId"], [None], "null is the only non-text literal")
         self.assertEqual(set(rows), ALLOWED, "every allow row, and only the allow rows, has live cases")
         wanted = {"positive": {"allowed"}, "wrong_role": {"denied"}, "wrong_tenant": {"denied", "absent"}}
         inventory = controller_inventory()
@@ -1993,6 +2004,10 @@ class ClinicianPolicySpec(unittest.TestCase):
                 for key, value in body.items():
                     if isinstance(value, str) and value.startswith("$"):
                         self.assertIn(value, fill, key)
+                    elif key in literals:
+                        self.assertIn(value, literals[key], key)
+                        if value is not None:
+                            self.assertIn("'" + value + "'", (API / write["audit"]["source"][0]).read_text(encoding="utf-8"), key)
                     else:
                         self.assertTrue(value == "" or isinstance(value, str) and value.startswith("SYNTHETIC"), key)
                 self.assertEqual("$revision" in body.values(), ":id" in route, "a revision belongs to the :id question")
@@ -2019,6 +2034,21 @@ class ClinicianPolicySpec(unittest.TestCase):
                 self.assertEqual(rows[route]["wrong_role"]["code"], "QUESTION_ROLE_REQUIRED")
                 self.assertIn(rows[route]["wrong_role"]["as"], ("doctor", "tech"))
                 self.assertEqual(rows[route]["wrong_tenant"]["as"], "kclinician")
+        # S5-U4c: the request service meets a same-institution member of a role it does not admit where one exists
+        # (view=mine, create, cancel); every app role of the owning institution reads one request and a study's requests
+        # (OQ-5 a), so their wrong role is the identity without one. The other institution's clinician meets the
+        # owner-institution rule.
+        requests = sorted(m + " " + p for (m, p), found in inventory.items() if found["file"] == "image-request.controller.ts")
+        self.assertEqual(len(requests), 5)
+        for route in requests:
+            with self.subTest(image_request=route):
+                wrong = rows[route]["wrong_role"]
+                if route in ("GET image-requests/:id", "GET studies/:uid/image-requests"):
+                    self.assertEqual((wrong["as"], wrong["status"], wrong["code"]), ("gateway", 403, None))
+                else:
+                    self.assertEqual(wrong["code"], "IMAGE_REQUEST_ROLE_REQUIRED")
+                    self.assertIn(wrong["as"], ("doctor", "tech"))
+                self.assertEqual(rows[route]["wrong_tenant"]["as"], "kclinician")
         # the live module drives these cases from the fixture and creates every identity they name
         live = LIVE_MODULE.read_text(encoding="utf-8")
         self.assertIn("def " + matrix["test"] + "(self) -> None:", live)
@@ -2040,6 +2070,17 @@ class ClinicianPolicySpec(unittest.TestCase):
         for use in ("drop_study_questions(uid, cls.owned_subjects())", "member_owner(self.stack, user)",
                     "ask_question(self.stack, user, uid, self.owner(user), body, rid)", "return read_question_row(qid)"):
             self.assertIn(use, question)
+        # S5-U4c: one implementation of the image request helpers, the one TEST-S5-U4c-LIVE runs on
+        self.assertIn("cls.addClassCleanup(cls.drop_shared_image_requests)", live)
+        request_shared = ("drop_study_image_requests", "make_image_request", "read_request_row")
+        self.assertIn("from clinician_request_live import " + ", ".join(request_shared) + "\n", live)
+        request_live = REQUEST_LIVE.read_text(encoding="utf-8")
+        for name in request_shared:
+            self.assertEqual(len(re.findall(rf"^def {name}\(", request_live, re.M)), 1, name)
+            self.assertNotIn(f"def {name}(", live, name)
+        for use in ("drop_study_image_requests(uid, cls.owned_subjects())", "make_image_request(self.stack, user, uid, self.owner(user)",
+                    "return read_request_row(rid)"):
+            self.assertIn(use, request_live)
         # test_01 probes every controller route that is neither public nor allowed, then requires exactly the denied rows
         self.assertIn('DENIED_ROUTES = {route for routes in FIXTURES["route_matrix"]["denied"].values() for route in routes}', live)
         self.assertIn("self.assertEqual(sorted(swept), sorted(DENIED_ROUTES)", live)
@@ -2127,7 +2168,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
-        # spaced route and controller decorators read the same 117 rows, and the unsupported shapes stop the inventory
+        # spaced route and controller decorators read the same 122 rows, and the unsupported shapes stop the inventory
         sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
@@ -2694,9 +2735,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
-        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed (117 = 4 + 2 + 11 + 100)
+        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed (122 = 4 + 2 + 16 + 100)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (117, 4, 2, 11, 100), "the real inventory is unchanged: 117 = 4 + 2 + 11 + 100")
+                         (122, 4, 2, 16, 100), "the real inventory is unchanged: 122 = 4 + 2 + 16 + 100")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2944,9 +2985,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
-        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed (117 = 4 + 2 + 11 + 100)
+        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed (122 = 4 + 2 + 16 + 100)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (117, 4, 2, 11, 100), "the real inventory is unchanged: 117 = 4 + 2 + 11 + 100")
+                         (122, 4, 2, 16, 100), "the real inventory is unchanged: 122 = 4 + 2 + 16 + 100")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3118,9 +3159,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         sources = api_sources()
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
-        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed (117 = 4 + 2 + 11 + 100)
+        # S5-U6b: GET admin/metrics denied; S5-U4a: 6 question rows allowed; S5-U4c: 5 image request rows allowed (122 = 4 + 2 + 16 + 100)
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (117, 4, 2, 11, 100), "the real inventory is unchanged: 117 = 4 + 2 + 11 + 100")
+                         (122, 4, 2, 16, 100), "the real inventory is unchanged: 122 = 4 + 2 + 16 + 100")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

@@ -50,6 +50,8 @@ model Institution {
   transfersFrom Transfer[] @relation("TransferFrom")
   transfersTo Transfer[] @relation("TransferTo")
   studyAccessPolicies StudyAccessPolicy[]
+  /// S5-U4c 영상 요청이 상대 기관으로 적은 기관. 이 관계는 상대 기관에 어떤 열람도 주지 않는다.
+  counterpartyImageRequests StudyImageRequest[]
 }
 
 /// 검사 하나에 대한 사람의 결정. Orthanc의 검사와 1:1.
@@ -97,6 +99,7 @@ model StudyState {
   techNotes TechNoteRevision[]
   consultations StudyConsultation[]
   questions StudyQuestion[]
+  imageRequests StudyImageRequest[]
   viewerItems ViewerItem[]
   manualSrs ManualSr[]
   viewerJobs ViewerJob[]
@@ -729,6 +732,54 @@ model StudyQuestionEntry {
 
   @@unique([questionId, seq])
   @@unique([questionId, appliedRevision])
+}
+
+/// S5-U4c 외부영상·영상전송 요청. 요청은 기록일 뿐 전송이 아니다: Transfer·TransferBasis·ProcessingAgreement와
+/// 연결이 없고, Closed는 영상을 보냈거나 가져왔다는 뜻이 아니다. 기관은 생성 시 caller 기관으로 고정하고,
+/// 읽기는 지금 그 검사의 소유 기관이 같을 때만 된다. 활성(Requested/Accepted) 요청은 (studyUid, kind, requesterSub)당
+/// 하나다 — migration의 부분 unique index "StudyImageRequest_active_key"가 강제한다(Prisma 스키마로 적을 수 없다).
+model StudyImageRequest {
+  id String @id @db.Uuid
+  studyUid String
+  study StudyState @relation(fields: [studyUid], references: [uid], onDelete: Restrict, onUpdate: Restrict)
+  institutionId String @db.VarChar(256)
+  kind String @db.VarChar(16)
+  requesterSub String @db.VarChar(256)
+  requesterActor String @db.VarChar(256)
+  requesterName String @db.VarChar(256)
+  counterpartyText String @db.VarChar(256)
+  counterpartyInstitutionId String?
+  counterparty Institution? @relation(fields: [counterpartyInstitutionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  reason String @db.VarChar(2000)
+  state String @db.VarChar(16)
+  revision Int
+  handlerActor String? @db.VarChar(256)
+  handlerName String? @db.VarChar(256)
+  note String? @db.VarChar(2000)
+  changedBy String @db.VarChar(256)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  receipts StudyImageRequestReceipt[]
+
+  @@index([institutionId, requesterSub, createdAt, id])
+  @@index([institutionId, state, createdAt, id])
+  @@index([studyUid])
+}
+
+/// 적용된 요청 하나의 영수증(생성 포함). 추가만 하고 고치거나 지우지 않는다. 생성 영수증의 requestId는 요청 id와 같다.
+/// 재전송은 result(그때 돌려준 적용 결과)를 그대로 돌려준다.
+model StudyImageRequestReceipt {
+  requestId String @id @db.Uuid
+  imageRequestId String @db.Uuid
+  imageRequest StudyImageRequest @relation(fields: [imageRequestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  subjectSub String @db.VarChar(256)
+  action String @db.VarChar(16)
+  fingerprint String
+  appliedRevision Int
+  result Json
+  at DateTime @default(now())
+
+  @@unique([imageRequestId, appliedRevision])
 }
 
 model HangingProtocolPreference {
