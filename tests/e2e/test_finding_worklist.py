@@ -831,6 +831,7 @@ class FindingWorklistE2E(navigation.FindingNavigationE2E):
         self.open_findings(w, f)
         # The button exists only because the shipped catalog is not empty (main.html:3907-3914).
         # Visible is not the same as reachable, which is the whole point of the hit test below.
+        self.open_toolbar_group(w, '#b-structured')
         expect(w.locator('#b-structured')).to_be_visible()
         for width, height in ((1680, 1100), (1366, 768)):
             self.entry_pass(w, f, width, height)

@@ -162,6 +162,7 @@ class WorkspacePersistenceE2E(PortraitWorkspaceE2E):
             self.assertEqual(set(portrait),{'main','top','related','prior'})
             page.set_viewport_size({'width':768,'height':1024})
             self.open_toolbar_group(page,'#layout-reset')
+            self.open_toolbar_group(page,'#b-history')
             for selector in ['#thumbwrap img','#clinical','#t-mod','#b-history','#layout-reset']:
                 self.reachable(page,selector)
             self.assertEqual(self.stored(page)['portrait'],portrait)

@@ -554,6 +554,7 @@ class ReportDictationInputDOMTest(unittest.TestCase):
         name had no display rule at all, so the window never appeared - a reader pressing
         `Structured` saw nothing. Every step below therefore goes through a control Playwright has
         to find visible and actionable; nothing here reaches into the page to bypass that."""
+        self.page.click("#report-more > summary")
         self.page.click("#b-structured")
         self.page.wait_for_function(
             "()=>{const m=$('#structmodal');"

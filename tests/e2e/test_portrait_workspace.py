@@ -107,6 +107,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
             self.drag(page, "#resize-main", 80)
             self.drag(page, "#resize-related", 20)
             self.portrait(page, 768, 1024)
+            self.open_toolbar_group(page, "#b-history")
             for selector in ["#thumbwrap img", "#clinical", "#t-mod", "#b-save", "#b-history", "#logout"]:
                 self.reachable(page, selector)
             self.snapshot(page, "768-report")
@@ -119,6 +120,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
             page.locator("#layout-toggle").click()  # auto -> portrait
             page.set_viewport_size({"width": 1600, "height": 1000})
             expect(page.locator("body")).to_have_class(re.compile(r"\bportrait\b"))
+            self.open_toolbar_group(page, "#b-history")
             self.reachable(page, "#b-history")
             self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # portrait -> landscape
@@ -127,6 +129,7 @@ class PortraitWorkspaceE2E(base.WorklistE2E):
             self.open_toolbar_group(page, "#layout-toggle")
             page.locator("#layout-toggle").click()  # landscape -> auto
             self.portrait(page)
+            self.open_toolbar_group(page, "#b-history")
             self.reachable(page, "#b-history")
             expect(page.locator(f'#rows tr[data-uid="{fixture.uid}"]')).to_have_class(re.compile(r"\bsel\b"))
             expect(page.locator("#findings")).to_have_value(fixture.secret)

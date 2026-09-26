@@ -61,7 +61,7 @@ class ReportWindowE2E(ReportPreviewE2E):
         self.assertEqual(self.saved_rows(f),before);self.assertEqual(self.hashes(),original)
 
     def select_ct(self,p,key):
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         p.locator('#report-preview').get_by_role('checkbox',name=key['item']['title'],exact=True).check()
         self.ready(p)
         p.get_by_role('combobox',name='출력 영상 밝기',exact=True).select_option('manual')
@@ -101,7 +101,7 @@ class ReportWindowE2E(ReportPreviewE2E):
         p.get_by_role('combobox',name='출력 영상 밝기',exact=True).select_option('auto');paper=self.ready(p)
         expect(paper.locator('.keys')).to_contain_text('밝기 자동 조정')
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         expect(p.get_by_role('combobox',name='출력 영상 밝기',exact=True)).to_have_value('auto')
         expect(p.get_by_label('W (폭)',exact=False)).to_have_value('400')
         expect(p.get_by_label('L (중심)',exact=False)).to_have_value('40')
@@ -187,7 +187,7 @@ class ReportWindowE2E(ReportPreviewE2E):
         f=self.fixture();self.seed_report(f)
         for _ in range(32):self.window_key(f,size=512)
         p=self.login();self.select(p,f);before=self.saved_rows(f);original=self.hashes()
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         p.get_by_role('combobox',name='출력 영상 밝기',exact=True).select_option('manual')
         boxes=p.locator('#report-preview').get_by_role('checkbox');self.assertEqual(boxes.count(),32)
         for box in boxes.all():box.check()

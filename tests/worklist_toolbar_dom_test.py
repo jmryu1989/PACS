@@ -33,6 +33,7 @@ import subprocess
 import unittest
 from pathlib import Path
 from playwright.sync_api import sync_playwright
+from report_actions_dom_test import without_ui3
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'worklist-v0/hpacs-lite'
@@ -340,7 +341,10 @@ class WorklistToolbarStructureTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.text = MAIN.read_text(encoding='utf-8')
+        # S5-UI3 regrouped the report panel's buttons after this unit. Its three regions are put back to their base
+        # bytes here, so the pins below keep standing for everything else; tests/report_actions_dom_test.py requires
+        # the result to be its base commit byte for byte.
+        cls.text = without_ui3(MAIN.read_text(encoding='utf-8'))
         cls.parts = parts(cls.text)
         cls.base = base_text()
         print('base commit', BASE, 'present' if cls.base is not None else 'absent in this clone; pinned values used')

@@ -79,7 +79,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         response=p.request.get(self.stack.proxy+'/api/studies/'+f.uid+'/report-preview')
         self.assertEqual(response.status,200);self.assertEqual(response.headers.get('cache-control'),'no-store')
         p.on('request',lambda r:writes.append(r.url) if r.method in ['POST','PUT','PATCH','DELETE'] and '/report' in r.url else None)
-        p.locator('#b-print').click();paper=self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();paper=self.ready(p)
         expect(paper.locator('header')).to_contain_text('승인된 저장본');expect(paper.locator('main')).not_to_contain_text('OTHER PRIVATE')
         self.assertEqual(paper.locator('script').count(),0)
         for key in keys:p.locator('#report-preview').get_by_role('checkbox',name=key['item']['title'],exact=True).check()
@@ -114,7 +114,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         printed.close();self.assertEqual(writes,[]);self.assertEqual(self.saved_rows(f),before);self.assertEqual(self.hashes(),original)
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
         p.locator('#findings').evaluate("e=>e.value='현재 편집문 <b>그대로</b>'")
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         p.get_by_role('combobox',name='출력 판독문',exact=True).select_option('editor');paper=self.ready(p)
         expect(paper.locator('header')).to_contain_text('현재 편집문 · 미확정')
         expect(paper.locator('pre').first).to_have_text('현재 편집문 <b>그대로</b>')
@@ -123,7 +123,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
 
     def test_03_failure_change_and_popup_block(self):
         f=self.fixture();self.seed_report(f);_,keys=self.add_keys(f)
-        p=self.login();self.select(p,f);p.locator('#b-print').click();self.ready(p)
+        p=self.login();self.select(p,f);self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         def failed(route):route.fulfill(status=503,body='unavailable')
         p.route('**/frames/*/preview',failed)
         p.locator('#report-preview').get_by_role('checkbox').first.check()
@@ -134,7 +134,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         p.evaluate('()=>window.open=()=>null')
         p.locator('#report-preview').get_by_role('button',name='인쇄 / PDF').click()
         expect(p.locator('#toast')).to_contain_text('인쇄 창을 열 수 없습니다')
-        p.reload();self.select(p,f);p.locator('#b-print').click();self.ready(p)
+        p.reload();self.select(p,f);self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         r=self.stack.request('POST','/studies/'+f.uid+'/report/commit','doctor',dict(action='save',baseVersion=1,findings='new server',conclusion='',recommendation=''))
         self.assertEqual(r.status,201,r.text)
         p.locator('#report-preview').get_by_role('button',name='인쇄 / PDF').click()
@@ -147,7 +147,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         f=self.fixture();g=self.fixture();self.seed_report(f);self.seed_report(g)
         p=self.login();self.select(p,f);pending=[]
         p.route('**/report-preview',lambda route:pending.append(route))
-        p.locator('#b-print').click()
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click()
         expect(p.locator('#report-preview [role=status]')).to_contain_text('불러오는 중')
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
         self.select(p,g);self.select(p,f)
@@ -155,7 +155,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
             try:route.continue_()
             except Exception:pass
         p.unroute('**/report-preview');expect(p.locator('#report-preview')).not_to_be_visible()
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         p.evaluate("()=>window.dispatchEvent(new StorageEvent('storage',{key:'kin-session-ended',newValue:'test'}))")
         expect(p.locator('#report-preview')).not_to_be_visible()
         self.assertEqual(p.locator('#report-preview iframe').get_attribute('srcdoc'),'')
@@ -163,7 +163,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
     def test_05_source_change_hidden_key_and_oversized_image(self):
         f=self.fixture();self.seed_report(f);_,keys=self.add_keys(f)
         p=self.login();self.select(p,f);before=self.saved_rows(f);original=self.hashes()
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         p.locator('#report-preview').get_by_role('checkbox').first.check();self.ready(p)
         def changed(route):
             response=route.fetch();body=response.json();body['UncompressedMD5']='0'*32
@@ -219,7 +219,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
 
     def test_07_no_keys_and_unsupported_print_engine(self):
         f=self.fixture();p=self.login();self.select(p,f);before=self.saved_rows(f)
-        p.locator('#b-print').click();paper=self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();paper=self.ready(p)
         expect(paper.locator('header')).to_contain_text('저장된 판독문 없음')
         expect(p.locator('#report-preview')).to_contain_text('저장한 키 이미지가 없습니다.')
         p.evaluate('''()=>{const original=window.open;window.open=(...a)=>{const w=original(...a);w.print=()=>w.__printCalled=true;return w;};}''')
@@ -246,7 +246,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         added=self.stack.request('POST','/studies/'+f.uid+'/viewer-items','doctor',dict(requestId=str(uuid.uuid4()),item=extra))
         self.assertEqual(added.status,200,added.text);keys.append(added.body)
         p=self.login();self.select(p,f);before=self.saved_rows(f);original=self.hashes()
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         for key in keys:p.locator('#report-preview').get_by_role('checkbox',name=key['item']['title'],exact=True).check()
         paper=self.ready(p)
         expect(paper.locator('.key')).to_have_count(3)
@@ -292,7 +292,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
         self.assertEqual(paper.locator('.key strong').all_text_contents(),order)
         layout.select_option('double');self.ready(p)
         p.locator('#report-preview').get_by_role('button',name='닫기',exact=True).click()
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         expect(layout).to_have_value('single')
         self.assertEqual(self.saved_rows(f),before);self.assertEqual(self.hashes(),original)
 
@@ -300,7 +300,7 @@ class ReportPreviewE2E(ViewerHistoryE2E):
     def test_09_layout_change_cancels_pending_print(self):
         f=self.fixture();self.seed_report(f);_,keys=self.add_keys(f)
         p=self.login();self.select(p,f);before=self.saved_rows(f)
-        p.locator('#b-print').click();self.ready(p)
+        self.open_toolbar_group(p,'#b-print');p.locator('#b-print').click();self.ready(p)
         p.locator('#report-preview').get_by_role('checkbox',name=keys[0]['item']['title'],exact=True).check()
         paper=self.ready(p);expect(paper.locator('.key')).to_have_count(1)
         # Hold one real response after the fetch, deliberately ignoring abort at

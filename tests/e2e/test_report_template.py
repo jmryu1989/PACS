@@ -19,6 +19,7 @@ class ReportTemplateE2E(previous.TemplatePreservationE2E):
         return values
 
     def capture(self, page):
+        self.open_toolbar_group(page, "#b-report-template")
         page.locator("#b-report-template").click()
         expect(page.locator("#tplmodal")).to_be_visible()
 
