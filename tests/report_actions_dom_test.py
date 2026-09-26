@@ -8,10 +8,16 @@ live in four sections (Reading, Status, Editor, Print and History) of a native <
 Same elements, same ids, same labels, same handlers: the page script is not touched. Except and Mark CVR, which had no
 id, get one (b-except, b-mark-cvr) and stay disabled placeholders.
 
-Dictate stays in view although UXR-G-08 lists it under More: tests/e2e/test_dictation_live.py (G-LIVE-GEO) presses
-and measures it at 1366x768 and 1680x1100 with the dictation pane open, and an open More adds a whole panel above the
-report fields there (about 100px at 419px), which is exactly the room G5/G6 measure. Kept in view, the flow needs no
-menu and the row above the fields is shorter than the base's.
+Dictate stays in view although UXR-G-08 lists it under More, to keep the report fields their room: at 1366x768 an open
+More grows the row above the fields from 28px to 130-134px, and with the dictation pane open as well the three fields
+reach their minimum heights (the geometry record). Starting dictation should not need that. Kept in view, the flow
+needs no menu, and tests/e2e/test_dictation_live.py (G-LIVE-GEO) still presses it where it measured it.
+
+fix1 (Astra S5-UI3-IMPROVE-R-001 proposals 1-3 and 6, D54; markup and CSS only): Dictate, Reset to Unread and Clear
+stand 8px further from the buttons before them, so the save actions, the status changes and Copy/Paste are not one
+click-slip away; each More section shows its aria-label as a short heading at the start of its own line (CSS content
+with empty alternative text, no new element, no new line); the More tooltip says where Structured appears, and Except
+and Mark CVR say they are not connected yet. The sections must stay one line each at the 419px column.
 
 RISK-S5-UI3-REPORT-ACTIONS: a button lost, duplicated or changed on the way (tag, attributes, label, disabled); a button
 outside the section it is declared in; the page script changed; the top row wrapping from 1366px or growing taller than
@@ -112,6 +118,15 @@ NEW_IDS = [MENU] + list(SECTIONS)
 IN_VIEW = TOP + [MENU + '>summary'] + FOOT
 MAX_IN_VIEW = 7
 DISABLED = ['b-addendum', 'b-dictate', 'b-except', 'b-mark-cvr', 'b-report-template']
+# fix1: the one attribute added to base buttons, the Korean tooltips of the two placeholders (the base had none).
+TITLES_ADDED = {
+    'b-except': '판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
+    'b-mark-cvr': '중요 결과(CVR) 표시: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.',
+}
+# fix1: (button, the one before it) set apart by 8px on top of the 4px gap; every other neighbour pair keeps 4px.
+GAP = 4
+GAPPED = {'b-dictate': 'b-prelim', 'b-unread': 'b-mark-cvr', 'b-clear': 'b-paste'}
+WIDE_GAP = GAP + 8
 # The shipped line that puts the Structured entry into these rows (main.html, inside `if (!structureForm.empty)`).
 STRUCTURED_LINE = '$("#b-print").before(button);'
 
@@ -218,8 +233,9 @@ MEASURE = r"""()=>{
   return {vw:innerWidth,vh:innerHeight,open:q('#report-more').open,rbtns:box(row),rfoot:box(q('.report-p .rfoot2')),
     redit:box(q('.report-p .redit')),pane:pane.hidden?null:box(pane),panel:box(q('#report-more > .toolbar-menu-panel')),
     top,natural,foot:[...q('.report-p .rfoot2').children].map(one),menu:[...document.querySelectorAll('#report-more button')].map(one),
-    sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>({id:s.id,...box(s),
-      ids:[...s.children].map(c=>c.id)})),
+    sections:[...document.querySelectorAll('#report-more .toolbar-section')].map(s=>{const h=getComputedStyle(s,'::before');
+      return {id:s.id,...box(s),ids:[...s.children].map(c=>c.id),kids:[...s.children].map(c=>({key:c.id,...box(c)})),
+        head:{label:s.getAttribute('aria-label'),content:h.content,font:h.fontSize,display:h.display}}}),
     fields:['findings','conclusion','recommendation'].map(i=>({id:i,...box(q('#'+i))}))};
 }"""
 
@@ -275,14 +291,17 @@ class ReportActionsStructureTest(unittest.TestCase):
         # The one line of script that places a button in these rows is still there, once.
         self.assertEqual(1, self.text.count(STRUCTURED_LINE))
 
-    def test_the_css_block_sets_one_font_size_and_it_is_the_buttons_size(self):
+    def test_the_css_block_sets_font_size_only_to_the_buttons_size(self):
         (cs, ce), _, _ = regions(self.text)
         block = self.text[cs:ce]
-        fonts = re.findall(r'\bfont(-size|-family|-weight)?\s*:\s*([^;]+);', block)
-        # Only the new More summary gets a size, the one the buttons beside it have (main.html .rbtns button).
-        self.assertEqual([('-size', FONT)], fonts)
-        rule = block[block.rfind('}', 0, block.index('font-size')) + 1:block.index('font-size')]
-        self.assertIn('.rbtns > .toolbar-menu > summary', rule)
+        fonts = [(m.group(1), m.group(2), m.start()) for m in
+                 re.finditer(r'\bfont(-size|-family|-weight)?\s*:\s*([^;]+);', block)]
+        # Only the two new things that carry text get a size, the one the buttons beside them have (main.html
+        # .rbtns button): the More summary and (fix1) the section headings. Nothing else changes a font.
+        self.assertEqual([('-size', FONT), ('-size', FONT)], [f[:2] for f in fonts])
+        rules = [block[block.rfind('}', 0, at) + 1:at] for _, _, at in fonts]
+        self.assertIn('.rbtns > .toolbar-menu > summary', rules[0])
+        self.assertIn('.rbtns .toolbar-section::before', rules[1])
         self.assertRegex(self.text, r'\.rbtns button, \.rfoot2 button \{[^}]*font-size: 11px;')
 
     def test_every_base_button_is_there_once_and_only_the_named_ids_are_new(self):
@@ -349,6 +368,14 @@ class ReportActionsDOMTest(unittest.TestCase):
         self.assertEqual([], [row[0] for row in got if row[1] is None])
         disabled = [key for key, tag, _ in got if re.search(r'\sdisabled=""', tag)]
         self.assertEqual(DISABLED, disabled)
+        # fix1 added one attribute, a tooltip, to the two placeholders: it is there with the pinned text, and with it
+        # taken off the start tag is the base's. Any other difference still fails the comparison below.
+        for row in got:
+            if row[0] in TITLES_ADDED:
+                attribute = f' title="{TITLES_ADDED[row[0]]}"'
+                with self.subTest(title=row[0]):
+                    self.assertEqual(1, row[1].count(attribute), row[1])
+                row[1] = row[1].replace(attribute, '')
         # The pin stands for the base: the same serialization of the base markup (the literals, or the commit).
         page = self.open_page(1366, 768, html=page_html(self.base) if self.base else
                               page_html(without_ui3(MAIN.read_text(encoding='utf-8'))), structured=False)
@@ -386,6 +413,9 @@ class ReportActionsDOMTest(unittest.TestCase):
             self.assertEqual('More▾', menu['summary'])
             self.assertEqual('More Report Actions', menu['label'])
             self.assertRegex(menu['title'], '[가-힣]')
+            # fix1: the tooltip says where the Structured entry appears, by the section's visible heading.
+            self.assertIn('Structured', menu['title'])
+            self.assertIn('Print and History', menu['title'])
             self.assertEqual(('group', 'More Report Actions'), (menu['role'], menu['panelLabel']))
             self.assertEqual([[s, 'toolbar-section', 'group', SECTION_LABELS[s]] for s in SECTIONS], menu['sections'])
             # In view with More closed: seven controls, in this order.
@@ -415,6 +445,10 @@ class ReportActionsDOMTest(unittest.TestCase):
             for c in top[i + 1:]:
                 self.assertFalse(overlap(a, c), f'{a["key"]} overlaps {c["key"]} {where}')
                 self.assertLess(a['x'], c['x'])
+        # fix1: Dictate stands apart from the save actions; the rest of the row keeps the 4px gap.
+        for a, c in zip(top, top[1:]):
+            gap = WIDE_GAP if GAPPED.get(c['key']) == a['key'] else GAP
+            self.assertAlmostEqual(gap, c['x'] - a['r'], delta=0.5, msg=f'{a["key"]} to {c["key"]} {where}')
         # The summary does not make the row taller than its buttons.
         natural = dict(m['natural'])
         buttons = max(natural[k] for k in TOP)
@@ -461,6 +495,23 @@ class ReportActionsDOMTest(unittest.TestCase):
         for s in sections:
             expected = ['b-structured'] + SECTIONS[s['id']] if s['id'] == 'report-more-output' else SECTIONS[s['id']]
             self.assertEqual(expected, s['ids'])
+            # fix1: each section is still one line at this width (the heading added no wrap and no line), its heading
+            # (the aria-label, drawn before the first button at the buttons' size) is there, and only Reset to Unread
+            # and Clear stand apart from the button before them.
+            kids = s['kids']
+            centres = [(k['y'] + k['b']) / 2 for k in kids]
+            self.assertLessEqual(max(centres) - min(centres), 1, f'{s["id"]} wraps {where}: {kids}')
+            self.assertLessEqual(s['h'], max(k['h'] for k in kids) + 0.5, f'{s["id"]} is taller than a line {where}')
+            head = s['head']
+            self.assertEqual(SECTION_LABELS[s['id']], head['label'])
+            # Chromium resolves attr() in the computed value: the label's text, with the empty alternative text.
+            self.assertEqual(f'"{head["label"]}" / ""', head['content'], f'{s["id"]} heading {where}')
+            self.assertEqual(FONT, head['font'], s['id'])
+            self.assertNotEqual('none', head['display'])
+            self.assertGreaterEqual(kids[0]['x'] - s['x'], 20, f'{s["id"]} shows no heading before its buttons {where}')
+            for a, c in zip(kids, kids[1:]):
+                gap = WIDE_GAP if GAPPED.get(c['key']) == a['key'] else GAP
+                self.assertAlmostEqual(gap, c['x'] - a['r'], delta=0.5, msg=f'{a["key"]} to {c["key"]} {where}')
         for b in m['menu']:
             self.assertGreater(b['w'], 0, b['key'])
             self.assertGreater(b['h'], 0, b['key'])
@@ -619,6 +670,65 @@ class ReportActionsDOMTest(unittest.TestCase):
                     # Closed again: Tab leaves the summary for the fields.
                     page.keyboard.press('Tab')
                     self.assertEqual('findings', page.evaluate(ACTIVE))
+                finally:
+                    page.close()
+
+    # ── (d) fix1, proposal 6: a real pointer and the shipped disabled states ──
+
+    def test_a_real_click_on_more_then_on_each_button_inside_reaches_that_button(self):
+        """The summary opened by a pointer click, not by setting `open`; then every enabled control inside it clicked by
+        the pointer at its centre (Playwright refuses a click another element would receive) and focused by it."""
+        for mode, reading in (('plain', False), ('reading', True)):
+            with self.subTest(mode=mode):
+                page = self.open_page(1366, 768, reading)
+                try:
+                    page.evaluate(PANE)
+                    page.evaluate(SETTLE)
+                    page.evaluate("()=>{window.__hits=[];document.addEventListener('click',e=>{"
+                                  "const t=e.target.closest('button,summary');__hits.push(t?(t.id||t.tagName):e.target.tagName)},true)}")
+                    page.locator('#report-more > summary').click()
+                    self.assertTrue(page.evaluate("document.querySelector('#report-more').open"))
+                    # Clicking a button would run its handler; the page script is stripped, so only its state is taken
+                    # off here, where the layout does not depend on it.
+                    page.evaluate(ENABLE_ALL)
+                    menu = page.evaluate("()=>[...document.querySelectorAll('#report-more button')].map(b=>b.id)")
+                    self.assertEqual(['b-addendum', 'b-transcribe', 'b-defer', 'b-except', 'b-mark-cvr', 'b-unread',
+                                      'b-copy', 'b-paste', 'b-clear', 'b-report-template', 'b-structured', 'b-print',
+                                      'b-history'], menu)
+                    for key in menu:
+                        page.locator('#' + key).click(timeout=2000)
+                        self.assertEqual(key, page.evaluate('()=>__hits.at(-1)'), f'{key} at 1366x768 {mode}')
+                        self.assertEqual(key, page.evaluate(ACTIVE), f'{key} not focused by the click {mode}')
+                        self.assertTrue(page.evaluate("document.querySelector('#report-more').open"), key)
+                    # The first click the page saw was the summary's, and each later one the button's.
+                    self.assertEqual(['SUMMARY'] + menu, page.evaluate('()=>__hits'))
+                finally:
+                    page.close()
+
+    def test_keyboard_opens_more_and_lands_on_its_first_enabled_button_with_the_shipped_disabled_states(self):
+        """Tab from Approve to the summary (disabled Dictate is skipped), Enter opens More, Tab lands on the first
+        enabled button inside it (Addendum is disabled until a report is approved) and walks only enabled ones."""
+        for mode, reading in (('plain', False), ('reading', True)):
+            with self.subTest(mode=mode):
+                page = self.open_page(1366, 768, reading)
+                try:
+                    page.locator('#b-approve').focus()
+                    order = []
+                    for _ in range(3):
+                        page.keyboard.press('Tab')
+                        order.append(page.evaluate(ACTIVE))
+                    self.assertEqual(['b-save', 'b-prelim', MENU + '>summary'], order)
+                    page.keyboard.press('Enter')
+                    self.assertTrue(page.evaluate("document.querySelector('#report-more').open"))
+                    enabled = page.evaluate(
+                        "()=>[...document.querySelectorAll('#report-more button')].filter(b=>!b.disabled).map(b=>b.id)")
+                    self.assertEqual('b-transcribe', enabled[0])
+                    walked = []
+                    for _ in range(len(enabled) + 1):
+                        page.keyboard.press('Tab')
+                        walked.append(page.evaluate(ACTIVE))
+                    self.assertEqual(enabled + ['findings'], walked)
+                    self.assertTrue(set(walked).isdisjoint(DISABLED), walked)
                 finally:
                     page.close()
 

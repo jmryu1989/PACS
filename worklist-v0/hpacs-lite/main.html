@@ -258,6 +258,12 @@
     .rbtns .toolbar-menu-panel { flex-direction: column; align-items: flex-start; gap: 4px; padding: 4px 6px; border-radius: 4px; }
     .rbtns .toolbar-section { gap: 4px; align-items: center; }
     .rbtns .toolbar-menu-panel > * + .toolbar-section { margin-left: 0; padding-left: 0; border-left: 0; }
+    /* 확정·저장 동작(Approve·Save·Prelim)과 Dictate, 구획 안의 일반 동작과 되돌리기·지우기(Reset to Unread, Clear)는
+       간격으로 떼어 옆 단추를 잘못 누르지 않게 한다. 구획 이름은 aria-label을 같은 줄 앞에 그대로 보인다: 줄을 더하지 않아
+       More를 연 높이가 늘지 않고, 대체 텍스트를 비워(/ "") 화면 낭독기가 그룹 이름을 두 번 읽지 않는다. 글자색은 --kin-dim이
+       아니라 단추 글자와 같은 --kin-muted다: 11px 글자가 이 바탕에서 --kin-dim이면 명암비 4.5:1에 못 미친다. */
+    .rbtns > #b-dictate, .rbtns #b-unread, .rbtns #b-clear { margin-left: 8px; }
+    .rbtns .toolbar-section::before { content: attr(aria-label) / ""; color: var(--kin-muted); font-size: 11px; white-space: nowrap; }
     @media (max-width: 1250px) {
       body.reading .rbtns > .toolbar-menu > summary { padding: 5px 7px; }
     }
@@ -1119,7 +1125,8 @@
       <div class="panel report-p">
         <!-- S5-UI3 (UXR-G-08): 단추·id·핸들러·disabled는 그대로이고 묶음만 새로 생겼다. 위 줄에 보이는 것은 Approve·Save·
              Prelim·Dictate와 More, 아래 줄은 Prev·Next다. 나머지는 More(<details>) 안의 네 구획에 있어 스크립트 없이 열리고
-             닫힌다. Dictate는 받아쓰기 기하(G-LIVE-GEO)를 측정하는 흐름이 누르는 단추라 위 줄에 남는다. 역할별 disabled는
+             닫힌다. Dictate는 판독문 입력 공간 때문에 위 줄에 남는다: 1366px에서 More를 열면 이 줄이 28px에서 130px 남짓으로
+             늘고, 받아쓰기 창까지 열면 판독문 칸이 최소 높이에 닿으므로 받아쓰기를 위해 More를 열게 하지 않는다. 역할별 disabled는
              스크립트가 지금처럼 정하고, More 안에 넣은 것을 권한 통제로 쓰지 않는다. 서식 입력 단추(Structured)는 스크립트가
              Print 바로 앞에 붙이므로 Print와 같은 구획에 나타난다. -->
         <div class="rbtns">
@@ -1128,7 +1135,7 @@
           <button id="b-prelim" title="상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)">Prelim</button>
           <button id="b-dictate" disabled title="음성 인식기가 연결되지 않았습니다.">Dictate</button>
           <details class="toolbar-menu" id="report-more">
-            <summary aria-label="More Report Actions" title="판독(추가기재·전사 요청), 상태(보류·판독 제외·CVR 표시·미판독으로 되돌리기), 편집(복사·붙여넣기·지우기·상용구 저장), 인쇄·개정 이력 단추를 펼칩니다">More<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+            <summary aria-label="More Report Actions" title="판독(추가기재·전사 요청), 상태(보류·판독 제외·CVR 표시·미판독으로 되돌리기), 편집(복사·붙여넣기·지우기·상용구 저장), 인쇄·개정 이력 단추를 펼칩니다. 서식 입력(Structured)은 서식이 있을 때 Print and History 구획의 Print 앞에 나타납니다">More<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
             <div class="toolbar-menu-panel" role="group" aria-label="More Report Actions">
               <div class="toolbar-section" id="report-more-reading" role="group" aria-label="Reading">
                 <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
@@ -1136,8 +1143,8 @@
               </div>
               <div class="toolbar-section" id="report-more-status" role="group" aria-label="Status">
                 <button id="b-defer">Defer</button>
-                <button id="b-except" disabled>Except</button>
-                <button id="b-mark-cvr" disabled>Mark CVR</button>
+                <button id="b-except" disabled title="판독 제외: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Except</button>
+                <button id="b-mark-cvr" disabled title="중요 결과(CVR) 표시: 아직 연결되지 않은 기능입니다(7/9단계 예정). 권한 때문에 막힌 것이 아닙니다.">Mark CVR</button>
                 <button id="b-unread">Reset to Unread</button>
               </div>
               <div class="toolbar-section" id="report-more-editor" role="group" aria-label="Editor">
