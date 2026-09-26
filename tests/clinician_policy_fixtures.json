@@ -205,7 +205,7 @@
   },
   "source_contract": {
     "unit": "S5-U1c",
-    "rule": "S5-U1c-F06: the closed contract of the lexer and loader checks. module_loads read a loader call by its first string or token and let member calls and calls that ':' followed pass, so require('@nest' + 'js/common'), module.require(name), 'true ? require(name) : null' and module['require']('@nestjs/common') loaded Nest's common unread and common['Put'] made a public route both inventories missed. Every api/src .ts file is read in the supported forms below and every other form that reaches a loader, an evaluator, a metadata writer or a class prototype is refused (fail-closed); a new form, package, Reflect or process member is a new decision, listed here only after checking that it neither loads nor evaluates code nor writes route or public metadata. refused pins each refusal regression with the reasons it must be refused for (fragments in order inside one check's message); accepted pins the controls that must still read; f06_loaders pins the reviewer's four loaders. S5-U1c-F07: every check trusted a code mask whose lexer opened a regex after '+', '-' or '}', so a division hid the metadata writes after it; regex_or_division is the closed rule for a '/' and pins its own cases.",
+    "rule": "S5-U1c-F06: the closed contract of the lexer and loader checks. module_loads read a loader call by its first string or token and let member calls and calls that ':' followed pass, so require('@nest' + 'js/common'), module.require(name), 'true ? require(name) : null' and module['require']('@nestjs/common') loaded Nest's common unread and common['Put'] made a public route both inventories missed. Every api/src .ts file is read in the supported forms below and every other form that reaches a loader, an evaluator, a metadata writer or a class prototype is refused (fail-closed); a new form, package, Reflect or process member is a new decision, listed here only after checking that it neither loads nor evaluates code nor writes route or public metadata. refused pins each refusal regression with the reasons it must be refused for (fragments in order inside one check's message); accepted pins the controls that must still read; f06_loaders pins the reviewer's four loaders. S5-U1c-F07: every check trusted a code mask whose lexer opened a regex after '+', '-' or '}', so a division hid the metadata writes after it; regex_or_division is the closed rule for a '/' and pins its own cases. S5-U1c-F08: controller_heritage took the first '{' after 'class' for the body, so a generic default's type literal hid the extends after it; class_heading is the closed rule for a class heading and pins its own cases.",
     "supported": [
       "a decorator '@Name(...)' applied directly, Name bound once by its own-name import from decorator_bindings.modules (S5-U1c-F01-F05)",
       "an ES module statement naming a plain string module: a file under api/src or a package in packages; a decorator name only by its own-name named import; no namespace, default, import = or export * of a project file or a '@nestjs/' package; import 'm' counts as naming m",
@@ -213,7 +213,7 @@
       "a method named require: declared in a class body ('[modifier] require(...) {' or ': T {') and called only as this.require(...) or this.<field>.require(...)",
       "a string literal, or a template without substitutions, alone between '[' and ']' is read as the name it spells: x['require'] is x.require, x?.['require'] is x?.require and common['Put'] is common.Put for every name check; such a key with an escape is refused",
       "a string literal or template without substitutions whose value (escapes decoded) is one of sealed_words or sealed_strings stands only as an element of an array literal: elsewhere a reflective call (Object.getOwnPropertyDescriptor(X, 'prototype')), a quoted key ({ '__proto__': p }) or a quoted member name ('constructor'() { ... }) reads it as that name",
-      "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends",
+      "Object and Array only as <Name>.<member>, <Name><type arguments> or new <Name>(...), and never after a declaring keyword; process only as process.<process_members>; Reflect only as Reflect.<reflect_members>; prototype only as <prototype_owners>.prototype; getPrototypeOf only as Object.getPrototypeOf(...) compared by === or !==; constructor only as a declaration whose body holds no return; no class heading in a *.controller.ts file has extends, the heading read to the '{' of its body past type parameters and heritage clauses as class_heading lists (S5-U1c-F08)",
       "a '/' outside a comment or literal only where regex_or_division reads it as a regex literal or a division from the token before it; a '/' whose reading turns on grammar the lexer does not track refuses the file, and a regex literal spells no name the name checks read (S5-U1c-F07)"
     ],
     "packages": ["@nestjs/common", "@nestjs/common/constants", "@nestjs/core", "@prisma/client", "crypto", "express", "jose", "node:crypto", "node:http", "rxjs"],
@@ -366,6 +366,42 @@
       "accepted": [
         "divisions after names, calls, indexes, postfix operators and non-null assertions",
         "regex literals after operators, '!', a control header and in a template"
+      ]
+    },
+    "class_heading": {
+      "unit": "S5-U1c-F08",
+      "rule": "S5-U1c-F08: controller_heritage took the first '{' after 'class' for the class body, so the type literal of a generic default ended the heading before its extends: api/src/review-inherited.controller.ts holding '@Controller('unlisted') export class ReviewInheritedController<T = {}> extends PacsController {}', registered in AppModule, inherits GET unlisted/health (PacsController's @Public()) while both inventories read 110 rows and public 4 and test_05/11/12/13/21/22 passed; '<T = { marker: string }>' and '<T = () => { marker: string }>' did the same. class_heading now reads every class keyword's heading to the '{' of its body, in the forms supported lists, and raises on anything else; in a *.controller.ts file an extends that opens a heritage clause is refused, an extends anywhere else in the heading is a form this contract does not list, and a class keyword whose heading it does not read is refused. class_body, which tells a method named require from a loader call, reads the same heading: a '{' opens a class body only as the body of a class keyword class_heading reads. forms pins the reviewer's three with the reasons each is refused for, refused and accepted the rest; test_23 also runs test_05 with each form in place.",
+      "supported": [
+        "'class', a name unless the class is an expression or a default export, optional type parameters, then extends and implements clauses in any order and the '{' of the class body; 'abstract', 'export' and 'export default' before 'class' are not part of the heading",
+        "type parameters and type arguments read to the '>' that closes them: '<' and '>' counted, '(', '[' and '{' skipped whole to the bracket that closes them (a type literal, a function type's parameters, a tuple), '=>' an arrow, and between them only names, numbers and , . = | & ? : -",
+        "a class reference of a heritage clause: a name, then '.' and a name and type arguments; after extends also a parenthesised start, call arguments and an index; implements takes a ',' list",
+        "class after '.', '?.' or '#' is a property name, not a keyword",
+        "in a *.controller.ts file no class heading holds extends, in a heritage clause or anywhere else, and every class keyword's heading is read",
+        "class_body: a '{' opens a class body only as the body of a class keyword whose heading class_heading reads; any other block holds no method declaration, so a require in it is read as a call"
+      ],
+      "forms": {
+        "<T = {}>": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = {}> extends PacsController')"]],
+        "<T = { marker: string }>": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = { marker: string }> extends PacsController')"]],
+        "<T = () => { marker: string }>": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = () => { marker: string }> extends PacsController')"]]
+      },
+      "control": {
+        "the same inheritance without a generic": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController extends PacsController')"]]
+      },
+      "refused": {
+        "an abstract generic class that extends": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController<T = {}> extends PacsController')"]],
+        "a default-exported generic class that extends": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class<T = {}> extends PacsController')"]],
+        "an implements clause with a type literal before extends": [["review-inherited.controller.ts: a class in a controller file extends another class", "'class ReviewInheritedController implements Marker<{ marker: string }> extends PacsController')"]],
+        "a type parameter constraint": [["review-inherited.controller.ts: a class heading in a controller file holds extends outside a heritage clause", "'class ReviewInheritedController<T extends object = {}>')"]],
+        "a '<' that does not close": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "does not close"]],
+        "a token no type holds inside '<' and '>'": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "'!' at offset", "which no type is written with"]],
+        "class as an object key in a controller file": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "':' at offset", "where the class heading goes on or its body opens"]],
+        "a member named class in a controller file": [["review-inherited.controller.ts: a class keyword in a controller file whose heading the reader does not read to its body", "'(' at offset", "where the class heading goes on or its body opens"]],
+        "a loader call in a block after 'x. class'": [["unlisted-routes.ts: a module loader the binding check does not follow", "require('../outside'): not a package the loaders may take"]]
+      },
+      "accepted": [
+        "a generic controller without inheritance",
+        "a require method in a class whose generic default holds a type literal",
+        "class as a property name after '.' and '?.' in a controller file"
       ]
     }
   },
