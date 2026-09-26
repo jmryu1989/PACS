@@ -2,7 +2,7 @@
   {
     "module": "tests/clinician_question_live.py",
     "unit": "s5-u4a-clinician-question",
-    "timeout": 700,
+    "timeout": 760,
     "cases": [
       "ClinicianQuestionLive.test_q01_question_attribution_comes_from_token",
       "ClinicianQuestionLive.test_q02_request_id_replay_and_reuse",
@@ -17,7 +17,8 @@
       "ClinicianQuestionLive.test_q11_answer_keeps_report_anchor_after_reset",
       "ClinicianQuestionLive.test_q12_study_delete_refused_while_questions_exist",
       "ClinicianQuestionLive.test_q13_audit_rows_owner_institution_only",
-      "ClinicianQuestionLive.test_q14_metadata_study_access_allows_and_denies"
+      "ClinicianQuestionLive.test_q14_metadata_study_access_allows_and_denies",
+      "ClinicianQuestionLive.test_q15_thread_read_is_one_snapshot"
     ],
     "expected": {
       "sweep": null,
@@ -27,7 +28,7 @@
   {
     "module": "tests/clinician_policy_live.py",
     "unit": "s5-u1c-clinician-policy",
-    "timeout": 555,
+    "timeout": 495,
     "cases": [
       "ClinicianPolicyLive.test_01_clinician_only_session_routes_and_default_denial",
       "ClinicianPolicyLive.test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout",
