@@ -123,7 +123,13 @@ jobs:
       - name: S5-UI2 worklist toolbar keeps one row of groups, every control and the page script
         timeout-minutes: 3
         run: |
-          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/worklist-toolbar/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-toolbar --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file worklist-v0/hpacs-lite/worklist-search.js --file tests/worklist_toolbar_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_toolbar_dom_test.py
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/worklist-toolbar/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/worklist-toolbar --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file worklist-v0/hpacs-lite/worklist-search.js --file tests/worklist_toolbar_dom_test.py --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/worklist_toolbar_dom_test.py
+      # S5-UI3 (UXR-G-08): the report button rows against the base commit's buttons and bytes (pinned; this shallow clone
+      # has no base commit), one top row from 1366px, More opening in the flow below it, Dictate clear of the pane.
+      - name: S5-UI3 report button rows keep every button in its declared section and the page script
+        timeout-minutes: 3
+        run: |
+          KIN_EVIDENCE_DIR="$PWD/tmp/workspace-ui-ci/report-actions/shots" python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/report-actions --cwd . --file worklist-v0/hpacs-lite/main.html --file worklist-v0/hpacs-lite/reading-workspace.css --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/report_actions_dom_test.py
       - name: Existing study arrivals and preserved reading inputs
         timeout-minutes: 3
         run: |
