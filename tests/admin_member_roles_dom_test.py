@@ -3,17 +3,27 @@
 
 The Members console (worklist-v0/hpacs-lite/admin.html) replaces a member's whole role list on save
 (PATCH roles). Before S5-U5a it drew three role checkboxes and sent only the checked ones, so a member
-holding clinician lost it with no error. This harness loads the shipped admin.html, auth.js and
+holding clinician lost it with no error. Until Astra S5-U5a-F01 every Save also re-sent approvalState,
+institution, roles and verificationOverride. AdminService.patchUser treats any of approvalState=APPROVED,
+institution or roles as a membership write: it isolates the member first (sessions deleted, Keycloak
+logout) and fills the fields it did not receive from its current values. So a Save with nothing changed
+ended the member's sessions, and an institution-only edit put back a role list another admin had changed
+after this page read the list. This harness loads the shipped admin.html, auth.js and
 study-access-admin.js unchanged from a synthetic origin, answers /api/me and /api/admin/users from an
-in-test store that sorts roles as AdminService.row() does, and records every PATCH body:
+in-test store that sorts roles as AdminService.row() does and, like patchUser, keeps the fields a PATCH
+leaves out, and records every PATCH body:
 
-  01  clinician-only, legacy and suspended members: load -> Save -> the same role set, and the
-      reopened dialog shows it again.
-  02  a mixed {clinician, radiologist} member keeps clinician when saved unchanged or when the admin
-      changes another role, and loses it only when the admin unchecks it.
-  03  a role this page does not draw (a server role list ahead of the page) is shown read-only and sent
-      back unchanged; it never leaks into the next member's dialog; its text is never markup.
-  04  a PENDING member is approved as clinician, the dialog opened from the keyboard.
+  01  clinician-only, mixed, legacy and suspended members: Save with nothing changed (also after a
+      padded institution, a role unchecked and checked again, or the e-mail override alone) sends no
+      request, says so in Korean and keeps the dialog open; the reopened dialog shows the same roles.
+  02  a mixed {clinician, radiologist} member: a role change sends {roles} and nothing else; clinician
+      stays when the admin changes another role and goes only when the admin unchecks it.
+  03  a role this page does not draw (a server role list ahead of the page) is shown read-only, counts
+      in the unchanged comparison and is sent back with a role change; it never leaks into the next
+      member's dialog or save; its text is never markup.
+  04  a PENDING member is approved as clinician from the keyboard with the override (approvalState,
+      institution, roles, verificationOverride); an INVALID member is approved by adding one role
+      (approvalState, roles: the institution it already has is not sent).
   05  every item of S5-U5a wording_acceptance.english_required (24) reads as the English label below,
       static (read while the first list request is held) and script-rendered; no button, heading,
       badge or header link has Hangul; the new role labels are not below 12px.
@@ -21,6 +31,12 @@ in-test store that sorts roles as AdminService.row() does, and records every PAT
   07  controls: the pre-fix role handling (no clinician checkbox, admin.html:446 submit) and a
       checked-only submit are served through the same route and must drop roles exactly as the risk
       says, so cases 01-03 cannot pass on a page that drops roles.
+  08  partial edits over a newer server state: institution only -> {institution}, and roles another
+      admin set after the list read stay; roles only -> {roles}, and the institution another admin set
+      stays; the override rides on an APPROVED member's edit without approvalState.
+  09  control: the c59e039 submit (all four fields on every Save) is served through the same route and
+      must PATCH on an unchanged Save and overwrite the newer roles, so cases 01 and 08 cannot pass on a
+      harness that misses the request or a store that ignores it.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does
 not answer is aborted and fails the case. The service half (approve [clinician] -> mixed -> revoke on
@@ -118,6 +134,7 @@ STATIC_LABELS = """() => { const t = selector => document.querySelector(selector
 
 DIALOG = """() => ({
   title: document.querySelector('#membership-title').textContent,
+  institution: document.querySelector('#membership-form input[name="institution"]').value,
   checked: [...document.querySelectorAll('#membership-roles input[name="role"]')].filter(i => i.checked).map(i => i.value),
   unmanaged: [...document.querySelectorAll('#membership-roles label.unmanaged')].map(label => {
     const input = label.querySelector('input');
@@ -130,11 +147,13 @@ DIALOG = """() => ({
 # canvas/boards/Regulatory.dc.html L51-58, which this unit does not read.
 AVOIDED = re.compile(r"진단|검출|판정|우선순위|diagnos|detect|priorit|\bAI\b", re.IGNORECASE)
 
+NO_CHANGE = "변경된 내용이 없어 저장하지 않았습니다."
+
 CLINICIAN_CHECKBOX = '          <label><input type="checkbox" name="role" value="clinician">임상의</label>\n'
 SHIPPED_ROLES = (
     "        const roles = [\n"
     "          ...roleInputs().filter(input => input.checked).map(input => input.value),\n"
-    "          ...unmanagedRoles(user),\n"
+    "          ...base.unmanaged,\n"
     "        ];\n"
 )
 # admin.html:446 before S5-U5a, verbatim.
@@ -143,6 +162,21 @@ CHECKED_ONLY_ROLES = (
     "        const roles = [\n"
     "          ...roleInputs().filter(input => input.checked).map(input => input.value),\n"
     "        ];\n"
+)
+SHIPPED_BODY = (
+    "        const body = {};\n"
+    "        if (base.approvalState !== \"APPROVED\") body.approvalState = \"APPROVED\";\n"
+    "        if (institution !== base.institution) body.institution = institution;\n"
+    "        if (!sameRoles(roles, base.roles)) body.roles = roles;\n"
+)
+# The PATCH body of admin.html:452-457 before S5-U5a and :482-487 at c59e039, the same four fields.
+FULL_BODY = (
+    "        const body = {\n"
+    "          approvalState: \"APPROVED\",\n"
+    "          institution: form.elements.institution.value,\n"
+    "          roles,\n"
+    "          verificationOverride: form.elements.verificationOverride.checked,\n"
+    "        };\n"
 )
 
 
@@ -164,8 +198,9 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.variants = {
-            "pre-fix": variant([(CLINICIAN_CHECKBOX, ""), (SHIPPED_ROLES, PRE_FIX_ROLES)]),
+            "pre-fix": variant([(CLINICIAN_CHECKBOX, ""), (SHIPPED_ROLES, PRE_FIX_ROLES), (SHIPPED_BODY, FULL_BODY)]),
             "checked-only": variant([(SHIPPED_ROLES, CHECKED_ONLY_ROLES)]),
+            "full-body": variant([(SHIPPED_BODY, FULL_BODY)]),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -250,7 +285,8 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
 
     @staticmethod
     def apply(user, body):
-        # The part of AdminService.patchUser this page reaches: an approval or membership write
+        # The part of AdminService.patchUser this page reaches: an approval or membership write takes
+        # the institution and roles it did not receive from the stored member (patchUser :252-253) and
         # replaces the whole role list, returned deduplicated and sorted as row() does.
         if body.get("approvalState") == "PENDING":
             user.update(approvalState="PENDING", institution=None, roles=[])
@@ -314,36 +350,66 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
                 "() => document.querySelector('#users tr') && !document.querySelector('#users tr[data-harness-stale]')")
         return self.patches[-1][1]
 
+    def save_unchanged(self):
+        before, reads = len(self.patches), self.list_reads
+        self.page.locator("#membership-dialog button[type=submit]").click()
+        # The notice is written after the comparison and nothing is awaited before it, so once it shows the
+        # submit handler has taken the no-request branch. Each case also checks self.patches at its end.
+        expect(self.page.locator("#membership-message")).to_have_text(NO_CHANGE)
+        self.assertTrue(self.dialog()["open"], "an unchanged Save keeps the dialog open")
+        self.assertEqual((before, reads), (len(self.patches), self.list_reads), "an unchanged Save sends nothing")
+
     def set_role(self, role, on):
         self.page.locator(f'#membership-roles input[name="role"][value="{role}"]').set_checked(on)
 
+    def set_institution(self, value):
+        self.page.locator('#membership-form input[name="institution"]').fill(value)
+
+    def set_override(self, on):
+        self.page.locator('#membership-form input[name="verificationOverride"]').set_checked(on)
+
     # ── cases ──
-    def test_01_members_round_trip_their_role_set_unchanged(self):
+    def test_01_unchanged_save_sends_nothing_and_the_role_set_survives(self):
+        # S5-U5a-F01: patchUser isolates the member (sessions deleted, Keycloak logout) on any approval or
+        # membership field, so a Save that changes nothing must not send one.
         self.load()
         cases = (("syn-clinician", ["clinician"], "clinician"),
+                 ("syn-mixed", ["radiologist", "clinician"], "clinician, radiologist"),
                  ("syn-legacy", ["radiologist", "technician", "admin"], "admin, radiologist, technician"),
                  ("syn-suspended", ["technician"], "technician"))
         for username, roles, cell in cases:
             with self.subTest(member=username):
-                before = list(self.user(username)["roles"])
                 expect(self.roles_cell(username)).to_have_text(cell)
                 self.open_membership(username)
                 seen = self.dialog()
-                self.assertEqual(("Change Membership", roles, []), (seen["title"], seen["checked"], seen["unmanaged"]))
-                body = self.save()
-                self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": roles,
-                                  "verificationOverride": False}, body)
-                self.assertEqual(before, self.user(username)["roles"])
-                expect(self.roles_cell(username)).to_have_text(cell)
-                self.assertFalse(self.message_shown())
-                self.open_membership(username)
-                self.assertEqual(roles, self.dialog()["checked"])
+                self.assertEqual(("Change Membership", INSTITUTION, roles, []),
+                                 (seen["title"], seen["institution"], seen["checked"], seen["unmanaged"]))
+                self.save_unchanged()
                 self.cancel()
+                self.open_membership(username)
+                seen = self.dialog()
+                self.assertEqual((roles, ""), (seen["checked"], seen["message"]))
+                self.cancel()
+                expect(self.roles_cell(username)).to_have_text(cell)
 
-    def test_02_mixed_member_keeps_clinician_unless_the_admin_unchecks_it(self):
+        # Edits that come back to the loaded values are no change either: the institution is compared
+        # trimmed, the roles as a set, and the e-mail override is not a field on its own.
+        self.open_membership("syn-mixed")
+        self.set_institution(f"  {INSTITUTION}  ")
+        self.set_role("clinician", False)
+        self.set_role("clinician", True)
+        self.set_override(True)
+        self.save_unchanged()
+        self.cancel()
+
+        self.assertEqual([], self.patches)
+        self.assertEqual(1, self.list_reads)
+        self.assertEqual(USERS, self.users)
+        self.assertFalse(self.message_shown())
+
+    def test_02_mixed_member_role_change_sends_roles_only_and_keeps_clinician(self):
         self.load()
-        steps = (("saved unchanged", {}, ["radiologist", "clinician"], ["radiologist", "clinician"]),
-                 ("technician added", {"technician": True}, ["radiologist", "clinician"],
+        steps = (("technician added", {"technician": True}, ["radiologist", "clinician"],
                   ["radiologist", "technician", "clinician"]),
                  ("clinician unchecked by the admin", {"clinician": False}, ["radiologist", "technician", "clinician"],
                   ["radiologist", "technician"]))
@@ -353,9 +419,10 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
                 self.assertEqual(shown, self.dialog()["checked"])
                 for role, on in edits.items():
                     self.set_role(role, on)
-                body = self.save()
-                self.assertEqual(sent, body["roles"])
+                self.assertEqual({"roles": sent}, self.save())
                 self.assertEqual(sorted(sent), self.user("syn-mixed")["roles"])
+                self.assertEqual(("APPROVED", INSTITUTION),
+                                 (self.user("syn-mixed")["approvalState"], self.user("syn-mixed")["institution"]))
                 expect(self.roles_cell("syn-mixed")).to_have_text(", ".join(sorted(sent)))
         self.assertFalse(self.message_shown())
 
@@ -370,38 +437,50 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
             self.assertEqual((True, True, False, 1), (item["checked"], item["disabled"], item["named"], item["elements"]))
             self.assertTrue(has_hangul(item["title"]), item["title"])
         self.assertIsNone(self.page.evaluate("() => document.body.dataset.pwned ?? null"))
-        body = self.save()
-        self.assertEqual(["radiologist", HOSTILE_ROLE, FUTURE_ROLE], body["roles"])
+        # The page lists the unmanaged roles after the checked ones, the server sorted them: still no change.
+        self.save_unchanged()
+        self.cancel()
 
         self.open_membership("syn-future")
         self.set_role("radiologist", False)
         self.set_role("clinician", True)
-        body = self.save()
-        self.assertEqual(["clinician", HOSTILE_ROLE, FUTURE_ROLE], body["roles"])
+        self.assertEqual({"roles": ["clinician", HOSTILE_ROLE, FUTURE_ROLE]}, self.save())
         self.assertEqual(sorted(["clinician", HOSTILE_ROLE, FUTURE_ROLE]), self.user("syn-future")["roles"])
 
         self.open_membership("syn-clinician")
         seen = self.dialog()
         self.assertEqual((["clinician"], []), (seen["checked"], seen["unmanaged"]))
-        self.assertEqual(["clinician"], self.save()["roles"])
+        self.set_role("technician", True)
+        self.assertEqual({"roles": ["technician", "clinician"]}, self.save())
         self.assertIsNone(self.page.evaluate("() => document.body.dataset.pwned ?? null"))
 
-    def test_04_pending_member_is_approved_as_clinician_from_the_keyboard(self):
+    def test_04_pending_and_invalid_members_are_approved_explicitly(self):
         self.load()
         expect(self.page.locator("#pending-badge")).to_have_text("Pending 1")
         self.row("syn-pending").get_by_role("button", name="Approve", exact=True).focus()
         self.page.keyboard.press("Enter")
         self.page.wait_for_function("() => document.querySelector('#membership-dialog').open")
         seen = self.dialog()
-        self.assertEqual(("Approve Member", [], []), (seen["title"], seen["checked"], seen["unmanaged"]))
-        self.page.locator('#membership-form input[name="institution"]').fill(INSTITUTION)
+        self.assertEqual(("Approve Member", "", [], []), (seen["title"], seen["institution"], seen["checked"], seen["unmanaged"]))
+        self.set_institution(INSTITUTION)
         self.page.get_by_role("checkbox", name="임상의", exact=True).check()
-        body = self.save()
+        self.set_override(True)
         self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": ["clinician"],
-                          "verificationOverride": False}, body)
+                          "verificationOverride": True}, self.save())
         expect(self.row("syn-pending").locator("td").nth(4)).to_have_text("APPROVED")
         expect(self.roles_cell("syn-pending")).to_have_text("clinician")
         expect(self.page.locator("#pending-badge")).to_have_text("Pending 0")
+
+        # INVALID here is one institution and no role: the approval adds the role and keeps the institution.
+        self.open_membership("syn-invalid")
+        seen = self.dialog()
+        self.assertEqual(("Change Membership", INSTITUTION, []), (seen["title"], seen["institution"], seen["checked"]))
+        self.set_role("radiologist", True)
+        self.assertEqual({"approvalState": "APPROVED", "roles": ["radiologist"]}, self.save())
+        self.assertEqual(("APPROVED", INSTITUTION, ["radiologist"]),
+                         tuple(self.user("syn-invalid")[key] for key in ("approvalState", "institution", "roles")))
+        expect(self.row("syn-invalid").locator("td").nth(4)).to_have_text("APPROVED")
+        self.assertFalse(self.message_shown())
 
     def test_05_english_required_labels_static_and_script_rendered(self):
         self.assertEqual(24, len(ENGLISH_REQUIRED))
@@ -490,6 +569,14 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.assertTrue(self.dialog()["open"])
         self.assertEqual([], self.patches)
         self.cancel()
+        # A blank institution passes the required attribute but trims to nothing: refused before any request.
+        self.open_membership("syn-clinician")
+        self.set_institution("   ")
+        self.page.locator("#membership-dialog button[type=submit]").click()
+        expect(self.page.locator("#membership-message")).to_have_text("기관을 입력하세요.")
+        self.assertTrue(self.dialog()["open"])
+        self.assertEqual([], self.patches)
+        self.cancel()
 
         self.row("syn-clinician").get_by_role("button", name="Email Reset Link", exact=True).click()
         expect(self.page.locator("#message")).to_have_text("비밀번호 변경 메일을 보냈습니다.")
@@ -503,7 +590,8 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         # A refusal is shown as the server wrote it; the store is unchanged.
         self.patch_error = (400, {"statusCode": 400, "message": "허용되지 않은 역할입니다"})
         self.open_membership("syn-mixed")
-        self.save(reload=False)
+        self.set_role("technician", True)
+        self.assertEqual({"roles": ["radiologist", "technician", "clinician"]}, self.save(reload=False))
         expect(self.page.locator("#message")).to_have_text("허용되지 않은 역할입니다")
         self.assertEqual(["clinician", "radiologist"], self.user("syn-mixed")["roles"])
 
@@ -526,6 +614,52 @@ class AdminMemberRolesDOMTest(unittest.TestCase):
         self.load(self.variants["checked-only"])
         self.open_membership("syn-future")
         self.assertEqual(["radiologist"], self.save()["roles"], "checked-only: the unmanaged roles are dropped")
+
+    def test_08_partial_edits_send_only_the_edited_field_and_keep_newer_server_values(self):
+        self.load()
+        # Another admin adds technician after this page read the list; this page edits the institution only.
+        self.user("syn-mixed")["roles"] = ["clinician", "radiologist", "technician"]
+        self.open_membership("syn-mixed")
+        seen = self.dialog()
+        self.assertEqual((INSTITUTION, ["radiologist", "clinician"]), (seen["institution"], seen["checked"]))
+        self.set_institution(" SYN-INST-B ")
+        self.assertEqual({"institution": "SYN-INST-B"}, self.save())
+        self.assertEqual(("SYN-INST-B", ["clinician", "radiologist", "technician"]),
+                         (self.user("syn-mixed")["institution"], self.user("syn-mixed")["roles"]))
+        expect(self.roles_cell("syn-mixed")).to_have_text("clinician, radiologist, technician")
+
+        # Another admin moves the legacy member to another institution; this page edits the roles only.
+        self.user("syn-legacy")["institution"] = "SYN-INST-C"
+        self.open_membership("syn-legacy")
+        self.assertEqual(INSTITUTION, self.dialog()["institution"])
+        self.set_role("technician", False)
+        self.assertEqual({"roles": ["radiologist", "admin"]}, self.save())
+        self.assertEqual(("SYN-INST-C", ["admin", "radiologist"]),
+                         (self.user("syn-legacy")["institution"], self.user("syn-legacy")["roles"]))
+        expect(self.row("syn-legacy").locator("td").nth(2)).to_have_text("SYN-INST-C")
+
+        # The e-mail override rides on an APPROVED member's edit; approvalState is not sent again.
+        self.open_membership("syn-clinician")
+        self.set_institution("SYN-INST-B")
+        self.set_override(True)
+        self.assertEqual({"institution": "SYN-INST-B", "verificationOverride": True}, self.save())
+        self.assertEqual(("SYN-INST-B", ["clinician"]),
+                         (self.user("syn-clinician")["institution"], self.user("syn-clinician")["roles"]))
+        self.assertEqual(3, len(self.patches))
+        self.assertFalse(self.message_shown())
+
+    def test_09_control_full_body_submit_patches_unchanged_saves_and_overwrites_newer_roles(self):
+        # The expected outputs are the defect (S5-U5a-F01), asserted exactly.
+        self.load(self.variants["full-body"])
+        self.open_membership("syn-clinician")
+        self.assertEqual({"approvalState": "APPROVED", "institution": INSTITUTION, "roles": ["clinician"],
+                          "verificationOverride": False}, self.save(), "full-body: an unchanged Save is a PATCH")
+        self.user("syn-mixed")["roles"] = ["clinician", "radiologist", "technician"]
+        self.open_membership("syn-mixed")
+        self.set_institution("SYN-INST-B")
+        self.assertEqual(["radiologist", "clinician"], self.save()["roles"])
+        self.assertEqual(["clinician", "radiologist"], self.user("syn-mixed")["roles"],
+                         "full-body: the technician another admin added is overwritten")
 
 
 if __name__ == "__main__":
