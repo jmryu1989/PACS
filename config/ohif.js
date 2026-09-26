@@ -615,7 +615,7 @@ function kinCreateViewerHistory() {
     if (!cs || !ct?.annotation?.locking) return;
     const entries = new Map(), annotations = new Map(), recovery = new Map();
     let scope = '', subject = '', me, generation = 0, readSequence = 0, shown = null, shownStatus = '', unmatched = false;
-    let controller = new AbortController(), ended = false, checking = false;
+    let controller = new AbortController(), ended = false, checking = false, ownAnswer = false;
     let lastAuth = 0, tried = 0, loading = false, navigation = 0, suspended = true;
     const panel = document.createElement('details');
     panel.id = 'kin-viewer-history'; panel.open = true;
@@ -1093,6 +1093,11 @@ function kinCreateViewerHistory() {
     const matches = (r, item) => r?.study === scope && r.seriesUid === item.seriesUid && r.sopUid === item.sopUid && r.frame === item.frame;
     const current = () => reference(viewport()?.getCurrentImageId?.());
     const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);
+    // S5-U2b-R-003 F01. 목록 읽기는 요청할 때 어느 목록인지 정해진다: writer의 작성자 목록(숨김 포함 전체) 또는 clinician의 확정 목록.
+    // 답은 그 읽기(세대·순번)의 것이고 문서가 지금도 같은 목록을 읽을 때만 그린다 — clinician-only 경계(clinicianBoundary)가 어떤
+    // 이유로 돌지 못했어도(settle은 감시자의 실패를 삼킨다) 전환 뒤에 도착한 작성자 목록은 그려지지 않는다.
+    const readPolicy = () => readOnly() ? 'final' : 'author';
+    const asked = (ticket, seq, policy) => valid(ticket) && seq === readSequence && readPolicy() === policy;
     const writable = entry => writer() && !suspended && !recovery.has(scope) && me?.kind === 'member' && me.roles?.includes('radiologist') &&
       (!entry.head || entry.head.authorSub === subject);
     const render = () => { try { viewport()?.render(); } catch (_) {} };
@@ -1161,6 +1166,9 @@ function kinCreateViewerHistory() {
       render();
     }
     async function api(path, options = {}, ticket = generation) {
+      // A request of a generation already given up (another study, the clinician-only boundary) is not sent at all: a save that
+      // was waiting for its /me when that answer said clinician-only never reaches the server.
+      if (!valid(ticket)) throw { stale: true };
       const parentSignal = controller.signal, request = new AbortController();
       const abort = () => request.abort(); parentSignal.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(abort, 30000);
@@ -1179,7 +1187,9 @@ function kinCreateViewerHistory() {
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
-      kinViewerSession.note(user);
+      // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
+      ownAnswer = true;
+      try { kinViewerSession.note(user); } finally { ownAnswer = false; }
       if (!user.sub || (subject && subject !== user.sub)) { end(); throw { stale: true }; }
       me = user; subject = user.sub; lastAuth = Date.now(); return user;
     }
@@ -1190,21 +1200,22 @@ function kinCreateViewerHistory() {
       if (error.status === 400 || error.status === 413) return '지원 영상·원본 평면·입력 길이를 확인하세요. 작성 내용은 저장되지 않았습니다.';
       return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
     }
-    async function load(resume = false, recheck = null) {
+    // `answered`: only the clinician-only boundary passes it, from inside this panel's own /me answer — that answer is this read's /me.
+    async function load(resume = false, recheck = null, answered = false) {
       if (!scope || ended || loading) return;
       const ticket = generation, seq = ++readSequence; loading = true; tried = Date.now();
       status.textContent = '저장 항목 확인 중…';
       try {
-        await authenticate(ticket);
-        if (readOnly()) return await readOnlyLoad(ticket, seq);
+        if (!answered) await authenticate(ticket);
+        if (readPolicy() === 'final') return await readOnlyLoad(ticket, seq);
         const heads = []; let cursor = null;
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
-          if (seq !== readSequence) return;
+          if (!asked(ticket, seq, 'author')) return;
           if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
-        if (!valid(ticket) || seq !== readSequence) return;
+        if (!asked(ticket, seq, 'author')) return;
         suspended = false;
         const parked = recovery.get(scope);
         if (resume === true && parked && parked.subject === subject) {
@@ -1256,7 +1267,7 @@ function kinCreateViewerHistory() {
       try {
         do {
           const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
-          if (seq !== readSequence) return;
+          if (!asked(ticket, seq, 'final')) return;
           if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
           if (!page.final) {
             if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
@@ -1270,12 +1281,22 @@ function kinCreateViewerHistory() {
               !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
           version = page.reportVersion; heads.push(...page.items); cursor = next;
         } while (cursor !== null);
-        if (!valid(ticket) || seq !== readSequence) return;
+        if (!asked(ticket, seq, 'final')) return;
         readOnlyShow(study, withheld ? null : version, heads);
       } catch (error) {
-        if (error?.stale || !valid(ticket) || seq !== readSequence) return;
+        if (error?.stale || !asked(ticket, seq, 'final')) return;
         readOnlyFailed(error);
       }
+    }
+    // S5-U2b-R-003 F01. clinician-only가 되는 순간은 이 패널이 진행 중인 모든 읽기·쓰기의 경계다. /me를 기다리는 읽기든 이미
+    // 작성자 목록을 요청한 읽기든(첫 쪽·다음 쪽·Refresh·Recheck Source), 저장·이력·SR 요청이든 reset()이 그 세대·순번을 버리고
+    // 요청을 끊으며(아직 보내지 않은 요청은 api가 보내지 않는다), 작성자 행과 그 표식을 지금 내린다. 그 뒤 확정 목록 읽기를 정확히
+    // 한 번 시작한다: 이 전환을 부른 답이 이 패널 자신의 /me면(ownAnswer) 방금 인증했으므로 곧바로 확정 목록을 읽고, 다른 확장의
+    // /me면 이 패널의 /me부터 다시 묻는다(끊은 /me의 늦은 답은 버린다). 진행 중인 읽기(loading)를 이유로 건너뛰지 않는다 — 건너뛰면
+    // writer로 이미 요청한 목록이 전환 뒤에 도착해 그려지고, 그 목록에는 확인 기준(shown)이 없어 final:false로도 내려가지 않았다.
+    function clinicianBoundary(own) {
+      reset('저장 항목 확인 중…'); toolbar();
+      load(false, null, own);
     }
     // 끝까지 검증한 한 판(확정 판 번호, 확정 전이면 null)만 그리고, 그 판을 뒤따르는 주기·포커스 확인의 기준(shown)으로 남긴다.
     function readOnlyShow(study, version, heads) {
@@ -1304,7 +1325,7 @@ function kinCreateViewerHistory() {
     // 풀리면(final:false) 행과 표식을 바로 내리고 withheld로, 판이 바뀌면 내린 뒤 새 판 전체를 처음부터 다시 검증해 그린다.
     // 전송 실패·5xx는 확인하지 못한 것이라 다음 확인까지 검증한 판을 두고, 4xx·형식 오류는 서버가 지금 내주지 않는 목록이라 내린다.
     function confirmShown(ticket, seq, study, page, error) {
-      if (error?.stale || !valid(ticket) || seq !== readSequence || loading || scope !== study || shown?.study !== study) return;
+      if (error?.stale || !asked(ticket, seq, 'final') || loading || scope !== study || shown?.study !== study) return;
       if (error) { if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500) readOnlyFailed(error); return; }
       if (!page || page.uid !== study || typeof page.final !== 'boolean' || (page.final
         ? !Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || !Array.isArray(page.items)
@@ -1798,12 +1819,13 @@ function kinCreateViewerHistory() {
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
     stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
     // 판정이 바뀌는 순간(이 패널의 /me가 아니어도): writer면 막는 동안 적어 둔 도구 모드·도구막대를 되돌리고, 그 밖이면 작성
-    // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 이미 그린 작성자 목록을 내린 뒤 읽기 전용 목록으로 다시
-    // 읽는다(진행 중인 읽기는 인증 뒤 스스로 그 경로로 들어간다). 다른 판정은 그려 둔 행의 컨트롤만 다시 그린다.
+    // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 clinicianBoundary를 지난다. 다른 판정은 그려 둔 행의 컨트롤만
+    // 다시 그린다.
     const unwatch = kinViewerSession.onChange(next => {
+      const own = ownAnswer;
       if (next === 'writer') reopenAuthoring(); else closeAuthoring();
       if (ended || !scope) return;
-      if (next === 'read-only') { if (!loading) { reset('저장 항목 확인 중…'); load(); } }
+      if (next === 'read-only') clinicianBoundary(own);
       else if (!suspended) { toolbar(); for (const e of entries.values()) row(e); }
     });
     const previousStop = stop;

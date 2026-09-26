@@ -67,6 +67,16 @@ record a mount):
       (as at R-002) keeps the retracted rows and asks nothing.
   13  VIEWER_STATE_MATRIX: every write/mark entry point and every recheck path observed in each session state
       (unconfirmed, refused, read-only, writer).
+  14  (Astra S5-U2b-R-003 F01) the change to clinician-only voids the reads a writer had in flight: the writer's first author
+      page held, another extension's /me (the module gate) answers the same account clinician-only and the page arrives late:
+      no row or mark of it, only the final read verified whole, and its final:false check takes that down; a new final read
+      that says final:false shows withheld only, and final:true is shown only after every page of one version (a second page
+      of another version is refused whole); Refresh held across the change with no source frame (rows and marks down at
+      once, the late page shows nothing); A->B->A with both of A's author pages held. Controls: the change as at R-003
+      (skipped while a read was loading) with the display check alone asks no final read; with neither, the late author page
+      is painted and the final:false check leaves it (Astra's reproduction).
+  15  SESSION_CHANGE_MATRIX: what the panel does with reads and writes in flight across unconfirmed->writer,
+      writer->read-only and read-only->writer (read-only never goes back), each row observed.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -108,6 +118,10 @@ def me(roles, sub="SYN-CLIN-SUB", user="syn-clinician", name="SYN Clinician"):
 CLINICIAN = me(["clinician", *KEYCLOAK_DEFAULTS])
 RADIOLOGIST = me(["radiologist", *KEYCLOAK_DEFAULTS], sub="SYN-RAD-SUB", user="syn-radiologist", name="SYN Radiologist")
 MIXED = me(["clinician", "radiologist"], sub="SYN-MIX-SUB", user="syn-mixed", name="SYN Mixed")
+# test_14/15: the same accounts after a role change (the same sub answers). MIXED loses radiologist: clinician-only. CLINICIAN
+# gains radiologist: the document stays read-only.
+MIXED_NOW_CLINICIAN = me(["clinician", *KEYCLOAK_DEFAULTS], sub="SYN-MIX-SUB", user="syn-mixed", name="SYN Mixed")
+CLINICIAN_NOW_MIXED = me(["clinician", "radiologist"])
 
 PREFIX = "1.2.826.0.1.3680043.10.5432"
 
@@ -241,6 +255,24 @@ WRITER_HEAD = {"id": item_id(41), "revision": 1, "hidden": False, "authorSub": N
 WRITER_HEAD_2 = {**WRITER_HEAD, "id": item_id(42), "item": {**WRITER_HEAD["item"], "title": "SYN writer key two"}}
 WRITER_CURSOR = "SYN-W-CURSOR_1"
 
+
+def author_page(*items, cursor=None):
+    # A writer (author) list answer as viewer.service lists heads, for the MIXED account's own items.
+    heads = []
+    for item in items:
+        head = copy.deepcopy(item)
+        head.update(hidden=False, authorSub=MIXED["sub"], authorActor="SYN Mixed")
+        head["item"]["hidden"] = False
+        heads.append(head)
+    return {"items": heads, "nextCursor": cursor}
+
+
+# test_14/15: author items. SHOWN_* are on screen before a change; LATE_* only ever arrive late (asked before the change). The
+# verified length on the shown frame is what the panel draws when a list with it is displayed.
+SHOWN_MARK, SHOWN_KEY = mark_item(81, "length", "SYN WRITER SHOWN LENGTH"), key_item(82, "SYN WRITER SHOWN KEY")
+LATE_MARK, LATE_KEY = mark_item(83, "length", "SYN LATE WRITER LENGTH"), key_item(84, "SYN LATE WRITER KEY")
+LATE_WRITE = key_item(85, "SYN LATE WRITTEN KEY")
+
 # config/ohif.js wording, verbatim (kinCreateViewerHistory READ_ONLY and its statuses).
 RO_NOTE = ("읽기 전용 · 확정 판독문에 저장된 측정·키 이미지만 표시합니다. 이 화면에서는 측정·키 이미지를 만들거나 저장하지 않으며 "
            "서버도 쓰기를 거절합니다.")
@@ -325,6 +357,26 @@ VIEWER_STATE_MATRIX = {
     "frame_return": ("none", "none", "check", "none"),             # the source frame comes back (clinician: checked at once)
     "frameless_focus": ("none", "none", "check", "none"),          # focus with no source frame (writer probe stays frame-bound)
     "study_change": ("none", "none", "read", "read-all"),          # the frame of another study
+}
+
+# test_15 (Astra S5-U2b-R-003 F01). Answers that arrive while the document's session state changes. A change is made by another
+# extension's /me (the layout panel's) or by the Measurements panel's own /me. Reads: read-all = the author list
+# (includeHidden=true), read = the final list, "+" joins the first pages asked in order (a duplicate read would show twice),
+# "me+" = the panel asked /me again first. In flight: none = no such request can be pending in the state before the change;
+# dropped = its answer arrives and nothing of it is shown; shown = it is shown; not sent = it never leaves the page.
+SESSION_CHANGES = ("unconfirmed->writer", "writer->read-only", "read-only->writer")
+SESSION_CHANGE_MATRIX = {
+    "state_after": ("writer", "read-only", "read-only"),   # read-only is never left: a later writer /me is noted, nothing changes
+    "shown_at_change": ("kept", "taken down", "kept"),     # the rows and marks on screen when the state changes
+    "reads_by_other_me": ("none", "me+read", "none"),      # what the change by another extension's /me starts
+    "reads_by_own_me": ("read-all", "read", "read"),       # the panel's own /me made (or met) it: that answer is the read's /me
+    "read_awaiting_me": ("read-all", "read", "read"),      # the panel's read waiting for its /me when another /me changed it
+    "author_first_page": ("none", "dropped", "none"),      # the author list's first page asked before, answered after
+    "author_next_page": ("none", "dropped", "none"),       # a later author page (the handed-out cursor) asked before
+    "author_refresh": ("none", "dropped", "none"),         # a Refresh of the shown author list asked before
+    "final_page": ("none", "none", "shown"),               # a final-list page asked before, answered after
+    "write_awaiting_me": ("none", "not sent", "none"),     # a Save waiting for the /me whose answer makes the change
+    "write_sent": ("none", "dropped", "none"),             # a Save already sent (the server decides the write itself)
 }
 
 # Script assets the wrappers load, answered with stubs that only record a mount (the real modules have their own tests).
@@ -672,8 +724,15 @@ NOTE_WATCH = ("  kinViewerSession.onChange(next=>{if(next==='writer')return;epoc
               "current=null;});\n")
 VERSION_PIN = "(version !== null && page.reportVersion !== version) ||"
 VALID = "    const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);\n"
-PAGE_SEQ = "          if (seq !== readSequence) return;\n          if (++pages > 6"
-FINAL_SEQ = "        if (!valid(ticket) || seq !== readSequence) return;\n        readOnlyShow("
+# Every list answer's display check (the page, the whole read, its failure, the final check's answer): generation, sequence and
+# the read policy it was asked under.
+ASKED = "    const asked = (ticket, seq, policy) => valid(ticket) && seq === readSequence && readPolicy() === policy;\n"
+BOUNDARY = "      if (next === 'read-only') clinicianBoundary(own);\n"
+# The change to read-only as it was at R-003: skipped while a read was loading.
+R003_CHANGE = "      if (next === 'read-only') { if (!loading) { reset('저장 항목 확인 중…'); load(); } }\n"
+HISTORY = "kin.viewer-history"
+# test_14/15: "another extension's /me" is the layout panel's (one /me at its mount, in every session state).
+OTHER = ["kin.viewer-layout"]
 POLICY = "    const nativeAuthoringClosed = () => !writer();\n"
 # The authoring policy as it was at R-002: closed only once clinician-only, and no clean-up of marks made before that.
 R002_POLICY = "    const nativeAuthoringClosed = () => readOnly();\n"
@@ -714,9 +773,13 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                     "config/ohif.js"),
             "no-version-pin": variant(CONFIG, [(VERSION_PIN, "", 1)], "config/ohif.js"),
             "uid-only": variant(CONFIG, [(VALID, "    const valid = ticket => !ended;\n", 1),
-                                         (PAGE_SEQ, "          if (++pages > 6", 1),
-                                         (FINAL_SEQ, "        readOnlyShow(", 1)],
+                                         (ASKED, "    const asked = () => !ended;\n", 1)],
                                 "config/ohif.js"),
+            # test_14 controls: the change as at R-003 with the display check kept, and with neither (the file at R-003).
+            "no-boundary": variant(CONFIG, [(BOUNDARY, R003_CHANGE, 1)], "config/ohif.js"),
+            "as-r003": variant(CONFIG, [(BOUNDARY, R003_CHANGE, 1),
+                                        (ASKED, "    const asked = (ticket, seq) => valid(ticket) && seq === readSequence;\n", 1)],
+                               "config/ohif.js"),
             "policy-off": variant(CONFIG, [(POLICY, "    const nativeAuthoringClosed = () => false;\n", 1)], "config/ohif.js"),
             "gate-as-before": variant(CONFIG, [(DECIDE, OLD_DECIDE, 1),
                                                (NOTE_CONNECT, "if(!active||state==='loading'||state==='ready')return;", 1)],
@@ -749,6 +812,17 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         self.held_items = []
         self.hold_probes = set()
         self.held_probes = []
+        # test_14/15: (study, "first"|"next") writer list pages kept unanswered while the case holds them; the final list's
+        # cursor pages of a study; the account the viewer-items routes serve when it is not self.me (the server's view of the
+        # roles when a /me answer and a list are asked at different times); Save requests (POST) the case answers itself.
+        self.hold_writer = set()
+        self.held_writer = []
+        self.hold_next = set()
+        self.held_next = []
+        self.list_me = None
+        self.accept_writes = False
+        self.held_writes = []
+        self.writes = []
         self.item_requests = []
         self.viewer_opens = []
         self.me_requests = 0
@@ -848,12 +922,18 @@ class ClinicianViewerDOMTest(unittest.TestCase):
         if method == "GET" and found:
             self.viewer_items(route, unquote(found.group(1)), parse_qs(url.query, keep_blank_values=True))
             return
+        found = re.fullmatch(r"/api/studies/([^/]+)/viewer-items(/[^?]*)?", path)
+        if method == "POST" and found and self.accept_writes:
+            # test_15: a Save on the wire, held for the case to answer (late).
+            self.writes.append((unquote(found.group(1)), found.group(2) or ""))
+            self.held_writes.append(route)
+            return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()
 
-    def clinician_session(self):
+    def clinician_session(self, account=None):
         # api/src/clinician-policy.ts clinicianOnly: app roles only, all of them clinician.
-        app = [role for role in self.me["roles"] if role in ("radiologist", "technician", "admin", "clinician")]
+        app = [role for role in (account or self.me)["roles"] if role in ("radiologist", "technician", "admin", "clinician")]
         return bool(app) and all(role == "clinician" for role in app)
 
     def viewer_items(self, route, target, query):
@@ -862,7 +942,8 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             self.unexpected.append(f"viewer-items query {query}")
             route.abort()
             return
-        if not self.clinician_session():
+        account = self.list_me or self.me
+        if not self.clinician_session(account):
             # The writer route (viewer.service list): every head, hidden ones included; the panel's access probe reads one.
             if query == {"limit": ["1"]}:
                 route.fulfill(json={"items": [], "nextCursor": None})
@@ -873,8 +954,11 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                 self.unexpected.append(f"writer viewer-items query {query}")
                 route.abort()
                 return
+            if (target, "first" if query == first else "next") in self.hold_writer:
+                self.held_writer.append((target, "first" if query == first else "next", route))
+                return
             head = copy.deepcopy(WRITER_HEAD if query == first else WRITER_HEAD_2)
-            head["authorSub"] = self.me["sub"]
+            head["authorSub"] = account["sub"]
             route.fulfill(json={"items": [head], "nextCursor": WRITER_CURSOR if self.writer_paged and query == first else None})
             return
         # clinicianViewerQuery: includeHidden only absent or 'false'; a cursor never with recheck.
@@ -887,6 +971,9 @@ class ClinicianViewerDOMTest(unittest.TestCase):
             return
         if query.get("limit") == ["100"] and "cursor" not in query and target in self.hold_items:
             self.held_items.append((target, route))
+            return
+        if query.get("limit") == ["100"] and "cursor" in query and target in self.hold_next:
+            self.held_next.append((target, query["cursor"][0], route))
             return
         if query.get("limit") == ["1"] and target in self.hold_probes:
             self.hold_probes.discard(target)
@@ -1776,6 +1863,330 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                     with self.subTest(state=state, row=row):
                         self.assertEqual(expected[STATES.index(state)], seen[row])
         self.me_status, self.writer_paged = None, False
+
+    # ── Astra S5-U2b-R-003 regressions ──
+    def writer_open(self, config=None, hold=(), paged=False):
+        # A writer (MIXED) document with only the Measurements panel entered; what the case holds arrives late (uncancellable).
+        self.me, self.me_status, self.list_me, self.writer_paged, self.hold_me, self.held_me = MIXED, None, None, paged, False, []
+        self.hold_writer, self.held_writer, self.hold_items, self.held_items = set(hold), [], set(), []
+        self.hold_next, self.held_next, self.accept_writes, self.held_writes, self.writes = set(), [], False, [], []
+        self.items, self.item_requests, self.cursors, self.me_requests = copy.deepcopy(ITEMS), [], {}, 0
+        self.open_viewer(config, uncancellable=True, enter=[HISTORY])
+
+    def to_clinician_only(self, ids=None, hold_final=False):
+        # Another extension's /me answers the same account clinician-only (the layout panel's; LATER adds the module gate's).
+        self.hold_writer, self.me = set(), MIXED_NOW_CLINICIAN
+        if hold_final:
+            self.hold_items = {VA}
+        self.page.evaluate("ids => synEnter(ids)", ids or OTHER)
+        self.wait_until(lambda: self.session() == "read-only", "the clinician-only answer")
+
+    def snapshot(self):
+        seen = self.panel()
+        return seen["state"], seen["rows"], self.page.evaluate("synDrawn()")
+
+    def labels(self):
+        return [row[2] for row in self.panel()["rows"]]
+
+    def first_reads(self, start):
+        # The list reads asked since `start` (first pages, in order): a read asked twice shows twice.
+        return "+".join(self.kind([request]) for request in self.item_requests[start:]
+                        if request[1].get("limit") != ["1"] and "cursor" not in request[1]) or "none"
+
+    @staticmethod
+    def change_effect(before, after):
+        if after[1:] == before[1:]:
+            return "kept"
+        return "taken down" if after[1:] == ([], []) else f"changed {after}"
+
+    def late(self, route, payload, marker):
+        # Answer a request asked before the change. shown: its item appears (given 2 s); dropped: the screen did not change.
+        before = self.snapshot()
+        self.release(route, payload)
+        deadline = time.monotonic() + 2
+        while marker not in str(self.snapshot()) and time.monotonic() < deadline:
+            self.page.wait_for_timeout(50)
+        after = self.snapshot()
+        return "shown" if marker in str(after) else "dropped" if after == before else f"changed {after}"
+
+    def test_14_clinician_only_change_voids_in_flight_writer_reads(self):
+        a_labels, a_drawn = ["SYN-A key", "SYN-A length", "SYN-A angle", "SYN-A arrow"], [["Length", "SYN-A length", True]]
+        late = ["SYN LATE WRITER LENGTH", "SYN LATE WRITER KEY"]
+        # (a) Astra's reproduction: the writer's first author page is held; the module gate's /me (and the layout panel's)
+        # answer the same account clinician-only; the final read is held; then the author page arrives.
+        for name in ("shipped", "no-boundary", "as-r003"):
+            with self.subTest(step="a", file=name):
+                self.writer_open(None if name == "shipped" else self.config_variants[name], hold={(VA, "first")})
+                self.wait_until(lambda: self.held_writer, "the first author page held")
+                self.assertEqual("writer", self.session())
+                self.to_clinician_only(LATER, hold_final=True)
+                if name == "shipped":
+                    self.wait_until(lambda: self.held_items, "the final read held")
+                else:
+                    self.settle()
+                self.release(self.held_writer.pop()[2], author_page(LATE_MARK, LATE_KEY))
+                seen, drawn = self.panel(), self.page.evaluate("synDrawn()")
+                if name == "as-r003":
+                    # Control: the file at R-003 paints the late author page (no data-read-only) and draws its mark ...
+                    self.assertEqual((None, VA, late, {"Read-only"}), (seen["state"], seen["uid"], [row[2] for row in seen["rows"]],
+                                                                        {row[1] for row in seen["rows"]}), "control: late page painted")
+                    self.assertEqual([["Length", "SYN LATE WRITER LENGTH", True]], drawn, "control: its mark drawn")
+                    # ... and the final:false check leaves it: that list has no verified final version to compare with.
+                    self.items[VA], before = "withheld", self.probes()
+                    self.focus()
+                    self.wait_until(lambda: self.probes() > before, "control: the final:false check asked")
+                    self.settle()
+                    self.assertEqual(late, self.labels(), "control: kept after final:false")
+                    continue
+                self.assertEqual(([], []), (seen["rows"], drawn), "nothing of the late author page")
+                if name == "no-boundary":
+                    # Control: the display check alone drops the page, but nothing asks the final list: the panel stays empty.
+                    self.assertEqual(["read-all"], [self.kind([r]) for r in self.reads()], "control: no final read")
+                    continue
+                self.assertEqual("loading", seen["state"])
+                self.hold_items = set()
+                self.release(self.held_items.pop()[1], self.clinician_page(VA, None)["json"])
+                seen = self.wait_panel("ready", VA)
+                self.assertEqual((a_labels, a_drawn), ([row[2] for row in seen["rows"]], self.page.evaluate("synDrawn()")))
+                cursor = next(iter(self.cursors))
+                self.assertEqual([(VA, {"includeHidden": ["true"], "limit": ["100"]}), (VA, {"limit": ["100"]}),
+                                  (VA, {"limit": ["100"], "cursor": [cursor]})], self.reads())
+                # Astra's next step: the final:false check takes those rows and the mark down.
+                self.items[VA] = "withheld"
+                self.focus()
+                seen = self.wait_panel("withheld", VA)
+                self.assertEqual((RO_WITHHELD, [], []), (seen["status"], seen["rows"], self.page.evaluate("synDrawn()")))
+
+        # (c) The new final read: final:false shows withheld with no row or mark and the late author page changes nothing;
+        # final:true is shown only after every page of one version (a second page of another version refuses the whole read).
+        with self.subTest(step="c"):
+            self.writer_open(hold={(VA, "first")})
+            self.wait_until(lambda: self.held_writer, "the first author page held")
+            self.items[VA] = "withheld"
+            self.to_clinician_only()
+            seen = self.wait_panel("withheld", VA)
+            self.assertEqual((RO_WITHHELD, [], []), (seen["status"], seen["rows"], self.page.evaluate("synDrawn()")))
+            self.assertEqual("dropped", self.late(self.held_writer.pop()[2], author_page(LATE_MARK, LATE_KEY), "SYN LATE"))
+            self.items[VA], self.hold_next = copy.deepcopy(ITEMS[VA]), {VA}
+            self.focus()
+            self.wait_until(lambda: self.held_next, "the second final page held")
+            self.assertEqual(("loading", [], []), self.snapshot())
+            _, cursor, route = self.held_next.pop()
+            self.release(route, {**self.clinician_page(VA, cursor)["json"], "reportVersion": 5})
+            seen = self.wait_panel("failed", VA)
+            self.assertEqual(([], []), (seen["rows"], self.page.evaluate("synDrawn()")))
+            self.hold_next = set()
+            self.page.get_by_role("button", name="Refresh", exact=True).click()
+            seen = self.wait_panel("ready", VA)
+            self.assertEqual((a_labels, a_drawn), ([row[2] for row in seen["rows"]], self.page.evaluate("synDrawn()")))
+
+        # (d) The author list on screen, no source frame, Refresh asked as a writer and held across the change: rows and marks
+        # go at once, the late page shows nothing, the final list is shown unmatched and drawn when the frame returns.
+        with self.subTest(step="d: refresh, frameless"):
+            self.writer_open(hold={(VA, "first")})
+            self.wait_until(lambda: self.held_writer, "the first author page held")
+            self.release(self.held_writer.pop()[2], author_page(SHOWN_MARK, SHOWN_KEY))
+            self.wait_until(lambda: self.page.evaluate("synDrawn()") == [["Length", "SYN WRITER SHOWN LENGTH", True]],
+                            "the author mark drawn")
+            self.frameless(True)
+            self.settle()
+            self.page.get_by_role("button", name="Refresh", exact=True).click()
+            self.wait_until(lambda: self.held_writer, "the Refresh page held")
+            self.to_clinician_only(hold_final=True)
+            self.assertEqual(([], []), self.snapshot()[1:], "rows and marks taken down at once")
+            self.wait_until(lambda: self.held_items, "the final read held")
+            self.assertEqual("dropped", self.late(self.held_writer.pop()[2], author_page(LATE_MARK, LATE_KEY), "SYN LATE"))
+            self.hold_items = set()
+            self.release(self.held_items.pop()[1], self.clinician_page(VA, None)["json"])
+            seen = self.wait_panel("ready", VA)
+            self.assertEqual(("unmatched", a_labels, []),
+                             (seen["frame"], [row[2] for row in seen["rows"]], self.page.evaluate("synDrawn()")))
+            self.frameless(False)
+            self.wait_until(lambda: self.page.evaluate("synDrawn()") == a_drawn, "the final mark drawn with the frame back")
+            self.assertIsNone(self.panel()["frame"])
+
+        # (d) A->B->A as a writer with both of A's author pages held, then the change: neither late page of A is shown.
+        with self.subTest(step="d: a-b-a"):
+            self.writer_open(hold={(VA, "first")})
+            self.wait_until(lambda: len(self.held_writer) == 1, "A's first author page held")
+            self.page.evaluate("study => synSwitch(study)", VP)
+            self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "B's author list")
+            self.page.evaluate("study => synSwitch(study)", VA)
+            self.wait_until(lambda: len(self.held_writer) == 2, "A's second author page held")
+            self.to_clinician_only()
+            self.wait_panel("ready", VA)
+            held, self.held_writer = self.held_writer, []
+            for _, _, route in held:
+                self.assertEqual("dropped", self.late(route, author_page(LATE_MARK, LATE_KEY), "SYN LATE"))
+            self.assertEqual((a_labels, a_drawn), (self.labels(), self.page.evaluate("synDrawn()")))
+
+    def test_15_session_change_matrix(self):
+        seen = {change: {} for change in SESSION_CHANGES}
+        authors = lambda requests: [r for r in requests if r[1].get("includeHidden") == ["true"]]
+        finals = lambda requests: [r for r in requests if "includeHidden" not in r[1] and r[1].get("limit") == ["100"]]
+        offered = lambda buttons: "none" if not set(buttons) & WRITER_CONTROLS else f"offered {buttons}"
+
+        # unconfirmed -> writer: the panel's /me held, the layout panel's /me answers writer, then the panel's.
+        u = seen["unconfirmed->writer"]
+        self.me, self.hold_me = RADIOLOGIST, True
+        self.open_viewer(uncancellable=True, enter=[HISTORY])
+        self.wait_until(lambda: len(self.held_me) == 1, "the panel's /me held")
+        self.assertEqual("unconfirmed", self.session())
+        before, asked, buttons = self.snapshot(), list(self.item_requests), self.panel()["buttons"]
+        start, me_before, self.hold_me = len(self.item_requests), self.me_requests, False
+        self.page.evaluate("ids => synEnter(ids)", OTHER)
+        self.wait_until(lambda: self.session() == "writer", "the layout panel's writer answer")
+        self.settle()
+        u["shown_at_change"] = self.change_effect(before, self.snapshot())
+        u["reads_by_other_me"] = ("me+" if self.me_requests - me_before > 1 else "") + self.first_reads(start)
+        self.release(self.held_me.pop(), RADIOLOGIST)
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the author list after the panel's /me")
+        u["read_awaiting_me"] = self.first_reads(start)
+        u["state_after"] = self.session()
+        for row in ("author_first_page", "author_next_page", "author_refresh"):
+            u[row] = "none" if not authors(asked) else "asked"
+        u["final_page"] = "none" if not finals(asked) else "asked"
+        u["write_awaiting_me"] = u["write_sent"] = offered(buttons)
+        # The panel's own /me makes the change (a document opened as a writer).
+        self.item_requests, self.cursors, self.me_requests = [], {}, 0
+        self.open_viewer(uncancellable=True, enter=[HISTORY])
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the author list")
+        self.settle()
+        u["reads_by_own_me"] = ("me+" if self.me_requests > 1 else "") + self.first_reads(0)
+
+        # writer -> read-only. Another extension's /me with the first author page held.
+        w = seen["writer->read-only"]
+        self.writer_open(hold={(VA, "first")})
+        self.wait_until(lambda: self.held_writer, "the first author page held")
+        start, me_before = len(self.item_requests), self.me_requests
+        w["final_page"] = "none" if not finals(self.item_requests) else "asked"
+        self.to_clinician_only()
+        self.wait_panel("ready", VA)
+        w["reads_by_other_me"] = ("me+" if self.me_requests - me_before > 1 else "") + self.first_reads(start)
+        w["author_first_page"] = self.late(self.held_writer.pop()[2], author_page(LATE_MARK, LATE_KEY), "SYN LATE")
+        w["state_after"] = self.session()
+        # A later author page (the handed-out cursor) held.
+        self.writer_open(hold={(VA, "next")}, paged=True)
+        self.wait_until(lambda: self.held_writer, "the next author page held")
+        self.to_clinician_only()
+        self.wait_panel("ready", VA)
+        w["author_next_page"] = self.late(self.held_writer.pop()[2], author_page(LATE_MARK), "SYN LATE")
+        # The author list and its mark on screen; Refresh held; the change; the final read held, then answered.
+        self.writer_open(hold={(VA, "first")})
+        self.wait_until(lambda: self.held_writer, "the first author page held")
+        self.release(self.held_writer.pop()[2], author_page(SHOWN_MARK, SHOWN_KEY))
+        self.wait_until(lambda: self.page.evaluate("synDrawn()") == [["Length", "SYN WRITER SHOWN LENGTH", True]],
+                        "the author mark drawn")
+        self.page.get_by_role("button", name="Refresh", exact=True).click()
+        self.wait_until(lambda: self.held_writer, "the Refresh page held")
+        before = self.snapshot()
+        self.to_clinician_only(hold_final=True)
+        w["shown_at_change"] = self.change_effect(before, self.snapshot())
+        self.wait_until(lambda: self.held_items, "the final read held")
+        w["author_refresh"] = self.late(self.held_writer.pop()[2], author_page(LATE_MARK, LATE_KEY), "SYN LATE")
+        self.hold_items = set()
+        self.release(self.held_items.pop()[1], self.clinician_page(VA, None)["json"])
+        self.wait_panel("ready", VA)
+        # Refresh waiting for its /me when another extension's /me makes the change; that given-up /me answers writer late.
+        self.writer_open()
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the author list")
+        self.hold_me = True
+        self.page.get_by_role("button", name="Refresh", exact=True).click()
+        self.wait_until(lambda: self.held_me, "the Refresh /me held")
+        start, self.hold_me = len(self.item_requests), False
+        self.to_clinician_only()
+        self.wait_panel("ready", VA)
+        self.release(self.held_me.pop(), MIXED)
+        self.settle()
+        self.assertEqual(("read-only", "ready"), (self.session(), self.panel()["state"]))
+        w["read_awaiting_me"] = self.first_reads(start)
+        # Refresh whose own /me answers clinician-only.
+        self.writer_open()
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the author list")
+        self.hold_me = True
+        self.page.get_by_role("button", name="Refresh", exact=True).click()
+        self.wait_until(lambda: self.held_me, "the Refresh /me held")
+        start, me_before, self.hold_me, self.me = len(self.item_requests), self.me_requests, False, MIXED_NOW_CLINICIAN
+        self.release(self.held_me.pop(), MIXED_NOW_CLINICIAN)
+        self.wait_panel("ready", VA)
+        w["reads_by_own_me"] = ("me+" if self.me_requests > me_before else "") + self.first_reads(start)
+        # A Save of a new key image waiting for its /me, which answers clinician-only.
+        history = self.page.locator("#kin-viewer-history")
+        self.writer_open()
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the author list")
+        self.accept_writes = True
+        history.get_by_role("button", name="Add Key Image", exact=True).click()
+        self.wait_until(lambda: "Save" in self.panel()["buttons"], "the new key image's Save")
+        self.hold_me = True
+        history.get_by_role("button", name="Save", exact=True).click()
+        self.wait_until(lambda: self.held_me, "the Save's /me held")
+        self.hold_me, self.me = False, MIXED_NOW_CLINICIAN
+        self.release(self.held_me.pop(), MIXED_NOW_CLINICIAN)
+        self.wait_panel("ready", VA)
+        self.settle()
+        w["write_awaiting_me"] = "not sent" if not self.writes else f"sent {self.writes}"
+        for route in self.held_writes:
+            self.release(route, author_page(LATE_WRITE)["items"][0])
+        # A Save already sent, answered after the change.
+        self.writer_open()
+        self.wait_until(lambda: "SYN writer key" in str(self.panel()["rows"]), "the author list")
+        self.accept_writes = True
+        history.get_by_role("button", name="Add Key Image", exact=True).click()
+        self.wait_until(lambda: "Save" in self.panel()["buttons"], "the new key image's Save")
+        history.get_by_role("button", name="Save", exact=True).click()
+        self.wait_until(lambda: self.held_writes, "the Save on the wire")
+        self.to_clinician_only()
+        self.wait_panel("ready", VA)
+        w["write_sent"] = self.late(self.held_writes.pop(), author_page(LATE_WRITE)["items"][0], "SYN LATE WRITTEN")
+
+        # read-only -> writer: the same clinician account gains radiologist. The lists stay served as the clinician's (list_me),
+        # so a writer read would show as read-all. A final page held across the layout panel's writer /me.
+        r = seen["read-only->writer"]
+        self.me, self.list_me, self.hold_items, self.held_items = CLINICIAN, CLINICIAN, {VA}, []
+        self.item_requests, self.cursors, self.me_requests, self.accept_writes = [], {}, 0, False
+        self.open_viewer(uncancellable=True, enter=[HISTORY])
+        self.wait_until(lambda: self.held_items, "the final read held")
+        self.assertEqual("read-only", self.session())
+        me_before, self.me = self.me_requests, CLINICIAN_NOW_MIXED
+        self.page.evaluate("ids => synEnter(ids)", OTHER)
+        self.wait_until(lambda: self.me_requests > me_before, "the layout panel's /me")
+        self.settle()
+        self.hold_items = set()
+        r["final_page"] = self.late(self.held_items.pop()[1], self.clinician_page(VA, None)["json"], "SYN-A key")
+        asked = list(self.item_requests)
+        # The final list on screen, Refresh waiting for the panel's /me, the layout panel's writer /me, then the panel's.
+        self.me, self.item_requests, self.cursors, self.me_requests = CLINICIAN, [], {}, 0
+        self.open_viewer(uncancellable=True, enter=[HISTORY])
+        self.wait_panel("ready", VA)
+        buttons, self.hold_me = self.panel()["buttons"], True
+        self.page.get_by_role("button", name="Refresh", exact=True).click()
+        self.wait_until(lambda: self.held_me, "the Refresh /me held")
+        before, start, me_before = self.snapshot(), len(self.item_requests), self.me_requests
+        self.me, self.hold_me = CLINICIAN_NOW_MIXED, False
+        self.page.evaluate("ids => synEnter(ids)", OTHER)
+        self.wait_until(lambda: self.me_requests > me_before, "the layout panel's /me")
+        self.settle()
+        r["shown_at_change"] = self.change_effect(before, self.snapshot())
+        r["reads_by_other_me"] = ("me+" if self.me_requests - me_before > 1 else "") + self.first_reads(start)
+        self.release(self.held_me.pop(), CLINICIAN_NOW_MIXED)
+        self.wait_until(lambda: self.first_reads(start) != "none", "the read after the panel's /me")
+        self.wait_panel("ready", VA)
+        r["read_awaiting_me"] = self.first_reads(start)
+        start, me_before = len(self.item_requests), self.me_requests
+        self.page.get_by_role("button", name="Refresh", exact=True).click()
+        self.wait_until(lambda: self.first_reads(start) != "none", "the Refresh read")
+        self.wait_panel("ready", VA)
+        r["reads_by_own_me"] = ("me+" if self.me_requests - me_before > 1 else "") + self.first_reads(start)
+        r["state_after"] = self.session()
+        asked += self.item_requests
+        for row in ("author_first_page", "author_next_page", "author_refresh"):
+            r[row] = "none" if not authors(asked) else "asked"
+        r["write_awaiting_me"] = r["write_sent"] = offered(buttons)
+        for change in SESSION_CHANGES:
+            self.assertEqual(set(SESSION_CHANGE_MATRIX), set(seen[change]), change)
+            for row, expected in SESSION_CHANGE_MATRIX.items():
+                with self.subTest(change=change, row=row):
+                    self.assertEqual(expected[SESSION_CHANGES.index(change)], seen[change][row])
 
 
 if __name__ == "__main__":
