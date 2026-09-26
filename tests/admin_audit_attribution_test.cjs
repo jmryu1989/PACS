@@ -5,7 +5,8 @@
  *      NEW-ACTION-DEFAULT / INVENTED-FIELDS / FAILURE-AS-EMPTY.
  *
  *  - the 30 synthetic vectors of the stage5 S5-U5b card (audit_attribution_contract, run 30): record-time readers and
- *    withheld sides per row, over synthetic AuditLog rows shaped like the real writers;
+ *    withheld sides per row, over synthetic AuditLog rows shaped like the real writers; vector 31 (added after the card,
+ *    Astra S5-U5b-D-F02) is the S5-U4a `study.question` row, hidden by its own table row from every institution;
  *  - the rejected current-group / current-owner rule as a negative control: it leaks exactly the card's rows;
  *  - unclear rows, the page read (filtering before paging, totals and continuations over visible rows only, a failed
  *    source never an empty page), the sealed continuation and the query shape;
@@ -14,7 +15,9 @@
  *  - Astra S5-U5b-B-F02: the SQL prefilter (strpos, a literal substring) loses no visible row and adds none for
  *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
  *  - completeness: every audit action written under api/src has a contract row (an unlisted action fails), and every
- *    contract row is written somewhere.
+ *    contract row is written somewhere. An action named by a constant is read from the one module-level literal
+ *    declaration in the same file; an imported, redeclared, shadowed or non-literal name stays unreadable. Negative
+ *    controls: a changed declaration, a new unlisted write and an imported constant each fail the check.
  *
  * Module: KIN_ADMIN_AUDIT_MODULE, default api/src/admin-audit.ts loaded through Node type stripping (Node >= 22.18);
  * the compiled /app/dist/admin-audit (kin-api:ci) is the same rule. The completeness scan reads api/src itself, so the
@@ -85,6 +88,12 @@ const CONTRACT = {
   ]
 };
 /* END S5-U5b audit_attribution_contract */
+/* After the card (Astra S5-U5b-D-F02): `study.question`, the S5-U4a clinician question record, gets its own hidden row
+ * instead of the unknown-action default. Its detail names the creating institution, but the one place that shows it is
+ * the study-scoped audit (pacs.service.ts audits(), OWNER_ONLY_AUDIT_ACTIONS), to the owner institution only; the
+ * Members console shows it to no institution. The card block above stays verbatim. */
+CONTRACT.hidden_study_scoped_owner_only = ["study.question"];
+CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidden:study_scoped_owner_only","record_time_visible_to":[],"withheld_sides":{},"note":"clinician question naming its institution: study-scoped owner-only audit, never the Members console"});
 
 const json = value => JSON.parse(JSON.stringify(value));
 const WITHHELD = { withheld: 'other_institution' };
@@ -146,6 +155,10 @@ const ROWS = new Map([
   row(28, 'future.action', S1, { by: 'inst-a' }),
   row(29, 'hanging-protocol.site.save', 'inst-a', { revision: 2 }),
   row(30, 'hold.force-release', S2, { by: 'inst-a', holder: 'syn-reader-b@members.test', heldAt: '2026-09-26T00:00:00.000Z', alive: true }),
+  // clinician-question.service.ts receipt(): the creating institution is recorded, the row is still not the console's
+  row(31, 'study.question', S2, { id: '00000000-0000-4000-8000-000000000031', institution: 'inst-a',
+    entry: '00000000-0000-4000-8000-000000000031', kind: 'question', from: null, to: 'Open', revision: 1,
+    requestId: '00000000-0000-4000-8000-000000000031', role: 'clinician' }, 'syn-clinician-a@members.test'),
 ].map(r => [r.id, r]));
 
 /** Sides of a member row the reader gets as {withheld:'other_institution'} (field rows withhold nothing). */
@@ -165,32 +178,42 @@ test('the module table is the card contract; allowed and hidden never overlap; t
   assert.deepEqual(json(A.AUDIT_REPORT_COMMIT_ACTIONS), CONTRACT.report_commit_actions_by_detail_by);
   assert.deepEqual(json(A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION), CONTRACT.hidden_no_record_time_institution);
   assert.deepEqual(json(A.AUDIT_HIDDEN_CONNECT), CONTRACT.hidden_connect_out_of_scope);
+  assert.deepEqual(json(A.AUDIT_HIDDEN_STUDY_SCOPED), CONTRACT.hidden_study_scoped_owner_only);
   assert.deepEqual(json(A.AUDIT_MEMBER_SNAPSHOT_FIELDS), CONTRACT.member_snapshot_fields_projected);
   assert.equal(CONTRACT.member_email_projected, false);
   assert.ok(!A.AUDIT_MEMBER_SNAPSHOT_FIELDS.includes('email'));
   for (const list of [A.AUDIT_MEMBER_ACTIONS, A.AUDIT_REPORT_COMMIT_ACTIONS, A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION,
-    A.AUDIT_HIDDEN_CONNECT, A.AUDIT_MEMBER_SNAPSHOT_FIELDS, A.AUDIT_CANDIDATE_ACTIONS, A.AUDIT_TARGET_ACTIONS])
+    A.AUDIT_HIDDEN_CONNECT, A.AUDIT_HIDDEN_STUDY_SCOPED, A.AUDIT_MEMBER_SNAPSHOT_FIELDS, A.AUDIT_CANDIDATE_ACTIONS,
+    A.AUDIT_TARGET_ACTIONS])
     assert.ok(Object.isFrozen(list));
   assert.ok(Object.isFrozen(A.AUDIT_FIELD_RULES));
   // Every allowed action resolves to its own rule, never to a hidden wildcard, and the candidate list is exactly them.
   const allowed = [...A.AUDIT_MEMBER_ACTIONS, ...Object.keys(A.AUDIT_FIELD_RULES), ...A.AUDIT_REPORT_COMMIT_ACTIONS.map(a => 'report.' + a)];
   assert.deepEqual([...A.AUDIT_CANDIDATE_ACTIONS].sort(), [...new Set(allowed)].sort());
   for (const action of allowed) assert.doesNotMatch(A.auditRule(action), /^hidden:/, action);
-  const hiddenEntries = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT];
+  const hiddenEntries = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT, ...A.AUDIT_HIDDEN_STUDY_SCOPED];
   for (const entry of hiddenEntries) {
     const covers = action => entry.endsWith('*') ? action.startsWith(entry.slice(0, -1)) : action === entry;
     assert.deepEqual(allowed.filter(covers), [], `${entry} shadows an allowed action`);
   }
   assert.deepEqual(json(A.AUDIT_TARGET_ACTIONS), ['hanging-protocol.site.save', 'hanging-protocol.site.reset']);
+  // study.question (S5-U4a) is hidden by its own row, and the SQL prefilter never fetches it for any institution.
+  assert.equal(A.auditRule('study.question'), 'hidden:study_scoped_owner_only');
+  assert.ok(!A.AUDIT_CANDIDATE_ACTIONS.includes('study.question'));
+  for (const reader of ['inst-a', 'inst-b', 'inst-z']) assert.equal(A.auditCandidateRow(ROWS.get(31), reader), false, reader);
   // Fail closed: unknown, near-miss and non-string actions are hidden.
   assert.equal(CONTRACT.default, 'hidden:unknown_action (fail closed)');
-  for (const action of ['future.action', 'Match', 'match ', 'report.sign', 'report.', 'admin.user.delete', 'study.question',
+  for (const action of ['future.action', 'Match', 'match ', 'report.sign', 'report.', 'admin.user.delete', 'study.question.reply',
     'study.image-request', 'hanging-protocol.site', '', null, undefined, 7, {}])
     assert.equal(A.auditRule(action), 'hidden:unknown_action', String(action));
 });
 
-test('the 30 synthetic vectors: record-time readers and withheld sides per row', () => {
-  assert.equal(CONTRACT.synthetic_vectors.length, 30);
+test('the synthetic vectors (the card\'s 30 and study.question): record-time readers and withheld sides per row', () => {
+  // 31 = the card's 30, unchanged, and the study.question row added with its contract row (Astra S5-U5b-D-F02).
+  assert.equal(CONTRACT.synthetic_vectors.length, 31);
+  assert.deepEqual(CONTRACT.synthetic_vectors.slice(0, 30).map(v => v.row), Array.from({ length: 30 }, (_, i) => i + 1));
+  assert.deepEqual(CONTRACT.synthetic_vectors[30], { row: 31, action: 'study.question', rule: 'hidden:study_scoped_owner_only',
+    record_time_visible_to: [], withheld_sides: {}, note: CONTRACT.synthetic_vectors[30].note });
   assert.deepEqual([...ROWS.keys()], CONTRACT.synthetic_vectors.map(v => v.row));
   for (const vector of CONTRACT.synthetic_vectors) {
     const source = ROWS.get(vector.row);
@@ -665,6 +688,32 @@ function actionOf(expression) {
   if ((m = /^`([^`$\\]+)\$\{(\w+)\}`$/.exec(expression))) return { kind: 'template', prefix: m[1], variable: m[2] };
   return null;
 }
+/**
+ * A bare identifier as the action: the value of the one module-level `(export) const NAME(: type) = '<literal>'` of the
+ * same file. Anything else stays unreadable (fail closed): an imported name (no declaration here), several
+ * declarations, let/var, a declaration inside a block, an initializer that is not one plain literal, or another
+ * binding of the name in the file (a parameter or destructured local could shadow the constant at the write; a
+ * matching object key or call argument is refused too, never guessed).
+ */
+function constantOf(name, text) {
+  const id = name.replace(/\$/g, '\\$'), end = `${id}(?![\\w$])`, word = `(?<![\\w$.])${end}`;
+  const declarations = text.match(new RegExp(`\\b(?:const|let|var|function|class|enum)\\s+${word}`, 'g')) ?? [];
+  const parameters = text.match(new RegExp(`[(,]\\s*(?:\\.\\.\\.)?${end}\\s*\\??\\s*[:=](?![=>])|${word}\\s*=>|` +
+    `\\bcatch\\s*\\(\\s*${word}|\\b(?:const|let|var)\\s*[{[][^=;]*${word}`, 'g')) ?? [];
+  const arrows = [...text.matchAll(/\(([^()]*)\)\s*(?::[^=;{()]+)?=>/g)].filter(m => new RegExp(word).test(m[1]));
+  if (declarations.length !== 1 || parameters.length || arrows.length) return null;
+  // One line, ending in its semicolon: a literal continued on the next line (`'a'\n + b`) is not a plain literal.
+  const m = new RegExp(`^(?:export[ \\t]+)?const[ \\t]+${id}[ \\t]*(?::[ \\t]*[^=\\n]+?)?[ \\t]*=[ \\t]*` +
+    `(?:'([^'\\\\\\n]+)'|"([^"\\\\\\n]+)")[ \\t]*;[ \\t]*(?://[^\\n]*)?$`, 'm').exec(text);
+  return m ? m[1] ?? m[2] : null;
+}
+/** An action expression of TypeScript source: actionOf, or a bare identifier naming its file's literal constant. */
+function actionIn(expression, text) {
+  const parsed = actionOf(expression);
+  if (parsed || !/^[A-Za-z_$][\w$]*$/.test(expression)) return parsed;
+  const value = constantOf(expression, text);
+  return value === null ? null : { kind: 'literal', actions: [value], constant: expression };
+}
 const line = (text, index) => text.slice(0, index).split('\n').length;
 function methodBefore(text, index) {
   const start = text.lastIndexOf('\n  async ', index);
@@ -708,7 +757,8 @@ function auditHelpers(text) {
   return helpers;
 }
 
-function scanAuditWrites() {
+/** The audit writes of `sources` (default: api/src as checked out); the negative controls pass changed copies. */
+function scanAuditWrites(sources = SOURCES) {
   const sites = [], helpers = [], callbacks = [], handlers = [], unrecognized = [];
   const add = (file, text, index, form, parsed) => {
     if (!parsed) { unrecognized.push(`${file}:${line(text, index)} ${form}`); return; }
@@ -717,9 +767,9 @@ function scanAuditWrites() {
       if (!expand) { unrecognized.push(`${file}:${line(text, index)} template ${parsed.prefix}\${${parsed.variable}}`); return; }
       parsed = { kind: 'literal', actions: expand(text, index).map(value => parsed.prefix + value), template: parsed.prefix };
     }
-    sites.push({ file, line: line(text, index), form, ...parsed });
+    sites.push({ file, line: line(text, index), form: parsed.constant ? `${form} const ${parsed.constant}` : form, ...parsed });
   };
-  for (const { file, text } of SOURCES) {
+  for (const { file, text } of sources) {
     for (const m of text.matchAll(/\bauditLog\s*\.\s*(\w+)\s*\(/g)) {
       if (READS.has(m[1])) continue;
       if (m[1] !== 'create') { unrecognized.push(`${file}:${line(text, m.index)} auditLog.${m[1]}`); continue; }
@@ -731,7 +781,7 @@ function scanAuditWrites() {
         .map(part => /^action\s*(?::\s*([\s\S]+))?$/.exec(part)).find(Boolean);
       if (!property) { unrecognized.push(`${file}:${line(text, m.index)} auditLog.create without action`); continue; }
       if (property[1] === undefined || property[1].trim() === 'action') { helpers.push(`${file}:${line(text, m.index)}`); continue; }
-      add(file, text, m.index, 'auditLog.create', actionOf(property[1].trim()));
+      add(file, text, m.index, 'auditLog.create', actionIn(property[1].trim(), text));
     }
     for (const m of text.matchAll(/INSERT\s+INTO\s+"AuditLog"\s*\(([^)]*)\)\s*(SELECT|VALUES)/gi)) {
       const columns = m[1].split(',').map(c => c.trim().replace(/"/g, ''));
@@ -755,21 +805,21 @@ function scanAuditWrites() {
       // Otherwise the action is the argument at the helper's `action` position (the actor can be a literal too).
       const positions = [...new Set(defined.filter(h => h.self === !!m[1] && h.action >= 0 && h.min <= args.length && args.length <= h.max)
         .map(h => h.action))];
-      add(file, text, m.index, call, positions.length === 1 ? actionOf(args[positions[0]] ?? '') : null);
+      add(file, text, m.index, call, positions.length === 1 ? actionIn(args[positions[0]] ?? '', text) : null);
     }
   }
   return { sites, helpers, callbacks, handlers, unrecognized };
 }
 
-test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
-  const scan = scanAuditWrites();
+/** The completeness verdict over one scan: throws at the first condition it does not meet. */
+function assertComplete(scan) {
   assert.deepEqual(scan.unrecognized, [], 'every audit write site must have a readable action');
   // The one literal-free helper call is the site hanging-protocol callback; its action is the auditLog.create it wraps.
   assert.deepEqual(scan.callbacks.map(c => [c.file, c.call]), [['api/src/pacs.service.ts', 'audit(tx, row)']]);
   assert.deepEqual(scan.handlers.map(h => h.split(':')[0]), ['api/src/pacs.controller.ts'], 'only the study-scoped GET audit handler');
   const literals = new Set(scan.sites.flatMap(site => site.kind === 'literal' ? site.actions : []));
   const prefixes = new Set(scan.sites.filter(site => site.kind === 'prefix').map(site => site.prefix));
-  const hiddenEntries = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT];
+  const hiddenEntries = [...A.AUDIT_HIDDEN_NO_RECORD_TIME_INSTITUTION, ...A.AUDIT_HIDDEN_CONNECT, ...A.AUDIT_HIDDEN_STUDY_SCOPED];
   const unlisted = [...literals].filter(action => A.auditRule(action) === 'hidden:unknown_action');
   assert.deepEqual(unlisted, [], 'an audit action written under api/src without a contract row');
   // A dynamic suffix cannot be listed one by one: its whole prefix must be a hidden wildcard (fail closed).
@@ -785,6 +835,15 @@ test('completeness: every audit action written under api/src has a contract row,
   assert.deepEqual([...allowed, ...exactHidden].filter(action => !literals.has(action)), [], 'contract rows nothing writes');
   assert.deepEqual(hiddenEntries.filter(entry => entry.endsWith('*')).map(entry => entry.slice(0, -1)).filter(p => !prefixes.has(p)), [],
     'wildcard rows without a dynamic writer');
+  return { literals, prefixes, unlisted };
+}
+
+test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
+  const scan = scanAuditWrites();
+  const { literals, prefixes, unlisted } = assertComplete(scan);
+  // The one action named by a constant: the S5-U4a question write, read from its own file's declaration.
+  assert.deepEqual(scan.sites.filter(site => site.constant).map(site => [site.file, site.form, site.kind, site.actions]),
+    [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']]]);
   const byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({
@@ -792,4 +851,66 @@ test('completeness: every audit action written under api/src has a contract row,
     distinct_actions: literals.size, dynamic_prefixes: [...prefixes].sort(), registered: literals.size - unlisted.length,
     by_rule: byRule, files: [...new Set(scan.sites.map(s => s.file))].length,
   }));
+});
+
+test('completeness negative controls: a changed constant, a new unlisted write and an imported constant fail', () => {
+  assertComplete(scanAuditWrites());   // the checked-out sources pass; each control below changes one thing
+  const QUESTION = 'api/src/clinician-question.service.ts';
+  const DECLARATION = "export const QUESTION_AUDIT_ACTION = 'study.question';";
+  const original = SOURCES.find(source => source.file === QUESTION);
+  assert.equal(original?.text.split(DECLARATION).length, 2, 'the declaration the controls change is in the source once');
+  const withFile = (file, text) => [...SOURCES.filter(source => source.file !== file), { file, text }];
+  const changed = replacement => withFile(QUESTION, original.text.replace(DECLARATION, replacement));
+  const failure = sources => {
+    const scan = scanAuditWrites(sources);
+    try { assertComplete(scan); } catch (error) { return { scan, error }; }
+    assert.fail('the completeness check passed');
+  };
+  const READABLE = /^every audit write site must have a readable action/;
+  const UNLISTED = /^an audit action written under api\/src without a contract row/;
+  // (a) The declaration changes. Another literal is an action without a row...
+  const renamed = failure(changed("export const QUESTION_AUDIT_ACTION = 'study.question.v2';"));
+  assert.match(renamed.error.message, UNLISTED);
+  assert.deepEqual(renamed.error.actual, ['study.question.v2']);
+  // ...and anything but one plain module-level literal declaration of the name leaves the write unreadable.
+  for (const replacement of [
+    "export const QUESTION_AUDIT_ACTION = 'study.' + 'question';",
+    'export const QUESTION_AUDIT_ACTION = `study.question`;',
+    "export const QUESTION_AUDIT_ACTION = String('study.question');",
+    "export let QUESTION_AUDIT_ACTION = 'study.question';",
+    "{ const QUESTION_AUDIT_ACTION = 'study.question'; }",
+    `${DECLARATION}\nfunction other() { const QUESTION_AUDIT_ACTION = 'study.question'; return QUESTION_AUDIT_ACTION; }`,
+    `${DECLARATION}\nconst shadow = (QUESTION_AUDIT_ACTION: string) => QUESTION_AUDIT_ACTION;`,
+    "import { QUESTION_AUDIT_ACTION } from './question-actions';",
+  ]) {
+    const { scan, error } = failure(changed(replacement));
+    assert.match(error.message, READABLE, replacement);
+    assert.deepEqual(error.actual.map(entry => entry.replace(/:\d+ /, ' ')), [`${QUESTION} auditLog.create`], replacement);
+    assert.deepEqual(scan.sites.filter(site => site.file === QUESTION), [], replacement);
+  }
+  // (b) A new write whose action has no row fails, written as a literal and as a constant.
+  const NEW = 'api/src/syn-unlisted.service.ts';
+  const added = failure(withFile(NEW, [
+    "export const SYN_UNLISTED_ACTION = 'syn.unlisted';",
+    'export class SynUnlistedService {',
+    '  async write(tx: any, c: any, uid: string) {',
+    "    await tx.auditLog.create({ data: { actor: c.actor, action: 'study.question.reply', target: uid } });",
+    '    await tx.auditLog.create({ data: { actor: c.actor, action: SYN_UNLISTED_ACTION, target: uid } });',
+    '  }',
+    '}',
+  ].join('\n')));
+  assert.match(added.error.message, UNLISTED);
+  assert.deepEqual(added.error.actual, ['study.question.reply', 'syn.unlisted']);
+  assert.deepEqual(added.scan.sites.filter(site => site.file === NEW).map(site => [site.line, site.form, site.actions]),
+    [[4, 'auditLog.create', ['study.question.reply']], [5, 'auditLog.create const SYN_UNLISTED_ACTION', ['syn.unlisted']]]);
+  // (c) A constant imported from another file is not followed: the write is unreadable.
+  const IMPORTED = 'api/src/syn-imported.service.ts';
+  const imported = failure(withFile(IMPORTED, [
+    "import { QUESTION_AUDIT_ACTION } from './clinician-question.service';",
+    'export async function write(tx: any, c: any, uid: string) {',
+    '  await tx.auditLog.create({ data: { actor: c.actor, action: QUESTION_AUDIT_ACTION, target: uid } });',
+    '}',
+  ].join('\n')));
+  assert.match(imported.error.message, READABLE);
+  assert.deepEqual(imported.error.actual, [`${IMPORTED}:3 auditLog.create`]);
 });
