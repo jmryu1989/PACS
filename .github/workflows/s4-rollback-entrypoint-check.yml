@@ -17,6 +17,8 @@ name: S4 rollback entrypoint check (RISK-RB-1, synthetic)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [opus/s4-rb1-check-20260926]
 
 permissions:
   contents: read
