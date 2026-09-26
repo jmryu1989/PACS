@@ -110,6 +110,29 @@ export interface AuditLogRow {
   detail: string | null;
 }
 
+/**
+ * detail 사전 거르기의 검색어: 읽는 기관 문자열의 JSON 표기. 후보 action의 detail은 모두 JSON.stringify로 쓰이므로,
+ * 이 기관을 적은 행의 detail에는 이 글자들이 그대로 들어 있다. 서비스는 이것을 strpos(패턴 해석 없는 부분 문자열)로
+ * 찾는다 — LIKE 패턴에 넣으면 JSON 표기의 역슬래시를 LIKE가 이스케이프로 먹어, `\`·`"`가 든 기관의 행을 판정 전에
+ * 놓친다(Astra S5-U5b-B-F02).
+ */
+export function auditMention(reader: string): string {
+  return JSON.stringify(reader);
+}
+
+const CANDIDATES = new Set(AUDIT_CANDIDATE_ACTIONS);
+const TARGETS = new Set(AUDIT_TARGET_ACTIONS);
+
+/**
+ * 서비스 SQL 사전 거르기(admin.service.ts auditEvents)의 순수 쌍둥이. strpos와 includes는 둘 다 글자 그대로의 부분
+ * 문자열이다. 넓은 조건이라 다른 기관 행이 섞일 수 있고, 보일지는 projectAuditRow가 정한다.
+ */
+export function auditCandidateRow(row: AuditLogRow, reader: string): boolean {
+  if (!CANDIDATES.has(row?.action)) return false;
+  return (typeof row.detail === 'string' && row.detail.includes(auditMention(reader)))
+    || (TARGETS.has(row.action) && row.target === reader);
+}
+
 /** 읽는 기관 한 곳에 내보내는 행. 회원 행의 before/after는 스냅숏, `{withheld:'other_institution'}`, 또는 null. */
 export interface AuditProjection {
   at: string;
@@ -267,28 +290,51 @@ export const AUDIT_CURSOR_TTL_MS = 10 * 60 * 1000;
 export const AUDIT_PAGE_DEFAULT = 25;
 export const AUDIT_PAGE_MAX = 100;
 
+// 봉인 전 값은 판 1바이트와 top·after·expires 각 8바이트(부호 없는 big-endian)로 늘 25바이트다. GCM은 평문 길이를
+// 숨기지 않으므로 숫자를 가변 길이로 적으면 값의 길이가 top(기관을 가리지 않은 전체 감사 id의 최댓값)의 자리수,
+// 곧 다른 기관 행이 늘어난 구간을 드러낸다(Astra S5-U5b-B-F01). 읽는 사람(기관·계정)은 평문에 넣지 않고 GCM 추가
+// 인증 자료(AAD)로 묶는다 — 다른 사람의 값은 인증 태그에서 떨어지고, 값의 길이는 누구에게나 같다.
+const CURSOR_VERSION = 2;
+const CURSOR_IV = 12;
+const CURSOR_TAG = 16;
+const CURSOR_PLAIN = 1 + 8 * 3;
+const CURSOR_BYTES = CURSOR_IV + CURSOR_TAG + CURSOR_PLAIN;
+/** 봉인한 값의 글자 수(base64url, 채움 없음). 소유자·id·숨긴 행과 무관하게 늘 이 길이다. */
+export const AUDIT_CURSOR_LENGTH = Math.ceil(CURSOR_BYTES * 4 / 3);
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+const ownerData = (owner: readonly string[]) => Buffer.from(JSON.stringify(owner), 'utf8');
+
 /** AES-256-GCM(무작위 IV)으로 봉인한다. 같은 상태도 매번 다른 값이고, 읽는 사람(기관·계정)과 유효시간이 묶인다. */
 export function sealAuditCursor(key: Uint8Array, owner: readonly string[], cursor: AuditCursor, now = Date.now()): string {
-  const iv = randomBytes(12);
+  const values = [cursor.top, cursor.after, now + AUDIT_CURSOR_TTL_MS];
+  if (!values.every(value => Number.isSafeInteger(value) && value >= 0)) throw new RangeError('audit cursor value');
+  const payload = Buffer.alloc(CURSOR_PLAIN);
+  payload.writeUInt8(CURSOR_VERSION, 0);
+  values.forEach((value, i) => payload.writeBigUInt64BE(BigInt(value), 1 + 8 * i));
+  const iv = randomBytes(CURSOR_IV);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const plainText = JSON.stringify({ v: 1, owner, top: cursor.top, after: cursor.after, expires: now + AUDIT_CURSOR_TTL_MS });
-  const body = Buffer.concat([cipher.update(plainText, 'utf8'), cipher.final()]);
+  cipher.setAAD(ownerData(owner));
+  const body = Buffer.concat([cipher.update(payload), cipher.final()]);
   return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
 }
 
 /** 봉인을 풀지 못하거나(위조·다른 키·API 재시작 전 값) 다른 사람·만료된 값이면 null. */
 export function openAuditCursor(key: Uint8Array, owner: readonly string[], token: unknown, now = Date.now()): AuditCursor | null {
-  if (typeof token !== 'string' || !token || token.length > AUDIT_CURSOR_MAX || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
+  if (typeof token !== 'string' || token.length !== AUDIT_CURSOR_LENGTH || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
   try {
     const raw = Buffer.from(token, 'base64url');
-    if (raw.toString('base64url') !== token || raw.length <= 28) return null;
-    const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12));
-    decipher.setAuthTag(raw.subarray(12, 28));
-    const data = JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8'));
-    if (!plain(data) || data.v !== 1 || JSON.stringify(data.owner) !== JSON.stringify(owner)
-        || !Number.isSafeInteger(data.top) || !Number.isSafeInteger(data.after) || data.after < 1 || data.after > data.top
-        || !Number.isSafeInteger(data.expires) || data.expires <= now) return null;
-    return { top: data.top, after: data.after };
+    if (raw.length !== CURSOR_BYTES || raw.toString('base64url') !== token) return null;
+    const decipher = createDecipheriv('aes-256-gcm', key, raw.subarray(0, CURSOR_IV));
+    decipher.setAAD(ownerData(owner));
+    decipher.setAuthTag(raw.subarray(CURSOR_IV, CURSOR_IV + CURSOR_TAG));
+    const data = Buffer.concat([decipher.update(raw.subarray(CURSOR_IV + CURSOR_TAG)), decipher.final()]);
+    if (data.length !== CURSOR_PLAIN || data.readUInt8(0) !== CURSOR_VERSION) return null;
+    const values = [0, 1, 2].map(i => data.readBigUInt64BE(1 + 8 * i));
+    if (values.some(value => value > MAX_SAFE)) return null;
+    const [top, after, expires] = values.map(Number);
+    if (after < 1 || after > top || expires <= now) return null;
+    return { top, after };
   } catch {
     return null;
   }

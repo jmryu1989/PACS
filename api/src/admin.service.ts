@@ -1,10 +1,11 @@
 import {
   BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException,
 } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import {
-  AUDIT_CANDIDATE_ACTIONS, AUDIT_TARGET_ACTIONS, AuditCursor, AuditSource, auditPageQuery, openAuditCursor, readAuditPage,
-  sealAuditCursor,
+  AUDIT_CANDIDATE_ACTIONS, AUDIT_TARGET_ACTIONS, AuditCursor, AuditLogRow, AuditSource, auditMention, auditPageQuery,
+  openAuditCursor, readAuditPage, sealAuditCursor,
 } from './admin-audit';
 import { memberState } from './auth.guard';
 // 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
@@ -326,9 +327,11 @@ export class AdminService {
    * 남은 기관 값만 보고, 회원의 지금 그룹·검사의 지금 소유 기관·지금 StudyAccess로 귀속을 다시 정하지 않는다.
    * 호출자의 기관은 "누가 읽는가"를 정할 뿐이다. 기존 검사 범위 `GET /api/audit`은 바꾸지 않는다.
    *
-   * 거르기는 쪽을 자르기 전이다. SQL은 계약표에 있는 action이면서 이 기관 문자열이 detail에 있거나(target이 기관인
-   * action이면 target이 이 기관인) 행만 후보로 넘기고 — 보이는 행을 빠뜨리지 않는 넓은 조건이다 — 정확한 판정은
-   * readAuditPage가 한다. 첫 쪽이 읽은 가장 큰 id를 다음 쪽 값에 봉인해 이어받는 동안의 기준으로 삼는다.
+   * 거르기는 쪽을 자르기 전이다. SQL은 계약표에 있는 action이면서 이 기관 문자열의 JSON 표기가 detail에 있거나(target이
+   * 기관인 action이면 target이 이 기관인) 행만 후보로 넘기고 — 보이는 행을 빠뜨리지 않는 넓은 조건이다 — 정확한 판정은
+   * readAuditPage가 한다. detail 검색은 strpos(글자 그대로의 부분 문자열)다: Prisma `contains`(LIKE 패턴)는 JSON
+   * 표기의 역슬래시를 이스케이프로 먹어 `\`·`"`가 든 기관의 행을 판정 전에 놓친다(admin-audit.ts auditCandidateRow가
+   * 같은 조건의 순수 쌍둥이다). 첫 쪽이 읽은 가장 큰 id를 다음 쪽 값에 봉인해 이어받는 동안의 기준으로 삼는다.
    *
    * 검사 접근이 제한된 관리자는 거절한다: 검사 행에는 오더 매칭 overlay 같은 검사 내용이 실리므로, 허용 범위 밖
    * 검사의 기록을 보이는 창이 된다(운영 지표의 ADMIN_METRICS_RESTRICTED와 같은 이유). 이것은 읽는 사람의 관문이며
@@ -354,16 +357,15 @@ export class AdminService {
     try {
       const top = cursor ? cursor.top
         : (await this.prisma.auditLog.findFirst({ orderBy: { id: 'desc' }, select: { id: true } }))?.id ?? 0;
-      const mention = JSON.stringify(me);
-      const source: AuditSource = (below, take) => this.prisma.auditLog.findMany({
-        where: {
-          id: below === null ? { lte: top } : { lte: top, lt: below },
-          action: { in: [...AUDIT_CANDIDATE_ACTIONS] },
-          OR: [{ detail: { contains: mention } }, { action: { in: [...AUDIT_TARGET_ACTIONS] }, target: me }],
-        },
-        orderBy: { id: 'desc' }, take,
-        select: { id: true, at: true, actor: true, action: true, target: true, detail: true },
-      });
+      const mention = auditMention(me);
+      const candidates = Prisma.join([...AUDIT_CANDIDATE_ACTIONS]), targets = Prisma.join([...AUDIT_TARGET_ACTIONS]);
+      const source: AuditSource = (below, take) => {
+        const older = below === null ? Prisma.empty : Prisma.sql`AND "id" < ${below}::int`;
+        return this.prisma.$queryRaw<AuditLogRow[]>`SELECT "id", "at", "actor", "action", "target", "detail" FROM "AuditLog"
+          WHERE "id" <= ${top}::int ${older} AND "action" IN (${candidates})
+            AND (strpos("detail", ${mention}) > 0 OR ("action" IN (${targets}) AND "target" = ${me}))
+          ORDER BY "id" DESC LIMIT ${take}`;
+      };
       const observedAt = new Date().toISOString();
       read = { top, observedAt, ...await readAuditPage(source, me, { after: cursor?.after ?? null, limit: page.limit }) };
     } catch (e: any) {

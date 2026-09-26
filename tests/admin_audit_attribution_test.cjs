@@ -9,6 +9,10 @@
  *  - the rejected current-group / current-owner rule as a negative control: it leaks exactly the card's rows;
  *  - unclear rows, the page read (filtering before paging, totals and continuations over visible rows only, a failed
  *    source never an empty page), the sealed continuation and the query shape;
+ *  - Astra S5-U5b-B-F01: the continuation has one length whatever the pinned top, the row id, the reader or the hidden
+ *    rows above the reader's own (GCM does not hide the payload length);
+ *  - Astra S5-U5b-B-F02: the SQL prefilter (strpos, a literal substring) loses no visible row and adds none for
+ *    institution names carrying \, ", % and _; the removed LIKE form, modelled, loses exactly the \ and " names' rows;
  *  - completeness: every audit action written under api/src has a contract row (an unlisted action fails), and every
  *    contract row is written somewhere.
  *
@@ -20,7 +24,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { readFileSync, readdirSync } = require('node:fs');
 const path = require('node:path');
-const { randomBytes } = require('node:crypto');
+const { createCipheriv, randomBytes } = require('node:crypto');
 
 const ROOT = path.join(__dirname, '..');
 const MODULE = process.env.KIN_ADMIN_AUDIT_MODULE || 'api/src/admin-audit.ts';
@@ -406,12 +410,16 @@ test('the continuation is sealed: opaque, bound to the reader, expiring, and nam
   const token = A.sealAuditCursor(key, owner, { top: 987654, after: 912345 }, now);
   assert.match(token, /^[A-Za-z0-9_-]+$/);
   assert.ok(token.length <= A.AUDIT_CURSOR_MAX);
+  assert.equal(token.length, A.AUDIT_CURSOR_LENGTH);
   assert.deepEqual(A.openAuditCursor(key, owner, token, now + 1000), { top: 987654, after: 912345 });
   const bytes = Buffer.from(token, 'base64url').toString('latin1');
   for (const plainText of ['987654', '912345', '"after"', '"top"', 'inst-a']) assert.ok(!bytes.includes(plainText), plainText);
   assert.notEqual(A.sealAuditCursor(key, owner, { top: 987654, after: 912345 }, now), token, 'a fresh IV each time');
   const raw = Buffer.from(token, 'base64url');
   const flipped = Buffer.from(raw); flipped[raw.length - 1] ^= 1;
+  // 53 bytes leave two unused bits in the last character: setting one decodes to the same bytes, but is not this value.
+  const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const loose = token.slice(0, -1) + ALPHABET[ALPHABET.indexOf(token.slice(-1)) | 1];
   const refused = {
     'another institution': A.openAuditCursor(key, ['inst-b', owner[1]], token, now),
     'another admin': A.openAuditCursor(key, [owner[0], '00000000-0000-4000-8000-0000000000bb'], token, now),
@@ -420,6 +428,7 @@ test('the continuation is sealed: opaque, bound to the reader, expiring, and nam
     'tampered': A.openAuditCursor(key, owner, flipped.toString('base64url'), now),
     'truncated': A.openAuditCursor(key, owner, token.slice(0, 30), now),
     'non-canonical base64': A.openAuditCursor(key, owner, token + '=', now),
+    'non-canonical last character': A.openAuditCursor(key, owner, loose, now),
     'a readable row id': A.openAuditCursor(key, owner, '912345', now),
     'too long': A.openAuditCursor(key, owner, 'A'.repeat(A.AUDIT_CURSOR_MAX + 1), now),
     'not a string': A.openAuditCursor(key, owner, 912345, now),
@@ -427,6 +436,167 @@ test('the continuation is sealed: opaque, bound to the reader, expiring, and nam
   for (const [name, value] of Object.entries(refused)) assert.equal(value, null, name);
   const outOfRange = A.sealAuditCursor(key, owner, { top: 5, after: 6 }, now);
   assert.equal(A.openAuditCursor(key, owner, outOfRange, now), null, 'after beyond the pinned top');
+});
+
+test('B-F01: the continuation has one length: id digits, the supported maximum and the reader never change it', () => {
+  const key = randomBytes(32), owner = ['inst-a', '00000000-0000-4000-8000-0000000000aa'], now = Date.UTC(2026, 8, 26);
+  assert.equal(A.AUDIT_CURSOR_LENGTH, 71, '12 IV + 16 tag + 25 payload bytes, base64url without padding');
+  const INT4 = 2147483647, MAX = Number.MAX_SAFE_INTEGER;   // AuditLog.id is int4; the layout carries any safe integer
+  const pairs = [[1, 1], [9, 2], [9, 9], [10, 2], [10, 9], [10, 10], [99, 2], [100, 2], [100, 99], [999, 2], [1000, 2],
+    [1000, 999], [INT4, 1], [INT4, INT4], [MAX, 1], [MAX, MAX]];
+  const lengths = new Set(), sizes = new Set();
+  for (const [top, after] of pairs) {
+    const token = A.sealAuditCursor(key, owner, { top, after }, now);
+    lengths.add(token.length);
+    sizes.add(Buffer.from(token, 'base64url').length);
+    assert.deepEqual(A.openAuditCursor(key, owner, token, now + 1), { top, after }, `${top}/${after}`);
+  }
+  assert.deepEqual([...lengths], [A.AUDIT_CURSOR_LENGTH]);
+  assert.deepEqual([...sizes], [53]);
+  // The expiry is fixed width too: the clock does not lengthen the value.
+  for (const clock of [0, 9, now, MAX - A.AUDIT_CURSOR_TTL_MS])
+    assert.equal(A.sealAuditCursor(key, owner, { top: 10, after: 2 }, clock).length, A.AUDIT_CURSOR_LENGTH, `clock ${clock}`);
+  // The reader is bound as GCM additional data, not written into the payload: its length does not show either.
+  for (const other of [['i', 's'], ['inst-' + 'x'.repeat(120), owner[1]], ['병원 \\ "%_', owner[1]]]) {
+    const token = A.sealAuditCursor(key, other, { top: 1000, after: 2 }, now);
+    assert.equal(token.length, A.AUDIT_CURSOR_LENGTH, JSON.stringify(other));
+    assert.deepEqual(A.openAuditCursor(key, other, token, now), { top: 1000, after: 2 });
+    assert.equal(A.openAuditCursor(key, owner, token, now), null, 'bound to its own reader');
+  }
+  // A value the layout cannot carry is refused when sealing, never truncated or wrapped.
+  for (const bad of [{ top: -1, after: 1 }, { top: MAX + 1, after: 1 }, { top: 1.5, after: 1 }, { top: 10, after: NaN }])
+    assert.throws(() => A.sealAuditCursor(key, owner, bad, now), RangeError, JSON.stringify(bad));
+  assert.throws(() => A.sealAuditCursor(key, owner, { top: 10, after: 2 }, MAX), RangeError, 'an expiry beyond the safe range');
+  // Only the fixed layout opens: under the right key and reader, another version, an unsafe value, another length or
+  // the old JSON payload is refused.
+  const forge = payload => {
+    const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(Buffer.from(JSON.stringify(owner), 'utf8'));
+    const body = Buffer.concat([cipher.update(payload), cipher.final()]);
+    return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
+  };
+  const layout = Buffer.alloc(25);
+  layout.writeUInt8(2, 0);
+  layout.writeBigUInt64BE(10n, 1);
+  layout.writeBigUInt64BE(2n, 9);
+  layout.writeBigUInt64BE(BigInt(now + 1000), 17);
+  assert.deepEqual(A.openAuditCursor(key, owner, forge(layout), now), { top: 10, after: 2 }, 'the forge builds the real layout');
+  const version1 = Buffer.from(layout); version1[0] = 1;
+  const unsafe = Buffer.from(layout); unsafe.writeBigUInt64BE(BigInt(MAX) + 1n, 1);
+  const unsafeExpiry = Buffer.from(layout); unsafeExpiry.writeBigUInt64BE(BigInt(MAX) + 1n, 17);
+  const zeroAfter = Buffer.from(layout); zeroAfter.writeBigUInt64BE(0n, 9);
+  const forged = {
+    'version 1': version1, 'top beyond the safe range': unsafe, 'expiry beyond the safe range': unsafeExpiry,
+    'after 0': zeroAfter, 'one byte shorter': layout.subarray(0, 24), 'one byte longer': Buffer.concat([layout, Buffer.alloc(1)]),
+    'the old JSON payload': Buffer.from(JSON.stringify({ v: 1, owner, top: 10, after: 2, expires: now + 1000 }), 'utf8'),
+  };
+  for (const [name, payload] of Object.entries(forged)) assert.equal(A.openAuditCursor(key, owner, forge(payload), now), null, name);
+});
+
+test('B-F01: hidden rows that move the pinned top across digit boundaries change no row, total, page end or length', async () => {
+  const key = randomBytes(32), owner = ['inst-a', '00000000-0000-4000-8000-0000000000aa'], now = Date.UTC(2026, 8, 26);
+  const visible = [1, 2, 3, 4, 5].map(id => row(id, 'study.arrived', `${S1}.${id}`, { institutionId: 'inst-a' }, 'system'));
+  const seen = [];
+  for (const top of [5, 9, 10, 99, 100, 999, 1000, 10000]) {
+    // Everything above the reader's rows is hidden from it: another institution's rows and a hidden action naming it.
+    const hiddenRows = [];
+    for (let id = 6; id <= top; id++)
+      hiddenRows.push(id % 2 ? row(id, 'state.patch', `${S2}.${id}`, { by: 'inst-b' })
+        : row(id, 'report.draft', `${S2}.${id}`, { len: [1, 0, 0], by: 'inst-a' }));
+    const rows = [...visible, ...hiddenRows];
+    const pinned = Math.max(...rows.map(r => r.id));
+    assert.equal(pinned, top);
+    const first = await A.readAuditPage(sourceOver(rows), 'inst-a', { after: null, limit: 2 });
+    const token = A.sealAuditCursor(key, owner, { top: pinned, after: first.last }, now);
+    const cursor = A.openAuditCursor(key, owner, token, now);
+    assert.deepEqual(cursor, { top: pinned, after: first.last });
+    const second = await A.readAuditPage(sourceOver(rows.filter(r => r.id <= cursor.top)), 'inst-a', { after: cursor.after, limit: 2 });
+    seen.push(JSON.stringify({ rows: first.rows, total: first.total, last: first.last, next: second.rows, length: token.length }));
+  }
+  assert.equal(new Set(seen).size, 1, 'the reader cannot tell how many hidden rows sit above its own');
+  assert.equal(JSON.parse(seen[0]).length, A.AUDIT_CURSOR_LENGTH);
+  assert.equal(JSON.parse(seen[0]).total, 5);
+});
+
+// ── the SQL prefilter (B-F02) ──
+
+/** PostgreSQL LIKE with its default escape character \ (the removed Prisma `contains` passed the value unescaped). */
+function likeMatches(text, pattern) {
+  const literal = ch => ch.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  let source = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '\\') source += literal(pattern[++i] ?? '');
+    else if (ch === '%') source += '[\\s\\S]*';
+    else if (ch === '_') source += '[\\s\\S]';
+    else source += literal(ch);
+  }
+  return new RegExp('^' + source + '$', 'u').test(text);
+}
+const removedLikeCandidate = (source, reader) => A.AUDIT_CANDIDATE_ACTIONS.includes(source.action)
+  && ((typeof source.detail === 'string' && likeMatches(source.detail, '%' + JSON.stringify(reader) + '%'))
+    || (A.AUDIT_TARGET_ACTIONS.includes(source.action) && source.target === reader));
+
+test('B-F02: the SQL prefilter is a literal substring: names with \\, ", % and _ lose no visible row and add none', async () => {
+  const NAMES = ['inst-a', 'inst\\b', 'inst"q', 'inst%p', 'inst_u', 'a\\"%_\\\\z', '병원 A'];
+  const OTHER = 'inst-z';
+  const rows = [], expected = new Map([...NAMES, OTHER].map(name => [name, []]));
+  let id = 0;
+  const add = (readers, action, target, detail, actor) => {
+    rows.push(row(++id, action, target, detail, actor));
+    for (const reader of readers) expected.get(reader).push(id);
+  };
+  NAMES.forEach((name, n) => {
+    const m = `syn-member-name-${n}`, uid = k => `${S3}.${n}.${k}`;
+    add([name], 'admin.user.approve', m, { before: snap(m, null, 'PENDING'), after: snap(m, name, 'APPROVED'), verificationOverride: true });
+    add([name, OTHER], 'admin.user.update', m, { before: snap(m, name, 'APPROVED'), after: snap(m, OTHER, 'APPROVED'),
+      verificationOverride: true });
+    add([name], 'study.access', m, { institution: name, subject: m, revision: 1, restricted: false, reason: 'SYN reason' });
+    add([name], 'study.arrived', uid(1), { institutionId: name }, 'system');
+    add([name], 'match', uid(1), { oid: 'O-SYN', ov: { name: 'SYN^PATIENT', id: 'SYN-P' }, by: name });
+    add([name], 'reader.assignment', uid(1), { institution: name, revision: 1, from: null, to: 'syn-reader@members.test' });
+    add([name], 'tech-note.revise', uid(1), { version: 1, institutionId: name });
+    add([name], 'report.approve', uid(1), { version: 1, by: name, len: [1, 0, 0] });
+    add([name], 'hanging-protocol.site.save', name, { revision: 1 });
+    add([], 'report.draft', uid(1), { len: [1, 0, 0], by: name });                  // hidden action
+    add([], 'study.arrived', uid(2), { institutionId: null, note: name }, 'system'); // unassigned: nobody
+  });
+  const all = { after: null, limit: 100 };
+  const lost = {};
+  for (const reader of [...NAMES, OTHER]) {
+    const label = JSON.stringify(reader);
+    const everything = await A.readAuditPage(sourceOver(rows), reader, all);
+    // What each reader sees is exactly the rows written for it: nothing of another name, however its LIKE pattern reads.
+    const shownIds = rows.filter(r => A.projectAuditRow(r, reader)).map(r => r.id);
+    assert.deepEqual(shownIds, expected.get(reader), label);
+    assert.equal(everything.total, reader === OTHER ? NAMES.length : 9, label);
+    // No visible row misses the prefilter, and the prefiltered read is the whole read.
+    for (const r of rows) if (A.projectAuditRow(r, reader)) assert.ok(A.auditCandidateRow(r, reader), `row ${r.id} for ${label}`);
+    const prefiltered = await A.readAuditPage(sourceOver(rows.filter(r => A.auditCandidateRow(r, reader))), reader, all);
+    assert.deepEqual(prefiltered, everything, `${label}: the prefilter changes nothing`);
+    const removed = await A.readAuditPage(sourceOver(rows.filter(r => removedLikeCandidate(r, reader))), reader, all);
+    lost[reader] = everything.total - removed.total;
+  }
+  // Negative control: the removed LIKE form loses every detail-attributed row of a name with \ or " (only the target
+  // row survives), and none for %, _ or plain names — the defect this test would catch if the LIKE came back.
+  assert.deepEqual(lost, { 'inst-a': 0, 'inst\\b': 8, 'inst"q': 8, 'inst%p': 0, 'inst_u': 0, 'a\\"%_\\\\z': 8, '병원 A': 0,
+    'inst-z': 0 });
+  // The mention is the JSON text the writers leave in detail.
+  for (const name of NAMES) assert.equal(A.auditMention(name), JSON.stringify(name));
+  // The service's SQL is the model above: strpos over the same mention, the same candidate and target lists, no LIKE.
+  const service = readFileSync(path.join(ROOT, 'api', 'src', 'admin.service.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const start = service.indexOf('\n  async auditEvents(');
+  assert.ok(start > 0, 'auditEvents is found');
+  const method = service.slice(start, service.indexOf('\n  }\n', start));
+  const sql = /\$queryRaw<AuditLogRow\[\]>`([^`]*)`/.exec(method);
+  assert.ok(sql, 'the audit read is one raw query');
+  assert.match(method, /const mention = auditMention\(me\);/);
+  assert.match(method, /const candidates = Prisma\.join\(\[\.\.\.AUDIT_CANDIDATE_ACTIONS\]\), targets = Prisma\.join\(\[\.\.\.AUDIT_TARGET_ACTIONS\]\);/);
+  assert.match(sql[1], /"action" IN \(\$\{candidates\}\)/);
+  assert.match(sql[1], /AND \(strpos\("detail", \$\{mention\}\) > 0 OR \("action" IN \(\$\{targets\}\) AND "target" = \$\{me\}\)\)/);
+  assert.match(sql[1], /ORDER BY "id" DESC LIMIT \$\{take\}/);
+  assert.doesNotMatch(sql[1], /\b(I?LIKE|SIMILAR)\b/i);
+  assert.doesNotMatch(method, /\bcontains\s*:/);
 });
 
 test('the query takes limit (1-100, default 25) and the sealed after only', () => {
