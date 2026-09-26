@@ -1,8 +1,17 @@
 (function(root){
   'use strict';
-  let active=null;
+  /*
+   * The page's session lifecycle (admin.html KinConsoleSession: ended, end, onEnd) is attached once (Astra S5-U6a-F04).
+   * Study Access sends its own requests, so its 401 ends the page session before any body is read, like every other
+   * request of the page, and the page's end (Log out, any 401, another tab) disposes the dialog at once: no unsaved-change
+   * confirm, no wait for the logout answer, no open, reload or save after it. Without an attached lifecycle open() does
+   * nothing rather than run a dialog that outlives its session.
+   */
+  let active=null,session=null,closeActive=null;
   const emptyRule=()=>({patientId:null,modalities:[],dateFrom:null,dateTo:null,studyUids:[]});
+  function attach(lifecycle){if(session)return;session=lifecycle;lifecycle.onEnd(()=>closeActive?.());}
   function open(user){
+    if(!session||session.ended())return;
     if(active){active.focus();return;}
     const owner=(()=>{const s=KinAuth.session();return [s?.institution,s?.sub];})();
     if(!owner.every(Boolean)||user.institution!==owner[0]||!user.enabled)return;
@@ -17,11 +26,16 @@
     function message(text){status.textContent=text;}
     function close(){if(busy||((dirty||pending)&&!confirm('저장되지 않았거나 결과를 확인하지 못한 변경이 있습니다. 닫으시겠습니까?')))return;dispose();}
     async function request(method,body){
+      if(closed||session.ended())throw Error('세션이 종료되었습니다');
       if(!sameOwner())throw Error('계정이 변경되었습니다. 다시 로그인하세요');
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
       try{
         const response=await fetch('/api/admin/users/'+encodeURIComponent(user.id)+'/study-access',{method,credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json','X-KIN-CSRF':'1'},...(body?{body:JSON.stringify(body)}:{})});
+        // Judged before the body and before the closed check: a 401 ends the page session even after this dialog is gone.
+        if(response.status===401){session.end();throw Error('세션이 만료되었습니다');}
         const result=await response.json().catch(()=>({}));
+        // A body read after the end or after Close is dropped: nothing of it is drawn or kept.
+        if(closed||session.ended())throw Error('세션이 종료되었습니다');
         if(!sameOwner())throw Error('계정이 변경되었습니다. 응답을 적용하지 않았습니다');
         if(!response.ok){const e=Error(typeof result.message==='string'?result.message:'접근 조건 요청을 처리하지 못했습니다');e.status=response.status;throw e;}
         if(JSON.stringify(result.owner)!==JSON.stringify(owner)||result.subject!==user.id||!Number.isInteger(result.revision))throw Error('접근 조건 응답의 사용자·버전을 확인하지 못했습니다');
@@ -44,10 +58,10 @@
       message(`Revision ${revision} · ${p.restricted?'Restricted':'No Additional Restriction'}${result.needsInstitutionReview?' · 기관 변경 후 최초 설정이 필요합니다.':''}`);
     }
     async function reload(ask=true){
-      if(busy||(ask&&(dirty||pending)&&!confirm('현재 입력·재시도 요청을 버리고 서버 설정을 불러오시겠습니까?')))return;
+      if(closed||busy||(ask&&(dirty||pending)&&!confirm('현재 입력·재시도 요청을 버리고 서버 설정을 불러오시겠습니까?')))return;
       const token=++generation;busy=true;controls();message('Loading');
       try{const r=await request('GET');if(closed||token!==generation)return;render(r);pending=null;}
-      catch(e){message(e.message||'접근 조건을 불러오지 못했습니다');}
+      catch(e){if(!closed)message(e.message||'접근 조건을 불러오지 못했습니다');}
       finally{busy=false;if(!closed)controls();}
     }
     function policy(){
@@ -57,7 +71,7 @@
         const v=key=>box.querySelector('[data-field="'+key+'"]').value.trim();return {patientId:v('patientId')||null,modalities:v('modalities')?v('modalities').split(/[,\s]+/).map(x=>x.toUpperCase()):[],dateFrom:v('dateFrom')||null,dateTo:v('dateTo')||null,studyUids:v('studyUids')?v('studyUids').split(/[,\s]+/):[]};})};
     }
     async function save(retry=false){
-      if(busy||revision===null)return;
+      if(closed||busy||revision===null)return;
       if(!retry){
         if(pending||!form.reportValidity())return;
         try{const p=policy();if(form.elements.mode.value==='rules'&&!p.rules.length)throw Error('조건을 추가하거나 Deny All Studies를 명시적으로 선택하세요');pending={expectedOwner:owner,revision,policy:p,reason:form.elements.reason.value,requestId:crypto.randomUUID()};}
@@ -65,19 +79,18 @@
       }
       busy=true;controls();message('Saving');const token=++generation;
       try{const result=await request('POST',pending);if(closed||token!==generation)return;pending=null;dirty=false;revision=null;message(`Saved · Revision ${result.revision}. Reload로 현재 설정을 확인하세요.`);}
-      catch(e){message((e.message||'저장 결과를 확인하지 못했습니다')+' · 입력을 유지했습니다.');if([400,403,404,409].includes(e.status)){pending=null;if(e.status===409)revision=null;}}
+      catch(e){if(closed)return;message((e.message||'저장 결과를 확인하지 못했습니다')+' · 입력을 유지했습니다.');if([400,403,404,409].includes(e.status)){pending=null;if(e.status===409)revision=null;}}
       finally{busy=false;if(!closed)controls();}
     }
     form.addEventListener('input',()=>{dirty=true;});form.elements.mode.onchange=modeChanged;
     $('[data-add]').onclick=()=>{addRule();dirty=true;};$('[data-reload]').onclick=()=>reload();$('[data-retry]').onclick=()=>save(true);$('[data-close]').onclick=close;
     form.onsubmit=e=>{e.preventDefault();save();};dialog.addEventListener('cancel',e=>{e.preventDefault();close();});
-    let channel=null;
-    function dispose(){closed=true;generation++;dialog.remove();if(active===dialog)active=null;channel?.close();window.removeEventListener('storage',onStorage);window.removeEventListener('pagehide',dispose);}
-    const onStorage=e=>{if(e.key==='kin-session-ended')dispose();};
-    try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')dispose();};}catch(e){}
+    // Close after a confirm, the page session's end (the attached lifecycle, which also hears other tabs) and pagehide all
+    // end here: the request generation moves and the pending save, revision and edits go with the dialog.
+    function dispose(){closed=true;generation++;pending=null;revision=null;dirty=false;if(dialog.open)dialog.close();dialog.remove();if(active===dialog)active=null;if(closeActive===dispose)closeActive=null;window.removeEventListener('pagehide',dispose);}
+    closeActive=dispose;
     window.addEventListener('pagehide',dispose,{once:true});
-    window.addEventListener('storage',onStorage);
     document.body.append(dialog);dialog.showModal();reload(false);
   }
-  root.KinStudyAccessAdmin={open};
+  root.KinStudyAccessAdmin={open,attach};
 })(window);
