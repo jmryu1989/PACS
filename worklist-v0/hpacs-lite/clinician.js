@@ -2,6 +2,8 @@
  * S5-U2a Clinician Home (clinician.html).
  * REQ-S5-U2a-CLINICIAN-HOME -> RISK-S5-U2a-STALE-A-B-A / HIDE-AS-PERMISSION / STATE-CONFUSION -> TEST-S5-U2a-DOM
  * (tests/clinician_home_dom_test.py).
+ * S5-U2b 뷰어·비교: REQ-S5-U2b-READONLY-VIEWER -> RISK-S5-U2b-WRITE-CONTROL / WRONG-PRIOR -> TEST-S5-U2b-DOM
+ * (tests/clinician_viewer_dom_test.py). 영상은 고정 OHIF 창에서 열고, 그 창의 읽기 전용은 config/ohif.js가 서버 /me로 정한다.
  *
  * 그리는 칸은 S5-U1b 두 읽기 응답에 있는 것뿐이다 — GET clinician/studies의 행과 GET clinician/studies/:uid/report.
  * 역할을 보고 컨트롤을 숨기거나 권한을 짐작하지 않는다. 서버가 거절하면(403/404/409) 그 상태 코드·코드·문구를
@@ -44,7 +46,18 @@
     keysFailed: '판독문을 불러오지 못해 키 이미지도 표시하지 않았습니다.',
     emptyField: '기재된 내용이 없습니다.',
     untitled: '(제목 없음)',
+    viewer: '영상은 새 창의 뷰어에서 읽기 전용으로 엽니다. 측정·키 이미지를 만들거나 저장하지 않으며 서버도 쓰기를 거절합니다.',
+    viewerAsked: '뷰어 창에 이 검사를 열도록 요청했습니다. 영상 표시는 그 창에서 확인하세요.',
+    compareAsked: '뷰어 창에 이 검사와 고른 비교 검사를 나란히 열도록 요청했습니다. 영상 표시는 그 창에서 확인하세요.',
+    viewerBlocked: '브라우저가 새 창을 막아 뷰어를 열지 못했습니다. 이 사이트의 팝업을 허용한 뒤 다시 누르세요.',
+    viewerUid: '검사 UID 형식을 확인할 수 없어 뷰어를 열지 않았습니다.',
+    compareGone: '비교할 검사를 지금 목록에서 같은 환자로 확인할 수 없어 열지 않았습니다. 목록을 새로고침하세요.',
+    compareHint: '서버가 정한 같은 환자 키(기관과 원본 DICOM 환자 ID)의 다른 검사만 표시합니다. 이름이나 화면에서 고친 환자 ID로는 묶지 않습니다. Compare는 이 검사와 나란히 엽니다.',
+    compareNone: '같은 환자 키의 다른 검사가 목록에 없어 나란히 비교할 검사가 없습니다.',
+    compareNoKey: '이 검사에는 서버 환자 키가 없어 비교할 검사를 찾지 않습니다.',
   };
+  const VIEWER_WINDOW = 'kin-clinician-viewer';
+  const STUDY_UID = /^\d+(?:\.\d+)+$/;
 
   const $ = selector => document.querySelector(selector);
   let owner = null;
@@ -363,6 +376,95 @@
     $('#report').hidden = false;
     $('#keys').hidden = false;
     $('#viewer-slot').hidden = false;
+    $('#open-viewer').disabled = false;
+    paintCompare(row);
+  }
+
+  // ── 뷰어와 비교(S5-U2b) ──
+
+  /**
+   * 같은 환자인지는 서버가 만든 sourcePatientKey(기관|원본 DICOM PatientID, pacs.service.ts)로만 본다. 이름·생년월일이나
+   * 기사가 화면에서 고친 환자 ID(overlay)는 다른 환자가 같아 보이거나 같은 환자가 달라 보이는 값이라 쓰지 않는다.
+   */
+  function patientKey(row) {
+    return row && typeof row.sourcePatientKey === 'string' && row.sourcePatientKey ? row.sourcePatientKey : null;
+  }
+
+  /**
+   * 비교 후보는 지금 목록(서버가 이 계정에 허용한 검사)에서 같은 환자 키의 다른 검사다. 후보가 있을 때만 이 칸을 만들고,
+   * 없으면 이유를 viewer-note 한 줄로 쓴다. 선택이 바뀌면(select·clearDetail) 그 자리에서 다시 그리거나 지운다 — 요청이 없으므로
+   * 늦게 도착해 다른 검사의 후보를 그리는 답도 없다.
+   */
+  function paintCompare(row) {
+    const old = $('#compare');
+    if (old) old.remove();
+    const note = $('#viewer-note');
+    const key = patientKey(row);
+    const peers = key === null ? [] : studies.filter(other => other.uid !== row.uid && patientKey(other) === key);
+    if (!peers.length) {
+      note.textContent = `${TEXT.viewer} ${key === null ? TEXT.compareNoKey : TEXT.compareNone}`;
+      return;
+    }
+    note.textContent = TEXT.viewer;
+    const section = node('section');
+    section.id = 'compare';
+    section.dataset.uid = row.uid;
+    section.setAttribute('aria-labelledby', 'compare-title');
+    section.style.marginTop = '14px';
+    const head = node('div', 'panel-head');
+    const title = node('h3', null, 'Comparison');
+    title.id = 'compare-title';
+    head.append(title);
+    const list = node('ul');
+    list.id = 'compare-list';
+    for (const other of peers) {
+      const item = node('li');
+      item.dataset.uid = other.uid;
+      item.style.margin = '6px 0';
+      const button = node('button', null, 'Compare');
+      button.type = 'button';
+      button.addEventListener('click', () => openViewer(other.uid));
+      item.append(node('span', null, `${day(other.date)} · ${dash(other.modality)} · ${dash(other.desc)}`), ' ',
+        statusBadge(other.report), ' ', button,
+        node('p', 'muted', `${dash(other.name)} · ${dash(other.id)} · ${dash(other.institutionName)}${other.tele === true ? ' · Tele' : ''}`));
+      list.append(item);
+    }
+    section.append(head, node('p', 'muted', TEXT.compareHint), list);
+    $('#viewer-slot').after(section);
+  }
+
+  /**
+   * 뷰어 창은 이름 하나로 다시 쓴다. 누른 순간의 선택과 목록으로 다시 확인한다 — 버튼을 그린 뒤 목록이 바뀌었거나 다른 검사를
+   * 골랐으면 다른 환자의 검사를 나란히 열 수 있다. 그 창이 읽기 전용인지는 창의 문서(config/ohif.js)가 서버 /me로 정하고, 쓰기는
+   * 서버가 거절한다. 이 화면은 역할을 보고 여기서 무엇을 막지 않는다.
+   */
+  function openViewer(otherUid) {
+    if (leaving || selected === null) return;
+    const row = byUid.get(selected);
+    if (!row) return;
+    const note = $('#viewer-note');
+    const other = otherUid === null ? null : byUid.get(otherUid);
+    if (otherUid !== null && (!other || other.uid === row.uid || patientKey(row) === null || patientKey(other) !== patientKey(row))) {
+      note.textContent = TEXT.compareGone;
+      return;
+    }
+    const uids = other ? [row.uid, other.uid] : [row.uid];
+    if (!uids.every(uid => typeof uid === 'string' && uid.length <= 64 && STUDY_UID.test(uid))) {
+      note.textContent = TEXT.viewerUid;
+      return;
+    }
+    // main.html openOhifWindow와 같은 주소 모양: 첫 검사가 현재 검사, 둘째가 비교 검사이고 비교 배치로 연다.
+    const url = `/ohif/viewer?StudyInstanceUIDs=${uids.join(',')}${other ? '&hangingProtocolId=@ohif/hpCompare' : ''}`;
+    let popup = null;
+    try { popup = root.open(url, VIEWER_WINDOW); } catch (_) {}
+    if (!popup) {
+      note.textContent = TEXT.viewerBlocked;
+      return;
+    }
+    // 뷰어 문서가 이 화면을 되짚지 못하게 끊는다(워크리스트의 뷰어 창과 같다).
+    try { popup.opener = null; } catch (_) {}
+    try { popup.focus(); } catch (_) {}
+    note.textContent = other ? TEXT.compareAsked : TEXT.viewerAsked;
   }
 
   function setReport(state, text, detail) {
@@ -402,6 +504,10 @@
     $('#report').hidden = true;
     $('#keys').hidden = true;
     $('#viewer-slot').hidden = true;
+    $('#open-viewer').disabled = true;
+    $('#viewer-note').textContent = TEXT.viewer;
+    const compare = $('#compare');
+    if (compare) compare.remove();
     const empty = $('#detail-empty');
     empty.textContent = note || TEXT.pick;
     empty.hidden = false;
@@ -575,6 +681,9 @@
     $('#refresh').addEventListener('click', () => loadList());
     $('#list-retry').addEventListener('click', () => loadList());
     $('#report-retry').addEventListener('click', () => { if (selected !== null) select(selected); });
+    $('#open-viewer').addEventListener('click', () => openViewer(null));
+    // Open Viewer와 Compare의 결과(창 차단·다시 확인 실패)를 읽어 준다.
+    $('#viewer-note').setAttribute('aria-live', 'polite');
     const tbody = $('#studies');
     tbody.addEventListener('click', event => {
       const tr = event.target.closest('tr[data-uid]');
