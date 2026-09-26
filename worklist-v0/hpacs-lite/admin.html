@@ -120,15 +120,15 @@
   <main>
     <div class="toolbar">
       <label class="wide">검색
-        <input id="search" type="search" placeholder="아이디, 이름, 이메일">
+        <input id="search" type="search" placeholder="아이디, 이름, 이메일" disabled>
       </label>
       <label>기관
-        <select id="institution-filter"><option value="">전체 기관</option></select>
+        <select id="institution-filter" disabled><option value="">전체 기관</option></select>
       </label>
       <span class="badge" id="pending-badge">Pending 0</span>
       <div class="spacer"></div>
-      <button type="button" id="refresh">Refresh</button>
-      <button type="button" class="primary" id="open-create">Create Member</button>
+      <button type="button" id="refresh" disabled>Refresh</button>
+      <button type="button" class="primary" id="open-create" disabled>Create Member</button>
     </div>
 
     <p class="message" id="message" role="alert"></p>
@@ -143,9 +143,9 @@
       </table>
     </div>
     <div class="pager">
-      <button type="button" id="previous">Previous</button>
+      <button type="button" id="previous" disabled>Previous</button>
       <span id="page-label">1 / 1</span>
-      <button type="button" id="next">Next</button>
+      <button type="button" id="next" disabled>Next</button>
     </div>
 
     <section class="gateway" id="gateway" aria-labelledby="gateway-title">
@@ -222,13 +222,14 @@
   <script src="study-access-admin.js"></script>
   <script>
     /*
-     * One end for this page's session (Astra S5-U6a-F01/F02). Log out, a 401 from any request of this page and another
-     * tab's session end all come here and only the first one acts: every panel's closer empties it and drops its requests
-     * in flight before anything is awaited, then the page leaves once. KinAuth.logout() clears and moves only after
-     * POST /auth/logout answers (no time limit), so a panel that waited for it kept the last session's studies on screen
-     * and painted late answers meanwhile. Another tab's end sends no POST: the session is already gone, and a POST now
-     * could end the one that tab has since started. This page's own logout reaches the channel too (auth.js sends from a
-     * new channel object); it finds the session ended and does nothing, so the move stays the one KinAuth.logout() makes.
+     * One end for this page's session (Astra S5-U6a-F01/F02). Log out, a 401 from any request of this page (the first
+     * /api/me included, S5-U6a-F05) and another tab's session end all come here and only the first one acts: every
+     * panel's closer empties it and drops its requests in flight before anything is awaited, then the page leaves once.
+     * KinAuth.logout() clears and moves only after POST /auth/logout answers (no time limit), so a panel that waited for
+     * it kept the last session's studies on screen and painted late answers meanwhile. Another tab's end sends no POST:
+     * the session is already gone, and a POST now could end the one that tab has since started. This page's own logout
+     * reaches the channel too (auth.js sends from a new channel object); it finds the session ended and does nothing, so
+     * the move stays the one KinAuth.logout() makes.
      * Every module of the page takes part (S5-U6a-F03/F04): the members console, Study Access (study-access-admin.js,
      * attached below: its own requests and dialog) and Gateway Status each register a closer and send their 401 here.
      */
@@ -646,17 +647,27 @@
           $(control).disabled = true;
       }
 
-      // A session that ends while /api/me is out has already moved this page: its answer starts nothing, and go() keeps
-      // that move the only one.
+      /*
+       * The console's controls are off in the markup until a session is known to be an approved admin's (S5-U6a-F05):
+       * before that no member read or write can start, and they turn on after the first list read, where the pages are
+       * known and the search has a list to filter. No session is a 401 on /api/me (auth.js answers null without reading
+       * its body): this page's session end like any other 401, so end() runs every closer before the logout is sent and
+       * makes the one move after it; go() is not called as well. A session that ended while /api/me or the first read was
+       * out has already moved this page: nothing starts and nothing turns on after it, and go() keeps that move the only
+       * one. The other refusals (a failed read, pending, demo, no admin role) only move: they do not end the session.
+       */
       async function boot() {
         try { await KinAuth.init(); }
         catch { KinConsoleSession.go("index.html"); return; }
         if (KinConsoleSession.ended()) return;
         const session = KinAuth.session();
-        if (!session || session.state !== "approved") { KinConsoleSession.go("index.html"); return; }
+        if (!session) { KinConsoleSession.end(); return; }
+        if (session.state !== "approved") { KinConsoleSession.go("index.html"); return; }
         if (session.demo || !KinAuth.has("admin")) { KinConsoleSession.go("main.html"); return; }
         $("#actor").textContent = session.displayName || session.user;
         await loadUsers();
+        if (KinConsoleSession.ended()) return;
+        for (const control of ["#search", "#institution-filter", "#refresh", "#open-create"]) $(control).disabled = false;
       }
 
       KinConsoleSession.onEnd(closeMembers);

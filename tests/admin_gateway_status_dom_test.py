@@ -77,6 +77,21 @@ off after the end, so their "Refresh reads nothing" check turns Refresh back on 
       tab's end, in either order, give one logout POST and one move when a 401 comes first, and no POST and one move
       when another tab's end comes first.
 
+The first /api/me 401 is an end of the page session too (Astra S5-U6a-F05). At b95bc17 boot() answered it (auth.js
+returns a null session) with the move alone: nothing closed and nothing was refused while the move was out, and Refresh
+and Create Member were on from the markup before the session was known, so a member list read out before it painted
+after it and a Create Member submit was still sent. Case 12 covers the other order (another tab's end first).
+
+  17  while /api/me is out no member control is on and only /api/me was sent; the controls turn on after the first list
+      read of an approved admin session and stay off when that read's 401 ends it; a pending session moves once with
+      no logout POST. With Refresh and Create Member turned on by script (the b95bc17 state), a list read held, a list
+      body held and the Create Member dialog filled, a first /api/me 401 (body never read) ends the session before the
+      logout answers: members, form and dialog go, the released body paints nothing, a submit sends nothing, and the
+      held read's 401, Log out and another tab's end add no POST and no move; Log out before the 401 is the same single
+      POST and move. Controls: the b95bc17 markup has every control on before /api/me; the b95bc17 boot moves once with
+      no end and no POST, keeps the dialog open, paints the late list and sends the Create Member POST; the boot without
+      its check after the first read turns the controls on again after that read's 401.
+
 Synthetic data only (SYN-* names, 1.2.* UIDs): no server, no network, no credentials. A request the harness does not
 answer is aborted and fails the case, as does a page error or a browser dialog.
 """
@@ -313,14 +328,40 @@ ATTEMPT_ACCESS = """user => { const d = window.__access;
   return document.querySelectorAll('#study-access-dialog').length; }"""
 
 # Controls for 14 and 15: the members console without its closer and its end checks (before the request, after the
-# body, before the list, the temporary password and the created member are written, after /api/me), and the Study
-# Access module without its 401 line and its end closer.
+# body, before the list, the temporary password and the created member are written, after /api/me, after the first
+# read), and the Study Access module without its 401 line and its end closer.
 MEMBERS_FROM = "      async function request(method, path, body) {\n"
 MEMBERS_TO = "      boot();\n"
 MEMBER_CLOSER = "      KinConsoleSession.onEnd(closeMembers);\n"
-MEMBER_END_CHECKS = 6
+MEMBER_END_CHECKS = 7
 ACCESS_401 = "        if(response.status===401){session.end();throw Error('세션이 만료되었습니다');}\n"
 ACCESS_CLOSER = "lifecycle.onEnd(()=>closeActive?.());"
+
+# S5-U6a-F05: the shipped lines and the b95bc17 ones they replaced (every control on in the markup, the null session of
+# a /api/me 401 answered by the move alone), and the check after the first read that keeps the controls off after its end.
+CONTROLS_MARKUP = [
+    ('<input id="search" type="search" placeholder="아이디, 이름, 이메일" disabled>',
+     '<input id="search" type="search" placeholder="아이디, 이름, 이메일">'),
+    ('<select id="institution-filter" disabled>', '<select id="institution-filter">'),
+    ('<button type="button" id="refresh" disabled>Refresh</button>', '<button type="button" id="refresh">Refresh</button>'),
+    ('<button type="button" class="primary" id="open-create" disabled>Create Member</button>',
+     '<button type="button" class="primary" id="open-create">Create Member</button>'),
+    ('<button type="button" id="previous" disabled>Previous</button>', '<button type="button" id="previous">Previous</button>'),
+    ('<button type="button" id="next" disabled>Next</button>', '<button type="button" id="next">Next</button>'),
+]
+NO_SESSION = ('        if (!session) { KinConsoleSession.end(); return; }\n'
+              '        if (session.state !== "approved") { KinConsoleSession.go("index.html"); return; }\n')
+B95BC17_NO_SESSION = '        if (!session || session.state !== "approved") { KinConsoleSession.go("index.html"); return; }\n'
+AFTER_FIRST_READ = "        await loadUsers();\n        if (KinConsoleSession.ended()) return;\n"
+OPENED = ["#search", "#institution-filter", "#refresh", "#open-create"]
+# The b95bc17 state, where the markup had them on: the race below needs a list read and the dialog before /api/me answers.
+TURN_ON = "() => { for (const s of ['#refresh', '#open-create']) document.querySelector(s).disabled = false; }"
+CREATE_VALUES = {"username": "syn-created", "email": "syn-created@members.test", "lastName": "SYN", "firstName": "Created"}
+# A submit of the Create Member form, filled again by script, whatever its dialog shows; the form is emptied after.
+ATTEMPT_CREATE = """values => { const form = document.querySelector('#create-form');
+  for (const [name, value] of Object.entries(values)) form.elements[name].value = value;
+  form.dispatchEvent(new Event('submit', {cancelable: true}));
+  form.reset(); }"""
 
 
 def has_hangul(text):
@@ -716,6 +757,56 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.assertTrue(self.page.evaluate("""() => { window.__access = document.querySelector('#study-access-dialog');
           return window.__access?.open === true; }"""))
         return self.held_access.pop()
+
+    # ── the first /api/me (case 17) ──
+    def boot_held(self, body=None):
+        """Opens the page with its /api/me held and returns that route. Before it answers only /api/me was sent and no
+        member control is on (the Gateway control neither)."""
+        if body is not None:
+            self.admin_body = body
+        sent = len(self.api_calls())
+        self.held_me = []
+        self.page.goto(ORIGIN + PAGE_PATH)
+        self.wait_until(lambda: len(self.held_me) == 1, "the session read")
+        me, self.held_me = self.held_me.pop(), None
+        self.page.evaluate(PROBE)
+        self.assertEqual([("GET", "/api/me", "")], self.api_calls()[sent:])
+        members = self.members()
+        self.assertEqual((0, "", []), (members["rows"], members["actor"], members["dialogs"]))
+        self.assertTrue(self.summary()["refreshDisabled"])
+        return me, members["enabled"]
+
+    def ended(self):
+        return self.page.evaluate("() => KinConsoleSession.ended()")
+
+    def race_before_the_session(self):
+        """With Refresh and Create Member on (TURN_ON): one list read held, a second answered with its body held, and the
+        Create Member dialog open and filled, all before /api/me answers. Returns the held read."""
+        self.page.evaluate(TURN_ON)
+        self.member_replies += ["hold", (200, MEMBERS)]
+        self.page.locator("#refresh").click()
+        self.wait_until(lambda: len(self.held_members) == 1, "the first list read")
+        self.hold_body(LIST_PATH)
+        self.page.locator("#refresh").click()
+        self.wait_until(lambda: self.held_bodies(LIST_PATH) == 1, "the second list answer")
+        self.page.locator("#open-create").click()
+        for name, value in CREATE_VALUES.items():
+            self.page.locator(f'#create-form input[name="{name}"]').fill(value)
+        members = self.members()
+        self.assertEqual((0, ["create-dialog"], list(CREATE_VALUES.values())),
+                         (members["rows"], members["dialogs"], members["create"]))
+        return self.held_members.pop()
+
+    def release_logout_and_move(self, other, logouts, moves):
+        """The held logout answers; its move (answered 204) is the only one, and the end signals again add nothing."""
+        self.cancel_moves = True
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.held_logouts = None
+        self.wait_until(lambda: self.moves() == moves + 1, "the move after the logout")
+        self.send(other, CHANNEL_SIGNAL)
+        self.page.wait_for_timeout(200)
+        self.assert_closed_away(logouts + 1, moves + 1)
+        self.cancel_moves = False
 
     # ── cases ──
     def test_01_opening_members_reads_nothing_until_asked(self):
@@ -1387,6 +1478,139 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                 self.held_logouts = None
                 self.arrive_at_index()
                 self.assert_closed_away(logouts + 1, moves + 1)
+
+    def test_17_a_first_session_401_ends_the_page_before_anything_paints_or_writes(self):
+        other = self.other_tab()
+        with self.subTest(me="200, an approved admin"):
+            me, enabled = self.boot_held()
+            self.assertEqual([], enabled)
+            self.member_replies.append("hold")
+            me.fulfill(json=ME)
+            self.wait_until(lambda: len(self.held_members) == 1, "the first list read")
+            expect(self.page.locator("#gateway-refresh")).to_be_enabled()
+            members = self.members()
+            self.assertEqual(([], "SYN Admin"), (members["enabled"], members["actor"]), "the controls wait for the first read")
+            self.held_members.pop().fulfill(json=MEMBERS)
+            expect(self.page.locator("#users td.username")).to_have_count(1)
+            expect(self.page.locator("#open-create")).to_be_enabled()
+            self.assertEqual(OPENED, self.members()["enabled"], "one page: Previous and Next stay off")
+
+        with self.subTest(me="200, the first list read 401"):
+            logouts, moves = self.logouts, self.moves()
+            me, _ = self.boot_held()
+            self.held_logouts = []
+            self.member_replies.append((401, {"message": SERVER_WORDING}))
+            me.fulfill(json=ME)
+            self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+            self.page.wait_for_timeout(200)
+            self.assertTrue(self.ended())
+            self.assert_closed()
+            self.assert_members_closed()
+            self.release_logout_and_move(other, logouts, moves)
+
+        with self.subTest(me="403 pending"):
+            logouts, moves, reads = self.logouts, self.moves(), self.count("GET", LIST_PATH)
+            me, _ = self.boot_held()
+            self.cancel_moves = True
+            me.fulfill(status=403, json={"code": "INSTITUTION_PENDING"})
+            self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
+            self.page.wait_for_timeout(200)
+            self.assertFalse(self.ended(), "a pending account is not a session end: nothing opened, no logout")
+            self.assertEqual([], self.members()["enabled"])
+            self.assertTrue(self.summary()["refreshDisabled"])
+            self.assertEqual(reads, self.count("GET", LIST_PATH))
+            self.assert_closed_away(logouts, moves + 1)
+            self.cancel_moves = False
+
+        with self.subTest(me="401 first, with a list read, a list body and Create Member out"):
+            logouts, moves = self.logouts, self.moves()
+            me, _ = self.boot_held()
+            held = self.race_before_the_session()
+            reads = self.count("GET", LIST_PATH)
+            self.held_logouts = []
+            self.hold_body("/api/me")
+            me.fulfill(status=401, json={"message": SERVER_WORDING})
+            self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+            # Ended and closed before the logout answers and before any move.
+            self.assertEqual((True, moves), (self.ended(), self.moves()))
+            self.assert_closed()
+            self.assert_members_closed()
+            # The body held from before comes back: nothing paints and nothing is read again.
+            self.release_bodies(LIST_PATH)
+            self.assertEqual(ENDED, self.assert_members_closed()["message"])
+            # The read held from before answers 401, body never read: no second POST and no move.
+            self.hold_body(LIST_PATH)
+            done = self.fetch_done(LIST_PATH)
+            held.fulfill(status=401, json={"message": SERVER_WORDING})
+            self.wait_until(lambda: self.fetch_done(LIST_PATH) > done, "the held read's 401")
+            self.assert_401_bodies_unread("/api/me", LIST_PATH)
+            # Log out and another tab's end add nothing either.
+            self.page.locator("#logout").click()
+            self.send(other, CHANNEL_SIGNAL)
+            self.send(other, STORAGE_SIGNAL)
+            self.page.wait_for_timeout(200)
+            self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
+            self.assert_members_closed()
+            self.assert_nothing_leaves()
+            self.page.evaluate(ATTEMPT_CREATE, CREATE_VALUES)
+            expect(self.page.locator("#create-message")).to_have_text(ENDED)
+            self.assertEqual((0, reads), (self.count("POST", LIST_PATH), self.count("GET", LIST_PATH)))
+            self.release_logout_and_move(other, logouts, moves)
+
+        with self.subTest(me="Log out first, then /api/me 401"):
+            logouts, moves, reads = self.logouts, self.moves(), self.count("GET", LIST_PATH)
+            me, _ = self.boot_held()
+            self.held_logouts = []
+            self.page.locator("#logout").click()
+            self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+            self.assertTrue(self.ended())
+            self.assert_closed()
+            self.assert_members_closed()
+            self.hold_body("/api/me")
+            done = self.fetch_done("/api/me")
+            me.fulfill(status=401, json={"message": SERVER_WORDING})
+            self.wait_until(lambda: self.fetch_done("/api/me") > done, "the session 401")
+            self.page.wait_for_timeout(200)
+            self.assert_401_bodies_unread("/api/me")
+            self.assertEqual((logouts + 1, moves, reads), (self.logouts, self.moves(), self.count("GET", LIST_PATH)))
+            self.release_logout_and_move(other, logouts, moves)
+
+        # Control: the b95bc17 markup has every member control on before /api/me answers.
+        me, enabled = self.boot_held(edited(CONTROLS_MARKUP))
+        self.assertEqual(MEMBER_CONTROLS, enabled)
+        me.fulfill(json=ME)
+        expect(self.page.locator("#users td.username")).to_have_count(1)
+
+        # Control: the boot without its check after the first read turns the controls on after that read's 401 ended it.
+        logouts, moves = self.logouts, self.moves()
+        me, _ = self.boot_held(edited([(AFTER_FIRST_READ, "        await loadUsers();\n")]))
+        self.cancel_moves = True
+        self.member_replies.append((401, {"message": SERVER_WORDING}))
+        me.fulfill(json=ME)
+        self.wait_until(lambda: self.moves() == moves + 1, "the control's move after its logout")
+        self.assertEqual((True, logouts + 1), (self.ended(), self.logouts))
+        self.assertEqual(OPENED, self.members()["enabled"])
+        self.cancel_moves = False
+
+        # Control, last (its Create Member answer reads the list again): the b95bc17 boot answers the null session with the
+        # move alone. Nothing ends and no logout is sent, the dialog stays open, the late list paints and the submit goes.
+        logouts, moves = self.logouts, self.moves()
+        me, _ = self.boot_held(edited([(NO_SESSION, B95BC17_NO_SESSION)]))
+        held = self.race_before_the_session()
+        self.cancel_moves = True
+        me.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.moves() == moves + 1, "the control's move")
+        self.page.wait_for_timeout(200)
+        members = self.members()
+        self.assertEqual((False, logouts, ["create-dialog"], ["#refresh", "#open-create"]),
+                         (self.ended(), self.logouts, members["dialogs"], members["enabled"]))
+        self.release_bodies(LIST_PATH)
+        expect(self.page.locator("#users td.username")).to_have_count(1)
+        self.admin_replies.append((200, CREATED))
+        self.page.evaluate(ATTEMPT_CREATE, CREATE_VALUES)
+        self.wait_until(lambda: self.count("POST", LIST_PATH) == 1, "the control's Create Member POST")
+        held.fulfill(json=MEMBERS)
+        self.cancel_moves = False
 
 
 if __name__ == "__main__":
