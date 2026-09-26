@@ -1,46 +1,18 @@
 [
   {
-    "module": "tests/clinician_question_live.py",
-    "unit": "s5-u4a-clinician-question",
-    "timeout": 760,
+    "module": "tests/admin_audit_live.py",
+    "unit": "s5-u5b-admin-audit",
+    "timeout": 900,
     "cases": [
-      "ClinicianQuestionLive.test_q01_question_attribution_comes_from_token",
-      "ClinicianQuestionLive.test_q02_request_id_replay_and_reuse",
-      "ClinicianQuestionLive.test_q03_state_machine_answer_followup_close",
-      "ClinicianQuestionLive.test_q04_closed_question_refuses_late_writes",
-      "ClinicianQuestionLive.test_q05_stale_revision_conflicts_without_merge",
-      "ClinicianQuestionLive.test_q06_cross_tenant_uid_and_owner_negatives",
-      "ClinicianQuestionLive.test_q07_revocation_hides_thread_and_refuses_replay",
-      "ClinicianQuestionLive.test_q08_role_matrix",
-      "ClinicianQuestionLive.test_q09_consultation_unchanged_for_clinician",
-      "ClinicianQuestionLive.test_q10_audit_rows_attributed_and_text_free",
-      "ClinicianQuestionLive.test_q11_answer_keeps_report_anchor_after_reset",
-      "ClinicianQuestionLive.test_q12_study_delete_refused_while_questions_exist",
-      "ClinicianQuestionLive.test_q13_audit_rows_owner_institution_only",
-      "ClinicianQuestionLive.test_q14_metadata_study_access_allows_and_denies",
-      "ClinicianQuestionLive.test_q15_thread_read_is_one_snapshot"
+      "AdminAuditLive.test_01_refusals_before_any_history",
+      "AdminAuditLive.test_02_member_history_is_attributed_at_write_time",
+      "AdminAuditLive.test_03_a_deleted_member_keeps_its_record_time_history",
+      "AdminAuditLive.test_04_a_study_recreated_under_another_owner_keeps_its_history",
+      "AdminAuditLive.test_05_rows_without_a_record_time_institution_reach_nobody",
+      "AdminAuditLive.test_06_totals_and_paging_count_visible_rows_only"
     ],
     "expected": {
       "sweep": null,
-      "audit_rows": {}
-    }
-  },
-  {
-    "module": "tests/clinician_policy_live.py",
-    "unit": "s5-u1c-clinician-policy",
-    "timeout": 495,
-    "cases": [
-      "ClinicianPolicyLive.test_01_clinician_only_session_routes_and_default_denial",
-      "ClinicianPolicyLive.test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout",
-      "ClinicianPolicyLive.test_03_member_console_approves_updates_and_revokes_a_clinician",
-      "ClinicianPolicyLive.test_04_mixed_and_legacy_roles_keep_their_existing_paths",
-      "ClinicianPolicyLive.test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case"
-    ],
-    "expected": {
-      "sweep": {
-        "routes": 117,
-        "denied": 100
-      },
       "audit_rows": {}
     }
   }
