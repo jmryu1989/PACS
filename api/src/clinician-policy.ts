@@ -180,6 +180,19 @@ export function clinicianViewerWithheld(uid: string) {
   return { uid, final: false, items: null, nextCursor: null };
 }
 
+/** 표시 항목을 읽는 사이 확정 머리 판이 바뀌었을 때의 409 코드. 목록의 STUDY_LIST_CHANGED와 같은 "다시 불러오라"다. */
+export const CLINICIAN_VIEWER_CHANGED = 'VIEWER_REPORT_CHANGED';
+
+/**
+ * 표시 항목 한 쪽을 확정본으로 내보내도 되는가. 세 판 번호가 **같은 확정 판**이어야 한다 — 읽기 전 관문의 머리 판,
+ * 항목과 같은 SQL 문장에서 읽은 확정 머리 판, 읽기 뒤 관문의 머리 판. "확정인가"를 두 번 묻는 것으로는 부족하다:
+ * reset → (W에서 항목 작성·읽기·숨김) → 재승인이 끼면 앞뒤 모두 확정이지만 가운데서 읽은 항목은 확정 전의 것이다.
+ * commitReport는 매번 더 큰 판 번호를 쓰므로(`Report.version`은 줄지 않는다) 같은 번호면 그 사이 확정 변경이 없었다.
+ */
+export function clinicianViewerPinned(before: unknown, read: unknown, after: unknown): boolean {
+  return Number.isSafeInteger(before) && (before as number) > 0 && read === before && after === before;
+}
+
 /**
  * clinician-only의 표시 항목 쿼리. 숨긴 항목은 요청할 수 없다 — includeHidden은 없거나 'false'만
  * 받고 그 밖은 null(거절)이다. 나머지 칸(limit·cursor·recheck)의 형식은 viewerPage가 그대로 판정한다.
@@ -195,18 +208,28 @@ export function clinicianViewerQuery(query: any): Record<string, unknown> | null
 const OVERLAY_DISPLAY = ['id', 'name', 'birth', 'sex', 'date', 'acc', 'desc', 'modality'];
 
 /**
- * 임상의 목록 한 행. 입력은 워크리스트 목록(listStudies)의 한 행과 그 검사의 머리 판(uid·version·action)이다.
- * 덮어쓰기(state.ov)는 서버에서 적용하고 ov·orig 자체는 싣지 않는다. sourcePatientKey는 워크리스트가 **원본**
- * PatientID로 만든 값 그대로다 — 덮어쓰기로 같은 환자 묶음이 바뀌지 않는다. 머리 판은 목록이 본 판 번호
- * (state.version)와 같을 때만 쓴다 — 그 사이 판이 바뀌었으면 모름(확정 아님)이다.
+ * 임상의 목록의 판독 상태 한 건을 이루는 칸. 모두 **한 SQL 문장**(한 스냅샷)에서 함께 읽는다 — StudyState의 기관 두 칸과
+ * rs·repDoc·confirm, Report.version(행이 없으면 0), 그 판 ReportVersion의 action. 워크리스트 행의 state(toClient)는
+ * StudyState와 Report를 서로 다른 시점에 읽어 합친 것이라, 그 사이 Addendum이 끼면 새 판 번호에 이전 서명자·확정일이
+ * 붙는다. 그래서 임상의 목록의 상태는 이 스냅샷 행에서만 만들고, 워크리스트 행과 이 칸들이 하나라도 다르면 답 전체를 거절한다.
+ */
+export const CLINICIAN_LIST_PINS: readonly string[] = Object.freeze(['institutionId', 'teleInstitutionId', 'rs', 'repDoc', 'confirm', 'version']);
+
+/**
+ * 임상의 목록 한 행. 입력은 워크리스트 목록(listStudies)의 한 행과 그 검사의 스냅샷 행(CLINICIAN_LIST_PINS + uid·action)이다.
+ * 판독 상태는 **스냅샷 행에서만** 만든다 — 워크리스트 행의 state는 판 번호와 서명자를 다른 시점에 읽었을 수 있다.
+ * 스냅샷 행이 없거나 다른 검사의 것이면 모름(확정 아님)이다.
+ * 덮어쓰기(state.ov)는 서버에서 적용하고 ov·orig 자체는 싣지 않는다. ov는 RS=W에서만 바뀌고, RS·판 번호가 목록과
+ * 스냅샷에서 같아야 답이 나가므로 확정 행에 확정 뒤 바뀐 ov가 붙지 않는다. sourcePatientKey는 워크리스트가 **원본**
+ * PatientID로 만든 값 그대로다 — 덮어쓰기로 같은 환자 묶음이 바뀌지 않는다.
  * state·techNote·readerAssignment·gatewayReceipt·orderIdentity와 초안은 이 행에 없다.
  */
-export function clinicianStudyRow(row: any, head: any) {
+export function clinicianStudyRow(row: any, snapshot: any) {
   const state = row?.state && typeof row.state === 'object' ? row.state : null;
   const ov = state?.ov;
   const overlay = ov && typeof ov === 'object' && !Array.isArray(ov) ? ov : null;
   const shown = (key: string) => own(overlay, key) && typeof overlay[key] === 'string' ? overlay[key] as string : text(row?.[key]);
-  const pinned = head && state && Number.isSafeInteger(state.version) && head.version === state.version ? head : null;
+  const record = snapshot && typeof snapshot === 'object' && typeof row?.uid === 'string' && snapshot.uid === row.uid ? snapshot : null;
   return {
     uid: text(row?.uid),
     id: shown('id'), name: shown('name'), birth: shown('birth'), sex: shown('sex'), date: shown('date'),
@@ -216,7 +239,7 @@ export function clinicianStudyRow(row: any, head: any) {
     sourcePatientKey: typeof row?.sourcePatientKey === 'string' ? row.sourcePatientKey : null,
     institutionName: text(row?.institutionName),
     tele: row?.tele === true,
-    report: clinicianReportStatus(state, pinned),
+    report: clinicianReportStatus(record, record ? { version: record.version, action: record.action } : null),
   };
 }
 
@@ -234,24 +257,24 @@ export function clinicianPagination(pagination: any) {
  * 임상의 목록 응답. 워크리스트 응답에서 studies(좁힌 행)·serverTime·pagination만 남긴다 —
  * observedAt·notObserved·orderReconciliation은 기사·엔지니어링 화면의 칸이라 버린다.
  */
-export function clinicianList(list: any, heads: any[]) {
-  const byUid = new Map((Array.isArray(heads) ? heads : []).map(head => [head?.uid, head]));
+export function clinicianList(list: any, snapshots: any[]) {
+  const byUid = new Map((Array.isArray(snapshots) ? snapshots : []).map(snapshot => [snapshot?.uid, snapshot]));
   const studies = (Array.isArray(list?.studies) ? list.studies : []).map((row: any) => clinicianStudyRow(row, byUid.get(row?.uid)));
   return { studies, serverTime: typeof list?.serverTime === 'string' ? list.serverTime : null,
     ...(list?.pagination ? { pagination: clinicianPagination(list.pagination) } : {}) };
 }
 
 /**
- * 목록을 만든 뒤 머리 판을 읽는 사이 행의 기관·원격판독·RS가 바뀌었는가. 바뀌었으면 워크리스트와 같이 답 전체를
- * 거절한다(STUDY_LIST_CHANGED). 행이 사라져도 바뀐 것이다.
+ * 목록을 만든 뒤 스냅샷 행을 읽는 사이 기관·원격판독·RS·서명자·확정일·판 번호 중 하나라도 바뀌었는가(CLINICIAN_LIST_PINS).
+ * 바뀌었으면 워크리스트와 같이 답 전체를 거절한다(STUDY_LIST_CHANGED). 행이 사라지거나 다른 행이 끼어도 바뀐 것이다.
+ * 판 번호와 서명 칸까지 보는 이유: 워크리스트 행이 이전 판의 서명자와 새 판 번호를 섞어 들고 있었다면 여기서 드러난다.
  */
 export function clinicianListChanged(rows: any[], current: any[]): boolean {
   const now = new Map((Array.isArray(current) ? current : []).map(state => [state?.uid, state]));
   const listed = Array.isArray(rows) ? rows : [];
   if (now.size !== new Set(listed.map(row => row?.uid)).size) return true;
   return listed.some(row => {
-    const state = now.get(row?.uid);
-    return !state || state.institutionId !== (row?.state?.institutionId ?? null)
-      || state.teleInstitutionId !== (row?.state?.teleInstitutionId ?? null) || state.rs !== row?.state?.rs;
+    const state = now.get(row?.uid), seen = row?.state && typeof row.state === 'object' ? row.state : {};
+    return !state || CLINICIAN_LIST_PINS.some(key => (state[key] ?? null) !== (seen[key] ?? null));
   });
 }

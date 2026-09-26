@@ -120,6 +120,8 @@
     "rule": "S5-F5 conservative default: body, key images and viewer items only when rs=A and the head ReportVersion (uid, Report.version) action is approve or addendum; D-S5-NONFINAL-VIEW stays open",
     "final_actions": ["approve", "addendum"],
     "open_states": ["W", "T", "P", "H"],
+    "list_snapshot_pins": ["institutionId", "teleInstitutionId", "rs", "repDoc", "confirm", "version"],
+    "viewer_changed_code": "VIEWER_REPORT_CHANGED",
     "list_response_keys": ["studies", "serverTime"],
     "list_paged_response_keys": ["studies", "serverTime", "pagination"],
     "list_row_keys": ["uid", "id", "name", "birth", "sex", "date", "acc", "desc", "modality", "count", "series", "sourcePatientKey", "institutionName", "tele", "report"],

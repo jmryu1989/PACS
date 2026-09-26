@@ -314,6 +314,7 @@ class ClinicianPolicySpec(unittest.TestCase):
         read = lambda name: (API / name).read_text(encoding="utf-8")  # noqa: E731
         controller, service = read("pacs.controller.ts"), read("pacs.service.ts")
         viewer, preview = read("viewer.controller.ts"), read("report-preview.controller.ts")
+        items = read("viewer.service.ts")
         contract = FIXTURES["read_contract"]
         self.assertEqual(ts_array(self.policy, "CLINICIAN_FINAL_ACTIONS"), contract["final_actions"])
         self.assertEqual(ts_array(self.policy, "CLINICIAN_OPEN_STATES"), contract["open_states"])
@@ -327,15 +328,28 @@ class ClinicianPolicySpec(unittest.TestCase):
             self.assertIn("return " + call + ";", block.group(1))
         self.assertNotIn("clinician", controller)
         # the clinician list IS the worklist enumeration (same tenant/tele/StudyAccess/page/recheck), narrowed after it
-        body = re.search(r"\n  async clinicianStudies\(c: Caller, query\?: any\) \{\n(.*?)\n  \}\n", service, re.S).group(1)
+        body = re.search(r"\n  async clinicianStudies\(c: Caller, query\?: any\) \{\r?\n(.*?)\r?\n  \}\r?\n", service, re.S).group(1)
         lines = [line.strip() for line in body.splitlines()]
         self.assertEqual(lines[:2], ["this.clinicianCaller(c);", "const list = await this.listStudies(c, query);"])
-        self.assertEqual(lines[-1], "return clinicianList(list, heads);")
+        self.assertEqual(lines[-1], "return clinicianList(list, current);")
         self.assertIn("if (clinicianListChanged(list.studies, current))", body)
-        self.assertIn("LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version", body)
-        for token in ("findings", "reportDraft", "toClient", "notObserved", "orderReconciliation", "gatewayReceipt"):
+        # S5-U1b-F02: scope and report status (rs, signer, date, Report.version, head action) come from ONE statement —
+        # one snapshot — and the rows are projected from it; no second StudyState/Report read is merged in
+        self.assertEqual(body.count("$queryRaw"), 1, "one statement reads the whole report status")
+        self.assertEqual(body.count("await "), 2, "listStudies and the one snapshot statement are the only reads")
+        snapshot = body[body.index("$queryRaw"):]
+        for fragment in ('SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,',
+                         "COALESCE(r.version, 0) AS version, v.action", 'FROM "StudyState" s',
+                         'LEFT JOIN "Report" r ON r.uid = s.uid',
+                         'LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version'):
+            self.assertIn(fragment, snapshot, fragment)
+        for token in ("findings", "reportDraft", "toClient", "notObserved", "orderReconciliation", "gatewayReceipt",
+                      "findMany", "findUnique"):
             self.assertNotIn(token, body, token)
-        self.assertRegex(self.policy, r"const pinned = head && state && Number\.isSafeInteger\(state\.version\) && head\.version === state\.version \? head : null;")
+        self.assertEqual(ts_array(self.policy, "CLINICIAN_LIST_PINS"), contract["list_snapshot_pins"])
+        self.assertIn("report: clinicianReportStatus(record, record ? { version: record.version, action: record.action } : null),", self.policy)
+        self.assertIn("return !state || CLINICIAN_LIST_PINS.some(key => (state[key] ?? null) !== (seen[key] ?? null));", self.policy)
+        self.assertNotIn("head.version === state.version", self.policy, "the worklist row's own version never pins a head")
         scope = re.search(r"\n  private async clinicianScope<T>\(.*?\n  \}\r?\n", service, re.S).group(0)
         self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", service)
         self.assertIn("this.clinicianCaller(c);", scope)
@@ -347,12 +361,43 @@ class ClinicianPolicySpec(unittest.TestCase):
         statistics = service[service.index("if (path === '/statistics') {"):service.index("// /dicom-web/studies/{uid}/")]
         closed = statistics.index("if (clinicianOnly(c.roles)) throw new ForbiddenException(")
         self.assertLess(closed, statistics.index("return;"), "the server-wide count closes for clinician-only before it passes")
-        # viewer items: clinician-only branch with the final check before AND after the read; others unchanged
+        # viewer items: clinician-only branch pinned to ONE signed version (S5-U1b-F01), not a boolean asked twice:
+        # gate -> items read in the same statement as the signed head of that version -> gate again, all compared
         self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
         branch = viewer[viewer.index("private async clinicianItems("):]
-        first, read_at = branch.index("clinicianViewerFinal(uid, c)"), branch.index("await this.svc.list(uid, page, c)")
-        self.assertLess(first, read_at)
-        self.assertGreater(branch.index("clinicianViewerFinal(uid, c)", read_at), read_at)
+        branch = branch[:branch.index("\n  }")]
+        steps = ("const version = await this.pacs.clinicianViewerHead(uid, c);",
+                 "if (version === null) return clinicianViewerWithheld(uid);",
+                 "const result = await this.svc.listFinal(uid, page, c, version);",
+                 "if (!clinicianViewerPinned(version, result.finalVersion, await this.pacs.clinicianViewerHead(uid, c)))",
+                 "throw new ConflictException({ code: CLINICIAN_VIEWER_CHANGED,",
+                 "return clinicianViewerPage(uid, result);")
+        positions = [branch.index(step) for step in steps]
+        self.assertEqual(positions, sorted(positions), "gate, pinned read, gate+compare, answer — in this order")
+        self.assertEqual(branch.count("clinicianViewerHead(uid, c)"), 2)
+        self.assertNotIn("this.svc.list(", branch, "the clinician path never reads items without the signed head")
+        for source in (viewer, service):
+            self.assertNotIn("clinicianViewerFinal", source, "a boolean gate cannot see reset -> re-approve")
+        self.assertIn("clinicianFinal(state.rs, head) ? head.version as number : null", service)
+        self.assertRegex(self.policy, r"return Number\.isSafeInteger\(before\) && \(before as number\) > 0 && read === before && after === before;")
+        self.assertEqual(re.search(r"export const CLINICIAN_VIEWER_CHANGED = '([A-Z_]+)';", self.policy).group(1),
+                         contract["viewer_changed_code"])
+        # the signed head and the items are one SQL statement: the head CTE, its column and the item filter
+        listed = items[items.index("async listFinal("):items.index("async write(")]
+        for fragment in ('SELECT r.version FROM "Report" r',
+                         'JOIN "StudyState" s ON s.uid = r.uid',
+                         'JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version',
+                         "WHERE r.uid = ${uid} AND r.version > 0 AND s.rs = 'A' AND v.action IN (${Prisma.join([...CLINICIAN_FINAL_ACTIONS])})",
+                         "Prisma.sql`, final_head AS (${signed})`",
+                         "Prisma.sql`(SELECT version FROM final_head) AS \"finalVersion\",`",
+                         "Prisma.sql`AND EXISTS(SELECT 1 FROM final_head f WHERE f.version = ${final}::int)`"):
+            self.assertIn(fragment, listed, fragment)
+        statement = listed[listed.index("const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})${signedHead}"):]
+        statement = statement[:statement.index("AS rows`;") + len("AS rows`;")]
+        for fragment in ("${signedHead}", "${signedColumn}", "WHERE (${page.includeHidden} OR NOT i.hidden) ${signedItems}"):
+            self.assertIn(fragment, statement, fragment)
+        self.assertIn("if (!Number.isSafeInteger(final) || final < 1) denied();", listed)
+        self.assertIn("return this.read(uid, query, c, id, null);", items, "the legacy list keeps the unsigned statement")
         # report-preview returns bodies at every RS; clinician-only is refused before any read
         guard_at = preview.index("if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });")
         self.assertLess(guard_at, preview.index("this.prisma.studyState.findUnique"))

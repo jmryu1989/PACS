@@ -2963,23 +2963,25 @@ export class PacsService implements OnModuleInit {
    * 메모·판독의 배정·Gateway 영수증·오더 대사·관측 부재·observedAt은 clinicianList가 버리고 싣지 않는다.
    * total·이어받기는 워크리스트와 같다 — 볼 수 있는 검사만 센다.
    *
-   * 확정 여부는 머리 판의 action이 있어야 판정된다(목록은 action을 싣지 않는다). 머리 판은 **목록이 본
-   * 판 번호와 같을 때만** 그 행의 것으로 쓴다(다르면 모름 = 확정 아님). 그 읽기 사이 기관·원격판독·RS가
-   * 바뀌었으면 워크리스트와 같은 409로 답 전체를 거절한다. 정책 변경은 StudyAccessInterceptor가 요청 전체에서 본다.
+   * 판독 상태(rs·repDoc·confirm·판 번호·머리 판 action)는 워크리스트 행에서 가져오지 않는다. listStudies는 StudyState와
+   * Report를 따로 읽으므로 그 사이 Addendum이 끼면 새 판 번호에 이전 서명자가 붙는다. 여기서 **한 SQL 문장**(한 스냅샷)으로
+   * 기관 두 칸과 판독 상태를 함께 읽어 그 행에서만 상태를 만들고, 워크리스트 행과 그 칸들(CLINICIAN_LIST_PINS)이 하나라도
+   * 다르면 워크리스트와 같은 409로 답 전체를 거절한다. 정책 변경은 StudyAccessInterceptor가 요청 전체에서 본다.
    */
   async clinicianStudies(c: Caller, query?: any) {
     this.clinicianCaller(c);
     const list = await this.listStudies(c, query);
     const uids: string[] = list.studies.map((row: any) => row.uid);
-    const heads = !uids.length ? [] : await this.prisma.$queryRaw<{ uid: string; version: number; action: string | null }[]>`
-      SELECT r.uid, r.version, v.action FROM "Report" r
+    const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
+      SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
+        COALESCE(r.version, 0) AS version, v.action
+      FROM "StudyState" s
+      LEFT JOIN "Report" r ON r.uid = s.uid
       LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
-      WHERE r.uid IN (${Prisma.join(uids)})`;
-    const current = !uids.length ? [] : await this.prisma.studyState.findMany({ where: { uid: { in: uids } },
-      select: { uid: true, institutionId: true, teleInstitutionId: true, rs: true } });
+      WHERE s.uid IN (${Prisma.join(uids)})`;
     if (clinicianListChanged(list.studies, current))
-      throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 접근 범위가 바뀌었습니다. 새로고침하세요.' });
-    return clinicianList(list, heads);
+      throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
+    return clinicianList(list, current);
   }
 
   /**
@@ -3000,9 +3002,13 @@ export class PacsService implements OnModuleInit {
     });
   }
 
-  /** 표시 항목 관문(viewer.controller): 호출자·검사 범위(밖이면 404)를 판정하고 지금 머리 판이 확정본인지만 답한다. */
-  async clinicianViewerFinal(uid: string, c: Caller): Promise<boolean> {
-    return this.clinicianScope(uid, c, async (_tx, state, head) => clinicianFinal(state.rs, head));
+  /**
+   * 표시 항목 관문(viewer.controller): 호출자·검사 범위(밖이면 404)를 판정하고, 지금 머리 판이 확정본이면 **그 판 번호**를,
+   * 아니면 null을 답한다. true/false로 줄이지 않는 이유: 관문 두 번이 모두 "확정"이어도 그 사이 reset → 재승인이 끼었을
+   * 수 있고, 그것은 판 번호로만 드러난다(clinicianViewerPinned).
+   */
+  async clinicianViewerHead(uid: string, c: Caller): Promise<number | null> {
+    return this.clinicianScope(uid, c, async (_tx, state, head) => clinicianFinal(state.rs, head) ? head.version as number : null);
   }
 
   /**

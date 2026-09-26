@@ -68,6 +68,9 @@ const clientState = (over = {}) => ({
   findings: SECRET + '-F', conclusion: SECRET + '-C', recommendation: SECRET + '-R',
   draft: { findings: DRAFT, conclusion: '', recommendation: '', baseVersion: 3, at: new Date() }, ...over,
 });
+// The one-statement snapshot row clinicianStudies reads (pacs.service): scope, report status, Report.version and its action.
+const snap = (over = {}) => ({ uid: '1.2.3', institutionId: 'hallym', teleInstitutionId: null, rs: 'A', repDoc: 'doc',
+  confirm: '2026-09-26', version: 3, action: 'approve', ...over });
 // One listStudies row: every writer/engineering field the worklist sends.
 const worklistRow = (over = {}, state = {}) => ({
   uid: '1.2.3', techNote: { version: 2, present: true },
@@ -93,6 +96,9 @@ test('the U1b allowlist and the S5-F5 constants are exactly the fixture values',
   assert.ok(Object.isFrozen(P.CLINICIAN_BUSINESS_ROUTES));
   assert.deepEqual([...P.CLINICIAN_FINAL_ACTIONS], C.final_actions);
   assert.deepEqual([...P.CLINICIAN_OPEN_STATES], C.open_states);
+  assert.deepEqual([...P.CLINICIAN_LIST_PINS], C.list_snapshot_pins);
+  assert.ok(Object.isFrozen(P.CLINICIAN_LIST_PINS));
+  assert.equal(P.CLINICIAN_VIEWER_CHANGED, C.viewer_changed_code);
   assert.deepEqual(Object.fromEntries(Object.entries(P.CLINICIAN_SNAPSHOT_FIELDS).map(([k, v]) => [k, [...v]])), C.snapshot_keys);
   for (const route of FIXTURES.business_routes) assert.equal(P.clinicianRouteAllowed(route), true, route);
   for (const route of FIXTURES.must_stay_denied) assert.equal(P.clinicianRouteAllowed(route), false, route);
@@ -208,6 +214,31 @@ test('viewer page and withheld answer carry the requested uid; withheld items ar
   assert.deepEqual(keys(withheld), sorted(C.viewer_page_keys));
 });
 
+test('viewer pin: the gate before, the signed head read with the items and the gate after must be one version', () => {
+  assert.equal(P.clinicianViewerPinned(3, 3, 3), true, 'no report change between the gates');
+  for (const [label, before, read, after] of [
+    // S5-U1b-F01: gate sees v3; reset reopens (v5, W); an item written and read in W; hidden; re-approved as v6.
+    // Both gates say "signed", which a boolean recheck accepted. The read carried no signed head at all.
+    ['reset, read in W, re-approved', 3, null, 6],
+    // the read itself already sees the re-approved head: still not the version the first gate admitted
+    ['reset and re-approved before the read', 3, 6, 6],
+    // an addendum or reset after the read: the last gate refuses the page read under v3
+    ['addendum after the read', 3, 3, 4],
+    ['reset after the read (no longer signed)', 3, 3, null],
+    ['reset before the read', 3, null, null],
+    // never a boolean, a string or a non-positive version standing in for a head
+    ['booleans are not versions', true, true, true],
+    ['strings are not versions', '3', '3', '3'],
+    ['mixed number and string', 3, '3', 3],
+    ['version 0 is no signed head', 0, 0, 0],
+    ['negative', -1, -1, -1],
+    ['fraction', 1.5, 1.5, 1.5],
+    ['unsafe integer', 2 ** 53, 2 ** 53, 2 ** 53],
+    ['missing', undefined, undefined, undefined],
+    ['null', null, null, null],
+  ]) assert.equal(P.clinicianViewerPinned(before, read, after), false, label);
+});
+
 test('viewer query: hidden items cannot be requested; everything else passes through to viewerPage', () => {
   assert.deepEqual(P.clinicianViewerQuery(undefined), { includeHidden: 'false' });
   assert.deepEqual(P.clinicianViewerQuery({}), { includeHidden: 'false' });
@@ -221,7 +252,7 @@ test('viewer query: hidden items cannot be requested; everything else passes thr
 test('list row: allowlisted identity and status from a full worklist row; overlay applied; no writer field', () => {
   const overlay = { id: 'PID-FIXED', name: 'LEE FIXED', birth: '19810202', sex: 'F', date: '20260925',
     acc: 'ACC-FIXED', desc: 'CT FIXED', modality: 'MR', ward: 'W9', age: 44 };
-  const row = P.clinicianStudyRow(worklistRow({}, { ov: overlay }), head('approve'));
+  const row = P.clinicianStudyRow(worklistRow({}, { ov: overlay }), snap());
   assert.deepEqual(keys(row), sorted(C.list_row_keys));
   assert.deepEqual(keys(row.report), sorted(C.report_final_keys));
   assert.deepEqual([row.id, row.name, row.birth, row.sex, row.date, row.acc, row.desc, row.modality],
@@ -233,7 +264,7 @@ test('list row: allowlisted identity and status from a full worklist row; overla
   for (const secret of [SECRET, DRAFT, 'W9', 'hold reason', 'O-1', 'doctor@x', 'reader@x', 'orig', 'engineering_only'])
     assert.ok(!text.includes(secret), secret);
   clean(row, 'list row');
-  assert.equal(P.clinicianStudyRow(worklistRow(), head('approve')).name, 'KIM JOHN', 'no overlay: the server-read tag');
+  assert.equal(P.clinicianStudyRow(worklistRow(), snap()).name, 'KIM JOHN', 'no overlay: the server-read tag');
 
   // Non-object overlays and non-string overlay values fall back to the row's server-read tag.
   for (const ov of ['{"id":"X"}', [1], 'x', 7, { name: 7, id: null }, null]) {
@@ -247,16 +278,38 @@ test('list row: allowlisted identity and status from a full worklist row; overla
   const counts = P.clinicianStudyRow(worklistRow({ count: null, series: 2.5 }), null);
   assert.deepEqual([counts.count, counts.series], [null, null]);
   // Non-final rows carry RS only; a P row stays P without its (already hidden) body.
-  assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'T' }), head('save')).report, { final: false, rs: 'T' });
-  assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'P', prelimHidden: true }), head('preliminary')).report,
-    { final: false, rs: 'P' });
-  // The head is the row's only when it is the version the list saw: a head read after a newer commit is unknown.
-  for (const version of [2, 4, '3', null]) {
-    const moved = P.clinicianStudyRow(worklistRow(), head('approve', { version }));
-    assert.deepEqual(moved.report, { final: false, rs: null }, String(version));
-  }
-  assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { version: '3' }), head('approve')).report, { final: false, rs: null });
-  assert.deepEqual(P.clinicianStudyRow({ uid: '1.2.3' }, head('approve')).report, { final: false, rs: null }, 'no state: unknown');
+  const open = { repDoc: null, confirm: null };
+  assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'T', ...open, version: 4 }), snap({ rs: 'T', ...open, version: 4, action: 'save' })).report,
+    { final: false, rs: 'T' });
+  assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'P', prelimHidden: true, ...open, version: 4 }),
+    snap({ rs: 'P', ...open, version: 4, action: 'preliminary' })).report, { final: false, rs: 'P' });
+});
+
+test('list row status comes only from the one-statement snapshot, never from the worklist row state', () => {
+  // S5-U1b-F02: listStudies read StudyState before an Addendum and Report after it, so its row carries the NEW
+  // version with the OLD signer and date. The snapshot row holds the one real combination; the row shows that.
+  const mixed = worklistRow({}, { repDoc: 'old-doc', confirm: '2026-09-25', version: 4 });
+  const addendum = snap({ repDoc: 'new-doc', confirm: '2026-09-26', version: 4, action: 'addendum' });
+  const row = P.clinicianStudyRow(mixed, addendum);
+  assert.deepEqual(row.report, { final: true, rs: 'A', action: 'addendum', version: 4, repDoc: 'new-doc', confirm: '2026-09-26' });
+  assert.ok(!JSON.stringify(row).includes('old-doc') && !JSON.stringify(row).includes('2026-09-25'), 'a signer of another version leaked');
+  // ...and the service never sends that row: the recheck sees the signer the worklist row carried move.
+  assert.equal(P.clinicianListChanged([mixed], [addendum]), true);
+  // The worklist row saying "signed" does not make the row signed, and the reverse.
+  assert.deepEqual(P.clinicianStudyRow(worklistRow(), snap({ rs: 'W', repDoc: null, confirm: null, version: 5, action: 'reset' })).report,
+    { final: false, rs: 'W' });
+  assert.deepEqual(P.clinicianStudyRow(worklistRow({}, { rs: 'W', version: 0 }), snap()).report.final, true,
+    'the projection follows the snapshot; the recheck below is what refuses a list that disagrees with it');
+  // No snapshot, a snapshot of another study, or a row without a uid: unknown, never signed.
+  for (const [label, listRow, snapshot] of [['no snapshot', worklistRow(), undefined], ['null snapshot', worklistRow(), null],
+    ['another study', worklistRow(), snap({ uid: '1.2.4' })], ['row without uid', { state: clientState() }, snap()],
+    ['row with a non-string uid', worklistRow({ uid: 7 }), snap({ uid: 7 })]])
+    assert.deepEqual(P.clinicianStudyRow(listRow, snapshot).report, { final: false, rs: null }, label);
+  // Only a signed head in the snapshot itself is final: its version and action, not the worklist row's.
+  for (const [label, over, rs] of [['version as text', { version: '3' }, null], ['no Report row', { version: 0, action: null }, null],
+    ['head not a sign-off', { action: 'save' }, null], ['head a discarded row', { action: 'discarded' }, null],
+    ['head missing', { action: undefined }, null], ['rs H over a signed head', { rs: 'H' }, 'H']])
+    assert.deepEqual(P.clinicianStudyRow(worklistRow(), snap(over)).report, { final: false, rs }, label);
 });
 
 test('list answer: narrowed rows, serverTime and counts-only pagination; engineering surfaces dropped', () => {
@@ -265,32 +318,43 @@ test('list answer: narrowed rows, serverTime and counts-only pagination; enginee
     notObserved: [{ uid: '9.9', origin: 'gateway', createdAt: 'x', gatewayReceipt: {} }],
     orderReconciliation: { orders: [{ oid: 'O-2', accession: 'present' }] },
     pagination: { owner: ['hallym', 'sub'], next: 'n.s', total: 2, offset: 0, limit: 2 } };
-  const heads = [{ uid: '1.2.3', version: 3, action: 'addendum' }, { uid: '1.2.4', version: 0, action: null }, { uid: '7.7', version: 1, action: 'approve' }];
-  const answer = P.clinicianList(list, heads);
+  const snapshots = [snap({ action: 'addendum' }), snap({ uid: '1.2.4', rs: 'W', repDoc: null, confirm: null, version: 0, action: null }),
+    snap({ uid: '7.7', version: 1 })];
+  const answer = P.clinicianList(list, snapshots);
   assert.deepEqual(keys(answer), sorted(C.list_paged_response_keys));
   assert.deepEqual(answer.studies.map(row => [row.uid, row.report.final, row.report.rs]), [['1.2.3', true, 'A'], ['1.2.4', false, 'W']]);
   assert.equal(answer.studies[0].report.action, 'addendum');
   assert.deepEqual(answer.pagination, { next: 'n.s', total: 2, offset: 0, limit: 2 });
-  assert.ok(!JSON.stringify(answer).includes('7.7'), 'a head for a study the list did not carry never appears');
+  assert.ok(!JSON.stringify(answer).includes('7.7'), 'a snapshot for a study the list did not carry never appears');
   clean(answer, 'list answer');
   const whole = P.clinicianList({ studies: [], serverTime: 's', observedAt: 'o', notObserved: [], orderReconciliation: null }, []);
   assert.deepEqual(whole, { studies: [], serverTime: 's' });
   assert.deepEqual(keys(whole), sorted(C.list_response_keys));
 });
 
-test('list recheck: institution, tele receiver or RS moved between the list and the head read refuses the answer', () => {
-  const rows = [worklistRow(), worklistRow({ uid: '1.2.4' }, { rs: 'T', teleInstitutionId: 'kin-center' })];
-  const same = [{ uid: '1.2.3', institutionId: 'hallym', teleInstitutionId: null, rs: 'A' },
-    { uid: '1.2.4', institutionId: 'hallym', teleInstitutionId: 'kin-center', rs: 'T' }];
+test('list recheck: scope, RS, signer, sign-off date or version moved between the list and the snapshot refuses the answer', () => {
+  const rows = [worklistRow(), worklistRow({ uid: '1.2.4' }, { rs: 'T', teleInstitutionId: 'kin-center', repDoc: null, confirm: null, version: 2 })];
+  const same = [snap(), snap({ uid: '1.2.4', teleInstitutionId: 'kin-center', rs: 'T', repDoc: null, confirm: null, version: 2, action: 'save' })];
   assert.equal(P.clinicianListChanged(rows, same), false);
   assert.equal(P.clinicianListChanged([], []), false);
+  // SQL NULL and an absent key are the same "no value" on both sides.
+  assert.equal(P.clinicianListChanged(rows, [{ ...same[0], teleInstitutionId: undefined }, same[1]]), false);
   for (const [label, current] of [
     ['institution', [{ ...same[0], institutionId: 'kin-center' }, same[1]]],
     ['tele cancelled', [same[0], { ...same[1], teleInstitutionId: null }]],
     ['rs reset', [{ ...same[0], rs: 'W' }, same[1]]],
+    ['addendum by another signer', [{ ...same[0], repDoc: 'doc2', version: 4, action: 'addendum' }, same[1]]],
+    ['addendum by the same signer the next day', [{ ...same[0], confirm: '2026-09-27', version: 4, action: 'addendum' }, same[1]]],
+    ['addendum by the same signer the same day', [{ ...same[0], version: 4, action: 'addendum' }, same[1]]],
+    ['signer only', [{ ...same[0], repDoc: 'doc2' }, same[1]]],
+    ['a first Report row', [same[0], { ...same[1], version: 3 }]],
+    ['version as text', [{ ...same[0], version: '3' }, same[1]]],
     ['row gone', [same[0]]],
     ['other row', [same[0], { ...same[1], uid: '1.2.5' }]],
   ]) assert.equal(P.clinicianListChanged(rows, current), true, label);
+  // Every pin is compared: moving any one of them alone refuses.
+  for (const key of C.list_snapshot_pins)
+    assert.equal(P.clinicianListChanged(rows, [{ ...same[0], [key]: 'moved' }, same[1]]), true, key);
 });
 
 test('pagination: counts and cursor only; the owner identifiers are not echoed', () => {
