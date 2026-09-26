@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>회원 관리 — KIN</title>
+  <title>Members — KIN</title>
   <style>
     :root {
       color-scheme: dark;
@@ -74,8 +74,9 @@
     .dialog-body h2 { margin: 0 0 18px; font-size: 20px; }
     .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
     .form-grid .full { grid-column: 1 / -1; }
-    .roles { display: flex; gap: 18px; border: 1px solid #355272; border-radius: 7px; padding: 10px; }
+    .roles { display: flex; flex-wrap: wrap; gap: 8px 18px; border: 1px solid #355272; border-radius: 7px; padding: 10px; }
     .roles label, .check { display: flex; align-items: center; gap: 7px; color: var(--text); }
+    .roles label.unmanaged { color: var(--muted); }
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
     .secret { margin: 14px 0; border: 1px solid #6c5731; border-radius: 8px; background: #2a2418; color: #ffe4a9; padding: 13px; overflow-wrap: anywhere; font: 700 15px/1.5 ui-monospace, monospace; user-select: all; }
     .secret-warning { color: #ffd37a; }
@@ -84,11 +85,11 @@
 <body>
   <header>
     <div class="brand">KOREA IMAGING NETWORK</div>
-    <h1>회원 관리</h1>
+    <h1>Members</h1>
     <div class="spacer"></div>
     <span class="actor" id="actor"></span>
-    <a class="button-link" href="main.html">워크리스트</a>
-    <button type="button" id="logout">로그아웃</button>
+    <a class="button-link" href="main.html">Worklist</a>
+    <button type="button" id="logout">Log out</button>
   </header>
 
   <main>
@@ -99,10 +100,10 @@
       <label>기관
         <select id="institution-filter"><option value="">전체 기관</option></select>
       </label>
-      <span class="badge" id="pending-badge">대기 0명</span>
+      <span class="badge" id="pending-badge">Pending 0</span>
       <div class="spacer"></div>
-      <button type="button" id="refresh">새로고침</button>
-      <button type="button" class="primary" id="open-create">회원 생성</button>
+      <button type="button" id="refresh">Refresh</button>
+      <button type="button" class="primary" id="open-create">Create Member</button>
     </div>
 
     <p class="message" id="message" role="alert"></p>
@@ -117,9 +118,9 @@
       </table>
     </div>
     <div class="pager">
-      <button type="button" id="previous">이전</button>
+      <button type="button" id="previous">Previous</button>
       <span id="page-label">1 / 1</span>
-      <button type="button" id="next">다음</button>
+      <button type="button" id="next">Next</button>
     </div>
   </main>
 
@@ -127,7 +128,7 @@
 
   <dialog id="create-dialog">
     <form class="dialog-body" id="create-form">
-      <h2>회원 생성</h2>
+      <h2>Create Member</h2>
       <p class="message" id="create-message" role="alert"></p>
       <div class="form-grid">
         <label>아이디<input name="username" required maxlength="128" autocomplete="off"></label>
@@ -136,42 +137,43 @@
         <label>이름<input name="firstName" required maxlength="128" autocomplete="off"></label>
       </div>
       <div class="dialog-actions">
-        <button type="button" data-close="create-dialog">취소</button>
-        <button type="submit" class="primary">생성</button>
+        <button type="button" data-close="create-dialog">Cancel</button>
+        <button type="submit" class="primary">Create</button>
       </div>
     </form>
   </dialog>
 
   <dialog id="membership-dialog">
     <form class="dialog-body" id="membership-form">
-      <h2 id="membership-title">회원 승인</h2>
+      <h2 id="membership-title">Approve Member</h2>
       <p class="message" id="membership-message" role="alert"></p>
       <div class="form-grid">
         <label class="full">기관
           <input name="institution" list="institution-options" required maxlength="128" autocomplete="off">
         </label>
-        <fieldset class="full roles">
+        <fieldset class="full roles" id="membership-roles">
           <legend>역할</legend>
           <label><input type="checkbox" name="role" value="radiologist">판독의</label>
           <label><input type="checkbox" name="role" value="technician">방사선사</label>
           <label><input type="checkbox" name="role" value="admin">관리자</label>
+          <label><input type="checkbox" name="role" value="clinician">임상의</label>
         </fieldset>
         <label class="full check"><input type="checkbox" name="verificationOverride">대면 확인으로 이메일 검증 예외 승인</label>
       </div>
       <div class="dialog-actions">
-        <button type="button" data-close="membership-dialog">취소</button>
-        <button type="submit" class="primary">저장</button>
+        <button type="button" data-close="membership-dialog">Cancel</button>
+        <button type="submit" class="primary">Save</button>
       </div>
     </form>
   </dialog>
 
   <dialog id="password-dialog">
     <div class="dialog-body">
-      <h2>임시 비밀번호</h2>
+      <h2>Temporary Password</h2>
       <p class="secret-warning">이 창을 닫으면 다시 볼 수 없습니다. 안전한 방법으로 회원에게 전달하세요.</p>
       <div class="secret" id="temporary-password"></div>
       <div class="dialog-actions">
-        <button type="button" class="primary" id="close-password">확인하고 닫기</button>
+        <button type="button" class="primary" id="close-password">Confirm &amp; Close</button>
       </div>
     </div>
   </dialog>
@@ -269,14 +271,36 @@
         return (!query || haystack.includes(query)) && (!institution || user.institution === institution);
       }
 
+      // 이 화면이 관리하는 역할은 마크업의 체크박스가 정한다. 스크립트에 목록을 따로 두면 둘이 어긋난다.
+      const roleInputs = () => [...$("#membership-form").querySelectorAll('input[name="role"]')];
+
+      function unmanagedRoles(user) {
+        const managed = roleInputs().map(input => input.value);
+        return user.roles.filter(role => !managed.includes(role));
+      }
+
       function openMembership(user) {
         state.editingId = user.id;
         setDialogMessage("#membership-message", "");
-        $("#membership-title").textContent = user.approvalState === "PENDING" ? "회원 승인" : "회원 자격 변경";
+        $("#membership-title").textContent = user.approvalState === "PENDING" ? "Approve Member" : "Change Membership";
         const form = $("#membership-form");
         form.elements.institution.value = user.institution || "";
-        form.querySelectorAll('input[name="role"]').forEach(input => {
+        roleInputs().forEach(input => {
           input.checked = user.roles.includes(input.value);
+        });
+        // 모르는 역할은 바꿀 수 없는 표시로만 보인다. 저장 목록은 submit이 user.roles에서 다시 만든다.
+        const fieldset = $("#membership-roles");
+        fieldset.querySelectorAll("label.unmanaged").forEach(label => label.remove());
+        unmanagedRoles(user).forEach(role => {
+          const label = document.createElement("label");
+          label.className = "unmanaged";
+          label.title = "이 화면에서 관리하지 않는 역할입니다. 저장해도 그대로 유지되며 여기서는 바꿀 수 없습니다.";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = true;
+          input.disabled = true;
+          label.append(input, document.createTextNode(role));
+          fieldset.append(label);
         });
         form.elements.verificationOverride.checked = false;
         $("#membership-dialog").showModal();
@@ -334,14 +358,14 @@
 
           const actions = document.createElement("td");
           actions.className = "actions";
-          actions.append(action(user.approvalState === "PENDING" ? "승인" : "자격 변경", () => openMembership(user)));
+          actions.append(action(user.approvalState === "PENDING" ? "Approve" : "Change Membership", () => openMembership(user)));
           if (user.approvalState === "APPROVED")
-            actions.append(action("승인 취소", () => mutate(user, { approvalState: "PENDING" })));
-          actions.append(action("임시 비번", () => resetPassword(user, "temp")));
-          actions.append(action("비번 메일", () => resetPassword(user, "email")));
+            actions.append(action("Revoke Approval", () => mutate(user, { approvalState: "PENDING" })));
+          actions.append(action("Temp Password", () => resetPassword(user, "temp")));
+          actions.append(action("Email Reset Link", () => resetPassword(user, "email")));
           actions.append(user.enabled
-            ? action("정지", () => mutate(user, { enabled: false }), "danger")
-            : action("활성", () => mutate(user, { enabled: true })));
+            ? action("Suspend", () => mutate(user, { enabled: false }), "danger")
+            : action("Activate", () => mutate(user, { enabled: true })));
           if(user.enabled && user.institution===KinAuth.session()?.institution && user.approvalState==="APPROVED")actions.append(action("Study Access",()=>KinStudyAccessAdmin.open(user)));
           row.append(actions);
           body.append(row);
@@ -380,7 +404,7 @@
           state.users = Array.isArray(result.users) ? result.users : [];
           state.users.forEach(user => { if (user.institution) state.institutions.add(user.institution); });
           rebuildInstitutionOptions();
-          $("#pending-badge").textContent = `대기 ${result.pendingCount}명`;
+          $("#pending-badge").textContent = `Pending ${result.pendingCount}`;
           const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
           $("#page-label").textContent = `${state.page} / ${pages}`;
           $("#previous").disabled = state.page <= 1;
@@ -443,10 +467,16 @@
       $("#membership-form").addEventListener("submit", async event => {
         event.preventDefault();
         const form = event.currentTarget;
-        const roles = [...form.querySelectorAll('input[name="role"]:checked')].map(input => input.value);
-        if (!roles.length) { setDialogMessage("#membership-message", "역할을 한 개 이상 선택하세요."); return; }
         const user = state.users.find(item => item.id === state.editingId);
         if (!user) { setDialogMessage("#membership-message", "회원 정보를 다시 불러오세요."); return; }
+        // 역할 집합 보존 규칙: PATCH roles는 서버에서 회원의 역할 전체를 바꾼다. 체크박스는 이 화면이
+        // 아는 역할만 정하고, 모르는 역할은 불러온 값 그대로 붙인다. 체크된 값만 보내던 때는 혼합 회원의
+        // clinician이 오류 없이 빠졌고(S5-U5a), 서버 역할 목록이 이 화면보다 먼저 늘면 같은 일이 반복된다.
+        const roles = [
+          ...roleInputs().filter(input => input.checked).map(input => input.value),
+          ...unmanagedRoles(user),
+        ];
+        if (!roles.length) { setDialogMessage("#membership-message", "역할을 한 개 이상 선택하세요."); return; }
         $("#membership-dialog").close();
         state.editingId = null;
         await mutate(user, {
