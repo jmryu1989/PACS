@@ -1,0 +1,14 @@
+[
+  {
+    "module": "tests/clinician_policy_live.py",
+    "unit": "s5-u1a-clinician-live",
+    "timeout": 900,
+    "cases": [
+      "ClinicianPolicyLive.test_01_clinician_only_session_routes_and_default_denial",
+      "ClinicianPolicyLive.test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout",
+      "ClinicianPolicyLive.test_03_member_console_approves_updates_and_revokes_a_clinician",
+      "ClinicianPolicyLive.test_04_mixed_and_legacy_roles_keep_their_existing_paths"
+    ],
+    "expected": {"sweep": {"routes": 108, "denied": 102}, "audit_rows": {"clinician": 0}}
+  }
+]

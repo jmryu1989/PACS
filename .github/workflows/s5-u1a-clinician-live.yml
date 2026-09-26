@@ -1,30 +1,34 @@
-# S5-U1a hosted gate G2: tests/clinician_policy_live.py (4 cases) against an IMMUTABLE candidate SHA.
+# S5 hosted clinician live gate: a declared list of live modules against an IMMUTABLE candidate SHA.
 #
-# Decision D2(a) keeps this live module out of the candidate_ci BASE, so the candidate commit is never
-# changed to run it. Like candidate.yml, this job checks out its own tools at github.sha and the candidate
+# Decision D2(a) keeps these live modules out of the candidate_ci BASE, so the candidate commit is never
+# changed to run them. Like candidate.yml, this job checks out its own tools at github.sha and the candidate
 # separately into target/, proves the exact SHA and a clean tree (candidate_ci.hosted_target), and brings
-# up the candidate's own disposable synthetic Compose stack through the candidate's measurement_ci.main
+# up the candidate's own disposable synthetic Compose stack ONCE through the candidate's measurement_ci.main
 # (empty hosted Docker daemon, generated secrets, synthetic DICOM seed, compose down --volumes). The
-# driver adds one profile with one suite and refuses any command other than
-#   python scripts/run-tests.py --module tests/clinician_policy_live.py --mode live --unit s5-u1a-clinician-live --timeout 900
-# which runs exactly once per workflow run.
+# driver adds one profile whose suites are tests/ops_s5_u1a_live_gate/modules.json, in order, and refuses
+# any command other than run-tests.py with each entry's own module, unit and timeout; each runs once.
 #
 # Triggers: GitHub accepts workflow_dispatch only for a workflow on the default branch, so a push to this
-# gate's own branch also runs it (as the RB-1 check did) and takes the SHA from
-# tests/ops_s5_u1a_live_gate/candidate.txt. Budget D3: at most three runs of 900 s; every push or dispatch
-# consumes one, a re-run is refused below and never counts, and a cancelled run is consumed, never a pass.
+# gate's own branch also runs it (as the RB-1 check did) and takes the SHA from candidate.txt and the list
+# from modules.json. Budget D3: every push or dispatch consumes one run of every listed unit, a re-run is
+# refused below and never counts, and a cancelled run is consumed, never a pass.
 #
 # No secret, no real patient data, no server. The last step's colour is a convenience: acceptance is
-# decided from the uploaded evidence (u1a-live-summary.json, the sanitized raw suite log, results.json).
-name: S5-U1a clinician live gate (G2, synthetic)
+# decided from the uploaded evidence (s5-live-summary.json, the sanitized raw suite logs, results.json).
+name: S5 clinician live gate (synthetic)
 
 on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: Full lowercase 40-character commit SHA of the immutable S5-U1a candidate
+        description: Full lowercase 40-character commit SHA of the immutable candidate
         required: true
         default: 88ce2df3b56ca1b63a66e14e0406e04aee5f2f62
+        type: string
+      modules:
+        description: JSON module list replacing modules.json for this run (empty uses the committed file)
+        required: false
+        default: ""
         type: string
   push:
     branches: [opus/s5-u1a-live-gate-20260926]
@@ -47,17 +51,19 @@ jobs:
           ref: ${{ github.sha }}
           path: tools
           persist-credentials: false
-      - name: Resolve the immutable candidate, first attempt only
+      - name: Resolve the immutable candidate and the module list, first attempt only
         id: candidate
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_SHA: ${{ inputs.candidate_sha }}
+          INPUT_MODULES: ${{ inputs.modules }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          mkdir "$GITHUB_WORKSPACE/u1a-live"
+          mkdir "$GITHUB_WORKSPACE/s5-live"
           [ "$RUN_ATTEMPT" = "1" ] || { echo "a re-run is not a new authorized attempt"; exit 1; }
-          sha="$(python3 -B tools/tests/ops_s5_u1a_live_gate/run_live.py resolve --event-name "$EVENT_NAME" --input-sha "$INPUT_SHA")"
+          sha="$(python3 -B tools/tests/ops_s5_u1a_live_gate/run_live.py resolve --event-name "$EVENT_NAME" --input-sha "$INPUT_SHA" --input-modules="$INPUT_MODULES"--modules-out "$GITHUB_WORKSPACE/s5-live-modules.json")"
           echo "candidate: $sha"
+          cat "$GITHUB_WORKSPACE/s5-live-modules.json"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Checkout the immutable candidate separately
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -67,33 +73,34 @@ jobs:
           persist-credentials: false
       - name: Pure gate and summary checks
         run: python3 -B tools/tests/ops_s5_u1a_live_gate/live_gate_test.py
-      - name: Install the synthetic seed dependencies (the module is API-only; no browser)
+      - name: Install the synthetic seed dependencies (the modules are API-only; no browser)
         timeout-minutes: 10
         run: |
-          python3 -m venv "$RUNNER_TEMP/u1a-python"
-          "$RUNNER_TEMP/u1a-python/bin/python" -m pip install numpy==2.0.2 pydicom==2.4.4
-      - name: G2 clinician live module, once, on the candidate's disposable synthetic stack
+          python3 -m venv "$RUNNER_TEMP/s5-live-python"
+          "$RUNNER_TEMP/s5-live-python/bin/python" -m pip install numpy==2.0.2 pydicom==2.4.4
+      - name: Listed live modules, each once, on one disposable synthetic stack of the candidate
         timeout-minutes: 28
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
         run: |
-          "$RUNNER_TEMP/u1a-python/bin/python" -B tools/tests/ops_s5_u1a_live_gate/run_live.py run --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA" --evidence "$GITHUB_WORKSPACE/u1a-live"
+          "$RUNNER_TEMP/s5-live-python/bin/python" -B tools/tests/ops_s5_u1a_live_gate/run_live.py run --target "$GITHUB_WORKSPACE/target" --candidate-sha "$CANDIDATE_SHA" --modules "$GITHUB_WORKSPACE/s5-live-modules.json" --evidence "$GITHUB_WORKSPACE/s5-live"
       - name: Summarize the recorded facts
         if: always()
         env:
           CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
         run: |
-          python3 -B tools/tests/ops_s5_u1a_live_gate/summarize.py write --out-dir target/tests/e2e/artifacts/s5-u1a-clinician-live-ci --evidence u1a-live --candidate-sha "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --output u1a-live/u1a-live-summary.json
+          python3 -B tools/tests/ops_s5_u1a_live_gate/summarize.py write --out-dir target/tests/e2e/artifacts/s5-live-gate-ci --evidence s5-live --modules s5-live-modules.json --candidate-sha "$CANDIDATE_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --output s5-live/s5-live-summary.json
       - name: Sanitized synthetic clinician live evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: s5-u1a-clinician-live-${{ github.run_id }}-${{ github.run_attempt }}
+          name: s5-live-gate-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            u1a-live/
-            target/tests/e2e/artifacts/s5-u1a-clinician-live-ci/
+            s5-live/
+            s5-live-modules.json
+            target/tests/e2e/artifacts/s5-live-gate-ci/
           if-no-files-found: error
           retention-days: 7
       - name: Report the recorded facts (the status is not an acceptance)
         if: always()
-        run: python3 -B tools/tests/ops_s5_u1a_live_gate/summarize.py check u1a-live/u1a-live-summary.json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python3 -B tools/tests/ops_s5_u1a_live_gate/summarize.py check s5-live/s5-live-summary.json | tee -a "$GITHUB_STEP_SUMMARY"
