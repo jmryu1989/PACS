@@ -1149,10 +1149,11 @@
         const response = await fetch(API + "/admin/metrics", { headers: { "X-KIN-CSRF": "1" } });
         // A 401 ends the page session here, before any body is read and before refreshOps compares its sequence: the 401
         // of an older read is this session's end too (S5-U6b-F03). The end moves ops.seq, so no read of this session paints
-        // after it, whatever order the answers arrive in.
+        // after it, whatever order the answers arrive in. The message differs from Gateway Status's on purpose: that block is
+        // a U6a control anchor that must occur once on the page; callers judge only error.status.
         if (response.status === 401) {
           KinConsoleSession.end();
-          throw Object.assign(new Error("session"), { status: 401 });
+          throw Object.assign(new Error("session ended"), { status: 401 });
         }
         if (KinConsoleSession.ended()) throw new Error("session ended");
         const payload = await response.json().catch(() => null);

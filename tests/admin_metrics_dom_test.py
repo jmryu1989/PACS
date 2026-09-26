@@ -235,7 +235,7 @@ FIXED = {
 # S5-U6b-F03 control: the 401 judged after the sequence check, as before the fix, so an older read's 401 is dropped.
 END_IN_REQUEST = """        if (response.status === 401) {
           KinConsoleSession.end();
-          throw Object.assign(new Error("session"), { status: 401 });
+          throw Object.assign(new Error("session ended"), { status: 401 });
         }
 """
 END_AFTER_SEQUENCE = """        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
@@ -256,10 +256,15 @@ COUNTING_ATTACH = """    window.__registered = 0;
 """ + ATTACH
 
 # ── S5-U6b-R-003 (F04/F05/F06): the merged page's modules on the one session end ──
-# Gateway Status's 401 block is the same text as Operations' (END_IN_REQUEST), so a control edits it inside the one
-# inline script its marker names.
+# A control still edits each panel's 401 block inside the one inline script its marker names. Gateway Status's block
+# throws "session" where Operations' throws "session ended": the U6a test's control anchors on the Gateway text once.
 GATEWAY_SCRIPT = " * S5-U6a Gateway Status (REQ-S5-U6a-GATEWAY-STATUS)."
 OPS_SCRIPT = " * S5-U6b Operations panel."
+GATEWAY_401_IN_REQUEST = """        if (response.status === 401) {
+          KinConsoleSession.end();
+          throw Object.assign(new Error("session"), { status: 401 });
+        }
+"""
 # The Gateway 401 as at 979a69b: thrown in gatewayRequest, judged in refreshGateway after the sequence check (F04).
 GATEWAY_401_BEFORE = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
 GATEWAY_AFTER_SEQUENCE = '        if (seq !== gateway.seq) return;\n        $("#gateway-busy").hidden = true;\n'
@@ -1117,7 +1122,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         # nobody logs out, Operations keeps its table and control, and the late 200 paints over it.
         self.logouts, self.held_logouts = 0, None
         older_ops, newer_ops = self.five_on_screen_and_two_reads_out(variant_in(GATEWAY_SCRIPT, [
-            (END_IN_REQUEST, GATEWAY_401_BEFORE), (GATEWAY_AFTER_SEQUENCE, GATEWAY_401_AFTER_SEQUENCE)]))
+            (GATEWAY_401_IN_REQUEST, GATEWAY_401_BEFORE), (GATEWAY_AFTER_SEQUENCE, GATEWAY_401_AFTER_SEQUENCE)]))
         self.draw_gateway()
         older, newer = self.hold_gateway_reads(2)
         done = self.path_done("fetch", STUDIES_PATH)
