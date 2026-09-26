@@ -27,7 +27,10 @@ extra writer-side fields planted in the stubs that the real serializer never sen
       account in the same browser clears the page.
   08  English controls / Korean explanations, no avoided words, no acknowledgement wording, no browser dialogs,
       text >= 12px, hit targets >= 24px, one tab stop for the list, arrows/Home/End/Enter/Space.
-  09  Log out, a session ended in another tab, pending and invalid membership, and no session.
+  09  Log out, a session ended in another tab, pending and invalid membership, and no session. Log out, two 401s and
+      another tab's log out (a channel message and the storage events of a set and a remove) each leave with one
+      navigation, counted as document requests while the first is held; the same file without the guard navigates
+      again inside the same window (control).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The service half is tests/clinician_read_live.py (hosted synthetic stack only).
@@ -41,7 +44,7 @@ import unicodedata
 import unittest
 from urllib.parse import parse_qs, unquote, urlparse
 
-from playwright.sync_api import expect, sync_playwright
+from playwright.sync_api import Error as PlaywrightError, expect, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -218,6 +221,25 @@ def variant(edits):
 
 REPORT_GUARD = "    return mine === reportSeq && selected === uid;\n"
 LIST_GUARD = "    return mine === listSeq;\n"
+GO_GUARD = "    if (leaving) return;\n    leaving = true;\n    location.replace(url);\n"
+LOGOUT_GUARD = "    if (leaving) return;\n    leaving = true;\n    KinAuth.logout();\n"
+
+# auth.js broadcastEnded() as another tab runs it (pinned in test_09): one channel message, then a localStorage set
+# and remove, each a storage event in every other tab of this origin.
+BROADCAST_ENDED = """() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close();
+  localStorage.setItem('kin-session-ended', String(Date.now())); localStorage.removeItem('kin-session-ended'); }"""
+# Installed in the page under test before its navigation is held. While a navigation is held, evaluate and
+# wait_for_function on that page do not return until it ends, so each session-ended that reaches the page is
+# reported as a request instead. Registered after clinician.js's listeners, and a BroadcastChannel delivers to the
+# oldest object first, so a report means the page has already handled that signal. It changes nothing the page does.
+WATCH_SIGNALS = """() => { const report = kind => fetch('/harness/signal?kind=' + kind);
+  window.synChannel = new BroadcastChannel('kin-session');
+  window.synChannel.onmessage = e => { if (e.data && e.data.type === 'session-ended') report('channel'); };
+  addEventListener('storage', e => { if (e.key === 'kin-session-ended') report('storage'); }); }"""
+# After the last signal, time for a second navigation to reach the harness. The nav-no-guard control in test_09 must
+# show its second navigation inside the same window, so the window is long enough.
+WINDOW_MS = 500
+EXPIRED = (401, {"statusCode": 401, "message": "인증 정보가 없습니다"})
 
 
 class ClinicianHomeDOMTest(unittest.TestCase):
@@ -227,6 +249,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             "uid-only": variant([(REPORT_GUARD, "    return selected === uid;\n")]),
             "no-guard": variant([(REPORT_GUARD, "    return true;\n")]),
             "list-no-guard": variant([(LIST_GUARD, "    return true;\n")]),
+            "nav-no-guard": variant([(GO_GUARD, "    location.replace(url);\n"), (LOGOUT_GUARD, "    KinAuth.logout();\n")]),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -247,6 +270,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.page_patch = None
         self.held_lists = None
         self.held_reports = None
+        self.held_documents = None
+        self.documents, self.failed_documents, self.signals = [], [], []
         self.cursors = {}
         self.list_requests, self.report_requests, self.logouts, self.booted = [], [], [], []
         self.me_requests = 0
@@ -257,6 +282,11 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.page.on("dialog", self.on_dialog)
         self.page.on("requestfinished", lambda request: self.finished.append(request))
+        # Main-frame document requests. A second location.replace cancels the first navigation before it commits, so
+        # framenavigated counts one either way; the requests show both.
+        self.page.on("request", lambda request: self.documents.append(request.url) if self.is_document(request) else None)
+        self.page.on("requestfailed", lambda request: self.failed_documents.append(f"{request.url} {request.failure}")
+                     if self.is_document(request) else None)
 
     def tearDown(self):
         self.context.close()
@@ -267,6 +297,9 @@ class ClinicianHomeDOMTest(unittest.TestCase):
     def on_dialog(self, dialog):
         self.dialogs.append(f"{dialog.type}: {dialog.message}")
         dialog.dismiss()
+
+    def is_document(self, request):
+        return request.is_navigation_request() and request.frame == self.page.main_frame
 
     # ── synthetic origin ──
     def route(self, route):
@@ -280,6 +313,9 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         if method == "GET" and path.startswith(BASE):
             name = path[len(BASE):]
             if name == "index.html" and self.index_stand_in:
+                if self.held_documents is not None:
+                    self.held_documents.append(route)
+                    return
                 route.fulfill(body=INDEX_STAND_IN, content_type="text/html; charset=utf-8")
                 return
             if name in ("main.html", "blank.html"):
@@ -297,6 +333,10 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             return
         if method == "GET" and path == "/harness/booted":
             self.booted.append(parse_qs(url.query, keep_blank_values=True))
+            route.fulfill(status=204, body="")
+            return
+        if method == "GET" and path == "/harness/signal":
+            self.signals.append(parse_qs(url.query).get("kind", [""])[0])
             route.fulfill(status=204, body="")
             return
         if path.startswith("/api/") and request.headers.get("x-kin-csrf") != "1":
@@ -417,6 +457,81 @@ class ClinicianHomeDOMTest(unittest.TestCase):
     def active(self):
         return self.page.evaluate("""() => { const e = document.activeElement;
           return {id: e.id || null, row: e.closest('tr[data-uid]')?.dataset.uid ?? null, text: e.textContent}; }""")
+
+    def hold_documents(self):
+        # Every navigation to index.html waits here, so a second location.replace lands while the first is in flight
+        # and shows up as a second document request instead of racing its commit. Nothing may evaluate in the page
+        # until land(): the harness only waits and reads what reached the routes.
+        self.held_documents, self.signals = [], []
+        return len(self.documents)
+
+    def navigations_after(self, start, channel=1, storage=0):
+        self.wait_until(lambda: self.held_documents, "the navigation to index.html")
+        self.wait_until(lambda: self.signals.count("channel") >= channel and self.signals.count("storage") >= storage,
+                        f"session-ended reaching the page (channel >= {channel}, storage >= {storage})")
+        self.page.wait_for_timeout(WINDOW_MS)
+        return self.documents[start:]
+
+    def signal_counts(self):
+        return {kind: self.signals.count(kind) for kind in ("channel", "storage")}
+
+    def log_out_here(self):
+        # auth.js navigates, then its session-ended comes back on this page's channel (a BroadcastChannel skips only
+        # the object that sent it).
+        self.open_home()
+        self.pick(1)
+        self.page.evaluate(WATCH_SIGNALS)
+        start = self.hold_documents()
+        self.page.locator("#logout").click()
+        return self.navigations_after(start)
+
+    def two_expired(self):
+        # The list answers 401 while a report request is pending, then the report answers 401 too.
+        self.open_home()
+        self.pick(1)
+        self.held_reports = []
+        self.row(2).click()
+        self.wait_until(lambda: len(self.held_reports) == 1, "the pending report request")
+        report = self.held_reports[0][1]
+        self.held_reports = None
+        self.page.evaluate(WATCH_SIGNALS)
+        start, logouts, self.list_errors = self.hold_documents(), len(self.logouts), [EXPIRED]
+        self.page.locator("#refresh").click()
+        first = self.navigations_after(start)
+        report.fulfill(status=EXPIRED[0], json=EXPIRED[1])
+        self.wait_until(lambda: any(item is report.request for item in self.finished), "the second 401 reaching the page")
+        self.page.wait_for_timeout(WINDOW_MS)
+        return first, self.documents[start:], len(self.logouts) - logouts
+
+    def log_out_elsewhere(self):
+        # Another tab runs auth.js broadcastEnded(): one channel message and the storage events of a set and a remove.
+        self.open_home()
+        self.pick(1)
+        other = self.context.new_page()
+        other.goto(ORIGIN + BASE + "blank.html")
+        self.page.evaluate(WATCH_SIGNALS)
+        start = self.hold_documents()
+        other.evaluate(BROADCAST_ENDED)
+        seen = self.navigations_after(start, storage=1)
+        other.close()
+        return seen, self.signal_counts()
+
+    def land(self):
+        held, self.held_documents = self.held_documents, None
+        # Only the newest can still be live: each later navigation cancelled the one before it. Answering the older
+        # ones only releases the harness's hold, and a request the browser already dropped may refuse the answer.
+        for route in held[:-1]:
+            try:
+                route.abort()
+            except PlaywrightError:
+                pass
+        held[-1].fulfill(body=INDEX_STAND_IN, content_type="text/html; charset=utf-8")
+        if len(held) == 1:
+            self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        else:
+            # Controls only: the cancelled navigations may report their abort while this waits.
+            self.wait_until(lambda: self.page.url == ORIGIN + BASE + "index.html", "the control landing on index.html")
+        expect(self.page.locator("#stand-in")).to_be_visible()
 
     # ── cases ──
     def test_01_landing_follows_the_guard_rule_and_main_html_hands_clinician_only_over(self):
@@ -821,23 +936,28 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             self.assertGreaterEqual(min(width, height), 24, text)
 
     def test_09_log_out_session_end_membership_and_no_session(self):
+        self.assertIn("      channel.postMessage({ type: 'session-ended' });\n", SHIPPED["auth.js"])
+        self.assertIn("      localStorage.setItem('kin-session-ended', String(Date.now()));\n"
+                      "      localStorage.removeItem('kin-session-ended');\n", SHIPPED["auth.js"])
+        index = ORIGIN + BASE + "index.html"
         self.index_stand_in = True
-        self.open_home()
-        self.pick(1)
-        self.page.locator("#logout").click()
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#stand-in")).to_be_visible()
-        self.assertEqual(["1"], self.logouts)
 
-        # Log out in another tab of this browser.
-        self.open_home()
-        self.pick(1)
-        other = self.context.new_page()
-        other.goto(ORIGIN + BASE + "blank.html")
-        other.evaluate("() => { const c = new BroadcastChannel('kin-session'); c.postMessage({type: 'session-ended'}); c.close(); }")
-        self.page.wait_for_url(ORIGIN + BASE + "index.html")
-        expect(self.page.locator("#stand-in")).to_be_visible()
-        other.close()
+        # Log out: the page's own session-ended clears it and does not navigate again.
+        self.assertEqual([index], self.log_out_here(), "Log out: one navigation")
+        self.assertEqual(["1"], self.logouts)
+        self.land()
+
+        # Two 401s: one POST /auth/logout, one navigation.
+        first, after, logouts = self.two_expired()
+        self.assertEqual(([index], [index], 1), (first, after, logouts), "two 401s: one log out, one navigation")
+        self.land()
+
+        # Log out in another tab of this browser: every signal calls leave(); the page navigates once.
+        seen, counts = self.log_out_elsewhere()
+        self.assertEqual(1, counts["channel"])
+        self.assertGreaterEqual(counts["storage"], 1)
+        self.assertEqual([index], seen, f"another tab's log out ({counts}): one navigation")
+        self.land()
 
         for code, title, text in (("INSTITUTION_PENDING", "Pending Approval",
                                    "가입 신청이 접수되었습니다. 관리자가 기관과 역할을 확인한 뒤 사용할 수 있습니다."),
@@ -855,9 +975,32 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                 self.assertEqual(lists, len(self.list_requests))
 
         self.me = (401, {"statusCode": 401, "message": "인증 정보가 없습니다"})
+        start = len(self.documents)
         self.page.goto(ORIGIN + BASE + "clinician.html")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         expect(self.page.locator("#stand-in")).to_be_visible()
+        self.assertEqual([ORIGIN + BASE + "clinician.html", index], self.documents[start:], "no session: one navigation")
+        self.assertEqual([], self.failed_documents, "no navigation was cancelled")
+
+        # Control: the same steps on the same file without the guard, inside the same window. The page's own
+        # session-ended navigates again, the second 401 logs out again (its auth.js navigation and echo add two more),
+        # and every signal from another tab navigates, so the single counts above are not a harness that misses them.
+        self.files["clinician.js"] = self.variants["nav-no-guard"]
+        self.me = me(["clinician", *KEYCLOAK_DEFAULTS])
+        self.assertEqual([index, index], self.log_out_here(), "nav-no-guard: Log out navigates twice")
+        self.land()
+
+        first, after, logouts = self.two_expired()
+        self.assertEqual(([index, index], 2), (first, logouts), "nav-no-guard: the second 401 logs out again")
+        self.wait_until(lambda: len(self.held_documents) == 4, "nav-no-guard: four navigations after two 401s")
+        self.assertEqual([index] * 4, self.documents[-4:])
+        self.land()
+
+        seen, counts = self.log_out_elsewhere()
+        self.assertEqual([index] * (counts["channel"] + counts["storage"]), seen,
+                         f"nav-no-guard: every signal ({counts}) navigates")
+        self.assertGreaterEqual(len(seen), 2)
+        self.land()
 
 
 if __name__ == "__main__":

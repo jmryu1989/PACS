@@ -52,6 +52,7 @@
   let selected = null;
   let refocus = null;
   let channel = null;
+  let leaving = false;
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -121,7 +122,7 @@
       const response = await fetch(API + path, { headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
       const body = await response.json().catch(() => null);
       if (response.status === 401) {
-        KinAuth.logout();
+        logout();
         throw failure(401, body, '세션이 만료되었습니다. 다시 로그인하세요.');
       }
       if (!response.ok) throw failure(response.status, body);
@@ -486,10 +487,28 @@
     document.body.replaceChildren();
   }
 
+  /**
+   * 이 문서의 이동은 한 번뿐이다. 진행 중인 이동 위에서 location.replace를 다시 부르면 첫 이동이 취소된다(net::ERR_ABORTED).
+   * 세션 종료 소식은 한 번에 여러 번 온다 — 다른 탭의 로그아웃은 BroadcastChannel 한 번과 storage 두 번(set·remove)이고,
+   * 이 문서의 로그아웃도 auth.js clearLocal()이 새 채널 객체로 보내므로 이 문서의 채널이 받는다(제외되는 것은 보낸 객체뿐이다).
+   */
+  function go(url) {
+    if (leaving) return;
+    leaving = true;
+    location.replace(url);
+  }
+
+  /** 로그아웃을 시작한 뒤의 이동은 KinAuth.logout()이 한다. 그 뒤에 오는 자기 종료 소식·두 번째 401은 화면만 지운다. */
+  function logout() {
+    if (leaving) return;
+    leaving = true;
+    KinAuth.logout();
+  }
+
   /** 세션이 끝났거나 다른 계정이 되었다. 이 계정의 검사·판독문을 화면에서 먼저 지우고 진입 화면이 다시 정하게 한다. */
   function leave() {
     close();
-    location.replace('index.html');
+    go('index.html');
   }
 
   function listen() {
@@ -513,8 +532,8 @@
   }
 
   function wire() {
-    $('#logout').addEventListener('click', () => KinAuth.logout());
-    $('#membership-logout').addEventListener('click', () => KinAuth.logout());
+    $('#logout').addEventListener('click', () => logout());
+    $('#membership-logout').addEventListener('click', () => logout());
     $('#refresh').addEventListener('click', () => loadList());
     $('#list-retry').addEventListener('click', () => loadList());
     $('#report-retry').addEventListener('click', () => { if (selected !== null) select(selected); });
@@ -533,12 +552,12 @@
     try {
       await KinAuth.init();
     } catch (_) {
-      location.replace('index.html');
+      go('index.html');
       return;
     }
     const session = KinAuth.session();
     if (!session) {
-      location.replace('index.html');
+      go('index.html');
       return;
     }
     listen();
@@ -548,7 +567,7 @@
     }
     // 데모 세션에는 서버가 없어 이 화면이 읽을 응답이 없다. 워크리스트의 데모로 보낸다.
     if (session.demo) {
-      location.replace('main.html');
+      go('main.html');
       return;
     }
     owner = [session.institution ?? null, session.sub ?? null];
