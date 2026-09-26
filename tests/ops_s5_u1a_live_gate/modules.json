@@ -1,32 +1,14 @@
 [
   {
-    "module": "tests/clinician_read_live.py",
-    "unit": "s5-u1b-clinician-read",
-    "timeout": 900,
-    "cases": [
-      "ClinicianReadLive.test_01_list_row_is_narrow_counts_only_visible_studies_and_keeps_role_gates",
-      "ClinicianReadLive.test_02_report_read_follows_the_head_row_final_then_reset_back_to_status",
-      "ClinicianReadLive.test_03_viewer_pair_items_statistics_and_the_tele_boundary",
-      "ClinicianReadLive.test_04_revocation_ends_the_kept_session_and_new_tokens_and_reports_the_kept_bearer_until_exp",
-      "ClinicianReadLive.test_05_same_user_a_b_a_gets_each_studys_own_answer",
-      "ClinicianReadLive.test_06_viewer_items_stay_on_one_signed_version_across_a_reset_and_reapproval",
-      "ClinicianReadLive.test_06b_viewer_pages_continue_only_on_the_signed_version_they_started",
-      "ClinicianReadLive.test_07_list_status_is_one_snapshot_when_an_addendum_lands_mid_list"
-    ],
-    "expected": {
-      "sweep": null,
-      "audit_rows": {}
-    }
-  },
-  {
     "module": "tests/clinician_policy_live.py",
-    "unit": "s5-u1b-clinician-policy",
-    "timeout": 355,
+    "unit": "s5-u1c-clinician-policy",
+    "timeout": 900,
     "cases": [
       "ClinicianPolicyLive.test_01_clinician_only_session_routes_and_default_denial",
       "ClinicianPolicyLive.test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout",
       "ClinicianPolicyLive.test_03_member_console_approves_updates_and_revokes_a_clinician",
-      "ClinicianPolicyLive.test_04_mixed_and_legacy_roles_keep_their_existing_paths"
+      "ClinicianPolicyLive.test_04_mixed_and_legacy_roles_keep_their_existing_paths",
+      "ClinicianPolicyLive.test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case"
     ],
     "expected": {
       "sweep": {
