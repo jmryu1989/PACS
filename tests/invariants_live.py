@@ -146,6 +146,12 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "studies/:uid/questions"): Route(Kind.TENANT),
     ("POST", "questions/:id/entries"): Route(Kind.TENANT),
     ("POST", "questions/:id/close"): Route(Kind.TENANT),
+    # S5-U4c — 영상 요청 등록. 요청은 전송이 아니다(Transfer·basis·agreement 불변). 경계는 image-request.service.ts.
+    ("GET", "image-requests"): Route(Kind.TENANT),
+    ("GET", "image-requests/:id"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/image-requests"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/image-requests"): Route(Kind.TENANT),
+    ("POST", "image-requests/:id"): Route(Kind.TENANT),
     ("GET", "reader-candidates"): Route(Kind.USER),
     ("GET", "studies/:uid/reader-assignment"): Route(Kind.USER),
     ("POST", "studies/:uid/reader-assignment"): Route(Kind.USER),

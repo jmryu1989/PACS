@@ -21,6 +21,9 @@ LIMITS = combined.LIMITS
 # measured at 32 tables). Keep producer, bounded copy and parser on one finite cap.
 # S5-U4a (41 tables): the synthetic rows grew by 2,920 bytes (exact); the whole receipt is estimated at
 # about 185 KB from a modelled catalog, pending the hosted producer's actual size.
+# S5-U4c (43 tables): the synthetic rows grew by 3,560 bytes (measured with a 34-digit UID; the real UID's length moves
+# it by a few bytes per row) and the modelled catalog by about 13 KB (26 columns, 16 constraints, 7 indexes; 411 of
+# the 512 columns catalog_contract allows); the whole receipt is estimated at about 203 KB, pending the hosted size.
 RECEIPT_LIMIT = 256*1024
 QUERY_LIMIT = 256*1024
 PROFILE = 'synthetic-product-v1'
@@ -53,13 +56,14 @@ MIGRATIONS = ['api/prisma/migrations/0_init/migration.sql',
               'api/prisma/migrations/20260924120000_order_accession/migration.sql',
               'api/prisma/migrations/20260924130000_gateway_receipt/migration.sql',
               'api/prisma/migrations/20260924140000_gateway_retry_request/migration.sql',
-              'api/prisma/migrations/20260926120000_study_questions/migration.sql']
+              'api/prisma/migrations/20260926120000_study_questions/migration.sql',
+              'api/prisma/migrations/20260926130000_study_image_requests/migration.sql']
 TABLES = sorted(['AuthSession', 'Institution', 'StudyState', 'Report', 'ReportVersion',
                  'ReportDraft', 'Order', 'UserFilter', 'ReadingTemplate', 'AuditLog',
                  'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                  'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                  'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
-                 'StudyQuestion', 'StudyQuestionEntry',
+                 'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                  'GatewayReceipt', 'GatewayRetryRequest'])
 SEQUENCES = ['AuditLog_id_seq', 'ReadingTemplate_id_seq', 'ReportVersion_id_seq', 'UserFilter_id_seq']
 STAMP = '2026-09-06T00:00:00.123'
@@ -260,6 +264,34 @@ def expected_rows(uid):
             entry=dict(id=entry_id, seq=seq, kind=kind), revision=seq, to=to, at='2026-09-06T00:00:00.123Z',
             **{'from': before}), at=STAMP)
         for entry_id, seq, kind, body, role, rs, version, before, to in entries]
+    # S5-U4c: two image requests and their four receipts. A Closed image-transfer request whose counterparty is the
+    # tele institution (a real FK value) carries the creating receipt (requestId = request id, revision 1), the accept
+    # and the close; an active external-image request with no counterparty id, handler or note carries its creating
+    # receipt and sits inside the partial unique index. Each result is the stored ImageRequestApplied a replay
+    # answers, so the receipts, the handler and note columns and a NULL and a real counterparty id all go through
+    # the exact dump comparison (F-19). The rows satisfy every CHECK of 20260926130000_study_image_requests.
+    closed_request, active_request = '00000000-0000-4000-8000-000000000e01', '00000000-0000-4000-8000-000000000e11'
+    requester = dict(requesterSub='SYNTHETIC-clinician-sub', requesterActor='SYNTHETIC-clinician',
+        requesterName='SYNTHETIC clinician')
+    rows['StudyImageRequest'] = [
+        dict(id=closed_request, studyUid=uid, institutionId='SYNTHETIC-hospital', kind='image-transfer', **requester,
+            counterpartyText='SYNTHETIC receiving hospital', counterpartyInstitutionId='SYNTHETIC-tele',
+            reason='SYNTHETIC transfer reason\n합성', state='Closed', revision=3, handlerActor='SYNTHETIC-tech',
+            handlerName='SYNTHETIC tech', note='SYNTHETIC processing record', changedBy='SYNTHETIC-tech',
+            createdAt=STAMP, updatedAt=STAMP),
+        dict(id=active_request, studyUid=uid, institutionId='SYNTHETIC-hospital', kind='external-image', **requester,
+            counterpartyText='SYNTHETIC outside clinic', counterpartyInstitutionId=None, reason='SYNTHETIC outside images',
+            state='Requested', revision=1, handlerActor=None, handlerName=None, note=None,
+            changedBy='SYNTHETIC-clinician', createdAt=STAMP, updatedAt=STAMP)]
+    receipts = [(closed_request, closed_request, 'image-transfer', 'SYNTHETIC-clinician-sub', 'create', None, 'Requested', 1),
+                ('00000000-0000-4000-8000-000000000e02', closed_request, 'image-transfer', 'SYNTHETIC-tech-sub', 'accept', 'Requested', 'Accepted', 2),
+                ('00000000-0000-4000-8000-000000000e03', closed_request, 'image-transfer', 'SYNTHETIC-tech-sub', 'close', 'Accepted', 'Closed', 3),
+                (active_request, active_request, 'external-image', 'SYNTHETIC-clinician-sub', 'create', None, 'Requested', 1)]
+    rows['StudyImageRequestReceipt'] = [dict(requestId=request_id, imageRequestId=parent, subjectSub=subject,
+        action=action, fingerprint=str(index + 5)*64, appliedRevision=revision,
+        result=dict(id=parent, studyUid=uid, requestId=request_id, kind=kind, action=action, to=to, revision=revision,
+            at='2026-09-06T00:00:00.123Z', **{'from': before}), at=STAMP)
+        for index, (request_id, parent, kind, subject, action, before, to, revision) in enumerate(receipts)]
     rows['ReaderAssignment']=[dict(studyUid=uid,institutionId='SYNTHETIC-hospital',revision=4,
         readerSub='SYNTHETIC-sub',readerActor='SYNTHETIC-reader',readerName='SYNTHETIC reader',changedBy='SYNTHETIC-admin',
         lastRequest='00000000-0000-4000-8000-000000000701',lastFingerprint='d'*64,updatedAt=STAMP)]
@@ -317,7 +349,7 @@ def create_product(name, db, uid):
                   'ViewerItem', 'ViewerRevision', 'ViewerStorageBudget', 'ViewerRequest', 'Finding', 'FindingRevision', 'WorkspaceLayout', 'WorklistColumns',
                   'TransferBasis', 'ProcessingAgreement', 'Transfer', 'ViewerJob', 'ViewerJobRevision', 'ManualSr', 'TechNoteRevision',
                   'FavoriteWorkspace', 'StudyTagCatalog', 'ReaderAssignment', 'ReadingPreferences', 'ReadingAppearance', 'WorkspaceShortcuts', 'HangingProtocolPreference', 'UserFilterCollection', 'SharedFilterLibrary', 'StudyConsultation', 'StudyAccessPolicy', 'StudyAccessRevision',
-                  'StudyQuestion', 'StudyQuestionEntry',
+                  'StudyQuestion', 'StudyQuestionEntry', 'StudyImageRequest', 'StudyImageRequestReceipt',
                   'GatewayReceipt', 'GatewayRetryRequest'):
         rows = data[table]
         for row in rows:
@@ -577,6 +609,29 @@ def constraint_probes(name, product):
         RAISE EXCEPTION 'missing question receipt result check'; EXCEPTION WHEN check_violation THEN NULL; END;
       BEGIN INSERT INTO "StudyQuestionEntry" SELECT * FROM "StudyQuestionEntry" LIMIT 1;
         RAISE EXCEPTION 'missing question receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequest" SET kind='transfer';
+        RAISE EXCEPTION 'missing image request kind check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequest" SET state='Bogus';
+        RAISE EXCEPTION 'missing image request state check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequest" SET note=NULL WHERE state='Closed';
+        RAISE EXCEPTION 'missing image request note check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequest" SET "handlerActor"=NULL,"handlerName"=NULL WHERE state='Closed';
+        RAISE EXCEPTION 'missing image request handler check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequest" SET "counterpartyInstitutionId"="institutionId" WHERE "counterpartyInstitutionId" IS NOT NULL;
+        RAISE EXCEPTION 'missing image request counterparty check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequest" SET "counterpartyInstitutionId"='SYNTHETIC-missing';
+        RAISE EXCEPTION 'missing image request counterparty FK'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN DELETE FROM "StudyImageRequest";
+        RAISE EXCEPTION 'missing image request receipt restriction'; EXCEPTION WHEN foreign_key_violation THEN NULL; END;
+      BEGIN INSERT INTO "StudyImageRequest" SELECT * FROM json_populate_record(NULL::"StudyImageRequest",
+        (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000e99'))::json FROM "StudyImageRequest" t WHERE state='Requested'));
+        RAISE EXCEPTION 'missing active image request unique'; EXCEPTION WHEN unique_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequestReceipt" SET "appliedRevision"=99 WHERE action='create';
+        RAISE EXCEPTION 'missing image request receipt revision check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN UPDATE "StudyImageRequestReceipt" SET result='[]'::jsonb WHERE action='create';
+        RAISE EXCEPTION 'missing image request receipt result check'; EXCEPTION WHEN check_violation THEN NULL; END;
+      BEGIN INSERT INTO "StudyImageRequestReceipt" SELECT * FROM "StudyImageRequestReceipt" LIMIT 1;
+        RAISE EXCEPTION 'missing image request receipt PK'; EXCEPTION WHEN unique_violation THEN NULL; END;
       BEGIN UPDATE "StudyConsultation" SET state='Requested';
         INSERT INTO "StudyConsultation" SELECT * FROM json_populate_record(NULL::"StudyConsultation",
           (SELECT (to_jsonb(t)||jsonb_build_object('id','00000000-0000-4000-8000-000000000999'))::json FROM "StudyConsultation" t LIMIT 1));

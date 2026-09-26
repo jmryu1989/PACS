@@ -646,14 +646,17 @@ class MigrationPins(unittest.TestCase):
     def test_migration_order_image_and_restore_bookkeeping(self):
         names = sorted(p.name for p in (ROOT / "api" / "prisma" / "migrations").iterdir() if p.is_dir())
         # S5-U4a: 20260926120000_study_questions (StudyQuestion/StudyQuestionEntry) is the one migration after U4; 29 -> 30.
-        questions = "20260926120000_study_questions"
-        self.assertEqual(names[-3:], [U3_MIGRATION, MIGRATION_NAME, questions],
-                         "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, which is last")
-        self.assertEqual(len(names), 30)
+        # S5-U4c: 20260926130000_study_image_requests (StudyImageRequest/StudyImageRequestReceipt) follows it; 30 -> 31.
+        questions, image_requests = "20260926120000_study_questions", "20260926130000_study_image_requests"
+        self.assertEqual(names[-4:], [U3_MIGRATION, MIGRATION_NAME, questions, image_requests],
+                         "U3 immediately before U4, U4 immediately before S5-U4a's study_questions, then S5-U4c's "
+                         "study_image_requests, which is last")
+        self.assertEqual(len(names), 31)
         self.assertIn("'" + MIGRATION_NAME + "'", text("tests", "production_image_test.py"))
         self.assertIn("              'api/prisma/migrations/" + U3_MIGRATION + "/migration.sql',\n"
                       "              'api/prisma/migrations/" + MIGRATION_NAME + "/migration.sql',\n"
-                      "              'api/prisma/migrations/" + questions + "/migration.sql']", FIXTURE)
+                      "              'api/prisma/migrations/" + questions + "/migration.sql',\n"
+                      "              'api/prisma/migrations/" + image_requests + "/migration.sql']", FIXTURE)
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'])", FIXTURE)          # TABLES
         self.assertIn("'GatewayReceipt', 'GatewayRetryRequest'):", FIXTURE)          # seeding order, after its FK parent
         self.assertIn("rows['GatewayRetryRequest'] = [dict(studyUid=uid, epoch='00000000-0000-4000-8000-000000000c01', seq=7,\n"
@@ -667,11 +670,12 @@ class MigrationPins(unittest.TestCase):
         self.assertEqual(FIXTURE.count("'GatewayReceipt'"), 3)
         transfer = text("tests", "ops_product_transfer_test.py")
         # S5-U4a: 30 migrations, 41 tables (StudyQuestion, StudyQuestionEntry), rows + 1 question + 3 receipts.
-        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 30)", transfer)
-        self.assertIn("self.assertEqual(len(transfer.TABLES), 41)", transfer)
-        self.assertIn("46 + 1 + 2 + 1 + 1 + 1 + 1 + 3)", transfer)
+        # S5-U4c: 31 migrations, 43 tables (StudyImageRequest, StudyImageRequestReceipt), rows + 2 requests + 4 receipts.
+        self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", transfer)
+        self.assertIn("self.assertEqual(len(transfer.TABLES), 43)", transfer)
+        self.assertIn("46 + 1 + 2 + 1 + 1 + 1 + 1 + 3 + 2 + 4)", transfer)
         for pinned in ("report_structure_migration_test.py", "order_reconciliation_source_test.py", "gateway_receipt_source_test.py"):
-            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 30)", text("tests", pinned), pinned)
+            self.assertIn("self.assertEqual(len(transfer.MIGRATIONS), 31)", text("tests", pinned), pinned)
 
 
 # ── the client ──

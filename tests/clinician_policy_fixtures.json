@@ -5,9 +5,11 @@
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
   "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report",
-    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"],
+    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
+    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
   "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report",
-    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close"],
+    "GET questions", "GET questions/:id", "GET studies/:uid/questions", "POST studies/:uid/questions", "POST questions/:id/entries", "POST questions/:id/close",
+    "GET image-requests", "GET image-requests/:id", "GET studies/:uid/image-requests", "POST studies/:uid/image-requests", "POST image-requests/:id"],
   "must_stay_denied": [
     "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
     "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
@@ -85,7 +87,12 @@
     {"method": 0, "controller": "/", "handler": "studies/:uid/questions", "key": "GET studies/:uid/questions", "allowed": true},
     {"method": 1, "controller": "/", "handler": "studies/:uid/questions", "key": "POST studies/:uid/questions", "allowed": true},
     {"method": 1, "controller": "/", "handler": "questions/:id/entries", "key": "POST questions/:id/entries", "allowed": true},
-    {"method": 1, "controller": "/", "handler": "questions/:id/close", "key": "POST questions/:id/close", "allowed": true}
+    {"method": 1, "controller": "/", "handler": "questions/:id/close", "key": "POST questions/:id/close", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "image-requests", "key": "GET image-requests", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "image-requests/:id", "key": "GET image-requests/:id", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/image-requests", "key": "GET studies/:uid/image-requests", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "studies/:uid/image-requests", "key": "POST studies/:uid/image-requests", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "image-requests/:id", "key": "POST image-requests/:id", "allowed": true}
   ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
@@ -127,7 +134,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 118, "public": 4, "session": 2, "business": 11, "denied": 101},
+    "counts": {"routes": 123, "public": 4, "session": 2, "business": 16, "denied": 101},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -199,6 +206,11 @@
       "POST questions/:id/entries": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "author follow-up (clinician) or answer (radiologist, never admin alone), decided by the server; replay returns the stored receipt; declared in allowed_additions"},
       "POST questions/:id/close": {"decision": "business", "unit": "S5-U4a", "commit": "b4d9989", "basis": "close by the author (note optional) or by a radiologist/admin with a note; replay returns the stored receipt; declared in allowed_additions"},
       "GET admin/metrics": {"decision": "denied", "unit": "S5-U6b", "commit": "9fe2f14", "basis": "admin operations metrics: institution-scoped counts, report TAT and server-wide storage (need admin, restricted study access refused); not a clinician read"},
+      "GET image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "image request list: view=mine is the clinician's own requests, view=queue needs radiologist, technician or admin (service 403 otherwise); owning institution and StudyAccess only, no count; declared in allowed_additions"},
+      "GET image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "one request: a clinician-only member reads only its own (404 otherwise), staff and radiologists the owning institution's; the counterparty institution never reads it; declared in allowed_additions"},
+      "GET studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "requests of one owned study (tele institution 404), the clinician's own only; declared in allowed_additions"},
+      "POST studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "external-image or image-transfer request create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); a record, never a transfer; declared in allowed_additions"},
+      "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
       "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"}
     }
   },
@@ -442,9 +454,14 @@
     "fill": {
       "$request_id": "a new UUID v4 for every call",
       "$owner": "[institution, sub] of the calling identity from GET /me, the value the question service compares expectedOwner with, so a refusal is the role or tenant rule and never OWNER_CHANGED",
-      "$revision": "the current revision of the :id question, read from StudyQuestion just before the call"
+      "$revision": "the current revision of the row's :id, read just before the call: the :id question from StudyQuestion, the :id image request from StudyImageRequest"
+    },
+    "literals": {
+      "rule": "S5-U4c: a write body value that is neither a fill placeholder, '' nor a SYNTHETIC text is one of these enumerated values, each spelled in the source file that defines the row's audit action (null is the explicit no-counterparty-id value)",
+      "values": {"kind": ["external-image", "image-transfer"], "action": ["cancel"], "counterpartyInstitutionId": [null]}
     },
     "question": "one question the clinician asks on the study before the loop with clinician_question_live.ask_question; :id is its id. The create row asks a second one, the entries row follows it up, and the close row, which runs after every other row that names it, closes it. The question rows go before the study cleanup (both foreign keys RESTRICT) through clinician_question_live.drop_study_questions",
+    "image_request": "S5-U4c: one image-transfer request the clinician makes on the study before the loop with clinician_request_live.make_image_request; :id of the image-requests rows is its id. The create row makes an external-image request (another kind, so the active-request rule never meets the prepared one) and the change row, which runs after every other row that names it, cancels the prepared one. The list row asks state=all. The request rows go before the study cleanup (every foreign key RESTRICT) through clinician_request_live.drop_study_image_requests",
     "identities": {
       "clinician": "clinician-only member of hallym, the study's institution",
       "kclinician": "clinician-only member of kin-center",
@@ -541,6 +558,47 @@
         "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
         "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+      },
+      "GET image-requests": {
+        "query": "view=mine&state=all",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "view=mine is the clinician's own list; radiologists and staff read view=queue"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the request"}
+      },
+      "GET image-requests/:id": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다", "basis": "every app role of the owning institution reads a request (OQ-5 a), so the identity without one is the wrong role"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
+      },
+      "GET studies/:uid/image-requests": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "gateway", "expect": "denied", "status": 403, "code": null, "message": "게이트웨이에 허용되지 않는 경로입니다", "basis": "every app role of the owning institution reads a study's requests (OQ-5 a), so the identity without one is the wrong role"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST studies/:uid/image-requests": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "kind": "external-image", "counterparty": "SYNTHETIC S5-U1c matrix hospital",
+                   "counterpartyInstitutionId": null, "reason": "SYNTHETIC S5-U1c matrix request"},
+          "expected_status": 201,
+          "audit": {"action": "study.image-request", "source": ["image-request.service.ts", "IMAGE_REQUEST_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "action": "create", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST image-requests/:id": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "action": "cancel", "note": "SYNTHETIC S5-U1c matrix cancel"},
+          "expected_status": 201,
+          "audit": {"action": "study.image-request", "source": ["image-request.service.ts", "IMAGE_REQUEST_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "action": "cancel", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "IMAGE_REQUEST_ROLE_REQUIRED", "basis": "a technician handles requests but never cancels one (the requesting clinician or admin does, OQ-5 a)"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "IMAGE_REQUEST_NOT_FOUND"}
       }
     }
   },
