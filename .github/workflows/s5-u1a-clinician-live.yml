@@ -23,7 +23,7 @@ on:
       candidate_sha:
         description: Full lowercase 40-character commit SHA of the immutable candidate
         required: true
-        default: 7a338c5323f887e3d6d26ea0155b2c2635abb40b
+        default: 6af1225d29724c072253e00764e187866cbff5dd
         type: string
       modules:
         description: JSON module list replacing modules.json for this run (empty uses the committed file)
