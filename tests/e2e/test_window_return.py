@@ -44,7 +44,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
   v.keyboard.press('Control+Alt+4');v.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}");expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-return-status')).to_have_text('세션이나 영상 창이 변경되었습니다.')
 
  def test_return_04_direct_viewer_has_no_parent_link(self):
-  a,b=self.pair();v=self.launch(self.login(),[a]);self.ready(v);expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-return-status')).to_contain_text('영상 새 창으로')
+  a,b=self.pair();v=self.launch(self.login(),[a]);self.ready(v);expect(v.locator('#kin-viewer-focus-4')).to_be_disabled();expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-describedby','kin-viewer-return-hint');expect(v.locator('#kin-viewer-return-hint')).to_contain_text('영상 새 창으로');self.assertIn('영상 새 창으로',v.locator('#kin-viewer-focus-4').get_attribute('title'));expect(v.locator('#kin-viewer-return-status')).to_be_empty()
   v.keyboard.press('Control+Alt+4');expect(v.locator('#kin-viewer-return-status')).to_contain_text('영상 새 창으로');self.assertTrue(v.evaluate('()=>window.opener===null'))
 
  def test_return_05_wrong_owner_and_scope_cannot_move_editor_focus(self):
@@ -71,7 +71,7 @@ class WindowReturnE2E(ViewerTechNoteE2E):
 
   p.locator('#reading-appearance-close').click();before=self.snapshot(v)
   v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeExit()");expect(v.locator('#kin-viewer-return-status')).to_have_count(0)
-  v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000);expect(v.locator('#kin-viewer-return-status')).to_have_count(1);expect(v.locator('#kin-viewer-return-status')).to_be_in_viewport();expect(v.locator('#kin-viewer-note-open')).not_to_be_visible()
+  v.evaluate("()=>window.config.extensions.find(e=>e.id==='kin.viewer-tech-note').onModeEnter()");expect(v.locator('#kin-viewer-note-open')).to_be_enabled(timeout=45000);expect(v.locator('#kin-viewer-return-status')).to_have_count(1);expect(v.locator('#kin-viewer-layout > summary #kin-viewer-return-status')).to_have_count(1);expect(v.locator('#kin-viewer-layout > summary')).to_be_in_viewport();expect(v.locator('#kin-viewer-focus-4')).to_have_attribute('aria-describedby','kin-viewer-return-hint');expect(v.locator('#kin-viewer-return-hint')).to_contain_text('연결된 판독문으로');self.assertIn('연결된 판독문으로',v.locator('#kin-viewer-focus-4').get_attribute('title'));expect(v.locator('#kin-viewer-note-open')).not_to_be_visible()
   v.keyboard.press('Control+Alt+4');self.returned(p,v);self.assertEqual(self.snapshot(v),before)
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(WindowReturnE2E(n) for n in loader.getTestCaseNames(WindowReturnE2E) if n.startswith('test_return_'))

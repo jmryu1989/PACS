@@ -14,8 +14,9 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const normalize=window.KinViewerWorkspaceDock.normalize;
   let ended=false,placement='bottom',selected=-1,autoHide=false,autoHidden=false,hover=false,held=false,pointerButton=null,timer,storage,channel,initialMessage='도구 영역 · 이 창';
   const live=()=>!ended&&preferences.allowed?.()!==false&&(!initialOwner||preferences.owner?.()===initialOwner);
-  // Routine outcomes stay silent: the Dock Settings note says where preferences live.
-  // Invalid, unavailable, unsaved and other-window messages still show in the row at once.
+  // Mount and tab clicks stay silent: the Dock Settings note says where preferences live.
+  // A settings or account change confirms itself (reading-appearance copies this status),
+  // and invalid, unavailable, unsaved and other-window messages show in the row at once.
   try{storage=w.localStorage;const raw=key?storage.getItem(key):null;if(raw!==null){const value=raw.length<=128?normalize(JSON.parse(raw)):null;if(value){placement=value.placement;selected=value.panel;autoHide=value.autoHide??false;initialMessage='';}else initialMessage='저장값 오류 · 기본 도구 영역';}else if(key)initialMessage='';}catch(e){initialMessage=e instanceof SyntaxError?'저장값 오류 · 기본 도구 영역':'저장소 사용 불가 · 이 창';}
   const style = d.createElement('style');
   style.textContent = `
@@ -93,13 +94,13 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
   const label=d.createElement('label');label.textContent='Dock Position ';group.append(label);
   const location=d.createElement('select');location.id='kin-dock-placement';location.setAttribute('aria-label','Dock Position');label.append(location);
   for(const [value,text] of [['bottom','Bottom'],['top','Top']]){const option=d.createElement('option');option.value=value;option.textContent=text;location.append(option);}
-  location.onchange=()=>{if(!live()){end();return;}if(!['bottom','top'].includes(location.value))return;placement=location.value;apply();save();};
+  location.onchange=()=>{if(!live()){end();return;}if(!['bottom','top'].includes(location.value))return;placement=location.value;apply();save(true);};
   const autoLabel=d.createElement('label');autoLabel.textContent='Auto-hide ';group.append(autoLabel);
   const auto=d.createElement('input');auto.type='checkbox';auto.id='kin-dock-autohide';auto.setAttribute('aria-label','Auto-hide Panels');autoLabel.append(auto);
   autoLabel.title='영상 화면 안에서 도구 밖 조작을 마치면 패널을 접습니다. 버튼이나 키보드로 다시 열 수 있습니다.';
-  auto.onchange=()=>{if(!live()){end();return;}autoHide=auto.checked;autoHidden=false;apply();save();};
+  auto.onchange=()=>{if(!live()){end();return;}autoHide=auto.checked;autoHidden=false;apply();save(true);};
   const reset=d.createElement('button');reset.type='button';reset.id='kin-dock-reset';reset.textContent='Reset Dock';group.append(reset);
-  reset.onclick=()=>{if(!live()){end();return;}placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();save();};
+  reset.onclick=()=>{if(!live()){end();return;}placement='bottom';selected=-1;autoHide=false;autoHidden=false;apply();save(true);};
   const note=d.createElement('span');note.id='kin-dock-settings-note';note.textContent=key?'이 브라우저·이 계정에 저장됩니다.':'이 창에만 적용됩니다.';group.append(note);
   function resizeVisible(){
     // Resizing a hidden iframe's zero-size image can corrupt its camera scale.
@@ -115,10 +116,10 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     schedule();
   }
   const value=()=>({version:2,placement,panel:selected,autoHide});
-  function save(){
+  function save(announce=false){
     window.dispatchEvent(new window.CustomEvent('kin-dock-preference-changed',{detail:{owner:initialOwner,value:value()}}));
     if(!key){status.textContent='도구 영역 · 이 창';return;}
-    try{storage.setItem(key,JSON.stringify(value()));status.textContent='';}
+    try{storage.setItem(key,JSON.stringify(value()));status.textContent=announce?'도구 영역을 기억했습니다 · 이 브라우저':'';}
     catch(_){status.textContent='저장하지 못해 이 창에만 적용합니다.';}
   }
   function schedule(){
@@ -154,7 +155,7 @@ window.KinViewerWorkspaceDock = function (w, preferences) {
     });
   };
   dock.end=end;
-  dock.applyPreference=next=>{const clean=normalize(next);if(!live()||!clean)return false;placement=clean.placement;selected=clean.panel;autoHide=clean.autoHide??autoHide;autoHidden=false;apply();save();return true;};
+  dock.applyPreference=next=>{const clean=normalize(next);if(!live()||!clean)return false;placement=clean.placement;selected=clean.panel;autoHide=clean.autoHide??autoHide;autoHidden=false;apply();save(true);return true;};
   dock.preference=()=>live()?value():null;
   dock.dispose=()=>{
     end();

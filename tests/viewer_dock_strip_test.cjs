@@ -117,15 +117,18 @@ test('closed row height and open panel height are unchanged; the disclosure is i
   x.$('kin-dock-settings-toggle').click();assert.equal(x.doc.body.classList.contains('kin-dock-open'),false);
 });
 
-test('routine status is silent, the saved value and key are unchanged, and failures still show in the row',()=>{
+const REMEMBERED='도구 영역을 기억했습니다 · 이 브라우저';
+
+test('mount and tab clicks are silent, the saved value and key are unchanged, and failures still show in the row',()=>{
   const x=mount(),status=x.$('kin-dock-preference-status');
   // The collapsed disclosure's note is in the DOM but hidden; only rendered row text counts.
   const shown=n=>n.hidden?'':n.text+n.children.map(shown).join('');
   assert.equal(status.textContent,'');assert.equal(shown(x.nav).includes('이 브라우저'),false);assert.equal(shown(x.nav).includes('도구 영역'),false);
   x.$('kin-dock-settings-toggle').click();assert.equal(shown(x.nav).includes('이 브라우저·이 계정에 저장됩니다.'),true);x.$('kin-dock-settings-toggle').click();
   x.$('kin-dock-placement').value='top';x.$('kin-dock-placement').onchange();
-  assert.deepEqual(x.writes,[['kin-viewer-dock:v1:["inst","sub"]','{"version":2,"placement":"top","panel":-1,"autoHide":false}']]);assert.equal(status.textContent,'');
+  assert.deepEqual(x.writes,[['kin-viewer-dock:v1:["inst","sub"]','{"version":2,"placement":"top","panel":-1,"autoHide":false}']]);
   assert.equal(x.doc.body.classList.contains('kin-dock-top'),true);
+  x.nav.children.find(b=>b.textContent==='Comparison').click();assert.equal(x.writes.length,2);assert.equal(status.textContent,'');
   const restored=mount({stored:'{"version":2,"placement":"top","panel":1,"autoHide":true}'});
   assert.equal(restored.$('kin-dock-preference-status').textContent,'');assert.equal(restored.$('kin-dock-autohide').checked,true);assert.equal(restored.$('kin-viewer-layout').hidden,false);
   assert.equal(mount({stored:'{bad'}).$('kin-dock-preference-status').textContent,'저장값 오류 · 기본 도구 영역');
@@ -133,6 +136,22 @@ test('routine status is silent, the saved value and key are unchanged, and failu
   assert.equal(mount({getThrows:true}).$('kin-dock-preference-status').textContent,'저장소 사용 불가 · 이 창');
   const denied=mount({setThrows:true});denied.$('kin-dock-reset').onclick();assert.equal(denied.$('kin-dock-preference-status').textContent,'저장하지 못해 이 창에만 적용합니다.');
   const unsaved=mount({owner:null});assert.equal(unsaved.$('kin-dock-preference-status').textContent,'도구 영역 · 이 창');
+});
+
+test('a saved settings or account change fills the status that reading-appearance copies, with the same id and text',()=>{
+  const x=mount(),status=x.$('kin-dock-preference-status');
+  x.$('kin-dock-placement').value='top';x.$('kin-dock-placement').onchange();assert.equal(status.textContent,REMEMBERED);
+  x.nav.children.find(b=>b.textContent==='Measurements').click();assert.equal(status.textContent,'');
+  x.$('kin-dock-autohide').checked=true;x.$('kin-dock-autohide').onchange();assert.equal(status.textContent,REMEMBERED);
+  x.nav.children.find(b=>b.textContent==='Measurements').click();x.$('kin-dock-reset').onclick();assert.equal(status.textContent,REMEMBERED);
+  // reading-appearance.js reads this element right after applyPreference returns true.
+  const account=mount(),before=account.writes.length;
+  assert.equal(account.dock.applyPreference({version:2,placement:'top',panel:1,autoHide:false}),true);assert.equal(account.writes.length,before+1);
+  assert.equal(account.dock.querySelector('#kin-dock-preference-status').textContent,REMEMBERED);
+  assert.equal(account.dock.applyPreference({version:2,placement:'side',panel:1,autoHide:false}),false);assert.equal(account.dock.querySelector('#kin-dock-preference-status').textContent,REMEMBERED);
+  // Unsaved and denied applies keep their own messages.
+  const unsaved=mount({owner:null});unsaved.dock.applyPreference({version:2,placement:'top',panel:0,autoHide:false});assert.equal(unsaved.$('kin-dock-preference-status').textContent,'도구 영역 · 이 창');
+  const denied=mount({setThrows:true});denied.dock.applyPreference({version:2,placement:'top',panel:0,autoHide:false});assert.equal(denied.$('kin-dock-preference-status').textContent,'저장하지 못해 이 창에만 적용합니다.');
 });
 
 test('session end disables every row control including Dock Settings',()=>{
@@ -146,5 +165,21 @@ test('viewer-tech-note puts return outcomes before Dock Settings and describes R
   assert.match(note,/nav\.insertBefore\(returnStatus,nav\.querySelector\('#kin-dock-settings'\)\)/);
   assert.match(note,/returnButton=toolButtons\.get\('Digit4'\)[^\n]*returnButton\.setAttribute\('aria-describedby',returnHint\.id\)/);
   assert.match(note,/describeReturn=text=>\{returnHint\.textContent=text;returnButton\.title=text;\}/);
-  assert.equal((note.match(/describeReturn\(/g)||[]).length,3);
+  assert.equal((note.match(/describeReturn\(/g)||[]).length,4);
+});
+
+test('the return path lives on Return to Report, not in the row; a refused shortcut repeats it (static)',()=>{
+  const note=fs.readFileSync(path.join(hpacs,'viewer-tech-note.js'),'utf8');
+  const guide=['판독 화면의 영상 새 창으로 열면 돌아갈 수 있습니다.','연결된 판독문으로 · '];
+  // Every assignment to the row status is an outcome, a failure or empty, never the guide text.
+  const writes=note.match(/returnStatus\.textContent=[^;]*;/g);assert.ok(writes.length>=8);
+  for(const w of writes)for(const g of guide)assert.equal(w.includes(g),false,w);
+  assert.equal((note.match(/returnStatus\.textContent=linked/g)||[]).length,0);
+  assert.match(note,/\{returnStatus\.textContent='';describeReturn\('판독 화면의 영상 새 창으로 열면 돌아갈 수 있습니다\.'\);refresh\(\);return;\}/);
+  assert.match(note,/returnStatus\.textContent=cancelled\?'이전 복귀 요청은 취소되었습니다\. 다시 눌러 돌아가세요\.':'';describeReturn\(linked\);/);
+  assert.match(note,/if\(readingChannel\)describeReturn\('연결된 판독문으로 · '\+api\.display\(shortcutMap\.report\)\);/);
+  // Unlinked Ctrl+Alt+4: after the live/owner/pending/modal gate, before the tracked gate.
+  const gate=note.indexOf("if(!readingChannel){returnStatus.textContent=returnHint.textContent;return;}");
+  assert.ok(gate>0);assert.ok(note.lastIndexOf('if(!live()||!owner||pendingReturn||',gate)>note.indexOf('function returnToReading(){'));
+  assert.ok(note.indexOf('if(!patientCopy.tracked())return;',gate)>gate);
 });
