@@ -34,22 +34,36 @@ function KinViewerBrand({ React }) {
     } catch (e) { /* 구형 브라우저는 storage 이벤트만 쓴다. */ }
     window.addEventListener('storage', onStorage);
 
-    // 내장 정보 창의 링크와 버전 정보는 유지하되, 화면에 노출되는 제품명만 중립화한다.
+    // S5-UI4: 톱니 메뉴의 About(업스트림 버전·링크 창)은 판독 화면에서 뺀다. 라이선스 표기는 로그인 페이지 하단에 둔다.
+    // OHIF 3.9 머리글은 메뉴 항목을 설정으로 끄는 길이 없어 DOM에서 처리한다. React가 소유한 행을 떼어 내면
+    // 이후 재조정(언어 변경 등)의 removeChild가 예외를 던져 뷰어가 멈출 수 있으므로, 노드는 제자리에 두고
+    // 표시·클릭·키보드 포커스·보조기술에서 모두 뺀다. Preferences 형제가 있는 메뉴 행만 대상으로 해 영상 문구를 건드리지 않는다.
+    const ABOUT_TITLES = new Set(['About', 'About OHIF Viewer']);
+    const hasLeafText = (element, text) =>
+      [element, ...element.querySelectorAll('*')].some(node => !node.childElementCount && node.textContent?.trim() === text);
+    const dropAboutItem = leaf => {
+      for (let row = leaf; row.parentElement && row.parentElement !== document.body; row = row.parentElement) {
+        const peers = [...row.parentElement.children].filter(peer => peer !== row && peer.localName !== 'svg');
+        if (peers.some(peer => hasLeafText(peer, 'Preferences'))) {
+          row.style.setProperty('display', 'none', 'important');
+          row.setAttribute('inert', '');
+          row.setAttribute('aria-hidden', 'true');
+          row.dataset.kinRemoved = 'about';
+          return true;
+        }
+        if (peers.some(peer => peer.textContent?.trim())) return false;
+      }
+      return false;
+    };
+
+    // 화면에 노출되는 업스트림 제품명은 중립화한다.
     const replaceBrandText = root => {
-      const replacements = new Map([
-        ['About', '오픈소스 정보'],
-        ['About OHIF Viewer', '오픈소스 정보'],
-        ['OHIF Viewer', 'KIN 판독 뷰어'],
-        ['https://github.com/OHIF/Viewers/', '업스트림 소스 저장소'],
-        ['https://github.com/OHIF/Viewers/blob/master/DATACITATION.md', '업스트림 데이터 인용 지침'],
-      ]);
       root.querySelectorAll?.('*').forEach(element => {
         if (element.childElementCount) return;
         const text = element.textContent?.trim();
         if (!text) return;
-        if (replacements.has(text)) {
-          element.textContent = replacements.get(text);
-        } else if (/OHIF|Open Health Imaging Foundation/i.test(text)) {
+        if (ABOUT_TITLES.has(text) && dropAboutItem(element)) return;
+        if (/OHIF|Open Health Imaging Foundation/i.test(text)) {
           element.textContent = text
             .replace(/Open Health Imaging Foundation/gi, '업스트림 오픈소스 프로젝트')
             .replace(/OHIF/gi, '업스트림');
