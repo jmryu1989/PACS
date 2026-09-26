@@ -15,7 +15,7 @@
 |---|---|
 | 렐름 | `kin` |
 | 클라이언트 | `kin-web` (public, Authorization Code + PKCE S256), `gw-kin-center` (비활성 Gateway 템플릿) |
-| 롤 | `radiologist`, `technician`, `admin`, `gateway` |
+| 롤 | `radiologist`, `technician`, `admin`, `clinician`, `gateway` |
 | 토큰 수명 | access 30분 / 세션 유휴 4시간 / 최대 12시간 |
 | 보호 | 비밀번호 최소 8자리(조합 강제 없음), 로그인 5회 실패 시 잠금(brute force) |
 
@@ -102,6 +102,12 @@ API의 `AuthGuard`가 그 값을 `req.institution`으로 꺼내고, 서비스 �
 
 `admin` 롤도 기관 경계를 넘지 못한다. 역할과 소속은 다른 축이라, admin이라고 남의 병원
 환자를 보게 하면 그건 편의가 아니라 구멍이다.
+
+`clinician` 롤만 가진 승인 회원은 API의 명시 allowlist(`api/src/clinician-policy.ts`)에 있는
+경로만 부를 수 있고 나머지는 `403 CLINICIAN_ROUTE_DENIED`다. 처음에는 본인 세션 동작(`GET /api/me`,
+`POST /api/auth/logout`)만 있고 업무 경로는 비어 있다. radiologist/technician/admin이 함께 있으면
+그 역할의 기존 권한 경로를 그대로 타며 clinician이 그것을 좁히지 않는다. 이미 운영 중인 렐름에는
+import가 적용되지 않으므로 관리 콘솔이나 Admin REST로 realm 역할 `clinician`을 한 번 추가한다.
 
 소속 그룹이 없는 계정은 **빈 목록이 아니라 403**을 받는다. 매퍼 설정이 틀렸을 때
 "검사가 하나도 없네"로 보이는 것이 가장 나쁘다.

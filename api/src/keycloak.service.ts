@@ -1,6 +1,7 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-
-const MANAGED_ROLES = new Set(['radiologist', 'technician', 'admin']);
+// setRoles()가 여기 없는 역할을 503으로 거절하고 approve()는 그것을 409 USER_ISOLATED로 끝낸다.
+// 그래서 관리 대상 역할은 guard·회원콘솔과 같은 목록(clinician-policy)이어야 한다.
+import { APP_ROLES as MANAGED_ROLES } from './clinician-policy';
 const USER_PAGE_SIZE = 25;
 const USER_SCAN_SIZE = 100;
 

@@ -3,11 +3,11 @@ import {
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import { memberState } from './auth.guard';
+// 역할 목록은 clinician-policy 한 곳에서 온다. 여기서 별도 literal을 두면 guard와 어긋난다.
+import { APP_ROLES } from './clinician-policy';
 import { KeycloakService, KeycloakUser } from './keycloak.service';
 import { Caller } from './pacs.service';
 import { PrismaService } from './prisma.service';
-
-const APP_ROLES = new Set(['radiologist', 'technician', 'admin']);
 
 function text(value: unknown, field: string, max: number, required = true): string {
   if (value == null && !required) return '';

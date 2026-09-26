@@ -2,14 +2,17 @@ import {
   CanActivate, ExecutionContext, ForbiddenException, Injectable,
   SetMetadata, UnauthorizedException,
 } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { Reflector } from '@nestjs/core';
 import { AuthService } from './auth.service';
+import {
+  APP_ROLES, CLINICIAN_ROUTE_DENIED, clinicianOnly, clinicianRouteAllowed, routeKey,
+} from './clinician-policy';
 
 /** 토큰 없이 부를 수 있는 네 진입점에만 붙인다: health, login, register, callback. */
 export const Public = () => SetMetadata('public', true);
 
 type MemberState = 'PENDING' | 'APPROVED' | 'INVALID';
-const APP_ROLES = new Set(['radiologist', 'technician', 'admin']);
 const KIN_ROLES = new Set([...APP_ROLES, 'gateway']);
 
 /** 회원콘솔과 가드가 공유하는 두 축 중 승인 상태의 단일 판정표. */
@@ -98,9 +101,10 @@ export class AuthGuard implements CanActivate {
 
     /**
      * Gateway는 회원의 특수 역할이 아니라 client-credentials 신원이다.
-     * realm_access에는 Keycloak 기본 역할도 섞이므로 KIN이 관리하는 네 역할만 비교한다.
+     * realm_access에는 Keycloak 기본 역할도 섞이므로 KIN이 관리하는 다섯 역할만 비교한다.
      * gw-* 또는 gateway 역할 어느 한쪽이라도 보이면 '비슷한 회원'으로 흘려보내지 않고,
-     * 네 조건이 전부 맞는지 여기서 닫힌 판정을 한다.
+     * 네 조건이 전부 맞는지 여기서 닫힌 판정을 한다. 사람 역할(clinician 포함)이 섞인
+     * 서비스 계정도 kinRoles.length === 1에 걸려 거절된다.
      */
     const kinRoles = req.roles.filter((role: string) => KIN_ROLES.has(role));
     const azp = typeof payload.azp === 'string' ? payload.azp : '';
@@ -131,6 +135,26 @@ export class AuthGuard implements CanActivate {
       throw new ForbiddenException({
         code: state === 'PENDING' ? 'INSTITUTION_PENDING' : 'INSTITUTION_INVALID',
       });
+
+    /**
+     * 승인은 "이 기관의 회원인가"이고 아래는 "이 행동을 해도 되는가"다. 두 축을 따로 판정한다.
+     * clinician만 가진 회원은 명시 allowlist의 (method, route template)만 통과하고 나머지는
+     * 서비스 층에 닿기 전에 거절된다 — 기존 writer 경로는 역할별 need()가 없는 곳이 많아서
+     * 역할 이름만 추가하면 그대로 열리기 때문이다. legacy 역할이 하나라도 있으면 이 게이트를
+     * 지나지 않고 기존 경로·need()·visible()·보고 상태 검사를 그대로 받는다.
+     * route template은 요청 URL이 아니라 Nest 데코레이터 메타데이터에서 읽는다.
+     * pending/invalid 회원의 logout 예외는 위에서 이미 끝났으므로 여기서는 승인 회원만 본다.
+     */
+    req.clinicianOnly = clinicianOnly(req.roles);
+    if (req.clinicianOnly) {
+      const key = routeKey(
+        this.reflector.get(METHOD_METADATA, ctx.getHandler()),
+        this.reflector.get(PATH_METADATA, ctx.getClass()),
+        this.reflector.get(PATH_METADATA, ctx.getHandler()),
+      );
+      if (!clinicianRouteAllowed(key))
+        throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });
+    }
 
     // Bearer 호출은 CSRF 대상이 아니다. 브라우저가 자동으로 싣는 쿠키 호출만 헤더를 요구한다.
     if (method !== 'bearer' && !['GET', 'HEAD'].includes(req.method) && req.headers['x-kin-csrf'] !== '1')
