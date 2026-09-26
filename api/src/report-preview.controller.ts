@@ -1,16 +1,42 @@
 import { StudyAccessService } from './study-access.service';
-import { Controller, ForbiddenException, Get, Param, Req } from '@nestjs/common';
+import { Controller, ForbiddenException, Get, Param, Query, Req } from '@nestjs/common';
 import { PrismaService } from './prisma.service';
 import { OrthancService } from './orthanc.service';
+import { Caller, PacsService } from './pacs.service';
 import { viewerUid } from './viewer-input';
+import { CLINICIAN_ROUTE_DENIED, clinicianOnly } from './clinician-policy';
+
+const member = (req: any): Caller => ({ sub: req.sub, actor: req.actor, roles: req.roles ?? [],
+  institution: req.institution ?? null, kind: req.kind ?? 'member' });
 
 @Controller()
 export class ReportPreviewController {
-  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService) {}
+  constructor(private prisma: PrismaService, private orthanc: OrthancService, private studyAccess:StudyAccessService,
+    private pacs: PacsService) {}
+
+  /**
+   * S5-U1b clinician reads. They live here, beside the report preview, because both answer "what may this
+   * person read of the report"; the controller is already no-store (app.module adminNoStore) and under the
+   * StudyAccess interceptor. The worklist route GET studies stays denied for clinician-only.
+   */
+  @Get('clinician/studies')
+  clinicianStudies(@Query() query: any, @Req() req: any) {
+    return this.pacs.clinicianStudies(member(req), query);
+  }
+
+  /** Final head (approve/addendum at RS A): that row's body and key images. Anything else: status only (S5-F5). */
+  @Get('clinician/studies/:uid/report')
+  clinicianReport(@Param('uid') uid: string, @Req() req: any) {
+    return this.pacs.clinicianReportRead(uid, member(req));
+  }
 
   @Get('studies/:uid/report-preview')
   async read(@Param('uid') uid: string, @Req() caller: any) {
     viewerUid(uid);
+    // S5-U1b: this answer carries the body at every RS (T/P/H/W included). clinician-only never reaches it
+    // through the guard allowlist; this second line keeps a widened allowlist from turning it into a
+    // non-final body for clinicians. Their read is GET clinician/studies/:uid/report.
+    if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });
     // Same read rule as PacsService.visible()/versions(): owner or current
     // tele grant, and the P author/reviewer pair. A hold only restricts writes.
     // patchState clears teleInstitutionId when the owner cancels the referral;

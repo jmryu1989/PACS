@@ -10,8 +10,8 @@ import { RequestMethod } from '@nestjs/common';
  *
  * 기본값이 deny인 이유: clinician을 APP_ROLES에 넣는 순간 memberState()가 APPROVED를 주므로,
  * 역할 이름 추가와 아래 allowlist 게이트는 **같은 커밋**에 있어야 한다. 이름만 먼저 넣은 후보는
- * 기존 writer 경로 전체를 임상의에게 여는 중간 상태다. 업무 allowlist는 비어 있고 U1b가
- * narrow DTO가 준비된 행만 하나씩 채운다.
+ * 기존 writer 경로 전체를 임상의에게 여는 중간 상태다. U1a의 업무 allowlist는 비어 있었고
+ * S5-U1b가 narrow DTO가 준비된 읽기 행만 채웠다(아래 CLINICIAN_BUSINESS_ROUTES).
  */
 export const CLINICIAN_ROLE = 'clinician';
 
@@ -24,8 +24,20 @@ export const APP_ROLES: ReadonlySet<string> = new Set([...LEGACY_APP_ROLES, CLIN
 /** 승인된 본인의 세션 동작. public 4개나 업무 allowlist와 섞지 않는다. */
 export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET me', 'POST auth/logout']);
 
-/** clinician-only 업무 allowlist. U1a에서는 비어 있다. 항목 형식은 `METHOD controller/handler/template`. */
-export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([]);
+/**
+ * clinician-only 업무 allowlist(S5-U1b). 항목 형식은 `METHOD controller/handler/template`.
+ * 좁은 응답이 준비된 읽기만 있다 — 행 하나를 더하는 일은 그 행의 응답 칸을 정하는 일과 같은 변경이다.
+ *  - `GET authz/dicom`·`POST dicom/lookup`: 뷰어 읽기 쌍. 하나만 열면 영상 한 장도 열리지 않는다.
+ *  - `GET studies/:uid/viewer-items`: clinician-only에게는 확정본일 때만, 아래 투영으로 좁혀서 준다.
+ *  - `GET clinician/studies`: 워크리스트의 기관·원격판독·StudyAccess·페이지 파이프라인에 좁은 행을 얹는다.
+ *  - `GET clinician/studies/:uid/report`: 머리 판이 확정본이면 본문과 key image, 아니면 상태만.
+ * `GET studies`·`GET bootstrap`·`GET studies/:uid/report-preview`·`GET audit`는 계속 거절한다 —
+ * 초안·오더·상용구·작성자 칸이나 확정 전 본문을 싣는 응답이다.
+ */
+export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
+  'GET authz/dicom', 'POST dicom/lookup', 'GET studies/:uid/viewer-items',
+  'GET clinician/studies', 'GET clinician/studies/:uid/report',
+]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =
   new Set([...CLINICIAN_SESSION_ROUTES, ...CLINICIAN_BUSINESS_ROUTES]);

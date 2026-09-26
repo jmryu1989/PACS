@@ -1,8 +1,11 @@
 # coding: utf-8
-"""S5-U1a clinician role and clinician-only default denial: pure stdlib spec and source check.
+"""S5-U1a clinician role and clinician-only default denial, S5-U1b read allowlist: pure stdlib spec and source check.
 
 REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE/ROLE-LIST-DRIFT
 -> TEST-S5-U1a-CLINICIAN-POLICY (this file) and TEST-S5-U1a-CLINICIAN-LIVE (clinician_policy_live.py).
+REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
+-> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
+(clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
 
 No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more:
   1. tests/clinician_policy_fixtures.json judged by an independent Python model of the guard rules
@@ -159,7 +162,13 @@ class ClinicianPolicySpec(unittest.TestCase):
         self.assertRegex(self.policy, r"export const APP_ROLES\b[^=]*=\s*new Set\(\[\.\.\.LEGACY_APP_ROLES, CLINICIAN_ROLE\]\);")
         self.assertEqual(ts_array(self.policy, "CLINICIAN_SESSION_ROUTES"), FIXTURES["session_routes"])
         self.assertEqual(ts_array(self.policy, "CLINICIAN_BUSINESS_ROUTES"), FIXTURES["business_routes"])
-        self.assertEqual(FIXTURES["business_routes"], [], "U1a ships an empty business allowlist; U1b adds rows")
+        # U1a shipped an empty business allowlist; U1b adds read rows only. The single non-GET row is the viewer's
+        # SOP lookup (answers an Orthanc instance id, writes nothing); anything else that is not a GET is a new decision.
+        self.assertEqual(len(FIXTURES["business_routes"]), len(set(FIXTURES["business_routes"])))
+        self.assertEqual([k for k in FIXTURES["business_routes"] if not k.startswith("GET ")], ["POST dicom/lookup"])
+        self.assertTrue({"GET authz/dicom", "POST dicom/lookup"} <= set(FIXTURES["business_routes"]),
+                        "the viewer read pair is allowed together or not at all")
+        self.assertTrue(set(FIXTURES["must_stay_denied"]).isdisjoint(ALLOWED))
         self.assertRegex(self.policy, r"export const CLINICIAN_ALLOWED_ROUTES\b[^=]*=\s*new Set\(\[\.\.\.CLINICIAN_SESSION_ROUTES, \.\.\.CLINICIAN_BUSINESS_ROUTES\]\);")
         self.assertRegex(self.policy, r"export const CLINICIAN_ROUTE_DENIED = 'CLINICIAN_ROUTE_DENIED';")
         self.assertEqual(FIXTURES["denied_code"], "CLINICIAN_ROUTE_DENIED")
@@ -202,7 +211,9 @@ class ClinicianPolicySpec(unittest.TestCase):
                 key = route_key(case["method"], case["controller"], case["handler"])
                 self.assertEqual(key, case["key"])
                 self.assertEqual(allowed(key), case["allowed"])
-        self.assertEqual(sum(1 for c in FIXTURES["route_metadata_cases"] if c["allowed"]), 3)
+        # 3 session cases from U1a plus one per U1b business row
+        self.assertEqual(sum(1 for c in FIXTURES["route_metadata_cases"] if c["allowed"]), 3 + len(FIXTURES["business_routes"]))
+        self.assertEqual({c["key"] for c in FIXTURES["route_metadata_cases"] if c["allowed"]}, ALLOWED)
         self.assertTrue(any(c["key"] is None for c in FIXTURES["route_metadata_cases"]))
 
     def test_05_every_current_route_is_classified_and_denied_unless_listed(self):
@@ -229,12 +240,22 @@ class ClinicianPolicySpec(unittest.TestCase):
         added = sorted(keys - BASELINE)
         removed = sorted(BASELINE - keys)
         self.assertEqual(removed, [], "a baseline route disappeared; re-check the planning inventory")
+        # A route added since the baseline is allowed only when a unit declared it as its own new read row.
+        declared = set(FIXTURES["allowed_additions"])
+        self.assertTrue(declared <= set(added), f"declared additions are not new routes: {sorted(declared - set(added))}")
+        self.assertTrue(declared <= ALLOWED)
         for key in added:
+            if key in declared:
+                continue
             self.assertFalse(allowed(key), f"route added since the 104 baseline must not be silently allowed: {key}")
+        for key in FIXTURES["must_stay_denied"]:
+            self.assertIn(key, keys, key)
+            self.assertFalse(allowed(key), f"{key} carries drafts, writer fields or non-final bodies")
         print("CLINICIAN_POLICY_INVENTORY " + json.dumps({
             "current_routes": len(inventory), "public": sorted(public), "allowed": sorted(ALLOWED),
             "denied_for_clinician_only": len(denied), "baseline_routes": len(BASELINE),
             "added_since_baseline": added, "removed_since_baseline": removed,
+            "allowed_additions": sorted(declared),
         }, ensure_ascii=True, sort_keys=True))
 
     def test_06_guard_source_pins(self):
