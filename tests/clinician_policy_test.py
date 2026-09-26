@@ -6,7 +6,7 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
-REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-19
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-20
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
@@ -20,7 +20,9 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      call it reads, spaced or not, or it refuses the file; a '//' comment ends at any of the four line terminators, and
      every other api/src .ts file goes through the same reader and may carry no route, @Controller() or @Public(); every
      decorator name is bound once by 'import { Name }' from its listed module and nothing renames, re-exports under
-     another name or shadows it, and Public ends at its declaration in auth.guard.ts)
+     another name or shadows it, and Public ends at its declaration in auth.guard.ts; a route, Controller,
+     RequestMapping, Public or SetMetadata name occurs in code only as its import and as a decorator the runs read, and
+     no Reflect metadata writer, decorator factory or loader of Nest or a project file reaches that metadata another way)
      compared with the invariants_live ROUTES table read as text,
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
@@ -133,6 +135,27 @@ DECORATOR_MODULE = {name: module for module, names in BINDINGS["modules"].items(
 # no import or export renames one of these, from or to: an alias is how a route or @Public() takes a harmless name
 BOUND_NAMES = frozenset(DECORATOR_MODULE) | DECIDING
 IMPORT_FORMS = frozenset({"named", "namespace", "default", "equals"})
+PUBLIC_MODULE = API / (DECORATOR_MODULE["Public"][2:] + ".ts")
+# the names a route, a controller or public metadata is made with; SetMetadata is what Public calls. Each occurs in code
+# only as the local name of its import and as a decorator the runs read. 'Put('x')(target, key, descriptor)' after the
+# class, the name handed to a variable, an array, applyDecorators or Reflect.decorate, 'common.Get' and an export apply
+# or pass on what neither inventory reads: 'import { Put }' plus such a call made a public route both missed
+# (S5-U1c-F05). RequestMapping, which no run may carry, is Nest's export too.
+METADATA_WRITER = BINDINGS["public_metadata_import"]["name"]
+STRICT_NAMES = DECIDING | {METADATA_WRITER}
+STRICT_MODULE = {**{name: DECORATOR_MODULE.get(name, "@nestjs/common") for name in DECIDING},
+                 METADATA_WRITER: BINDINGS["public_metadata_import"]["module"]}
+STRICT_NAME = re.compile(rf"(?:{'|'.join(sorted(STRICT_NAMES))})(?![\w$])")
+# what writes the same metadata under none of those names: reflect-metadata ('Reflect.defineMetadata('path', ...)' is a
+# route) and Nest's decorator factory ('Reflector.createDecorator({ key: 'public' })' is a @Public()). Reflect occurs only
+# as 'Reflect.<member>' of a member that writes nothing, so it is not handed on either.
+METADATA_WRITERS = frozenset({"defineMetadata", "decorate", "createDecorator"})
+REFLECT_WRITERS = METADATA_WRITERS | {"metadata"}
+WRITER_NAME = re.compile(rf"(?:{'|'.join(sorted(METADATA_WRITERS))})(?![\w$])")
+REFLECT_NAME = re.compile(r"Reflect(?![\w$])")
+# a loader hands back a module object whose members no name check reads: require('@nestjs/common')['Put'] is a route
+LOADER_NAME = re.compile(r"(require|import)(?![\w$])")
+IDENTIFIER_CHAR = re.compile(r"[\w$]")
 # tsconfig compiles src/**/*, which takes .tsx, .mts and .cts too; a script no inventory opens could hold a controller
 UNREAD_SCRIPTS = frozenset({".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 # TypeScript accepts whitespace, a line break or a comment between '@', the name and '('. A reader that wanted '@Name('
@@ -523,10 +546,13 @@ def module_statements(path, source):
     return found
 
 
-def own_import(path, code, statements, name, module, uses):
+def own_import(path, code, statements, name, module, uses, properties=True):
     """Raise unless one value import binds name, by its own name, from module, and name occurs in the code only there, at
-    the offsets in uses and as a property after '.': a declaration, parameter, destructuring or second import of the
-    name anywhere in the file could be the binding a use reads (S5-U1c-F04)."""
+    the offsets in uses and, when properties, as a property after '.': a declaration, parameter, destructuring or second
+    import of the name anywhere in the file could be the binding a use reads (S5-U1c-F04). A STRICT_NAMES name is no
+    property anywhere: undecorated_names refuses 'x.Get', and the calls for SetMetadata in Public's module and for a
+    name no run carries pass properties=False, since 'x.SetMetadata' is that export reached through a module object
+    (S5-U1c-F05)."""
     binders = [(s["form"], s["imported"], s["module"], s["type"]) for s in statements
                if s["form"] in IMPORT_FORMS and s["local"] == name]
     if binders != [("named", name, module, False)]:
@@ -535,14 +561,106 @@ def own_import(path, code, statements, name, module, uses):
     other = []
     for match in re.finditer(rf"(?<![\w$]){re.escape(name)}(?![\w$])", code):
         before = code[:match.start()].rstrip()
-        if match.start() not in {at, *uses} and not (before.endswith(".") and not before.endswith("..")):
+        if match.start() not in {at, *uses} and not (properties and before.endswith(".") and not before.endswith("..")):
             other.append(code[max(0, match.start() - 24):match.end() + 24].strip())
     if other:
         raise AssertionError(f"{path.name}: {name} is declared or used outside its import and its uses: {other}")
 
 
+def line_of(code, at):
+    return code.count("\n", 0, at) + 1
+
+
+def words(pattern, code):
+    """pattern's matches that no identifier character precedes. The check sits here, not in a leading lookbehind, so the
+    regex engine skips ahead to a name's first letter instead of trying every offset; a match that starts inside a
+    longer identifier holds only identifier characters, so it hides no match that starts a word."""
+    return [match for match in pattern.finditer(code)
+            if not (match.start() and IDENTIFIER_CHAR.match(code, match.start() - 1))]
+
+
+def undecorated_names(path, source, code, statements, uses):
+    """The STRICT_NAMES the code names; raises when one occurs anywhere but the local name of an import and a decorator
+    the runs read (uses), a property after '.' included (S5-U1c-F05). Public's module declares Public and calls
+    SetMetadata once; public_export, which controller_inventory always runs, holds both there to exactly that."""
+    exempt = {"Public", METADATA_WRITER} if path == PUBLIC_MODULE else set()
+    imported = {s["at"] for s in statements if s["form"] in IMPORT_FORMS}
+    present, loose = set(), []
+    for match in words(STRICT_NAME, code):
+        name, at = match.group(0), match.start()
+        if name in exempt:
+            continue
+        present.add(name)
+        if at not in imported and at not in uses.get(name, ()):
+            loose.append((name, line_of(code, at), " ".join(source[max(0, at - 24):match.end() + 32].split())))
+    if loose:
+        names = ", ".join(sorted({name for name, _line, _text in loose}))
+        raise AssertionError(f"{path.name}: {names} used where no decorator the inventory reads applies it: "
+                             f"{[(line, text) for _name, line, text in loose]}")
+    return present
+
+
+def metadata_writes(path, code):
+    """Raise on a metadata writer in code: defineMetadata, decorate or createDecorator under any object, and Reflect used
+    other than as 'Reflect.<member>' of a member that writes nothing (S5-U1c-F05)."""
+    found = [(line_of(code, match.start()), match.group(0)) for match in words(WRITER_NAME, code)]
+    for match in words(REFLECT_NAME, code):
+        dot = skip_gap(code, match.end())
+        member = IDENTIFIER.match(code, skip_gap(code, dot + 1)) if code.startswith(".", dot) else None
+        if member is None or member.group(0) in REFLECT_WRITERS:
+            found.append((line_of(code, match.start()), "Reflect" + ("." + member.group(0) if member else "")))
+    if found:
+        raise AssertionError(f"{path.name}: a metadata writer that attaches route or public metadata without a decorator "
+                             f"the inventory reads: {sorted(found)}")
+
+
+def loadable(module):
+    """A package by name: no file of the project in any spelling (relative, absolute, a URL), none of Nest's packages."""
+    name = module[len("node:"):] if module.startswith("node:") else module
+    return bool(name) and not name.lower().startswith((".", "/", "@nestjs/")) and ":" not in name and "\\" not in name
+
+
+def module_loads(path, source, code):
+    """Raise on a module loader the binding checks cannot follow (S5-U1c-F05): require() or import() of a file of the
+    project or of one of Nest's packages, of a module computed at run time, and require used other than by a call.
+
+    The whole-module import statements are refused in decorator_bindings; require('@nestjs/common')['Put'] and
+    (await import('./auth.guard'))['Public'] hand back the same exports as values that no name check reads. A method
+    named require takes no module string: 'async require(c: Caller) {' declares one, this.studyAccess.require(c, uids)
+    calls one, and both are left alone; a member call with a module string is a loader too (module.require('m')).
+    """
+    found = []
+    for match in words(LOADER_NAME, code):
+        word, at = match.group(1), match.start()
+        back = at - 1
+        while back >= 0 and code[back].isspace():
+            back -= 1
+        member = back >= 0 and code[back] == "." and code[max(0, back - 2):back + 1] != "..."
+        paren = skip_gap(code, match.end())
+        if not code.startswith("(", paren):
+            if word == "require" and not member:
+                found.append((line_of(code, at), "require not called"))
+            continue
+        start = skip_gap(source, paren + 1)
+        if source.startswith(("'", '"'), start):
+            module = source[start + 1:literal_end(source, start) - 1]
+        elif source.startswith("`", start) and not (template := template_part(source, start + 1))[1]:
+            module = source[start + 1:template[0] - 1]
+        elif member or code[call_end(code, paren):].lstrip()[:1] in ("{", ":"):
+            continue
+        else:
+            found.append((line_of(code, at), f"{word}() of a module computed at run time"))
+            continue
+        if not loadable(module):
+            found.append((line_of(code, at), f"{word}({module!r})"))
+    if found:
+        raise AssertionError(f"{path.name}: a module loader the binding check does not follow (a project file, a Nest "
+                             f"package or a computed module): {found}")
+
+
 def decorator_bindings(path, source, runs):
-    """{name: module} of the decorator names the runs read; raises unless each is its module's own export (S5-U1c-F04).
+    """{name: module} of the decorator names the runs read; raises unless each is its module's own export (S5-U1c-F04)
+    and nothing applies a route, a controller or public metadata another way (S5-U1c-F05).
 
     The inventories classify by name, and 'import { Get as Header }' plus 'import { Public as HttpCode } from
     './auth.guard'' made '@HttpCode() @Header('x')' a public route both read as a header and a status code. So, in every
@@ -550,6 +668,12 @@ def decorator_bindings(path, source, runs):
     renames a BOUND_NAMES name from or to another, no namespace, default, import = or export * takes a module that
     exports decorators or binds a BOUND_NAMES name, and every name the runs read passes own_import against
     DECORATOR_MODULE with its decorators as the uses.
+
+    The runs alone name what is checked, so 'import { Put }' and 'Put('unlisted')(target, 'unlisted', descriptor)' after
+    the class made a public route both inventories missed. Then, also in every file: a STRICT_NAMES name occurs only as
+    its import and its decorators (undecorated_names) and is bound by its own import from STRICT_MODULE even when no
+    decorator uses it, no metadata writer occurs (metadata_writes), and no loader reaches a project file or a Nest
+    package (module_loads).
     """
     code = code_mask(source)
     if "\\" in code:
@@ -570,13 +694,19 @@ def decorator_bindings(path, source, runs):
             uses.setdefault(name, set()).add(DECORATOR_CALL.match(code, start).start(1))
     for name, offsets in sorted(uses.items()):
         own_import(path, code, statements, name, DECORATOR_MODULE.get(name), offsets)
+    present = undecorated_names(path, source, code, statements, uses)
+    metadata_writes(path, code)
+    module_loads(path, source, code)
+    for name in sorted(present - set(uses)):
+        own_import(path, code, statements, name, STRICT_MODULE[name], set(), properties=False)
     return {name: DECORATOR_MODULE[name] for name in sorted(uses)}
 
 
 def public_export(sources):
     """The Public binding ends in its module: './auth.guard' declares Public once, in code, as the public-metadata call
-    test_05 counts, of Nest's own SetMetadata, and names Public nowhere else (S5-U1c-F04)."""
-    path = API / (DECORATOR_MODULE["Public"][2:] + ".ts")
+    test_05 counts, of Nest's own SetMetadata, and names Public nowhere else (S5-U1c-F04); SetMetadata occurs there
+    only as its import and in that declaration, not as a property either (S5-U1c-F05)."""
+    path = PUBLIC_MODULE
     if path not in sources:
         raise AssertionError(f"{path.name}, the module every Public import names, is not among the sources")
     source, declaration = sources[path], BINDINGS["public_declaration"]
@@ -590,7 +720,7 @@ def public_export(sources):
         raise AssertionError(f"{path.name}: Public occurs outside its declaration at offsets {elsewhere}")
     metadata = BINDINGS["public_metadata_import"]
     own_import(path, code, module_statements(path, source), metadata["name"], metadata["module"],
-               {at + declaration.index(metadata["name"])})
+               {at + declaration.index(metadata["name"])}, properties=False)
 
 
 def outside_decorators(path, source):
@@ -599,7 +729,8 @@ def outside_decorators(path, source):
     Both inventories open *.controller.ts only, so a route decorator, @Controller(), @RequestMapping() or @Public()
     anywhere else declares what neither sees (S5-U1c-F03). It is refused, and so are a shape the runs cannot read, a
     name outside_decorators does not classify (an alias or a wrapper can make a route), such call text in a comment
-    or literal, and a classified name that is not Nest's own export ('Controller as Injectable', S5-U1c-F04).
+    or literal, a classified name that is not Nest's own export ('Controller as Injectable', S5-U1c-F04) and a route,
+    Controller or Public applied by a call, a metadata writer or a loader ('Controller('x')(Unlisted)', S5-U1c-F05).
     """
     runs = decorator_runs(source)
     names = [name for run in runs for name, _start, _end in run["items"]]
@@ -673,7 +804,8 @@ def controller_inventory(sources=None):
     writing it. A file that is not *.controller.ts must pass outside_decorators, so a route declared there stops the
     inventory, and with it test_05, instead of being left out (S5-U1c-F03). Every decorator name a controller carries
     must be its module's own export and Public must end at its declaration, or a route or @Public() under a classified
-    name stops it too (S5-U1c-F04).
+    name stops it too (S5-U1c-F04), and so does a route or Public applied by a call, a metadata writer or a loader in
+    any file (S5-U1c-F05).
     """
     found = {}
     sources = api_sources() if sources is None else sources
@@ -1631,8 +1763,11 @@ class ClinicianPolicySpec(unittest.TestCase):
                 {API / "nested" / "bound.controller.ts": controller(nest + "import { Public } from '../auth.guard';\n",
                                                                   "  @Public()\n  @Get('read')\n  read() { return {}; }\n")},
                 {("GET", "bound/read"): True}),
-            "a property named like a decorator": ({added: controller(nest, "  @Get('read')\n  read() { return this.Get; }\n")},
-                                                  {("GET", "bound/read"): False}),
+            # a route name as a property is refused since S5-U1c-F05 (test_20); a classified name still is not a binding
+            "a property named like a classified decorator": (
+                {added: controller(nest + "import { Header } from '@nestjs/common';\n",
+                                   "  @Header('x-read', '1')\n  @Get('read')\n  read() { return this.Header; }\n")},
+                {("GET", "bound/read"): False}),
             "unrelated aliases and a namespace": (
                 {outside: service(inject + "import * as fs from 'node:fs';\nimport { readFile as load } from 'node:fs/promises';\n")},
                 {}),
@@ -1647,6 +1782,200 @@ class ClinicianPolicySpec(unittest.TestCase):
         print("CLINICIAN_POLICY_IMPORT_BINDINGS " + json.dumps({
             "files": len(sources), "bindings_by_module": dict(sorted(used.items())), "refused": sorted(refused),
             "accepted": sorted(accepted), "real_routes": len(baseline), "real_public": len(PUBLIC),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_20_decorators_applied_without_at_are_refused(self):
+        """S5-U1c-F05: decorator_bindings checked only the names the '@' runs carried.
+
+        'import { Put } from '@nestjs/common'' and 'import { Public } from './auth.guard'' in the registered
+        study-tags.controller.ts, an undecorated unlisted() and, after the class, 'Put('unlisted')(target, 'unlisted',
+        descriptor); Public()(target, 'unlisted', descriptor);' made PUT study-tags/unlisted a public route both
+        inventories missed: 110 rows, public 4, test_05/11/12/13 green. Controller, Put and Public called the same way in
+        unlisted-routes.ts, registered in AppModule, did the same. A route, Controller, RequestMapping, Public or
+        SetMetadata name now occurs in code only as its import and its decorators, and the metadata writers and loaders
+        that reach the same metadata under no such name are refused; each refusal is matched by its message.
+        """
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        self.assertEqual(len(baseline), MATRIX["counts"]["routes"])
+        self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
+        tags, outside, app = API / "study-tags.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
+        member, registered = "  @Get() read(", "StudyAccessController],"
+        self.assertEqual(sources[tags].count(member), 1)
+        self.assertEqual(sources[app].count(registered), 1)
+        self.assertTrue(sources[tags].endswith("}\n"))
+        applied = ("const target = StudyTagsController.prototype;\n"
+                   "const descriptor = Object.getOwnPropertyDescriptor(target, 'unlisted');\n")
+
+        def tagged(imports, calls):
+            # the reviewer's shape: imports added, an undecorated member in the registered class, calls after the class
+            return imports + sources[tags].replace(member, "  unlisted() { return {}; }\n" + member) + applied + calls
+
+        put, public = "import { Put } from '@nestjs/common';\n", "import { Public } from './auth.guard';\n"
+        reviewed = tagged(put + public, "Put('unlisted')(target, 'unlisted', descriptor);\n"
+                                        "Public()(target, 'unlisted', descriptor);\n")
+        moved = ("import { Controller, Put } from '@nestjs/common';\n" + public
+                 + "export class UnlistedController {\n  unlisted() { return {}; }\n}\n"
+                   "Controller('unlisted')(UnlistedController);\n"
+                   "const target = UnlistedController.prototype;\n"
+                   "const descriptor = Object.getOwnPropertyDescriptor(target, 'unlisted');\n"
+                   "Put('write')(target, 'unlisted', descriptor);\nPublic()(target, 'unlisted', descriptor);\n")
+        app_module = ("import { UnlistedController } from './unlisted-routes';\n"
+                      + sources[app].replace(registered, "StudyAccessController, UnlistedController],"))
+
+        def names(source):
+            return sorted({name for run in decorator_runs(source) for name, _start, _end in run["items"]})
+
+        # control: what the readers before this check saw — the controller's handlers, its deciding call text and the
+        # names its runs carry are unchanged, and the outside file carries no decorator, so nothing stopped either
+        self.assertEqual([h[:3] for h in controller_handlers(tags, reviewed)],
+                         [h[:3] for h in controller_handlers(tags, sources[tags])])
+        self.assertEqual([t for _o, t in decorator_text(reviewed)], [t for _o, t in decorator_text(sources[tags])])
+        self.assertEqual(names(reviewed), names(sources[tags]))
+        self.assertTrue({"Put", "Public"}.isdisjoint(names(reviewed)))
+        self.assertEqual((decorator_runs(moved), decorator_text(moved)), ([], []))
+        # control: the same route written as decorators is read, public, and a row test_05 finds missing
+        decorated = controller_inventory({**sources, tags: put + public + sources[tags].replace(
+            member, "  @Public() @Put('unlisted') unlisted() { return {}; }\n" + member)})
+        self.assertEqual({key: meta["public"] for key, meta in decorated.items() if key not in baseline},
+                         {("PUT", "study-tags/unlisted"): True})
+        self.assertNotIn("PUT study-tags/unlisted", PUBLIC | SESSION | BUSINESS | DENIED_ROUTES)
+        undecorated = "used where no decorator the inventory reads applies it"
+        writer = "a metadata writer that attaches route or public metadata without a decorator the inventory reads"
+        loader = "a module loader the binding check does not follow"
+        added = API / "bound.controller.ts"
+        nest = "import { Controller, Get } from '@nestjs/common';\n"
+        inject = "import { Injectable } from '@nestjs/common';\n"
+
+        def controller(imports, member_text):
+            return imports + "@Controller('bound')\nexport class BoundController {\n" + member_text + "}\n"
+
+        def service(imports, after):
+            return (imports + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
+                    "const target = Helper.prototype;\nconst descriptor = Object.getOwnPropertyDescriptor(target, 'run');\n"
+                    + after)
+
+        on_read = ("(StudyTagsController.prototype, 'read', "
+                   "Object.getOwnPropertyDescriptor(StudyTagsController.prototype, 'read'));\n")
+        refused = {
+            "reviewer: study-tags Put and Public applied by call":
+                ({tags: reviewed}, r"study-tags\.controller\.ts: Public, Put " + undecorated),
+            "reviewer: unlisted-routes.ts Controller, Put and Public applied by call, registered in AppModule":
+                ({outside: moved, app: app_module}, r"unlisted-routes\.ts: Controller, Public, Put " + undecorated),
+            "Put alone applied by call": ({tags: tagged(put, "Put('unlisted')(target, 'unlisted', descriptor);\n")},
+                                          r"study-tags\.controller\.ts: Put " + undecorated),
+            "Public applied by call to the existing GET study-tags": ({tags: public + sources[tags] + "Public()" + on_read},
+                                                                      r"study-tags\.controller\.ts: Public " + undecorated),
+            "SetMetadata('public', true) applied by call to the existing GET study-tags": (
+                {tags: "import { SetMetadata } from '@nestjs/common';\n" + sources[tags]
+                       + "SetMetadata('public', true)" + on_read},
+                r"study-tags\.controller\.ts: SetMetadata " + undecorated),
+            # a name a run carries already met own_import with its decorators as the uses (S5-U1c-F04), which refuses the
+            # call first; the gap was the names no run carries
+            "Controller, carried by a run, applied by call to a second class": (
+                {tags: sources[tags] + "export class Second {\n  read() { return {}; }\n}\nController('second')(Second);\n"},
+                r"study-tags\.controller\.ts: Controller is declared or used outside its import and its uses"),
+            "RequestMapping applied by call": (
+                {tags: tagged("import { RequestMapping, RequestMethod } from '@nestjs/common';\n",
+                              "RequestMapping({ path: 'unlisted', method: RequestMethod.PUT })(target, 'unlisted', "
+                              "descriptor);\n")},
+                r"study-tags\.controller\.ts: RequestMapping " + undecorated),
+            "a route decorator handed to a variable": (
+                {tags: tagged(put, "const route = Put;\nroute('unlisted')(target, 'unlisted', descriptor);\n")},
+                r"Put " + undecorated),
+            "a route decorator in an array": ({tags: tagged(put, "const applied = [Put('unlisted')];\n")},
+                                              r"Put " + undecorated),
+            "a route decorator in an object": ({tags: tagged(put, "const table = { write: Put };\n")}, r"Put " + undecorated),
+            "through applyDecorators": (
+                {tags: tagged("import { applyDecorators, Put } from '@nestjs/common';\n",
+                              "applyDecorators(Put('unlisted'))(target, 'unlisted', descriptor);\n")},
+                r"Put " + undecorated),
+            "through Reflect.decorate": (
+                {tags: tagged(put, "Reflect.decorate([Put('unlisted')], target, 'unlisted', descriptor);\n")},
+                r"Put " + undecorated),
+            "a re-export under its own name": ({outside: service(inject, "export { Put } from '@nestjs/common';\n")},
+                                               r"unlisted-routes\.ts: Put " + undecorated),
+            "a route name as a property of this": (
+                {added: controller(nest, "  @Get('read')\n  read() { return this.Get; }\n")},
+                r"bound\.controller\.ts: Get " + undecorated),
+            "a route name on a module object": (
+                {outside: service(inject, "const common = require('@nestjs/common');\n"
+                                          "common.Put('x')(target, 'run', descriptor);\n")},
+                r"unlisted-routes\.ts: Put " + undecorated),
+            "route metadata by Reflect.defineMetadata": (
+                {tags: tagged("", "Reflect.defineMetadata('path', 'unlisted', descriptor.value);\n"
+                                  "Reflect.defineMetadata('method', 2, descriptor.value);\n")},
+                writer + r".*'Reflect\.defineMetadata'"),
+            "public metadata by Reflect.metadata": (
+                {tags: tagged("", "Reflect.metadata('public', true)(target, 'unlisted', descriptor);\n")},
+                writer + r".*'Reflect\.metadata'"),
+            "Reflect handed on": ({tags: tagged("", "const R = Reflect;\n")}, writer + r".*'Reflect'\)"),
+            "Reflect by a computed member": (
+                {tags: tagged("", "Reflect['defineMetadata']('public', true, descriptor.value);\n")},
+                writer + r".*'Reflect'\)"),
+            "public by Reflector.createDecorator": (
+                {outside: service(inject + "import { Reflector } from '@nestjs/core';\n",
+                                  "export const Open = Reflector.createDecorator<boolean>({ key: 'public' });\n"
+                                  "Open(true)(target, 'run', descriptor);\n")},
+                writer + r".*'createDecorator'"),
+            "a computed member of a required Nest module": (
+                {tags: tagged("", "require('@nestjs/common')['Put']('unlisted')(target, 'unlisted', descriptor);\n")},
+                loader + r".*require\('@nestjs/common'\)"),
+            "a member loader of a Nest module": (
+                {outside: service(inject, "export const common = module.require('@nestjs/common');\n")},
+                loader + r".*require\('@nestjs/common'\)"),
+            "the Public module by dynamic import": (
+                {outside: service(inject, "export const open = async () => (await import('./auth.guard'))['Public'];\n")},
+                loader + r".*import\('\./auth\.guard'\)"),
+            "the Public module by require with its extension": (
+                {outside: service(inject, "export const open = require('./auth.guard.js')['Public'];\n")},
+                loader + r".*require\('\./auth\.guard\.js'\)"),
+            "a part of Nest's common by a template": (
+                {outside: service(inject, "export const parts = require(`@nestjs/common/decorators`);\n")},
+                loader + r".*require\('@nestjs/common/decorators'\)"),
+            "a module computed at run time": (
+                {outside: service(inject, "const name = ['@nestjs', 'common'].join('/');\n"
+                                          "export const common = require(name);\n")},
+                loader + r".*require\(\) of a module computed at run time"),
+            "a template with an expression": (
+                {outside: service(inject, "export const common = import(`@nestjs/${'common'}`);\n")},
+                loader + r".*import\(\) of a module computed at run time"),
+            "require handed on": ({outside: service(inject, "const load = require;\nexport const common = load('x');\n")},
+                                  loader + r".*require not called"),
+            "Public applied by call in its own module": (
+                {GUARD: sources[GUARD] + "Public()(AuthGuard.prototype, 'canActivate', "
+                                         "Object.getOwnPropertyDescriptor(AuthGuard.prototype, 'canActivate'));\n"},
+                r"auth\.guard\.ts: Public occurs outside its declaration"),
+            "a second SetMetadata call in the Public module": (
+                {GUARD: sources[GUARD] + "SetMetadata('public', true)(AuthGuard);\n"},
+                r"auth\.guard\.ts: SetMetadata is declared or used outside its import and its uses"),
+            "SetMetadata as a property in the Public module": (
+                {GUARD: sources[GUARD] + "export const open = (globalThis as any).SetMetadata;\n"},
+                r"auth\.guard\.ts: SetMetadata is declared or used outside its import and its uses"),
+        }
+        for label, (files, message) in refused.items():
+            with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
+                controller_inventory({**sources, **files})
+        # the reviewer's outside file stops test_12's reader too
+        with self.assertRaisesRegex(AssertionError, r"unlisted-routes\.ts: Controller, Public, Put " + undecorated):
+            outside_decorators(outside, moved)
+        # controls: an unused import, Reflect's readers, packages loaded by name and a method named require still read
+        accepted = {
+            "an unused import of a route decorator": {tags: put + sources[tags]},
+            "Reflect.ownKeys": {outside: service(inject, "export const keys = (v: object) => Reflect.ownKeys(v);\n")},
+            "a package by require and by import()": {outside: service(inject, (
+                "export const raw = require('express').raw;\n"
+                "export const hash = async () => (await import('node:crypto')).createHash('md5');\n"))},
+            "a method named require": {outside: inject + "@Injectable()\nexport class Access {\n"
+                                                         "  async require(c: any) { return c; }\n"
+                                                         "  run() { return this.require(1); }\n}\n"},
+        }
+        for label, files in accepted.items():
+            with self.subTest(accepted=label):
+                self.assertEqual(controller_inventory({**sources, **files}), baseline)
+        print("CLINICIAN_POLICY_UNDECORATED_USES " + json.dumps({
+            "strict_names": sorted(STRICT_NAMES), "refused": sorted(refused), "accepted": sorted(accepted),
+            "real_routes": len(baseline), "real_public": len(PUBLIC),
         }, ensure_ascii=True, sort_keys=True))
 
 
