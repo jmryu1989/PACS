@@ -80,6 +80,31 @@
     .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
     .secret { margin: 14px 0; border: 1px solid #6c5731; border-radius: 8px; background: #2a2418; color: #ffe4a9; padding: 13px; overflow-wrap: anywhere; font: 700 15px/1.5 ui-monospace, monospace; user-select: all; }
     .secret-warning { color: #ffd37a; }
+    /* S5-U6a Gateway Status: every state is a word as well as a colour; nothing below 12px. */
+    .gateway { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 18px; }
+    .gateway-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+    .gateway-head h2 { margin: 0; font-size: 17px; }
+    .gateway-head .spacer { flex: 1; }
+    .gateway-hint { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+    .gstate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
+    .gstate.received { background: #1b3552; color: #a9d2fa; }
+    .gstate.retry_requested { background: #5c4215; color: #ffe09b; }
+    .gstate.failed { background: #592631; color: #ffadb7; }
+    .gstate.unknown { background: #393d48; color: #d1d5dd; }
+    .gstate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
+    .gstate.not_loaded, .gstate.observed { background: var(--panel2); color: #b9c9dc; }
+    .gateway-counts, .gateway-busy { color: var(--muted); font-size: 13px; }
+    .gateway-rows { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .gateway-rows:empty { display: none; }
+    .gateway-rows li { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 12px; align-items: start; border-bottom: 1px solid #22364f; padding: 10px 12px; font-size: 13px; }
+    .gateway-rows li:last-child { border-bottom: 0; }
+    .gateway-rows.stale li { opacity: .72; }
+    .gw-study { font-weight: 650; overflow-wrap: anywhere; }
+    .gw-uid, .gw-detail { color: var(--muted); overflow-wrap: anywhere; }
+    .gw-action { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; max-width: 380px; }
+    .gw-action button { padding: 5px 9px; font-size: 12px; }
+    .gw-note { color: var(--muted); font-size: 12px; }
+    .gateway-empty { margin: 0; color: var(--muted); padding: 14px 0; }
   </style>
 </head>
 <body>
@@ -122,6 +147,21 @@
       <span id="page-label">1 / 1</span>
       <button type="button" id="next">Next</button>
     </div>
+
+    <section class="gateway" id="gateway" aria-labelledby="gateway-title">
+      <div class="gateway-head">
+        <h2 id="gateway-title">Gateway Status</h2>
+        <span class="gstate not_loaded" id="gateway-list-state" role="status" title="아직 조회하지 않았습니다.">Not Loaded</span>
+        <span class="gateway-counts" id="gateway-counts">Counts Unknown</span>
+        <span class="gateway-busy" id="gateway-busy" hidden>Loading</span>
+        <div class="spacer"></div>
+        <button type="button" id="gateway-refresh" disabled>Refresh Gateway Status</button>
+      </div>
+      <p class="gateway-hint">이 기관 Gateway가 보고한 검사별 전송 상태입니다. 검사 목록은 이 버튼을 누를 때만 읽습니다. Gateway 보고가 없는 검사(장비 직송·Gateway 미설치)는 정상이며 여기에 나오지 않습니다.</p>
+      <p class="message" id="gateway-message" role="alert"></p>
+      <ol class="gateway-rows" id="gateway-rows"></ol>
+      <p class="gateway-empty" id="gateway-empty" hidden></p>
+    </section>
   </main>
 
   <datalist id="institution-options"></datalist>
@@ -520,6 +560,224 @@
       }
 
       boot();
+    })();
+  </script>
+  <script>
+    /*
+     * S5-U6a Gateway Status (REQ-S5-U6a-GATEWAY-STATUS). The list is the existing GET /studies answer: the server sends
+     * a receipt only on an own study and only one this institution credentials wrote (pacs.service.ts listStudies, rows
+     * and Not Observed items), so this page adds no route and filters nothing itself. Now Retry is the existing POST
+     * studies/:uid/gateway-retry with its technician-or-admin rule. Nothing is requested and study-arrivals.js is not
+     * loaded until the admin asks: opening Members stays one member-list read.
+     */
+    (() => {
+      const API = `${location.origin}/api`;
+      const $ = selector => document.querySelector(selector);
+      const gateway = { seq: 0, retrySeq: 0, observedAt: null, absentKnown: null, failed: false, rows: [], items: new Map(),
+        ended: false, rules: null };
+
+      function setGatewayMessage(value) {
+        const box = $("#gateway-message");
+        box.textContent = value || "";
+        box.classList.toggle("show", !!value);
+      }
+
+      // The shared receipt rules (study-arrivals.js) load once, on first use; a failed load may be tried again.
+      function arrivalsRules() {
+        if (window.KinStudyArrivals) return Promise.resolve();
+        if (!gateway.rules) gateway.rules = new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = "study-arrivals.js";
+          script.onload = () => window.KinStudyArrivals ? resolve() : reject(new Error("rules"));
+          script.onerror = () => { gateway.rules = null; script.remove(); reject(new Error("rules")); };
+          document.head.append(script);
+        });
+        return gateway.rules;
+      }
+
+      async function gatewayRequest(method, path, body) {
+        const options = { method, headers: { "X-KIN-CSRF": "1" } };
+        if (body !== undefined) {
+          options.headers["Content-Type"] = "application/json";
+          options.body = JSON.stringify(body);
+        }
+        const response = await fetch(API + path, options);
+        // 401 is judged before any body is read, so an ended session never waits on a body before the screen empties.
+        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        return payload;
+      }
+
+      // Fixed sentences only: server wording is never shown here.
+      function failureText(error) {
+        if (error?.status === 403) return "이 계정으로는 검사 목록을 조회할 수 없습니다.";
+        if (error?.status === 409) return "검사 접근 범위가 바뀌었습니다. 다시 조회하세요.";
+        if (error?.status === 503) return "서버가 바쁘거나 원본 조회가 지연되었습니다. 잠시 후 다시 조회하세요.";
+        if (error) return "검사 목록을 불러오지 못했습니다.";
+        return "조회 응답 형식을 확인할 수 없습니다.";
+      }
+
+      // A 401 ends this page session once: loads and requests in flight are dropped and the list empties before logout.
+      function endSession() {
+        if (gateway.ended) return;
+        gateway.ended = true;
+        gateway.seq++;
+        for (const item of gateway.items.values()) item.dataset.request = "";
+        gateway.items.clear();
+        Object.assign(gateway, { rows: [], observedAt: null, absentKnown: null, failed: false });
+        $("#gateway-rows").replaceChildren();
+        $("#gateway-empty").hidden = true;
+        $("#gateway-busy").hidden = true;
+        $("#gateway-refresh").disabled = true;
+        setGatewayMessage("");
+        KinAuth.logout();
+      }
+
+      function newItem(uid) {
+        const item = document.createElement("li");
+        Object.assign(item.dataset, { uid, key: "", request: "", requested: "" });
+        const chip = document.createElement("span");
+        const body = document.createElement("div");
+        const study = document.createElement("div");
+        study.className = "gw-study";
+        const uidLine = document.createElement("div");
+        uidLine.className = "gw-uid";
+        const detail = document.createElement("div");
+        detail.className = "gw-detail";
+        body.append(study, uidLine, detail);
+        const action = document.createElement("div");
+        action.className = "gw-action";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.hidden = true;
+        button.addEventListener("click", requestRetry);
+        const note = document.createElement("span");
+        note.className = "gw-note";
+        action.append(button, note);
+        item.append(chip, body, action);
+        return item;
+      }
+
+      function drawItem(item, row, rules) {
+        const [chip, body, action] = item.children, [study, uidLine, detail] = body.children, [button, note] = action.children;
+        const retry = rules.gatewayRetryAction(row.receipt), key = retry?.kind === "now_retry" ? retry.key : "";
+        // Another receipt drops the in-flight token, the stored mark and the note, also when an older key comes back
+        // (A->B->A): an answer is only ever written over the receipt it was requested for.
+        if (item.dataset.key !== key) {
+          Object.assign(item.dataset, { key, request: "", requested: "" });
+          note.textContent = "";
+          note.title = "";
+        }
+        const status = rules.gatewayStatus(row.receipt, item.dataset.requested || null);
+        item.dataset.status = status.key;
+        chip.className = `gstate ${status.key}`;
+        chip.textContent = status.text;
+        chip.title = status.title;
+        study.textContent = row.absent ? `Not Observed · ${row.origin} · ${rules.formatTime(row.createdAt)}`
+          : [row.name, row.patientId, row.date, row.acc].filter(Boolean).join(" · ") || "—";
+        uidLine.textContent = row.uid;
+        detail.textContent = [status.detail, status.reason].filter(Boolean).join(" · ");
+        button.textContent = rules.RETRY_TEXT.button;
+        button.title = retry?.title ?? "";
+        // D10: the existing technician-or-admin rule (KinAuth.has mirrors need()); never offered over a failed list read.
+        button.hidden = !key || !!item.dataset.requested || gateway.failed || !KinAuth.has("technician");
+        button.disabled = !!item.dataset.request;
+        // Without a bindable retry the note is the status action itself: the F-01 sentence for failed, else nothing.
+        if (!key) {
+          note.textContent = status.retry?.text ?? "";
+          note.title = status.retry?.title ?? "";
+        }
+        return status;
+      }
+
+      function drawGateway() {
+        const rules = window.KinStudyArrivals, kept = new Map(gateway.items), statuses = [], items = [];
+        gateway.items = new Map();
+        for (const row of gateway.rows) {
+          const item = kept.get(row.uid) ?? newItem(row.uid);
+          kept.delete(row.uid);
+          gateway.items.set(row.uid, item);
+          statuses.push(drawItem(item, row, rules).key);
+          items.push(item);
+        }
+        // An item that left the list drops its token, so its late answer is written nowhere; one that comes back is new.
+        for (const item of kept.values()) item.dataset.request = "";
+        const list = $("#gateway-rows");
+        // Moving a kept item would drop keyboard focus, so the children are replaced only when the items change.
+        if (items.length !== list.children.length || items.some((item, index) => item !== list.children[index])) list.replaceChildren(...items);
+        list.classList.toggle("stale", gateway.failed);
+        const summary = rules.gatewayStatusSummary({ observedAt: gateway.observedAt, failed: gateway.failed,
+          absentKnown: gateway.absentKnown, statuses });
+        const state = $("#gateway-list-state");
+        state.className = `gstate ${summary.key}`;
+        state.textContent = summary.text;
+        state.title = summary.title;
+        $("#gateway-counts").textContent = summary.counts;
+        const empty = $("#gateway-empty");
+        empty.hidden = !gateway.observedAt || gateway.rows.length > 0;
+        empty.textContent = gateway.absentKnown ? "이 기관 Gateway 보고가 있는 검사가 없습니다."
+          : "목록에 있는 검사에는 Gateway 보고가 없습니다. 영상이 관측되지 않은 검사의 Gateway 보고는 이번 조회로 확인하지 못했습니다.";
+      }
+
+      async function refreshGateway() {
+        if (gateway.ended) return;
+        const seq = ++gateway.seq;
+        $("#gateway-busy").hidden = false;
+        let result = null, error = null, rulesFailed = false;
+        try { await arrivalsRules(); }
+        catch { rulesFailed = true; }
+        if (!rulesFailed) {
+          try { result = await gatewayRequest("GET", "/studies"); }
+          catch (e) { error = e ?? new Error("request failed"); }
+        }
+        // Only the newest load paints; a session end moves seq too, so a late answer never paints after it.
+        if (seq !== gateway.seq) return;
+        $("#gateway-busy").hidden = true;
+        if (error?.status === 401) { endSession(); return; }
+        if (rulesFailed) { setGatewayMessage("화면 규칙(study-arrivals.js)을 불러오지 못했습니다. 다시 시도하세요."); return; }
+        const read = error ? null : window.KinStudyArrivals.gatewayStatusRows(result);
+        if (read) {
+          Object.assign(gateway, { failed: false, observedAt: read.observedAt, absentKnown: read.absentKnown, rows: read.rows });
+          setGatewayMessage("");
+        } else {
+          // Nothing is emptied: the last successful list stays, marked as the last observation.
+          gateway.failed = true;
+          setGatewayMessage(failureText(error));
+        }
+        drawGateway();
+      }
+
+      /*
+       * One POST with an empty body and nothing shown before the answer. The answer is written only while the same item
+       * still draws the same receipt key with this token (drawItem and drawGateway drop it otherwise). Retry Requested
+       * means the request is stored at KIN, never that a retry ran.
+       */
+      async function requestRetry(event) {
+        const button = event.currentTarget, item = button.closest("li"), uid = item?.dataset.uid, key = item?.dataset.key;
+        if (!uid || !key || button.hidden || item.dataset.request) return;
+        const token = String(++gateway.retrySeq);
+        item.dataset.request = token;
+        button.disabled = true;
+        let answer = null, error = null;
+        try { answer = await gatewayRequest("POST", `/studies/${encodeURIComponent(uid)}/gateway-retry`, {}); }
+        catch (e) { error = e ?? new Error("request failed"); }
+        if (error?.status === 401) { endSession(); return; }
+        if (item.dataset.request !== token || item.dataset.key !== key || gateway.items.get(uid) !== item) return;
+        const shown = window.KinStudyArrivals.gatewayRetryAnswer(uid, answer, error);
+        Object.assign(item.dataset, { request: "", requested: shown.requested ? key : "" });
+        const note = item.querySelector(".gw-note");
+        note.textContent = shown.text;
+        note.title = shown.title;
+        drawGateway();
+      }
+
+      $("#gateway-refresh").addEventListener("click", refreshGateway);
+      // Enabled only for the session the Members console accepts (approved, not demo, admin); init() is shared, not repeated.
+      KinAuth.init().then(session => {
+        if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#gateway-refresh").disabled = false;
+      }).catch(() => {});
     })();
   </script>
 </body>
