@@ -280,6 +280,12 @@ jobs:
       - name: S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-timeline-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file tests/clinician_timeline_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_timeline_dom_test.py
+      # S5-U4c: the image request screens (Clinician Home request area, Technician-mode queue, read-only reading line) against
+      # an in-test stand-in of the S5-U4c routes (no stack, network or credentials); envelope, requestId/revision, codes,
+      # A-B-A and session end, and the guard-less control files must paint the late answers the shipped files drop.
+      - name: S5-U4c Image request screens, write envelope, refusals by code, A-B-A and session end DOM
+        timeout-minutes: 4
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-request-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file tests/clinician_request_dom_test.py --file tests/report_actions_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_request_dom_test.py
       # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
       # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM
