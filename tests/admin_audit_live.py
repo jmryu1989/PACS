@@ -29,15 +29,19 @@ name and expected seconds on a warm hosted stack):
            opaque and bound to its reader (B's admin gets 409), and a Study Access-restricted admin gets 403
            ADMIN_AUDIT_RESTRICTED, never an empty list.
 
+Each case records the rows a write produced as soon as that write succeeded, so a case stopped midway leaves the next
+cases comparing against exactly what was written (hosted 36244365412: test_03..06 failed only on test_02's bookkeeping).
+
 A query failure of the database cannot be caused safely on a shared stack; that failure-is-not-empty path is the pure
 readAuditPage case in tests/admin_audit_attribution_test.cjs and the service's 503 ADMIN_AUDIT_UNAVAILABLE.
 
-Owned data only: three run-created Keycloak groups kin-test-<run>-a/-b/-z (the synthetic institutions A, B and Z), the
-run's identities (admins of A, B and Z, a second admin of A, a clinician-only, a technician and a radiologist of A),
-member m created through the member console, two run-created gateway clients, the realm roles `clinician` and
-`gateway` only when this run had to create them, one synthetic study UID 2.25.<random>, and AuditLog rows the run
-inserts by exact id. Cleanup removes exactly these (AuditLog by id, run target or run actor; StudyState, Study Access
-and site Hanging Protocol rows by the run's UID and institutions).
+Owned data only: three run-created Keycloak groups kin-test-<run>-a/-b/-z (the synthetic institutions A, B and Z) and
+the Institution rows of the same ids (StudyAccessPolicy.institution references Institution(id)), the run's identities
+(admins of A, B and Z, a second admin of A, a clinician-only, a technician and a radiologist of A), member m created
+through the member console, two run-created gateway clients, the realm roles `clinician` and `gateway` only when this
+run had to create them, one synthetic study UID 2.25.<random>, and AuditLog rows the run inserts by exact id. Cleanup
+removes exactly these (AuditLog by id, run target or run actor; StudyState, Study Access and site Hanging Protocol rows
+by the run's UID and institutions; then the Institution rows by the ids this run inserted).
 """
 from __future__ import annotations
 
@@ -99,6 +103,7 @@ class AdminAuditLive(unittest.TestCase):
         cls.addClassCleanup(cls.stack.cleanup_test_identities)
         cls.run_id = uuid.uuid4().hex[:12]
         cls.groups: dict[str, tuple[str, str]] = {}
+        cls.institutions: list[str] = []
         cls.created_roles: list[str] = []
         cls.gateway_clients: list[str] = []
         cls.inserted: list[int] = []
@@ -107,6 +112,7 @@ class AdminAuditLive(unittest.TestCase):
         cls.study = "2.25." + str(uuid.uuid4().int)
         cls.expected: dict[str, list[tuple]] = {"A": [], "B": []}
         cls.addClassCleanup(cls.delete_groups)
+        cls.addClassCleanup(cls.delete_institutions)   # runs after purge_owned_rows: the policy rows reference it
         cls.addClassCleanup(cls.delete_created_roles)
         cls.addClassCleanup(cls.delete_gateway_clients)
         cls.addClassCleanup(cls.delete_members)
@@ -114,6 +120,7 @@ class AdminAuditLive(unittest.TestCase):
         cls.stack.require_stack()
         for key in "ABZ":
             cls.create_group(key)
+            cls.create_institution(key)
         cls.ensure_role("clinician")
         a, b, z = (cls.groups[key][0] for key in "ABZ")
         for logical, roles, group in (("u5b-admin-a", ["admin"], a), ("u5b-admin-a2", ["admin"], a), ("u5b-admin-b", ["admin"], b),
@@ -136,6 +143,20 @@ class AdminAuditLive(unittest.TestCase):
         if len(exact) != 1:
             raise RuntimeError(f"synthetic institution group lookup failed: {name}")
         cls.groups[key] = (name, exact[0]["id"])
+
+    @classmethod
+    def create_institution(cls, key: str) -> None:
+        """The group's Institution row. A group alone is not enough: StudyAccessPolicy.institution references
+        Institution(id), and a policy write in a group without the row was answered 500 (hosted 36244365412, 23503)."""
+        name = cls.groups[key][0]
+        if not GROUP.fullmatch(name):
+            raise RuntimeError("invalid synthetic institution name")
+        # A plain INSERT: a row that already has this id fails here and is never taken for the run's own. Once psql
+        # returns the row is this run's, so it is kept for cleanup before its output is checked.
+        out = psql(f'INSERT INTO "Institution" (id, name) VALUES (\'{name}\', \'SYN S5-U5b {key}\') RETURNING id;')
+        cls.institutions.append(name)
+        if [line for line in out if GROUP.fullmatch(line)] != [name]:
+            raise RuntimeError(f"synthetic institution row insert returned {out!r}")
 
     @classmethod
     def ensure_role(cls, name: str) -> dict:
@@ -264,6 +285,21 @@ class AdminAuditLive(unittest.TestCase):
         if failures:
             raise RuntimeError("synthetic institution cleanup failed: " + ", ".join(failures))
 
+    @classmethod
+    def delete_institutions(cls) -> None:
+        """Only the Institution rows this run inserted. A Study Access row still naming one blocks the delete (RESTRICT)
+        and fails here rather than being removed on the way."""
+        names = list(cls.institutions)
+        cls.institutions.clear()
+        if not names:
+            return
+        if not all(GROUP.fullmatch(name) for name in names):
+            raise RuntimeError("refusing cleanup: an owned institution id has an unexpected shape")
+        listed = ",".join(f"'{name}'" for name in names)
+        psql(f'DELETE FROM "Institution" WHERE id IN ({listed});')
+        if psql(f'SELECT count(*) FROM "Institution" WHERE id IN ({listed});') != ["0"]:
+            raise RuntimeError("synthetic institution rows remain")
+
     # ── helpers ──
     def inst(self, key: str) -> str:
         return self.groups[key][0]
@@ -286,9 +322,15 @@ class AdminAuditLive(unittest.TestCase):
         self.assertEqual(sorted(self.expected[key]), sorted(shape(row) for row in body["rows"]), f"{key}'s record-time rows")
         return body
 
-    def member_patch(self, admin: str, member: str, body: dict, action: str) -> None:
+    def expect_rows(self, a=(), b=()) -> None:
+        """The rows one write just produced, recorded as soon as it succeeded (never at the end of the case)."""
+        self.expected["A"] += list(a)
+        self.expected["B"] += list(b)
+
+    def member_patch(self, admin: str, member: str, body: dict, action: str, a=(), b=()) -> None:
         result = self.stack.request("PATCH", f"/admin/users/{quote(member)}", admin, body)
         self.assertEqual(result.status, 200, f"{action}: {result.status}")
+        self.expect_rows(a, b)
 
     # ── cases ──
     def test_01_refusals_before_any_history(self) -> None:
@@ -322,18 +364,24 @@ class AdminAuditLive(unittest.TestCase):
         self.assertEqual(created.body["approvalState"], "PENDING")
         a, b = self.inst("A"), self.inst("B")
         self.member_patch("u5b-admin-a", member, {"approvalState": "APPROVED", "institution": a, "roles": ["technician"],
-                                                  "verificationOverride": True}, "approve into A")
-        self.member_patch("u5b-admin-a", member, {"roles": ["radiologist", "technician"], "verificationOverride": True}, "roles in A")
+                                                  "verificationOverride": True}, "approve into A",
+                          a=[("admin.user.approve", member, ())])
+        self.member_patch("u5b-admin-a", member, {"roles": ["radiologist", "technician"], "verificationOverride": True}, "roles in A",
+                          a=[("admin.user.update", member, ())])
         reset = self.stack.request("POST", f"/admin/users/{quote(member)}/reset-password", "u5b-admin-a", {"mode": "temp"})
         self.assertEqual(reset.status, 200, f"password reset: {reset.status}")
+        self.expect_rows(a=[("admin.user.reset-password", member, ())])
         policy = self.stack.request("POST", f"/admin/users/{quote(member)}/study-access", "u5b-admin-a", {
             "expectedOwner": [a, self.stack.user_ids["u5b-admin-a"]], "revision": 0, "requestId": str(uuid.uuid4()),
             "reason": "SYN S5-U5b policy while in A",
             "policy": {"version": 1, "restricted": False, "startsAt": None, "endsAt": None, "rules": []}})
         self.assertIn(policy.status, (200, 201), policy.text)
-        self.member_patch("u5b-admin-z", member, {"institution": b, "verificationOverride": True}, "move A->B by Z")
-        self.member_patch("u5b-admin-b", member, {"enabled": False}, "suspend in B")
-        self.member_patch("u5b-admin-b", member, {"approvalState": "PENDING"}, "un-approve in B")
+        self.expect_rows(a=[("study.access", member, ())])
+        self.member_patch("u5b-admin-z", member, {"institution": b, "verificationOverride": True}, "move A->B by Z",
+                          a=[("admin.user.update", member, ("after",))], b=[("admin.user.update", member, ("before",))])
+        self.member_patch("u5b-admin-b", member, {"enabled": False}, "suspend in B", b=[("admin.user.suspend", member, ())])
+        self.member_patch("u5b-admin-b", member, {"approvalState": "PENDING"}, "un-approve in B",
+                          b=[("admin.user.unapprove", member, ())])
 
         # Stored shapes the API cannot be made to write on demand, as admin.service.ts row() writes them.
         def snapshot(member_id, institution, state, roles=("technician",)):
@@ -344,14 +392,10 @@ class AdminAuditLive(unittest.TestCase):
         self.synthetic_members += [partial, ambiguous]
         self.insert_audit("admin.user.patch.failed", partial, {"before": snapshot(partial, b, "APPROVED"),
                           "after": snapshot(partial, a, "INVALID", roles=()), "verificationOverride": True, "failed": True})
+        self.expect_rows(a=[("admin.user.patch.failed", partial, ("before",))], b=[("admin.user.patch.failed", partial, ("after",))])
         self.insert_audit("admin.user.update", ambiguous, {"before": snapshot(ambiguous, None, "INVALID"),
                           "after": snapshot(ambiguous, a, "APPROVED"), "verificationOverride": True})
 
-        self.expected["A"] += [("admin.user.approve", member, ()), ("admin.user.update", member, ()),
-                               ("admin.user.reset-password", member, ()), ("study.access", member, ()),
-                               ("admin.user.update", member, ("after",)), ("admin.user.patch.failed", partial, ("before",))]
-        self.expected["B"] += [("admin.user.update", member, ("before",)), ("admin.user.suspend", member, ()),
-                               ("admin.user.unapprove", member, ()), ("admin.user.patch.failed", partial, ("after",))]
         seen_a, seen_b = self.assert_history("A"), self.assert_history("B")
         self.assertEqual(self.read("Z")["total"], 0, "Z (the mover's institution) receives nothing")
         move_a = next(r for r in seen_a["rows"] if shape(r) == ("admin.user.update", member, ("after",)))
@@ -379,22 +423,25 @@ class AdminAuditLive(unittest.TestCase):
         a, b, uid = self.inst("A"), self.inst("B"), self.study
         announced = self.stack.bearer_request("POST", "/gateway/announce", self.gateway["A"], {"studyUid": uid})
         self.assertEqual((announced.status, announced.body.get("institutionId")), (200, a), announced.text)
+        self.expect_rows(a=[("study.announce", uid, ())])
         patched = self.stack.request("PATCH", f"/studies/{uid}", "u5b-admin-a", {"ward": "SYN-U5B-A"})
         self.assertEqual(patched.status, 200, patched.text)
+        self.expect_rows(a=[("state.patch", uid, ())])
         site = self.stack.request("PUT", "/hanging-protocols/site", "u5b-admin-a",
                                   {"expectedOwner": {"institution": a, "subject": ""}, "revision": 0, "value": None})
         self.assertEqual(site.status, 200, site.text)
+        self.expect_rows(a=[("hanging-protocol.site.reset", a, ())])
         removed = self.stack.request("DELETE", f"/studies/{uid}", "u5b-admin-a")
         self.assertEqual(removed.status, 200, removed.text)
+        self.expect_rows(a=[("state.delete", uid, ())])
         again = self.stack.bearer_request("POST", "/gateway/announce", self.gateway["B"], {"studyUid": uid})
         self.assertEqual((again.status, again.body.get("institutionId")), (200, b), again.text)
+        self.expect_rows(b=[("study.announce", uid, ())])
         patched_b = self.stack.request("PATCH", f"/studies/{uid}", "u5b-admin-b", {"ward": "SYN-U5B-B"})
         self.assertEqual(patched_b.status, 200, patched_b.text)
+        self.expect_rows(b=[("state.patch", uid, ())])
         # The study's current owner is B; that does not decide who reads A's rows about it.
         self.assertEqual(psql(f'SELECT "institutionId" FROM "StudyState" WHERE uid=\'{uid}\';'), [b])
-        self.expected["A"] += [("study.announce", uid, ()), ("state.patch", uid, ()), ("hanging-protocol.site.reset", a, ()),
-                               ("state.delete", uid, ())]
-        self.expected["B"] += [("study.announce", uid, ()), ("state.patch", uid, ())]
         seen_a, seen_b = self.assert_history("A"), self.assert_history("B")
         self.assertEqual(self.read("Z")["total"], 0)
         by_a = {row["action"]: row for row in seen_a["rows"] if row["target"] == uid}
@@ -463,9 +510,9 @@ class AdminAuditLive(unittest.TestCase):
             "reason": "SYN S5-U5b restricted admin",
             "policy": {"version": 1, "restricted": True, "startsAt": None, "endsAt": None, "rules": []}})
         self.assertIn(restricted.status, (200, 201), restricted.text)
+        self.expect_rows(a=[("study.access", second, ())])
         refused = self.audit("u5b-admin-a2")
         self.assertEqual((refused.status, refused.body.get("code")), (403, "ADMIN_AUDIT_RESTRICTED"), refused.text)
-        self.expected["A"].append(("study.access", second, ()))
         self.assertEqual(self.assert_history("A")["total"], full["total"] + 1, "the policy write is A's row")
         print("S5-U5B-AUDIT-LIVE " + json.dumps({"A": len(self.expected["A"]), "B": len(self.expected["B"]),
               "pages": len(pages), "inserted": len(self.inserted)}, sort_keys=True))
