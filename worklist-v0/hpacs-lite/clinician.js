@@ -125,11 +125,13 @@
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
       const response = await fetch(API + path, { headers: { 'X-KIN-CSRF': '1' }, signal: controller.signal });
-      const body = await response.json().catch(() => null);
+      // 401은 상태 줄에서 바로 끝낸다. 본문을 기다리는 동안에는 leaving과 요청 번호가 그대로라 그사이 도착한 다른
+      // 읽기의 답(확정 판독문·key image)이 그려진다. 떠나는 문서는 이 오류를 보이지 않으므로 본문은 읽지 않는다.
       if (response.status === 401) {
         logout();
-        throw failure(401, body, '세션이 만료되었습니다. 다시 로그인하세요.');
+        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
       }
+      const body = await response.json().catch(() => null);
       if (!response.ok) throw failure(response.status, body);
       return body;
     } catch (error) {

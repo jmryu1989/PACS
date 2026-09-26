@@ -39,6 +39,10 @@ extra writer-side fields planted in the stubs that the real serializer never sen
       report or key image is left and a pending report answer does not paint; only a successful list and account
       check read the study again (Retry). The same file without setAside() keeps the final report and paints the
       pending answer (control).
+  12  a 401 whose status line has arrived and whose body is held (a page-side stub): the page is already clear and
+      has sent its one POST, and the current report's 200 that arrives meanwhile does not paint, whether the 401 body
+      stays held, completes, or completes malformed; then one navigation. The request() of 2dd971b, which reads the
+      body before the status, paints that answer while the body is held and logs out only once it arrives (control).
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The service half is tests/clinician_read_live.py (hosted synthetic stack only).
@@ -244,6 +248,11 @@ GO_GUARD = "    if (leaving) return;\n    leaving = true;\n    location.replace(
 LOGOUT_GUARD = "    if (leaving) return;\n    leaving = true;\n    KinAuth.logout();\n"
 LOGOUT_CLOSE = "  function logout() {\n    close();\n"
 SET_ASIDE = "    setAside();\n"
+STATUS_FIRST = ("      if (response.status === 401) {\n        logout();\n"
+                "        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');\n      }\n"
+                "      const body = await response.json().catch(() => null);\n")
+BODY_FIRST = ("      const body = await response.json().catch(() => null);\n      if (response.status === 401) {\n"
+              "        logout();\n        throw failure(401, body, '세션이 만료되었습니다. 다시 로그인하세요.');\n      }\n")
 
 # auth.js broadcastEnded() as another tab runs it (pinned in test_09): one channel message, then a localStorage set
 # and remove, each a storage event in every other tab of this origin.
@@ -261,6 +270,25 @@ WATCH_SIGNALS = """() => { const report = kind => fetch('/harness/signal?kind=' 
 # show its second navigation inside the same window, so the window is long enough.
 WINDOW_MS = 500
 EXPIRED = (401, {"statusCode": 401, "message": "인증 정보가 없습니다"})
+# test_12 only, before the page's scripts: a route answers a 401 whole, so this hands the page a Response with the
+# same status and headers whose body waits for the harness — a 401 whose status line has arrived and whose body has
+# not. finish('json') delivers the body the route sent, finish('malformed') a truncated one. Every other answer
+# passes through unchanged.
+HOLD_401_BODY = """(() => {
+  const real = globalThis.fetch.bind(globalThis), held = globalThis.synHeld401 = [];
+  globalThis.fetch = async (...args) => {
+    const response = await real(...args);
+    if (response.status !== 401) return response;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    let finish;
+    const gate = new Promise(resolve => { finish = resolve; });
+    held.push({url: response.url, finish});
+    const body = new ReadableStream({pull: controller => gate.then(kind => {
+      controller.enqueue(kind === 'malformed' ? new TextEncoder().encode('{"statusCode":401,"mess') : bytes);
+      controller.close(); })});
+    return new Response(body, {status: response.status, statusText: response.statusText, headers: response.headers});
+  };
+})()"""
 
 
 class ClinicianHomeDOMTest(unittest.TestCase):
@@ -276,6 +304,8 @@ class ClinicianHomeDOMTest(unittest.TestCase):
             "logout-no-close": variant([(LOGOUT_CLOSE, "  function logout() {\n"),
                                         (REPORT_GUARD, "    return mine === reportSeq && selected === uid;\n")]),
             "list-keeps-detail": variant([(SET_ASIDE, "")]),
+            # The request() of 2dd971b: the 401 is seen only after its body has been read.
+            "body-before-401": variant([(STATUS_FIRST, BODY_FIRST)]),
         }
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
@@ -605,6 +635,20 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.wait_until(lambda: self.held_documents, "the navigation to index.html")
         self.page.wait_for_timeout(WINDOW_MS)
         return self.documents[start:]
+
+    def expire_behind_a_held_body(self):
+        # Two report reads pending, row 2 then the current row 1 (a final report with two key images); row 2 answers
+        # 401 and HOLD_401_BODY holds its body. POST /auth/logout is held too.
+        self.open_home()
+        self.pick(1)
+        self.page.evaluate(WATCH_SIGNALS)
+        earlier, current = self.pending_reports(2, 1)
+        self.held_logouts = []
+        earlier.fulfill(status=EXPIRED[0], json=EXPIRED[1])
+        self.page.wait_for_function("() => synHeld401.length === 1")
+        self.assertEqual([f"{ORIGIN}/api/clinician/studies/{uid(2)}/report"],
+                         self.page.evaluate("() => synHeld401.map(held => held.url)"))
+        return current
 
     # ── cases ──
     def test_01_landing_follows_the_guard_rule_and_main_html_hands_clinician_only_over(self):
@@ -1254,6 +1298,49 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         seen = self.report()
         self.assertEqual((uid(2), "final", ["Findings", "SYN-B findings"]), (seen["detailUid"], seen["state"], seen["sections"][0]),
                          "list-keeps-detail: the pending answer paints after a 409")
+
+    def test_12_a_401_ends_the_session_on_its_status_line_while_its_body_is_held(self):
+        # The 401 is known from its status line. Nothing may wait for its body: while the body and POST /auth/logout are
+        # both held the page is clear and the current study's 200 does not paint, however the body ends.
+        index = ORIGIN + BASE + "index.html"
+        self.index_stand_in = True
+        self.page.add_init_script(HOLD_401_BODY)
+        answer_a = self.reports[uid(1)]
+        for ending in ("held", "json", "malformed"):
+            with self.subTest(body=ending):
+                logouts = len(self.logouts)
+                current = self.expire_behind_a_held_body()
+                post = self.pending_log_out()
+                self.assert_closed(f"{ending}: 401 status line, body and log out held")
+                self.release(current, answer_a)
+                self.assert_closed(f"{ending}: the current report's 200 after the 401 status line")
+                if ending != "held":
+                    self.page.evaluate("kind => synHeld401[0].finish(kind)", ending)
+                    self.settle()
+                    self.assert_closed(f"{ending}: the 401 body completes")
+                self.assertEqual(1, len(self.logouts) - logouts, f"{ending}: one POST while it is pending")
+                self.assertEqual([index], self.finish_log_out(post), f"{ending}: one navigation")
+                self.assertEqual(1, len(self.logouts) - logouts, f"{ending}: one POST")
+                self.land()
+
+        # Control: request() of 2dd971b reads the body first. While it is held nothing is cleared, no POST is sent and
+        # the current answer paints its final report and key images; the session ends only when the body arrives. So
+        # the checks above cannot pass on a harness that delivers a 401's body with its status line.
+        self.files["clinician.js"] = self.variants["body-before-401"]
+        logouts = len(self.logouts)
+        current = self.expire_behind_a_held_body()
+        self.release(current, answer_a)
+        seen = self.report()
+        self.assertEqual(("final", ["Findings", "SYN-A findings line 1\nline 2"], "키 이미지 2건", "SYN ALPHA", 0),
+                         (seen["state"], seen["sections"][0], seen["keysState"], self.identity()["Name"],
+                          len(self.logouts) - logouts),
+                         "body-before-401: the current answer paints while the 401 body is held")
+        self.page.evaluate("kind => synHeld401[0].finish(kind)", "json")
+        post = self.pending_log_out()
+        self.assert_closed("body-before-401: the page closes only once the 401 body arrives")
+        self.assertEqual(1, len(self.logouts) - logouts)
+        post.fulfill(status=204, body="")
+        self.page.wait_for_url(index)
 
 
 if __name__ == "__main__":
