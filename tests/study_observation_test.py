@@ -432,6 +432,34 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S5-UI1 header session text and its Session details popover; tests/worklist_header_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"session-who": 1, "session-details": 1, "session-details-user": 1, "session-details-roles": 1},
+    "functions": {},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# S5-U6b menubar storage: 'Storage Unobservable' instead of a 0 that hides a failed read;
+# tests/admin_metrics_dom_test.py pins how it behaves.
+for _kind, _extra in {
+    "ids": {},
+    "functions": {"refreshStorage": 1},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
+# Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
+# current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
+RECOUNTED = {
+    "ids": {},
+    "functions": {},
+    # S5-U6b (REQ-S5-U6b-OPS-METRICS): the two copies of the list loads' fetch-and-write, which left the '0.0GB / -'
+    # default on a failed read, are now one refreshStorage() called from both, so one lookup remains.
+    "selectors": {"#storage": (2, 1)},
+}
+for _kind in RECOUNTED:
+    assert not set(RECOUNTED[_kind]) & set(ADDED[_kind]), _kind
 
 
 def inventory(text):
@@ -477,6 +505,9 @@ class Stage3Anchors(unittest.TestCase):
                 rest = Counter(current[kind])
                 for key, count in ADDED[kind].items():
                     self.assertEqual(count, rest.pop(key, 0), key)
+                for key, (before, after) in RECOUNTED[kind].items():
+                    self.assertEqual(after, rest[key], key)
+                    rest[key] = before
                 self.assertEqual(keys, len(rest))
                 self.assertEqual(digest, hashlib.sha256(json.dumps(sorted(rest.items()), ensure_ascii=False).encode()).hexdigest())
         main = MAIN.read_text(encoding="utf-8")
