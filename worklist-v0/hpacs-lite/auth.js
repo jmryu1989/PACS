@@ -69,6 +69,29 @@ const KinAuth = (() => {
     return cached;
   }
 
+  /**
+   * S5-U2a 첫 화면. 업무 역할이 clinician뿐인 세션은 main.html(Radiology/Technician 탭)이 아니라 clinician.html로 간다.
+   * 판정은 guard의 clinician-only 게이트(api/src/clinician-policy.ts clinicianOnly)와 같은 규칙이다 — clinician이 있고
+   * 기존 세 역할이 하나도 없음. Keycloak 기본 역할은 보지 않는다. 어느 페이지를 여는지만 정할 뿐 권한이 아니다:
+   * 두 페이지의 모든 요청은 서버가 역할·기관을 다시 판정한다.
+   */
+  const LEGACY_ROLES = ['radiologist', 'technician', 'admin'];
+  function home(session) {
+    const roles = session && session.state === 'approved' && !session.demo && Array.isArray(session.roles) ? session.roles : [];
+    return roles.includes('clinician') && !roles.some(role => LEGACY_ROLES.includes(role)) ? 'clinician.html' : 'main.html';
+  }
+
+  /**
+   * OIDC 콜백(api/src/auth.controller.ts)은 모든 로그인을 main.html로 돌려보낸다. clinician-only 세션이 그 페이지의
+   * 작업을 시작하지 않도록 main.html에서만 clinician.html로 옮기고, 옮기는 동안 init()을 끝내지 않는다 —
+   * main.html의 boot는 `await KinAuth.init()` 다음 줄로 넘어가지 않는다.
+   */
+  function land(session) {
+    if (!/\/main\.html$/.test(location.pathname) || home(session) !== 'clinician.html') return session;
+    location.replace('clinician.html');
+    return new Promise(() => {});
+  }
+
   return {
     KC,
 
@@ -77,12 +100,15 @@ const KinAuth = (() => {
       if (!initializing) {
         initializing = loadSession()
           .then(result => { initialized = true; return result; })
+          .then(land)
           .finally(() => { initializing = null; });
       }
       return initializing;
     },
 
     session() { return cached; },
+
+    home(session = cached) { return home(session); },
 
     has(role) {
       const session = cached;
