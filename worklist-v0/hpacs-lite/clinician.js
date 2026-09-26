@@ -6,6 +6,8 @@
  * (tests/clinician_viewer_dom_test.py). 영상은 고정 OHIF 창에서 열고, 그 창의 읽기 전용은 config/ohif.js가 서버 /me로 정한다.
  * S5-U3 환자 타임라인: REQ-S5-U3-PATIENT-TIMELINE -> RISK-S5-U3-NAME-MERGE / ID-ONLY-IDENTITY / TENANT -> TEST-S5-U3-DOM
  * (tests/clinician_timeline_dom_test.py). 묶음은 서버 GET clinician/studies/:uid/timeline이 정하고, 이 화면은 사용자가 열 때만 읽는다.
+ * S5-U4b 질문 스레드: REQ-S5-U4b-QUESTION-UI -> RISK-S5-U4b-STALE -> TEST-S5-U4b-DOM (tests/clinician_question_dom_test.py).
+ * 서버 S5-U4a route(studies/:uid/questions·questions/:id·entries·close)만 쓰고, 이 화면은 사용자가 Questions를 열 때만 읽는다.
  *
  * 그리는 칸은 S5-U1b 두 읽기 응답에 있는 것뿐이다 — GET clinician/studies의 행과 GET clinician/studies/:uid/report.
  * 역할을 보고 컨트롤을 숨기거나 권한을 짐작하지 않는다. 서버가 거절하면(403/404/409) 그 상태 코드·코드·문구를
@@ -78,6 +80,57 @@
     notListed: '이 검사는 지금 목록에 없어 열 수 없습니다. 목록을 새로고침하세요.',
   };
   const RELATIONS = ['match', 'mismatch', 'not_comparable'];
+  // S5-U4b 질문 스레드 문구. 상태명·버튼·제목은 영어, 설명·확인·오류는 한국어다(AGENTS §4).
+  const QUESTION = {
+    hint: '이 검사에 대해 소속 기관 영상의학과에 질문을 남깁니다. 질문과 답변은 작성한 본인과 소속 기관의 판독의·관리자만 봅니다. '
+      + '새 답변은 알림으로 오지 않으니 이 칸을 다시 열어 확인하세요. 답변은 판독문이 아니며 판독문을 대신하지 않습니다.',
+    summary: '이 검사에 대한 질문과 답변을 엽니다. 연 뒤에만 서버에서 읽습니다.',
+    loading: '질문 목록을 불러오는 중입니다…',
+    failed: '질문 목록을 불러오지 못했습니다.',
+    empty: '이 검사에 남긴 질문이 없습니다. 목록 조회는 성공했습니다.',
+    ready: count => `이 검사에 남긴 질문 ${count}건을 최신순으로 표시합니다.`,
+    malformed: '질문 응답 형식을 확인할 수 없습니다. 다시 불러오세요.',
+    notFound: '이 검사나 질문을 찾을 수 없습니다. 원격판독으로 받은 검사, 접근 조건이 바뀐 검사에는 질문을 남길 수 없습니다.',
+    item: (created, count, last) => `${created} 등록 · 항목 ${count}개 · 최근 ${last}`,
+    threadLoading: '질문 스레드를 불러오는 중입니다…',
+    threadFailed: '질문 스레드를 불러오지 못했습니다.',
+    threadMeta: (created, name) => `${created} 등록 · 작성 ${name}`,
+    closedNote: '닫힌 질문입니다. 새 답변·추가 질문·닫기는 서버가 거절합니다.',
+    anchorChanged: '답변 이후 판독 상태가 바뀌었습니다.',
+    anchorDetail: (then, now) => `답변 때 ${then} → 지금 ${now}`,
+    closeEmpty: '사유 없이 닫았습니다.',
+    askHint: '1~2,000자. 작성자·기관·시각은 서버가 로그인한 계정으로 기록합니다.',
+    replyHint: '같은 스레드에 추가 질문으로 이어집니다. 답변이 있던 질문은 다시 Open이 됩니다.',
+    closeHint: '작성자는 사유 없이 닫을 수 있습니다. 닫은 질문에는 더 쓸 수 없습니다.',
+    noText: '1~2,000자의 내용을 입력하세요.',
+    sending: '보내는 중입니다…',
+    saved: '저장했습니다.',
+    replayed: '이미 저장된 요청입니다. 서버가 처음 저장한 결과를 돌려주었습니다.',
+    discarded: '보낸 요청을 버렸습니다. 저장되었을 수 있으니 다시 불러온 목록에서 확인하세요.',
+    writeMalformed: '저장 응답의 형식을 확인할 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인합니다.',
+    noRequestId: '요청 ID를 만들지 못해 보내지 않았습니다.',
+    refused: '서버가 이 계정의 질문 읽기를 거절했습니다. 권한이 바뀌었다면 화면을 다시 불러오세요.',
+    ownerChanged: '로그인한 계정이 바뀌었습니다. 이 화면에서는 질문을 더 읽거나 쓰지 않습니다. 화면을 다시 불러오세요.',
+    unknown: '저장되었는지 알 수 없습니다. Retry는 같은 요청 ID로 다시 보내 저장 결과를 확인하고, Discard는 이 요청을 버립니다.',
+    rejected: '서버가 요청을 거절했습니다.',
+    codes: {
+      QUESTION_CHANGED: '그사이 이 질문이 바뀌었습니다. 스레드를 다시 불러왔으니 내용을 확인한 뒤 다시 보내세요.',
+      QUESTION_CLOSED: '이미 닫힌 질문이라 더 쓸 수 없습니다.',
+      QUESTION_STATE: '지금 질문 상태에서는 할 수 없는 동작입니다.',
+      QUESTION_ENTRY_LIMIT: '이 스레드의 항목 수가 상한에 도달했습니다.',
+      REQUEST_ID_REUSED: '같은 요청 ID가 다른 내용에 이미 쓰였습니다. 다시 불러온 뒤 새로 보내세요.',
+      QUESTION_BUSY: '서버가 다른 요청을 처리하고 있어 저장하지 못했을 수 있습니다. Retry는 같은 요청 ID로 다시 보냅니다.',
+      STUDY_ACCESS_CHANGED: '요청 중 검사 접근 조건이 바뀌었습니다. 저장되었을 수 있으니 Retry로 같은 요청을 다시 보내 확인하세요.',
+    },
+    statuses: { 400: '서버가 입력을 거절했습니다.', 403: '서버가 이 동작을 거절했습니다.' },
+  };
+  const QUESTION_STATES = ['Open', 'Answered', 'Closed'];
+  const QUESTION_BADGE = { Open: 'open', Answered: 'final', Closed: 'unknown' };
+  const QUESTION_KIND = { question: 'Question', followup: 'Follow-up', answer: 'Answer', close: 'Close' };
+  const QUESTION_ROLE = { clinician: 'Clinician', radiologist: 'Radiologist', admin: 'Admin' };
+  const REPORT_STATE = { W: 'Awaiting Report', T: 'In Progress', P: 'Preliminary', A: 'Approved', H: 'On Hold' };
+  const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const QUESTION_TEXT_MAX = 2000;
 
   const $ = selector => document.querySelector(selector);
   let owner = null;
@@ -94,6 +147,21 @@
   // 사용자가 Show Timeline을 누른 뒤에만 참이다. 그 뒤 고르는 검사는 타임라인을 이어서 읽는다(이 문서 안에서만).
   let timelineOpen = false;
   let timelineSeq = 0;
+  // S5-U4b. Questions를 연 뒤에는 이어서 고르는 검사도 연 채로 읽는다(이 문서 안에서만, 타임라인과 같다).
+  let questionsOpen = false;
+  // 고른 검사·칸 열고 닫기·잠금마다 오른다. 목록·스레드 읽기는 자기 번호와 함께 이 값을 들고 떠난다.
+  let questionEpoch = 0;
+  let questionListSeq = 0;
+  let questionThreadSeq = 0;
+  let questionThread = null;
+  // 지금 연 스레드의 마지막으로 읽은 응답. 답변·닫기의 기준 revision은 여기서만 온다.
+  let questionThreadItem = null;
+  // 서버가 질문 읽기를 거절했거나 다른 계정의 답이 왔다: 이 문서에서는 질문을 더 읽거나 쓰지 않는다(뷰어 세션과 같은 한 방향).
+  let questionLock = null;
+  // 검사·스레드·동작별로 쓰던 글, 결과를 모르는 요청(같은 requestId로 다시 보낼 것), 마지막 결과 문구. 이 문서의 메모리에만 둔다.
+  const questionDrafts = new Map();
+  const questionAttempts = new Map();
+  const questionNotes = new Map();
 
   function node(tag, className, text) {
     const element = document.createElement(tag);
@@ -532,6 +600,7 @@
     const compare = $('#compare');
     if (compare) compare.remove();
     clearTimeline();
+    clearQuestions();
     const empty = $('#detail-empty');
     empty.textContent = note || TEXT.pick;
     empty.hidden = false;
@@ -611,6 +680,7 @@
     markSelected(uid);
     paintIdentity(row);
     paintTimelineShell(row);
+    paintQuestionsShell(row);
     clearReport();
     setReport('loading', TEXT.reportLoading);
     setKeys(TEXT.keysLoading, null);
@@ -893,6 +963,688 @@
     select(uid);
     const toggle = $('#timeline-toggle');
     if (toggle) toggle.focus();
+  }
+
+  // ── 질문 스레드(S5-U4b) ──
+  // 소속 기관 영상의학과에 남기는 질문. 서버 S5-U4a의 질문 route만 쓰고 consultation 화면·요청과 섞지 않는다.
+  // 칸은 고른 검사마다 접힌 summary 한 줄로 생기고, 사용자가 Questions를 열어야 읽는다 — 목록 한 번이 서버 트랜잭션 한 번이다.
+  // 접힌 칸에는 단추·제목이 없다: 열 때 몸체를 만들고 닫을 때 지워서, 열지 않은 사람의 화면 구성과 탭 순서가 그대로다.
+  // 역할을 보고 쓰기 컨트롤을 숨기지 않는다. 누르면 서버가 정하고 거절은 코드·문구 그대로 보인다. 판독문 본문은 읽지도
+  // 붙이지도 않는다(스레드 응답의 판독 상태·판 번호만 쓴다).
+
+  const questionKey = (uid, id, action) => `${uid}\n${id || ''}\n${action}`;
+  const questionNoteKey = (uid, id) => `${uid}\n${id || ''}`;
+
+  /** A->B->A·칸 닫기·잠금: 요청 번호와 함께 epoch와 지금 고른 검사를 본다. UID만 보면 A의 첫 답이 A의 두 번째 자리에 그려진다. */
+  function questionFresh(epoch, uid) {
+    return !leaving && questionLock === null && epoch === questionEpoch && selected === uid;
+  }
+
+  /** 응답의 owner가 이 화면의 계정인가. 다르면 false(다른 계정의 답), 모양이 틀리면 null(형식 오류)이다. */
+  function questionOwnerOf(data) {
+    const value = data && data.owner;
+    if (!Array.isArray(value) || value.length !== 2 || !value.every(part => typeof part === 'string')) return null;
+    return value[0] === owner[0] && value[1] === owner[1];
+  }
+
+  function questionTime(value) {
+    const date = typeof value === 'string' ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return '—';
+    const two = part => String(part).padStart(2, '0');
+    return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
+  }
+
+  function reportStateText(anchor) {
+    const name = REPORT_STATE[anchor.rs] || `RS ${anchor.rs}`;
+    return anchor.version === null ? name : `${name} · Version ${anchor.version}`;
+  }
+
+  function questionBadge(state) {
+    return node('span', `status ${QUESTION_BADGE[state]}`, state);
+  }
+
+  /** 요청마다 새 UUID v4. randomUUID가 없는 브라우저는 같은 형식을 getRandomValues로 만든다. */
+  function questionRequestId() {
+    if (root.crypto && typeof root.crypto.randomUUID === 'function') return root.crypto.randomUUID();
+    const bytes = root.crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map(part => part.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  /**
+   * 질문 쓰기. 읽기(request)와 같이 401은 본문을 기다리지 않고 세션을 끝낸다. 연결 실패·제한 시간은 status 0이다 —
+   * 서버가 적용했는지 모르는 결과라 부르는 쪽이 같은 requestId로 다시 보낼 수 있게 남긴다.
+   */
+  async function questionPost(path, payload) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const response = await fetch(API + path, { method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', 'X-KIN-CSRF': '1' }, body: JSON.stringify(payload) });
+      if (response.status === 401) {
+        logout();
+        throw failure(401, null, '세션이 만료되었습니다. 다시 로그인하세요.');
+      }
+      const answer = await response.json().catch(() => null);
+      if (!response.ok) throw failure(response.status, answer);
+      return answer;
+    } catch (error) {
+      if (error && error.kin) throw error;
+      throw failure(0, null, error && error.name === 'AbortError' ? '응답이 없어 요청을 멈췄습니다.' : '서버에 연결하지 못했습니다.');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** #3 응답의 모양 검사. 다른 검사의 행이나 모르는 상태가 하나라도 있으면 답 전체를 그리지 않는다. */
+  function readQuestionSummaries(data, uid) {
+    const items = data && data.items;
+    if (!Array.isArray(items) || items.length > 50) throw new Error(QUESTION.malformed);
+    for (const item of items) {
+      if (!item || typeof item !== 'object' || typeof item.id !== 'string' || !QUESTION_ID.test(item.id) || item.studyUid !== uid
+          || !QUESTION_STATES.includes(item.state) || !Number.isSafeInteger(item.revision) || item.revision < 1
+          || !Number.isSafeInteger(item.entryCount) || item.entryCount < 1 || !item.author || typeof item.author !== 'object')
+        throw new Error(QUESTION.malformed);
+    }
+    return items;
+  }
+
+  /**
+   * #2 응답의 모양 검사. 요청한 스레드·고른 검사의 답이어야 하고, 항목은 seq 1부터 빈틈없이 이어지며 revision과 개수가 같다
+   * (서버 CHECK revision = entryCount). 판독 상태 표지는 상태 코드와 판 번호뿐이다.
+   */
+  function readQuestionThread(data, uid, id) {
+    const item = data && data.item;
+    const text = value => typeof value === 'string';
+    const person = (value, role) => !!value && typeof value === 'object' && text(value.actor) && text(value.name)
+      && (!role || Object.prototype.hasOwnProperty.call(QUESTION_ROLE, value.role));
+    const anchor = value => !!value && typeof value === 'object' && text(value.rs) && value.rs.length > 0
+      && (value.version === null || (Number.isSafeInteger(value.version) && value.version > 0));
+    if (!item || typeof item !== 'object' || item.id !== id || item.studyUid !== uid || !QUESTION_STATES.includes(item.state)
+        || !person(item.author) || !Array.isArray(item.entries) || !item.entries.length || item.entries.length > 100
+        || item.revision !== item.entries.length || item.entryCount !== item.entries.length || !anchor(item.current)
+        || (item.state === 'Closed') !== (!!item.closed && typeof item.closed === 'object'))
+      throw new Error(QUESTION.malformed);
+    item.entries.forEach((entry, index) => {
+      if (!entry || typeof entry !== 'object' || entry.seq !== index + 1
+          || !Object.prototype.hasOwnProperty.call(QUESTION_KIND, entry.kind) || (index === 0) !== (entry.kind === 'question')
+          || !text(entry.body) || (entry.kind !== 'close' && !entry.body.trim()) || !person(entry.author, true) || !anchor(entry.reportAnchor))
+        throw new Error(QUESTION.malformed);
+    });
+    return item;
+  }
+
+  /** 쓰기 응답 봉투의 확인: 이 요청의 requestId·검사·스레드·동작이어야 저장 결과로 받는다. */
+  function questionApplied(answer, attempt) {
+    const applied = answer && answer.applied;
+    const actions = { ask: ['create'], reply: ['answer', 'followup'], close: ['close'] }[attempt.action];
+    return !!applied && typeof applied === 'object' && typeof answer.replayed === 'boolean'
+      && typeof applied.requestId === 'string' && applied.requestId.toLowerCase() === attempt.requestId
+      && applied.studyUid === attempt.uid && actions.includes(applied.action) && QUESTION_STATES.includes(applied.to)
+      && applied.id === (attempt.threadId === null ? attempt.requestId : attempt.threadId);
+  }
+
+  function questionAnchorChanged(then, now) {
+    return then.rs !== now.rs || then.version !== now.version;
+  }
+
+  /** 고른 검사의 질문 칸. 닫혀 있으면 summary 한 줄뿐이고, 이 문서에서 전에 열었으면 열린 채로 만들고 읽는다. */
+  function paintQuestionsShell(row) {
+    clearQuestions();
+    const section = node('details');
+    section.id = 'questions';
+    section.dataset.uid = row.uid;
+    section.dataset.state = 'closed';
+    section.style.marginTop = '14px';
+    const summary = node('summary', null, 'Questions');
+    summary.id = 'questions-summary';
+    summary.title = QUESTION.summary;
+    summary.style.cssText = 'cursor:pointer;font-weight:650;min-height:28px;padding:4px 0';
+    section.append(summary);
+    section.addEventListener('toggle', () => questionsToggled(section));
+    $('#detail').append(section);
+    if (questionsOpen) {
+      section.open = true;
+      openQuestions(section);
+    }
+  }
+
+  /** 선택이 바뀌거나 내려갈 때: 진행 중인 읽기의 답을 버리고 칸을 지운다. 쓰던 글·결과를 모르는 요청은 검사별로 남는다. */
+  function clearQuestions() {
+    questionEpoch++;
+    questionThread = null;
+    questionThreadItem = null;
+    const old = $('#questions');
+    if (old) old.remove();
+  }
+
+  function questionsToggled(section) {
+    if (leaving || !section.isConnected || section.dataset.uid !== selected) return;
+    const body = section.querySelector('#questions-body');
+    // paintQuestionsShell이 연 칸의 toggle 사건은 이미 반영했다.
+    if (section.open === (body !== null)) return;
+    questionsOpen = section.open;
+    if (section.open) {
+      openQuestions(section);
+      return;
+    }
+    questionEpoch++;
+    questionThread = null;
+    questionThreadItem = null;
+    section.dataset.state = 'closed';
+    body.remove();
+  }
+
+  function openQuestions(section) {
+    buildQuestionsBody(section);
+    if (questionLock !== null) paintQuestionLock();
+    else loadQuestions(section.dataset.uid);
+  }
+
+  function buildQuestionsBody(section) {
+    const uid = section.dataset.uid;
+    const body = node('div');
+    body.id = 'questions-body';
+    const state = node('div', 'state');
+    state.id = 'questions-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.id = 'questions-retry';
+    retry.addEventListener('click', () => loadQuestions(uid));
+    state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    const list = node('ol');
+    list.id = 'question-list';
+    list.style.cssText = 'margin:0 0 10px;padding-left:20px';
+    list.hidden = true;
+    const thread = node('section');
+    thread.id = 'question-thread';
+    thread.hidden = true;
+    const ask = questionComposer(uid, null, 'ask', { label: 'New Question', hint: QUESTION.askHint, button: 'Ask', multiline: true,
+      send: field => sendQuestion(uid, null, 'ask', field, `/studies/${encodeURIComponent(uid)}/questions`, {}) });
+    ask.append(questionNote(questionNoteKey(uid, null)));
+    ask.hidden = true;
+    body.append(node('p', 'muted', QUESTION.hint), state, list, thread, ask);
+    section.append(body);
+  }
+
+  function setQuestionsState(state, text, detail) {
+    const box = $('#questions-state');
+    if (!box) return;
+    box.dataset.state = state;
+    box.querySelector('.state-text').textContent = text;
+    box.querySelector('.state-detail').textContent = detail || '';
+    $('#questions-retry').hidden = state !== 'failed';
+  }
+
+  /** 읽기 실패의 자세한 줄: 404는 이유를 먼저 쓴다(원격판독으로 받은 검사·접근이 바뀐 검사를 서버가 구별하지 않는다). */
+  function questionReadDetail(error) {
+    return `${error && error.status === 404 ? `${QUESTION.notFound}\n` : ''}${describe(error)}`;
+  }
+
+  /** #3. 고른 검사에서 내가 남긴 질문(서버가 작성자 본인 것만 준다). 성공하면 열린 스레드도 다시 읽는다. */
+  async function loadQuestions(uid) {
+    if (leaving || selected !== uid || !$('#questions-body')) return;
+    if (questionLock !== null) {
+      paintQuestionLock();
+      return;
+    }
+    const epoch = questionEpoch;
+    const mine = ++questionListSeq;
+    setQuestionsState('loading', QUESTION.loading);
+    try {
+      const data = await request(`/studies/${encodeURIComponent(uid)}/questions`);
+      if (!questionFresh(epoch, uid) || mine !== questionListSeq) return;
+      const same = questionOwnerOf(data);
+      if (same === false) {
+        lockQuestions(QUESTION.ownerChanged, '');
+        return;
+      }
+      if (same === null) throw new Error(QUESTION.malformed);
+      paintQuestionList(uid, readQuestionSummaries(data, uid));
+    } catch (error) {
+      if (!questionFresh(epoch, uid) || mine !== questionListSeq) return;
+      if (error.status === 403) {
+        lockQuestions(QUESTION.refused, describe(error));
+        return;
+      }
+      $('#questions').dataset.state = 'failed';
+      $('#question-list').replaceChildren();
+      $('#question-list').hidden = true;
+      hideQuestionThread();
+      setQuestionsState('failed', QUESTION.failed, questionReadDetail(error));
+    }
+  }
+
+  function paintQuestionList(uid, items) {
+    $('#question-list').replaceChildren(...items.map(item => questionItem(uid, item)));
+    $('#question-list').hidden = !items.length;
+    $('#questions').dataset.state = items.length ? 'ready' : 'empty';
+    setQuestionsState(items.length ? 'ready' : 'empty', items.length ? QUESTION.ready(items.length) : QUESTION.empty);
+    $('.question-compose[data-action="ask"]').hidden = false;
+    if (questionThread !== null && items.some(item => item.id === questionThread)) loadQuestionThread(uid, questionThread);
+    else {
+      questionThread = null;
+      hideQuestionThread();
+    }
+  }
+
+  function questionItem(uid, item) {
+    const li = node('li');
+    li.dataset.id = item.id;
+    li.style.margin = '6px 0';
+    if (item.id === questionThread) li.setAttribute('aria-current', 'true');
+    const open = node('button', null, 'Open Thread');
+    open.type = 'button';
+    open.dataset.openThread = '';
+    open.addEventListener('click', () => openQuestionThread(uid, item.id));
+    li.append(questionBadge(item.state), ' ', QUESTION.item(questionTime(item.createdAt), item.entryCount, questionTime(item.lastEntryAt)),
+      ' ', open);
+    return li;
+  }
+
+  function openQuestionThread(uid, id) {
+    if (leaving || questionLock !== null || selected !== uid) return;
+    questionThread = id;
+    for (const li of document.querySelectorAll('#question-list > li')) {
+      if (li.dataset.id === id) li.setAttribute('aria-current', 'true');
+      else li.removeAttribute('aria-current');
+    }
+    loadQuestionThread(uid, id);
+  }
+
+  /** 스레드 칸을 비운다. 진행 중인 스레드 읽기의 답은 번호로 버린다. */
+  function hideQuestionThread() {
+    questionThreadSeq++;
+    questionThreadItem = null;
+    const box = $('#question-thread');
+    if (!box) return;
+    box.hidden = true;
+    box.replaceChildren();
+    delete box.dataset.id;
+    delete box.dataset.state;
+  }
+
+  /**
+   * 스레드 자리. 같은 스레드를 다시 읽을 때는 머리·항목만 바꾸고 쓰는 칸은 그대로 둔다 — 다시 만들면 치고 있던 글자와
+   * 커서가 사라진다. 다른 스레드를 열 때만 새로 만든다.
+   */
+  function questionThreadShell(uid, id) {
+    const box = $('#question-thread');
+    if (box.dataset.id === id) return box;
+    questionThreadItem = null;
+    box.dataset.id = id;
+    box.dataset.state = 'loading';
+    const head = node('div', 'panel-head');
+    const title = node('h4', null, 'Thread');
+    title.id = 'question-thread-title';
+    title.style.margin = '0';
+    const status = node('span');
+    status.id = 'question-thread-status';
+    head.append(title, status);
+    const meta = node('p', 'muted');
+    meta.id = 'question-thread-meta';
+    const state = node('div', 'state');
+    state.id = 'question-thread-state';
+    state.setAttribute('role', 'status');
+    state.setAttribute('aria-live', 'polite');
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.id = 'question-thread-retry';
+    retry.addEventListener('click', () => loadQuestionThread(uid, id));
+    state.append(node('p', 'state-text'), node('p', 'state-detail'), retry);
+    const entries = node('ol');
+    entries.id = 'question-entries';
+    entries.style.cssText = 'margin:0;padding-left:20px';
+    const closed = node('p', 'muted', QUESTION.closedNote);
+    closed.id = 'question-closed-note';
+    closed.hidden = true;
+    const target = () => questionThreadItem && questionThreadItem.id === id ? questionThreadItem : null;
+    const reply = questionComposer(uid, id, 'reply', { label: 'Reply', hint: QUESTION.replyHint, button: 'Reply', multiline: true,
+      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'reply', field, `/questions/${encodeURIComponent(id)}/entries`, { revision: item.revision }); } });
+    const close = questionComposer(uid, id, 'close', { label: 'Close Reason', hint: QUESTION.closeHint, button: 'Close', multiline: false,
+      send: field => { const item = target(); if (item) sendQuestion(uid, id, 'close', field, `/questions/${encodeURIComponent(id)}/close`, { revision: item.revision }); } });
+    box.setAttribute('aria-labelledby', 'question-thread-title');
+    box.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px';
+    box.replaceChildren(head, meta, state, entries, closed, reply, close, questionNote(questionNoteKey(uid, id)));
+    return box;
+  }
+
+  function setThreadState(state, text, detail) {
+    const box = $('#question-thread-state');
+    if (!box) return;
+    box.dataset.state = state;
+    box.hidden = state === 'ready';
+    box.querySelector('.state-text').textContent = text;
+    box.querySelector('.state-detail').textContent = detail || '';
+    $('#question-thread-retry').hidden = state !== 'failed';
+  }
+
+  /** #2. 스레드 전체를 읽는다. 늦은 답은 번호·epoch·고른 검사·연 스레드로 버린다. */
+  async function loadQuestionThread(uid, id) {
+    if (leaving || questionLock !== null || selected !== uid || questionThread !== id || !$('#question-thread')) return;
+    const epoch = questionEpoch;
+    const mine = ++questionThreadSeq;
+    const box = questionThreadShell(uid, id);
+    box.hidden = false;
+    setThreadState('loading', QUESTION.threadLoading);
+    try {
+      const data = await request(`/questions/${encodeURIComponent(id)}`);
+      if (!questionFresh(epoch, uid) || mine !== questionThreadSeq || questionThread !== id) return;
+      const same = questionOwnerOf(data);
+      if (same === false) {
+        lockQuestions(QUESTION.ownerChanged, '');
+        return;
+      }
+      if (same === null) throw new Error(QUESTION.malformed);
+      paintQuestionThread(uid, readQuestionThread(data, uid, id));
+    } catch (error) {
+      if (!questionFresh(epoch, uid) || mine !== questionThreadSeq || questionThread !== id) return;
+      if (error.status === 403) {
+        lockQuestions(QUESTION.refused, describe(error));
+        return;
+      }
+      questionThreadItem = null;
+      box.dataset.state = 'failed';
+      $('#question-thread-status').replaceChildren();
+      $('#question-thread-meta').textContent = '';
+      $('#question-entries').replaceChildren();
+      $('#question-closed-note').hidden = true;
+      setThreadState('failed', QUESTION.threadFailed, questionReadDetail(error));
+      paintQuestionComposers(uid, id);
+    }
+  }
+
+  function paintQuestionThread(uid, item) {
+    questionThreadItem = item;
+    const box = $('#question-thread');
+    box.dataset.state = item.state;
+    $('#question-thread-status').replaceChildren(questionBadge(item.state));
+    $('#question-thread-meta').textContent = QUESTION.threadMeta(questionTime(item.createdAt), dash(item.author.name || item.author.actor));
+    $('#question-entries').replaceChildren(...item.entries.map(entry => questionEntry(entry, item.current)));
+    $('#question-closed-note').hidden = item.state !== 'Closed';
+    setThreadState('ready', '');
+    paintQuestionComposers(uid, item.id);
+  }
+
+  function questionEntry(entry, current) {
+    const li = node('li');
+    li.dataset.seq = String(entry.seq);
+    li.dataset.kind = entry.kind;
+    li.style.margin = '8px 0';
+    const meta = node('p', 'muted');
+    meta.style.margin = '0';
+    meta.append(node('strong', null, QUESTION_KIND[entry.kind]),
+      ` · ${dash(entry.author.name || entry.author.actor)} (${QUESTION_ROLE[entry.author.role]}) · ${questionTime(entry.at)}`);
+    const body = entry.body ? node('p', 'body-text', entry.body) : node('p', 'muted', QUESTION.closeEmpty);
+    body.style.margin = '2px 0 0';
+    li.append(meta, body);
+    // 답변 뒤 판독이 승인·Addendum·Reset되었으면 그 답이 어느 판독 상태를 보고 쓴 것인지 알린다(서버는 스레드를 다시 열지 않는다).
+    if (entry.kind === 'answer' && questionAnchorChanged(entry.reportAnchor, current)) {
+      const note = node('p');
+      note.dataset.anchor = '';
+      note.style.cssText = 'margin:4px 0 0;padding:4px 8px;border-left:3px solid #7a6a33;color:#ffe7a8';
+      note.append(node('strong', null, QUESTION.anchorChanged), ' ',
+        QUESTION.anchorDetail(reportStateText(entry.reportAnchor), reportStateText(current)));
+      li.append(note);
+    }
+    return li;
+  }
+
+  /**
+   * 쓰는 칸 하나(새 질문·Reply·Close Reason). 결과를 모르는 요청이 있는 동안 글은 바꿀 수 없고 Retry(같은 requestId)와
+   * Discard만 있다 — 글을 고쳐 새 requestId로 보내면 이미 저장된 것 위에 하나가 더 생길 수 있다.
+   */
+  function questionComposer(uid, threadId, action, spec) {
+    const key = questionKey(uid, threadId, action);
+    const wrap = node('div', 'question-compose');
+    wrap.dataset.key = key;
+    wrap.dataset.action = action;
+    wrap.style.marginTop = '10px';
+    const fieldId = `question-${action}-text`;
+    const hintId = `question-${action}-hint`;
+    const label = node('label', null, spec.label);
+    label.htmlFor = fieldId;
+    label.style.cssText = 'display:block;font-weight:650';
+    const hint = node('p', 'muted', spec.hint);
+    hint.id = hintId;
+    hint.style.margin = '2px 0 6px';
+    const field = node(spec.multiline ? 'textarea' : 'input');
+    field.id = fieldId;
+    field.dataset.field = '';
+    if (spec.multiline) field.rows = 3;
+    else field.type = 'text';
+    field.maxLength = QUESTION_TEXT_MAX;
+    field.setAttribute('aria-describedby', hintId);
+    field.style.cssText = 'display:block;width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:7px;'
+      + 'background:var(--panel2);color:var(--text);font:inherit;resize:vertical';
+    field.addEventListener('input', () => {
+      if (!questionAttempts.has(key)) questionDrafts.set(key, field.value);
+    });
+    const actions = node('div');
+    actions.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px';
+    const send = node('button', null, spec.button);
+    send.type = 'button';
+    send.dataset.send = '';
+    send.addEventListener('click', () => spec.send(field));
+    const retry = node('button', null, 'Retry');
+    retry.type = 'button';
+    retry.dataset.retry = '';
+    retry.addEventListener('click', () => resendQuestion(key));
+    const discard = node('button', null, 'Discard');
+    discard.type = 'button';
+    discard.dataset.discard = '';
+    discard.addEventListener('click', () => discardQuestion(key));
+    actions.append(send, retry, discard);
+    wrap.append(label, hint, field, actions);
+    paintQuestionComposer(wrap);
+    return wrap;
+  }
+
+  /** 쓰는 칸의 모양은 맵(쓰던 글·결과를 모르는 요청)과 지금 연 스레드에서만 정한다. */
+  function paintQuestionComposer(wrap) {
+    const key = wrap.dataset.key;
+    const [, threadId] = key.split('\n');
+    const attempt = questionAttempts.get(key) || null;
+    const field = wrap.querySelector('[data-field]');
+    wrap.dataset.state = !attempt ? 'idle' : attempt.busy ? 'busy' : 'unknown';
+    field.readOnly = attempt !== null;
+    // 같은 글이면 쓰지 않는다: 값을 다시 넣으면 치고 있던 커서·한글 조합이 끊긴다.
+    const value = attempt ? attempt.text : questionDrafts.get(key) || '';
+    if (field.value !== value) field.value = value;
+    // 답변·닫기의 기준 revision은 마지막으로 읽힌 그 스레드에서만 온다. 한 번도 읽히지 않았거나 읽기에 실패했으면 보내지 않는다.
+    const ready = threadId === '' || (questionThreadItem !== null && questionThreadItem.id === threadId);
+    wrap.querySelector('[data-send]').disabled = attempt !== null || !ready;
+    for (const name of ['retry', 'discard']) wrap.querySelector(`[data-${name}]`).hidden = !attempt || attempt.busy;
+  }
+
+  function paintQuestionComposers(uid, id) {
+    const closed = questionThreadItem !== null && questionThreadItem.id === id && questionThreadItem.state === 'Closed';
+    for (const wrap of document.querySelectorAll('.question-compose')) {
+      const [owned, threadId] = wrap.dataset.key.split('\n');
+      if (owned !== uid || threadId !== id) continue;
+      paintQuestionComposer(wrap);
+      // 닫힌 스레드에는 쓰는 칸을 두지 않는다. 쓰던 글이나 결과를 모르는 요청이 남은 칸만 그대로 둔다.
+      wrap.hidden = closed && !questionAttempts.has(wrap.dataset.key) && !(questionDrafts.get(wrap.dataset.key) || '');
+    }
+  }
+
+  function repaintQuestionComposer(key) {
+    for (const wrap of document.querySelectorAll('.question-compose')) if (wrap.dataset.key === key) paintQuestionComposer(wrap);
+  }
+
+  function questionNote(noteKey) {
+    const box = node('div', 'state');
+    box.dataset.noteKey = noteKey;
+    box.setAttribute('role', 'status');
+    box.setAttribute('aria-live', 'polite');
+    box.style.marginTop = '8px';
+    box.append(node('p', 'state-text'), node('p', 'state-detail'));
+    paintQuestionNote(box);
+    return box;
+  }
+
+  function paintQuestionNote(box) {
+    const note = questionNotes.get(box.dataset.noteKey) || null;
+    box.hidden = note === null;
+    box.dataset.state = note ? note.state : 'idle';
+    box.querySelector('.state-text').textContent = note ? note.text : '';
+    box.querySelector('.state-detail').textContent = note ? note.detail : '';
+    // 결과를 모르는 요청은 실패처럼 눈에 띄게 둔다(clinician.html은 failed만 색을 정한다).
+    const alarm = note !== null && note.state === 'unknown';
+    box.style.borderColor = alarm ? 'var(--danger-line)' : '';
+    box.style.background = alarm ? 'var(--danger-bg)' : '';
+    box.style.color = alarm ? 'var(--danger-text)' : '';
+  }
+
+  function setQuestionNote(noteKey, state, text, detail) {
+    questionNotes.set(noteKey, { state, text, detail: detail || '' });
+    for (const box of document.querySelectorAll('[data-note-key]')) if (box.dataset.noteKey === noteKey) paintQuestionNote(box);
+  }
+
+  /** 새 쓰기: 새 requestId(UUID v4)와 이 화면의 계정([기관, sub])을 싣는다. 답변·닫기는 지금 읽힌 스레드의 revision을 싣는다. */
+  function sendQuestion(uid, threadId, action, field, path, payload) {
+    const key = questionKey(uid, threadId, action);
+    const noteKey = questionNoteKey(uid, threadId);
+    if (leaving || questionLock !== null || selected !== uid || questionAttempts.has(key)) return;
+    const text = field.value;
+    const blankAllowed = action === 'close' && text === '';
+    if (!blankAllowed && (!text.trim() || text.length > QUESTION_TEXT_MAX)) {
+      setQuestionNote(noteKey, 'failed', QUESTION.noText);
+      return;
+    }
+    let requestId;
+    try {
+      requestId = questionRequestId().toLowerCase();
+    } catch (_) {
+      setQuestionNote(noteKey, 'failed', QUESTION.noRequestId);
+      return;
+    }
+    const attempt = { requestId, uid, threadId, action, noteKey, path, text, busy: false, unknown: false,
+      payload: { ...payload, [action === 'close' ? 'note' : 'body']: text } };
+    questionDrafts.set(key, text);
+    questionAttempts.set(key, attempt);
+    sendQuestionAttempt(key, attempt);
+  }
+
+  /** 결과를 모르는 요청만 같은 requestId·같은 본문으로 다시 보낸다. 이미 적용되었으면 서버가 저장한 결과를 돌려준다. */
+  function resendQuestion(key) {
+    const attempt = questionAttempts.get(key);
+    if (leaving || questionLock !== null || !attempt || attempt.busy || !attempt.unknown) return;
+    sendQuestionAttempt(key, attempt);
+  }
+
+  /** 결과를 모르는 요청을 버린다. 글은 칸에 남기고, 저장되었는지는 다시 읽은 목록으로 보인다. */
+  function discardQuestion(key) {
+    const attempt = questionAttempts.get(key);
+    if (leaving || !attempt || attempt.busy) return;
+    questionAttempts.delete(key);
+    questionDrafts.set(key, attempt.text);
+    setQuestionNote(attempt.noteKey, 'discarded', QUESTION.discarded);
+    repaintQuestionComposer(key);
+    refreshQuestions(attempt.uid);
+  }
+
+  /** 고른 검사가 그대로이고 칸이 열려 있으면 목록(과 열린 스레드)을 다시 읽는다. */
+  function refreshQuestions(uid) {
+    if (!leaving && questionLock === null && selected === uid && $('#questions-body')) loadQuestions(uid);
+  }
+
+  async function sendQuestionAttempt(key, attempt) {
+    attempt.busy = true;
+    attempt.unknown = false;
+    setQuestionNote(attempt.noteKey, 'busy', QUESTION.sending);
+    repaintQuestionComposer(key);
+    let answer = null;
+    let error = null;
+    try {
+      answer = await questionPost(attempt.path, { requestId: attempt.requestId, expectedOwner: owner, ...attempt.payload });
+    } catch (caught) {
+      error = caught;
+    }
+    // 세션이 끝났거나 잠겨 맵을 비웠으면 이 결과는 어디에도 쓰지 않는다.
+    if (leaving || questionAttempts.get(key) !== attempt) return;
+    attempt.busy = false;
+    if (error) {
+      questionWriteFailed(key, attempt, error);
+      return;
+    }
+    const same = questionOwnerOf(answer);
+    if (same === false) {
+      lockQuestions(QUESTION.ownerChanged, '');
+      return;
+    }
+    if (same === null || !questionApplied(answer, attempt)) {
+      attempt.unknown = true;
+      setQuestionNote(attempt.noteKey, 'unknown', QUESTION.writeMalformed);
+      repaintQuestionComposer(key);
+      return;
+    }
+    questionAttempts.delete(key);
+    questionDrafts.delete(key);
+    setQuestionNote(attempt.noteKey, 'saved', answer.replayed ? QUESTION.replayed : QUESTION.saved);
+    repaintQuestionComposer(key);
+    // 화면의 스레드는 쓰기 응답(적용 결과)이 아니라 읽기 route로 다시 읽은 현재 상태로만 그린다. 새 질문은 그 스레드를 연다.
+    if (!leaving && questionLock === null && selected === attempt.uid && $('#questions-body')) {
+      if (attempt.action === 'ask') questionThread = answer.applied.id;
+      loadQuestions(attempt.uid);
+    }
+  }
+
+  /**
+   * 쓰기 실패. 연결 실패·제한 시간·5xx·QUESTION_BUSY·STUDY_ACCESS_CHANGED(커밋 뒤 최종 확인일 수 있다)는 적용 여부를 모르는
+   * 결과라 Retry(같은 requestId)를 남긴다. 그 밖의 거절은 요청을 버리고 쓰던 글은 칸에 둔다. OWNER_CHANGED는 계정이 바뀐 것이다.
+   */
+  function questionWriteFailed(key, attempt, error) {
+    if (error.status === 401) return;
+    if (error.code === 'OWNER_CHANGED') {
+      lockQuestions(QUESTION.ownerChanged, describe(error));
+      return;
+    }
+    if (error.status === 0 || error.status >= 500 || error.code === 'STUDY_ACCESS_CHANGED') {
+      attempt.unknown = true;
+      setQuestionNote(attempt.noteKey, 'unknown', QUESTION.codes[error.code] || QUESTION.unknown, describe(error));
+      repaintQuestionComposer(key);
+      return;
+    }
+    questionAttempts.delete(key);
+    setQuestionNote(attempt.noteKey, 'failed',
+      QUESTION.codes[error.code] || (error.status === 404 ? QUESTION.notFound : QUESTION.statuses[error.status]) || QUESTION.rejected,
+      describe(error));
+    repaintQuestionComposer(key);
+    // 질문이 바뀌었거나 닫혔거나 보이지 않게 되었으면 지금 서버 상태를 다시 읽는다(쓰던 글은 칸에 남는다).
+    if (error.status === 404 || error.status === 409) refreshQuestions(attempt.uid);
+  }
+
+  /**
+   * 서버가 질문 읽기를 거절했거나(403) 다른 계정의 답·OWNER_CHANGED가 왔다. 이 문서에서는 질문을 더 읽거나 쓰지 않고
+   * 진행 중인 요청의 답도 그리지 않는다(뷰어 세션의 거절·계정 변경과 같은 한 방향). 쓰던 글은 이전 계정의 것이라 버린다.
+   */
+  function lockQuestions(text, detail) {
+    if (questionLock !== null) return;
+    questionLock = { text, detail: detail || '' };
+    questionEpoch++;
+    questionThread = null;
+    questionThreadItem = null;
+    questionDrafts.clear();
+    questionAttempts.clear();
+    questionNotes.clear();
+    paintQuestionLock();
+  }
+
+  function paintQuestionLock() {
+    const body = $('#questions-body');
+    if (!body || questionLock === null) return;
+    $('#questions').dataset.state = 'locked';
+    const state = node('div', 'state');
+    state.id = 'questions-state';
+    state.dataset.state = 'failed';
+    state.setAttribute('role', 'alert');
+    state.append(node('p', 'state-text', questionLock.text), node('p', 'state-detail', questionLock.detail));
+    body.replaceChildren(node('p', 'muted', QUESTION.hint), state);
   }
 
   // ── 세션 ──
