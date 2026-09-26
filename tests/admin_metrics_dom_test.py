@@ -37,8 +37,35 @@ and records every request:
   11  the same for Log out. Control: the button straight to KinAuth.logout() (the handler before the fix).
   12  the same for a 401 on the Gateway Status list read. Control: Operations' closer kept off the page's session end
       (the F04 state: a panel with an end of its own) keeps the ended session's table and control.
-  13  an object that already exists (S5-U6a's top-level const above this page's block, as when the two units meet) stays
-      the page's one: nothing is put on window, Gateway Status and Operations register with it, Log out ends through it.
+  13  one session object: the shipped page defines KinConsoleSession once (S5-U6a's top-level const; this unit's
+      conditional definition went with the merge of main 7780f578, which brought S5-U6a), nothing is put on window, and
+      Study Access, the members console, Gateway Status and Operations each register one closer on it; Log out ends
+      through it.
+
+Every module of the merged page on that one end (Astra S5-U6b-R-003). For these cases the harness also answers Study
+Access, the member writes and a held /api/me, holds member-list and Gateway reads, and serves study-arrivals.js:
+
+  14  S5-U6b-F06: Study Access read and edited (Save on) while an Operations or a Gateway read is out; that read's 401
+      disposes the dialog before the logout answers; the dropped dialog's Save, Retry and Reload and a new open send no
+      GET and no POST. Control: the module without its closer and its end checks keeps the dialog open after the end and
+      its Save sends the POST.
+  15  S5-U6b-F04: Operations shows Studies Owned 5 with two reads out, and two Gateway reads are out; the OLDER Gateway
+      read's 401 closes every panel before the logout answers; the newer Gateway 200 and the late Operations 200 (6) and
+      401 repaint nothing and log out no second time; controls forced on send nothing. Control: Gateway's 401 judged
+      after its sequence check (979a69b) never ends the session: no logout, Operations keeps 11 rows and its control,
+      and the late 200 paints 6.
+  16  S5-U6b-F05: a member-list read, a temporary password and a Create Member submit held at the server when Log out or
+      an Operations 401 ends the session: members, dialogs, forms and controls go before the logout answers; the late
+      answers draw no row, open no dialog, read no list again and only say that the session ended. Control: the members
+      console without its closer and end checks draws the late list and opens the temporary password.
+  17  the matrix for the live panels: the members console, Gateway Status, Operations and Study Access each show the
+      session's data with one request out; each of a member-list 401, a Gateway 401, an Operations 401, a Study Access
+      401 and Log out closes all four before the logout answers; the other late answers paint nothing; no module sends a
+      request after the end; one logout and one navigation.
+  18  the matrix for the boot: while /api/me or the first member-list read is out, a /api/me 401, a member-list 401, a
+      Gateway 401, an Operations 401, a Study Access 401 (opened by script: the page draws no row before the first read)
+      and Log out each end the session; nothing turns on, no row is drawn, Study Access opens nothing, the late first
+      read draws nothing; one logout and one navigation.
 
 WorklistStorageDOMTest (S5-U6b-F02) slices main.html's shipped #storage element and refreshStorage() into a page with a
 queued fetch: S01 the default names no number; S02 network failure, bad JSON, a missing or malformed TotalDiskSize, 403
@@ -221,22 +248,99 @@ LOGOUT_BUTTON = '$("#logout").addEventListener("click", () => KinConsoleSession.
 LOGOUT_BUTTON_BEFORE = '$("#logout").addEventListener("click", () => KinAuth.logout());'
 OPS_ON_END = "      KinConsoleSession.onEnd(() => {\n        ops.seq++;\n"
 OPS_OFF_END = "      void (() => {\n        ops.seq++;\n"
-# S5-U6a (b95bc17) defines the object as a top-level const in a script right after study-access-admin.js. This stand-in
-# has the same three calls and counts what reaches it.
-STUDY_ACCESS_SCRIPT = '  <script src="study-access-admin.js"></script>\n'
-EARLIER_SESSION = """  <script>
-    const KinConsoleSession = (() => {
-      const closers = [];
-      let ended = false;
-      window.__earlier = { closers, ends: 0 };
-      return {
-        ended: () => ended,
-        onEnd(closer) { if (ended) closer(); else closers.push(closer); },
-        end() { window.__earlier.ends++; if (ended) return; ended = true; for (const closer of closers) closer(); KinAuth.logout(); },
-      };
-    })();
-  </script>
-"""
+# The page's one object (S5-U6a) is attached to Study Access right after its definition. Test 13 counts every closer
+# registered on it by wrapping onEnd there, before the first registration.
+ATTACH = "    KinStudyAccessAdmin.attach(KinConsoleSession);\n"
+COUNTING_ATTACH = """    window.__registered = 0;
+    KinConsoleSession.onEnd = (onEnd => closer => { window.__registered++; onEnd(closer); })(KinConsoleSession.onEnd);
+""" + ATTACH
+
+# ── S5-U6b-R-003 (F04/F05/F06): the merged page's modules on the one session end ──
+# Gateway Status's 401 block is the same text as Operations' (END_IN_REQUEST), so a control edits it inside the one
+# inline script its marker names.
+GATEWAY_SCRIPT = " * S5-U6a Gateway Status (REQ-S5-U6a-GATEWAY-STATUS)."
+OPS_SCRIPT = " * S5-U6b Operations panel."
+# The Gateway 401 as at 979a69b: thrown in gatewayRequest, judged in refreshGateway after the sequence check (F04).
+GATEWAY_401_BEFORE = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
+GATEWAY_AFTER_SEQUENCE = '        if (seq !== gateway.seq) return;\n        $("#gateway-busy").hidden = true;\n'
+GATEWAY_401_AFTER_SEQUENCE = GATEWAY_AFTER_SEQUENCE + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n"
+# The members console as S5-U6a leaves it: one closer and seven end checks between request() and boot() (F05 control).
+MEMBERS_FROM = "      async function request(method, path, body) {\n"
+MEMBERS_TO = "      boot();\n"
+MEMBER_CLOSER = "      KinConsoleSession.onEnd(closeMembers);\n"
+MEMBER_END_CHECKS = 7
+# Study Access (study-access-admin.js): its closer and its three end checks (open, before the request, after the body).
+ACCESS_SCRIPT = BASE + "study-access-admin.js"
+ACCESS_CLOSER = "lifecycle.onEnd(()=>closeActive?.());"
+ACCESS_END_CHECKS = 3
+
+MEMBER = MEMBERS["users"][0]
+LIST_PATH = "/api/admin/users"
+RESET_PATH = LIST_PATH + "/" + MEMBER["id"] + "/reset-password"
+ACCESS_PATH = LIST_PATH + "/" + MEMBER["id"] + "/study-access"
+STUDIES_PATH = "/api/studies"
+ENDED = "세션이 종료되었습니다"
+EXPIRED = "세션이 만료되었습니다"
+SECRET = "SYN-TEMPORARY-VALUE"
+ACCESS = {"owner": [INSTITUTION, ME["sub"]], "subject": MEMBER["id"], "revision": 0, "needsInstitutionReview": False,
+          "policy": {"version": 1, "restricted": False, "startsAt": None, "endsAt": None, "rules": []}}
+ACCESS_READ = "Revision 0 · No Additional Restriction"
+LATE_MEMBERS = dict(MEMBERS, users=[dict(MEMBER, username="syn-late", name="SYN Late Member")])
+CREATED = {"id": "SYN-U-2", "username": "syn-created", "email": "syn-created@members.test", "emailVerified": False,
+           "name": "SYN Created", "institution": None, "roles": [], "enabled": True, "approvalState": "PENDING",
+           "temporaryPassword": "SYN-CREATED-VALUE"}
+CREATE_VALUES = {"username": "syn-created", "email": "syn-created@members.test", "lastName": "SYN", "firstName": "Created"}
+EPOCH = "0a1b2c3d-0000-4000-8000-00000000000a"
+
+
+def gateway_list(n=1):
+    """n own studies with a Gateway receipt (Report Received), as GET /api/studies answers them."""
+    studies = [{"uid": f"1.2.{10 + i}", "count": 3, "series": 1, "acc": f"SYN-ACC-{i}", "id": f"SYN-PID-{i}",
+                "name": f"SYN PATIENT {i}", "birth": "19800101", "date": "20260926", "sex": "O", "modality": "CT",
+                "desc": "SYN", "institutionName": INSTITUTION, "tele": False, "state": {"rs": "W"},
+                "gatewayReceipt": {"phase": "sending", "successCount": 3, "localCount": 12, "attempt": 1, "errorCode": None,
+                                   "serverReceivedAt": "2026-09-26T00:00:20.000Z", "agentSeq": 4 + i, "epoch": EPOCH}}
+               for i in range(n)]
+    return {"studies": studies, "serverTime": "2026-09-26T00:00:30.000Z", "observedAt": "2026-09-26T00:00:30.000Z",
+            "notObserved": []}
+
+
+# Every panel of the page in one read. window.__access is the Study Access dialog a case opened, kept so it can be read
+# after the page drops it.
+PANELS = """controls => { const q = s => document.querySelector(s), access = window.__access;
+  return {ended: KinConsoleSession.ended(),
+    opsRows: document.querySelectorAll('#metrics-rows > tr').length, opsState: q('#metrics-state').textContent,
+    opsWrapHidden: q('#metrics-wrap').hidden, opsRefresh: !q('#metrics-refresh').disabled, opsBusy: !q('#metrics-busy').hidden,
+    gatewayRows: document.querySelectorAll('#gateway-rows > li').length, gatewayState: q('#gateway-list-state').textContent,
+    gatewayCounts: q('#gateway-counts').textContent, gatewayRefresh: !q('#gateway-refresh').disabled,
+    memberRows: document.querySelectorAll('#users tr').length, actor: q('#actor').textContent,
+    memberControls: controls.filter(s => !q(s).disabled), search: q('#search').value,
+    create: [...q('#create-form').querySelectorAll('input')].map(i => i.value),
+    dialogs: [...document.querySelectorAll('dialog')].filter(d => d.open).map(d => d.id),
+    secret: q('#temporary-password').textContent, message: q('#message').textContent,
+    accessInDocument: document.querySelectorAll('#study-access-dialog').length,
+    accessConnected: access ? access.isConnected : null, accessOpen: access ? access.open : null,
+    accessStatus: access ? access.querySelector('[data-status]').textContent : null,
+    text: [...document.body.children].filter(e => e.tagName !== 'SCRIPT').map(e => e.textContent).join(' ')}; }"""
+MEMBER_CONTROLS = ["#search", "#institution-filter", "#refresh", "#open-create", "#previous", "#next"]
+# After the end: every panel's control forced on and pressed, then back off (a disabled button dispatches no click).
+FORCE_CONTROLS = """() => { for (const s of ['#metrics-refresh', '#gateway-refresh', '#refresh']) {
+  const b = document.querySelector(s); b.disabled = false; b.click(); b.disabled = true; } }"""
+# After the end: Study Access opened again and, when a case opened it before, the dropped dialog's Reload, Retry and
+# Save pressed through their handlers (a detached button would not even dispatch a click).
+ATTEMPT_ACCESS = """user => { const d = window.__access;
+  KinStudyAccessAdmin.open(user);
+  if (d) { d.querySelector('[data-reload]').onclick(); d.querySelector('[data-retry]').onclick();
+    d.querySelector('form').onsubmit(new Event('submit', {cancelable: true})); }
+  return document.querySelectorAll('#study-access-dialog').length; }"""
+# Log out by the button's own handler: while a modal dialog is open the rest of the page is inert to a pointer.
+LOG_OUT = "() => document.querySelector('#logout').click()"
+# What each module's request answers when it comes back after the end, by the key every_panel_out() returns.
+LATE = {"members": (LIST_PATH, LATE_MEMBERS), "gateway": (STUDIES_PATH, gateway_list(2)),
+        "operations": (METRICS_PATH, answer(second=9, rows=replace(ROWS, "studies.own", value=6))),
+        "access": (ACCESS_PATH, dict(ACCESS, revision=3))}
+SIGNALS = {"a member-list 401": "members", "a Gateway 401": "gateway", "an Operations 401": "operations",
+           "a Study Access 401": "access", "Log out": None}
 
 
 def has_hangul(text):
@@ -248,6 +352,38 @@ def variant(old, new="", body=ADMIN_HTML, name="admin.html"):
     if found != 1:
         raise AssertionError(f"setup: {old!r} occurs {found} times in {name}")
     return body.replace(old, new)
+
+
+def variant_in(marker, edits, body=ADMIN_HTML):
+    """The edits made inside the one inline script that holds `marker` (the marker itself once in the page)."""
+    if body.count(marker) != 1:
+        raise AssertionError(f"setup: {marker!r} occurs {body.count(marker)} times in admin.html")
+    at = body.index(marker)
+    start, stop = body.rindex("<script", 0, at), body.index("</script>", at)
+    block = body[start:stop]
+    for old, new in edits:
+        block = variant(old, new, body=block, name=f"the script of {marker.strip()!r}")
+    return body[:start] + block + body[stop:]
+
+
+def members_unguarded():
+    """admin.html with the members console's closer and end checks taken out; the other modules keep theirs."""
+    text = variant(MEMBER_CLOSER)
+    start, stop = text.index(MEMBERS_FROM), text.index(MEMBERS_TO)
+    segment = text[start:stop]
+    found = segment.count("KinConsoleSession.ended()")
+    if found != MEMBER_END_CHECKS:
+        raise AssertionError(f"setup: {found} end checks in the members console, expected {MEMBER_END_CHECKS}")
+    return text[:start] + segment.replace("KinConsoleSession.ended()", "false") + text[stop:]
+
+
+def access_unguarded():
+    """study-access-admin.js with its closer and its end checks taken out."""
+    text = variant(ACCESS_CLOSER, body=lf_text(HPACS / "study-access-admin.js"), name="study-access-admin.js")
+    found = text.count("session.ended()")
+    if found != ACCESS_END_CHECKS:
+        raise AssertionError(f"setup: {found} end checks in study-access-admin.js, expected {ACCESS_END_CHECKS}")
+    return text.replace("session.ended()", "false")
 
 
 class AdminMetricsDOMTest(unittest.TestCase):
@@ -267,6 +403,11 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.replies, self.held = [], []
         self.member_replies, self.study_replies, self.serve_arrivals = [], [], False
         self.logouts, self.held_logouts = 0, None
+        # S5-U6b-R-003 cases: held member-list and Gateway reads, Study Access, the member writes and /api/me.
+        self.held_members, self.held_studies = [], []
+        self.access_replies, self.held_access, self.admin_replies, self.held_admin = [], [], [], []
+        self.held_me = None
+        self.scripts = dict(SCRIPTS)
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
         self.page = self.context.new_page()
@@ -297,8 +438,8 @@ class AdminMetricsDOMTest(unittest.TestCase):
         if method == "GET" and path == PAGE_PATH:
             route.fulfill(body=self.admin_body, content_type="text/html; charset=utf-8")
             return
-        if method == "GET" and path in SCRIPTS:
-            route.fulfill(body=SCRIPTS[path], content_type="application/javascript; charset=utf-8")
+        if method == "GET" and path in self.scripts:
+            route.fulfill(body=self.scripts[path], content_type="application/javascript; charset=utf-8")
             return
         if method == "GET" and path == ARRIVALS_PATH and self.serve_arrivals:
             # ARRIVALS_JS is the shipped study-arrivals.js (read at module level, below this class).
@@ -315,18 +456,25 @@ class AdminMetricsDOMTest(unittest.TestCase):
             route.abort()
             return
         if method == "GET" and path == "/api/me":
+            if self.held_me is not None:
+                self.held_me.append(route)
+                return
             route.fulfill(json=ME)
             return
-        if method == "GET" and path == "/api/admin/users" and url.query == "page=1":
+        if method == "GET" and path == LIST_PATH and url.query == "page=1":
             if self.member_replies:
-                status, body = self.member_replies.pop(0)
-                route.fulfill(status=status, json=body)
+                self.reply_from(route, self.member_replies, self.held_members)
                 return
             route.fulfill(json=MEMBERS)
             return
-        if method == "GET" and path == "/api/studies" and url.query == "" and self.study_replies:
-            status, body = self.study_replies.pop(0)
-            route.fulfill(status=status, json=body)
+        if method in ("GET", "POST") and path == ACCESS_PATH:
+            self.reply_from(route, self.access_replies, self.held_access)
+            return
+        if method == "POST" and path in (LIST_PATH, RESET_PATH):
+            self.reply_from(route, self.admin_replies, self.held_admin)
+            return
+        if method == "GET" and path == STUDIES_PATH and url.query == "" and self.study_replies:
+            self.reply_from(route, self.study_replies, self.held_studies)
             return
         if method == "GET" and path == METRICS_PATH and url.query == "":
             if not self.replies:
@@ -349,6 +497,19 @@ class AdminMetricsDOMTest(unittest.TestCase):
             return
         self.unexpected.append(f"{method} {request.url}")
         route.abort()
+
+    def reply_from(self, route, replies, held):
+        """The next queued reply: "hold" keeps the route in `held` for the case to answer; none queued fails the case."""
+        if not replies:
+            self.unexpected.append(f"{route.request.method} {route.request.url} (no answer queued)")
+            route.abort()
+            return
+        reply = replies.pop(0)
+        if reply == "hold":
+            held.append(route)
+            return
+        status, body = reply
+        route.fulfill(status=status, json=body)
 
     # ── page helpers ──
     def wait_until(self, predicate, what, timeout=10.0):
@@ -659,10 +820,12 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
 
         # Control: the 401 judged after the sequence check (the order before S5-U6b-F03) drops an older read's 401 —
-        # the table stays, nobody logs out, and the newer answer paints.
+        # the table stays, nobody logs out, and the newer answer paints. Edited inside the Operations script: Gateway
+        # Status's 401 block is the same text.
         self.logouts, self.held_logouts = 0, None
-        self.open(variant(SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n",
-                          body=variant(END_IN_REQUEST, END_AFTER_SEQUENCE)))
+        self.open(variant_in(OPS_SCRIPT, [
+            (SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n"),
+            (END_IN_REQUEST, END_AFTER_SEQUENCE)]))
         self.refresh((200, answer()))
         older, newer = self.hold_reads(2)
         older.fulfill(status=401, json={"message": SERVER_WORDING})
@@ -765,12 +928,15 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.assert_the_end_closes_operations("gateway")
         self.control_the_end_leaves_operations("gateway", variant(OPS_ON_END, OPS_OFF_END), shared_end_ran=True)
 
-    def test_13_an_earlier_session_object_stays_the_page_one(self):
-        # S5-U6a's object as it sits when the units meet: a top-level const in a script above this page's block.
-        self.open(variant(STUDY_ACCESS_SCRIPT, STUDY_ACCESS_SCRIPT + EARLIER_SESSION))
-        self.assertEqual(["undefined", False, 2], self.page.evaluate(
-            "() => [typeof window.KinConsoleSession, 'KinConsoleSession' in window, window.__earlier.closers.length]"),
-            "this page's block defines nothing; Gateway Status and Operations register with the earlier object")
+    def test_13_the_page_has_one_session_object_and_every_module_registers_on_it(self):
+        # One definition in the shipped page, and no conditional second one (the pre-merge branch had one).
+        self.assertEqual(1, ADMIN_HTML.count("KinConsoleSession = "))
+        self.assertNotIn("typeof KinConsoleSession", ADMIN_HTML)
+        self.assertNotIn("window.KinConsoleSession", ADMIN_HTML)
+        self.open(variant(ATTACH, COUNTING_ATTACH))
+        self.assertEqual(["object", False, 4], self.page.evaluate(
+            "() => [typeof KinConsoleSession, 'KinConsoleSession' in window, window.__registered]"),
+            "a top-level const; Study Access, the members console, Gateway Status and Operations register one closer each")
         self.refresh((200, answer()))
         self.held_logouts = []
         self.page.locator("#logout").click()
@@ -778,10 +944,349 @@ class AdminMetricsDOMTest(unittest.TestCase):
         summary = self.summary()
         self.assertEqual((0, True, True, "Not Loaded"),
                          (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["state"]))
-        self.assertEqual(1, self.page.evaluate("() => window.__earlier.ends"), "Log out ends through the earlier object")
+        self.assertTrue(self.page.evaluate("() => KinConsoleSession.ended()"), "Log out ends through the page's object")
         self.held_logouts.pop().fulfill(status=204, body="")
         self.page.wait_for_url(ORIGIN + BASE + "index.html")
         self.assertEqual(1, self.logouts)
+
+    # ── S5-U6b-R-003: every module of the merged page on the one session end ──
+    def path_done(self, kind, path):
+        """Answers the page received (kind "fetch") or bodies it read (kind "json") on path, in this document."""
+        return self.page.evaluate(f"path => window.__{kind}Done.filter(item => item === path).length", path)
+
+    def count(self, method, path):
+        return sum(1 for c in self.calls if c["method"] == method and c["path"] == path)
+
+    def api_sent(self):
+        """Every API request so far but the logout (counted on its own)."""
+        return sum(1 for c in self.calls if c["path"].startswith("/api/") and c["path"] != "/api/auth/logout")
+
+    def moves(self):
+        return self.count("GET", BASE + "index.html")
+
+    def panels(self):
+        return self.page.evaluate(PANELS, MEMBER_CONTROLS)
+
+    def member_button(self, name):
+        return self.page.locator("#users td.actions").get_by_role("button", name=name, exact=True)
+
+    def draw_gateway(self, n=1):
+        """Gateway Status draws n studies; its rules (study-arrivals.js) load on this first use."""
+        self.serve_arrivals = True
+        self.study_replies.append((200, gateway_list(n)))
+        done = self.path_done("json", STUDIES_PATH)
+        self.page.locator("#gateway-refresh").click()
+        self.wait_until(lambda: self.path_done("json", STUDIES_PATH) > done, "the Gateway list read")
+        expect(self.page.locator("#gateway-rows > li")).to_have_count(n)
+
+    def hold_gateway_reads(self, n):
+        """n Gateway list reads in flight, oldest first."""
+        self.study_replies += ["hold"] * n
+        button = self.page.locator("#gateway-refresh")
+        for index in range(n):
+            button.click()
+            self.wait_until(lambda: len(self.held_studies) == index + 1, f"Gateway read {index + 1} in flight")
+        held, self.held_studies = self.held_studies, []
+        return held
+
+    def open_study_access(self):
+        """Study Access on the member, its first read answered; the dialog is kept as window.__access."""
+        self.access_replies.append((200, ACCESS))
+        self.member_button("Study Access").click()
+        expect(self.page.locator("#study-access-dialog [data-status]")).to_have_text(ACCESS_READ)
+        self.page.evaluate("() => { window.__access = document.querySelector('#study-access-dialog'); }")
+
+    def edit_study_access(self):
+        """Deny All Studies with a reason: Save is on, as in the Astra S5-U6b-F06 reproduction."""
+        self.page.locator('#study-access-dialog select[name="mode"]').select_option("none")
+        self.page.locator('#study-access-dialog input[name="reason"]').fill("SYN reason")
+        expect(self.page.locator("#study-access-dialog [data-save]")).to_be_enabled()
+
+    def end_by(self, how, held):
+        """End the session by `how` (a key of SIGNALS): Log out, or the 401 of the held request of that module. The logout
+        answer is held."""
+        self.held_logouts = []
+        key = SIGNALS[how]
+        if key is None:
+            self.page.evaluate(LOG_OUT)
+        else:
+            held.pop(key).fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.logouts == 1, f"{how}: the logout request")
+
+    def assert_all_closed(self, what):
+        """Every panel closed: nothing of the ended session, no dialog, every control off."""
+        s = self.panels()
+        self.assertEqual((True, 0, "Not Loaded", True, False, False, 0, "Not Loaded", "Counts Unknown", False),
+                         (s["ended"], s["opsRows"], s["opsState"], s["opsWrapHidden"], s["opsRefresh"], s["opsBusy"],
+                          s["gatewayRows"], s["gatewayState"], s["gatewayCounts"], s["gatewayRefresh"]),
+                         f"{what}: Operations and Gateway Status are closed")
+        self.assertEqual((0, "", [], "", ["", "", "", ""], [], "", 0),
+                         (s["memberRows"], s["actor"], s["memberControls"], s["search"], s["create"], s["dialogs"],
+                          s["secret"], s["accessInDocument"]),
+                         f"{what}: the members console and Study Access are closed")
+        self.assertIsNone(re.search(r"SYN|syn-|1\.2\.\d", s["text"]), f"{what}: nothing of the ended session is left")
+        return s
+
+    def assert_nothing_leaves(self, what):
+        """After the end no module sends a request: every control forced on and pressed, Study Access opened again and
+        its dropped dialog's Reload, Retry and Save pressed, Log out pressed again."""
+        sent = self.api_sent()
+        self.page.evaluate(FORCE_CONTROLS)
+        self.assertEqual(0, self.page.evaluate(ATTEMPT_ACCESS, MEMBER), f"{what}: Study Access opens no dialog")
+        self.page.evaluate(LOG_OUT)
+        self.page.wait_for_timeout(150)
+        self.assertEqual(sent, self.api_sent(), f"{what}: no request after the end")
+        self.assertEqual(1, self.logouts, f"{what}: one logout")
+
+    def release_logout(self, moves, what):
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.held_logouts = None
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
+        self.assertEqual((1, moves + 1), (self.logouts, self.moves()), f"{what}: one logout and one navigation")
+
+    def release_late(self, held, what):
+        """Answers every request still held as a success (LATE) and waits until the page received each."""
+        for key, route in held.items():
+            path, body = LATE[key]
+            before = self.path_done("fetch", path)
+            route.fulfill(json=body)
+            self.wait_until(lambda: self.path_done("fetch", path) > before, f"{what}: the late {key} answer")
+        self.page.wait_for_timeout(150)
+
+    def test_14_study_access_closes_with_the_page_session(self):
+        for how in ("an Operations 401", "a Gateway 401"):
+            with self.subTest(how=how):
+                self.logouts, self.held_logouts, moves = 0, None, self.moves()
+                self.open()
+                self.refresh((200, answer(rows=replace(ROWS, "studies.own", value=5))))
+                if how == "a Gateway 401":
+                    self.draw_gateway()
+                    held = {"gateway": self.hold_gateway_reads(1)[0]}
+                else:
+                    held = {"operations": self.hold_reads(1)[0]}
+                self.open_study_access()
+                self.edit_study_access()
+                gets = self.count("GET", ACCESS_PATH)
+                self.end_by(how, held)
+                s = self.assert_all_closed(how)
+                self.assertEqual((False, False, ACCESS_READ), (s["accessConnected"], s["accessOpen"], s["accessStatus"]),
+                                 f"{how}: the dialog is disposed before the logout answers")
+                self.assert_nothing_leaves(how)
+                self.assertEqual((gets, 0), (self.count("GET", ACCESS_PATH), self.count("POST", ACCESS_PATH)),
+                                 f"{how}: no Study Access GET or POST after the end")
+                self.assertEqual(ACCESS_READ, self.panels()["accessStatus"])
+                self.release_logout(moves, how)
+
+        # Control: the module without its closer and its end checks (the F06 state) keeps the dialog open after the end,
+        # and its Save sends the POST.
+        self.logouts, self.held_logouts = 0, None
+        self.scripts[ACCESS_SCRIPT] = access_unguarded()
+        self.open()
+        self.refresh((200, answer()))
+        held = {"operations": self.hold_reads(1)[0]}
+        self.open_study_access()
+        self.edit_study_access()
+        self.end_by("an Operations 401", held)
+        s = self.panels()
+        self.assertEqual((True, True, True, 1), (s["ended"], s["accessConnected"], s["accessOpen"], s["accessInDocument"]))
+        self.access_replies.append((409, {"message": SERVER_WORDING}))
+        self.page.locator("#study-access-dialog [data-save]").click()
+        self.wait_until(lambda: self.count("POST", ACCESS_PATH) == 1, "control: the Study Access POST after the end")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+
+    def test_15_an_older_gateway_read_401_ends_the_session_at_once(self):
+        older_ops, newer_ops = self.five_on_screen_and_two_reads_out()
+        self.draw_gateway()
+        older, newer = self.hold_gateway_reads(2)
+        self.end_by("a Gateway 401", {"gateway": older})
+        self.assert_all_closed("an older Gateway read's 401")
+        self.release_late({"gateway": newer}, "the newer Gateway read")
+        newer_ops.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
+        self.wait_until(lambda: self.fetch_done() == 2, "the late Operations 200")
+        older_ops.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done() == 3, "the late Operations 401")
+        self.page.wait_for_timeout(150)
+        self.assert_all_closed("after the late answers")
+        self.assertEqual(1, self.json_done(), "no Operations answer after the end is read")
+        self.assert_nothing_leaves("an older Gateway read's 401")
+        self.release_logout(0, "an older Gateway read's 401")
+
+        # Control: Gateway's 401 judged after its sequence check (979a69b) drops the older read's 401: nothing ends,
+        # nobody logs out, Operations keeps its table and control, and the late 200 paints over it.
+        self.logouts, self.held_logouts = 0, None
+        older_ops, newer_ops = self.five_on_screen_and_two_reads_out(variant_in(GATEWAY_SCRIPT, [
+            (END_IN_REQUEST, GATEWAY_401_BEFORE), (GATEWAY_AFTER_SEQUENCE, GATEWAY_401_AFTER_SEQUENCE)]))
+        self.draw_gateway()
+        older, newer = self.hold_gateway_reads(2)
+        done = self.path_done("fetch", STUDIES_PATH)
+        older.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.path_done("fetch", STUDIES_PATH) > done, "control: the older Gateway 401")
+        self.page.wait_for_timeout(150)
+        s = self.panels()
+        self.assertEqual((False, 0, 11, True), (s["ended"], self.logouts, s["opsRows"], s["opsRefresh"]))
+        newer_ops.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
+        self.wait_until(lambda: self.json_done() == 2, "control: the late Operations answer read")
+        self.wait_until(lambda: not self.summary()["busy"], "control: the load finished")
+        self.assertEqual("6", self.own_cell())
+        older_ops.fulfill(json=answer(second=7))
+        newer.fulfill(json=gateway_list(1))
+        self.wait_until(lambda: self.path_done("fetch", STUDIES_PATH) > done + 1, "control: the newer Gateway answer")
+
+    def member_answers_out(self, create=True):
+        """A member-list read, a temporary password and (create) a Create Member submit, each held at the server. The
+        Create Member dialog is modal, so it comes last."""
+        self.member_replies.append("hold")
+        self.page.locator("#refresh").click()
+        self.wait_until(lambda: len(self.held_members) == 1, "the member-list read")
+        self.admin_replies.append("hold")
+        self.member_button("Temp Password").click()
+        self.wait_until(lambda: len(self.held_admin) == 1, "the temporary password request")
+        held = {"list": (self.held_members.pop(), LIST_PATH, LATE_MEMBERS),
+                "reset": (self.held_admin.pop(), RESET_PATH, dict(MEMBER, temporaryPassword=SECRET))}
+        if create:
+            self.page.locator("#open-create").click()
+            for name, value in CREATE_VALUES.items():
+                self.page.locator(f'#create-form input[name="{name}"]').fill(value)
+            self.admin_replies.append("hold")
+            self.page.locator("#create-form button[type=submit]").click()
+            self.wait_until(lambda: len(self.held_admin) == 1, "the Create Member request")
+            held["create"] = (self.held_admin.pop(), LIST_PATH, CREATED)
+        return held
+
+    def release_member_answers(self, held):
+        """Each held member answer comes back as a success; waits until the page has read its body."""
+        for key, (route, path, body) in held.items():
+            before = self.path_done("json", path)
+            route.fulfill(json=body)
+            self.wait_until(lambda: self.path_done("json", path) > before, f"the late {key} answer read")
+        self.page.wait_for_timeout(150)
+
+    def test_16_the_members_console_closes_and_drops_late_answers(self):
+        for how in ("Log out", "an Operations 401"):
+            with self.subTest(how=how):
+                self.logouts, self.held_logouts, moves = 0, None, self.moves()
+                self.open()
+                ending = {"operations": self.hold_reads(1)[0]} if how == "an Operations 401" else {}
+                held = self.member_answers_out()
+                self.assertEqual(["create-dialog"], self.panels()["dialogs"])
+                self.end_by(how, ending)
+                self.assert_all_closed(how)
+                reads = self.count("GET", LIST_PATH)
+                self.release_member_answers(held)
+                s = self.assert_all_closed(f"{how}: after the late answers")
+                self.assertEqual(ENDED, s["message"], "a late answer only says that the session ended")
+                self.assertEqual(reads, self.count("GET", LIST_PATH), "no list read after the creation")
+                self.assert_nothing_leaves(how)
+                self.release_logout(moves, how)
+
+        # Control: the members console without its closer and end checks (the F05 state) draws the late list and opens
+        # the temporary password after the end.
+        self.logouts, self.held_logouts = 0, None
+        self.open(members_unguarded())
+        ending = {"operations": self.hold_reads(1)[0]}
+        held = self.member_answers_out(create=False)
+        self.end_by("an Operations 401", ending)
+        self.release_member_answers(held)
+        s = self.panels()
+        self.assertEqual((True, 1, ["password-dialog"], SECRET), (s["ended"], s["memberRows"], s["dialogs"], s["secret"]))
+        self.assertIn("SYN Late Member", s["text"])
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+
+    def every_panel_out(self):
+        """Every live module shows this session's data and has one request out: Operations (Studies Owned 5), Gateway
+        Status (one study), the members console (one member) and Study Access (read, then Reload). Study Access comes
+        last: while its modal dialog is open the rest of the page is inert. Returns the held routes by module."""
+        self.open()
+        self.refresh((200, answer(rows=replace(ROWS, "studies.own", value=5))))
+        self.draw_gateway()
+        held = {"operations": self.hold_reads(1)[0], "gateway": self.hold_gateway_reads(1)[0]}
+        self.member_replies.append("hold")
+        self.page.locator("#refresh").click()
+        self.wait_until(lambda: len(self.held_members) == 1, "the member-list read")
+        held["members"] = self.held_members.pop()
+        self.open_study_access()
+        self.access_replies.append("hold")
+        self.page.locator("#study-access-dialog [data-reload]").click()
+        self.wait_until(lambda: len(self.held_access) == 1, "the Study Access reload")
+        held["access"] = self.held_access.pop()
+        s = self.panels()
+        self.assertEqual((False, 11, 1, 1, ["study-access-dialog"], "Loading"),
+                         (s["ended"], s["opsRows"], s["gatewayRows"], s["memberRows"], s["dialogs"], s["accessStatus"]))
+        return held
+
+    def test_17_every_signal_closes_every_live_panel(self):
+        for how in SIGNALS:
+            with self.subTest(how=how):
+                self.logouts, self.held_logouts, moves = 0, None, self.moves()
+                held = self.every_panel_out()
+                self.end_by(how, held)
+                s = self.assert_all_closed(how)
+                self.assertEqual((False, False, "Loading"), (s["accessConnected"], s["accessOpen"], s["accessStatus"]),
+                                 f"{how}: Study Access is disposed before the logout answers")
+                self.release_late(held, how)
+                s = self.assert_all_closed(f"{how}: after the late answers")
+                self.assertEqual("Loading", s["accessStatus"], f"{how}: the late Study Access answer draws nothing")
+                self.assertEqual(EXPIRED if how == "a member-list 401" else ENDED, s["message"],
+                                 f"{how}: the members console says only that the session ended")
+                self.assert_nothing_leaves(how)
+                self.release_logout(moves, how)
+
+    def test_18_the_boot_takes_every_end(self):
+        for how in ("a /api/me 401", "a member-list 401", "a Gateway 401", "an Operations 401", "a Study Access 401",
+                    "Log out"):
+            with self.subTest(how=how):
+                self.logouts, self.held_logouts, moves = 0, [], self.moves()
+                reads = self.count("GET", LIST_PATH)
+                self.held_me = []
+                self.page.goto(ORIGIN + PAGE_PATH)
+                self.wait_until(lambda: len(self.held_me) == 1, "the session read")
+                me, self.held_me = self.held_me.pop(), None
+                first_read = 0
+                if how == "a /api/me 401":
+                    me.fulfill(status=401, json={"message": SERVER_WORDING})
+                elif how == "Log out":
+                    self.page.locator("#logout").click()
+                    self.wait_until(lambda: self.logouts == 1, "the logout request")
+                    me.fulfill(json=ME)
+                    self.wait_until(lambda: self.path_done("json", "/api/me") == 1, "the late session answer read")
+                elif how == "a member-list 401":
+                    self.member_replies.append((401, {"message": SERVER_WORDING}))
+                    me.fulfill(json=ME)
+                    first_read = 1
+                else:
+                    # The first list read is out, so the boot is still pending; Gateway Status and Operations are on.
+                    self.member_replies.append("hold")
+                    me.fulfill(json=ME)
+                    self.wait_until(lambda: len(self.held_members) == 1, "the first list read")
+                    expect(self.page.locator("#metrics-refresh")).to_be_enabled()
+                    expect(self.page.locator("#gateway-refresh")).to_be_enabled()
+                    if how == "a Gateway 401":
+                        self.serve_arrivals = True
+                        self.study_replies.append((401, {"message": SERVER_WORDING}))
+                        self.page.locator("#gateway-refresh").click()
+                    elif how == "an Operations 401":
+                        self.replies.append((401, {"message": SERVER_WORDING}))
+                        self.page.locator("#metrics-refresh").click()
+                    else:
+                        self.access_replies.append((401, {"message": SERVER_WORDING}))
+                        self.page.evaluate("""user => { KinStudyAccessAdmin.open(user);
+                          window.__access = document.querySelector('#study-access-dialog'); }""", MEMBER)
+                    self.wait_until(lambda: self.logouts == 1, f"{how}: the logout request")
+                    done = self.path_done("json", LIST_PATH)
+                    self.held_members.pop().fulfill(json=MEMBERS)
+                    self.wait_until(lambda: self.path_done("json", LIST_PATH) > done, "the late first list read")
+                    first_read = 1
+                self.wait_until(lambda: self.logouts == 1, f"{how}: the logout request")
+                self.page.wait_for_timeout(150)
+                s = self.assert_all_closed(how)
+                if how == "a Study Access 401":
+                    self.assertEqual((False, False), (s["accessConnected"], s["accessOpen"]))
+                self.assertEqual(reads + first_read, self.count("GET", LIST_PATH), f"{how}: no list read after the end")
+                self.assert_nothing_leaves(how)
+                self.release_logout(moves, how)
 
 
 # ── S5-U6b-F02: the worklist menubar storage figure (main.html #storage) ──
