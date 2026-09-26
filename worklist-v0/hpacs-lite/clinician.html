@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clinician Home — KIN</title>
+  <link rel="icon" type="image/svg+xml" href="/kin-brand/kin-emblem-j1.svg">
+  <style>
+    /* S5-U2a: 글자는 12px 미만을 쓰지 않는다(UXR-G-13). 상태는 색과 함께 항상 글자로 쓴다(UXR-G-12). */
+    :root {
+      color-scheme: dark;
+      --bg: #07101d;
+      --panel: #101b2a;
+      --panel2: #142237;
+      --line: #29405d;
+      --text: #eef4ff;
+      --muted: #a9b9cc;
+      --accent: #4b98e3;
+      --focus: #9cc3ff;
+      --danger-bg: #3c1b23;
+      --danger-line: #7c343e;
+      --danger-text: #ffd9dd;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+    button { font: inherit; }
+    button {
+      min-height: 28px; border: 1px solid #3c5b80; border-radius: 7px; background: #19304b; color: var(--text);
+      padding: 4px 11px; cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #23466d; }
+    button:disabled { color: var(--muted); background: var(--panel2); border-color: var(--line); cursor: not-allowed; }
+    button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+    header {
+      min-height: 54px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 20px;
+      background: #0d1725; border-bottom: 1px solid var(--line);
+    }
+    header .brand { font-size: 12px; letter-spacing: .15em; color: #86bdf2; }
+    header h1 { margin: 0; font-size: 17px; }
+    .spacer { flex: 1; }
+    header .actor { color: var(--muted); }
+    main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 18px; padding: 18px 20px; }
+    @media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } }
+    .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 16px; min-width: 0; }
+    .panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .panel-head h2, .panel-head h3 { margin: 0; }
+    h2 { font-size: 16px; }
+    h3 { font-size: 15px; }
+    h4 { margin: 12px 0 4px; font-size: 13px; color: #b9c9dc; }
+    .hint, .muted { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+    .state { margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
+    .state p { margin: 0; }
+    .state .state-detail:empty { display: none; }
+    .state .state-detail { margin-top: 4px; font-size: 13px; white-space: pre-wrap; }
+    .state button { margin-top: 8px; }
+    .state[data-state="failed"] { border-color: var(--danger-line); background: var(--danger-bg); color: var(--danger-text); }
+    .state[data-state="empty"] { border-style: dashed; }
+    .table-wrap { overflow: auto; max-height: calc(100vh - 230px); border: 1px solid var(--line); border-radius: 8px; }
+    @media (max-width: 1100px) { .table-wrap { max-height: none; } }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #22364f; padding: 7px 9px; text-align: left; vertical-align: middle; white-space: nowrap; }
+    th { position: sticky; top: 0; background: var(--panel2); color: #b9c9dc; font-size: 12px; font-weight: 650; }
+    tbody tr { cursor: pointer; }
+    tbody tr:hover { background: #13233a; }
+    tbody tr[aria-current="true"] { background: #16304f; box-shadow: inset 4px 0 0 var(--accent); }
+    tbody tr[aria-current="true"] button.view { border-color: var(--accent); font-weight: 650; }
+    td.name { font-weight: 650; }
+    .status { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 1px 8px; font-size: 12px; font-weight: 700; }
+    .status.final { background: #16442d; border-color: #3f8a5f; color: #b8f0cf; }
+    .status.open { background: #3a3218; border-color: #7a6a33; color: #ffe7a8; }
+    .status.unknown { background: #2b313c; border-color: #56607a; color: #dde3ee; }
+    .tag { display: inline-block; border: 1px solid #56607a; border-radius: 5px; padding: 0 5px; font-size: 12px; color: #dde3ee; }
+    .identity { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 14px; margin: 0 0 14px;
+      padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
+    .field { min-width: 0; }
+    .field dt { color: var(--muted); font-size: 12px; }
+    .field dd { margin: 0; overflow-wrap: anywhere; }
+    .meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 6px 14px; margin: 0 0 6px; }
+    #report, #keys { margin-bottom: 14px; }
+    .body-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #key-list { margin: 0; padding-left: 20px; }
+    .key { margin-bottom: 8px; }
+    .key p { margin: 0; }
+    .key-title { font-weight: 650; }
+    .key-ref { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    #keys-state { margin: 0 0 8px; }
+    .viewer-slot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+    .viewer-slot span { color: var(--muted); font-size: 13px; }
+    .membership { max-width: 560px; margin: 60px auto; }
+    .membership p { line-height: 1.7; color: #c8d5e6; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">KOREA IMAGING NETWORK</div>
+    <h1>Clinician Home</h1>
+    <div class="spacer"></div>
+    <span class="actor" id="actor"></span>
+    <button type="button" id="logout">Log out</button>
+  </header>
+
+  <main id="home">
+    <section class="panel" aria-labelledby="studies-title">
+      <div class="panel-head">
+        <h2 id="studies-title">Studies</h2>
+        <div class="spacer"></div>
+        <button type="button" id="refresh">Refresh</button>
+      </div>
+      <p class="hint">내 기관 검사와 원격판독으로 받은 검사 중 서버가 허용한 검사만 표시합니다. 행을 고르면 확정 판독문과 키 이미지를 먼저 보여 줍니다.</p>
+      <div class="state" id="list-state" data-state="loading" role="status" aria-live="polite">
+        <p class="state-text">검사 목록을 불러오는 중입니다…</p>
+        <p class="state-detail"></p>
+        <button type="button" id="list-retry" hidden>Retry</button>
+      </div>
+      <div class="table-wrap">
+        <table aria-busy="true">
+          <thead>
+            <tr>
+              <th scope="col">Action</th><th scope="col">Name</th><th scope="col">Patient ID</th>
+              <th scope="col" title="나이는 검사일 기준입니다(생년월일과 검사일로 계산).">Sex / Age</th>
+              <th scope="col">Birth Date</th><th scope="col">Study Date</th><th scope="col">Modality</th>
+              <th scope="col">Description</th><th scope="col">Institution</th><th scope="col">Report</th>
+            </tr>
+          </thead>
+          <tbody id="studies"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" id="detail" aria-labelledby="detail-title">
+      <div class="panel-head"><h2 id="detail-title">Study</h2></div>
+      <p class="muted" id="detail-empty">목록에서 검사를 고르면 확정 판독문과 키 이미지를 먼저 표시합니다.</p>
+      <dl class="identity" id="identity" aria-label="Patient and study identifiers" hidden></dl>
+
+      <section id="report" aria-labelledby="report-title" hidden>
+        <div class="panel-head"><h3 id="report-title">Report</h3><span id="report-status"></span></div>
+        <div class="state" id="report-state" data-state="loading" role="status" aria-live="polite">
+          <p class="state-text"></p>
+          <p class="state-detail"></p>
+          <button type="button" id="report-retry" hidden>Retry</button>
+        </div>
+        <dl class="meta" id="report-meta" hidden></dl>
+        <div id="report-body" hidden></div>
+      </section>
+
+      <section id="keys" aria-labelledby="keys-title" hidden>
+        <div class="panel-head"><h3 id="keys-title">Key Images</h3></div>
+        <p id="keys-state"></p>
+        <ol id="key-list" hidden></ol>
+      </section>
+
+      <div class="viewer-slot" id="viewer-slot" hidden>
+        <button type="button" id="open-viewer" disabled aria-describedby="viewer-note">Open Viewer</button>
+        <span id="viewer-note">영상 보기는 다음 단계에서 이 화면에 연결됩니다. 지금은 판독문과 키 이미지 목록만 표시합니다.</span>
+      </div>
+    </section>
+  </main>
+
+  <section class="panel membership" id="membership" aria-labelledby="membership-title" hidden>
+    <h2 id="membership-title"></h2>
+    <p id="membership-text"></p>
+    <button type="button" id="membership-logout">Log out</button>
+  </section>
+
+  <script src="auth.js"></script>
+  <script src="clinician.js"></script>
+  <script>KinClinicianHome.boot();</script>
+</body>
+</html>
