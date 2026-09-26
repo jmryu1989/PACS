@@ -64,12 +64,13 @@ export const AUDIT_HIDDEN_CONNECT: readonly string[] = Object.freeze([
 ]);
 
 /**
- * 검사 범위 기록이라 관리자 감사로 넓히지 않는 행. S5-U4a 임상의 질문 기록은 detail에 생성 기관을 남기지만, 그 행을
- * 보여 주는 곳은 검사별 감사(pacs.service.ts audits()의 OWNER_ONLY_AUDIT_ACTIONS)뿐이고 생성 기관 = 현재 소유 기관 =
- * 읽는 기관일 때만이다. 회원 콘솔은 어느 기관에도 싣지 않는다 — 표에 없는 action의 기본 숨김에 기대지 않고 여기 적는다.
+ * 검사 범위 기록이라 관리자 감사로 넓히지 않는 행. S5-U4a 임상의 질문 기록과 S5-U4c 영상 요청 기록은 detail에 생성
+ * 기관을 남기지만, 그 행을 보여 주는 곳은 검사별 감사(pacs.service.ts audits()의 OWNER_ONLY_AUDIT_ACTIONS)뿐이고 생성
+ * 기관 = 현재 소유 기관 = 읽는 기관일 때만이다. 회원 콘솔은 어느 기관에도 싣지 않는다 — 표에 없는 action의 기본 숨김에
+ * 기대지 않고 여기 적는다.
  */
 export const AUDIT_HIDDEN_STUDY_SCOPED: readonly string[] = Object.freeze([
-  "study.question",
+  "study.question", "study.image-request",
 ]);
 
 /** 회원 스냅숏에서 내보내는 칸. email은 어느 회원 행에도 싣지 않는다. */

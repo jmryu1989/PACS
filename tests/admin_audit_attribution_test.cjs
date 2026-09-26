@@ -91,8 +91,9 @@ const CONTRACT = {
 /* After the card (Astra S5-U5b-D-F02): `study.question`, the S5-U4a clinician question record, gets its own hidden row
  * instead of the unknown-action default. Its detail names the creating institution, but the one place that shows it is
  * the study-scoped audit (pacs.service.ts audits(), OWNER_ONLY_AUDIT_ACTIONS), to the owner institution only; the
- * Members console shows it to no institution. The card block above stays verbatim. */
-CONTRACT.hidden_study_scoped_owner_only = ["study.question"];
+ * Members console shows it to no institution. The card block above stays verbatim. `study.image-request`, the S5-U4c
+ * image request record (the S5-U4c merge), is the same kind of owner-only study-scoped row and takes the same row. */
+CONTRACT.hidden_study_scoped_owner_only = ["study.question", "study.image-request"];
 CONTRACT.synthetic_vectors.push({"row":31,"action":"study.question","rule":"hidden:study_scoped_owner_only","record_time_visible_to":[],"withheld_sides":{},"note":"clinician question naming its institution: study-scoped owner-only audit, never the Members console"});
 
 const json = value => JSON.parse(JSON.stringify(value));
@@ -197,14 +198,17 @@ test('the module table is the card contract; allowed and hidden never overlap; t
     assert.deepEqual(allowed.filter(covers), [], `${entry} shadows an allowed action`);
   }
   assert.deepEqual(json(A.AUDIT_TARGET_ACTIONS), ['hanging-protocol.site.save', 'hanging-protocol.site.reset']);
-  // study.question (S5-U4a) is hidden by its own row, and the SQL prefilter never fetches it for any institution.
-  assert.equal(A.auditRule('study.question'), 'hidden:study_scoped_owner_only');
-  assert.ok(!A.AUDIT_CANDIDATE_ACTIONS.includes('study.question'));
+  // study.question (S5-U4a) and study.image-request (S5-U4c) are hidden by their own rows, and the SQL prefilter never
+  // fetches them for any institution.
+  for (const action of ['study.question', 'study.image-request']) {
+    assert.equal(A.auditRule(action), 'hidden:study_scoped_owner_only', action);
+    assert.ok(!A.AUDIT_CANDIDATE_ACTIONS.includes(action), action);
+  }
   for (const reader of ['inst-a', 'inst-b', 'inst-z']) assert.equal(A.auditCandidateRow(ROWS.get(31), reader), false, reader);
   // Fail closed: unknown, near-miss and non-string actions are hidden.
   assert.equal(CONTRACT.default, 'hidden:unknown_action (fail closed)');
   for (const action of ['future.action', 'Match', 'match ', 'report.sign', 'report.', 'admin.user.delete', 'study.question.reply',
-    'study.image-request', 'hanging-protocol.site', '', null, undefined, 7, {}])
+    'study.image-transfer', 'hanging-protocol.site', '', null, undefined, 7, {}])
     assert.equal(A.auditRule(action), 'hidden:unknown_action', String(action));
 });
 
@@ -841,9 +845,11 @@ function assertComplete(scan) {
 test('completeness: every audit action written under api/src has a contract row, and every row is written', () => {
   const scan = scanAuditWrites();
   const { literals, prefixes, unlisted } = assertComplete(scan);
-  // The one action named by a constant: the S5-U4a question write, read from its own file's declaration.
+  // The actions named by a constant: the S5-U4a question write and the S5-U4c image request write, each read from its
+  // own file's declaration.
   assert.deepEqual(scan.sites.filter(site => site.constant).map(site => [site.file, site.form, site.kind, site.actions]),
-    [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']]]);
+    [['api/src/clinician-question.service.ts', 'auditLog.create const QUESTION_AUDIT_ACTION', 'literal', ['study.question']],
+      ['api/src/image-request.service.ts', 'auditLog.create const IMAGE_REQUEST_AUDIT_ACTION', 'literal', ['study.image-request']]]);
   const byRule = {};
   for (const action of literals) { const rule = A.auditRule(action).split(':')[0]; byRule[rule] = (byRule[rule] ?? 0) + 1; }
   console.log('ADMIN_AUDIT_COMPLETENESS ' + JSON.stringify({
