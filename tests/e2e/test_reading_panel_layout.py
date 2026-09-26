@@ -314,6 +314,7 @@ class ReadingPanelLayoutE2E(ReadingWorkspaceE2E):
         source.bring_to_front()
         source_report = source.locator('#findings').input_value()
         source_view = self.native_view(source_frame)
+        self.open_toolbar_group(source, '#layout-reset')
         source.locator('#layout-reset').click()
         self.assertEqual(self.panels(source), self.defaults())
         self.assertIsNone(self.stored(source))

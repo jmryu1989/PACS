@@ -39,9 +39,11 @@ class ColumnFitE2E(ColumnsRoamingE2E):
  def test_fit_04_explicit_reading_style_precedence_survives_width_apply(self):
   a=self.fixture();p=self.login();p.locator('#quick').fill(a.patient_id);self.open_columns(p);p.locator('#wc-size').select_option('18');p.locator('#wc-font').select_option('mono');p.locator('#wc-color').select_option('warm');p.locator('#wc-save').click()
   cell=self.cell(p,a.uid,'name');expect(cell).to_have_css('font-size','18px');self.assertIn('Consolas',cell.evaluate('e=>getComputedStyle(e).fontFamily'));expect(cell).to_have_css('color','rgb(255, 230, 196)')
+  self.open_toolbar_group(p,'#reading-appearance-open')
   p.locator('#reading-appearance-open').click();p.locator('#reading-text-list').select_option('16');p.locator('#reading-font-list').select_option('sans');p.locator('#reading-color-list').select_option('cool');p.locator('#reading-appearance-close').click()
   expect(cell).to_have_css('font-size','16px');self.assertNotIn('Consolas',cell.evaluate('e=>getComputedStyle(e).fontFamily'));expect(cell).to_have_css('color','rgb(215, 243, 255)')
   self.open_columns(p);self.fit(p,'name');p.locator('#wc-save').click();expect(cell).to_have_css('font-size','16px');expect(cell).to_have_css('color','rgb(215, 243, 255)');p.reload();expect(p.locator('#dbstat')).to_contain_text('DB Connected');expect(self.cell(p,a.uid,'name')).to_have_css('font-size','16px')
+  self.open_toolbar_group(p,'#reading-appearance-open')
   p.locator('#reading-appearance-open').click();p.locator('#reading-appearance-reset').click();p.locator('#reading-font-reset').click();p.locator('#reading-color-reset').click();p.locator('#reading-appearance-close').click();expect(self.cell(p,a.uid,'name')).to_have_css('font-size','12px');self.assertNotIn('Consolas',self.cell(p,a.uid,'name').evaluate('e=>getComputedStyle(e).fontFamily'))
 
 def load_tests(loader,tests,pattern):return unittest.TestSuite(ColumnFitE2E(n) for n in loader.getTestCaseNames(ColumnFitE2E) if n.startswith('test_fit_'))

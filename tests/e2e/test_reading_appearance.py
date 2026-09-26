@@ -7,6 +7,7 @@ from test_reading_workspace import ReadingWorkspaceE2E
 
 class ReadingAppearanceE2E(ReadingWorkspaceE2E):
  def settings(self,p):
+  self.open_toolbar_group(p,'#reading-appearance-open')
   p.locator('#reading-appearance-open').click();expect(p.locator('#reading-appearance-dialog')).to_be_visible()
  def stored(self,p):
   return p.evaluate("() => Object.fromEntries(Object.keys(localStorage).filter(k=>k.startsWith('kin-reading-text:v1:')).map(k=>[k,localStorage.getItem(k)]))")

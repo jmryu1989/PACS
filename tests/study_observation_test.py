@@ -449,6 +449,19 @@ for _kind, _extra in {
 }.items():
     assert not set(_extra) & set(ADDED[_kind]), _kind
     ADDED[_kind].update(_extra)
+# S5-UI2 (UXR-G-01) worklist toolbar groups and the ids given to base toolbar controls that had none; markup only, the
+# page script is unchanged. tests/worklist_toolbar_dom_test.py pins how they behave.
+for _kind, _extra in {
+    "ids": {"toolbar-search": 1, "toolbar-filters": 1, "toolbar-refresh": 1, "toolbar-refresh-menu": 1,
+            "toolbar-view": 1, "toolbar-more": 1, "toolbar-status": 1,
+            "qf-days-0": 1, "qf-days-3": 1, "qf-days-7": 1, "qf-days-30": 1, "qf-days-60": 1, "qf-days-all": 1,
+            "workspace-server-summary": 1, "workspace-server-save": 1, "workspace-server-load": 1,
+            "workspace-server-clear": 1},
+    "functions": {},
+    "selectors": {},
+}.items():
+    assert not set(_extra) & set(ADDED[_kind]), _kind
+    ADDED[_kind].update(_extra)
 # Pre-S4 keys whose count a later unit changed on purpose: (pre-S4 count, current count). The test asserts the
 # current count, then puts the pre-S4 count back before the digest, so BASE stays the e15c69c pin.
 RECOUNTED = {

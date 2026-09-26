@@ -26,6 +26,7 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         expect(page.locator("#rows tr[data-uid]" )).to_have_count(2)
 
         name = '검사함-"<&-' + uuid.uuid4().hex[:8]
+        self.open_toolbar_group(page, '#savefilter')
         page.locator('#savefilter').click()
         page.locator('#sfm-name').fill(name)
         with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/api/filters")) as saved:
@@ -41,10 +42,12 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         expect(chip).to_have_attribute("aria-label", f"{name}, 로드된 목록 기준 2건")
         expect(chip.locator("img, script")).to_have_count(0)
 
+        self.open_toolbar_group(page, '#chips')
         chip.focus()
         page.evaluate("render()")
         expect(chip).to_be_focused()
 
+        self.open_toolbar_group(page, '#chips')
         chip.locator("span").click(button="right")
         with page.expect_response(lambda r: r.request.method == "PATCH" and "/api/filters/" in r.url) as toggled:
             page.locator("#ctx").get_by_text("Set as Default", exact=True).click()
@@ -61,6 +64,7 @@ class SavedFilterCountsE2E(previous.WorklistE2E):
         with page.expect_response(lambda r: r.request.method == "GET" and r.url.split("?")[0].endswith("/api/studies")):
             page.locator("#refresh").click()
         expect(chip).to_contain_text("(3)")
+        self.open_toolbar_group(page, '#chips')
         chip.locator("span").click()
         expect(page.locator("#quick")).to_have_value(shared_id)
         expect(page.locator('#filterrow input[data-f="desc"]')).to_have_value("Invariant route fixture")

@@ -8,6 +8,7 @@ from test_reading_workspace import ReadingWorkspaceE2E,canvas_ready
 class RelatedKeyboardE2E(ReadingWorkspaceE2E):
  def test_related_keyboard_01_preview_compare_and_report_draft(self):
   a,b=self.pair();p=self.login();self.choose(p,a);original=self.originals();p.locator('#findings').fill('KEEP RELATED KEYBOARD REPORT')
+  self.open_toolbar_group(p,'#image-opening-open')
   p.locator('#image-opening-open').click();p.locator('#image-opening-target').select_option('workspace');p.locator('#image-opening-done').click()
   expect(p.locator('#image-opening-open')).to_be_focused()
   p.locator('#related-options-open').focus();expect(p.locator('#related-options-open')).to_be_focused();p.keyboard.press('Tab')

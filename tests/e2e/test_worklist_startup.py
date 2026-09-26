@@ -14,6 +14,7 @@ class WorklistStartupE2E(SavedFilterManagerE2E):
     sign_out=WorkspacePersistenceE2E.sign_out
 
     def enable(self,p):
+        self.open_toolbar_group(p,'#image-opening-open')
         p.locator('#image-opening-open').click();expect(p.locator('#worklist-select-first')).not_to_be_checked()
         p.locator('#worklist-select-first').check();expect(p.locator('#worklist-startup-status')).to_contain_text('다음 로그인')
         p.locator('#image-opening-done').click()
@@ -32,11 +33,13 @@ class WorklistStartupE2E(SavedFilterManagerE2E):
         c=self.fixture();fresh.locator('#refresh').click()
         fresh.wait_for_function('(uid)=>studies.some(s=>s.uid===uid)',arg=c.uid)
         self.assertEqual(fresh.evaluate('selectedUid'),a.uid)
+        self.open_toolbar_group(fresh,'#image-opening-open')
         fresh.locator('#image-opening-open').click();fresh.locator('#image-opening-reset').click()
         expect(fresh.locator('#worklist-select-first')).not_to_be_checked();fresh.locator('#image-opening-done').click()
         self.assertEqual(fresh.evaluate('selectedUid'),a.uid)
         self.sign_out(fresh);other=self.sign_in(context,'doctor2')
         expect(other.locator(f'#rows tr[data-uid="{c.uid}"]')).to_be_visible();self.assertIsNone(other.evaluate('selectedUid'))
+        self.open_toolbar_group(other,'#image-opening-open')
         other.locator('#image-opening-open').click();expect(other.locator('#worklist-select-first')).not_to_be_checked()
 
     def test_startup_02_user_input_during_initial_read_prevents_selection(self):

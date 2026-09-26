@@ -9,7 +9,7 @@ from workspace_roaming_support import cleanup_workspace
 class ToolbarAccountE2E(ToolbarPreferencesE2E):
  def setUp(self):super().setUp();self.addCleanup(cleanup_workspace,self.stack,'ReadingAppearance')
  def settings(self,p):
-  if not p.locator('#reading-appearance-dialog').is_visible():p.locator('#reading-appearance-open').click()
+  if not p.locator('#reading-appearance-dialog').is_visible():self.open_toolbar_group(p,'#reading-appearance-open');p.locator('#reading-appearance-open').click()
  def account_ready(self,p):self.settings(p);expect(p.locator('#appearance-account-save')).to_be_enabled()
  def save_account(self,p):p.locator('#appearance-account-save').click();expect(p.locator('#appearance-account-status')).to_have_text('표시 설정을 계정에 저장했습니다.')
  def loaded(self,p):expect(p.locator('#appearance-account-status')).to_have_text('계정의 표시 설정을 불러왔습니다.')

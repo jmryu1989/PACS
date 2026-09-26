@@ -14,6 +14,7 @@ class WorklistAlertsE2E(WorklistE2E):
 
     def controls(self,p):
         expect(p.locator('#worklist-alerts-open')).to_be_enabled()
+        self.open_toolbar_group(p,'#worklist-alerts-open')
         p.locator('#worklist-alerts-open').click()
         expect(p.locator('#worklist-alerts-dialog')).to_be_visible()
 

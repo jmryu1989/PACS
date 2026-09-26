@@ -13,6 +13,7 @@ class FavoriteListE2E(FavoritesE2E):
   for f in [a,c]:s=self.change(self.body(s,'add',fid,uid=f.uid))
   p=self.login();self.select(p,b);return a,b,c,s,fid,p
  def apply(self,p):
+  self.open_toolbar_group(p,'#favorite-open')
   p.locator('#favorite-open').click();expect(p.locator('#favorite-apply')).to_be_enabled();p.locator('#favorite-apply').click()
   expect(p.locator('#favorite-dialog')).not_to_be_visible();expect(p.locator('#filterlist')).to_contain_text('즐겨찾기: SYNTHETIC <list>')
  def test_favorite_list_01_filter_navigation_report_and_clear(self):
@@ -23,8 +24,9 @@ class FavoriteListE2E(FavoritesE2E):
   p.locator('#heads th[data-key="date"]').click();order=p.locator('#rows tr[data-uid]').evaluate_all('(rs)=>rs.map(r=>r.dataset.uid)')
   self.assertEqual(set(order),{a.uid,c.uid});p.locator(f'#rows tr[data-uid="{order[0]}"]').click();p.locator('#b-next').click()
   expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',order[1]);p.locator('#b-prev').click();expect(p.locator('#rows tr.sel')).to_have_attribute('data-uid',order[0])
+  self.open_toolbar_group(p,'#favorite-clear')
   p.locator('#quick').fill('NO FAVORITE MATCH');expect(p.locator('#rows tr[data-uid]')).to_have_count(0);expect(p.locator('#favorite-clear')).to_be_visible()
-  p.locator('#quick').fill(a.patient_id);p.locator('#favorite-clear').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(3)
+  p.locator('#quick').fill(a.patient_id);self.open_toolbar_group(p,'#favorite-clear');p.locator('#favorite-clear').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(3)
   p.locator(f'#rows tr[data-uid="{b.uid}"]').click();expect(p.locator('#findings')).to_have_value('KEEP OUTSIDE FILTER REPORT')
   self.apply(p);p.locator('#clearfilter').click();expect(p.locator('#favorite-clear')).not_to_be_visible();expect(p.locator('#filterlist')).not_to_contain_text('즐겨찾기:')
   self.assertEqual(len(self.versions(b)),1)
@@ -36,6 +38,7 @@ class FavoriteListE2E(FavoritesE2E):
   p.unroute('**/api/favorite-folders');p.locator('#refresh').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(1);expect(p.locator('#filterlist')).not_to_contain_text('확인 실패')
   self.change(self.body(s,'delete',fid));p.locator('#refresh').click();expect(p.locator('#filterlist')).to_contain_text('폴더가 삭제되었습니다');expect(p.locator('#rows tr[data-uid]')).to_have_count(0)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);p.screenshot(path=str(folder/'deleted-scope.png'))
+  self.open_toolbar_group(p,'#favorite-clear')
   p.locator('#favorite-clear').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(3)
  def test_favorite_list_03_late_refresh_cannot_restore_cleared_scope(self):
   a,b,c,s,fid,p=self.prepare();self.apply(p);waiting=[]
@@ -43,6 +46,7 @@ class FavoriteListE2E(FavoritesE2E):
   # Route arrival is observed through the captured request, not an arbitrary sleep.
   with p.expect_request('**/api/favorite-folders') as request:
    p.locator('#refresh').click()
+  self.open_toolbar_group(p,'#favorite-clear')
   p.locator('#favorite-clear').click();expect(p.locator('#rows tr[data-uid]')).to_have_count(3)
   for route in waiting:route.fulfill(status=200,content_type='application/json',body=json.dumps(s))
   expect(p.locator('#favorite-clear')).not_to_be_visible();expect(p.locator('#filterlist')).not_to_contain_text('즐겨찾기:');expect(p.locator('#rows tr[data-uid]')).to_have_count(3)

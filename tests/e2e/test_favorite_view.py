@@ -41,14 +41,14 @@ class FavoriteViewE2E(ViewerJobsE2E):
   self.assertEqual(self.stack.request('GET',f'/studies/{a.uid}/viewer-jobs/{job["id"]}','doctor').body['snapshot'],snapshot)
   s=self.change(self.body(s,'view',fid,uid=a.uid,jobId=job['id']));s=self.change(self.body(s,'remove',fid,uid=a.uid));self.assertEqual(s['folders'][0]['views'],{})
  def test_favorite_view_02_connect_cross_browser_and_restore(self):
-  a,b,job,s,fid=self.prepare_favorite();p=self.login();self.select(p,b);p.locator('#findings').fill('KEEP FAVORITE VIEW REPORT');p.locator('#favorite-open').click()
+  a,b,job,s,fid=self.prepare_favorite();p=self.login();self.select(p,b);p.locator('#findings').fill('KEEP FAVORITE VIEW REPORT');self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click()
   p.locator('.favorite-link').get_by_role('button',name='보기 상태 연결',exact=True).click();expect(p.locator('#favorite-view-choice option')).to_have_count(1)
   expect(p.locator('#favorite-view-choice')).to_have_value(job['id'])
   def lost(route):route.fetch();route.abort()
   p.route('**/api/favorite-folders',lambda route:lost(route) if route.request.method=='POST' else route.continue_())
   p.locator('#favorite-view-save').click();expect(p.locator('#favorite-retry')).to_be_visible();expect(p.locator('#favorite-retry')).to_be_enabled()
   p.unroute('**/api/favorite-folders');p.locator('#favorite-retry').click();expect(p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True)).to_be_visible()
-  p.locator('#favorite-close').click();other=self.login();self.select(other,b);other.locator('#favorite-open').click()
+  p.locator('#favorite-close').click();other=self.login();self.select(other,b);self.open_toolbar_group(other,'#favorite-open');other.locator('#favorite-open').click()
   other.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(other.locator('#reading-target')).to_contain_text(a.uid)
   frame=other.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,2);expect(frame.locator('#kin-viewer-jobs-status')).to_contain_text('복원했습니다',timeout=60000)
   self.assertIn('kinJob='+job['id'],other.locator('#reading-frame').get_attribute('src'))
@@ -56,6 +56,7 @@ class FavoriteViewE2E(ViewerJobsE2E):
   self.assertEqual(len(actual),2)
   for value in actual:self.assertAlmostEqual(value['lower'],-1000,delta=0.01);self.assertAlmostEqual(value['upper'],-1,delta=0.01)
   self.assertEqual(len(self.versions(a)),1);self.assertEqual(len(self.versions(b)),1)
+  self.open_toolbar_group(p,'#favorite-open')
   p.locator('#favorite-open').click();p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(p.locator('#reading-target')).to_contain_text(a.uid)
   p.get_by_role('button',name='Worklist',exact=True).click()
   p.locator(f'#rows tr[data-uid="{b.uid}"]').click();expect(p.locator('#findings')).to_have_value('KEEP FAVORITE VIEW REPORT')
@@ -70,7 +71,7 @@ class FavoriteViewE2E(ViewerJobsE2E):
   print('FAVORITE SAVED DISPLAY',json.dumps(dict(expected=expected,observed=observed)),flush=True)
   folder=Path(os.environ['KIN_EVIDENCE_DIR']);folder.mkdir(parents=True,exist_ok=True);other.screenshot(path=str(folder/'favorite-view.png'))
  def test_favorite_view_03_revoked_prior_does_not_change_report_target(self):
-  a,b,job,s,fid=self.prepare_favorite();c=self.ct(a.patient_id,'other','20260601');self.seed_report(c);self.change(self.body(s,'view',fid,uid=a.uid,jobId=job['id']));p=self.login();self.select(p,c);p.locator('#findings').fill('KEEP BLOCKED VIEW');p.locator('#favorite-open').click()
+  a,b,job,s,fid=self.prepare_favorite();c=self.ct(a.patient_id,'other','20260601');self.seed_report(c);self.change(self.body(s,'view',fid,uid=a.uid,jobId=job['id']));p=self.login();self.select(p,c);p.locator('#findings').fill('KEEP BLOCKED VIEW');self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click()
   audit=self.favorite_audits();self.assertEqual(psql('SELECT ("teleInstitutionId" IS NULL)::text FROM "StudyState" WHERE uid='+literal(b.uid)),['true'])
   psql(f"UPDATE \"StudyState\" SET \"institutionId\"='kin-center' WHERE uid='{b.uid}'")
   try:
@@ -84,7 +85,7 @@ class FavoriteViewE2E(ViewerJobsE2E):
   p=self.login();self.select(p,b);p.locator('#findings').fill('KEEP DIRTY PREVIOUS REPORT');p.locator('#m-reading').click()
   expect(p.locator('#reading-frame')).to_be_visible();frame=p.locator('#reading-frame').element_handle().content_frame();canvas_ready(frame,1)
   frame.get_by_role('button',name='Comparison',exact=True).click();frame.get_by_label('Job Title',exact=True).fill('KEEP UNSAVED PREVIOUS VIEW')
-  src=p.locator('#reading-frame').get_attribute('src');p.get_by_role('button',name='Worklist',exact=True).click();p.locator('#favorite-open').click()
+  src=p.locator('#reading-frame').get_attribute('src');p.get_by_role('button',name='Worklist',exact=True).click();self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click()
   p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click();expect(p.locator('#reading-status')).to_contain_text('저장하지 않은 작업')
   self.assertEqual(p.locator('#reading-frame').get_attribute('src'),src);expect(frame.get_by_label('Job Title',exact=True)).to_have_value('KEEP UNSAVED PREVIOUS VIEW')
   p.get_by_role('button',name='Return to Previous Viewer',exact=True).click();expect(p.locator('#findings')).to_have_value('KEEP DIRTY PREVIOUS REPORT')
@@ -94,7 +95,7 @@ class FavoriteViewE2E(ViewerJobsE2E):
  def test_favorite_view_05_late_view_after_session_end_is_discarded(self):
   a,b,job,s,fid=self.prepare_favorite();self.change(self.body(s,'view',fid,uid=a.uid,jobId=job['id']))
   full=self.stack.request('GET',f'/studies/{a.uid}/viewer-jobs/{job["id"]}','doctor').body
-  p=self.login();self.select(p,b);p.locator('#favorite-open').click();waiting=[];pattern='**/viewer-jobs/'+job['id'];p.route(pattern,lambda r:waiting.append(r))
+  p=self.login();self.select(p,b);self.open_toolbar_group(p,'#favorite-open');p.locator('#favorite-open').click();waiting=[];pattern='**/viewer-jobs/'+job['id'];p.route(pattern,lambda r:waiting.append(r))
   with p.expect_request(pattern):p.locator('.favorite-link').get_by_role('button',name='저장 보기 열기',exact=True).click()
   p.evaluate("()=>{const c=new BroadcastChannel('kin-session');c.postMessage({type:'session-ended'});c.close()}")
   expect(p.locator('#favorite-dialog')).not_to_be_visible()

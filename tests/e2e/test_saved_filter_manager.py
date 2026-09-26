@@ -28,6 +28,7 @@ class SavedFilterManagerE2E(base.WorklistE2E):
         return saved
 
     def open_manager(self, page):
+        self.open_toolbar_group(page, '#managefilters')
         page.locator('#managefilters').click()
         expect(page.locator('#saved-filter-manager')).to_be_visible()
 
@@ -144,6 +145,7 @@ class SavedFilterManagerE2E(base.WorklistE2E):
 
     def test_manager_03_keyboard_cancel_and_small_layout(self):
         page = self.login()
+        self.open_toolbar_group(page, '#managefilters')
         page.locator('#managefilters').focus(); page.keyboard.press('Enter')
         expect(page.locator('#sfm-search')).to_be_focused()
         for width, height in ((900, 600), (600, 900)):

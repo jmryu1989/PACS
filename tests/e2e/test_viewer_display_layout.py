@@ -26,6 +26,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         v=opened.value;v.wait_for_url('**/ohif/viewer?**');canvas_ready(v,1)
         v.wait_for_function('typeof kinViewerJobWorkspaceState==="function"')
         marker=v.evaluate('window.__displayDocument=crypto.randomUUID()')
+        self.open_toolbar_group(p,'#viewer-windows-open')
         p.locator('#viewer-windows-open').click()
         return p,v,fixture,marker
 
@@ -117,7 +118,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
     def test_display_06_two_patients_move_independently_and_keep_report_target(self):
         p,first,a,first_marker=self.setup_viewer();p.locator('#viewer-windows-done').click()
         b=self.ct('DISPLAY-OTHER-'+uuid.uuid4().hex[:12],'other','20260802');self.seed_report(b,findings='DISPLAY SECOND BASE')
-        original=self.originals();p.locator('#image-opening-open').click()
+        original=self.originals();self.open_toolbar_group(p,'#image-opening-open');p.locator('#image-opening-open').click()
         p.locator('#image-opening-limit').select_option('2');p.locator('#image-opening-done').click()
         p.locator('#quick').fill('');p.evaluate('load()');self.select(p,b);self.thumbs(p,1)
         expect(p.locator('#findings')).to_have_value('DISPLAY SECOND BASE');p.locator('#findings').fill('SECOND PATIENT UNSAVED REPORT')
@@ -127,6 +128,7 @@ class ViewerDisplayLayoutE2E(PhysicalMonitorsE2E):
         second_marker=second.evaluate('window.__displayDocument=crypto.randomUUID()')
         for viewer,title in [(first,'FIRST PATIENT UNSAVED JOB'),(second,'SECOND PATIENT UNSAVED JOB')]:
             viewer.get_by_role('button',name='Comparison',exact=True).click();viewer.get_by_label('Job Title',exact=True).fill(title)
+        self.open_toolbar_group(p,'#viewer-windows-open')
         p.locator('#viewer-windows-open').click();p.locator('#viewer-windows-displays').click()
         expect(p.locator('[data-window-index="1"][data-window-action="display-1"]')).to_be_enabled()
         expected=p.evaluate('''async()=>{const screens=KinViewerDisplayLayout.screens(await getScreenDetails());

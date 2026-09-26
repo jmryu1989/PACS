@@ -28,6 +28,7 @@ class StudyAccessRecoveryE2E(StudyAccessE2E):
     def test_recovery_01_status_change_retains_unsaved_report(self):
         a,b=self.fixture(),self.fixture();self.seed_report(a);p=self.login();self.select(p,a)
         p.locator('#findings').fill('SYNTHETIC UNSAVED ACCESS TEXT');p.evaluate('clearInterval(poll)')
+        self.open_toolbar_group(p,'#study-access-open')
         expect(p.locator('#study-access-open')).to_be_enabled();p.locator('#study-access-open').click()
         d=p.locator('#study-access-status');expect(d).to_be_visible();expect(d.locator('[data-status]')).to_contain_text('Revision 0')
         self.write(policy([b.uid]));d.locator('[data-refresh]').click();expect(d.locator('[data-status]')).to_contain_text('Restricted')
@@ -41,6 +42,7 @@ class StudyAccessRecoveryE2E(StudyAccessE2E):
     def test_recovery_04_poll_recovers_changed_policy_after_outage(self):
         a,b=self.fixture(),self.fixture();self.seed_report(a);p=self.login();self.select(p,a)
         p.locator('#findings').fill('SYNTHETIC OUTAGE UNSAVED');p.evaluate('clearInterval(poll)')
+        self.open_toolbar_group(p,'#study-access-open')
         p.locator('#study-access-open').click();d=p.locator('#study-access-status')
         expect(d.locator('[data-status]')).to_contain_text('Revision 0')
         p.route('**/api/study-access',lambda route:route.abort('failed'))

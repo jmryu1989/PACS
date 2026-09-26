@@ -53,11 +53,13 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         self.fail("New owned SOP did not reach the exact lookup API")
 
     def manual(self, page):
+        self.open_toolbar_group(page, "#worklist-refresh")
         page.locator("#worklist-refresh").select_option("0")
         page.wait_for_function("()=>!studyPageClient.busy")
 
     def automatic(self, page):
         page.bring_to_front()
+        self.open_toolbar_group(page, "#worklist-refresh")
         page.locator("#worklist-refresh").select_option("30")
         expect(page.locator("#worklist-refresh")).to_have_value("30")
 
@@ -109,6 +111,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         holder = self.state(fixture)["holder"]; self.assertEqual(self.stack.actor("doctor"), holder)
         versions, report_rows, originals = self.versions(fixture), self.report_rows(fixture), self.originals()
         before_row = self.study_row(fixture)
+        self.open_toolbar_group(work, "#image-opening-open")
         work.locator("#image-opening-open").click()
         work.locator("#image-opening-target").select_option("window")
         work.locator("#image-opening-prior").set_checked(False)
@@ -147,6 +150,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
         expect(viewer.get_by_label("Job Title", exact=True)).to_have_value("ARRIVAL ORIGINAL UNSAVED JOB")
         self.assertTrue(viewer.evaluate("()=>kinViewerJobWorkspaceState().dirty"))
 
+        self.open_toolbar_group(work, "#viewer-windows-open")
         work.locator("#viewer-windows-open").click()
         expect(work.locator("#viewer-windows-dialog")).to_be_visible()
         latest = work.locator('[data-window-index="0"][data-window-action="latest"]')
@@ -209,6 +213,7 @@ class StudyArrivalsE2E(DisplayControlsE2E):
             page.wait_for_timeout(100)
         self.assertEqual(1, len(held))
         self.assertEqual(before["count"] + 1, self.study_row(fixture)["count"])
+        self.open_toolbar_group(page, "#worklist-refresh")
         page.locator("#worklist-refresh").select_option("0")
         held[0][0].fulfill(response=held[0][1]); page.wait_for_function("()=>!studyPageClient.busy")
         self.assertEqual(before["count"], page.evaluate("uid=>studies.find(s=>s.uid===uid).count", fixture.uid))

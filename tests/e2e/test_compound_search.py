@@ -242,6 +242,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         self.assertEqual(result.status, 201)
         self.addCleanup(self.remove_filter, result.body['id'])
         page.evaluate('reloadPrefs()')
+        self.open_toolbar_group(page, '#chips')
         page.locator('#chips button', has_text=bad_name).click()
         expect(page.locator('#toast')).to_contain_text('복합')
         self.rows_are(page, [first])
@@ -262,6 +263,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
         default_writes = []
         page.on('request', lambda request: default_writes.append(request.post_data_json)
                 if request.method == 'PATCH' and '/api/filters/' in request.url else None)
+        self.open_toolbar_group(page, '#chips')
         page.locator('#chips button', has_text=bad_name).click(button='right')
         page.locator('#ctx').get_by_text('Set as Default', exact=True).click()
         expect(page.locator('#toast')).to_contain_text('복합')
@@ -386,6 +388,7 @@ class CompoundSearchE2E(manager.SavedFilterManagerE2E):
             prompts.append(dialog.message)
             dialog.dismiss()
         page.on('dialog', unexpected_prompt)
+        self.open_toolbar_group(page, '#savefilter')
         page.locator('#savefilter').click()
         expect(page.locator('#toast')).to_contain_text('복합')
         self.assertEqual(prompts, [])

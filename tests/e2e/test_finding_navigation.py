@@ -359,6 +359,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         expect(self.panel(popup).get_by_label('Finding Title')).to_have_value('POPUP DRAFT')
         # Close Window is refused for the same reason, visible as Unsaved in the window list.
         w.locator('#m-reading').click(); expect(w.locator('#m-reading')).to_have_text('Reading Workspace')
+        self.open_toolbar_group(w, '#viewer-windows-open')
         w.locator('#viewer-windows-open').click(); expect(w.locator('#viewer-windows-dialog')).to_be_visible()
         expect(w.locator('.viewer-window-row')).to_have_count(1); expect(w.locator('.viewer-window-row')).to_contain_text('Unsaved')
         w.locator('[data-window-action="close"]').click()
@@ -397,7 +398,7 @@ class FindingNavigationE2E(ViewerHistoryE2E):
         self.assertEqual(self.viewer_ready(frame)[0], b.uid)
         # A clean window closes.
         popup.wait_for_function("()=>typeof kinViewerWindowOwner==='function'&&!!kinViewerWindowOwner()&&!kinViewerHistoryWorkspaceState().dirty")
-        w.locator('#m-reading').click(); w.locator('#viewer-windows-open').click()
+        w.locator('#m-reading').click(); self.open_toolbar_group(w, '#viewer-windows-open'); w.locator('#viewer-windows-open').click()
         expect(w.locator('.viewer-window-row')).to_contain_text('Open')
         w.locator('[data-window-action="close"]').click()
         expect(w.locator('#viewer-windows-status')).to_contain_text('영상 창을 닫았습니다'); self.assertTrue(popup.is_closed())

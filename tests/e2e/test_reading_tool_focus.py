@@ -29,6 +29,7 @@ class ToolFocusE2E(ReadingWorkspaceE2E):
   a,b=self.pair();p=self.login();f=self.workspace(p,a);p.locator('#findings').fill('KEEP GUARDED REPORT');p.locator('#findings').focus()
   for args in [{'repeat':True},{'isComposing':True},{'shiftKey':True},{'metaKey':True}]:
    p.locator('#findings').dispatch_event('keydown',dict(key='7',code='Digit7',ctrlKey=True,altKey=True,bubbles=True,**args));expect(p.locator('#findings')).to_be_focused()
+  self.open_toolbar_group(p,'#reading-appearance-open')
   p.locator('#reading-appearance-open').click();expect(p.locator('#reading-appearance-dialog')).to_be_visible()
   active=p.evaluate('()=>document.activeElement.id');p.keyboard.press('Control+Alt+7');self.assertEqual(p.evaluate('()=>document.activeElement.id'),active)
   p.keyboard.press('Escape');p.locator('#reading-frame').evaluate('(e)=>e.inert=true')

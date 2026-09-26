@@ -22,6 +22,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
     def remote(self,page):
         r=page.request.get(self.stack.proxy+'/api/workspace-layout');self.assertEqual(r.status,200);return r.json()
     def open_menu(self,page):
+        self.open_toolbar_group(page,'#workspace-server-menu')
         menu=page.locator('#workspace-server-menu')
         if menu.get_attribute('open') is None:menu.locator('summary').click()
         expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_enabled()
@@ -56,6 +57,7 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         writes=[];y.on('request',lambda r:writes.append(r.url.split('?')[0]) if r.method not in ('GET','HEAD','OPTIONS') and '/api/' in r.url else None)
         self.action(y,'Load from Account','불러왔습니다');self.assertEqual(self.stored(y),layout);self.same_sizes(y,layout);self.shot(y,'portrait-restored')
         y.set_viewport_size(dict(width=768,height=1024))
+        self.open_toolbar_group(y,'#layout-reset')
         for selector in ['#thumbwrap img','#clinical','#t-mod','#b-history','#layout-reset','#workspace-server-menu summary']:self.reachable(y,selector)
         self.assertEqual(self.stored(y),layout);self.shot(y,'small-clamped')
         for key,value in [('findings','Roam findings'),('conclusion','Roam conclusion'),('recommendation','Roam recommendation')]:expect(y.locator('#'+key)).to_have_value(value)
@@ -68,9 +70,11 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         b=self.sign_in(x,'doctor2');self.assertIsNone(self.remote(b)['layout']);self.mode_is(b,'auto')
         self.open_menu(a);a.get_by_role('button',name='Save to Account',exact=True).click()
         expect(a.locator('#workspace-server-status')).to_contain_text('세션이 변경');expect(a.get_by_role('button',name='Save to Account',exact=True)).to_be_disabled()
+        self.open_toolbar_group(b,'#layout-toggle')
         b.locator('#layout-toggle').click();self.action(b,'Save to Account','저장했습니다');saved_b=self.remote(b)
         by=self.sign_in(self.device(),'doctor2');self.mode_is(by,'auto');self.action(by,'Load from Account','불러왔습니다');self.mode_is(by,'portrait')
         ay=self.sign_in(self.device());self.assertEqual(self.remote(ay),saved_a);self.action(ay,'Load from Account','불러왔습니다')
+        self.open_toolbar_group(by,'#layout-toggle')
         by.locator('#layout-toggle').click();self.action(by,'Save to Account','저장했습니다')
         before=self.stored(b);self.action(b,'Save to Account','다른 창에서');self.assertEqual(self.stored(b),before)
         self.action(b,'Reset Account Layout','다른 창에서');self.assertIsNotNone(self.remote(b)['layout'])
@@ -80,10 +84,12 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         print('ROAM A/B X/Y saved revisions '+json.dumps([saved_a['revision'],saved_b['revision']]),flush=True)
 
     def test_roam_03_delayed_load_and_session_end(self):
-        page=self.sign_in(self.device());page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다')
+        page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다')
+        self.open_toolbar_group(page,'#layout-reset')
         page.locator('#layout-reset').click();pending=[];pattern='**/api/workspace-layout'
         page.route(pattern,lambda r:pending.append(r));self.open_menu(page)
         page.get_by_role('button',name='Load from Account',exact=True).click();expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_disabled()
+        self.open_toolbar_group(page,'#layout-toggle')
         page.locator('#layout-toggle').click();page.locator('#layout-toggle').click();before=self.stored(page)
         self.assertEqual(len(pending),1);pending[0].fulfill(response=pending[0].fetch())
         expect(page.locator('#workspace-server-status')).to_contain_text('현재 배치가 변경');self.assertEqual(self.stored(page),before);self.mode_is(page,'landscape');page.unroute(pattern)
@@ -96,9 +102,10 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         self.assertEqual(self.stored(page),before);expect(page.get_by_role('button',name='Load from Account',exact=True)).to_be_disabled()
 
     def test_roam_04_failure_storage_denial_and_csrf(self):
-        page=self.sign_in(self.device());page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
+        page=self.sign_in(self.device());self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click();self.action(page,'Save to Account','저장했습니다');remote=self.remote(page)
         denied=page.request.put(self.stack.proxy+'/api/workspace-layout',data=dict(expectedOwner=remote['owner'],revision=remote['revision'],layout=remote['layout']))
         self.assertEqual(denied.status,403);self.assertEqual(self.remote(page),remote)
+        self.open_toolbar_group(page,'#layout-reset')
         page.locator('#layout-reset').click();before=self.stored(page);pattern='**/api/workspace-layout'
         bad=dict(remote,layout=dict(remote['layout'],mode='wrong'))
         page.route(pattern,lambda r:r.fulfill(status=200,json=bad));self.action(page,'Load from Account','형식을 확인할 수 없습니다');self.assertEqual(self.stored(page),before);page.unroute(pattern)
@@ -110,8 +117,8 @@ class WorkspaceRoamingE2E(WorkspacePersistenceE2E):
         expect(page.locator('#workspace-server-status')).to_contain_text('접근 권한이 없습니다');expect(page.get_by_role('button',name='Save to Account',exact=True)).to_be_disabled();self.mode_is(page,'portrait')
 
     def test_roam_05_account_changes_while_old_read_is_pending(self):
-        context=self.device();page=self.sign_in(context);page.locator('#layout-toggle').click()
-        self.action(page,'Save to Account','저장했습니다');page.locator('#layout-reset').click();before=self.stored(page)
+        context=self.device();page=self.sign_in(context);self.open_toolbar_group(page,'#layout-toggle');page.locator('#layout-toggle').click()
+        self.action(page,'Save to Account','저장했습니다');self.open_toolbar_group(page,'#layout-reset');page.locator('#layout-reset').click();before=self.stored(page)
         pending=[];page.route('**/api/workspace-layout',lambda r:pending.append(r));self.open_menu(page)
         page.get_by_role('button',name='Load from Account',exact=True).click();page.wait_for_timeout(100);self.assertEqual(len(pending),1)
         response=pending[0].fetch()
