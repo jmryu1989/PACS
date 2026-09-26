@@ -1,10 +1,18 @@
 {
-  "unit": "S5-U1a",
+  "unit": "S5-U1a+S5-U1b",
   "app_roles": ["radiologist", "technician", "admin", "clinician"],
   "legacy_roles": ["radiologist", "technician", "admin"],
   "clinician_role": "clinician",
   "session_routes": ["GET me", "POST auth/logout"],
-  "business_routes": [],
+  "business_routes": ["GET authz/dicom", "POST dicom/lookup", "GET studies/:uid/viewer-items", "GET clinician/studies", "GET clinician/studies/:uid/report"],
+  "allowed_additions": ["GET clinician/studies", "GET clinician/studies/:uid/report"],
+  "must_stay_denied": [
+    "GET studies", "GET bootstrap", "GET prefs", "GET audit", "GET studies/:uid/report-preview",
+    "GET studies/:uid/report/versions", "GET studies/:uid/report/citations", "GET studies/:uid/report/structure",
+    "GET studies/:uid/viewer-items/:id/revisions", "POST studies/:uid/viewer-items", "GET studies/:uid/findings",
+    "GET studies/:uid/tech-note", "GET studies/:uid/reader-assignment", "PUT studies/:uid/report",
+    "POST studies/:uid/report/commit", "POST studies/:uid/hold", "GET colleagues", "GET unassigned"
+  ],
   "denied_code": "CLINICIAN_ROUTE_DENIED",
   "public_routes": ["GET health", "GET auth/login", "GET auth/register", "GET auth/callback"],
   "request_method_enum": {"0": "GET", "1": "POST", "2": "PUT", "3": "DELETE", "4": "PATCH", "5": "ALL", "6": "OPTIONS", "7": "HEAD", "8": "SEARCH"},
@@ -56,7 +64,19 @@
     {"method": 99, "controller": "/", "handler": "me", "key": null, "allowed": false},
     {"method": null, "controller": "/", "handler": "me", "key": null, "allowed": false},
     {"method": 0, "controller": null, "handler": "me", "key": null, "allowed": false},
-    {"method": 0, "controller": "/", "handler": null, "key": null, "allowed": false}
+    {"method": 0, "controller": "/", "handler": null, "key": null, "allowed": false},
+    {"method": 0, "controller": "/", "handler": "authz/dicom", "key": "GET authz/dicom", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "dicom/lookup", "key": "POST dicom/lookup", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "dicom/lookup", "key": "GET dicom/lookup", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items", "key": "GET studies/:uid/viewer-items", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "studies/:uid/viewer-items", "key": "POST studies/:uid/viewer-items", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "studies/:uid/viewer-items/:id/revisions", "key": "GET studies/:uid/viewer-items/:id/revisions", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "clinician/studies", "key": "GET clinician/studies", "allowed": true},
+    {"method": 0, "controller": "/", "handler": "/clinician/studies/:uid/report/", "key": "GET clinician/studies/:uid/report", "allowed": true},
+    {"method": 1, "controller": "/", "handler": "clinician/studies", "key": "POST clinician/studies", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "studies", "key": "GET studies", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "bootstrap", "key": "GET bootstrap", "allowed": false},
+    {"method": 0, "controller": "/", "handler": "audit", "key": "GET audit", "allowed": false}
   ],
   "baseline_inventory": {
     "source_sha": "d914a9a8441819301cac28299063bdd6e721c10b",
@@ -94,5 +114,42 @@
       "PUT studies/:uid/report", "PUT worklist-columns", "PUT workspace-layout", "PUT workspace-shortcuts"
     ]
   },
-  "live_probe_values": {":uid": "1.2.826.0.1.3680043.8.498.0", ":id": "1", ":version": "1"}
+  "live_probe_values": {":uid": "1.2.826.0.1.3680043.8.498.0", ":id": "1", ":version": "1"},
+  "read_contract": {
+    "unit": "S5-U1b",
+    "rule": "S5-F5 conservative default: body, key images and viewer items only when rs=A and the head ReportVersion (uid, Report.version) action is approve or addendum; D-S5-NONFINAL-VIEW stays open",
+    "final_actions": ["approve", "addendum"],
+    "open_states": ["W", "T", "P", "H"],
+    "list_snapshot_pins": ["institutionId", "teleInstitutionId", "rs", "repDoc", "confirm", "version"],
+    "viewer_changed_code": "VIEWER_REPORT_CHANGED",
+    "list_response_keys": ["studies", "serverTime"],
+    "list_paged_response_keys": ["studies", "serverTime", "pagination"],
+    "list_row_keys": ["uid", "id", "name", "birth", "sex", "date", "acc", "desc", "modality", "count", "series", "sourcePatientKey", "institutionName", "tele", "report"],
+    "overlay_display_keys": ["id", "name", "birth", "sex", "date", "acc", "desc", "modality"],
+    "pagination_keys": ["next", "total", "offset", "limit"],
+    "report_final_keys": ["final", "rs", "action", "version", "repDoc", "confirm"],
+    "report_open_keys": ["final", "rs"],
+    "report_body_keys": ["findings", "conclusion", "recommendation"],
+    "report_read_keys": ["uid", "report", "keys"],
+    "key_image_keys": ["id", "revision", "item"],
+    "viewer_page_keys": ["uid", "final", "reportVersion", "items", "nextCursor"],
+    "viewer_withheld_keys": ["uid", "final", "items", "nextCursor"],
+    "viewer_cursor_max": 512,
+    "viewer_item_keys": ["id", "revision", "createdAt", "updatedAt", "item"],
+    "viewer_measurement_extra_keys": ["referenceStatus"],
+    "snapshot_keys": {
+      "key": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "title", "description"],
+      "arrow": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points"],
+      "length": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "viewPlaneNormal", "viewUp", "baseline"],
+      "angle": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "viewPlaneNormal", "viewUp", "baseline"],
+      "ellipse": ["schemaVersion", "kind", "seriesUid", "sopUid", "frame", "frameOfReferenceUid", "label", "points", "viewPlaneNormal", "viewUp", "baseline"]
+    },
+    "forbidden_keys": [
+      "draft", "drafts", "state", "techNote", "readerAssignment", "gatewayReceipt", "orderIdentity", "notObserved",
+      "orderReconciliation", "orders", "templates", "filters", "holder", "heldAt", "holdReason", "preDoc", "preReviewer",
+      "prelimHidden", "ov", "orig", "oid", "orderOid", "matched", "ss", "em", "ts", "ward", "reqHosp", "institutionId",
+      "teleInstitutionId", "authorSub", "authorActor", "author", "updatedBy", "sourceDigest", "hidden", "reason",
+      "citations", "structured", "canPreviewEditor", "observedAt", "owner", "studyUid", "actor", "baseVersion", "age"
+    ]
+  }
 }

@@ -7,6 +7,7 @@ import { OrthancService } from './orthanc.service';
 import { Caller } from './pacs.service';
 import { ViewerSourceUnavailable, warnViewerSource } from './viewer-source-warning';
 import { canonical, isManualMeasurement, viewerCommand, viewerFingerprint, viewerPage, viewerUid, viewerUuid, verifyViewerReference, VIEWER_LIMITS } from './viewer-input';
+import { CLINICIAN_FINAL_ACTIONS } from './clinician-policy';
 
 const denied = () => { throw new ForbiddenException('표시 항목에 접근할 수 없습니다'); };
 const conflict = () => { throw new ConflictException('표시 항목 또는 요청이 변경되었습니다'); };
@@ -98,7 +99,25 @@ export class ViewerService {
     }
   }
 
-  async list(uid: string, query: any, c: Caller, id?: string) {
+  list(uid: string, query: any, c: Caller, id?: string) {
+    return this.read(uid, query, c, id, null);
+  }
+
+  /**
+   * S5-U1b clinician-only read of the items of one signed head. The items are
+   * read in the same SQL statement as the head (rs A, Report.version = `final`,
+   * that version's action approve/addendum), so an item that only existed while
+   * a reset had reopened the report can never be read as part of `final`.
+   * `finalVersion` is the signed head that statement saw (null: none); when it
+   * is not `final` the page is empty and the caller refuses the answer.
+   */
+  async listFinal(uid: string, query: any, c: Caller, final: number):
+      Promise<{ items: any[]; nextCursor: string | null; finalVersion: number | null }> {
+    if (!Number.isSafeInteger(final) || final < 1) denied();
+    return await this.read(uid, query, c, undefined, final) as any;
+  }
+
+  private async read(uid: string, query: any, c: Caller, id: string | undefined, final: number | null) {
     member(c); viewerUid(uid); visible(await this.prisma.studyState.findUnique({where:{uid}}),c); await this.studyAccess.require(c,[uid]); if (id !== undefined) viewerUuid(id);
     const page = viewerPage(query, id !== undefined);
     // The permission predicate and page share a single SQL statement, including
@@ -107,6 +126,15 @@ export class ViewerService {
       const parent = Prisma.sql`SELECT uid FROM "StudyState" WHERE uid = ${uid}
         AND ("institutionId" = ${c.institution} OR "teleInstitutionId" = ${c.institution})
         AND (rs <> 'P' OR "preDoc" = ${c.actor} OR "preReviewer" = ${c.actor})`;
+      // Checking "signed?" before and after a separate read cannot see a reset
+      // and re-approval in between; the pinned head is part of this statement.
+      const signed = final === null ? null : Prisma.sql`SELECT r.version FROM "Report" r
+        JOIN "StudyState" s ON s.uid = r.uid
+        JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
+        WHERE r.uid = ${uid} AND r.version > 0 AND s.rs = 'A' AND v.action IN (${Prisma.join([...CLINICIAN_FINAL_ACTIONS])})`;
+      const signedHead = signed ? Prisma.sql`, final_head AS (${signed})` : Prisma.empty;
+      const signedColumn = signed ? Prisma.sql`(SELECT version FROM final_head) AS "finalVersion",` : Prisma.empty;
+      const signedItems = signed ? Prisma.sql`AND EXISTS(SELECT 1 FROM final_head f WHERE f.version = ${final}::int)` : Prisma.empty;
       if (id !== undefined) {
         const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent}),
           head AS (SELECT i.id FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid" WHERE i.id = ${id}::uuid)
@@ -121,17 +149,18 @@ export class ViewerService {
           reason: row.reason, actor: row.actor, at: timestamp(row.at), payloadBytes: row.payloadBytes, item: row.snapshot }));
         return { revisions, nextCursor: pageRow.rows.length > page.limit ? revisions[revisions.length - 1].revision : null };
       }
-      const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})
-        SELECT EXISTS(SELECT 1 FROM parent) AS allowed,
+      const [pageRow] = await tx.$queryRaw<any[]>`WITH parent AS (${parent})${signedHead}
+        SELECT EXISTS(SELECT 1 FROM parent) AS allowed, ${signedColumn}
           COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY page.id) FROM (
             SELECT i.* FROM "ViewerItem" i JOIN parent p ON p.uid = i."studyUid"
-            WHERE (${page.includeHidden} OR NOT i.hidden)
+            WHERE (${page.includeHidden} OR NOT i.hidden) ${signedItems}
               AND (${page.recheck}::uuid IS NULL OR i.id = ${page.recheck}::uuid)
               AND (${page.cursor}::uuid IS NULL OR i.id > ${page.cursor}::uuid)
             ORDER BY i.id LIMIT ${page.limit + 1}) page), '[]'::jsonb) AS rows`;
       if (!pageRow.allowed) denied();
       const items = pageRow.rows.slice(0, page.limit).map(row => result(row));
-      return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null };
+      return { items, nextCursor: pageRow.rows.length > page.limit ? items[items.length - 1].id : null,
+        ...(signed ? { finalVersion: Number.isSafeInteger(pageRow.finalVersion) ? pageRow.finalVersion as number : null } : {}) };
     }, true);
     if ('items' in pageResult) await this.verifyMeasurements(uid, pageResult.items, c);
     return pageResult;

@@ -173,6 +173,9 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("DELETE", "templates/:id"): Route(Kind.USER),
     ("GET", "bootstrap"): Route(Kind.REPORT, "bootstrap", "collection"),
     ("GET", "studies"): Route(Kind.REPORT, "studies", "collection"),
+    # S5-U1b 임상의 읽기. 판독 상태·확정본을 읽으므로 REPORT 배터리(기사 무손상·예비 판독 제3자·타 기관 admin)에 든다.
+    ("GET", "clinician/studies"): Route(Kind.REPORT, "clinician-studies", "collection"),
+    ("GET", "clinician/studies/:uid/report"): Route(Kind.REPORT, "clinician-report"),
     ("GET", "unassigned"): Route(Kind.TENANT),
     ("POST", "studies/:uid/assign"): Route(Kind.TENANT),
     ("PATCH", "studies/:uid"): Route(Kind.REPORT, "patch"),
@@ -3556,6 +3559,10 @@ class LiveInvariantTests(unittest.TestCase):
             return self.stack.request("GET", "/bootstrap", user)
         if operation == "studies":
             return self.stack.request("GET", "/studies", user)
+        if operation == "clinician-studies":
+            return self.stack.request("GET", "/clinician/studies", user)
+        if operation == "clinician-report":
+            return self.stack.request("GET", f"/clinician/studies/{uid}/report", user)
         if operation == "patch":
             return self.stack.request("PATCH", f"/studies/{uid}", user, {"ss": "Verified"})
         if operation == "draft-put":
