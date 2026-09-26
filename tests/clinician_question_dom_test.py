@@ -227,6 +227,31 @@ READER_BLOCK = slice_between(MAIN, BLOCK_START, BLOCK_END)
 API_FN = extract_function(MAIN, "api")
 CLINICIAN_BLOCK = slice_between(SHIPPED["clinician.js"], "  // ── 질문 스레드(S5-U4b) ──", "  // ── 세션 ──")
 
+# The four S5-U4b insertions into main.html, each contiguous: (name, first bytes, end marker, whether the end marker is
+# part of the region). The markup's last line alone (`</section>`) is not unique, so its marker is the last two lines.
+U4B_REGIONS = [
+    ("css", "    /* S5-U4b 질문 줄과 창.", "    #question-pane .question-detail:empty { display: none; }\n", True),
+    ("markup", "        <!-- S5-U4b 임상의 질문 스레드(판독 대상 검사).",
+     '          <div id="question-pane" role="region" aria-label="Question Threads" hidden></div>\n        </section>\n', True),
+    ("hook", "      // S5-U4b: 판독 대상이 바뀐 때만 그 검사의 임상의 질문을 읽는다", HOOK, True),
+    ("script", BLOCK_START + "\n", BLOCK_END, False),
+]
+
+
+def without_u4b(text):
+    """main.html (LF) with the four S5-U4b regions taken out: the bytes S5-UI2's and S5-UI3's pins stand for, since
+    tests/worklist_toolbar_dom_test.py and tests/report_actions_dom_test.py pin main.html outside their own regions.
+    Raises if a marker is missing or not unique, so a moved or doubled region fails instead of being half cut."""
+    text = text.replace("\r\n", "\n")
+    for name, start, end, inclusive in U4B_REGIONS:
+        for marker in (start, end):
+            if text.count(marker) != 1:
+                raise AssertionError(f"S5-U4b {name} marker {marker!r} occurs {text.count(marker)} times in main.html")
+        first = text.index(start)
+        last = text.index(end, first) + (len(end) if inclusive else 0)
+        text = text[:first] + text[last:]
+    return text
+
 # Everything the cut block and the shipped api() read from the page script, as small stand-ins. select() is the page's
 # early return for the same study followed by renderClinical(), whose S5-U4b line is the shipped HOOK.
 READER_PRELUDE = """
