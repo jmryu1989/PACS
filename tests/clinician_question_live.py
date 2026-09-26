@@ -101,6 +101,52 @@ def restricted(*rules):
     return {"version": 1, "restricted": True, "startsAt": None, "endsAt": None, "rules": list(rules)}
 
 
+# ── question helpers shared with clinician_policy_live test_05 (the matrix's :id question and its cleanup) ──
+
+def member_owner(stack, user: str) -> list[str]:
+    """expectedOwner of one identity: [institution, sub] as GET /me answers them, the value the service compares."""
+    me = stack.request("GET", "/me", user)
+    if me.status != 200:
+        raise AssertionError(f"GET /me as {user}: {me.status} {me.text[:300]}")
+    return [me.body["institution"], me.body["sub"]]
+
+
+def ask_question(stack, user: str, uid: str, owner: list[str], body: str, rid: str | None = None):
+    """POST studies/:uid/questions with exactly the three keys the service takes: (requestId, HTTP result)."""
+    rid = rid or str(uuid.uuid4())
+    return rid, stack.request("POST", f"/studies/{quote(uid)}/questions", user,
+                              {"requestId": rid, "expectedOwner": owner, "body": body})
+
+
+def read_question_row(qid: str) -> dict:
+    """The StudyQuestion row of one id, read with psql; anything but exactly one row fails the calling case."""
+    if not UUID.fullmatch(qid):
+        raise AssertionError(f"not a question id: {qid!r}")
+    rows = psql(f'SELECT to_jsonb(t)::text FROM "StudyQuestion" t WHERE id={lit(qid)}')
+    if len(rows) != 1:
+        raise AssertionError(f"StudyQuestion {qid}: {rows}")
+    return json.loads(rows[0])
+
+
+def drop_study_questions(uid: str, owned: set[str]) -> None:
+    """Question rows of one run-owned study, children first; rows written by a subject outside owned stop the cleanup.
+
+    Both foreign keys RESTRICT and LiveStack.cleanup_fixture deletes StudyState directly, so a module that writes
+    questions on its study runs this before the study cleanup."""
+    if not STUDY_UID.fullmatch(uid):
+        raise RuntimeError(f"refusing question cleanup for an abnormal UID: {uid}")
+    authors = set(psql(f'SELECT DISTINCT "authorSub" FROM "StudyQuestion" WHERE "studyUid"={lit(uid)}'))
+    authors |= set(psql(f'SELECT DISTINCT e."authorSub" FROM "StudyQuestionEntry" e JOIN "StudyQuestion" q '
+                        f'ON q.id=e."questionId" WHERE q."studyUid"={lit(uid)}'))
+    foreign = authors - owned
+    if foreign:
+        raise RuntimeError(f"refusing to delete question rows this run did not write: {sorted(foreign)}")
+    psql(f'BEGIN; DELETE FROM "StudyQuestionEntry" e USING "StudyQuestion" q WHERE q.id=e."questionId" '
+         f'AND q."studyUid"={lit(uid)}; DELETE FROM "StudyQuestion" WHERE "studyUid"={lit(uid)}; COMMIT;')
+    if psql(f'SELECT count(*) FROM "StudyQuestion" WHERE "studyUid"={lit(uid)}') != ["0"]:
+        raise RuntimeError("question rows remained after cleanup")
+
+
 class ClinicianQuestionLive(unittest.TestCase):
     maxDiff = None
 
@@ -155,19 +201,7 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     @classmethod
     def drop_questions(cls, uid: str) -> None:
-        """Question rows of one run-owned study, children first; rows written by anyone else stop the cleanup."""
-        if not STUDY_UID.fullmatch(uid):
-            raise RuntimeError(f"refusing question cleanup for an abnormal UID: {uid}")
-        authors = set(psql(f'SELECT DISTINCT "authorSub" FROM "StudyQuestion" WHERE "studyUid"={lit(uid)}'))
-        authors |= set(psql(f'SELECT DISTINCT e."authorSub" FROM "StudyQuestionEntry" e JOIN "StudyQuestion" q '
-                            f'ON q.id=e."questionId" WHERE q."studyUid"={lit(uid)}'))
-        foreign = authors - cls.owned_subjects()
-        if foreign:
-            raise RuntimeError(f"refusing to delete question rows this run did not write: {sorted(foreign)}")
-        psql(f'BEGIN; DELETE FROM "StudyQuestionEntry" e USING "StudyQuestion" q WHERE q.id=e."questionId" '
-             f'AND q."studyUid"={lit(uid)}; DELETE FROM "StudyQuestion" WHERE "studyUid"={lit(uid)}; COMMIT;')
-        if psql(f'SELECT count(*) FROM "StudyQuestion" WHERE "studyUid"={lit(uid)}') != ["0"]:
-            raise RuntimeError("question rows remained after cleanup")
+        drop_study_questions(uid, cls.owned_subjects())
 
     @classmethod
     def drop_all_questions(cls) -> None:
@@ -185,9 +219,7 @@ class ClinicianQuestionLive(unittest.TestCase):
 
     def owner(self, user: str) -> list[str]:
         if user not in self.owners:
-            me = self.stack.request("GET", "/me", user)
-            self.assertEqual(me.status, 200, me.text)
-            self.owners[user] = [me.body["institution"], me.body["sub"]]
+            self.owners[user] = member_owner(self.stack, user)
         return self.owners[user]
 
     def check(self, result, status: int, expected_code: str | None = None):
@@ -197,9 +229,7 @@ class ClinicianQuestionLive(unittest.TestCase):
         return result
 
     def ask(self, user, uid, body="SYNTHETIC question", rid=None, expect=201, expected_code=None):
-        rid = rid or str(uuid.uuid4())
-        result = self.stack.request("POST", f"/studies/{quote(uid)}/questions", user,
-                                    {"requestId": rid, "expectedOwner": self.owner(user), "body": body})
+        rid, result = ask_question(self.stack, user, uid, self.owner(user), body, rid)
         return rid, self.check(result, expect, expected_code)
 
     def entry(self, user, qid, revision, body="SYNTHETIC answer", rid=None, expect=201, expected_code=None):
@@ -228,10 +258,7 @@ class ClinicianQuestionLive(unittest.TestCase):
         return {item["id"] for item in result.body["items"]}
 
     def question_row(self, qid) -> dict:
-        self.assertRegex(qid, UUID)
-        rows = psql(f'SELECT to_jsonb(t)::text FROM "StudyQuestion" t WHERE id={lit(qid)}')
-        self.assertEqual(len(rows), 1, rows)
-        return json.loads(rows[0])
+        return read_question_row(qid)
 
     def entries(self, qid) -> list[dict]:
         self.assertRegex(qid, UUID)

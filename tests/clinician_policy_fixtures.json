@@ -436,10 +436,18 @@
     "test": "test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case",
     "marker": "CLINICIAN_LIVE_MATRIX",
     "study": "one run-owned synthetic hallym study (LiveStack.create_fixture, C-STORE), report left at RS W; the matrix writes no report, item or setting",
+    "write_rule": "S5-U4a: a write allow row is a handler that answers 201 (a POST without @HttpCode). Its write names the method, the request body (placeholders from fill are the run's values), the expected status and the audit rows the positive writes: action (the product constant in source), rows, the actor's identity, target and detail values. Its wrong_role and wrong_tenant are denials, 403 and 404, and write nothing. A read row keeps the read contract: 200/204, no request body but dicom/lookup's, no audit row. Every case of every row is checked against the AuditLog rows it caused.",
+    "fill": {
+      "$request_id": "a new UUID v4 for every call",
+      "$owner": "[institution, sub] of the calling identity from GET /me, the value the question service compares expectedOwner with, so a refusal is the role or tenant rule and never OWNER_CHANGED",
+      "$revision": "the current revision of the :id question, read from StudyQuestion just before the call"
+    },
+    "question": "one question the clinician asks on the study before the loop with clinician_question_live.ask_question; :id is its id. The create row asks a second one, the entries row follows it up, and the close row, which runs after every other row that names it, closes it. The question rows go before the study cleanup (both foreign keys RESTRICT) through clinician_question_live.drop_study_questions",
     "identities": {
       "clinician": "clinician-only member of hallym, the study's institution",
       "kclinician": "clinician-only member of kin-center",
       "doctor": "radiologist-only member of hallym (LiveStack)",
+      "tech": "technician-only member of hallym (LiveStack)",
       "gateway": "valid gateway client-credentials identity of kin-center (LiveStack.service_token)",
       "cinvalid": "clinician-only member with two institution groups, created by the case"
     },
@@ -473,12 +481,64 @@
       "GET clinician/studies": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
         "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
-        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "basis": "a collection: the other institution's clinician is answered, without the study"}
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "studies", "field": "uid", "value": ":uid"}, "basis": "a collection: the other institution's clinician is answered, without the study"}
       },
       "GET clinician/studies/:uid/report": {
         "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
         "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": null, "message": "clinician 권한"},
         "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": null, "message": "검사를 찾을 수 없습니다"}
+      },
+      "GET questions": {
+        "query": "view=mine",
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED", "basis": "view=mine is the clinician's own list; a radiologist reads view=inbox"},
+        "wrong_tenant": {"as": "kclinician", "expect": "absent", "status": 200, "code": null, "absent": {"list": "items", "field": "id", "value": ":id"}, "basis": "a collection: the other institution's clinician is answered, without the question"}
+      },
+      "GET questions/:id": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+      },
+      "GET studies/:uid/questions": {
+        "positive": {"as": "clinician", "expect": "allowed", "status": 200, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST studies/:uid/questions": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "body": "SYNTHETIC S5-U1c matrix question"},
+          "expected_status": 201,
+          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "question", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "doctor", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "STUDY_NOT_FOUND"}
+      },
+      "POST questions/:id/entries": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "body": "SYNTHETIC S5-U1c matrix follow-up"},
+          "expected_status": 201,
+          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "followup", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
+      },
+      "POST questions/:id/close": {
+        "write": {
+          "method": "POST",
+          "body": {"requestId": "$request_id", "expectedOwner": "$owner", "revision": "$revision", "note": ""},
+          "expected_status": 201,
+          "audit": {"action": "study.question", "source": ["clinician-question.service.ts", "QUESTION_AUDIT_ACTION"], "rows": 1,
+                    "actor": "clinician", "target": ":uid", "detail": {"requestId": "$request_id", "kind": "close", "role": "clinician"}}
+        },
+        "positive": {"as": "clinician", "expect": "allowed", "status": 201, "code": null},
+        "wrong_role": {"as": "tech", "expect": "denied", "status": 403, "code": "QUESTION_ROLE_REQUIRED"},
+        "wrong_tenant": {"as": "kclinician", "expect": "denied", "status": 404, "code": "QUESTION_NOT_FOUND"}
       }
     }
   },
