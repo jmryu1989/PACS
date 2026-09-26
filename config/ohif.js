@@ -1177,8 +1177,9 @@ function kinCreateViewerHistory() {
     function sessionEnded() { kinViewerSession.refuse(); end(); }
     async function api(path, options = {}, ticket = generation) {
       // A request of a generation already given up (another study, the clinician-only boundary) is not sent at all: a save that
-      // was waiting for its /me when that answer said clinician-only never reaches the server.
-      if (!valid(ticket)) throw { stale: true };
+      // was waiting for its /me when that answer said clinician-only never reaches the server. Nor is any request of a document
+      // whose login ended (X4-R-001 F02), whether or not this panel has heard of it yet.
+      if (kinViewerSession.ended() || !valid(ticket)) throw { stale: true };
       const parentSignal = controller.signal, request = new AbortController();
       const abort = () => request.abort(); parentSignal.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(abort, 30000);
@@ -1197,9 +1198,10 @@ function kinCreateViewerHistory() {
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
-      // Another account ends the document's login before its verdict is noted (Astra S5-U2b-X3-R-001 F01, the layout panel's
-      // order too): noted first, a clinician-only account made the document read-only, which the refusal after it cannot leave.
-      if (subject && subject !== user.sub) { sessionEnded(); throw { stale: true }; }
+      // Another account ends the document's login before its verdict is noted (Astra S5-U2b-X3-R-001 F01, X4-R-001 F01). note()
+      // makes that comparison against the account the document confirmed first — by this mount, an earlier one or another panel —
+      // so a mount that has not confirmed anyone yet (subject is empty after a mode re-entry) is covered too; a refusal there ends
+      // this panel inside note() through the session watcher.
       // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
       ownAnswer = true;
       try { kinViewerSession.note(user); } finally { ownAnswer = false; }
@@ -1714,6 +1716,8 @@ function kinCreateViewerHistory() {
       }
     }
     function scan() {
+      // The observation tick sees the document's end first (X4-R-001 F02): whichever way it was noted, this panel ends with it.
+      if (!ended && kinViewerSession.ended()) end();
       closeAuthoring();
       if (ended) return;
       const r = current();
@@ -1835,7 +1839,8 @@ function kinCreateViewerHistory() {
     // 판정이 바뀌는 순간(이 패널의 /me가 아니어도): writer면 막는 동안 적어 둔 도구 모드·도구막대를 되돌리고, 그 밖이면 작성
     // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 clinicianBoundary를 지난다. 다른 판정은 그려 둔 행의 컨트롤만
     // 다시 그린다. (Astra S5-U2b-X2-R-001 F01) 어느 확장의 /me든 refused가 되면 이 패널도 끝나고, 끝난 패널은 그 뒤 공유 판정이
-    // 무엇이든 작성 경로를 다시 열지 않는다.
+    // 무엇이든 작성 경로를 다시 열지 않는다. (X4-R-001 F02) read-only 문서의 종료도 여기로 온다: 확정 목록과 그 표식을 내리고
+    // 주기·포커스 확인을 멈춘다.
     const unwatch = kinViewerSession.onChange(next => {
       const own = ownAnswer;
       if (next === 'refused' && !ended) end();
@@ -1861,8 +1866,9 @@ function kinCreateViewerHistory() {
       for (const restore of guardedTools.values()) restore();
       guardedTools.clear();
     };
-    // A mode entry in a document whose login already ended (F01) starts ended: no /me, no list, authoring closed.
-    if (kinViewerSession.state() === 'refused') end();
+    // A mode entry in a document whose login already ended (F01; X4-R-001 F02: a read-only document's end too) starts ended: no /me,
+    // no list, authoring closed.
+    if (kinViewerSession.ended()) end();
     scan();
   }
   return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -1942,33 +1948,51 @@ function kinViewerClinicianOnly(me) {
    되는 순간 내려간다.
    (Astra S5-U2b-X2-R-001 F01) refused도 문서가 끝날 때까지 되돌리지 않는다. 401/403·로그아웃·다른 계정은 이 문서의 로그인이
    끝난 것이고(각 패널은 "다시 로그인한 뒤 뷰어를 여세요"라고 알린다), 그 전에 보낸 /me든 그 뒤의 /me든, 어느 확장의 것이든,
-   응답 본문이 늦게 끝난 것이든 writer 답이 작성 경로를 다시 열지 못한다. 돌아가는 길은 새 뷰어다. */
+   응답 본문이 늦게 끝난 것이든 writer 답이 작성 경로를 다시 열지 못한다. 돌아가는 길은 새 뷰어다.
+   (Astra S5-U2b-X4-R-001 F01·F02) 문서 수명의 상태는 셋이고 모드 종료·재진입이 어느 것도 지우지 않는다.
+   owner: 이 문서가 처음 확인한 계정([기관, sub]). /me를 받는 곳(측정 패널·배치 패널·쓰기 화면 관문, 재확인·주기 확인 포함)은
+   모두 note()로 적고, note()는 역할 판정을 반영하기 전에 답의 계정을 owner와 비교한다 — 다른 계정은 그 역할이 무엇이든 곧바로
+   종료다. 패널마다 따로 비교하면 새로 붙은 패널·재진입한 패널은 비교할 계정이 없어 다른 계정의 writer 답으로 작성 경로를 다시
+   열었다. ended: 로그인이 끝났다(401/403·로그아웃 방송·다른 계정·구성원이 아닌 답). 역할 판정과 따로 두고 read-only보다
+   앞선다 — read-only 문서도 끝나면 끝나고(그래야 재진입이 목록 읽기를 다시 시작하지 않는다), read-only에서 writer로는 여전히
+   돌아가지 않는다. 조회·작성·마운트·주기 확인의 관문은 ended부터 본다. */
 const kinViewerSession = (() => {
-  let state = 'unconfirmed', read = null;
+  let role = 'unconfirmed', ended = false, owner = null, read = null;
   const waiting = new Set(), watchers = new Set(), changes = new Set();
+  const state = () => ended ? 'refused' : role;
   function settle(next) {
-    if (state === 'read-only') return state;
-    if (state === 'refused') return state;
-    const previous = state; state = next;
-    for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(next); }
-    if (next === 'read-only') for (const watch of [...watchers]) { try { watch(); } catch (_) {} }
-    if (next !== previous) for (const watch of [...changes]) { try { watch(next); } catch (_) {} }
-    return state;
+    const previous = state();
+    if (ended) return previous;
+    if (role === 'read-only' && next !== 'refused') return previous;
+    if (next === 'refused') ended = true; else role = next;
+    const now = state();
+    for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(now); }
+    if (now === 'read-only' && previous !== now) for (const watch of [...watchers]) { try { watch(); } catch (_) {} }
+    if (now !== previous) for (const watch of [...changes]) { try { watch(now); } catch (_) {} }
+    return now;
   }
-  const member = me => me?.kind === 'member' && typeof me.sub === 'string' && me.sub.length > 0;
-  const note = me => settle(kinViewerClinicianOnly(me) ? 'read-only' : member(me) ? 'writer' : 'refused');
+  // The account a /me answer is from. An answer without one (not a member, no sub) is refused: it cannot be compared with the owner.
+  const account = me => me?.kind === 'member' && typeof me.sub === 'string' && me.sub.length > 0
+    ? JSON.stringify([typeof me.institution === 'string' ? me.institution : null, me.sub]) : null;
+  function note(me) {
+    const who = account(me);
+    if (who !== null && owner !== null && who !== owner) return settle('refused');
+    if (who !== null && owner === null) owner = who;
+    return settle(who === null ? 'refused' : kinViewerClinicianOnly(me) ? 'read-only' : 'writer');
+  }
   return {
-    state: () => state,
-    readOnly: () => state === 'read-only',
-    writer: () => state === 'writer',
+    state,
+    ended: () => ended,
+    readOnly: () => state() === 'read-only',
+    writer: () => state() === 'writer',
     note,
     refuse: () => settle('refused'),
     onReadOnly(watch) { watchers.add(watch); return () => { watchers.delete(watch); }; },
     onChange(watch) { changes.add(watch); return () => { changes.delete(watch); }; },
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
     decide() {
-      if (state === 'read-only') return Promise.resolve(state);
-      if (state === 'refused') return Promise.resolve(state);
+      if (ended) return Promise.resolve(state());
+      if (role === 'read-only') return Promise.resolve(role);
       const answer = new Promise(resolve => waiting.add(resolve));
       if (!read && typeof fetch === 'function') {
         read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } }).then(async response => {
@@ -2020,15 +2044,11 @@ function kinCreateViewerLayout() {
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
     }
     async function authenticate(signal) {
-      // The owner this panel confirmed, read before the request: an end() while the answer was on the way clears `key`, and the
-      // answer is still that of this document's browser session.
-      const known = key;
-      const me = await get('/api/me', signal), next = model.owner(me), confirmed = key || known;
-      // Astra S5-U2b-X3-R-001 F01: another account is the end of the document's login, not only of this panel. The shared session
-      // is refused before note() could post that account's verdict (a writer would keep the other extensions writing and a mode
-      // re-entry would give the account buttons back; a clinician-only one would leave the document read-only instead of ended).
-      // A mode exit with the same account is not an account change and stays this panel's own end below.
-      if (confirmed && next !== confirmed) { sessionEnded(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
+      const me = await get('/api/me', signal), next = model.owner(me);
+      // Astra S5-U2b-X3-R-001 F01 · X4-R-001 F01: another account is the end of the document's login, not only of this panel. The
+      // account check is the shared session's: note() compares this answer with the account the document confirmed first (by any
+      // panel, before any mode exit) before it posts a verdict, and refuses the session on a difference; the watcher below then ends
+      // this panel, so live() is false here. A check of this panel's own key could not see an account confirmed before this mount.
       kinViewerSession.note(me);
       if (!live() || !next) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       key = next;
@@ -2054,7 +2074,7 @@ function kinCreateViewerLayout() {
       await load('hanging-protocol-model.js', 'KinHangingProtocolModel');
       if (!live()) return;
       await load('viewer-hanging-protocol.js', 'KinViewerHangingProtocol');
-      if (!live() || kinViewerSession.readOnly()) return;
+      if (kinViewerSession.ended() || !live() || kinViewerSession.readOnly()) return;
       const host = hpHost = document.createElement('section'); panel.append(host);
       hp = window.KinViewerHangingProtocol.mount({ services, host, owner: hpOwner, live,
         access: async ({ signal }) => {
@@ -2100,7 +2120,7 @@ function kinCreateViewerLayout() {
       return value;
     }
     async function run(action) {
-      if (busy || !live() || !key || !studies || kinViewerSession.readOnly()) return;
+      if (kinViewerSession.ended() || busy || !live() || !key || !studies || kinViewerSession.readOnly()) return;
       busy = true; refresh(); status.textContent = '계정과 검사 접근 확인 중…'; const before = signature();
       try {
         await authenticate();
@@ -2134,14 +2154,16 @@ function kinCreateViewerLayout() {
     const unwatch = kinViewerSession.onReadOnly(readOnlyPanel);
     if (kinViewerSession.readOnly()) readOnlyPanel();
     // F01: refused by any extension's /me (before this panel's own answer or after it enabled the account buttons) ends this panel;
-    // its late writer /me then finds it ended and neither keys the buttons nor mounts the Hanging Protocol editor. The logout broadcast
-    // ends only this panel here: the Measurements panel hears the same broadcast and ends the document's session (sessionEnded there).
+    // its late writer /me then finds it ended and neither keys the buttons nor mounts the Hanging Protocol editor.
     const unwatchEnd = kinViewerSession.onChange(next => { if (next === 'refused') end(); });
-    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
-    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
+    // Astra S5-U2b-X4-R-001 F02: the logout broadcast ends the document's session here too, not only this panel — a document whose
+    // Measurements panel is not mounted (or has already left) must not open this panel's account controls again on a mode re-entry.
+    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };
+    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); };
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
-    if (kinViewerSession.state() === 'refused') end();
+    // A mode entry in a document whose login already ended starts ended: no /me, no account buttons, no editor.
+    if (kinViewerSession.ended()) end();
     else if (studies) authenticate().then(async () => {
       if (!live()) return;
       if (kinViewerSession.readOnly()) { readOnlyPanel(); return; }

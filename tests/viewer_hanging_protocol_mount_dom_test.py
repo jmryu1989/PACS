@@ -179,6 +179,13 @@ class ViewerHangingProtocolMountDOMTest(unittest.TestCase):
         self.release(self.delayed_studies, json={'studies': STUDIES}); self.page.wait_for_timeout(100); self.assertEqual(0, self.page.evaluate('setCalls.length'))
 
         self.page.evaluate('viewerLayoutExtension.onModeExit()'); self.change_owner_after = None; self.me_count = 0; self.delayed_studies = None
+        # S5-U2b-X4-R-001-F02: the logout broadcast ended this document's session, so the mode re-entry stays ended — no /me, no
+        # editor, the ended status (before: the editor mounted again after asking /me). The delayed owner change below is checked
+        # in a new viewer document instead.
+        self.page.evaluate('mountLayout()'); self.page.wait_for_timeout(100)
+        self.assertEqual((0, 0), (self.me_count, self.page.get_by_role('heading', name='Hanging Protocols').count()))
+        expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
+        self.page.goto(f'https://mount.test/ohif/viewer?StudyInstanceUIDs={CURRENT},{RELATED}'); self.page.add_script_tag(content=INTEGRATION)
         self.page.evaluate('mountLayout()'); expect(self.page.get_by_role('heading', name='Hanging Protocols')).to_be_visible()
         self.change_owner_after = self.me_count + 1
         self.page.locator('#kin-hp-apply').click(); expect(self.page.locator('#kin-viewer-layout-status')).to_contain_text('세션이 변경')
