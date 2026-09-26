@@ -2,13 +2,15 @@
   {
     "module": "tests/clinician_read_live.py",
     "unit": "s5-u1b-clinician-read",
-    "timeout": 800,
+    "timeout": 900,
     "cases": [
       "ClinicianReadLive.test_01_list_row_is_narrow_counts_only_visible_studies_and_keeps_role_gates",
       "ClinicianReadLive.test_02_report_read_follows_the_head_row_final_then_reset_back_to_status",
       "ClinicianReadLive.test_03_viewer_pair_items_statistics_and_the_tele_boundary",
-      "ClinicianReadLive.test_04_a_revoked_member_loses_every_clinician_read",
-      "ClinicianReadLive.test_05_same_user_a_b_a_gets_each_studys_own_answer"
+      "ClinicianReadLive.test_04_revocation_ends_the_kept_session_and_new_tokens_and_reports_the_kept_bearer_until_exp",
+      "ClinicianReadLive.test_05_same_user_a_b_a_gets_each_studys_own_answer",
+      "ClinicianReadLive.test_06_viewer_items_stay_on_one_signed_version_across_a_reset_and_reapproval",
+      "ClinicianReadLive.test_07_list_status_is_one_snapshot_when_an_addendum_lands_mid_list"
     ],
     "expected": {
       "sweep": null,
