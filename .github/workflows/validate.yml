@@ -75,6 +75,12 @@ jobs:
       # through scripts/run-tests.py on a hosted synthetic stack and is not a step of this job.
       - name: S5-U1a clinician-only default denial fixtures, route classification and role-list source pins
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-policy --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_policy_test.py --file api/src/clinician-policy.ts --file api/src/auth.guard.ts --file api/src/admin.service.ts --file api/src/keycloak.service.ts --file keycloak/kin-realm.json --file tests/invariants_live.py -- python3 -B tests/clinician_policy_test.py
+      # S5-U1b: the clinician read projections against the read_contract field sets (deep key walk, no stack). This job
+      # builds no kin-api:ci, so KIN_CLINICIAN_POLICY_MODULE points the test at the TS source instead of its default
+      # /app/dist/clinician-policy; node:22 strips the types (>= 22.18) and the test serves '@nestjs/common' from the
+      # fixture. The S5-U1b live module runs only through scripts/run-tests.py on a hosted synthetic stack.
+      - name: S5-U1b clinician read serializer vectors against the TS source
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-read-serializer --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_read_serializer_test.cjs --file api/src/clinician-policy.ts -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_CLINICIAN_POLICY_MODULE=api/src/clinician-policy.ts node:22-alpine node --test tests/clinician_read_serializer_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
