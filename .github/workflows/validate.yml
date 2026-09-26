@@ -242,6 +242,12 @@ jobs:
       - name: S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py
+      # S5-U3: the shipped clinician home's Patient Timeline against stubbed timeline answers grouped by the server patient key
+      # only (no stack, network or credentials); nothing is read before Show Timeline, another key's row is refused, the marker
+      # follows the server's source relation, and the guard-less / display-comparing control files must fail those checks.
+      - name: S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-timeline-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file tests/clinician_timeline_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_timeline_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
