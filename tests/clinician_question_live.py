@@ -3,7 +3,8 @@
 
 REQ-S5-U4p-ATTRIBUTION/TENANT/STUDY-ACCESS-READ/QUESTION-STATE/IDEMPOTENCY/LATE-UPDATE/REVOCATION/ROLE-MATRIX/
 CONSULTATION-SEPARATE/AUDIT/AUDIT-READ -> RISK-S5-U4p-* -> TEST-S5-U4a-LIVE (contract S5-U4p section 2.3, 7.1, 11.1,
-decision D33). The case names are the contract's Q01-Q14. Hosted synthetic stack only, through scripts/run-tests.py:
+decision D33). The case names are the contract's Q01-Q14; Q15 is Astra S5-U4a-F01 (one thread read is one snapshot).
+Hosted synthetic stack only, through scripts/run-tests.py:
 
     python scripts/run-tests.py --module tests/clinician_question_live.py --mode live --unit s5-u4a-clinician-question --timeout 1800
 
@@ -17,7 +18,9 @@ study per case, the question rows, receipts and audit rows written on those stud
 on this run's radiologists. Every case removes its question rows before the study cleanup (both foreign keys RESTRICT,
 and LiveStack.cleanup_fixture deletes StudyState directly), refusing rows another member wrote. Q07 and Q13 move the
 owning institution of their own synthetic study with psql (no product path moves ownership, contract F-21) and move it
-back in a finally block; Q07 removes the clinician role from its own mixed member.
+back in a finally block; Q07 removes the clinician role from its own mixed member. Q15 holds the run clinician's
+study-access advisory lock in its own psql session for the writes it makes through the product routes and commits that
+session (it writes nothing) in a finally block.
 
 Not proved here: withdrawing a clinician-only member's access per study (study-access target() still manages admin,
 radiologist and technician members only, decision D33 OQ-8 b); a third institution beyond hallym and kin-center (Q13 uses
@@ -28,7 +31,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import subprocess
 import sys
+import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +60,7 @@ CASES = (
     ("test_q12_study_delete_refused_while_questions_exist", 30),
     ("test_q13_audit_rows_owner_institution_only", 55),
     ("test_q14_metadata_study_access_allows_and_denies", 60),
+    ("test_q15_thread_read_is_one_snapshot", 45),
 )
 SETUP_SECONDS = 90
 EXPECTED_SECONDS = SETUP_SECONDS + sum(seconds for _name, seconds in CASES)
@@ -370,6 +376,66 @@ class ClinicianQuestionLive(unittest.TestCase):
             self.assertEqual(listed.status, 200, listed.text[:300])
             kinds = {change["ChangeType"] for change in listed.body["Changes"]}
             self.assertTrue(kinds <= TIME_ONLY_CHANGES, sorted(kinds))
+
+    def whole(self, item) -> None:
+        """One thread answer is one moment (S5-U4a-F01): revision = entryCount = entries 1..n, closed exactly when Closed."""
+        self.assertEqual(item["revision"], item["entryCount"])
+        self.assertEqual([e["seq"] for e in item["entries"]], list(range(1, item["entryCount"] + 1)))
+        self.assertEqual(item["closed"] is not None, item["state"] == "Closed")
+        self.assertEqual(any(e["kind"] == "close" for e in item["entries"]), item["state"] == "Closed")
+
+    def hold_access_lock(self, user):
+        """An open psql transaction holding `user`'s study-access advisory lock exclusively: every question transaction of
+        that member takes it shared (StudyAccessService.snapshot) and waits here. Same shape as finding_api_test.hold."""
+        key = "study-access:" + json.dumps(self.owner(user), separators=(",", ":"), ensure_ascii=False)
+        holder = subprocess.Popen(["docker", "exec", "-i", "kin-db", "psql", "-XqAt", "-U", "kin", "-d", "kin", "-v", "ON_ERROR_STOP=1"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        holder.stdin.write("BEGIN; SET LOCAL statement_timeout='8s'; SET LOCAL idle_in_transaction_session_timeout='30s'; "
+                           f"SELECT pg_advisory_xact_lock(hashtextextended({lit(key)}, 0)); SELECT 'LOCKED';\n")
+        holder.stdin.flush()
+        while holder.stdout.readline().strip() != "LOCKED":
+            if holder.poll() is not None:
+                raise RuntimeError("study-access lock holder failed: " + holder.stderr.read())
+        return holder, key
+
+    def holder_rows(self, holder, sql) -> list[str]:
+        """Read-only `sql` in the holder's own session: no process start-up while requests wait on its lock."""
+        holder.stdin.write(sql + "; SELECT 'DONE';\n")
+        holder.stdin.flush()
+        rows = []
+        while (line := holder.stdout.readline().strip()) != "DONE":
+            if not line and holder.poll() is not None:
+                self.fail("the lock holder session ended: " + holder.stderr.read())
+            if line:
+                rows.append(line)
+        return rows
+
+    def wait_on_lock(self, holder, key, count, timeout=10) -> None:
+        """Bounded wait until `count` sessions wait for the shared lock of `key` (a bigint key shows its high half in
+        classid and its low half in objid, objsubid 1)."""
+        sql = ("SELECT count(*) FROM pg_locks l CROSS JOIN (SELECT hashtextextended(" + lit(key) + ", 0) AS h) k "
+               "WHERE l.locktype='advisory' AND l.objsubid=1 AND l.mode='ShareLock' AND NOT l.granted "
+               "AND l.classid::text::bigint=((k.h>>32)&4294967295) AND l.objid::text::bigint=(k.h&4294967295)")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.holder_rows(holder, sql) == [str(count)]:
+                return
+            time.sleep(0.02)
+        self.fail(f"{count} request(s) were not observed waiting on the study-access lock")
+
+    def release_lock(self, holder) -> None:
+        """Commit the holder (it wrote nothing); a second call and an ended session are no-ops."""
+        if holder.poll() is not None:
+            return
+        holder.stdin.write("COMMIT;\n")
+        holder.stdin.flush()
+        try:
+            holder.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.communicate()
+            raise
+        self.assertEqual(holder.returncode, 0, "the study-access lock holder failed")
 
     # ── cases (contract S5-U4p section 2.3 names) ──
 
@@ -906,6 +972,56 @@ class ClinicianQuestionLive(unittest.TestCase):
         self.shut("qy", qid, 3, note="SYNTHETIC denied close", expect=404, expected_code="QUESTION_NOT_FOUND")
         self.assertEqual(self.ledger(f.uid, qid), (3, 3, 3))
         self.assert_orthanc_unchanged(marks)
+
+    def test_q15_thread_read_is_one_snapshot(self) -> None:
+        """Astra S5-U4a-F01. The thread read (#2) and the study's thread list (#3) of the clinician wait on the clinician's
+        study-access lock, the first query of their transaction. RepeatableRead fixed the snapshot before that wait, so
+        an answer, a close and a report reset committed through the product routes meanwhile reach neither answer: both
+        are the moment before, whole. A read taking a snapshot per statement answers the moment after instead."""
+        f = self.study()
+        _, created = self.ask("clinician", f.uid)
+        qid = created.body["applied"]["id"]
+        approved = self.check(self.commit(f.uid, "doctor", "approve", 0, findings="SYNTHETIC-Q15-findings"), 201)
+        self.assertEqual(approved.body["rs"], "A")
+        thread_path, study_path = f"/questions/{quote(qid)}", f"/studies/{quote(f.uid)}/questions"
+        before = self.read("clinician", qid)
+        listed = self.check(self.stack.request("GET", study_path, "clinician"), 200).body["items"]
+        self.whole(before)
+        self.assertEqual((before["state"], before["revision"], before["current"]), ("Open", 1, {"rs": "A", "version": self.head_version(f.uid)}))
+        self.assertEqual([item["id"] for item in listed], [qid])
+        for user in ("clinician", "doctor", "doctor2"):
+            self.stack.token(user)   # no token exchange or GET /me while the reads wait
+            self.owner(user)
+        holder, key = self.hold_access_lock("clinician")
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                reads = [pool.submit(self.stack.request, "GET", path, "clinician") for path in (thread_path, study_path)]
+                self.wait_on_lock(holder, key, 2)
+                started = time.monotonic()
+                _, answered = self.entry("doctor2", qid, 1, body="SYNTHETIC Q15 answer while the reads wait")
+                _, closed = self.shut("doctor", qid, 2, note="SYNTHETIC Q15 close while the reads wait")
+                reset = self.check(self.commit(f.uid, "doctor", "reset", approved.body["version"], reason="SYNTHETIC Q15 reset"), 201)
+                # the waiting transactions give up after the service's 3 s lock_timeout (503 QUESTION_BUSY)
+                print(f"CLINICIAN_QUESTION_Q15_WRITES_SECONDS {time.monotonic() - started:.3f}", flush=True)
+                self.release_lock(holder)
+                thread, threads = [future.result(timeout=30) for future in reads]
+        finally:
+            self.release_lock(holder)
+        self.assertEqual([answered.body["applied"]["revision"], closed.body["applied"]["revision"], reset.body["rs"]], [2, 3, "W"])
+        self.check(thread, 200)
+        self.check(threads, 200)
+        self.assertEqual(thread.body["item"], before, "the waiting read answers the snapshot fixed before the commits")
+        self.assertEqual(threads.body["items"], listed, "the waiting study list answers the same snapshot")
+        self.whole(thread.body["item"])
+        after = self.read("clinician", qid)
+        self.whole(after)
+        self.assertEqual((after["state"], after["revision"], [e["kind"] for e in after["entries"]]), ("Closed", 3, ["question", "answer", "close"]))
+        self.assertEqual((after["closed"]["by"]["actor"], after["closed"]["by"]["role"]), (self.stack.actor("doctor"), "radiologist"))
+        self.assertEqual(after["current"], {"rs": "W", "version": self.head_version(f.uid)})
+        self.assertNotEqual(after["current"]["version"], before["current"]["version"])
+        [summary] = self.check(self.stack.request("GET", study_path, "clinician"), 200).body["items"]
+        self.assertEqual((summary["state"], summary["revision"], summary["entryCount"]), ("Closed", 3, 3))
+        self.assertEqual(self.ledger(f.uid, qid), (3, 3, 3))
 
 
 # The pinned order is the class's own: a renamed, added or missing case stops the module before any live call.

@@ -83,13 +83,19 @@ export class ClinicianQuestionService {
     throw roleRequired();
   }
 
-  private async run<T>(c: Caller, fn: (tx: any) => Promise<T>): Promise<T> {
+  /**
+   * 쓰기는 기본 격리(ReadCommitted)에서 검사·질문 행을 잠근 뒤 커밋된 최신 행을 본다. 읽기(#2·#3)는 RepeatableRead 한
+   * 스냅샷에서 질문 행·검사 상태·항목·현재 판 번호를 모두 읽는다 — 문장마다 새 스냅샷이면 그 사이에 커밋된 답변·닫기·판독
+   * 취소가 섞여 revision·항목·closed·current가 실제로 없었던 조합이 된다(S5-U4a-F01). 읽기는 행 잠금을 잡지 않는다.
+   * 스냅샷은 접근 정책 공유 잠금을 기다리기 전에 정해지므로 그 사이의 정책 변경은 StudyAccessInterceptor가 응답 전에 거절한다.
+   */
+  private async run<T>(c: Caller, fn: (tx: any) => Promise<T>, read = false): Promise<T> {
     try {
       return await this.prisma.$transaction(async tx => {
         await tx.$executeRaw`SET LOCAL lock_timeout = '3s'`;
         await this.studyAccess.snapshot(c, tx);
         return fn(tx);
-      }, { maxWait: 4000, timeout: 8000 });
+      }, read ? { isolationLevel: 'RepeatableRead', maxWait: 4000, timeout: 8000 } : { maxWait: 4000, timeout: 8000 });
     } catch (e: any) {
       // 영수증 PK가 부딪히는 경우는 같은 requestId가 다른 부모에서 동시에 쓰인 때뿐이다(같은 부모는 행 잠금이 줄 세운다).
       if (e?.code === 'P2002') throw reused();
@@ -210,6 +216,7 @@ export class ClinicianQuestionService {
       } catch (_) { throw invalid('질문 목록 페이지를 확인하세요'); }
     }
     // 불변인 생성 기관과 **현재** 소유 기관을 함께 JOIN한다 — 옮겨 간 검사의 질문은 어느 쪽 목록에도 나오지 않는다.
+    // 항목 요약·lastEntryAt·소유 기관이 한 문장이라 한 스냅샷이다. 여러 문장을 조합하는 #2·#3만 읽기 트랜잭션을 쓴다.
     const before = cursor?.at ?? '9999-12-31T00:00:00.000Z', beforeId = cursor?.id ?? 'ffffffff-ffff-ffff-ffff-ffffffffffff';
     const rows: any[] = await this.prisma.$queryRaw`SELECT q.*,
         (SELECT max(e.at) FROM "StudyQuestionEntry" e WHERE e."questionId"=q.id) AS "lastEntryAt"
@@ -234,7 +241,7 @@ export class ClinicianQuestionService {
       const { row, rs } = await this.question(tx, id.toLowerCase(), c, scope, false);
       const entries: any[] = await tx.studyQuestionEntry.findMany({ where: { questionId: row.id }, orderBy: { seq: 'asc' } });
       return { owner: this.owner(c), item: this.thread(row, entries, await this.anchor(tx, row.studyUid, rs)) };
-    });
+    }, true);
   }
 
   /** #3 한 검사의 스레드 요약(최신 50개). 임상의는 자기 질문만. */
@@ -252,7 +259,7 @@ export class ClinicianQuestionService {
           AND (NOT ${own} OR q."authorSub"=${c.sub})
         ORDER BY q."createdAt" DESC,q.id DESC LIMIT 50`;
       return { owner: this.owner(c), items: rows.map(row => this.summary(row, row.lastEntryAt)) };
-    });
+    }, true);
   }
 
   /** #4 질문 등록. 작성자·기관·역할 표지는 토큰에서만 오고 body에는 정확히 세 키만 받는다. */
