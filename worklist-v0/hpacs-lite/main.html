@@ -245,6 +245,23 @@
     #conclusion { flex: 2; min-height: 34px; }
     #recommendation { flex: 1; min-height: 26px; }
     .rfoot2 { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 8px; background: #1b212c; flex: none; justify-content: flex-end; }
+    /* ── S5-UI3 판독 단추 묶음 (UXR-G-08) ──
+       여닫는 방식은 툴바 묶음(S5-UI2)의 .toolbar-menu 규약 그대로다: 요약 단추만 이 줄에 서고, 펼친 내용은 줄 끝의
+       다음 줄로 들어가 판독문 칸을 그만큼 내린다. 떠 있는 판으로 만들지 않은 것은 <details>가 바깥을 눌러도 닫히지 않아,
+       판이 판독문 칸과 받아쓰기 창을 덮은 채 남기 때문이다. 소견 서랍의 위 경계는 .redit 위쪽을 따라 내려가므로
+       (reading-findings.js bindTop) 펼친 단추를 덮지 않는다. 여기서는 요약 단추를 옆 단추와 같은 상자로 맞추고, 펼친 판은
+       구획마다 한 줄로 쌓는다. 판독 열은 1366·1680px에서 419px라 구획이 어차피 한 줄씩 쌓이는데, 툴바처럼 구획선을 왼쪽에
+       두면 줄마다 들여쓰기로 보인다. 요약 단추의 줄 높이를 1로 두는 것은 한글 대체 글꼴의 줄 높이가 이 줄을 단추보다
+       4px 키우지 않게 하려는 것이다. */
+    .rbtns > .toolbar-menu > summary { gap: 4px; background: var(--kin-panel2); border: 1px solid var(--kin-line2); color: var(--kin-muted);
+                                       padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; line-height: 1; }
+    .rbtns .toolbar-menu-panel { flex-direction: column; align-items: flex-start; gap: 4px; padding: 4px 6px; border-radius: 4px; }
+    .rbtns .toolbar-section { gap: 4px; align-items: center; }
+    .rbtns .toolbar-menu-panel > * + .toolbar-section { margin-left: 0; padding-left: 0; border-left: 0; }
+    @media (max-width: 1250px) {
+      body.reading .rbtns > .toolbar-menu > summary { padding: 5px 7px; }
+    }
+    /* ── S5-UI3 끝 ── */
     /* 초안 표시줄 — 확정본이 아닌 것을 보고 있다는 안내. 경고(빨강)가 아니라 안내(노랑)다. */
     .draftbar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; flex: none;
                 background: #2a2617; border-top: 1px solid #5c5124; color: #d8b24a; font-size: 11px; }
@@ -1100,16 +1117,41 @@
 
       <!-- Report (7.4) — Radiology 모드 -->
       <div class="panel report-p">
+        <!-- S5-UI3 (UXR-G-08): 단추·id·핸들러·disabled는 그대로이고 묶음만 새로 생겼다. 위 줄에 보이는 것은 Approve·Save·
+             Prelim·Dictate와 More, 아래 줄은 Prev·Next다. 나머지는 More(<details>) 안의 네 구획에 있어 스크립트 없이 열리고
+             닫힌다. Dictate는 받아쓰기 기하(G-LIVE-GEO)를 측정하는 흐름이 누르는 단추라 위 줄에 남는다. 역할별 disabled는
+             스크립트가 지금처럼 정하고, More 안에 넣은 것을 권한 통제로 쓰지 않는다. 서식 입력 단추(Structured)는 스크립트가
+             Print 바로 앞에 붙이므로 Print와 같은 구획에 나타난다. -->
         <div class="rbtns">
           <button class="approve" id="b-approve">Approve</button>
           <button class="save" id="b-save">Save</button>
-          <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
           <button id="b-prelim" title="상급 판독의를 지정해 최종 판독을 맡깁니다 (RS: P)">Prelim</button>
           <button id="b-dictate" disabled title="음성 인식기가 연결되지 않았습니다.">Dictate</button>
-          <button id="b-transcribe">Transcribe</button>
-          <button disabled>Except</button>
-          <button disabled>Mark CVR</button>
-          <button id="b-print">Print</button>
+          <details class="toolbar-menu" id="report-more">
+            <summary aria-label="More Report Actions" title="판독(추가기재·전사 요청), 상태(보류·판독 제외·CVR 표시·미판독으로 되돌리기), 편집(복사·붙여넣기·지우기·상용구 저장), 인쇄·개정 이력 단추를 펼칩니다">More<span class="toolbar-caret" aria-hidden="true">▾</span></summary>
+            <div class="toolbar-menu-panel" role="group" aria-label="More Report Actions">
+              <div class="toolbar-section" id="report-more-reading" role="group" aria-label="Reading">
+                <button id="b-addendum" disabled title="승인된 판독문에 덧붙입니다 (이전 승인본은 그대로 남습니다)">Addendum</button>
+                <button id="b-transcribe">Transcribe</button>
+              </div>
+              <div class="toolbar-section" id="report-more-status" role="group" aria-label="Status">
+                <button id="b-defer">Defer</button>
+                <button id="b-except" disabled>Except</button>
+                <button id="b-mark-cvr" disabled>Mark CVR</button>
+                <button id="b-unread">Reset to Unread</button>
+              </div>
+              <div class="toolbar-section" id="report-more-editor" role="group" aria-label="Editor">
+                <button id="b-copy">Copy</button>
+                <button id="b-paste">Paste</button>
+                <button id="b-clear">Clear</button>
+                <button id="b-report-template" disabled>Save as Template</button>
+              </div>
+              <div class="toolbar-section" id="report-more-output" role="group" aria-label="Print and History">
+                <button id="b-print">Print</button>
+                <button id="b-history" title="판독문 개정 이력">History</button>
+              </div>
+            </div>
+          </details>
         </div>
         <!-- 쓰다 만 초안이 있을 때만 보인다. 확정본과 다른 것을 보고 있다는 사실을
              화면이 말해주지 않으면, 사용자는 저장된 것을 보고 있다고 믿는다. -->
@@ -1157,13 +1199,6 @@
           <textarea id="recommendation" placeholder="Please enter recommendation"></textarea>
         </div>
         <div class="rfoot2">
-          <button id="b-report-template" disabled>Save as Template</button>
-          <button id="b-copy">Copy</button>
-          <button id="b-paste">Paste</button>
-          <button id="b-history" title="판독문 개정 이력">History</button>
-          <button id="b-unread">Reset to Unread</button>
-          <button id="b-defer">Defer</button>
-          <button id="b-clear">Clear</button>
           <button id="b-prev">◀ Prev</button>
           <button id="b-next">Next ▶</button>
         </div>
