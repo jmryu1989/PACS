@@ -34,6 +34,26 @@ in-test queues (an answer can be held and released out of order) and records eve
   09  the pure rules in the page: every phase, requested key, unreadable receipt, error-code echo, malformed answers
       and the summary before, during and after failure.
 
+One end for the page session (Astra S5-U6a-F01/F02). At cafc72c only the Gateway section's own 401 emptied it: Log out
+and the member API 401 called KinAuth.logout() directly, which clears and moves only after POST /auth/logout answers,
+nothing listened for another tab's end, and a 401 of an older list read was dropped by the sequence check. Each case
+has a control that serves the cafc72c behaviour through the same route and must keep the list:
+
+  10  Log out and a member-list 401 empty the section (rows, counts, state, control) before the logout answers; a list
+      read and a retry held from before come back as successes and paint nothing; no request leaves the page after
+      the end; Log out again and the page's own end broadcast add no POST and no move. Control: Log out wired to
+      KinAuth.logout() keeps the list while the POST is out.
+  11  another tab's end (the auth.js BroadcastChannel message; the storage pair with BroadcastChannel missing here)
+      empties the section, drops the late answers, sends no logout POST and moves once, also when the signals repeat.
+      Control: the page without the two listeners keeps the list and stays.
+  12  an end while /api/me is still out: its later answer (200 or 401) enables nothing, reads no member list, sends no
+      logout POST and makes no second move.
+      In 11 and 12 the move to index.html is answered 204: the browser cancels it and the old document stays to be read
+      (Playwright cannot evaluate a page whose move is held). Every move is still one request, so a second is counted.
+  13  two list reads out; the older answers 401 first: the section empties before the logout answers, the newer 200
+      paints nothing, a second 401 (the retry) adds no POST and no move. Control: the 401 judged after the sequence
+      check (cafc72c) keeps the list and never logs out.
+
 Synthetic data only (SYN-* names, 1.2.* UIDs): no server, no network, no credentials. A request the harness does not
 answer is aborted and fails the case, as does a page error or a browser dialog.
 """
@@ -72,13 +92,20 @@ EPOCH = "0a1b2c3d-0000-4000-8000-00000000000a"
 SERVER_WORDING = "SYN-SERVER-WORDING"
 
 # Counts the bodies the page read, by path. A continuation that awaits response.json() has run by the time the
-# next evaluate sees the count, so a late answer that paints nothing can still be waited for.
+# next evaluate sees the count, so a late answer that paints nothing can still be waited for. __fetchDone does the
+# same for answers whose body is never read (a 401).
 INIT = """(() => {
   window.__jsonDone = [];
   const json = Response.prototype.json;
   Response.prototype.json = function () {
     const path = new URL(this.url).pathname;
     return json.call(this).finally(() => { window.__jsonDone.push(path); });
+  };
+  window.__fetchDone = [];
+  const fetch0 = window.fetch;
+  window.fetch = function (input, init) {
+    const path = new URL(input instanceof Request ? input.url : String(input), location.href).pathname;
+    return fetch0.call(window, input, init).finally(() => { window.__fetchDone.push(path); });
   };
 })();"""
 
@@ -173,16 +200,60 @@ DELIVERY = re.compile(r"전송됨|재전송|재시도됨|전송 완료|수신 �
 SEQUENCE_GUARD = "        if (seq !== gateway.seq) return;\n"
 TOKEN_GUARD = "        if (item.dataset.request !== token || item.dataset.key !== key || gateway.items.get(uid) !== item) return;\n"
 
+# S5-U6a-F01/F02 controls: the shipped lines and the cafc72c behaviour they replaced.
+LOGOUT_WIRING = '      $("#logout").addEventListener("click", () => KinConsoleSession.end());\n'
+CAFC72C_LOGOUT_WIRING = '      $("#logout").addEventListener("click", () => KinAuth.logout());\n'
+END_LISTENERS = (
+    '      try {\n'
+    '        const channel = new BroadcastChannel("kin-session");\n'
+    '        channel.onmessage = event => { if (event.data?.type === "session-ended") endedElsewhere(); };\n'
+    '      } catch (_) {}\n'
+    '      // The fallback where BroadcastChannel is missing; auth.js sends both, and both land here idempotently.\n'
+    '      addEventListener("storage", event => { if (event.key === "kin-session-ended") endedElsewhere(); });\n')
+GATEWAY_401 = (
+    '        if (response.status === 401) {\n'
+    '          KinConsoleSession.end();\n'
+    '          throw Object.assign(new Error("session"), { status: 401 });\n'
+    '        }\n')
+CAFC72C_GATEWAY_401 = '        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });\n'
+AFTER_SEQUENCE = SEQUENCE_GUARD + '        $("#gateway-busy").hidden = true;\n'
+CAFC72C_AFTER_SEQUENCE = AFTER_SEQUENCE + '        if (error?.status === 401) { KinConsoleSession.end(); return; }\n'
+
+# What auth.js broadcastEnded() sends when a session ends; a second tab sends the same, one kind at a time.
+AUTH_SIGNALS = ("channel.postMessage({ type: 'session-ended' });",
+                "localStorage.setItem('kin-session-ended', String(Date.now()));",
+                "localStorage.removeItem('kin-session-ended');")
+CHANNEL_SIGNAL = """() => { const channel = new BroadcastChannel('kin-session');
+  channel.postMessage({ type: 'session-ended' }); channel.close(); }"""
+STORAGE_SIGNAL = """() => { localStorage.setItem('kin-session-ended', String(Date.now()));
+  localStorage.removeItem('kin-session-ended'); }"""
+# Registered after the page's own listeners, so a count seen here means the page's listener has already run.
+PROBE = """() => { window.__signals = {channel: 0, storage: 0};
+  addEventListener('storage', event => { if (event.key === 'kin-session-ended') window.__signals.storage++; });
+  try { window.__probe = new BroadcastChannel('kin-session');
+    window.__probe.onmessage = event => { if (event.data?.type === 'session-ended') window.__signals.channel++; };
+  } catch (_) {} }"""
+OTHER_PATH = BASE + "other-tab.html"
+OTHER = "<!doctype html><title>SYN other tab</title><p id=other>SYN OTHER TAB</p>"
+ENDED = "세션이 종료되었습니다"
+
 
 def has_hangul(text):
     return any(unicodedata.name(ch, "").startswith("HANGUL") for ch in text)
 
 
+def edited(edits):
+    text = ADMIN_HTML
+    for old, new in edits:
+        found = text.count(old)
+        if found != 1:
+            raise AssertionError(f"setup: {old!r} occurs {found} times in admin.html")
+        text = text.replace(old, new)
+    return text
+
+
 def variant(old):
-    found = ADMIN_HTML.count(old)
-    if found != 1:
-        raise AssertionError(f"setup: {old!r} occurs {found} times in admin.html")
-    return ADMIN_HTML.replace(old, "")
+    return edited([(old, "")])
 
 
 def retry_path(uid):
@@ -207,6 +278,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.held_studies, self.held_retries = [], []
         self.retry_posts = []
         self.logouts, self.held_logouts = 0, None
+        self.member_replies = []
+        self.held_me, self.cancel_moves = None, False
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
         self.page = self.context.new_page()
@@ -242,6 +315,12 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             route.fulfill(body=SCRIPTS[path], content_type="application/javascript; charset=utf-8")
             return
         if method == "GET" and path == BASE + "index.html":
+            if self.cancel_moves:
+                # Playwright cannot evaluate a page while its move is held, so the move is answered 204: the browser
+                # cancels it and the old document stays to be read. The request is the move being counted, and a second
+                # location.replace() would send a second one.
+                route.fulfill(status=204, body="")
+                return
             route.fulfill(body=INDEX, content_type="text/html; charset=utf-8")
             return
         if path == "/favicon.ico":
@@ -252,10 +331,14 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
             route.abort()
             return
         if method == "GET" and path == "/api/me":
+            if self.held_me is not None:
+                self.held_me.append(route)
+                return
             route.fulfill(json=ME)
             return
         if method == "GET" and path == "/api/admin/users" and url.query == "page=1":
-            route.fulfill(json=MEMBERS)
+            status, body = self.member_replies.pop(0) if self.member_replies else (200, MEMBERS)
+            route.fulfill(status=status, json=body)
             return
         if method == "GET" and path == "/api/studies" and url.query == "":
             self.answer(route, self.study_replies, self.held_studies)
@@ -335,6 +418,100 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
 
     def api_calls(self):
         return [(c["method"], c["path"], c["query"]) for c in self.calls if c["path"].startswith("/api/")]
+
+    # ── session end helpers (cases 10-13) ──
+    def fetch_done(self, path):
+        return self.page.evaluate("path => window.__fetchDone.filter(item => item === path).length", path)
+
+    def count(self, method, path):
+        return sum(1 for c in self.calls if c["method"] == method and c["path"] == path)
+
+    def moves(self):
+        """Requests for the entry page: each location.replace() to it is one."""
+        return self.count("GET", BASE + "index.html")
+
+    def other_tab(self):
+        """A second tab of the same origin. It only sends what auth.js broadcastEnded() sends."""
+        for statement in AUTH_SIGNALS:
+            self.assertIn(statement, SCRIPTS[BASE + "auth.js"], "the harness signal is the one auth.js sends")
+        other = self.context.new_page()
+
+        def serve(route):
+            url = urlparse(route.request.url)
+            if f"{url.scheme}://{url.netloc}" == ORIGIN and url.path == OTHER_PATH:
+                route.fulfill(body=OTHER, content_type="text/html; charset=utf-8")
+            elif f"{url.scheme}://{url.netloc}" == ORIGIN and url.path == "/favicon.ico":
+                route.fulfill(status=404, body="")
+            else:
+                self.unexpected.append(f"other tab: {route.request.method} {route.request.url}")
+                route.abort()
+
+        other.route("**/*", serve)
+        other.goto(ORIGIN + OTHER_PATH)
+        return other
+
+    def signals(self):
+        return self.page.evaluate("() => window.__signals")
+
+    def send(self, other, signal):
+        """Send one end signal from the other tab and wait until this page's listeners have run on it."""
+        before = self.signals()
+        other.evaluate(signal)
+        key = "channel" if signal == CHANNEL_SIGNAL else "storage"
+        # The storage pair is two events (set, remove); a missing BroadcastChannel here never counts one.
+        want = before[key] + (1 if key == "channel" else 2)
+        self.wait_until(lambda: self.signals()[key] >= want, f"the {key} signal here")
+
+    def list_and_retry_in_flight(self):
+        """FIVE drawn, then a Now Retry and a list read both held: the answers a session end must drop."""
+        self.refresh((200, FIVE))
+        self.retry_replies.append("hold")
+        self.item("1.2.12").locator("button").click()
+        self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
+        self.study_replies.append("hold")
+        self.page.locator("#gateway-refresh").click()
+        self.wait_until(lambda: len(self.held_studies) == 1, "the list read")
+        summary = self.summary()
+        self.assertEqual((6, False), (summary["rows"], summary["refreshDisabled"]))
+
+    def two_reads(self):
+        """Two list reads held, in the order they were sent."""
+        self.study_replies += ["hold", "hold"]
+        button = self.page.locator("#gateway-refresh")
+        button.click()
+        self.wait_until(lambda: len(self.held_studies) == 1, "the first read")
+        button.click()
+        self.wait_until(lambda: len(self.held_studies) == 2, "the second read")
+        older, newer = self.held_studies
+        self.held_studies = []
+        return older, newer
+
+    def arrive_at_index(self):
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
+
+    def assert_closed_away(self, logouts, moves):
+        self.assertEqual((logouts, moves), (self.logouts, self.moves()), "logout POSTs and moves, counted since the start")
+
+    def assert_closed(self):
+        summary = self.summary()
+        self.assertEqual((0, True, False, False, False, None),
+                         (summary["rows"], summary["refreshDisabled"], summary["busy"], summary["messageShown"],
+                          summary["stale"], summary["empty"]), "the section is emptied and its control is off")
+        self.assertEqual(("Not Loaded", "gstate not_loaded", "아직 조회하지 않았습니다.", "Counts Unknown"),
+                         (summary["state"], summary["stateClass"], summary["stateTitle"], summary["counts"]),
+                         "the last session's counts are gone")
+        text = self.page.evaluate("() => document.querySelector('#gateway').textContent")
+        self.assertIsNone(re.search(r"SYN|1\.2\.\d", text), "no patient, study or UID of the last session")
+
+    def release_late(self):
+        """The list read and the retry held from before the end come back as successes; neither may paint."""
+        studies, retries = self.json_done("/api/studies"), self.json_done(retry_path("1.2.12"))
+        self.held_studies.pop().fulfill(json=FIVE)
+        self.held_retries.pop().fulfill(json={"studyUid": "1.2.12", "result": "requested", "requestedAt": at(7)})
+        self.wait_until(lambda: self.json_done("/api/studies") > studies and self.json_done(retry_path("1.2.12")) > retries,
+                        "the late answers read")
+        self.assert_closed()
 
     # ── cases ──
     def test_01_opening_members_reads_nothing_until_asked(self):
@@ -666,6 +843,157 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
              "Transfer Failed 0 · Retry Requested 0 · Unknown 0 · Report Received 0 · Not Observed Unknown"],
         ], result["summaries"])
         self.assertTrue(result["frozen"])
+
+    def test_10_log_out_and_a_member_401_empty_the_section_before_the_logout_answers(self):
+        for how in ("Log out", "member list 401"):
+            with self.subTest(how=how):
+                self.open()
+                self.list_and_retry_in_flight()
+                logouts, moves = self.logouts, self.moves()
+                self.held_logouts = []
+                if how == "Log out":
+                    self.page.locator("#logout").click()
+                else:
+                    self.member_replies.append((401, {"message": SERVER_WORDING}))
+                    self.page.locator("#refresh").click()
+                self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+                self.assert_closed()
+                self.release_late()
+                # Nothing leaves the page after its end: the member console's Refresh says so and reads nothing.
+                reads = self.count("GET", "/api/admin/users")
+                self.page.locator("#refresh").click()
+                expect(self.page.locator("#message")).to_have_text(ENDED)
+                self.assertEqual(reads, self.count("GET", "/api/admin/users"))
+                # Log out again adds nothing; after the POST answers, auth.js's end broadcast reaches this page too.
+                self.page.locator("#logout").click()
+                self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
+                self.held_logouts.pop().fulfill(status=204, body="")
+                self.held_logouts = None
+                self.arrive_at_index()
+                self.assert_closed_away(logouts + 1, moves + 1)
+
+        # Control: Log out wired to KinAuth.logout() with no end listener (cafc72c) keeps the list and the control
+        # while the POST is out.
+        self.open(edited([(LOGOUT_WIRING, CAFC72C_LOGOUT_WIRING), (END_LISTENERS, "")]))
+        self.refresh((200, FIVE))
+        logouts = self.logouts
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        self.wait_until(lambda: self.logouts == logouts + 1, "the control's logout request")
+        summary = self.summary()
+        self.assertEqual((6, False, "gstate observed"), (summary["rows"], summary["refreshDisabled"], summary["stateClass"]))
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.held_logouts = None
+        self.arrive_at_index()
+
+    def test_11_another_tabs_end_empties_the_section_without_a_logout_post(self):
+        other = self.other_tab()
+        # Control first, both signals: the page without the two listeners keeps the list and stays.
+        self.open(variant(END_LISTENERS))
+        self.page.evaluate(PROBE)
+        self.refresh((200, FIVE))
+        moves, logouts = self.moves(), self.logouts
+        self.send(other, CHANNEL_SIGNAL)
+        self.send(other, STORAGE_SIGNAL)
+        self.page.wait_for_timeout(200)
+        summary = self.summary()
+        self.assertEqual((6, False, moves, logouts), (summary["rows"], summary["refreshDisabled"], self.moves(), self.logouts))
+
+        for signal, channel_here in ((CHANNEL_SIGNAL, True), (STORAGE_SIGNAL, False)):
+            with self.subTest(signal="BroadcastChannel" if channel_here else "storage, no BroadcastChannel here"):
+                if not channel_here:
+                    # From here on this tab has no BroadcastChannel: the storage pair is the only signal it can get.
+                    self.page.add_init_script("delete window.BroadcastChannel;")
+                self.open(ADMIN_HTML)
+                self.assertEqual(channel_here, self.page.evaluate("() => typeof BroadcastChannel === 'function'"))
+                self.page.evaluate(PROBE)
+                self.list_and_retry_in_flight()
+                moves, logouts, reads = self.moves(), self.logouts, self.count("GET", "/api/admin/users")
+                self.cancel_moves = True
+                self.send(other, signal)
+                self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
+                self.assert_closed()
+                self.release_late()
+                self.page.locator("#refresh").click()
+                expect(self.page.locator("#message")).to_have_text(ENDED)
+                # The signals again: no second move, no logout POST, no request.
+                for again in (CHANNEL_SIGNAL, STORAGE_SIGNAL) if channel_here else (STORAGE_SIGNAL,):
+                    self.send(other, again)
+                self.page.wait_for_timeout(200)
+                self.assertEqual(reads, self.count("GET", "/api/admin/users"))
+                self.assert_closed()
+                self.assert_closed_away(logouts, moves + 1)
+                self.cancel_moves = False
+
+    def test_12_an_end_while_the_session_is_read_starts_nothing(self):
+        other = self.other_tab()
+        for status in (200, 401):
+            with self.subTest(me=status):
+                moves, logouts, reads = self.moves(), self.logouts, self.count("GET", "/api/admin/users")
+                self.held_me, self.cancel_moves = [], True
+                self.page.goto(ORIGIN + PAGE_PATH)
+                self.wait_until(lambda: len(self.held_me) == 1, "the session read")
+                self.page.evaluate(PROBE)
+                self.send(other, CHANNEL_SIGNAL)
+                self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
+                me, self.held_me = self.held_me.pop(), None
+                if status == 200:
+                    me.fulfill(json=ME)
+                    self.wait_until(lambda: self.json_done("/api/me") == 1, "the session answer read")
+                else:
+                    me.fulfill(status=401, json={"message": SERVER_WORDING})
+                    self.wait_until(lambda: self.fetch_done("/api/me") == 1, "the session answer")
+                self.page.wait_for_timeout(200)
+                summary = self.summary()
+                self.assertEqual((True, 0, "Not Loaded", "Counts Unknown"),
+                                 (summary["refreshDisabled"], summary["rows"], summary["state"], summary["counts"]))
+                self.assertEqual(["", ""], self.page.evaluate(
+                    "() => [document.querySelector('#actor').textContent, document.querySelector('#message').textContent]"))
+                self.assertEqual(reads, self.count("GET", "/api/admin/users"))
+                self.assert_closed_away(logouts, moves + 1)
+                self.cancel_moves = False
+
+    def test_13_an_older_reads_401_ends_the_session_whatever_the_order(self):
+        self.open()
+        self.refresh((200, FIVE))
+        self.retry_replies.append("hold")
+        self.item("1.2.12").locator("button").click()
+        self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
+        older, newer = self.two_reads()
+        logouts, moves = self.logouts, self.moves()
+        self.held_logouts = []
+        older.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+        self.assert_closed()
+        done = self.json_done("/api/studies")
+        newer.fulfill(json=FIVE)
+        self.wait_until(lambda: self.json_done("/api/studies") > done, "the newer answer read")
+        self.assert_closed()
+        # A second 401 (the retry answer) adds no POST and no move.
+        self.held_retries.pop().fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done(retry_path("1.2.12")) == 1, "the retry 401")
+        self.assert_closed()
+        self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.held_logouts = None
+        self.arrive_at_index()
+        self.assert_closed_away(logouts + 1, moves + 1)
+
+        # Control: the 401 judged after the sequence check (cafc72c) drops the older read's 401 with its answer.
+        self.open(edited([(GATEWAY_401, CAFC72C_GATEWAY_401), (AFTER_SEQUENCE, CAFC72C_AFTER_SEQUENCE)]))
+        self.refresh((200, FIVE))
+        older, newer = self.two_reads()
+        logouts = self.logouts
+        done = self.fetch_done("/api/studies")
+        older.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done("/api/studies") > done, "the control's older 401")
+        summary = self.summary()
+        self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
+        done = self.json_done("/api/studies")
+        newer.fulfill(json=FIVE)
+        self.wait_until(lambda: self.json_done("/api/studies") > done, "the control's newer answer read")
+        summary = self.summary()
+        self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
 
 
 if __name__ == "__main__":
