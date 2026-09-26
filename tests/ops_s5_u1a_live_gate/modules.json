@@ -1,23 +1,17 @@
 [
   {
-    "module": "tests/clinician_policy_live.py",
-    "unit": "s5-u1c-clinician-policy",
+    "module": "tests/clinician_timeline_live.py",
+    "unit": "s5-u3-clinician-timeline",
     "timeout": 900,
     "cases": [
-      "ClinicianPolicyLive.test_01_clinician_only_session_routes_and_default_denial",
-      "ClinicianPolicyLive.test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout",
-      "ClinicianPolicyLive.test_03_member_console_approves_updates_and_revokes_a_clinician",
-      "ClinicianPolicyLive.test_04_mixed_and_legacy_roles_keep_their_existing_paths",
-      "ClinicianPolicyLive.test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case"
+      "ClinicianTimelineLive.test_01_same_name_is_not_the_same_patient_and_another_name_does_not_split_one",
+      "ClinicianTimelineLive.test_02_same_patient_id_other_birth_or_sex_is_one_timeline_with_a_conflict_marker",
+      "ClinicianTimelineLive.test_03_tele_referrals_bound_the_receiving_timeline_and_institutions_stay_apart",
+      "ClinicianTimelineLive.test_04_role_gates_shapes_cursors_paging_fields_and_no_audit"
     ],
     "expected": {
-      "sweep": {
-        "routes": 110,
-        "denied": 99
-      },
-      "audit_rows": {
-        "clinician": 0
-      }
+      "sweep": null,
+      "audit_rows": {}
     }
   }
 ]
