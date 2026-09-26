@@ -6,7 +6,8 @@ The Members console (worklist-v0/hpacs-lite/admin.html) gains an Operations sect
 tests/admin_metrics_test.cjs) and shows each row with its state, value, unit, denominator, scope, source and observation
 time. This harness loads the shipped admin.html, auth.js and study-access-admin.js unchanged from a synthetic origin,
 answers /api/me, the member list, /api/admin/metrics and the logout from in-test queues (an answer can be held and
-released out of order) and records every request:
+released out of order; the F04 cases also queue a member-list answer and serve study-arrivals.js and the Gateway list)
+and records every request:
 
   01  opening Members reads only /api/me and the member list: no metrics read and no Gateway rules until asked; the
       section says Not Loaded with no table.
@@ -28,6 +29,16 @@ released out of order) and records every request:
   09  S5-U6b-F03: with three reads out, the OLDEST read's 401 empties the section at once (Not Loaded, control off) and
       logs out once; the newer 200 and a second 401 neither repaint nor log out again; one navigation. Control: the 401
       judged after the sequence check (the order before the fix) keeps the table, never logs out, and paints the newer.
+  10  S5-U6b-F04: with Operations showing a table and two reads out, a 401 on the member list empties the section and
+      turns its control off at once (Gateway Status's control too), before the logout answers; the late newer 200 and
+      older 401 neither repaint nor log out again; the control forced back on and pressed sends nothing; Log out pressed
+      again posts nothing; one logout and one navigation. Control: that 401 straight to KinAuth.logout() (the call before
+      the fix) keeps the table and its control, and the late 200 paints over it.
+  11  the same for Log out. Control: the button straight to KinAuth.logout() (the handler before the fix).
+  12  the same for a 401 on the Gateway Status list read. Control: Operations' closer kept off the page's session end
+      (the F04 state: a panel with an end of its own) keeps the ended session's table and control.
+  13  an object that already exists (S5-U6a's top-level const above this page's block, as when the two units meet) stays
+      the page's one: nothing is put on window, Gateway Status and Operations register with it, Log out ends through it.
 
 WorklistStorageDOMTest (S5-U6b-F02) slices main.html's shipped #storage element and refreshStorage() into a page with a
 queued fetch: S01 the default names no number; S02 network failure, bad JSON, a missing or malformed TotalDiskSize, 403
@@ -65,7 +76,8 @@ ORIGIN = "https://members.test"
 BASE = "/worklist/hpacs-lite/"
 PAGE_PATH = BASE + "admin.html"
 ARRIVALS_PATH = BASE + "study-arrivals.js"
-# study-arrivals.js is deliberately not served: a request for it is unexpected and fails the case.
+# study-arrivals.js is served only once a case asks for Gateway Status (serve_arrivals): anywhere else a request for it
+# is unexpected and fails the case.
 SCRIPTS = {BASE + name: lf_text(HPACS / name) for name in ("auth.js", "study-access-admin.js")}
 INDEX = "<!doctype html><title>SYN index</title><p id=index>SYN INDEX</p>"
 INSTITUTION = "SYN-INST-A"
@@ -195,11 +207,35 @@ FIXED = {
 }
 # S5-U6b-F03 control: the 401 judged after the sequence check, as before the fix, so an older read's 401 is dropped.
 END_IN_REQUEST = """        if (response.status === 401) {
-          consoleSession.end();
+          KinConsoleSession.end();
           throw Object.assign(new Error("session"), { status: 401 });
         }
 """
 END_AFTER_SEQUENCE = """        if (response.status === 401) throw Object.assign(new Error("session"), { status: 401 });
+"""
+# S5-U6b-F04 controls. The member list's 401 and Log out as they were before the page's one session end (straight to
+# KinAuth.logout()), and Operations' closer built but never registered on that end (a panel with an end of its own).
+MEMBERS_END = '          KinConsoleSession.end();\n          throw new Error("세션이 만료되었습니다");\n'
+MEMBERS_END_BEFORE = '          await KinAuth.logout();\n          throw new Error("세션이 만료되었습니다");\n'
+LOGOUT_BUTTON = '$("#logout").addEventListener("click", () => KinConsoleSession.end());'
+LOGOUT_BUTTON_BEFORE = '$("#logout").addEventListener("click", () => KinAuth.logout());'
+OPS_ON_END = "      KinConsoleSession.onEnd(() => {\n        ops.seq++;\n"
+OPS_OFF_END = "      void (() => {\n        ops.seq++;\n"
+# S5-U6a (b95bc17) defines the object as a top-level const in a script right after study-access-admin.js. This stand-in
+# has the same three calls and counts what reaches it.
+STUDY_ACCESS_SCRIPT = '  <script src="study-access-admin.js"></script>\n'
+EARLIER_SESSION = """  <script>
+    const KinConsoleSession = (() => {
+      const closers = [];
+      let ended = false;
+      window.__earlier = { closers, ends: 0 };
+      return {
+        ended: () => ended,
+        onEnd(closer) { if (ended) closer(); else closers.push(closer); },
+        end() { window.__earlier.ends++; if (ended) return; ended = true; for (const closer of closers) closer(); KinAuth.logout(); },
+      };
+    })();
+  </script>
 """
 
 
@@ -229,6 +265,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.admin_body = ADMIN_HTML
         self.calls, self.unexpected, self.errors, self.dialogs = [], [], [], []
         self.replies, self.held = [], []
+        self.member_replies, self.study_replies, self.serve_arrivals = [], [], False
         self.logouts, self.held_logouts = 0, None
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
@@ -263,6 +300,10 @@ class AdminMetricsDOMTest(unittest.TestCase):
         if method == "GET" and path in SCRIPTS:
             route.fulfill(body=SCRIPTS[path], content_type="application/javascript; charset=utf-8")
             return
+        if method == "GET" and path == ARRIVALS_PATH and self.serve_arrivals:
+            # ARRIVALS_JS is the shipped study-arrivals.js (read at module level, below this class).
+            route.fulfill(body=ARRIVALS_JS, content_type="application/javascript; charset=utf-8")
+            return
         if method == "GET" and path == BASE + "index.html":
             route.fulfill(body=INDEX, content_type="text/html; charset=utf-8")
             return
@@ -277,7 +318,15 @@ class AdminMetricsDOMTest(unittest.TestCase):
             route.fulfill(json=ME)
             return
         if method == "GET" and path == "/api/admin/users" and url.query == "page=1":
+            if self.member_replies:
+                status, body = self.member_replies.pop(0)
+                route.fulfill(status=status, json=body)
+                return
             route.fulfill(json=MEMBERS)
+            return
+        if method == "GET" and path == "/api/studies" and url.query == "" and self.study_replies:
+            status, body = self.study_replies.pop(0)
+            route.fulfill(status=status, json=body)
             return
         if method == "GET" and path == METRICS_PATH and url.query == "":
             if not self.replies:
@@ -612,7 +661,7 @@ class AdminMetricsDOMTest(unittest.TestCase):
         # Control: the 401 judged after the sequence check (the order before S5-U6b-F03) drops an older read's 401 —
         # the table stays, nobody logs out, and the newer answer paints.
         self.logouts, self.held_logouts = 0, None
-        self.open(variant(SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { consoleSession.end(); return; }\n",
+        self.open(variant(SEQUENCE_GUARD, SEQUENCE_GUARD + "        if (error?.status === 401) { KinConsoleSession.end(); return; }\n",
                           body=variant(END_IN_REQUEST, END_AFTER_SEQUENCE)))
         self.refresh((200, answer()))
         older, newer = self.hold_reads(2)
@@ -624,6 +673,115 @@ class AdminMetricsDOMTest(unittest.TestCase):
         self.wait_until(lambda: self.json_done() == 2, "control: the newer answer read")
         self.wait_until(lambda: not self.summary()["busy"], "control: the load finished")
         self.assert_observed(8)
+
+    # ── S5-U6b-F04: every end path of the page closes Operations ──
+    def metrics_gets(self):
+        return sum(1 for c in self.calls if c["path"] == METRICS_PATH)
+
+    def five_on_screen_and_two_reads_out(self, body=None):
+        """Operations shows the table with Studies Owned 5, and two more reads are out (oldest first)."""
+        self.open(body)
+        self.refresh((200, answer(rows=replace(ROWS, "studies.own", value=5))))
+        self.assertEqual("5", self.own_cell())
+        return self.hold_reads(2)
+
+    def end_elsewhere(self, path):
+        """End the page session through `path`, never through an Operations read, with the logout answer held."""
+        self.held_logouts = []
+        if path == "members":
+            self.member_replies.append((401, {"message": SERVER_WORDING}))
+            self.page.locator("#refresh").click()
+        elif path == "logout":
+            self.page.locator("#logout").click()
+        elif path == "gateway":
+            self.serve_arrivals = True
+            self.study_replies.append((401, {"message": SERVER_WORDING}))
+            self.page.locator("#gateway-refresh").click()
+        else:
+            raise AssertionError(f"setup: unknown end path {path!r}")
+        self.wait_until(lambda: self.logouts == 1, f"the logout request ({path})")
+
+    def assert_the_end_closes_operations(self, path):
+        older, newer = self.five_on_screen_and_two_reads_out()
+        self.end_elsewhere(path)
+        summary = self.summary()
+        self.assertEqual((0, True, True, False, False, "Not Loaded", "mstate not_loaded"),
+                         (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["busy"],
+                          summary["messageShown"], summary["state"], summary["stateClass"]),
+                         f"{path}: Operations empties at once, with the logout still unanswered")
+        self.assertTrue(self.page.locator("#gateway-refresh").is_disabled(), f"{path}: Gateway Status closes too")
+        # The two reads sent before the end answer late: the newer with a 200 (Studies Owned 6), the older with a 401.
+        newer.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
+        self.wait_until(lambda: self.fetch_done() == 2, f"{path}: the late 200 received")
+        older.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done() == 3, f"{path}: the late 401 received")
+        # No new read, no second logout: the control forced back on and pressed, then Log out pressed again.
+        self.page.evaluate("() => { const b = document.querySelector('#metrics-refresh'); b.disabled = false; b.click(); }")
+        self.page.locator("#logout").click()
+        self.page.wait_for_timeout(100)
+        summary = self.summary()
+        self.assertEqual((0, True, "Not Loaded", False), (summary["rows"], summary["wrapHidden"], summary["state"], summary["busy"]),
+                         f"{path}: no answer repaints after the end")
+        self.assertEqual(1, self.json_done(), f"{path}: no answer after the end is read")
+        self.assertEqual(3, self.metrics_gets(), f"{path}: no metrics read after the end")
+        self.assertEqual(1, self.logouts, f"{path}: one logout")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        expect(self.page.locator("#index")).to_have_text("SYN INDEX")
+        self.assertEqual(1, self.logouts)
+        self.assertEqual(1, [c["path"] for c in self.calls].count(BASE + "index.html"), "one navigation")
+
+    def control_the_end_leaves_operations(self, path, body, shared_end_ran):
+        """The same end with its path, or Operations, off the page's one session end: the ended session's table and its
+        control stay. When the end never reached the shared object, the late 200 paints and the late 401 logs out again."""
+        self.logouts, self.held_logouts = 0, None
+        older, newer = self.five_on_screen_and_two_reads_out(body)
+        self.end_elsewhere(path)
+        summary = self.summary()
+        self.assertEqual((11, False, False, "5"), (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], self.own_cell()),
+                         f"control ({path}): the ended session's table and control stay")
+        newer.fulfill(json=answer(second=8, rows=replace(ROWS, "studies.own", value=6)))
+        self.wait_until(lambda: self.fetch_done() == 2, f"control ({path}): the late 200 received")
+        self.wait_until(lambda: not self.summary()["busy"], f"control ({path}): the late load finished")
+        self.assertEqual((11, "5" if shared_end_ran else "6"), (self.summary()["rows"], self.own_cell()))
+        older.fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.fetch_done() == 3, f"control ({path}): the late 401 received")
+        self.wait_until(lambda: self.logouts == (1 if shared_end_ran else 2), f"control ({path}): the logouts")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(1 if shared_end_ran else 2, self.logouts)
+        for route in self.held_logouts:
+            route.fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+
+    def test_10_a_member_list_401_closes_operations_at_once(self):
+        self.assert_the_end_closes_operations("members")
+        self.control_the_end_leaves_operations("members", variant(MEMBERS_END, MEMBERS_END_BEFORE), shared_end_ran=False)
+
+    def test_11_log_out_closes_operations_at_once(self):
+        self.assert_the_end_closes_operations("logout")
+        self.control_the_end_leaves_operations("logout", variant(LOGOUT_BUTTON, LOGOUT_BUTTON_BEFORE), shared_end_ran=False)
+
+    def test_12_a_gateway_list_401_closes_operations_at_once(self):
+        self.assert_the_end_closes_operations("gateway")
+        self.control_the_end_leaves_operations("gateway", variant(OPS_ON_END, OPS_OFF_END), shared_end_ran=True)
+
+    def test_13_an_earlier_session_object_stays_the_page_one(self):
+        # S5-U6a's object as it sits when the units meet: a top-level const in a script above this page's block.
+        self.open(variant(STUDY_ACCESS_SCRIPT, STUDY_ACCESS_SCRIPT + EARLIER_SESSION))
+        self.assertEqual(["undefined", False, 2], self.page.evaluate(
+            "() => [typeof window.KinConsoleSession, 'KinConsoleSession' in window, window.__earlier.closers.length]"),
+            "this page's block defines nothing; Gateway Status and Operations register with the earlier object")
+        self.refresh((200, answer()))
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        self.wait_until(lambda: self.logouts == 1, "the logout request")
+        summary = self.summary()
+        self.assertEqual((0, True, True, "Not Loaded"),
+                         (summary["rows"], summary["wrapHidden"], summary["refreshDisabled"], summary["state"]))
+        self.assertEqual(1, self.page.evaluate("() => window.__earlier.ends"), "Log out ends through the earlier object")
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.page.wait_for_url(ORIGIN + BASE + "index.html")
+        self.assertEqual(1, self.logouts)
 
 
 # ── S5-U6b-F02: the worklist menubar storage figure (main.html #storage) ──
