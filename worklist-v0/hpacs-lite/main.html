@@ -530,6 +530,15 @@
        고르거나 세로로 세운 모니터가 Auto로 세로 배치가 돼도 헤더는 가로 배치와 같은 52px여야 하므로 이 폭에서는 여백을 뺀다. */
     @media (min-width: 1366px) {
       body.portrait .menubar { padding-top: 0; padding-bottom: 0; }
+      /* S5-U6b-X2-F01: 저장량 문구(#storage, 최대 'Storage 8192.00 TiB (Server-wide)')가 상태 묶음을 넓히자 줄지 않는
+         세션 묶음이 통째로 둘째 줄로 내려가 헤더가 74~79px이 됐다 — 1680px에서는 미관측 문구만으로도. flex 줄 나눔은 항목을
+         줄여 보지 않고 다음 줄로 보내므로, 이 폭에서는 세션 묶음이 남은 폭을 받고(기준 0) 그 안에서 말줄임되는 사용자·기관
+         단추만 줄어든다. Members·EN·Log out은 줄지 않는다. 좁은 창의 줄바꿈 안전장치는 1366px 미만에 그대로 둔다. */
+      .menubar .spacer { flex: none; }
+      .menubar-session { flex: 1 1 0; min-width: 0; justify-content: flex-end; }
+      .menubar-session > .mright { flex: none; }
+      .menubar-session > .session-who { flex: 0 1 auto; min-width: 7em; }
+      .session-who #user { flex: 0 1 auto; }
     }
 
     .userfilter {
