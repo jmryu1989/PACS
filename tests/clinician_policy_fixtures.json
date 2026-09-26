@@ -134,7 +134,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 122, "public": 4, "session": 2, "business": 16, "denied": 100},
+    "counts": {"routes": 123, "public": 4, "session": 2, "business": 16, "denied": 101},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -177,7 +177,7 @@
       "admin": [
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET unassigned",
-        "POST studies/:uid/assign", "GET admin/metrics"
+        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit"
       ],
       "consultation": [
         "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
@@ -210,7 +210,8 @@
       "GET image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "one request: a clinician-only member reads only its own (404 otherwise), staff and radiologists the owning institution's; the counterparty institution never reads it; declared in allowed_additions"},
       "GET studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "requests of one owned study (tele institution 404), the clinician's own only; declared in allowed_additions"},
       "POST studies/:uid/image-requests": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "external-image or image-transfer request create (clinician role, owning institution, attribution from the token only, per-request receipt and one audit row); a record, never a transfer; declared in allowed_additions"},
-      "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"}
+      "POST image-requests/:id": {"decision": "business", "unit": "S5-U4c", "commit": "4749f5f", "basis": "state change: accept/close/decline by technician or admin only, cancel by the requesting clinician or admin; replay returns the stored receipt; Connect routes stay denied; declared in allowed_additions"},
+      "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"}
     }
   },
   "controller_decorators": {
