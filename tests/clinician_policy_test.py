@@ -2019,7 +2019,7 @@ class ClinicianPolicySpec(unittest.TestCase):
             with self.subTest(refused=label), self.assertRaisesRegex(AssertionError, message):
                 read(source)
         # the real controllers: a denied handler that gains a spaced @Public() changes the public set test_05 pins,
-        # spaced route and controller decorators read the same 111 rows, and the unsupported shapes stop the inventory
+        # spaced route and controller decorators read the same 112 rows, and the unsupported shapes stop the inventory
         sources = api_sources()
         pacs = API / "pacs.controller.ts"
         route, key = "  @Get('studies')\n", "GET studies"
@@ -2587,8 +2587,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics (need admin) joined the admin denied rows, 110 -> 111 and denied 99 -> 100
+        # S5-U5b: GET admin/audit (need admin) joined the admin denied rows, 111 -> 112 and denied 100 -> 101
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (111, 4, 2, 5, 100), "the real inventory is unchanged: 111 = 4 + 2 + 5 + 100")
+                         (112, 4, 2, 5, 101), "the real inventory is unchanged: 112 = 4 + 2 + 5 + 101")
         self.assertEqual({m + " " + p for (m, p), meta in baseline.items() if meta["public"]}, PUBLIC)
         # the listed packages are exactly what api/src names, the loaded ones exactly what it loads
         named, loaded = set(), set()
@@ -2837,8 +2838,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics (need admin) joined the admin denied rows, 110 -> 111 and denied 99 -> 100
+        # S5-U5b: GET admin/audit (need admin) joined the admin denied rows, 111 -> 112 and denied 100 -> 101
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (111, 4, 2, 5, 100), "the real inventory is unchanged: 111 = 4 + 2 + 5 + 100")
+                         (112, 4, 2, 5, 101), "the real inventory is unchanged: 112 = 4 + 2 + 5 + 101")
         contract = CONTRACT["regex_or_division"]
         self.assertEqual((sorted(OPERAND_WORDS), sorted(UNREAD_WORDS), sorted(CONTROL_WORDS), sorted(OPERAND_PUNCT),
                           sorted(UNREAD_PUNCT)),
@@ -3011,8 +3013,9 @@ class ClinicianPolicySpec(unittest.TestCase):
         baseline = controller_inventory(sources)
         counts = MATRIX["counts"]
         # S5-U6b: GET admin/metrics (need admin) joined the admin denied rows, 110 -> 111 and denied 99 -> 100
+        # S5-U5b: GET admin/audit (need admin) joined the admin denied rows, 111 -> 112 and denied 100 -> 101
         self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
-                         (111, 4, 2, 5, 100), "the real inventory is unchanged: 111 = 4 + 2 + 5 + 100")
+                         (112, 4, 2, 5, 101), "the real inventory is unchanged: 112 = 4 + 2 + 5 + 101")
         contract = CONTRACT["class_heading"]
         # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
         keywords, extending = 0, set()

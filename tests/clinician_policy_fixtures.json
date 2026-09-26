@@ -119,7 +119,7 @@
     "unit": "S5-U1c",
     "head": "9e7f69885b3eaa8e6c90ca9bd6de01b460e2794b",
     "rule": "Every (method, template) of the controllers has exactly one row: public_routes, session_routes, business_routes or one basis group of denied. The pure test fails on a controller route without a row, a row without a controller route, a row in two places, and counts that disagree with the controllers or invariants_live ROUTES. Nothing is denied by subtraction.",
-    "counts": {"routes": 111, "public": 4, "session": 2, "business": 5, "denied": 100},
+    "counts": {"routes": 112, "public": 4, "session": 2, "business": 5, "denied": 101},
     "basis_legend": {
       "report": "reading/report workflow: writes the report, drafts, hold, dictation or study state, or reads drafts, history, citations, structure, the worklist/bootstrap payload or a body at every RS. The clinician reads are GET clinician/studies and GET clinician/studies/:uid/report (S5-U1b).",
       "viewer": "viewer annotations, findings, manual SR and viewer jobs: writes, or reads revisions, hidden rows and authors. The clinician's final-only item read is GET studies/:uid/viewer-items (S5-U1b).",
@@ -162,7 +162,7 @@
       "admin": [
         "GET admin/users", "POST admin/users", "PATCH admin/users/:id", "POST admin/users/:id/reset-password",
         "GET admin/users/:id/study-access", "POST admin/users/:id/study-access", "GET audit", "GET unassigned",
-        "POST studies/:uid/assign", "GET admin/metrics"
+        "POST studies/:uid/assign", "GET admin/metrics", "GET admin/audit"
       ],
       "consultation": [
         "GET consultation-candidates", "GET consultations", "GET consultations/:id", "POST consultations/:id",
@@ -184,7 +184,8 @@
       "POST gateway/receipt": {"decision": "denied", "unit": "S4-U3", "commit": "3955e38", "basis": "gateway client-credentials transmission receipt (needExact gateway)"},
       "GET gateway/retry-requests": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "gateway client-credentials pull of pending Now Retry UIDs (needExact gateway)"},
       "POST studies/:uid/gateway-retry": {"decision": "denied", "unit": "S4-U4", "commit": "6dbc01b", "basis": "technician Now Retry request (need technician, owning institution only)"},
-      "GET admin/metrics": {"decision": "denied", "unit": "S5-U6b", "commit": "9fe2f14", "basis": "admin operations metrics: institution-scoped counts, report TAT and server-wide storage (need admin, restricted study access refused); not a clinician read"}
+      "GET admin/metrics": {"decision": "denied", "unit": "S5-U6b", "commit": "9fe2f14", "basis": "admin operations metrics: institution-scoped counts, report TAT and server-wide storage (need admin, restricted study access refused); not a clinician read"},
+      "GET admin/audit": {"decision": "denied", "unit": "S5-U5b", "commit": "014010f", "basis": "admin audit and security read attributed by the institution recorded in each row (need admin, restricted study access refused); not a clinician read"}
     }
   },
   "controller_decorators": {
