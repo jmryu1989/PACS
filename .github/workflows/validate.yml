@@ -259,6 +259,21 @@ jobs:
       - name: S5-U2a Clinician Home landing, final-report-first reads, A-B-A guard and list state DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-home-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file api/src/auth.controller.ts --file tests/clinician_home_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_home_dom_test.py
+      # S5-U2b: the shipped clinician home (Open Viewer, same-patient comparison) and config/ohif.js's kinCreate* extensions
+      # in a stub OHIF page (no stack, network or credentials); a clinician-only session must get no create/link/save
+      # control and only same-key comparison studies, and the guard-less control files must offer them. The file runs in three
+      # steps of about a minute each (tests/README.md S5-U2b): as one step it takes about 3 minutes, over the step budget, which
+      # is not raised. -k picks the cases by name; `test_2` also takes any case added after test_23.
+      - name: S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM (01-13)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_0 -k test_10_ -k test_11_ -k test_12_ -k test_13_
+      - name: S5-U2b Clinician viewer clinician-only change, held work and session end DOM (14-18)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom-2 --cwd . --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_14_ -k test_15_ -k test_16_ -k test_17_ -k test_18_
+      # 22 serves the shipped Job, Findings and Tech Note modules in place of their stubs.
+      - name: S5-U2b Clinician viewer document owner, real write modules and logout between modes DOM (19-)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom-3 --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_19_ -k test_2
       # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
       # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM

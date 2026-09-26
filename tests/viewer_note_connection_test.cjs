@@ -18,13 +18,20 @@ function fixture(standalone=false,identityReady=true,optionalReady=true){
   // failure/retry case below instead of being mistaken for the note script.
   if(identityReady)window.KinViewerIdentity={};
   if(standalone)window.top=window;
+  // S5-U2b-R-001 F02: the bridge connects only after a /me answered writer (kinViewerSession.decide). This fixture's
+  // session is a radiologist, and the shared session judgement is loaded with the bridge.
   const context={window,document:{querySelector:()=>null,createElement:()=>({remove(){this.removed=true;}}),head:{append:s=>scripts.push(s)}},
-    setTimeout:f=>{timers.add(f);return f;},clearTimeout:f=>timers.delete(f)};
+    setTimeout:f=>{timers.add(f);return f;},clearTimeout:f=>timers.delete(f),
+    fetch:async()=>({status:200,ok:true,json:async()=>({kind:'member',sub:'reader',roles:['radiologist']})})};
   vm.createContext(context);
-  vm.runInContext(source.slice(source.indexOf('function kinCreateViewerTechNote()'),source.indexOf('\nwindow.config =')),context);
+  vm.runInContext(source.slice(source.indexOf('function kinViewerClinicianOnly('),source.indexOf('function kinCreateViewerLayout()'))+
+    source.slice(source.indexOf('function kinCreateViewerTechNote()'),source.indexOf('\nwindow.config =')),context);
   const extension=context.kinCreateViewerTechNote();extension.preRegistration({servicesManager:{services:{}}});
-  const install=()=>{window.kinViewerTechNote=()=>({mount(){mounts++;return true;},stop(){stops++;}});};
-  return {extension,window,scripts,timers,install,mounts:()=>mounts,stops:()=>stops};
+  // S5-U2b-X5-R-001 F01: the bridge is handed the document's session (kinViewerSession.writeModule); `handed` keeps what it got.
+  const install=()=>{window.kinViewerTechNote=(services,session)=>{handed=session;return {mount(){mounts++;return true;},stop(){stops++;}};};};
+  let handed;
+  return {extension,window,scripts,timers,install,mounts:()=>mounts,stops:()=>stops,handed:()=>handed,
+    session:()=>vm.runInContext('kinViewerSession',context)};
 }
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 test('all optional MPR asset failures still allow exactly one note bridge mount',async()=>{
@@ -73,6 +80,22 @@ test('late load after exit never mounts; reentry mounts only current lifecycle',
   f.install();f.scripts[0].onload();await flush();assert.equal(f.mounts(),0);
   f.window.kinViewerNoteReconnect();await flush();assert.equal(f.mounts(),0);
   f.extension.onModeEnter();await flush();assert.equal(f.mounts(),1);assert.equal(f.scripts.length,1);
+});
+test('S5-U2b-X5-R-001 F01: the bridge gets the document session; the document end keeps it in place until mode exit, clinician-only stops it',async()=>{
+  for(const [end,stopped,state] of [['refused',0,'refused'],['clinician-only',1,'read-only']]){
+    const f=fixture();f.extension.onModeEnter();await flush();
+    f.install();f.scripts[0].onload();await flush();
+    assert.equal(f.window.kinViewerNoteConnectionState(),'ready',end);assert.equal(f.mounts(),1);
+    const session=f.session();assert.equal(f.handed(),session.writeModule,end);
+    if(end==='refused')session.refuse();else session.note({kind:'member',sub:'reader',roles:['clinician']});
+    // The real bridge ends itself in place through writeModule.onEnd (viewer-tech-note.js); the gate keeps it for mode exit and
+    // names why. Clinician-only is still taken down by the gate.
+    assert.deepEqual([f.stops(),f.window.kinViewerNoteConnectionState(),session.state()],[stopped,state,state],end);
+    f.window.kinViewerNoteReconnect();await flush();assert.equal(f.mounts(),1,end);
+    f.extension.onModeExit();assert.equal(f.stops(),1,end);
+    // A mode entry of the ended or read-only document connects nothing.
+    f.extension.onModeEnter();await flush();assert.deepEqual([f.mounts(),f.window.kinViewerNoteConnectionState()],[1,state],end);
+  }
 });
 test('timeout clears failed node and reentry during pending load has one mount',async()=>{
   const f=fixture();f.extension.onModeEnter();await flush();[...f.timers][0]();await flush();

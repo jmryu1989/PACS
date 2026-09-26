@@ -5,6 +5,14 @@ from pathlib import Path
 from playwright.sync_api import expect
 from test_volume_sync import VolumeSyncE2E
 
+# S5-U2b (Astra S5-U2b-X2-R-001 F01, X5-R-001 F01/F02): the logout these cases use to tear the MPR tools down is the end of the viewer
+# document's login, and a document whose login ended keeps authoring closed (config/ohif.js nativeAuthoringClosed, the X2-R-001 F01
+# contract): every tool that is not an image-viewing tool and was Active or Passive is left Enabled, drawn marks shown, none made or
+# edited. The write modules end before that end is posted (kinViewerSession settle), so the MPR teardown hands the tool group back
+# first and the closure then applies to exactly that group. Up to 287f0a2 a logout left authoring open and the group unchanged.
+VIEWING_TOOLS={'WindowLevel','Pan','Zoom','StackScroll','TrackballRotate','Crosshairs','Magnify'}
+def authoring_closed(options):return {name:({**o,'mode':'Enabled'} if name not in VIEWING_TOOLS and o.get('mode') in ('Active','Passive') else o) for name,o in options.items()}
+
 class VolumePreferencesE2E(VolumeSyncE2E):
  def setUp(self):
   super().setUp()
@@ -97,7 +105,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   a,p,v=self.starting();self.mouse(v);v.locator('[data-cy=WindowLevel]').click()
   native=v.evaluate('()=>{window.prefTools=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(projectionVP.id,projectionVP.renderingEngineId);return prefTools.toolOptions}')
   v.evaluate('()=>window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))')
-  expect(v.locator('.kin-mpr-configured')).to_have_count(0);expect(v.locator('.kin-mpr-zoom')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),native)
+  expect(v.locator('.kin-mpr-configured')).to_have_count(0);expect(v.locator('.kin-mpr-zoom')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(native))
  def test_properties_10_saved_profile_applies_after_job_restore(self):
   a,p,v=self.starting();self.mouse(v);self.sync(v,'Windowing',False);self.sync(v,'Zoom',True);panel=self.properties(v);panel.get_by_role('button',name='Save MPR Preferences',exact=True).click();self.save_volume(v);before=self.volume_state(v)
   capture='()=>kinCreateVolumeJob({grid:services.viewportGridService,cs:services.cornerstoneViewportService,ds:services.displaySetService,studies:new URLSearchParams(location.search).get("StudyInstanceUIDs").split(",")}).capture()';saved=v.evaluate(capture)
@@ -140,7 +148,7 @@ class VolumePreferencesE2E(VolumeSyncE2E):
   a,p,v=self.starting()
   original=v.evaluate('()=>{window.prefTools=cornerstoneTools.ToolGroupManager.getToolGroupForViewport(projectionVP.id,projectionVP.renderingEngineId);prefTools.setToolActive("Zoom",{bindings:[{mouseButton:2,modifierKey:16},{numTouchPoints:2}]});return prefTools.toolOptions}')
   self.mouse(v);bindings=v.evaluate('()=>prefTools.getToolOptions("Zoom").bindings');self.assertIn({'mouseButton':2,'modifierKey':16},bindings);self.assertIn({'numTouchPoints':2},bindings)
-  v.evaluate('()=>window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))');expect(v.locator('.kin-mpr-configured')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),original)
+  v.evaluate('()=>window.dispatchEvent(new StorageEvent("storage",{key:"kin-session-ended",newValue:"test"}))');expect(v.locator('.kin-mpr-configured')).to_have_count(0);self.assertEqual(v.evaluate('()=>prefTools.toolOptions'),authoring_closed(original))
  def test_properties_18_passive_tool_bound_by_apply_mouse_restores_after_hanging_protocol_retirement(self):
   # IF-A06. Choosing Zoom on the native toolbar leaves WindowLevel Passive; Apply Mouse then binds it to the middle button.
   # Retiring the Hanging Protocol planes must hand the reused native tool group back exactly as the toolbar left it, and the

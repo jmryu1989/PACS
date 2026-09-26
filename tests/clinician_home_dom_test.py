@@ -14,7 +14,8 @@ extra writer-side fields planted in the stubs that the real serializer never sen
       on are pinned.
   02  identifiers (name, ID, sex / age at study, birth date, study date, institution) from the list row; a final
       answer shows its version, type, signer, date, three body fields and key images, in that order before anything
-      else; data is text, never markup or translated; no planted field reaches the page.
+      else; data is text, never markup or translated; no planted field reaches the page. Open Viewer stays disabled
+      until a study is picked and then asks window.open (stubbed) for /ohif/viewer?StudyInstanceUIDs=<uid> (S5-U2b).
   03  non-final answers (P, W, T, H, unknown) show the status only, even when the stub carries a body; a final answer
       without its body or key list, an answer for another study, 404 and 403 are failures shown as the server wrote
       them, with Retry.
@@ -712,6 +713,7 @@ class ClinicianHomeDOMTest(unittest.TestCase):
         self.assertEqual([HOSTILE, "SYN Hospital A Tele", "On Hold"], [self.cells(6)[i] for i in (1, 8, 9)])
         self.assertEqual("In Progress", self.cells(7)[9])
 
+        expect(self.page.locator("#open-viewer")).to_be_disabled()
         seen = self.pick(1)
         self.assertEqual({"Name": "SYN ALPHA", "Patient ID": "SYN-P-001", "Sex / Age at Study": "M / 45Y",
                           "Birth Date": "1980-05-17", "Study Date": "2026-03-20", "Institution": "SYN Hospital A",
@@ -726,15 +728,24 @@ class ClinicianHomeDOMTest(unittest.TestCase):
                           "keysState": "키 이미지 2건", "keysHidden": False,
                           "keys": [["SYN key one", "SYN key one note", f"Series {PREFIX}.91 · Instance {PREFIX}.91.1 · Frame 12"],
                                    [HOSTILE, f"Series {PREFIX}.92 · Instance {PREFIX}.92.1 · Frame 1"]]}, seen)
-        # Identifiers, then the final report, then key images, then the (inactive) viewer slot.
+        # Identifiers, then the final report, then key images, then the viewer slot.
         self.assertEqual(["identity", "report", "keys", "viewer-slot"], self.page.evaluate(
             "() => [...document.querySelectorAll('#identity, #report, #keys, #viewer-slot')].map(e => e.id)"))
         self.assertEqual("Sex / Age at Study", self.page.locator("#identity dt").nth(2).text_content())
         self.assertTrue(has_hangul(self.page.locator("#identity dt").nth(2).get_attribute("title")))
-        expect(self.page.locator("#open-viewer")).to_be_disabled()
+        expect(self.page.locator("#open-viewer")).to_be_enabled()
         self.assertTrue(has_hangul(self.page.locator("#viewer-note").text_content()))
         self.assertEqual(("true", "Viewing"), (self.row(1).get_attribute("aria-current"), self.row(1).locator("button").text_content()))
         self.assertEqual((None, "View"), (self.row(2).get_attribute("aria-current"), self.row(2).locator("button").text_content()))
+        # S5-U2b opens the read-only viewer; a page-side window.open stub records it so no viewer document is requested
+        # from this harness (tests/clinician_viewer_dom_test.py loads the real window).
+        self.page.evaluate("""() => { window.synOpened = [];
+          window.open = (url, name) => { const popup = {opener: window, focused: false, focus() { this.focused = true; }};
+            window.synOpened.push({url, name, popup}); return popup; }; }""")
+        self.page.locator("#open-viewer").click()
+        self.assertEqual([[f"/ohif/viewer?StudyInstanceUIDs={uid(1)}", "kin-clinician-viewer", True, True]], self.page.evaluate(
+            "() => window.synOpened.map(o => [o.url, o.name, o.popup.opener === null, o.popup.focused])"))
+        self.assertTrue(has_hangul(self.page.locator("#viewer-note").text_content()))
 
         seen = self.pick(2)
         self.assertEqual(("Final · Addendum", "Addendum이 반영된 확정 판독문입니다.", {"Version": "5", "Type": "Addendum",
