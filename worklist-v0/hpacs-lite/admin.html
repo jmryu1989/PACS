@@ -123,6 +123,27 @@
     #metrics-table th { font-size: 12px; }
     #metrics-table.stale #metrics-rows { opacity: .72; }
     #metrics-table .metric-name { font-weight: 650; }
+    /* S5-U5b Audit / Security: every state is a word as well as a colour; nothing below 12px. */
+    .audit { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 18px; }
+    .audit-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 8px; }
+    .audit-head h2 { margin: 0; font-size: 17px; }
+    .audit-head .spacer { flex: 1; }
+    .audit-hint, .audit-fixed { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+    .audit-fixed { color: #c9d6e6; }
+    .audit-counts, .audit-busy { color: var(--muted); font-size: 13px; }
+    .astate { display: inline-block; border: 1px solid transparent; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 750; }
+    .astate.not_loaded, .astate.observed { background: var(--panel2); color: #b9c9dc; }
+    .astate.query_failed { border-color: #7c343e; background: #3c1b23; color: #ffd9dd; }
+    .audit-table { overflow-x: auto; margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    #audit-table th, #audit-table td { padding: 9px 10px; font-size: 13px; overflow-wrap: anywhere; vertical-align: top; }
+    #audit-table th { font-size: 12px; }
+    #audit-table.stale #audit-rows { opacity: .72; }
+    #audit-table .aline { font-size: 12px; }
+    #audit-table .alabel { color: var(--muted); }
+    #audit-table .aval.not_recorded, #audit-table .aval.none { color: var(--muted); font-style: italic; }
+    #audit-table .aval.withheld { color: #ddd6f7; font-style: italic; }
+    .audit-empty { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+    .audit-pager { display: flex; justify-content: center; margin-top: 12px; }
   </style>
 </head>
 <body>
@@ -201,6 +222,32 @@
           <tbody id="metrics-rows"></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="audit" id="audit" aria-labelledby="audit-title">
+      <div class="audit-head">
+        <h2 id="audit-title">Audit / Security</h2>
+        <span class="astate not_loaded" id="audit-state" role="status" title="아직 조회하지 않았습니다.">Not Loaded</span>
+        <span class="audit-counts" id="audit-counts" title="아직 성공한 조회가 없어 건수를 모릅니다.">Events Unknown</span>
+        <span class="audit-busy" id="audit-busy" hidden>Loading</span>
+        <div class="spacer"></div>
+        <button type="button" id="audit-refresh" disabled>Refresh Audit</button>
+      </div>
+      <p class="audit-hint">회원·역할 변경, 검사 접근 조건, 판독자 배정과 검사 감사 기록 가운데 이 기관에 귀속된 행만 보입니다. 귀속은 행을 기록할 때 함께 남은 기관 값으로만 정하며, 지금 소속 그룹이나 지금 검사 소유 기관으로 다시 정하지 않습니다. 기관을 옮긴 회원의 행은 이 기관 쪽 기록만 보이고 다른 쪽은 기관 이름 없이 withheld: other institution으로 보입니다. 행에 기록되지 않은 값은 not recorded로 보입니다. 감사 기록은 이 버튼을 누를 때만 읽습니다.</p>
+      <p class="audit-fixed" id="audit-unattributed">오래된 행 중 기록 시점 기관이 없는 행은 표시되지 않습니다.</p>
+      <p class="audit-fixed" id="audit-access-history" title="로그인·로그아웃·세션 만료 기록은 수집하지 않습니다. 이 구역은 회원·검사·설정의 변경 이력만 보입니다.">접속 이력: 수집되지 않음</p>
+      <p class="message" id="audit-message" role="alert"></p>
+      <div class="audit-table" id="audit-wrap" hidden>
+        <!-- Column headers sit in their own tbody, not a thead: the page's `thead th` stays the member table's headers. -->
+        <table id="audit-table">
+          <tbody class="audit-columns">
+            <tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Previous Value</th><th scope="col">Reason</th><th scope="col">Recorded Detail</th></tr>
+          </tbody>
+          <tbody id="audit-rows"></tbody>
+        </table>
+      </div>
+      <p class="audit-empty" id="audit-empty" hidden>이 기관에 귀속된 감사 기록이 없습니다.</p>
+      <div class="audit-pager"><button type="button" id="audit-more" hidden disabled>Load More</button></div>
     </section>
   </main>
 
@@ -1253,6 +1300,303 @@
       KinAuth.init().then(session => {
         if (KinConsoleSession.ended()) return;
         if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#metrics-refresh").disabled = false;
+      }).catch(() => {});
+    })();
+  </script>
+  <script id="admin-audit-model">
+    /*
+     * S5-U5b Audit / Security model (REQ-S5-U5b-ADMIN-AUDIT / MOVE-PROJECTION). Pure: no DOM and no request. The server
+     * (api/src/admin-audit.ts) decides which rows this institution sees and what of each; this model checks that shape
+     * and turns a row into words. It never fills a value the row did not record: an absent value reads "not recorded",
+     * and the other institution's side of a member move reads "withheld: other institution" with no name. A member
+     * snapshot carrying a field outside the projected set (email included) makes the whole answer unreadable.
+     */
+    (function (root) {
+      "use strict";
+      const NOT_RECORDED = "not recorded";
+      const WITHHELD = "withheld: other institution";
+      const TITLES = Object.freeze({
+        not_recorded: "이 행에 기록되지 않은 값입니다. 다른 값으로 짐작해 채우지 않습니다.",
+        withheld: "다른 기관 쪽 기록이라 내용과 기관 이름을 보이지 않습니다.",
+        none: "기록된 값이 비어 있습니다.",
+      });
+      const SNAPSHOT_FIELDS = Object.freeze(["id", "username", "name", "roles", "enabled", "approvalState", "emailVerified", "institution"]);
+      const EVENT_FIELDS = Object.freeze(["verificationOverride", "mode", "failed"]);
+      const TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+      const plain = value => !!value && typeof value === "object" && !Array.isArray(value);
+      const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+      const time = value => typeof value === "string" && TIME.test(value) && Number.isFinite(Date.parse(value));
+      const count = value => Number.isSafeInteger(value) && value >= 0;
+      const text = value => typeof value === "string" && value.length > 0;
+      const pad = value => String(value).padStart(2, "0");
+      const localTime = iso => { const d = new Date(iso);
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+
+      /** One side of a member row: null (not recorded), the withheld mark, or a snapshot of projected fields only. */
+      function side(value) {
+        if (value === null) return { kind: "not_recorded" };
+        if (!plain(value)) return null;
+        const keys = Object.keys(value);
+        if (owns(value, "withheld")) return keys.length === 1 && value.withheld === "other_institution" ? { kind: "withheld" } : null;
+        if (keys.some(key => !SNAPSHOT_FIELDS.includes(key)) || !owns(value, "institution") || !owns(value, "approvalState")) return null;
+        return { kind: "snapshot", value };
+      }
+
+      function readRow(raw) {
+        if (!plain(raw) || !time(raw.at) || !text(raw.actor) || !text(raw.action) || typeof raw.target !== "string"
+          || typeof raw.rule !== "string" || !plain(raw.detail)) return null;
+        const base = { at: raw.at, actor: raw.actor, action: raw.action, target: raw.target };
+        if (raw.rule === "member_snapshots") {
+          if (!owns(raw.detail, "before") || !owns(raw.detail, "after")
+            || Object.keys(raw.detail).some(key => key !== "before" && key !== "after" && !EVENT_FIELDS.includes(key))) return null;
+          const before = side(raw.detail.before), after = side(raw.detail.after);
+          if (!before || !after) return null;
+          return { ...base, member: true, before, after,
+            events: EVENT_FIELDS.filter(key => owns(raw.detail, key)).map(key => [key, raw.detail[key]]) };
+        }
+        if (!raw.rule.startsWith("field:")) return null;
+        return { ...base, member: false, detail: raw.detail };
+      }
+
+      /** The whole answer, or null when any part cannot be read (the page then keeps its last reading as stale). */
+      function readAnswer(answer) {
+        if (!plain(answer) || !text(answer.institutionId) || !time(answer.observedAt) || !count(answer.total)
+          || !Array.isArray(answer.rows) || answer.rows.length > answer.total
+          || !(answer.next === null || text(answer.next))) return null;
+        const rows = [];
+        for (const raw of answer.rows) {
+          const row = readRow(raw);
+          if (!row) return null;
+          rows.push(row);
+        }
+        return { institutionId: answer.institutionId, observedAt: answer.observedAt, total: answer.total, rows, next: answer.next };
+      }
+
+      const notRecorded = label => ({ label, text: NOT_RECORDED, state: "not_recorded", title: TITLES.not_recorded });
+
+      /** A recorded value in words. A recorded null or an empty list reads None; it is recorded, so never "not recorded". */
+      function valueLine(label, value) {
+        if (value === null || Array.isArray(value) && !value.length) return { label, text: "None", state: "none", title: TITLES.none };
+        if (Array.isArray(value) && value.every(item => typeof item === "string")) return { label, text: value.join(", "), state: "value", title: "" };
+        return { label, text: typeof value === "string" ? value : JSON.stringify(value), state: "value", title: "" };
+      }
+
+      function sideLines(prefix, value) {
+        if (value.kind === "not_recorded") return [notRecorded(prefix)];
+        if (value.kind === "withheld") return [{ label: prefix, text: WITHHELD, state: "withheld", title: TITLES.withheld }];
+        const label = field => prefix ? `${prefix}.${field}` : field;
+        return SNAPSHOT_FIELDS.map(field => owns(value.value, field) ? valueLine(label(field), value.value[field]) : notRecorded(label(field)));
+      }
+
+      /**
+       * Words for one read row. Previous Value is a member row's before snapshot and otherwise not recorded (no other
+       * writer records a previous value); Reason is the row's own reason string when it recorded one.
+       */
+      function display(row, format = localTime) {
+        const previous = row.member ? sideLines(null, row.before) : [notRecorded(null)];
+        const reason = !row.member && typeof row.detail.reason === "string"
+          ? [{ label: null, text: row.detail.reason, state: "value", title: "" }] : [notRecorded(null)];
+        const detail = row.member
+          ? [...sideLines("after", row.after), ...row.events.map(([key, value]) => valueLine(key, value))]
+          : Object.keys(row.detail).filter(key => key !== "reason").map(key => valueLine(key, row.detail[key]));
+        return { time: format(row.at), timeTitle: `기록한 서버 시각 ${row.at}`, actor: row.actor, action: row.action,
+          target: row.target, previous, reason, detail: detail.length ? detail : [notRecorded(null)] };
+      }
+
+      /** The panel line: before a read, after a read, and after a failed read (the last reading stays, marked). */
+      function summary(view, format = localTime) {
+        const observedAt = view?.observedAt ?? null;
+        if (view?.failed) return observedAt
+          ? { key: "query_failed", text: `Query Failed · 마지막 조회 기준 ${format(observedAt)}`,
+              title: "마지막으로 성공한 조회의 행을 흐리게 두었습니다. 지금 기록이 아닐 수 있습니다." }
+          : { key: "query_failed", text: "Query Failed · 아직 성공한 조회가 없습니다",
+              title: "성공한 조회가 없어 행을 보이지 않습니다. 기록이 없다는 뜻이 아닙니다." };
+        if (!observedAt) return { key: "not_loaded", text: "Not Loaded", title: "아직 조회하지 않았습니다." };
+        return { key: "observed", text: `Loaded ${format(observedAt)}`, title: "서버가 이 기관의 감사 기록을 읽은 시각입니다." };
+      }
+
+      /** Counts of the rows this institution sees; nothing else is counted, so nothing else can be told. */
+      function counts(view) {
+        if (!view) return { text: "Events Unknown", title: "아직 성공한 조회가 없어 건수를 모릅니다." };
+        const events = n => `${n} ${n === 1 ? "Event" : "Events"}`;
+        return { text: `Showing ${view.shown} of ${events(view.total)}`, title: "이 기관에 귀속되어 보이는 행만 셉니다." };
+      }
+
+      root.KinAdminAudit = Object.freeze({ NOT_RECORDED, WITHHELD, TITLES, SNAPSHOT_FIELDS, readAnswer, display, summary, counts,
+        formatTime: localTime });
+    })(typeof globalThis === "object" ? globalThis : this);
+  </script>
+  <script>
+    /*
+     * S5-U5b Audit / Security panel. One GET /api/admin/audit per "Refresh Audit" and one per "Load More" (with the
+     * sealed after of the last answer); nothing at page boot, so opening Members stays /api/me plus the member list.
+     * Only the newest Refresh paints (A->B->A), and a Load More answer is appended only while the list it continues is
+     * still the one on screen. A 401 from any read, older ones included, ends the page session before any body is read
+     * or any sequence is compared; the end is the page's one session object, whose closers empty every panel, this one
+     * included. A failed read is never shown as no events: the last reading stays, dimmed, and the empty sentence goes.
+     */
+    (() => {
+      const API = `${location.origin}/api`;
+      const $ = selector => document.querySelector(selector);
+      const PAGE_SIZE = 25;
+      const audit = { seq: 0, failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false };
+
+      function setAuditMessage(value) {
+        const box = $("#audit-message");
+        box.textContent = value || "";
+        box.classList.toggle("show", !!value);
+      }
+
+      async function auditRequest(query) {
+        if (KinConsoleSession.ended()) throw new Error("audit ended");
+        const response = await fetch(`${API}/admin/audit?${query}`, { headers: { "X-KIN-CSRF": "1" } });
+        // A 401 ends the page session here, before any body is read and before the caller compares its sequence: an
+        // older read's 401 is this session's end too. The end moves audit.seq, so nothing of this session paints after.
+        if (response.status === 401) {
+          KinConsoleSession.end();
+          throw Object.assign(new Error("audit ended"), { status: 401 });
+        }
+        if (KinConsoleSession.ended()) throw new Error("audit ended");
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status}`),
+          { status: response.status, code: typeof payload?.code === "string" ? payload.code : undefined });
+        return payload;
+      }
+
+      // Fixed sentences only: server wording is never shown here.
+      function failureText(error) {
+        if (error?.status === 403) return error.code === "ADMIN_AUDIT_RESTRICTED"
+          ? "검사 접근 범위가 제한된 계정은 감사 기록을 볼 수 없습니다." : "이 계정으로는 감사 기록을 조회할 수 없습니다.";
+        if (error?.status === 409) return error.code === "ADMIN_AUDIT_CURSOR_EXPIRED"
+          ? "이어받기 유효기간이 지났거나 서버가 다시 시작되었습니다. Refresh Audit로 처음부터 다시 조회하세요."
+          : "검사 접근 조건이 바뀌었습니다. 다시 조회하세요.";
+        if (error?.status === 503) return "서버가 바쁘거나 감사 기록 조회가 지연되었습니다. 잠시 후 다시 조회하세요.";
+        if (error) return "감사 기록을 불러오지 못했습니다.";
+        return "조회 응답 형식을 확인할 수 없습니다.";
+      }
+
+      function lineNodes(lines) {
+        return lines.map(item => {
+          const line = document.createElement("div");
+          line.className = "aline";
+          if (item.label) {
+            const label = document.createElement("span");
+            label.className = "alabel";
+            label.textContent = `${item.label}: `;
+            line.append(label);
+          }
+          const value = document.createElement("span");
+          value.className = `aval ${item.state}`;
+          value.textContent = item.text;
+          if (item.title) value.title = item.title;
+          line.append(value);
+          return line;
+        });
+      }
+
+      function drawRow(row) {
+        const shown = window.KinAdminAudit.display(row), tr = document.createElement("tr");
+        Object.assign(tr.dataset, { action: shown.action, target: shown.target });
+        for (const [value, title] of [[shown.time, shown.timeTitle], [shown.actor], [shown.action], [shown.target]]) {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          if (title) cell.title = title;
+          tr.append(cell);
+        }
+        for (const lines of [shown.previous, shown.reason, shown.detail]) {
+          const cell = document.createElement("td");
+          cell.append(...lineNodes(lines));
+          tr.append(cell);
+        }
+        return tr;
+      }
+
+      function drawAudit() {
+        const M = window.KinAdminAudit, read = audit.read;
+        $("#audit-rows").replaceChildren(...(read ? audit.rows.map(drawRow) : []));
+        $("#audit-wrap").hidden = !read || !audit.rows.length;
+        $("#audit-table").classList.toggle("stale", audit.failed && !!read);
+        // No events is said only by a successful read that found none; a failure never reads as an empty list.
+        $("#audit-empty").hidden = !read || audit.failed || audit.rows.length > 0;
+        const line = M.summary({ observedAt: read ? read.observedAt : null, failed: audit.failed });
+        const state = $("#audit-state");
+        state.className = `astate ${line.key}`;
+        state.textContent = line.text;
+        state.title = line.title;
+        const shown = M.counts(read ? { shown: audit.rows.length, total: read.total } : null);
+        Object.assign($("#audit-counts"), { textContent: shown.text, title: shown.title });
+        $("#audit-busy").hidden = !audit.pending && !audit.loadingMore;
+        const more = $("#audit-more");
+        more.hidden = !read || !audit.next;
+        more.disabled = audit.pending || audit.loadingMore || audit.failed || KinConsoleSession.ended();
+      }
+
+      /*
+       * The page session ended (Log out, or a 401 on a request of any panel). Runs before anything is awaited: moving seq
+       * drops every Refresh and Load More in flight, and the rows, the continuation, the message and the controls go with
+       * them; the state line goes back to Not Loaded. The logout is the session end's.
+       */
+      KinConsoleSession.onEnd(() => {
+        audit.seq++;
+        Object.assign(audit, { failed: false, read: null, rows: [], next: null, pending: false, loadingMore: false });
+        $("#audit-refresh").disabled = true;
+        setAuditMessage("");
+        drawAudit();
+      });
+
+      async function refreshAudit() {
+        if (KinConsoleSession.ended()) return;
+        const seq = ++audit.seq;
+        Object.assign(audit, { pending: true, loadingMore: false });
+        drawAudit();
+        let answer = null, error = null;
+        try { answer = await auditRequest(`limit=${PAGE_SIZE}`); }
+        catch (e) { error = e ?? new Error("request failed"); }
+        // Only the newest load paints; a session end (a 401 in auditRequest too) moves seq, so nothing paints after it.
+        if (seq !== audit.seq) return;
+        audit.pending = false;
+        const read = error ? null : window.KinAdminAudit.readAnswer(answer);
+        if (read) {
+          Object.assign(audit, { read, rows: read.rows, next: read.next, failed: false });
+          setAuditMessage("");
+        } else {
+          // Nothing is emptied: the last successful reading stays, marked as the last observation.
+          audit.failed = true;
+          setAuditMessage(failureText(error));
+        }
+        drawAudit();
+      }
+
+      async function loadMore() {
+        const cursor = audit.next, seq = audit.seq;
+        if (KinConsoleSession.ended() || !cursor || audit.pending || audit.loadingMore || audit.failed) return;
+        audit.loadingMore = true;
+        drawAudit();
+        let answer = null, error = null;
+        try { answer = await auditRequest(`limit=${PAGE_SIZE}&after=${encodeURIComponent(cursor)}`); }
+        catch (e) { error = e ?? new Error("request failed"); }
+        // A Refresh sent meanwhile or the session end moved seq; a newer list carries another continuation.
+        if (seq !== audit.seq || audit.next !== cursor) return;
+        audit.loadingMore = false;
+        const read = error ? null : window.KinAdminAudit.readAnswer(answer);
+        if (read && read.institutionId === audit.read.institutionId) {
+          Object.assign(audit, { rows: audit.rows.concat(read.rows), next: read.next, read: { ...audit.read, total: read.total } });
+          setAuditMessage("");
+        } else {
+          // The rows already shown stay valid; only the next page failed. An expired continuation cannot be retried.
+          if (error?.code === "ADMIN_AUDIT_CURSOR_EXPIRED") audit.next = null;
+          setAuditMessage(failureText(error));
+        }
+        drawAudit();
+      }
+
+      $("#audit-refresh").addEventListener("click", refreshAudit);
+      $("#audit-more").addEventListener("click", loadMore);
+      // Enabled only for the session the Members console accepts (approved, not demo, admin); init() is shared, not repeated.
+      // A session that ended while /api/me was out keeps the control off: its answer belongs to that session.
+      KinAuth.init().then(session => {
+        if (KinConsoleSession.ended()) return;
+        if (session?.state === "approved" && !session.demo && KinAuth.has("admin")) $("#audit-refresh").disabled = false;
       }).catch(() => {});
     })();
   </script>
