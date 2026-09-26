@@ -6,7 +6,7 @@ REQ-S5-U1a-ROLE-DEFAULT-DENY -> RISK-S5-CLINICIAN-WRITER-LEAK/UNCLASSIFIED-ROUTE
 REQ-S5-U1b-CLINICIAN-READ -> RISK-S5-U1b-DRAFT-LEAK/NONFINAL-BODY/WRITER-FIELD/COUNT-LEAK/TENANT-UID
 -> this file (allowlist == fixture, declared additions only, source pins), TEST-S5-U1b-PURE
 (clinician_read_serializer_test.cjs) and TEST-S5-U1b-LIVE (clinician_read_live.py).
-REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-22
+REQ-S5-U1c-ROUTE-COMPLETENESS -> RISK-S5-U1c-NEW-ROUTE-LEAK/MIXED-DOWNGRADE -> TEST-S5-U1c-INVENTORY (test_05, test_11-23
 here) and TEST-S5-U1c-LIVE-MATRIX (clinician_policy_live.py test_01/test_04/test_05): every controller route has exactly one
 route_matrix row, nothing is denied by subtraction, and review notes D3/D5/D6/D8 of S5-U1a are closed by pins.
 
@@ -26,7 +26,9 @@ No Node, no Nest, no browser, no stack. Three kinds of evidence and nothing more
      tests/clinician_policy_fixtures.json source_contract is the closed list of forms that reach a loader, an evaluator,
      a metadata writer or a class prototype, and every other form is refused; a '/' is a regex or a division by the
      token before it, a '/' whose reading turns on grammar the lexer does not track refuses the file, and no regex
-     literal spells a checked name, S5-U1c-F07) compared with the invariants_live ROUTES table read as text,
+     literal spells a checked name, S5-U1c-F07; every class heading is read to the '{' of its body past type parameters
+     and heritage clauses, and no class in a controller file extends, S5-U1c-F08) compared with the invariants_live
+     ROUTES table read as text,
      with the 104-row planning baseline and with the route matrix: every current route is public, a listed session or
      business row, or a denied row with a named basis, and every route added since the baseline has its own row.
   3. Source pins that guard, member console, Keycloak client and realm carry the same role list and that
@@ -43,6 +45,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest import mock
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -178,6 +181,10 @@ CHECKED_NAMES = (STRICT_NAME, WRITER_NAME, REFLECT_NAME, LOADER_NAME, SEALED_WOR
 RETURN_WORD = re.compile(r"(?<![\w$.])return(?![\w$])")
 CLASS_WORD = re.compile(r"(?<![\w$.])class(?![\w$])")
 EXTENDS_WORD = re.compile(r"(?<![\w$.])extends(?![\w$])")
+# S5-U1c-F08: the words that open a heritage clause, and what a type between '<' and '>' is written with besides names,
+# numbers, '=>' and the brackets angle_end skips whole
+HERITAGE_WORDS = frozenset({"extends", "implements"})
+TYPE_PUNCT = frozenset(",.=|&?:-")
 # what stands before a method named require in a class body: the end of the member before it, or a modifier
 MEMBER_START = frozenset({"{", "}", ";", "async", "public", "private", "protected", "static", "override"})
 KEY_NAME = re.compile(r"[A-Za-z_$][\w$]*")
@@ -823,10 +830,119 @@ def enclosing(code, at):
     return None
 
 
+def heading_token(code, index):
+    """(text, start, end) of the token at code[index] past whitespace: a name or number, '=>' or one character; ('',
+    end, end) at the end. code is masked, so no comment or literal is left to read."""
+    while index < len(code) and (code[index] in WHITESPACE or code[index].isspace()):
+        index += 1
+    word = IDENTIFIER.match(code, index)
+    end = word.end() if word else min(len(code), index + (2 if code.startswith("=>", index) else 1))
+    return code[index:end], index, end
+
+
+def angle_end(code, at):
+    """Offset past the '>' that closes the '<' at code[at] of type parameters or type arguments: '<' and '>' counted,
+    '(', '[' and '{' skipped whole to the bracket that closes them (a type literal, a function type's parameters, a
+    tuple), '=>' an arrow. A '<' that does not close raises, and so does a token no type is written with, so the reader
+    neither stops at a type literal's '{' nor reads on past the heading (S5-U1c-F08)."""
+    depth, index = 0, at
+    while True:
+        text, start, end = heading_token(code, index)
+        if not text:
+            raise AssertionError(f"the '<' at offset {at} does not close")
+        if text == "<":
+            depth += 1
+        elif text == ">":
+            depth -= 1
+            if depth == 0:
+                return end
+        elif text in ("(", "[", "{"):
+            end = bracket_end(code, start)
+        elif not (IDENTIFIER.fullmatch(text) or text == "=>" or text in TYPE_PUNCT):
+            raise AssertionError(f"{text!r} at offset {start} inside the '<' at offset {at}, which no type is written with")
+        index = end
+
+
+def reference_end(code, index, clause):
+    """Offset past one class reference of an extends or implements clause at code[index]: a name, then '.' and a name
+    and type arguments; after extends also a parenthesised start, call arguments and an index ('extends
+    Mixin(Base)<T>'). A keyword where the name goes, and any other start, raises."""
+    text, start, end = heading_token(code, index)
+    if clause == "extends" and text == "(":
+        end = bracket_end(code, start)
+    elif not KEY_NAME.fullmatch(text) or text in OPERAND_WORDS | UNREAD_WORDS:
+        raise AssertionError(f"{text!r} at offset {start}, where the {clause} clause names a class")
+    while True:
+        text, start, following = heading_token(code, end)
+        if text == ".":
+            text, start, following = heading_token(code, following)
+            if not IDENTIFIER.fullmatch(text):
+                raise AssertionError(f"{text!r} at offset {start} after '.' in the {clause} clause")
+        elif text == "<":
+            following = angle_end(code, start)
+        elif clause == "extends" and text in ("(", "["):
+            following = bracket_end(code, start)
+        else:
+            return end
+        end = following
+
+
+def class_heading(code, at):
+    """{'body', 'extends'} of the class keyword at code[at]: the offset of the '{' that opens its class body, and the
+    offsets of the extends that open its heritage clauses. code is masked.
+
+    The heading is read as TypeScript writes one: 'class', a name unless the class is an expression or a default
+    export, type parameters, extends and implements clauses in either order (the reader does not rely on the order the
+    compiler asks for), then the '{' of the body. Type parameters and arguments are read to their closing '>'
+    (angle_end). The reader before this took the first '{' after 'class' for the body, so the type literal of '<T =
+    {}>', '<T = { marker: string }>' or '<T = () => { marker: string }>' ended the heading before the 'extends
+    PacsController' after it: a registered controller that would serve GET unlisted/health, PacsController's @Public(),
+    left both inventories at 110 rows and public 4 (S5-U1c-F08). Anything else after 'class' raises with its reason:
+    the reader does not guess where such a heading ends.
+    """
+    text, start, end = heading_token(code, at + len("class"))
+    if KEY_NAME.fullmatch(text) and text not in HERITAGE_WORDS:
+        text, start, end = heading_token(code, end)
+    if text == "<":
+        text, start, end = heading_token(code, angle_end(code, start))
+    extends = []
+    while text in HERITAGE_WORDS:
+        clause = text
+        if clause == "extends":
+            extends.append(start)
+        text, start, end = heading_token(code, reference_end(code, end, clause))
+        while clause == "implements" and text == ",":
+            text, start, end = heading_token(code, reference_end(code, end, clause))
+    if text != "{":
+        raise AssertionError(f"{text!r} at offset {start}, where the class heading goes on or its body opens")
+    return {"body": start, "extends": tuple(extends)}
+
+
+def class_keywords(code):
+    """Offsets of the class keywords of code; 'class' after '.', '?.' or '#' is a property name, not a keyword."""
+    return [match.start() for match in CLASS_WORD.finditer(code)
+            if not (is_property(code, match.start()) or before_token(code, match.start())[0] == "#")]
+
+
+@functools.lru_cache(maxsize=None)
+def class_bodies(code):
+    """The offsets of every '{' that opens a class body in code: one per class keyword whose heading class_heading
+    reads. A keyword it does not read opens none, so a require in that block is read as a call, which can only refuse."""
+    bodies = set()
+    for at in class_keywords(code):
+        try:
+            bodies.add(class_heading(code, at)["body"])
+        except AssertionError:
+            continue
+    return frozenset(bodies)
+
+
 def class_body(code, brace):
-    """Whether the '{' at code[brace] opens a class body: 'class' heads the text since the ';', '{' or '}' before it."""
-    start = max(code.rfind(";", 0, brace), code.rfind("{", 0, brace), code.rfind("}", 0, brace)) + 1
-    return CLASS_WORD.search(code, start, brace) is not None
+    """Whether the '{' at code[brace] opens a class body, as class_heading reads the class keyword's heading. The reader
+    before this took a '{' whose text since the ';', '{' or '}' before it held the word class, so 'if (x. class) {'
+    passed a loader call in that block, with a block after it, as a method declaration, and the body of 'class
+    Access<T = { marker: string }> {' was none (S5-U1c-F08)."""
+    return brace in class_bodies(code)
 
 
 def class_method(code, at, end):
@@ -1070,16 +1186,38 @@ def module_sources(path, statements):
 
 def controller_heritage(path, code):
     """Raise on a class with an extends clause in a *.controller.ts file (S5-U1c-F06): its instances would carry the
-    base's route methods, read under the base's file and served under this file's @Controller() prefix."""
-    headings = []
-    for match in CLASS_WORD.finditer(code):
-        brace = code.find("{", match.end())
-        heading = code[match.start():len(code) if brace < 0 else brace]
-        if EXTENDS_WORD.search(heading):
-            headings.append((line_of(code, match.start()), " ".join(heading.split())))
-    if headings:
-        raise AssertionError(f"{path.name}: a class in a controller file extends another class, whose route methods it "
-                             f"would serve under this file's prefix: {headings}")
+    base's route methods, read under the base's file and served under this file's @Controller() prefix.
+
+    Every class keyword's heading is read to the '{' of its body by class_heading, past type parameters and heritage
+    clauses (S5-U1c-F08). An extends that opens a heritage clause is refused; an extends anywhere else in the heading, a
+    type parameter constraint or a conditional type, is a form source_contract does not list; and a class keyword whose
+    heading class_heading does not read (a '<' that does not close, a token no heading holds, class as a key or a member
+    name) is refused too, since an extends in what follows it would go unread. Each kind is its own reason."""
+    heritage, elsewhere, unread = [], [], []
+    for at in class_keywords(code):
+        try:
+            heading = class_heading(code, at)
+        except AssertionError as error:
+            unread.append((line_of(code, at), str(error), " ".join(code[at:at + 60].split())))
+            continue
+        text = " ".join(code[at:heading["body"]].split())
+        if heading["extends"]:
+            heritage.append((line_of(code, at), text))
+        elif EXTENDS_WORD.search(code, at, heading["body"]):
+            elsewhere.append((line_of(code, at), text))
+    problems = []
+    if heritage:
+        problems.append(f"{path.name}: a class in a controller file extends another class, whose route methods it would "
+                        f"serve under this file's prefix: {heritage}")
+    if elsewhere:
+        problems.append(f"{path.name}: a class heading in a controller file holds extends outside a heritage clause (a "
+                        f"type parameter constraint or a conditional type), which source_contract does not list: "
+                        f"{elsewhere}")
+    if unread:
+        problems.append(f"{path.name}: a class keyword in a controller file whose heading the reader does not read to "
+                        f"its body, so an extends in it could go unread: {unread}")
+    if problems:
+        raise AssertionError(" | ".join(problems))
 
 
 def decorator_bindings(path, source, runs):
@@ -1266,7 +1404,8 @@ def controller_inventory(sources=None):
     must be its module's own export and Public must end at its declaration, or a route or @Public() under a classified
     name stops it too (S5-U1c-F04), and so does a route or Public applied by a call, a metadata writer or a loader in
     any file (S5-U1c-F05), any form source_contract does not list and an extends clause in a controller file
-    (S5-U1c-F06). Every check runs on every file and the refusal joins each reason.
+    (S5-U1c-F06), read past the generic defaults whose type literal hid it (S5-U1c-F08). Every check runs on every file
+    and the refusal joins each reason.
     """
     found, problems = {}, []
     sources = api_sources() if sources is None else sources
@@ -2855,6 +2994,162 @@ class ClinicianPolicySpec(unittest.TestCase):
             "f07_refused": f07, "division": sorted(divisions), "regex": sorted(regexes),
             "refused_readings": sorted(refused_readings), "refused": sorted(refused), "accepted": sorted(accepted),
             "real_routes": len(baseline), "real_public": len(PUBLIC),
+        }, ensure_ascii=True, sort_keys=True))
+
+    def test_23_class_headings_are_read_past_type_parameters(self):
+        """S5-U1c-F08: controller_heritage took the first '{' after 'class' for the class body.
+
+        api/src/review-inherited.controller.ts holding '@Controller('unlisted') export class ReviewInheritedController<T =
+        {}> extends PacsController {}', registered in AppModule, ended its heading at the generic default's type literal,
+        so the extends after it went unread and GET unlisted/health, PacsController's @Public() under this prefix, stayed
+        out of every inventory: 110 rows, public 4, test_05/11/12/13/21/22 green. '<T = { marker: string }>' and '<T = () => {
+        marker: string }>' did the same. class_heading reads every heading to the '{' of its body and class_body reads the
+        same heading; each refusal is matched by its reasons inside one check's message, and test_05 itself runs with each
+        of the reviewer's forms in place of api/src.
+        """
+        sources = api_sources()
+        baseline = controller_inventory(sources)
+        counts = MATRIX["counts"]
+        self.assertEqual((len(baseline), counts["public"], counts["session"], counts["business"], counts["denied"]),
+                         (110, 4, 2, 5, 99), "the real inventory is unchanged: 110 = 4 + 2 + 5 + 99")
+        contract = CONTRACT["class_heading"]
+        # every class keyword of api/src has a heading class_heading reads, and no controller file's class extends
+        keywords, extending = 0, set()
+        for path, source in sorted(sources.items()):
+            code = code_mask(source)
+            for at in class_keywords(code):
+                keywords += 1
+                heading = class_heading(code, at)
+                self.assertIn(heading["body"], class_bodies(code))
+                if heading["extends"]:
+                    extending.add(path.name)
+        self.assertTrue(extending)
+        self.assertEqual([name for name in extending if name.endswith(".controller.ts")], [])
+
+        def old_class_body(code, brace):
+            # the class_body before this: the word class in the text since the ';', '{' or '}' before the brace
+            start = max(code.rfind(";", 0, brace), code.rfind("{", 0, brace), code.rfind("}", 0, brace)) + 1
+            return CLASS_WORD.search(code, start, brace) is not None
+
+        def reasons_in(message, reasons):
+            # each reason is fragments in order inside one check's message, so no other check's text can stand in for it
+            parts = message.split(" | ")
+            for fragments in reasons:
+                pattern = ".*".join(map(re.escape, fragments))
+                self.assertTrue(any(re.search(pattern, part) for part in parts), f"{fragments} not in {message}")
+
+        def refusal(files):
+            with self.assertRaises(AssertionError) as caught:
+                controller_inventory({**sources, **files})
+            return str(caught.exception)
+
+        added, outside, app = API / "review-inherited.controller.ts", API / "unlisted-routes.ts", API / "app.module.ts"
+        registered = "controllers: [DictationController,"
+        self.assertEqual(sources[app].count(registered), 1)
+        self.assertTrue({added, outside}.isdisjoint(sources))
+
+        def controller(heading, before="", body="", inherits=True):
+            # the reviewer's file, registered in AppModule's controllers before DictationController as the review did
+            text = ("import { Controller } from '@nestjs/common';\n"
+                    + ("import { PacsController } from './pacs.controller';\n" if inherits else "") + before
+                    + "@Controller('unlisted')\nexport " + heading + " {" + body + "}\n")
+            return {added: text, app: "import { ReviewInheritedController } from './review-inherited.controller';\n"
+                                      + sources[app].replace(registered, "controllers: [ReviewInheritedController, "
+                                                                         "DictationController,")}
+
+        forms = {
+            "<T = {}>": controller("class ReviewInheritedController<T = {}> extends PacsController"),
+            "<T = { marker: string }>": controller(
+                "class ReviewInheritedController<T = { marker: string }> extends PacsController"),
+            "<T = () => { marker: string }>": controller(
+                "class ReviewInheritedController<T = () => { marker: string }> extends PacsController"),
+        }
+        control = {"the same inheritance without a generic": controller(
+            "class ReviewInheritedController extends PacsController")}
+        self.assertEqual((sorted(forms), sorted(control)), (sorted(contract["forms"]), sorted(contract["control"])))
+        pinned = {**contract["forms"], **contract["control"]}
+        test_05 = self.test_05_every_route_has_exactly_one_matrix_row_and_the_counts_reconcile
+        f08 = {}
+        for label, files in {**forms, **control}.items():
+            with self.subTest(f08=label):
+                code = code_mask(files[added])
+                at = class_keywords(code)
+                self.assertEqual(len(at), 1)
+                self.assertEqual(len(class_heading(code, at[0])["extends"]), 1)
+                # control: the heading before this ran to the first '{', the generic default's, and so held no extends
+                self.assertEqual(EXTENDS_WORD.search(code, at[0], code.find("{", at[0])) is not None, label in control)
+                reasons_in(refusal(files), pinned[label])
+                # test_05 itself with the file set in place of api/src stops at the refusal instead of passing
+                with mock.patch.object(sys.modules[__name__], "api_sources",
+                                       lambda root=API, files=files: {**sources, **files}):
+                    with self.assertRaises(AssertionError) as caught:
+                        test_05()
+                reasons_in(str(caught.exception), pinned[label])
+                f08[label] = ["controller_inventory", "test_05"]
+        # a generic controller is read like any other: its own route is a row test_05 finds missing
+        routed = controller("class ReviewInheritedController<T = () => { marker: string }>",
+                            "import { Get } from '@nestjs/common';\n", "\n  @Get('read')\n  read() { return {}; }\n",
+                            inherits=False)
+        found = controller_inventory({**sources, **routed})
+        self.assertEqual(sorted(set(found) - set(baseline)), [("GET", "unlisted/read")])
+        self.assertFalse(found[("GET", "unlisted/read")]["public"])
+        with mock.patch.object(sys.modules[__name__], "api_sources", lambda root=API: {**sources, **routed}):
+            with self.assertRaisesRegex(AssertionError, "controller routes without a route_matrix row"):
+                test_05()
+        inject = "import { Injectable } from '@nestjs/common';\n"
+        helper = inject + "@Injectable()\nexport class Helper {\n  run() { return 1; }\n}\n"
+        refused = {
+            "an abstract generic class that extends": controller(
+                "abstract class ReviewInheritedController<T = {}> extends PacsController"),
+            # registered only by a default import, which decorator_bindings refuses in app.module.ts for itself
+            "a default-exported generic class that extends": {
+                added: controller("default class<T = {}> extends PacsController")[added]},
+            "an implements clause with a type literal before extends": controller(
+                "class ReviewInheritedController implements Marker<{ marker: string }> extends PacsController",
+                "interface Marker<T> { marker?: T }\n"),
+            "a type parameter constraint": controller("class ReviewInheritedController<T extends object = {}>",
+                                                      inherits=False),
+            "a '<' that does not close": controller("class ReviewInheritedController<T = {} extends PacsController"),
+            "a token no type holds inside '<' and '>'": controller("class ReviewInheritedController<T = PacsController!>"),
+            "class as an object key in a controller file": controller(
+                "class ReviewInheritedController", "export const keys = { class: 1 };\n", inherits=False),
+            "a member named class in a controller file": controller(
+                "class ReviewInheritedController", body="\n  class() { return 1; }\n", inherits=False),
+            "a loader call in a block after 'x. class'": {
+                outside: helper + "const x: any = {};\nif (x. class) {\n  require('../outside')\n  {}\n}\n"},
+        }
+        self.assertEqual(sorted(refused), sorted(contract["refused"]), "class_heading.refused pins exactly these cases")
+        for label, files in refused.items():
+            with self.subTest(refused=label):
+                reasons_in(refusal(files), contract["refused"][label])
+        # control: the class_body before this took the if block for a class body, so the loader call in it, a block
+        # after it, passed as a method declaration
+        code = code_mask(refused["a loader call in a block after 'x. class'"][outside])
+        block = code.index("{", code.index("x. class"))
+        self.assertTrue(old_class_body(code, block))
+        self.assertFalse(class_body(code, block))
+        accepted = {
+            "a generic controller without inheritance": controller(
+                "class ReviewInheritedController<T = { marker: string }>", inherits=False),
+            "a require method in a class whose generic default holds a type literal": {outside: inject + (
+                "@Injectable()\nexport class Access<T = { marker: string }> {\n  async require(c: any) { return c; }\n"
+                "  run() { return this.require(1); }\n}\n")},
+            "class as a property name after '.' and '?.' in a controller file": controller(
+                "class ReviewInheritedController", "export const flag = (x: any) => x. class ?? x?. class;\n",
+                inherits=False),
+        }
+        self.assertEqual(sorted(accepted), sorted(contract["accepted"]), "class_heading.accepted pins exactly these")
+        for label, files in accepted.items():
+            with self.subTest(accepted=label):
+                self.assertEqual(controller_inventory({**sources, **files}), baseline)
+        # control: the class_body before this found no class body there, so that require method was read as a loader call
+        code = code_mask(accepted["a require method in a class whose generic default holds a type literal"][outside])
+        body = class_heading(code, code.index("class Access"))["body"]
+        self.assertFalse(old_class_body(code, body))
+        self.assertTrue(class_body(code, body))
+        print("CLINICIAN_POLICY_CLASS_HEADING " + json.dumps({
+            "f08_refused": f08, "refused": sorted(refused), "accepted": sorted(accepted), "class_keywords": keywords,
+            "extending_outside_controllers": sorted(extending), "real_routes": len(baseline), "real_public": len(PUBLIC),
         }, ensure_ascii=True, sort_keys=True))
 
 
