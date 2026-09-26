@@ -1955,16 +1955,29 @@ function kinViewerClinicianOnly(me) {
    종료다. 패널마다 따로 비교하면 새로 붙은 패널·재진입한 패널은 비교할 계정이 없어 다른 계정의 writer 답으로 작성 경로를 다시
    열었다. ended: 로그인이 끝났다(401/403·로그아웃 방송·다른 계정·구성원이 아닌 답). 역할 판정과 따로 두고 read-only보다
    앞선다 — read-only 문서도 끝나면 끝나고(그래야 재진입이 목록 읽기를 다시 시작하지 않는다), read-only에서 writer로는 여전히
-   돌아가지 않는다. 조회·작성·마운트·주기 확인의 관문은 ended부터 본다. */
+   돌아가지 않는다. 조회·작성·마운트·주기 확인의 관문은 ended부터 본다.
+   (Astra S5-U2b-X5-R-001 F01) 쓰기 화면(소견·저장 작업·Tech 메모)이 스스로 묻는 /me(첫 확인·재확인·주기 확인)도 문서의 판정이다:
+   writeModule로 받은 answer()가 그 답을 owner와 비교해 판정을 적은 뒤에야 화면이 계정을 쓰고, 그 화면의 401(또는 /me의 403)은
+   refuse()로 문서를 끝낸다. 로그인이 끝나면 쓰기 화면은 내려가지 않고 제자리에서 끝난다 — onEnd()로 등록한 end가 판정을 알리기
+   전에 돌아, 각 화면이 자기 자리에 "다시 로그인" 안내를 남기고, 화면의 정리(MPR 도구가 도구 그룹을 돌려주는 복원)가 작성 경로를
+   닫는 정책보다 먼저 끝난다. clinician-only는 여전히 쓰기 화면을 내린다(모듈 관문).
+   (Astra S5-U2b-X5-R-001 F02) 로그아웃 방송(storage·BroadcastChannel)은 문서가 받는다: 모든 확장이 모드 종료로 내려간 사이의
+   로그아웃도 ended로 적히고, 모드 종료는 이 수신자·owner·ended를 지우지 않는다. */
 const kinViewerSession = (() => {
-  let role = 'unconfirmed', ended = false, owner = null, read = null;
-  const waiting = new Set(), watchers = new Set(), changes = new Set();
+  let role = 'unconfirmed', ended = false, owner = null, read = null, ending = false;
+  const waiting = new Set(), watchers = new Set(), changes = new Set(), enders = new Set();
   const state = () => ended ? 'refused' : role;
   function settle(next) {
     const previous = state();
     if (ended) return previous;
+    if (ending) return previous;
     if (role === 'read-only' && next !== 'refused') return previous;
-    if (next === 'refused') ended = true; else role = next;
+    if (next === 'refused') {
+      // The mounted write modules end in place first, while the document still reads as it was (F01; e2e volume preferences 09/14).
+      ending = true;
+      for (const end of [...enders]) { try { end(); } catch (_) {} }
+      ending = false; ended = true;
+    } else role = next;
     const now = state();
     for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(now); }
     if (now === 'read-only' && previous !== now) for (const watch of [...watchers]) { try { watch(); } catch (_) {} }
@@ -1980,6 +1993,20 @@ const kinViewerSession = (() => {
     if (who !== null && owner === null) owner = who;
     return settle(who === null ? 'refused' : kinViewerClinicianOnly(me) ? 'read-only' : 'writer');
   }
+  // F02: the document's own logout receivers, for its whole life (a panel's listener leaves with the panel at mode exit).
+  const loggedOut = () => { settle('refused'); };
+  let logoutChannel = null;
+  try { globalThis.addEventListener?.('storage', e => { if (e?.key === 'kin-session-ended') loggedOut(); }); } catch (_) {}
+  try { if (typeof BroadcastChannel === 'function') { logoutChannel = new BroadcastChannel('kin-session'); logoutChannel.onmessage = e => { if (e?.data?.type === 'session-ended') loggedOut(); }; } } catch (_) {}
+  // F01: what a write module is handed. answer(me) is its own successful /me: compared with the document's account and noted before
+  // the module keeps anything of it; true only while the document is still a writer of that account. refuse() is its 401 (or 403 on
+  // /me). onEnd(end) registers its in-place end for as long as it is mounted.
+  const writeModule = Object.freeze({
+    answer(me) { note(me); return state() === 'writer'; },
+    refuse() { settle('refused'); },
+    ended: () => ended,
+    onEnd(end) { enders.add(end); return () => { enders.delete(end); }; },
+  });
   return {
     state,
     ended: () => ended,
@@ -1987,6 +2014,7 @@ const kinViewerSession = (() => {
     writer: () => state() === 'writer',
     note,
     refuse: () => settle('refused'),
+    writeModule,
     onReadOnly(watch) { watchers.add(watch); return () => { watchers.delete(watch); }; },
     onChange(watch) { changes.add(watch); return () => { changes.delete(watch); }; },
     // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
@@ -2768,9 +2796,10 @@ function kinCreateCTPresets() {
 
 function kinCreateViewerJobs() {
   let ready, current, epoch = 0;
-  // S5-U2b(R-001 F02, R-002 F01): a document that stops being a confirmed writer (clinician-only, or a /me refused with 401/403)
-  // takes the Job panel down even if a writer answer mounted it first.
-  kinViewerSession.onChange(next => { if (next !== 'writer') { epoch++; current?.stop(); current = null; } });
+  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Job panel down even if a writer answer mounted it
+  // first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the panel has ended in place through
+  // kinViewerSession.writeModule (its status keeps saying why), a mount still waiting is dropped, and mode exit takes it down.
+  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -2778,7 +2807,7 @@ function kinCreateViewerJobs() {
       script.onerror = () => reject(new Error('비교 작업 화면을 불러오지 못했습니다.')); document.head.append(script);
     });
     ready = load('viewer-volume-job.js').catch(() => {}).then(() => load('viewer-jobs.js'))
-      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel));
+      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel, kinViewerSession.writeModule));
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch;
@@ -2792,9 +2821,10 @@ function kinCreateViewerJobs() {
 // Findings live inside the Measurements panel; the dock keeps its two panels unchanged.
 function kinCreateViewerFindings() {
   let ready, current, epoch = 0;
-  // S5-U2b(R-001 F02, R-002 F01): a document that stops being a confirmed writer (clinician-only, or a /me refused with 401/403)
-  // takes the Findings section down even if a writer answer mounted it first.
-  kinViewerSession.onChange(next => { if (next !== 'writer') { epoch++; current?.stop(); current = null; } });
+  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Findings section down even if a writer answer
+  // mounted it first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the section's store has ended in place
+  // through kinViewerSession.writeModule (its status keeps "다시 로그인"), and mode exit takes it down.
+  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-findings', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -2803,7 +2833,10 @@ function kinCreateViewerFindings() {
     });
     ready = load('finding-link-model.js').then(() => load('viewer-findings.js')).then(() => {
       if (typeof window.kinViewerFindings !== 'function' || !window.kinFindingLinkModel) throw new Error('소견 화면을 불러오지 못했습니다. 뷰어를 다시 여세요.');
-      return window.kinViewerFindings(servicesManager.services, window.kinFindingLinkModel);
+      // The section builds its store itself: every store it creates here is given the document's session (its /me and its end).
+      const model = window.kinFindingLinkModel, session = kinViewerSession.writeModule;
+      const connected = Object.create(model, { createStore: { value: deps => model.createStore({ ...deps, session }) } });
+      return window.kinViewerFindings(servicesManager.services, connected, session);
     });
     ready.catch(() => {});
   }, onModeEnter() {
@@ -2819,9 +2852,10 @@ function kinCreateViewerFindings() {
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
-  // S5-U2b(R-001 F02, R-002 F01): a document that stops being a confirmed writer drops the note bridge even if a writer answer
-  // connected it first; the bridge state names why ('read-only' or 'refused').
-  kinViewerSession.onChange(next=>{if(next==='writer')return;epoch++;if(active)state=next;current?.stop();current=null;});
+  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only drops the note bridge even if a writer answer connected it
+  // first; the bridge state names why ('read-only' or 'refused'). (Astra S5-U2b-X5-R-001 F01) The end of the document's login has
+  // ended the bridge in place through kinViewerSession.writeModule (its status says to open the viewer again); mode exit stops it.
+  kinViewerSession.onChange(next=>{if(next==='writer')return;epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
   function connect() {
     if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
     const ticket=epoch;state='loading';
@@ -2872,7 +2906,7 @@ function kinCreateViewerTechNote() {
         typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
-      .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
+      .then(()=>window.kinViewerTechNote(servicesManager.services,kinViewerSession.writeModule)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
   },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
