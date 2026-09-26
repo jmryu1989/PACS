@@ -309,6 +309,58 @@ class ClinicianPolicySpec(unittest.TestCase):
             secret = client.get("secret")
             self.assertTrue(secret is None or secret.startswith("${"), client["clientId"])
 
+    def test_09_u1b_read_rows_are_narrow_scoped_and_final_gated_in_source(self):
+        """S5-U1b source pins. Runtime proof is clinician_read_live.py; these catch a narrow path being widened."""
+        read = lambda name: (API / name).read_text(encoding="utf-8")  # noqa: E731
+        controller, service = read("pacs.controller.ts"), read("pacs.service.ts")
+        viewer, preview = read("viewer.controller.ts"), read("report-preview.controller.ts")
+        contract = FIXTURES["read_contract"]
+        self.assertEqual(ts_array(self.policy, "CLINICIAN_FINAL_ACTIONS"), contract["final_actions"])
+        self.assertEqual(ts_array(self.policy, "CLINICIAN_OPEN_STATES"), contract["open_states"])
+        self.assertRegex(self.policy, r"return rs === 'A' && typeof action === 'string' && CLINICIAN_FINAL_ACTIONS\.includes\(action\)")
+        # both new rows live in the report-preview controller (no-store middleware, StudyAccess interceptor) and go
+        # straight to their clinician service method; pacs.controller.ts, whose bytes S4-U5 pins, gains nothing
+        for route, call in (("clinician/studies", "this.pacs.clinicianStudies(member(req), query)"),
+                            ("clinician/studies/:uid/report", "this.pacs.clinicianReportRead(uid, member(req))")):
+            block = re.search(rf"@Get\('{re.escape(route)}'\)\n(.*?)\n  \}}", preview, re.S)
+            self.assertIsNotNone(block, route)
+            self.assertIn("return " + call + ";", block.group(1))
+        self.assertNotIn("clinician", controller)
+        # the clinician list IS the worklist enumeration (same tenant/tele/StudyAccess/page/recheck), narrowed after it
+        body = re.search(r"\n  async clinicianStudies\(c: Caller, query\?: any\) \{\n(.*?)\n  \}\n", service, re.S).group(1)
+        lines = [line.strip() for line in body.splitlines()]
+        self.assertEqual(lines[:2], ["this.clinicianCaller(c);", "const list = await this.listStudies(c, query);"])
+        self.assertEqual(lines[-1], "return clinicianList(list, heads);")
+        self.assertIn("if (clinicianListChanged(list.studies, current))", body)
+        self.assertIn("LEFT JOIN \"ReportVersion\" v ON v.uid = r.uid AND v.version = r.version", body)
+        for token in ("findings", "reportDraft", "toClient", "notObserved", "orderReconciliation", "gatewayReceipt"):
+            self.assertNotIn(token, body, token)
+        self.assertRegex(self.policy, r"const pinned = head && state && Number\.isSafeInteger\(state\.version\) && head\.version === state\.version \? head : null;")
+        scope = re.search(r"\n  private async clinicianScope<T>\(.*?\n  \}\r?\n", service, re.S).group(0)
+        self.assertIn("need(c.roles, CLINICIAN_ROLE, '임상의 조회');", service)
+        self.assertIn("this.clinicianCaller(c);", scope)
+        self.assertIn("const state = await this.gate(uid, c, tx);", scope)
+        self.assertIn("if (!state) throw new NotFoundException('검사를 찾을 수 없습니다');", scope)
+        self.assertIn("where: { uid_version: { uid, version: report.version } },", scope)
+        self.assertIn("isolationLevel: 'RepeatableRead'", scope)
+        self.assertIn("if (!report.final) return { uid, report, keys: null };", service)
+        statistics = service[service.index("if (path === '/statistics') {"):service.index("// /dicom-web/studies/{uid}/")]
+        closed = statistics.index("if (clinicianOnly(c.roles)) throw new ForbiddenException(")
+        self.assertLess(closed, statistics.index("return;"), "the server-wide count closes for clinician-only before it passes")
+        # viewer items: clinician-only branch with the final check before AND after the read; others unchanged
+        self.assertIn("return clinicianOnly(c.roles) ? this.clinicianItems(uid, query, c) : this.svc.list(uid, query, c);", viewer)
+        branch = viewer[viewer.index("private async clinicianItems("):]
+        first, read_at = branch.index("clinicianViewerFinal(uid, c)"), branch.index("await this.svc.list(uid, page, c)")
+        self.assertLess(first, read_at)
+        self.assertGreater(branch.index("clinicianViewerFinal(uid, c)", read_at), read_at)
+        # report-preview returns bodies at every RS; clinician-only is refused before any read
+        guard_at = preview.index("if (clinicianOnly(caller.roles)) throw new ForbiddenException({ code: CLINICIAN_ROUTE_DENIED });")
+        self.assertLess(guard_at, preview.index("this.prisma.studyState.findUnique"))
+        # both new rows sit in the REPORT battery of invariants_live (technician, preliminary third party, other tenant)
+        manifest = MANIFEST.read_text(encoding="utf-8")
+        self.assertIn('("GET", "clinician/studies"): Route(Kind.REPORT, "clinician-studies", "collection"),', manifest)
+        self.assertIn('("GET", "clinician/studies/:uid/report"): Route(Kind.REPORT, "clinician-report"),', manifest)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
