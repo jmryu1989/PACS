@@ -1,42 +1,18 @@
 [
   {
-    "module": "tests/clinician_request_live.py",
-    "unit": "s5-u4c-image-request",
-    "timeout": 660,
+    "module": "tests/admin_audit_live.py",
+    "unit": "s5-u5b-admin-audit",
+    "timeout": 900,
     "cases": [
-      "ClinicianRequestLive.test_r01_registration_creates_no_transfer_rows",
-      "ClinicianRequestLive.test_r02_state_machine_and_handlers",
-      "ClinicianRequestLive.test_r03_active_duplicate_and_replay",
-      "ClinicianRequestLive.test_r04_counterparty_validation_and_no_counterparty_visibility",
-      "ClinicianRequestLive.test_r05_cross_tenant_and_revocation",
-      "ClinicianRequestLive.test_r06_dto_has_no_transfer_vocabulary",
-      "ClinicianRequestLive.test_r07_role_matrix",
-      "ClinicianRequestLive.test_r08_connect_routes_still_deny_clinician",
-      "ClinicianRequestLive.test_r09_audit_rows",
-      "ClinicianRequestLive.test_r10_audit_rows_owner_institution_only",
-      "ClinicianRequestLive.test_r11_metadata_study_access_allows_and_denies"
+      "AdminAuditLive.test_01_refusals_before_any_history",
+      "AdminAuditLive.test_02_member_history_is_attributed_at_write_time",
+      "AdminAuditLive.test_03_a_deleted_member_keeps_its_record_time_history",
+      "AdminAuditLive.test_04_a_study_recreated_under_another_owner_keeps_its_history",
+      "AdminAuditLive.test_05_rows_without_a_record_time_institution_reach_nobody",
+      "AdminAuditLive.test_06_totals_and_paging_count_visible_rows_only"
     ],
     "expected": {
       "sweep": null,
-      "audit_rows": {}
-    }
-  },
-  {
-    "module": "tests/clinician_policy_live.py",
-    "unit": "s5-u1c-clinician-policy",
-    "timeout": 595,
-    "cases": [
-      "ClinicianPolicyLive.test_01_clinician_only_session_routes_and_default_denial",
-      "ClinicianPolicyLive.test_02_pending_and_invalid_clinician_keep_membership_codes_and_logout",
-      "ClinicianPolicyLive.test_03_member_console_approves_updates_and_revokes_a_clinician",
-      "ClinicianPolicyLive.test_04_mixed_and_legacy_roles_keep_their_existing_paths",
-      "ClinicianPolicyLive.test_05_every_allow_row_has_a_positive_a_wrong_role_and_a_wrong_tenant_case"
-    ],
-    "expected": {
-      "sweep": {
-        "routes": 122,
-        "denied": 100
-      },
       "audit_rows": {}
     }
   }
