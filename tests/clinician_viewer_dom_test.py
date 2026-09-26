@@ -142,6 +142,12 @@ Findings, Job and Tech Note modules instead):
       list, no module, no mark or account control. Without a logout the same re-entry works. Control: the file at fix7 (Astra's
       reproduction: the writer document asks /me three times, reads its author list and draws; the clinician-only one asks /me
       twice and reads its final list).
+  24  (S5-U2c, Astra S5-VIEWER-UXR-R-001 F01) CT position sync (kin.ct-sync, the real extension over a same-patient CT pair and a
+      permissive native synchronizer): a clinician-only document asks /me, GET clinician/studies?limit=100 and /me again — never
+      GET studies, which this harness does not answer — shows no notice after the normal login and moves the prior to the same
+      position; an unanswered check (/me 500) says so with Recheck Access, which the pointer reaches while the notice itself lets it
+      through, and pressing it brings sync back; a 401 is the only session end (its words, no button, nothing asked after it).
+      Control: a radiologist document keeps GET studies.
 
 Synthetic data only (SYN-* names): no server, no network, no credentials. A request the harness does not answer is
 aborted and fails the case. The server half is S5-U1b (tests/clinician_read_live.py, hosted synthetic stack only).
@@ -983,6 +989,78 @@ MODULE_RECHECK = {
       synNoteApi('GET', '/syn-note').then(() => 'sent', error => error.message).then(outcome => { window.synNoteOutcome = outcome; }); }""",
 }
 BROADCAST_LOGOUT = "() => { const c = new BroadcastChannel('kin-session'); c.postMessage({ type: 'session-ended' }); c.close(); }"
+
+
+# test_24 (S5-U2c): config/ohif.js kinCreateCTSync wording, verbatim.
+CT_SYNC_TEXT = {
+    "ended": "세션이 변경되었거나 종료되어 위치 동기를 중지했습니다. 다시 로그인한 뒤 뷰어를 여세요",
+    "confirmed": "검사 접근 정보를 확인했습니다. 위치 동기를 사용할 수 있습니다",
+    "failed": "검사 접근 정보를 확인하지 못해 위치 동기를 멈췄습니다. 연결 상태를 확인한 뒤 다시 확인하세요",
+    "synced": "같은 좌표계의 CT 위치 동기",
+}
+# test_24: the shipped kin.ct-sync mounted over two same-frame CT stacks (current every 2 mm, prior every 4 mm) with the pinned
+# sync group's surface; the native synchronizer is permissive (every enabled target goes to the nearest position), so a target that
+# stays put was held by the extension. Nothing else of the harness is booted.
+CT_SYNC_BOOT = """([current, prior]) => {
+  const CT = '1.2.840.10008.5.1.4.1.1.2', ENGINE = 'syn-ct-engine', planes = new Map(), viewports = new Map(), grid = new Map(), sets = new Map();
+  const stack = (vp, study, series, zs) => {
+    const ids = zs.map((z, i) => `wadors:${location.origin}/dicom-web/studies/${study}/series/${series}/instances/${series}.${i}/frames/1`);
+    ids.forEach((id, i) => planes.set(id, { frameOfReferenceUID: 'SYN-FOR-1', imagePositionPatient: [0, 0, zs[i]], rowCosines: [1, 0, 0], columnCosines: [0, 1, 0] }));
+    sets.set('syn-ds-' + vp, { StudyInstanceUID: study, SeriesInstanceUID: series, Modality: 'CT', SOPClassUID: CT, images: ids.map(() => ({ SOPClassUID: CT })) });
+    grid.set(vp, { viewportId: vp, displaySetInstanceUIDs: ['syn-ds-' + vp] });
+    viewports.set(vp, { id: vp, type: 'stack', index: 0, ids, getRenderingEngine: () => ({ id: ENGINE }), getImageIds() { return this.ids; },
+      getCurrentImageIdIndex() { return this.index; }, getCurrentImageId() { return this.ids[this.index]; } });
+  };
+  stack('syn-ct-a', current, current + '.1', Array.from({ length: 16 }, (_, i) => i * 2));
+  stack('syn-ct-b', prior, prior + '.1', Array.from({ length: 8 }, (_, i) => i * 4));
+  const z = id => planes.get(id)?.imagePositionPatient[2];
+  window.cornerstone.imageLoader = { loadAndCacheImage: async () => ({}) };
+  window.cornerstone.metaData = { get: (type, id) => type === 'imagePlaneModule' ? planes.get(id) : undefined };
+  window.cornerstone.utilities = { spatialRegistrationMetadataProvider: { add() {} } };
+  class NativeSync {
+    constructor() { this.targets = []; this.options = {}; this.enabled = true; }
+    add(info) { this.targets.push(info); }
+    getTargetViewports() { return this.targets.map(t => ({ ...t })); }
+    hasTargetViewport(engine, id) { return this.targets.some(t => t.renderingEngineId === engine && t.viewportId === id); }
+    isDisabled() { return !this.enabled; }
+    setEnabled(value) { this.enabled = value; }
+    getOptions(id) { return this.options[id]; }
+    setOptions(id, value) { this.options[id] = value; }
+    destroy() { this.targets = []; }
+    async fireEvent(info) {
+      const sz = z(viewports.get(info.viewportId).getCurrentImageId());
+      for (const t of this.targets) {
+        if (t.viewportId === info.viewportId || this.options[t.viewportId]?.disabled) continue;
+        const target = viewports.get(t.viewportId), zs = target.ids.map(z);
+        target.index = zs.reduce((best, value, i) => Math.abs(value - sz) < Math.abs(zs[best] - sz) ? i : best, 0);
+      }
+    }
+  }
+  const creators = new Map(['imageSlice', 'stackimage'].map(type => [type, () => new NativeSync()]));
+  const services = {
+    syncGroupService: { getSyncCreatorForType: type => creators.get(type), addSynchronizerType: (type, fn) => { creators.set(type, fn); } },
+    cornerstoneViewportService: { getCornerstoneViewport: id => viewports.get(id) },
+    viewportGridService: { getState: () => ({ viewports: grid }) },
+    displaySetService: { getDisplaySetByUID: uid => sets.get(uid) } };
+  const extension = window.config.extensions.find(e => e && e.id === 'kin.ct-sync');
+  extension.preRegistration({ servicesManager: { services } });
+  let sync = null;
+  window.synCt = {
+    enter() { extension.onModeEnter(); sync = creators.get('imageSlice')('IMAGE_SLICE_SYNC', {});
+      for (const viewportId of viewports.keys()) sync.add({ viewportId, renderingEngineId: ENGINE }); },
+    exit() { extension.onModeExit(); },
+    scroll(vp, index) { viewports.get(vp).index = index; sync.fireEvent({ viewportId: vp, renderingEngineId: ENGINE }, {}); },
+    z: vp => z(viewports.get(vp).getCurrentImageId()),
+    notice() { const n = document.querySelector('#kin-ct-sync-status'), b = document.querySelector('#kin-ct-sync-recheck');
+      return n ? { visible: !n.hidden, text: n.hidden ? '' : n.querySelector('span').textContent, recheck: !!b && !n.hidden && !b.hidden } : null; },
+  };
+  window.synCt.enter();
+}"""
+# test_24: what the pointer reaches at the centre of Recheck Access and of the notice's words, and the button's size.
+CT_SYNC_HIT = """() => { const n = document.querySelector('#kin-ct-sync-status'), b = document.querySelector('#kin-ct-sync-recheck');
+  const at = r => document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2), rb = b.getBoundingClientRect();
+  return { button: at(rb) === b, words_pass: !n.contains(at(n.querySelector('span').getBoundingClientRect())), height: rb.height,
+    font: parseFloat(getComputedStyle(b).fontSize) }; }"""
 
 
 class ClinicianViewerDOMTest(unittest.TestCase):
@@ -3417,6 +3495,81 @@ class ClinicianViewerDOMTest(unittest.TestCase):
                                  (self.session(), self.me_requests - asked, self.page.evaluate("synAdd('ArrowAnnotate')")),
                                  "control: the logout was missed")
                 self.page.evaluate("synClearMarks()")
+
+    # test_24 (S5-U2c)
+    def api_paths(self, start):
+        paths = []
+        for request in self.finished[start:]:
+            url = urlparse(request.url)
+            if url.path.startswith("/api/"):
+                paths.append(url.path + (f"?{url.query}" if url.query else ""))
+        return paths
+
+    def ct_sync_document(self):
+        self.viewer_page = True
+        self.page.goto(VIEWER_URL)
+        start = len(self.finished)
+        self.page.evaluate(CT_SYNC_BOOT, [VA, VP])
+        self.wait_until(lambda: len(self.api_paths(start)) >= 3, "the CT sync access check")
+        self.settle()
+        return self.api_paths(start)
+
+    def test_24_clinician_ct_sync_reads_the_narrow_list_and_says_why_it_stops(self):
+        self.rows = [study(VA, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20260320", FINAL),
+                     study(VP, "SYN KIM", "SYN-P-100", patient(INST_A, "SYN-P-100"), "20250101", OPEN)]
+        self.assertEqual(["/api/me", "/api/clinician/studies?limit=100", "/api/me"], self.ct_sync_document())
+        self.assertEqual([], self.unexpected, "no GET studies (and every request carried X-KIN-CSRF)")
+        self.assertEqual({"visible": False, "text": "", "recheck": False}, self.page.evaluate("synCt.notice()"))
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 8, "the prior at the same position")
+        self.assertEqual(CT_SYNC_TEXT["synced"], self.page.evaluate("synCt.notice()")["text"])
+        # An unanswered check: its own words and Recheck Access, which the pointer reaches through the pass-through notice.
+        self.page.evaluate("synCt.exit()")
+        self.me_status = 500
+        asked = self.me_requests
+        self.page.evaluate("synCt.enter()")
+        self.wait_until(lambda: self.me_requests > asked, "the failing /me")
+        self.settle()
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.notice()")["recheck"], "Recheck Access offered")
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["failed"], "recheck": True}, 8),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')")))
+        hit = self.page.evaluate(CT_SYNC_HIT)
+        self.assertEqual((True, True), (hit["button"], hit["words_pass"]))
+        self.assertGreaterEqual(hit["height"], 24)
+        self.assertGreaterEqual(hit["font"], 12)
+        self.me_status = None
+        self.page.locator("#kin-ct-sync-recheck").click()
+        self.wait_until(lambda: self.page.evaluate("synCt.notice()")["text"] == CT_SYNC_TEXT["confirmed"], "the confirmed recheck")
+        self.page.evaluate("synCt.scroll('syn-ct-a', 6)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 12, "sync back after Recheck Access")
+        # A 401 is the end of the login: the session words, no button, and nothing is asked after it.
+        self.page.evaluate("synCt.exit()")
+        self.me_status = 401
+        asked = self.me_requests
+        self.page.evaluate("synCt.enter()")
+        self.wait_until(lambda: (self.page.evaluate("synCt.notice()") or {}).get("visible"), "the session end")
+        self.settle()
+        start = len(self.finished)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 8)")
+        self.settle()
+        self.assertEqual(({"visible": True, "text": CT_SYNC_TEXT["ended"], "recheck": False}, 12, [], 1),
+                         (self.page.evaluate("synCt.notice()"), self.page.evaluate("synCt.z('syn-ct-b')"),
+                          self.api_paths(start), self.me_requests - asked))
+        self.assertEqual([], self.unexpected)
+        # Control: a radiologist document keeps GET studies (answered here by this page only).
+        self.fresh_page()
+        self.me, self.me_status = RADIOLOGIST, None
+        listed = []
+
+        def studies(route):
+            listed.append(route.request.headers.get("x-kin-csrf"))
+            route.fulfill(json={"studies": copy.deepcopy(self.rows), "observedAt": "2026-09-27T00:00:00.000Z"})
+        self.page.route(lambda url: urlparse(url).path == "/api/studies", studies)
+        self.assertEqual(["/api/me", "/api/studies", "/api/me"], self.ct_sync_document())
+        self.assertEqual(["1"], listed)
+        self.page.evaluate("synCt.scroll('syn-ct-a', 4)")
+        self.wait_until(lambda: self.page.evaluate("synCt.z('syn-ct-b')") == 8, "control: the radiologist's prior at the same position")
 
 
 if __name__ == "__main__":
