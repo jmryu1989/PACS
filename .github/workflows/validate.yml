@@ -236,6 +236,12 @@ jobs:
       - name: S5-U2a Clinician Home landing, final-report-first reads, A-B-A guard and list state DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-home-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file api/src/auth.controller.ts --file tests/clinician_home_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_home_dom_test.py
+      # S5-U2b: the shipped clinician home (Open Viewer, same-patient comparison) and config/ohif.js's kinCreate* extensions
+      # in a stub OHIF page (no stack, network or credentials); a clinician-only session must get no create/link/save
+      # control and only same-key comparison studies, and the guard-less control files must offer them.
+      - name: S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
