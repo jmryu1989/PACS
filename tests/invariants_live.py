@@ -139,6 +139,19 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("GET", "consultations/:id"): Route(Kind.USER),
     ("POST", "studies/:uid/consultations"): Route(Kind.USER),
     ("POST", "consultations/:id"): Route(Kind.USER),
+    # S5-U4a — 임상의 질문(consultation과 별도 모델·서비스). 기관·StudyAccess·작성자 경계는 clinician-question.service.ts.
+    ("GET", "questions"): Route(Kind.TENANT),
+    ("GET", "questions/:id"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/questions"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/questions"): Route(Kind.TENANT),
+    ("POST", "questions/:id/entries"): Route(Kind.TENANT),
+    ("POST", "questions/:id/close"): Route(Kind.TENANT),
+    # S5-U4c — 영상 요청 등록. 요청은 전송이 아니다(Transfer·basis·agreement 불변). 경계는 image-request.service.ts.
+    ("GET", "image-requests"): Route(Kind.TENANT),
+    ("GET", "image-requests/:id"): Route(Kind.TENANT),
+    ("GET", "studies/:uid/image-requests"): Route(Kind.TENANT),
+    ("POST", "studies/:uid/image-requests"): Route(Kind.TENANT),
+    ("POST", "image-requests/:id"): Route(Kind.TENANT),
     ("GET", "reader-candidates"): Route(Kind.USER),
     ("GET", "studies/:uid/reader-assignment"): Route(Kind.USER),
     ("POST", "studies/:uid/reader-assignment"): Route(Kind.USER),
@@ -205,6 +218,10 @@ ROUTES: dict[tuple[str, str], Route] = {
     ("POST", "admin/users"): Route(Kind.NEITHER),
     ("PATCH", "admin/users/:id"): Route(Kind.NEITHER),
     ("POST", "admin/users/:id/reset-password"): Route(Kind.NEITHER),
+    # S5-U6b 운영 지표: admin 전용, 기관 범위 합계(visible 경계)만 싣는 읽기다.
+    ("GET", "admin/metrics"): Route(Kind.TENANT),
+    # S5-U5b 감사·보안 기록: admin 전용, 행을 쓸 때 남은 기관으로 귀속한 행만 싣는 읽기다(tests/admin_audit_live.py).
+    ("GET", "admin/audit"): Route(Kind.TENANT),
 }
 
 
@@ -256,6 +273,21 @@ def controller_routes() -> set[tuple[str, str]]:
             route_path = "/".join(part for part in (prefix, child) if part)
             found.add((http_decorators[match.group(1)], route_path))
     return found
+
+
+def policy_app_roles() -> frozenset[str]:
+    """회원 앱 역할 전체(api/src/clinician-policy.ts APP_ROLES = legacy 셋 + clinician).
+
+    guard·회원 콘솔·Keycloak 클라이언트가 읽는 목록을 그대로 읽는다. 여기 따로 적은 목록은 역할이
+    늘어날 때 조용히 낡아, Keycloak이 들고 있는 역할을 관리 대상 밖으로 빼고 비교한다(S5-U1c D3).
+    """
+    source = (ROOT / "api" / "src" / "clinician-policy.ts").read_text(encoding="utf-8")
+    legacy = re.search(r"export const LEGACY_APP_ROLES\b[^=]*=\s*Object\.freeze\(\[(.*?)\]\);", source, re.S)
+    clinician = re.search(r"export const CLINICIAN_ROLE = '([a-z]+)';", source)
+    composed = re.search(r"export const APP_ROLES\b[^=]*=\s*new Set\(\[\.\.\.LEGACY_APP_ROLES, CLINICIAN_ROLE\]\);", source)
+    if not (legacy and clinician and composed):
+        raise AssertionError("clinician-policy.ts의 APP_ROLES 형태를 읽지 못했습니다")
+    return frozenset(re.findall(r"'([a-z]+)'", legacy.group(1)) + [clinician.group(1)])
 
 
 @dataclass
@@ -1485,7 +1517,7 @@ process.stdout.write(JSON.stringify(value));
         groups = self.admin("GET", f"/users/{quote(user_id)}/groups")
         roles = self.admin("GET", f"/users/{quote(user_id)}/role-mappings/realm")
         self.assertEqual((groups.status, roles.status), (200, 200), groups.text + roles.text)
-        app = {"radiologist", "technician", "admin"}
+        app = policy_app_roles()
         return sorted(g["name"] for g in groups.body), sorted(r["name"] for r in roles.body if r["name"] in app)
 
     def admin_row(self, username: str) -> dict[str, Any]:

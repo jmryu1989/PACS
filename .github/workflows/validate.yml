@@ -81,6 +81,13 @@ jobs:
       # fixture. The S5-U1b live module runs only through scripts/run-tests.py on a hosted synthetic stack.
       - name: S5-U1b clinician read serializer vectors against the TS source
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-read-serializer --cwd . --file tests/clinician_policy_fixtures.json --file tests/clinician_read_serializer_test.cjs --file api/src/clinician-policy.ts -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_CLINICIAN_POLICY_MODULE=api/src/clinician-policy.ts node:22-alpine node --test tests/clinician_read_serializer_test.cjs
+      # S5-U5b: the admin audit attribution rule (api/src/admin-audit.ts, type-stripped by node:22) over the card's 30
+      # vectors with the rejected current-group/current-owner rule as a negative control, the page read, the sealed
+      # continuation, and the completeness of the action table over every audit write under api/src (the repository is
+      # mounted read-only for that scan). The S5-U5b live module runs only through scripts/run-tests.py on a hosted
+      # synthetic stack.
+      - name: S5-U5b admin audit record-time attribution vectors, negative control and action-table completeness
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-attribution --cwd . --file api/src/admin-audit.ts --file api/src/admin.service.ts --file tests/admin_audit_attribution_test.cjs -- docker run --rm --network none --read-only -v "$PWD:/src:ro" -w /src -e KIN_ADMIN_AUDIT_MODULE=api/src/admin-audit.ts node:22-alpine node --test tests/admin_audit_attribution_test.cjs
       - name: Keep pinned browser dependencies independent of unused Chrome APT repository
         run: |
           python3 tests/ci_browser_apt_test.py
@@ -242,10 +249,19 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-home-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/index.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/main.html --file api/src/auth.controller.ts --file tests/clinician_home_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_home_dom_test.py
       # S5-U2b: the shipped clinician home (Open Viewer, same-patient comparison) and config/ohif.js's kinCreate* extensions
       # in a stub OHIF page (no stack, network or credentials); a clinician-only session must get no create/link/save
-      # control and only same-key comparison studies, and the guard-less control files must offer them.
-      - name: S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM
+      # control and only same-key comparison studies, and the guard-less control files must offer them. The file runs in three
+      # steps of about a minute each (tests/README.md S5-U2b): as one step it takes about 3 minutes, over the step budget, which
+      # is not raised. -k picks the cases by name; `test_2` also takes any case added after test_23.
+      - name: S5-U2b Clinician read-only viewer, same-patient comparison, A-B-A and state DOM (01-13)
         timeout-minutes: 3
-        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_0 -k test_10_ -k test_11_ -k test_12_ -k test_13_
+      - name: S5-U2b Clinician viewer clinician-only change, held work and session end DOM (14-18)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom-2 --cwd . --file config/ohif.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_14_ -k test_15_ -k test_16_ -k test_17_ -k test_18_
+      # 22 serves the shipped Job, Findings and Tech Note modules in place of their stubs.
+      - name: S5-U2b Clinician viewer document owner, real write modules and logout between modes DOM (19-)
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom-3 --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_19_ -k test_2
       # S5-U3: the shipped clinician home's Patient Timeline against stubbed timeline answers grouped by the server patient key
       # only (no stack, network or credentials); nothing is read before Show Timeline, another key's row is refused, the marker
       # follows the server's source relation, and the guard-less / display-comparing control files must fail those checks.
@@ -257,6 +273,17 @@ jobs:
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-gateway-status-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file worklist-v0/hpacs-lite/study-arrivals.js --file tests/admin_gateway_status_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_gateway_status_dom_test.py
+      # S5-U6b: the shipped Members console Operations section against in-test GET /admin/metrics answers (no stack, network
+      # or credentials); unknown never reads as 0, a late answer must not paint, and the guard-less control must.
+      - name: S5-U6b Members console Operations metrics states, unknown never 0, A-B-A guard and wording DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-metrics-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file tests/admin_metrics_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_metrics_dom_test.py
+      # S5-U5b: the shipped Members console Audit / Security section against in-test GET /admin/audit answers (no stack,
+      # network or credentials); not recorded and withheld are words, a failure never reads as no events, a late answer
+      # must not paint, and the guard-less controls must.
+      - name: S5-U5b Members console Audit / Security rows, withheld and not recorded, failure not empty, A-B-A guards DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/admin-audit-dom --cwd . --file worklist-v0/hpacs-lite/admin.html --file worklist-v0/hpacs-lite/auth.js --file worklist-v0/hpacs-lite/study-access-admin.js --file tests/admin_audit_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/admin_audit_dom_test.py
       - name: D-MEASURE2 B1 real readback, held drafts, manual SR and source recovery
         timeout-minutes: 28
         run: |
@@ -1013,6 +1040,10 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_source_test.cjs
       - name: Study access policy, fail-closed storage and stale response boundaries
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_access_policy_test.cjs /tests/study_access_service_test.cjs
+      - name: S5-U4a compiled question service, StudyAccess source reads before locks, receipts and audit keys
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/clinician-question-service --cwd . --file api/src/clinician-question.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/clinician_question_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/clinician_question_service_test.cjs
+      - name: S5-U4c compiled image request service, StudyAccess source reads before locks, receipts, lock order and audit keys
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/image-request-service --cwd . --file api/src/image-request.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/image_request_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/image_request_service_test.cjs
       - name: Compiled stale-draft addendum guard and draft base-version boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
@@ -1027,6 +1058,10 @@ jobs:
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/gateway-retry-server --cwd . --file api/src/gateway-retry.ts --file api/src/pacs.service.ts --file api/src/study-access.service.ts --file tests/gateway_retry_vectors.json --file tests/gateway_retry_server_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/gateway_retry_server_test.cjs
       - name: S4-U5 compiled study identity rule over every shared vector and the real list path over a fake store
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/study-identity-server --cwd . --file api/src/study-identity.ts --file api/src/pacs.service.ts --file api/src/orthanc.service.ts --file api/src/study-access.service.ts --file tests/study_identity_vectors.json --file tests/study_identity_server_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_identity_server_test.cjs
+      # S5-U6b: KIN_ADMIN_METRICS_SERVER makes the compiled cases mandatory here (a missing module fails the run); the
+      # page model half reads the shipped admin.html through the second read-only mount.
+      - name: S5-U6b compiled admin metrics rows and route over a fake store, and the page model that reads them
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/admin-metrics --cwd . --file api/src/pacs.service.ts --file api/src/admin.controller.ts --file worklist-v0/hpacs-lite/admin.html --file tests/admin_metrics_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" -v "$PWD/worklist-v0:/worklist-v0:ro" -e KIN_ADMIN_METRICS_SERVER=/app/dist/pacs.service --entrypoint node kin-api:ci --test /tests/admin_metrics_test.cjs
       - name: Compiled dictation PCM WAV byte boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/dictation-audio --cwd . --file api/src/dictation-audio.ts --file tests/dictation_audio_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/dictation_audio_test.cjs
       - name: Compiled dictation API bounds, engine protocol and disconnect lifecycle

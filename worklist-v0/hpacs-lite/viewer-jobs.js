@@ -1,5 +1,10 @@
-/* The saved state references original DICOM. No viewer runtime IDs or pixels persist. */
-window.kinViewerJobs = function (services, model) {
+/* The saved state references original DICOM. No viewer runtime IDs or pixels persist.
+ * S5-U2b (Astra S5-U2b-X5-R-001 F01): in the viewer, `session` is the document's session (config/ohif.js
+ * kinViewerSession.writeModule). This panel's own /me answers are compared with the document's account before
+ * anything of them is kept, its 401 (or a 403 on /me) ends the document's login, and the document's end —
+ * whichever panel or broadcast saw it — ends this panel in place, with its status saying why. Without one
+ * (unit harnesses) the panel keeps its own account checks only. */
+window.kinViewerJobs = function (services, model, session = null) {
   let stop = () => {};
   function mount() {
     stop();
@@ -41,7 +46,7 @@ window.kinViewerJobs = function (services, model) {
     const ownsWindowUnload = window.top === window;
     if (ownsWindowUnload) window.addEventListener('beforeunload', beforeUnload);
     const abort = new AbortController(), buttons = new Set();
-    const live = () => !ended && location.search === search;
+    const live = () => !ended && !session?.ended() && location.search === search;
     const path = '/studies/' + studies[0] + '/viewer-jobs';
     const ordered = () => [...grid.getState().viewports.values()].sort((a, b) => a.y-b.y || a.x-b.x);
     const writable = () => me?.roles?.includes('radiologist');
@@ -130,10 +135,16 @@ window.kinViewerJobs = function (services, model) {
       const send = () => fetch('/api' + url, { ...request, credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
         headers: { 'X-KIN-CSRF': '1', ...(me ? { 'X-KIN-Subject': me.sub } : {}), ...(request.body ? { 'Content-Type': 'application/json' } : {}) } });
       try {
+        // Nothing more leaves a document whose login has ended, whichever step of a read or write was next.
+        if (session?.ended()) throw new Error('세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.');
         let r;
         try { r = await send(); } catch (error) { if (!read || controller.signal.aborted || error?.name !== 'TypeError' || !live()) throw error; r = await send(); }
         if (!live()) throw new Error('화면이 변경되었습니다.');
-        if (r.status === 401 || r.status === 403 && !foreign) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
+        if (r.status === 401 || r.status === 403 && !foreign) {
+          // A 401, or a 403 on /me, is the end of the document's login; a 403 on this study's Jobs still ends this panel only.
+          if (r.status === 401 || url === '/me') session?.refuse();
+          end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.');
+        }
         const value = await r.json().catch(() => null);
         if (!live()) throw new Error('화면이 변경되었습니다.');
         if (!r.ok || !value) { const e = new Error(typeof value?.message === 'string' ? value.message : '서버 연결을 확인한 뒤 다시 시도하세요.'); e.status = r.status; throw e; }
@@ -142,6 +153,9 @@ window.kinViewerJobs = function (services, model) {
     }
     async function authenticate(signal) {
       const next = await api('/me', { signal });
+      // The document's account first: another account (or a refused answer) has ended the document's login and this panel with it,
+      // a clinician-only answer has taken the panel down; neither is kept as this panel's account.
+      if (session && !session.answer(next)) { end(); throw new Error('계정이 변경되었습니다.'); }
       if (next.kind !== 'member' || !next.sub || !next.institution || me && (next.sub !== me.sub || next.institution !== me.institution)) { end(); throw new Error('계정이 변경되었습니다.'); }
       me = next; lastAuth = Date.now();
     }
@@ -642,6 +656,7 @@ window.kinViewerJobs = function (services, model) {
     for (const event of ['pointerdown', 'wheel', 'keydown']) document.addEventListener(event, interaction, { capture: true, passive: false });
     const storage = e => { if (e.key === 'kin-session-ended') end(); }; window.addEventListener('storage', storage);
     try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+    const offEnd = session?.onEnd(end) || (() => {});
     const timer = setInterval(() => {
       if (!live()) { end(); return; }
       if (!busy && !checking && Date.now()-lastAuth > 15000) {
@@ -664,7 +679,7 @@ window.kinViewerJobs = function (services, model) {
       status.textContent = '비교 영상 로딩을 완료하지 못했습니다. 목록의 이 작업 복원으로 다시 시도하세요.';
     }
     initialize().catch(e => { if (live()) status.textContent = e.message; }).finally(refresh);
-    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; if (window.kinViewerJobCommand === mipCommand) delete window.kinViewerJobCommand; if (window.kinViewerJobLocation === jobLocation) delete window.kinViewerJobLocation; end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
+    stop = () => { if (window.kinViewerJobWorkspaceState === workspaceState) delete window.kinViewerJobWorkspaceState; if (window.kinViewerJobCommand === mipCommand) delete window.kinViewerJobCommand; if (window.kinViewerJobLocation === jobLocation) delete window.kinViewerJobLocation; offEnd(); end(); printer?.destroy(); clearInterval(timer); channel?.close(); window.removeEventListener('storage', storage); if (ownsWindowUnload) window.removeEventListener('beforeunload', beforeUnload); for (const event of ['pointerdown', 'wheel', 'keydown']) document.removeEventListener(event, interaction, true); panel.remove(); };
   }
   return { mount, stop: () => stop() };
 };

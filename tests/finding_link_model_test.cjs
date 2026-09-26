@@ -2577,6 +2577,90 @@ test('mounted continuation: the one-use nonce is consumed once; a missing record
   for (const v of [good, missing, mismatched, blocked, plainPage]) v.findings.stop();
 });
 
+/* ---------- S5-U2b (Astra S5-U2b-X5-R-001 F01): the store's own /me and its end go through the viewer document's session ---------- */
+// config/ohif.js kinViewerSession as shipped, in a context without a window or fetch (its logout receivers and decide()'s read stay off).
+function viewerSession() {
+  const from = source.indexOf('function kinViewerClinicianOnly('), to = source.indexOf('function kinCreateViewerLayout()');
+  assert.ok(from > 0 && to > from, 'the session anchors are present');
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(from, to), context);
+  return vm.runInContext('kinViewerSession', context);
+}
+const FIRST = { kind: 'member', sub: 'reader-1', roles: ['radiologist'] };
+const ENDED_TEXT = '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.';
+// A store of a writer document the other panels confirmed with FIRST (the transport's own /me answers FIRST unless a case changes it).
+function sessionStore() {
+  const session = viewerSession(), t = transport();
+  assert.equal(session.note(FIRST), 'writer');
+  const { store } = makeStore(t, { session: session.writeModule });
+  return { session, t, store };
+}
+
+test('S5-U2b X5 F01: the store notes its own /me with the document before keeping it; another account ends the document and the store', async () => {
+  for (const other of [{ kind: 'member', sub: 'reader-2', roles: ['radiologist'] }, { kind: 'member', sub: 'reader-2', roles: ['clinician'] }]) {
+    const { session, t, store } = sessionStore();
+    t.state.me = other;
+    store.syncHistory(history(A, [])); await tick();
+    assert.equal(session.state(), 'refused', other.roles[0]);
+    assert.deepEqual([store.state().ended, store.state().status, store.state().subject, store.state().me], [true, ENDED_TEXT, '', null]);
+    assert.deepEqual(t.log.map(x => x.url), ['/api/me'], 'nothing is read after the other account');
+    assert.equal(store.newDraft(), null);
+  }
+  // The same account is noted and the store works; clinician-only for it turns the document read-only (the gate takes the section
+  // down) and the store keeps nothing of that answer, without ending the document's login.
+  const same = sessionStore();
+  same.store.syncHistory(history(A, [])); await tick();
+  assert.equal(same.session.state(), 'writer'); assert.ok(same.store.newDraft());
+  assert.deepEqual(same.t.log.map(x => x.url), ['/api/me', '/api/studies/' + A + '/findings?includeHidden=true&limit=100']);
+  const clinician = sessionStore();
+  clinician.t.state.me = { ...FIRST, roles: ['clinician'] };
+  clinician.store.syncHistory(history(A, [])); await tick();
+  assert.deepEqual([clinician.session.state(), clinician.session.ended(), clinician.store.state().ended, clinician.store.state().me],
+    ['read-only', false, true, null]);
+  assert.deepEqual(clinician.t.log.map(x => x.url), ['/api/me']);
+});
+
+test('S5-U2b X5 F01: a 401 or a 403 on the store\'s /me ends the document; a 403 on its list only refuses that study', async () => {
+  for (const status of [401, 403]) {
+    const { session, t, store } = sessionStore();
+    t.state.meStatus = status;
+    store.syncHistory(history(A, [])); await tick();
+    assert.deepEqual([session.state(), store.state().ended, store.state().status], ['refused', true, ENDED_TEXT], String(status));
+    assert.deepEqual(t.log.map(x => x.url), ['/api/me']);
+  }
+  // A 401 on the list itself ends the login too.
+  const listed = sessionStore();
+  listed.t.state.responses.push({ status: 401, body: { message: 'SYN' } });
+  listed.store.syncHistory(history(A, [])); await tick();
+  assert.deepEqual([listed.session.state(), listed.store.state().ended], ['refused', true]);
+  // A 403 on this study's list: the store holds its work (deny), the document's login goes on.
+  const denied = sessionStore();
+  denied.t.state.responses.push({ status: 403, body: { message: 'SYN' } });
+  denied.store.syncHistory(history(A, [])); await tick();
+  assert.deepEqual([denied.session.state(), denied.store.state().ended, denied.store.state().status],
+    ['writer', false, '이 검사에 접근할 수 없습니다. 접근 확인 후 Refresh로 다시 불러오세요.']);
+});
+
+test('S5-U2b X5 F01: the document\'s end, whoever saw it, ends the attached store in place and stops what it had started', async () => {
+  const { session, t, store } = sessionStore();
+  store.syncHistory(history(A, [])); await tick();
+  assert.ok(store.newDraft());
+  // Reload asked /me; the document ends (another panel's 401, the logout broadcast) before that answer comes back.
+  t.state.hold = true; store.load(); await tick();
+  assert.equal(t.log.at(-1).url, '/api/me');
+  const asked = t.log.length;
+  session.refuse();
+  assert.deepEqual([store.state().ended, store.state().entries.size, store.state().status], [true, 0, ENDED_TEXT], 'ended at once');
+  t.release(); await tick(40);
+  assert.equal(t.log.length, asked, 'the list that /me would have led to is never asked');
+  assert.equal(await store.save({ id: 'x' }), false);
+  // A store disposed at mode exit is no longer reached by the session.
+  const gone = sessionStore();
+  gone.store.syncHistory(history(A, [])); await tick();
+  gone.store.dispose(); gone.session.refuse();
+  assert.equal(gone.store.state().ended, false);
+});
+
 // The S2-B1 list/command suite runs in this same process as well, so the existing hosted Validate step
 // for this file also executes it; `node --test tests/finding_command_test.cjs` runs it alone.
 require('./finding_command_test.cjs');
