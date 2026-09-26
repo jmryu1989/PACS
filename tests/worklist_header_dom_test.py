@@ -10,6 +10,12 @@ two rows (73px). The reading layout's report buttons moved 21px down under the I
 drawer and Dictate stopped owning its centre. tests/e2e/test_dictation_live.py measures that layout
 only at VIEWPORTS = ((1680, 1100), (1366, 768)), so from 1366 up the header must stay one 52px row;
 below it wrapping stays the fallback that keeps Log out on screen.
+
+S5-UI1-B-R-001: the user and institution text wrapped inside a width cap, so a name of the allowed
+length still pushed the header past 52px (F1), and body.portrait's 4px+4px padding plus the 44px tabs
+and the 1px border made 53px (F2). The header now shows that text on one line, ellipsized when long,
+and the whole text is in a Session details popover opened by a button. The page script is stripped,
+so the shipped block that copies the text into that popover is cut out of main.html and run as is.
 """
 import os
 import re
@@ -28,15 +34,35 @@ ONE_ROW_HEIGHT = 52
 CONNECTED = '<span style="color:#4ac06a">●</span> DB Connected'
 # goOffline() writes this; it is the longest status text the header shows.
 OFFLINE = '<span style="color:#ff6b6b">●</span> 서버 연결 끊김 — 저장 불가 (클릭: 재시도)'
+# The longest role text applyRoleUi() writes.
+ROLES = 'radiologist, technician, admin'
+# The longest name the product accepts: admin.service.ts:167-168 take lastName and firstName up to 128 characters
+# each (trimmed length), and auth.guard.ts:79 joins them as "<family> <given>" - 257 characters. Hangul syllables
+# are among the widest glyphs the header draws.
+HANGUL = '가나다라마바사아자차카타파하'
+NAME_MAX = (HANGUL * 10)[:128] + ' ' + (HANGUL[::-1] * 10)[:128]
+# Without names auth.guard.ts:80 falls back to the e-mail; admin.service.ts:165 accepts up to 254 characters.
+EMAIL_MAX = 'w' * 64 + '@' + 'm' * 186 + '.kr'
+# Institution.name (schema.prisma:43) is an unbounded String written only by the seed (pacs.service.ts:317), and
+# goOnline() prepends it to the roles. No length is safe by construction, so the header must not depend on one.
+INSTITUTION_LONG = (HANGUL * 20)[:256]
 # The longest session text the screen writes: goOnline() puts "<institution> · <roles>" into #roles.
 SESSIONS = {
-    'admin': ('류 정모', '한림병원 · radiologist, technician, admin', CONNECTED),
-    'long-institution': ('류 정모', '가톨릭대학교 서울성모병원 영상의학과 판독실 · radiologist, technician, admin', CONNECTED),
-    'long-offline': ('류 정모', '가톨릭대학교 서울성모병원 영상의학과 판독실 · radiologist, technician, admin', OFFLINE),
+    'admin': ('류 정모', '한림병원 · ' + ROLES, CONNECTED),
+    'long-institution': ('류 정모', '가톨릭대학교 서울성모병원 영상의학과 판독실 · ' + ROLES, CONNECTED),
+    'long-offline': ('류 정모', '가톨릭대학교 서울성모병원 영상의학과 판독실 · ' + ROLES, OFFLINE),
+    'max-name': (NAME_MAX, INSTITUTION_LONG + ' · ' + ROLES, CONNECTED),
+    'max-offline': (NAME_MAX, INSTITUTION_LONG + ' · ' + ROLES, OFFLINE),
+    'max-email': (EMAIL_MAX, '한림병원 · ' + ROLES, CONNECTED),
 }
+READING_SESSIONS = ('admin', 'long-institution', 'long-offline', 'max-name', 'max-offline')
+PORTRAIT_SESSIONS = ('admin', 'max-name', 'max-offline')
 # Names the header may fold to an icon when narrow; the words stay in the DOM and in the tooltip.
 FOLDED = [('.brand', 'KOREA IMAGING NETWORK'), ('.menubar .item', 'Config'), ('.menubar .item', 'Help')]
 LABELS_SHOWN_FROM = 1680
+# The shipped block that copies #user/#roles into the Session details popover and the button's tooltip.
+SESSION_BLOCK_START = '    // 세션 상세(S5-UI1):'
+SESSION_BLOCK_END = '\n    function showMembershipState(state) {'
 
 
 def page_html():
@@ -47,8 +73,16 @@ def page_html():
     return re.sub(r'<link\b[^>]*>', '', html)
 
 
-FILL = """([user, roles, reading, dbstat])=>{
+def session_block():
+    html = (ASSETS / 'main.html').read_text(encoding='utf-8')
+    start = html.find(SESSION_BLOCK_START)
+    end = html.find(SESSION_BLOCK_END, start)
+    return html[start:end] if start >= 0 and end > start else None
+
+
+FILL = """([user, roles, reading, portrait, dbstat])=>{
   document.body.classList.toggle('reading', reading);
+  document.body.classList.toggle('portrait', portrait);
   document.querySelector('#m-unassigned').style.display='';
   document.querySelector('#member-link').style.display='';
   document.querySelector('#storage').textContent='1.0GB used';
@@ -67,9 +101,30 @@ MEASURE = """()=>{
     .map(e=>({name:e.id||e.className||e.textContent.trim(),text:e.textContent.trim(),box:box(e),
               sw:e.scrollWidth,cw:e.clientWidth}));
   const out=document.querySelector('#logout');
+  const who=document.querySelector('#session-who');
+  const part=s=>{const e=document.querySelector(s),cs=getComputedStyle(e);
+    return {sel:s,box:box(e),sh:e.scrollHeight,ch:e.clientHeight,font:parseFloat(cs.fontSize),
+            whiteSpace:cs.whiteSpace,textOverflow:cs.textOverflow,inWho:!!who&&who.contains(e)}};
   return {vw:innerWidth,vh:innerHeight,docSW:document.documentElement.scrollWidth,
           bar:{...box(bar),sw:bar.scrollWidth,cw:bar.clientWidth},items,
-          logout:{...box(out),tag:out.tagName,text:out.textContent.trim(),font:parseFloat(getComputedStyle(out).fontSize)}};
+          logout:{...box(out),tag:out.tagName,text:out.textContent.trim(),font:parseFloat(getComputedStyle(out).fontSize)},
+          who:who&&{...box(who),tag:who.tagName,type:who.type,target:who.getAttribute('popovertarget'),title:who.title},
+          parts:['#user','#roles'].map(part)};
+}"""
+
+# The Session details popover as drawn: open or not, its box, whether it scrolls or clips, what it holds, and
+# whether its centre is its own (nothing on top of it).
+DETAILS = """()=>{
+  const d=document.querySelector('#session-details');
+  if(!d) return null;
+  const r=d.getBoundingClientRect(),hit=document.elementFromPoint((r.left+r.right)/2,(r.top+r.bottom)/2);
+  return {open:d.matches(':popover-open'),tag:d.tagName,role:d.getAttribute('role'),popover:d.getAttribute('popover'),
+          box:{x:r.left,y:r.top,r:r.right,b:r.bottom,w:r.width,h:r.height},
+          sw:d.scrollWidth,cw:d.clientWidth,sh:d.scrollHeight,ch:d.clientHeight,
+          user:document.querySelector('#session-details-user').textContent,
+          roles:document.querySelector('#session-details-roles').textContent,
+          font:Math.min(...[...d.querySelectorAll('dt,dd')].map(e=>parseFloat(getComputedStyle(e).fontSize))),
+          own:!!hit&&d.contains(hit),barH:document.querySelector('.menubar').getBoundingClientRect().height};
 }"""
 
 # Where a name may be folded: the element that carries it, its tooltip, and whether its words are drawn.
@@ -81,11 +136,14 @@ FOLD = """(names)=>names.map(([sel, word])=>{
   return {word, found:true, text:el.textContent, title:el.title, labelShown:!!r&&r.width>1&&r.height>1};
 })"""
 
+ACTIVE = "()=>document.activeElement&&document.activeElement.id"
+
 
 class WorklistHeaderDOMTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.html = page_html()
+        cls.session_block = session_block()
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch()
 
@@ -94,24 +152,59 @@ class WorklistHeaderDOMTest(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
 
-    def check(self, width, height, session, reading=False):
+    def one_row(self, width, bar_height, what):
+        if width >= ONE_ROW_FROM:
+            # The G-LIVE-GEO premise: one row, so the report column starts where the reading layout expects it.
+            self.assertAlmostEqual(ONE_ROW_HEIGHT, bar_height, delta=0.5, msg=f'header is {bar_height}px at {width} {what}')
+        else:
+            # Narrower windows may wrap; the header only has to hold at least its one-row height.
+            self.assertGreaterEqual(bar_height, ONE_ROW_HEIGHT - 0.5)
+
+    def tab_to(self, page, element_id):
+        for _ in range(60):
+            page.keyboard.press('Tab')
+            if page.evaluate(ACTIVE) == element_id:
+                return True
+        return False
+
+    def check_details(self, page, width, height, user, roles):
+        d = page.evaluate(DETAILS)
+        self.assertTrue(d['open'], 'Session details did not open')
+        self.assertNotEqual('DIALOG', d['tag'])
+        self.assertNotEqual('dialog', d['role'])
+        # Opening it does not reflow the header.
+        self.one_row(width, d['barH'], 'with Session details open')
+        # The whole text, not a cut-down copy, and nothing in it scrolled or clipped away.
+        self.assertEqual(user, d['user'])
+        self.assertEqual(roles, d['roles'])
+        self.assertLessEqual(d['sw'], d['cw'] + 1, 'Session details clips its text sideways')
+        self.assertLessEqual(d['sh'], d['ch'] + 1, 'Session details hides part of its text')
+        self.assertGreaterEqual(d['font'], 12)
+        b = d['box']
+        self.assertGreater(b['w'], 0)
+        self.assertGreaterEqual(b['x'], 0, d)
+        self.assertGreaterEqual(b['y'], 0, d)
+        self.assertLessEqual(b['r'], width, d)
+        self.assertLessEqual(b['b'], height, d)
+        self.assertTrue(d['own'], 'something covers Session details')
+        return d
+
+    def check(self, width, height, session, reading=False, portrait=False):
         user, roles, dbstat = SESSIONS[session]
         page = self.browser.new_page(viewport={'width': width, 'height': height})
         page.set_default_timeout(4000)
         page.route('**/*', lambda route: route.abort())
         page.set_content(self.html)
-        page.evaluate(FILL, [user, roles, reading, dbstat])
-        m = None
+        if self.session_block:
+            page.add_script_tag(content=self.session_block)
+        page.evaluate(FILL, [user, roles, reading, portrait, dbstat])
+        tag = f'{width}x{height}-{session}' + ('-reading' if reading else '') + ('-portrait' if portrait else '')
+        m = d = None
         try:
             m = page.evaluate(MEASURE)
             bar = m['bar']
-            if width >= ONE_ROW_FROM:
-                # The G-LIVE-GEO premise: one row, so the report column starts where the reading layout expects it.
-                self.assertEqual(0, bar['y'])
-                self.assertAlmostEqual(ONE_ROW_HEIGHT, bar['h'], delta=0.5, msg=f'header is {bar["h"]}px at {width}, not one row')
-            else:
-                # Narrower windows may wrap; the header only has to hold at least its one-row height.
-                self.assertGreaterEqual(bar['h'], ONE_ROW_HEIGHT - 0.5)
+            self.assertEqual(0, bar['y'])
+            self.one_row(width, bar['h'], '')
             # Folding a name hides its words from the row only: they stay in the DOM and in the tooltip.
             for fold in page.evaluate(FOLD, FOLDED):
                 self.assertTrue(fold['found'], fold['word'])
@@ -143,7 +236,8 @@ class WorklistHeaderDOMTest(unittest.TestCase):
                 self.assertLessEqual(b['r'], m['bar']['r'] + 0.5, item['name'])
                 self.assertGreaterEqual(b['y'], m['bar']['y'] - 0.5, item['name'])
                 self.assertLessEqual(b['b'], m['bar']['b'] + 0.5, item['name'])
-                # Text is wrapped, never clipped: the full user, role and status strings stay on screen.
+                # No header item is clipped. The user/institution text inside the session button may be ellipsized;
+                # that button is the item here, and its whole text is checked in Session details below.
                 self.assertLessEqual(item['sw'], item['cw'] + 1, f'{item["name"]} clips "{item["text"]}"')
             boxes = [i for i in m['items'] if i['box']['w'] and i['box']['h']]
             for i, a in enumerate(boxes):
@@ -151,29 +245,60 @@ class WorklistHeaderDOMTest(unittest.TestCase):
                     ow = min(a['box']['r'], c['box']['r']) - max(a['box']['x'], c['box']['x'])
                     oh = min(a['box']['b'], c['box']['b']) - max(a['box']['y'], c['box']['y'])
                     self.assertFalse(ow > 1 and oh > 1, f'{a["name"]} overlaps {c["name"]}')
+            # The page script still writes the same text into the same elements.
             self.assertEqual(roles, page.locator('#roles').text_content())
             self.assertEqual(user, page.locator('#user').text_content())
+            # The user and institution/role text: one line each inside the session button, never wrapped, at least
+            # 12px. It may end in an ellipsis; the button's tooltip and Session details carry all of it.
+            who = m['who']
+            self.assertIsNotNone(who, 'no Session details button (#session-who)')
+            self.assertEqual('BUTTON', who['tag'])
+            self.assertEqual('button', who['type'])
+            self.assertEqual('session-details', who['target'])
+            self.assertEqual(user + '\n' + roles, who['title'])
+            for part in m['parts']:
+                b = part['box']
+                self.assertTrue(part['inWho'], part['sel'])
+                self.assertEqual('nowrap', part['whiteSpace'], part['sel'])
+                self.assertEqual('ellipsis', part['textOverflow'], part['sel'])
+                self.assertGreaterEqual(part['font'], 12, part['sel'])
+                self.assertLessEqual(part['sh'], part['ch'] + 1, f'{part["sel"]} runs onto a second line')
+                self.assertLessEqual(b['h'], 2 * part['font'], f'{part["sel"]} is {b["h"]}px tall, more than one line')
+                self.assertGreaterEqual(b['x'], who['x'] - 0.5, part['sel'])
+                self.assertLessEqual(b['r'], who['r'] + 0.5, part['sel'])
+                self.assertGreaterEqual(b['y'], m['bar']['y'] - 0.5, part['sel'])
+                self.assertLessEqual(b['b'], m['bar']['b'] + 0.5, part['sel'])
             logout = page.locator('#logout')
             expect(logout).to_be_visible()
             expect(logout).to_be_in_viewport(ratio=1)
-            # Keyboard first, while focus navigation still starts at the top of the document:
-            # Tab alone reaches Log out and Enter activates it.
-            reached = False
-            for _ in range(60):
-                page.keyboard.press('Tab')
-                if page.evaluate("()=>document.activeElement&&document.activeElement.id==='logout'"):
-                    reached = True
-                    break
-            self.assertTrue(reached, 'Tab never reached Log out')
+            # Keyboard first, while focus navigation still starts at the top of the document: Tab reaches the
+            # session button, Enter opens Session details and Escape closes it again; Tab then reaches Log out
+            # and Enter activates it.
+            self.assertTrue(self.tab_to(page, 'session-who'), 'Tab never reached the session button')
+            page.keyboard.press('Enter')
+            d = self.check_details(page, width, height, user, roles)
+            OUT.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(OUT / f'header-{tag}-details.png'),
+                            clip={'x': 0, 'y': 0, 'width': width, 'height': min(height, max(140, d['box']['b'] + 8))})
+            page.keyboard.press('Escape')
+            self.assertFalse(page.evaluate(DETAILS)['open'], 'Escape did not close Session details')
+            self.assertEqual('session-who', page.evaluate(ACTIVE))
+            self.assertTrue(self.tab_to(page, 'logout'), 'Tab never reached Log out')
             page.keyboard.press('Enter')
             self.assertEqual(1, page.evaluate('logoutClicks'))
+            # The pointer: a hit-tested click opens it and a second click on the same button closes it.
+            session_who = page.locator('#session-who')
+            session_who.click()
+            self.check_details(page, width, height, user, roles)
+            session_who.click()
+            self.assertFalse(page.evaluate(DETAILS)['open'], 'a second click did not close Session details')
             logout.click()  # Playwright's hit test: nothing covers the button.
             self.assertEqual(2, page.evaluate('logoutClicks'))
         finally:
             OUT.mkdir(parents=True, exist_ok=True)
-            tag = f'{width}x{height}-{session}' + ('-reading' if reading else '')
             page.screenshot(path=str(OUT / f'header-{tag}.png'), clip={'x': 0, 'y': 0, 'width': width, 'height': 140})
-            print(tag, m and {'bar': m['bar'], 'logout': m['logout'], 'docSW': m['docSW']})
+            print(tag, m and {'bar': m['bar'], 'logout': m['logout'], 'who': m['who'], 'docSW': m['docSW']},
+                  d and {'details': d['box']})
             page.close()
 
     def test_log_out_stays_visible_and_reachable_at_every_width(self):
@@ -186,9 +311,18 @@ class WorklistHeaderDOMTest(unittest.TestCase):
         # reading-workspace.css scrolls the menubar sideways in this mode; a header that fits never needs to.
         # 1366x768 and 1680x1100 are the layouts G-LIVE-GEO measures.
         for width, height in VIEWPORTS:
-            for session in ('long-institution', 'long-offline'):
+            for session in READING_SESSIONS:
                 with self.subTest(width=width, session=session):
                     self.check(width, height, session, reading=True)
+
+    def test_portrait_layout_keeps_the_same_header(self):
+        # Layout: Portrait can be chosen or restored on a wide window, and Auto picks it on a monitor stood on end
+        # (applyLayout: innerHeight > innerWidth). From 1366 up the header is the same one 52px row there.
+        for width, height in VIEWPORTS:
+            for reading in (False, True):
+                for session in PORTRAIT_SESSIONS:
+                    with self.subTest(width=width, reading=reading, session=session):
+                        self.check(width, height, session, reading=reading, portrait=True)
 
 
 if __name__ == '__main__':
