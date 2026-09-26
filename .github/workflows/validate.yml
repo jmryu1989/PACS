@@ -262,6 +262,12 @@ jobs:
       - name: S5-U2b Clinician viewer document owner, real write modules and logout between modes DOM (19-)
         timeout-minutes: 3
         run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-viewer-dom-3 --cwd . --file config/ohif.js --file worklist-v0/hpacs-lite/viewer-jobs.js --file worklist-v0/hpacs-lite/viewer-findings.js --file worklist-v0/hpacs-lite/finding-link-model.js --file worklist-v0/hpacs-lite/viewer-tech-note.js --file tests/clinician_viewer_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_viewer_dom_test.py -k test_19_ -k test_2
+      # S5-U3: the shipped clinician home's Patient Timeline against stubbed timeline answers grouped by the server patient key
+      # only (no stack, network or credentials); nothing is read before Show Timeline, another key's row is refused, the marker
+      # follows the server's source relation, and the guard-less / display-comparing control files must fail those checks.
+      - name: S5-U3 Clinician patient timeline, identity conflict marker, A-B-A and state DOM
+        timeout-minutes: 3
+        run: python3 scripts/record-run.py --run-dir tmp/workspace-ui-ci/clinician-timeline-dom --cwd . --file worklist-v0/hpacs-lite/clinician.html --file worklist-v0/hpacs-lite/clinician.js --file worklist-v0/hpacs-lite/auth.js --file tests/clinician_timeline_dom_test.py -- "$RUNNER_TEMP/measurement-python/bin/python" -B tests/clinician_timeline_dom_test.py
       # S5-U6a: the shipped Members console Gateway Status section against in-test GET /studies and retry answers (no stack,
       # network or credentials); a late list or retry answer must not paint, and the guard-less controls must.
       - name: S5-U6a Members console Gateway Status five states, retry rule, A-B-A guards and wording DOM

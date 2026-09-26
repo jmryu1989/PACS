@@ -9,7 +9,7 @@ import { KeycloakService } from './keycloak.service';
 import { FindingService } from './finding.service';
 import { canonical, viewerUid } from './viewer-input';
 import { CLINICIAN_ROLE, clinicianFinal, clinicianKeyImage, clinicianList, clinicianListChanged, clinicianOnly,
-  clinicianReport } from './clinician-policy';
+  clinicianReport, clinicianTimeline, clinicianTimelineMembers } from './clinician-policy';
 import { applyKeepList, blockIsBlank, citationArray, citationIdList, citationInsertInput, citationSourceRef,
   citationUnion, CitationInputError, lineBlockOccurrences, presenceState, projectCitation, sameTextCounts,
   REPORT_CITATION_FIELDS, REPORT_CITATION_LIMITS, REPORT_CITATION_SCHEMA, SOURCE_UNAVAILABLE } from './report-citation';
@@ -23,6 +23,8 @@ import { normalizeWorklistColumns } from './worklist-columns';
 import { studyPageQuery, studyPageSlice } from './study-page';
 import { reconcileOrders } from './order-reconciliation';
 import { ORDER_IDENTITY_SELECT, orderIdentity, overlayShape, OVERLAY_RULE_TEXT } from './study-identity';
+// S5-U3 타임라인의 원본 생년월일·성별 비교는 S4-U5의 검토된 정규화를 그대로 쓴다(위 줄은 S4-U5 시험이 고정한다).
+import { birthKey, sexKey } from './study-identity';
 import { decideGatewayReceipt, GATEWAY_EPOCH_INCIDENT_WINDOW_MS, GatewayReceiptInputError, parseGatewayReceipt,
   projectGatewayReceipt, storedGatewayReceipt } from './gateway-receipt';
 import type { GatewayReceipt, GatewayReceiptDecision } from './gateway-receipt';
@@ -3296,6 +3298,46 @@ export class PacsService implements OnModuleInit {
         select: { version: true, action: true, findings: true, conclusion: true, recommendation: true } }) : null;
       return work(tx, state, head);
     }, { isolationLevel: 'RepeatableRead', maxWait: 2000, timeout: 5000 });
+  }
+
+  // ══════════════════ S5-U3 환자 영상 타임라인 ══════════════════
+  // REQ-S5-U3-PATIENT-TIMELINE. 묶음·모양은 clinician-policy.ts의 순수 함수가 정하고, 여기서는 열거·쪽·스냅샷만 정한다.
+
+  /**
+   * 기준 검사와 서버 환자 키(기관|원본 DICOM PatientID)가 같은 검사 전부를 쪽으로 나눠 준다. 열거는 **워크리스트 목록(listStudies)
+   * 그 자체**를 쪽 없이 한 번 부른 것이다 — 기관·원격판독·StudyAccess·lazy 등록·접근 재검사를 여기서 다시 만들지 않는다.
+   * 그래서 취소된 원격판독 검사와 접근 정책 밖의 검사는 타임라인에도 없고, total도 볼 수 있는 검사만 센다. 기준 검사가 그 목록에
+   * 없으면(없는 검사·다른 기관·취소된 원격판독·정책 밖) 404다 — 존재 여부도 정보다.
+   * 쪽은 study-page.ts의 서명 이어받기를 그대로 쓰고 limit이 없으면 400이다(한 환자 ID에 검사가 몰려도 답이 한없이 커지지 않게).
+   * 이어받기의 주인은 호출자·접근 정책 판·기준 검사라 워크리스트나 다른 검사의 타임라인 값으로는 이어지지 않고, 쪽 사이에 묶음이
+   * 바뀌면 409다. 판독 상태는 clinicianStudies와 같은 한 SQL 문장에서만 만들고 목록 행과 다르면 답 전체를 409로 거절한다.
+   */
+  async clinicianTimeline(uid: string, c: Caller, query?: any) {
+    this.clinicianCaller(c);
+    viewerUid(uid);
+    const me = inst(c);
+    const access = await this.studyAccess.snapshot(c);
+    const owner = [me, c.sub, c.actor, String(access.revision), String(access.windowOpen), 'timeline', uid];
+    const page = studyPageQuery(query, owner);
+    if (!page) throw new BadRequestException('타임라인은 limit(1~100)으로 쪽을 나눠 읽습니다');
+    const list = await this.listStudies(c);
+    const anchor = list.studies.find((row: any) => row.uid === uid);
+    if (!anchor) throw new NotFoundException('검사를 찾을 수 없습니다');
+    const members = clinicianTimelineMembers(anchor, list.studies);
+    const window = studyPageSlice(members, (row: any) => row.uid as string, page, owner);
+    const uids: string[] = window.rows.map((row: any) => row.uid);
+    const current = !uids.length ? [] : await this.prisma.$queryRaw<any[]>`
+      SELECT s.uid, s."institutionId", s."teleInstitutionId", s.rs, s."repDoc", s.confirm,
+        COALESCE(r.version, 0) AS version, v.action
+      FROM "StudyState" s
+      LEFT JOIN "Report" r ON r.uid = s.uid
+      LEFT JOIN "ReportVersion" v ON v.uid = r.uid AND v.version = r.version
+      WHERE s.uid IN (${Prisma.join(uids)})`;
+    if (clinicianListChanged(window.rows, current))
+      throw new ConflictException({ code: 'STUDY_LIST_CHANGED', message: '검사 목록 또는 판독 상태가 바뀌었습니다. 새로고침하세요.' });
+    // listStudies 행의 birth·sex는 QIDO 원본 태그이고 덮어쓰기는 state.ov에 따로 있다 — 여기서는 원본만 비교한다.
+    return clinicianTimeline(uid, anchor, members, window, current, list.serverTime,
+      (row: any) => ({ birth: birthKey(row?.birth), sex: sexKey(row?.sex) }));
   }
 
   /**
