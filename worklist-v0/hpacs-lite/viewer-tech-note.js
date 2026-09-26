@@ -303,15 +303,18 @@ function kinCreateVolumeProjection({services,selected,live,allowed=live,host}){
   return {dispose(){ended=true;clearInterval(timer);panel.remove();for(const label of labels.values())label.remove();labels.clear();}};
 }
 
-/* Viewer study bridge: verified loaded source identity, never URL-first guessing. */
-window.kinViewerTechNote=function(services){
+/* Viewer study bridge: verified loaded source identity, never URL-first guessing.
+ * S5-U2b (Astra S5-U2b-X5-R-001 F01): `session` is the viewer document's session (config/ohif.js kinViewerSession.writeModule).
+ * The bridge's own /me answers are compared with the document's account before the owner is kept, its 401 (or a 403 on /me)
+ * ends the document's login, and the document's end ends the bridge in place, with its status saying why. */
+window.kinViewerTechNote=function(services,session=null){
   let stop=()=>{};
   function mount(){
     stop();
     const search=location.search,query=new URLSearchParams(search),values=query.getAll('StudyInstanceUIDs'),studies=values.length===1?values[0].split(','):[];
     if(!studies.length||studies.length>2||new Set(studies).size!==studies.length||studies.some(uid=>uid.length>64||!/^\d+(?:\.\d+)+$/.test(uid)))return;
     let ended=false,busy=false,owner=null,channel,dock,windowLink;const requests=new Set();
-    const live=()=>!ended&&location.search===search;
+    const live=()=>!ended&&!session?.ended()&&location.search===search;
     const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
     const text=v=>v&&typeof v==='object'?String(v.Alphabetic??v.Ideographic??v.Phonetic??''):String(v??'');
     function selectedStack(viewportId){
@@ -502,11 +505,14 @@ window.kinViewerTechNote=function(services){
       const controller=new AbortController();requests.add(controller);const timer=setTimeout(()=>controller.abort(),12000);
       try{const r=await fetch('/api'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,headers:{'X-KIN-CSRF':'1',...(owner?{'X-KIN-Subject':owner[1],'X-KIN-Institution':owner[0]}:{}),...(body===undefined?{}:{'Content-Type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
         if(!live())throw new Error('영상창이 변경되었습니다');
-        if([401,403].includes(r.status)){end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
+        // A 401, or a 403 on /me, is the end of the document's login; a 403 on a note still ends this bridge only.
+        if([401,403].includes(r.status)){if(r.status===401||path==='/me')session?.refuse();end();throw new Error('메모 계정 또는 접근 권한을 확인하세요');}
         const value=await r.json().catch(()=>null);if(!r.ok||!value)throw Object.assign(new Error(typeof value?.message==='string'?value.message:'서버 응답을 확인하세요'),{status:r.status});return value;
       }finally{clearTimeout(timer);requests.delete(controller);}
     }
-    async function authenticate(){const me=await raw('GET','/me');const next=[me.institution,me.sub];if(me.kind!=='member'||next.some(v=>typeof v!=='string'||!v)||owner&&!same(owner,next)){end();throw new Error('메모 계정이 변경되었습니다');}owner=next;return next;}
+    // The document's account first: another account (or a refused answer) has ended the document and this bridge with it, a
+    // clinician-only answer has taken the bridge down; neither becomes the bridge's owner.
+    async function authenticate(){const me=await raw('GET','/me');if(session&&!session.answer(me)){end();throw new Error('메모 계정이 변경되었습니다');}const next=[me.institution,me.sub];if(me.kind!=='member'||next.some(v=>typeof v!=='string'||!v)||owner&&!same(owner,next)){end();throw new Error('메모 계정이 변경되었습니다');}owner=next;return next;}
     const note=KinTechNote({allowed:()=>live()&&!!owner,api:async(method,path,body)=>{const before=await authenticate();const result=await raw(method,path,body);if(!live()||!same(before,await authenticate()))throw new Error('메모 계정이 변경되었습니다');return result;}});
     async function open(){
       if(!live()||busy||!owner||document.querySelector('dialog[open]'))return;
@@ -537,8 +543,9 @@ window.kinViewerTechNote=function(services){
     button.onclick=open;document.addEventListener('keydown',key);
     const storage=e=>{if(e.key==='kin-session-ended')end();};window.addEventListener('storage',storage);window.addEventListener('pagehide',end);
     try{channel=new BroadcastChannel('kin-session');channel.onmessage=e=>{if(e.data?.type==='session-ended')end();};}catch(_){}
+    const offEnd=session?.onEnd(end)||(()=>{});
     const timer=setInterval(()=>{if(!live())end();else refreshReturnSelection();},500);
-    stop=()=>{end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);patientCopy.dispose();channel?.close();returnStatus.remove();panel.remove();};
+    stop=()=>{offEnd();end();dock?.dispose();dock=null;clearInterval(timer);document.removeEventListener('keydown',key);window.removeEventListener('storage',storage);window.removeEventListener('pagehide',end);patientCopy.dispose();channel?.close();returnStatus.remove();panel.remove();};
     async function connect(){
       if(!live()||busy)return;
       const restore=document.activeElement===retry;busy=true;refresh();status.textContent='메모 연결 확인 중…';

@@ -490,8 +490,13 @@
    * anchors the store and the second is its comparison study: activating the comparison viewport keeps
    * the anchor's entries, drafts and pending bodies, and the comparison heads come from that study's own
    * viewer-items list. `deps.history`/`deps.activate` read the viewer for crossNavigate; `deps.setTimeout`,
-   * `deps.clearTimeout` and `deps.navigationMs` bound it. */
+   * `deps.clearTimeout` and `deps.navigationMs` bound it.
+   * S5-U2b (Astra S5-U2b-X5-R-001 F01): `deps.session` is the viewer document's session (config/ohif.js
+   * kinViewerSession.writeModule, handed in by the Findings gate). Each /me answer is compared with the document's
+   * account before the store keeps it, a 401 (or a 403 on /me) ends the document's login, and the document's end —
+   * whoever saw it — ends this store in place. Without it the store keeps its own subject check only. */
   function createStore(deps) {
+    const session = deps.session && typeof deps.session.answer === 'function' ? deps.session : null;
     const fetchImpl = deps.fetch, makeId = deps.uuid, timeoutMs = Number.isFinite(deps.timeoutMs) ? deps.timeoutMs : 30000;
     const later = typeof deps.setTimeout === 'function' ? deps.setTimeout : (fn, ms) => setTimeout(fn, ms);
     const cancelLater = typeof deps.clearTimeout === 'function' ? deps.clearTimeout : id => clearTimeout(id);
@@ -509,7 +514,7 @@
     for (const record of heldRecords(deps.recovered)) s.parked.set(heldKey(record.subject, record.scope), record);
     let controller = typeof AbortController === 'function' ? new AbortController() : null;
     const notify = () => { for (const fn of [...listeners]) { try { fn(); } catch (_) {} } };
-    const valid = ticket => !s.ended && ticket === s.generation;
+    const valid = ticket => !s.ended && !session?.ended() && ticket === s.generation;
     const writable = entry => !s.suspended && s.compat !== 'old-api' && s.me?.kind === 'member' && Array.isArray(s.me.roles) && s.me.roles.includes('radiologist') &&
       (!entry || !entry.head || entry.head.authorSub === s.subject);
     const hasWork = e => !!(e.editing || e.pending || e.busy);
@@ -584,8 +589,11 @@
       s.parked.clear();
       reset('로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'); s.ended = true; s.me = null; s.subject = ''; notify();
     }
+    // The document's end reaches this store while it is attached (a mode exit detaches it first).
+    const offEnd = session && typeof session.onEnd === 'function' ? session.onEnd(end) : () => {};
     // Mode exit: hand every entry with work to the next store of this document and stop this one.
     function detach() {
+      offEnd();
       if (s.ended) return [];
       park();
       const records = heldRecords([...s.parked.values()]);
@@ -602,10 +610,12 @@
       parentSignal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(abort, timeoutMs);
       try {
+        // Nothing more leaves a document whose login has ended, whichever step of a read or write was next.
+        if (session?.ended()) { end(); throw { stale: true }; }
         const res = await fetchImpl('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request?.signal,
           headers: { 'X-KIN-CSRF': '1', [SCHEMA_HEADER]: String(SCHEMA), ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
         if (!valid(ticket)) throw { stale: true };
-        if (res.status === 401 || (res.status === 403 && path === '/me')) { end(); throw { stale: true }; }
+        if (res.status === 401 || (res.status === 403 && path === '/me')) { session?.refuse(); end(); throw { stale: true }; }
         if (res.status === 403 && !foreign) { deny(); throw { stale: true }; }
         const data = await res.json().catch(() => null);
         if (!valid(ticket)) throw { stale: true };
@@ -618,6 +628,9 @@
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
+      // The document's account first: another account (or a refused answer) has ended the document and this store with it, a
+      // clinician-only answer has taken the section down; neither is kept as this store's login.
+      if (session && !session.answer(user)) { end(); throw { stale: true }; }
       if (!user || !user.sub || (s.subject && s.subject !== user.sub)) { end(); throw { stale: true }; }
       s.me = user; s.subject = user.sub;
       // Copies handed over from another login are never restored or counted for this one.
@@ -1052,7 +1065,7 @@
     return { state: () => s, subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); }, valid, writable, hasWork, held, workState,
       discardHeld, detach, pairOf, anchorLive, studyOf, comparisonOf, pairBlocked, loadPair, loadJobs, shownJob, toggleJob,
       setScope, syncHistory, load, newDraft, updateDraft, toggleSource, setPrimary, refreshSource, useLatest, discard, edit, save, navigate, history, end,
-      dispose: () => { listeners.clear(); controller?.abort(); } };
+      dispose: () => { offEnd(); listeners.clear(); controller?.abort(); } };
   }
 
   const api = { LINK_STATES, LINK_LABELS, NAVIGATION_REASONS, ACTIVATION_REASONS, CROSS_REASONS, LIMITS, linkState, sourceStatus, valueText, reasonText, annotationText,

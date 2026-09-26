@@ -614,9 +614,9 @@ function kinCreateViewerHistory() {
     const cs = window.cornerstone, ct = window.cornerstoneTools;
     if (!cs || !ct?.annotation?.locking) return;
     const entries = new Map(), annotations = new Map(), recovery = new Map();
-    let scope = '', subject = '', me, generation = 0, readSequence = 0;
-    let controller = new AbortController(), ended = false, checking = false;
-    let lastAuth = 0, loading = false, navigation = 0, suspended = true;
+    let scope = '', subject = '', me, generation = 0, readSequence = 0, shown = null, shownStatus = '', unmatched = false;
+    let controller = new AbortController(), ended = false, checking = false, ownAnswer = false;
+    let lastAuth = 0, tried = 0, loading = false, navigation = 0, suspended = true;
     const panel = document.createElement('details');
     panel.id = 'kin-viewer-history'; panel.open = true;
     panel.style.cssText = 'position:fixed;right:8px;bottom:30px;z-index:40;width:300px;max-height:58vh;overflow:auto;background:#101e32;color:#e1ecfc;border:1px solid #657c9f;border-radius:8px;padding:10px;font:13px sans-serif';
@@ -627,6 +627,35 @@ function kinCreateViewerHistory() {
     const clone = value => JSON.parse(JSON.stringify(value));
     const itemOnly = head => { const item = clone(head.item); delete item.hidden; delete item.sourceDigest; return item; };
     const manual = kind => ['length', 'angle', 'ellipse'].includes(kind);
+    // S5-U2b: /me가 업무 역할 clinician뿐이라고 답한 세션은 이 패널에서 저장된 항목을 보기만 한다. 만들기·저장·SR·이력
+    // 컨트롤을 두지 않는 것은 화면일 뿐 권한이 아니다 — 쓰기는 서버(S5-U1a/U1b)가 거절한다. /me를 읽기 전에는 어느 쪽 컨트롤도 없다.
+    // 판정은 문서 공통(kinViewerSession)이다: 어느 확장의 /me가 답했든, 모드를 다시 들어와도 쓰기 쪽으로 돌아가지 않는다.
+    const readOnly = () => kinViewerSession.readOnly();
+    // Astra S5-U2b-R-002 F01: authoring (native tools, mark edits, SR, this panel's own save paths) is open only while a successful
+    // /me answered writer. No answer yet, an error or a 401/403 leaves image viewing only, the same as a clinician-only document.
+    const writer = () => kinViewerSession.writer();
+    // Astra S5-U2b-X-R-001 F01. 보관한 writer 작업(recovery)은 writer가 재개하거나 버릴 때까지 그 검사의 목록 표식·영상 이동을
+    // 멈춘다 — 보관 초안과 서버 목록을 한 화면에서 섞지 않으려는 것이다. clinician-only 문서의 확정 목록은 그 초안과 이어지지 않는
+    // 다른 목록이고 read-only는 되돌리지 않아 이 문서에서 재개할 길도 없다: 멈추면 검증한 확정 표식과 Go to Image가 풀리지 않는다.
+    // 그래서 보관 작업은 그대로 격리해 두고(표시·복원·삭제하지 않으며 창 닫기 경고 jobGuard도 그대로) 읽기 쪽만 막지 않는다.
+    // 쓰기 쪽 검사(writable·SR·도구·captureAnnotations)는 recovery.has(scope)를 그대로 읽는다.
+    const held = () => recovery.has(scope) && !readOnly();
+    const READ_ONLY = {
+      note: '읽기 전용 · 확정 판독문에 저장된 측정·키 이미지만 표시합니다. 이 화면에서는 측정·키 이미지를 만들거나 저장하지 않으며 서버도 쓰기를 거절합니다.',
+      withheld: '확정 판독문이 아니어서 저장된 측정·키 이미지를 표시하지 않습니다 · 읽기 전용',
+      tool: '읽기 전용 화면입니다. 측정을 만들지 않습니다.',
+      edit: '읽기 전용 화면입니다. 측정·표식을 편집하지 않습니다.',
+      sr: '읽기 전용 화면에서는 SR을 만들거나 저장하지 않습니다.',
+      denied: '이 검사의 저장 항목을 읽을 수 없습니다(HTTP 403). 서버가 거절했습니다.',
+      unmatched: '현재 화면에서 원본 프레임을 확인할 수 없어 이 목록을 표시 영상과 맞추지 않았습니다. 마지막으로 확인한 검사 기준이며 확정 여부는 계속 다시 확인합니다.',
+    };
+    const UNCONFIRMED = {
+      tool: '계정이 확인되기 전에는 영상 조작만 할 수 있습니다. 측정·표식을 만들지 않습니다.',
+      edit: '계정이 확인되기 전에는 측정·표식을 편집하지 않습니다.',
+      sr: '계정이 확인되기 전에는 SR을 만들거나 저장하지 않습니다.',
+    };
+    // After a 401/403 or a logout the panel has ended: that, not the account wording, is what the user needs to hear.
+    const closedText = kind => ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : (readOnly() ? READ_ONLY : UNCONFIRMED)[kind];
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
@@ -691,7 +720,7 @@ function kinCreateViewerHistory() {
     const numericMeasurement = m => manual(kinds[m?.toolName]);
     const unverifiedReport = () => ({ columns: ['Verification'], values: ['재확인 필요'] });
     function checkedMeasurement(m) {
-      if (!m || ended || suspended || recovery.has(scope)) return null;
+      if (!m || ended || suspended || held()) return null;
       const a = ct.annotation.state.getAnnotation(m.uid);
       if (!a || a.data.kinUnverified || !sample(a)) return null;
       const mapping = measurementService.getSourceMappings(m.source?.name, m.source?.version)
@@ -821,6 +850,12 @@ function kinCreateViewerHistory() {
       const original = commands?.getCommand(name, reportContext);
       if (!original) continue;
       const guarded = { ...original, commandFn: options => {
+        if (!writer()) {
+          const message = closedText('sr');
+          status.textContent = message;
+          services.uiNotificationService.show({ title: 'SR', message, type: 'warning' });
+          throw new Error(message);
+        }
         const blocked = options.measurementData?.find(m => {
           const a = ct.annotation.state.getAnnotation(m.uid), current = measurementService.getMeasurement(m.uid);
           if (!numericMeasurement(m) && !numericMeasurement(current) && !manual(kinds[a?.metadata.toolName])) return false;
@@ -841,6 +876,213 @@ function kinCreateViewerHistory() {
       commands.registerCommand(reportContext, name, guarded);
       reportRestores.push(() => { if (commands.getCommand(name, reportContext) === guarded) commands.registerCommand(reportContext, name, original); });
     }
+    // S5-U2b-R-001 F01 · R-002 F01. writer로 확인되지 않은 문서(답 없음·오류·401/403·clinician-only)에서는 뷰어 자체의 작성
+    // 경로를 닫는다. 주 마우스 도구로 켤 수 있는 것은 영상 조작(W/L·이동·확대·넘기기·3D 회전·MPR 교차선·돋보기)뿐이고, 나머지
+    // 도구는 이미 그려진 표식을 보여 주기만 하도록(Enabled) 둔다. 도구막대·단축키·명령·다른 확장의 전환은 모두 도구 그룹의
+    // setToolActive/setToolPassive로 끝나므로 그 둘을 그룹마다 지키고, 모드 없이 도구에 바로 닿는 addNewAnnotation은 도구가
+    // 스스로 거절한다. 그룹은 모드가 이 확장보다 나중에 만들고 /me 답은 그보다 늦을 수 있어, 만들어질 때 감싸 두고 매 관찰마다
+    // 다시 맞춘다. 막는 동안 모드가 정한 모드는 적어 두었다가 writer 답이 오면 되돌린다(도구막대도 같다). 화면 정책일 뿐 서버
+    // 권한을 대신하지 않는다.
+    const VIEW_TOOLS = new Set(['WindowLevel', 'Pan', 'Zoom', 'StackScroll', 'TrackballRotate', 'Crosshairs', 'Magnify']);
+    // The pinned longitudinal mode's measurement and annotation tools (its toolbar and initToolGroups). In a document that is not a
+    // confirmed writer, a mark of one of these that this panel did not draw from a saved head is removed; SR display ('kin-sr:'),
+    // reference lines and crosshairs keep their own state.
+    const NATIVE_MARKS = new Set(['ArrowAnnotate', 'Length', 'Angle', 'Bidirectional', 'RectangleROI', 'EllipticalROI', 'CircleROI', 'Probe',
+      'DragProbe', 'CobbAngle', 'CalibrationLine', 'PlanarFreehandROI', 'SplineROI', 'LivewireContour', 'UltrasoundDirectionalTool',
+      'WindowLevelRegion', 'PlanarFreehandContourSegmentation', 'AdvancedMagnify']);
+    const PRIMARY = ct.Enums?.MouseBindings?.Primary ?? 1;
+    // Astra S5-U2b-X2-R-001 F01: an ended panel (401/403, logout, another account) keeps authoring closed whatever the shared state says.
+    const nativeAuthoringClosed = () => ended || !writer();
+    const guardedGroups = new Map(), guardedTools = new Map(), policyRestores = [];
+    function guardTool(name, tool) {
+      if (!tool || VIEW_TOOLS.has(name) || typeof tool.addNewAnnotation !== 'function' || guardedTools.has(tool)) return;
+      const add = tool.addNewAnnotation, own = Object.hasOwn(tool, 'addNewAnnotation');
+      const guarded = function (...args) {
+        if (nativeAuthoringClosed()) { status.textContent = closedText('tool'); return; }
+        return add.apply(this, args);
+      };
+      tool.addNewAnnotation = guarded;
+      guardedTools.set(tool, () => { if (tool.addNewAnnotation === guarded) { if (own) tool.addNewAnnotation = add; else delete tool.addNewAnnotation; } });
+    }
+    function guardGroup(group) {
+      if (!group || ['setToolActive', 'setToolPassive', 'setToolEnabled'].some(name => typeof group[name] !== 'function')) return null;
+      if (guardedGroups.has(group)) return guardedGroups.get(group);
+      const active = group.setToolActive, passive = group.setToolPassive, addTool = group.addTool;
+      // What the mode or the viewer asked for a tool this policy kept Enabled; the writer answer gives it back.
+      const intended = new Map();
+      let viewing = 'WindowLevel';
+      // 네이티브 전환은 새 도구를 켜기 전에 이전 주 도구를 먼저 내려 두므로, 거절한 뒤에는 마지막 영상 조작 도구를 다시 켠다.
+      const keepViewing = () => {
+        if (!group.getActivePrimaryMouseButtonTool?.() && group.hasTool?.(viewing)) active.call(group, viewing, { bindings: [{ mouseButton: PRIMARY }] });
+      };
+      const onActive = function (name, options, ...rest) {
+        if (!nativeAuthoringClosed() || VIEW_TOOLS.has(name)) {
+          if (VIEW_TOOLS.has(name) && options?.bindings?.some(b => b?.mouseButton === PRIMARY && !b.modifierKey)) viewing = name;
+          return active.call(group, name, options, ...rest);
+        }
+        intended.set(name, { mode: 'Active', bindings: [...(options?.bindings || [])] });
+        status.textContent = closedText('tool'); keepViewing();
+      };
+      const onPassive = function (name, ...rest) {
+        if (!nativeAuthoringClosed() || VIEW_TOOLS.has(name)) return passive.call(group, name, ...rest);
+        intended.set(name, { mode: 'Passive', bindings: [] }); return group.setToolEnabled(name);
+      };
+      const onAddTool = typeof addTool === 'function' && function (name, ...rest) {
+        const result = addTool.call(this, name, ...rest);
+        guardTool(name, group.getToolInstance?.(name)); return result;
+      };
+      group.setToolActive = onActive; group.setToolPassive = onPassive;
+      if (onAddTool) group.addTool = onAddTool;
+      for (const name of Object.keys(group.toolOptions || {})) guardTool(name, group.getToolInstance?.(name));
+      const record = { keepViewing, intended,
+        reopen() {
+          for (const [name, want] of intended) {
+            if (group.toolOptions?.[name]?.mode !== 'Enabled') continue;
+            // A refused primary activation is not replayed: the viewing tool keeps the primary button and the user picks the tool again.
+            const bindings = want.bindings.filter(b => b?.mouseButton !== PRIMARY || b.modifierKey);
+            if (want.mode === 'Active' && bindings.length) active.call(group, name, { bindings }); else passive.call(group, name);
+          }
+          intended.clear();
+        },
+        restore() {
+          if (group.setToolActive === onActive) group.setToolActive = active;
+          if (group.setToolPassive === onPassive) group.setToolPassive = passive;
+          if (onAddTool && group.addTool === onAddTool) group.addTool = addTool;
+        } };
+      guardedGroups.set(group, record); return record;
+    }
+    function enforceTools() {
+      const manager = ct.ToolGroupManager, groups = new Set(typeof manager?.getAllToolGroups === 'function' ? manager.getAllToolGroups() : []);
+      const v = viewport(), own = v && manager?.getToolGroupForViewport?.(v.id, v.renderingEngineId);
+      if (own) groups.add(own);
+      for (const group of groups) {
+        const record = guardGroup(group); if (!record) continue;
+        let demoted = false;
+        for (const [name, options] of Object.entries(group.toolOptions || {})) {
+          // A tool added around group.addTool (an extension's addToolInstance) gets the instance guard here.
+          guardTool(name, group.getToolInstance?.(name));
+          if (!VIEW_TOOLS.has(name) && (options?.mode === 'Active' || options?.mode === 'Passive')) {
+            record.intended.set(name, { mode: options.mode, bindings: [...(options.bindings || [])] });
+            group.setToolEnabled(name); demoted = true;
+          }
+        }
+        if (demoted) record.keepViewing();
+      }
+    }
+    // 도구막대: 작성 도구를 켜는 버튼·묶음 항목을 없앤다(비활성 버튼으로 남기지 않는다). 버튼 정의와 평가·명령 연결은 뷰어의 것을
+    // 그대로 쓰고, 모드가 버튼을 다시 넣을 때마다(모드 재진입 포함) 같은 규칙으로 다시 줄인다. 줄이기 전의 버튼·구역은 적어 두었다가
+    // writer 답이 오면 그대로 되돌린다.
+    const ACTIVATING = ['setToolActiveToolbar', 'setToolActive', 'toggleActiveDisabledToolbar'];
+    const authoring = button => [button?.commands].flat().some(command => {
+      const name = typeof command === 'string' ? command : command?.commandName;
+      return ACTIVATING.includes(name) && !VIEW_TOOLS.has(command?.commandOptions?.toolName ?? button.id);
+    });
+    const TOOLBAR = ['getButtons', 'removeButton', 'addButtons', 'clearButtonSection', 'createButtonSection'];
+    const trimmed = new Set(), originals = new Map(), sectionOriginals = new Map(), replacements = new WeakSet(); let trimming = false;
+    function enforceToolbar() {
+      const bar = services.toolbarService;
+      if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function')) return;
+      const replaced = [];
+      for (const [id, button] of Object.entries(bar.getButtons() || {})) {
+        if (replacements.has(button)) continue;
+        const props = button?.props || {}, items = Array.isArray(props.items) ? props.items : null;
+        if (!items) { if (authoring({ id, commands: props.commands })) { trimmed.add(id); originals.set(id, button); } continue; }
+        const kept = items.filter(item => !authoring(item));
+        if (!kept.length) { trimmed.add(id); originals.set(id, button); continue; }
+        if (kept.length < items.length || props.primary && authoring(props.primary)) {
+          const replacement = { ...button, props: { ...props, items: kept, primary: props.primary && !authoring(props.primary) ? props.primary : kept[0] } };
+          originals.set(id, button); replacements.add(replacement); replaced.push(replacement);
+        }
+      }
+      const buttons = bar.getButtons() || {}, gone = [...trimmed].filter(id => buttons[id]);
+      const sections = Object.entries(bar.state?.buttonSections || {}).filter(([, ids]) => Array.isArray(ids) && ids.some(id => trimmed.has(id)));
+      if (!gone.length && !replaced.length && !sections.length) return;
+      trimming = true;
+      try {
+        for (const id of [...gone, ...replaced.map(button => button.id)]) bar.removeButton(id);
+        if (replaced.length) bar.addButtons(replaced);
+        for (const [key, ids] of sections) {
+          const applied = ids.filter(id => !trimmed.has(id));
+          sectionOriginals.set(key, { original: [...ids], applied });
+          bar.clearButtonSection(key); bar.createButtonSection(key, [...applied]);
+        }
+        bar.refreshToolbarState?.({ viewportId: services.viewportGridService.getActiveViewportId?.() });
+      } finally { trimming = false; }
+    }
+    function reopenToolbar() {
+      const bar = services.toolbarService;
+      if (trimming || TOOLBAR.some(name => typeof bar?.[name] !== 'function') || !originals.size && !sectionOriginals.size) return;
+      trimming = true;
+      try {
+        // Only what still stands as this policy left it goes back; a section or button the mode has built again since is its own.
+        const current = bar.state?.buttonSections || {}, same = (a, b) => Array.isArray(a) && a.length === b.length && a.every((id, i) => id === b[i]);
+        const sections = [...sectionOriginals].filter(([key, record]) => same(current[key], record.applied));
+        const listed = new Set(sections.flatMap(([, record]) => record.original));
+        const buttons = bar.getButtons() || {}, back = [];
+        for (const [id, original] of originals) {
+          if (buttons[id] ? !replacements.has(buttons[id]) : !listed.has(id)) continue;
+          if (buttons[id]) bar.removeButton(id);
+          back.push(original);
+        }
+        if (back.length) bar.addButtons(back);
+        for (const [key, record] of sections) { bar.clearButtonSection(key); bar.createButtonSection(key, [...record.original]); }
+        bar.refreshToolbarState?.({ viewportId: services.viewportGridService.getActiveViewportId?.() });
+      } finally { trimming = false; trimmed.clear(); originals.clear(); sectionOriginals.clear(); }
+    }
+    // 이 패널이 저장된 판에서 그리지 않은 작성 도구 표식(작성 경로를 모두 돌아 생긴 것 포함)은 writer가 아닌 문서에 남기지 않는다.
+    function dropLocalMarks() {
+      let dropped = false;
+      for (const a of ct.annotation.state.getAllAnnotations()) {
+        if (!NATIVE_MARKS.has(a?.metadata?.toolName) || annotations.has(a.annotationUID) || String(a.annotationUID).startsWith('kin-sr:')) continue;
+        ct.annotation.state.removeAnnotation(a.annotationUID);
+        if (measurementService.getMeasurement(a.annotationUID)) measurementService.remove(a.annotationUID);
+        dropped = true;
+      }
+      if (dropped) render();
+    }
+    function closeAuthoring() { if (nativeAuthoringClosed()) { enforceTools(); enforceToolbar(); dropLocalMarks(); } }
+    function reopenAuthoring() {
+      if (nativeAuthoringClosed()) return;
+      for (const record of guardedGroups.values()) record.reopen();
+      reopenToolbar();
+    }
+    // 표식 편집 메뉴와 명령: 우클릭 메뉴(Delete measurement·Add Label), 이름 입력, 측정 수정, 화살표 글 입력. 새 화살표의 글
+    // 입력에는 빈 답을 주어 네이티브 도구가 그 그리기를 취소하게 하고, 이미 있는 표식의 글 고치기는 답하지 않아 그대로 둔다.
+    for (const name of ['showCornerstoneContextMenu', 'deleteMeasurement', 'setMeasurementLabel', 'updateMeasurement', 'arrowTextCallback']) {
+      const original = commands?.getCommand(name, 'CORNERSTONE');
+      if (typeof original?.commandFn !== 'function') continue;
+      const guarded = { ...original, commandFn: options => {
+        if (!nativeAuthoringClosed()) return original.commandFn(options);
+        status.textContent = closedText('edit');
+        if (name === 'arrowTextCallback' && !options?.data) options?.callback?.();
+      } };
+      commands.registerCommand('CORNERSTONE', name, guarded);
+      policyRestores.push(() => { if (commands.getCommand(name, 'CORNERSTONE') === guarded) commands.registerCommand('CORNERSTONE', name, original); });
+    }
+    // 측정 목록 패널의 이름 바꾸기·잠금 풀기도 표식 편집이다. 사용자 편집(notYetUpdatedAtSource true)만 거절하고, 도구와의
+    // 동기화(false)와 이 패널의 표시 갱신은 그대로 둔다. 목록의 Delete는 이 창의 그림만 지우며 저장 항목은 다음 관찰에서 다시 그린다.
+    for (const [name, edits] of [['update', args => args[2] === true], ['toggleLockMeasurement', () => true]]) {
+      const original = measurementService[name];
+      if (typeof original !== 'function') continue;
+      const guarded = function (...args) {
+        if (nativeAuthoringClosed() && edits(args)) { status.textContent = closedText('edit'); return; }
+        return original.apply(this, args);
+      };
+      measurementService[name] = guarded;
+      policyRestores.push(() => { if (measurementService[name] === guarded) measurementService[name] = original; });
+    }
+    const groupService = services.toolGroupService, toolbarService = services.toolbarService;
+    if (typeof groupService?.subscribe === 'function') {
+      // TOOLGROUP_CREATED는 그룹을 만든 직후, 도구를 넣고 모드를 정하기 전에 동기로 온다: 여기서 감싸야 모드가 정하는 첫 모드부터 지킨다.
+      if (groupService.EVENTS?.TOOLGROUP_CREATED) policyRestores.push(unsubscribe(groupService.subscribe(groupService.EVENTS.TOOLGROUP_CREATED,
+        event => guardGroup(ct.ToolGroupManager?.getToolGroup?.(event?.toolGroupId)))));
+      // 감싸지 않은 그룹이나 이 확장 밖의 전환이 작성 도구를 켜면 그 자리에서 되돌린다.
+      if (groupService.EVENTS?.TOOL_ACTIVATED) policyRestores.push(unsubscribe(groupService.subscribe(groupService.EVENTS.TOOL_ACTIVATED,
+        event => { if (nativeAuthoringClosed() && !VIEW_TOOLS.has(event?.toolName)) enforceTools(); })));
+    }
+    if (typeof toolbarService?.subscribe === 'function' && toolbarService.EVENTS?.TOOL_BAR_MODIFIED)
+      policyRestores.push(unsubscribe(toolbarService.subscribe(toolbarService.EVENTS.TOOL_BAR_MODIFIED, () => { if (nativeAuthoringClosed()) enforceToolbar(); })));
+    function unsubscribe(subscription) { return () => subscription?.unsubscribe?.(); }
     const text = (parent, tag, value) => { const el = document.createElement(tag); el.textContent = value; parent.append(el); return el; };
     const button = (parent, label, run, disabled = false) => {
       const b = text(parent, 'button', label); b.type = 'button'; b.disabled = disabled;
@@ -858,7 +1100,12 @@ function kinCreateViewerHistory() {
     const matches = (r, item) => r?.study === scope && r.seriesUid === item.seriesUid && r.sopUid === item.sopUid && r.frame === item.frame;
     const current = () => reference(viewport()?.getCurrentImageId?.());
     const valid = ticket => !ended && ticket === generation && (!current() || current().study === scope);
-    const writable = entry => !suspended && !recovery.has(scope) && me?.kind === 'member' && me.roles?.includes('radiologist') &&
+    // S5-U2b-R-003 F01. 목록 읽기는 요청할 때 어느 목록인지 정해진다: writer의 작성자 목록(숨김 포함 전체) 또는 clinician의 확정 목록.
+    // 답은 그 읽기(세대·순번)의 것이고 문서가 지금도 같은 목록을 읽을 때만 그린다 — clinician-only 경계(clinicianBoundary)가 어떤
+    // 이유로 돌지 못했어도(settle은 감시자의 실패를 삼킨다) 전환 뒤에 도착한 작성자 목록은 그려지지 않는다.
+    const readPolicy = () => readOnly() ? 'final' : 'author';
+    const asked = (ticket, seq, policy) => valid(ticket) && seq === readSequence && readPolicy() === policy;
+    const writable = entry => writer() && !suspended && !recovery.has(scope) && me?.kind === 'member' && me.roles?.includes('radiologist') &&
       (!entry.head || entry.head.authorSub === subject);
     const render = () => { try { viewport()?.render(); } catch (_) {} };
     const lock = (entry, locked) => { if (entry.annotationUID) ct.annotation.locking.setAnnotationLocked(entry.annotationUID, locked); };
@@ -875,8 +1122,8 @@ function kinCreateViewerHistory() {
       generation++; readSequence++; navigation++; controller.abort(); controller = new AbortController();
       srRequests.clear();
       for (const e of entries.values()) removeAnnotation(e);
-      entries.clear(); annotations.clear(); list.replaceChildren(); actions.replaceChildren(); loading = false; suspended = true;
-      delete panel.dataset.studyUid;
+      entries.clear(); annotations.clear(); list.replaceChildren(); actions.replaceChildren(); loading = false; suspended = true; shown = null;
+      unmatched = false; delete panel.dataset.studyUid; delete panel.dataset.readOnly; delete panel.dataset.frame;
       status.textContent = message; render();
     }
     const hasWork = e => e.editing || e.pending || e.heldDraft;
@@ -908,7 +1155,8 @@ function kinCreateViewerHistory() {
         ct.annotation.state.removeAnnotation(a.annotationUID);
         if (measurementService.getMeasurement(a.annotationUID)) measurementService.remove(a.annotationUID);
       }
-      reset('이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
+      reset(readOnly() ? READ_ONLY.denied : '이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
+      if (readOnly()) { panel.dataset.readOnly = 'denied'; panel.dataset.studyUid = scope; }
       button(actions, 'Recheck Access', () => load());
     }
     function end(modeExit = false) {
@@ -924,7 +1172,14 @@ function kinCreateViewerHistory() {
       }
       render();
     }
+    // Astra S5-U2b-X2-R-001 F01. A real end of the login (401/403, a logout broadcast, another account) is the document's end too:
+    // kinViewerSession keeps 'refused', so no /me asked before or after it gives the other extensions a writer back. Mode exit is not.
+    function sessionEnded() { kinViewerSession.refuse(); end(); }
     async function api(path, options = {}, ticket = generation) {
+      // A request of a generation already given up (another study, the clinician-only boundary) is not sent at all: a save that
+      // was waiting for its /me when that answer said clinician-only never reaches the server. Nor is any request of a document
+      // whose login ended (X4-R-001 F02), whether or not this panel has heard of it yet.
+      if (kinViewerSession.ended() || !valid(ticket)) throw { stale: true };
       const parentSignal = controller.signal, request = new AbortController();
       const abort = () => request.abort(); parentSignal.addEventListener('abort', abort, { once: true });
       const timeout = setTimeout(abort, 30000);
@@ -932,17 +1187,26 @@ function kinCreateViewerHistory() {
       const res = await fetch('/api' + path, { ...options, cache: 'no-store', credentials: 'same-origin', signal: request.signal,
         headers: { 'X-KIN-CSRF': '1', ...(options.body ? { 'Content-Type': 'application/json' } : {}) } });
       if (!valid(ticket)) throw { stale: true };
-      if (res.status === 401 || res.status === 403 && path === '/me') { end(); throw { stale: true }; }
+      if (res.status === 401 || res.status === 403 && path === '/me') { sessionEnded(); throw { stale: true }; }
       if (res.status === 403) { deny(); throw { stale: true }; }
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw { stale: true };
-      if (!res.ok || !data) throw { status: res.status, code: data?.code };
+      // `said` (the server's wording) is read only by readOnlyLoad; writer paths keep their own messages (manualSr reads `message`).
+      if (!res.ok || !data) throw { status: res.status, code: data?.code, said: data?.message };
       return data;
       } finally { clearTimeout(timeout); parentSignal.removeEventListener('abort', abort); }
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
-      if (!user.sub || (subject && subject !== user.sub)) { end(); throw { stale: true }; }
+      // Another account ends the document's login before its verdict is noted (Astra S5-U2b-X3-R-001 F01, X4-R-001 F01). note()
+      // makes that comparison against the account the document confirmed first — by this mount, an earlier one or another panel —
+      // so a mount that has not confirmed anyone yet (subject is empty after a mode re-entry) is covered too; a refusal there ends
+      // this panel inside note() through the session watcher.
+      // The session watcher below runs inside note(): ownAnswer tells it that this panel's own /me is the answer it reacts to.
+      ownAnswer = true;
+      try { kinViewerSession.note(user); } finally { ownAnswer = false; }
+      // `ended`: the answer itself refused (not a viewer member) and the session watcher ended this panel inside note().
+      if (ended || !user.sub) { sessionEnded(); throw { stale: true }; }
       me = user; subject = user.sub; lastAuth = Date.now(); return user;
     }
     const path = () => '/studies/' + scope + '/viewer-items';
@@ -952,20 +1216,22 @@ function kinCreateViewerHistory() {
       if (error.status === 400 || error.status === 413) return '지원 영상·원본 평면·입력 길이를 확인하세요. 작성 내용은 저장되지 않았습니다.';
       return '저장 결과를 확인하지 못했습니다. 같은 요청 재시도로 결과를 확인하세요.';
     }
-    async function load(resume = false, recheck = null) {
+    // `answered`: only the clinician-only boundary passes it, from inside this panel's own /me answer — that answer is this read's /me.
+    async function load(resume = false, recheck = null, answered = false) {
       if (!scope || ended || loading) return;
-      const ticket = generation, seq = ++readSequence; loading = true;
+      const ticket = generation, seq = ++readSequence; loading = true; tried = Date.now();
       status.textContent = '저장 항목 확인 중…';
       try {
-        await authenticate(ticket);
+        if (!answered) await authenticate(ticket);
+        if (readPolicy() === 'final') return await readOnlyLoad(ticket, seq);
         const heads = []; let cursor = null;
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
-          if (seq !== readSequence) return;
+          if (!asked(ticket, seq, 'author')) return;
           if (!Array.isArray(page.items) || heads.length + page.items.length > 512 || (cursor && page.nextCursor === cursor)) throw new Error('Invalid page');
           heads.push(...page.items); cursor = page.nextCursor;
         } while (cursor);
-        if (!valid(ticket) || seq !== readSequence) return;
+        if (!asked(ticket, seq, 'author')) return;
         suspended = false;
         const parked = recovery.get(scope);
         if (resume === true && parked && parked.subject === subject) {
@@ -1001,9 +1267,114 @@ function kinCreateViewerHistory() {
       } catch (e) { if (!e.stale && valid(ticket)) status.textContent = '목록을 확인하지 못했습니다. 새로고침으로 다시 확인하세요.'; }
       finally { if (ticket === generation) loading = false; }
     }
+    // S5-U2b 읽기 전용 목록. 서버는 clinician-only에게 확정본일 때만 좁힌 쪽({uid, final, reportVersion, items, nextCursor})을
+    // 주고, 숨긴 항목 요청은 400으로 거절한다. 이어받기 값은 받은 그대로 넘기고, 모든 쪽이 같은 검사·같은 확정 판이어야
+    // 한다 — 판이 다른 쪽을 이어 붙이면 어느 확정 시점에도 없던 목록이 된다(S5-U1b-F04). 읽는 동안 이전 목록을 내려 두고,
+    // 실패하면 받은 쪽도 버린다. 확정 전(items null)은 빈 목록(항목 없음)과 다르게 알린다.
+    const dropRows = () => {
+      for (const e of entries.values()) removeAnnotation(e);
+      entries.clear(); list.replaceChildren(); shown = null; unmatched = false; delete panel.dataset.frame;
+    };
+    async function readOnlyLoad(ticket, seq) {
+      if (!valid(ticket) || seq !== readSequence) return;
+      const study = scope, heads = [];
+      let cursor = null, version = null, withheld = false, pages = 0;
+      dropRows(); panel.dataset.readOnly = 'loading'; toolbar();
+      try {
+        do {
+          const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
+          if (!asked(ticket, seq, 'final')) return;
+          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page.final) {
+            if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
+            withheld = true; break;
+          }
+          const next = page.nextCursor;
+          if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
+              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
+                h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
+              !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
+          version = page.reportVersion; heads.push(...page.items); cursor = next;
+        } while (cursor !== null);
+        if (!asked(ticket, seq, 'final')) return;
+        readOnlyShow(study, withheld ? null : version, heads);
+      } catch (error) {
+        if (error?.stale || !asked(ticket, seq, 'final')) return;
+        readOnlyFailed(error);
+      }
+    }
+    // S5-U2b-R-003 F01. clinician-only가 되는 순간은 이 패널이 진행 중인 모든 읽기·쓰기의 경계다. /me를 기다리는 읽기든 이미
+    // 작성자 목록을 요청한 읽기든(첫 쪽·다음 쪽·Refresh·Recheck Source), 저장·이력·SR 요청이든 reset()이 그 세대·순번을 버리고
+    // 요청을 끊으며(아직 보내지 않은 요청은 api가 보내지 않는다), 작성자 행과 그 표식을 지금 내린다. 그 뒤 확정 목록 읽기를 정확히
+    // 한 번 시작한다: 이 전환을 부른 답이 이 패널 자신의 /me면(ownAnswer) 방금 인증했으므로 곧바로 확정 목록을 읽고, 다른 확장의
+    // /me면 이 패널의 /me부터 다시 묻는다(끊은 /me의 늦은 답은 버린다). 진행 중인 읽기(loading)를 이유로 건너뛰지 않는다 — 건너뛰면
+    // writer로 이미 요청한 목록이 전환 뒤에 도착해 그려지고, 그 목록에는 확인 기준(shown)이 없어 final:false로도 내려가지 않았다.
+    function clinicianBoundary(own) {
+      reset('저장 항목 확인 중…'); toolbar();
+      load(false, null, own);
+    }
+    // 끝까지 검증한 한 판(확정 판 번호, 확정 전이면 null)만 그리고, 그 판을 뒤따르는 주기·포커스 확인의 기준(shown)으로 남긴다.
+    function readOnlyShow(study, version, heads) {
+      suspended = false; shown = { study, version }; unmatched = false;
+      for (const head of heads) {
+        const e = { id: head.id, head, draft: itemOnly(head), editing: false, latest: null, message: '' };
+        entries.set(e.id, e); row(e);
+      }
+      shownStatus = version === null ? READ_ONLY.withheld : heads.length ? '확정 판독문 r' + version + '의 저장 항목 ' + heads.length + '개 · 읽기 전용'
+        : '확정 판독문 r' + version + '에 저장된 측정·키 이미지가 없습니다 · 읽기 전용';
+      status.textContent = shownStatus;
+      panel.dataset.studyUid = study; panel.dataset.readOnly = version === null ? 'withheld' : heads.length ? 'ready' : 'empty';
+      toolbar(); hydrate(); frameMatch(current());
+    }
+    function readOnlyFailed(error) {
+      dropRows();
+      const said = Array.isArray(error?.said) ? error.said.filter(x => typeof x === 'string').join(' ') : typeof error?.said === 'string' ? error.said : '';
+      status.textContent = '저장 항목을 불러오지 못했습니다. ' + (Number.isInteger(error?.status)
+        ? (said ? said + ' ' : '') + '(HTTP ' + error.status + (typeof error.code === 'string' ? ' · ' + error.code : '') + ')'
+        : error?.name === 'AbortError' || error instanceof TypeError ? '서버 응답을 받지 못했습니다.' : '응답 형식을 확인할 수 없습니다.') + ' Refresh로 다시 읽으세요.';
+      panel.dataset.studyUid = scope; panel.dataset.readOnly = 'failed';
+      toolbar();
+    }
+    // S5-U2b-R-001 F03. 주기·포커스 확인의 답도 지금 그려 둔 확정 판(shown)과 대조한다. 같은 검사·같은 읽기 세대의 답만 본다 —
+    // 다른 검사로 옮겼다 돌아온 A→B→A의 늦은 답이나 그 사이 새로 시작한 읽기가 있으면 이 답은 아무것도 바꾸지 않는다. 확정이
+    // 풀리면(final:false) 행과 표식을 바로 내리고 withheld로, 판이 바뀌면 내린 뒤 새 판 전체를 처음부터 다시 검증해 그린다.
+    // 전송 실패·5xx는 확인하지 못한 것이라 다음 확인까지 검증한 판을 두고, 4xx·형식 오류는 서버가 지금 내주지 않는 목록이라 내린다.
+    function confirmShown(ticket, seq, study, page, error) {
+      if (error?.stale || !asked(ticket, seq, 'final') || loading || scope !== study || shown?.study !== study) return;
+      if (error) { if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500) readOnlyFailed(error); return; }
+      if (!page || page.uid !== study || typeof page.final !== 'boolean' || (page.final
+        ? !Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || !Array.isArray(page.items)
+        : page.items !== null || page.nextCursor !== null)) return readOnlyFailed(new Error('Invalid page'));
+      const version = page.final ? page.reportVersion : null;
+      if (version === shown.version) return;
+      dropRows();
+      if (version === null) return readOnlyShow(study, null, []);
+      panel.dataset.readOnly = 'loading'; toolbar(); load();
+    }
+    // S5-U2b-R-002 F02. 이 확인은 활성 화면의 원본 프레임 식별과 떼어 둔다: 그려 둔 검사(scope)와 읽기 세대를 기준으로 주기(15초)·
+    // 포커스마다 확인하고, 답은 위 confirmShown의 UID·세대 방어를 그대로 거친다. 프레임이 없는 화면(MPR·볼륨·로딩 실패)에
+    // 머물러도 취소·교체된 판이 확인 없이 남지 않는다.
+    function recheckShown() {
+      if (!scope || !subject || suspended || loading || checking || Date.now() - lastAuth <= 15000) return;
+      checking = true; const ticket = generation, seq = readSequence, study = scope;
+      authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket))
+        .then(page => confirmShown(ticket, seq, study, page, null), error => confirmShown(ticket, seq, study, null, error))
+        .catch(() => {}).finally(() => { checking = false; });
+    }
+    // 목록은 식별된 원본 프레임으로만 화면 영상과 이어진다. 활성 화면에서 그 검사의 원본 프레임을 찾지 못하면 목록을 영상과 맞추지
+    // 않았다고 알리고(data-frame="unmatched") 위 확인은 계속한다. 프레임이 돌아오면 그 자리에서 다시 확인한다.
+    function frameMatch(r) {
+      const lost = !!shown && !(r && r.study === shown.study);
+      if (lost === unmatched) return;
+      unmatched = lost;
+      if (lost) { panel.dataset.frame = 'unmatched'; status.textContent = shownStatus + ' · ' + READ_ONLY.unmatched; return; }
+      delete panel.dataset.frame; status.textContent = shownStatus; lastAuth = 0;
+    }
     function toolbar() {
       const ticket = generation;
       actions.replaceChildren(); button(actions, 'Refresh', load);
+      if (!writer()) { if (readOnly()) text(actions, 'p', READ_ONLY.note); return; }
       if (recovery.has(scope)) {
         text(actions, 'p', '이 검사의 미저장 작업이 보관 중입니다. 이 뷰어를 닫거나 로그아웃하면 폐기됩니다.');
         button(actions, 'Resume Held Work', () => { if (valid(ticket)) return load(true); });
@@ -1083,8 +1454,8 @@ function kinCreateViewerHistory() {
         const tool = group.getToolInstance(tools[kind]), config = tool.configuration, add = tool.addNewAnnotation;
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
-          if (ended || !subject || suspended || recovery.has(scope)) {
-            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
+          if (ended || !subject || suspended || recovery.has(scope) || !writer()) {
+            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : !writer() ? closedText('tool') : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
@@ -1149,7 +1520,8 @@ function kinCreateViewerHistory() {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
       text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
-      if (e.head) text(el, 'div', e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
+      // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
+      if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
         input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
           e.draft[e.draft.kind !== 'key' ? 'label' : 'title'] = value; updateAnnotation(e);
@@ -1171,7 +1543,8 @@ function kinCreateViewerHistory() {
       }
       button(el, 'Go to Image', () => navigate(e));
       const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
-      if (sourceUnverified && !e.head.hidden) {
+      // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
+      if (sourceUnverified && !e.head.hidden && writer()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
         if (!e.heldDraft) button(el, 'Recheck Source', () => {
           if (valid(generation) && entries.get(e.id) === e && !e.busy && !e.pending) return load(false, e.head.id);
@@ -1207,7 +1580,8 @@ function kinCreateViewerHistory() {
           button(el, 'Discard Held Changes', () => discardHeld(e), !!(e.busy || e.pending));
         }
       }
-      if (e.head) button(el, 'History', async () => {
+      // Revisions carry authors and hidden states; that route is a writer read, not a clinician one (S5-U1b allowlist).
+      if (e.head && writer()) button(el, 'History', async () => {
         const ticket = generation; let cursor = null, count = 0;
         const history = document.createElement('div'); el.append(history);
         const more = async () => {
@@ -1293,7 +1667,7 @@ function kinCreateViewerHistory() {
       return { highlighted: true, annotation: 'shown', ...live };
     }
     const navigationEnv = { services, viewport, reference, matches, hydrate, highlight,
-      ended: () => ended, scope: () => scope, busy: () => suspended || recovery.has(scope),
+      ended: () => ended, scope: () => scope, busy: () => suspended || held(),
       generation: () => generation, valid, navigation: () => navigation, beginNavigation: () => ++navigation,
       delay: () => new Promise(resolve => setTimeout(resolve, 100)) };
     const navigateTo = target => kinViewerNavigateTo(navigationEnv, target);
@@ -1306,7 +1680,7 @@ function kinCreateViewerHistory() {
       } catch (_) { return { viewportId: null, image: null }; }
     };
     async function navigate(e) {
-      if (!valid(generation) || suspended || recovery.has(scope) || entries.get(e.id) !== e) return;
+      if (!valid(generation) || suspended || held() || entries.get(e.id) !== e) return;
       const outcome = await navigateTo({ studyUid: scope, seriesUid: e.draft.seriesUid, sopUid: e.draft.sopUid, frame: e.draft.frame });
       if (outcome.ok || !valid(generation) || entries.get(e.id) !== e) return;
       const message = { 'series-missing': '현재 검사에서 원본 시리즈를 찾을 수 없습니다.', 'frame-missing': '원본 프레임을 열지 못했습니다.',
@@ -1315,7 +1689,7 @@ function kinCreateViewerHistory() {
     }
     // Read-only view of the saved heads for the Findings section: only saved rows are linkable and
     // the Orthanc verdict travels with them, separate from any database link state.
-    const historyState = () => ({ scope, subject, ended, suspended: suspended || recovery.has(scope), writable: writable({}),
+    const historyState = () => ({ scope, subject, ended, suspended: suspended || held(), writable: writable({}),
       generation, loading, ...shownImage(),
       heads: [...entries.values()].filter(e => e.head).map(e => ({ id: e.head.id, revision: e.head.revision, hidden: !!e.head.hidden,
         kind: e.draft.kind, label: e.draft.label ?? e.draft.title ?? '', seriesUid: e.head.item.seriesUid, sopUid: e.head.item.sopUid,
@@ -1323,7 +1697,7 @@ function kinCreateViewerHistory() {
         values: Array.isArray(e.head.item.baseline?.values) ? [...e.head.item.baseline.values] : null, working: !!(e.editing || e.pending || e.busy) })) });
     function hydrate() {
       const v = viewport(), imageId = v?.getCurrentImageId?.(), r = reference(imageId);
-      if (!r || r.study !== scope || !subject || ended || suspended || recovery.has(scope)) return;
+      if (!r || r.study !== scope || !subject || ended || suspended || held()) return;
       configureMeasurements(ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       const plane = cs.metaData.get('imagePlaneModule', imageId);
       for (const e of entries.values()) {
@@ -1342,16 +1716,24 @@ function kinCreateViewerHistory() {
       }
     }
     function scan() {
+      // The observation tick sees the document's end first (X4-R-001 F02): whichever way it was noted, this panel ends with it.
+      if (!ended && kinViewerSession.ended()) end();
+      closeAuthoring();
       if (ended) return;
       const r = current();
+      if (r && r.study !== scope) {
+        park(); reset('검사 확인 중…'); scope = r.study; me = null;
+        load(); return;
+      }
+      // No /me has answered this panel yet (errors, time-outs): ask again on focus and every 15 s, so that a passing failure
+      // does not leave a writer with image viewing only until the next study (authoring waits for a writer answer).
+      if (!subject && scope && !loading && Date.now() - tried > 15000) { load(); return; }
+      // S5-U2b-R-002 F02: the final list a clinician-only document shows is checked whether or not a source frame is identified.
+      if (readOnly()) { frameMatch(r); recheckShown(); }
       // Switching display sets briefly removes the viewport. Mode exit, not
       // that loading gap, owns teardown of drafts and in-flight commands.
       if (!r) return;
-      if (r.study !== scope) {
-        park(); reset('검사 확인 중…'); scope = r?.study || ''; me = null;
-        if (scope) load(); return;
-      }
-      if (!subject || !scope || suspended || recovery.has(scope)) return;
+      if (!subject || !scope || suspended || held()) return;
       const v = viewport();
       configureMeasurements(v && ct.ToolGroupManager.getToolGroupForViewport(v.id, v.renderingEngineId));
       for (const a of ct.annotation.state.getAllAnnotations()) {
@@ -1389,14 +1771,16 @@ function kinCreateViewerHistory() {
       }
       hydrate();
       captureAnnotations();
-      if (Date.now() - lastAuth > 15000 && !checking) {
+      // The writer's access probe (a 403 parks the drafts in deny()); a clinician-only document is checked above.
+      if (!readOnly() && Date.now() - lastAuth > 15000 && !checking) {
         checking = true; const ticket = generation;
         authenticate(ticket).then(() => api(path() + '?limit=1', {}, ticket)).catch(() => {}).finally(() => { checking = false; });
       }
       refreshMeasurementViews(); refreshSrButtons();
     }
     function captureAnnotations() {
-      if (suspended || recovery.has(scope)) return;
+      // Not a confirmed writer: a mark drawn with the viewer's own tools never becomes an unsaved item of this panel.
+      if (suspended || recovery.has(scope) || !writer()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
         const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : 2;
@@ -1415,9 +1799,10 @@ function kinCreateViewerHistory() {
         }
       }
     }
-    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
-    const onFocus = () => { lastAuth = 0; };
-    const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) ||
+    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };
+    const onFocus = () => { lastAuth = 0; tried = 0; };
+    // A document that is not a confirmed writer has no mark to save, so an unlocked native mark is not unsaved work there.
+    const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) || writer() &&
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
     // Finding drafts (including ones held for another study) count for the whole-viewer guards:
     // worklist Next Study, window reuse/close, cell merge/hanging protocol and page unload. They are
@@ -1439,7 +1824,7 @@ function kinCreateViewerHistory() {
     window.kinViewerHistoryActivate = activateStudy;
     window.kinViewerHistoryState = historyState;
     let channel;
-    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') end(); }; } catch (_) {}
+    try { channel = new BroadcastChannel('kin-session'); channel.onmessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); }; } catch (_) {}
     window.addEventListener('storage', onStorage); window.addEventListener('focus', onFocus); window.addEventListener('beforeunload', beforeUnload);
     // The pinned viewer changes active viewports through several services. A
     // bounded observation timer also covers stack frame changes without patching them.
@@ -1451,8 +1836,24 @@ function kinCreateViewerHistory() {
     document.addEventListener(stackEvent, onImage, true);
     const subscriptions = Object.values(services.viewportGridService.EVENTS).map(event => services.viewportGridService.subscribe(event, onImage));
     stop = () => { end(true); clearInterval(timer); channel?.close(); document.removeEventListener(stackEvent, onImage, true); subscriptions.forEach(s => s.unsubscribe()); window.removeEventListener('storage', onStorage); window.removeEventListener('focus', onFocus); window.removeEventListener('beforeunload', beforeUnload); for (const restores of configured.values()) restores.reverse().forEach(restore => restore()); configured.clear(); panel.remove(); };
+    // 판정이 바뀌는 순간(이 패널의 /me가 아니어도): writer면 막는 동안 적어 둔 도구 모드·도구막대를 되돌리고, 그 밖이면 작성
+    // 경로를 닫고 이 패널이 그리지 않은 표식을 지운다. read-only는 clinicianBoundary를 지난다. 다른 판정은 그려 둔 행의 컨트롤만
+    // 다시 그린다. (Astra S5-U2b-X2-R-001 F01) 어느 확장의 /me든 refused가 되면 이 패널도 끝나고, 끝난 패널은 그 뒤 공유 판정이
+    // 무엇이든 작성 경로를 다시 열지 않는다. (X4-R-001 F02) read-only 문서의 종료도 여기로 온다: 확정 목록과 그 표식을 내리고
+    // 주기·포커스 확인을 멈춘다.
+    const unwatch = kinViewerSession.onChange(next => {
+      const own = ownAnswer;
+      if (next === 'refused' && !ended) end();
+      if (next === 'writer' && !ended) reopenAuthoring(); else closeAuthoring();
+      if (ended || !scope) return;
+      if (next === 'read-only') clinicianBoundary(own);
+      else if (!suspended) { toolbar(); for (const e of entries.values()) row(e); }
+    });
     const previousStop = stop;
     stop = () => {
+      unwatch(); policyRestores.reverse().forEach(restore => restore());
+      for (const record of guardedGroups.values()) record.restore();
+      guardedGroups.clear();
       if (window.kinViewerHistoryHasUnsaved === jobGuard) delete window.kinViewerHistoryHasUnsaved;
       if (window.kinViewerHistoryWorkspaceState === workspaceState) delete window.kinViewerHistoryWorkspaceState;
       if (window.kinViewerHistoryNavigate === navigateTo) delete window.kinViewerHistoryNavigate;
@@ -1461,7 +1862,13 @@ function kinCreateViewerHistory() {
       if (measurementService.getMeasurements === projectedMeasurements) measurementService.getMeasurements = originalMeasurements;
       reportRestores.reverse().forEach(restore => restore());
       previousStop();
+      // After previousStop: the measurement wrappers configureMeasurements put over these restore to them first.
+      for (const restore of guardedTools.values()) restore();
+      guardedTools.clear();
     };
+    // A mode entry in a document whose login already ended (F01; X4-R-001 F02: a read-only document's end too) starts ended: no /me,
+    // no list, authoring closed.
+    if (kinViewerSession.ended()) end();
     scan();
   }
   return { id: 'kin.viewer-history', preRegistration({ servicesManager, commandsManager, extensionManager }) { services = servicesManager.services; commands = commandsManager; extensions = extensionManager; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
@@ -1521,6 +1928,111 @@ function kinHangingProtocolDisplaySets(values) {
       image.SeriesInstanceUID === value.SeriesInstanceUID));
 }
 
+/* S5-U2b. 서버 /me의 역할이 업무 역할 clinician뿐인가 — api/src/clinician-policy.ts clinicianOnly와 같은 규칙이다(Keycloak
+   기본 역할은 보지 않고, 기존 세 역할이 하나라도 섞이면 아니다). 이 뷰어가 쓰기 컨트롤을 두지 않을 때만 쓰며 권한 판정이
+   아니다: 쓰기와 작성자 쪽 읽기는 서버가 거절하고, 이 판정은 그 거절을 부를 버튼을 주지 않을 뿐이다. */
+function kinViewerClinicianOnly(me) {
+  const roles = me && me.kind === 'member' && Array.isArray(me.roles) ? me.roles : [];
+  const app = roles.filter(role => ['radiologist', 'technician', 'admin', 'clinician'].includes(role));
+  return app.length > 0 && app.every(role => role === 'clinician');
+}
+
+/* S5-U2b(Astra S5-U2b-R-001 F02). 이 뷰어 문서의 계정 판정 하나. 측정 패널·배치 패널·쓰기 화면 관문 중 어느 쪽이 받은 /me든
+   여기에 적는다: unconfirmed(성공한 답 없음) · refused(401/403, 또는 뷰어 구성원이 아닌 답) · writer · read-only(clinician-only).
+   read-only는 문서가 끝날 때까지 되돌리지 않는다 — 한 확장의 /me 실패, 뒤이은 다른 답, 모드 재진입이 쓰기 화면을 다시 열지
+   못한다. 쓰기 화면(소견·저장 작업·Tech 메모)은 성공한 /me가 writer라고 답했을 때만 붙는다(decide). 오류·시간 초과·형식
+   오류는 허가도 거절도 아니라서 결정을 미루고, 이 문서의 다음 성공한 /me(다른 확장의 것 포함)가 정한다. 권한 판정이 아니다:
+   쓰기와 작성자 쪽 읽기는 서버가 거절하고, 이 판정은 그 거절을 부를 화면을 붙이지 않을 뿐이다.
+   (Astra S5-U2b-R-002 F01) 기본값은 읽기 전용이다: 측정·표식 작성 경로는 writer일 때만 열리고, unconfirmed·refused에서도
+   영상 조작만 된다. onChange는 판정이 바뀔 때마다 알린다 — 측정 패널이 작성 경로를 열고 닫고, 쓰기 화면은 writer가 아니게
+   되는 순간 내려간다.
+   (Astra S5-U2b-X2-R-001 F01) refused도 문서가 끝날 때까지 되돌리지 않는다. 401/403·로그아웃·다른 계정은 이 문서의 로그인이
+   끝난 것이고(각 패널은 "다시 로그인한 뒤 뷰어를 여세요"라고 알린다), 그 전에 보낸 /me든 그 뒤의 /me든, 어느 확장의 것이든,
+   응답 본문이 늦게 끝난 것이든 writer 답이 작성 경로를 다시 열지 못한다. 돌아가는 길은 새 뷰어다.
+   (Astra S5-U2b-X4-R-001 F01·F02) 문서 수명의 상태는 셋이고 모드 종료·재진입이 어느 것도 지우지 않는다.
+   owner: 이 문서가 처음 확인한 계정([기관, sub]). /me를 받는 곳(측정 패널·배치 패널·쓰기 화면 관문, 재확인·주기 확인 포함)은
+   모두 note()로 적고, note()는 역할 판정을 반영하기 전에 답의 계정을 owner와 비교한다 — 다른 계정은 그 역할이 무엇이든 곧바로
+   종료다. 패널마다 따로 비교하면 새로 붙은 패널·재진입한 패널은 비교할 계정이 없어 다른 계정의 writer 답으로 작성 경로를 다시
+   열었다. ended: 로그인이 끝났다(401/403·로그아웃 방송·다른 계정·구성원이 아닌 답). 역할 판정과 따로 두고 read-only보다
+   앞선다 — read-only 문서도 끝나면 끝나고(그래야 재진입이 목록 읽기를 다시 시작하지 않는다), read-only에서 writer로는 여전히
+   돌아가지 않는다. 조회·작성·마운트·주기 확인의 관문은 ended부터 본다.
+   (Astra S5-U2b-X5-R-001 F01) 쓰기 화면(소견·저장 작업·Tech 메모)이 스스로 묻는 /me(첫 확인·재확인·주기 확인)도 문서의 판정이다:
+   writeModule로 받은 answer()가 그 답을 owner와 비교해 판정을 적은 뒤에야 화면이 계정을 쓰고, 그 화면의 401(또는 /me의 403)은
+   refuse()로 문서를 끝낸다. 로그인이 끝나면 쓰기 화면은 내려가지 않고 제자리에서 끝난다 — onEnd()로 등록한 end가 판정을 알리기
+   전에 돌아, 각 화면이 자기 자리에 "다시 로그인" 안내를 남기고, 화면의 정리(MPR 도구가 도구 그룹을 돌려주는 복원)가 작성 경로를
+   닫는 정책보다 먼저 끝난다. clinician-only는 여전히 쓰기 화면을 내린다(모듈 관문).
+   (Astra S5-U2b-X5-R-001 F02) 로그아웃 방송(storage·BroadcastChannel)은 문서가 받는다: 모든 확장이 모드 종료로 내려간 사이의
+   로그아웃도 ended로 적히고, 모드 종료는 이 수신자·owner·ended를 지우지 않는다. */
+const kinViewerSession = (() => {
+  let role = 'unconfirmed', ended = false, owner = null, read = null, ending = false;
+  const waiting = new Set(), watchers = new Set(), changes = new Set(), enders = new Set();
+  const state = () => ended ? 'refused' : role;
+  function settle(next) {
+    const previous = state();
+    if (ended) return previous;
+    if (ending) return previous;
+    if (role === 'read-only' && next !== 'refused') return previous;
+    if (next === 'refused') {
+      // The mounted write modules end in place first, while the document still reads as it was (F01; e2e volume preferences 09/14).
+      ending = true;
+      for (const end of [...enders]) { try { end(); } catch (_) {} }
+      ending = false; ended = true;
+    } else role = next;
+    const now = state();
+    for (const resolve of [...waiting]) { waiting.delete(resolve); resolve(now); }
+    if (now === 'read-only' && previous !== now) for (const watch of [...watchers]) { try { watch(); } catch (_) {} }
+    if (now !== previous) for (const watch of [...changes]) { try { watch(now); } catch (_) {} }
+    return now;
+  }
+  // The account a /me answer is from. An answer without one (not a member, no sub) is refused: it cannot be compared with the owner.
+  const account = me => me?.kind === 'member' && typeof me.sub === 'string' && me.sub.length > 0
+    ? JSON.stringify([typeof me.institution === 'string' ? me.institution : null, me.sub]) : null;
+  function note(me) {
+    const who = account(me);
+    if (who !== null && owner !== null && who !== owner) return settle('refused');
+    if (who !== null && owner === null) owner = who;
+    return settle(who === null ? 'refused' : kinViewerClinicianOnly(me) ? 'read-only' : 'writer');
+  }
+  // F02: the document's own logout receivers, for its whole life (a panel's listener leaves with the panel at mode exit).
+  const loggedOut = () => { settle('refused'); };
+  let logoutChannel = null;
+  try { globalThis.addEventListener?.('storage', e => { if (e?.key === 'kin-session-ended') loggedOut(); }); } catch (_) {}
+  try { if (typeof BroadcastChannel === 'function') { logoutChannel = new BroadcastChannel('kin-session'); logoutChannel.onmessage = e => { if (e?.data?.type === 'session-ended') loggedOut(); }; } } catch (_) {}
+  // F01: what a write module is handed. answer(me) is its own successful /me: compared with the document's account and noted before
+  // the module keeps anything of it; true only while the document is still a writer of that account. refuse() is its 401 (or 403 on
+  // /me). onEnd(end) registers its in-place end for as long as it is mounted.
+  const writeModule = Object.freeze({
+    answer(me) { note(me); return state() === 'writer'; },
+    refuse() { settle('refused'); },
+    ended: () => ended,
+    onEnd(end) { enders.add(end); return () => { enders.delete(end); }; },
+  });
+  return {
+    state,
+    ended: () => ended,
+    readOnly: () => state() === 'read-only',
+    writer: () => state() === 'writer',
+    note,
+    refuse: () => settle('refused'),
+    writeModule,
+    onReadOnly(watch) { watchers.add(watch); return () => { watchers.delete(watch); }; },
+    onChange(watch) { changes.add(watch); return () => { changes.delete(watch); }; },
+    // 같은 때 붙는 확장끼리 /me 읽기 하나를 나눠 쓴다. 답은 그 읽기나 다른 확장의 성공한 /me 중 먼저 온 쪽이다.
+    decide() {
+      if (ended) return Promise.resolve(state());
+      if (role === 'read-only') return Promise.resolve(role);
+      const answer = new Promise(resolve => waiting.add(resolve));
+      if (!read && typeof fetch === 'function') {
+        read = fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } }).then(async response => {
+          if (response.status === 401 || response.status === 403) settle('refused');
+          else if (response.ok) note(await response.json());
+        }).catch(() => {}).finally(() => { read = null; });
+      }
+      return answer;
+    },
+  };
+})();
+
 function kinCreateViewerLayout() {
   let services, stop;
   function mount() {
@@ -1534,12 +2046,14 @@ function kinCreateViewerLayout() {
     const note = document.createElement('p'); note.textContent = '최근 1건만 저장합니다. 영상 위치·확대·주석은 포함하지 않습니다.'; panel.append(note);
     const status = document.createElement('p'); status.id = 'kin-viewer-layout-status'; status.setAttribute('role', 'status'); panel.append(status);
     const controls = document.createElement('div'); panel.append(controls); document.body.append(panel);
-    let ended = false, busy = false, key = null, channel, hpOwner = null, hp = null;
+    let ended = false, busy = false, key = null, channel, hpOwner = null, hp = null, hpHost = null;
     const controller = new AbortController();
     const buttons = [];
     const live = () => !ended && location.search === search;
     const refresh = () => buttons.forEach(b => { b.disabled = ended || busy || !key || !studies; });
-    function end() { ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    function end() { if (ended) return; ended = true; controller.abort(); hp?.end(); key = null; status.textContent = '세션이 변경되었습니다. 다시 로그인한 뒤 뷰어를 여세요.'; refresh(); }
+    // Astra S5-U2b-X2-R-001 F01: a 401 or a refused /me of this panel is the end of the document's login (kinViewerSession keeps 'refused').
+    function sessionEnded() { kinViewerSession.refuse(); end(); }
     async function get(path, signal) {
       const request = new AbortController(), abort = () => request.abort();
       controller.signal.addEventListener('abort', abort, { once: true });
@@ -1549,16 +2063,31 @@ function kinCreateViewerLayout() {
       try {
         const response = await fetch(path, { credentials: 'same-origin', cache: 'no-store', signal: request.signal, headers: { 'X-KIN-CSRF': '1' } });
         if (!live()) throw new Error('화면이 변경되어 배치를 적용하지 않았습니다.');
-        if (response.status === 401 || response.status === 403) { end(); throw new Error('검사 접근 권한을 확인할 수 없습니다.'); }
+        if (response.status === 401 || response.status === 403) {
+          if (response.status === 401 || path === '/api/me') sessionEnded(); else end();
+          throw new Error('검사 접근 권한을 확인할 수 없습니다.');
+        }
         if (!response.ok) throw new Error('서버 연결을 확인한 뒤 다시 시도하세요.');
         return await response.json();
       } finally { clearTimeout(timer); controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', abort); }
     }
     async function authenticate(signal) {
       const me = await get('/api/me', signal), next = model.owner(me);
-      if (!live() || !next || (key && next !== key)) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
+      // Astra S5-U2b-X3-R-001 F01 · X4-R-001 F01: another account is the end of the document's login, not only of this panel. The
+      // account check is the shared session's: note() compares this answer with the account the document confirmed first (by any
+      // panel, before any mode exit) before it posts a verdict, and refuses the session on a difference; the watcher below then ends
+      // this panel, so live() is false here. A check of this panel's own key could not see an account confirmed before this mount.
+      kinViewerSession.note(me);
+      if (!live() || !next) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       key = next;
       hpOwner = { institution: me.institution, subject: me.sub };
+    }
+    // S5-U2b: 배치 저장·복원과 Hanging Protocol은 작성자 목록을 읽고 계정에 쓰므로, 문서가 clinician-only로 확인되면(이 패널의
+    // /me든 다른 확장의 것이든, 이 모드 진입 전이든) 없애고 다른 확장이 적는 상태 줄만 남긴다.
+    function readOnlyPanel() {
+      for (const b of buttons.splice(0)) b.remove();
+      hp?.end(); hp = null; hpHost?.remove(); hpHost = null;
+      summary.textContent = 'Viewer Status'; note.textContent = '읽기 전용 화면입니다. 배치 저장·복원과 Hanging Protocol은 제공하지 않습니다. 화면 배치는 뷰어의 기본 레이아웃 도구로 바꿀 수 있습니다.';
     }
     async function mountProtocols() {
       const load = (name, global) => window[global] ? Promise.resolve() : new Promise((resolve, reject) => {
@@ -1573,8 +2102,8 @@ function kinCreateViewerLayout() {
       await load('hanging-protocol-model.js', 'KinHangingProtocolModel');
       if (!live()) return;
       await load('viewer-hanging-protocol.js', 'KinViewerHangingProtocol');
-      if (!live()) return;
-      const host = document.createElement('section'); panel.append(host);
+      if (kinViewerSession.ended() || !live() || kinViewerSession.readOnly()) return;
+      const host = hpHost = document.createElement('section'); panel.append(host);
       hp = window.KinViewerHangingProtocol.mount({ services, host, owner: hpOwner, live,
         access: async ({ signal }) => {
           await authenticate(signal);
@@ -1619,7 +2148,7 @@ function kinCreateViewerLayout() {
       return value;
     }
     async function run(action) {
-      if (busy || !live() || !key || !studies) return;
+      if (kinViewerSession.ended() || busy || !live() || !key || !studies || kinViewerSession.readOnly()) return;
       busy = true; refresh(); status.textContent = '계정과 검사 접근 확인 중…'; const before = signature();
       try {
         await authenticate();
@@ -1650,13 +2179,26 @@ function kinCreateViewerLayout() {
       b.style.cssText = 'margin:3px;padding:4px 7px;border:1px solid #657c9f;border-radius:4px';
       b.onclick = () => run(action); controls.append(b); buttons.push(b);
     }
-    const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
-    const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
+    const unwatch = kinViewerSession.onReadOnly(readOnlyPanel);
+    if (kinViewerSession.readOnly()) readOnlyPanel();
+    // F01: refused by any extension's /me (before this panel's own answer or after it enabled the account buttons) ends this panel;
+    // its late writer /me then finds it ended and neither keys the buttons nor mounts the Hanging Protocol editor.
+    const unwatchEnd = kinViewerSession.onChange(next => { if (next === 'refused') end(); });
+    // Astra S5-U2b-X4-R-001 F02: the logout broadcast ends the document's session here too, not only this panel — a document whose
+    // Measurements panel is not mounted (or has already left) must not open this panel's account controls again on a mode re-entry.
+    const onStorage = e => { if (e.key === 'kin-session-ended') sessionEnded(); };
+    const onMessage = e => { if (e.data?.type === 'session-ended') sessionEnded(); };
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
-    if (studies) authenticate().then(async () => { if (live()) { status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols(); } }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
+    // A mode entry in a document whose login already ended starts ended: no /me, no account buttons, no editor.
+    if (kinViewerSession.ended()) end();
+    else if (studies) authenticate().then(async () => {
+      if (!live()) return;
+      if (kinViewerSession.readOnly()) { readOnlyPanel(); return; }
+      status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
+    }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
     else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
-    stop = () => { end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
+    stop = () => { unwatch(); unwatchEnd(); end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
   }
   return { id: 'kin.viewer-layout', preRegistration({ servicesManager }) { services = servicesManager.services; }, onModeEnter: mount, onModeExit() { stop?.(); stop = null; } };
 }
@@ -2254,6 +2796,10 @@ function kinCreateCTPresets() {
 
 function kinCreateViewerJobs() {
   let ready, current, epoch = 0;
+  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Job panel down even if a writer answer mounted it
+  // first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the panel has ended in place through
+  // kinViewerSession.writeModule (its status keeps saying why), a mount still waiting is dropped, and mode exit takes it down.
+  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-jobs', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -2261,11 +2807,12 @@ function kinCreateViewerJobs() {
       script.onerror = () => reject(new Error('비교 작업 화면을 불러오지 못했습니다.')); document.head.append(script);
     });
     ready = load('viewer-volume-job.js').catch(() => {}).then(() => load('viewer-jobs.js'))
-      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel));
+      .then(() => window.kinViewerJobs(servicesManager.services, kinViewerLayoutModel, kinViewerSession.writeModule));
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch;
-    ready.then(extension => { if (ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    // S5-U2b: saved jobs are written and read on writer routes; only a /me that answered writer mounts the Job panel.
+    kinViewerSession.decide().then(session => session === 'writer' ? ready : null).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
       if (ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = e.message; }
     });
   }, onModeExit() { epoch++; current?.stop(); current = null; } };
@@ -2274,6 +2821,10 @@ function kinCreateViewerJobs() {
 // Findings live inside the Measurements panel; the dock keeps its two panels unchanged.
 function kinCreateViewerFindings() {
   let ready, current, epoch = 0;
+  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only takes the Findings section down even if a writer answer
+  // mounted it first. (Astra S5-U2b-X5-R-001 F01) The end of the document's login does not: the section's store has ended in place
+  // through kinViewerSession.writeModule (its status keeps "다시 로그인"), and mode exit takes it down.
+  kinViewerSession.onChange(next => { if (next === 'writer') return; epoch++; if (next === 'read-only') { current?.stop(); current = null; } });
   return { id: 'kin.viewer-findings', preRegistration({ servicesManager }) {
     const load = name => new Promise((resolve, reject) => {
       const script = document.createElement('script'); script.src = '/worklist/hpacs-lite/' + name;
@@ -2282,12 +2833,16 @@ function kinCreateViewerFindings() {
     });
     ready = load('finding-link-model.js').then(() => load('viewer-findings.js')).then(() => {
       if (typeof window.kinViewerFindings !== 'function' || !window.kinFindingLinkModel) throw new Error('소견 화면을 불러오지 못했습니다. 뷰어를 다시 여세요.');
-      return window.kinViewerFindings(servicesManager.services, window.kinFindingLinkModel);
+      // The section builds its store itself: every store it creates here is given the document's session (its /me and its end).
+      const model = window.kinFindingLinkModel, session = kinViewerSession.writeModule;
+      const connected = Object.create(model, { createStore: { value: deps => model.createStore({ ...deps, session }) } });
+      return window.kinViewerFindings(servicesManager.services, connected, session);
     });
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch;
-    ready.then(extension => { if (ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    // S5-U2b: findings are written and linked on writer routes; only a /me that answered writer mounts the Findings section.
+    kinViewerSession.decide().then(session => session === 'writer' ? ready : null).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
       if (ticket !== epoch) return;
       const host = document.querySelector('#kin-viewer-history');
       if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = e.message; host.append(p); }
@@ -2297,8 +2852,12 @@ function kinCreateViewerFindings() {
 
 function kinCreateViewerTechNote() {
   let ready, current, prepare, epoch=0, active=false, state='stopped';
+  // S5-U2b(R-001 F02, R-002 F01): a document that turns clinician-only drops the note bridge even if a writer answer connected it
+  // first; the bridge state names why ('read-only' or 'refused'). (Astra S5-U2b-X5-R-001 F01) The end of the document's login has
+  // ended the bridge in place through kinViewerSession.writeModule (its status says to open the viewer again); mode exit stops it.
+  kinViewerSession.onChange(next=>{if(next==='writer')return;epoch++;if(active)state=next;if(next==='read-only'){current?.stop();current=null;}});
   function connect() {
-    if(!active||state==='loading'||state==='ready')return;
+    if(!active||state==='loading'||state==='ready'||!kinViewerSession.writer())return;
     const ticket=epoch;state='loading';
     prepare().then(extension=>{
       if(!active||ticket!==epoch)return;
@@ -2347,10 +2906,13 @@ function kinCreateViewerTechNote() {
         typeof window.kinRenderVolumeScout==='function'?Promise.resolve():load('viewer-volume-scout.js'),
         typeof window.kinCreateVolumeBatch==='function'?Promise.resolve():load('viewer-volume-batch.js')]))
       .then(()=>typeof window.kinViewerTechNote==='function'?undefined:load('viewer-tech-note.js'))
-      .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
+      .then(()=>window.kinViewerTechNote(servicesManager.services,kinViewerSession.writeModule)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
-  },onModeEnter(){if(!prepare)return;epoch++;active=true;state='stopped';connect();
+  },onModeEnter(){if(!prepare)return;epoch++;active=true;state='unconfirmed';const ticket=epoch;
+    // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes. The bridge connects only
+    // after a /me answered writer; until an answer it stays 'unconfirmed', and 'read-only'/'refused' never connect.
+    kinViewerSession.decide().then(session=>{if(!active||ticket!==epoch)return;if(session==='writer'){state='stopped';connect();}else state=session;});
   },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }
 
