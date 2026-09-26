@@ -32,12 +32,17 @@ export const CLINICIAN_SESSION_ROUTES: readonly string[] = Object.freeze(['GET m
  *  - `GET studies/:uid/viewer-items`: clinician-only에게는 확정본일 때만, 아래 투영으로 좁혀서 준다.
  *  - `GET clinician/studies`: 워크리스트의 기관·원격판독·StudyAccess·페이지 파이프라인에 좁은 행을 얹는다.
  *  - `GET clinician/studies/:uid/report`: 머리 판이 확정본이면 본문과 key image, 아니면 상태만.
+ *  - S5-U4a 질문 여섯 행(clinician-question.controller.ts): 게이트 통과는 서비스에 닿는다는 뜻일 뿐이고
+ *    동작별 역할(view=inbox·답변은 radiologist 등)과 기관·StudyAccess·작성자 경계는 서비스가 판정한다.
  * `GET studies`·`GET bootstrap`·`GET studies/:uid/report-preview`·`GET audit`는 계속 거절한다 —
  * 초안·오더·상용구·작성자 칸이나 확정 전 본문을 싣는 응답이다.
  */
 export const CLINICIAN_BUSINESS_ROUTES: readonly string[] = Object.freeze([
   'GET authz/dicom', 'POST dicom/lookup', 'GET studies/:uid/viewer-items',
   'GET clinician/studies', 'GET clinician/studies/:uid/report',
+  // S5-U4a
+  'GET questions', 'GET questions/:id', 'GET studies/:uid/questions',
+  'POST studies/:uid/questions', 'POST questions/:id/entries', 'POST questions/:id/close',
 ]);
 
 export const CLINICIAN_ALLOWED_ROUTES: ReadonlySet<string> =
