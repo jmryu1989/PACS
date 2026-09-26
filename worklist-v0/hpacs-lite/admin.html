@@ -229,6 +229,8 @@
      * and painted late answers meanwhile. Another tab's end sends no POST: the session is already gone, and a POST now
      * could end the one that tab has since started. This page's own logout reaches the channel too (auth.js sends from a
      * new channel object); it finds the session ended and does nothing, so the move stays the one KinAuth.logout() makes.
+     * Every module of the page takes part (S5-U6a-F03/F04): the members console, Study Access (study-access-admin.js,
+     * attached below: its own requests and dialog) and Gateway Status each register a closer and send their 401 here.
      */
     const KinConsoleSession = (() => {
       const closers = [];
@@ -275,12 +277,15 @@
         },
       };
     })();
+    KinStudyAccessAdmin.attach(KinConsoleSession);
   </script>
   <script>
     (() => {
       const API = `${location.origin}/api`;
       const state = { page: 1, pageSize: 25, total: 0, users: [], editing: null, institutions: new Set() };
       const $ = selector => document.querySelector(selector);
+      // What the console says before its first read, put back when the session ends: the last counts belong to it.
+      const opening = { pending: $("#pending-badge").textContent, page: $("#page-label").textContent };
 
       function setMessage(value) {
         const box = $("#message");
@@ -308,7 +313,7 @@
           options.headers["Content-Type"] = "application/json";
           options.body = JSON.stringify(body);
         }
-        // Nothing leaves this page after its session ended, and an answer that arrives after that is dropped.
+        // Nothing leaves this page after its session ended.
         if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
         const response = await fetch(API + path, options);
         // The 401 is judged before the body is read: the page session ends here, for every panel, not after a body.
@@ -316,8 +321,10 @@
           KinConsoleSession.end();
           throw new Error("세션이 만료되었습니다");
         }
-        if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
         const payload = await response.json().catch(() => ({}));
+        // The body can outlast the session (S5-U6a-F03): an answer read after the end is dropped here, and each caller
+        // checks again right before it writes, so neither the member list nor a temporary password comes back.
+        if (KinConsoleSession.ended()) throw new Error("세션이 종료되었습니다");
         if (response.status === 403) {
           KinConsoleSession.go("main.html");
           throw new Error("회원 관리 권한이 없습니다");
@@ -430,6 +437,7 @@
         setMessage("");
         try {
           const changed = await request("POST", `/admin/users/${encodeURIComponent(user.id)}/reset-password`, { mode });
+          if (KinConsoleSession.ended()) return;
           if (mode === "temp") showTemporaryPassword(changed.temporaryPassword);
           else setMessage("비밀번호 변경 메일을 보냈습니다.");
         } catch (error) {
@@ -508,6 +516,7 @@
         setMessage("");
         try {
           const result = await request("GET", `/admin/users?page=${state.page}`);
+          if (KinConsoleSession.ended()) return;
           state.page = result.page;
           state.pageSize = result.pageSize;
           state.total = result.total;
@@ -563,6 +572,7 @@
             username: values.get("username"), email: values.get("email"),
             firstName: values.get("firstName"), lastName: values.get("lastName"),
           });
+          if (KinConsoleSession.ended()) return;
           form.reset();
           $("#create-dialog").close();
           showTemporaryPassword(created.temporaryPassword);
@@ -609,6 +619,33 @@
       });
       $("#membership-dialog").addEventListener("close", () => { state.editing = null; });
 
+      /*
+       * The page session ended (Log out, a 401 on any request of this page, another tab). Runs before anything is awaited
+       * (S5-U6a-F03): the members, the institutions they named, the edit in progress, both forms, the search and a
+       * temporary password go, every dialog of this console closes and its controls turn off. An answer still out is
+       * dropped by request() after its body and again right before its caller writes, so nothing comes back.
+       */
+      function closeMembers() {
+        Object.assign(state, { page: 1, total: 0, users: [], editing: null, institutions: new Set() });
+        $("#create-dialog").close();
+        $("#membership-dialog").close();
+        closeTemporaryPassword();
+        $("#create-form").reset();
+        $("#membership-form").reset();
+        $("#membership-roles").querySelectorAll("label.unmanaged").forEach(label => label.remove());
+        setDialogMessage("#create-message", "");
+        setDialogMessage("#membership-message", "");
+        setMessage("");
+        $("#search").value = "";
+        rebuildInstitutionOptions();
+        $("#users").replaceChildren();
+        $("#pending-badge").textContent = opening.pending;
+        $("#page-label").textContent = opening.page;
+        $("#actor").textContent = "";
+        for (const control of ["#search", "#institution-filter", "#refresh", "#open-create", "#previous", "#next"])
+          $(control).disabled = true;
+      }
+
       // A session that ends while /api/me is out has already moved this page: its answer starts nothing, and go() keeps
       // that move the only one.
       async function boot() {
@@ -622,6 +659,7 @@
         await loadUsers();
       }
 
+      KinConsoleSession.onEnd(closeMembers);
       boot();
     })();
   </script>

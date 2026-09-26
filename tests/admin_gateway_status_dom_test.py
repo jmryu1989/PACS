@@ -6,8 +6,9 @@ GET /api/studies answer: rows and Not Observed items carry the own-institution r
 tenant filter is the server's and is proved over the compiled service by tests/gateway_receipt_server_test.cjs; this
 page filters nothing itself. Its one action is the existing POST /api/studies/:uid/gateway-retry (technician-or-admin,
 decision D10). This harness loads the shipped admin.html, auth.js, study-access-admin.js and study-arrivals.js
-unchanged from a synthetic origin, answers /api/me, the member list, /api/studies, the retry POST and the logout from
-in-test queues (an answer can be held and released out of order) and records every request:
+unchanged from a synthetic origin, answers /api/me, the member list and member writes, Study Access, /api/studies, the
+retry POST and the logout from in-test queues (an answer can be held and released out of order) and records every
+request:
 
   01  opening Members reads only /api/me and the member list: no /api/studies, and study-arrivals.js is not loaded
       until Refresh Gateway Status; the section says Not Loaded and Counts Unknown, never 0.
@@ -54,6 +55,28 @@ has a control that serves the cafc72c behaviour through the same route and must 
       paints nothing, a second 401 (the retry) adds no POST and no move. Control: the 401 judged after the sequence
       check (cafc72c) keeps the list and never logs out.
 
+Every module of the page shares that end (Astra S5-U6a-F03/F04). At c274267 the members console registered no closer
+and checked the end only before a body was read, so an answer whose body was still out came back after Log out as the
+member list or a temporary password; Study Access sent its own requests with no link to the end, so its 401 was a plain
+error that kept the Gateway list, and its dialog stayed open, Reload still sending, until the logout answered. The init
+script can hold a body after its headers arrived (__jsonHold), the window those late answers need; a hold still waiting
+after a 401 proves the page never read that body. Cases 10-12 also check the members console closed; its controls are
+off after the end, so their "Refresh reads nothing" check turns Refresh back on by script and meets request()'s own check.
+
+  14  a temporary password, a suspension, a member-list read and (another tab) a Create Member submit are out with their
+      bodies held when Log out, another tab or a Gateway 401 over the open membership dialog ends the session: members,
+      institutions, search, edit, forms, password and dialogs go and the controls turn off before the logout answers;
+      the released bodies paint nothing, open nothing and read no list again. Control: the members console without its
+      closer and end checks paints the late list and opens the temporary password.
+  15  Study Access over a drawn Gateway list: a 401 on its GET and on its POST (body held, never read) ends the page
+      session, empties the Gateway list and the members console and removes the dialog with no confirm before the
+      logout answers; a GET held across another tab's end draws nothing when it comes; after the end the module opens no
+      dialog and its Reload, Retry and Save send nothing. Control: the module without its 401 line and its closer reads
+      the 401 as an error, keeps the list, sends no logout, and its dialog outlives another tab's end.
+  16  a retry, a member-list read and a Study Access read out together: their 401s (bodies held, none read) and another
+      tab's end, in either order, give one logout POST and one move when a 401 comes first, and no POST and one move
+      when another tab's end comes first.
+
 Synthetic data only (SYN-* names, 1.2.* UIDs): no server, no network, no credentials. A request the harness does not
 answer is aborted and fails the case, as does a page error or a browser dialog.
 """
@@ -93,13 +116,25 @@ SERVER_WORDING = "SYN-SERVER-WORDING"
 
 # Counts the bodies the page read, by path. A continuation that awaits response.json() has run by the time the
 # next evaluate sees the count, so a late answer that paints nothing can still be waited for. __fetchDone does the
-# same for answers whose body is never read (a 401).
+# same for answers whose body is never read (a 401). A path put in __jsonHold holds the next body read on it after its
+# headers arrived, until the case releases it from __jsonHeld (S5-U6a-F03); a hold never taken is a body never read.
 INIT = """(() => {
   window.__jsonDone = [];
+  window.__jsonHold = [];
+  window.__jsonHeld = [];
   const json = Response.prototype.json;
   Response.prototype.json = function () {
     const path = new URL(this.url).pathname;
-    return json.call(this).finally(() => { window.__jsonDone.push(path); });
+    let read = json.call(this);
+    const hold = window.__jsonHold.indexOf(path);
+    if (hold >= 0) {
+      window.__jsonHold.splice(hold, 1);
+      const body = read;
+      read = new Promise((resolve, reject) => {
+        window.__jsonHeld.push({path, release: () => body.then(resolve, reject)});
+      });
+    }
+    return read.finally(() => { window.__jsonDone.push(path); });
   };
   window.__fetchDone = [];
   const fetch0 = window.fetch;
@@ -237,6 +272,56 @@ OTHER_PATH = BASE + "other-tab.html"
 OTHER = "<!doctype html><title>SYN other tab</title><p id=other>SYN OTHER TAB</p>"
 ENDED = "세션이 종료되었습니다"
 
+# S5-U6a-F03/F04: the members console's writes and Study Access, on the one member of MEMBERS.
+MEMBER = MEMBERS["users"][0]
+LIST_PATH = "/api/admin/users"
+MEMBER_PATH = LIST_PATH + "/" + MEMBER["id"]
+RESET_PATH = MEMBER_PATH + "/reset-password"
+ACCESS_PATH = MEMBER_PATH + "/study-access"
+ADMIN_WRITES = {("POST", LIST_PATH), ("PATCH", MEMBER_PATH), ("POST", RESET_PATH)}
+SECRET = "SYN-TEMPORARY-VALUE"
+CREATED = {"id": "SYN-U-2", "username": "syn-created", "email": "syn-created@members.test", "emailVerified": False,
+           "name": "SYN Created", "institution": None, "roles": [], "enabled": True, "approvalState": "PENDING",
+           "temporaryPassword": "SYN-CREATED-VALUE"}
+ACCESS = {"owner": [INSTITUTION, ME["sub"]], "subject": MEMBER["id"], "revision": 0, "needsInstitutionReview": False,
+          "policy": {"version": 1, "restricted": False, "startsAt": None, "endsAt": None, "rules": []}}
+ACCESS_SCRIPT = BASE + "study-access-admin.js"
+
+MEMBER_CONTROLS = ["#search", "#institution-filter", "#refresh", "#open-create", "#previous", "#next"]
+MEMBERS_STATE = """controls => { const q = s => document.querySelector(s), form = q('#membership-form');
+  return {rows: document.querySelectorAll('#users tr').length, actor: q('#actor').textContent,
+    badge: q('#pending-badge').textContent, page: q('#page-label').textContent,
+    enabled: controls.filter(s => !q(s).disabled), options: [...q('#institution-filter').options].map(o => o.value),
+    datalist: q('#institution-options').children.length, search: q('#search').value,
+    dialogs: [...document.querySelectorAll('dialog')].filter(d => d.open).map(d => d.id),
+    studyAccess: document.querySelectorAll('#study-access-dialog').length, secret: q('#temporary-password').textContent,
+    create: [...q('#create-form').querySelectorAll('input')].map(i => i.value),
+    edit: [form.elements.institution.value, ...[...form.querySelectorAll('input[type=checkbox]')].filter(i => i.checked).map(i => i.value)],
+    unmanaged: form.querySelectorAll('label.unmanaged').length, message: q('#message').textContent,
+    text: [...document.body.children].filter(e => e.tagName !== 'SCRIPT').map(e => e.textContent).join(' ')}; }"""
+# The Study Access dialog the case opened, kept as window.__access so it can be read after the page drops it.
+ACCESS_STATE = """() => { const d = window.__access;
+  return {connected: d.isConnected, open: d.open, status: d.querySelector('[data-status]').textContent,
+    inDocument: document.querySelectorAll('#study-access-dialog').length}; }"""
+# After the end: open Study Access again and press the dropped dialog's Reload, Retry and Save through their handlers
+# (a disabled or detached button would not even dispatch a click).
+ATTEMPT_ACCESS = """user => { const d = window.__access;
+  KinStudyAccessAdmin.open(user);
+  d.querySelector('[data-reload]').onclick();
+  d.querySelector('[data-retry]').onclick();
+  d.querySelector('form').onsubmit(new Event('submit', {cancelable: true}));
+  return document.querySelectorAll('#study-access-dialog').length; }"""
+
+# Controls for 14 and 15: the members console without its closer and its end checks (before the request, after the
+# body, before the list, the temporary password and the created member are written, after /api/me), and the Study
+# Access module without its 401 line and its end closer.
+MEMBERS_FROM = "      async function request(method, path, body) {\n"
+MEMBERS_TO = "      boot();\n"
+MEMBER_CLOSER = "      KinConsoleSession.onEnd(closeMembers);\n"
+MEMBER_END_CHECKS = 6
+ACCESS_401 = "        if(response.status===401){session.end();throw Error('세션이 만료되었습니다');}\n"
+ACCESS_CLOSER = "lifecycle.onEnd(()=>closeActive?.());"
+
 
 def has_hangul(text):
     return any(unicodedata.name(ch, "").startswith("HANGUL") for ch in text)
@@ -254,6 +339,28 @@ def edited(edits):
 
 def variant(old):
     return edited([(old, "")])
+
+
+def members_unguarded():
+    """admin.html with the members console's closer and end checks taken out; Gateway and Study Access keep theirs."""
+    text = edited([(MEMBER_CLOSER, "")])
+    start, stop = text.index(MEMBERS_FROM), text.index(MEMBERS_TO)
+    segment = text[start:stop]
+    found = segment.count("KinConsoleSession.ended()")
+    if found != MEMBER_END_CHECKS:
+        raise AssertionError(f"setup: {found} end checks in the members console, expected {MEMBER_END_CHECKS}")
+    return text[:start] + segment.replace("KinConsoleSession.ended()", "false") + text[stop:]
+
+
+def access_unattached():
+    """study-access-admin.js with its 401 line and its end closer taken out."""
+    text = SCRIPTS[ACCESS_SCRIPT]
+    for old in (ACCESS_401, ACCESS_CLOSER):
+        found = text.count(old)
+        if found != 1:
+            raise AssertionError(f"setup: {old!r} occurs {found} times in study-access-admin.js")
+        text = text.replace(old, "")
+    return text
 
 
 def retry_path(uid):
@@ -278,7 +385,9 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.held_studies, self.held_retries = [], []
         self.retry_posts = []
         self.logouts, self.held_logouts = 0, None
-        self.member_replies = []
+        self.member_replies, self.held_members = [], []
+        self.admin_replies, self.access_replies, self.held_access, self.access_calls = [], [], [], []
+        self.scripts = dict(SCRIPTS)
         self.held_me, self.cancel_moves = None, False
         self.context = self.browser.new_context(timezone_id="UTC", viewport={"width": 1280, "height": 900})
         self.context.add_init_script(INIT)
@@ -311,8 +420,8 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         if method == "GET" and path == PAGE_PATH:
             route.fulfill(body=self.admin_body, content_type="text/html; charset=utf-8")
             return
-        if method == "GET" and path in SCRIPTS:
-            route.fulfill(body=SCRIPTS[path], content_type="application/javascript; charset=utf-8")
+        if method == "GET" and path in self.scripts:
+            route.fulfill(body=self.scripts[path], content_type="application/javascript; charset=utf-8")
             return
         if method == "GET" and path == BASE + "index.html":
             if self.cancel_moves:
@@ -336,9 +445,20 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                 return
             route.fulfill(json=ME)
             return
-        if method == "GET" and path == "/api/admin/users" and url.query == "page=1":
-            status, body = self.member_replies.pop(0) if self.member_replies else (200, MEMBERS)
+        if method == "GET" and path == LIST_PATH and url.query == "page=1":
+            reply = self.member_replies.pop(0) if self.member_replies else (200, MEMBERS)
+            if reply == "hold":
+                self.held_members.append(route)
+                return
+            status, body = reply
             route.fulfill(status=status, json=body)
+            return
+        if method in ("GET", "POST") and path == ACCESS_PATH:
+            self.access_calls.append(method)
+            self.answer(route, self.access_replies, self.held_access)
+            return
+        if (method, path) in ADMIN_WRITES:
+            self.answer(route, self.admin_replies, [])
             return
         if method == "GET" and path == "/api/studies" and url.query == "":
             self.answer(route, self.study_replies, self.held_studies)
@@ -512,6 +632,90 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.wait_until(lambda: self.json_done("/api/studies") > studies and self.json_done(retry_path("1.2.12")) > retries,
                         "the late answers read")
         self.assert_closed()
+
+    # ── every module (cases 10-16) ──
+    def members(self):
+        return self.page.evaluate(MEMBERS_STATE, MEMBER_CONTROLS)
+
+    def assert_members_closed(self):
+        members = self.members()
+        self.assertEqual((0, "", "Pending 0", "1 / 1", [], [""], 0, "", [], 0, "", ["", "", "", ""], [""], 0),
+                         (members["rows"], members["actor"], members["badge"], members["page"], members["enabled"],
+                          members["options"], members["datalist"], members["search"], members["dialogs"],
+                          members["studyAccess"], members["secret"], members["create"], members["edit"],
+                          members["unmanaged"]),
+                         "the members console is emptied, every dialog is closed and its controls are off")
+        self.assertIsNone(re.search(r"SYN|syn-|1\.2\.\d", members["text"]), "no member, patient, study or UID left")
+        return members
+
+    def assert_nothing_leaves(self):
+        """No request leaves the page after its end. Refresh is off; turned back on by script, request() itself refuses:
+        it says the session ended and reads nothing."""
+        reads = self.count("GET", LIST_PATH)
+        self.page.evaluate("() => { const b = document.querySelector('#refresh'); b.disabled = false; b.click(); b.disabled = true; }")
+        expect(self.page.locator("#message")).to_have_text(ENDED)
+        self.assertEqual(reads, self.count("GET", LIST_PATH))
+
+    def member_button(self, name):
+        return self.page.locator("#users td.actions").get_by_role("button", name=name, exact=True)
+
+    def hold_body(self, path):
+        """The next body the page reads on path is held after its headers arrived."""
+        self.page.evaluate("path => { window.__jsonHold.push(path); }", path)
+
+    def held_bodies(self, path):
+        return self.page.evaluate("path => window.__jsonHeld.filter(h => h.path === path).length", path)
+
+    def release_bodies(self, path):
+        """Lets every held body read on path finish and waits until the page has taken them."""
+        done = self.json_done(path)
+        count = self.page.evaluate("""path => { const held = window.__jsonHeld.filter(h => h.path === path);
+          window.__jsonHeld = window.__jsonHeld.filter(h => h.path !== path); held.forEach(h => h.release()); return held.length; }""", path)
+        self.assertGreater(count, 0, f"no body held on {path}")
+        self.wait_until(lambda: self.json_done(path) >= done + count, f"the held bodies on {path} read")
+
+    def assert_401_bodies_unread(self, *paths):
+        """Each path was held once for its next body read before its 401 came. A 401 is judged before any body, so every
+        hold is still waiting and no body was taken."""
+        seen = self.page.evaluate("""paths => paths.map(path => [window.__jsonHold.filter(p => p === path).length,
+          window.__jsonHeld.filter(h => h.path === path).length])""", list(paths))
+        self.assertEqual([[1, 0]] * len(paths), seen, "the 401 bodies were never read")
+        self.page.evaluate("() => { window.__jsonHold = []; }")
+
+    def start_member_answers(self, create=False):
+        """A temporary password, a suspension and a member-list read answered with their bodies held; with create also a
+        Create Member submit from its open dialog. The page's continuations wait on the bodies (the S5-U6a-F03 window)."""
+        self.admin_replies.append((200, dict(MEMBER, temporaryPassword=SECRET)))
+        self.hold_body(RESET_PATH)
+        self.member_button("Temp Password").click()
+        self.wait_until(lambda: self.held_bodies(RESET_PATH) == 1, "the temporary password answer")
+        self.admin_replies.append((200, dict(MEMBER, enabled=False)))
+        self.hold_body(MEMBER_PATH)
+        self.member_button("Suspend").click()
+        self.wait_until(lambda: self.held_bodies(MEMBER_PATH) == 1, "the suspension answer")
+        self.hold_body(LIST_PATH)
+        self.page.locator("#refresh").click()
+        self.wait_until(lambda: self.held_bodies(LIST_PATH) == 1, "the member-list answer")
+        if create:
+            self.page.locator("#open-create").click()
+            for name, value in (("username", "syn-created"), ("email", "syn-created@members.test"),
+                                ("lastName", "SYN"), ("firstName", "Created")):
+                self.page.locator(f'#create-form input[name="{name}"]').fill(value)
+            self.admin_replies.append((200, CREATED))
+            self.hold_body(LIST_PATH)
+            self.page.locator("#create-form button[type=submit]").click()
+            self.wait_until(lambda: self.held_bodies(LIST_PATH) == 2, "the Create Member answer")
+        members = self.members()
+        self.assertEqual((1, ["create-dialog"] if create else []), (members["rows"], members["dialogs"]))
+
+    def open_study_access(self):
+        """Study Access on the member with its first GET held; the dialog is kept as window.__access."""
+        self.access_replies.append("hold")
+        self.member_button("Study Access").click()
+        self.wait_until(lambda: len(self.held_access) == 1, "the Study Access read")
+        self.assertTrue(self.page.evaluate("""() => { window.__access = document.querySelector('#study-access-dialog');
+          return window.__access?.open === true; }"""))
+        return self.held_access.pop()
 
     # ── cases ──
     def test_01_opening_members_reads_nothing_until_asked(self):
@@ -858,12 +1062,9 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                     self.page.locator("#refresh").click()
                 self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
                 self.assert_closed()
+                self.assert_members_closed()
                 self.release_late()
-                # Nothing leaves the page after its end: the member console's Refresh says so and reads nothing.
-                reads = self.count("GET", "/api/admin/users")
-                self.page.locator("#refresh").click()
-                expect(self.page.locator("#message")).to_have_text(ENDED)
-                self.assertEqual(reads, self.count("GET", "/api/admin/users"))
+                self.assert_nothing_leaves()
                 # Log out again adds nothing; after the POST answers, auth.js's end broadcast reaches this page too.
                 self.page.locator("#logout").click()
                 self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
@@ -913,9 +1114,9 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                 self.send(other, signal)
                 self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
                 self.assert_closed()
+                self.assert_members_closed()
                 self.release_late()
-                self.page.locator("#refresh").click()
-                expect(self.page.locator("#message")).to_have_text(ENDED)
+                self.assert_nothing_leaves()
                 # The signals again: no second move, no logout POST, no request.
                 for again in (CHANNEL_SIGNAL, STORAGE_SIGNAL) if channel_here else (STORAGE_SIGNAL,):
                     self.send(other, again)
@@ -949,6 +1150,7 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
                                  (summary["refreshDisabled"], summary["rows"], summary["state"], summary["counts"]))
                 self.assertEqual(["", ""], self.page.evaluate(
                     "() => [document.querySelector('#actor').textContent, document.querySelector('#message').textContent]"))
+                self.assert_members_closed()
                 self.assertEqual(reads, self.count("GET", "/api/admin/users"))
                 self.assert_closed_away(logouts, moves + 1)
                 self.cancel_moves = False
@@ -994,6 +1196,197 @@ class AdminGatewayStatusDOMTest(unittest.TestCase):
         self.wait_until(lambda: self.json_done("/api/studies") > done, "the control's newer answer read")
         summary = self.summary()
         self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
+
+    def test_14_member_answers_read_after_the_end_are_dropped(self):
+        other = self.other_tab()
+        for how in ("Log out", "another tab", "a Gateway 401 over the membership dialog"):
+            with self.subTest(how=how):
+                self.open()
+                self.page.evaluate(PROBE)
+                logouts, moves = self.logouts, self.moves()
+                if how == "a Gateway 401 over the membership dialog":
+                    self.study_replies.append("hold")
+                    self.page.locator("#gateway-refresh").click()
+                    self.wait_until(lambda: len(self.held_studies) == 1, "the list read")
+                    self.member_button("Change Membership").click()
+                    self.page.wait_for_function("() => document.querySelector('#membership-dialog').open")
+                    self.page.locator('#membership-form input[name="institution"]').fill("SYN-INST-EDIT")
+                    self.page.locator('#membership-roles input[value="radiologist"]').check()
+                    self.held_logouts = []
+                    self.hold_body("/api/studies")
+                    self.held_studies.pop().fulfill(status=401, json={"message": SERVER_WORDING})
+                    self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+                    self.assert_401_bodies_unread("/api/studies")
+                    self.assert_closed()
+                    self.assert_members_closed()
+                else:
+                    self.start_member_answers(create=how == "another tab")
+                    if how == "Log out":
+                        self.held_logouts = []
+                        self.page.locator("#logout").click()
+                        self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+                    else:
+                        self.cancel_moves = True
+                        self.send(other, CHANNEL_SIGNAL)
+                        self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
+                    self.assert_members_closed()
+                    reads = self.count("GET", LIST_PATH)
+                    for path in (RESET_PATH, MEMBER_PATH, LIST_PATH):
+                        self.release_bodies(path)
+                    members = self.assert_members_closed()
+                    self.assertEqual(ENDED, members["message"], "a late answer only says that the session ended")
+                    self.assertEqual(reads, self.count("GET", LIST_PATH), "no list read after the suspension or the creation")
+                self.assert_nothing_leaves()
+                if how == "another tab":
+                    self.assert_closed_away(logouts, moves + 1)
+                    self.cancel_moves = False
+                    continue
+                self.page.locator("#logout").click()
+                self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
+                self.held_logouts.pop().fulfill(status=204, body="")
+                self.held_logouts = None
+                self.arrive_at_index()
+                self.assert_closed_away(logouts + 1, moves + 1)
+
+        # Control: without the closer and the end checks the late list paints again and the temporary password opens.
+        self.open(members_unguarded())
+        logouts = self.logouts
+        self.start_member_answers()
+        self.held_logouts = []
+        self.page.locator("#logout").click()
+        self.wait_until(lambda: self.logouts == logouts + 1, "the control's logout request")
+        for path in (RESET_PATH, MEMBER_PATH, LIST_PATH):
+            self.release_bodies(path)
+        members = self.members()
+        self.assertEqual((1, ["password-dialog"], SECRET), (members["rows"], members["dialogs"], members["secret"]))
+        self.held_logouts.pop().fulfill(status=204, body="")
+        self.held_logouts = None
+        self.arrive_at_index()
+
+    def test_15_study_access_takes_the_page_session_end(self):
+        other = self.other_tab()
+        for how in ("GET 401", "POST 401", "GET held across another tab's end"):
+            with self.subTest(how=how):
+                self.open()
+                self.page.evaluate(PROBE)
+                self.list_and_retry_in_flight()
+                logouts, moves = self.logouts, self.moves()
+                held = self.open_study_access()
+                shown = "Loading"
+                if how == "POST 401":
+                    held.fulfill(json=ACCESS)
+                    status = self.page.locator("#study-access-dialog [data-status]")
+                    expect(status).to_have_text("Revision 0 · No Additional Restriction")
+                    self.page.locator('#study-access-dialog select[name="mode"]').select_option("none")
+                    self.page.locator('#study-access-dialog input[name="reason"]').fill("SYN reason")
+                    self.access_replies.append("hold")
+                    self.page.locator("#study-access-dialog [data-save]").click()
+                    self.wait_until(lambda: len(self.held_access) == 1, "the Study Access save")
+                    held, shown = self.held_access.pop(), "Saving"
+                if how == "GET held across another tab's end":
+                    self.cancel_moves = True
+                    self.send(other, CHANNEL_SIGNAL)
+                    self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
+                else:
+                    self.held_logouts = []
+                    self.hold_body(ACCESS_PATH)
+                    held.fulfill(status=401, json={"message": SERVER_WORDING})
+                    self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+                    self.assert_401_bodies_unread(ACCESS_PATH)
+                # Everything closed before the logout answers: the Gateway list, the members console and the dialog.
+                self.assert_closed()
+                self.assert_members_closed()
+                self.assertEqual({"connected": False, "open": False, "status": shown, "inDocument": 0},
+                                 self.page.evaluate(ACCESS_STATE))
+                self.release_late()
+                if how == "GET held across another tab's end":
+                    done = self.json_done(ACCESS_PATH)
+                    held.fulfill(json=ACCESS)
+                    self.wait_until(lambda: self.json_done(ACCESS_PATH) > done, "the late Study Access answer read")
+                    self.assertEqual(shown, self.page.evaluate(ACCESS_STATE)["status"], "the late answer draws nothing")
+                calls = len(self.access_calls)
+                self.assertEqual(0, self.page.evaluate(ATTEMPT_ACCESS, MEMBER))
+                self.page.wait_for_timeout(200)
+                self.assertEqual(calls, len(self.access_calls), "no open, reload, retry or save after the end")
+                self.assertEqual(shown, self.page.evaluate(ACCESS_STATE)["status"])
+                self.assert_members_closed()
+                if how == "GET held across another tab's end":
+                    self.assert_closed_away(logouts, moves + 1)
+                    self.cancel_moves = False
+                    continue
+                self.page.locator("#logout").click()
+                self.assertEqual((logouts + 1, moves), (self.logouts, self.moves()))
+                self.held_logouts.pop().fulfill(status=204, body="")
+                self.held_logouts = None
+                self.arrive_at_index()
+                self.assert_closed_away(logouts + 1, moves + 1)
+
+        # Control: without its 401 line and its closer the module reads the 401 as an error: the Gateway list stays and
+        # nothing logs out; then another tab's end closes the page's other sections while the dialog stays open.
+        self.scripts[ACCESS_SCRIPT] = access_unattached()
+        self.open()
+        self.page.evaluate(PROBE)
+        self.refresh((200, FIVE))
+        logouts, moves, done = self.logouts, self.moves(), self.json_done(ACCESS_PATH)
+        self.open_study_access().fulfill(status=401, json={"message": SERVER_WORDING})
+        self.wait_until(lambda: self.json_done(ACCESS_PATH) > done, "the control reads the 401 body")
+        expect(self.page.locator("#study-access-dialog [data-status]")).to_have_text(SERVER_WORDING)
+        summary = self.summary()
+        self.assertEqual((6, False, logouts), (summary["rows"], summary["refreshDisabled"], self.logouts))
+        self.cancel_moves = True
+        self.send(other, CHANNEL_SIGNAL)
+        self.wait_until(lambda: self.moves() == moves + 1, "the control's move")
+        self.assertEqual(0, self.summary()["rows"])
+        self.assertTrue(self.page.evaluate("() => document.querySelector('#study-access-dialog')?.open === true"),
+                        "the control's dialog outlives the end")
+        self.cancel_moves = False
+
+    def test_16_every_modules_401_and_another_tabs_end_together(self):
+        other = self.other_tab()
+        for first in ("a 401", "another tab"):
+            with self.subTest(first=first):
+                self.open()
+                self.page.evaluate(PROBE)
+                self.refresh((200, FIVE))
+                # One request of each module out: a Gateway retry, a member-list read and a Study Access read.
+                self.retry_replies.append("hold")
+                self.item("1.2.12").locator("button").click()
+                self.wait_until(lambda: len(self.held_retries) == 1, "the retry POST")
+                self.member_replies.append("hold")
+                self.page.locator("#refresh").click()
+                self.wait_until(lambda: len(self.held_members) == 1, "the member-list read")
+                routes = [self.open_study_access(), self.held_retries.pop(), self.held_members.pop()]
+                paths = (ACCESS_PATH, retry_path("1.2.12"), LIST_PATH)
+                for path in paths:
+                    self.hold_body(path)
+                logouts, moves = self.logouts, self.moves()
+                if first == "another tab":
+                    self.cancel_moves = True
+                    self.send(other, CHANNEL_SIGNAL)
+                    self.wait_until(lambda: self.moves() == moves + 1, "the move to the entry page")
+                else:
+                    self.held_logouts = []
+                for route, path in zip(routes, paths):
+                    done = self.fetch_done(path)
+                    route.fulfill(status=401, json={"message": SERVER_WORDING})
+                    self.wait_until(lambda: self.fetch_done(path) > done, f"the 401 on {path}")
+                    if first == "a 401" and path == ACCESS_PATH:
+                        self.wait_until(lambda: self.logouts == logouts + 1, "the logout request")
+                self.send(other, CHANNEL_SIGNAL)
+                self.send(other, STORAGE_SIGNAL)
+                self.page.wait_for_timeout(200)
+                self.assert_401_bodies_unread(*paths)
+                self.assert_closed()
+                self.assert_members_closed()
+                if first == "another tab":
+                    self.assert_closed_away(logouts, moves + 1)
+                    self.cancel_moves = False
+                    continue
+                self.assert_closed_away(logouts + 1, moves)
+                self.held_logouts.pop().fulfill(status=204, body="")
+                self.held_logouts = None
+                self.arrive_at_index()
+                self.assert_closed_away(logouts + 1, moves + 1)
 
 
 if __name__ == "__main__":
