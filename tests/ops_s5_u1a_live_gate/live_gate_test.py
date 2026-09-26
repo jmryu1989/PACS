@@ -21,9 +21,12 @@ sys.path.insert(0, str(HERE))
 import run_live  # noqa: E402
 import summarize  # noqa: E402
 
+# A fixture SHA for the synthetic runs below; the committed candidate is only ever read from candidate.txt,
+# so replacing candidate.txt and modules.json together never needs a pin here.
 SHA = "88ce2df3b56ca1b63a66e14e0406e04aee5f2f62"
 WORKFLOW = ROOT / ".github/workflows/s5-u1a-clinician-live.yml"
 MODULES_FILE = HERE / "modules.json"
+CANDIDATE_FILE = HERE / "candidate.txt"
 CLINICIAN = "kin-test-0123456789ab-clinician@local.test"
 MIXED = "kin-test-0123456789ab-clinician-radiologist@local.test"
 ADMIN = "kin-test-0123456789ab-jmryu@local.test"
@@ -65,6 +68,18 @@ def suite_log(entry, routes=None, denied=None, markers=None, result="OK", ran=No
     stderr = ["%s (%s.%s) ... ok" % (case.split(".")[1], stem, case) for case in entry["cases"]]
     stderr += ["", "-" * 70, "Ran %d tests in 41.203s" % (len(entry["cases"]) if ran is None else ran), "", result]
     return "\n".join(stdout + stderr) + "\n"
+
+
+def committed_candidate():
+    raw = CANDIDATE_FILE.read_bytes()
+    match = re.fullmatch(rb"([0-9a-f]{40})\n", raw)
+    if match is None:
+        raise AssertionError("candidate.txt must hold one full lowercase SHA and a line end: %r" % raw[:80])
+    return match.group(1).decode("ascii")
+
+
+def committed_modules():
+    return json.loads(MODULES_FILE.read_text(encoding="utf-8"))
 
 
 def launched(entry):
@@ -109,10 +124,43 @@ class Recorded:
 
 
 class ModuleListTests(unittest.TestCase):
-    def test_committed_list_is_the_u1a_candidate_expectation(self):
-        # candidate.txt and modules.json move together; the committed pair is still candidate 88ce2df.
-        modules = summarize.parse_modules(MODULES_FILE.read_bytes())
-        self.assertEqual(modules, [POLICY])
+    def test_committed_list_is_a_valid_run_description(self):
+        # candidate.txt and modules.json move together in the conductor's commit; the pins here are the rules a
+        # push would run under, not the values of one candidate.
+        modules = committed_modules()
+        self.assertEqual(summarize.parse_modules(MODULES_FILE.read_bytes()), modules)
+        self.assertTrue(1 <= len(modules) <= 4, len(modules))
+        # Restated rather than read from summarize so a changed constant there cannot widen what a push runs.
+        self.assertEqual((summarize.DEADLINE - summarize.STACK_RESERVE, summarize.MARGIN), (1325, 35))
+        self.assertLessEqual(sum(entry["timeout"] + 35 for entry in modules), 1325)
+        for key in ("unit", "module"):
+            names = [entry[key] for entry in modules]
+            self.assertEqual(len(set(names)), len(names), key)
+        stems = [summarize.step_name(entry["module"]) for entry in modules]
+        self.assertEqual(len(set(stems)), len(stems))
+        for entry in modules:
+            with self.subTest(unit=entry["unit"]):
+                self.assertEqual(set(entry), {"module", "unit", "timeout", "cases", "expected"})
+                self.assertRegex(entry["module"], r"^tests/[a-z][a-z0-9_]*_live\.py$")
+                self.assertRegex(entry["unit"], r"^[a-z0-9][a-z0-9-]{0,79}$")
+                self.assertIs(type(entry["timeout"]), int)
+                self.assertTrue(1 <= entry["timeout"] <= 900, entry["timeout"])
+                self.assertTrue(entry["cases"])
+                self.assertEqual(len(set(entry["cases"])), len(entry["cases"]))
+                for case in entry["cases"]:
+                    self.assertRegex(case, r"^[A-Za-z_]\w*\.test_\w+$")
+                self.assertEqual(set(entry["expected"]), {"sweep", "audit_rows"})
+                sweep = entry["expected"]["sweep"]
+                if sweep is not None:
+                    self.assertEqual(set(sweep), {"routes", "denied"})
+                    for count in sweep.values():
+                        self.assertIs(type(count), int)
+                        self.assertGreaterEqual(count, 0)
+                self.assertIsInstance(entry["expected"]["audit_rows"], dict)
+                for logical, count in entry["expected"]["audit_rows"].items():
+                    self.assertRegex(logical, r"^[a-z0-9_-]+$")
+                    self.assertIs(type(count), int)
+                    self.assertGreaterEqual(count, 0)
 
     def test_valid_lists(self):
         self.assertEqual(summarize.validate_modules(copy.deepcopy(TWO)), TWO)
@@ -286,23 +334,32 @@ class SummaryTests(unittest.TestCase):
         self.assertTrue(summary["problems"][0].startswith("module list unusable"))
 
     def test_nothing_recorded_still_writes_a_failing_summary(self):
-        out, evidence = Path(self.temp.name) / "absent", Path(self.temp.name) / "s5-live"
-        evidence.mkdir()
-        output = evidence / "s5-live-summary.json"
-        with mock.patch("sys.stdout"):
-            code = summarize.main(["write", "--out-dir", str(out), "--evidence", str(evidence), "--modules",
-                                   str(MODULES_FILE), "--candidate-sha", SHA, "--run-id", "9", "--run-attempt", "1",
-                                   "--output", str(output)])
-        self.assertEqual(code, 0)
-        summary = json.loads(output.read_text(encoding="utf-8"))
-        (item,) = summary["modules"]
-        self.assertEqual({key: item[key] for key in ("status", "exit", "marker", "routes", "denied", "audit_rows")},
-                         {"status": "not_run", "exit": None, "marker": None, "routes": None, "denied": None,
-                          "audit_rows": None})
-        self.assertIn("results.json missing", summary["problems"])
-        self.assertFalse(summary["matches_expected"])
-        with mock.patch("sys.stdout"):
-            self.assertEqual(summarize.main(["check", str(output)]), 1)
+        # The committed list and a fixed two-entry list: every listed unit gets its own not_run record.
+        two = Path(self.temp.name) / "two.json"
+        two.write_text(json.dumps(TWO), encoding="utf-8")
+        for name, listed, modules in (("committed", MODULES_FILE, committed_modules()), ("two", two, TWO)):
+            with self.subTest(modules=name), tempfile.TemporaryDirectory() as root:
+                out, evidence = Path(root) / "absent", Path(root) / "s5-live"
+                evidence.mkdir()
+                output = evidence / "s5-live-summary.json"
+                with mock.patch("sys.stdout"):
+                    code = summarize.main(["write", "--out-dir", str(out), "--evidence", str(evidence), "--modules",
+                                           str(listed), "--candidate-sha", SHA, "--run-id", "9", "--run-attempt",
+                                           "1", "--output", str(output)])
+                self.assertEqual(code, 0)
+                summary = json.loads(output.read_text(encoding="utf-8"))
+                self.assertEqual([item["unit"] for item in summary["modules"]],
+                                 [entry["unit"] for entry in modules])
+                for item in summary["modules"]:
+                    self.assertEqual({key: item[key] for key in ("status", "exit", "marker", "routes", "denied",
+                                                                 "audit_rows")},
+                                     {"status": "not_run", "exit": None, "marker": None, "routes": None,
+                                      "denied": None, "audit_rows": None}, item["unit"])
+                    self.assertFalse(item["matches_expected"], item["unit"])
+                self.assertIn("results.json missing", summary["problems"])
+                self.assertFalse(summary["matches_expected"])
+                with mock.patch("sys.stdout"):
+                    self.assertEqual(summarize.main(["check", str(output)]), 1)
 
     def test_check_exits_zero_only_for_a_matching_summary(self):
         recorded = Recorded(self.temp.name, modules=TWO)
@@ -331,8 +388,11 @@ class DriverTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
 
     def test_committed_candidate_matches_the_dispatch_default(self):
-        self.assertEqual(run_live.resolve_candidate("push", "", HERE / "candidate.txt"), SHA)
-        self.assertIn("default: " + SHA + "\n", WORKFLOW.read_text(encoding="utf-8"))
+        # A dispatch left at its default must run the candidate the committed module list describes.
+        candidate = committed_candidate()
+        self.assertEqual(run_live.resolve_candidate("push", "", CANDIDATE_FILE), candidate)
+        defaults = re.findall(r"(?m)^ +default: ([0-9a-f]{40})$", WORKFLOW.read_text(encoding="utf-8"))
+        self.assertEqual(defaults, [candidate])
 
     def test_candidate_resolution_is_strict(self):
         path = Path(self.temp.name) / "candidate.txt"
@@ -368,7 +428,7 @@ class DriverTests(unittest.TestCase):
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             self.assertEqual(run_live.main(["resolve", "--event-name", "push", "--modules-out", str(out)]), 0)
-        self.assertEqual(printed.getvalue(), SHA + "\n")
+        self.assertEqual(printed.getvalue(), committed_candidate() + "\n")
         self.assertEqual(out.read_bytes(), MODULES_FILE.read_bytes())
         # An existing output is never overwritten, and a refused override writes nothing.
         with mock.patch("sys.stderr"):
@@ -388,7 +448,7 @@ class DriverTests(unittest.TestCase):
                 run_live.exact_plan(FakeRunner(cases), POLICY)
 
     def load_ci(self, name):
-        # This checkout's measurement_ci is byte-identical to the candidate's (489c326..88ce2df leaves it alone).
+        # This checkout's measurement_ci is byte-identical to the candidate's (489c326..d02ed37e leaves it alone).
         return run_live.load(ROOT / "tests/measurement_ci.py", name)
 
     def test_the_real_profile_runner_yields_each_exact_command_once_in_order(self):
@@ -439,16 +499,22 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(run_live.retain_ledger(Path(self.temp.name) / "absent", destination / "none", ["x"]), [])
 
     def test_refusal_outside_hosted_ci_records_the_driver_without_launching(self):
+        # The committed list and a fixed two-entry list: the refusal names every listed unit, in order.
+        two = Path(self.temp.name) / "two.json"
+        two.write_text(json.dumps(TWO), encoding="utf-8")
+        for name, listed, modules in (("committed", MODULES_FILE, committed_modules()), ("two", two, TWO)):
+            with self.subTest(modules=name), tempfile.TemporaryDirectory() as root:
+                evidence = Path(root) / "s5-live"
+                evidence.mkdir()
+                with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), mock.patch("traceback.print_exc"):
+                    code = run_live.run_recorded(Path(root) / "target", SHA, listed, evidence)
+                record = json.loads((evidence / "driver.json").read_text(encoding="utf-8"))
+                self.assertEqual((code, record["exit"], record["launched_commands"], record["units"]),
+                                 (125, 125, [], [entry["unit"] for entry in modules]))
+                self.assertIn("GitHub-hosted", record["error"])
+                self.assertEqual(sorted(path.name for path in evidence.iterdir()), ["driver.json"])
         evidence = Path(self.temp.name) / "s5-live"
         evidence.mkdir()
-        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}), mock.patch("traceback.print_exc"):
-            code = run_live.run_recorded(Path(self.temp.name) / "target", SHA, MODULES_FILE, evidence)
-        record = json.loads((evidence / "driver.json").read_text(encoding="utf-8"))
-        self.assertEqual((code, record["exit"], record["launched_commands"], record["units"]),
-                         (125, 125, [], [POLICY["unit"]]))
-        self.assertIn("GitHub-hosted", record["error"])
-        self.assertEqual(sorted(path.name for path in evidence.iterdir()), ["driver.json"])
-        (evidence / "driver.json").unlink()
         (evidence / "stale.json").write_text("{}", encoding="utf-8")
         with mock.patch("traceback.print_exc"):
             self.assertEqual(run_live.run_recorded(Path(self.temp.name) / "target", SHA, MODULES_FILE, evidence), 125)

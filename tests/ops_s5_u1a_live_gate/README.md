@@ -9,7 +9,7 @@ list from `modules.json`, so S5-U1b and later units add modules instead of a new
 | File | Role |
 |---|---|
 | `.github/workflows/s5-u1a-clinician-live.yml` | push to `opus/s5-u1a-live-gate-20260926` (GitHub refuses `workflow_dispatch` for a workflow not on the default branch) or `workflow_dispatch` with `candidate_sha` and an optional `modules` JSON string replacing `modules.json` |
-| `candidate.txt` | the candidate SHA a push runs: `88ce2df3b56ca1b63a66e14e0406e04aee5f2f62` (PR #86) |
+| `candidate.txt` | the candidate SHA a push runs: one full lowercase SHA and a line end (S5-U1b: `d02ed37e29d4c9f9700b51ab0e2c8f63252f99c2`; S5-U1a was `88ce2df`, PR #86) |
 | `modules.json` | the module list a push runs; it describes the candidate in `candidate.txt`, so both change in the same commit |
 | `run_live.py` | `resolve` picks the SHA and validates the list into `s5-live-modules.json`; `run` proves the checkout with `candidate_ci.hosted_target`, pins each module's cases, adds one profile to the candidate's own `measurement_ci.py` and calls its `main` |
 | `summarize.py` | the list validation, `write` (recorded files → `s5-live-summary.json`) and `check` (the convenience status) |
@@ -40,11 +40,18 @@ existing multi-suite profile keeps). Two modules at 900 s do not fit: one module
 355 s for the other. At run time the driver still refuses, instead of shortening, any module whose
 `--timeout` the remaining deadline would cut.
 
-For S5-U1b the conductor replaces the committed single entry, together with `candidate.txt`, by
-`tests/clinician_read_live.py` (unit `s5-u1b-clinician-read`, the five `ClinicianReadLive` cases,
-`sweep: null`) and a re-run of `tests/clinician_policy_live.py` under its own unit with the candidate's
-sweep counts (denied 99 expected); the `audit_rows` values and the timeouts are the conductor's choice
-within the limit above. A `workflow_dispatch` `modules` override is validated the same way.
+The committed list is S5-U1b's, for candidate `d02ed37e`: `tests/clinician_read_live.py` (unit
+`s5-u1b-clinician-read`, 800 s, the five `ClinicianReadLive` cases, `sweep: null`, no audit identity
+listed) and then a re-run of `tests/clinician_policy_live.py` under its own unit `s5-u1b-clinician-policy`
+(355 s, the four `ClinicianPolicyLive` cases, sweep routes 110 / denied 99, clinician audit rows 0), a
+declared worst case of 835 + 390 = 1225 s. The conductor chooses these values and commits them with
+`candidate.txt`; `live_gate_test.py` pins none of them. It reads both committed files and checks only the
+rules a push runs under: the list passes the validation above (schema, each unit and module once, cases
+as `Class.test_name`, Σ(timeout + 35) ≤ 1325), `candidate.txt` holds one full lowercase SHA, and the
+workflow's `workflow_dispatch` `candidate_sha` default is that same SHA, so a dispatch left at its
+default runs the candidate the committed list describes. The refusal and summary checks run both the
+committed list and a fixed two-entry list and expect one record per listed unit, in order. A
+`workflow_dispatch` `modules` override is validated the same way.
 
 ## One stack, modules in order; what is and is not isolated between them
 
