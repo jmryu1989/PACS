@@ -997,6 +997,8 @@ jobs:
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/viewer_source_test.cjs
       - name: Study access policy, fail-closed storage and stale response boundaries
         run: docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/study_access_policy_test.cjs /tests/study_access_service_test.cjs
+      - name: S5-U4a compiled question service, StudyAccess source reads before locks, receipts and audit keys
+        run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/clinician-question-service --cwd . --file api/src/clinician-question.service.ts --file api/src/study-access.service.ts --file api/src/pacs.service.ts --file tests/clinician_question_service_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/clinician_question_service_test.cjs
       - name: Compiled stale-draft addendum guard and draft base-version boundaries
         run: python3 scripts/record-run.py --run-dir tmp/runtime-ci/report-stale-draft --cwd . --file api/src/pacs.service.ts --file tests/report_stale_draft_test.cjs -- docker run --rm --network none --read-only -v "$PWD/tests:/tests:ro" --entrypoint node kin-api:ci --test /tests/report_stale_draft_test.cjs
       - name: Compiled citation attestation, carry-forward, limits and guarded read
