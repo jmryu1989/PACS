@@ -614,7 +614,7 @@ function kinCreateViewerHistory() {
     const cs = window.cornerstone, ct = window.cornerstoneTools;
     if (!cs || !ct?.annotation?.locking) return;
     const entries = new Map(), annotations = new Map(), recovery = new Map();
-    let scope = '', subject = '', me, generation = 0, readSequence = 0;
+    let scope = '', subject = '', me, generation = 0, readSequence = 0, clinicianSession = false;
     let controller = new AbortController(), ended = false, checking = false;
     let lastAuth = 0, loading = false, navigation = 0, suspended = true;
     const panel = document.createElement('details');
@@ -627,6 +627,17 @@ function kinCreateViewerHistory() {
     const clone = value => JSON.parse(JSON.stringify(value));
     const itemOnly = head => { const item = clone(head.item); delete item.hidden; delete item.sourceDigest; return item; };
     const manual = kind => ['length', 'angle', 'ellipse'].includes(kind);
+    // S5-U2b: /me가 업무 역할 clinician뿐이라고 답한 세션은 이 패널에서 저장된 항목을 보기만 한다. 만들기·저장·SR·이력
+    // 컨트롤을 두지 않는 것은 화면일 뿐 권한이 아니다 — 쓰기는 서버(S5-U1a/U1b)가 거절한다. /me를 읽기 전에는 어느 쪽 컨트롤도 없다.
+    // 한 번 그렇게 답한 문서는 끝날 때까지 읽기 전용이다: deny()·검사 전환이 me를 비우는 사이에 쓰기 쪽으로 돌아가지 않는다.
+    const readOnly = () => clinicianSession;
+    const READ_ONLY = {
+      note: '읽기 전용 · 확정 판독문에 저장된 측정·키 이미지만 표시합니다. 이 화면에서는 측정·키 이미지를 만들거나 저장하지 않으며 서버도 쓰기를 거절합니다.',
+      withheld: '확정 판독문이 아니어서 저장된 측정·키 이미지를 표시하지 않습니다 · 읽기 전용',
+      tool: '읽기 전용 화면입니다. 측정을 만들지 않습니다.',
+      sr: '읽기 전용 화면에서는 SR을 만들거나 저장하지 않습니다.',
+      denied: '이 검사의 저장 항목을 읽을 수 없습니다(HTTP 403). 서버가 거절했습니다.',
+    };
     function measurementReason(imageId, kind, points) {
       const image = cs.metaData.get('instance', imageId);
       const finite = n => (typeof n === 'number' || typeof n === 'string' && n.trim() !== '') && Number.isFinite(Number(n));
@@ -821,6 +832,11 @@ function kinCreateViewerHistory() {
       const original = commands?.getCommand(name, reportContext);
       if (!original) continue;
       const guarded = { ...original, commandFn: options => {
+        if (readOnly()) {
+          status.textContent = READ_ONLY.sr;
+          services.uiNotificationService.show({ title: 'SR', message: READ_ONLY.sr, type: 'warning' });
+          throw new Error(READ_ONLY.sr);
+        }
         const blocked = options.measurementData?.find(m => {
           const a = ct.annotation.state.getAnnotation(m.uid), current = measurementService.getMeasurement(m.uid);
           if (!numericMeasurement(m) && !numericMeasurement(current) && !manual(kinds[a?.metadata.toolName])) return false;
@@ -876,7 +892,7 @@ function kinCreateViewerHistory() {
       srRequests.clear();
       for (const e of entries.values()) removeAnnotation(e);
       entries.clear(); annotations.clear(); list.replaceChildren(); actions.replaceChildren(); loading = false; suspended = true;
-      delete panel.dataset.studyUid;
+      delete panel.dataset.studyUid; delete panel.dataset.readOnly;
       status.textContent = message; render();
     }
     const hasWork = e => e.editing || e.pending || e.heldDraft;
@@ -908,7 +924,8 @@ function kinCreateViewerHistory() {
         ct.annotation.state.removeAnnotation(a.annotationUID);
         if (measurementService.getMeasurement(a.annotationUID)) measurementService.remove(a.annotationUID);
       }
-      reset('이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
+      reset(readOnly() ? READ_ONLY.denied : '이 검사에 접근할 수 없습니다. 보관 작업은 접근 확인 후 재개할 수 있습니다.'); me = null;
+      if (readOnly()) { panel.dataset.readOnly = 'denied'; panel.dataset.studyUid = scope; }
       button(actions, 'Recheck Access', () => load());
     }
     function end(modeExit = false) {
@@ -936,14 +953,15 @@ function kinCreateViewerHistory() {
       if (res.status === 403) { deny(); throw { stale: true }; }
       const data = await res.json().catch(() => null);
       if (!valid(ticket)) throw { stale: true };
-      if (!res.ok || !data) throw { status: res.status, code: data?.code };
+      // `said` (the server's wording) is read only by readOnlyLoad; writer paths keep their own messages (manualSr reads `message`).
+      if (!res.ok || !data) throw { status: res.status, code: data?.code, said: data?.message };
       return data;
       } finally { clearTimeout(timeout); parentSignal.removeEventListener('abort', abort); }
     }
     async function authenticate(ticket) {
       const user = await api('/me', {}, ticket);
       if (!user.sub || (subject && subject !== user.sub)) { end(); throw { stale: true }; }
-      me = user; subject = user.sub; lastAuth = Date.now(); return user;
+      me = user; subject = user.sub; lastAuth = Date.now(); if (kinViewerClinicianOnly(user)) clinicianSession = true; return user;
     }
     const path = () => '/studies/' + scope + '/viewer-items';
     function errorMessage(error) {
@@ -958,6 +976,7 @@ function kinCreateViewerHistory() {
       status.textContent = '저장 항목 확인 중…';
       try {
         await authenticate(ticket);
+        if (readOnly()) return await readOnlyLoad(ticket, seq);
         const heads = []; let cursor = null;
         do {
           const page = await api(path() + '?includeHidden=true&limit=100' + (recheck ? '&recheck=' + encodeURIComponent(recheck) : '') + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), {}, ticket);
@@ -1001,9 +1020,56 @@ function kinCreateViewerHistory() {
       } catch (e) { if (!e.stale && valid(ticket)) status.textContent = '목록을 확인하지 못했습니다. 새로고침으로 다시 확인하세요.'; }
       finally { if (ticket === generation) loading = false; }
     }
+    // S5-U2b 읽기 전용 목록. 서버는 clinician-only에게 확정본일 때만 좁힌 쪽({uid, final, reportVersion, items, nextCursor})을
+    // 주고, 숨긴 항목 요청은 400으로 거절한다. 이어받기 값은 받은 그대로 넘기고, 모든 쪽이 같은 검사·같은 확정 판이어야
+    // 한다 — 판이 다른 쪽을 이어 붙이면 어느 확정 시점에도 없던 목록이 된다(S5-U1b-F04). 읽는 동안 이전 목록을 내려 두고,
+    // 실패하면 받은 쪽도 버린다. 확정 전(items null)은 빈 목록(항목 없음)과 다르게 알린다.
+    async function readOnlyLoad(ticket, seq) {
+      const study = scope, heads = [], drop = () => { for (const e of entries.values()) removeAnnotation(e); entries.clear(); list.replaceChildren(); };
+      let cursor = null, version = null, withheld = false, pages = 0;
+      drop(); panel.dataset.readOnly = 'loading'; toolbar();
+      try {
+        do {
+          const page = await api(path() + '?limit=100' + (cursor === null ? '' : '&cursor=' + encodeURIComponent(cursor)), {}, ticket);
+          if (seq !== readSequence) return;
+          if (++pages > 6 || !page || page.uid !== study || typeof page.final !== 'boolean') throw new Error('Invalid page');
+          if (!page.final) {
+            if (cursor !== null || page.items !== null || page.nextCursor !== null) throw new Error('Invalid page');
+            withheld = true; break;
+          }
+          const next = page.nextCursor;
+          if (!Number.isSafeInteger(page.reportVersion) || page.reportVersion < 1 || (version !== null && page.reportVersion !== version) ||
+              !Array.isArray(page.items) || page.items.length > 100 || heads.length + page.items.length > 512 ||
+              !page.items.every(h => h && typeof h === 'object' && typeof h.id === 'string' && h.id && Number.isSafeInteger(h.revision) &&
+                h.item && typeof h.item === 'object' && Object.hasOwn(names, h.item.kind)) ||
+              !(next === null || typeof next === 'string' && next.length > 0 && next.length <= 512 && next !== cursor)) throw new Error('Invalid page');
+          version = page.reportVersion; heads.push(...page.items); cursor = next;
+        } while (cursor !== null);
+        if (!valid(ticket) || seq !== readSequence) return;
+        suspended = false;
+        for (const head of heads) {
+          const e = { id: head.id, head, draft: itemOnly(head), editing: false, latest: null, message: '' };
+          entries.set(e.id, e); row(e);
+        }
+        status.textContent = withheld ? READ_ONLY.withheld : heads.length ? '확정 판독문 r' + version + '의 저장 항목 ' + heads.length + '개 · 읽기 전용'
+          : '확정 판독문 r' + version + '에 저장된 측정·키 이미지가 없습니다 · 읽기 전용';
+        panel.dataset.studyUid = scope; panel.dataset.readOnly = withheld ? 'withheld' : heads.length ? 'ready' : 'empty';
+        toolbar(); hydrate();
+      } catch (error) {
+        if (error?.stale || !valid(ticket) || seq !== readSequence) return;
+        drop();
+        const said = Array.isArray(error?.said) ? error.said.filter(x => typeof x === 'string').join(' ') : typeof error?.said === 'string' ? error.said : '';
+        status.textContent = '저장 항목을 불러오지 못했습니다. ' + (Number.isInteger(error?.status)
+          ? (said ? said + ' ' : '') + '(HTTP ' + error.status + (typeof error.code === 'string' ? ' · ' + error.code : '') + ')'
+          : error?.name === 'AbortError' || error instanceof TypeError ? '서버 응답을 받지 못했습니다.' : '응답 형식을 확인할 수 없습니다.') + ' Refresh로 다시 읽으세요.';
+        panel.dataset.studyUid = scope; panel.dataset.readOnly = 'failed';
+        toolbar();
+      }
+    }
     function toolbar() {
       const ticket = generation;
       actions.replaceChildren(); button(actions, 'Refresh', load);
+      if (readOnly()) { text(actions, 'p', READ_ONLY.note); return; }
       if (recovery.has(scope)) {
         text(actions, 'p', '이 검사의 미저장 작업이 보관 중입니다. 이 뷰어를 닫거나 로그아웃하면 폐기됩니다.');
         button(actions, 'Resume Held Work', () => { if (valid(ticket)) return load(true); });
@@ -1083,8 +1149,8 @@ function kinCreateViewerHistory() {
         const tool = group.getToolInstance(tools[kind]), config = tool.configuration, add = tool.addNewAnnotation;
         const lines = config.getTextLines;
         tool.addNewAnnotation = function (event) {
-          if (ended || !subject || suspended || recovery.has(scope)) {
-            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
+          if (ended || !subject || suspended || recovery.has(scope) || readOnly()) {
+            status.textContent = ended ? '로그인이 종료되었습니다. 다시 로그인한 뒤 뷰어를 여세요.' : readOnly() ? READ_ONLY.tool : '현재 검사 접근과 보관 작업을 확인한 후 측정하세요.'; return;
           }
           const v = cs.getEnabledElement(event.detail.element).viewport;
           const id = v.type === 'stack' && v.getCurrentImageId();
@@ -1149,7 +1215,8 @@ function kinCreateViewerHistory() {
       if (!e.element) { e.element = document.createElement('section'); e.element.style.cssText = 'border-top:1px solid #405777;margin-top:8px;padding-top:8px'; list.append(e.element); }
       const el = e.element; el.replaceChildren(); el.dataset.itemId = e.head?.id || ''; el.dataset.kind = e.draft.kind;
       text(el, 'strong', names[e.draft.kind] + ' · ' + (e.head ? 'Saved r' + e.head.revision : 'Unsaved') + (e.head?.hidden ? ' · Hidden' : ''));
-      if (e.head) text(el, 'div', e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
+      // The clinician projection carries no author (clinician-policy.ts clinicianViewerItem).
+      if (e.head) text(el, 'div', readOnly() ? 'Read-only' : e.head.authorActor + (writable(e) ? ' · My Item' : ' · Read-only'));
       if (e.editing) {
         input(el, e.draft.kind !== 'key' ? 'Annotation Text' : 'Key Title', e.draft.label ?? e.draft.title, value => {
           e.draft[e.draft.kind !== 'key' ? 'label' : 'title'] = value; updateAnnotation(e);
@@ -1171,7 +1238,8 @@ function kinCreateViewerHistory() {
       }
       button(el, 'Go to Image', () => navigate(e));
       const sourceUnverified = manual(e.draft.kind) && e.head && e.head.referenceStatus !== 'verified';
-      if (sourceUnverified && !e.head.hidden) {
+      // Recheck and remeasure belong to the writer; a read-only row keeps the "재확인 필요" message hydrate() writes.
+      if (sourceUnverified && !e.head.hidden && !readOnly()) {
         text(el, 'p', '저장 이력과 현재 원본 확인은 별개입니다. 이 항목만 다시 확인할 수 있습니다. 원본이 바뀐 경우 새 뷰어에서 다시 측정하세요. 이 창의 수정과 기존 저장 이력은 유지됩니다.');
         if (!e.heldDraft) button(el, 'Recheck Source', () => {
           if (valid(generation) && entries.get(e.id) === e && !e.busy && !e.pending) return load(false, e.head.id);
@@ -1207,7 +1275,8 @@ function kinCreateViewerHistory() {
           button(el, 'Discard Held Changes', () => discardHeld(e), !!(e.busy || e.pending));
         }
       }
-      if (e.head) button(el, 'History', async () => {
+      // Revisions carry authors and hidden states; that route is not a clinician read (S5-U1b allowlist).
+      if (e.head && !readOnly()) button(el, 'History', async () => {
         const ticket = generation; let cursor = null, count = 0;
         const history = document.createElement('div'); el.append(history);
         const more = async () => {
@@ -1396,7 +1465,8 @@ function kinCreateViewerHistory() {
       refreshMeasurementViews(); refreshSrButtons();
     }
     function captureAnnotations() {
-      if (suspended || recovery.has(scope)) return;
+      // Read-only: a mark drawn with the viewer's own tools never becomes an unsaved item of this panel.
+      if (suspended || recovery.has(scope) || readOnly()) return;
       for (const a of ct.annotation.state.getAllAnnotations()) {
         const kind = kinds[a.metadata.toolName];
         const count = kind === 'angle' ? 3 : kind === 'ellipse' ? 4 : 2;
@@ -1417,7 +1487,8 @@ function kinCreateViewerHistory() {
     }
     const onStorage = e => { if (e.key === 'kin-session-ended') end(); };
     const onFocus = () => { lastAuth = 0; };
-    const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) ||
+    // A read-only document has no mark to save, so an unlocked native mark is not unsaved work there.
+    const jobGuard = () => recovery.size > 0 || [...entries.values()].some(x => hasWork(x) || x.busy) || !readOnly() &&
       ct.annotation.state.getAllAnnotations().some(a => kinds[a.metadata.toolName] && !ct.annotation.locking.isAnnotationLocked(a.annotationUID));
     // Finding drafts (including ones held for another study) count for the whole-viewer guards:
     // worklist Next Study, window reuse/close, cell merge/hanging protocol and page unload. They are
@@ -1521,6 +1592,15 @@ function kinHangingProtocolDisplaySets(values) {
       image.SeriesInstanceUID === value.SeriesInstanceUID));
 }
 
+/* S5-U2b. 서버 /me의 역할이 업무 역할 clinician뿐인가 — api/src/clinician-policy.ts clinicianOnly와 같은 규칙이다(Keycloak
+   기본 역할은 보지 않고, 기존 세 역할이 하나라도 섞이면 아니다). 이 뷰어가 쓰기 컨트롤을 두지 않을 때만 쓰며 권한 판정이
+   아니다: 쓰기와 작성자 쪽 읽기는 서버가 거절하고, 이 판정은 그 거절을 부를 버튼을 주지 않을 뿐이다. */
+function kinViewerClinicianOnly(me) {
+  const roles = me && me.kind === 'member' && Array.isArray(me.roles) ? me.roles : [];
+  const app = roles.filter(role => ['radiologist', 'technician', 'admin', 'clinician'].includes(role));
+  return app.length > 0 && app.every(role => role === 'clinician');
+}
+
 function kinCreateViewerLayout() {
   let services, stop;
   function mount() {
@@ -1534,7 +1614,7 @@ function kinCreateViewerLayout() {
     const note = document.createElement('p'); note.textContent = '최근 1건만 저장합니다. 영상 위치·확대·주석은 포함하지 않습니다.'; panel.append(note);
     const status = document.createElement('p'); status.id = 'kin-viewer-layout-status'; status.setAttribute('role', 'status'); panel.append(status);
     const controls = document.createElement('div'); panel.append(controls); document.body.append(panel);
-    let ended = false, busy = false, key = null, channel, hpOwner = null, hp = null;
+    let ended = false, busy = false, key = null, channel, hpOwner = null, hp = null, readOnly = false;
     const controller = new AbortController();
     const buttons = [];
     const live = () => !ended && location.search === search;
@@ -1559,6 +1639,7 @@ function kinCreateViewerLayout() {
       if (!live() || !next || (key && next !== key)) { end(); throw new Error('계정이 변경되어 배치를 적용하지 않았습니다.'); }
       key = next;
       hpOwner = { institution: me.institution, subject: me.sub };
+      if (kinViewerClinicianOnly(me)) readOnly = true;
     }
     async function mountProtocols() {
       const load = (name, global) => window[global] ? Promise.resolve() : new Promise((resolve, reject) => {
@@ -1654,7 +1735,13 @@ function kinCreateViewerLayout() {
     const onMessage = e => { if (e.data?.type === 'session-ended') end(); };
     window.addEventListener('storage', onStorage);
     try { channel = new BroadcastChannel('kin-session'); channel.addEventListener('message', onMessage); } catch (_) {}
-    if (studies) authenticate().then(async () => { if (live()) { status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols(); } }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
+    if (studies) authenticate().then(async () => {
+      if (!live()) return;
+      // S5-U2b: layout save/restore and Hanging Protocols read the writer list and save to the account; a clinician-only
+      // session keeps this panel only for the status lines other extensions write here.
+      if (readOnly) { for (const b of buttons.splice(0)) b.remove(); summary.textContent = 'Viewer Status'; note.textContent = '읽기 전용 화면입니다. 배치 저장·복원과 Hanging Protocol은 제공하지 않습니다. 화면 배치는 뷰어의 기본 레이아웃 도구로 바꿀 수 있습니다.'; return; }
+      status.textContent = '현재 검사의 배치를 직접 저장하거나 복원하세요.'; await mountProtocols();
+    }).catch(error => { if (live()) status.textContent = error?.message || '계정 정보를 확인할 수 없습니다. 뷰어를 다시 여세요.'; }).finally(refresh);
     else status.textContent = '현재 검사 1~2개의 일반 CT 배치만 지원합니다.';
     stop = () => { end(); window.removeEventListener('storage', onStorage); channel?.close(); panel.remove(); };
   }
@@ -2265,7 +2352,8 @@ function kinCreateViewerJobs() {
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch;
-    ready.then(extension => { if (ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    // S5-U2b: saved jobs are written and read on writer routes; a clinician-only session gets no Job panel.
+    kinViewerReadOnlySession().then(readOnly => readOnly ? null : ready).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
       if (ticket === epoch) { const p = document.querySelector('#kin-viewer-layout-status'); if (p) p.textContent = e.message; }
     });
   }, onModeExit() { epoch++; current?.stop(); current = null; } };
@@ -2287,7 +2375,8 @@ function kinCreateViewerFindings() {
     ready.catch(() => {});
   }, onModeEnter() {
     const ticket = ++epoch;
-    ready.then(extension => { if (ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
+    // S5-U2b: findings are written and linked on writer routes; a clinician-only session gets no Findings section.
+    kinViewerReadOnlySession().then(readOnly => readOnly ? null : ready).then(extension => { if (extension && ticket === epoch) { current = extension; current.mount(); } }).catch(e => {
       if (ticket !== epoch) return;
       const host = document.querySelector('#kin-viewer-history');
       if (host) { const p = document.createElement('p'); p.id = 'kin-viewer-findings-unavailable'; p.textContent = e.message; host.append(p); }
@@ -2350,7 +2439,9 @@ function kinCreateViewerTechNote() {
       .then(()=>window.kinViewerTechNote(servicesManager.services)).catch(e=>{ready=null;throw e;}));
     window.kinViewerNoteConnectionState=()=>state;
     window.kinViewerNoteReconnect=()=>{if(active&&state==='failed')connect();};
-  },onModeEnter(){if(!prepare)return;epoch++;active=true;state='stopped';connect();
+  },onModeEnter(){if(!prepare)return;epoch++;active=true;state='stopped';const ticket=epoch;
+    // S5-U2b: Tech notes are a technician record the clinician allowlist neither reads nor writes; no note bridge there.
+    kinViewerReadOnlySession().then(readOnly=>{if(!active||ticket!==epoch)return;if(readOnly)state='read-only';else connect();});
   },onModeExit(){epoch++;active=false;state='stopped';current?.stop();current=null;}};
 }
 
@@ -2853,6 +2944,18 @@ function kinCreateSeriesMetadataRecovery() {
     onModeEnter() { release(); install(); },
     onModeExit() { release(); },
   };
+}
+
+/* S5-U2b. 쓰기 화면(소견·저장 작업·Tech 메모)을 붙이기 전의 /me 한 번(판정은 kinViewerClinicianOnly). 같은 모드 진입에서
+   함께 붙는 확장은 진행 중인 읽기를 나눠 쓰고, 답이 오면 비워 다음 진입은 새로 읽는다. clinician-only라는 답에만 true다 —
+   답을 받지 못하면 예전처럼 붙이고, 그 화면의 쓰기 컨트롤은 각자의 판독의 역할 확인과 서버 거절을 그대로 따른다. */
+let kinViewerSessionRead = null;
+function kinViewerReadOnlySession() {
+  if (typeof fetch !== 'function') return Promise.resolve(false);
+  return kinViewerSessionRead ||= fetch('/api/me', { credentials: 'same-origin', cache: 'no-store', headers: { 'X-KIN-CSRF': '1' } })
+    .then(response => response.ok ? response.json() : null)
+    .then(me => kinViewerClinicianOnly(me), () => false)
+    .finally(() => { kinViewerSessionRead = null; });
 }
 
 window.config = {
