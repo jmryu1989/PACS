@@ -191,7 +191,7 @@ BLOCK_NO_GUARD = variant(BLOCK, [
 ], "the S5-U4c block")
 
 # Everything the cut block and the shipped api()/setMode() read from the page script, as small stand-ins. The page's
-# refreshRight() is the shipped HOOK line (pinned in s02); synPick() is a selection followed by it.
+# renderClinical() is the shipped HOOK line (pinned in s02); synPick() is a selection followed by it.
 PRELUDE = """
 const $ = s => document.querySelector(s);
 const API = location.origin + '/api';
@@ -211,9 +211,9 @@ const KinAuth = {
   has: role => { const s = window.synSession; return !!s && s.state === 'approved' && (s.roles.includes(role) || s.roles.includes('admin')); },
   logout: async () => { window.synLogouts += 1; },
 };
-function refreshRight() {
+function renderClinical() {
 HOOK}
-window.synPick = uid => { selectedUid = uid; refreshRight(); };
+window.synPick = uid => { selectedUid = uid; renderClinical(); };
 window.synSetMode = m => setMode(m);
 """.replace("HOOK", HOOK)
 
@@ -509,9 +509,10 @@ class ImageRequestStructureTest(unittest.TestCase):
 
     def test_s02_hooks_regions_and_boundaries(self):
         self.assertEqual(1, MAIN.count(HOOK))
-        # refreshRight() takes a destructured default argument, so it is cut by its closing line, not by braces (the cut stops
-        # before the newline that ends its last line).
-        self.assertIn(HOOK, slice_between(MAIN, "    function refreshRight(", "\n    }\n") + "\n")
+        # The hook sits in renderClinical(), which the report_* harnesses replace with a stub; they run select() and
+        # refreshRight() as shipped, so a name there that they do not declare would throw a ReferenceError.
+        self.assertIn(HOOK, slice_between(MAIN, "    function renderClinical() {", "    function applyObservation("))
+        self.assertNotIn("imageRequests", slice_between(MAIN, "    function select(uid, {", "    function renderClinical()"))
         order = slice_between(MAIN, '      <div class="panel order-p"', "      </div><!-- /workrow -->")
         self.assertIn('<details id="image-request-queue">', order)
         self.assertLess(order.index('<details id="image-request-queue">'), order.index('<div class="statusbar">'))

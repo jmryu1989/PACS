@@ -3149,13 +3149,13 @@
       updateReportButtons();
       readingWorkspace.selectionChanged(deferViewer);
       readingFindings?.sync();
-      imageRequests?.sync();
     }
 
     function renderClinical() {
       imagePreview?.sync();
       const s = viewed();
       renderPatientCopy();
+      imageRequests?.sync();
       if (srUid && srUid !== s?.uid) closeSR();
       $('#sr-open').disabled = !s || demoMode;
       $('#tech-note-open').disabled = !s || demoMode || !serverMode || offline;
@@ -4430,8 +4430,10 @@
       }
 
       /**
-       * refreshRight()가 부른다(선택·목록 갱신마다). 판독 대상이 바뀐 때만 이전 대상의 줄을 내리고 새 대상을 읽는다 — 같은 대상이면
-       * 요청도 그리기도 없다. 원격판독으로 받은 검사는 읽지 않는다: 요청은 소유 기관 안에서만 오가고(U4p T-4) 늘 404다.
+       * renderClinical()이 부른다(선택·목록 갱신·관련 검사 보기마다). 판독 대상이 바뀐 때만 이전 대상의 줄을 내리고 새 대상을
+       * 읽는다 — 같은 대상이면 요청도 그리기도 없다. refreshRight()에 두지 않는다: report_* 시험은 select()·refreshRight()를
+       * 잘라 그대로 돌리고 renderClinical()만 비워 두므로, 거기서 선언되지 않은 이름은 ReferenceError가 된다.
+       * 원격판독으로 받은 검사는 읽지 않는다: 요청은 소유 기관 안에서만 오가고(U4p T-4) 늘 404다.
        */
       function sync() {
         if (ended) return;
